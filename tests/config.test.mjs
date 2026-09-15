@@ -10,12 +10,15 @@ import {
   LOCAL_FILE,
   CAVEMAN_LEVELS,
   EFFORTS,
+  SANDBOXES,
+  KNOWN_HARNESSES,
   ROLES,
   ENFORCEMENT_KEYS,
   ENFORCEMENT_VALIDATORS,
   ConfigError,
   validateLocal,
   validateGate,
+  validateHarnesses,
   readLayer,
   writeLayer,
   loadConfig,
@@ -970,5 +973,129 @@ test('loadGateConfig is left alone: it is still the plain reader', async () => {
     await writeJson(root, GATE_FILE, { lens: 'performance', phases: { default: { checks: [] } } })
     const config = await loadGateConfig(root)
     assert.equal(config.lens, 'performance')
+  })
+})
+
+// Task 2: harnesses.codex.* config validation. Every claim below is asserted by the run, not
+// inferred: the harness block is permitted in both layers, its fields are shape-checked, and
+// `config set` reaches the same field rules through validateKey.
+test('harness vocabulary constants name the sandboxes and the known harnesses', () => {
+  assert.deepEqual(SANDBOXES, ['clone', 'files', 'full'])
+  assert.deepEqual(KNOWN_HARNESSES, ['codex'])
+})
+
+test('a well-formed harnesses.codex block passes both layers unchanged', () => {
+  const block = {
+    harnesses: {
+      codex: {
+        sandbox: 'clone',
+        network: false,
+        timeoutMinutes: 30,
+        tierModels: { capable: 'gpt-5-codex' },
+      },
+    },
+  }
+  assert.equal(validateLocal(block), block)
+  assert.equal(validateGate(block), block)
+})
+
+test('harnesses.codex.sandbox rejects a bogus value naming every sandbox', () => {
+  assert.throws(
+    () => validateHarnesses({ codex: { sandbox: 'bogus' } }, LOCAL_FILE),
+    (err) => err instanceof ConfigError && SANDBOXES.every((s) => err.message.includes(s)),
+  )
+})
+
+test('validateHarnesses rejects an unknown harness name, naming the file and path', () => {
+  assert.throws(
+    () => validateHarnesses({ gemini: {} }, GATE_FILE),
+    (err) => err instanceof ConfigError
+      && err.message.includes(GATE_FILE) && err.message.includes('harnesses.gemini'),
+  )
+})
+
+test('validateHarnesses rejects an unknown field on a known harness', () => {
+  assert.throws(
+    () => validateHarnesses({ codex: { turbo: true } }, LOCAL_FILE),
+    (err) => err instanceof ConfigError && err.message.includes('harnesses.codex.turbo'),
+  )
+})
+
+test('validateHarnesses rejects a non-integer or too-small timeoutMinutes', () => {
+  for (const bad of [0, -1, 1.5, '5', null]) {
+    assert.throws(
+      () => validateHarnesses({ codex: { timeoutMinutes: bad } }, LOCAL_FILE),
+      (err) => err instanceof ConfigError && err.message.includes('timeoutMinutes'),
+    )
+  }
+  assert.doesNotThrow(() => validateHarnesses({ codex: { timeoutMinutes: 1 } }, LOCAL_FILE))
+})
+
+test('validateHarnesses rejects a non-boolean network and a non-object tierModels', () => {
+  assert.throws(
+    () => validateHarnesses({ codex: { network: 'yes' } }, LOCAL_FILE),
+    (err) => err instanceof ConfigError && err.message.includes('network'),
+  )
+  for (const bad of [null, [], 'x']) {
+    assert.throws(
+      () => validateHarnesses({ codex: { tierModels: bad } }, LOCAL_FILE),
+      (err) => err instanceof ConfigError && err.message.includes('tierModels'),
+    )
+  }
+})
+
+test('validateHarnesses rejects a non-object harnesses value and a non-object entry', () => {
+  for (const bad of [null, [], 'x', 3]) {
+    assert.throws(
+      () => validateHarnesses(bad, LOCAL_FILE),
+      (err) => err instanceof ConfigError && err.message.includes('keyed by harness name'),
+    )
+  }
+  assert.throws(
+    () => validateHarnesses({ codex: [] }, LOCAL_FILE),
+    (err) => err instanceof ConfigError && err.message.includes('harnesses.codex must be an object'),
+  )
+})
+
+test('config set routes harnesses.codex.sandbox through the field rules', () => {
+  assert.equal(validateKey('harnesses.codex.sandbox', 'files'), 'files')
+  assert.equal(validateKey('harnesses.codex.sandbox', 'full'), 'full')
+  assert.throws(
+    () => validateKey('harnesses.codex.sandbox', 'x'),
+    (err) => err instanceof ConfigError && SANDBOXES.every((s) => err.message.includes(s)),
+  )
+  assert.equal(validateKey('harnesses.codex.network', true), true)
+  assert.equal(validateKey('harnesses.codex.timeoutMinutes', 5), 5)
+  assert.throws(
+    () => validateKey('harnesses.codex.timeoutMinutes', 0),
+    (err) => err instanceof ConfigError && err.message.includes('timeoutMinutes'),
+  )
+})
+
+test('harnesses is not an enforcement key: the local layer accepts it', () => {
+  assert.equal(isEnforcementKey('harnesses'), false)
+  assert.equal(isEnforcementKey('harnesses.codex.sandbox'), false)
+  assert.doesNotThrow(() => validateLocal({ harnesses: { codex: { sandbox: 'clone' } } }))
+})
+
+test('loadConfig merges harness config gate-first with the local layer overriding', async () => {
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, {
+      harnesses: { codex: { sandbox: 'clone', network: false, timeoutMinutes: 30 } },
+    })
+    await writeJson(root, LOCAL_FILE, {
+      harnesses: { codex: { sandbox: 'files' } },
+    })
+    const { resolved } = await loadConfig(root)
+    assert.deepEqual(resolved.harnesses.codex, {
+      sandbox: 'files', network: false, timeoutMinutes: 30,
+    })
+  })
+})
+
+test('loadConfig exposes an empty harnesses map when neither layer sets one', async () => {
+  await withTempRoot(async (root) => {
+    const { resolved } = await loadConfig(root)
+    assert.deepEqual(resolved.harnesses, {})
   })
 })

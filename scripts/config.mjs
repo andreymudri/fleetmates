@@ -9,6 +9,8 @@ export const LOCAL_FILE = NAMES.localFile
 
 export const CAVEMAN_LEVELS = ['lite', 'full', 'ultra']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+export const SANDBOXES = ['clone', 'files', 'full']
+export const KNOWN_HARNESSES = ['codex']
 export const ROLES = ['implementer', 'reviewer', 'integrator']
 
 // Keys that decide a verdict. They may appear only in the tracked manifest: the local file
@@ -97,6 +99,43 @@ export const ENFORCEMENT_VALIDATORS = {
   },
 }
 
+// Harness config is not an enforcement key: nothing in it changes a gate verdict, so it is
+// permitted in both fleetmates.local.json and fleetmates.gate.json. Both layers' validators call
+// this so the same shape rules apply wherever the block appears.
+export function validateHarnesses(harnesses, file) {
+  if (harnesses === null || typeof harnesses !== 'object' || Array.isArray(harnesses)) {
+    throw new ConfigError('harnesses must be an object keyed by harness name')
+  }
+  for (const [name, entry] of Object.entries(harnesses)) {
+    if (!KNOWN_HARNESSES.includes(name)) {
+      throw new ConfigError(`unknown harness in ${file}: harnesses.${name}`)
+    }
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new ConfigError(`harnesses.${name} must be an object`)
+    }
+    for (const field of Object.keys(entry)) {
+      if (!['sandbox', 'network', 'timeoutMinutes', 'tierModels'].includes(field)) {
+        throw new ConfigError(`unknown key in ${file}: harnesses.${name}.${field}`)
+      }
+    }
+    if (entry.sandbox !== undefined && !SANDBOXES.includes(entry.sandbox)) {
+      throw new ConfigError(`harnesses.${name}.sandbox must be one of ${SANDBOXES.join(', ')}`)
+    }
+    if (entry.network !== undefined && typeof entry.network !== 'boolean') {
+      throw new ConfigError(`harnesses.${name}.network must be a boolean`)
+    }
+    if (entry.timeoutMinutes !== undefined
+      && (!Number.isInteger(entry.timeoutMinutes) || entry.timeoutMinutes < 1)) {
+      throw new ConfigError(`harnesses.${name}.timeoutMinutes must be an integer >= 1`)
+    }
+    if (entry.tierModels !== undefined
+      && (entry.tierModels === null || typeof entry.tierModels !== 'object'
+        || Array.isArray(entry.tierModels))) {
+      throw new ConfigError(`harnesses.${name}.tierModels must be an object`)
+    }
+  }
+}
+
 export function validateLocal(local) {
   if (local === null || typeof local !== 'object' || Array.isArray(local)) {
     throw new ConfigError(`${LOCAL_FILE} must contain a JSON object`)
@@ -107,7 +146,7 @@ export function validateLocal(local) {
         `${key} is an enforcement key; it may only be set in ${GATE_FILE}`,
       )
     }
-    if (!['maxParallel', 'caveman', 'agents'].includes(key)) {
+    if (!['maxParallel', 'caveman', 'agents', 'harnesses'].includes(key)) {
       throw new ConfigError(`unknown key in ${LOCAL_FILE}: ${key}`)
     }
   }
@@ -136,6 +175,7 @@ export function validateLocal(local) {
       if (entry.effort !== undefined) VALIDATORS.effort(entry.effort)
     }
   }
+  if (local.harnesses !== undefined) validateHarnesses(local.harnesses, LOCAL_FILE)
   return local
 }
 
@@ -171,6 +211,7 @@ export function validateGate(gate) {
       if (entry.effort !== undefined) VALIDATORS.effort(entry.effort)
     }
   }
+  if (gate.harnesses !== undefined) validateHarnesses(gate.harnesses, GATE_FILE)
   // Every entry in ENFORCEMENT_KEYS has a validator. If a future key joins that list without
   // one, refusing is the right direction — waving an unchecked enforcement key through is the
   // one outcome this must never have — but it is refused as a ConfigError, not as a raw
@@ -235,12 +276,25 @@ export async function loadConfig(root) {
     }
   }
 
+  // Harness config merges the same way agents do: gate first, local overriding, per named
+  // harness. Unlike agents it carries no per-field provenance — nothing reads it as a source —
+  // so only the merged shape is assembled.
+  const harnesses = {}
+  const harnessNames = new Set([
+    ...Object.keys(gate.harnesses ?? {}),
+    ...Object.keys(local?.harnesses ?? {}),
+  ])
+  for (const name of harnessNames) {
+    harnesses[name] = { ...gate.harnesses?.[name], ...local?.harnesses?.[name] }
+  }
+
   return {
     gate,
     resolved: {
       maxParallel: pick('maxParallel', defaultMaxParallel()),
       caveman: pick('caveman', false),
       agents,
+      harnesses,
     },
     sources,
   }
@@ -296,6 +350,16 @@ export function validateKey(dotted, value) {
     const [, role, field] = agentMatch
     if (!ROLES.includes(role)) throw new ConfigError(`unknown agent role: ${role}`)
     return VALIDATORS[field](value)
+  }
+  // `config set harnesses.codex.sandbox clone` validates the single field by handing
+  // validateHarnesses a one-key harness object, reusing its per-field rules rather than
+  // duplicating them here. tierModels is deliberately absent: it is an object, not a scalar
+  // `config set` can parse from an argv string.
+  const harnessMatch = /^harnesses\.([a-z]+)\.(sandbox|network|timeoutMinutes)$/.exec(dotted)
+  if (harnessMatch) {
+    const [, name, field] = harnessMatch
+    validateHarnesses({ [name]: { [field]: value } }, LOCAL_FILE)
+    return value
   }
   throw new ConfigError(`unknown config key: ${dotted}`)
 }
