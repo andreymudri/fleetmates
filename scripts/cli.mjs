@@ -3449,6 +3449,16 @@ export async function runCli(argv, io = { out: console.log }) {
       { out: () => {}, err: () => {} },
     )
 
+    // Personas are pre-resolved into strings HERE, because the driver interpolates the accessor it
+    // is given straight into a template literal WITHOUT awaiting it (driver.mjs's `${personaFor(
+    // role)}`). `personaFor` is async (it reads `agents/tm-<role>.md`), so handing the driver the
+    // async function itself made every implementer's whole system prompt the literal
+    // `[object Promise]` — a Promise stringified. `personaFor` must STAY async for the reviewer and
+    // integrator handlers, which await it; the driver alone needs a synchronous accessor, so all
+    // three role bodies are read once here and the accessor is a pure `role -> string` lookup.
+    const personaBodies = {}
+    for (const role of ROLES) personaBodies[role] = await personaFor(role)
+
     const { results, orphaned } = await dispatchPhase({
       adapter,
       git: (args, opts) => defaultGitExec(args, { cwd: root, ...opts }),
@@ -3463,7 +3473,7 @@ export async function runCli(argv, io = { out: console.log }) {
       tierModels,
       effortFor: () => resolved.agents.implementer.effort || undefined,
       composeBriefFor,
-      personaFor,
+      personaFor: (role) => personaBodies[role],
       runDir: runDir(root, runId),
       completeEnforcement,
     })

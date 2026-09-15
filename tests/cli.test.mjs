@@ -15337,3 +15337,97 @@ test('harnessSettings reads configured harness values when present', () => {
   assert.equal(settings.timeoutMinutes, 5)
   assert.deepEqual(settings.tierModels, { mid: 'm' })
 })
+
+// HIGH (final round): the driver interpolates the persona accessor WITHOUT awaiting it
+// (driver.mjs `${personaFor(role)}`), so handing it the async `personaFor` made every implementer's
+// whole system prompt the literal `[object Promise]`. dispatch must pre-resolve the personas and
+// hand the driver a SYNCHRONOUS accessor. This runs the REAL dispatch handler through a fake `codex`
+// on PATH that captures the prompt it is fed on stdin, and asserts that prompt starts with the
+// actual tm-implementer.md body (frontmatter stripped) and contains no `[object Promise]`. Mutating
+// dispatch back to the async `personaFor` makes the captured prompt `[object Promise]\n\n<brief>`
+// and turns this RED. It also pins the frontmatter stripping: an unstripped persona starts with
+// `---`, not the body.
+test('dispatch feeds the real implementer persona to the harness, never [object Promise]', {
+  skip: process.platform === 'win32' ? 'fake-codex shebang script needs a POSIX shell' : false,
+}, async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+
+    const promptDir = await mkdtemp(path.join(tmpdir(), 'tm-prompt-'))
+    const promptOut = path.join(promptDir, 'prompt.txt')
+    const bin = await mkdtemp(path.join(tmpdir(), 'tm-fakecodex-'))
+    const FAKE = [
+      '#!/usr/bin/env node',
+      "const { writeFileSync } = require('node:fs')",
+      'const argv = process.argv.slice(2)',
+      "if (argv[0] === 'login' && argv[1] === 'status') { process.stdout.write('Logged in\\n'); process.exit(0) }",
+      "const oIndex = argv.indexOf('-o')",
+      'const resultPath = oIndex !== -1 ? argv[oIndex + 1] : null',
+      "let buffered = ''",
+      "process.stdin.setEncoding('utf8')",
+      "process.stdin.on('data', (c) => { buffered += c })",
+      "process.stdin.on('end', () => {",
+      '  if (process.env.FAKE_PROMPT_OUT) writeFileSync(process.env.FAKE_PROMPT_OUT, buffered)',
+      "  process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 't1' }) + '\\n')",
+      "  process.stdout.write(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } }) + '\\n')",
+      "  if (resultPath) writeFileSync(resultPath, JSON.stringify({ status: 'done', branch: 'fleetmates/r1/T1', filesChanged: [], summary: 'ok', blockers: [] }))",
+      '  process.exit(0)',
+      '})',
+      'process.stdin.resume()',
+    ].join('\n')
+    await writeFile(path.join(bin, 'codex'), FAKE)
+    await chmod(path.join(bin, 'codex'), 0o755)
+    const codexHome = await mkdtemp(path.join(tmpdir(), 'tm-codexhome-'))
+
+    // The expected persona: exactly what personaFor reads and strips.
+    const rawAgent = await readFile(new URL('../agents/tm-implementer.md', import.meta.url), 'utf8')
+    const fm = rawAgent.match(/^---\n[\s\S]*?\n---\n?/)
+    const personaBody = fm ? rawAgent.slice(fm[0].length).replace(/^\s+/, '') : rawAgent
+
+    const savedPath = process.env.PATH
+    const savedHome = process.env.CODEX_HOME
+    const savedPrompt = process.env.FAKE_PROMPT_OUT
+    lines.length = 0
+    try {
+      process.env.PATH = `${bin}${path.delimiter}${savedPath}`
+      process.env.CODEX_HOME = codexHome
+      process.env.FAKE_PROMPT_OUT = promptOut
+      const code = await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+      assert.equal(code, 0, lines.join('\n'))
+      const captured = await readFile(promptOut, 'utf8')
+      assert.doesNotMatch(captured, /\[object Promise\]/, captured.slice(0, 80))
+      assert.ok(captured.startsWith(personaBody), `prompt did not start with the tm-implementer body:\n${captured.slice(0, 120)}`)
+    } finally {
+      process.env.PATH = savedPath
+      if (savedHome === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = savedHome
+      if (savedPrompt === undefined) delete process.env.FAKE_PROMPT_OUT
+      else process.env.FAKE_PROMPT_OUT = savedPrompt
+      await rm(bin, { recursive: true, force: true })
+      await rm(codexHome, { recursive: true, force: true })
+      await rm(promptDir, { recursive: true, force: true })
+    }
+  })
+})
+
+// HIGH (final round): pins the verdict-value half of dispatch-integrator's guard. A real FAILED gate
+// writes `{verdict:'FAIL',...}` under the exact numeric key this run derives, so a regression
+// dropping the `verdict !== 'PASS'` check would authorize merging on a FAILED gate. Records a FAIL
+// under the derived key and asserts the integrator REFUSES; mutating the guard to drop the
+// value-check turns this RED.
+test('dispatch-integrator refuses a FAIL gate recorded under the derived numeric key', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const plan = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), 'utf8'))
+    const derived = await derive(root, 'r1', { plan: plan.planPath })
+    const key = String(derived.currentPhase)
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    status.gates = { [key]: { verdict: 'FAIL', phaseName: 'default', phase: derived.currentPhase } }
+    await writeFile(statusPath, JSON.stringify(status))
+    lines.length = 0
+    const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'default', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no recorded PASS/)
+  })
+})
