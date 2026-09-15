@@ -101,14 +101,20 @@ function sandboxRefusal(dir) {
 // The harness resolved from `--harness` (default `codex`), or null after printing the
 // unknown-harness message that names every known harness. A bare `--harness` (parsed as the
 // boolean `true` when the flag carries no value) reads as the default rather than as a name.
+//
+// The name is checked against the exported allowlist BEFORE `getAdapter`, not through the truthiness
+// of a bare `ADAPTERS[name]` lookup: `--harness __proto__` and `--harness constructor` resolve to
+// truthy INHERITED properties on the registry object, which slip past a `!adapter` test and then
+// throw `adapter.probe is not a function` out of `runCli`. `HARNESS_NAMES` is a plain array of own
+// keys, so `.includes` admits only a real harness and a prototype key is refused exactly like
+// `bogus`.
 function resolveHarness(flags, io) {
   const name = (flags.harness === undefined || flags.harness === true) ? 'codex' : flags.harness
-  try {
-    return getAdapter(name)
-  } catch (err) {
-    io.out(err.message)
+  if (!HARNESS_NAMES.includes(name)) {
+    io.out(`unknown harness: ${printable(String(name))} (known: ${HARNESS_NAMES.join(', ')})`)
     return null
   }
+  return getAdapter(name)
 }
 
 // The harness sandbox/network/timeout/tierModels for one run, resolved from `harnesses.<name>.*`
@@ -3409,10 +3415,20 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name)
 
-    // The brief every implementer is prompted with, composed exactly as the `brief`/`workflow`
-    // paths compose it: same plan pointer, the same global constraints read at the run anchor, the
-    // same caveman level. Both `--plan` and `--base` are optional, and a bare one parses as `true`.
-    const planPath = flags.plan === true ? '' : (flags.plan ?? '')
+    // The plan path the brief points at AND the plan `completeEnforcement` runs `complete` against.
+    // It must resolve to a real path: `complete --plan '' --enforcement-only` exits 2 for a missing
+    // argument, and the driver reads any code that is not 3 as a pass — so an empty plan would
+    // SILENTLY disable enforcement for every task. When `--plan` is omitted (or a bare `--plan`
+    // parses as `true`), fall back to the plan path `init-run` recorded in plan.json — which is the
+    // run's plan by definition — and refuse the whole dispatch when neither yields one, rather than
+    // dispatch teammates whose work nothing enforces.
+    const flagPlan = (flags.plan === true || flags.plan == null) ? '' : String(flags.plan)
+    const recordedPlan = typeof plan.planPath === 'string' ? plan.planPath : ''
+    const planPath = flagPlan || recordedPlan
+    if (planPath === '') {
+      io.out(`run ${printable(runId)} has no plan path to enforce against — pass --plan <path>, or re-run init-run so plan.json records one`)
+      return 2
+    }
     const baseBranch = flags.base === true ? '' : (flags.base ?? '')
     const planMarkdown = await planAtAnchor(root, planPath, flags, io)
     if (planMarkdown === PLAN_READ_REJECTED) return 2
@@ -3536,11 +3552,23 @@ export async function runCli(argv, io = { out: console.log }) {
     // integrator is dispatched by the orchestrator after the gate it itself ran wrote this record,
     // so reading it here is the orchestrator confirming its own prior verdict, not trusting an
     // enforced party. No PASS means the gate has not passed, and nothing may merge.
-    const gateKey = flags.phase && flags.phase !== true ? flags.phase : 'default'
+    //
+    // The record is found by its `phaseName`, NOT by the raw `--phase` used as a KEY. `gate` keys
+    // its record under `String(ctx.currentPhase ?? phaseName)` — the NUMERIC derived phase for
+    // every phase after the first — while it stores the manifest key it selected checks under as
+    // `phaseName` on the record itself. Looking up `status.gates['default']` therefore missed the
+    // real PASS for any phase >= 2 (recorded under e.g. `"2"`) and refused a gate that had passed.
+    // Scanning for the entry whose `phaseName` matches, whatever numeric key it landed under, is
+    // what mirrors how the gate actually wrote it. `Object.values` reads only own enumerable
+    // properties, so a `__proto__`-shaped key cannot inject a fake PASS.
+    const phaseName = flags.phase && flags.phase !== true ? flags.phase : 'default'
     const status = await readState(root, runId, 'status')
-    const recorded = status?.gates?.[gateKey]
-    if (!recorded || recorded.verdict !== 'PASS') {
-      io.out(`phase ${printable(gateKey)} of run ${printable(runId)} has no recorded PASS — run the gate to a PASS before dispatching the integrator`)
+    const gates = status && typeof status.gates === 'object' && status.gates !== null ? status.gates : {}
+    const passed = Object.values(gates).some(
+      (g) => g && typeof g === 'object' && g.verdict === 'PASS' && g.phaseName === phaseName,
+    )
+    if (!passed) {
+      io.out(`phase ${printable(phaseName)} of run ${printable(runId)} has no recorded PASS — run the gate to a PASS before dispatching the integrator`)
       return 4
     }
 
@@ -3568,13 +3596,14 @@ export async function runCli(argv, io = { out: console.log }) {
     })
     await handle.sessionId
     await waitForExit(handle.child, timeoutMs)
-    io.out(`dispatched integrator for phase ${printable(gateKey)}`)
+    io.out(`dispatched integrator for phase ${printable(phaseName)}`)
     return 0
   }
 
   if (command === 'message') {
-    const text = flags.text === true ? '' : (flags.text ?? '')
-    if (text === '') { io.out(`--text must not be empty\n\n${USAGE}`); return 2 }
+    // `--text` is REQUIRED, so `missingArgs` has already refused an absent, bare (`true`) or empty
+    // (`''`) value with exit 2 before this handler runs — `text` is a non-empty string here.
+    const text = flags.text
     const messageSessionsDir = path.join(runDir(root, runId), 'sessions')
     const file = path.join(messageSessionsDir, `${flags.task}.json`)
     let record

@@ -5,7 +5,8 @@ import { constants as fsConstants, readFileSync, renameSync, symlinkSync } from 
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync, spawn } from 'node:child_process'
+import { once } from 'node:events'
 import {
   runCli,
   mergeSuppliedResults,
@@ -2155,7 +2156,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 105, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
+const CENSUS_EXPECTED = { 'cli.mjs': 107, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2355,10 +2356,10 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **123 lines: 105 in `cli.mjs`, 6 in
+// can no longer drift away from the code unnoticed. It came to **125 lines: 107 in `cli.mjs`, 6 in
 // `reviews.mjs`, 6 in `digest.mjs`, 6 in `finish.mjs`**.
 //
-// The most recent move was the T7 headless-dispatch commands, which added **19 sites, all in
+// The most recent move was the T7 headless-dispatch commands, which added **21 sites, all in
 // `cli.mjs`**, named here as a GROUP and not row-driven for the same reason `collect-reviews`'s
 // path sentences are (see the group below): every one wraps a value that is either off this CLI's
 // own argv (`--run`, `--task`, `--phase`) or read out of `status.json`/`plan.json`/a session
@@ -2373,6 +2374,10 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // report — the `--json` `printableBlock` and the two text lines wrapping the run id and each task
 // id. `dispatch`'s brief/complete-enforcement recursion emits nothing of its own, and the harness
 // probe's `reason`/`fix` come off the adapter, not an agent file, so neither is in this class.
+// The T7 fix round added two more to the same group: `resolveHarness`'s unknown-harness refusal
+// (wrapping the `--harness` value off argv, shared by `dispatch`/`dispatch-reviews`/
+// `dispatch-integrator`/`message`) and `dispatch`'s no-plan-path refusal (the run id), which is why
+// the group is 21 rather than 19.
 //
 // It was allowed to drift once, and by more than two times: this paragraph said 48 — 32/6/6/4 —
 // while the census had already passed a hundred, which is exactly the failure the paragraph above
@@ -14806,6 +14811,24 @@ test('dispatch refuses an unknown harness, naming the harnesses it knows', async
   })
 })
 
+// A prototype key must be refused exactly like `bogus`: a bare `ADAPTERS[name]` lookup returns a
+// truthy INHERITED property for `__proto__`/`constructor`, which slips past a `!adapter` test and
+// then throws `adapter.probe is not a function` out of `runCli`. The allowlist check in
+// `resolveHarness` turns both into the same exit-2 refusal.
+test('dispatch refuses a prototype-key harness name rather than throwing', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    for (const evil of ['__proto__', 'constructor']) {
+      lines.length = 0
+      const code = await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--harness', evil, '--root', root], io)
+      assert.equal(code, 2, `${evil}: ${lines.join('\n')}`)
+      // `__proto__` and `constructor` carry no regex metacharacters, so they match literally.
+      assert.match(lines.join('\n'), new RegExp(`unknown harness: ${evil}`))
+      assert.match(lines.join('\n'), /known: codex/)
+    }
+  })
+})
+
 // The git-writability preflight (Step 2). With the common git dir chmod'd read-only, every
 // command that writes git must exit 2 with the fixed three-line sandbox message on STDERR and
 // create nothing on the way to it. Skipped as root, whose writes ignore the mode bits.
@@ -14867,14 +14890,53 @@ test('dispatch-integrator refuses with exit 4 when the phase has no recorded PAS
   })
 })
 
-// The refusal is scoped to the phase key it was asked about: a PASS recorded under `default` does
-// not clear the guard for a different phase that has none.
-test('dispatch-integrator refusal is scoped to the phase key it was asked about', async () => {
+// The HIGH bug: `gate` keys its record under the NUMERIC derived phase (e.g. `"2"` for phase 2),
+// storing the manifest key it selected checks under as `phaseName` on the record. A lookup by the
+// raw `--phase` used as a KEY (`status.gates['default']`) therefore missed the real PASS for every
+// phase >= 2 and refused a gate that had passed. This records a PASS the way `gate` actually does
+// for phase 2 and asserts `dispatch-integrator --phase default` FINDS it — it does not refuse with
+// exit 4. PATH is cleared so the harness probe fails deterministically (no `codex` binary),
+// proving the gate-key check was cleared without depending on a real codex. With the old
+// `flags.phase ?? 'default'` key lookup this goes RED (exit 4, "no recorded PASS").
+test('dispatch-integrator finds the PASS gate records under a numeric key for a phase >= 2', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
     const status = JSON.parse(await readFile(statusPath, 'utf8'))
-    status.gates = { default: { verdict: 'PASS' } }
+    // Exactly the shape `gate` writes: numeric key, `phaseName` naming the manifest phase.
+    status.gates = { 2: { verdict: 'PASS', phaseName: 'default', phase: 2 } }
+    await writeFile(statusPath, JSON.stringify(status))
+    // A fake `codex` that reports "Not logged in" (prepended to PATH so git still resolves for the
+    // git-writability preflight) makes the harness probe fail deterministically, so this proves the
+    // gate-key check was cleared without depending on a real, logged-in codex.
+    const bin = await mkdtemp(path.join(tmpdir(), 'tm-fakecodex-'))
+    await writeFile(path.join(bin, 'codex'), '#!/usr/bin/env node\nprocess.stdout.write("Not logged in\\n");process.exit(1)\n')
+    await chmod(path.join(bin, 'codex'), 0o755)
+    const savedPath = process.env.PATH
+    lines.length = 0
+    try {
+      process.env.PATH = `${bin}${path.delimiter}${savedPath}`
+      const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'default', '--root', root], io)
+      // Not the no-PASS refusal: the gate-key check was cleared. The probe then fails on the fake
+      // codex (exit 2), which is the next step, not this guard.
+      assert.notEqual(code, 4, lines.join('\n'))
+      assert.doesNotMatch(lines.join('\n'), /no recorded PASS/)
+      assert.match(lines.join('\n'), /codex login/)
+    } finally {
+      process.env.PATH = savedPath
+      await rm(bin, { recursive: true, force: true })
+    }
+  })
+})
+
+// The refusal stays scoped: a PASS recorded for the `default` phase does not clear the guard for a
+// DIFFERENT manifest phase that has none.
+test('dispatch-integrator still refuses a phase that has no PASS of its own', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    status.gates = { 1: { verdict: 'PASS', phaseName: 'default', phase: 1 } }
     await writeFile(statusPath, JSON.stringify(status))
     lines.length = 0
     const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'integration', '--root', root], io)
@@ -14982,5 +15044,192 @@ test('message refuses a task id that escapes the run directory before reaching t
     // No session path was joined: the escaping `.fleetmates/r1/sessions/../evil.json` is
     // `.fleetmates/r1/evil.json`, and nothing created it.
     await assert.rejects(stat(path.join(root, '.fleetmates', 'r1', 'evil.json')))
+  })
+})
+
+// MEDIUM: dispatch must resolve a real plan to enforce against. When `--plan` is omitted it falls
+// back to the plan path `init-run` recorded in plan.json; when neither yields one it refuses with
+// exit 2 rather than proceeding with `complete --plan ''`, which exits 2 for a missing argument and
+// would read to the driver as a pass — silently disabling enforcement for every task. This edits
+// plan.json to drop the recorded planPath so no plan is resolvable. With the guard removed the
+// dispatch proceeds and the empty-plan enforcement bypass returns, so this goes RED.
+test('dispatch refuses when no plan path can be resolved to enforce against', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const planStatePath = path.join(root, '.fleetmates', 'r1', 'plan.json')
+    const plan = JSON.parse(await readFile(planStatePath, 'utf8'))
+    delete plan.planPath
+    await writeFile(planStatePath, JSON.stringify(plan))
+    lines.length = 0
+    // No --plan on argv either, so nothing supplies a plan path.
+    const code = await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /no plan path to enforce against/)
+    // Nothing was dispatched: no session store was created.
+    await assert.rejects(stat(path.join(root, '.fleetmates', 'r1', 'sessions')))
+  })
+})
+
+// dispatch's early refusals, both reachable before any adapter is resolved or spawned.
+test('dispatch refuses a phase with no tasks with exit 4', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['dispatch', '--run', 'r1', '--phase', '99', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no tasks for phase 99/)
+  })
+})
+
+test('dispatch refuses when the run has no recorded run branch with exit 4', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    // Init from the BASE branch: `init-run` records no run branch when HEAD is the base, so
+    // plan.json carries none and a sandbox clone of `origin/<undefined>` could never be built.
+    g(['checkout', '--quiet', 'main'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no recorded run branch/)
+  })
+})
+
+// message's own refusal paths, all reachable before the adapter resumes anything.
+test('message with no --text is refused with exit 2', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['message', '--run', 'r1', '--task', 'T1', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /missing required argument: --text/)
+  })
+})
+
+test('message with an empty --text is refused with exit 2', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['message', '--run', 'r1', '--task', 'T1', '--text', '', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /missing required argument: --text/)
+  })
+})
+
+test('message with no recorded session is refused with exit 4', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['message', '--run', 'r1', '--task', 'T1', '--text', 'hi', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no session recorded for task T1/)
+  })
+})
+
+test('message with a session record carrying no session id is refused with exit 4', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const sessionsDir = path.join(root, '.fleetmates', 'r1', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFile(path.join(sessionsDir, 'T1.json'), JSON.stringify({ taskId: 'T1', state: 'running' }))
+    lines.length = 0
+    const code = await runCli(['message', '--run', 'r1', '--task', 'T1', '--text', 'hi', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no session id to resume/)
+  })
+})
+
+// message SIGTERMs a live recorded process group before resuming. The child is spawned detached so
+// its pgid equals its pid, which is what the driver's `killProcess(-pid)` targets. Removing the
+// SIGTERM from the message handler leaves the child running until its own `sleep` exits, so the
+// awaited exit never arrives promptly and this goes RED. PART (a) — the driver actually recording
+// a live pid — is a coordinated follow-up in scripts/driver.mjs (outside this file set); this pins
+// PART (b), the handler's forward-compatible guard, by supplying the pid the driver will later
+// write. PATH is cleared so the resume's codex spawn fails fast instead of doing real work.
+test('message SIGTERMs a live recorded process before resuming', {
+  skip: process.platform === 'win32' ? 'no POSIX process groups on win32' : false,
+}, async () => {
+  await withRepo(async ({ root, io }) => {
+    const sessionsDir = path.join(root, '.fleetmates', 'r1', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' })
+    const exited = once(child, 'exit')
+    await writeFile(path.join(sessionsDir, 'T1.json'), JSON.stringify({
+      taskId: 'T1', sessionId: 'sid', pid: child.pid, sandbox: { cwd: root, meta: { mode: 'full' } },
+    }))
+    const savedPath = process.env.PATH
+    const emptyBin = await mkdtemp(path.join(tmpdir(), 'tm-nobin-'))
+    try {
+      process.env.PATH = emptyBin
+      await runCli(['message', '--run', 'r1', '--task', 'T1', '--text', 'hi', '--root', root], io)
+      const [, signal] = await exited
+      assert.equal(signal, 'SIGTERM')
+    } finally {
+      process.env.PATH = savedPath
+      try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
+      await rm(emptyBin, { recursive: true, force: true })
+    }
+  })
+})
+
+// The mirror case: a record with no pid names no process to signal, so message must reach the
+// resume without attempting a kill and without throwing. A live sentinel with an unrelated pid is
+// left untouched.
+test('message signals nothing when the record names no process', {
+  skip: process.platform === 'win32' ? 'no POSIX process groups on win32' : false,
+}, async () => {
+  await withRepo(async ({ root, io }) => {
+    const sessionsDir = path.join(root, '.fleetmates', 'r1', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFile(path.join(sessionsDir, 'T1.json'), JSON.stringify({
+      taskId: 'T1', sessionId: 'sid', sandbox: { cwd: root, meta: { mode: 'full' } },
+    }))
+    const sentinel = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' })
+    const savedPath = process.env.PATH
+    const emptyBin = await mkdtemp(path.join(tmpdir(), 'tm-nobin-'))
+    try {
+      process.env.PATH = emptyBin
+      const code = await runCli(['message', '--run', 'r1', '--task', 'T1', '--text', 'hi', '--root', root], io)
+      assert.equal(code, 0)
+      // The unrelated live process is still running: message signalled nothing.
+      assert.doesNotThrow(() => process.kill(sentinel.pid, 0))
+    } finally {
+      process.env.PATH = savedPath
+      try { process.kill(-sentinel.pid, 'SIGKILL') } catch { /* already gone */ }
+      await rm(emptyBin, { recursive: true, force: true })
+    }
+  })
+})
+
+// dispatch-reviews relays a non-zero exit and message from `review-dispatch` rather than swallowing
+// it: with no gate manifest, `review-dispatch` cannot tell which lenses to dispatch and exits 4, so
+// dispatch-reviews forwards that. Reached before the harness probe, so no real codex is needed.
+test('dispatch-reviews forwards a review-dispatch refusal', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    // `--phase default` avoids review-dispatch's multi-phase ambiguity refusal; with no
+    // fleetmates.gate.json it then exits 4 ("no gate manifest"), which dispatch-reviews forwards.
+    const code = await runCli(['dispatch-reviews', '--run', 'r1', '--phase', 'default', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no gate manifest/)
+  })
+})
+
+// Step 6 fallback: with a run named but NO session store, `usage` reads the Claude Code transcript
+// store rather than printing the session-store report. CLAUDE_CONFIG_DIR points at an empty dir so
+// the transcript store is missing and the read fails deterministically (exit 1) — and the output is
+// NOT the `run <id> (N tasks)` session-store shape.
+test('usage falls back to the transcript store when a run has no session store', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const emptyConfig = await mkdtemp(path.join(tmpdir(), 'tm-cfg-'))
+    const savedConfig = process.env.CLAUDE_CONFIG_DIR
+    lines.length = 0
+    try {
+      process.env.CLAUDE_CONFIG_DIR = emptyConfig
+      const code = await runCli(['usage', '--run', 'r1', '--root', root], io)
+      assert.equal(code, 1, lines.join('\n'))
+      // Not the session-store report: it fell through to the transcript path.
+      assert.doesNotMatch(lines.join('\n'), /run r1 {2}\(\d+ task/)
+    } finally {
+      if (savedConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = savedConfig
+      await rm(emptyConfig, { recursive: true, force: true })
+    }
   })
 })
