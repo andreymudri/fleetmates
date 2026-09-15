@@ -1,9 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createGit, GitError, defaultGitExec, teammateRef, COMMIT_MARKER, classifyHeadRef } from '../scripts/git.mjs'
+import { createGit, GitError, defaultGitExec, teammateRef, COMMIT_MARKER, classifyHeadRef, fetchTaskBranch, gitDirWritable } from '../scripts/git.mjs'
 
 const recorder = (result = { code: 0, stdout: '', stderr: '' }) => {
   const calls = []
@@ -1928,4 +1928,96 @@ test('currentBranch answers null for every state the classifier rejects, not jus
   assert.equal(await at('refs/heads/run-branch\n').currentBranch(), 'run-branch')
   const detached = createGit({ exec: async () => ({ code: 1, signal: null, stdout: '', stderr: '' }) })
   assert.equal(await detached.currentBranch(), null)
+})
+
+// Task 3: hardened local fetch. The argv-and-env assertion runs against a fake exec that records
+// what it was called with, so the neutralising flags are proven present without a repository.
+test('fetchTaskBranch disables hooks/fsmonitor, fetches ff-only into refs/heads, and sets GIT_OPTIONAL_LOCKS=0', async () => {
+  const calls = []
+  const exec = async (args, opts) => { calls.push({ args, opts }); return { code: 0, signal: null, stdout: '', stderr: '' } }
+  await fetchTaskBranch(exec, { fromGitDir: '/some/teammate/.git', branch: 'fleetmates/r1/T7' })
+  assert.equal(calls.length, 1)
+  const { args, opts } = calls[0]
+  // The two -c overrides that keep a planted config from executing on the host.
+  assert.ok(args.includes('core.hooksPath=/dev/null'), 'hooksPath must be nulled')
+  assert.ok(args.includes('core.fsmonitor=false'), 'fsmonitor must be disabled')
+  // A fetch that carries no tags and does not write FETCH_HEAD.
+  assert.equal(args[4], 'fetch')
+  assert.ok(args.includes('--no-tags'))
+  assert.ok(args.includes('--no-write-fetch-head'))
+  // The git dir sits right after --end-of-options, and the refspec has no leading '+', so the
+  // fetch is fast-forward-only rather than a forced overwrite.
+  const eoo = args.indexOf('--end-of-options')
+  assert.equal(args[eoo + 1], '/some/teammate/.git')
+  assert.equal(args[eoo + 2], 'refs/heads/fleetmates/r1/T7:refs/heads/fleetmates/r1/T7')
+  assert.ok(!args[eoo + 2].startsWith('+'), 'no leading + keeps the fetch fast-forward only')
+  // Optional locks off, layered into env rather than replacing it.
+  assert.deepEqual(opts.env, { GIT_OPTIONAL_LOCKS: '0' })
+})
+
+// End-to-end: a second repo with a commit on a branch, fetched into a first repo by fetchTaskBranch.
+test('against real repositories, fetchTaskBranch brings a teammate branch in', async () => {
+  const host = await mkdtemp(path.join(tmpdir(), 'tm-git-fetch-host-'))
+  const mate = await mkdtemp(path.join(tmpdir(), 'tm-git-fetch-mate-'))
+  const shHost = (args) => defaultGitExec(args, host)
+  const shMate = (args) => defaultGitExec(args, mate)
+  try {
+    for (const [sh, root] of [[shHost, host], [shMate, mate]]) {
+      await sh(['init', '--initial-branch=main'])
+      await sh(['config', 'user.email', 'test@example.com'])
+      await sh(['config', 'user.name', 'test'])
+      await writeFile(path.join(root, 'base.txt'), 'base\n', 'utf8')
+      await sh(['add', '.'])
+      await sh(['commit', '-m', 'base'])
+    }
+    // The teammate commits on its own task branch.
+    await shMate(['checkout', '-b', 'fleetmates/r1/T7'])
+    await writeFile(path.join(mate, 'task.txt'), 'work\n', 'utf8')
+    await shMate(['add', '.'])
+    await shMate(['commit', '-m', 'task work'])
+    const mateTip = (await shMate(['rev-parse', 'fleetmates/r1/T7'])).stdout.trim()
+    // Before the fetch the host has no such branch.
+    assert.notEqual((await shHost(['rev-parse', '--verify', 'refs/heads/fleetmates/r1/T7'])).code, 0)
+    const res = await fetchTaskBranch((args, opts) => defaultGitExec(args, { cwd: host, ...opts }), {
+      fromGitDir: path.join(mate, '.git'),
+      branch: 'fleetmates/r1/T7',
+    })
+    assert.equal(res.code, 0, res.stderr)
+    // The branch now resolves in the host to the teammate's tip.
+    assert.equal((await shHost(['rev-parse', 'refs/heads/fleetmates/r1/T7'])).stdout.trim(), mateTip)
+  } finally {
+    await rm(host, { recursive: true, force: true })
+    await rm(mate, { recursive: true, force: true })
+  }
+})
+
+// Task 3: writability preflight. The positive leg on a normal repo.
+test('gitDirWritable returns ok on a normal temp repo', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-writable-'))
+  try {
+    await defaultGitExec(['init', '--initial-branch=main'], root)
+    const res = await gitDirWritable((args, opts) => defaultGitExec(args, { cwd: root, ...opts }), root)
+    assert.equal(res.ok, true)
+    assert.ok(res.dir.endsWith('.git'), res.dir)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// The negative leg: making the common dir unwritable is detected as { ok: false } with a code.
+// chmod 0500 is ignored for the owner when running as root, so this leg is skipped there.
+test('gitDirWritable reports not-ok with a code when the git dir is unwritable', { skip: process.getuid && process.getuid() === 0 ? 'chmod is ignored for root' : false }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-unwritable-'))
+  const gitDir = path.join(root, '.git')
+  try {
+    await defaultGitExec(['init', '--initial-branch=main'], root)
+    await chmod(gitDir, 0o500)
+    const res = await gitDirWritable((args, opts) => defaultGitExec(args, { cwd: root, ...opts }), root)
+    assert.equal(res.ok, false)
+    assert.ok(typeof res.code === 'string' && res.code.length > 0, `expected an error code, got ${res.code}`)
+    assert.ok(res.dir.endsWith('.git'), res.dir)
+  } finally {
+    await chmod(gitDir, 0o700).catch(() => {})
+    await rm(root, { recursive: true, force: true })
+  }
 })
