@@ -213,6 +213,40 @@ test('buildResumeArgv (clone mode) carries exec, resume, the session id, sandbox
   assert.ok(!argv.includes('-C'))
 })
 
+// The whole sandbox-SELECTION matrix, pinned explicitly per mode per builder, so a downgrade of
+// `SANDBOX_FLAG.files` (or `buildResumeArgv`'s files/full branches) to the wrong flag cannot ship
+// green. Clone mode is already exercised by the tests above via other assertions; repeated here
+// with `hasPair` so every mode is proven the same way, in one place, and none is left unpinned.
+test('buildSpawnArgv selects -s workspace-write for clone and files, and -s danger-full-access for full', () => {
+  const argvFor = (mode) => buildSpawnArgv({
+    sandbox: { cwd: '/sandboxes/clones/T5', meta: { mode, gitdir: '/sandboxes/gitdirs/T5' } },
+    schemaPath: '/s.json', resultPath: '/r.json',
+  })
+  assert.ok(hasPair(argvFor('clone'), '-s', 'workspace-write'), 'clone mode: expected the pair -s workspace-write')
+  assert.ok(hasPair(argvFor('files'), '-s', 'workspace-write'), 'files mode: expected the pair -s workspace-write')
+  assert.ok(hasPair(argvFor('full'), '-s', 'danger-full-access'), 'full mode: expected the pair -s danger-full-access')
+})
+
+test('buildResumeArgv selects sandbox_mode="workspace-write" for clone and files, and sandbox_mode="danger-full-access" for full', () => {
+  const argvFor = (mode) => buildResumeArgv({
+    sandbox: { cwd: '/sandboxes/clones/T5', meta: { mode, gitdir: '/sandboxes/gitdirs/T5' } },
+    sessionId: 'thread-abc',
+    schemaPath: '/s.json', resultPath: '/r.json',
+  })
+  assert.ok(
+    hasPair(argvFor('clone'), '-c', 'sandbox_mode="workspace-write"'),
+    'clone mode: expected the pair -c sandbox_mode="workspace-write"',
+  )
+  assert.ok(
+    hasPair(argvFor('files'), '-c', 'sandbox_mode="workspace-write"'),
+    'files mode: expected the pair -c sandbox_mode="workspace-write"',
+  )
+  assert.ok(
+    hasPair(argvFor('full'), '-c', 'sandbox_mode="danger-full-access"'),
+    'full mode: expected the pair -c sandbox_mode="danger-full-access"',
+  )
+})
+
 // --- spawnCodex/resumeCodex against the fake binary --------------------------------------
 
 test('spawnCodex resolves the session id from the stream and closes stdin (a regression here hangs into the timeout)', { timeout: 5000 }, async () => {
@@ -274,10 +308,12 @@ test('spawnCodex never lets GIT_DIR/GIT_WORK_TREE reach the codex process\'s own
       await once(handle.child, 'close')
     })
     const seenEnv = JSON.parse(await readFile(envOutPath, 'utf8'))
-    // GIT_DIR/GIT_WORK_TREE are real, non-empty values in THIS test's own process (set via the
-    // `-c shell_environment_policy.set=…` argv, and asserted present there by the test above) —
-    // so a codex process that saw them at all would report non-null here. `null` is the only
-    // value that proves they were never inherited.
+    // GIT_DIR/GIT_WORK_TREE never live in THIS test's own process.env either — they exist only
+    // inside the built `-c shell_environment_policy.set=…` argv value (asserted present there by
+    // the test above). What this assertion actually catches: a buggy `run()` that added an `env`
+    // override to its `spawn('codex', …)` call (e.g. `{ ...process.env, GIT_DIR: … }`) would make
+    // the CHILD report a real value here; the correct `run()` passes no `env` override at all, so
+    // the fake — which only ever sees what its own process.env carries — reports `null` for both.
     assert.equal(seenEnv.GIT_DIR, null)
     assert.equal(seenEnv.GIT_WORK_TREE, null)
   } finally {
