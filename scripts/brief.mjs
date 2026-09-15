@@ -25,6 +25,12 @@
 // assertion cannot do this: an unused import changes no rendered output. The check bounds the
 // named routes to the host; it is not a proof of purity in general.
 
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+
+// scripts/brief.mjs -> scripts/ -> <fleetmates root>/scripts/cli.mjs
+const CLI_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cli.mjs')
+
 // With a base branch, the brief opens with a checkout that has an explicit start point and a
 // log line the teammate can check against a named ref. With no base there is nothing to branch
 // from: emitting `git checkout -B <branch>` with a missing operand would silently create the
@@ -100,7 +106,7 @@ const blastRadius = (task) => (task.neighbours && task.neighbours.length ? [
 const locateStep = (task, runId) => (runId ? [
   'RECORD YOUR WORKTREE. Immediately after the checkout above, run:',
   '',
-  '    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" locate --run ' + runId + ' --task ' + task.id,
+  `    node ${JSON.stringify(CLI_PATH)} locate --run ${runId} --task ${task.id}`,
   '',
   'It takes no path arguments: it reads your worktree and branch from where you run it, so it',
   'is safe to run from any directory inside your worktree. This is how your work is identified',
@@ -191,7 +197,7 @@ const verifyStep = (task, runId, planPath, baseBranch) => (runId && planPath ? [
   'BEFORE YOU RETURN "done". Run the task gate on your own work, in the FOREGROUND:',
   '',
   '    ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")',
-  '    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete \\',
+  `    node ${JSON.stringify(CLI_PATH)} complete \\`,
   '      --run ' + runId + ' --task ' + task.id + ' --plan ' + planPath
     + (baseBranch ? ' --base ' + baseBranch : '') + ' --root "$ROOT"',
   '',
