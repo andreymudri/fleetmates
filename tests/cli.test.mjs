@@ -29,6 +29,7 @@ import {
   derive,
   plantedReviewsLink,
   emptyResultsOpenFlags,
+  harnessSettings,
 } from '../scripts/cli.mjs'
 import { previewOwnerMarkerPath, previewClaimPath } from '../scripts/merge-preview.mjs'
 import { renderRunSummary } from '../scripts/finish.mjs'
@@ -2156,7 +2157,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 107, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
+const CENSUS_EXPECTED = { 'cli.mjs': 108, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2356,10 +2357,10 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **125 lines: 107 in `cli.mjs`, 6 in
+// can no longer drift away from the code unnoticed. It came to **126 lines: 108 in `cli.mjs`, 6 in
 // `reviews.mjs`, 6 in `digest.mjs`, 6 in `finish.mjs`**.
 //
-// The most recent move was the T7 headless-dispatch commands, which added **21 sites, all in
+// The most recent move was the T7 headless-dispatch commands, which added **22 sites, all in
 // `cli.mjs`**, named here as a GROUP and not row-driven for the same reason `collect-reviews`'s
 // path sentences are (see the group below): every one wraps a value that is either off this CLI's
 // own argv (`--run`, `--task`, `--phase`) or read out of `status.json`/`plan.json`/a session
@@ -2374,10 +2375,11 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // report — the `--json` `printableBlock` and the two text lines wrapping the run id and each task
 // id. `dispatch`'s brief/complete-enforcement recursion emits nothing of its own, and the harness
 // probe's `reason`/`fix` come off the adapter, not an agent file, so neither is in this class.
-// The T7 fix round added two more to the same group: `resolveHarness`'s unknown-harness refusal
+// The T7 fix rounds added three more to the same group: `resolveHarness`'s unknown-harness refusal
 // (wrapping the `--harness` value off argv, shared by `dispatch`/`dispatch-reviews`/
-// `dispatch-integrator`/`message`) and `dispatch`'s no-plan-path refusal (the run id), which is why
-// the group is 21 rather than 19.
+// `dispatch-integrator`/`message`), `dispatch`'s no-plan-path refusal (the run id), and
+// `dispatch-integrator`'s derive-failure line (the run id and the `derive` error message, which can
+// quote git output), which is why the group is 22 rather than 19.
 //
 // It was allowed to drift once, and by more than two times: this paragraph said 48 — 32/6/6/4 —
 // while the census had already passed a hundred, which is exactly the failure the paragraph above
@@ -14890,58 +14892,112 @@ test('dispatch-integrator refuses with exit 4 when the phase has no recorded PAS
   })
 })
 
-// The HIGH bug: `gate` keys its record under the NUMERIC derived phase (e.g. `"2"` for phase 2),
-// storing the manifest key it selected checks under as `phaseName` on the record. A lookup by the
-// raw `--phase` used as a KEY (`status.gates['default']`) therefore missed the real PASS for every
-// phase >= 2 and refused a gate that had passed. This records a PASS the way `gate` actually does
-// for phase 2 and asserts `dispatch-integrator --phase default` FINDS it — it does not refuse with
-// exit 4. PATH is cleared so the harness probe fails deterministically (no `codex` binary),
-// proving the gate-key check was cleared without depending on a real codex. With the old
-// `flags.phase ?? 'default'` key lookup this goes RED (exit 4, "no recorded PASS").
-test('dispatch-integrator finds the PASS gate records under a numeric key for a phase >= 2', async () => {
+// Writes an executable fake `codex` into a fresh bin dir and returns { bin, cleanup, prepend }.
+// `prepend` PREPENDS it to PATH so git still resolves for the git-writability preflight; the fake
+// reports "Not logged in" so the harness probe fails deterministically (exit 2) without a real,
+// logged-in codex, letting a test assert what happens BEFORE the probe.
+async function fakeCodexNotLoggedIn() {
+  const bin = await mkdtemp(path.join(tmpdir(), 'tm-fakecodex-'))
+  await writeFile(path.join(bin, 'codex'), '#!/usr/bin/env node\nprocess.stdout.write("Not logged in\\n");process.exit(1)\n')
+  await chmod(path.join(bin, 'codex'), 0o755)
+  const saved = process.env.PATH
+  return {
+    prepend: () => { process.env.PATH = `${bin}${path.delimiter}${saved}` },
+    cleanup: async () => { process.env.PATH = saved; await rm(bin, { recursive: true, force: true }) },
+  }
+}
+
+// The DEFINITIVE-fix behaviour: the integrator looks up the EXACT key `gate` writes — the numeric
+// derived phase from `deriveContext` — never a `phaseName` scan. This records a PASS under the key
+// this run actually derives (computed here through the same exported `derive`) and asserts the
+// integrator FINDS it: it does not refuse with exit 4. The fake codex makes the probe fail after
+// the gate-key check clears, so this needs no real codex. A mutant that reverts to the phaseName
+// scan still passes here (the phaseName matches), which is why the three refusal tests below —
+// solo, __proto__, wrong numeric phase — are the ones that kill it.
+test('dispatch-integrator authorizes when the gate wrote a PASS under the derived numeric key', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const plan = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), 'utf8'))
+    const derived = await derive(root, 'r1', { plan: plan.planPath })
+    const key = String(derived.currentPhase)
     const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
     const status = JSON.parse(await readFile(statusPath, 'utf8'))
-    // Exactly the shape `gate` writes: numeric key, `phaseName` naming the manifest phase.
-    status.gates = { 2: { verdict: 'PASS', phaseName: 'default', phase: 2 } }
+    status.gates = { [key]: { verdict: 'PASS', phaseName: 'default', phase: derived.currentPhase } }
     await writeFile(statusPath, JSON.stringify(status))
-    // A fake `codex` that reports "Not logged in" (prepended to PATH so git still resolves for the
-    // git-writability preflight) makes the harness probe fail deterministically, so this proves the
-    // gate-key check was cleared without depending on a real, logged-in codex.
-    const bin = await mkdtemp(path.join(tmpdir(), 'tm-fakecodex-'))
-    await writeFile(path.join(bin, 'codex'), '#!/usr/bin/env node\nprocess.stdout.write("Not logged in\\n");process.exit(1)\n')
-    await chmod(path.join(bin, 'codex'), 0o755)
-    const savedPath = process.env.PATH
+    const fake = await fakeCodexNotLoggedIn()
     lines.length = 0
     try {
-      process.env.PATH = `${bin}${path.delimiter}${savedPath}`
+      fake.prepend()
       const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'default', '--root', root], io)
-      // Not the no-PASS refusal: the gate-key check was cleared. The probe then fails on the fake
-      // codex (exit 2), which is the next step, not this guard.
+      // Not the no-PASS refusal: the gate-key check cleared. The probe then fails on the fake codex.
       assert.notEqual(code, 4, lines.join('\n'))
       assert.doesNotMatch(lines.join('\n'), /no recorded PASS/)
       assert.match(lines.join('\n'), /codex login/)
     } finally {
-      process.env.PATH = savedPath
-      await rm(bin, { recursive: true, force: true })
+      await fake.cleanup()
     }
   })
 })
 
-// The refusal stays scoped: a PASS recorded for the `default` phase does not clear the guard for a
-// DIFFERENT manifest phase that has none.
-test('dispatch-integrator still refuses a phase that has no PASS of its own', async () => {
+// A `--no-fleet` gate records under a `solo:<phaseName>` key with the SAME phaseName but with
+// fileset+ownership enforcement STRIPPED. The exact-key lookup never consults it, so a solo PASS
+// does NOT authorize the integrator. With the phaseName scan this went to exit 0/probe instead of
+// refusing — merging on a vacuous gate.
+test('dispatch-integrator refuses a solo (--no-fleet) PASS record', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
     const status = JSON.parse(await readFile(statusPath, 'utf8'))
-    status.gates = { 1: { verdict: 'PASS', phaseName: 'default', phase: 1 } }
+    status.gates = { 'solo:default': { verdict: 'PASS', phaseName: 'default' } }
     await writeFile(statusPath, JSON.stringify(status))
     lines.length = 0
-    const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'integration', '--root', root], io)
+    const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'default', '--root', root], io)
     assert.equal(code, 4, lines.join('\n'))
-    assert.match(lines.join('\n'), /integration.*no recorded PASS/)
+    assert.match(lines.join('\n'), /no recorded PASS/)
+  })
+})
+
+// `status.json` is JSON-parsed, so a text key `"__proto__"` is an OWN enumerable property that a
+// scan (`Object.values`) reads — a forged `__proto__` PASS would clear the guard. The exact-key
+// lookup uses `Object.hasOwn(gates, <numeric key>)`, which never names `__proto__`, so the forged
+// entry is not consulted. The status.json text is written LITERALLY so the `__proto__` really lands
+// as a parsed own key rather than mutating the prototype.
+test('dispatch-integrator refuses a forged __proto__ gate key', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    delete status.gates
+    // Splice a raw `"__proto__"` gate into the JSON text so JSON.parse makes it an own key.
+    const text = JSON.stringify(status).replace(/}$/, ',"gates":{"__proto__":{"verdict":"PASS","phaseName":"default"}}}')
+    await writeFile(statusPath, text)
+    // Confirm the fixture really produced an own `__proto__` gate key, not a prototype mutation.
+    const reparsed = JSON.parse(await readFile(statusPath, 'utf8'))
+    assert.ok(Object.hasOwn(reparsed.gates, '__proto__'))
+    lines.length = 0
+    const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'default', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no recorded PASS/)
+  })
+})
+
+// A PASS recorded for a DIFFERENT numeric phase than the one this run derives does not authorize:
+// the exact-key lookup targets the specific phase being integrated, so it cannot merge phase N+1 on
+// phase N's PASS. This records the PASS one phase above the derived key.
+test('dispatch-integrator refuses a PASS recorded for a different numeric phase', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const plan = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), 'utf8'))
+    const derived = await derive(root, 'r1', { plan: plan.planPath })
+    const otherKey = String((derived.currentPhase ?? 1) + 1)
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    status.gates = { [otherKey]: { verdict: 'PASS', phaseName: 'default', phase: Number(otherKey) } }
+    await writeFile(statusPath, JSON.stringify(status))
+    lines.length = 0
+    const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'default', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no recorded PASS/)
   })
 })
 
@@ -15053,6 +15109,11 @@ test('message refuses a task id that escapes the run directory before reaching t
 // would read to the driver as a pass — silently disabling enforcement for every task. This edits
 // plan.json to drop the recorded planPath so no plan is resolvable. With the guard removed the
 // dispatch proceeds and the empty-plan enforcement bypass returns, so this goes RED.
+//
+// Environment-independent by construction: the plan-path guard runs BEFORE the harness probe, so
+// this reaches its refusal with no `codex` on PATH. A fake codex is installed anyway so that even
+// if the ordering regresses (guard moved back after the probe), the guard is still reached and this
+// keeps asserting the real message rather than the probe's — the failure mode the reviewer named.
 test('dispatch refuses when no plan path can be resolved to enforce against', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
@@ -15060,13 +15121,31 @@ test('dispatch refuses when no plan path can be resolved to enforce against', as
     const plan = JSON.parse(await readFile(planStatePath, 'utf8'))
     delete plan.planPath
     await writeFile(planStatePath, JSON.stringify(plan))
+    // A logged-in fake codex with a writable CODEX_HOME, so the probe would PASS if it were reached
+    // — proving the refusal here is the plan-path guard, not a probe short-circuit.
+    const bin = await mkdtemp(path.join(tmpdir(), 'tm-fakecodex-'))
+    await writeFile(path.join(bin, 'codex'), '#!/usr/bin/env node\nif(process.argv[2]==="login"){process.stdout.write("Logged in\\n");process.exit(0)}\nprocess.exit(0)\n')
+    await chmod(path.join(bin, 'codex'), 0o755)
+    const codexHome = await mkdtemp(path.join(tmpdir(), 'tm-codexhome-'))
+    const savedPath = process.env.PATH
+    const savedHome = process.env.CODEX_HOME
     lines.length = 0
-    // No --plan on argv either, so nothing supplies a plan path.
-    const code = await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
-    assert.equal(code, 2, lines.join('\n'))
-    assert.match(lines.join('\n'), /no plan path to enforce against/)
-    // Nothing was dispatched: no session store was created.
-    await assert.rejects(stat(path.join(root, '.fleetmates', 'r1', 'sessions')))
+    try {
+      process.env.PATH = `${bin}${path.delimiter}${savedPath}`
+      process.env.CODEX_HOME = codexHome
+      // No --plan on argv either, so nothing supplies a plan path.
+      const code = await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--root', root], io)
+      assert.equal(code, 2, lines.join('\n'))
+      assert.match(lines.join('\n'), /no plan path to enforce against/)
+      // Nothing was dispatched: no session store was created.
+      await assert.rejects(stat(path.join(root, '.fleetmates', 'r1', 'sessions')))
+    } finally {
+      process.env.PATH = savedPath
+      if (savedHome === undefined) delete process.env.CODEX_HOME
+      else process.env.CODEX_HOME = savedHome
+      await rm(bin, { recursive: true, force: true })
+      await rm(codexHome, { recursive: true, force: true })
+    }
   })
 })
 
@@ -15232,4 +15311,29 @@ test('usage falls back to the transcript store when a run has no session store',
       await rm(emptyConfig, { recursive: true, force: true })
     }
   })
+})
+
+// MEDIUM: harnessSettings's security-relevant defaults are reached by no dispatch test (a real
+// dispatch would need a harness), so they are pinned directly. An empty resolved config must yield
+// an isolated `clone` sandbox, network OFF, a 30-minute timeout, and no tier->model map — the safe
+// posture spec §7 assumes. Mutating any default (e.g. `sandbox ?? 'files'`) goes RED here.
+test('harnessSettings falls back to the safe defaults when the config sets nothing', () => {
+  const settings = harnessSettings({ harnesses: {} }, 'codex')
+  assert.equal(settings.sandboxMode, 'clone')
+  assert.equal(settings.network, false)
+  assert.equal(settings.timeoutMinutes, 30)
+  assert.deepEqual(settings.tierModels, {})
+})
+
+// And when the config DOES set them, harnessSettings reads the configured values through — so the
+// defaults above are genuine fallbacks, not values it always returns.
+test('harnessSettings reads configured harness values when present', () => {
+  const settings = harnessSettings(
+    { harnesses: { codex: { sandbox: 'full', network: true, timeoutMinutes: 5, tierModels: { mid: 'm' } } } },
+    'codex',
+  )
+  assert.equal(settings.sandboxMode, 'full')
+  assert.equal(settings.network, true)
+  assert.equal(settings.timeoutMinutes, 5)
+  assert.deepEqual(settings.tierModels, { mid: 'm' })
 })

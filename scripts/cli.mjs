@@ -120,7 +120,7 @@ function resolveHarness(flags, io) {
 // The harness sandbox/network/timeout/tierModels for one run, resolved from `harnesses.<name>.*`
 // with the same defaults the codex adapter assumes when a field is unset: an isolated `clone`,
 // network off, a 30-minute timeout, and no tier→model map.
-function harnessSettings(resolved, harnessName) {
+export function harnessSettings(resolved, harnessName) {
   const entry = (resolved.harnesses && resolved.harnesses[harnessName]) || {}
   return {
     sandboxMode: entry.sandbox ?? 'clone',
@@ -3404,19 +3404,9 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
 
-    const resolved = await resolveConfig(root, io)
-    if (!resolved) return 2
-
-    const adapter = resolveHarness(flags, io)
-    if (!adapter) return 2
-
-    const probe = await adapter.probe({})
-    if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
-
-    const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name)
-
     // The plan path the brief points at AND the plan `completeEnforcement` runs `complete` against.
-    // It must resolve to a real path: `complete --plan '' --enforcement-only` exits 2 for a missing
+    // Resolved and refused BEFORE the harness probe, so a run that cannot be enforced never even
+    // probes an external CLI: `complete --plan '' --enforcement-only` exits 2 for a missing
     // argument, and the driver reads any code that is not 3 as a pass — so an empty plan would
     // SILENTLY disable enforcement for every task. When `--plan` is omitted (or a bare `--plan`
     // parses as `true`), fall back to the plan path `init-run` recorded in plan.json — which is the
@@ -3429,6 +3419,18 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`run ${printable(runId)} has no plan path to enforce against — pass --plan <path>, or re-run init-run so plan.json records one`)
       return 2
     }
+
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+
+    const adapter = resolveHarness(flags, io)
+    if (!adapter) return 2
+
+    const probe = await adapter.probe({})
+    if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
+
+    const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name)
+
     const baseBranch = flags.base === true ? '' : (flags.base ?? '')
     const planMarkdown = await planAtAnchor(root, planPath, flags, io)
     if (planMarkdown === PLAN_READ_REJECTED) return 2
@@ -3548,27 +3550,47 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'dispatch-integrator') {
-    // Refuses unless the phase holds a recorded PASS. Unlike a teammate-facing decision, the
-    // integrator is dispatched by the orchestrator after the gate it itself ran wrote this record,
-    // so reading it here is the orchestrator confirming its own prior verdict, not trusting an
-    // enforced party. No PASS means the gate has not passed, and nothing may merge.
+    // Refuses unless the phase being integrated holds a recorded PASS. Unlike a teammate-facing
+    // decision, the integrator is dispatched by the orchestrator after the gate it itself ran wrote
+    // this record, so reading it is the orchestrator confirming its own prior verdict, not trusting
+    // an enforced party. No PASS means the gate has not passed, and nothing may merge.
     //
-    // The record is found by its `phaseName`, NOT by the raw `--phase` used as a KEY. `gate` keys
-    // its record under `String(ctx.currentPhase ?? phaseName)` — the NUMERIC derived phase for
-    // every phase after the first — while it stores the manifest key it selected checks under as
-    // `phaseName` on the record itself. Looking up `status.gates['default']` therefore missed the
-    // real PASS for any phase >= 2 (recorded under e.g. `"2"`) and refused a gate that had passed.
-    // Scanning for the entry whose `phaseName` matches, whatever numeric key it landed under, is
-    // what mirrors how the gate actually wrote it. `Object.values` reads only own enumerable
-    // properties, so a `__proto__`-shaped key cannot inject a fake PASS.
+    // The record is looked up by the EXACT key `gate` writes — `String(ctx.currentPhase ?? phaseName)`
+    // (the NUMERIC derived fleet phase; see the gate handler) — derived here through the same
+    // `derive`/`deriveContext` the gate uses, NOT by scanning for a matching `phaseName`. A
+    // phaseName scan was wrong three ways and each is closed by the exact-key lookup:
+    //   - the one manifest phase is named `default`, so EVERY fleet phase records `phaseName:
+    //     'default'` — a scan authorized integrating phase 4 on phase 2's PASS; the numeric key
+    //     targets the specific phase being integrated.
+    //   - a `--no-fleet` gate records under a `solo:<phaseName>` key with the SAME `phaseName` but
+    //     with fileset+ownership enforcement STRIPPED; a scan matched it and merged on a vacuous
+    //     gate. The numeric key never equals `solo:...`, so a solo record is never consulted.
+    //   - `status.json` is JSON-parsed, so a text key `"__proto__"` is an OWN enumerable property
+    //     that `Object.values` reads — a scan let a forged `__proto__` PASS clear the guard.
+    //     `Object.hasOwn(gates, gateKey)` with a numeric `gateKey` never names it.
     const phaseName = flags.phase && flags.phase !== true ? flags.phase : 'default'
     const status = await readState(root, runId, 'status')
+    // `derive` reads the plan at the run anchor, so it needs a plan path. Take it from `--plan`, or
+    // fall back to the one `init-run` recorded — the same resolution `dispatch` uses. `derive`
+    // throws on a base/run-branch collision, a detached HEAD, or an unreadable plan; that is a
+    // "cannot verify which phase to integrate", handled like the gate handler handles it — a clear
+    // exit, not a crash.
+    const planState = await readState(root, runId, 'plan')
+    const planPath = (flags.plan && flags.plan !== true)
+      ? flags.plan
+      : (typeof planState?.planPath === 'string' ? planState.planPath : '')
+    let derived
+    try {
+      derived = await derive(root, runId, { ...flags, plan: planPath })
+    } catch (err) {
+      io.out(`cannot verify which phase to integrate for run ${printable(runId)}: ${printable(err.message)}`)
+      return 4
+    }
+    const gateKey = String(derived.currentPhase ?? phaseName)
     const gates = status && typeof status.gates === 'object' && status.gates !== null ? status.gates : {}
-    const passed = Object.values(gates).some(
-      (g) => g && typeof g === 'object' && g.verdict === 'PASS' && g.phaseName === phaseName,
-    )
-    if (!passed) {
-      io.out(`phase ${printable(phaseName)} of run ${printable(runId)} has no recorded PASS — run the gate to a PASS before dispatching the integrator`)
+    const recorded = Object.hasOwn(gates, gateKey) ? gates[gateKey] : undefined
+    if (!recorded || typeof recorded !== 'object' || recorded.verdict !== 'PASS') {
+      io.out(`phase ${printable(phaseName)} of run ${printable(runId)} has no recorded PASS under key ${printable(gateKey)} — run the gate to a PASS before dispatching the integrator`)
       return 4
     }
 
