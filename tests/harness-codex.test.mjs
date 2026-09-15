@@ -395,6 +395,102 @@ test('makeCodexSandbox (files mode) produces a git-less checkout of the branch t
   }
 })
 
+// A run repo whose checked-out branch ('main') and the branch handed to `makeCodexSandbox` as
+// `runBranch` ('diverged') carry different trees — 'diverged' adds a file 'main' does not have.
+// Content divergence is what makes index pollution OBSERVABLE: staging an identical tree onto
+// an identical tree leaves no diff, which is exactly why the original defect (no `GIT_INDEX_FILE`)
+// passed every prior test in this suite even though it was writing straight into the run repo's
+// real index the whole time.
+async function initDivergedRepo(runRepo) {
+  await initRepo(runRepo)
+  await defaultGitExec(['checkout', '-b', 'diverged'], runRepo)
+  await writeFile(path.join(runRepo, 'only-in-work.txt'), 'diverged\n', 'utf8')
+  await defaultGitExec(['add', '.'], runRepo)
+  await defaultGitExec(['config', 'user.email', 'test@example.com'], runRepo)
+  await defaultGitExec(['config', 'user.name', 'test'], runRepo)
+  await defaultGitExec(['commit', '-m', 'diverged content'], runRepo)
+  await defaultGitExec(['checkout', 'main'], runRepo)
+}
+
+test('makeCodexSandbox (files mode) leaves the run repo\'s own index and HEAD untouched, even when runBranch diverges from it', async () => {
+  const runRepo = await mkdtemp(path.join(tmpdir(), 'tm-codex-run-'))
+  try {
+    await initDivergedRepo(runRepo)
+    const headBefore = (await defaultGitExec(['rev-parse', 'HEAD'], runRepo)).stdout.trim()
+    const stagedBefore = await defaultGitExec(['diff', '--cached', '--name-only'], runRepo)
+    assert.equal(stagedBefore.stdout.trim(), '')
+
+    const sandbox = await makeCodexSandbox(defaultGitExec, {
+      runRepo, runBranch: 'diverged', runId: 'r1', taskId: 'T9', mode: 'files',
+    })
+    // The sandbox itself does get the diverged branch's tree — that part is correct and expected.
+    const content = await readFile(path.join(sandbox.cwd, 'only-in-work.txt'), 'utf8')
+    assert.equal(content, 'diverged\n')
+
+    // The assertion whose absence let the run repo's shared index get polluted: the
+    // `--work-tree <cwd> checkout` in files mode must run against a PRIVATE index
+    // (GIT_INDEX_FILE), never the run repo's own — otherwise this checkout stages
+    // 'diverged''s tree (including a file 'main' never had) into runRepo's real index. Without
+    // the fix this reproduces exactly the coordinator's own finding: `git diff --cached
+    // --name-status` in runRepo shows `A only-in-work.txt`.
+    const staged = await defaultGitExec(['diff', '--cached', '--name-only'], runRepo)
+    assert.equal(staged.stdout.trim(), '', `expected the run repo's index to be unchanged, got staged: ${staged.stdout}`)
+    const headAfter = (await defaultGitExec(['rev-parse', 'HEAD'], runRepo)).stdout.trim()
+    assert.equal(headAfter, headBefore)
+  } finally {
+    await rm(runRepo, { recursive: true, force: true })
+  }
+})
+
+test('makeCodexSandbox (files mode) does not contend for the run repo\'s real index.lock, even while something else holds it', async () => {
+  const runRepo = await mkdtemp(path.join(tmpdir(), 'tm-codex-run-'))
+  try {
+    await initRepo(runRepo)
+    // Simulates a concurrent git process already holding the run repo's own index lock — the
+    // exact file a shared-index checkout would need and fail on
+    // (`fatal: Unable to create '<runRepo>/.git/index.lock': File exists`). A files-mode build
+    // using a private index (GIT_INDEX_FILE) never touches this file at all, so it must succeed
+    // regardless.
+    const gitDir = (await defaultGitExec(['rev-parse', '--git-dir'], runRepo)).stdout.trim()
+    const lockPath = path.join(runRepo, gitDir, 'index.lock')
+    await writeFile(lockPath, '', 'utf8')
+    try {
+      const sandbox = await makeCodexSandbox(defaultGitExec, {
+        runRepo, runBranch: 'main', runId: 'r1', taskId: 'T10', mode: 'files',
+      })
+      const content = await readFile(path.join(sandbox.cwd, 'base.txt'), 'utf8')
+      assert.equal(content, 'base\n')
+      // The lock we planted is still exactly as we left it — nothing here ever tried to take it.
+      const lockContent = await readFile(lockPath, 'utf8')
+      assert.equal(lockContent, '')
+    } finally {
+      await rm(lockPath, { force: true })
+    }
+  } finally {
+    await rm(runRepo, { recursive: true, force: true })
+  }
+})
+
+test('makeCodexSandbox (files mode) — two concurrent builds on the same run repo both resolve, with distinct cwds and the expected tree', async () => {
+  const runRepo = await mkdtemp(path.join(tmpdir(), 'tm-codex-run-'))
+  try {
+    await initRepo(runRepo)
+    const [a, b] = await Promise.all([
+      makeCodexSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'TA', mode: 'files' }),
+      makeCodexSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'TB', mode: 'files' }),
+    ])
+    for (const sandbox of [a, b]) {
+      const content = await readFile(path.join(sandbox.cwd, 'base.txt'), 'utf8')
+      assert.equal(content, 'base\n')
+    }
+    assert.notEqual(a.cwd, b.cwd)
+    const staged = await defaultGitExec(['diff', '--cached', '--name-only'], runRepo)
+    assert.equal(staged.stdout.trim(), '')
+  } finally {
+    await rm(runRepo, { recursive: true, force: true })
+  }
+})
+
 // --- collectCodex: the only host-side git touch against teammate material -----------------
 
 test('collectCodex (clone mode) fetches the task branch from the sandbox git dir into the run repo', async () => {
@@ -443,6 +539,29 @@ test('probe returns ok:true when the fake reports logged in and CODEX_HOME is wr
     const res = await probe({ env: { ...process.env, FAKE_CODEX_LOGGED_IN: '1', CODEX_HOME: home } })
     assert.deepEqual(res, { ok: true })
   } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+// The writability guard (§2 item 15: codex dies without a writable CODEX_HOME) — pinned so
+// deleting that block cannot leave the suite green. chmod 0o500 is ignored for the owner when
+// running as root (same convention as tests/git.test.mjs), and win32 chmod semantics don't
+// produce the same denial, so both are skipped there.
+test('probe returns ok:false when the fake reports logged in but CODEX_HOME is not writable', {
+  timeout: 5000,
+  skip: process.platform === 'win32'
+    ? 'win32 chmod does not deny directory writes the same way'
+    : (process.getuid && process.getuid() === 0 ? 'chmod is ignored for root' : false),
+}, async () => {
+  const home = await mkdtemp(path.join(tmpdir(), 'tm-codex-home-unwritable-'))
+  try {
+    await chmod(home, 0o500)
+    const res = await probe({ env: { ...process.env, FAKE_CODEX_LOGGED_IN: '1', CODEX_HOME: home } })
+    assert.equal(res.ok, false)
+    assert.ok(res.reason && res.reason.length > 0, 'expected an actionable reason')
+    assert.ok(res.fix && res.fix.includes(home), `expected the fix to name ${home}, got ${res.fix}`)
+  } finally {
+    await chmod(home, 0o700).catch(() => {})
     await rm(home, { recursive: true, force: true })
   }
 })

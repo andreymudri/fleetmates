@@ -137,7 +137,19 @@ export async function makeCodexSandbox(git, { runRepo, runBranch, runId, taskId,
   if (mode === 'files') {
     const cwd = path.join(base, 'files', taskId)
     await mkdir(cwd, { recursive: true })
-    await must(git, ['--work-tree', cwd, 'checkout', runBranch, '--', '.'], { cwd: runRepo })
+    // A PRIVATE index, outside `cwd` so it is never checked into the work tree. Without this,
+    // `checkout --work-tree <cwd>` still resolves GIT_DIR to `runRepo/.git` (no env override),
+    // so it (a) takes `runRepo/.git/index.lock` — a second concurrent files-mode build on the
+    // same run repo collides with "Unable to create '<runRepo>/.git/index.lock': File exists" —
+    // and (b) STAGES the branch's tree into the run repo's own shared index, corrupting whatever
+    // the host later commits or reports as staged there. `GIT_INDEX_FILE` relocates both the
+    // index and its lock, so per-task builds share neither with the run repo or with each other.
+    // Only needed for this one checkout — `files` mode never touches git again (`collect`
+    // computes and commits the diff itself) — so it is removed right after, best-effort.
+    const filesIndex = path.join(base, `files-index-${taskId}`)
+    await must(git, ['--work-tree', cwd, 'checkout', runBranch, '--', '.'],
+      { cwd: runRepo, env: { GIT_INDEX_FILE: filesIndex } })
+    await rm(filesIndex, { force: true })
     return { cwd, meta: { mode, branch } }
   }
   const gitdir = path.join(base, 'gitdirs', taskId)
