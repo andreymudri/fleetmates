@@ -266,6 +266,7 @@ the driver, decides landability.
 - Create: `scripts/harnesses/codex.mjs`
 - Create: `scripts/harnesses/index.mjs`
 - Create: `tests/harness-codex.test.mjs`
+- Modify: `tests/names.test.mjs`
 
 **Depends:** T1, T3
 
@@ -385,6 +386,16 @@ the driver, decides landability.
 
 - [ ] **Step 6:** Export the adapter object binding these:
   `export const codexAdapter = { name: 'codex', probe, makeSandbox: makeCodexSandbox, collect: collectCodex, cleanup, spawn, resume, readResult, readUsage, sandboxFlag: SANDBOX_FLAG }`.
+
+- [ ] **Step 0 (added by amendment):** `scripts/harnesses/` is the first subdirectory ever created
+  under `scripts/`, and `tests/names.test.mjs`'s `sources()` does a flat, non-recursive
+  `readdirSync(path.join(root, dir))` over `['scripts','hooks']` and `readFileSync`s every entry as
+  a file — so a subdirectory makes it throw `EISDIR`. Fix `sources()` to walk recursively: read each
+  directory with `{ withFileTypes: true }`, recurse into subdirectories, and collect only files
+  (repo-relative paths, forward slashes). This is not merely a guard — the recursion means the new
+  `scripts/harnesses/*.mjs` files are now scanned for legacy spellings too, which is the test's
+  intent. Keep `EXEMPT_FILES` semantics. Confirm the "scan would catch a legacy spelling" sibling
+  test still passes.
 
 - [ ] **Step 7:** Create `tests/harness-codex.test.mjs` with a fake `codex` on `PATH` (a Node script
   written to a temp dir, prepended to `PATH`) that: emits a `thread.started` line then a
