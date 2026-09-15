@@ -1,13 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, chmod } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   dispatchPhase, fixedRefusal, DriverLockError,
-  killProcess, waitForExit, releaseLock, runPool,
+  killProcess, waitForExit, releaseLock, runPool, acquireLock, pidAlive,
 } from '../scripts/driver.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -17,19 +17,28 @@ const DONE = { status: 'done', branch: 'b', filesChanged: ['a'], summary: 's', b
 
 // A fake child process: an EventEmitter that records the kill signals it receives. With no `pid`
 // property, the driver's kill path falls straight to `child.kill`, which we can then assert on.
-function makeChild({ exits = true } = {}) {
+// `exitDelayMs` lets a test hold a child in-flight so peak concurrency can be observed.
+function makeChild({ exits = true, exitDelayMs = 0, onExit } = {}) {
   const child = new EventEmitter()
   child.kills = []
   child.kill = (sig) => { child.kills.push(sig); return true }
-  if (exits) setImmediate(() => child.emit('exit', 0))
+  if (exits) {
+    const fire = () => { onExit?.(); child.emit('exit', 0) }
+    if (exitDelayMs > 0) setTimeout(fire, exitDelayMs)
+    else setImmediate(fire)
+  }
   return child
 }
 
 // A plain-JS adapter with no real codex behind it. Records every call and returns scripted
 // results/usage/enforcement codes so each driver path can be exercised deterministically.
-function makeStubAdapter({ result = DONE, usage = null, enforcementCodes = [0], neverExit = false } = {}) {
+function makeStubAdapter({
+  result = DONE, usage = null, enforcementCodes = [0], neverExit = false,
+  exitDelayForTask,
+} = {}) {
   const calls = { makeSandbox: [], spawn: [], resume: [], collect: [], readResult: [], enforcement: [] }
   const children = []
+  const concurrency = { inFlight: 0, peak: 0 }
   let ei = 0
   const branchTask = (branch) => branch.split('/').pop()
   const adapter = {
@@ -40,9 +49,13 @@ function makeStubAdapter({ result = DONE, usage = null, enforcementCodes = [0], 
     },
     async spawn(opts) {
       calls.spawn.push(opts)
-      const child = makeChild({ exits: !neverExit })
+      const taskId = branchTask(opts.sandbox.meta.branch)
+      concurrency.inFlight += 1
+      concurrency.peak = Math.max(concurrency.peak, concurrency.inFlight)
+      const exitDelayMs = exitDelayForTask ? exitDelayForTask(taskId) : 0
+      const child = makeChild({ exits: !neverExit, exitDelayMs, onExit: () => { concurrency.inFlight -= 1 } })
       children.push(child)
-      return { child, sessionId: Promise.resolve(`sid-${branchTask(opts.sandbox.meta.branch)}`) }
+      return { child, sessionId: Promise.resolve(`sid-${taskId}`) }
     },
     async resume(opts) {
       calls.resume.push(opts)
@@ -64,7 +77,7 @@ function makeStubAdapter({ result = DONE, usage = null, enforcementCodes = [0], 
     ei += 1
     return code
   }
-  return { adapter, calls, children, completeEnforcement }
+  return { adapter, calls, children, completeEnforcement, concurrency }
 }
 
 function baseArgs(runDir, overrides = {}) {
@@ -334,6 +347,117 @@ test('releaseLock leaves a lock naming a different pid intact', async () => {
   await releaseLock(lockPath)
   const still = await readFile(lockPath, 'utf8')
   assert.equal(still.trim(), '2147483646')
+})
+
+test('a stale-lock takeover racing a completed takeover refuses instead of clobbering it', async () => {
+  // The documented interleaving, driven deterministically: actor B detects the dead holder and
+  // pauses; actor A completes its takeover and holds a LIVE lock; B resumes and, because the
+  // removal is re-validated under the takeover token, sees A's live lock and refuses rather than
+  // deleting it. A destructive (rm/rename) takeover would delete A's lock and both would acquire.
+  const runDir = await tmpRunDir('stale-race')
+  const lockPath = path.join(runDir, 'driver.lock')
+  const dead = 2147483646
+  await writeFile(lockPath, `${dead}\n`)
+  const isAlive = (p) => p === 1001 || p === 1002 // both actors alive; the seeded holder is dead
+
+  let signalReached
+  const bReachedSeam = new Promise((resolve) => { signalReached = resolve })
+  let releaseB
+  const bMayProceed = new Promise((resolve) => { releaseB = resolve })
+
+  const bPromise = acquireLock(lockPath, {
+    pid: 1002,
+    isAlive,
+    onDeadHolder: async () => { signalReached(); await bMayProceed },
+  })
+  await bReachedSeam
+
+  // A takes over to completion while B is parked at the seam.
+  await acquireLock(lockPath, { pid: 1001, isAlive })
+  assert.equal((await readFile(lockPath, 'utf8')).trim(), '1001')
+
+  releaseB()
+  await assert.rejects(bPromise, (err) => {
+    assert.ok(err instanceof DriverLockError)
+    return true
+  })
+  // A's live lock survived untouched.
+  assert.equal((await readFile(lockPath, 'utf8')).trim(), '1001')
+})
+
+test('pidAlive treats an EPERM (foreign, live) process as alive', () => {
+  const original = process.kill
+  process.kill = () => { const e = new Error('operation not permitted'); e.code = 'EPERM'; throw e }
+  try {
+    assert.equal(pidAlive(4242), true)
+  } finally {
+    process.kill = original
+  }
+})
+
+test('a lock held by an EPERM (foreign, live) pid is refused, not taken over', async () => {
+  const runDir = await tmpRunDir('eperm-lock')
+  const lockPath = path.join(runDir, 'driver.lock')
+  await writeFile(lockPath, '4242\n')
+  // Simulate a foreign live holder: kill(0) reports EPERM for its pid.
+  const original = process.kill
+  process.kill = (pid, sig) => {
+    if (pid === 4242) { const e = new Error('EPERM'); e.code = 'EPERM'; throw e }
+    return original(pid, sig)
+  }
+  try {
+    await assert.rejects(acquireLock(lockPath), (err) => err instanceof DriverLockError)
+  } finally {
+    process.kill = original
+  }
+  // The foreign holder's lock was not clobbered.
+  assert.equal((await readFile(lockPath, 'utf8')).trim(), '4242')
+})
+
+test('dispatchPhase never runs more than maxParallel tasks at once', async () => {
+  const runDir = await tmpRunDir('concurrency')
+  const stub = makeStubAdapter({ enforcementCodes: [0], exitDelayForTask: () => 15 })
+  const phaseTasks = Array.from({ length: 6 }, (_, i) => ({ id: `T${i}` }))
+  const out = await dispatchPhase(baseArgs(runDir, {
+    runId: 'rp', adapter: stub.adapter, completeEnforcement: stub.completeEnforcement,
+    phaseTasks, maxParallel: 2,
+  }))
+  assert.equal(out.results.length, 6)
+  assert.ok(stub.concurrency.peak <= 2, `peak concurrency ${stub.concurrency.peak} exceeded maxParallel 2`)
+  assert.ok(stub.concurrency.peak >= 2, 'the pool should reach its bound with 6 tasks')
+})
+
+test('results come back in phaseTasks order even when tasks finish out of order', async () => {
+  const runDir = await tmpRunDir('order')
+  // T0 finishes last, T2 first: the reassembly must still yield T0, T1, T2.
+  const delays = { T0: 30, T1: 15, T2: 0 }
+  const stub = makeStubAdapter({ enforcementCodes: [0], exitDelayForTask: (id) => delays[id] ?? 0 })
+  const out = await dispatchPhase(baseArgs(runDir, {
+    runId: 'ro', adapter: stub.adapter, completeEnforcement: stub.completeEnforcement,
+    phaseTasks: [{ id: 'T0' }, { id: 'T1' }, { id: 'T2' }], maxParallel: 3,
+  }))
+  assert.deepEqual(out.results.map((r) => r.taskId), ['T0', 'T1', 'T2'])
+})
+
+test('a failed session write during orphaning does not re-reject the pool', async (t) => {
+  if (process.getuid && process.getuid() === 0) return t.skip('chmod is ignored as root')
+  const runDir = await tmpRunDir('double-fault')
+  const sessionsDir = path.join(runDir, 'sessions')
+  await mkdir(sessionsDir, { recursive: true })
+  const stub = makeStubAdapter({ enforcementCodes: [0] })
+  stub.adapter.makeSandbox = async () => { throw new Error('sandbox blew up') }
+  await chmod(sessionsDir, 0o500) // read-only: the orphan session write will fail with EACCES
+  try {
+    const out = await dispatchPhase(baseArgs(runDir, {
+      runId: 'rd', adapter: stub.adapter, completeEnforcement: stub.completeEnforcement,
+      phaseTasks: [{ id: 'TA' }],
+    }))
+    // The double fault (sandbox throw + unwritable session) still resolves with the task orphaned.
+    assert.deepEqual(out.orphaned, ['TA'])
+    assert.deepEqual(out.results, [])
+  } finally {
+    await chmod(sessionsDir, 0o700)
+  }
 })
 
 test('fixedRefusal is byte-identical to the enforcement refusal subagent-stop.mjs sends', async () => {

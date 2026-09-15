@@ -6,7 +6,7 @@
 // phase gate recomputes) before it is recorded. Returns `{ results, orphaned }` in the shape the
 // Workflow template returns (`templates/phase-workflow.js`), so the CLI post-processing, the
 // gate and `finish` are identical on both dispatch paths.
-import { mkdir, readFile, writeFile, rm } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rm, link, unlink } from 'node:fs/promises'
 import path from 'node:path'
 
 // A driver already holds this run's lock. Thrown by `dispatchPhase` so the CLI can translate it
@@ -37,7 +37,7 @@ export function fixedRefusal(taskId, runId) {
 // process.kill(pid, 0) probes existence without signalling: no throw or EPERM means a live
 // process (EPERM is alive-but-not-ours), ESRCH means it is gone. A driver whose pid is gone left
 // a stale lock that must not block a resume.
-function pidAlive(pid) {
+export function pidAlive(pid) {
   try {
     process.kill(pid, 0)
     return true
@@ -170,27 +170,71 @@ export async function runPool(items, limit, worker) {
 }
 
 // Acquires `lockPath` for this process. Refuses (throws DriverLockError, exit 1) when the lock
-// holds a live pid; takes over a lock whose pid is gone. The create is atomic (`flag: 'wx'`,
-// i.e. O_CREAT|O_EXCL) so two concurrent dispatches on one run cannot both acquire — an earlier
-// read-then-write let both pass. On a stale lock the file is removed and the exclusive create is
-// retried once: only the single retry that wins the exclusive create takes over; a concurrent
-// take-over loses the race and is refused.
-async function acquireLock(lockPath) {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      await writeFile(lockPath, `${process.pid}\n`, { flag: 'wx' })
-      return
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err
-      const existing = await readFile(lockPath, 'utf8').catch(() => null)
-      const pid = existing == null ? Number.NaN : Number.parseInt(existing.trim(), 10)
-      if (Number.isInteger(pid) && pidAlive(pid)) throw new DriverLockError(pid, lockPath)
-      // Stale (dead pid) or unreadable: drop it and retry the exclusive create exactly once. A
-      // second EEXIST means another taker-over won the race, so refuse rather than loop.
-      if (attempt >= 1) throw new DriverLockError(Number.isInteger(pid) ? pid : -1, lockPath)
-      await rm(lockPath, { force: true })
+// holds a LIVE pid; takes over a lock whose pid is gone. Two properties make concurrent dispatches
+// on one run safe:
+//   1. The install is `link(tmp, lockPath)` — atomic and NON-clobbering (EEXIST if the lock is
+//      already present), so exactly one of N racers installs into an empty slot. `writeFile(...,
+//      {flag:'wx'})` gives the same O_EXCL guarantee, but link lets the same tmp seed both the lock
+//      and the takeover token below without a second write.
+//   2. A stale (dead-holder) lock is removed ONLY while holding an exclusive takeover TOKEN (itself
+//      an atomic link) and ONLY after RE-READING the holder under that token and confirming it is
+//      still dead. This is the load-bearing fix: a plain `rm`/`rename` takeover reads the dead pid,
+//      then deletes whatever is at the path — which, if a competitor already took over, is that
+//      competitor's LIVE lock, so both drivers proceed (measured: rm 2-7/1000, rename worse). The
+//      re-read under the token turns that into a refusal, because no one can install over the stale
+//      lock (link EEXISTs) or take it over (the token is held) between the re-read and the rm.
+// A crash mid-takeover leaves at most a stale `<lock>.takeover`; the bounded loop then refuses
+// rather than spinning, and the leftover is a normal file a later run overwrites via the same link.
+export async function acquireLock(lockPath, { pid = process.pid, isAlive = pidAlive, onDeadHolder } = {}) {
+  const token = `${lockPath}.takeover`
+  const tmp = `${lockPath}.tmp.${pid}.${process.hrtime.bigint()}`
+  await writeFile(tmp, `${pid}\n`)
+  try {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        await link(tmp, lockPath)
+        return
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err
+        const holder = await readPid(lockPath)
+        if (Number.isInteger(holder) && isAlive(holder)) throw new DriverLockError(holder, lockPath)
+        // A test-only seam to drive the takeover interleaving deterministically; unused in
+        // production. Fired once, after detecting a dead holder and before claiming the token, so a
+        // test can let a competitor finish its takeover here and prove the under-token re-read
+        // refuses rather than clobbering the competitor's fresh LIVE lock.
+        if (onDeadHolder) {
+          const hook = onDeadHolder
+          onDeadHolder = null
+          await hook()
+        }
+        // Dead holder: serialize the removal behind the token. A competitor holding the token means
+        // a takeover is in flight, so loop and re-check rather than race it.
+        try {
+          await link(tmp, token)
+        } catch (terr) {
+          if (terr.code === 'EEXIST') continue
+          throw terr
+        }
+        try {
+          const under = await readPid(lockPath)
+          if (Number.isInteger(under) && isAlive(under)) throw new DriverLockError(under, lockPath)
+          await rm(lockPath, { force: true })
+        } finally {
+          await unlink(token).catch(() => {})
+        }
+        // lockPath is now empty; loop back to the atomic link, which gates the final winner.
+      }
     }
+    throw new DriverLockError(-1, lockPath)
+  } finally {
+    await unlink(tmp).catch(() => {})
   }
+}
+
+// The pid an existing lock names, or NaN when the file is gone or unreadable.
+async function readPid(lockPath) {
+  const raw = await readFile(lockPath, 'utf8').catch(() => null)
+  return raw == null ? Number.NaN : Number.parseInt(raw.trim(), 10)
 }
 
 // Removes the lock only while it still names this process, so a concurrent take-over is not
@@ -321,10 +365,16 @@ export async function dispatchPhase({
   // git failure) must orphan only THAT task, never reject the pool and abandon its siblings. The
   // error is written to the task's session so a resume can see why it failed.
   async function orphanThrow(task, err) {
-    const sessionFile = path.join(sessionsDir, `${task.id}.json`)
-    const prior = (await readJson(sessionFile)) || {}
     const message = err && err.message ? err.message : String(err)
-    await writeJson(sessionFile, { ...prior, taskId: task.id, state: 'orphaned', exitReason: message })
+    // The session write is itself guarded: a second fault here (e.g. the session write rejects)
+    // must NOT escape the worker's catch and re-reject the pool, which would revive the
+    // sibling-abandonment this whole path exists to prevent. A write failure still yields an
+    // in-memory orphaned outcome; only the on-disk record is lost.
+    try {
+      const sessionFile = path.join(sessionsDir, `${task.id}.json`)
+      const prior = (await readJson(sessionFile)) || {}
+      await writeJson(sessionFile, { ...prior, taskId: task.id, state: 'orphaned', exitReason: message })
+    } catch { /* double fault: keep the task orphaned in memory, do not re-throw */ }
     return { kind: 'orphaned' }
   }
 
