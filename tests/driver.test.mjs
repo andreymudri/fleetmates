@@ -5,7 +5,10 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { dispatchPhase, fixedRefusal, DriverLockError } from '../scripts/driver.mjs'
+import {
+  dispatchPhase, fixedRefusal, DriverLockError,
+  killProcess, waitForExit, releaseLock, runPool,
+} from '../scripts/driver.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SUBAGENT_STOP = path.join(HERE, '..', 'scripts', 'subagent-stop.mjs')
@@ -232,6 +235,105 @@ test('a stale driver.lock (dead pid) is taken over', async () => {
   assert.equal(out.results.length, 1)
   assert.equal(out.results[0].status, 'done')
   assert.equal(calls.spawn.length, 1)
+})
+
+test('a task whose makeSandbox throws is orphaned without abandoning its siblings', async () => {
+  const runDir = await tmpRunDir('worker-throw')
+  const stub = makeStubAdapter({ enforcementCodes: [0] })
+  const original = stub.adapter.makeSandbox
+  stub.adapter.makeSandbox = async (git, opts) => {
+    if (opts.taskId === 'TA') throw new Error('clone failed for TA')
+    return original(git, opts)
+  }
+  const out = await dispatchPhase(baseArgs(runDir, {
+    runId: 'rw', adapter: stub.adapter, completeEnforcement: stub.completeEnforcement,
+    phaseTasks: [{ id: 'TA' }, { id: 'TB' }],
+  }))
+
+  // The pool resolved (did not reject); the throwing task is orphaned, the sibling completed.
+  assert.deepEqual(out.orphaned, ['TA'])
+  assert.equal(out.results.length, 1)
+  assert.equal(out.results[0].taskId, 'TB')
+  assert.equal(out.results[0].status, 'done')
+
+  const sessionA = await readSession(runDir, 'TA')
+  assert.equal(sessionA.state, 'orphaned')
+  assert.match(sessionA.exitReason, /clone failed for TA/)
+})
+
+test('runPool tracks its cleanup promise so a throwing worker leaks no unhandled rejection', async () => {
+  const seen = []
+  const onUnhandled = (err) => seen.push(err)
+  process.on('unhandledRejection', onUnhandled)
+  let ran = 0
+  try {
+    await assert.rejects(runPool([1, 2, 3], 2, async (n) => {
+      ran += 1
+      if (n === 1) throw new Error('worker boom')
+    }))
+    // Give any detached rejected promise a full turn to surface as unhandled.
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled)
+  }
+  assert.equal(seen.length, 0, 'no unhandled rejection should escape runPool')
+  assert.ok(ran >= 1)
+})
+
+test('two concurrent dispatches on one run: exactly one proceeds, the other is refused', async () => {
+  const runDir = await tmpRunDir('concurrent-lock')
+  const stubs = [makeStubAdapter({ enforcementCodes: [0] }), makeStubAdapter({ enforcementCodes: [0] })]
+  const settled = await Promise.allSettled(stubs.map((s, i) => dispatchPhase(baseArgs(runDir, {
+    runId: 'rc', adapter: s.adapter, completeEnforcement: s.completeEnforcement, phaseTasks: [{ id: `T${i}` }],
+  }))))
+
+  const fulfilled = settled.filter((r) => r.status === 'fulfilled')
+  const rejected = settled.filter((r) => r.status === 'rejected')
+  assert.equal(fulfilled.length, 1)
+  assert.equal(rejected.length, 1)
+  assert.ok(rejected[0].reason instanceof DriverLockError)
+  assert.equal(rejected[0].reason.exitCode, 1)
+})
+
+test('killProcess signals the process group (negative pid), not the child directly', () => {
+  const original = process.kill
+  const calls = []
+  process.kill = (pid, sig) => { calls.push([pid, sig]) }
+  try {
+    const child = { pid: 424242, kill: () => calls.push(['child.kill']) }
+    killProcess(child, 'SIGTERM')
+  } finally {
+    process.kill = original
+  }
+  assert.deepEqual(calls, [[-424242, 'SIGTERM']])
+})
+
+test('waitForExit escalates to SIGKILL after the grace when SIGTERM is ignored', async () => {
+  const child = new EventEmitter()
+  const signals = []
+  child.kill = (sig) => { signals.push(sig) } // ignores the signal: never emits exit
+  const reason = await waitForExit(child, 20, { killGraceMs: 40 })
+  assert.equal(reason, 'timeout')
+  assert.deepEqual(signals, ['SIGTERM'])
+  await new Promise((resolve) => setTimeout(resolve, 90))
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
+})
+
+test('waitForExit settles immediately when the child has already exited', async () => {
+  const child = new EventEmitter()
+  child.exitCode = 0 // already exited: no further 'exit' event will ever fire
+  const reason = await waitForExit(child, 100, { killGraceMs: 100 })
+  assert.equal(reason, 'exit')
+})
+
+test('releaseLock leaves a lock naming a different pid intact', async () => {
+  const runDir = await tmpRunDir('release-guard')
+  const lockPath = path.join(runDir, 'driver.lock')
+  await writeFile(lockPath, '2147483646\n')
+  await releaseLock(lockPath)
+  const still = await readFile(lockPath, 'utf8')
+  assert.equal(still.trim(), '2147483646')
 })
 
 test('fixedRefusal is byte-identical to the enforcement refusal subagent-stop.mjs sends', async () => {

@@ -50,7 +50,7 @@ function pidAlive(pid) {
 // child's own children go too, then the child directly. `-pid` targets the group whose id equals
 // the child's pid; a non-detached child leads no such group, so this resolves to ESRCH and is
 // caught — it can never reach the driver's own group, whose id is a different pid.
-function killProcess(child, signal) {
+export function killProcess(child, signal) {
   if (!child) return
   if (typeof child.pid === 'number' && child.pid > 0) {
     try {
@@ -64,9 +64,11 @@ function killProcess(child, signal) {
 }
 
 // Resolves 'exit' when the child ends, or 'timeout' when `timeoutMs` elapses first. On timeout it
-// SIGTERMs, schedules an unref'd SIGKILL 10s later (so a wedged child is reaped without the driver
-// waiting on it), and resolves 'timeout' immediately so the caller can mark the task orphaned.
-function waitForExit(child, timeoutMs) {
+// SIGTERMs, schedules an unref'd SIGKILL `killGraceMs` later (so a wedged child that ignores
+// SIGTERM is still reaped without the driver waiting on it), and resolves 'timeout' immediately so
+// the caller can mark the task orphaned. `killGraceMs` is injectable only so tests can shorten the
+// grace; production always uses the 10s default.
+export function waitForExit(child, timeoutMs, { killGraceMs = 10_000 } = {}) {
   return new Promise((resolve) => {
     let settled = false
     const done = (reason) => {
@@ -82,7 +84,7 @@ function waitForExit(child, timeoutMs) {
     }
     const timer = setTimeout(() => {
       killProcess(child, 'SIGTERM')
-      const kill9 = setTimeout(() => killProcess(child, 'SIGKILL'), 10_000)
+      const kill9 = setTimeout(() => killProcess(child, 'SIGKILL'), killGraceMs)
       kill9.unref?.()
       done('timeout')
     }, timeoutMs)
@@ -144,36 +146,56 @@ function appendBlocker(blockers, message) {
 }
 
 // Runs `worker` over `items` at most `limit` at a time, preserving no ordering itself (the caller
-// re-assembles results in task order from the map the workers fill).
-async function runPool(items, limit, worker) {
-  const bound = Math.max(1, limit | 0 || 1)
+// re-assembles results in task order from the map the workers fill). The tracked promise is the
+// SAME one that carries the settle-and-cleanup: an earlier version tracked a bare promise and did
+// its cleanup on a detached `p.finally(...)`, whose rejection was never awaited and surfaced as an
+// unhandled rejection (fatal under Node's default `--unhandled-rejections=throw`). Here a worker
+// throw rejects only the awaited promise, so `Promise.race`/`Promise.all` handle it and nothing
+// leaks.
+export async function runPool(items, limit, worker) {
+  const bound = Math.max(1, (limit | 0) || 1)
   const executing = new Set()
   for (const item of items) {
-    const p = Promise.resolve().then(() => worker(item))
+    const p = (async () => {
+      try {
+        return await worker(item)
+      } finally {
+        executing.delete(p)
+      }
+    })()
     executing.add(p)
-    p.finally(() => executing.delete(p))
     if (executing.size >= bound) await Promise.race(executing)
   }
   await Promise.all(executing)
 }
 
 // Acquires `lockPath` for this process. Refuses (throws DriverLockError, exit 1) when the lock
-// holds a live pid; takes over a lock whose pid is gone. Writing this pid last means a taker-over
-// leaves the lock naming itself.
+// holds a live pid; takes over a lock whose pid is gone. The create is atomic (`flag: 'wx'`,
+// i.e. O_CREAT|O_EXCL) so two concurrent dispatches on one run cannot both acquire — an earlier
+// read-then-write let both pass. On a stale lock the file is removed and the exclusive create is
+// retried once: only the single retry that wins the exclusive create takes over; a concurrent
+// take-over loses the race and is refused.
 async function acquireLock(lockPath) {
-  const existing = await readFile(lockPath, 'utf8').catch(() => null)
-  if (existing != null) {
-    const pid = Number.parseInt(existing.trim(), 10)
-    if (Number.isInteger(pid) && pidAlive(pid)) {
-      throw new DriverLockError(pid, lockPath)
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await writeFile(lockPath, `${process.pid}\n`, { flag: 'wx' })
+      return
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err
+      const existing = await readFile(lockPath, 'utf8').catch(() => null)
+      const pid = existing == null ? Number.NaN : Number.parseInt(existing.trim(), 10)
+      if (Number.isInteger(pid) && pidAlive(pid)) throw new DriverLockError(pid, lockPath)
+      // Stale (dead pid) or unreadable: drop it and retry the exclusive create exactly once. A
+      // second EEXIST means another taker-over won the race, so refuse rather than loop.
+      if (attempt >= 1) throw new DriverLockError(Number.isInteger(pid) ? pid : -1, lockPath)
+      await rm(lockPath, { force: true })
     }
   }
-  await writeFile(lockPath, `${process.pid}\n`)
 }
 
 // Removes the lock only while it still names this process, so a concurrent take-over is not
 // clobbered (a same-run second driver is refused, so in practice the lock is ours).
-async function releaseLock(lockPath) {
+export async function releaseLock(lockPath) {
   const current = await readFile(lockPath, 'utf8').catch(() => null)
   if (current != null && Number.parseInt(current.trim(), 10) === process.pid) {
     await rm(lockPath, { force: true })
@@ -295,10 +317,25 @@ export async function dispatchPhase({
     return { kind: 'result', result: { taskId, ...result } }
   }
 
+  // A processTask throw (adapter.makeSandbox/collect throw via the codex adapter's `must()` on any
+  // git failure) must orphan only THAT task, never reject the pool and abandon its siblings. The
+  // error is written to the task's session so a resume can see why it failed.
+  async function orphanThrow(task, err) {
+    const sessionFile = path.join(sessionsDir, `${task.id}.json`)
+    const prior = (await readJson(sessionFile)) || {}
+    const message = err && err.message ? err.message : String(err)
+    await writeJson(sessionFile, { ...prior, taskId: task.id, state: 'orphaned', exitReason: message })
+    return { kind: 'orphaned' }
+  }
+
   try {
     const outcomes = new Map()
     await runPool(phaseTasks, maxParallel, async (task) => {
-      outcomes.set(task.id, await processTask(task))
+      try {
+        outcomes.set(task.id, await processTask(task))
+      } catch (err) {
+        outcomes.set(task.id, await orphanThrow(task, err))
+      }
     })
     const results = []
     const orphaned = []
