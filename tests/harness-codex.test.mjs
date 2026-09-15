@@ -106,6 +106,17 @@ async function withEnv(vars, fn) {
   }
 }
 
+// Asserts a `-c key=value` pair appears as ADJACENT argv elements, in that order — a loose
+// `.includes(value)` check would still pass if the pair were split apart or the value moved
+// under a different flag. This pins the exact `['-c', <value>]` pair `baseArgs` (codex.mjs)
+// builds for each security-relevant setting.
+function hasPair(argv, flag, value) {
+  for (let i = 0; i < argv.length - 1; i++) {
+    if (argv[i] === flag && argv[i + 1] === value) return true
+  }
+  return false
+}
+
 async function initRepo(root) {
   await defaultGitExec(['init', '--initial-branch=main'], root)
   await defaultGitExec(['config', 'user.email', 'test@example.com'], root)
@@ -137,6 +148,22 @@ test('buildSpawnArgv (clone mode) carries --disable hooks, -s workspace-write, -
   assert.equal(argv[0], 'exec')
   assert.ok(argv.includes('--disable'))
   assert.ok(argv.includes('hooks'))
+  // --skip-git-repo-check: the clone's cwd carries no `.git` pointer (§7), so codex must not
+  // refuse to start over that.
+  assert.ok(argv.includes('--skip-git-repo-check'))
+  // approval_policy="never": headless `codex exec` has no one to answer an interactive approval
+  // prompt — without this pair the process blocks forever waiting on one.
+  assert.ok(hasPair(argv, '-c', 'approval_policy="never"'), 'expected the pair -c approval_policy="never"')
+  // The two sandbox_workspace_write excludes: without them /tmp and $TMPDIR read as
+  // writable-by-default gaps in the workspace-write sandbox.
+  assert.ok(
+    hasPair(argv, '-c', 'sandbox_workspace_write.exclude_slash_tmp=true'),
+    'expected the pair -c sandbox_workspace_write.exclude_slash_tmp=true',
+  )
+  assert.ok(
+    hasPair(argv, '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true'),
+    'expected the pair -c sandbox_workspace_write.exclude_tmpdir_env_var=true',
+  )
   const sIndex = argv.indexOf('-s')
   assert.equal(argv[sIndex + 1], 'workspace-write')
   const addDirIndex = argv.indexOf('--add-dir')
@@ -215,6 +242,18 @@ test('readResult returns null when the -o file was never written', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-codex-noresult-'))
   try {
     const result = await readResult({ resultPath: path.join(dir, 'absent.json') })
+    assert.equal(result, null)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('readResult returns null (not a throw) when the -o file exists but is not valid JSON', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-codex-badjson-'))
+  try {
+    const resultPath = path.join(dir, 'bad.json')
+    await writeFile(resultPath, 'not json at all {{{', 'utf8')
+    const result = await readResult({ resultPath })
     assert.equal(result, null)
   } finally {
     await rm(dir, { recursive: true, force: true })
