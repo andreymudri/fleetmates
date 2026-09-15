@@ -38,7 +38,9 @@ import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from './prun
 import { previewOwnerMarkerPath, previewClaimPrefix } from './merge-preview.mjs'
 import { rebuildRunState } from './rebuild.mjs'
 import { generatePhaseWorkflow } from './workflow-gen.mjs'
-import { createGit, GitError, defaultGitExec } from './git.mjs'
+import { createGit, GitError, defaultGitExec, gitDirWritable } from './git.mjs'
+import { getAdapter, HARNESS_NAMES } from './harnesses/index.mjs'
+import { dispatchPhase, waitForExit, runPool, killProcess, pidAlive } from './driver.mjs'
 import { buildCoupling, neighboursOf, inventory, hotPairs, renderMap } from './codemap.mjs'
 import { mapNotesStale, mapNotesPrompt, mapNotesWritable } from './mapnotes.mjs'
 import { deriveContext } from './gate-runner.mjs'
@@ -73,7 +75,64 @@ function resolvedTempRoot() {
   }
 }
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|config> [options]
+// scripts/cli.mjs -> scripts/ -> <fleetmates root>. The agent personas live at
+// <fleetmates root>/agents/tm-<role>.md, next to this scripts directory.
+const FLEET_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
+
+// The persona a headless teammate is prompted with: the body of `agents/tm-<role>.md` with its
+// YAML frontmatter stripped, so the harness prompt is the same system-prompt text a Claude Code
+// `agentType: fleetmates:tm-<role>` dispatch would carry. Roles map by name — implementer,
+// reviewer, integrator — the same three `scripts/config.mjs` declares in ROLES.
+async function personaFor(role) {
+  const body = await readFile(path.join(FLEET_ROOT, 'agents', `tm-${role}.md`), 'utf8')
+  const frontmatter = body.match(/^---\n[\s\S]*?\n---\n?/)
+  return frontmatter ? body.slice(frontmatter[0].length).replace(/^\s+/, '') : body
+}
+
+// The message Step 2 prints for every GIT_WRITING_COMMANDS command whose common git dir this
+// shell cannot write. Copied to the letter from the plan so both the code and the test that pins
+// it read the same three lines.
+function sandboxRefusal(dir) {
+  return `cannot write to ${dir}: this shell is sandboxed.\n`
+    + '  Start the harness with full access (codex: --sandbox danger-full-access),\n'
+    + '  or re-run this one command with sandbox escalation.'
+}
+
+// The harness resolved from `--harness` (default `codex`), or null after printing the
+// unknown-harness message that names every known harness. A bare `--harness` (parsed as the
+// boolean `true` when the flag carries no value) reads as the default rather than as a name.
+function resolveHarness(flags, io) {
+  const name = (flags.harness === undefined || flags.harness === true) ? 'codex' : flags.harness
+  try {
+    return getAdapter(name)
+  } catch (err) {
+    io.out(err.message)
+    return null
+  }
+}
+
+// The harness sandbox/network/timeout/tierModels for one run, resolved from `harnesses.<name>.*`
+// with the same defaults the codex adapter assumes when a field is unset: an isolated `clone`,
+// network off, a 30-minute timeout, and no tier→model map.
+function harnessSettings(resolved, harnessName) {
+  const entry = (resolved.harnesses && resolved.harnesses[harnessName]) || {}
+  return {
+    sandboxMode: entry.sandbox ?? 'clone',
+    network: entry.network ?? false,
+    timeoutMinutes: entry.timeoutMinutes ?? 30,
+    tierModels: entry.tierModels ?? {},
+  }
+}
+
+// Sums the codex `readUsage` totals a driver stores per task into one token count, or null when
+// no usage was recorded. The shape is `{ input, cachedInput, cacheWrite, output, reasoning }`.
+function totalTokens(usage) {
+  if (!usage || typeof usage !== 'object') return null
+  return (usage.input ?? 0) + (usage.cachedInput ?? 0) + (usage.cacheWrite ?? 0)
+    + (usage.output ?? 0) + (usage.reasoning ?? 0)
+}
+
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
@@ -95,6 +154,11 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
   brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
+  dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--root <path>]
+  dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--root <path>]
+  dispatch-integrator --run <id> [--phase <name>] [--harness <name>] [--root <path>]
+  message  --run <id> --task <id> --text <s> [--harness <name>] [--root <path>]
+  sessions --run <id> [--root <path>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>] [--enforcement-only]
   fix      --run <id> --phase <n> --verdict <path> [--root <path>]
   record-fix-round --run <id> --phase <n> --task <id> [--root <path>]
@@ -231,6 +295,15 @@ export const REQUIRED = {
   locate: ['run', 'task'],
   brief: ['run', 'task', 'plan'],
   workflow: ['run', 'phase'],
+  // `dispatch` replaces the Workflow path for one numeric plan phase, so its `--phase` is a
+  // plan phase number like `workflow`'s (it is in NUMERIC_PHASE_COMMANDS below).
+  dispatch: ['run', 'phase'],
+  // `dispatch-reviews`/`dispatch-integrator` operate on a MANIFEST phase key like
+  // `review-dispatch`/`collect-reviews`, which defaults to `default`; `--phase` is not required.
+  'dispatch-reviews': ['run'],
+  'dispatch-integrator': ['run'],
+  message: ['run', 'task', 'text'],
+  sessions: ['run'],
   complete: ['run', 'task', 'plan'],
   fix: ['run', 'phase', 'verdict'],
   'record-fix-round': ['run', 'phase', 'task'],
@@ -262,6 +335,11 @@ export const KNOWN_FLAGS = {
   brief: ['run', 'task', 'plan', 'base', 'fix-round'],
   complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
   workflow: ['run', 'phase', 'models', 'plan', 'base'],
+  dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models'],
+  'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models'],
+  'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models'],
+  message: ['run', 'task', 'harness', 'text'],
+  sessions: ['run'],
   fix: ['run', 'phase', 'verdict'],
   'record-fix-round': ['run', 'phase', 'task'],
   'review-dispatch': ['run', 'phase', 'models'],
@@ -272,7 +350,9 @@ export const KNOWN_FLAGS = {
   'prune-run': ['run', 'plan', 'base', 'yes', 'results', 'enforcement-only'],
   'rebuild-state': ['run', 'plan', 'base', 'force'],
   map: ['files', 'commits', 'top'],
-  usage: ['session', 'json'],
+  // `--run` reads a headless run's session store (`.fleetmates/<run>/sessions/*.json`); without
+  // it `usage` still reads the Claude Code transcript store keyed by session.
+  usage: ['session', 'json', 'run'],
   'map-notes': ['run', 'write'],
   config: ['local'],
 }
@@ -293,7 +373,17 @@ function unknownFlags(command, flags) {
 // phase-gate skill end to end nothing about why the two commands do not compose.
 const NAMED_PHASE_REFUSAL = '__named_phase__'
 
-const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round'])
+const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round', 'dispatch'])
+
+// Every command that writes to the repository's git dir. Each fails fast through the
+// `gitDirWritable` preflight below when this shell cannot write the common dir, so a sandboxed
+// orchestrator gets one fixable message instead of a failure deep inside a worktree add, a clone,
+// or a fetch. `dispatch`/`dispatch-reviews`/`dispatch-integrator` clone, fetch and merge; the
+// existing four (`finish`, `prune-run`, `init-run`, `gate`) already touched git before this set
+// named them.
+const GIT_WRITING_COMMANDS = new Set([
+  'dispatch', 'dispatch-reviews', 'dispatch-integrator', 'finish', 'prune-run', 'init-run', 'gate',
+])
 
 // Every command that accepts caller-supplied check results. `gate` takes a flat list for the one
 // phase it computes; `finish` and `prune-run` recompute every phase, so theirs is keyed by phase.
@@ -2756,9 +2846,28 @@ export async function runCli(argv, io = { out: console.log }) {
     if ((command === 'claim' || command === 'unclaim') && typeof flags.task === 'string') {
       assertContained(path.join(root, NAMES.stateDir, runId, 'claims'), flags.task, '--task')
     }
+    // `message` builds `.fleetmates/<run>/sessions/<task>.json` from --task and hands the task's
+    // session id to a harness, so its task id is contained here too — a `../evil` must be refused
+    // (exit 2) before any session path is joined or any adapter is invoked, not reach the driver.
+    if (command === 'message' && typeof flags.task === 'string') {
+      assertContained(path.join(root, NAMES.stateDir, runId, 'sessions'), flags.task, '--task')
+    }
   } catch (err) {
     io.out(`${err.message}\n\n${USAGE}`)
     return 2
+  }
+
+  // The git-writability preflight (Step 2): a command that writes the repo's git dir fails fast
+  // with one fixable message when this shell cannot write the common dir, rather than deep inside
+  // a clone, fetch or worktree add. Runs after the id-containment check so `dispatch --run ../evil`
+  // is still refused as an escape (exit 2) before this touches git, and before any command body so
+  // nothing is created on the way to the refusal.
+  if (GIT_WRITING_COMMANDS.has(command)) {
+    const writable = await gitDirWritable((args, opts) => defaultGitExec(args, { cwd: root, ...opts }), root)
+    if (!writable.ok) {
+      io.err(sandboxRefusal(writable.dir))
+      return 2
+    }
   }
 
   if (command === 'init-run') {
@@ -3270,6 +3379,287 @@ export async function runCli(argv, io = { out: console.log }) {
       effort: resolved.agents.implementer.effort ?? '',
     })
     io.out(src)
+    return 0
+  }
+
+  if (command === 'dispatch') {
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) { io.out(`no plan for run ${runId} — run init-run first`); return 4 }
+    const phase = Number(flags.phase)
+    const phaseTasks = (plan.tasks ?? []).filter((t) => t.phase === phase)
+    if (phaseTasks.length === 0) { io.out(`no tasks for phase ${printable(flags.phase)} in run ${runId}`); return 4 }
+
+    // The run branch every sandbox is cut from — recorded by `init-run`. Absent means no branch
+    // was ever confirmed for this run, and a clone of `origin/<undefined>` cannot be built, so a
+    // dispatch would fail identically inside every teammate's `makeSandbox`. Refused here instead.
+    const runBranch = typeof plan.runBranch === 'string' ? plan.runBranch : null
+    if (!runBranch) {
+      io.out(`run ${printable(runId)} has no recorded run branch — check out its branch and re-run init-run before dispatching`)
+      return 4
+    }
+
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+
+    const adapter = resolveHarness(flags, io)
+    if (!adapter) return 2
+
+    const probe = await adapter.probe({})
+    if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
+
+    const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name)
+
+    // The brief every implementer is prompted with, composed exactly as the `brief`/`workflow`
+    // paths compose it: same plan pointer, the same global constraints read at the run anchor, the
+    // same caveman level. Both `--plan` and `--base` are optional, and a bare one parses as `true`.
+    const planPath = flags.plan === true ? '' : (flags.plan ?? '')
+    const baseBranch = flags.base === true ? '' : (flags.base ?? '')
+    const planMarkdown = await planAtAnchor(root, planPath, flags, io)
+    if (planMarkdown === PLAN_READ_REJECTED) return 2
+    const constraints = parseConstraints(planMarkdown)
+    const composeBriefFor = (task) => composeBrief({
+      task: { ...task, branch: taskBranchName(runId, task.id) },
+      runId, planPath, baseBranch, constraints, caveman: resolved.caveman,
+    })
+
+    // Runs the existing `complete --enforcement-only` code path in `root` and returns its exit
+    // code — the same check the phase gate recomputes. Output is swallowed: the driver reads only
+    // the code, and a `3` triggers its one enforcement resume with the fixed refusal.
+    const completeEnforcement = (taskId) => runCli(
+      ['complete', '--run', runId, '--task', taskId, '--plan', planPath,
+        ...(baseBranch ? ['--base', baseBranch] : []), '--enforcement-only', '--root', root],
+      { out: () => {}, err: () => {} },
+    )
+
+    const { results, orphaned } = await dispatchPhase({
+      adapter,
+      git: (args, opts) => defaultGitExec(args, { cwd: root, ...opts }),
+      runRepo: root,
+      runId,
+      runBranch,
+      phaseTasks,
+      maxParallel: resolved.maxParallel,
+      sandboxMode,
+      network,
+      timeoutMinutes,
+      tierModels,
+      effortFor: () => resolved.agents.implementer.effort || undefined,
+      composeBriefFor,
+      personaFor,
+      runDir: runDir(root, runId),
+      completeEnforcement,
+    })
+
+    // Each session record is stamped with the harness that produced it, so `sessions` can name a
+    // harness per row. The driver owns every other field; this only adds `harness`.
+    const dispatchSessionsDir = path.join(runDir(root, runId), 'sessions')
+    for (const task of phaseTasks) {
+      const file = path.join(dispatchSessionsDir, `${task.id}.json`)
+      try {
+        const record = JSON.parse(await readFile(file, 'utf8'))
+        record.harness = adapter.name
+        await writeFile(file, `${JSON.stringify(record, null, 2)}\n`)
+      } catch { /* a task that produced no record has nothing to stamp */ }
+    }
+
+    // Append each result to status.json exactly as the Workflow path's post-processing does: a
+    // returned result sets the task's state to its status, and a task that produced nothing is
+    // `orphaned`. No recorded PASS is consulted; this only reflects what the phase produced.
+    const status = await readState(root, runId, 'status')
+    if (status) {
+      const byId = new Map(results.map((r) => [r.taskId, r]))
+      for (const task of status.tasks ?? []) {
+        if (byId.has(task.id)) task.state = byId.get(task.id).status
+        else if (orphaned.includes(task.id)) task.state = 'orphaned'
+      }
+      await writeState(root, runId, 'status', status)
+    }
+
+    for (const r of results) io.out(`${printable(r.taskId)}: ${printable(r.status)}`)
+    for (const id of orphaned) io.out(`${printable(id)}: orphaned`)
+    return 0
+  }
+
+  if (command === 'dispatch-reviews') {
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+    const adapter = resolveHarness(flags, io)
+    if (!adapter) return 2
+
+    // The lenses and per-lens prompts come from `review-dispatch`, unchanged: this reuses that
+    // command's output rather than re-deriving it, so both dispatch paths agree on what a phase's
+    // reviewers are. Its stdout is the JSON spec; a non-zero exit forwards its message and code.
+    const captured = []
+    const phaseArgs = flags.phase && flags.phase !== true ? ['--phase', flags.phase] : []
+    const modelArgs = flags.models && flags.models !== true ? ['--models', flags.models] : []
+    const code = await runCli(
+      ['review-dispatch', '--run', runId, ...phaseArgs, ...modelArgs, '--root', root],
+      { out: (t) => captured.push(t), err: (t) => io.err(t) },
+    )
+    if (code !== 0) { io.out(captured.join('\n')); return code }
+    const spec = JSON.parse(captured.join('\n'))
+
+    const probe = await adapter.probe({})
+    if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
+
+    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name)
+    const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
+    const persona = await personaFor('reviewer')
+    const reviewSessionsDir = path.join(runDir(root, runId), 'sessions')
+    await mkdir(reviewSessionsDir, { recursive: true })
+
+    // One reviewer per lens, in parallel, cwd at the project root — read-only, each creating its
+    // own scratch worktree outside the repo. Nothing is written to status or results here;
+    // `collect-reviews` reads the findings files the reviewers write and is unchanged.
+    await runPool(spec.reviewers, resolved.maxParallel, async (reviewer) => {
+      const base = path.join(reviewSessionsDir, `review-${reviewer.lens}`)
+      const handle = await adapter.spawn({
+        sandbox: { cwd: root, meta: { mode: 'full' } },
+        prompt: `${persona}\n\n${reviewer.prompt}`,
+        model: reviewer.model,
+        effort: reviewer.effort,
+        network,
+        schemaPath: `${base}.schema.json`,
+        resultPath: `${base}.result.json`,
+        streamPath: `${base}.stream.jsonl`,
+        errPath: `${base}.stderr.log`,
+      })
+      await handle.sessionId
+      await waitForExit(handle.child, timeoutMs)
+    })
+    io.out(`dispatched ${spec.reviewers.length} reviewer${spec.reviewers.length === 1 ? '' : 's'} for phase ${printable(spec.phase)}`)
+    return 0
+  }
+
+  if (command === 'dispatch-integrator') {
+    // Refuses unless the phase holds a recorded PASS. Unlike a teammate-facing decision, the
+    // integrator is dispatched by the orchestrator after the gate it itself ran wrote this record,
+    // so reading it here is the orchestrator confirming its own prior verdict, not trusting an
+    // enforced party. No PASS means the gate has not passed, and nothing may merge.
+    const gateKey = flags.phase && flags.phase !== true ? flags.phase : 'default'
+    const status = await readState(root, runId, 'status')
+    const recorded = status?.gates?.[gateKey]
+    if (!recorded || recorded.verdict !== 'PASS') {
+      io.out(`phase ${printable(gateKey)} of run ${printable(runId)} has no recorded PASS — run the gate to a PASS before dispatching the integrator`)
+      return 4
+    }
+
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+    const adapter = resolveHarness(flags, io)
+    if (!adapter) return 2
+    const probe = await adapter.probe({})
+    if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
+
+    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name)
+    const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
+    const persona = await personaFor('integrator')
+    const integratorSessionsDir = path.join(runDir(root, runId), 'sessions')
+    await mkdir(integratorSessionsDir, { recursive: true })
+    const base = path.join(integratorSessionsDir, 'integrator')
+    const handle = await adapter.spawn({
+      sandbox: { cwd: root, meta: { mode: 'full' } },
+      prompt: persona,
+      network,
+      schemaPath: `${base}.schema.json`,
+      resultPath: `${base}.result.json`,
+      streamPath: `${base}.stream.jsonl`,
+      errPath: `${base}.stderr.log`,
+    })
+    await handle.sessionId
+    await waitForExit(handle.child, timeoutMs)
+    io.out(`dispatched integrator for phase ${printable(gateKey)}`)
+    return 0
+  }
+
+  if (command === 'message') {
+    const text = flags.text === true ? '' : (flags.text ?? '')
+    if (text === '') { io.out(`--text must not be empty\n\n${USAGE}`); return 2 }
+    const messageSessionsDir = path.join(runDir(root, runId), 'sessions')
+    const file = path.join(messageSessionsDir, `${flags.task}.json`)
+    let record
+    try {
+      record = JSON.parse(await readFile(file, 'utf8'))
+    } catch {
+      io.out(`no session recorded for task ${printable(flags.task)} in run ${printable(runId)}`)
+      return 4
+    }
+    if (typeof record.sessionId !== 'string' || record.sessionId === '') {
+      io.out(`task ${printable(flags.task)} has no session id to resume`)
+      return 4
+    }
+    const resolved = await resolveConfig(root, io)
+    if (!resolved) return 2
+    const adapter = resolveHarness(flags, io)
+    if (!adapter) return 2
+
+    // SIGTERM the task's live process group first, if the record names one, so the resume never
+    // races a still-running turn. The driver records a pid only while a child is in flight, so an
+    // absent or dead pid means there is nothing to signal.
+    if (Number.isInteger(record.pid) && pidAlive(record.pid)) {
+      killProcess({ pid: record.pid }, 'SIGTERM')
+    }
+
+    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name)
+    const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
+    const base = path.join(messageSessionsDir, `${flags.task}`)
+    const handle = await adapter.resume({
+      sandbox: record.sandbox,
+      sessionId: record.sessionId,
+      message: text,
+      network,
+      schemaPath: `${base}.schema.json`,
+      resultPath: `${base}.result.json`,
+      streamPath: `${base}.stream.jsonl`,
+      errPath: `${base}.stderr.log`,
+    })
+    await handle.sessionId
+    await waitForExit(handle.child, timeoutMs)
+    io.out(`resumed ${printable(flags.task)}`)
+    return 0
+  }
+
+  if (command === 'sessions') {
+    const sessDir = path.join(runDir(root, runId), 'sessions')
+    let entries
+    try {
+      entries = await readdir(sessDir)
+    } catch {
+      io.out(`no sessions for run ${printable(runId)}`)
+      return 1
+    }
+    // Only the per-task records (`<taskId>.json`), never the sidecar files a driver writes beside
+    // them (`<taskId>.schema.json`, `<taskId>.result.json`, and the `.stream.jsonl`/`.stderr.log`).
+    const taskFiles = entries
+      .filter((f) => f.endsWith('.json') && !f.endsWith('.schema.json') && !f.endsWith('.result.json'))
+      .sort()
+    if (taskFiles.length === 0) { io.out(`no sessions for run ${printable(runId)}`); return 1 }
+
+    const header = ['task', 'harness', 'session', 'state', 'elapsed', 'tokens']
+    const rows = [header]
+    for (const fileName of taskFiles) {
+      let record
+      try {
+        record = JSON.parse(await readFile(path.join(sessDir, fileName), 'utf8'))
+      } catch { continue }
+      const taskId = record.taskId ?? fileName.replace(/\.json$/, '')
+      const tokens = totalTokens(record.usage)
+      const elapsed = Number.isFinite(record.startedAt) && Number.isFinite(record.updatedAt)
+        ? `${Math.round((record.updatedAt - record.startedAt) / 1000)}s`
+        : '—'
+      rows.push([
+        printable(String(taskId)),
+        printable(String(record.harness ?? '—')),
+        printable(String(record.sessionId ?? '—')),
+        printable(String(record.state ?? '—')),
+        elapsed,
+        tokens == null ? '—' : String(tokens),
+      ])
+    }
+    const widths = header.map((_, i) => Math.max(...rows.map((r) => r[i].length)))
+    for (const r of rows) {
+      io.out(r.map((cell, i) => cell.padEnd(widths[i])).join('  ').trimEnd())
+    }
     return 0
   }
 
@@ -4172,6 +4562,41 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'usage') {
+    // A headless run stores per-task usage in its session records (`readUsage` output, per task).
+    // When those exist and a run was named, report token totals from them; the Claude Code
+    // transcript path below is preserved unchanged for a Claude Code session.
+    if (typeof runId === 'string') {
+      const usageSessionsDir = path.join(runDir(root, runId), 'sessions')
+      let entries = null
+      try { entries = await readdir(usageSessionsDir) } catch { entries = null }
+      const taskFiles = (entries ?? [])
+        .filter((f) => f.endsWith('.json') && !f.endsWith('.schema.json') && !f.endsWith('.result.json'))
+        .sort()
+      if (taskFiles.length > 0) {
+        const tasks = []
+        for (const fileName of taskFiles) {
+          let record
+          try {
+            record = JSON.parse(await readFile(path.join(usageSessionsDir, fileName), 'utf8'))
+          } catch { continue }
+          tasks.push({ taskId: record.taskId ?? fileName.replace(/\.json$/, ''), usage: record.usage ?? null })
+        }
+        if (flags.json === true) {
+          io.out(printableBlock(JSON.stringify({ runId, tasks }, null, 2)))
+        } else {
+          const lines = [`run ${printable(String(runId))}  (${tasks.length} task${tasks.length === 1 ? '' : 's'})`, '']
+          let total = 0
+          for (const t of tasks) {
+            const tok = totalTokens(t.usage) ?? 0
+            total += tok
+            lines.push(`${printable(String(t.taskId))}  ${tok}`)
+          }
+          lines.push(`TOTAL  ${total}`)
+          io.out(lines.join('\n'))
+        }
+        return 0
+      }
+    }
     // Reads the harness's own transcript store, which is internal and may change: a failure to
     // find it is reported with the path rather than rendered as an empty table, because a table
     // of zeros reads as "this run cost nothing".

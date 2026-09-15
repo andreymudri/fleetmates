@@ -2155,7 +2155,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 86, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
+const CENSUS_EXPECTED = { 'cli.mjs': 105, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2355,8 +2355,24 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **104 lines: 86 in `cli.mjs`, 6 in
+// can no longer drift away from the code unnoticed. It came to **123 lines: 105 in `cli.mjs`, 6 in
 // `reviews.mjs`, 6 in `digest.mjs`, 6 in `finish.mjs`**.
+//
+// The most recent move was the T7 headless-dispatch commands, which added **19 sites, all in
+// `cli.mjs`**, named here as a GROUP and not row-driven for the same reason `collect-reviews`'s
+// path sentences are (see the group below): every one wraps a value that is either off this CLI's
+// own argv (`--run`, `--task`, `--phase`) or read out of `status.json`/`plan.json`/a session
+// record — the agent-written class this table vouches for — and reaches a terminal, so a forged
+// run id, task id, phase key, harness name, session id or task state cannot draw raw control
+// bytes through them. They are: `dispatch`'s no-tasks-for-phase and no-run-branch refusals and its
+// two per-result breakdown lines (`taskId`/`status` and the orphaned id); `dispatch-reviews`'s
+// dispatched-count line (`spec.phase`); `dispatch-integrator`'s no-recorded-PASS refusal and its
+// dispatched line (`gateKey` twice, run id once); `message`'s no-session and no-session-id
+// refusals and its resumed line (`--task`, run id); `sessions`'s two no-sessions lines (run id)
+// and its four per-row cells (task id, harness, session id, state); and `usage`'s session-store
+// report — the `--json` `printableBlock` and the two text lines wrapping the run id and each task
+// id. `dispatch`'s brief/complete-enforcement recursion emits nothing of its own, and the harness
+// probe's `reason`/`fix` come off the adapter, not an agent file, so neither is in this class.
 //
 // It was allowed to drift once, and by more than two times: this paragraph said 48 — 32/6/6/4 —
 // while the census had already passed a hundred, which is exactly the failure the paragraph above
@@ -6536,7 +6552,7 @@ async function writeVerdict(root, verdict) {
 test('usage lists the fix subcommand', async () => {
   await withRepo(async ({ io, lines }) => {
     assert.equal(await runCli(['nope'], io), 2)
-    assert.match(lines.join('\n'), /init-run\|gate\|doctor\|liveness\|digest\|claim\|unclaim\|locate\|brief\|workflow\|complete\|fix/)
+    assert.match(lines.join('\n'), /init-run\|gate\|doctor\|liveness\|digest\|claim\|unclaim\|locate\|brief\|workflow\|dispatch\|dispatch-reviews\|dispatch-integrator\|message\|sessions\|complete\|fix/)
     assert.match(lines.join('\n'), /fix\s+--run <id> --phase <n> --verdict <path>/)
   })
 })
@@ -14770,5 +14786,201 @@ test('init-run names a ref-path branch name rather than blaming the base branch'
     assert.doesNotMatch(out, /HEAD is detached/)
     const plan = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), 'utf8'))
     assert.equal(plan.runBranch, undefined)
+  })
+})
+
+// ── Task 7: headless-dispatch CLI commands, preflight, and usage from sessions ──────────────
+
+// `getAdapter` throws for an unknown harness, and `dispatch` turns that into an exit-2 refusal
+// that names every harness this CLI knows — so an operator who mistyped `--harness` sees the
+// spellings that work rather than a stack trace. No adapter is spawned: the refusal is reached
+// before `adapter.probe`, so this needs no real codex on PATH.
+test('dispatch refuses an unknown harness, naming the harnesses it knows', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--harness', 'bogus', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /unknown harness: bogus/)
+    assert.match(lines.join('\n'), /codex/)
+  })
+})
+
+// The git-writability preflight (Step 2). With the common git dir chmod'd read-only, every
+// command that writes git must exit 2 with the fixed three-line sandbox message on STDERR and
+// create nothing on the way to it. Skipped as root, whose writes ignore the mode bits.
+test('every git-writing command exits 2 with the sandbox message when the common git dir is unwritable', {
+  skip: process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)
+    ? 'chmod is ignored for root and unavailable on win32'
+    : false,
+}, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-cli-sandbox-'))
+  const gitDir = path.join(root, '.git')
+  try {
+    git(root, ['init', '--quiet', '--initial-branch=main'])
+    git(root, ['config', 'user.email', 'test@example.com'])
+    git(root, ['config', 'user.name', 'Test'])
+    const planPath = path.join(root, 'plan.md')
+    await writeFile(planPath, PLAN, 'utf8')
+    await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'x' }), 'utf8')
+    await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n', 'utf8')
+    git(root, ['add', '.'])
+    git(root, ['commit', '--quiet', '-m', 'initial'])
+    git(root, ['checkout', '--quiet', '-b', 'run-branch'])
+    await chmod(gitDir, 0o500)
+
+    const commands = [
+      ['dispatch', '--run', 'r1', '--phase', '1'],
+      ['dispatch-reviews', '--run', 'r1'],
+      ['dispatch-integrator', '--run', 'r1'],
+      ['finish', '--run', 'r1', '--plan', planPath],
+      ['prune-run', '--run', 'r1', '--plan', planPath],
+      ['init-run', planPath, '--run', 'r1'],
+      ['gate', '--run', 'r1', '--plan', planPath],
+    ]
+    for (const argv of commands) {
+      const out = []
+      const err = []
+      const code = await runCli([...argv, '--root', root], { out: (t) => out.push(t), err: (t) => err.push(t) })
+      assert.equal(code, 2, `${argv[0]}: ${out.concat(err).join('\n')}`)
+      assert.match(err.join('\n'), /this shell is sandboxed/, argv[0])
+      assert.match(err.join('\n'), /cannot write to .*\.git/, argv[0])
+      assert.match(err.join('\n'), /danger-full-access/, argv[0])
+    }
+    // Nothing was created on the way to the refusal: no run directory exists.
+    await assert.rejects(stat(path.join(root, '.fleetmates', 'r1')))
+  } finally {
+    await chmod(gitDir, 0o700).catch(() => {})
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// `dispatch-integrator` merges teammate branches into the run branch, so it refuses (exit 4)
+// unless the phase holds a recorded PASS — the gate must have passed before anything merges.
+test('dispatch-integrator refuses with exit 4 when the phase has no recorded PASS', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    const code = await runCli(['dispatch-integrator', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /no recorded PASS/)
+  })
+})
+
+// The refusal is scoped to the phase key it was asked about: a PASS recorded under `default` does
+// not clear the guard for a different phase that has none.
+test('dispatch-integrator refusal is scoped to the phase key it was asked about', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    status.gates = { default: { verdict: 'PASS' } }
+    await writeFile(statusPath, JSON.stringify(status))
+    lines.length = 0
+    const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'integration', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /integration.*no recorded PASS/)
+  })
+})
+
+// `sessions` prints one row per per-task record, reading harness, session id, state, elapsed and a
+// summed token count — and never turns a driver sidecar file (`.result.json`, `.schema.json`) into
+// a row.
+test('sessions renders one row per recorded task session', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const sessionsDir = path.join(root, '.fleetmates', 'r1', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFile(path.join(sessionsDir, 'T1.json'), JSON.stringify({
+      taskId: 'T1', harness: 'codex', sessionId: 'sid-1', state: 'done',
+      usage: { input: 10, cachedInput: 0, cacheWrite: 0, output: 5, reasoning: 2 },
+    }))
+    await writeFile(path.join(sessionsDir, 'T2.json'), JSON.stringify({
+      taskId: 'T2', harness: 'codex', sessionId: 'sid-2', state: 'orphaned', usage: null,
+    }))
+    // Sidecars a driver writes beside the record must not become rows.
+    await writeFile(path.join(sessionsDir, 'T1.result.json'), '{}')
+    await writeFile(path.join(sessionsDir, 'T1.schema.json'), '{}')
+    lines.length = 0
+    const code = await runCli(['sessions', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.match(out, /task\s+harness\s+session\s+state\s+elapsed\s+tokens/)
+    assert.match(out, /T1\s+codex\s+sid-1\s+done\s+—\s+17/)
+    assert.match(out, /T2\s+codex\s+sid-2\s+orphaned\s+—\s+—/)
+    assert.doesNotMatch(out, /result|schema/)
+  })
+})
+
+// `sessions` on a run with no session store says so and exits 1, rather than printing an empty
+// table that would read as a run that did nothing.
+test('sessions on a run with no session store exits 1', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['sessions', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 1)
+    assert.match(lines.join('\n'), /no sessions for run r1/)
+  })
+})
+
+// Step 6: with a run named and its session store present, `usage` sums each task's recorded
+// token totals from the store rather than reading the Claude Code transcript store.
+test('usage reads the run session store when present', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const sessionsDir = path.join(root, '.fleetmates', 'r1', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFile(path.join(sessionsDir, 'T1.json'), JSON.stringify({
+      taskId: 'T1', usage: { input: 100, cachedInput: 0, cacheWrite: 0, output: 20, reasoning: 0 },
+    }))
+    lines.length = 0
+    const code = await runCli(['usage', '--run', 'r1', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const out = lines.join('\n')
+    assert.match(out, /run r1/)
+    assert.match(out, /T1\s+120/)
+    assert.match(out, /TOTAL\s+120/)
+  })
+})
+
+// The `--json` branch of the session-store report emits the per-task usage as JSON.
+test('usage --json emits the run session store as JSON', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const sessionsDir = path.join(root, '.fleetmates', 'r1', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFile(path.join(sessionsDir, 'T1.json'), JSON.stringify({
+      taskId: 'T1', usage: { input: 1, cachedInput: 0, cacheWrite: 0, output: 2, reasoning: 0 },
+    }))
+    lines.length = 0
+    const code = await runCli(['usage', '--run', 'r1', '--json', '--root', root], io)
+    assert.equal(code, 0, lines.join('\n'))
+    const report = JSON.parse(lines.join('\n'))
+    assert.equal(report.runId, 'r1')
+    assert.deepEqual(report.tasks, [{ taskId: 'T1', usage: { input: 1, cachedInput: 0, cacheWrite: 0, output: 2, reasoning: 0 } }])
+  })
+})
+
+// SECURITY (carry-forward from the T6 driver review). The run id and, for `message`, the task id
+// must pass the existing containment validation BEFORE any `.fleetmates/<run>/...` path is joined
+// or the driver is reached. A `../evil` is refused with exit 2 and creates nothing outside the run
+// directory. If the existing entry points already reject it, this pins that they keep doing so.
+test('dispatch refuses a run id that escapes the run directory before reaching the driver', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['dispatch', '--run', '../evil', '--phase', '1', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /--run.*escapes the run directory/)
+    // The `.fleetmates/../evil` that a raw join would have produced is `<root>/evil`.
+    await assert.rejects(stat(path.join(root, 'evil')))
+  })
+})
+
+test('message refuses a task id that escapes the run directory before reaching the driver', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    lines.length = 0
+    const code = await runCli(['message', '--run', 'r1', '--task', '../evil', '--text', 'hi', '--root', root], io)
+    assert.equal(code, 2, lines.join('\n'))
+    assert.match(lines.join('\n'), /--task.*escapes the run directory/)
+    // No session path was joined: the escaping `.fleetmates/r1/sessions/../evil.json` is
+    // `.fleetmates/r1/evil.json`, and nothing created it.
+    await assert.rejects(stat(path.join(root, '.fleetmates', 'r1', 'evil.json')))
   })
 })
