@@ -19,7 +19,10 @@ import { getAdapter, HARNESS_NAMES } from '../scripts/harnesses/index.mjs'
 //  - BLOCKS reading stdin until it closes — a regression that leaves the adapter's stdin open
 //    hangs any test that spawns it into that test's timeout, per spec §2 item 4;
 //  - emits `thread.started` then FAKE_CODEX_TURNS `turn.completed` lines, and writes the `-o`
-//    result file unless FAKE_CODEX_WITHHOLD_RESULT=1.
+//    result file unless FAKE_CODEX_WITHHOLD_RESULT=1;
+//  - when FAKE_CODEX_ENV_OUT points somewhere, records its OWN `GIT_DIR`/`GIT_WORK_TREE` there —
+//    the only way to observe what `run()` actually put in the spawned process's environment,
+//    as opposed to what argv says (see the GIT_DIR/GIT_WORK_TREE-never-inherited test below).
 const FAKE_CODEX_SRC = `#!/usr/bin/env node
 const { writeFileSync } = require('node:fs')
 
@@ -37,6 +40,13 @@ if (argv[0] === 'login' && argv[1] === 'status') {
 const oIndex = argv.indexOf('-o')
 const resultPath = oIndex !== -1 ? argv[oIndex + 1] : null
 if (resultPath) writeFileSync(\`\${resultPath}.argv.json\`, JSON.stringify(argv))
+
+if (process.env.FAKE_CODEX_ENV_OUT) {
+  writeFileSync(process.env.FAKE_CODEX_ENV_OUT, JSON.stringify({
+    GIT_DIR: process.env.GIT_DIR ?? null,
+    GIT_WORK_TREE: process.env.GIT_WORK_TREE ?? null,
+  }))
+}
 
 const threadId = process.env.FAKE_CODEX_THREAD_ID || 'thread-fixture-1'
 const turns = Number(process.env.FAKE_CODEX_TURNS || '1')
@@ -231,6 +241,45 @@ test('spawnCodex resolves the session id from the stream and closes stdin (a reg
     assert.equal(recordedArgv[sIndex + 1], 'workspace-write')
     assert.ok(recordedArgv.includes('--add-dir'))
     assert.ok(recordedArgv.some((a) => typeof a === 'string' && a.startsWith('shell_environment_policy.set=') && a.includes('GIT_DIR')))
+  } finally {
+    await rm(cwd, { recursive: true, force: true })
+    await rm(gitdir, { recursive: true, force: true })
+    await rm(sessionsDir, { recursive: true, force: true })
+  }
+})
+
+// The core sandbox-escape defense (codex.mjs:36-40): GIT_DIR/GIT_WORK_TREE reach the agent's own
+// shell tool calls only through `-c shell_environment_policy.set=…` — never the codex process's
+// OWN environment. If they leaked into codex's env, its per-turn `git status` (§2 item 9) would
+// inherit them and walk straight into whatever config the teammate plants in the sandbox git
+// dir. The argv-shape tests above only count `GIT_DIR=` tokens in argv, which says nothing about
+// the spawned process's actual environment — this test reads that environment back from the fake
+// binary itself, the only way to observe what `run()` (codex.mjs) really passed to `spawn`.
+test('spawnCodex never lets GIT_DIR/GIT_WORK_TREE reach the codex process\'s own environment', { timeout: 5000 }, async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'tm-codex-clone-'))
+  const gitdir = await mkdtemp(path.join(tmpdir(), 'tm-codex-gitdir-'))
+  const sessionsDir = await mkdtemp(path.join(tmpdir(), 'tm-codex-sessions-'))
+  try {
+    const envOutPath = path.join(sessionsDir, 'T5.env.json')
+    await withEnv({ FAKE_CODEX_ENV_OUT: envOutPath }, async () => {
+      const sandbox = { cwd, meta: { mode: 'clone', gitdir } }
+      const handle = await spawnCodex({
+        sandbox, prompt: 'do the task',
+        schemaPath: path.join(sessionsDir, 'T5.schema.json'),
+        resultPath: path.join(sessionsDir, 'T5.json'),
+        streamPath: path.join(sessionsDir, 'T5.jsonl'),
+        errPath: path.join(sessionsDir, 'T5.err'),
+      })
+      await handle.sessionId
+      await once(handle.child, 'close')
+    })
+    const seenEnv = JSON.parse(await readFile(envOutPath, 'utf8'))
+    // GIT_DIR/GIT_WORK_TREE are real, non-empty values in THIS test's own process (set via the
+    // `-c shell_environment_policy.set=…` argv, and asserted present there by the test above) —
+    // so a codex process that saw them at all would report non-null here. `null` is the only
+    // value that proves they were never inherited.
+    assert.equal(seenEnv.GIT_DIR, null)
+    assert.equal(seenEnv.GIT_WORK_TREE, null)
   } finally {
     await rm(cwd, { recursive: true, force: true })
     await rm(gitdir, { recursive: true, force: true })
@@ -471,21 +520,26 @@ test('makeCodexSandbox (files mode) does not contend for the run repo\'s real in
   }
 })
 
-test('makeCodexSandbox (files mode) — two concurrent builds on the same run repo both resolve, with distinct cwds and the expected tree', async () => {
+// runBranch is 'diverged' (content-divergent from the run repo's checked-out 'main', per
+// initDivergedRepo above), not 'main' — with same-branch content, staging the tree onto itself
+// leaves no diff, so this test would pass 15/15 even with GIT_INDEX_FILE removed and give false
+// confidence. Divergent content is what makes the run repo's index actually OBSERVE pollution
+// from either concurrent build.
+test('makeCodexSandbox (files mode) — two concurrent builds on the same run repo both resolve, with distinct cwds and the diverged tree, and the run repo\'s index stays clean', async () => {
   const runRepo = await mkdtemp(path.join(tmpdir(), 'tm-codex-run-'))
   try {
-    await initRepo(runRepo)
+    await initDivergedRepo(runRepo)
     const [a, b] = await Promise.all([
-      makeCodexSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'TA', mode: 'files' }),
-      makeCodexSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'TB', mode: 'files' }),
+      makeCodexSandbox(defaultGitExec, { runRepo, runBranch: 'diverged', runId: 'r1', taskId: 'TA', mode: 'files' }),
+      makeCodexSandbox(defaultGitExec, { runRepo, runBranch: 'diverged', runId: 'r1', taskId: 'TB', mode: 'files' }),
     ])
     for (const sandbox of [a, b]) {
-      const content = await readFile(path.join(sandbox.cwd, 'base.txt'), 'utf8')
-      assert.equal(content, 'base\n')
+      const content = await readFile(path.join(sandbox.cwd, 'only-in-work.txt'), 'utf8')
+      assert.equal(content, 'diverged\n')
     }
     assert.notEqual(a.cwd, b.cwd)
     const staged = await defaultGitExec(['diff', '--cached', '--name-only'], runRepo)
-    assert.equal(staged.stdout.trim(), '')
+    assert.equal(staged.stdout.trim(), '', `expected the run repo's index to stay clean, got staged: ${staged.stdout}`)
   } finally {
     await rm(runRepo, { recursive: true, force: true })
   }
