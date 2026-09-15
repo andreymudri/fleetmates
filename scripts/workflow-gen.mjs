@@ -2,6 +2,7 @@ import { taskBranchName } from './enforce.mjs'
 import { NAMES } from './names.mjs'
 import { readFile } from 'node:fs/promises'
 import { composeBrief } from './brief.mjs'
+import { RESULT_SCHEMA } from './result-schema.mjs'
 
 const TEMPLATE = new URL('../templates/phase-workflow.js', import.meta.url)
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
@@ -19,7 +20,7 @@ function jsString(value) {
     .replace(/\r/g, '\\r')}'`
 }
 
-const MARKER = /__(?:META|TASKS|BRIEFS|EFFORT)__/g
+const MARKER = /__(?:META|TASKS|BRIEFS|EFFORT|RESULT_SCHEMA)__/g
 
 // Serializes a plain JS value (string/number/boolean/null/array/object) as a JS
 // literal with unquoted identifier keys and single-quoted strings, matching the
@@ -82,6 +83,7 @@ export async function generatePhaseWorkflow({
       2,
     ),
     __EFFORT__: () => jsLiteral(effort),
+    __RESULT_SCHEMA__: () => JSON.stringify(RESULT_SCHEMA, null, 2),
   }
 
   // One global pass over the template, not a chain of per-marker replacements. A chain

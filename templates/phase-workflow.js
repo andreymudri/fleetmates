@@ -2,10 +2,10 @@
 // marker below with a JSON array of { id, title, files, branch, model? }, the META
 // marker with the meta literal, the BRIEFS marker with a JSON object mapping each
 // task id to its already-composed brief text, and the EFFORT marker with a plain JS
-// literal. Briefs are composed by the generator through scripts/brief.mjs, not here: a
-// generated workflow runs without module or filesystem access, so the only way both
-// dispatch paths (this template and `cli.mjs brief`) can share one implementation is
-// for the text to arrive already composed.
+// literal, and the RESULT_SCHEMA marker with the shared result-schema literal. Briefs are
+// composed by the generator through scripts/brief.mjs, not here: a generated workflow runs
+// without module or filesystem access, so the only way both dispatch paths (this template and
+// `cli.mjs brief`) can share one implementation is for the text to arrive already composed.
 __META__
 
 const TASKS = __TASKS__
@@ -14,17 +14,7 @@ const BRIEFS = __BRIEFS__
 
 const EFFORT = __EFFORT__
 
-const RESULT_SCHEMA = {
-  type: 'object',
-  required: ['status', 'branch', 'filesChanged', 'summary', 'blockers'],
-  properties: {
-    status: { type: 'string', enum: ['done', 'blocked', 'failed'] },
-    branch: { type: 'string' },
-    filesChanged: { type: 'array', items: { type: 'string' } },
-    summary: { type: 'string' },
-    blockers: { type: 'array', items: { type: 'string' } },
-  },
-}
+const RESULT_SCHEMA = __RESULT_SCHEMA__
 
 // Briefs are composed by the generator, not here: a generated workflow runs without module
 // or filesystem access, so the only way both dispatch paths can share one implementation is

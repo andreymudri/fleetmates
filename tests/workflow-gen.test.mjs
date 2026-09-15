@@ -43,6 +43,12 @@ test('the generated body is syntactically valid javascript', async () => {
   assert.doesNotThrow(() => new Function(`return (async () => { ${body} })`))
 })
 
+test('the RESULT_SCHEMA marker is substituted with the shared schema literal', async () => {
+  const src = await generatePhaseWorkflow({ runId: '3f2a', phase: 1, tasks, maxParallel: 4 })
+  assert.match(src, /const RESULT_SCHEMA = \{[\s\S]*"status"[\s\S]*"branch"/)
+  assert.doesNotMatch(src, /__RESULT_SCHEMA__/)
+})
+
 test('generating a phase with no tasks throws', async () => {
   await assert.rejects(
     () => generatePhaseWorkflow({ runId: 'x', phase: 1, tasks: [], maxParallel: 4 }),
