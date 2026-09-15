@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, mkdir, readFile, writeFile, chmod } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, chmod, rm, link } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -383,6 +383,45 @@ test('a stale-lock takeover racing a completed takeover refuses instead of clobb
   })
   // A's live lock survived untouched.
   assert.equal((await readFile(lockPath, 'utf8')).trim(), '1001')
+})
+
+test('a token-holder re-reading an empty slot never clobbers a competitor fresh live lock', async () => {
+  // Drives the OS-level empty-slot window the seam-only test missed: a competitor removed the stale
+  // lock (slot empty) and is between its rm and its non-token install; the token-holder must not
+  // delete the competitor's fresh LIVE lock when it re-reads NaN under the token.
+  const runDir = await tmpRunDir('empty-window')
+  const lockPath = path.join(runDir, 'driver.lock')
+  const dead = 2147483646
+  await writeFile(lockPath, `${dead}\n`)
+  const isAlive = (p) => p === 1001 || p === 1002
+  const compTmp = path.join(runDir, 'comp.tmp')
+  await writeFile(compTmp, '1002\n')
+
+  const a = acquireLock(lockPath, {
+    pid: 1001,
+    isAlive,
+    // competitor C removed the stale lock (slot now empty) before A claims the token
+    onDeadHolder: async () => { await rm(lockPath, { force: true }) },
+    // competitor C installs its fresh LIVE lock into the exact empty-slot window A re-reads
+    onEmptyUnderToken: async () => { await link(compTmp, lockPath) },
+  })
+  await assert.rejects(a, (err) => err instanceof DriverLockError)
+  // C's live lock is intact — A refused rather than deleting and replacing it.
+  assert.equal((await readFile(lockPath, 'utf8')).trim(), '1002')
+})
+
+test('acquireLock throws DriverLockError when takeover attempts are exhausted', async () => {
+  const runDir = await tmpRunDir('exhaust')
+  const lockPath = path.join(runDir, 'driver.lock')
+  const dead = 2147483646
+  await writeFile(lockPath, `${dead}\n`)
+  // A takeover token that never clears: every attempt sees EEXIST on the token and loops until the
+  // bounded loop gives up, which must throw (never silently return without the lock).
+  await writeFile(`${lockPath}.takeover`, 'held\n')
+  await assert.rejects(
+    acquireLock(lockPath, { pid: 1001, isAlive: (p) => p === 1001 }),
+    (err) => err instanceof DriverLockError,
+  )
 })
 
 test('pidAlive treats an EPERM (foreign, live) process as alive', () => {

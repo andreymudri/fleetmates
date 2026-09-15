@@ -183,9 +183,14 @@ export async function runPool(items, limit, worker) {
 //      competitor's LIVE lock, so both drivers proceed (measured: rm 2-7/1000, rename worse). The
 //      re-read under the token turns that into a refusal, because no one can install over the stale
 //      lock (link EEXISTs) or take it over (the token is held) between the re-read and the rm.
-// A crash mid-takeover leaves at most a stale `<lock>.takeover`; the bounded loop then refuses
-// rather than spinning, and the leftover is a normal file a later run overwrites via the same link.
-export async function acquireLock(lockPath, { pid = process.pid, isAlive = pidAlive, onDeadHolder } = {}) {
+// A hard crash mid-takeover can strand the `<lock>.takeover` token. Because the token is claimed
+// with the same non-clobbering `link` (EEXIST on an existing file), a stranded token is NOT
+// auto-recovered — it is never overwritten and blocks future takeovers until `<lock>.takeover` is
+// removed by hand. This is fail-safe (the bounded loop refuses with DriverLockError rather than
+// spinning or double-acquiring) and is a known LOW limitation tracked as a follow-up.
+export async function acquireLock(lockPath, {
+  pid = process.pid, isAlive = pidAlive, onDeadHolder, onEmptyUnderToken,
+} = {}) {
   const token = `${lockPath}.takeover`
   const tmp = `${lockPath}.tmp.${pid}.${process.hrtime.bigint()}`
   await writeFile(tmp, `${pid}\n`)
@@ -217,12 +222,29 @@ export async function acquireLock(lockPath, { pid = process.pid, isAlive = pidAl
         }
         try {
           const under = await readPid(lockPath)
+          // A test-only seam, unused in production: fired only when the slot re-reads empty under
+          // the token, so a test can install a competitor's fresh LIVE lock into that exact window
+          // and prove this branch does not clobber it.
+          if (onEmptyUnderToken && !Number.isInteger(under)) {
+            const hook = onEmptyUnderToken
+            onEmptyUnderToken = null
+            await hook()
+          }
           if (Number.isInteger(under) && isAlive(under)) throw new DriverLockError(under, lockPath)
-          await rm(lockPath, { force: true })
+          if (Number.isInteger(under)) {
+            // Positively-confirmed DEAD integer holder: safe to remove. We hold the token and
+            // `link` EEXISTs on the present stale lock, so no competitor can install until we clear
+            // it. Removing on a NaN/empty read would be the bug the token exists to prevent — a
+            // competitor between its own rm and its fresh non-token `link` install leaves the slot
+            // momentarily empty, and an unconditional rm here would delete that fresh LIVE lock.
+            await rm(lockPath, { force: true })
+          }
+          // else: slot is empty/contested (NaN) — do NOT remove; loop back to the atomic link,
+          // which either wins the empty slot or sees the competitor's fresh live lock and refuses.
         } finally {
           await unlink(token).catch(() => {})
         }
-        // lockPath is now empty; loop back to the atomic link, which gates the final winner.
+        // Loop back to the atomic link, which gates the final winner.
       }
     }
     throw new DriverLockError(-1, lockPath)
