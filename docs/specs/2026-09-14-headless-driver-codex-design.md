@@ -10,10 +10,10 @@ this one fixes.
 |---|---|
 | Which harnesses? | Codex CLI, Gemini CLI, OpenCode. |
 | What counts as "works on harness X"? | Full parity: phased dispatch in worktrees, gate, integration, stop-time enforcement, redirecting a teammate, resuming a run, usage reporting, model and effort per role. |
-| How are teammates run? | A **headless driver** inside fleetmates: it creates each worktree and runs one headless harness process per task. Not the harness's in-session subagents. |
+| How are teammates run? | A **headless driver** inside fleetmates: it creates an isolated sandbox and runs one headless harness process per task. Not the harness's in-session subagents. |
 | Which harness first? | Codex. It closes the adapter interface; Gemini and OpenCode implement it afterwards. |
 | How do skills find the CLI outside Claude Code? | `<fleetmates root>` = `$CLAUDE_PLUGIN_ROOT` when set, otherwise two directories above the skill's own `SKILL.md`. No `bin`, no global install. |
-| Which sandbox do Codex teammates use? | Measured, then chosen: `workspace-write` cannot commit (section 2), so the default is `danger-full-access`, held in an explicit config key. |
+| Which sandbox do Codex teammates use? | Measured, then chosen: `workspace-write` in an **isolated clone** (section 2/7), the default. `danger-full-access` and a git-less fallback stay selectable. Teammates never run unsandboxed by default. |
 | Does the Claude Code path change? | No. `Workflow` / `Agent` dispatch and the `SubagentStop` hook stay as they are. |
 
 ## 1. Why a driver and not the harnesses' own subagents
@@ -34,7 +34,7 @@ Source: three research reports of 2026-09-14 built from each project's docs and 
 `--help` on the installed binaries. Codex rows marked in section 2 were re-measured here.
 
 The last row is the only capability all three share, so the driver builds on it. Every gap in the
-table becomes a driver responsibility, implemented once: the driver owns the worktree, runs the
+table becomes a driver responsibility, implemented once: the driver owns the sandbox, runs the
 enforcement check itself when the process exits, and redirects a teammate by stopping and
 resuming its session.
 
@@ -57,14 +57,48 @@ git log of those repositories, not any model's report, is the evidence for the g
    before any model call.
 6. **Token usage** arrives per turn:
    `{"type":"turn.completed","usage":{"input_tokens","cached_input_tokens","cache_write_input_tokens","output_tokens","reasoning_output_tokens"}}`.
-7. **`workspace-write` cannot commit in a linked worktree.** With `/tmp` and `$TMPDIR` excluded
-   from the writable roots (so a control write outside the cwd was denied, proving the sandbox was
-   active): `git add` and `git commit` both exit 128. Adding `--add-dir <repo>/.git` does not
-   change that. Network is denied unless `sandbox_workspace_write.network_access=true`.
-8. **An orchestrator inside `workspace-write` cannot drive a fleet.** `git worktree add` from the
-   repository root failed, and a nested `codex exec` died with
-   `failed to initialize in-process app-server client: Read-only file system (os error 30)`.
-9. Unauthenticated, `codex exec` retries a 401 for about 45 s before exiting 1.
+7. **`workspace-write` cannot commit in a *linked worktree*.** Codex keeps `<root>/.git`
+   read-only, and resolves a `gitdir:` pointer file so its target is protected too
+   (`codex-rs/protocol/src/permissions.rs:1757-1794`, tag `rust-v0.149.0`). For a linked worktree
+   that target is `<main>/.git/worktrees/T`, which holds `index.lock`; `git add`/`commit` exit 128.
+   `--add-dir <main>/.git` does not help. Every control write outside the cwd was denied, so the
+   sandbox was active.
+8. **`workspace-write` *can* commit in a separate clone.** `git clone --shared
+   --separate-git-dir=<gitdir> <repo> <clone>` with `codex exec -s workspace-write -C <clone>
+   --add-dir <gitdir>` commits: the exact-path `--add-dir` drops the git dir's read-only default
+   (`permissions.rs:1187-1191`). Writes to the main worktree, the main `.git`, another teammate's
+   clone or git dir, and the run directory were all denied. This is the basis of the isolated-clone
+   layout in section 7.
+9. **Codex runs `git status` outside the sandbox every turn** (`core/src/turn_metadata.rs:453-477`),
+   in the session cwd, hardened with `GIT_OPTIONAL_LOCKS=0 -c core.hooksPath=/dev/null
+   -c core.fsmonitor=false` (`git-utils/src/info.rs:404-420`) — but **not** against a
+   `filter.<x>.clean` the teammate plants in its own git config. Measured: with a clone that keeps
+   its `.git` pointer, a planted clean filter fired outside the sandbox in a turn where the model
+   ran no command at all. The section 7 layout removes the teammate's git dir from where that
+   status resolves.
+10. **Codex hooks run outside the sandbox**, cwd = the session dir (`hooks/src/engine/command_runner.rs`).
+    `--disable hooks` (or `-c features.hooks=false`) stops all of them — plugin, config, and project
+    `.codex/hooks.json` — before discovery. Measured: a project `SessionStart` hook wrote outside the
+    writable roots with hooks on, and did not run with `--disable hooks`.
+11. **A sandboxed agent cannot create or widen `.git`/`.codex`.** In the clone `<clone>/.git` shows
+    as an empty read-only directory (bwrap masks the missing protected name); creating the pointer
+    file or `mkdir .git` is denied, so the agent cannot redirect the harness's git back at its own
+    config.
+12. **`codex exec resume` stays sandboxed and still commits.** It takes no `-s`/`-C`/`--add-dir`;
+    passing `-c sandbox_mode`, `-c sandbox_workspace_write.writable_roots`, and
+    `-c shell_environment_policy.set` reproduces the sandbox. Measured: an outside control write was
+    denied and a second commit landed.
+13. **The host's `git fetch <gitdir>` is safe.** With real new commits to transfer and
+    `uploadpack.packObjectsHook` plus a `pre-upload-pack` hook planted in the git dir, a local
+    `git fetch` from it fired neither. A local fetch does not run a send-side upload-pack transport.
+14. **A permission profile that denies `<gitdir>/config` write is a dead end.** Codex writes that
+    file at session start (loading the `local` AGENTS.md environment); denying it aborts startup
+    with `bwrap: Can't write data to file …/config: Bad file descriptor`. So the git config must be
+    writable, and the clean-filter vector cannot be closed by permissions.
+15. Unauthenticated, `codex exec` retries a 401 for about 45 s before exiting 1; `$CLAUDE_PLUGIN_ROOT`
+    is set only for hooks (item 3); and an orchestrator inside `workspace-write` cannot drive a fleet
+    — a nested `codex exec` dies with `Read-only file system` — which is why the orchestrator runs
+    unsandboxed (section 7).
 
 ## 3. Architecture
 
@@ -73,14 +107,19 @@ orchestrator: the harness's main agent, following the skills
   └─ cli.mjs dispatch --run R --phase N --harness codex        (run in the background, waited on)
        preflight: git common dir writable, adapter.probe() ok
        for each task in the phase, at most maxParallel at once:
-         1. worktree  .fleetmates/R/worktrees/T  on branch fleetmates/R/T, forked from the run branch
+         1. adapter.makeSandbox(T) → an isolated checkout on branch fleetmates/R/T (see §7)
          2. adapter.spawn → record sessionId in .fleetmates/R/sessions/T.json as soon as it is known
          3. process exits → adapter.readResult → validate against the result schema
-         4. complete --enforcement-only
-              exit 3 → adapter.resume(sessionId, fixed refusal text), at most once, then back to 3
-         5. write result, usage and exit reason to sessions/T.json
+         4. adapter.collect(T): git fetch the task branch from the sandbox into the run repo (§7)
+         5. complete --enforcement-only
+              exit 3 → adapter.resume(sessionId, fixed refusal text), at most once, then back to 4
+         6. write result, usage and exit reason to sessions/T.json
        print the phase results in the same shape the Workflow path returns
 ```
+
+The driver holds git; the teammate's sandbox is a throwaway clone whose git config the teammate
+may write but nothing on the host ever executes. Step 4 is the *only* host-side git touch against
+teammate material, and it is a plain `fetch` — measured not to run send-side hooks (§2 item 13).
 
 ### Units
 
@@ -99,8 +138,11 @@ orchestrator: the harness's main agent, following the skills
 {
   name: 'codex',
   probe({ env }) → { ok: true } | { ok: false, reason, fix },   // installed, logged in, home writable
-  spawn({ cwd, prompt, model, effort, sandbox, schemaPath, resultPath, streamPath }) → handle,
-  resume({ cwd, sessionId, message, model, effort, sandbox, schemaPath, resultPath, streamPath }) → handle,
+  makeSandbox({ runRepo, runBranch, runId, taskId, mode }) → { cwd, meta },  // §7: clone or plain copy
+  collect({ runRepo, sandbox, branch }) → void,                 // hardened `git fetch` from the sandbox
+  cleanup({ sandbox }) → void,
+  spawn({ sandbox, prompt, model, effort, schemaPath, resultPath, streamPath }) → handle,
+  resume({ sandbox, sessionId, message, model, effort, schemaPath, resultPath, streamPath }) → handle,
   // handle: { child, sessionId: Promise<string|null> }
   readResult({ resultPath }) → object | null,
   readUsage({ streamPath }) → { input, cachedInput, cacheWrite, output, reasoning } | null,
@@ -109,7 +151,9 @@ orchestrator: the harness's main agent, following the skills
 
 `spawn` and `resume` start the process and return at once. The driver owns waiting, timeouts,
 signals and the enforcement loop, so the adapters stay free of control flow and the tests for that
-flow are written once.
+flow are written once. `makeSandbox`/`collect`/`cleanup` own the whole sandbox lifecycle, so what
+counts as "isolated" is the adapter's business and section 7's layout does not leak into the driver
+— the git-less fallback and a future harness that isolates differently are the same interface.
 
 ### The prompt
 
@@ -121,16 +165,17 @@ definitions, and a prefix behaves the same on all three harnesses.
 path including Claude Code. Today the brief emits a literal `$CLAUDE_PLUGIN_ROOT`, which is only
 expanded if the teammate's shell happens to have it.
 
-### Branches and worktrees
+### Branches and isolation
 
-The driver creates `fleetmates/R/T` itself, forked from the recorded run branch. The implementer
-brief's `checkout -B` becomes a no-op on this path, and the Claude Code failure mode where a
-teammate skips it and commits to a harness-named branch cannot occur. If the branch already exists
-(a fix round or a resumed run), the driver reuses it and never resets it.
+Each teammate's branch is `fleetmates/R/T`, created inside its own sandbox (§7), never in the run
+repo's worktree. The implementer brief's `checkout -B` becomes a no-op on this path, and the Claude
+Code failure mode where a teammate skips it and commits to a harness-named branch cannot occur. The
+branch reaches the run repo only through `collect`'s `fetch`. If the branch already exists (a fix
+round or a resumed run), the driver fetches onto it fast-forward-only and never force-resets it.
 
-`.fleetmates/` is gitignored, so worktrees under it do not dirty the main worktree. The `ownership`
-check and `subagent-stop.mjs` have each had defects involving nested worktrees before; the plan
-carries a test that gates a phase whose worktrees live under `.fleetmates/`.
+`.fleetmates/` is gitignored, so the sandboxes under it do not dirty the run worktree. The
+`ownership` check and `subagent-stop.mjs` have each had defects involving nested git dirs before;
+the plan carries a test that gates a phase whose sandboxes live under `.fleetmates/`.
 
 ## 4. CLI commands
 
@@ -148,19 +193,34 @@ Code transcript store otherwise.
 ## 5. The Codex adapter
 
 ```
-codex exec --json -C <cwd> -s <sandbox> -m <model> -c model_reasoning_effort=<effort>
-           --output-schema <schemaPath> -o <resultPath>          stdin: the prompt, then closed
-codex exec resume <sessionId> --json -m … -c … --output-schema <schemaPath> -o <resultPath>
-           stdin: the message, then closed
+# spawn — cwd is the clone, git dir reached only through the agent's own shell env
+codex exec --json -C <clone> -s workspace-write --disable hooks
+           -m <model> -c model_reasoning_effort=<effort>
+           -c 'shell_environment_policy.set={GIT_DIR="<gitdir>",GIT_WORK_TREE="<clone>"}'
+           -c sandbox_workspace_write.exclude_slash_tmp=true
+           -c sandbox_workspace_write.exclude_tmpdir_env_var=true
+           --add-dir <gitdir> --output-schema <schemaPath> -o <resultPath>   stdin: prompt, then closed
+
+# resume — no -s/-C/--add-dir; the sandbox is rebuilt through -c, cwd is the clone
+codex exec resume <sessionId> --json --disable hooks -m … -c model_reasoning_effort=…
+           -c sandbox_mode="workspace-write"
+           -c sandbox_workspace_write.writable_roots=["<gitdir>"]
+           -c 'shell_environment_policy.set={GIT_DIR="<gitdir>",GIT_WORK_TREE="<clone>"}'
+           --output-schema <schemaPath> -o <resultPath>                      stdin: message, then closed
 ```
 
+- **`--disable hooks` is mandatory** (§2 item 10): Codex hooks run outside the sandbox. The adapter
+  refuses to spawn without it.
+- **The clone carries no `.git` pointer** (§7). `GIT_DIR` is set only in the agent's shell via
+  `shell_environment_policy.set`, never in the `codex` process environment — otherwise Codex's own
+  per-turn `git status` inherits it and runs the teammate's planted config (§2 item 9).
 - `stdout` goes to `streamPath` (`sessions/T.jsonl`); the adapter resolves `sessionId` from the
   first `thread.started` line. `stderr` goes to `sessions/T.err`.
 - `-m` and the effort option are omitted when the role has no configured value, so Codex's own
   defaults apply, the same way the Workflow path omits `model` and `effort`.
 - `readUsage` sums `turn.completed.usage` across the stream.
 - `probe`: `codex login status` must not say `Not logged in`, and `$CODEX_HOME` (default `~/.codex`)
-  must be writable, since section 2 item 8 shows the process dies without it.
+  must be writable, since section 2 item 15 shows the process dies without it.
 - Whether `--output-schema` accepts `RESULT_SCHEMA` as written is **not yet measured**. OpenAI's
   structured output rejects schemas without `additionalProperties: false`. The first plan task
   runs it; if Codex refuses, `result-schema.mjs` gains the property for both paths, which the
@@ -168,13 +228,15 @@ codex exec resume <sessionId> --json -m … -c … --output-schema <schemaPath> 
 
 ## 6. Enforcement
 
-After a teammate's process exits, the driver runs
-`complete --run R --task T --plan P --root <project root> --enforcement-only` and reads
-the exit status with the contract `subagent-stop.mjs` already consumes:
+After a teammate's process exits, the driver `collect`s the task branch into the run repo and runs
+`complete --run R --task T --plan P --root <run repo> --enforcement-only` — in the run repo, never
+in the teammate's sandbox, so no teammate git config is ever on the path. It reads the exit status
+with the contract `subagent-stop.mjs` already consumes:
 
 - **3** (a task-scoped check rejected: `fileset`, `merge`): resume the session once with the same
-  fixed text the hook sends today, then run the check again. A second 3 records the task as
-  `failed` with `enforcement` as the reason.
+  fixed text the hook sends today (`resume` stays sandboxed and can still commit, §2 item 12), then
+  `collect` again and re-run the check. A second 3 records the task as `failed` with `enforcement`
+  as the reason.
 - **0, 2, 4**: record and move on. As with the hook, only the teammate's own fixable work may
   cost it a turn.
 
@@ -184,14 +246,77 @@ gate. The phase gate stays the only verdict.
 
 ## 7. Sandbox
 
-**Teammates.** `harnesses.codex.sandbox`, default `danger-full-access`, allowed values the three
-Codex modes. `workspace-write` stays selectable for users who configure writable roots that work;
-section 2 item 7 is quoted in the key's documentation so nobody has to re-measure why it is not
-the default.
+Teammates run under Codex's own `workspace-write` sandbox by default — never unsandboxed. The
+problem the layout solves: `workspace-write` cannot commit in a linked worktree (§2 item 7), and
+the naive fix (a clone the agent can commit to) lets the agent write its own git config, which
+Codex's per-turn `git status` then executes *outside* the sandbox (§2 item 9). The measured-safe
+layout removes the teammate's git dir from every path the host walks.
 
-**Orchestrator.** Every CLI command that writes to git (`init-run`, `dispatch*`, `gate`,
-`finish`, `prune-run`) starts with a functional preflight: create and remove a file
-in `git rev-parse --git-common-dir`. On `EROFS` or `EACCES` it exits 2 naming both ways out:
+### The isolated-clone layout (`harnesses.codex.sandbox = "clone"`, default)
+
+`makeSandbox` builds, per task:
+
+```
+.fleetmates/R/gitdirs/T     ← the git dir (objects shared with the run repo via --shared)
+.fleetmates/R/clones/T      ← the work tree, with NO .git pointer file
+```
+
+- `git clone --shared --separate-git-dir=<gitdir> <run repo> <clone>`, then `checkout -b
+  fleetmates/R/T`, then **delete `<clone>/.git`**.
+- `spawn` runs with cwd `<clone>`, `--add-dir <gitdir>`, `--disable hooks`, and `GIT_DIR`/
+  `GIT_WORK_TREE` set **only in the agent's shell** (§5).
+
+Why each piece is load-bearing, all measured (§2):
+
+- **No `.git` pointer, `GIT_DIR` only in the agent shell** (items 9, 12): Codex's per-turn
+  host-side `git status` walks up from `<clone>` and resolves to the *run repo* (where `.fleetmates/`
+  is gitignored), not the teammate's git dir, so a planted `filter.<x>.clean` never runs on the host.
+- **`--disable hooks`** (item 10): Codex hooks run outside the sandbox.
+- **The agent cannot re-point at its git dir** (item 11): `<clone>/.git` is a read-only masked
+  directory; it can neither create the pointer file nor `mkdir .git`.
+- **Host touches the git dir only through `collect`'s `fetch`** (item 13), hardened
+  `GIT_OPTIONAL_LOCKS=0 -c core.hooksPath=/dev/null -c core.fsmonitor=false`. The driver **never**
+  runs git with the clone as cwd or the teammate git dir as `--git-dir`; `liveness`
+  (`scripts/git.mjs:479`) does exactly that and is therefore not used on this path.
+- A permission profile is **not** used: denying `<gitdir>/config` write aborts Codex startup, and
+  the config must stay writable, so it cannot close the filter vector (§2 item 14).
+
+Unmeasured, and therefore each a first-phase plan task before this layout is trusted:
+
+- macOS (seatbelt) and Windows — only Linux/bubblewrap was measured; the "walks up to the run repo"
+  behaviour and the `.git` masking may differ.
+- That the harness `git status` resolves to the run repo is inferred from the canary, not observed
+  directly; the task confirms which repo it opens.
+- `resume` reproducing the sandbox through `-c` across a real multi-phase run.
+
+### The git-less fallback (`harnesses.codex.sandbox = "files"`)
+
+`makeSandbox` gives the teammate a plain checkout of the branch's tree with **no git at all** (§2
+item 4 — a teammate with no repo runs fine). The teammate only edits files; `collect` computes the
+diff against the fork point and commits it in the run repo, treating the tree as untrusted. Safe by
+construction — no teammate-controlled git config exists — at the cost of the teammate's own `git`
+(granular commits, and tests that need git history). Selectable for platforms where the clone
+layout is not yet confirmed.
+
+### `danger-full-access`
+
+Still selectable (`harnesses.codex.sandbox = "full"`) for users who accept it. It is not the
+default and the config key's documentation says why.
+
+### Network
+
+`workspace-write` denies network unless `sandbox_workspace_write.network_access=true`. Off by
+default; a separate `harnesses.codex.network` key turns it on for tasks that install dependencies,
+with the exfiltration trade-off stated. `npm install` inside the clone is not yet measured beyond
+"network reaches the registry".
+
+### Orchestrator
+
+The orchestrator itself must run unsandboxed (§2 item 15): it writes the run repo's `.git`, and a
+nested `codex exec` cannot even start inside `workspace-write`. Every CLI command that writes to git
+(`init-run`, `dispatch*`, `gate`, `finish`, `prune-run`) starts with a functional preflight: create
+and remove a file in `git rev-parse --git-common-dir`. On `EROFS` or `EACCES` it exits 2 naming both
+ways out:
 
     cannot write to <dir>: this shell is sandboxed.
       Start the harness with full access (codex: --sandbox danger-full-access),
@@ -208,7 +333,8 @@ A new ergonomics key, allowed in `fleetmates.local.json` and `fleetmates.gate.js
 {
   "harnesses": {
     "codex": {
-      "sandbox": "danger-full-access",
+      "sandbox": "clone",
+      "network": false,
       "timeoutMinutes": 90,
       "tierModels": { "cheap": "…", "mid": "…", "capable": "…" }
     }
@@ -218,6 +344,9 @@ A new ergonomics key, allowed in `fleetmates.local.json` and `fleetmates.gate.js
 
 - Not an enforcement key: nothing in it changes a gate verdict, since `fileset` and `ownership`
   are recomputed from git.
+- `sandbox` is one of `clone` (default, §7), `files` (git-less fallback), `full`
+  (`danger-full-access`). `config set` refuses any other value.
+- `network` gates `sandbox_workspace_write.network_access`; default `false`.
 - `tierModels` maps the existing tiers (`cheap`, `mid`, `capable`) to model ids. An unmapped tier
   omits `-m`.
 - Effort reuses `agents.<role>.effort`. The five fleetmates values are valid Codex values as spelled.
@@ -241,8 +370,9 @@ A new ergonomics key, allowed in `fleetmates.local.json` and `fleetmates.gate.js
   `SubagentStop` handler fires for the orchestrator's own in-session subagents and fails open, as
   it does for unrelated subagents under Claude Code.
 - **README.** A "Codex" install section: marketplace add, plugin add, `codex login`, trusting the
-  hooks in `/hooks` (without it `using-fleetmates` activates only by its description), and the two
-  sandbox facts from section 7.
+  hooks in `/hooks` (without it `using-fleetmates` activates only by its description), and the
+  sandbox model from section 7 — teammates run sandboxed in an isolated clone, the orchestrator
+  runs with full access.
 - **Tests that pin skill text** (`md-contract`, `skill-contracts`, `agents.test.mjs:370`) change
   in the same commits as the text they pin.
 
@@ -250,8 +380,10 @@ A new ergonomics key, allowed in `fleetmates.local.json` and `fleetmates.gate.js
 
 | Condition | Result |
 |---|---|
-| `probe` fails | `dispatch*` exits 2 before creating any worktree, printing the adapter's `fix` (e.g. `run: codex login`). |
+| `probe` fails | `dispatch*` exits 2 before creating any sandbox, printing the adapter's `fix` (e.g. `run: codex login`). |
 | Git common dir not writable | Exit 2, section 7 message. |
+| `makeSandbox` cannot build the clone (disk, git error) | Task recorded `orphaned` with the git error; the phase continues for the others. |
+| Adapter asked to spawn without `--disable hooks` | Internal invariant; the adapter refuses rather than run teammate hooks outside the sandbox. |
 | Process exits with no result file, or one that fails the schema | `orphaned`, last 20 lines of stderr in `sessions/T.json`. Never `done`. |
 | `timeoutMinutes` elapses | SIGTERM the process group, 10 s, SIGKILL. `orphaned`, `timeout` as the reason. The session stays resumable. |
 | `resume` fails to start | Recorded on the task; no retry loop. |
@@ -272,13 +404,25 @@ teammate's claim, exactly as on the Workflow path, and `doctor` and the gate dec
   resumes only unfinished tasks; `probe` refusal.
 - **Preflight.** A repository whose common dir is made read-only: every git-writing command exits
   2 with the message, and none of them has created anything.
-- **Config.** Valid and invalid `harnesses.codex.*` values through `config set`.
-- **Nested worktrees.** Gate a phase whose worktrees live under `.fleetmates/R/worktrees/`:
-  `ownership` passes and `fileset` sees each branch's paths.
-- **End to end, real Codex.** Skipped automatically when `probe` fails. A three-task plan in a
-  scratch repository: `init-run`, `dispatch`, `gate`, `dispatch-integrator`, and a check that the
-  run branch holds all three merges. Runs through `npm run test:e2e:codex`, not `npm test`,
-  because it spends tokens.
+- **Config.** Valid and invalid `harnesses.codex.*` values through `config set`, including the three
+  `sandbox` values and rejection of a fourth.
+- **Sandbox layout, unit.** `makeSandbox` for `clone` produces a clone with no `.git` pointer, a
+  separate git dir, and the branch checked out; `collect` fast-forwards the branch into the run repo
+  and refuses a non-fast-forward. `files` produces a git-less tree and `collect` commits its diff.
+- **Nested git dirs.** Gate a phase whose sandboxes live under `.fleetmates/`: `ownership` passes
+  and `fileset` sees each branch's paths.
+- **Security regression, real Codex (canary).** The measured escapes, as tests that fail if a Codex
+  update reopens them, each with a canary written to a path outside every writable root:
+  1. clone layout — a planted `filter.clean` does **not** fire during a no-command turn;
+  2. the agent **cannot** create `<clone>/.git`;
+  3. `--disable hooks` — a project `SessionStart` hook does **not** run;
+  4. `resume` — an outside control write is denied and a commit still lands;
+  5. host `git fetch <gitdir>` — a planted `uploadpack.packObjectsHook` does **not** fire.
+  Each has a positive control proving the canary works. Runs through `npm run test:e2e:codex`,
+  skipped when `probe` fails.
+- **End to end, real Codex.** A three-task plan in a scratch repository: `init-run`, `dispatch`
+  (clone sandbox), `gate`, `dispatch-integrator`, and a check that the run branch holds all three
+  merges. `npm run test:e2e:codex`, not `npm test`, because it spends tokens.
 
 ## Out of scope
 
