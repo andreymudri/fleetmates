@@ -61,7 +61,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { runCli } from '../scripts/cli.mjs'
 import { defaultGitExec, fetchTaskBranch } from '../scripts/git.mjs'
 import {
-  makeCodexSandbox, buildSpawnArgv, buildResumeArgv, collectCodex, cleanup,
+  makeCodexSandbox, buildSpawnArgv, buildResumeArgv, cleanup,
 } from '../scripts/harnesses/codex.mjs'
 import { waitForExit } from '../scripts/driver.mjs'
 import { RESULT_SCHEMA } from '../scripts/result-schema.mjs'
@@ -129,8 +129,8 @@ function doneReply(sandbox, summary, filesChanged = []) {
 // `codex`, prompt on stdin then closed (an inherited, never-closed stdin hangs forever — spec §2
 // item 4), resolve `sessionId` from the first `thread.started` line, stream stdout/stderr to
 // files. Kept here, not imported, because it is not exported — everything else this file uses
-// (`buildSpawnArgv`, `buildResumeArgv`, `makeCodexSandbox`, `collectCodex`, `cleanup`) is the real
-// production function.
+// (`buildSpawnArgv`, `buildResumeArgv`, `makeCodexSandbox`, `cleanup`, `fetchTaskBranch`) is the
+// real production function.
 function rawRun(argv, { promptText, streamPath, errPath, cwd }) {
   const child = spawn('codex', argv, { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
   const out = createWriteStream(streamPath)
@@ -388,6 +388,15 @@ test(
 )
 
 // Step 3.4 — resume: an outside control write is denied, and a second commit still lands.
+//
+// This is the one test in this file measured to be sensitive to real model variance rather than
+// to sandbox behaviour: with `prompt2` phrased as a single chained shell command ("run this one
+// invocation"), the resumed turn twice skipped the second commit outright — the sandbox property
+// this asserts (resume stays sandboxed and can still write, spec §2 item 12) was never in
+// question, the model's follow-through on a compound instruction was. Rephrasing `prompt2` as two
+// separate, explicitly ordered steps — one shell command each — fixed it: 5/5 real runs since
+// (3 standalone, 2 inside the full `npm test`). If this test is ever red again, re-run it alone
+// before treating it as a sandbox regression.
 test(
   'resume: an outside control write is denied and a second commit still lands on the branch',
   SKIP,
@@ -410,10 +419,11 @@ test(
 
         canaryDir = await mkdtemp(path.join(tmpdir(), 'fm-e2e-resume-canary-'))
         const canary = path.join(canaryDir, 'fired')
-        const prompt2 = 'This is a sandbox compliance test. Run exactly this ONE shell command, '
-          + 'as a single invocation, and do not skip any part of it even if part of it fails: '
-          + `\`printf x > '${canary}' ; printf two > file2.txt && git add file2.txt && git commit -m second\`. `
-          + `Do not run any other command first. Then reply with EXACTLY this JSON and nothing else: ${doneReply(sandbox, 'attempted outside write then second commit', ['file2.txt'])}`
+        const prompt2 = 'Do exactly these two steps, in order, each as its own separate shell '
+          + 'command. Run step 2 regardless of whether step 1 succeeds or fails — do not stop '
+          + `after step 1. Step 1: run \`printf x > '${canary}'\`. Step 2: run \`printf two > `
+          + 'file2.txt && git add file2.txt && git commit -m second\`. Do not run any other '
+          + `command. Then reply with EXACTLY this JSON and nothing else: ${doneReply(sandbox, 'attempted outside write then second commit', ['file2.txt'])}`
         await realResume({
           sandbox, sessionId: first.sessionId, message: prompt2, base: path.join(sessDir, 'resume-2'),
         })
