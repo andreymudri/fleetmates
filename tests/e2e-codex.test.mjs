@@ -1,10 +1,16 @@
 // End-to-end and security-regression tests against a REAL, logged-in Codex CLI (plan
 // docs/plans/2026-09-15-headless-driver-codex.md, Task 10; spec
 // docs/specs/2026-09-14-headless-driver-codex-design.md §11). Every test in this file spawns the
-// real `codex` binary — no fake, no fixture — and skips itself, rather than failing, on a machine
-// where Codex is not installed and logged in, so `npm test` (which globs `tests/*.test.mjs` and
-// therefore matches this file too) stays green offline. Run just this suite with
-// `npm run test:e2e:codex`.
+// real `codex` binary — no fake, no fixture — and skips itself, rather than failing, whenever
+// `codexReady()` is false OR `FLEETMATES_E2E` is not `'1'`. Both are required on purpose: this
+// file matches the default `test` script's `tests/*.test.mjs` glob, and the phase gate's own
+// merged-preview `npm test` can run on a host that HAS Codex installed and logged in — measured:
+// on such a host, `codexReady()` alone let these real-model spawns run inside the deterministic
+// default suite the gate scores, and their non-determinism (a real turn occasionally not
+// finishing the way it usually does) showed up as a flaky gate, not as a property of this file's
+// own logic. `FLEETMATES_E2E=1`, set only by `npm run test:e2e:codex`, is the explicit opt-in that
+// keeps the default `test`/`test:verbose` scripts green and deterministic on ANY host, Codex or
+// not, while still letting this suite run for real on demand.
 //
 // KNOWN, MEASURED DEFECT — read before touching the spawn helpers below. `scripts/result-schema.
 // mjs`'s `RESULT_SCHEMA`, exactly as committed, is refused by real Codex 0.149.0's structured
@@ -86,7 +92,14 @@ function codexReady() {
   return cachedReady
 }
 
-const SKIP = { skip: codexReady() ? false : 'codex is not installed and logged in on this machine' }
+// Opt-in gate, IN ADDITION to codexReady(): a Codex-present, logged-in host is exactly the host
+// the phase gate's merged-preview `npm test` runs on (measured — see the fix-round note this
+// answers), and a real-model spawn is not deterministic the way the rest of this repo's suite is.
+// `codexReady()` alone made the default `npm test` glob run these for real on such a host;
+// `FLEETMATES_E2E=1` (set only by the `test:e2e:codex` script, never by `test`/`test:verbose`) is
+// the second, explicit opt-in that keeps them out of the deterministic default suite the gate
+// runs, while `npm run test:e2e:codex` still exercises them for real.
+const SKIP = { skip: codexReady() && process.env.FLEETMATES_E2E === '1' ? false : 'set FLEETMATES_E2E=1 and run test:e2e:codex to run the real-Codex e2e suite' }
 
 // A generous ceiling for one real turn. Every prompt below is a short, unambiguous instruction
 // (a no-op reply, one or two already-decided shell commands) chosen specifically so a real turn

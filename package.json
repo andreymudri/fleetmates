@@ -40,7 +40,7 @@
   "scripts": {
     "test": "node --test --test-reporter=./scripts/quiet-reporter.mjs tests/*.test.mjs",
     "test:verbose": "node --test tests/*.test.mjs",
-    "test:e2e:codex": "node --test tests/e2e-codex.test.mjs",
+    "test:e2e:codex": "FLEETMATES_E2E=1 node --test tests/e2e-codex.test.mjs",
     "test:hostile-tmpdir": "node scripts/hostile-tmpdir-sweep.mjs"
   }
 }
