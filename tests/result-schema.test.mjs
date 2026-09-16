@@ -20,3 +20,7 @@ test('required is exactly the five contract fields, in order', () => {
 test('the status enum is exactly done, blocked, failed', () => {
   assert.deepEqual(RESULT_SCHEMA.properties.status.enum, ['done', 'blocked', 'failed'])
 })
+
+test('additionalProperties is false, as Codex --output-schema requires', () => {
+  assert.equal(RESULT_SCHEMA.additionalProperties, false)
+})
