@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A headless driver and a Codex adapter, alongside the existing Claude Code Workflow path. New
+  commands: `dispatch`, `dispatch-reviews`, `dispatch-integrator`, `message`, `sessions`.
+- `harnesses.codex.*` config: `sandbox` (`clone` default, `files`, `full`), `network`,
+  `timeoutMinutes`, `tierModels`.
+
 ## v2.0.1
 
 No change to the plugin itself — the published files are identical to 2.0.0.

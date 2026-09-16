@@ -92,6 +92,28 @@ version's notice once.
 Because the check writes a cache the *next* session reads, a newly published version is reported
 one session after the check that found it. That is the cost of never blocking session start.
 
+## Running on Codex
+
+fleetmates also runs headless under Codex CLI, alongside Claude Code, from the same package:
+
+    codex plugin marketplace add andreymudri/fleetmates
+    codex plugin add fleetmates@fleetmates
+    codex login
+
+The package installs unchanged from the same `.claude-plugin/marketplace.json` — there is no
+separate Codex manifest.
+
+**Trust the hooks in `/hooks` after installing.** Without that, `using-fleetmates` activates only
+by its description text, not through the `SubagentStop` hook this plugin relies on for
+enforcement.
+
+### Sandbox
+
+Teammates run sandboxed in an isolated clone by default (`harnesses.codex.sandbox = "clone"`) —
+never unsandboxed. A git-less `files` fallback and `full` (`danger-full-access`) are also
+selectable. The orchestrator itself needs full access to write the run repo's git, and exits with
+a fixable message if it is started inside a sandbox. Network access is off by default.
+
 ## Coming from claude-teammates
 
 fleetmates is claude-teammates, renamed. To move over:
