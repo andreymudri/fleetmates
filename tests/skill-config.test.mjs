@@ -95,7 +95,7 @@ const SKILL_FIXTURE_URL = new URL('./fixtures/fleetmates-config.SKILL.md', impor
 // the skill — added sentence, added section, reworded aside, trailing space — fails here first.
 // This is the layer that actually closes the prose surface. The rest survive because they turn
 // "the digest changed" into a message that says WHICH kind of change it was.
-const SKILL_SHA256 = '114ae3986e57bba21ef311d74298085af5ccdd0bca9dce8e508ee9720b898759'
+const SKILL_SHA256 = '6dc02ace9d0a33427dce3490328f048984208b7b100fea78c251349fe01217dd'
 
 test('the skill matches the digest recorded in this test file', async () => {
   const text = await readFile(SKILL_URL)
@@ -128,6 +128,7 @@ const HEADINGS = [
   '## Read before you write',
   '## Collect the change interactively',
   '## Never hand-edit a key `config set` accepts',
+  '## Harness settings',
 ]
 
 test('the skill has exactly the sections that were reviewed', async () => {

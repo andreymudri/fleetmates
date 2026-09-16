@@ -7,13 +7,13 @@ description: Use when checking what a running fleet is doing - renders the diges
 
 ## Digest
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" digest --run <runId> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" digest --run <runId> --root <project root>
 
 Show that block as-is. It is deliberately compact; do not expand it into prose.
 
 ## What the repository says
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" doctor --run <runId> --plan <planPath> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" doctor --run <runId> --plan <planPath> --root <project root>
 
 The digest renders `status.json`, which the teammates being supervised write; `doctor` asks git
 instead. It reports the main worktree's branch and any dirty paths, every worktree and who holds
@@ -32,7 +32,7 @@ in a poll loop.
 
 ## The heartbeat
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" liveness --run <runId> --plan <planPath> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" liveness --run <runId> --plan <planPath> --root <project root>
 
 Run it on the 20-30 minute heartbeat, not in a loop. Exit 1 means at least one teammate of the
 current phase has neither committed nor touched its worktree inside the window.

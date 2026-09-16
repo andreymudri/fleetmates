@@ -13,12 +13,12 @@ cadence. Use `using-fleetmates` to decide which one applies before reaching for 
 
 ## 1. Initialize the run
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" init-run <planPath> --run <runId> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" init-run <planPath> --run <runId> --root <project root>
 
 This writes `.fleetmates/<runId>/plan.json` and `status.json` — the same shared state a fleet
 run would write. Because of that:
 
-- `node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" digest --run <runId> --root <project root>`
+- `node "<fleetmates root>/scripts/cli.mjs" digest --run <runId> --root <project root>`
   renders this run unchanged, whether it ran inline or across teammates.
 - `fleet-lifecycle resume <runId>` can resume it later.
 - If the work turns out to be bigger than expected mid-run, hand it to `parallel-execution`

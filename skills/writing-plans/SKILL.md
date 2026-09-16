@@ -162,7 +162,7 @@ write set for that task — a stray path outside it is caught at merge and fails
 Before handing a plan to a fleet, run it through the parser and phase assigner yourself:
 
 ```
-node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" init-run docs/plans/<file>.md --run plancheck --root <project root>
+node "<fleetmates root>/scripts/cli.mjs" init-run docs/plans/<file>.md --run plancheck --root <project root>
 ```
 
 Read the printed phase breakdown and confirm it matches intent — tasks that should run

@@ -10,7 +10,7 @@ description: Use when executing a written plan across background teammates - spl
 Create and check out this run's branch **before** initializing, then run `init-run` from it:
 
     git checkout -b <run branch> <base branch>    # e.g. run/<runId> from master
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" init-run <planPath> --run <runId> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" init-run <planPath> --run <runId> --root <project root>
 
 This writes `.fleetmates/<runId>/plan.json` and `status.json` and prints the phase breakdown.
 Tasks land in the same phase only when their deps are satisfied and their file sets are
@@ -55,7 +55,7 @@ branch.
 
 Phases with **three or more** tasks go through the Workflow tool:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" workflow --run <runId> --phase <n> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" workflow --run <runId> --phase <n> --root <project root>
 
 Write that source to a file and invoke `Workflow` with it. The Workflow tool needs the user's
 opt-in — ask once per run, then remember it for that run.
@@ -71,7 +71,7 @@ Phases with fewer than three tasks are dispatched as direct background `Agent` c
 On either direct-`Agent` path — the fallback above and the fewer-than-three-task case — build each
 teammate's brief with the CLI rather than composing it by hand:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" brief --run <id> --task <id> --plan <path> --base <branch> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" brief --run <id> --task <id> --plan <path> --base <branch> --root <project root>
 
 The Workflow path already renders each brief from the same composer, so a hand-written dispatch is
 only ever a way to drift from what the gate enforces.
@@ -110,6 +110,17 @@ verdict.
 
 Wait on completion notifications. Do not poll in a loop.
 
+### On a harness other than Claude Code
+
+When the orchestrator is not Claude Code, the Workflow tool and background `Agent` calls do not
+exist. Dispatch the whole phase through the CLI instead:
+
+    node "<fleetmates root>/scripts/cli.mjs" dispatch --run <id> --phase <n> --harness <name> --root <project root>
+
+This is worktree-isolated and gate-identical: it produces the same result contract the Workflow
+and Agent paths do, and resuming a run re-runs the same `dispatch`. The harness name is the one
+the orchestrator is itself running in, passed explicitly.
+
 ## 3. Record results
 
 Append every result to `status.json`. A teammate that returned nothing is `orphaned`, not
@@ -117,7 +128,7 @@ Append every result to `status.json`. A teammate that returned nothing is `orpha
 
 Before dispatching a later phase, check whether the plan still describes the tree:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" plan-drift --run <runId> --plan <planPath> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" plan-drift --run <runId> --plan <planPath> --root <project root>
 
 It compares the working-tree plan against the plan at the anchor and separates drift that still
 reaches the work from drift on an already-integrated phase, which exits 1. A later task's brief
@@ -127,7 +138,7 @@ only in the plan, because a dispatch already sent carries the old text.
 
 A returned `done` is a claim, not evidence. Check it against git before believing it:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" doctor --run <runId> --plan <planPath> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" doctor --run <runId> --plan <planPath> --root <project root>
 
 A teammate that skipped its `checkout -B` commits on the harness's own branch and leaves
 `fleetmates/<runId>/<taskId>` pointing at the run tip with nothing on it: the returned `branch`
@@ -170,7 +181,7 @@ stopping at the boundary — verified on Windows, and exactly the shape a depend
 during bootstrap (see "Worktree mechanics" below) can leave behind; nothing unlinks it first
 the way a leaked preview's own links are unlinked, because that sweep runs only for previews:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes
+    node "<fleetmates root>/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes
 
 This is the only supported way to clean up after a phase. It recomputes each phase's gate rather
 than reading `status.gates`, removes only this run's worktrees whose phase passes, sweeps every
@@ -239,7 +250,7 @@ gitignored `fleetmates.local.json` is the normal place to.
 When generating a Workflow, pass the same map through so the generated dispatches carry
 concrete models:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" workflow --run <id> --phase <n> --root <root> \
+    node "<fleetmates root>/scripts/cli.mjs" workflow --run <id> --phase <n> --root <root> \
       --models '{"cheap":"haiku","mid":"sonnet","capable":"opus"}'
 
 ## Before dispatching tm-integrator
@@ -364,7 +375,7 @@ repository with thousands of commits.
 
 Ask the same question yourself for any file set:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" map --files <a,b> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" map --files <a,b> --root <project root>
 
 Coupling is correlation in history, not a dependency: a source and its test, a caller and its
 callee, and two files one person kept tidy all look alike to it. Nothing enforces it and no gate
@@ -388,7 +399,7 @@ teammate automatically; a teammate never shares a worktree with another.
   stale ones before starting a new run.
 - **Prune with the command rather than by hand:**
 
-      node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> [--yes]
+      node "<fleetmates root>/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> [--yes]
 
   It recomputes each phase's gate, removes only this run's worktrees whose phase passes, sweeps
   every leaked merge-preview worktree under the system temp directory regardless of which run
@@ -396,7 +407,7 @@ teammate automatically; a teammate never shares a worktree with another.
   prints the plan anyway.
 - **Skip the slow part with `--enforcement-only`:**
 
-      node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --enforcement-only [--yes]
+      node "<fleetmates root>/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --enforcement-only [--yes]
 
   `finish` and `prune-run` otherwise recompute every command check of every phase — for a
   five-phase run, five full test suites — to answer a question that usually does not need them.
