@@ -9,8 +9,10 @@ description: Use when changing how the fleet runs — parallelism, or model tier
 
 `config` manages the **ergonomics** keys only: `maxParallel`, `caveman`, and
 `agents.<role>.tier`/`agents.<role>.effort`. Those, plus the per-harness `harnesses.codex.*` keys
-documented under **Harness settings** below, are the keys `config set`/`config unset` accept, in
-either layer, subject to the enforcement rule below.
+documented under **Harness settings** below, are the keys `config set` accepts, in either
+layer, subject to the enforcement rule below. `config unset` removes only the ergonomics
+keys; every `harnesses.codex.*` key is rejected there with `unknown config key` and exit 2,
+so a harness key is cleared by deleting its line from the layer file directly.
 
 `fleetmates.gate.json` is tracked and can also hold the **enforcement** keys `phases`, `lens`, and
 `preview`. Those are edited by hand, deliberately: enforcement policy is meant to land as a
