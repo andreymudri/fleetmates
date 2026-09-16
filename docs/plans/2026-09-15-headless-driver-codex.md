@@ -541,6 +541,9 @@ the driver, decides landability.
 - Modify: `agents/tm-implementer.md`
 - Modify: `tests/skill-contracts.test.mjs`
 - Modify: `tests/md-contract.test.mjs`
+- Modify: `tests/skill-config.test.mjs`
+- Modify: `tests/fixtures/fleetmates-config.SKILL.md`
+- Modify: `tests/skill-finishing-branch.test.mjs`
 
 **Depends:** T7
 
@@ -577,6 +580,14 @@ the driver, decides landability.
   any assertion pinning `$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs` to accept `<fleetmates root>/scripts/cli.mjs`,
   and add an assertion that `using-fleetmates` defines `<fleetmates root>` in terms of both
   `$CLAUDE_PLUGIN_ROOT` and the skill directory. Run `npm test` for the skill suites.
+
+- [ ] **Step 7:** The `fleetmates-config` and `finishing-a-development-branch` skills edited above are
+  byte-pinned by tests outside the original Step 6 set; update those in the SAME commit so the merged
+  tree stays green. In `tests/skill-config.test.mjs`, recompute the `SKILL_SHA256` constant for the
+  edited `skills/fleetmates-config/SKILL.md` and update `tests/fixtures/fleetmates-config.SKILL.md` to
+  the new byte-for-byte content. In `tests/skill-finishing-branch.test.mjs`, update the `introduces`
+  regex that pins the literal `$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs prune-run ...` line so it accepts
+  the `<fleetmates root>/scripts/cli.mjs` form. Run `npm test` and confirm the whole suite is green.
 
 ### Task 9: README and changelog for the Codex path
 
@@ -642,3 +653,26 @@ the driver, decides landability.
 - [ ] **Step 5:** In `tests/npm-scripts.test.mjs`, assert `package.json` has a `test:e2e:codex`
   script pointing at `tests/e2e-codex.test.mjs`. Run `npm test` and confirm green (the e2e cases skip
   without Codex).
+
+### Task 11: RESULT_SCHEMA declares additionalProperties for real Codex
+
+Real Codex (0.149.0, `--output-schema`) refuses a JSON schema whose object does not set
+`additionalProperties`, so the headless `dispatch --harness codex` path currently orphans every
+task (measured in Task 10's e2e suite, which skips its full-run case until this lands). The
+Workflow path is unaffected either way. This task closes that so the Codex path actually completes.
+
+**Files:**
+- Modify: `scripts/result-schema.mjs`
+- Modify: `tests/result-schema.test.mjs`
+
+**Depends:** T7
+
+- [ ] **Step 1:** In `scripts/result-schema.mjs`, add `additionalProperties: false` to the top-level
+  `RESULT_SCHEMA` object (a sibling of `type`, `required`, `properties`). Change nothing else — the
+  `required` array and the `properties` block stay exactly as they are, so both the Workflow template
+  and the driver keep validating the identical shape. Update the module's top comment to note the
+  key is required by Codex's `--output-schema`.
+
+- [ ] **Step 2:** In `tests/result-schema.test.mjs`, add an assertion that
+  `RESULT_SCHEMA.additionalProperties === false`, so a future edit that drops it turns the suite red
+  (Codex would silently start refusing the schema again otherwise). Run `npm test` and confirm green.
