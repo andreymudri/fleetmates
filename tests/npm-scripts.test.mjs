@@ -20,9 +20,20 @@ test('npm test drives the quiet reporter, and the reporter exists', async () => 
 // is asserted rather than remembered.
 test('no npm script relies on a shell pipeline', async () => {
   const s = await scripts()
-  for (const name of ['test', 'test:verbose']) {
+  for (const name of ['test', 'test:verbose', 'test:e2e:codex']) {
     assert.doesNotMatch(s[name], /[|>]|&&|\bgrep\b/, `${name} must not depend on shell features cmd.exe lacks`)
   }
+})
+
+// `tests/e2e-codex.test.mjs` matches the `test` script's own `tests/*.test.mjs` glob (every test
+// in it skips itself when Codex is unavailable, so `npm test` stays green offline — see that
+// file). `test:e2e:codex` is the explicit, single-file way to run just that suite, and it has to
+// keep naming the real file or a rename of the suite silently breaks the explicit entry point
+// while the glob-matched default entry point stays green and hides it.
+test('test:e2e:codex runs the e2e Codex suite by its own file', async () => {
+  const s = await scripts()
+  assert.match(s['test:e2e:codex'], /\bnode --test tests\/e2e-codex\.test\.mjs\b/)
+  assert.ok(existsSync(new URL('tests/e2e-codex.test.mjs', root)), 'the file test:e2e:codex names must exist')
 })
 
 // The escape hatch has to stay an escape hatch: if test:verbose ever names a reporter of its
