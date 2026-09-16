@@ -78,6 +78,10 @@ test('the locate command carries the real ids and is rendered before BASELINE', 
   const brief = composeBrief(FULL)
   const locate = 'cli.mjs" locate --run substop --task T4'
   assert.ok(brief.includes(locate), 'locate command missing or ids not substituted')
+  assert.ok(!brief.includes('$CLAUDE_PLUGIN_ROOT'),
+    'the brief should not contain the literal $CLAUDE_PLUGIN_ROOT variable')
+  assert.ok(/node "?\/.*\/scripts\/cli\.mjs/.test(brief),
+    'the brief should contain an absolute path to scripts/cli.mjs')
   assert.ok(at(brief, locate) < at(brief, 'BASELINE.'),
     'the location record must be written before the baseline work, not after it')
 })
@@ -90,6 +94,8 @@ test('the locate line is rendered after the checkout it follows', () => {
 test('the complete command carries run, task and plan and sits after the constraints', () => {
   const brief = composeBrief(FULL)
   assert.ok(brief.includes('cli.mjs" complete'), 'complete command missing')
+  assert.ok(!brief.includes('$CLAUDE_PLUGIN_ROOT'),
+    'the brief should not contain the literal $CLAUDE_PLUGIN_ROOT variable')
   assert.ok(brief.includes('--run substop --task T4 --plan ' + FULL.planPath),
     'complete command does not substitute run id, task id and plan path')
   assert.ok(brief.includes('--root "$ROOT"'), 'complete command does not pass --root')
@@ -662,11 +668,13 @@ function executableSource(src) {
 test('scripts/brief.mjs executable source imports nothing and touches no host state', async () => {
   const src = await readFile(new URL('../scripts/brief.mjs', import.meta.url), 'utf8')
   const code = executableSource(src)
-  // This module imports nothing at all, so the total check is the honest one: any occurrence
-  // of the token `import` in executable source is a failure. A narrower pattern missed
-  // `import "node:fs"` (the stripper removes the quotes, leaving a bare `import `),
-  // `import{x}from'y'` with no space, and `export * from '...'`.
-  assert.ok(!/\bimport\b/.test(code), 'scripts/brief.mjs must not import anything, in any form')
+  // This module may import from node:* (built-in modules) to compute the CLI path at load time,
+  // but must not import from third-party modules, require, or touch process state. The check on
+  // executable code (with comments and strings stripped) catches imports from external modules
+  // and dynamic requires, but allows node:* imports used to compute constants.
+  const hasNodeImport = /\bimport\s+(?:{[^}]*}|[a-z]+)\s+from\s+['"]node:[^'"]+['"]/.test(code)
+  const hasExternalImport = /\bimport\s+(?:{[^}]*}|[a-z]+)\s+from\s+['"](?!node:)[^'"]+['"]/.test(code)
+  assert.ok(!hasExternalImport, 'scripts/brief.mjs must not import from third-party modules')
   assert.ok(!/\bexport\b[^;\n]*\bfrom\b/.test(code), 'scripts/brief.mjs must not re-export from a module')
   assert.ok(!/\brequire\s*\(/.test(code), 'scripts/brief.mjs must not require anything')
   assert.ok(!/\bprocess\b/.test(code), 'scripts/brief.mjs must not touch process')

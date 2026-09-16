@@ -104,10 +104,12 @@ These thoughts mean STOP — you're rationalizing your way out of a skill check:
 
 ## Invoking the CLI
 
-`CLAUDE_PLUGIN_ROOT` is where this plugin is installed; `--root` is always the user's project
-repo. They are never the same directory. Every CLI call in every skill uses both:
+`<fleetmates root>` is where this plugin is installed: it is `$CLAUDE_PLUGIN_ROOT` when that
+variable is set (Claude Code), otherwise the directory two levels above this skill's own
+`SKILL.md` (`dirname(dirname(<this skill's dir>))`). `--root` is always the user's project repo.
+They are never the same directory. Every CLI call in every skill uses both:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" <subcommand> --root <project root> ...
+    node "<fleetmates root>/scripts/cli.mjs" <subcommand> --root <project root> ...
 
 Invoking the CLI by a relative path fails as soon as the working directory
 isn't the plugin's own — which, installed via `/plugin`, it never is.

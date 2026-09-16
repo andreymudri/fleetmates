@@ -46,11 +46,30 @@ function codeLines(file, text) {
   return kept
 }
 
+// Recursive, because the scan's whole point is to catch a legacy spelling wherever one lives —
+// a flat, one-level `readdirSync` stopped being sound the moment a task (T5, `scripts/harnesses/`)
+// introduced the first subdirectory under `scripts/`: it threw `EISDIR` trying to `readFileSync`
+// the directory itself, and would otherwise have left everything under it unscanned rather than
+// failing loudly. `relDir` is built with a literal `/`, never `path.join`, so the relative paths
+// this returns match `EXEMPT_FILES` and the git-style forward-slash paths the rest of the plugin
+// uses, on every platform.
+function walk(absDir, relDir) {
+  const found = []
+  for (const entry of readdirSync(absDir, { withFileTypes: true })) {
+    const rel = relDir ? `${relDir}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      found.push(...walk(path.join(absDir, entry.name), rel))
+    } else if (entry.isFile()) {
+      found.push(rel)
+    }
+  }
+  return found
+}
+
 function sources() {
   const found = []
   for (const dir of ['scripts', 'hooks']) {
-    for (const name of readdirSync(path.join(root, dir))) {
-      const rel = `${dir}/${name}`
+    for (const rel of walk(path.join(root, dir), dir)) {
       if (!EXEMPT_FILES.has(rel)) found.push(rel)
     }
   }

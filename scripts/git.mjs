@@ -1,5 +1,7 @@
 import { NAMES } from './names.mjs'
 import { spawn } from 'node:child_process'
+import { mkdtemp, rm } from 'node:fs/promises'
+import path from 'node:path'
 // `printable` only. scripts/reviews.mjs imports NOTHING — it is a leaf — so this cannot cycle back
 // through git.mjs and drags no other module in with it. Wrapping at this single point rather than
 // at each print site is deliberate: the ref below reaches nine commands' stdout, and a per-site
@@ -68,9 +70,20 @@ export const COMMIT_MARKER = 'commit/'
 
 // argv array, shell: false. Branch names reach git as a single argv entry, so a name
 // containing shell metacharacters is data, never a command.
-export function defaultGitExec(args, cwd) {
+//
+// The second argument is the cwd as a bare string for every existing call site, which passes
+// no env. The hardened helpers below (fetchTaskBranch, gitDirWritable) pass an options object
+// `{ cwd, env }` instead, so both forms are accepted here: when an env is given it is layered
+// over `process.env` rather than replacing it, so a helper that sets GIT_OPTIONAL_LOCKS keeps
+// PATH and the rest of the inherited environment.
+export function defaultGitExec(args, cwdOrOpts, env) {
+  let cwd = cwdOrOpts
+  if (cwdOrOpts !== null && typeof cwdOrOpts === 'object') {
+    cwd = cwdOrOpts.cwd
+    env = cwdOrOpts.env
+  }
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd })
+    const child = spawn('git', args, env ? { cwd, env: { ...process.env, ...env } } : { cwd })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', (d) => { stdout += d })
@@ -176,10 +189,12 @@ export function classifyHeadRef(ref) {
 }
 
 export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
-  const runRaw = (args) => exec(args, cwd)
+  // `env` is forwarded so a caller can disable optional locks or hooks for one command; every
+  // existing call site omits it and so inherits the process environment unchanged.
+  const runRaw = (args, env) => exec(args, cwd, env)
 
-  const run = async (args) => {
-    const { code, stdout, stderr } = await runRaw(args)
+  const run = async (args, env) => {
+    const { code, stdout, stderr } = await runRaw(args, env)
     if (code !== 0) throw new GitError(describeGitFailure(args, code, stderr))
     return stdout
   }
@@ -749,4 +764,33 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
 
 export function teammateRef(runId, taskId) {
   return `${NAMES.refPrefix}/${runId}/${taskId}`
+}
+
+// Fetch one branch from a teammate's git dir into this repo. Runs with hooks, fsmonitor and
+// optional locks disabled and a null hooksPath so a config the teammate planted in <fromGitDir>
+// cannot execute on the host. Fast-forward only: a non-ff means the run branch advanced under
+// the task and the gate's merge check must judge it, not a silent reset.
+export async function fetchTaskBranch(git, { fromGitDir, branch }) {
+  return git([
+    '-c', 'core.hooksPath=/dev/null',
+    '-c', 'core.fsmonitor=false',
+    'fetch', '--no-tags', '--no-write-fetch-head',
+    '--end-of-options', fromGitDir,
+    `refs/heads/${branch}:refs/heads/${branch}`,
+  ], { env: { GIT_OPTIONAL_LOCKS: '0' } })
+}
+
+// Returns { ok: true } if this process can write the repo's git dir, else { ok: false, dir, code }.
+// Used by every CLI command that writes git, so a sandboxed orchestrator fails fast with a fixable
+// message instead of deep inside a worktree add.
+export async function gitDirWritable(git, root) {
+  const common = (await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root }))
+    .stdout.trim()
+  try {
+    const probe = await mkdtemp(path.join(common, '.fm-writable-'))
+    await rm(probe, { recursive: true, force: true })
+    return { ok: true, dir: common }
+  } catch (err) {
+    return { ok: false, dir: common, code: err.code || 'EACCES' }
+  }
 }

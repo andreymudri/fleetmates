@@ -38,8 +38,8 @@ on every skill under `skills/` — get them wrong and the suite fails, not just 
   Naming a subcommand that doesn't exist fails the suite, not just the reader.
 - **Every `tm-*` agent named in the body must actually exist.** Only `tm-implementer`,
   `tm-reviewer`, and `tm-integrator` exist under `agents/`.
-- **The CLI is always invoked through `$CLAUDE_PLUGIN_ROOT`**, never a relative path:
-  `node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" <subcommand> --root <project root>`. A relative
+- **The CLI is always invoked through `<fleetmates root>`**, never a relative path:
+  `node "<fleetmates root>/scripts/cli.mjs" <subcommand> --root <project root>`. A relative
   invocation works from the author's shell and breaks for everyone else.
 
 ## Write the description as a trigger, not a summary

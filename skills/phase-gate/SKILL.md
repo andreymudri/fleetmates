@@ -9,7 +9,7 @@ Phases run autonomously end to end. The boundary is where verification happens.
 
 ## Run it
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --run <runId> --root <project root> [--phase <name>]
+    node "<fleetmates root>/scripts/cli.mjs" gate --run <runId> --root <project root> [--phase <name>]
 
 Exit codes: `0` PASS, `1` FAIL, `2` the manifest is broken, `3` no manifest (an inferred one
 was printed).
@@ -30,7 +30,7 @@ those you execute:
 
 - **agent** — generate the dispatches rather than assembling them by hand:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" review-dispatch --run <runId> --root <project root> --phase <name> [--models <json>]
+    node "<fleetmates root>/scripts/cli.mjs" review-dispatch --run <runId> --root <project root> --phase <name> [--models <json>]
 
   It prints one reviewer per lens with the tier, effort, findings path, scratch worktree and
   prompt already resolved, and exits 4 rather than emitting a dispatch when the phase has no
@@ -68,7 +68,7 @@ those you execute:
 
   To rebuild the results file from those drops rather than by hand:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" collect-reviews --run <runId> --root <project root> --phase <name>
+    node "<fleetmates root>/scripts/cli.mjs" collect-reviews --run <runId> --root <project root> --phase <name>
 
   `--phase` is not optional on a plan with more than one phase, on either command above:
   omitted, it names the manifest key `default`, which scopes the review to every task branch in
@@ -169,7 +169,7 @@ those you execute:
 
 Then hand those results back and let the CLI recompute:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --run <runId> --plan <planPath> --root <project root> --results <path>
+    node "<fleetmates root>/scripts/cli.mjs" gate --run <runId> --plan <planPath> --root <project root> --results <path>
 
 The file is `{ "results": [ { "name": "review", "kind": "agent", "status": "pass", "findings": [] } ] }`.
 Add `"source": "file"` to an entry recovered from a reviewer's findings file rather than from
@@ -184,6 +184,20 @@ CLI-computed — never hand-written into `status.json`.
 one. Hand it the same results, keyed by phase: `{ "phases": { "1": { "results": [...] } } }`. A
 phase that passed on supplied results is marked `(review supplied)` in its output, so a reader
 can tell a recomputed pass from a reported one.
+
+## On a harness other than Claude Code
+
+When the orchestrator is not Claude Code, dispatch the reviewers and the integrator through the
+CLI rather than the `Agent` path. The reviewer dispatch is:
+
+    node "<fleetmates root>/scripts/cli.mjs" dispatch-reviews --run <id> --phase <name> --harness <h> --root <project root>
+
+and the integrator step is:
+
+    node "<fleetmates root>/scripts/cli.mjs" dispatch-integrator --run <id> --phase <name> --harness <h> --root <project root>
+
+Each is worktree-isolated and gate-identical, and the harness name is the one the orchestrator is
+running in, passed explicitly.
 
 ## What the `merge` check does
 
@@ -200,7 +214,7 @@ dependency declares what to link:
 Check that declaration before a run rather than at the first gate, when the fix is still a
 one-line manifest edit:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" preview-check --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" preview-check --root <project root>
 
 It applies the same rules the `merge` check applies and exits 1 naming any entry that is
 missing, not a directory, escaping, repeated, or tracked.
@@ -233,7 +247,7 @@ run root, and the verdict JSON you just produced; it prints one of three decisio
 `retry`, or `escalate` — and exits 0 for all three, so read the `decision` field rather than the
 exit status.
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" fix --run <runId> --phase <n> --verdict <path> --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" fix --run <runId> --phase <n> --verdict <path> --root <project root>
 
 `--verdict` names a file holding that same JSON, and `--phase` must match its own `phase` field —
 a mismatch exits 2 rather than adjudicating the wrong phase's findings, and so does a malformed

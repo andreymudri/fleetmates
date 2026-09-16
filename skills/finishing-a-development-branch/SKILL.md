@@ -36,7 +36,7 @@ run — but a record in `status.gates` is a report written by the agents being e
 Use `status.gates` only to see which phases the run executed. For each of those phases,
 **re-run the gate now**:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --run <runId> --plan <planPath> --root <project root> --phase <name>
+    node "<fleetmates root>/scripts/cli.mjs" gate --run <runId> --plan <planPath> --root <project root> --phase <name>
 
 `gate` recomputes `fileset` and `ownership` from git at the moment it runs — it does not read
 or trust the old record. If any phase's fresh run does not exit `0`, the work is not finished —
@@ -50,7 +50,7 @@ absent or empty, the run is inline, and the absent gates are expected, not a fau
 
 There is no fleet history to derive `fileset` or `ownership` from, so run the gate solo:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" gate --no-fleet --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" gate --no-fleet --root <project root>
 
 `--no-fleet` is the only way the enforcement checks are skipped, and it runs the project's
 full test suite (and any other command checks `fleetmates.gate.json` declares) fresh — a
@@ -93,7 +93,7 @@ those branches would actually be deleted — that verdict is computed only insid
 removal itself. Run it first without `--yes` to read the plan, then add `--yes` to
 remove what it lists:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> [--yes]
+    node "<fleetmates root>/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> [--yes]
 
 It removes a task's worktree only where that task's phase gate recomputes to PASS, and
 it deletes the worktree's branch only where `git merge-base --is-ancestor` proves the

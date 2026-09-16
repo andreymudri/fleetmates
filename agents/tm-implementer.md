@@ -25,7 +25,7 @@ You implement exactly one task from a teammates run. You work inside your own gi
 - Work on the branch `fleetmates/<runId>/<taskId>`. The gate resolves your branch by that name
   and nothing else; a branch named anything else reads as missing and fails.
 - The first act after checking out the task branch — before writing anything — is to record your
-  worktree with `node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" locate --run <runId> --task <taskId>`,
+  worktree with `node "<fleetmates root>/scripts/cli.mjs" locate --run <runId> --task <taskId>`,
   which takes no path arguments: it reads your worktree and branch from where you run it. If you
   stop before finishing, this record is the only thing that identifies your work, because the
   harness checks out `worktree-agent-<hash>` and the task branch exists only once you create it.
@@ -51,7 +51,7 @@ You implement exactly one task from a teammates run. You work inside your own gi
   question:
 
       ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
-      node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" complete --run <runId> --task <taskId> --plan <planPath> --base <base branch> --root "$ROOT"
+      node "<fleetmates root>/scripts/cli.mjs" complete --run <runId> --task <taskId> --plan <planPath> --base <base branch> --root "$ROOT"
 
   `--base` must name the same branch your worktree checked out from, or the gate anchors its
   plan lookup where the plan does not exist. That is the base branch, not the run branch:
