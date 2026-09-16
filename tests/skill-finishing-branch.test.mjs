@@ -92,7 +92,7 @@ test('states the --yes flag is destructive before showing the command, with the 
     // Anchored to the WHOLE code block, not a substring: `pattern.test(code)` alone is satisfied
     // by the pinned line sitting anywhere inside a bigger block, including one sandwiched between
     // an `rm -rf` line above it and a `git branch -D $(...)` line below it. `^...$` refuses both.
-    introduces: /^node "\$CLAUDE_PLUGIN_ROOT\/scripts\/cli\.mjs" prune-run --run <runId> --plan <planPath> --root <project root> \[--yes\]$/,
+    introduces: /^node "<fleetmates root>\/scripts\/cli\.mjs" prune-run --run <runId> --plan <planPath> --root <project root> \[--yes\]$/,
     subject: /--yes|--force/i,
     allow: [
       /^Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above/,

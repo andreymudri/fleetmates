@@ -8,8 +8,9 @@ description: Use when changing how the fleet runs — parallelism, or model tier
 ## What `config` covers, and what it does not
 
 `config` manages the **ergonomics** keys only: `maxParallel`, `caveman`, and
-`agents.<role>.tier`/`agents.<role>.effort`. Those are the only keys `config set`/`config unset`
-accept, in either layer, subject to the enforcement rule below.
+`agents.<role>.tier`/`agents.<role>.effort`. Those, plus the per-harness `harnesses.codex.*` keys
+documented under **Harness settings** below, are the keys `config set`/`config unset` accept, in
+either layer, subject to the enforcement rule below.
 
 `fleetmates.gate.json` is tracked and can also hold the **enforcement** keys `phases`, `lens`, and
 `preview`. Those are edited by hand, deliberately: enforcement policy is meant to land as a
@@ -58,7 +59,7 @@ rather than setting it quietly.
 
 Always resolve both layers together, for both roots:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" config list --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" config list --root <project root>
 
 This prints every ergonomics key with the layer that currently wins it, so you know what a
 change would override before proposing one. It never prints `phases`, `lens`, or `preview` —
@@ -78,7 +79,7 @@ and is accepted; whether those names are real reviewer lenses is only exercised 
 For an ergonomics key, use `AskUserQuestion` twice — once for the key, once for the value,
 offering the permitted values as options — then write through the CLI:
 
-    node "$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs" config set <key> <value> --root <project root> --local
+    node "<fleetmates root>/scripts/cli.mjs" config set <key> <value> --root <project root> --local
 
 Drop `--local` only when the key should be a tracked default rather than a personal override; the
 CLI still accepts ergonomics keys in `fleetmates.gate.json` and reports which layer rejected the
@@ -98,3 +99,26 @@ key `config set`/`config unset` accepts. Every such change goes through the CLI,
 has exactly one implementation and the interactive path can never produce a file the CLI itself
 would reject. The one deliberate exception is the enforcement keys above, which `config` cannot
 write at all — those are hand-edited by design, not because this skill's rule was skipped.
+
+## Harness settings
+
+A run driven on a harness other than Claude Code reads its per-harness settings from
+`harnesses.<name>.<field>`, and `codex` is the one harness this plugin knows. Four fields
+configure a Codex run:
+
+- **`harnesses.codex.sandbox`** — the sandbox each teammate runs in: `clone` (the default),
+  `files`, or `full`.
+- **`harnesses.codex.network`** — a boolean, whether the run may reach the network.
+- **`harnesses.codex.timeoutMinutes`** — an integer minute budget, at least `1`.
+- **`harnesses.codex.tierModels`** — a map from tier name to the Codex model to run at that tier.
+
+Set the three scalar fields through the CLI, in either layer, the same way as any ergonomics key:
+
+    node "<fleetmates root>/scripts/cli.mjs" config set harnesses.codex.sandbox clone --root <project root> --local
+
+`tierModels` is an object rather than a scalar `config set` can parse from one argument, so it is
+hand-edited in `fleetmates.gate.json` or `fleetmates.local.json`; `config set harnesses.codex.tierModels`
+is rejected with `unknown config key`.
+
+Where the orchestrator has no `AskUserQuestion` tool, offer the permitted values as a numbered
+list and read the operator's pick, then write it through the CLI the same way.

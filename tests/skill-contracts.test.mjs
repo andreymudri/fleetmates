@@ -50,11 +50,29 @@ test('every skill directory contains a SKILL.md with valid frontmatter', async (
 test('no skill invokes the CLI by a relative path', async () => {
   for (const name of await allSkills()) {
     const { body } = await skill(name)
+    // Every CLI call names `<fleetmates root>/scripts/cli.mjs`. `<fleetmates root>` is defined by
+    // using-fleetmates as `$CLAUDE_PLUGIN_ROOT` when set and the skill's own directory otherwise,
+    // so the older `$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs` literal stays accepted too. Strip both
+    // rooted forms, then any surviving `cli.mjs` is a relative invocation.
+    const stripped = body
+      .replace(/\$\{?CLAUDE_PLUGIN_ROOT\}?\/scripts\/cli\.mjs/g, 'OK')
+      .replace(/<fleetmates root>\/scripts\/cli\.mjs/g, 'OK')
     assert.ok(
-      !/(?<!\$\{?CLAUDE_PLUGIN_ROOT\}?\/scripts\/)cli\.mjs/.test(body.replace(/\$\{?CLAUDE_PLUGIN_ROOT\}?\/scripts\/cli\.mjs/g, 'OK')),
-      `${name}: invokes cli.mjs without CLAUDE_PLUGIN_ROOT`,
+      !/cli\.mjs/.test(stripped),
+      `${name}: invokes cli.mjs without the <fleetmates root>/scripts prefix`,
     )
   }
+})
+
+test('using-fleetmates defines <fleetmates root> in terms of $CLAUDE_PLUGIN_ROOT and the skill directory', async () => {
+  const { body } = await skill('using-fleetmates')
+  assert.match(body, /<fleetmates root>/, 'using-fleetmates must define the <fleetmates root> token')
+  assert.match(body, /\$CLAUDE_PLUGIN_ROOT/, 'the definition must name $CLAUDE_PLUGIN_ROOT as the Claude Code case')
+  assert.match(
+    body,
+    /dirname\(dirname\(/,
+    'the definition must give the skill-directory fallback (dirname(dirname(<skill dir>)))',
+  )
 })
 
 test('adapted skills credit the upstream project', async () => {
@@ -1090,7 +1108,7 @@ test('parallel-execution makes prune-run the only supported cleanup', async () =
   // sweep and a check-skipping `--enforcement-only` flag — proven by mutation below.
   assertCode(
     cleanup,
-    /^node "\$CLAUDE_PLUGIN_ROOT\/scripts\/cli\.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes$/,
+    /^node "<fleetmates root>\/scripts\/cli\.mjs" prune-run --run <runId> --plan <planPath> --root <project root> --yes$/,
     'the cleanup section must show the exact prune-run invocation the claim is about, and nothing else in the same block',
   )
   // `assertCode` is `scope.code.find()` — it finds ONE matching block and says nothing about
@@ -1478,7 +1496,7 @@ test('fleet-supervision states the stall recovery resumes that agent rather than
 })
 
 // The direct-dispatch instructions in parallel-execution build each teammate's brief from
-// `cli.mjs brief` rather than composing it by hand. The invocation carries the CLAUDE_PLUGIN_ROOT
+// `cli.mjs brief` rather than composing it by hand. The invocation carries the <fleetmates root>
 // prefix a skill CLI call must (see the relative-path test above), so the closing quote sits
 // between `cli.mjs` and `brief`; binding the literal keeps the dispatch instructions from drifting
 // away from the CLI they call.
@@ -1815,6 +1833,12 @@ const GUARD_SHAPE = [
   'paragraph',
   'paragraph',
   'paragraph',
+  // The "On a harness other than Claude Code" subsection nests under this h2, so its heading,
+  // prose and command block sit in this section's block list too.
+  'heading',
+  'paragraph',
+  'code',
+  'paragraph',
 ]
 
 const CONTRACT_REFUSAL = [
@@ -1830,8 +1854,9 @@ const SUPERVISION_REFUSAL = [
 ]
 
 const GUARD_CODE = [
-  "node \"$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs\" workflow --run <runId> --phase <n> --root <project root>",
-  "node \"$CLAUDE_PLUGIN_ROOT/scripts/cli.mjs\" brief --run <id> --task <id> --plan <path> --base <branch> --root <project root>",
+  "node \"<fleetmates root>/scripts/cli.mjs\" workflow --run <runId> --phase <n> --root <project root>",
+  "node \"<fleetmates root>/scripts/cli.mjs\" brief --run <id> --task <id> --plan <path> --base <branch> --root <project root>",
+  "node \"<fleetmates root>/scripts/cli.mjs\" dispatch --run <id> --phase <n> --harness <name> --root <project root>",
 ]
 
 const RECORD_BLOCK = [
@@ -1884,6 +1909,10 @@ const GUARD_BLOCK = [
   'Never read a stop that was allowed as a verdict.',
   'Wait on completion notifications.',
   'Do not poll in a loop.',
+  'When the orchestrator is not Claude Code, the Workflow tool and background Agent calls do not exist.',
+  'Dispatch the whole phase through the CLI instead:',
+  'This is worktree-isolated and gate-identical: it produces the same result contract the Workflow and Agent paths do, and resuming a run re-runs the same dispatch.',
+  'The harness name is the one the orchestrator is itself running in, passed explicitly.',
 ]
 
 // Lock the section's WHOLE statement list, not a suffix of it. An earlier version started at the
@@ -1937,9 +1966,10 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
   assertBlock(doc.section('Dispatch the phase'), GUARD_BLOCK, 'the Dispatch section')
   assertShape(doc.section('Dispatch the phase'), GUARD_SHAPE, 'the Dispatch section')
 
-  // The command blocks' CONTENT, not just their presence in the shape. GUARD_SHAPE pins that two
-  // code blocks exist here; without this, a comment line inside either could carry prose the
-  // statement inventory forbids, since code contributes no statements.
+  // The command blocks' CONTENT, not just their presence in the shape. GUARD_SHAPE pins that three
+  // code blocks exist here — the Workflow and brief invocations plus the non-Claude-Code dispatch;
+  // without this, a comment line inside any could carry prose the statement inventory forbids,
+  // since code contributes no statements.
   assert.deepEqual(
     doc.section('Dispatch the phase').blocks.filter((b) => b.kind === 'code').map((b) => b.code),
     GUARD_CODE,
