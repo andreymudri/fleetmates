@@ -15213,6 +15213,22 @@ test('message with a session record carrying no session id is refused with exit 
   })
 })
 
+// A finished Cursor task's checkout is removed once its result is recorded (driver `cleanupOnResult`),
+// so there is no workspace left to resume into: refused before any harness is resolved or spawned.
+test('message on a task whose sandbox was removed is refused with exit 4', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const sessionsDir = path.join(root, '.fleetmates', 'r1', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFile(path.join(sessionsDir, 'T1.json'), JSON.stringify({
+      taskId: 'T1', sessionId: 's1', state: 'done', sandboxRemoved: true, sandbox: { cwd: '/gone', meta: { mode: 'files' } },
+    }))
+    lines.length = 0
+    const code = await runCli(['message', '--run', 'r1', '--task', 'T1', '--text', 'hi', '--harness', 'cursor', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /task T1 already finished and its sandbox was removed/)
+  })
+})
+
 // message SIGTERMs a live recorded process group before resuming. The child is spawned detached so
 // its pgid equals its pid, which is what the driver's `killProcess(-pid)` targets. Removing the
 // SIGTERM from the message handler leaves the child running until its own `sleep` exits, so the

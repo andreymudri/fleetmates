@@ -7,7 +7,7 @@
 import { spawn as spawnProcess } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, rm, rmdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { validateResult } from '../result-schema.mjs'
@@ -269,9 +269,20 @@ export async function collectCursor(git, { runRepo, sandbox, branch }) {
   await commitFilesTree(git, { runRepo, runBranch: sandbox.meta.runBranch, sandbox, branch })
 }
 
+// Removes a finished task's checkout, then its now-empty run and repo directories (never the shared
+// `fleetmates/cursor` root, and never a directory that still holds another task's checkout).
 export async function cleanup({ sandbox }) {
   if (sandbox.meta.mode !== 'files') return
   await rm(sandbox.cwd, { recursive: true, force: true })
+  let dir = path.dirname(sandbox.cwd)
+  for (let i = 0; i < 2; i++) {
+    try {
+      await rmdir(dir)
+    } catch {
+      return
+    }
+    dir = path.dirname(dir)
+  }
 }
 
 function status(env) {
@@ -342,6 +353,8 @@ export const cursorAdapter = {
   name: 'cursor',
   defaultSandbox: 'files',
   supportsEffort: false,
+  // Checkouts live outside the run repo, where nothing else ever removes them.
+  cleanupOnResult: true,
   probe,
   makeSandbox: makeCursorSandbox,
   collect: collectCursor,

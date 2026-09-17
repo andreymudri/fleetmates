@@ -385,6 +385,7 @@ test('cursorAdapter exposes the adapter interface and its Cursor defaults', () =
   assert.equal(cursorAdapter.name, 'cursor')
   assert.equal(cursorAdapter.defaultSandbox, 'files')
   assert.equal(cursorAdapter.supportsEffort, false)
+  assert.equal(cursorAdapter.cleanupOnResult, true)
 })
 
 test('the registry resolves cursor', () => {
@@ -423,4 +424,19 @@ test('makeCursorSandbox refuses a cache inside a git repository, naming it', { t
     }),
     (err) => err.message.includes('must not live inside a git repository') && err.message.includes(dotfiles),
   )
+})
+
+test('cleanup removes the checkout and its empty run and repo directories, but keeps a sibling task', { timeout: 10000 }, async () => {
+  const runRepo = await freshDir('run')
+  await initRepo(runRepo)
+  const cache = await freshDir('cache')
+  const env = { XDG_CACHE_HOME: cache }
+  const a = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env })
+  const b = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T2', mode: 'files', env })
+  await cleanup({ sandbox: a })
+  await assert.rejects(stat(a.cwd), /ENOENT/)
+  await stat(b.cwd)
+  await cleanup({ sandbox: b })
+  await assert.rejects(stat(path.dirname(path.dirname(b.cwd))), /ENOENT/)
+  await stat(path.join(cache, 'fleetmates', 'cursor'))
 })

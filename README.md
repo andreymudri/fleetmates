@@ -134,6 +134,8 @@ way out of it. Cursor teammates therefore only ever run in a git-less `files` ch
 - Checkouts live under `$XDG_CACHE_HOME/fleetmates/cursor/` (default `~/.cache`), outside the
   repository: Cursor runs the `.cursor/hooks.json` of any git repository that encloses its
   workspace. `dispatch` refuses if that cache directory is itself inside a git repository.
+  A checkout is removed as soon as its task's result is recorded; an orphaned task keeps its
+  checkout so the task can be resumed.
 - `.cursor/{sandbox,hooks,cli,mcp,worktrees}.json`, `.cursor/hooks/`, `.claude/settings*.json` and
   `.vscode/` are removed from the checkout before every session. A teammate that changes one of
   them is orphaned, and none of those paths ever changes on the task branch.

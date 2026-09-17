@@ -3653,6 +3653,10 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`task ${printable(flags.task)} has no session id to resume`)
       return 4
     }
+    if (record.sandboxRemoved === true) {
+      io.out(`task ${printable(flags.task)} already finished and its sandbox was removed: its work is on its task branch; dispatch a new task to change it`)
+      return 4
+    }
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
     const adapter = resolveHarness(flags, io)

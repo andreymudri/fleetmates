@@ -335,6 +335,20 @@ export async function dispatchPhase({
     record = { ...record, taskId, sessionId, sandbox, state: 'running', ...(effortIgnored ? { effortIgnored } : {}) }
     await writeJson(sessionFile, record)
 
+    // An adapter whose sandbox is a throwaway checkout (Cursor) removes it once the task's result is
+    // recorded and its work is on the task branch. The result is written first, so a cleanup that
+    // fails can never change what was recorded; an orphaned task keeps its sandbox for a resume.
+    const finalize = async () => {
+      if (!adapter.cleanupOnResult) return
+      try {
+        await adapter.cleanup({ sandbox })
+      } catch {
+        return
+      }
+      record = { ...record, sandboxRemoved: true }
+      await writeJson(sessionFile, record)
+    }
+
     const orphan = async (exitReason) => {
       record = { ...record, state: 'orphaned', exitReason, usage: await safeUsage(adapter, paths.streamPath) }
       await writeJson(sessionFile, record)
@@ -378,6 +392,7 @@ export async function dispatchPhase({
           usage: await safeUsage(adapter, paths.streamPath),
         }
         await writeJson(sessionFile, record)
+        await finalize()
         return { kind: 'result', result: { taskId, ...failed } }
       }
     }
@@ -387,6 +402,7 @@ export async function dispatchPhase({
       usage: await safeUsage(adapter, paths.streamPath),
     }
     await writeJson(sessionFile, record)
+    await finalize()
     return { kind: 'result', result: { taskId, ...result } }
   }
 
