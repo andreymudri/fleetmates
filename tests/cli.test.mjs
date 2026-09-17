@@ -35,6 +35,10 @@ import { previewOwnerMarkerPath, previewClaimPath } from '../scripts/merge-previ
 import { renderRunSummary } from '../scripts/finish.mjs'
 import { PlanSectionError } from '../scripts/plan-sections.mjs'
 
+// Fake harness binaries here are `#!/usr/bin/env node` scripts on PATH, which Windows cannot execute
+// (no shebang support; a real CLI there is a .cmd shim). Tests that spawn one are skipped on win32.
+const WIN32_FAKE_SKIP = process.platform === 'win32' ? 'shebang fake binaries do not execute on win32' : false
+
 const PLAN = `### Task 1: A
 
 **Files:**
@@ -15355,7 +15359,7 @@ test('harnessSettings takes the adapter default sandbox when the config sets non
 // dispatch-integrator on --harness cursor, through a logged-in fake `cursor-agent`: the probe's
 // warning (a global hooks.json) is printed and dispatch continues; the integrator runs in the
 // user's repo (`full`), so its prompt carries no files-sandbox instruction ("do not run git").
-test('dispatch-integrator --harness cursor prints the probe warning and sends no files-sandbox instruction', async () => {
+test('dispatch-integrator --harness cursor prints the probe warning and sends no files-sandbox instruction', { skip: WIN32_FAKE_SKIP }, async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     const plan = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), 'utf8'))

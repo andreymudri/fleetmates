@@ -11,6 +11,10 @@ import {
 } from '../scripts/harnesses/codex.mjs'
 import { getAdapter, HARNESS_NAMES } from '../scripts/harnesses/index.mjs'
 
+// Fake harness binaries here are `#!/usr/bin/env node` scripts on PATH, which Windows cannot execute
+// (no shebang support; a real CLI there is a .cmd shim). Tests that spawn one are skipped on win32.
+const WIN32_FAKE_SKIP = process.platform === 'win32' ? 'shebang fake binaries do not execute on win32' : false
+
 // A fake `codex` on PATH (Node, CommonJS so a bare shebang-invoked file with no extension runs
 // without a nearby package.json "type": "module"). It:
 //  - answers `login status` from FAKE_CODEX_LOGGED_IN (default logged in);
@@ -249,7 +253,7 @@ test('buildResumeArgv selects sandbox_mode="workspace-write" for clone and files
 
 // --- spawnCodex/resumeCodex against the fake binary --------------------------------------
 
-test('spawnCodex resolves the session id from the stream and closes stdin (a regression here hangs into the timeout)', { timeout: 5000 }, async () => {
+test('spawnCodex resolves the session id from the stream and closes stdin (a regression here hangs into the timeout)', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'tm-codex-clone-'))
   const gitdir = await mkdtemp(path.join(tmpdir(), 'tm-codex-gitdir-'))
   const sessionsDir = await mkdtemp(path.join(tmpdir(), 'tm-codex-sessions-'))
@@ -289,7 +293,7 @@ test('spawnCodex resolves the session id from the stream and closes stdin (a reg
 // dir. The argv-shape tests above only count `GIT_DIR=` tokens in argv, which says nothing about
 // the spawned process's actual environment — this test reads that environment back from the fake
 // binary itself, the only way to observe what `run()` (codex.mjs) really passed to `spawn`.
-test('spawnCodex never lets GIT_DIR/GIT_WORK_TREE reach the codex process\'s own environment', { timeout: 5000 }, async () => {
+test('spawnCodex never lets GIT_DIR/GIT_WORK_TREE reach the codex process\'s own environment', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'tm-codex-clone-'))
   const gitdir = await mkdtemp(path.join(tmpdir(), 'tm-codex-gitdir-'))
   const sessionsDir = await mkdtemp(path.join(tmpdir(), 'tm-codex-sessions-'))
@@ -371,7 +375,7 @@ test('spawnCodex withholding the -o file: readResult is null, not a throw', { ti
   }
 })
 
-test('readUsage sums two turn.completed usages', { timeout: 5000 }, async () => {
+test('readUsage sums two turn.completed usages', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'tm-codex-clone-'))
   const gitdir = await mkdtemp(path.join(tmpdir(), 'tm-codex-gitdir-'))
   const sessionsDir = await mkdtemp(path.join(tmpdir(), 'tm-codex-sessions-'))
@@ -409,7 +413,7 @@ test('readUsage returns null when the stream carries no turn.completed event', a
   }
 })
 
-test('resumeCodex builds a resume argv the fake receives, with exec/resume/session id and sandbox_mode', { timeout: 5000 }, async () => {
+test('resumeCodex builds a resume argv the fake receives, with exec/resume/session id and sandbox_mode', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), 'tm-codex-clone-'))
   const gitdir = await mkdtemp(path.join(tmpdir(), 'tm-codex-gitdir-'))
   const sessionsDir = await mkdtemp(path.join(tmpdir(), 'tm-codex-sessions-'))
@@ -616,7 +620,7 @@ test('probe returns ok:false with the codex login fix when the fake reports Not 
   assert.equal(res.fix, 'run: codex login')
 })
 
-test('probe returns ok:true when the fake reports logged in and CODEX_HOME is writable', { timeout: 5000 }, async () => {
+test('probe returns ok:true when the fake reports logged in and CODEX_HOME is writable', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   const home = await mkdtemp(path.join(tmpdir(), 'tm-codex-home-'))
   try {
     const res = await probe({ env: { ...process.env, FAKE_CODEX_LOGGED_IN: '1', CODEX_HOME: home } })

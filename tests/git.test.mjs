@@ -2006,7 +2006,11 @@ test('gitDirWritable returns ok on a normal temp repo', async () => {
 
 // The negative leg: making the common dir unwritable is detected as { ok: false } with a code.
 // chmod 0500 is ignored for the owner when running as root, so this leg is skipped there.
-test('gitDirWritable reports not-ok with a code when the git dir is unwritable', { skip: process.getuid && process.getuid() === 0 ? 'chmod is ignored for root' : false }, async () => {
+test('gitDirWritable reports not-ok with a code when the git dir is unwritable', {
+  skip: process.platform === 'win32'
+    ? 'win32 chmod does not deny directory writes'
+    : (process.getuid && process.getuid() === 0 ? 'chmod is ignored for root' : false),
+}, async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-git-unwritable-'))
   const gitDir = path.join(root, '.git')
   try {

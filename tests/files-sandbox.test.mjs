@@ -61,6 +61,7 @@ test('makeFilesSandbox checks out the branch tree with no .git and leaves the ru
     ])
     assert.notEqual(a.cwd, b.cwd)
     assert.deepEqual(a.meta, { mode: 'files', branch: 'fleetmates/r1/T1', runBranch: 'main' })
+    assert.ok(a.cwd.includes(path.join('.fleetmates', 'r1', 'files', 'T1')))
     assert.equal(await readFile(path.join(a.cwd, 'base.txt'), 'utf8'), 'base\n')
     await assert.rejects(stat(path.join(a.cwd, '.git')), /ENOENT/)
     assert.deepEqual(await snapshot(runRepo), before)
@@ -104,7 +105,8 @@ test('commitFilesTree lands edits, additions, deletions and exec bits as one com
     assert.equal(await out(['rev-parse', 'fleetmates/r1/T1^'], runRepo), main)
     assert.equal(await out(['show', 'fleetmates/r1/T1:base.txt'], runRepo), 'edited')
     const tree = await out(['ls-tree', '-r', 'fleetmates/r1/T1'], runRepo)
-    assert.match(tree, /^100755 blob \w+\tsrc\/new\.sh$/m)
+    // Windows filesystems carry no exec bit; there a new file is committed as 100644 by design.
+    if (process.platform !== 'win32') assert.match(tree, /^100755 blob \w+\tsrc\/new\.sh$/m)
     assert.doesNotMatch(tree, /gone\.txt/)
     assert.match(tree, /\t\.claude\/settings\.json$/m)
     assert.deepEqual(await snapshot(runRepo), before)
@@ -134,8 +136,11 @@ test('commitFilesTree stores a symlink as a link, never its target', async () =>
 
 test('commitFilesTree never runs a clean filter selected by an in-tree .gitattributes', async () => {
   await withRepo(async ({ root, runRepo }) => {
+    // The marker path reaches the filter through the environment, never spliced into the command:
+    // the hostile-TMPDIR sweep runs this with a temp root full of shell metacharacters.
     const marker = path.join(root, 'filter-fired')
-    await out(['config', 'filter.x.clean', `touch ${marker}; cat`], runRepo)
+    process.env.FM_FILTER_MARKER = marker
+    await out(['config', 'filter.x.clean', 'touch "$FM_FILTER_MARKER"; cat'], runRepo)
     const sandbox = await makeFilesSandbox(git, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1' })
     await writeFile(path.join(sandbox.cwd, '.gitattributes'), '* filter=x\n')
     await writeFile(path.join(sandbox.cwd, 'base.txt'), 'edited\n')
@@ -244,5 +249,39 @@ test('commitFilesTree with refuseControlChanges commits when control paths are u
     await writeFile(path.join(sandbox.cwd, 'base.txt'), 'edited\n')
     await commitFilesTree(git, { runRepo, runBranch: 'main', sandbox, branch: 'fleetmates/r1/T1', refuseControlChanges: true })
     assert.equal(await out(['show', 'fleetmates/r1/T1:base.txt'], runRepo), 'edited')
+  })
+})
+
+// Measured on Windows CI: `git checkout` applied core.autocrlf, so every file read back as edited.
+// The checkout is written from the blobs, so no conversion or smudge filter can alter a byte.
+test('makeFilesSandbox writes blob bytes exactly: no autocrlf, eol attribute or smudge filter applies', async () => {
+  await withRepo(async ({ root, runRepo }) => {
+    await writeFile(path.join(runRepo, '.gitattributes'), '*.txt text eol=crlf\n* filter=x\n')
+    await out(['add', '.gitattributes'], runRepo)
+    await out(['commit', '-m', 'attrs'], runRepo)
+    const marker = path.join(root, 'smudge-fired')
+    process.env.FM_SMUDGE_MARKER = marker
+    await out(['config', 'core.autocrlf', 'true'], runRepo)
+    await out(['config', 'filter.x.smudge', 'touch "$FM_SMUDGE_MARKER"; cat'], runRepo)
+    const sandbox = await makeFilesSandbox(git, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1' })
+    assert.equal(await readFile(path.join(sandbox.cwd, 'base.txt'), 'utf8'), 'base\n')
+    await assert.rejects(stat(marker), /ENOENT/)
+    await commitFilesTree(git, { runRepo, runBranch: 'main', sandbox, branch: 'fleetmates/r1/T1', refuseControlChanges: true })
+    assert.equal(await out(['rev-parse', 'fleetmates/r1/T1'], runRepo), await out(['rev-parse', 'main'], runRepo))
+  })
+})
+
+test('makeFilesSandbox reproduces exec bits and symlinks from the tree', { skip: process.platform === 'win32' ? 'no exec bits or unprivileged symlinks on win32' : false }, async () => {
+  await withRepo(async ({ runRepo }) => {
+    await writeFile(path.join(runRepo, 'run.sh'), '#!/bin/sh\n')
+    await chmod(path.join(runRepo, 'run.sh'), 0o755)
+    await symlink('base.txt', path.join(runRepo, 'link'))
+    await out(['add', '.'], runRepo)
+    await out(['commit', '-m', 'modes'], runRepo)
+    const sandbox = await makeFilesSandbox(git, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1' })
+    assert.ok((await stat(path.join(sandbox.cwd, 'run.sh'))).mode & 0o100)
+    assert.ok((await lstat(path.join(sandbox.cwd, 'link'))).isSymbolicLink())
+    await commitFilesTree(git, { runRepo, runBranch: 'main', sandbox, branch: 'fleetmates/r1/T1' })
+    assert.equal(await out(['rev-parse', 'fleetmates/r1/T1'], runRepo), await out(['rev-parse', 'main'], runRepo))
   })
 })

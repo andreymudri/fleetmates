@@ -80,7 +80,7 @@ test('the locate command carries the real ids and is rendered before BASELINE', 
   assert.ok(brief.includes(locate), 'locate command missing or ids not substituted')
   assert.ok(!brief.includes('$CLAUDE_PLUGIN_ROOT'),
     'the brief should not contain the literal $CLAUDE_PLUGIN_ROOT variable')
-  assert.ok(/node "?\/.*\/scripts\/cli\.mjs/.test(brief),
+  assert.ok(/node "?(?:\/|[A-Za-z]:\\).*[\\/]scripts[\\/]cli\.mjs/.test(brief),
     'the brief should contain an absolute path to scripts/cli.mjs')
   assert.ok(at(brief, locate) < at(brief, 'BASELINE.'),
     'the location record must be written before the baseline work, not after it')

@@ -12,6 +12,10 @@ import {
   cursorCheckoutRoot, enclosingGitRoot, FILES_PREAMBLE,
 } from '../scripts/harnesses/cursor.mjs'
 
+// Fake harness binaries here are `#!/usr/bin/env node` scripts on PATH, which Windows cannot execute
+// (no shebang support; a real CLI there is a .cmd shim). Tests that spawn one are skipped on win32.
+const WIN32_FAKE_SKIP = process.platform === 'win32' ? 'shebang fake binaries do not execute on win32' : false
+
 // A fake `cursor-agent` on PATH (CommonJS so a shebang file with no extension runs). It:
 //  - answers `status` from FAKE_CURSOR_LOGGED_IN (default logged in);
 //  - writes its argv and the stdin it received to FAKE_CURSOR_ARGV_OUT when set;
@@ -133,7 +137,7 @@ test('assertSafeArgv refuses every sandbox-weakening flag', () => {
 
 // --- spawn / resume ----------------------------------------------------------------------------
 
-test('spawn scrubs a files sandbox, writes a deny-network sandbox.json, closes stdin and records the session id', { timeout: 10000 }, async () => {
+test('spawn scrubs a files sandbox, writes a deny-network sandbox.json, closes stdin and records the session id', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
   const cwd = await freshDir('ws')
   await mkdir(path.join(cwd, '.cursor'), { recursive: true })
   await writeFile(path.join(cwd, '.cursor', 'hooks.json'), '{}')
@@ -158,7 +162,7 @@ test('spawn scrubs a files sandbox, writes a deny-network sandbox.json, closes s
   assert.ok(seen.input.endsWith(RESULT_INSTRUCTION))
 })
 
-test('resume re-scrubs, rewrites sandbox.json (allow with network) and appends to the stream', { timeout: 10000 }, async () => {
+test('resume re-scrubs, rewrites sandbox.json (allow with network) and appends to the stream', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
   const cwd = await freshDir('ws')
   const sessions = await freshDir('sessions')
   const streamPath = path.join(sessions, 's.jsonl')
@@ -180,7 +184,7 @@ test('resume re-scrubs, rewrites sandbox.json (allow with network) and appends t
   assert.equal(lines.filter((l) => l.type === 'result').length, 2)
 })
 
-test('a full sandbox (reviewers, integrator) is neither scrubbed, given a sandbox.json, nor sent the files instruction', { timeout: 10000 }, async () => {
+test('a full sandbox (reviewers, integrator) is neither scrubbed, given a sandbox.json, nor sent the files instruction', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
   const cwd = await freshDir('repo')
   await mkdir(path.join(cwd, '.claude'), { recursive: true })
   await writeFile(path.join(cwd, '.claude', 'settings.json'), '{"user":true}')
@@ -211,7 +215,7 @@ const resultLine = (text, extra = {}) => ({
   usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 1 }, ...extra,
 })
 
-test('the handle\'s flushed promise resolves with the result line on disk', { timeout: 10000 }, async () => {
+test('the handle\'s flushed promise resolves with the result line on disk', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
   const cwd = await freshDir('ws')
   const streamPath = path.join(await freshDir('sessions'), 's.jsonl')
   await withEnv({ FAKE_CURSOR_RESULT_TEXT: JSON.stringify(good) }, async () => {
@@ -278,7 +282,7 @@ test('makeCursorSandbox refuses clone and full', async () => {
   }
 })
 
-test('collectCursor commits a clean checkout, keeping the driver-written sandbox.json out of the branch', { timeout: 10000 }, async () => {
+test('collectCursor commits a clean checkout, keeping the driver-written sandbox.json out of the branch', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
   const runRepo = await freshDir('run')
   await initRepo(runRepo)
   const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: await freshDir('cache') } })
@@ -293,7 +297,7 @@ test('collectCursor commits a clean checkout, keeping the driver-written sandbox
   assert.doesNotMatch(tree.stdout, /\.cursor/)
 })
 
-test('collectCursor refuses a modified sandbox.json or a planted control file and creates no branch', { timeout: 10000 }, async () => {
+test('collectCursor refuses a modified sandbox.json or a planted control file and creates no branch', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
   for (const plant of [
     async (cwd) => writeFile(path.join(cwd, '.cursor', 'sandbox.json'), '{"additionalReadwritePaths":["/"]}'),
     async (cwd) => {
@@ -327,12 +331,12 @@ test('collectCursor and cleanup leave a full sandbox alone', async () => {
 
 // --- probe -------------------------------------------------------------------------------------------
 
-test('probe: logged in with a writable home and no global policy is ok', { timeout: 5000 }, async () => {
+test('probe: logged in with a writable home and no global policy is ok', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   const home = await freshDir('home')
   assert.deepEqual(await probe({ env: { ...process.env, CURSOR_CONFIG_DIR: home } }), { ok: true })
 })
 
-test('probe: logged out names the login fix', { timeout: 5000 }, async () => {
+test('probe: logged out names the login fix', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   const home = await freshDir('home')
   const res = await probe({ env: { ...process.env, CURSOR_CONFIG_DIR: home, FAKE_CURSOR_LOGGED_IN: '0' } })
   assert.equal(res.ok, false)
@@ -348,7 +352,7 @@ test('probe: a missing binary names the install fix', { timeout: 5000 }, async (
 
 test('probe: an unwritable home is not ok', {
   timeout: 5000,
-  skip: process.getuid && process.getuid() === 0 ? 'chmod is ignored for root' : false,
+  skip: WIN32_FAKE_SKIP || (process.getuid && process.getuid() === 0 ? 'chmod is ignored for root' : false),
 }, async () => {
   const home = await freshDir('home')
   await chmod(home, 0o500)
@@ -361,7 +365,7 @@ test('probe: an unwritable home is not ok', {
   }
 })
 
-test('probe: a widening global sandbox.json is refused', { timeout: 5000 }, async () => {
+test('probe: a widening global sandbox.json is refused', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   for (const policy of [{ additionalReadwritePaths: ['/srv'] }, { networkPolicy: { default: 'allow' } }, { type: 'insecure_none' }]) {
     const home = await freshDir('home')
     await writeFile(path.join(home, 'sandbox.json'), JSON.stringify(policy))
@@ -371,7 +375,7 @@ test('probe: a widening global sandbox.json is refused', { timeout: 5000 }, asyn
   }
 })
 
-test('probe: a global hooks.json is ok with a warning', { timeout: 5000 }, async () => {
+test('probe: a global hooks.json is ok with a warning', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   const home = await freshDir('home')
   await writeFile(path.join(home, 'hooks.json'), '{}')
   const res = await probe({ env: { ...process.env, CURSOR_CONFIG_DIR: home } })
@@ -397,7 +401,9 @@ test('the registry resolves cursor', () => {
 test('cursorCheckoutRoot is keyed by run repo and run, under XDG_CACHE_HOME', () => {
   const a = cursorCheckoutRoot({ runRepo: '/r/one', runId: 'r1', env: { XDG_CACHE_HOME: '/c' } })
   const b = cursorCheckoutRoot({ runRepo: '/r/two', runId: 'r1', env: { XDG_CACHE_HOME: '/c' } })
-  assert.match(a, /^\/c\/fleetmates\/cursor\/[0-9a-f]{16}\/r1$/)
+  const prefix = path.join('/c', 'fleetmates', 'cursor') + path.sep
+  assert.ok(a.startsWith(prefix), a)
+  assert.match(a.slice(prefix.length), /^[0-9a-f]{16}[\\/]r1$/)
   assert.notEqual(a, b)
 })
 
@@ -444,7 +450,7 @@ test('cleanup removes the checkout and its empty run and repo directories, but k
 
 // Review finding 3: a control-path refusal must survive the scrub it performs — a re-dispatch that
 // resumes the same checkout is refused again, before any turn is spent.
-test('a control-path refusal is permanent for that checkout: spawn, resume and collect all refuse afterwards', { timeout: 10000 }, async () => {
+test('a control-path refusal is permanent for that checkout: spawn, resume and collect all refuse afterwards', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
   const runRepo = await freshDir('run')
   await initRepo(runRepo)
   const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: await freshDir('cache') } })
@@ -462,7 +468,7 @@ test('a control-path refusal is permanent for that checkout: spawn, resume and c
 })
 
 // Review finding 6: valid JSON that is not an object must not crash the probe.
-test('probe: a global sandbox.json that is valid JSON but not an object is refused, not thrown', { timeout: 5000 }, async () => {
+test('probe: a global sandbox.json that is valid JSON but not an object is refused, not thrown', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   for (const raw of ['null', '[]', '"x"', '3']) {
     const home = await freshDir('home')
     await writeFile(path.join(home, 'sandbox.json'), raw)

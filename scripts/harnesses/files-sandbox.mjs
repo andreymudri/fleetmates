@@ -6,7 +6,7 @@
 // hashed from bytes the host read itself, with filters off, and the tree is assembled in a private
 // index. No hook, filter, attribute or symlink target from the checkout is ever evaluated.
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, rm, lstat, readdir, readFile, readlink } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, lstat, readdir, readFile, readlink, symlink, writeFile, chmod } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -35,24 +35,71 @@ export function isControlPath(rel) {
   return CONTROL_PATHS.some((entry) => p === entry || p.startsWith(`${entry}/`))
 }
 
-// A plain, git-less checkout of `runBranch`'s tree. The checkout runs against a PRIVATE index
-// outside the checkout: without `GIT_INDEX_FILE` it would take the run repo's own `index.lock` (so
-// two concurrent builds collide) and stage the branch's tree into the run repo's shared index.
-// `checkoutRoot` overrides where the checkout lives (default `<runRepo>/.fleetmates/<runId>/files`).
+// A plain, git-less copy of `runBranch`'s tree, written BYTE-EXACT from the blobs: no index, no
+// `git checkout`, so no smudge filter, no autocrlf/eol conversion and no index.lock. Exactness is the
+// point — `commitFilesTree` hashes the checkout with `--no-filters`, so any conversion on the way out
+// (measured on Windows CI: `core.autocrlf` turned every `\n` into `\r\n`) would read back as an edit
+// to every file. Gitlinks (submodules) become empty directories and are kept from the run branch at
+// commit time. `checkoutRoot` overrides where the checkout lives (default
+// `<runRepo>/.fleetmates/<runId>/files`).
 export async function makeFilesSandbox(git, { runRepo, runBranch, runId, taskId, checkoutRoot }) {
-  const base = path.join(runRepo, '.fleetmates', runId)
   const branch = `fleetmates/${runId}/${taskId}`
-  const cwd = path.join(checkoutRoot ?? path.join(base, 'files'), taskId)
+  const cwd = path.join(checkoutRoot ?? path.join(runRepo, '.fleetmates', runId, 'files'), taskId)
   await mkdir(cwd, { recursive: true })
-  await mkdir(base, { recursive: true })
-  const filesIndex = path.join(base, `files-index-${taskId}`)
-  const res = await git(['--work-tree', cwd, 'checkout', runBranch, '--', '.'],
-    { cwd: runRepo, env: { GIT_INDEX_FILE: filesIndex } })
-  await rm(filesIndex, { force: true })
-  if (res.code !== 0) {
-    throw new Error(`git checkout of ${runBranch} into ${cwd} failed: ${(res.stderr || '').trim() || `exit ${res.code}`}`)
+  const label = `makeFilesSandbox (${runBranch} into ${cwd})`
+  const entries = []
+  for (const record of (await gitRun(['ls-tree', '-r', '-z', '--end-of-options', `${runBranch}^{tree}`], { cwd: runRepo }, label)).split('\0')) {
+    if (!record) continue
+    const tab = record.indexOf('\t')
+    const [mode, type, sha] = record.slice(0, tab).split(' ')
+    entries.push({ mode, type, sha, rel: record.slice(tab + 1) })
+  }
+  for (const entry of entries.filter((e) => e.type === 'commit')) {
+    await mkdir(path.join(cwd, ...entry.rel.split('/')), { recursive: true })
+  }
+  // Blobs are read in batches so a large tree is never held in memory at once.
+  const blobs = entries.filter((e) => e.type === 'blob')
+  for (let start = 0; start < blobs.length; start += BATCH) {
+    const chunk = blobs.slice(start, start + BATCH)
+    const raw = await gitRun(['cat-file', '--batch'], { cwd: runRepo, input: chunk.map((e) => `${e.sha}\n`).join(''), raw: true }, label)
+    const contents = splitBatch(raw)
+    for (const [i, entry] of chunk.entries()) await writeEntry(cwd, entry, contents[i])
   }
   return { cwd, meta: { mode: 'files', branch, runBranch } }
+}
+
+const BATCH = 200
+
+async function writeEntry(cwd, entry, bytes) {
+  const abs = path.join(cwd, ...entry.rel.split('/'))
+  await mkdir(path.dirname(abs), { recursive: true })
+  if (entry.mode === '120000') {
+    try {
+      await symlink(bytes.toString('utf8'), abs)
+    } catch {
+      // No symlink privilege (Windows): the link text as a file. commitFilesTree maps an unchanged
+      // blob back to the run branch's mode there.
+      await writeFile(abs, bytes)
+    }
+    return
+  }
+  await writeFile(abs, bytes)
+  if (entry.mode === '100755') await chmod(abs, 0o755)
+}
+
+// Splits `git cat-file --batch` output (`<sha> <type> <size>\n<bytes>\n` per object) into buffers.
+function splitBatch(buf) {
+  const out = []
+  let pos = 0
+  while (pos < buf.length) {
+    const nl = buf.indexOf(0x0a, pos)
+    const header = buf.subarray(pos, nl).toString('utf8').split(' ')
+    if (header[1] === 'missing') throw new Error(`makeFilesSandbox: blob ${header[0]} missing`)
+    const size = Number(header[2])
+    out.push(buf.subarray(nl + 1, nl + 1 + size))
+    pos = nl + 1 + size + 1
+  }
+  return out
 }
 
 // Removes every control path present in `cwd` and returns the relative paths it found, sorted.
@@ -88,7 +135,7 @@ export async function scrubControlPaths(cwd) {
 
 // git with an optional stdin payload. `defaultGitExec` has no stdin, and `hash-object --stdin`
 // is what lets the host hash bytes it read itself instead of handing git a path in the checkout.
-function gitRun(args, { cwd, env, input }) {
+function gitRun(args, { cwd, env, input, raw = false }, label = 'commitFilesTree') {
   return new Promise((resolve, reject) => {
     // stdin is a pipe only when there is a payload: a command that never reads it (rev-parse,
     // write-tree) can exit before an empty write lands, and that write then fails with EPIPE.
@@ -101,11 +148,11 @@ function gitRun(args, { cwd, env, input }) {
     child.stderr.on('data', (d) => { stderr += d })
     child.on('error', reject)
     child.on('close', (code) => {
-      const text = Buffer.concat(stdout).toString('utf8')
+      const bytes = Buffer.concat(stdout)
       if (code !== 0) {
-        reject(new Error(`commitFilesTree: git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`))
+        reject(new Error(`${label}: git ${args.join(' ')} failed: ${stderr.trim() || `exit ${code}`}`))
       } else {
-        resolve(text)
+        resolve(raw ? bytes : bytes.toString('utf8'))
       }
     })
     if (child.stdin) {
@@ -146,6 +193,15 @@ async function walk(root, rel, kept, out) {
   }
 }
 
+// Windows filesystems carry no exec bit and, without privilege, no symlinks, so a file whose bytes
+// are unchanged keeps the run branch's mode there; elsewhere the filesystem's own mode is the truth
+// (a chmod-only change is a change).
+function modeFor(entry, sha, baseEntries) {
+  if (process.platform !== 'win32') return entry.mode
+  const base = baseEntries.get(entry.rel)
+  return base && base.sha === sha ? base.mode : entry.mode
+}
+
 async function identity(runRepo) {
   const get = async (key) => {
     try {
@@ -176,6 +232,7 @@ export async function commitFilesTree(_git, { runRepo, runBranch, sandbox, branc
     const lines = []
     const kept = []
     const baseControl = new Map()
+    const baseEntries = new Map()
     for (const record of (await g(['ls-tree', '-r', '-z', '--end-of-options', base])).split('\0')) {
       if (!record) continue
       const tab = record.indexOf('\t')
@@ -186,6 +243,7 @@ export async function commitFilesTree(_git, { runRepo, runBranch, sandbox, branc
         kept.push(rel)
       }
       if (isControlPath(rel)) baseControl.set(rel, `${mode} ${sha}`)
+      baseEntries.set(rel, { mode, sha })
     }
 
     const found = { entries: [], control: [] }
@@ -200,7 +258,7 @@ export async function commitFilesTree(_git, { runRepo, runBranch, sandbox, branc
         }
         seen.add(entry.rel)
         const sha = (await g(['hash-object', '-w', '--no-filters', '--stdin'], await entry.read())).trim()
-        if (baseControl.get(entry.rel) !== `${entry.mode} ${sha}`) changed.add(entry.rel)
+        if (baseControl.get(entry.rel) !== `${modeFor(entry, sha, baseEntries)} ${sha}`) changed.add(entry.rel)
       }
       for (const rel of baseControl.keys()) {
         if (!seen.has(rel) && !found.control.some((e) => e.mode === 'not-a-directory' && rel.startsWith(`${e.rel}/`))) {
@@ -212,7 +270,7 @@ export async function commitFilesTree(_git, { runRepo, runBranch, sandbox, branc
     const entries = found.entries
     for (const entry of entries) {
       const sha = (await g(['hash-object', '-w', '--no-filters', '--stdin'], await entry.read())).trim()
-      lines.push(`${entry.mode} ${sha}\t${entry.rel}`)
+      lines.push(`${modeFor(entry, sha, baseEntries)} ${sha}\t${entry.rel}`)
     }
 
     await g(['read-tree', '--empty'])
