@@ -178,16 +178,18 @@ test('resume re-scrubs, rewrites sandbox.json (allow with network) and appends t
   assert.equal(lines.filter((l) => l.type === 'result').length, 2)
 })
 
-test('a full sandbox (reviewers, integrator) is neither scrubbed nor given a sandbox.json', { timeout: 10000 }, async () => {
+test('a full sandbox (reviewers, integrator) is neither scrubbed, given a sandbox.json, nor sent the files instruction', { timeout: 10000 }, async () => {
   const cwd = await freshDir('repo')
   await mkdir(path.join(cwd, '.claude'), { recursive: true })
   await writeFile(path.join(cwd, '.claude', 'settings.json'), '{"user":true}')
   const sessions = await freshDir('sessions')
-  await withEnv({ FAKE_CURSOR_RESULT_TEXT: JSON.stringify(good) }, async () => {
+  const argvOut = path.join(sessions, 'argv.json')
+  await withEnv({ FAKE_CURSOR_ARGV_OUT: argvOut, FAKE_CURSOR_RESULT_TEXT: JSON.stringify(good) }, async () => {
     await runToExit(await spawnCursor({
       sandbox: { cwd, meta: { mode: 'full' } }, prompt: 'p', network: false, streamPath: path.join(sessions, 's.jsonl'),
     }))
   })
+  assert.equal(JSON.parse(await readFile(argvOut, 'utf8')).input, 'p')
   assert.equal(await readFile(path.join(cwd, '.claude', 'settings.json'), 'utf8'), '{"user":true}')
   await assert.rejects(stat(path.join(cwd, '.cursor', 'sandbox.json')), /ENOENT/)
 })

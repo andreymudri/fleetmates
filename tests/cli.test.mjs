@@ -15327,6 +15327,64 @@ test('harnessSettings falls back to the safe defaults when the config sets nothi
 
 // And when the config DOES set them, harnessSettings reads the configured values through — so the
 // defaults above are genuine fallbacks, not values it always returns.
+test('harnessSettings takes the adapter default sandbox when the config sets none', () => {
+  assert.equal(harnessSettings({ harnesses: {} }, 'cursor', 'files').sandboxMode, 'files')
+  assert.equal(harnessSettings({ harnesses: {} }, 'codex', 'clone').sandboxMode, 'clone')
+})
+
+// dispatch-integrator on --harness cursor, through a logged-in fake `cursor-agent`: the probe's
+// warning (a global hooks.json) is printed and dispatch continues; the integrator runs in the
+// user's repo (`full`), so its prompt carries no files-sandbox instruction ("do not run git").
+test('dispatch-integrator --harness cursor prints the probe warning and sends no files-sandbox instruction', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const plan = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), 'utf8'))
+    const derived = await derive(root, 'r1', { plan: plan.planPath })
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    status.gates = { [String(derived.currentPhase)]: { verdict: 'PASS', phaseName: 'default', phase: derived.currentPhase } }
+    await writeFile(statusPath, JSON.stringify(status))
+
+    const bin = await mkdtemp(path.join(tmpdir(), 'fm-fakecursor-'))
+    const home = await mkdtemp(path.join(tmpdir(), 'fm-cursor-home-'))
+    const seen = path.join(bin, 'seen.json')
+    await writeFile(path.join(home, 'hooks.json'), '{}')
+    await writeFile(path.join(bin, 'cursor-agent'), `#!/usr/bin/env node
+const fs = require('node:fs')
+const argv = process.argv.slice(2)
+if (argv[0] === 'status') { process.stdout.write('Logged in as x\\n'); process.exit(0) }
+let input = ''
+process.stdin.on('data', (c) => { input += c })
+process.stdin.on('end', () => {
+  fs.writeFileSync(${JSON.stringify(seen)}, JSON.stringify({ argv, input }))
+  process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's' }) + '\\n')
+  process.exit(0)
+})
+`)
+    await chmod(path.join(bin, 'cursor-agent'), 0o755)
+    const savedPath = process.env.PATH
+    const savedHome = process.env.CURSOR_CONFIG_DIR
+    lines.length = 0
+    try {
+      process.env.PATH = `${bin}${path.delimiter}${savedPath}`
+      process.env.CURSOR_CONFIG_DIR = home
+      const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'default', '--harness', 'cursor', '--root', root], io)
+      assert.equal(code, 0, lines.join('\n'))
+      assert.match(lines.join('\n'), /^warning: .*hooks\.json runs outside the sandbox/m)
+      assert.match(lines.join('\n'), /dispatched integrator/)
+      const { argv, input } = JSON.parse(await readFile(seen, 'utf8'))
+      assert.equal(argv[argv.indexOf('--workspace') + 1], root)
+      assert.doesNotMatch(input, /no git repository/)
+    } finally {
+      process.env.PATH = savedPath
+      if (savedHome === undefined) delete process.env.CURSOR_CONFIG_DIR
+      else process.env.CURSOR_CONFIG_DIR = savedHome
+      await rm(bin, { recursive: true, force: true })
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+})
+
 test('harnessSettings reads configured harness values when present', () => {
   const settings = harnessSettings(
     { harnesses: { codex: { sandbox: 'full', network: true, timeoutMinutes: 5, tierModels: { mid: 'm' } } } },

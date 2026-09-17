@@ -513,3 +513,39 @@ test('fixedRefusal is byte-identical to the enforcement refusal subagent-stop.mj
     .replaceAll('\\n', '\n')
   assert.equal(fixedRefusal('TX', 'RX'), reconstructed)
 })
+
+test('an adapter without effort support gets no effort and the session records effortIgnored', async () => {
+  const runDir = await tmpRunDir('effort-ignored')
+  const { adapter, calls, completeEnforcement } = makeStubAdapter()
+  adapter.supportsEffort = false
+  await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement, effortFor: () => 'high' }))
+  assert.equal(calls.spawn[0].effort, undefined)
+  assert.equal((await readSession(runDir, 'T1')).effortIgnored, true)
+})
+
+test('an adapter with default effort support receives effort and records no effortIgnored', async () => {
+  const runDir = await tmpRunDir('effort-kept')
+  const { adapter, calls, completeEnforcement } = makeStubAdapter()
+  await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement, effortFor: () => 'high' }))
+  assert.equal(calls.spawn[0].effort, 'high')
+  assert.equal('effortIgnored' in (await readSession(runDir, 'T1')), false)
+})
+
+test('readResult receives the stream path and runs only after the handle has flushed', async () => {
+  const runDir = await tmpRunDir('flushed')
+  const { adapter, calls, completeEnforcement } = makeStubAdapter()
+  let flushed = false
+  const spawn = adapter.spawn
+  adapter.spawn = async (opts) => {
+    const handle = await spawn(opts)
+    handle.flushed = new Promise((resolve) => setTimeout(() => { flushed = true; resolve() }, 30))
+    return handle
+  }
+  const readResult = adapter.readResult
+  adapter.readResult = async (opts) => {
+    assert.equal(flushed, true, 'readResult ran before the stream flushed')
+    return readResult(opts)
+  }
+  await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement }))
+  assert.equal(calls.readResult[0].streamPath, path.join(runDir, 'sessions', 'T1.stream.jsonl'))
+})

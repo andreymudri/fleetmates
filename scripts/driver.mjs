@@ -311,7 +311,11 @@ export async function dispatchPhase({
     const role = task.role || 'implementer'
     const prompt = `${personaFor(role)}\n\n${composeBriefFor(task)}`
     const model = resolveModel(task)
-    const effort = effortFor ? effortFor(task) : undefined
+    // A harness with no effort control (Cursor bakes effort into the model id) gets none, and the
+    // session says so rather than dropping the configured value silently.
+    const effortRaw = effortFor ? effortFor(task) : undefined
+    const effortIgnored = adapter.supportsEffort === false && effortRaw !== undefined
+    const effort = adapter.supportsEffort === false ? undefined : effortRaw
     const paths = {
       schemaPath: path.join(sessionsDir, `${taskId}.schema.json`),
       resultPath: path.join(sessionsDir, `${taskId}.result.json`),
@@ -328,7 +332,7 @@ export async function dispatchPhase({
     // fire with no listener and hang the driver.
     const exited = waitForExit(handle.child, timeoutMs)
     const sessionId = (await handle.sessionId) ?? record.sessionId ?? null
-    record = { ...record, taskId, sessionId, sandbox, state: 'running' }
+    record = { ...record, taskId, sessionId, sandbox, state: 'running', ...(effortIgnored ? { effortIgnored } : {}) }
     await writeJson(sessionFile, record)
 
     const orphan = async (exitReason) => {
@@ -339,8 +343,10 @@ export async function dispatchPhase({
 
     const reason = await exited
     if (reason === 'timeout') return orphan('timeout')
+    // An adapter whose result lives in its stream file flushes that file after the child exits.
+    await handle.flushed
 
-    let result = await adapter.readResult({ resultPath: paths.resultPath })
+    let result = await adapter.readResult({ resultPath: paths.resultPath, streamPath: paths.streamPath })
     if (result == null) return orphan((await stderrTail(paths.errPath)) || 'no result')
 
     await adapter.collect(git, { runRepo, sandbox, branch })
@@ -356,7 +362,8 @@ export async function dispatchPhase({
       await h2.sessionId
       const reason2 = await exited2
       if (reason2 === 'timeout') return orphan('timeout')
-      const reread = await adapter.readResult({ resultPath: paths.resultPath })
+      await h2.flushed
+      const reread = await adapter.readResult({ resultPath: paths.resultPath, streamPath: paths.streamPath })
       if (reread != null) result = reread
       await adapter.collect(git, { runRepo, sandbox, branch })
       code = await completeEnforcement(taskId)

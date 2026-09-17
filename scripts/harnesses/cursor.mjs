@@ -44,7 +44,9 @@ export function buildResumeArgv({ sandbox, sessionId, model }) {
 }
 
 // Cursor has no output-schema flag (§4.4), so the contract travels in the prompt and `readResult`
-// validates what comes back. Appended to every spawn prompt and every resume message.
+// validates what comes back. Appended to every spawn prompt and resume message in a `files`
+// checkout only: a `full` sandbox (reviewers, integrator) works in the real repository with git,
+// and its persona already defines what it returns.
 export const RESULT_INSTRUCTION = '\n\n---\n'
   + 'This workspace is a plain directory with no git repository: do not run git, and do not try to '
   + 'commit. When you finish, the host commits every file in the workspace for you. Files under '
@@ -53,6 +55,10 @@ export const RESULT_INSTRUCTION = '\n\n---\n'
   + 'Your final message must be exactly one JSON object and nothing else, with exactly these keys: '
   + '"status" ("done", "blocked" or "failed"), "branch" (string), "filesChanged" (array of '
   + 'strings), "summary" (string), "blockers" (array of strings).'
+
+function withInstruction(sandbox, text) {
+  return sandbox.meta.mode === 'files' ? `${text}${RESULT_INSTRUCTION}` : text
+}
 
 // Scrub, then write the driver's own policy (§4.2). Only a `files` checkout is touched: a `full`
 // sandbox is the user's own repository (reviewers, integrator), whose control files are theirs.
@@ -118,13 +124,13 @@ function run(argv, { promptText, streamPath, errPath, cwd, append }) {
 export async function spawnCursor({ sandbox, prompt, model, network, streamPath, errPath }) {
   await prepareWorkspace(sandbox, network)
   const argv = buildSpawnArgv({ sandbox, model })
-  return run(argv, { promptText: `${prompt}${RESULT_INSTRUCTION}`, streamPath, errPath, cwd: sandbox.cwd, append: false })
+  return run(argv, { promptText: withInstruction(sandbox, prompt), streamPath, errPath, cwd: sandbox.cwd, append: false })
 }
 
 export async function resumeCursor({ sandbox, sessionId, message, model, network, streamPath, errPath }) {
   await prepareWorkspace(sandbox, network)
   const argv = buildResumeArgv({ sandbox, sessionId, model })
-  return run(argv, { promptText: `${message}${RESULT_INSTRUCTION}`, streamPath, errPath, cwd: sandbox.cwd, append: true })
+  return run(argv, { promptText: withInstruction(sandbox, message), streamPath, errPath, cwd: sandbox.cwd, append: true })
 }
 
 async function resultLines(streamPath) {
