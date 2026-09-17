@@ -60,6 +60,21 @@ never the model's report.
     sibling `<repo>/.fleetmates/r/` were denied with `Permission denied`, an edit-tool write to
     `<repo>/` was `Rejected:`, and an in-workspace write succeeded. Measured during implementation,
     before the checkout location was relied on.
+15. **…but a nested workspace inherits the enclosing repository's hooks.** A `.cursor/hooks.json` at
+    the root of the git repository containing the workspace fired its `sessionStart` for a workspace
+    at `<repo>/.fleetmates/r/files/T`; the same file in a plain (non-git) parent directory did not.
+    A repo-root `.cursor/sandbox.json` did not widen the nested workspace. Measured when the first
+    real e2e run's hooks canary fired. Consequence: Cursor checkouts live outside every git
+    repository (§4.2a), not under `.fleetmates/`.
+16. **An existing `.cursor/sandbox.json` is read-only to the agent.** With the driver's file in place,
+    a shell overwrite failed with `Read-only file system` (item 10's write succeeded only because no
+    file existed yet). The collect-time refusal stays as the backstop.
+17. **`result` concatenates the turn.** The final `type:"result"` line's `result` is every assistant
+    message of the turn joined (`Creating hello.txt…{"status":…}`); the final message alone is the
+    last `type:"assistant"` event.
+18. **No `--model` is not `auto`.** Omitting `--model` made cursor-agent pick `Composer 2.5`; a free plan
+    refuses it (`ActionRequiredError: Named models unavailable Free plans can only use Auto`, exit 1).
+    `--model auto` works.
 
 ## 2. Why this layout
 
@@ -95,7 +110,7 @@ The cost: a Cursor teammate cannot commit, so a task lands as one host-made comm
 
 Spawn:
 
-    cursor-agent -p --output-format stream-json --trust --sandbox enabled --workspace <cwd> [--model <id>]
+    cursor-agent -p --output-format stream-json --trust --sandbox enabled --workspace <cwd> --model <id|auto>
 
 Resume: the same, plus `--resume <sessionId>`. The prompt or redirect message goes on stdin, and
 stdin is always closed (item 3). The child's cwd is the checkout.
@@ -110,6 +125,14 @@ the built argv contains any of them, so a later edit cannot silently reintroduce
 `sandbox.json` write of §4.2: that workspace is the user's own repository, whose control files are
 theirs, and anything written there would be committed. Only `files` sandboxes are scrubbed.
 `makeSandbox` for Cursor throws for any mode other than `files`.
+
+### 4.2a Checkout location
+
+`makeCursorSandbox` builds the checkout at `$XDG_CACHE_HOME/fleetmates/cursor/<sha256(runRepo)[:16]>/<runId>/<taskId>`
+(`~/.cache` when unset) — outside the run repo (item 15) and never in a temp directory, which every
+Cursor sandbox can write. It walks the checkout root's ancestors for a `.git` entry (a filesystem
+check, no git command) and refuses with the repository's path when one exists, e.g. a dotfiles repo
+at `$HOME`. Codex `files` mode keeps `<runRepo>/.fleetmates/<run>/files/<task>`.
 
 ### 4.2 Scrub (before spawn, before every resume, and at collect)
 
@@ -164,16 +187,20 @@ teammate content is executed. The temporary index is removed on success and fail
 - **Session id** — from the first `system/init` line (item 2), recorded in `sessions/T.json` as soon
   as it is seen.
 - **Result** — Cursor has no output-schema flag. The prompt ends with a fixed instruction: the final
-  message must be exactly one JSON object matching `RESULT_SCHEMA`. `readResult` takes the `result`
-  string of the last `type:"result"` line in the stream file and parses it — whole text, else the
-  last fenced ```` ```json ```` block — then validates it against `RESULT_SCHEMA`. It returns `null`
+  message must be exactly one JSON object matching `RESULT_SCHEMA`. `readResult` considers only the
+  events after the last `user` line (so a resume never returns the previous session's answer), reads
+  the last `assistant` message's text first and the `result` string second (item 17), and accepts the
+  first candidate — whole text, last fenced ```` ```json ```` block, or a JSON object ending the text —
+  that validates against `RESULT_SCHEMA`. It returns `null`
   (→ `orphaned`) for: no result line, `is_error: true`, unparsable text, schema failure. No retry.
   Nothing is written into the checkout.
 - **Usage** — `readUsage` sums `usage` over every `type:"result"` line (a resume appends one):
   `inputTokens→input`, `cacheReadTokens→cachedInput`, `cacheWriteTokens→cacheWrite`,
   `outputTokens→output`, `reasoning: 0`. `null` when there is no result line.
 - **Model** — `harnesses.cursor.tierModels` maps `cheap`/`mid`/`capable` to full Cursor model ids,
-  e.g. `"capable": "claude-opus-5-high"`. Unmapped → no `--model` (Cursor's `auto`).
+  e.g. `"capable": "claude-opus-5-high"`. Unmapped → `--model auto`, explicitly: measured during
+  implementation, omitting `--model` made cursor-agent pick a named default (`Composer 2.5`) that a
+  free plan refuses (`Named models unavailable Free plans can only use Auto`, exit 1).
 - **Effort** — not passable (item 5). The adapter ignores `agents.<role>.effort` and the driver
   records `effortIgnored: true` in `sessions/T.json`. Docs tell the user to choose the effort variant
   in `tierModels`.

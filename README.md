@@ -131,6 +131,9 @@ way out of it. Cursor teammates therefore only ever run in a git-less `files` ch
 
 - A Cursor teammate cannot commit. When it finishes, fleetmates commits its checkout as **one
   commit** on the task branch, without ever pointing git at the checkout.
+- Checkouts live under `$XDG_CACHE_HOME/fleetmates/cursor/` (default `~/.cache`), outside the
+  repository: Cursor runs the `.cursor/hooks.json` of any git repository that encloses its
+  workspace. `dispatch` refuses if that cache directory is itself inside a git repository.
 - `.cursor/{sandbox,hooks,cli,mcp,worktrees}.json`, `.cursor/hooks/`, `.claude/settings*.json` and
   `.vscode/` are removed from the checkout before every session. A teammate that changes one of
   them is orphaned, and none of those paths ever changes on the task branch.
@@ -144,7 +147,8 @@ way out of it. Cursor teammates therefore only ever run in a git-less `files` ch
 Cursor has no separate effort setting: effort is part of the model id. Map each tier to the variant
 you want in `harnesses.cursor.tierModels`, for example
 `{ "cheap": "composer-2.5", "mid": "claude-sonnet-5-thinking-high", "capable": "claude-opus-5-high" }`
-(`cursor-agent models` lists them). `agents.<role>.effort` is ignored for Cursor teammates, and each
+(`cursor-agent models` lists them). An unmapped tier runs `--model auto`, the only model a free
+Cursor plan accepts. `agents.<role>.effort` is ignored for Cursor teammates, and each
 session record says so with `effortIgnored: true`.
 
 ## Coming from claude-teammates
