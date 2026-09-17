@@ -335,11 +335,12 @@ export async function dispatchPhase({
     record = { ...record, taskId, sessionId, sandbox, state: 'running', ...(effortIgnored ? { effortIgnored } : {}) }
     await writeJson(sessionFile, record)
 
-    // An adapter whose sandbox is a throwaway checkout (Cursor) removes it once the task's result is
+    // An adapter whose sandbox is a throwaway checkout (Cursor) removes it once a `done` result is
     // recorded and its work is on the task branch. The result is written first, so a cleanup that
-    // fails can never change what was recorded; an orphaned task keeps its sandbox for a resume.
+    // fails can never change what was recorded. A blocked, failed or orphaned task keeps its sandbox:
+    // `message` or a re-dispatch resumes it there.
     const finalize = async () => {
-      if (!adapter.cleanupOnResult) return
+      if (!adapter.cleanupOnResult || record.state !== 'done') return
       try {
         await adapter.cleanup({ sandbox })
       } catch {

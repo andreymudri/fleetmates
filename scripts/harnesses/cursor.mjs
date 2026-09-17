@@ -65,8 +65,24 @@ function withInstruction(sandbox, text) {
 
 // Scrub, then write the driver's own policy (§4.2). Only a `files` checkout is touched: a `full`
 // sandbox is the user's own repository (reviewers, integrator), whose control files are theirs.
+// A control-path refusal is recorded next to the checkout — in the checkout root, which the sandbox
+// cannot write (measured: sibling paths of a workspace are denied) — because the scrub that detects
+// the violation also removes the evidence. Without the marker a re-dispatch resumes the cleaned
+// checkout and commits it.
+const refusalMarker = (sandbox) => `${sandbox.cwd}.control-path`
+
+async function priorRefusal(sandbox) {
+  try {
+    return (await readFile(refusalMarker(sandbox), 'utf8')).trim()
+  } catch {
+    return null
+  }
+}
+
 async function prepareWorkspace(sandbox, network) {
   if (sandbox.meta.mode !== 'files') return
+  const refused = await priorRefusal(sandbox)
+  if (refused) throw new Error(`control-path: ${refused}`)
   await scrubControlPaths(sandbox.cwd)
   const text = JSON.stringify({ type: 'workspace_readwrite', networkPolicy: { default: network ? 'allow' : 'deny' } })
   await mkdir(path.join(sandbox.cwd, '.cursor'), { recursive: true })
@@ -258,6 +274,8 @@ export async function makeCursorSandbox(git, { runRepo, runBranch, runId, taskId
 // the checkout. The driver's own `sandbox.json`, byte-identical to what it wrote, is expected.
 export async function collectCursor(git, { runRepo, sandbox, branch }) {
   if (sandbox.meta.mode !== 'files') return
+  const refused = await priorRefusal(sandbox)
+  if (refused) throw new Error(`control-path: ${refused}`)
   let policy = null
   try {
     policy = await readFile(path.join(sandbox.cwd, '.cursor', 'sandbox.json'), 'utf8')
@@ -265,7 +283,10 @@ export async function collectCursor(git, { runRepo, sandbox, branch }) {
   const found = await scrubControlPaths(sandbox.cwd)
   const unexpected = found.filter((rel) => !(rel === '.cursor/sandbox.json'
     && typeof sandbox.meta.sandboxJson === 'string' && policy === sandbox.meta.sandboxJson))
-  if (unexpected.length) throw new Error(`control-path: ${unexpected.join(', ')}`)
+  if (unexpected.length) {
+    await writeFile(refusalMarker(sandbox), unexpected.join(', '))
+    throw new Error(`control-path: ${unexpected.join(', ')}`)
+  }
   await commitFilesTree(git, { runRepo, runBranch: sandbox.meta.runBranch, sandbox, branch })
 }
 
@@ -274,6 +295,7 @@ export async function collectCursor(git, { runRepo, sandbox, branch }) {
 export async function cleanup({ sandbox }) {
   if (sandbox.meta.mode !== 'files') return
   await rm(sandbox.cwd, { recursive: true, force: true })
+  await rm(refusalMarker(sandbox), { force: true })
   let dir = path.dirname(sandbox.cwd)
   for (let i = 0; i < 2; i++) {
     try {
@@ -328,6 +350,9 @@ export async function probe({ env = process.env } = {}) {
       policy = JSON.parse(raw)
     } catch {
       return { ok: false, reason: `${globalPolicy} is not valid JSON`, fix: `fix or remove ${globalPolicy}` }
+    }
+    if (policy === null || typeof policy !== 'object' || Array.isArray(policy)) {
+      return { ok: false, reason: `${globalPolicy} is not a JSON object`, fix: `fix or remove ${globalPolicy}` }
     }
     const widens = (policy.type !== undefined && policy.type !== 'workspace_readwrite')
       || (Array.isArray(policy.additionalReadwritePaths) && policy.additionalReadwritePaths.length > 0)

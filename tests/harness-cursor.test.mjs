@@ -440,3 +440,33 @@ test('cleanup removes the checkout and its empty run and repo directories, but k
   await assert.rejects(stat(path.dirname(path.dirname(b.cwd))), /ENOENT/)
   await stat(path.join(cache, 'fleetmates', 'cursor'))
 })
+
+// Review finding 3: a control-path refusal must survive the scrub it performs — a re-dispatch that
+// resumes the same checkout is refused again, before any turn is spent.
+test('a control-path refusal is permanent for that checkout: spawn, resume and collect all refuse afterwards', { timeout: 10000 }, async () => {
+  const runRepo = await freshDir('run')
+  await initRepo(runRepo)
+  const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: await freshDir('cache') } })
+  const streamPath = path.join(await freshDir('sessions'), 's.jsonl')
+  await withEnv({ FAKE_CURSOR_RESULT_TEXT: JSON.stringify(good) }, async () => {
+    await runToExit(await spawnCursor({ sandbox, prompt: 'p', network: false, streamPath }))
+  })
+  await mkdir(path.join(sandbox.cwd, '.claude'), { recursive: true })
+  await writeFile(path.join(sandbox.cwd, '.claude', 'settings.local.json'), '{}')
+  await assert.rejects(collectCursor(defaultGitExec, { runRepo, sandbox, branch: 'fleetmates/r1/T1' }), /control-path/)
+  // The planted file is gone now; the refusal must not be.
+  await assert.rejects(collectCursor(defaultGitExec, { runRepo, sandbox, branch: 'fleetmates/r1/T1' }), /control-path: .*\.claude\/settings\.local\.json/)
+  await assert.rejects(resumeCursor({ sandbox, sessionId: 's', message: 'm', network: false, streamPath }), /control-path/)
+  await assert.rejects(spawnCursor({ sandbox, prompt: 'p', network: false, streamPath }), /control-path/)
+})
+
+// Review finding 6: valid JSON that is not an object must not crash the probe.
+test('probe: a global sandbox.json that is valid JSON but not an object is refused, not thrown', { timeout: 5000 }, async () => {
+  for (const raw of ['null', '[]', '"x"', '3']) {
+    const home = await freshDir('home')
+    await writeFile(path.join(home, 'sandbox.json'), raw)
+    const res = await probe({ env: { ...process.env, CURSOR_CONFIG_DIR: home } })
+    assert.equal(res.ok, false, raw)
+    assert.match(res.fix, /fix or remove/)
+  }
+})

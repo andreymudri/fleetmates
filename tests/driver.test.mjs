@@ -581,3 +581,26 @@ test('a failing cleanup never changes a finished task\'s recorded result', async
   assert.equal(session.state, 'done')
   assert.equal('sandboxRemoved' in session, false)
 })
+
+// Review finding 4: only a `done` task's sandbox is removed; a blocked or failed task may be
+// unblocked through `message`, which resumes in that sandbox.
+test('cleanupOnResult keeps the sandbox of a blocked or failed task', async () => {
+  for (const status of ['blocked', 'failed']) {
+    const runDir = await tmpRunDir(`cleanup-${status}`)
+    const { adapter, completeEnforcement } = makeStubAdapter({ result: { ...DONE, status } })
+    const cleaned = []
+    adapter.cleanupOnResult = true
+    adapter.cleanup = async ({ sandbox }) => { cleaned.push(sandbox.cwd) }
+    await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement }))
+    assert.deepEqual(cleaned, [], status)
+    assert.equal('sandboxRemoved' in (await readSession(runDir, 'T1')), false, status)
+  }
+  const runDir = await tmpRunDir('cleanup-enforcement-failed')
+  const { adapter, completeEnforcement } = makeStubAdapter({ enforcementCodes: [3, 3] })
+  const cleaned = []
+  adapter.cleanupOnResult = true
+  adapter.cleanup = async ({ sandbox }) => { cleaned.push(sandbox.cwd) }
+  await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement }))
+  assert.equal((await readSession(runDir, 'T1')).state, 'failed')
+  assert.deepEqual(cleaned, [])
+})

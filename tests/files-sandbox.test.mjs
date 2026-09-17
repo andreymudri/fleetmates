@@ -168,3 +168,81 @@ test('commitFilesTree keeps runBranch control files and never adds planted ones'
     assert.doesNotMatch(tree, /\.cursor/)
   })
 })
+
+// Review finding 1: a symlinked control ANCESTOR (`.claude -> ~/.claude`) must never be followed.
+test('scrubControlPaths removes a symlinked or non-directory control ancestor without touching its target', async () => {
+  await withRepo(async ({ root }) => {
+    const cwd = path.join(root, 'ws')
+    const home = path.join(root, 'home-claude')
+    await mkdir(cwd, { recursive: true })
+    await mkdir(home)
+    await writeFile(path.join(home, 'settings.json'), 'user')
+    await writeFile(path.join(home, 'settings.local.json'), 'user-local')
+    await symlink(home, path.join(cwd, '.claude'))
+    await writeFile(path.join(cwd, '.cursor'), 'a file, not a dir')
+    const found = await scrubControlPaths(cwd)
+    assert.deepEqual(found, ['.claude', '.cursor'])
+    await assert.rejects(lstat(path.join(cwd, '.claude')), /ENOENT/)
+    await assert.rejects(lstat(path.join(cwd, '.cursor')), /ENOENT/)
+    assert.equal(await readFile(path.join(home, 'settings.json'), 'utf8'), 'user')
+    assert.equal(await readFile(path.join(home, 'settings.local.json'), 'utf8'), 'user-local')
+  })
+})
+
+// Review finding 2: a file or symlink at a control ancestor must not displace the run branch's
+// protected entries beneath it.
+test('commitFilesTree keeps protected entries when the checkout replaces their directory with a file or symlink', async () => {
+  for (const plant of [
+    async (cwd) => writeFile(path.join(cwd, '.claude'), 'file'),
+    async (cwd) => symlink('nowhere', path.join(cwd, '.claude')),
+  ]) {
+    await withRepo(async ({ runRepo }) => {
+      const sandbox = await makeFilesSandbox(git, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1' })
+      await rm(path.join(sandbox.cwd, '.claude'), { recursive: true, force: true })
+      await plant(sandbox.cwd)
+      await commitFilesTree(git, { runRepo, runBranch: 'main', sandbox, branch: 'fleetmates/r1/T1' })
+      const tree = await out(['ls-tree', '-r', 'fleetmates/r1/T1'], runRepo)
+      assert.match(tree, /\t\.claude\/settings\.json$/m)
+      assert.doesNotMatch(tree, /\t\.claude$/m)
+    })
+  }
+})
+
+test('commitFilesTree never commits a symlinked control ancestor absent from the run branch', async () => {
+  await withRepo(async ({ runRepo }) => {
+    const sandbox = await makeFilesSandbox(git, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1' })
+    await symlink('cfg', path.join(sandbox.cwd, '.cursor'))
+    await commitFilesTree(git, { runRepo, runBranch: 'main', sandbox, branch: 'fleetmates/r1/T1' })
+    assert.doesNotMatch(await out(['ls-tree', '-r', '--name-only', 'fleetmates/r1/T1'], runRepo), /^\.cursor/m)
+  })
+})
+
+// Review finding 5: a harness that does not scrub (Codex) must not have control-path edits dropped
+// silently — `refuseControlChanges` turns them into a refusal naming the paths.
+test('commitFilesTree with refuseControlChanges refuses a changed, added or removed control path and commits nothing', async () => {
+  for (const [label, change] of [
+    ['changed', async (cwd) => writeFile(path.join(cwd, '.claude', 'settings.json'), '{"changed":true}\n')],
+    ['added', async (cwd) => { await mkdir(path.join(cwd, '.vscode')); await writeFile(path.join(cwd, '.vscode', 'settings.json'), '{}') }],
+    ['removed', async (cwd) => rm(path.join(cwd, '.claude', 'settings.json'))],
+  ]) {
+    await withRepo(async ({ runRepo }) => {
+      const sandbox = await makeFilesSandbox(git, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1' })
+      await change(sandbox.cwd)
+      await assert.rejects(
+        commitFilesTree(git, { runRepo, runBranch: 'main', sandbox, branch: 'fleetmates/r1/T1', refuseControlChanges: true }),
+        /control-path: /, label,
+      )
+      const ref = await git(['rev-parse', '--verify', '--quiet', 'refs/heads/fleetmates/r1/T1'], { cwd: runRepo })
+      assert.notEqual(ref.code, 0, label)
+    })
+  }
+})
+
+test('commitFilesTree with refuseControlChanges commits when control paths are untouched', async () => {
+  await withRepo(async ({ runRepo }) => {
+    const sandbox = await makeFilesSandbox(git, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1' })
+    await writeFile(path.join(sandbox.cwd, 'base.txt'), 'edited\n')
+    await commitFilesTree(git, { runRepo, runBranch: 'main', sandbox, branch: 'fleetmates/r1/T1', refuseControlChanges: true })
+    assert.equal(await out(['show', 'fleetmates/r1/T1:base.txt'], runRepo), 'edited')
+  })
+})

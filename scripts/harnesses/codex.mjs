@@ -154,7 +154,8 @@ export async function makeCodexSandbox(git, { runRepo, runBranch, runId, taskId,
 // commits the checkout itself through `commitFilesTree`, which never points git at it.
 export async function collectCodex(git, { runRepo, sandbox, branch }) {
   if (sandbox.meta.mode === 'files') {
-    await commitFilesTree(git, { runRepo, runBranch: sandbox.meta.runBranch, sandbox, branch })
+    // Codex does not scrub its checkout, so a control-path edit is refused rather than dropped.
+    await commitFilesTree(git, { runRepo, runBranch: sandbox.meta.runBranch, sandbox, branch, refuseControlChanges: true })
     return
   }
   const res = await fetchTaskBranch((a, o) => git(a, { ...o, cwd: runRepo }), {

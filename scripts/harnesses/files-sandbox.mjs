@@ -25,6 +25,11 @@ export const CONTROL_PATHS = [
   '.vscode',
 ]
 
+// The directories that contain control paths. A teammate that replaces one with a symlink or a
+// plain file would redirect every path beneath it (`.claude -> ~/.claude`), so an ancestor that is
+// not a real directory is itself treated as a control path.
+export const CONTROL_ANCESTORS = [...new Set(CONTROL_PATHS.filter((p) => p.includes('/')).map((p) => p.split('/')[0]))].sort()
+
 export function isControlPath(rel) {
   const p = rel.split(path.sep).join('/')
   return CONTROL_PATHS.some((entry) => p === entry || p.startsWith(`${entry}/`))
@@ -50,10 +55,24 @@ export async function makeFilesSandbox(git, { runRepo, runBranch, runId, taskId,
   return { cwd, meta: { mode: 'files', branch, runBranch } }
 }
 
-// Removes every control path present in `cwd` (never following a symlink) and returns the
-// relative paths it found, sorted.
+// Removes every control path present in `cwd` and returns the relative paths it found, sorted.
+// Symlinks are never followed at ANY level: a control ancestor that is not a real directory is
+// removed itself (the link, not its target) before any path beneath it is looked at, so no `lstat`
+// or `rm` below ever resolves through a teammate-made link.
 export async function scrubControlPaths(cwd) {
   const found = []
+  for (const dir of CONTROL_ANCESTORS) {
+    const abs = path.join(cwd, dir)
+    let st
+    try {
+      st = await lstat(abs)
+    } catch {
+      continue
+    }
+    if (st.isDirectory() && !st.isSymbolicLink()) continue
+    await rm(abs, { force: true })
+    found.push(dir)
+  }
   for (const rel of CONTROL_PATHS) {
     const abs = path.join(cwd, rel)
     try {
@@ -98,19 +117,31 @@ function gitRun(args, { cwd, env, input }) {
   })
 }
 
-async function walk(root, rel, skip, entries) {
+// Collects the checkout's committable entries into `out.entries` and its control-path entries into
+// `out.control`. A control ancestor that is not a real directory is never committed (it would
+// displace or redirect the protected entries beneath it) and is reported in `out.control` as a
+// change. A path that is an ancestor of a kept run-branch entry is never committed either: in
+// `update-index --index-info` a later file entry silently replaces the directory beneath it.
+async function walk(root, rel, kept, out) {
   for (const name of await readdir(path.join(root, rel))) {
     if (name === '.git') continue
     const childRel = rel ? `${rel}/${name}` : name
-    if (isControlPath(childRel) || skip.has(childRel)) continue
     const abs = path.join(root, childRel)
     const st = await lstat(abs)
+    const realDir = st.isDirectory() && !st.isSymbolicLink()
+    if (CONTROL_ANCESTORS.includes(childRel) && !realDir) {
+      out.control.push({ rel: childRel, mode: 'not-a-directory' })
+      continue
+    }
+    const control = isControlPath(childRel)
+    if (!realDir && !control && kept.some((k) => k.startsWith(`${childRel}/`))) continue
+    const bucket = control ? out.control : out.entries
     if (st.isSymbolicLink()) {
-      entries.push({ rel: childRel, mode: '120000', read: () => readlink(abs) })
-    } else if (st.isDirectory()) {
-      await walk(root, childRel, skip, entries)
+      bucket.push({ rel: childRel, mode: '120000', read: () => readlink(abs) })
+    } else if (realDir) {
+      await walk(root, childRel, kept, out)
     } else if (st.isFile()) {
-      entries.push({ rel: childRel, mode: (st.mode & 0o111) ? '100755' : '100644', read: () => readFile(abs) })
+      bucket.push({ rel: childRel, mode: (st.mode & 0o111) ? '100755' : '100644', read: () => readFile(abs) })
     }
   }
 }
@@ -129,7 +160,12 @@ async function identity(runRepo) {
 // Commits the checkout on top of `runBranch` as `branch`. Control paths and gitlinks keep the run
 // branch's entries; everything else comes from the checkout. An unchanged tree points `branch` at
 // `runBranch` without a commit.
-export async function commitFilesTree(_git, { runRepo, runBranch, sandbox, branch }) {
+//
+// `refuseControlChanges`: for a harness that does not scrub its checkout (Codex), a control path the
+// teammate added, changed or removed would otherwise be dropped silently; with this set the commit is
+// refused with `control-path: <paths>` and no ref is written. A scrubbing harness (Cursor) leaves it
+// off, because its checkout never holds control paths by the time it is committed.
+export async function commitFilesTree(_git, { runRepo, runBranch, sandbox, branch, refuseControlChanges = false }) {
   const idxDir = await mkdtemp(path.join(os.tmpdir(), 'fm-files-idx-'))
   const env = { GIT_INDEX_FILE: path.join(idxDir, 'index') }
   const g = (args, input) => gitRun(args, { cwd: runRepo, env, input })
@@ -138,7 +174,8 @@ export async function commitFilesTree(_git, { runRepo, runBranch, sandbox, branc
     const baseTree = (await g(['rev-parse', '--verify', '--end-of-options', `${base}^{tree}`])).trim()
 
     const lines = []
-    const kept = new Set()
+    const kept = []
+    const baseControl = new Map()
     for (const record of (await g(['ls-tree', '-r', '-z', '--end-of-options', base])).split('\0')) {
       if (!record) continue
       const tab = record.indexOf('\t')
@@ -146,12 +183,33 @@ export async function commitFilesTree(_git, { runRepo, runBranch, sandbox, branc
       const rel = record.slice(tab + 1)
       if (isControlPath(rel) || mode === '160000') {
         lines.push(`${mode} ${sha}\t${rel}`)
-        kept.add(rel)
+        kept.push(rel)
       }
+      if (isControlPath(rel)) baseControl.set(rel, `${mode} ${sha}`)
     }
 
-    const entries = []
-    await walk(sandbox.cwd, '', kept, entries)
+    const found = { entries: [], control: [] }
+    await walk(sandbox.cwd, '', kept, found)
+    if (refuseControlChanges) {
+      const changed = new Set()
+      const seen = new Set()
+      for (const entry of found.control) {
+        if (entry.mode === 'not-a-directory') {
+          changed.add(entry.rel)
+          continue
+        }
+        seen.add(entry.rel)
+        const sha = (await g(['hash-object', '-w', '--no-filters', '--stdin'], await entry.read())).trim()
+        if (baseControl.get(entry.rel) !== `${entry.mode} ${sha}`) changed.add(entry.rel)
+      }
+      for (const rel of baseControl.keys()) {
+        if (!seen.has(rel) && !found.control.some((e) => e.mode === 'not-a-directory' && rel.startsWith(`${e.rel}/`))) {
+          changed.add(rel)
+        }
+      }
+      if (changed.size) throw new Error(`control-path: ${[...changed].sort().join(', ')}`)
+    }
+    const entries = found.entries
     for (const entry of entries) {
       const sha = (await g(['hash-object', '-w', '--no-filters', '--stdin'], await entry.read())).trim()
       lines.push(`${entry.mode} ${sha}\t${entry.rel}`)
