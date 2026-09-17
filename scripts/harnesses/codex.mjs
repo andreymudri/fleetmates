@@ -8,6 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { RESULT_SCHEMA } from '../result-schema.mjs'
 import { fetchTaskBranch } from '../git.mjs'
+import { makeFilesSandbox, commitFilesTree } from './files-sandbox.mjs'
 
 // `-s <flag>` per sandbox mode. `full` is `danger-full-access` — never chosen automatically
 // (spec "Out of Scope"), only selectable through `harnesses.codex.sandbox = "full"`.
@@ -134,24 +135,7 @@ async function must(git, args, opts) {
 export async function makeCodexSandbox(git, { runRepo, runBranch, runId, taskId, mode }) {
   const base = path.join(runRepo, '.fleetmates', runId)
   const branch = `fleetmates/${runId}/${taskId}`
-  if (mode === 'files') {
-    const cwd = path.join(base, 'files', taskId)
-    await mkdir(cwd, { recursive: true })
-    // A PRIVATE index, outside `cwd` so it is never checked into the work tree. Without this,
-    // `checkout --work-tree <cwd>` still resolves GIT_DIR to `runRepo/.git` (no env override),
-    // so it (a) takes `runRepo/.git/index.lock` — a second concurrent files-mode build on the
-    // same run repo collides with "Unable to create '<runRepo>/.git/index.lock': File exists" —
-    // and (b) STAGES the branch's tree into the run repo's own shared index, corrupting whatever
-    // the host later commits or reports as staged there. `GIT_INDEX_FILE` relocates both the
-    // index and its lock, so per-task builds share neither with the run repo or with each other.
-    // Only needed for this one checkout — `files` mode never touches git again (`collect`
-    // computes and commits the diff itself) — so it is removed right after, best-effort.
-    const filesIndex = path.join(base, `files-index-${taskId}`)
-    await must(git, ['--work-tree', cwd, 'checkout', runBranch, '--', '.'],
-      { cwd: runRepo, env: { GIT_INDEX_FILE: filesIndex } })
-    await rm(filesIndex, { force: true })
-    return { cwd, meta: { mode, branch } }
-  }
+  if (mode === 'files') return makeFilesSandbox(git, { runRepo, runBranch, runId, taskId })
   const gitdir = path.join(base, 'gitdirs', taskId)
   const cwd = path.join(base, 'clones', taskId)
   await mkdir(path.dirname(gitdir), { recursive: true })
@@ -162,14 +146,17 @@ export async function makeCodexSandbox(git, { runRepo, runBranch, runId, taskId,
   // No `.git` pointer: keeps the harness's own git off the teammate's config (§7). Only for
   // `clone` — `full` mode keeps it, since `danger-full-access` removes the reason to hide it.
   if (mode === 'clone') await rm(path.join(cwd, '.git'), { recursive: true, force: true })
-  return { cwd, meta: { mode, gitdir, branch } }
+  return { cwd, meta: { mode, gitdir, branch, runBranch } }
 }
 
 // The only host-side git touch against teammate material (§3, §7): a hardened `fetch` of the
-// task branch from the sandbox's git dir into the run repo. `files` mode has no git dir — the
-// driver commits the diff itself, so there is nothing to fetch.
+// task branch from the sandbox's git dir into the run repo. `files` mode has no git dir: the host
+// commits the checkout itself through `commitFilesTree`, which never points git at it.
 export async function collectCodex(git, { runRepo, sandbox, branch }) {
-  if (sandbox.meta.mode === 'files') return
+  if (sandbox.meta.mode === 'files') {
+    await commitFilesTree(git, { runRepo, runBranch: sandbox.meta.runBranch, sandbox, branch })
+    return
+  }
   const res = await fetchTaskBranch((a, o) => git(a, { ...o, cwd: runRepo }), {
     fromGitDir: sandbox.meta.gitdir,
     branch,
