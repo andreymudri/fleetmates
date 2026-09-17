@@ -26,11 +26,17 @@ import {
   cursorAdapter, makeCursorSandbox, spawnCursor, resumeCursor, collectCursor, readResult,
 } from '../scripts/harnesses/cursor.mjs'
 
-const MODEL = process.env.FLEETMATES_E2E_CURSOR_MODEL || 'composer-2.5'
+// Unset means Cursor's own `auto`: a free Cursor plan refuses every named model (measured:
+// "ActionRequiredError: Named models unavailable Free plans can only use Auto"), and the process
+// exits 1 within seconds, so a named default would fail every case here for an account reason.
+const MODEL = process.env.FLEETMATES_E2E_CURSOR_MODEL || undefined
 const TURN_TIMEOUT_MS = 5 * 60_000
 const ready = process.env.FLEETMATES_E2E === '1' && (await cursorAdapter.probe()).ok
 const SKIP = { skip: ready ? false : 'set FLEETMATES_E2E=1 with a logged-in cursor-agent, via npm run test:e2e:cursor', timeout: 20 * 60_000 }
 const SCRATCH = path.join(os.homedir(), '.cache', 'fleetmates-e2e-cursor')
+// Cursor checkouts go under XDG_CACHE_HOME (scripts/harnesses/cursor.mjs `cursorCheckoutRoot`); point
+// it inside this suite's scratch so every checkout, including the CLI full run's, is removed with it.
+process.env.XDG_CACHE_HOME = path.join(SCRATCH, 'xdg-cache')
 
 const exists = async (p) => stat(p).then(() => true, () => false)
 
@@ -129,7 +135,11 @@ test('network is denied when harnesses.cursor.network is false', SKIP, async () 
   })
 })
 
-test('a teammate-planted .cursor/sandbox.json orphans the task and never reaches a branch', SKIP, async () => {
+// Measured: once the driver has written `.cursor/sandbox.json`, Cursor makes it read-only to the agent
+// ("Read-only file system"), so the overwrite is denied and collect's control-path refusal (unit-tested
+// in harness-cursor.test.mjs) is the backstop, not the front line. Either outcome is safe; the case
+// asserts the policy is unchanged or the task refused, and that the file never reaches a branch.
+test('a teammate cannot widen .cursor/sandbox.json, and the file never reaches a branch', SKIP, async () => {
   await withScratch(async ({ dir, outside, runRepo }) => {
     const sandbox = await sandboxFor(runRepo, 'T4')
     await turn(spawnCursor({
@@ -137,13 +147,24 @@ test('a teammate-planted .cursor/sandbox.json orphans the task and never reaches
       prompt: steps(`Run in your shell tool: printf '%s' '{"additionalReadwritePaths":["${outside}"]}' > .cursor/sandbox.json`),
     }))
     assert.ok(await exists(path.join(sandbox.cwd, 'ran.txt')), 'control: the model did not complete the turn')
-    await assert.rejects(collectCursor(defaultGitExec, { runRepo, sandbox, branch: 'fleetmates/e2e/T4' }), /control-path: \.cursor\/sandbox\.json/)
-    const ref = await defaultGitExec(['rev-parse', '--verify', '--quiet', 'refs/heads/fleetmates/e2e/T4'], runRepo)
-    assert.notEqual(ref.code, 0)
+    const policy = await readFile(path.join(sandbox.cwd, '.cursor', 'sandbox.json'), 'utf8').catch(() => null)
+    const branch = 'fleetmates/e2e/T4'
+    if (policy === sandbox.meta.sandboxJson) {
+      await collectCursor(defaultGitExec, { runRepo, sandbox, branch })
+      const tree = execFileSync('git', ['ls-tree', '-r', '--name-only', branch], { cwd: runRepo, encoding: 'utf8' })
+      assert.doesNotMatch(tree, /\.cursor/)
+    } else {
+      await assert.rejects(collectCursor(defaultGitExec, { runRepo, sandbox, branch }), /control-path: \.cursor\/sandbox\.json/)
+      const ref = await defaultGitExec(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`], runRepo)
+      assert.notEqual(ref.code, 0)
+    }
   })
 })
 
-test('a .cursor/hooks.json on the run branch is scrubbed and its sessionStart never fires', SKIP, async () => {
+// Covers both discovery paths: the file is committed on the run branch (so the checkout would carry
+// it) AND present at the run repo's root, which Cursor reads for any workspace nested in that repo
+// (measured) — the reason checkouts live outside every git repository.
+test('a .cursor/hooks.json on the run branch and at the run repo root never fires', SKIP, async () => {
   await withScratch(async ({ dir, outside, runRepo }) => {
     const marker = path.join(outside, 'hook')
     await positiveControl(marker)
@@ -216,7 +237,7 @@ test('full run: init-run, dispatch --harness cursor, gate and dispatch-integrato
         },
       },
       harnesses: {
-        cursor: { timeoutMinutes: 8, tierModels: { cheap: MODEL, mid: MODEL, capable: MODEL } },
+        cursor: { timeoutMinutes: 8, ...(MODEL ? { tierModels: { cheap: MODEL, mid: MODEL, capable: MODEL } } : {}) },
       },
     }, null, 2))
     execFileSync('git', ['add', '.'], { cwd: root })
