@@ -99,6 +99,13 @@ stdin is always closed (item 3). The child's cwd is the checkout.
 `--approve-mcps`, `--sandbox disabled`, `--worktree` or `--api-key`; an internal assertion throws if
 the built argv contains any of them, so a later edit cannot silently reintroduce item 6.
 
+`dispatch-reviews` and `dispatch-integrator` hand the adapter `{ cwd: <run repo>, meta: { mode:
+'full' } }` (the Codex spec's orchestrator-side roles). For Cursor, `full` keeps the same argv —
+`--sandbox enabled`, never `--force` — with the run repo as workspace, and skips the scrub and the
+`sandbox.json` write of §4.2: that workspace is the user's own repository, whose control files are
+theirs, and anything written there would be committed. Only `files` sandboxes are scrubbed.
+`makeSandbox` for Cursor throws for any mode other than `files`.
+
 ### 4.2 Scrub (before spawn, before every resume, and at collect)
 
 `CONTROL_PATHS`, relative to the checkout:
