@@ -1,9 +1,10 @@
 import { codexAdapter } from './codex.mjs'
+import { cursorAdapter } from './cursor.mjs'
 
-// Maps a `--harness` name to its adapter. Adding a second harness (Gemini, OpenCode — later
-// plans) means adding one entry here; nothing else in the driver or the CLI names a harness
+// Maps a `--harness` name to its adapter. Adding a harness means adding one entry here (and its
+// name to `KNOWN_HARNESSES` in config.mjs); nothing else in the driver or the CLI names a harness
 // directly.
-const ADAPTERS = { codex: codexAdapter }
+const ADAPTERS = { codex: codexAdapter, cursor: cursorAdapter }
 
 export function getAdapter(name) {
   const adapter = ADAPTERS[name]

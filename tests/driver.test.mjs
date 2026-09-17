@@ -513,3 +513,94 @@ test('fixedRefusal is byte-identical to the enforcement refusal subagent-stop.mj
     .replaceAll('\\n', '\n')
   assert.equal(fixedRefusal('TX', 'RX'), reconstructed)
 })
+
+test('an adapter without effort support gets no effort and the session records effortIgnored', async () => {
+  const runDir = await tmpRunDir('effort-ignored')
+  const { adapter, calls, completeEnforcement } = makeStubAdapter()
+  adapter.supportsEffort = false
+  await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement, effortFor: () => 'high' }))
+  assert.equal(calls.spawn[0].effort, undefined)
+  assert.equal((await readSession(runDir, 'T1')).effortIgnored, true)
+})
+
+test('an adapter with default effort support receives effort and records no effortIgnored', async () => {
+  const runDir = await tmpRunDir('effort-kept')
+  const { adapter, calls, completeEnforcement } = makeStubAdapter()
+  await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement, effortFor: () => 'high' }))
+  assert.equal(calls.spawn[0].effort, 'high')
+  assert.equal('effortIgnored' in (await readSession(runDir, 'T1')), false)
+})
+
+test('readResult receives the stream path and runs only after the handle has flushed', async () => {
+  const runDir = await tmpRunDir('flushed')
+  const { adapter, calls, completeEnforcement } = makeStubAdapter()
+  let flushed = false
+  const spawn = adapter.spawn
+  adapter.spawn = async (opts) => {
+    const handle = await spawn(opts)
+    handle.flushed = new Promise((resolve) => setTimeout(() => { flushed = true; resolve() }, 30))
+    return handle
+  }
+  const readResult = adapter.readResult
+  adapter.readResult = async (opts) => {
+    assert.equal(flushed, true, 'readResult ran before the stream flushed')
+    return readResult(opts)
+  }
+  await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement }))
+  assert.equal(calls.readResult[0].streamPath, path.join(runDir, 'sessions', 'T1.stream.jsonl'))
+})
+
+test('an adapter with cleanupOnResult removes a finished task\'s sandbox and records it; an orphan keeps its sandbox', async () => {
+  const runDir = await tmpRunDir('cleanup-on-result')
+  const { adapter, completeEnforcement } = makeStubAdapter()
+  const cleaned = []
+  adapter.cleanupOnResult = true
+  adapter.cleanup = async ({ sandbox }) => { cleaned.push(sandbox.cwd) }
+  await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement }))
+  assert.deepEqual(cleaned, ['/cwd/T1'])
+  assert.equal((await readSession(runDir, 'T1')).sandboxRemoved, true)
+
+  const orphanDir = await tmpRunDir('cleanup-orphan')
+  const stub = makeStubAdapter({ result: null })
+  const kept = []
+  stub.adapter.cleanupOnResult = true
+  stub.adapter.cleanup = async ({ sandbox }) => { kept.push(sandbox.cwd) }
+  await dispatchPhase(baseArgs(orphanDir, { adapter: stub.adapter, completeEnforcement: stub.completeEnforcement }))
+  assert.deepEqual(kept, [])
+  assert.equal('sandboxRemoved' in (await readSession(orphanDir, 'T1')), false)
+})
+
+test('a failing cleanup never changes a finished task\'s recorded result', async () => {
+  const runDir = await tmpRunDir('cleanup-throws')
+  const { adapter, completeEnforcement } = makeStubAdapter()
+  adapter.cleanupOnResult = true
+  adapter.cleanup = async () => { throw new Error('EBUSY') }
+  const out = await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement }))
+  assert.equal(out.results[0].status, 'done')
+  const session = await readSession(runDir, 'T1')
+  assert.equal(session.state, 'done')
+  assert.equal('sandboxRemoved' in session, false)
+})
+
+// Review finding 4: only a `done` task's sandbox is removed; a blocked or failed task may be
+// unblocked through `message`, which resumes in that sandbox.
+test('cleanupOnResult keeps the sandbox of a blocked or failed task', async () => {
+  for (const status of ['blocked', 'failed']) {
+    const runDir = await tmpRunDir(`cleanup-${status}`)
+    const { adapter, completeEnforcement } = makeStubAdapter({ result: { ...DONE, status } })
+    const cleaned = []
+    adapter.cleanupOnResult = true
+    adapter.cleanup = async ({ sandbox }) => { cleaned.push(sandbox.cwd) }
+    await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement }))
+    assert.deepEqual(cleaned, [], status)
+    assert.equal('sandboxRemoved' in (await readSession(runDir, 'T1')), false, status)
+  }
+  const runDir = await tmpRunDir('cleanup-enforcement-failed')
+  const { adapter, completeEnforcement } = makeStubAdapter({ enforcementCodes: [3, 3] })
+  const cleaned = []
+  adapter.cleanupOnResult = true
+  adapter.cleanup = async ({ sandbox }) => { cleaned.push(sandbox.cwd) }
+  await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement }))
+  assert.equal((await readSession(runDir, 'T1')).state, 'failed')
+  assert.deepEqual(cleaned, [])
+})

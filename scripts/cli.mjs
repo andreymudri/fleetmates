@@ -118,12 +118,13 @@ function resolveHarness(flags, io) {
 }
 
 // The harness sandbox/network/timeout/tierModels for one run, resolved from `harnesses.<name>.*`
-// with the same defaults the codex adapter assumes when a field is unset: an isolated `clone`,
-// network off, a 30-minute timeout, and no tier→model map.
-export function harnessSettings(resolved, harnessName) {
+// with safe defaults when a field is unset: the adapter's own default sandbox (an isolated `clone`
+// for codex, the git-less `files` checkout for cursor), network off, a 30-minute timeout, and no
+// tier→model map.
+export function harnessSettings(resolved, harnessName, defaultSandbox = 'clone') {
   const entry = (resolved.harnesses && resolved.harnesses[harnessName]) || {}
   return {
-    sandboxMode: entry.sandbox ?? 'clone',
+    sandboxMode: entry.sandbox ?? defaultSandbox,
     network: entry.network ?? false,
     timeoutMinutes: entry.timeoutMinutes ?? 30,
     tierModels: entry.tierModels ?? {},
@@ -3428,8 +3429,9 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const probe = await adapter.probe({})
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
+    if (probe.warning) io.out(`warning: ${probe.warning}`)
 
-    const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name)
+    const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
 
     const baseBranch = flags.base === true ? '' : (flags.base ?? '')
     const planMarkdown = await planAtAnchor(root, planPath, flags, io)
@@ -3529,8 +3531,9 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const probe = await adapter.probe({})
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
+    if (probe.warning) io.out(`warning: ${probe.warning}`)
 
-    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name)
+    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
     const persona = await personaFor('reviewer')
     const reviewSessionsDir = path.join(runDir(root, runId), 'sessions')
@@ -3610,8 +3613,9 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!adapter) return 2
     const probe = await adapter.probe({})
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
+    if (probe.warning) io.out(`warning: ${probe.warning}`)
 
-    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name)
+    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
     const persona = await personaFor('integrator')
     const integratorSessionsDir = path.join(runDir(root, runId), 'sessions')
@@ -3649,6 +3653,10 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`task ${printable(flags.task)} has no session id to resume`)
       return 4
     }
+    if (record.sandboxRemoved === true) {
+      io.out(`task ${printable(flags.task)} already finished and its sandbox was removed: its work is on its task branch; dispatch a new task to change it`)
+      return 4
+    }
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
     const adapter = resolveHarness(flags, io)
@@ -3661,7 +3669,7 @@ export async function runCli(argv, io = { out: console.log }) {
       killProcess({ pid: record.pid }, 'SIGTERM')
     }
 
-    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name)
+    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
     const base = path.join(messageSessionsDir, `${flags.task}`)
     const handle = await adapter.resume({
@@ -3676,6 +3684,7 @@ export async function runCli(argv, io = { out: console.log }) {
     })
     await handle.sessionId
     await waitForExit(handle.child, timeoutMs)
+    await handle.flushed
     io.out(`resumed ${printable(flags.task)}`)
     return 0
   }

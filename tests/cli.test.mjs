@@ -2157,7 +2157,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 108, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
+const CENSUS_EXPECTED = { 'cli.mjs': 109, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2357,10 +2357,14 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **126 lines: 108 in `cli.mjs`, 6 in
+// can no longer drift away from the code unnoticed. It came to **127 lines: 109 in `cli.mjs`, 6 in
 // `reviews.mjs`, 6 in `digest.mjs`, 6 in `finish.mjs`**.
 //
-// The most recent move was the T7 headless-dispatch commands, which added **22 sites, all in
+// The most recent move was **1 site in `cli.mjs`**: `message`'s sandbox-removed refusal, which wraps
+// the `--task` argv value exactly like its no-session and no-session-id neighbours (Cursor adapter,
+// a finished task whose checkout the driver removed).
+//
+// The move before that was the T7 headless-dispatch commands, which added **22 sites, all in
 // `cli.mjs`**, named here as a GROUP and not row-driven for the same reason `collect-reviews`'s
 // path sentences are (see the group below): every one wraps a value that is either off this CLI's
 // own argv (`--run`, `--task`, `--phase`) or read out of `status.json`/`plan.json`/a session
@@ -15213,6 +15217,22 @@ test('message with a session record carrying no session id is refused with exit 
   })
 })
 
+// A finished Cursor task's checkout is removed once its result is recorded (driver `cleanupOnResult`),
+// so there is no workspace left to resume into: refused before any harness is resolved or spawned.
+test('message on a task whose sandbox was removed is refused with exit 4', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    const sessionsDir = path.join(root, '.fleetmates', 'r1', 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFile(path.join(sessionsDir, 'T1.json'), JSON.stringify({
+      taskId: 'T1', sessionId: 's1', state: 'done', sandboxRemoved: true, sandbox: { cwd: '/gone', meta: { mode: 'files' } },
+    }))
+    lines.length = 0
+    const code = await runCli(['message', '--run', 'r1', '--task', 'T1', '--text', 'hi', '--harness', 'cursor', '--root', root], io)
+    assert.equal(code, 4, lines.join('\n'))
+    assert.match(lines.join('\n'), /task T1 already finished and its sandbox was removed/)
+  })
+})
+
 // message SIGTERMs a live recorded process group before resuming. The child is spawned detached so
 // its pgid equals its pid, which is what the driver's `killProcess(-pid)` targets. Removing the
 // SIGTERM from the message handler leaves the child running until its own `sleep` exits, so the
@@ -15327,6 +15347,64 @@ test('harnessSettings falls back to the safe defaults when the config sets nothi
 
 // And when the config DOES set them, harnessSettings reads the configured values through — so the
 // defaults above are genuine fallbacks, not values it always returns.
+test('harnessSettings takes the adapter default sandbox when the config sets none', () => {
+  assert.equal(harnessSettings({ harnesses: {} }, 'cursor', 'files').sandboxMode, 'files')
+  assert.equal(harnessSettings({ harnesses: {} }, 'codex', 'clone').sandboxMode, 'clone')
+})
+
+// dispatch-integrator on --harness cursor, through a logged-in fake `cursor-agent`: the probe's
+// warning (a global hooks.json) is printed and dispatch continues; the integrator runs in the
+// user's repo (`full`), so its prompt carries no files-sandbox instruction ("do not run git").
+test('dispatch-integrator --harness cursor prints the probe warning and sends no files-sandbox instruction', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const plan = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), 'utf8'))
+    const derived = await derive(root, 'r1', { plan: plan.planPath })
+    const statusPath = path.join(root, '.fleetmates', 'r1', 'status.json')
+    const status = JSON.parse(await readFile(statusPath, 'utf8'))
+    status.gates = { [String(derived.currentPhase)]: { verdict: 'PASS', phaseName: 'default', phase: derived.currentPhase } }
+    await writeFile(statusPath, JSON.stringify(status))
+
+    const bin = await mkdtemp(path.join(tmpdir(), 'fm-fakecursor-'))
+    const home = await mkdtemp(path.join(tmpdir(), 'fm-cursor-home-'))
+    const seen = path.join(bin, 'seen.json')
+    await writeFile(path.join(home, 'hooks.json'), '{}')
+    await writeFile(path.join(bin, 'cursor-agent'), `#!/usr/bin/env node
+const fs = require('node:fs')
+const argv = process.argv.slice(2)
+if (argv[0] === 'status') { process.stdout.write('Logged in as x\\n'); process.exit(0) }
+let input = ''
+process.stdin.on('data', (c) => { input += c })
+process.stdin.on('end', () => {
+  fs.writeFileSync(${JSON.stringify(seen)}, JSON.stringify({ argv, input }))
+  process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 's' }) + '\\n')
+  process.exit(0)
+})
+`)
+    await chmod(path.join(bin, 'cursor-agent'), 0o755)
+    const savedPath = process.env.PATH
+    const savedHome = process.env.CURSOR_CONFIG_DIR
+    lines.length = 0
+    try {
+      process.env.PATH = `${bin}${path.delimiter}${savedPath}`
+      process.env.CURSOR_CONFIG_DIR = home
+      const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'default', '--harness', 'cursor', '--root', root], io)
+      assert.equal(code, 0, lines.join('\n'))
+      assert.match(lines.join('\n'), /^warning: .*hooks\.json runs outside the sandbox/m)
+      assert.match(lines.join('\n'), /dispatched integrator/)
+      const { argv, input } = JSON.parse(await readFile(seen, 'utf8'))
+      assert.equal(argv[argv.indexOf('--workspace') + 1], root)
+      assert.doesNotMatch(input, /no git repository/)
+    } finally {
+      process.env.PATH = savedPath
+      if (savedHome === undefined) delete process.env.CURSOR_CONFIG_DIR
+      else process.env.CURSOR_CONFIG_DIR = savedHome
+      await rm(bin, { recursive: true, force: true })
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+})
+
 test('harnessSettings reads configured harness values when present', () => {
   const settings = harnessSettings(
     { harnesses: { codex: { sandbox: 'full', network: true, timeoutMinutes: 5, tierModels: { mid: 'm' } } } },

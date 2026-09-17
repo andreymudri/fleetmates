@@ -114,6 +114,45 @@ never unsandboxed. A git-less `files` fallback and `full` (`danger-full-access`)
 selectable. The orchestrator itself needs full access to write the run repo's git, and exits with
 a fixable message if it is started inside a sandbox. Network access is off by default.
 
+## Running on Cursor
+
+Cursor can run a fleet's teammates. The orchestrator stays whichever harness you drive — Claude
+Code or Codex — and passes `--harness cursor` to `dispatch`, `dispatch-reviews`,
+`dispatch-integrator` and `message`:
+
+    cursor-agent login
+
+### Sandbox
+
+Cursor runs git itself, outside its own sandbox, so a repository inside a teammate's workspace is a
+way out of it. Cursor teammates therefore only ever run in a git-less `files` checkout
+(`harnesses.cursor.sandbox` accepts nothing else), always with `--sandbox enabled` and never with
+`--force`:
+
+- A Cursor teammate cannot commit. When it finishes, fleetmates commits its checkout as **one
+  commit** on the task branch, without ever pointing git at the checkout.
+- Checkouts live under `$XDG_CACHE_HOME/fleetmates/cursor/` (default `~/.cache`), outside the
+  repository: Cursor runs the `.cursor/hooks.json` of any git repository that encloses its
+  workspace. `dispatch` refuses if that cache directory is itself inside a git repository.
+  A checkout is removed as soon as its task's result is recorded; an orphaned task keeps its
+  checkout so the task can be resumed.
+- `.cursor/{sandbox,hooks,cli,mcp,worktrees}.json`, `.cursor/hooks/`, `.claude/settings*.json` and
+  `.vscode/` are removed from the checkout before every session. A teammate that changes one of
+  them is orphaned, and none of those paths ever changes on the task branch.
+- Network access is off by default; `harnesses.cursor.network = true` turns it on.
+- `dispatch` refuses to start while a global `~/.cursor/sandbox.json` widens every sandbox (extra
+  writable paths, a non-default `type`, or a network default of `allow`), and warns when a global
+  `~/.cursor/hooks.json` exists, because those hooks run outside the sandbox.
+
+### Models and effort
+
+Cursor has no separate effort setting: effort is part of the model id. Map each tier to the variant
+you want in `harnesses.cursor.tierModels`, for example
+`{ "cheap": "composer-2.5", "mid": "claude-sonnet-5-thinking-high", "capable": "claude-opus-5-high" }`
+(`cursor-agent models` lists them). An unmapped tier runs `--model auto`, the only model a free
+Cursor plan accepts. `agents.<role>.effort` is ignored for Cursor teammates, and each
+session record says so with `effortIgnored: true`.
+
 ## Coming from claude-teammates
 
 fleetmates is claude-teammates, renamed. To move over:

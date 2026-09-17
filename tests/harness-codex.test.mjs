@@ -144,7 +144,7 @@ test('getAdapter resolves the codex adapter, and HARNESS_NAMES lists it', () => 
 })
 
 test('getAdapter refuses an unknown harness, naming the known ones', () => {
-  assert.throws(() => getAdapter('bogus'), /unknown harness: bogus \(known: codex\)/)
+  assert.throws(() => getAdapter('bogus'), /unknown harness: bogus \(known: codex, cursor\)/)
 })
 
 // --- argv builders (spec §5), pure -------------------------------------------------------
@@ -608,13 +608,6 @@ test('collectCodex (clone mode) fetches the task branch from the sandbox git dir
   }
 })
 
-test('collectCodex (files mode) is a no-op — nothing to fetch, the driver commits the diff itself', async () => {
-  let called = false
-  const spy = async (args, opts) => { called = true; return defaultGitExec(args, opts) }
-  await collectCodex(spy, { runRepo: '/irrelevant', sandbox: { meta: { mode: 'files' } }, branch: 'fleetmates/r1/T9' })
-  assert.equal(called, false)
-})
-
 // --- probe ---------------------------------------------------------------------------------
 
 test('probe returns ok:false with the codex login fix when the fake reports Not logged in', { timeout: 5000 }, async () => {
@@ -653,5 +646,27 @@ test('probe returns ok:false when the fake reports logged in but CODEX_HOME is n
   } finally {
     await chmod(home, 0o700).catch(() => {})
     await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('collectCodex (files mode) commits the teammate\'s edits on the task branch', async () => {
+  const runRepo = await mkdtemp(path.join(tmpdir(), 'tm-codex-run-'))
+  try {
+    await initRepo(runRepo)
+    const sandbox = await makeCodexSandbox(defaultGitExec, {
+      runRepo, runBranch: 'main', runId: 'r1', taskId: 'T9', mode: 'files',
+    })
+    await writeFile(path.join(sandbox.cwd, 'base.txt'), 'edited\n', 'utf8')
+    await writeFile(path.join(sandbox.cwd, 'new.txt'), 'new\n', 'utf8')
+    await collectCodex(defaultGitExec, { runRepo, sandbox, branch: 'fleetmates/r1/T9' })
+    const log = await defaultGitExec(['log', '--format=%s', 'main..fleetmates/r1/T9'], runRepo)
+    assert.equal(log.code, 0, log.stderr)
+    assert.equal(log.stdout.trim().split('\n').length, 1)
+    const edited = await defaultGitExec(['show', 'fleetmates/r1/T9:base.txt'], runRepo)
+    assert.equal(edited.stdout, 'edited\n')
+    const added = await defaultGitExec(['show', 'fleetmates/r1/T9:new.txt'], runRepo)
+    assert.equal(added.stdout, 'new\n')
+  } finally {
+    await rm(runRepo, { recursive: true, force: true })
   }
 })

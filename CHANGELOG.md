@@ -8,6 +8,14 @@
   commands: `dispatch`, `dispatch-reviews`, `dispatch-integrator`, `message`, `sessions`.
 - `harnesses.codex.*` config: `sandbox` (`clone` default, `files`, `full`), `network`,
   `timeoutMinutes`, `tierModels`.
+- A Cursor adapter (`--harness cursor`): teammates run in a scrubbed, git-less checkout that the
+  host commits, with `--sandbox enabled` and never `--force`.
+- `harnesses.cursor.*` config: `sandbox` (`files` only), `network`, `timeoutMinutes`, `tierModels`.
+
+### Fixed
+
+- Codex `files` sandbox: the teammate's edits were never committed to its task branch. The host
+  now commits the checkout through the same hardened path the Cursor adapter uses.
 
 ## v2.0.1
 

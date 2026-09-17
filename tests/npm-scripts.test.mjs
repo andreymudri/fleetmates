@@ -20,7 +20,7 @@ test('npm test drives the quiet reporter, and the reporter exists', async () => 
 // is asserted rather than remembered.
 test('no npm script relies on a shell pipeline', async () => {
   const s = await scripts()
-  for (const name of ['test', 'test:verbose', 'test:e2e:codex']) {
+  for (const name of ['test', 'test:verbose', 'test:e2e:codex', 'test:e2e:cursor']) {
     assert.doesNotMatch(s[name], /[|>]|&&|\bgrep\b/, `${name} must not depend on shell features cmd.exe lacks`)
   }
 })
@@ -55,4 +55,11 @@ test('test:verbose names no reporter, so it keeps the full spec output', async (
   const s = await scripts()
   assert.ok(s['test:verbose'], 'test:verbose must exist')
   assert.doesNotMatch(s['test:verbose'], /--test-reporter/)
+})
+
+test('test:e2e:cursor opts into the e2e Cursor suite and runs it by its own file', async () => {
+  const s = await scripts()
+  assert.match(s['test:e2e:cursor'], /\bFLEETMATES_E2E=1\b/, 'test:e2e:cursor must set FLEETMATES_E2E=1')
+  assert.match(s['test:e2e:cursor'], /\bnode --test tests\/e2e-cursor\.test\.mjs\b/)
+  assert.ok(existsSync(new URL('tests/e2e-cursor.test.mjs', root)), 'the file test:e2e:cursor names must exist')
 })

@@ -8,10 +8,10 @@ description: Use when changing how the fleet runs — parallelism, or model tier
 ## What `config` covers, and what it does not
 
 `config` manages the **ergonomics** keys only: `maxParallel`, `caveman`, and
-`agents.<role>.tier`/`agents.<role>.effort`. Those, plus the per-harness `harnesses.codex.*` keys
+`agents.<role>.tier`/`agents.<role>.effort`. Those, plus the per-harness `harnesses.<name>.*` keys
 documented under **Harness settings** below, are the keys `config set` accepts, in either
 layer, subject to the enforcement rule below. `config unset` removes only the ergonomics
-keys; every `harnesses.codex.*` key is rejected there with `unknown config key` and exit 2,
+keys; every `harnesses.<name>.*` key is rejected there with `unknown config key` and exit 2,
 so a harness key is cleared by deleting its line from the layer file directly.
 
 `fleetmates.gate.json` is tracked and can also hold the **enforcement** keys `phases`, `lens`, and
@@ -105,14 +105,23 @@ write at all — those are hand-edited by design, not because this skill's rule 
 ## Harness settings
 
 A run driven on a harness other than Claude Code reads its per-harness settings from
-`harnesses.<name>.<field>`, and `codex` is the one harness this plugin knows. Four fields
-configure a Codex run:
+`harnesses.<name>.<field>`. This plugin knows two harnesses, `codex` and `cursor`, and each takes
+the same four fields. For a Codex run:
 
 - **`harnesses.codex.sandbox`** — the sandbox each teammate runs in: `clone` (the default),
   `files`, or `full`.
 - **`harnesses.codex.network`** — a boolean, whether the run may reach the network.
 - **`harnesses.codex.timeoutMinutes`** — an integer minute budget, at least `1`.
 - **`harnesses.codex.tierModels`** — a map from tier name to the Codex model to run at that tier.
+
+For a Cursor run, the fields mean the same with two differences:
+
+- **`harnesses.cursor.sandbox`** accepts only `files`, which is also the default. `clone` and
+  `full` are rejected: Cursor runs git outside its sandbox, so no layout that keeps a repository in
+  the workspace is safe.
+- **`harnesses.cursor.tierModels`** is where effort is chosen, because Cursor bakes effort into the
+  model id (`claude-opus-5-low`, `claude-opus-5-high`). `agents.<role>.effort` is ignored for
+  Cursor teammates.
 
 Set the three scalar fields through the CLI, in either layer, the same way as any ergonomics key:
 
