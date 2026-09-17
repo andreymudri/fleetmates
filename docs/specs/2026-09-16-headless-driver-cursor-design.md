@@ -55,6 +55,11 @@ never the model's report.
     `.claude/settings.json` `SessionStart`/`Stop` hook did not fire in this run; Cursor's docs say
     Claude Code hooks are read, so this is treated as a live vector anyway.
 13. **A git-less directory works.** The agent edits files normally with no repository present.
+14. **A workspace nested in a repository stays confined.** Workspace
+    `<repo>/.fleetmates/r/files/T` (gitignored): shell writes to `<repo>/`, `<repo>/.git/` and the
+    sibling `<repo>/.fleetmates/r/` were denied with `Permission denied`, an edit-tool write to
+    `<repo>/` was `Rejected:`, and an in-workspace write succeeded. Measured during implementation,
+    before the checkout location was relied on.
 
 ## 2. Why this layout
 
