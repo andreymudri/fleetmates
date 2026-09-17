@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
 import { defaultGitExec } from '../scripts/git.mjs'
+import { getAdapter, HARNESS_NAMES } from '../scripts/harnesses/index.mjs'
 import {
   buildSpawnArgv, buildResumeArgv, assertSafeArgv, spawnCursor, resumeCursor, readResult,
   readUsage, probe, makeCursorSandbox, collectCursor, cleanup, cursorAdapter, RESULT_INSTRUCTION,
@@ -360,4 +361,9 @@ test('cursorAdapter exposes the adapter interface and its Cursor defaults', () =
   assert.equal(cursorAdapter.name, 'cursor')
   assert.equal(cursorAdapter.defaultSandbox, 'files')
   assert.equal(cursorAdapter.supportsEffort, false)
+})
+
+test('the registry resolves cursor', () => {
+  assert.equal(getAdapter('cursor'), cursorAdapter)
+  assert.ok(HARNESS_NAMES.includes('cursor'))
 })

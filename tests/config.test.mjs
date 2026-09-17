@@ -981,7 +981,7 @@ test('loadGateConfig is left alone: it is still the plain reader', async () => {
 // `config set` reaches the same field rules through validateKey.
 test('harness vocabulary constants name the sandboxes and the known harnesses', () => {
   assert.deepEqual(SANDBOXES, ['clone', 'files', 'full'])
-  assert.deepEqual(KNOWN_HARNESSES, ['codex'])
+  assert.deepEqual(KNOWN_HARNESSES, ['codex', 'cursor'])
 })
 
 test('a well-formed harnesses.codex block passes both layers unchanged', () => {
@@ -1098,4 +1098,32 @@ test('loadConfig exposes an empty harnesses map when neither layer sets one', as
     const { resolved } = await loadConfig(root)
     assert.deepEqual(resolved.harnesses, {})
   })
+})
+
+test('a well-formed harnesses.cursor block passes both layers, and config set reaches its fields', () => {
+  const block = {
+    harnesses: {
+      cursor: { sandbox: 'files', network: true, timeoutMinutes: 45, tierModels: { capable: 'claude-opus-5-high' } },
+    },
+  }
+  assert.equal(validateLocal(block), block)
+  assert.equal(validateGate(block), block)
+  assert.equal(validateKey('harnesses.cursor.sandbox', 'files'), 'files')
+  assert.equal(validateKey('harnesses.cursor.network', false), false)
+  assert.equal(validateKey('harnesses.cursor.timeoutMinutes', 5), 5)
+})
+
+test('harnesses.cursor.sandbox refuses clone and full with the reason, while codex still accepts them', () => {
+  for (const mode of ['clone', 'full']) {
+    assert.throws(
+      () => validateKey('harnesses.cursor.sandbox', mode),
+      (err) => err instanceof ConfigError
+        && err.message.includes('Cursor runs git outside its sandbox; only "files" is supported'),
+    )
+    assert.throws(
+      () => validateLocal({ harnesses: { cursor: { sandbox: mode } } }),
+      (err) => err instanceof ConfigError && err.message.includes('only "files" is supported'),
+    )
+    assert.equal(validateKey('harnesses.codex.sandbox', mode), mode)
+  }
 })

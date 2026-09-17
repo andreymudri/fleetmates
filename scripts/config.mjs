@@ -10,7 +10,10 @@ export const LOCAL_FILE = NAMES.localFile
 export const CAVEMAN_LEVELS = ['lite', 'full', 'ultra']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const SANDBOXES = ['clone', 'files', 'full']
-export const KNOWN_HARNESSES = ['codex']
+export const KNOWN_HARNESSES = ['codex', 'cursor']
+// The sandboxes each harness may run teammates in. Cursor runs git outside its own sandbox, so
+// only its git-less `files` checkout is safe (docs/specs/2026-09-16-headless-driver-cursor-design.md §2).
+export const HARNESS_SANDBOXES = { codex: SANDBOXES, cursor: ['files'] }
 export const ROLES = ['implementer', 'reviewer', 'integrator']
 
 // Keys that decide a verdict. They may appear only in the tracked manifest: the local file
@@ -118,8 +121,11 @@ export function validateHarnesses(harnesses, file) {
         throw new ConfigError(`unknown key in ${file}: harnesses.${name}.${field}`)
       }
     }
-    if (entry.sandbox !== undefined && !SANDBOXES.includes(entry.sandbox)) {
-      throw new ConfigError(`harnesses.${name}.sandbox must be one of ${SANDBOXES.join(', ')}`)
+    if (entry.sandbox !== undefined && !HARNESS_SANDBOXES[name].includes(entry.sandbox)) {
+      if (name === 'cursor') {
+        throw new ConfigError('harnesses.cursor.sandbox: Cursor runs git outside its sandbox; only "files" is supported')
+      }
+      throw new ConfigError(`harnesses.${name}.sandbox must be one of ${HARNESS_SANDBOXES[name].join(', ')}`)
     }
     if (entry.network !== undefined && typeof entry.network !== 'boolean') {
       throw new ConfigError(`harnesses.${name}.network must be a boolean`)
