@@ -8,7 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { RESULT_SCHEMA } from '../result-schema.mjs'
 import { fetchTaskBranch } from '../git.mjs'
-import { makeFilesSandbox, commitFilesTree } from './files-sandbox.mjs'
+import { makeFilesSandbox, commitFilesTree, FILES_PREAMBLE } from './files-sandbox.mjs'
 
 // `-s <flag>` per sandbox mode. `full` is `danger-full-access` — never chosen automatically
 // (spec "Out of Scope"), only selectable through `harnesses.codex.sandbox = "full"`.
@@ -172,6 +172,12 @@ export async function cleanup({ sandbox }) {
   if (sandbox.meta.gitdir) await rm(sandbox.meta.gitdir, { recursive: true, force: true })
 }
 
+// A `files` checkout has no repository of its own — git there resolves the run repo, whose .git the
+// sandbox denies — so the persona's git steps are overridden up front, exactly as for Cursor.
+function withPreamble(sandbox, text) {
+  return sandbox.meta.mode === 'files' ? `${FILES_PREAMBLE}${text}` : text
+}
+
 // Writes `RESULT_SCHEMA` once per task, before the first spawn (a resume reuses the file a
 // spawn already wrote).
 export async function spawnCodex({
@@ -179,14 +185,14 @@ export async function spawnCodex({
 }) {
   await writeFile(schemaPath, JSON.stringify(RESULT_SCHEMA))
   const argv = buildSpawnArgv({ sandbox, model, effort, network, schemaPath, resultPath })
-  return run(argv, { promptText: prompt, streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd })
+  return run(argv, { promptText: withPreamble(sandbox, prompt), streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd })
 }
 
 export async function resumeCodex({
   sandbox, sessionId, message, model, effort, network, schemaPath, resultPath, streamPath, errPath,
 }) {
   const argv = buildResumeArgv({ sandbox, sessionId, model, effort, network, schemaPath, resultPath })
-  return run(argv, { promptText: message, streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd })
+  return run(argv, { promptText: withPreamble(sandbox, message), streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd })
 }
 
 // Reads and parses the `-o` result file. `null` on ENOENT or a parse error — never a throw —

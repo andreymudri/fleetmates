@@ -10,6 +10,19 @@ import { mkdir, mkdtemp, rm, lstat, readdir, readFile, readlink, symlink, writeF
 import os from 'node:os'
 import path from 'node:path'
 
+// Sent BEFORE the persona and brief to a teammate in a files checkout, by every adapter that offers
+// one (Cursor always, Codex in `files` mode). The implementer persona assumes a git
+// worktree — create the task branch, run `locate`, commit, prove the commit with `git log`, run
+// `complete` — none of which a git-less checkout can do, and a model told both things with no
+// precedence can reasonably give up and report `failed`. This names each cancelled step and says
+// it overrides them; RESULT_INSTRUCTION then closes the prompt with the result contract.
+export const FILES_PREAMBLE = 'READ FIRST — this overrides the instructions that follow. You are running in a '
+  + 'plain directory with NO git repository and NO worktree. Skip every step below that uses git or a '
+  + 'worktree: do not create or check out a branch, do not run `locate` or `complete`, do not commit, and do '
+  + 'not try to prove a commit with `git log` or `git diff`. Edit the files your task names, run the '
+  + 'project\'s tests if you can, and report. The host commits your workspace to the task branch and runs '
+  + 'the checks itself; a missing commit is never a reason to report `blocked` or `failed`.\n\n---\n\n'
+
 // Workspace files a harness reads as configuration — hooks that run outside the sandbox, sandbox
 // policy that widens the next session, MCP and editor config. A teammate must never add, change or
 // delete these: they are scrubbed from the checkout and taken from the run branch at commit time.

@@ -9,6 +9,7 @@ import {
   buildSpawnArgv, buildResumeArgv, spawnCodex, resumeCodex,
   readResult, readUsage, probe, makeCodexSandbox, collectCodex, codexAdapter,
 } from '../scripts/harnesses/codex.mjs'
+import { FILES_PREAMBLE } from '../scripts/harnesses/files-sandbox.mjs'
 import { getAdapter, HARNESS_NAMES } from '../scripts/harnesses/index.mjs'
 
 // Fake harness binaries here are `#!/usr/bin/env node` scripts on PATH, which Windows cannot execute
@@ -60,6 +61,7 @@ let buffered = ''
 process.stdin.setEncoding('utf8')
 process.stdin.on('data', (chunk) => { buffered += chunk })
 process.stdin.on('end', () => {
+  if (resultPath) writeFileSync(\`\${resultPath}.stdin.txt\`, buffered)
   process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: threadId }) + '\\n')
   for (let i = 0; i < turns; i++) {
     process.stdout.write(JSON.stringify({
@@ -672,5 +674,37 @@ test('collectCodex (files mode) commits the teammate\'s edits on the task branch
     assert.equal(added.stdout, 'new\n')
   } finally {
     await rm(runRepo, { recursive: true, force: true })
+  }
+})
+
+// A `files` checkout has no repository of its own: git run inside it walks up to the RUN repo, whose
+// .git the workspace-write sandbox denies (spec 2026-09-14 §2 item 8). The implementer persona's
+// branch/locate/commit/proof/complete steps cannot succeed there, so the prompt must lead with the
+// override — the same one the Cursor adapter sends. A clone sandbox keeps git and gets no override.
+test('spawnCodex and resumeCodex lead a files-mode prompt with FILES_PREAMBLE, and a clone prompt without it', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
+  const sessionsDir = await mkdtemp(path.join(tmpdir(), 'tm-codex-sessions-'))
+  const cwd = await mkdtemp(path.join(tmpdir(), 'tm-codex-files-'))
+  try {
+    const paths = (name) => ({
+      schemaPath: path.join(sessionsDir, `${name}.schema.json`),
+      resultPath: path.join(sessionsDir, `${name}.json`),
+      streamPath: path.join(sessionsDir, `${name}.jsonl`),
+      errPath: path.join(sessionsDir, `${name}.err`),
+    })
+    const stdinOf = (name) => readFile(path.join(sessionsDir, `${name}.json.stdin.txt`), 'utf8')
+    const files = { cwd, meta: { mode: 'files' } }
+    let h = await spawnCodex({ sandbox: files, prompt: 'do the task', ...paths('F1') })
+    await once(h.child, 'close')
+    assert.equal(await stdinOf('F1'), `${FILES_PREAMBLE}do the task`)
+    h = await resumeCodex({ sandbox: files, sessionId: 's', message: 'fix it', ...paths('F2') })
+    await once(h.child, 'close')
+    assert.equal(await stdinOf('F2'), `${FILES_PREAMBLE}fix it`)
+    const clone = { cwd, meta: { mode: 'clone', gitdir: cwd } }
+    h = await spawnCodex({ sandbox: clone, prompt: 'do the task', ...paths('C1') })
+    await once(h.child, 'close')
+    assert.equal(await stdinOf('C1'), 'do the task')
+  } finally {
+    await rm(sessionsDir, { recursive: true, force: true })
+    await rm(cwd, { recursive: true, force: true })
   }
 })
