@@ -7,6 +7,9 @@ You write a plan. The plugin splits it into phases of tasks whose file sets don'
 dispatches one teammate per task, and refuses to move to the next phase until a gate — computed
 from git, not from anything an agent reported — says the phase is clean.
 
+Teammates run as Claude Code subagents, or headless through the Codex CLI or the Cursor CLI — see
+[Running on Codex](#running-on-codex) and [Running on Cursor](#running-on-cursor).
+
 ```
 phase 1   T1  T2  T3        3 worktrees, in parallel
   gate    merge · test · fileset · ownership · review
@@ -114,6 +117,15 @@ never unsandboxed. A git-less `files` fallback and `full` (`danger-full-access`)
 selectable. The orchestrator itself needs full access to write the run repo's git, and exits with
 a fixable message if it is started inside a sandbox. Network access is off by default.
 
+In `files` mode the teammate has no repository of its own, so:
+
+- its prompt opens with an override telling it to skip every git step of the implementer
+  instructions (task branch, `locate`, commit, commit proof, `complete`);
+- fleetmates commits the checkout as **one commit** on the task branch, byte for byte, without
+  running git in the checkout;
+- a change to `.cursor/*.json`, `.cursor/hooks/`, `.claude/settings*.json` or `.vscode/` is refused
+  (the task is orphaned, naming the paths) rather than dropped.
+
 ## Running on Cursor
 
 Cursor can run a fleet's teammates. The orchestrator stays whichever harness you drive — Claude
@@ -129,20 +141,29 @@ way out of it. Cursor teammates therefore only ever run in a git-less `files` ch
 (`harnesses.cursor.sandbox` accepts nothing else), always with `--sandbox enabled` and never with
 `--force`:
 
-- A Cursor teammate cannot commit. When it finishes, fleetmates commits its checkout as **one
-  commit** on the task branch, without ever pointing git at the checkout.
+- A Cursor teammate cannot commit. Its prompt opens with an override telling it to skip every git
+  step of the implementer instructions, and when it finishes, fleetmates commits its checkout as
+  **one commit** on the task branch, byte for byte, without ever pointing git at the checkout.
 - Checkouts live under `$XDG_CACHE_HOME/fleetmates/cursor/` (default `~/.cache`), outside the
   repository: Cursor runs the `.cursor/hooks.json` of any git repository that encloses its
   workspace. `dispatch` refuses if that cache directory is itself inside a git repository.
-  A checkout is removed as soon as its task's result is recorded; an orphaned task keeps its
-  checkout so the task can be resumed.
+  A checkout is removed once its task is recorded `done`; a blocked, failed or orphaned task keeps
+  its checkout, so `message` or a new `dispatch` can resume it there.
 - `.cursor/{sandbox,hooks,cli,mcp,worktrees}.json`, `.cursor/hooks/`, `.claude/settings*.json` and
-  `.vscode/` are removed from the checkout before every session. A teammate that changes one of
-  them is orphaned, and none of those paths ever changes on the task branch.
+  `.vscode/` are removed from the checkout before every session, without following symlinks at any
+  level. A teammate that changes one of them — or replaces `.cursor` or `.claude` with a file or a
+  symlink — is orphaned, and that checkout is refused for good; none of those paths ever changes on
+  the task branch.
 - Network access is off by default; `harnesses.cursor.network = true` turns it on.
 - `dispatch` refuses to start while a global `~/.cursor/sandbox.json` widens every sandbox (extra
   writable paths, a non-default `type`, or a network default of `allow`), and warns when a global
   `~/.cursor/hooks.json` exists, because those hooks run outside the sandbox.
+
+### Platforms
+
+The Cursor sandbox behaviour above was measured on Linux. The adapter spawns `cursor-agent`
+directly, without a shell, which a Windows `.cmd` shim does not support; running Cursor teammates on
+Windows is untested.
 
 ### Models and effort
 

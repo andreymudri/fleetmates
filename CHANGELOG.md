@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.1.0
 
 ### Added
 
@@ -16,6 +16,13 @@
 
 - Codex `files` sandbox: the teammate's edits were never committed to its task branch. The host
   now commits the checkout through the same hardened path the Cursor adapter uses.
+- `files` checkouts are written byte for byte from the tree instead of through `git checkout`, so
+  `core.autocrlf`, `eol` attributes and smudge filters no longer make every file read as edited
+  (measured on Windows CI).
+- `files` mode prompts (Codex and Cursor) open with an override for the implementer persona's git
+  steps, which cannot succeed in a checkout without a repository.
+- Codex `files` mode refuses a change to a control path (`.cursor/*.json`, `.claude/settings*.json`,
+  `.vscode/`) instead of dropping it silently.
 
 ## v2.0.1
 
