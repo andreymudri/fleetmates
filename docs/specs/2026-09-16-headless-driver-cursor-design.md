@@ -194,6 +194,11 @@ teammate content is executed. The temporary index is removed on success and fail
   that validates against `RESULT_SCHEMA`. It returns `null`
   (→ `orphaned`) for: no result line, `is_error: true`, unparsable text, schema failure. No retry.
   Nothing is written into the checkout.
+- **Prompt precedence** — in a `files` checkout the prompt is `FILES_PREAMBLE` + persona and brief +
+  `RESULT_INSTRUCTION`. The implementer persona is written for a git worktree (branch, `locate`,
+  commit, `git log` proof, `complete`); the preamble comes first, says it overrides those steps and
+  names each one, so a teammate never reports `failed` for a commit it cannot make. `full` sandboxes
+  (reviewers, integrator) get neither.
 - **Usage** — `readUsage` sums `usage` over every `type:"result"` line (a resume appends one):
   `inputTokens→input`, `cacheReadTokens→cachedInput`, `cacheWriteTokens→cacheWrite`,
   `outputTokens→output`, `reasoning: 0`. `null` when there is no result line.

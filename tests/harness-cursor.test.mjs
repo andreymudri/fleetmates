@@ -9,7 +9,7 @@ import { getAdapter, HARNESS_NAMES } from '../scripts/harnesses/index.mjs'
 import {
   buildSpawnArgv, buildResumeArgv, assertSafeArgv, spawnCursor, resumeCursor, readResult,
   readUsage, probe, makeCursorSandbox, collectCursor, cleanup, cursorAdapter, RESULT_INSTRUCTION,
-  cursorCheckoutRoot, enclosingGitRoot,
+  cursorCheckoutRoot, enclosingGitRoot, FILES_PREAMBLE,
 } from '../scripts/harnesses/cursor.mjs'
 
 // A fake `cursor-agent` on PATH (CommonJS so a shebang file with no extension runs). It:
@@ -153,7 +153,8 @@ test('spawn scrubs a files sandbox, writes a deny-network sandbox.json, closes s
   assert.equal(sandbox.meta.sandboxJson, JSON.stringify(policy))
   const seen = JSON.parse(await readFile(argvOut, 'utf8'))
   assert.deepEqual(seen.argv, buildSpawnArgv({ sandbox, model: 'm' }))
-  assert.ok(seen.input.startsWith('do it'))
+  assert.ok(seen.input.startsWith(FILES_PREAMBLE))
+  assert.ok(seen.input.includes('do it'))
   assert.ok(seen.input.endsWith(RESULT_INSTRUCTION))
 })
 
@@ -469,4 +470,15 @@ test('probe: a global sandbox.json that is valid JSON but not an object is refus
     assert.equal(res.ok, false, raw)
     assert.match(res.fix, /fix or remove/)
   }
+})
+
+// The implementer persona is written for a git worktree (commit, `locate`, prove the commit with
+// `git log`, run `complete`). A files checkout has no git, so the override must come BEFORE that
+// persona and name every step it cancels — a trailing note alone left real teammates reporting
+// `failed` for work they could not "prove".
+test('FILES_PREAMBLE cancels every git-bound step of the implementer persona by name', () => {
+  for (const step of ['git', 'worktree', 'commit', 'locate', 'complete', 'branch']) {
+    assert.match(FILES_PREAMBLE, new RegExp(step, 'i'), step)
+  }
+  assert.match(FILES_PREAMBLE, /overrides/i)
 })

@@ -59,8 +59,20 @@ export const RESULT_INSTRUCTION = '\n\n---\n'
   + '"status" ("done", "blocked" or "failed"), "branch" (string), "filesChanged" (array of '
   + 'strings), "summary" (string), "blockers" (array of strings).'
 
+// Sent BEFORE the persona and brief in a files checkout. The implementer persona assumes a git
+// worktree — create the task branch, run `locate`, commit, prove the commit with `git log`, run
+// `complete` — none of which a git-less checkout can do, and a model told both things with no
+// precedence can reasonably give up and report `failed`. This names each cancelled step and says
+// it overrides them; RESULT_INSTRUCTION then closes the prompt with the result contract.
+export const FILES_PREAMBLE = 'READ FIRST — this overrides the instructions that follow. You are running in a '
+  + 'plain directory with NO git repository and NO worktree. Skip every step below that uses git or a '
+  + 'worktree: do not create or check out a branch, do not run `locate` or `complete`, do not commit, and do '
+  + 'not try to prove a commit with `git log` or `git diff`. Edit the files your task names, run the '
+  + 'project\'s tests if you can, and report. The host commits your workspace to the task branch and runs '
+  + 'the checks itself; a missing commit is never a reason to report `blocked` or `failed`.\n\n---\n\n'
+
 function withInstruction(sandbox, text) {
-  return sandbox.meta.mode === 'files' ? `${text}${RESULT_INSTRUCTION}` : text
+  return sandbox.meta.mode === 'files' ? `${FILES_PREAMBLE}${text}${RESULT_INSTRUCTION}` : text
 }
 
 // Scrub, then write the driver's own policy (§4.2). Only a `files` checkout is touched: a `full`
