@@ -69,8 +69,10 @@ export async function scrubControlPaths(cwd) {
 // is what lets the host hash bytes it read itself instead of handing git a path in the checkout.
 function gitRun(args, { cwd, env, input }) {
   return new Promise((resolve, reject) => {
+    // stdin is a pipe only when there is a payload: a command that never reads it (rev-parse,
+    // write-tree) can exit before an empty write lands, and that write then fails with EPIPE.
     const child = spawn('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-      cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'],
+      cwd, env: { ...process.env, ...env }, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     })
     const stdout = []
     let stderr = ''
@@ -85,7 +87,12 @@ function gitRun(args, { cwd, env, input }) {
         resolve(text)
       }
     })
-    child.stdin.end(input ?? '')
+    if (child.stdin) {
+      // A git that dies early surfaces through its exit code in 'close'; the write error itself
+      // must not escape as an unhandled stream error.
+      child.stdin.on('error', () => {})
+      child.stdin.end(input)
+    }
   })
 }
 
