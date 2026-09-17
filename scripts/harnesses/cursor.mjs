@@ -6,7 +6,8 @@
 // own sandbox (§1 item 9), so no layout that leaves a repository in the workspace is safe.
 import { spawn as spawnProcess } from 'node:child_process'
 import { createWriteStream } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { validateResult } from '../result-schema.mjs'
@@ -29,10 +30,12 @@ export function assertSafeArgv(argv) {
   return argv
 }
 
+// With no `--model`, cursor-agent does not fall back to `auto`: it picks a named default, which a
+// free plan refuses at the first call ("Named models unavailable Free plans can only use Auto",
+// exit 1). An unmapped tier therefore asks for `auto` explicitly.
 function baseArgs({ sandbox, model }) {
-  const args = ['-p', '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled', '--workspace', sandbox.cwd]
-  if (model) args.push('--model', model)
-  return args
+  return ['-p', '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled', '--workspace', sandbox.cwd,
+    '--model', model || 'auto']
 }
 
 export function buildSpawnArgv({ sandbox, model }) {
@@ -133,44 +136,74 @@ export async function resumeCursor({ sandbox, sessionId, message, model, network
   return run(argv, { promptText: withInstruction(sandbox, message), streamPath, errPath, cwd: sandbox.cwd, append: true })
 }
 
-async function resultLines(streamPath) {
+async function streamEvents(streamPath) {
   let raw
   try {
     raw = await readFile(streamPath, 'utf8')
   } catch {
     return []
   }
-  const lines = []
+  const events = []
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
-    let evt
-    try { evt = JSON.parse(line) } catch { continue }
-    if (evt && evt.type === 'result') lines.push(evt)
+    try {
+      const evt = JSON.parse(line)
+      if (evt && typeof evt === 'object') events.push(evt)
+    } catch { /* a partial or foreign line */ }
   }
-  return lines
+  return events
 }
 
-function parseResultText(text) {
-  try {
-    return JSON.parse(text)
-  } catch { /* fall through to the fenced form */ }
-  const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)\n\s*```/g)]
-  if (!fences.length) return null
-  try {
-    return JSON.parse(fences[fences.length - 1][1])
-  } catch {
-    return null
+const resultLines = async (streamPath) => (await streamEvents(streamPath)).filter((e) => e.type === 'result')
+
+// Every way a model's final text can carry the result object: the whole text, the last fenced
+// json block, or a JSON object that ends the text after prose.
+function parseCandidates(text) {
+  const out = []
+  const trimmed = text.trim()
+  try { out.push(JSON.parse(trimmed)) } catch { /* not bare JSON */ }
+  const fences = [...trimmed.matchAll(/```json\s*\n([\s\S]*?)\n\s*```/g)]
+  if (fences.length) {
+    try { out.push(JSON.parse(fences[fences.length - 1][1])) } catch { /* unparsable fence */ }
   }
+  if (trimmed.endsWith('}')) {
+    for (let i = trimmed.lastIndexOf('{'); i >= 0; i = trimmed.lastIndexOf('{', i - 1)) {
+      try {
+        out.push(JSON.parse(trimmed.slice(i)))
+        break
+      } catch { /* widen to the previous brace */ }
+      if (i === 0) break
+    }
+  }
+  return out
 }
 
-// The last `result` line's text, parsed and validated. `null` — never a throw — for anything that
-// is not a valid result, because every such case is `orphaned`, not a driver crash.
+// The turn's result, validated. Cursor's `result` field is the CONCATENATION of every assistant
+// message in the turn (measured: "Creating `hello.txt`…{\"status\":…}"), so the last assistant
+// message is read first and `result` is the fallback. Only the events after the last `user` line
+// count, so a resume never returns the previous session's answer. `null` — never a throw — for
+// anything that is not a valid result: every such case is `orphaned`, not a driver crash.
 export async function readResult({ streamPath }) {
-  const lines = await resultLines(streamPath)
-  const last = lines[lines.length - 1]
-  if (!last || last.is_error || typeof last.result !== 'string') return null
-  const parsed = parseResultText(last.result.trim())
-  return validateResult(parsed) ? parsed : null
+  const events = await streamEvents(streamPath)
+  let start = 0
+  events.forEach((e, i) => { if (e.type === 'user') start = i })
+  const turn = events.slice(start)
+  const result = turn.filter((e) => e.type === 'result').pop()
+  if (!result || result.is_error) return null
+  const texts = []
+  const assistant = turn.filter((e) => e.type === 'assistant').pop()
+  const parts = assistant?.message?.content
+  if (Array.isArray(parts)) {
+    const text = parts.filter((p) => p && p.type === 'text' && typeof p.text === 'string').map((p) => p.text).join('')
+    if (text) texts.push(text)
+  }
+  if (typeof result.result === 'string') texts.push(result.result)
+  for (const text of texts) {
+    for (const candidate of parseCandidates(text)) {
+      if (validateResult(candidate)) return candidate
+    }
+  }
+  return null
 }
 
 export async function readUsage({ streamPath }) {
@@ -186,9 +219,39 @@ export async function readUsage({ streamPath }) {
   return totals
 }
 
-export async function makeCursorSandbox(git, { runRepo, runBranch, runId, taskId, mode }) {
+// Where Cursor checkouts live: outside the run repo AND outside every git repository. Cursor loads
+// `.cursor/hooks.json` from the root of the git repository enclosing its workspace and runs those
+// hooks outside the sandbox (measured: a nested workspace fired the repo root's `sessionStart`; a
+// plain parent directory's did not). Never a temp directory either — temp dirs are writable from
+// every sandbox, so one teammate could reach another's checkout.
+export function cursorCheckoutRoot({ runRepo, runId, env = process.env }) {
+  const cache = env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache')
+  const repoKey = createHash('sha256').update(path.resolve(runRepo)).digest('hex').slice(0, 16)
+  return path.join(cache, 'fleetmates', 'cursor', repoKey, runId)
+}
+
+// The nearest ancestor of `dir` holding a `.git` entry, or null. Plain filesystem checks: no git
+// command ever runs against a checkout.
+export async function enclosingGitRoot(dir) {
+  for (let cur = path.resolve(dir); ; cur = path.dirname(cur)) {
+    try {
+      await lstat(path.join(cur, '.git'))
+      return cur
+    } catch { /* keep walking */ }
+    if (path.dirname(cur) === cur) return null
+  }
+}
+
+export async function makeCursorSandbox(git, { runRepo, runBranch, runId, taskId, mode, env = process.env }) {
   if (mode !== 'files') throw new Error('Cursor runs git outside its sandbox; only "files" is supported')
-  return makeFilesSandbox(git, { runRepo, runBranch, runId, taskId })
+  const checkoutRoot = cursorCheckoutRoot({ runRepo, runId, env })
+  await mkdir(checkoutRoot, { recursive: true })
+  const repo = await enclosingGitRoot(checkoutRoot)
+  if (repo) {
+    throw new Error(`Cursor checkouts must not live inside a git repository, but ${checkoutRoot} is inside ${repo}: `
+      + 'Cursor runs that repository\'s .cursor/hooks.json outside its sandbox. Point XDG_CACHE_HOME outside it.')
+  }
+  return makeFilesSandbox(git, { runRepo, runBranch, runId, taskId, checkoutRoot })
 }
 
 // Refuses the task when the teammate touched a control path (§4.2); otherwise the host commits

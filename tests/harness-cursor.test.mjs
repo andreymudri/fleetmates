@@ -9,6 +9,7 @@ import { getAdapter, HARNESS_NAMES } from '../scripts/harnesses/index.mjs'
 import {
   buildSpawnArgv, buildResumeArgv, assertSafeArgv, spawnCursor, resumeCursor, readResult,
   readUsage, probe, makeCursorSandbox, collectCursor, cleanup, cursorAdapter, RESULT_INSTRUCTION,
+  cursorCheckoutRoot, enclosingGitRoot,
 } from '../scripts/harnesses/cursor.mjs'
 
 // A fake `cursor-agent` on PATH (CommonJS so a shebang file with no extension runs). It:
@@ -107,10 +108,10 @@ async function runToExit(handle) {
 
 // --- argv ------------------------------------------------------------------------------------
 
-test('buildSpawnArgv is exact, with and without a model', () => {
+test('buildSpawnArgv is exact, with a model and with none (explicit auto)', () => {
   const sandbox = { cwd: '/w', meta: { mode: 'files' } }
   assert.deepEqual(buildSpawnArgv({ sandbox }),
-    ['-p', '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled', '--workspace', '/w'])
+    ['-p', '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled', '--workspace', '/w', '--model', 'auto'])
   assert.deepEqual(buildSpawnArgv({ sandbox, model: 'claude-opus-5-high' }),
     ['-p', '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled', '--workspace', '/w', '--model', 'claude-opus-5-high'])
 })
@@ -233,6 +234,27 @@ test('readResult returns null for prose, is_error, no result line, a schema viol
   assert.equal(await readResult({ streamPath: path.join(scratch, 'missing.jsonl') }), null)
 })
 
+test('readResult reads the final assistant message when result concatenates the whole turn', async () => {
+  // Measured shape: `result` joins every assistant message of the turn.
+  const streamPath = await streamWith([
+    { type: 'user', message: { content: [{ type: 'text', text: 'task' }] } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'Creating hello.txt, then the JSON.' }] } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: JSON.stringify(good) }] } },
+    resultLine(`Creating hello.txt, then the JSON.${JSON.stringify(good)}`),
+  ])
+  assert.deepEqual(await readResult({ streamPath }), good)
+  const onlyResult = await streamWith([resultLine(`Creating hello.txt, then the JSON.${JSON.stringify(good)}`)])
+  assert.deepEqual(await readResult({ streamPath: onlyResult }), good)
+})
+
+test('readResult never returns a previous session\'s answer after a resume that produced none', async () => {
+  const streamPath = await streamWith([
+    { type: 'user', message: {} }, resultLine(JSON.stringify(good)),
+    { type: 'system', subtype: 'init', session_id: 's' }, { type: 'user', message: {} },
+  ])
+  assert.equal(await readResult({ streamPath }), null)
+})
+
 test('readResult uses the last result line', async () => {
   const streamPath = await streamWith([resultLine(JSON.stringify(good)), resultLine(JSON.stringify({ ...good, status: 'blocked' }))])
   assert.equal((await readResult({ streamPath })).status, 'blocked')
@@ -258,7 +280,7 @@ test('makeCursorSandbox refuses clone and full', async () => {
 test('collectCursor commits a clean checkout, keeping the driver-written sandbox.json out of the branch', { timeout: 10000 }, async () => {
   const runRepo = await freshDir('run')
   await initRepo(runRepo)
-  const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files' })
+  const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: await freshDir('cache') } })
   const sessions = await freshDir('sessions')
   await withEnv({ FAKE_CURSOR_RESULT_TEXT: JSON.stringify(good) }, async () => {
     await runToExit(await spawnCursor({ sandbox, prompt: 'p', network: false, streamPath: path.join(sessions, 's.jsonl') }))
@@ -280,7 +302,7 @@ test('collectCursor refuses a modified sandbox.json or a planted control file an
   ]) {
     const runRepo = await freshDir('run')
     await initRepo(runRepo)
-    const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files' })
+    const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: await freshDir('cache') } })
     await withEnv({ FAKE_CURSOR_RESULT_TEXT: JSON.stringify(good) }, async () => {
       await runToExit(await spawnCursor({ sandbox, prompt: 'p', network: false, streamPath: path.join(runRepo, 's.jsonl') }))
     })
@@ -368,4 +390,37 @@ test('cursorAdapter exposes the adapter interface and its Cursor defaults', () =
 test('the registry resolves cursor', () => {
   assert.equal(getAdapter('cursor'), cursorAdapter)
   assert.ok(HARNESS_NAMES.includes('cursor'))
+})
+
+test('cursorCheckoutRoot is keyed by run repo and run, under XDG_CACHE_HOME', () => {
+  const a = cursorCheckoutRoot({ runRepo: '/r/one', runId: 'r1', env: { XDG_CACHE_HOME: '/c' } })
+  const b = cursorCheckoutRoot({ runRepo: '/r/two', runId: 'r1', env: { XDG_CACHE_HOME: '/c' } })
+  assert.match(a, /^\/c\/fleetmates\/cursor\/[0-9a-f]{16}\/r1$/)
+  assert.notEqual(a, b)
+})
+
+test('makeCursorSandbox puts the checkout outside the run repo and outside any git repository', { timeout: 10000 }, async () => {
+  const runRepo = await freshDir('run')
+  await initRepo(runRepo)
+  const cache = await freshDir('cache')
+  const sandbox = await makeCursorSandbox(defaultGitExec, {
+    runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: cache },
+  })
+  assert.ok(sandbox.cwd.startsWith(cache))
+  assert.ok(!sandbox.cwd.startsWith(runRepo))
+  assert.equal(await enclosingGitRoot(sandbox.cwd), null)
+  assert.equal(await readFile(path.join(sandbox.cwd, 'base.txt'), 'utf8'), 'base\n')
+})
+
+test('makeCursorSandbox refuses a cache inside a git repository, naming it', { timeout: 10000 }, async () => {
+  const runRepo = await freshDir('run')
+  await initRepo(runRepo)
+  const dotfiles = await freshDir('dotfiles')
+  await defaultGitExec(['init'], dotfiles)
+  await assert.rejects(
+    makeCursorSandbox(defaultGitExec, {
+      runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: path.join(dotfiles, 'cache') },
+    }),
+    (err) => err.message.includes('must not live inside a git repository') && err.message.includes(dotfiles),
+  )
 })

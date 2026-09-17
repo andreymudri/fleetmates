@@ -33,11 +33,13 @@ export function isControlPath(rel) {
 // A plain, git-less checkout of `runBranch`'s tree. The checkout runs against a PRIVATE index
 // outside the checkout: without `GIT_INDEX_FILE` it would take the run repo's own `index.lock` (so
 // two concurrent builds collide) and stage the branch's tree into the run repo's shared index.
-export async function makeFilesSandbox(git, { runRepo, runBranch, runId, taskId }) {
+// `checkoutRoot` overrides where the checkout lives (default `<runRepo>/.fleetmates/<runId>/files`).
+export async function makeFilesSandbox(git, { runRepo, runBranch, runId, taskId, checkoutRoot }) {
   const base = path.join(runRepo, '.fleetmates', runId)
   const branch = `fleetmates/${runId}/${taskId}`
-  const cwd = path.join(base, 'files', taskId)
+  const cwd = path.join(checkoutRoot ?? path.join(base, 'files'), taskId)
   await mkdir(cwd, { recursive: true })
+  await mkdir(base, { recursive: true })
   const filesIndex = path.join(base, `files-index-${taskId}`)
   const res = await git(['--work-tree', cwd, 'checkout', runBranch, '--', '.'],
     { cwd: runRepo, env: { GIT_INDEX_FILE: filesIndex } })
