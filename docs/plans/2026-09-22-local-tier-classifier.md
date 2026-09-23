@@ -525,6 +525,38 @@ because every test used a fake `claude`.
 - [ ] **Step 5:** `npm test` green; commit
   `feat(classifier): generation, labelling and extraction pipeline`.
 
+### Task 14: generated briefs with code fences parse, and the swap check's device half is pinned
+
+Phase-2 review found two gaps that were not blocking but must close before the operator
+generates data. `generate.mjs`'s `extractJsonBlock` runs its fence regex on a bare JSON reply,
+so a brief containing a code fence is cut at that fence. The parse then fails and the project's
+whole batch is dropped. Fenced tasks, the `hasFence` feature, could never enter the dataset.
+Separately, `loadModel`'s `stat.dev !== link.dev` comparison has no test.
+
+**Files:**
+- Modify: `tools/classifier/generate.mjs`
+- Test: `tests/classifier-pipeline.test.mjs`
+- Test: `tests/classifier-policy.test.mjs`
+
+**Depends:** T2, T7
+
+**Model:** mid
+
+- [ ] **Step 1:** Write a failing test:
+  `parseGeneratedTasks(JSON.stringify([{ title, brief: 'Add:\n```js\nconst x = 1\n```\nto config.js', files, tier }]))`
+  must return `ok: true`, with the brief intact. Add a second failing test: a fenced reply
+  (```json … ```) whose inner brief itself contains a fence must also parse.
+- [ ] **Step 2:** Fix `extractJsonBlock`. Try `JSON.parse(text.trim())` first. Fall back to an
+  outer fence only when that fails, and only to a fence that wraps the whole reply (anchored at
+  the start and end of the trimmed text).
+- [ ] **Step 3:** Write a test in `tests/classifier-policy.test.mjs` where an injected `open`
+  returns a handle whose `stat()` reports the real `ino` but `dev + 1`. Expect
+  `{ unavailable }` matching `/changed while it was being opened/`. Confirm that deleting
+  `|| stat.dev !== link.dev` turns it red, then restore it. `scripts/classifier-policy.mjs` is
+  not modified.
+- [ ] **Step 4:** `npm test` green; commit
+  `fix(classifier): parse fenced briefs in generated replies and pin the swap check device half`.
+
 ### Task 8: train, tune and ship the weights
 
 **Files:**
@@ -533,7 +565,7 @@ because every test used a fake `claude`.
 - Create: `classifier/tier-model.json`
 - Create: `docs/specs/2026-09-22-tier-classifier-model-card.md`
 
-**Depends:** T1, T2, T4, T6, T7
+**Depends:** T1, T2, T4, T6, T7, T14
 
 **Model:** capable
 
