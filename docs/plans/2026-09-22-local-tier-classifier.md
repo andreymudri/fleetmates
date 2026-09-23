@@ -440,14 +440,15 @@ dataset.
 - Create: `tools/classifier/data/replay-results.jsonl`
 - Create: `tools/classifier/data/loss.json`
 
-**Depends:** T5
+**Depends:** T5, T13
 
 **Model:** mid
 
 - [ ] **Step 1:** Run
-  `node tools/classifier/replay.mjs --roots ~/Work/projetos --count 30 --dry-run` and record the
-  planned cell count.
-- [ ] **Step 2:** Run the same command with `--execute`. On a usage-limit stop, commit the
+  `node tools/classifier/replay.mjs --roots <comma-separated repo roots> --count 30 --dry-run`
+  and record the planned cell count. `--roots` takes each repository root, not a parent folder.
+- [ ] **Step 2:** Run `--smoke` first (Task 13). If the smoke cell does not pass, stop and report
+  `BLOCKED` with its `failReason`. Only then run the same command with `--execute`. On a usage-limit stop, commit the
   partial results, report `BLOCKED: usage limit, resume with <exact command>`, and stop.
   Resuming does not re-run finished cells.
 - [ ] **Step 3:** If a headless `claude` session cannot start from this environment, report
@@ -455,6 +456,48 @@ dataset.
 - [ ] **Step 4:** Once every cell is finished, confirm `loss.json` exists. Its interval is
   reported as measured, even if wide.
 - [ ] **Step 5:** `npm test` green; commit `data(classifier): replay outcomes and measured loss ratio`.
+
+### Task 13: replay sessions can actually edit, and failures say why
+
+The first real replay run (2026-09-22, 90 cells, about 9 h) recorded 90 of 90 cells as `fail`
+at every tier. Root cause, reproduced: `claude -p` without a permission mode denies every
+`Write`/`Edit`, so each session changed nothing and was graded as a no-op fail. The session
+itself exits 0 and reports the denials only in `permission_denials`. No test could catch this,
+because every test used a fake `claude`.
+
+**Files:**
+- Modify: `tools/classifier/replay.mjs`
+- Test: `tests/classifier-replay.test.mjs`
+
+**Depends:** T5
+
+**Model:** capable
+
+- [ ] **Step 1:** Write a failing test that the spawned argv contains
+  `--permission-mode bypassPermissions`. Add it to the spawn. The operator chose this mode so
+  a replay session has the same freedom a fleet teammate had. The header comment must say
+  plainly that the session runs unattended with the operator's OS permissions, and that the
+  `$TMPDIR` clone is not a sandbox.
+- [ ] **Step 2:** Write failing tests that a session JSON result with a non-empty
+  `permission_denials` array makes the cell **invalid**, not `fail`:
+  - nothing is appended for it;
+  - `main` stops the run with a message naming the denied tool names and the count;
+  - resume re-runs the cell.
+- [ ] **Step 3:** Write failing tests that every appended record carries `failReason` for a
+  `fail`. The value is one of `no-op`, `fileset`, `command:<check name>`, `session-error` or
+  `preview-copy`, and never contains task text, paths or command output. Also record
+  `permissionDenials` (a count) and `turns`.
+- [ ] **Step 4:** Add a `--preflight` step that `--execute` always runs first. It starts one real
+  session in a scratch git repo under `$TMPDIR`, asks it to create one file and run
+  `git status`, and aborts the whole run unless the file exists and the session reports zero
+  permission denials. Test it with a fake `claude` in both a success and a denial case.
+- [ ] **Step 5:** Add `--smoke`. It runs exactly one cell at the `capable` tier on the first
+  selected task, prints its status, `failReason`, cost and turns, and appends nothing. Test it
+  with a fake `claude`.
+- [ ] **Step 6:** `npm test` green. Run
+  `node tools/classifier/replay.mjs --preflight --models '{"cheap":"haiku","mid":"sonnet","capable":"opus"}'`
+  once for real and paste its output. It is one small session. Commit
+  `fix(classifier): replay sessions run with edit permission and record why a cell failed`.
 
 ### Task 7: dataset generation and labelling pipeline
 
