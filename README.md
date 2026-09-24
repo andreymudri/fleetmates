@@ -331,8 +331,9 @@ inferred: the dispatching skill fixes them at `capable` and `cheap`, and a confi
 that fixed choice. The integrator's `cheap` comes from a replay, recorded in
 `tools/replay/data/integrator-verdict.json`: haiku and sonnet each passed 14 of 14 past
 integrations with no wrong-tree result, at a mean US$0.049 against US$0.171. None of those
-integrations had a conflict, so conflict resolution on haiku is unmeasured; set
-`agents.integrator.tier` to route integration higher.
+integrations had a conflict, so the replay covered clean integrations only. The integrator now
+escalates every conflict ([`agents/tm-integrator.md`](agents/tm-integrator.md)), so it never
+resolves one on any model. Set `agents.integrator.tier` to route integration higher.
 
 ### `caveman` is narrower than its position in that table suggests
 

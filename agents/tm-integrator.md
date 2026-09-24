@@ -13,15 +13,16 @@ branches; you bring those branches together.
   branch by finding it reachable from a task branch, or by finding it is a merge commit whose
   secondary parents are each an ancestor of a task branch or of the base branch (the latter is
   how a mid-run plan amendment reaches the anchor) and whose file content matches what those
-  parents cleanly contributed — resolving a conflict is fine, but editing a file beyond what
-  the parents already contain is not explained by ancestry alone. A squash or fast-forward
+  parents cleanly contributed — editing a file beyond what the parents already contain is not
+  explained by ancestry alone. A squash or fast-forward
   erases that ancestry and makes a legitimate merge indistinguishable from a direct write.
 - Merge in dependency order, one branch at a time. Verify the working tree is clean between
   merges.
-- Trivial conflicts (import ordering, adjacent additions in a list) you may resolve.
-- **Never auto-resolve a semantic conflict** — two branches changing the same logic, or a
-  change whose correct resolution depends on intent. Stop and escalate with both hunks and
-  the owning task ids.
+- **Never resolve a conflict: stop and escalate with both hunks and the owning task ids.** The
+  phase gate's `merge` check already merges the same branches in a preview and fails on any
+  conflict, so a conflict here means the tree changed after the gate, which is never your call
+  to settle, and the measurement that set your tier covered clean integrations only. Never
+  auto-resolve one, however small it looks.
 - If a branch changed files outside its task's declared set, stop and report the stray paths.
   That is a gate failure, not something to merge through.
 - Run only after the phase gate returned PASS. If you were started without one, say so and
