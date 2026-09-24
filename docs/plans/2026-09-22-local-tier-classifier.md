@@ -33,7 +33,7 @@ model misses a release gate twice. The research is in
 | Runtime | Pure JavaScript in the `init-run` process, with no child process, network, native addon or dependency. |
 | Training | Pure JavaScript under `tools/classifier/`. It imports the **same** shipped feature extractor, so training and runtime cannot compute features differently. No Python. |
 | Thresholds | Tuned on the validation split to minimise weighted loss subject to the gates, then frozen into `tier-model.json`. |
-| Loss weight | Measured by a controlled replay of real tasks, not assumed. See "Cost measurement". |
+| Loss weight | A 3×3 cost matrix built from per-tier costs measured by a controlled replay of real tasks, not assumed. See "Cost measurement". The first replay showed tier cost is not monotonic (opus cheaper and faster than sonnet), so a single under/over ratio is not used. |
 | Cheap tier | Allowed in v1, protected by the gates. |
 | Failure direction | A missing, invalid or incompatible weights file falls back to the heuristic with one run-level diagnostic. It never blocks `init-run`. |
 | Privacy | Task text never leaves the machine. No telemetry. Nothing is collected from users' runs automatically. |
@@ -145,8 +145,20 @@ limits, not metered spend.
   - the over-tier cost at a tier t > t\* is the cost at t minus the cost at t\*.
 
   `underOverRatio` = mean under-tier cost / mean over-tier cost, computed on the usage-weighted
-  cost, with a bootstrap 95% interval. The evaluator freezes the point estimate. Wall-clock
-  ratios are reported beside it.
+  cost, with a bootstrap 95% interval. It is **reported only**: the first replay measured
+  26.93 with an interval of [-189, 257] and a wall-clock ratio of -11.70, because a pricier tier
+  can be cheaper per task than a lower one (opus averaged $1.52 and 5.4 min, sonnet $3.87 and
+  14.1 min). A difference that assumes the tiers are ordered by cost goes negative and the ratio
+  is meaningless.
+- **Cost matrix (the loss the gates and training use).** Let m(t) be the mean usage-weighted
+  cost of every finished cell at tier t, pass or fail, and let the floor be 0.05 × min m(t).
+  For predicted tier p and true tier t:
+  - `cost[p][t] = 0` when p = t;
+  - `cost[p][t] = m(p) + m(t)` when p < t (under-tier: the failed attempt plus the escalation);
+  - `cost[p][t] = max(m(p) − m(t), floor)` when p > t (over-tier: the extra spend, never free).
+
+  `loss.json` carries this as `costMatrix` (keyed `[predicted][true]`), the per-tier means, and a
+  `wallClockMatrix` built the same way from mean wall-clock, which is reported only.
 - **What gets committed.** Only metrics keyed by `sha256(repo realpath, run id, task id)` enter
   `tools/classifier/data/replay-results.jsonl`, never code or task text.
 - **Usage limits.** Every finished cell is appended as it completes. A usage-limit error stops
@@ -215,7 +227,7 @@ use the 95% Wilson bound. With 300 rows, zero observed errors still has an upper
 | All under-tiering | Point estimate at most 3%; Wilson upper bound at most 5% |
 | Cheap precision | Point estimate at least 90%; Wilson lower bound at least 85% |
 | Cheap recall | At least 50% |
-| Weighted loss | At least 15% below the current heuristic, with under-tier errors weighted by the measured `underOverRatio`. A paired bootstrap (10,000 resamples, fixed seed) must give a 95% interval for the improvement that excludes 0. |
+| Weighted loss | At least 15% below the current heuristic, with each (predicted, true) pair costed by the measured `costMatrix`. A paired bootstrap (10,000 resamples, fixed seed) must give a 95% interval for the improvement that excludes 0. |
 | Outcome rows | Weighted loss on `labelKind: "outcome"` rows no worse than the heuristic's |
 | Calibration | Top-label ECE with 10 equal-width bins at most 0.10 |
 | Determinism | Golden probabilities agree within 1e-12 and tiers are identical on Linux, macOS and Windows in the normal `npm test` matrix |
@@ -228,7 +240,7 @@ reported only, never shipped. The report also contains:
 
 - the confusion matrix;
 - per-class precision, recall and F1;
-- weighted loss using both the usage-weighted and the wall-clock ratio;
+- weighted loss under both the usage-weighted `costMatrix` and the wall-clock matrix, with both matrices and `underOverRatio` printed;
 - calibration buckets;
 - label agreement (Cohen's kappa for each `labelProcedure`);
 - size and speed.
@@ -557,6 +569,63 @@ Separately, `loadModel`'s `stat.dev !== link.dev` comparison has no test.
 - [ ] **Step 4:** `npm test` green; commit
   `fix(classifier): parse fenced briefs in generated replies and pin the swap check device half`.
 
+### Task 15: cost-matrix loss, and the evaluator's open phase-3 findings
+
+The replay (T6) showed tier cost is not monotonic, so the scalar `underOverRatio` cannot weight
+the loss (see "Cost measurement"). The operator chose a cost matrix built from the replay's
+per-tier means. Phase-3 review also left open findings in the evaluator that must close before
+T8 relies on its verdict.
+
+**Files:**
+- Modify: `tools/classifier/replay.mjs`
+- Test: `tests/classifier-replay.test.mjs`
+- Modify: `tools/classifier/data/loss.json`
+- Modify: `tools/classifier/evaluate.mjs`
+- Test: `tests/classifier-evaluate.test.mjs`
+- Test: `tests/classifier-pipeline.test.mjs`
+
+**Depends:** T4, T6
+
+**Model:** mid
+
+- [ ] **Step 1:** Write failing tests for `computeLoss` in `replay.mjs`: from hand-built records
+  it returns `tierMeans` (usage and wall-clock), `costMatrix` and `wallClockMatrix` exactly as
+  "Cost measurement" defines them, including the floor on an over-tier entry whose difference is
+  negative, and a cell with a missing cost excluded from the mean, never counted as 0. The
+  existing `underOverRatio`, its interval and `wallClockRatio` stay in the output unchanged.
+  Add `lossVersion: 2`.
+- [ ] **Step 2:** Add `node tools/classifier/replay.mjs --recompute-loss --out <dir>`. It reads
+  the existing `replay-results.jsonl` in `<dir>`, runs no cell and spawns no process, and
+  rewrites `loss.json`. Test it. Then run it on `tools/classifier/data/` and commit the
+  regenerated `loss.json`. `replay-results.jsonl` must be byte-identical afterwards.
+- [ ] **Step 3:** Replay cells pass `--strict-mcp-config` to `claude -p`, so a measured session
+  never loads the operator's global MCP servers. Update the argument test.
+- [ ] **Step 4:** Write failing tests, then switch `evaluate.mjs` from `underOverRatio` to the
+  matrix:
+  - `pairLoss(actual, predicted, costMatrix)` returns `costMatrix[predicted][actual]`;
+  - `validateLoss` requires `lossVersion: 2` and a `costMatrix` with all nine entries finite,
+    the diagonal 0 and every off-diagonal entry > 0, and otherwise exits 2 naming the problem.
+    `wallClockMatrix`, when present, is validated the same way and weights the report-only
+    wall-clock loss;
+  - the weighted-loss gate, the outcome-rows gate, the paired bootstrap and
+    `fitRetunedHeuristic` all use `costMatrix`;
+  - the report prints both matrices, the tier means and `underOverRatio` as reported-only.
+
+  A contract test loads the regenerated committed `tools/classifier/data/loss.json` through
+  `validateLoss` and `main`.
+- [ ] **Step 5:** Close the phase-3 findings, each with a test that the named mutation turns red:
+  - `main` runs the `size` check before measuring speed. A model over `MAX_MODEL_BYTES` yields
+    exit 1 with `size` named and `report.json`/`report.md` written. Speed is then reported as
+    not measured and the speed gate fails with that reason, not a crash or exit 2;
+  - the determinism gate fails when the tier is stable but a probability drifts by more than
+    1e-12 (mutation: remove the probability comparison);
+  - each rate gate is tested exactly on its threshold: cheap recall 1/2 passes, cheap precision
+    270/300 passes, all-under-tiering 30/1000 passes (mutation: `>=` to `>`, `<=` to `<`);
+  - in `tests/classifier-pipeline.test.mjs`, a fenced reply whose opening prose line contains
+    ```` ```json ```` inline still parses (mutation: `isFenceLine` uses `includes`).
+- [ ] **Step 6:** `npm test` green; commit
+  `feat(classifier): cost-matrix loss and evaluator gate fixes`.
+
 ### Task 8: train, tune and ship the weights
 
 **Files:**
@@ -565,14 +634,14 @@ Separately, `loadModel`'s `stat.dev !== link.dev` comparison has no test.
 - Create: `classifier/tier-model.json`
 - Create: `docs/specs/2026-09-22-tier-classifier-model-card.md`
 
-**Depends:** T1, T2, T4, T6, T7, T14
+**Depends:** T1, T2, T4, T6, T7, T14, T15
 
 **Model:** capable
 
 - [ ] **Step 1:** Write failing tests on a synthetic separable fixture:
   - training converges;
   - the result is identical for a fixed seed;
-  - the cost-weighted loss uses `underOverRatio`;
+  - the cost-weighted loss uses `costMatrix` from `loss.json` (keyed `[predicted][true]`);
   - L2 regularisation strength is chosen by grouped cross-validation on train rows;
   - threshold tuning reads validation rows only and **never** holdout rows;
   - weights are rounded to 6 significant digits **before** evaluation.
