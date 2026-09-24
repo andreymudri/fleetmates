@@ -19,12 +19,17 @@
 
 ### Fixed
 
-- `tools/replay/replay.mjs` refuses a value-taking flag given without a value, matches run ids
-  across hyphens (`foo` no longer resolves to `foo-bar`'s merge), recognises another run's merge
-  from its subject, and records a failed `preview.link` copy as `invalid` instead of `fail`;
-  copied link trees are read-only during the session.
-- `tools/replay/integrator-replay.mjs` shell-quotes its resume command, checks merge order,
-  honours `optional` command checks, and prints per-cell progress and session-error reasons.
+- `tools/replay/replay.mjs` refuses a value-taking flag given without a value and matches run
+  ids across hyphens (`foo` no longer resolves to `foo-bar`'s merge). It recognises another
+  run's merge from a leading `merge(<run>):` subject, or from a trailing `(<run>)` naming a
+  known run. A failed `preview.link` copy records the cell as `invalid` instead of `fail`, and a
+  nested `preview.link` entry under a symlinked base-tree directory is refused. Copied link
+  trees are read-only only while a replay session runs and are fingerprinted before and after
+  it; any change fails the cell as `link-modified`. Gate commands run on a writable copy, as in
+  the real gate.
+- `tools/replay/integrator-replay.mjs` shell-quotes its resume command, verifies each merge's
+  second parent is the dispatched task tip, honours `optional` command checks, and prints
+  per-cell progress and session-error reasons.
 
 ### Added
 

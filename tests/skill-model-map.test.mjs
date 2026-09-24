@@ -171,3 +171,13 @@ test('parallel-execution does not say the integrator resolves trivial conflicts'
   assertNoStatement(s, /\btrivial\b/i, 'the integrator contract resolves no conflict')
   assertStatement(s, /tm-integrator contract escalates every conflict\b/, 'the skill must state the escalation rule')
 })
+
+test('the README says the integrator escalates every conflict and never that it resolves one', async () => {
+  const doc = await readme()
+  assertStatement(doc, /integrator now escalates every conflict\b/, 'the README must state the escalation rule')
+  assertNoStatement(
+    doc,
+    /\bconflict resolution\b|\bresolv(e|es|ing) (a |the |one |every )?conflicts?\b|\btrivial conflicts?\b/i,
+    'no README sentence may imply the integrator resolves a conflict',
+  )
+})
