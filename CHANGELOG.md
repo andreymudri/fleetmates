@@ -13,6 +13,18 @@
   US$0.171 (tools/replay/data/integrator-verdict.json). The sample held no conflicted
   integration, so conflict handling on haiku is unmeasured. A configured
   `agents.integrator.tier` still overrides it.
+- `tm-integrator` now escalates every merge conflict, with both hunks and the owning task ids,
+  instead of resolving trivial ones itself. The phase gate's `merge` check already fails on any
+  conflict, so a conflict at integration means the tree changed after the gate.
+
+### Fixed
+
+- `tools/replay/replay.mjs` refuses a value-taking flag given without a value, matches run ids
+  across hyphens (`foo` no longer resolves to `foo-bar`'s merge), recognises another run's merge
+  from its subject, and records a failed `preview.link` copy as `invalid` instead of `fail`;
+  copied link trees are read-only during the session.
+- `tools/replay/integrator-replay.mjs` shell-quotes its resume command, checks merge order,
+  honours `optional` command checks, and prints per-cell progress and session-error reasons.
 
 ### Added
 
