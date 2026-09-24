@@ -327,8 +327,12 @@ the key — a setting that was silently dropped is a setting you believe took ef
 An unset tier resolves differently per role, so "default" is not one answer. The **implementer**
 tier is inferred per task by `init-run` from the plan; a configured value overrides that
 inference for every task. The **reviewer** and **integrator** are not in the plan and are not
-inferred: the dispatching skill fixes them at `capable` and `mid`, and a configured tier replaces
-that fixed choice.
+inferred: the dispatching skill fixes them at `capable` and `cheap`, and a configured tier replaces
+that fixed choice. The integrator's `cheap` comes from a replay, recorded in
+`tools/replay/data/integrator-verdict.json`: haiku and sonnet each passed 14 of 14 past
+integrations with no wrong-tree result, at a mean US$0.049 against US$0.171. None of those
+integrations had a conflict, so conflict resolution on haiku is unmeasured; set
+`agents.integrator.tier` to route integration higher.
 
 ### `caveman` is narrower than its position in that table suggests
 
@@ -421,6 +425,26 @@ can be traced to the file that set it.
 `capable`. The map from tier to a concrete model lives in the dispatching skill and reaches the
 CLI through `workflow --models`, so this repository and `fleetmates.gate.json` stay free of model
 names that would otherwise go stale. Setting a model name as a tier is rejected.
+
+### Why `mid` runs on opus
+
+On the Claude harness the map is `cheap -> haiku`, `mid -> opus`, `capable -> opus`. A replay of
+30 tasks that had already merged in real runs, each rerun at every tier from its base tree:
+
+| tier | model | passed | mean cost (US$, list price) | mean wall-clock |
+|---|---|---|---|---|
+| cheap | haiku | 26/30 | 1.09 | 10.6 min |
+| mid (before) | sonnet | 29/30 | 3.87 | 14.1 min |
+| capable | opus | 29/30 | 1.52 | 5.4 min |
+
+Opus passed as many tasks as sonnet at under half the mean cost and wall-clock, so `mid` now
+dispatches to opus. The data and the tool that reran it are in
+[`tools/replay/`](tools/replay/README.md). Codex and Cursor keep their own
+`harnesses.<name>.tierModels`; nothing here was measured on them.
+
+To restore sonnet for `mid`, change the map on the dispatch side, not in configuration: dispatch
+`mid` tasks on sonnet and pass
+`--models '{"cheap":"haiku","mid":"sonnet","capable":"opus"}'` to `workflow`.
 
 ## Layout
 
