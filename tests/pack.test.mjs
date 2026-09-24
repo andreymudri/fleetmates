@@ -28,5 +28,6 @@ test('the package carries the plugin and nothing that only develops it', () => {
   }
   const skills = readdirSync(new URL('../skills/', import.meta.url), { withFileTypes: true }).filter((e) => e.isDirectory())
   for (const skill of skills) assert.ok(paths.includes(`skills/${skill.name}/SKILL.md`), `package is missing skills/${skill.name}/SKILL.md`)
-  assert.deepEqual(paths.filter((p) => p.startsWith('tests/') || p.startsWith('docs/') || p.startsWith('.github/')), [])
+  // tools/ holds operator replay tooling and its recorded data, which must never ship.
+  assert.deepEqual(paths.filter((p) => ['tests/', 'docs/', '.github/', 'tools/'].some((dir) => p.startsWith(dir))), [])
 })
