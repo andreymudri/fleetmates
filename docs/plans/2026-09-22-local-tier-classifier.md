@@ -191,8 +191,11 @@ Row schema (additional properties rejected):
 
 Freeze rules, enforced by `verify-frozen`:
 
-- **Holdout size and spread.** At least 300 rows, at least 75 per class, and at least 20
-  `source` groups. No group supplies more than 10% of holdout rows.
+- **Holdout size and spread.** At least 150 rows, at least 40 per class, and at least 15
+  `source` groups. No group supplies more than 10% of holdout rows. (Originally 300, 75 and 20.
+  Only 124 own tasks exist across 18 runs and no public rows, so a 300-row holdout could not
+  also meet the synthetic caps below. The operator kept the caps and shrank the holdout; see
+  Task 16.)
 - **Synthetic share.** At most 60% of all rows and at most 40% of holdout rows.
 - **Split integrity.** No `source` appears in more than one split.
 - **Generator and labeller families differ.** Synthetic rows come from a Claude model, and the
@@ -219,7 +222,7 @@ the only ground truth. The report shows both separately.
 
 `tools/classifier/evaluate.mjs` exits non-zero on any miss. It is evaluated on the frozen
 holdout, with the frozen thresholds, and with the rounded weights exactly as shipped. Rate gates
-use the 95% Wilson bound. With 300 rows, zero observed errors still has an upper bound of 1.26%.
+use the 95% Wilson bound. With 150 rows, zero observed errors still has an upper bound of 2.5%.
 
 | Gate | Required result |
 |---|---|
@@ -627,6 +630,34 @@ T8 relies on its verdict.
 - [ ] **Step 6:** `npm test` green; commit
   `feat(classifier): cost-matrix loss and evaluator gate fixes`.
 
+### Task 16: holdout size rescaled to the data that exists
+
+At checkpoint 2, `extract-own.mjs` found 124 own tasks across 18 runs, and there are no public
+rows. A 300-row holdout with at most 40% synthetic rows needs 180 non-synthetic holdout rows,
+and the 60% overall cap limits the whole dataset to about 310 rows. The operator kept both
+synthetic caps and shrank the holdout rules to 150 rows, 40 per class and 15 source groups.
+
+**Files:**
+- Modify: `tools/classifier/dataset.mjs`
+- Test: `tests/classifier-dataset.test.mjs`
+- Modify: `tools/classifier/README.md`
+
+**Depends:** T3
+
+**Model:** cheap
+
+- [ ] **Step 1:** Change the failing tests first: the compliant fixture becomes a 150-row
+  holdout (50 per class, 15 groups of 10), and the rejection tests use 149 rows, 39 in one
+  class and 14 groups. Confirm they fail on the current code.
+- [ ] **Step 2:** In `checkFreezeRules`, replace the literals 300, 75 and 20 with exported named
+  constants `HOLDOUT_MIN_ROWS = 150`, `HOLDOUT_MIN_PER_CLASS = 40` and
+  `HOLDOUT_MIN_SOURCES = 15`, and use them in the violation messages. The 10% group cap and both
+  synthetic caps are unchanged.
+- [ ] **Step 3:** Update the "Freeze rules" section of `tools/classifier/README.md` and the
+  sentence there that cites a 300-row fixture.
+- [ ] **Step 4:** `npm test` green; commit
+  `feat(classifier): rescale holdout freeze rules to 150 rows, 40 per class, 15 groups`.
+
 ### Task 8: train, tune and ship the weights
 
 **Files:**
@@ -635,7 +666,7 @@ T8 relies on its verdict.
 - Create: `classifier/tier-model.json`
 - Create: `docs/specs/2026-09-22-tier-classifier-model-card.md`
 
-**Depends:** T1, T2, T4, T6, T7, T14, T15
+**Depends:** T1, T2, T4, T6, T7, T14, T15, T16
 
 **Model:** capable
 
