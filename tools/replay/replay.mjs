@@ -28,10 +28,14 @@
 //     `realpath(cell/node_modules)/../.git/refs/heads` resolved straight into the source repo's
 //     own `.git`, exposing its already-solved branches — the same answer-leakage class Finding A
 //     exists to prevent, reopened by a different door. A copy has no such door: the cell's
-//     `node_modules` becomes a real, independent directory inside the isolated clone, made
-//     read-only while the session runs (it is excluded from the fileset check, so an edit there
-//     would otherwise go unseen), torn down (and, either way, removed again with the whole clone)
-//     before the cell finishes;
+//     `node_modules` becomes a real, independent, writable directory inside the isolated clone,
+//     torn down (and, either way, removed again with the whole clone) before the cell finishes.
+//     It is excluded from the fileset check, so each session (the fix round too) runs between two
+//     fingerprints of the copied trees — path, type, size, mode, content sha256, symlink target —
+//     with the trees read-only only for the session itself (see lockLinkTrees). Any difference
+//     fails the cell as `link-modified`, with no fix round after it. The read-only lock alone is
+//     no guard (a bypassPermissions session can `chmod -R u+w`); the fingerprint is. Gate
+//     commands run after the unlock, on the writable trees, as the real gate's links are;
 //   - is removed afterward, regardless of outcome.
 // NOT isolated by any of this, and nothing here claims otherwise: the `claude -p` child process
 // itself is an ordinary process running with the operator's own OS permissions, no sandbox and no
@@ -56,7 +60,7 @@
 //     `$TMPDIR` that must create a file and run `git status` with zero permission denials, or the
 //     whole run is aborted before any cell starts.
 // Every `fail` record carries a `failReason` from a fixed set — `no-op`, `fileset`,
-// `command:<check name>`, `session-error` — never task text, a path or command output, plus
+// `command:<check name>`, `session-error`, `link-modified` — never task text, a path or command output, plus
 // `permissionDenials` (a count) and `turns`. A `preview.link` copy refusal is recorded as
 // `invalid` with failReason `preview-copy` and a null cost, wall-clock and turns (no session ran),
 // and computeLoss leaves `invalid` records out.
@@ -104,6 +108,7 @@
 // the underlying replay data has not.
 import {
   mkdtemp, mkdir, rm, readFile, writeFile, appendFile, realpath, readdir, cp, lstat, chmod,
+  readlink,
 } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -282,14 +287,35 @@ function runIdPattern(runId) {
   return new RegExp(`(?<![\\w-])${escapeRegExp(runId)}(?![\\w-])`)
 }
 
-// The run a merge subject names in one of the two forms fleetmates writes: a leading
-// `merge(<run>):`, else a trailing `(<run>)`. Null when neither is present. Read from the subject
-// alone, so a run with no `.fleetmates/<run>/plan.json` under the roots is still recognised.
+// The run a merge subject may name: `prefixed` from a leading `merge(<run>):`, which always names
+// a run; else `trailing` from a trailing single-token `(<x>)`, which is only a CANDIDATE — the
+// caller counts it as a run id only when x is a known run (see knownRunIdsForRoots), because an
+// integrator also titles its own merges "... (parser)", "(#12)" or "(wip)". Each is null when
+// absent.
 function runNamedInSubject(subject) {
   const prefixed = /^merge\(([^()\s]+)\)/i.exec(subject)
-  if (prefixed) return prefixed[1]
+  if (prefixed) return { prefixed: prefixed[1], trailing: null }
   const trailing = /\(([^()\s]+)\)\s*$/.exec(subject)
-  return trailing ? trailing[1] : null
+  return { prefixed: null, trailing: trailing ? trailing[1] : null }
+}
+
+// Every run id any root knows of: a `.fleetmates/<run>` or `.teammates/<run>` state directory, or a
+// `run/<run>` branch. Read from the whole set of roots, so a run whose state lives in another
+// checkout still counts. Only the trailing `(<x>)` form consults this.
+async function knownRunIdsForRoots(roots, { gitExecFn, readdirFn = readdir }) {
+  const ids = new Set()
+  for (const root of roots) {
+    for (const stateDir of ['.fleetmates', '.teammates']) {
+      const entries = await readdirFn(path.join(root, stateDir), { withFileTypes: true }).catch(() => [])
+      for (const entry of entries) if (entry.isDirectory()) ids.add(entry.name)
+    }
+    const res = await gitExecFn(['for-each-ref', '--format=%(refname)', 'refs/heads/run/'], root)
+    if (res.code !== 0) continue
+    for (const ref of res.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
+      ids.add(ref.slice('refs/heads/run/'.length))
+    }
+  }
+  return ids
 }
 
 // Every merge commit reachable from the default branch, subject included — fetched once per root
@@ -324,10 +350,11 @@ async function commitParents(root, sha, gitExecFn) {
 //       at all, so `--merges` never surfaces one.
 //   (b) a candidate whose subject never names THIS run's own id, and names a DIFFERENT run —
 //       either a known run id (one with `.fleetmates/<run>/plan.json` under the roots) as a whole
-//       token, or any run id in the `merge(<run>):` or trailing `(<run>)` form fleetmates writes,
-//       state directory or not — is rejected outright, even when it is the only candidate left.
-//       A whole token treats '-' as part of the id (see runIdPattern). A run with no state
-//       directory whose subject names no run in those forms stays invisible: its merge is a
+//       token, or any run in a leading `merge(<run>):`, or a trailing single-token `(<x>)` when x
+//       is a known run (a `.fleetmates`/`.teammates` state dir or a `run/<x>` branch in any root)
+//       — is rejected outright, even when it is the only candidate left. A trailing `(<x>)` that
+//       is not a known run ("(parser)", "(#12)") is an ordinary word. A whole token treats '-' as
+//       part of the id (see runIdPattern). A merge whose subject names no run in those ways is a
 //       neutral candidate, and a sole neutral candidate is accepted.
 //       Reproduced directly: run A's T1, squash-merged (leaving no valid merge of its own), still
 //       had exactly one OTHER candidate left after (a) — run B's own, unrelated "T1" — and the old
@@ -340,6 +367,7 @@ async function commitParents(root, sha, gitExecFn) {
 //       remaining candidate's short sha named in the reason.
 async function resolveBaseByMerge({
   root, runId, taskId, declaredFiles, planPath, defaultBranch, gitExecFn, mergeCache, knownRunIds = [],
+  subjectRunIds = new Set(),
 }) {
   let merges = mergeCache.get(root)
   if (!merges) {
@@ -383,9 +411,10 @@ async function resolveBaseByMerge({
   const belongsToAnotherRun = (subject) => {
     if (runPattern.test(subject)) return false
     if (otherRunPatterns.some((p) => p.test(subject))) return true
-    // Any run named in a fleetmates form is another run's here: a subject naming our own run
-    // already returned above.
-    return runNamedInSubject(subject) !== null
+    // A subject naming our own run already returned above, so a run named here is another's.
+    const { prefixed, trailing } = runNamedInSubject(subject)
+    if (prefixed !== null) return true
+    return trailing !== null && subjectRunIds.has(trailing)
   }
   const notOtherRuns = passing.filter((p) => !belongsToAnotherRun(p.subject))
   if (notOtherRuns.length === 0) {
@@ -431,6 +460,8 @@ export async function locateTasks(pool, { gitExecFn = defaultGitExec } = {}) {
     if (!runIdsByRoot.has(item.root)) runIdsByRoot.set(item.root, new Set())
     runIdsByRoot.get(item.root).add(item.runId)
   }
+  const subjectRunIds = await knownRunIdsForRoots([...runIdsByRoot.keys()], { gitExecFn })
+  for (const ids of runIdsByRoot.values()) for (const id of ids) subjectRunIds.add(id)
   const out = []
   for (const item of pool) {
     if (!defaultBranchCache.has(item.root)) {
@@ -462,6 +493,7 @@ export async function locateTasks(pool, { gitExecFn = defaultGitExec } = {}) {
           gitExecFn,
           mergeCache,
           knownRunIds: [...(runIdsByRoot.get(item.root) ?? [])],
+          subjectRunIds,
         })
         if (merged.baseSha) {
           baseSha = merged.baseSha
@@ -677,7 +709,7 @@ export async function copyPreviewPaths(dir, repoRoot, paths = []) {
   const created = []
   const teardown = async () => {
     for (const dst of created.reverse()) {
-      await setTreeWritable(dst, true).catch(() => {})
+      await makeTreeWritable(dst).catch(() => {})
       await rm(dst, { recursive: true, force: true }).catch(() => {})
     }
   }
@@ -733,14 +765,81 @@ export async function copyPreviewPaths(dir, repoRoot, paths = []) {
       await cp(realTarget, dst, { recursive: true, verbatimSymlinks: true })
     }
     created.push(dst)
-    try {
-      await setTreeWritable(dst, false)
-    } catch (err) {
-      await teardown()
-      throw err
-    }
   }
   return teardown
+}
+
+// ---------------------------------------------------------------------------------------------
+// Guarding the copied link trees during a session. They are excluded from the fileset check (see
+// verifyCell), so an edit a session made under one went unseen. runTierCell fingerprints them,
+// locks them read-only only while a session runs, unlocks them and fingerprints again; any
+// difference fails the cell as `link-modified`. The lock alone stops only an accidental write —
+// a bypassPermissions session can `chmod -R u+w` and edit — so the fingerprint is the check. Gate
+// commands run after the unlock, on the writable tree, the way the real gate's linked directories
+// are writable (a check that writes node_modules/.cache must not fail here and pass there).
+// ---------------------------------------------------------------------------------------------
+
+// Each declared link path under `dir` (resolved via realpath, as copyPreviewPaths builds them).
+async function linkTreeRoots(dir, paths) {
+  const realDir = await realpath(dir).catch(() => dir)
+  return paths.map((entry) => ({ entry, abs: path.resolve(realDir, entry) }))
+}
+
+// One line per path under each declared link, sorted: relative path, type, size, mode, and a
+// sha256 of a file's content or a symlink's target text. A declared link that is absent adds no
+// line, so a session creating one adds lines and changes the fingerprint.
+export async function fingerprintLinkTrees(dir, paths = []) {
+  const lines = []
+  const walk = async (abs, rel) => {
+    let info
+    try {
+      info = await lstat(abs)
+    } catch {
+      return
+    }
+    const mode = (info.mode & 0o7777).toString(8)
+    if (info.isSymbolicLink()) {
+      lines.push(`${rel}\u0000symlink\u0000${mode}\u0000${await readlink(abs)}`)
+    } else if (info.isDirectory()) {
+      lines.push(`${rel}\u0000dir\u0000${mode}`)
+      for (const name of (await readdir(abs)).sort()) await walk(path.join(abs, name), `${rel}/${name}`)
+    } else if (info.isFile()) {
+      const sha = createHash('sha256').update(await readFile(abs)).digest('hex')
+      lines.push(`${rel}\u0000file\u0000${info.size}\u0000${mode}\u0000${sha}`)
+    } else {
+      lines.push(`${rel}\u0000other\u0000${mode}`)
+    }
+  }
+  for (const { entry, abs } of await linkTreeRoots(dir, paths)) await walk(abs, entry)
+  return lines.join('\n')
+}
+
+// Removes every write bit from each declared link tree — files and directories; symlinks are
+// skipped, never chmod'ed, since chmod follows a symlink and an inner one kept verbatim by the
+// copy may point outside the cell. Returns `unlock`, which restores each path's exact prior mode
+// (a path the session removed meanwhile is skipped).
+export async function lockLinkTrees(dir, paths = []) {
+  const modes = []
+  const walk = async (abs) => {
+    const info = await lstat(abs).catch(() => null)
+    if (!info || info.isSymbolicLink()) return
+    const mode = info.mode & 0o7777
+    modes.push([abs, mode])
+    if (info.isDirectory()) {
+      for (const name of await readdir(abs)) await walk(path.join(abs, name))
+    }
+    await chmod(abs, mode & ~0o222)
+  }
+  const unlock = async () => {
+    for (const [abs, mode] of modes) await chmod(abs, mode).catch(() => {})
+  }
+  try {
+    for (const { abs } of await linkTreeRoots(dir, paths)) await walk(abs)
+  } catch (err) {
+    await unlock()
+    throw err
+  }
+  return unlock
 }
 
 // `path` itself when it exists, else its nearest existing ancestor, resolved via `realpath`.
@@ -757,20 +856,17 @@ async function realpathOfDeepestExisting(target) {
   }
 }
 
-// The copied link trees are excluded from the fileset check (see verifyCell), so an edit a session
-// made under one went unseen. They are made read-only — every file and directory — before the
-// session starts, and writable again (owner write bit) before removal, since a directory without
-// write permission cannot have its entries unlinked. Symlinks are skipped, never chmod'ed: chmod
-// follows a symlink, and an inner symlink kept verbatim by the copy may point outside the cell.
-async function setTreeWritable(target, writable) {
+// Adds the owner write bit throughout a copied tree before teardown removes it: a directory
+// without write permission cannot have its entries unlinked, and a tree can still be locked (see
+// lockLinkTrees) when a session throws before its unlock. Symlinks are skipped, never chmod'ed:
+// chmod follows a symlink, and an inner symlink kept verbatim by the copy may point outside the cell.
+async function makeTreeWritable(target) {
   const info = await lstat(target)
   if (info.isSymbolicLink()) return
-  const mode = info.mode & 0o7777
-  if (writable) await chmod(target, mode | 0o200)
+  await chmod(target, (info.mode & 0o7777) | 0o200)
   if (info.isDirectory()) {
-    for (const entry of await readdir(target)) await setTreeWritable(path.join(target, entry), writable)
+    for (const entry of await readdir(target)) await makeTreeWritable(path.join(target, entry))
   }
-  if (!writable) await chmod(target, mode & ~0o222)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -987,7 +1083,9 @@ async function verifyCell({
   return { passed: failures.length === 0, failures, reasons }
 }
 
-// The one `failReason` a failed cell records, from a fixed set: `session-error` when the last
+// The one `failReason` a failed cell records, from a fixed set: `link-modified` when a session
+// changed a copied preview.link tree (see lockLinkTrees — it outranks everything, since no gate
+// command ran against that tree); `session-error` when the last
 // session's output was malformed or an error result; otherwise `fileset` (something outside the
 // declared files changed — the session acted, just in the wrong place), then `no-op` (nothing
 // declared changed, which usually explains any failing command check too), then the FIRST failing
@@ -997,9 +1095,10 @@ async function verifyCell({
 // has a matching `reasons.push`), so running out of reasons is a bug here, not a session outcome:
 // it throws rather than defaulting to a label that would hide which branch was missed.
 export function pickFailReason(verification, lastParsed) {
+  const reasons = verification.reasons ?? []
+  if (reasons.includes('link-modified')) return 'link-modified'
   if (lastParsed.malformed) return 'session-error'
   if (lastParsed.isError) return 'session-error'
-  const reasons = verification.reasons ?? []
   if (reasons.includes('fileset')) return 'fileset'
   if (reasons.includes('no-op')) return 'no-op'
   const command = reasons.find((r) => r.startsWith('command:'))
@@ -1070,19 +1169,47 @@ export async function runTierCell({
       }
     }
 
-    const attempt1 = await attemptOnce({ cwd: cloneDir, prompt, model, claudeBin, spawnFn, env })
+    // Every session runs with the copied link trees locked and fingerprinted around it (see
+    // lockLinkTrees); `linkModified` is true when the tree after the session differs from before.
+    // The gate commands in verifyCell run after the unlock, on the writable tree.
+    const guardedAttempt = async (options) => {
+      if (links.length === 0) return { attempt: await attemptOnce(options), linkModified: false }
+      const before = await fingerprintLinkTrees(cloneDir, links)
+      const unlock = await lockLinkTrees(cloneDir, links)
+      let attempt
+      try {
+        attempt = await attemptOnce(options)
+      } finally {
+        await unlock()
+      }
+      const after = await fingerprintLinkTrees(cloneDir, links).catch(() => null)
+      return { attempt, linkModified: after !== before }
+    }
+    const linkModifiedVerification = {
+      passed: false,
+      failures: ['a preview.link directory was modified during the session'],
+      reasons: ['link-modified'],
+    }
+
+    const first = await guardedAttempt({ cwd: cloneDir, prompt, model, claudeBin, spawnFn, env })
+    const attempt1 = first.attempt
     if (attempt1.parsed.usageLimit) return { usageLimit: true }
     if (attempt1.parsed.permissionDenials > 0) return invalidCell(attempt1.parsed)
 
     const attempts = [attempt1]
-    let verification = attempt1.parsed.malformed
-      ? { passed: false, failures: ['claude produced output that was not valid JSON'] }
-      : await verifyCell({
+    let verification
+    if (first.linkModified) verification = linkModifiedVerification
+    else if (attempt1.parsed.malformed) verification = { passed: false, failures: ['claude produced output that was not valid JSON'] }
+    else {
+      verification = await verifyCell({
         cloneDir, baseSha: cloneBaseSha, declaredFiles, config, phaseName, links, runCheckFn, gitExecFn,
       })
+    }
 
-    if (!verification.passed && !attempt1.parsed.malformed && attempt1.parsed.sessionId) {
-      const attempt2 = await attemptOnce({
+    // No fix round after a link modification: the tree the gate commands would run against is
+    // no longer the one copied in, so nothing a second turn does could be graded fairly.
+    if (!verification.passed && !first.linkModified && !attempt1.parsed.malformed && attempt1.parsed.sessionId) {
+      const second = await guardedAttempt({
         cwd: cloneDir,
         prompt: fixMessage(verification.failures),
         model,
@@ -1091,14 +1218,17 @@ export async function runTierCell({
         spawnFn,
         env,
       })
+      const attempt2 = second.attempt
       attempts.push(attempt2)
       if (attempt2.parsed.usageLimit) return { usageLimit: true }
       if (attempt2.parsed.permissionDenials > 0) return invalidCell(attempt2.parsed)
-      verification = attempt2.parsed.malformed
-        ? { passed: false, failures: ['the fix round produced output that was not valid JSON'] }
-        : await verifyCell({
+      if (second.linkModified) verification = linkModifiedVerification
+      else if (attempt2.parsed.malformed) verification = { passed: false, failures: ['the fix round produced output that was not valid JSON'] }
+      else {
+        verification = await verifyCell({
           cloneDir, baseSha: cloneBaseSha, declaredFiles, config, phaseName, links, runCheckFn, gitExecFn,
         })
+      }
     }
 
     const anyCostMissing = attempts.some((a) => a.parsed.costMissing)

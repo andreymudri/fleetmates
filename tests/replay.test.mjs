@@ -17,6 +17,7 @@ import {
   selectDiverseSample, computeLoss, parseClaudeOutput, materializeBaseTree, removeClone,
   resolveBaseSha, planMarkdownAtBase, buildReplayPrompt, runTierCell, main, DEFAULT_TIERS,
   copyPreviewPaths, directoryByteSize, runPreflight, PREFLIGHT_FILE, pickFailReason, DEFAULT_SEED,
+  lockLinkTrees, fingerprintLinkTrees,
 } from '../tools/replay/replay.mjs'
 
 const WIN32_FAKE_SKIP = process.platform === 'win32' ? 'shebang fake binaries do not execute on win32' : false
@@ -32,8 +33,8 @@ const WIN32_FAKE_SKIP = process.platform === 'win32' ? 'shebang fake binaries do
 // `permission_denials` is always printed (an empty array unless the entry sets one), matching the
 // shape the first real replay recorded for a real `claude -p --output-format json` result.
 // `files` are written into cwd, then `tryFiles` (the same, but a failed write is only logged to
-// FAKE_CLAUDE_LOG + '.errors' instead of crashing), then `remove` entries are deleted, before the
-// result is printed.
+// FAKE_CLAUDE_LOG + '.errors' instead of crashing), then `remove` entries are deleted, then
+// `shell` (a command string) is run in cwd, before the result is printed.
 // `raw`, when present, is written to stdout VERBATIM instead of a constructed JSON object (used
 // for the malformed-output case).
 const FAKE_CLAUDE_SRC = `#!/usr/bin/env node
@@ -67,6 +68,7 @@ process.stdin.on('end', () => {
   for (const rel of entry.remove || []) {
     fs.rmSync(path.join(process.cwd(), rel), { force: true })
   }
+  if (entry.shell) require('node:child_process').execSync(entry.shell, { cwd: process.cwd(), stdio: 'ignore' })
   if (entry.raw !== undefined) {
     process.stdout.write(entry.raw)
   } else {
@@ -833,8 +835,8 @@ test('runTierCell: a session write under the copied preview.link directory never
   const queuePath = path.join(scratch, 'queue.json')
   // The session's own queue entry writes DONE.txt (declared) AND, separately, mutates the linked
   // dependency file — exactly the write the old symlink let through to the source repo for real.
-  // `tryFiles`: the copy is read-only now (see the read-only tests below), so the write is refused
-  // rather than crashing the fake session.
+  // `tryFiles`: the tree is read-only while the session runs (see the link-modified tests below),
+  // so the write is refused rather than crashing the fake session.
   await writeQueue(queuePath, [{
     files: { 'DONE.txt': 'DONE\n' },
     tryFiles: { 'node_modules/dep/index.js': 'mutated by the session\n' },
@@ -891,9 +893,6 @@ test('copyPreviewPaths: an ABSOLUTE in-repo symlink entry copies a real director
   const linkInfo = await lstat(path.join(cellDir, 'node_modules'))
   assert.ok(!linkInfo.isSymbolicLink(), 'the top-level entry is a real directory, not a symlink')
 
-  // The copy is read-only; chmod follows a symlink, so a copy that were still a symlink back into
-  // the source would make the source file writable too and the write below would reach it.
-  await chmod(path.join(cellDir, 'node_modules', 'dep', 'index.js'), 0o644)
   await writeFile(path.join(cellDir, 'node_modules', 'dep', 'index.js'), 'mutated\n', 'utf8')
   const sourceContent = await readFile(path.join(sourceRoot, 'store', 'nm', 'dep', 'index.js'), 'utf8')
   assert.equal(sourceContent, 'original\n', 'a write through the copy does not reach the source repo')
@@ -918,9 +917,6 @@ test('copyPreviewPaths: a RELATIVE in-repo symlink entry copies a real directory
   const linkInfo = await lstat(path.join(cellDir, 'node_modules'))
   assert.ok(!linkInfo.isSymbolicLink(), 'the top-level entry is a real directory, not a dangling relative symlink')
 
-  // The copy is read-only; chmod follows a symlink, so a copy that were still a symlink back into
-  // the source would make the source file writable too and the write below would reach it.
-  await chmod(path.join(cellDir, 'node_modules', 'dep', 'index.js'), 0o644)
   await writeFile(path.join(cellDir, 'node_modules', 'dep', 'index.js'), 'mutated\n', 'utf8')
   const sourceContent = await readFile(path.join(sourceRoot, 'store', 'nm', 'dep', 'index.js'), 'utf8')
   assert.equal(sourceContent, 'original\n', 'a write through the copy does not reach the source repo')
@@ -1650,6 +1646,80 @@ test('locateTasks: a subject in the "(<run>)" or "merge(<run>)" form naming the 
     const byRun = await locateByRun(root)
     assert.equal(byRun.runA.located, true, `${subject}: ${byRun.runA.reason}`)
   }
+  await rm(scratch, { recursive: true, force: true })
+})
+
+// Fix round — a trailing single-token "(x)" was read as a run id whatever x was, so a task's own
+// merge titled "... (parser)" became unlocatable with a false "names a different run" reason
+// (reproduced by the phase 1 reviewers). The leading `merge(<run>):` form always counts; a
+// trailing "(x)" counts only when x is a known run: a `.fleetmates`/`.teammates` state dir or a
+// `run/<x>` branch in any root.
+for (const word of ['parser', '#12', 'wip']) {
+  test(`locateTasks: a trailing "(${word})" that is not a known run does not make the task's own merge unlocatable`, async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-word-'))
+    const { root } = await buildRunsCollisionFixture({
+      dir: path.join(scratch, 'proj'),
+      runs: [
+        { runId: 'runA', subject: `merge: T1 edit a.js (${word})` },
+        { runId: 'runB', squash: true },
+      ],
+    })
+    const byRun = await locateByRun(root)
+    assert.equal(byRun.runA.located, true, byRun.runA.reason)
+    assert.equal(byRun.runA.method, 'merge')
+    await rm(scratch, { recursive: true, force: true })
+  })
+}
+
+test('locateTasks: a trailing "(runB)" with neither a state dir nor a run/runB branch is not a known run', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-unknown-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [
+      { runId: 'runA', squash: true },
+      { runId: 'runB', subject: 'Merge T1: edit a.js (runB)', state: false },
+    ],
+  })
+  await git(['branch', '-D', 'run/runB'], root)
+  const byRun = await locateByRun(root)
+  assert.equal(byRun.runA.located, true, 'with nothing naming runB a run, "(runB)" is an ordinary word')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('locateTasks: a trailing "(runB)" is a known run through a .teammates state dir alone', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-teammates-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [
+      { runId: 'runA', squash: true },
+      { runId: 'runB', subject: 'Merge T1: edit a.js (runB)', state: false },
+    ],
+  })
+  await git(['branch', '-D', 'run/runB'], root)
+  await mkdir(path.join(root, '.teammates', 'runB'), { recursive: true })
+  const byRun = await locateByRun(root)
+  assert.equal(byRun.runA.located, false)
+  assert.ok(byRun.runA.reason.includes('other run'), byRun.runA.reason)
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('locateTasks: a trailing "(runB)" is a known run through a run/runB branch in ANOTHER root', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-otherroot-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [
+      { runId: 'runA', squash: true },
+      { runId: 'runB', subject: 'Merge T1: edit a.js (runB)', state: false },
+    ],
+  })
+  await git(['branch', '-D', 'run/runB'], root)
+  // The other root is in the pool through its own run, runC, and holds a run/runB branch.
+  const other = await buildRunsCollisionFixture({ dir: path.join(scratch, 'other'), runs: [{ runId: 'runC', subject: 'Merge T1: edit a.js' }] })
+  await git(['branch', 'run/runB'], other.root)
+  const results = await locateTasks(poolFromPlans(await listRunPlans([root, other.root])))
+  const runA = results.find((r) => r.runId === 'runA')
+  assert.equal(runA.located, false)
+  assert.ok(runA.reason.includes('other run'), runA.reason)
   await rm(scratch, { recursive: true, force: true })
 })
 
@@ -2601,7 +2671,7 @@ test('main --execute: a denied cell appends nothing, stops the run naming the to
 })
 
 // Step 3 — every `fail` says why, without task text, paths or command output.
-const FAIL_REASONS = /^(no-op|fileset|command:[^\s/\\]+|session-error|preview-copy)$/
+const FAIL_REASONS = /^(no-op|fileset|command:[^\s/\\]+|session-error|link-modified)$/
 
 test('runTierCell: failReason is no-op when no declared file changed', { skip: WIN32_FAKE_SKIP }, async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-reason-noop-'))
@@ -2768,83 +2838,181 @@ test('copyPreviewPaths: refuses a nested entry under a base-tree symlink, and wr
   await rm(scratch, { recursive: true, force: true })
 })
 
-// mto-followups T1, step 4 — the copied link trees are excluded from the fileset check, so a
-// session's edit under one went unseen. They are now read-only (files and directories) while the
-// session runs, and made writable again before removal.
+// mto-followups T1, step 4 and its fix round — the copied link trees are excluded from the fileset
+// check, so a session's edit under one went unseen. Read-only alone was reproduced wrong twice:
+// left locked through the gate commands, a check writing node_modules/.cache failed as
+// command:<check> (the real gate links these directories writable); and a bypassPermissions
+// session can `chmod -R u+w` and edit anyway. Now: copies are writable; runTierCell fingerprints
+// the link trees, locks them only while a session runs, unlocks and re-fingerprints, and any
+// difference fails the cell as `link-modified`. Gate commands run on the writable tree.
 const ROOT_SKIP = process.getuid?.() === 0 ? 'root ignores file modes' : false
 
-test('copyPreviewPaths: the copied tree is read-only, files and directories, and teardown still removes it', { skip: ROOT_SKIP }, async () => {
-  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-copy-readonly-'))
+function linkGateConfig(extraChecks = []) {
+  return {
+    preview: { link: ['node_modules'] },
+    phases: {
+      default: {
+        checks: [
+          { name: 'done-marker', kind: 'command', run: `node -e "process.exit(require('fs').existsSync('DONE.txt') ? 0 : 1)"` },
+          ...extraChecks,
+        ],
+      },
+    },
+  }
+}
+
+async function linkFixture(scratch, nonce, extraChecks) {
+  const fixture = await buildFixtureRepo({ dir: path.join(scratch, 'proj'), briefNonce: nonce, gateConfig: linkGateConfig(extraChecks) })
+  await mkdir(path.join(fixture.root, 'node_modules', 'dep'), { recursive: true })
+  await writeFile(path.join(fixture.root, 'node_modules', 'dep', 'index.js'), 'original\n', 'utf8')
+  return fixture
+}
+
+test('copyPreviewPaths: the copy is writable, so a gate-style write under node_modules/.cache succeeds', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-copy-writable-'))
   const sourceRoot = path.join(scratch, 'source')
   await mkdir(path.join(sourceRoot, 'node_modules', 'dep'), { recursive: true })
   await writeFile(path.join(sourceRoot, 'node_modules', 'dep', 'index.js'), 'original\n', 'utf8')
   const cellDir = path.join(scratch, 'cell')
   await mkdir(cellDir, { recursive: true })
   const teardown = await copyPreviewPaths(cellDir, sourceRoot, ['node_modules'])
+  await mkdir(path.join(cellDir, 'node_modules', '.cache'), { recursive: true })
+  await writeFile(path.join(cellDir, 'node_modules', '.cache', 'x'), '1\n', 'utf8')
+  await teardown()
+  assert.deepEqual(await readdir(cellDir), [])
+  await rm(scratch, { recursive: true, force: true })
+})
 
+test('lockLinkTrees: read-only files and directories while locked; unlock restores the exact modes; symlinks untouched', { skip: ROOT_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-lock-'))
+  const cellDir = path.join(scratch, 'cell')
+  await mkdir(path.join(cellDir, 'node_modules', 'dep'), { recursive: true })
+  await writeFile(path.join(cellDir, 'node_modules', 'dep', 'index.js'), 'original\n', 'utf8')
+  await writeFile(path.join(cellDir, 'node_modules', 'dep', 'ro.js'), 'ro\n', 'utf8')
+  await chmod(path.join(cellDir, 'node_modules', 'dep', 'ro.js'), 0o444)
+  const outsideFile = path.join(scratch, 'outside.js')
+  await writeFile(outsideFile, 'outside\n', 'utf8')
+  await symlink(outsideFile, path.join(cellDir, 'node_modules', 'link.js'))
+  const modeOf = async (rel) => (await stat(path.join(cellDir, rel))).mode & 0o7777
+  const before = await Promise.all(['node_modules', 'node_modules/dep', 'node_modules/dep/index.js', 'node_modules/dep/ro.js'].map(modeOf))
+
+  const unlock = await lockLinkTrees(cellDir, ['node_modules', 'absent'])
   await assert.rejects(writeFile(path.join(cellDir, 'node_modules', 'dep', 'index.js'), 'mutated\n'), { code: 'EACCES' })
   await assert.rejects(writeFile(path.join(cellDir, 'node_modules', 'dep', 'new.js'), 'new\n'), { code: 'EACCES' })
   await assert.rejects(writeFile(path.join(cellDir, 'node_modules', 'new.js'), 'new\n'), { code: 'EACCES' })
-  assert.equal(await readFile(path.join(cellDir, 'node_modules', 'dep', 'index.js'), 'utf8'), 'original\n')
-  const sourceMode = (await stat(path.join(sourceRoot, 'node_modules', 'dep', 'index.js'))).mode
-  assert.ok(sourceMode & 0o200, 'the source repo\'s own file keeps its write permission')
-
-  await teardown()
-  assert.deepEqual(await readdir(cellDir), [], 'teardown removed the read-only copy')
-  await rm(scratch, { recursive: true, force: true })
-})
-
-test('copyPreviewPaths: an inner symlink in the copied tree is left alone, so its target keeps its mode', { skip: ROOT_SKIP }, async () => {
-  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-copy-readonly-sym-'))
-  const sourceRoot = path.join(scratch, 'source')
-  await mkdir(path.join(sourceRoot, 'node_modules'), { recursive: true })
-  const outsideFile = path.join(scratch, 'outside.js')
-  await writeFile(outsideFile, 'outside\n', 'utf8')
-  await symlink(outsideFile, path.join(sourceRoot, 'node_modules', 'link.js'))
-  const cellDir = path.join(scratch, 'cell')
-  await mkdir(cellDir, { recursive: true })
-  const teardown = await copyPreviewPaths(cellDir, sourceRoot, ['node_modules'])
   assert.ok((await stat(outsideFile)).mode & 0o200, 'chmod never followed the inner symlink')
-  await teardown()
+  await unlock()
+  const after = await Promise.all(['node_modules', 'node_modules/dep', 'node_modules/dep/index.js', 'node_modules/dep/ro.js'].map(modeOf))
+  assert.deepEqual(after, before)
   await rm(scratch, { recursive: true, force: true })
 })
 
-test('runTierCell: a session write under a copied link directory does not change it, and the clone is still removed', { skip: WIN32_FAKE_SKIP || ROOT_SKIP }, async () => {
-  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-copy-readonly-cell-'))
-  const gateConfig = {
-    preview: { link: ['node_modules'] },
-    phases: {
-      default: {
-        checks: [
-          { name: 'done-marker', kind: 'command', run: `node -e "process.exit(require('fs').existsSync('DONE.txt') ? 0 : 1)"` },
-          {
-            name: 'link-intact',
-            kind: 'command',
-            run: `node -e "const fs = require('fs'); process.exit(fs.readFileSync('node_modules/dep/index.js', 'utf8') === 'original\\\\n' && !fs.existsSync('node_modules/dep/new.js') ? 0 : 1)"`,
-          },
-        ],
-      },
-    },
-  }
-  const fixture = await buildFixtureRepo({ dir: path.join(scratch, 'proj'), briefNonce: 'copy-readonly-cell', gateConfig })
-  await mkdir(path.join(fixture.root, 'node_modules', 'dep'), { recursive: true })
-  await writeFile(path.join(fixture.root, 'node_modules', 'dep', 'index.js'), 'original\n', 'utf8')
+test('fingerprintLinkTrees: changes with content, a new file, a removed file, a mode and a symlink target', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-fingerprint-'))
+  const cellDir = path.join(scratch, 'cell')
+  const nm = path.join(cellDir, 'node_modules')
+  await mkdir(path.join(nm, 'dep'), { recursive: true })
+  await writeFile(path.join(nm, 'dep', 'index.js'), 'aaaa\n', 'utf8')
+  await symlink('dep/index.js', path.join(nm, 'link.js'))
+  const fp = () => fingerprintLinkTrees(cellDir, ['node_modules', 'absent'])
+  const base = await fp()
+  assert.equal(await fp(), base, 'stable when nothing changed')
+  await writeFile(path.join(nm, 'dep', 'index.js'), 'bbbb\n', 'utf8')
+  assert.notEqual(await fp(), base, 'same size, different content')
+  await writeFile(path.join(nm, 'dep', 'index.js'), 'aaaa\n', 'utf8')
+  assert.equal(await fp(), base)
+  await chmod(path.join(nm, 'dep', 'index.js'), 0o755)
+  assert.notEqual(await fp(), base, 'mode')
+  await chmod(path.join(nm, 'dep', 'index.js'), 0o644)
+  const reset = await fp()
+  await writeFile(path.join(nm, 'dep', 'new.js'), '', 'utf8')
+  assert.notEqual(await fp(), reset, 'new file')
+  await rm(path.join(nm, 'dep', 'new.js'))
+  assert.equal(await fp(), reset)
+  await rm(path.join(nm, 'link.js'))
+  await symlink('dep/other.js', path.join(nm, 'link.js'))
+  assert.notEqual(await fp(), reset, 'symlink target')
+  await rm(path.join(nm, 'link.js'))
+  await symlink('dep/index.js', path.join(nm, 'link.js'))
+  await mkdir(path.join(cellDir, 'absent'))
+  assert.notEqual(await fp(), reset, 'a declared link that was absent and now exists')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('runTierCell: a gate command writing under node_modules/.cache passes, with no fix round', { skip: WIN32_FAKE_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-cache-write-'))
+  const fixture = await linkFixture(scratch, 'cache-write', [{
+    name: 'cache-write',
+    kind: 'command',
+    run: `node -e "const fs = require('fs'); fs.mkdirSync('node_modules/.cache', { recursive: true }); fs.writeFileSync('node_modules/.cache/x', '1')"`,
+  }])
+  const { cell, calls, tmpRoot } = await runCellWith({ scratch, fixture, queue: [passingEntry(), passingEntry()] })
+  assert.equal(cell.status, 'pass', `failReason ${cell.failReason}`)
+  assert.equal(cell.fixRound, false)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(await readdir(tmpRoot), [], 'the clone was removed')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('runTierCell: a session that leaves the link trees alone passes, and a plain write under them is refused', { skip: WIN32_FAKE_SKIP || ROOT_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-link-alone-'))
+  const fixture = await linkFixture(scratch, 'link-alone')
   const { cell, tmpRoot } = await runCellWith({
     scratch,
     fixture,
-    queue: [{
-      files: { 'DONE.txt': 'DONE\n' },
-      tryFiles: { 'node_modules/dep/index.js': 'mutated by the session\n', 'node_modules/dep/new.js': 'new\n' },
-      totalCostUsd: 0.1,
-    }],
+    queue: [{ ...passingEntry(), tryFiles: { 'node_modules/dep/index.js': 'mutated\n', 'node_modules/dep/new.js': 'new\n' } }],
   })
   const errors = await readFile(path.join(scratch, 'log.jsonl.errors'), 'utf8')
   assert.match(errors, /node_modules\/dep\/index\.js EACCES/)
   assert.match(errors, /node_modules\/dep\/new\.js EACCES/)
-  assert.equal(cell.status, 'pass', 'link-intact saw the copied tree unchanged after the session')
-  assert.deepEqual(await readdir(tmpRoot), [], 'the clone, read-only link tree included, was removed')
+  assert.equal(cell.status, 'pass', `failReason ${cell.failReason}`)
+  assert.deepEqual(await readdir(tmpRoot), [], 'the clone was removed')
   await rm(scratch, { recursive: true, force: true })
 })
+
+test('runTierCell: a session that chmods the link tree writable and edits it fails as link-modified, with no fix round', { skip: WIN32_FAKE_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-link-modified-'))
+  const fixture = await linkFixture(scratch, 'link-modified')
+  const { cell, calls, tmpRoot } = await runCellWith({
+    scratch,
+    fixture,
+    queue: [
+      // The session also leaves a read-only directory of its own under the link, which the
+      // unlock knows nothing about: teardown must still be able to remove it.
+      {
+        ...passingEntry(),
+        shell: 'chmod -R u+w node_modules && echo mutated > node_modules/dep/index.js'
+          + ' && mkdir node_modules/own && touch node_modules/own/f && chmod a-w node_modules/own',
+      },
+      passingEntry(),
+    ],
+  })
+  assert.equal(cell.status, 'fail')
+  assert.equal(cell.failReason, 'link-modified')
+  assert.equal(cell.fixRound, false)
+  assert.equal(calls.length, 1, 'no fix round was spent')
+  assert.deepEqual(await readdir(tmpRoot), [], 'the clone was removed')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('runTierCell: a link tree modified during the fix round also fails as link-modified', { skip: WIN32_FAKE_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-link-modified-fix-'))
+  const fixture = await linkFixture(scratch, 'link-modified-fix')
+  const { cell, calls } = await runCellWith({
+    scratch,
+    fixture,
+    queue: [
+      failingEntry(),
+      { ...passingEntry(), remove: ['WRONG.txt'], shell: 'chmod -R u+w node_modules && echo x > node_modules/dep/new.js' },
+    ],
+  })
+  assert.equal(calls.length, 2)
+  assert.equal(cell.fixRound, true)
+  assert.equal(cell.status, 'fail')
+  assert.equal(cell.failReason, 'link-modified')
+  await rm(scratch, { recursive: true, force: true })
+})
+
 
 test('runTierCell: a passing cell carries failReason null, zero denials and its turns', { skip: WIN32_FAKE_SKIP }, async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-reason-pass-'))
@@ -3134,6 +3302,8 @@ test('pickFailReason: each branch, and a failed verification with no recorded re
   assert.equal(pickFailReason({ reasons: ['no-op', 'fileset'] }, clean), 'fileset')
   assert.equal(pickFailReason({ reasons: ['command:a', 'no-op'] }, clean), 'no-op')
   assert.equal(pickFailReason({ reasons: ['command:a', 'command:b'] }, clean), 'command:a')
+  assert.equal(pickFailReason({ reasons: ['command:a', 'fileset', 'link-modified'] }, clean), 'link-modified')
+  assert.equal(pickFailReason({ reasons: ['link-modified'] }, { malformed: true, isError: false }), 'link-modified')
   assert.throws(() => pickFailReason({ reasons: [] }, clean), /no recorded reason/)
   assert.throws(() => pickFailReason({}, clean), /no recorded reason/)
 })
