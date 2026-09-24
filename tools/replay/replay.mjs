@@ -28,8 +28,10 @@
 //     `realpath(cell/node_modules)/../.git/refs/heads` resolved straight into the source repo's
 //     own `.git`, exposing its already-solved branches — the same answer-leakage class Finding A
 //     exists to prevent, reopened by a different door. A copy has no such door: the cell's
-//     `node_modules` becomes a real, independent directory inside the isolated clone, torn down
-//     (and, either way, removed again with the whole clone) before the cell finishes;
+//     `node_modules` becomes a real, independent directory inside the isolated clone, made
+//     read-only while the session runs (it is excluded from the fileset check, so an edit there
+//     would otherwise go unseen), torn down (and, either way, removed again with the whole clone)
+//     before the cell finishes;
 //   - is removed afterward, regardless of outcome.
 // NOT isolated by any of this, and nothing here claims otherwise: the `claude -p` child process
 // itself is an ordinary process running with the operator's own OS permissions, no sandbox and no
@@ -54,8 +56,10 @@
 //     `$TMPDIR` that must create a file and run `git status` with zero permission denials, or the
 //     whole run is aborted before any cell starts.
 // Every `fail` record carries a `failReason` from a fixed set — `no-op`, `fileset`,
-// `command:<check name>`, `session-error`, `preview-copy` — never task text, a path or command
-// output, plus `permissionDenials` (a count) and `turns`.
+// `command:<check name>`, `session-error` — never task text, a path or command output, plus
+// `permissionDenials` (a count) and `turns`. A `preview.link` copy refusal is recorded as
+// `invalid` with failReason `preview-copy` and a null cost, wall-clock and turns (no session ran),
+// and computeLoss leaves `invalid` records out.
 // Selection is restricted to LANDED tasks, located one of two ways because `prune-run` deletes a
 // task's own branch once its run integrates — on a real fleet history, that branch is gone by the
 // time this tool runs, so a scheme that depends on it existing finds nothing:
@@ -67,10 +71,11 @@
 //     whose plan text is readable at that base. A squash merge leaves no such M (no 2-parent
 //     commit at all) and is correctly reported unlocatable, not silently skipped. A bare task id
 //     is not unique across runs — reproduced directly, two runs that both had a "T1" resolved one
-//     run's T1 to the OTHER run's merge — so ties are broken by the run id, next, as a whole token
-//     in the same subject; if more than one candidate still remains, the task is `unlocatable`
-//     with every remaining merge's short sha named, never guessed at by "earliest" or anything
-//     else.
+//     run's T1 to the OTHER run's merge — so a candidate whose subject names another run is
+//     rejected, and ties are broken by the run id, next, as a whole token (hyphens included) in
+//     the same subject (see resolveBaseByMerge); if more than one candidate still remains, the
+//     task is `unlocatable` with every remaining merge's short sha named, never guessed at by
+//     "earliest" or anything else.
 // A task still pending, sitting on a run that never merged, or whose plan text is not readable at
 // the resolved base, is excluded and reported with a reason rather than guessed at.
 // Only a cell's hashed key (`sha256(repo realpath, run id, task id)`, pseudonymous and guessable —
@@ -98,7 +103,7 @@
 // seed it used in `loss.json`. Used whenever the cost-matrix formula in `computeLoss` changes but
 // the underlying replay data has not.
 import {
-  mkdtemp, mkdir, rm, readFile, writeFile, appendFile, realpath, readdir, cp, lstat,
+  mkdtemp, mkdir, rm, readFile, writeFile, appendFile, realpath, readdir, cp, lstat, chmod,
 } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -270,6 +275,23 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+// A run id as a whole token. Run ids are hyphenated slugs and `\b` treats '-' as a boundary, so
+// `\bfoo\b` matched inside "foo-bar": run foo's squash-merged T1 resolved to run foo-bar's merge.
+// The anchors here treat '-' as part of the id.
+function runIdPattern(runId) {
+  return new RegExp(`(?<![\\w-])${escapeRegExp(runId)}(?![\\w-])`)
+}
+
+// The run a merge subject names in one of the two forms fleetmates writes: a leading
+// `merge(<run>):`, else a trailing `(<run>)`. Null when neither is present. Read from the subject
+// alone, so a run with no `.fleetmates/<run>/plan.json` under the roots is still recognised.
+function runNamedInSubject(subject) {
+  const prefixed = /^merge\(([^()\s]+)\)/i.exec(subject)
+  if (prefixed) return prefixed[1]
+  const trailing = /\(([^()\s]+)\)\s*$/.exec(subject)
+  return trailing ? trailing[1] : null
+}
+
 // Every merge commit reachable from the default branch, subject included — fetched once per root
 // (see mergeCache in locateTasks) rather than once per task, since a root with many tasks would
 // otherwise re-walk the same history for each one.
@@ -300,8 +322,13 @@ async function commitParents(root, sha, gitExecFn) {
 //       merge-base(M^1, M^2) is non-empty and touches only the task's declared files; and have
 //       the task's own planPath readable at that base. A squash merge produces no 2-parent commit
 //       at all, so `--merges` never surfaces one.
-//   (b) a candidate whose subject names a DIFFERENT known run id as a whole token — and never
-//       names THIS run's own id — is rejected outright, even when it is the only candidate left.
+//   (b) a candidate whose subject never names THIS run's own id, and names a DIFFERENT run —
+//       either a known run id (one with `.fleetmates/<run>/plan.json` under the roots) as a whole
+//       token, or any run id in the `merge(<run>):` or trailing `(<run>)` form fleetmates writes,
+//       state directory or not — is rejected outright, even when it is the only candidate left.
+//       A whole token treats '-' as part of the id (see runIdPattern). A run with no state
+//       directory whose subject names no run in those forms stays invisible: its merge is a
+//       neutral candidate, and a sole neutral candidate is accepted.
 //       Reproduced directly: run A's T1, squash-merged (leaving no valid merge of its own), still
 //       had exactly one OTHER candidate left after (a) — run B's own, unrelated "T1" — and the old
 //       code accepted whatever was left standing regardless of whose subject it actually was. If
@@ -350,12 +377,16 @@ async function resolveBaseByMerge({
         + 'base (a squash merge, or a different task\'s merge)',
     }
   }
-  const runPattern = new RegExp(`\\b${escapeRegExp(runId)}\\b`)
+  const runPattern = runIdPattern(runId)
   const otherRunIds = knownRunIds.filter((r) => r !== runId)
-  const otherRunPatterns = otherRunIds.map((r) => new RegExp(`\\b${escapeRegExp(r)}\\b`))
-  const belongsToAnotherRun = (subject) => (
-    !runPattern.test(subject) && otherRunPatterns.some((p) => p.test(subject))
-  )
+  const otherRunPatterns = otherRunIds.map(runIdPattern)
+  const belongsToAnotherRun = (subject) => {
+    if (runPattern.test(subject)) return false
+    if (otherRunPatterns.some((p) => p.test(subject))) return true
+    // Any run named in a fleetmates form is another run's here: a subject naming our own run
+    // already returned above.
+    return runNamedInSubject(subject) !== null
+  }
   const notOtherRuns = passing.filter((p) => !belongsToAnotherRun(p.subject))
   if (notOtherRuns.length === 0) {
     return {
@@ -645,7 +676,10 @@ async function copyWithReflinkAttempt(target, dst, execFn = execCapture) {
 export async function copyPreviewPaths(dir, repoRoot, paths = []) {
   const created = []
   const teardown = async () => {
-    for (const dst of created.reverse()) await rm(dst, { recursive: true, force: true }).catch(() => {})
+    for (const dst of created.reverse()) {
+      await setTreeWritable(dst, true).catch(() => {})
+      await rm(dst, { recursive: true, force: true }).catch(() => {})
+    }
   }
   const realRepoRoot = await realpath(repoRoot).catch(() => repoRoot)
   // Resolved once, and dst below is built from THIS, not `dir` — a `dst` built from `dir` and
@@ -673,7 +707,10 @@ export async function copyPreviewPaths(dir, repoRoot, paths = []) {
       throw new Error(`preview link ${JSON.stringify(entry)}: not a directory`)
     }
     const dst = path.resolve(realDir, entry)
-    if (isOutsideDir(realDir, dst)) {
+    // The textual check alone missed a nested entry under a directory the base tree holds as a
+    // symlink: `vendor/nm` with `vendor -> /elsewhere` is inside the cell as text, and the copy
+    // landed in /elsewhere/nm. The deepest existing ancestor of `dst` is resolved as well.
+    if (isOutsideDir(realDir, dst) || isOutsideDir(realDir, await realpathOfDeepestExisting(dst))) {
       await teardown()
       throw new Error(`preview link ${JSON.stringify(entry)} would be copied outside the preview tree`)
     }
@@ -696,8 +733,44 @@ export async function copyPreviewPaths(dir, repoRoot, paths = []) {
       await cp(realTarget, dst, { recursive: true, verbatimSymlinks: true })
     }
     created.push(dst)
+    try {
+      await setTreeWritable(dst, false)
+    } catch (err) {
+      await teardown()
+      throw err
+    }
   }
   return teardown
+}
+
+// `path` itself when it exists, else its nearest existing ancestor, resolved via `realpath`.
+async function realpathOfDeepestExisting(target) {
+  let current = target
+  for (;;) {
+    try {
+      return await realpath(current)
+    } catch {
+      const parent = path.dirname(current)
+      if (parent === current) return current
+      current = parent
+    }
+  }
+}
+
+// The copied link trees are excluded from the fileset check (see verifyCell), so an edit a session
+// made under one went unseen. They are made read-only — every file and directory — before the
+// session starts, and writable again (owner write bit) before removal, since a directory without
+// write permission cannot have its entries unlinked. Symlinks are skipped, never chmod'ed: chmod
+// follows a symlink, and an inner symlink kept verbatim by the copy may point outside the cell.
+async function setTreeWritable(target, writable) {
+  const info = await lstat(target)
+  if (info.isSymbolicLink()) return
+  const mode = info.mode & 0o7777
+  if (writable) await chmod(target, mode | 0o200)
+  if (info.isDirectory()) {
+    for (const entry of await readdir(target)) await setTreeWritable(path.join(target, entry), writable)
+  }
+  if (!writable) await chmod(target, mode & ~0o222)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -971,24 +1044,28 @@ export async function runTierCell({
       // honestly. What DOES throw here is one of copyPreviewPaths' own safety refusals (outside
       // the repository, not a directory, outside the cell, already present) or a genuine I/O
       // error — and swallowing THAT silently graded the cell as though its dependencies were
-      // there when they were not. It fails the cell instead, with the refusal's own reason, rather
-      // than continuing as if nothing were declared.
+      // there when they were not. The cell is `invalid` instead, with the refusal's own reason,
+      // rather than continuing as if nothing were declared. Not `fail`: no session ran, so the
+      // cell says nothing about the tier, and a `fail` with cost 0 read as a free failed attempt
+      // in the loss. Cost, wall-clock and turns are unknown (null), never 0.
       try {
         teardownLinks = await copyPreviewPathsFn(cloneDir, root, declaredLinks)
         links = declaredLinks
       } catch (err) {
         return {
           usageLimit: false,
-          status: 'fail',
-          totalCostUsd: 0,
-          costMissing: false,
-          wallClockMs: 0,
+          invalid: true,
+          status: 'invalid',
+          totalCostUsd: null,
+          costMissing: true,
+          wallClockMs: null,
           fixRound: false,
           sessionId: null,
           previewLinkError: err.message,
           failReason: 'preview-copy',
           permissionDenials: 0,
-          turns: 0,
+          deniedTools: [],
+          turns: null,
         }
       }
     }
@@ -1107,6 +1184,10 @@ function formatPreflight(result, model) {
   return `preflight: FAILED (${why}) — ${detail}`
 }
 
+function formatPreviewCopy(key, tier, cell) {
+  return `  ${key.slice(0, 12)} ${tier}: INVALID (preview-copy), preview.link copy: ${cell.previewLinkError}`
+}
+
 function formatInvalid(key, tier, cell) {
   return `INVALID: ${key.slice(0, 12)} ${tier}: the session reported ${cell.permissionDenials} permission denial(s) `
     + `(${cell.deniedTools.join(', ')}); nothing was recorded for this cell`
@@ -1204,6 +1285,9 @@ function bootstrapRatioInterval(unders, overs, { seed, samples }) {
 export function computeLoss(records, {
   models, seed = DEFAULT_SEED, bootstrapSamples = DEFAULT_BOOTSTRAP_SAMPLES, now = () => new Date().toISOString(),
 } = {}) {
+  // An `invalid` record (a preview-copy refusal: no session ran) says nothing about any tier, so
+  // it is left out of everything below — not a failed attempt, and not an unresolved task.
+  records = records.filter((r) => r.status !== 'invalid')
   const byKey = new Map()
   for (const record of records) {
     if (!byKey.has(record.key)) byKey.set(record.key, {})
@@ -1275,6 +1359,10 @@ export function computeLoss(records, {
 // ---------------------------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------------------------
+// A value-taking flag with no value — last on the line, or followed by another `--flag` — throws
+// naming the flag, and main exits 2. It used to parse as `true`: a bare `--seed` became
+// Number(true) === 1 and was accepted, and a bare `--out` fell back to the committed data
+// directory and rewrote its loss.json.
 function parseArgs(argv) {
   const flags = {}
   const VALUELESS = new Set(['execute', 'dry-run', 'smoke', 'preflight', 'recompute-loss'])
@@ -1288,7 +1376,7 @@ function parseArgs(argv) {
     }
     const next = argv[i + 1]
     if (next === undefined || next.startsWith('--')) {
-      flags[name] = true
+      throw new Error(`${token} needs a value`)
     } else {
       flags[name] = next
       i += 1
@@ -1421,7 +1509,13 @@ async function readExistingLoss(lossPath, readFileFn) {
 }
 
 export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n`) }, deps = {}) {
-  const flags = parseArgs(argv)
+  let flags
+  try {
+    flags = parseArgs(argv)
+  } catch (err) {
+    io.out(err.message)
+    return 2
+  }
   const execute = flags.execute === true
   const smoke = flags.smoke === true
   const recomputeLoss = flags['recompute-loss'] === true
@@ -1593,6 +1687,10 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
       io.out('BLOCKED: usage limit during --smoke')
       return 1
     }
+    if (cell.previewLinkError) {
+      io.out(formatPreviewCopy(item.key, tier, cell))
+      return 1
+    }
     if (cell.invalid) {
       io.out(formatInvalid(item.key, tier, cell))
       return 1
@@ -1640,12 +1738,13 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
         io.out(`BLOCKED: usage limit, resume with ${buildResumeCommand(argv)}`)
         return 1
       }
-      if (cell.invalid) {
+      // A preview-copy refusal is recorded as `invalid` and the run goes on: it is a property of the
+      // task's manifest and the source checkout, so re-running the cell would only repeat it.
+      if (cell.previewLinkError) {
+        io.out(formatPreviewCopy(item.key, tier, cell))
+      } else if (cell.invalid) {
         io.out(`${formatInvalid(item.key, tier, cell)}; fix the permission setup, then resume with ${buildResumeCommand(argv)}`)
         return 1
-      }
-      if (cell.previewLinkError) {
-        io.out(`  ${item.key.slice(0, 12)} ${tier}: FAILED, preview.link copy: ${cell.previewLinkError}`)
       }
       const record = {
         key: item.key,
