@@ -17,6 +17,7 @@ import {
   selectDiverseSample, computeLoss, parseClaudeOutput, materializeBaseTree, removeClone,
   resolveBaseSha, planMarkdownAtBase, buildReplayPrompt, runTierCell, main, DEFAULT_TIERS,
   copyPreviewPaths, directoryByteSize, runPreflight, PREFLIGHT_FILE, pickFailReason, DEFAULT_SEED,
+  lockLinkTrees, fingerprintLinkTrees,
 } from '../tools/replay/replay.mjs'
 
 const WIN32_FAKE_SKIP = process.platform === 'win32' ? 'shebang fake binaries do not execute on win32' : false
@@ -31,7 +32,9 @@ const WIN32_FAKE_SKIP = process.platform === 'win32' ? 'shebang fake binaries do
 //     permissionDenials: [{ tool_name, tool_use_id, tool_input }], numTurns }
 // `permission_denials` is always printed (an empty array unless the entry sets one), matching the
 // shape the first real replay recorded for a real `claude -p --output-format json` result.
-// `files` are written into cwd, then `remove` entries are deleted, before the result is printed.
+// `files` are written into cwd, then `tryFiles` (the same, but a failed write is only logged to
+// FAKE_CLAUDE_LOG + '.errors' instead of crashing), then `remove` entries are deleted, then
+// `shell` (a command string) is run in cwd, before the result is printed.
 // `raw`, when present, is written to stdout VERBATIM instead of a constructed JSON object (used
 // for the malformed-output case).
 const FAKE_CLAUDE_SRC = `#!/usr/bin/env node
@@ -55,9 +58,17 @@ process.stdin.on('end', () => {
     fs.mkdirSync(path.dirname(dest), { recursive: true })
     fs.writeFileSync(dest, content)
   }
+  for (const [rel, content] of Object.entries(entry.tryFiles || {})) {
+    try {
+      fs.writeFileSync(path.join(process.cwd(), rel), content)
+    } catch (err) {
+      if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG + '.errors', rel + ' ' + err.code + '\\n')
+    }
+  }
   for (const rel of entry.remove || []) {
     fs.rmSync(path.join(process.cwd(), rel), { force: true })
   }
+  if (entry.shell) require('node:child_process').execSync(entry.shell, { cwd: process.cwd(), stdio: 'ignore' })
   if (entry.raw !== undefined) {
     process.stdout.write(entry.raw)
   } else {
@@ -824,8 +835,11 @@ test('runTierCell: a session write under the copied preview.link directory never
   const queuePath = path.join(scratch, 'queue.json')
   // The session's own queue entry writes DONE.txt (declared) AND, separately, mutates the linked
   // dependency file — exactly the write the old symlink let through to the source repo for real.
+  // `tryFiles`: the tree is read-only while the session runs (see the link-modified tests below),
+  // so the write is refused rather than crashing the fake session.
   await writeQueue(queuePath, [{
-    files: { 'DONE.txt': 'DONE\n', 'node_modules/dep/index.js': 'mutated by the session\n' },
+    files: { 'DONE.txt': 'DONE\n' },
+    tryFiles: { 'node_modules/dep/index.js': 'mutated by the session\n' },
     totalCostUsd: 0.1,
   }])
   const tmpRoot = path.join(scratch, 'tmp')
@@ -1063,7 +1077,7 @@ test('runTierCell: a preview.link copy failure fails the cell visibly, instead o
     env: { FAKE_CLAUDE_QUEUE: queuePath, FAKE_CLAUDE_LOG: logPath },
   })
 
-  assert.equal(cell.status, 'fail', 'the cell fails rather than silently grading without its dependency')
+  assert.equal(cell.status, 'invalid', 'the cell is invalid rather than silently graded without its dependency')
   assert.ok(cell.previewLinkError, 'the failure reason is surfaced, not swallowed')
   assert.ok(cell.previewLinkError.includes('outside the repository'))
   const calls = await readFile(logPath, 'utf8').catch(() => '')
@@ -1224,14 +1238,16 @@ test('locateTasks: a deleted task branch resolves the same base the reflog path 
 
 test('locateTasks: recognizes all three real-world integration-merge message shapes', async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-shapes-'))
+  // `merge(<run>)` names the run it belongs to, so that shape's fixture run is called "portals": a
+  // subject naming a different run is rejected (see the mto-followups step 3 tests below).
   const shapes = [
     { taskId: 'T6', subject: 'Merge T6: the crafting planner' },
-    { taskId: 'T5', subject: 'merge(portals): T5 wire portals into settings' },
+    { taskId: 'T5', subject: 'merge(portals): T5 wire portals into settings', runId: 'portals' },
     { taskId: 'T3', subject: "Merge branch 'teammates/reporting/T3' into reporting-integri" },
   ]
   for (const [i, shape] of shapes.entries()) {
     const fixture = await buildFixtureRepo({
-      dir: path.join(scratch, `proj${i}`), runId: `r${i}`, taskId: shape.taskId, briefNonce: `shape-${i}`,
+      dir: path.join(scratch, `proj${i}`), runId: shape.runId ?? `r${i}`, taskId: shape.taskId, briefNonce: `shape-${i}`,
       taskMergeSubject: shape.subject, mergeTaskIntoRun: true, mergeRunIntoMaster: true,
     })
     const expectedBase = await resolveBaseSha({ root: fixture.root, runId: fixture.runId, taskId: fixture.taskId })
@@ -1283,6 +1299,20 @@ test('locateTasks: a merge naming a different, longer task id ("T30") does not l
 async function buildTwoRunCollisionFixture({
   dir, taskAMergeSubject, taskBMergeSubject, squashA = false, squashB = false,
 }) {
+  return buildRunsCollisionFixture({
+    dir,
+    runs: [
+      { runId: 'runA', subject: taskAMergeSubject, squash: squashA },
+      { runId: 'runB', subject: taskBMergeSubject, squash: squashB },
+    ],
+  })
+}
+
+// The same shape for any list of runs, in landing order: each run lands its own "T1" editing
+// `a.js`. `state: false` leaves out that run's `.fleetmates/<run>/plan.json` — a run whose state
+// directory is gone, or lives in another checkout: its merges are still in git history, but
+// locateTasks never learns its run id from the roots.
+async function buildRunsCollisionFixture({ dir, runs }) {
   await mkdir(dir, { recursive: true })
   await git(['init', '--quiet'], dir)
   await git(['symbolic-ref', 'HEAD', 'refs/heads/master'], dir)
@@ -1306,10 +1336,8 @@ async function buildTwoRunCollisionFixture({
   // never committed to git in real usage either; keeping it out of every commit here is not just a
   // test-fixture fix, it is the accurate shape.
   const runBranches = {}
-  for (const [runId, content, subject, squash] of [
-    ['runA', 'from run A\n', taskAMergeSubject, squashA],
-    ['runB', 'from run B\n', taskBMergeSubject, squashB],
-  ]) {
+  for (const { runId, subject, squash = false } of runs) {
+    const content = `from ${runId}\n`
     const runBranch = `run/${runId}`
     runBranches[runId] = runBranch
     const taskBranch = taskBranchName(runId, 'T1')
@@ -1332,7 +1360,8 @@ async function buildTwoRunCollisionFixture({
     await git(['branch', '-D', taskBranch], dir)
   }
 
-  for (const runId of ['runA', 'runB']) {
+  for (const { runId, state = true } of runs) {
+    if (!state) continue
     await mkdir(path.join(dir, '.fleetmates', runId), { recursive: true })
     const planState = {
       runId,
@@ -1492,6 +1521,238 @@ test('locateTasks: the run-id tiebreak is a whole token — run "r1" does not ma
   assert.equal(r1Result.located, true)
   assert.equal(r1Result.baseSha, expectedR1Base, 'run "r1" resolves to its OWN base, not "r10"\'s, despite "r1" being a prefix of "r10"')
   assert.notEqual(r1Result.baseSha, r10Result.baseSha)
+  await rm(scratch, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------------------------
+// mto-followups T1, step 2 — a run id is a hyphenated slug, and `\b` treats '-' as a boundary.
+// Reproduced before the fix (scratchpad repro-hyphen.mjs): with runs "foo" and "foo-bar", run
+// foo's squash-merged T1 resolved to foo-bar's merge, because `\bfoo\b` matched inside
+// "(foo-bar)" and the own-run guard then took foo-bar's merge for foo's own.
+// ---------------------------------------------------------------------------------------------
+
+async function locateByRun(root) {
+  const results = await locateTasks(poolFromPlans(await listRunPlans([root])))
+  return Object.fromEntries(results.map((r) => [r.runId, r]))
+}
+
+test('locateTasks: run "foo"\'s squash-merged T1 never resolves to run "foo-bar"\'s T1 merge', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-hyphen-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [
+      { runId: 'foo', squash: true },
+      { runId: 'foo-bar', subject: 'Merge T1: edit a.js (foo-bar)' },
+    ],
+  })
+  const byRun = await locateByRun(root)
+  assert.equal(byRun['foo-bar'].located, true, 'sanity: foo-bar\'s own T1 is locatable')
+  assert.equal(byRun.foo.located, false, 'foo\'s squashed T1 must not resolve to foo-bar\'s base')
+  assert.ok(byRun.foo.reason.includes('other run'), byRun.foo.reason)
+  await rm(scratch, { recursive: true, force: true })
+})
+
+// One test per anchor. The subjects name the run in running text, never in the "(<run>)" form, so
+// only the run-id patterns decide — the subject parse would otherwise catch these on its own.
+for (const { own, other, why } of [
+  { own: 'foo', other: 'foo-bar', why: 'own-run lookahead: "foo" is not a whole token of "foo-bar"' },
+  { own: 'bar', other: 'foo-bar', why: 'own-run lookbehind: "bar" is not a whole token of "foo-bar"' },
+]) {
+  test(`locateTasks: ${why}`, async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-hyphen-own-'))
+    const { root } = await buildRunsCollisionFixture({
+      dir: path.join(scratch, 'proj'),
+      runs: [
+        { runId: own, squash: true },
+        { runId: other, subject: `Merge T1: edit a.js for ${other}` },
+      ],
+    })
+    const byRun = await locateByRun(root)
+    assert.equal(byRun[own].located, false, `${own}'s T1 must not resolve to ${other}'s merge`)
+    assert.ok(byRun[own].reason.includes('other run'), byRun[own].reason)
+    await rm(scratch, { recursive: true, force: true })
+  })
+}
+
+// The other-run patterns: run "baz"'s own merge subject mentions "foo-bar" (a run with no state
+// here), and "foo" is a known run. With `\b`, "foo" matched inside "foo-bar" and baz's own, sole
+// candidate was rejected as foo's.
+for (const { mention, why } of [
+  { mention: 'foo-bar', why: 'other-run lookahead: known run "foo" is not named by "foo-bar"' },
+  { mention: 'bar-foo', why: 'other-run lookbehind: known run "foo" is not named by "bar-foo"' },
+]) {
+  test(`locateTasks: ${why}`, async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-hyphen-other-'))
+    const { root } = await buildRunsCollisionFixture({
+      dir: path.join(scratch, 'proj'),
+      runs: [
+        { runId: 'foo', squash: true },
+        { runId: 'baz', subject: `Merge T1: edit a.js, rebased over ${mention}` },
+      ],
+    })
+    const byRun = await locateByRun(root)
+    assert.equal(byRun.baz.located, true, byRun.baz.reason)
+    assert.equal(byRun.baz.method, 'merge')
+    await rm(scratch, { recursive: true, force: true })
+  })
+}
+
+test('locateTasks: the own-run guard keeps a sole candidate whose subject names both its own run and another', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-own-guard-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [
+      { runId: 'runA', subject: 'Merge T1: edit a.js for runA after runB' },
+      { runId: 'runB', squash: true },
+    ],
+  })
+  const byRun = await locateByRun(root)
+  assert.equal(byRun.runA.located, true, `a subject naming runA is runA's even when it also names runB: ${byRun.runA.reason}`)
+  await rm(scratch, { recursive: true, force: true })
+})
+
+// ---------------------------------------------------------------------------------------------
+// mto-followups T1, step 3 — "another run" was only a run with `.fleetmates/<run>/plan.json` under
+// the roots. Reproduced before the fix: with runB's state directory gone, runA's squash-merged T1
+// resolved to the sole candidate left, runB's merge, even though its subject names runB in the
+// forms fleetmates writes.
+// ---------------------------------------------------------------------------------------------
+
+for (const subject of ['Merge T1: edit a.js (runB)', 'merge(runB): T1 edit a.js']) {
+  test(`locateTasks: a subject naming another run ("${subject}") is rejected with no state dir for that run`, async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-stateless-'))
+    const { root } = await buildRunsCollisionFixture({
+      dir: path.join(scratch, 'proj'),
+      runs: [
+        { runId: 'runA', squash: true },
+        { runId: 'runB', subject, state: false },
+      ],
+    })
+    const byRun = await locateByRun(root)
+    assert.equal(byRun.runB, undefined, 'sanity: runB has no state, so it is not in the pool')
+    assert.equal(byRun.runA.located, false, 'runA\'s squashed T1 must not resolve to runB\'s merge')
+    assert.ok(byRun.runA.reason.includes('other run'), byRun.runA.reason)
+    await rm(scratch, { recursive: true, force: true })
+  })
+}
+
+test('locateTasks: a subject in the "(<run>)" or "merge(<run>)" form naming the task\'s own run is accepted', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-own-form-'))
+  for (const [i, subject] of ['Merge T1: edit a.js (runA)', 'merge(runA): T1 edit a.js (T1-T3)'].entries()) {
+    const { root } = await buildRunsCollisionFixture({
+      dir: path.join(scratch, `proj${i}`),
+      runs: [{ runId: 'runA', subject }],
+    })
+    const byRun = await locateByRun(root)
+    assert.equal(byRun.runA.located, true, `${subject}: ${byRun.runA.reason}`)
+  }
+  await rm(scratch, { recursive: true, force: true })
+})
+
+// Fix round — a trailing single-token "(x)" was read as a run id whatever x was, so a task's own
+// merge titled "... (parser)" became unlocatable with a false "names a different run" reason
+// (reproduced by the phase 1 reviewers). The leading `merge(<run>):` form always counts; a
+// trailing "(x)" counts only when x is a known run: a `.fleetmates`/`.teammates` state dir holding
+// plan.json or status.json, or a `run/<x>` branch, in any root.
+for (const word of ['parser', '#12', 'wip']) {
+  test(`locateTasks: a trailing "(${word})" that is not a known run does not make the task's own merge unlocatable`, async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-word-'))
+    const { root } = await buildRunsCollisionFixture({
+      dir: path.join(scratch, 'proj'),
+      runs: [
+        { runId: 'runA', subject: `merge: T1 edit a.js (${word})` },
+        { runId: 'runB', squash: true },
+      ],
+    })
+    const byRun = await locateByRun(root)
+    assert.equal(byRun.runA.located, true, byRun.runA.reason)
+    assert.equal(byRun.runA.method, 'merge')
+    await rm(scratch, { recursive: true, force: true })
+  })
+}
+
+test('locateTasks: a trailing "(index)" is not a known run when .fleetmates/index holds no plan.json or status.json', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-index-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [{ runId: 'runA', subject: 'merge: T1 edit a.js (index)' }],
+  })
+  await mkdir(path.join(root, '.fleetmates', 'index'), { recursive: true })
+  await writeFile(path.join(root, '.fleetmates', 'index', 'runs.json'), '{}\n', 'utf8')
+  await mkdir(path.join(root, '.teammates', 'index'), { recursive: true })
+  const byRun = await locateByRun(root)
+  assert.equal(byRun.runA.located, true, byRun.runA.reason)
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('locateTasks: a trailing "(runB)" with neither a state dir nor a run/runB branch is not a known run', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-unknown-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [
+      { runId: 'runA', squash: true },
+      { runId: 'runB', subject: 'Merge T1: edit a.js (runB)', state: false },
+    ],
+  })
+  await git(['branch', '-D', 'run/runB'], root)
+  const byRun = await locateByRun(root)
+  assert.equal(byRun.runA.located, true, 'with nothing naming runB a run, "(runB)" is an ordinary word')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+// The state file is what makes a state directory a run's; neither file is parsed here, so an
+// empty one counts.
+for (const [stateDir, stateFile] of [['.teammates', 'plan.json'], ['.teammates', 'status.json'], ['.fleetmates', 'status.json']]) {
+  test(`locateTasks: a trailing "(runB)" is a known run through ${stateDir}/runB/${stateFile} alone`, async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-statefile-'))
+    const { root } = await buildRunsCollisionFixture({
+      dir: path.join(scratch, 'proj'),
+      runs: [
+        { runId: 'runA', squash: true },
+        { runId: 'runB', subject: 'Merge T1: edit a.js (runB)', state: false },
+      ],
+    })
+    await git(['branch', '-D', 'run/runB'], root)
+    await mkdir(path.join(root, stateDir, 'runB'), { recursive: true })
+    await writeFile(path.join(root, stateDir, 'runB', stateFile), '', 'utf8')
+    const byRun = await locateByRun(root)
+    assert.equal(byRun.runA.located, false)
+    assert.ok(byRun.runA.reason.includes('other run'), byRun.runA.reason)
+    await rm(scratch, { recursive: true, force: true })
+  })
+}
+
+test('locateTasks: a trailing "(runB)" is a known run through a run/runB branch in ANOTHER root', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-otherroot-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [
+      { runId: 'runA', squash: true },
+      { runId: 'runB', subject: 'Merge T1: edit a.js (runB)', state: false },
+    ],
+  })
+  await git(['branch', '-D', 'run/runB'], root)
+  // The other root is in the pool through its own run, runC, and holds a run/runB branch.
+  const other = await buildRunsCollisionFixture({ dir: path.join(scratch, 'other'), runs: [{ runId: 'runC', subject: 'Merge T1: edit a.js' }] })
+  await git(['branch', 'run/runB'], other.root)
+  const results = await locateTasks(poolFromPlans(await listRunPlans([root, other.root])))
+  const runA = results.find((r) => r.runId === 'runA')
+  assert.equal(runA.located, false)
+  assert.ok(runA.reason.includes('other run'), runA.reason)
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('locateTasks: a sole candidate from a run with no state dir and no run named in its subject is still accepted', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-stateless-neutral-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [
+      { runId: 'runA', squash: true },
+      { runId: 'runB', subject: 'Merge T1: edit a.js', state: false },
+    ],
+  })
+  const byRun = await locateByRun(root)
+  assert.equal(byRun.runA.located, true, 'nothing identifies the merge as another run\'s, so it is not rejected')
   await rm(scratch, { recursive: true, force: true })
 })
 
@@ -2066,6 +2327,44 @@ test('main: --roots is required', async () => {
   assert.ok(messages[0].includes('--roots'))
 })
 
+// mto-followups T1, step 1 — reproduced before the fix: a bare `--seed` parsed as `true`,
+// Number(true) is 1, and `--recompute-loss` wrote a loss.json with "seed": 1; a bare `--out` fell
+// back to the default data directory and rewrote the loss.json there.
+test('main: a bare --seed exits 2 naming the flag, and writes no loss.json', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-bare-seed-'))
+  await writeFile(path.join(scratch, 'replay-results.jsonl'), `${RECOMPUTE_RECORDS.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8')
+  const messages = []
+  const code = await main(['--recompute-loss', '--out', scratch, '--seed'], { out: (s) => messages.push(s) }, { bootstrapSamples: 5 })
+  assert.equal(code, 2, messages.join(' | '))
+  assert.match(messages.join('\n'), /--seed/)
+  await assert.rejects(stat(path.join(scratch, 'loss.json')), 'no loss.json was written')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('main: a bare --out exits 2 naming the flag, and never falls back to the default data directory', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-bare-out-'))
+  const defaultDir = path.join(scratch, 'default')
+  await mkdir(defaultDir, { recursive: true })
+  await writeFile(path.join(defaultDir, 'replay-results.jsonl'), `${RECOMPUTE_RECORDS.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8')
+  const messages = []
+  const code = await main(['--recompute-loss', '--out'], { out: (s) => messages.push(s) }, { outDir: defaultDir, bootstrapSamples: 5 })
+  assert.equal(code, 2, messages.join(' | '))
+  assert.match(messages.join('\n'), /--out/)
+  assert.deepEqual(await readdir(defaultDir), ['replay-results.jsonl'], 'the default directory gained no loss.json')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('main: a value-taking flag followed by another flag exits 2 naming it', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-flag-flag-'))
+  await writeFile(path.join(scratch, 'replay-results.jsonl'), `${RECOMPUTE_RECORDS.map((r) => JSON.stringify(r)).join('\n')}\n`, 'utf8')
+  const messages = []
+  const code = await main(['--seed', '--recompute-loss', '--out', scratch], { out: (s) => messages.push(s) }, { bootstrapSamples: 5 })
+  assert.equal(code, 2, messages.join(' | '))
+  assert.match(messages.join('\n'), /--seed/)
+  await assert.rejects(stat(path.join(scratch, 'loss.json')), 'no loss.json was written')
+  await rm(scratch, { recursive: true, force: true })
+})
+
 test('main: a dry run needs no --models at all', async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-nomodel-'))
   const messages = []
@@ -2391,7 +2690,7 @@ test('main --execute: a denied cell appends nothing, stops the run naming the to
 })
 
 // Step 3 — every `fail` says why, without task text, paths or command output.
-const FAIL_REASONS = /^(no-op|fileset|command:[^\s/\\]+|session-error|preview-copy)$/
+const FAIL_REASONS = /^(no-op|fileset|command:[^\s/\\]+|session-error|link-modified)$/
 
 test('runTierCell: failReason is no-op when no declared file changed', { skip: WIN32_FAKE_SKIP }, async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-reason-noop-'))
@@ -2461,13 +2760,278 @@ test('runTierCell: failReason is preview-copy when the preview.link copy is refu
   await mkdir(outside, { recursive: true })
   await symlink(outside, path.join(fixture.root, 'node_modules'))
   const { cell, calls } = await runCellWith({ scratch, fixture, queue: [passingEntry()] })
-  assert.equal(cell.status, 'fail')
+  // mto-followups T1, step 4 — reproduced before the fix: this cell was `fail` with cost 0 and
+  // `costMissing: false`, a free failed attempt that pulled the tier's mean cost down.
+  assert.equal(cell.status, 'invalid')
   assert.equal(cell.failReason, 'preview-copy')
   assert.equal(cell.permissionDenials, 0)
-  assert.equal(cell.turns, 0)
+  assert.equal(cell.totalCostUsd, null, 'no session ran, so there is no cost — never 0')
+  assert.equal(cell.costMissing, true)
+  assert.equal(cell.wallClockMs, null)
+  assert.equal(cell.turns, null)
   assert.equal(calls.length, 0)
   await rm(scratch, { recursive: true, force: true })
 })
+
+test('main --execute: a preview-copy failure prints its line and appends invalid records the loss ignores', { skip: WIN32_FAKE_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-copy-main-'))
+  const gateConfig = {
+    preview: { link: ['node_modules'] },
+    phases: { default: { checks: [{ name: 'x', kind: 'command', run: 'node -e "process.exit(0)"' }] } },
+  }
+  const fixture = await buildFixtureRepo({ dir: path.join(scratch, 'proj'), briefNonce: 'copy-main', gateConfig })
+  const outside = path.join(scratch, 'outside-the-repo')
+  await mkdir(outside, { recursive: true })
+  await symlink(outside, path.join(fixture.root, 'node_modules'))
+  const outDir = path.join(scratch, 'data')
+  const tmpRoot = path.join(scratch, 'tmp')
+  await mkdir(tmpRoot, { recursive: true })
+  const queuePath = path.join(scratch, 'queue.json')
+  await writeQueue(queuePath, [preflightEntry()])
+  const messages = []
+  const argv = ['--roots', fixture.root, '--count', '1', '--execute', '--models', MODELS_ARG]
+  const code = await main(argv, { out: (s) => messages.push(s) }, { tmpRoot, outDir, claudeEnv: { FAKE_CLAUDE_QUEUE: queuePath } })
+  assert.equal(code, 0, messages.join(' | '))
+  const lines = messages.filter((m) => m.includes('preview.link copy'))
+  assert.equal(lines.length, DEFAULT_TIERS.length, messages.join(' | '))
+  for (const [i, tier] of DEFAULT_TIERS.entries()) {
+    assert.match(lines[i], new RegExp(`^  [0-9a-f]{12} ${tier}: INVALID \\(preview-copy\\), preview\\.link copy: preview link "node_modules" resolves outside the repository$`))
+  }
+  const records = (await readFile(path.join(outDir, 'replay-results.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
+  assert.equal(records.length, DEFAULT_TIERS.length)
+  for (const r of records) {
+    assert.equal(r.status, 'invalid')
+    assert.equal(r.failReason, 'preview-copy')
+    assert.equal(r.totalCostUsd, null)
+    assert.equal(r.costMissing, true)
+    assert.equal(r.wallClockMs, null)
+  }
+  const loss = JSON.parse(await readFile(path.join(outDir, 'loss.json'), 'utf8'))
+  assert.equal(loss.resolvedTaskCount, 0)
+  assert.equal(loss.unresolvedTaskCount, 0, 'an invalid cell is no evidence about the task, so it is not counted as unresolved')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('main --smoke: a preview-copy failure prints its line and exits 1', { skip: WIN32_FAKE_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-copy-smoke-'))
+  const gateConfig = {
+    preview: { link: ['node_modules'] },
+    phases: { default: { checks: [{ name: 'x', kind: 'command', run: 'node -e "process.exit(0)"' }] } },
+  }
+  const fixture = await buildFixtureRepo({ dir: path.join(scratch, 'proj'), briefNonce: 'copy-smoke', gateConfig })
+  const outside = path.join(scratch, 'outside-the-repo')
+  await mkdir(outside, { recursive: true })
+  await symlink(outside, path.join(fixture.root, 'node_modules'))
+  const tmpRoot = path.join(scratch, 'tmp')
+  await mkdir(tmpRoot, { recursive: true })
+  const queuePath = path.join(scratch, 'queue.json')
+  await writeQueue(queuePath, [])
+  const messages = []
+  const argv = ['--roots', fixture.root, '--count', '1', '--smoke', '--models', MODELS_ARG]
+  const code = await main(argv, { out: (s) => messages.push(s) }, { tmpRoot, claudeEnv: { FAKE_CLAUDE_QUEUE: queuePath } })
+  assert.equal(code, 1, messages.join(' | '))
+  assert.match(messages.join('\n'), /^ {2}[0-9a-f]{12} capable: INVALID \(preview-copy\), preview\.link copy: preview link "node_modules" resolves outside the repository$/m)
+  await rm(scratch, { recursive: true, force: true })
+})
+
+// mto-followups T1, step 4 — the destination check compared only the textual path, so a nested
+// entry under a directory the base tree holds as a SYMLINK passed it, and the copy landed wherever
+// that symlink points. Reproduced before the fix: the entry's content appeared in the outside
+// directory.
+test('copyPreviewPaths: refuses a nested entry under a base-tree symlink, and writes nothing through it', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-copy-nested-'))
+  const sourceRoot = path.join(scratch, 'source')
+  await mkdir(path.join(sourceRoot, 'vendor', 'nm', 'dep'), { recursive: true })
+  await writeFile(path.join(sourceRoot, 'vendor', 'nm', 'dep', 'index.js'), 'dependency\n', 'utf8')
+  const outside = path.join(scratch, 'outside-the-cell')
+  await mkdir(outside, { recursive: true })
+  const cellDir = path.join(scratch, 'cell')
+  await mkdir(cellDir, { recursive: true })
+  await symlink(outside, path.join(cellDir, 'vendor'))
+
+  await assert.rejects(
+    copyPreviewPaths(cellDir, sourceRoot, ['vendor/nm']),
+    /would be copied outside the preview tree/,
+  )
+  assert.deepEqual(await readdir(outside), [], 'nothing was copied through the symlink')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+// mto-followups T1, step 4 and its fix round — the copied link trees are excluded from the fileset
+// check, so a session's edit under one went unseen. Read-only alone was reproduced wrong twice:
+// left locked through the gate commands, a check writing node_modules/.cache failed as
+// command:<check> (the real gate links these directories writable); and a bypassPermissions
+// session can `chmod -R u+w` and edit anyway. Now: copies are writable; runTierCell fingerprints
+// the link trees, locks them only while a session runs, unlocks and re-fingerprints, and any
+// difference fails the cell as `link-modified`. Gate commands run on the writable tree.
+const ROOT_SKIP = process.getuid?.() === 0 ? 'root ignores file modes' : false
+
+function linkGateConfig(extraChecks = []) {
+  return {
+    preview: { link: ['node_modules'] },
+    phases: {
+      default: {
+        checks: [
+          { name: 'done-marker', kind: 'command', run: `node -e "process.exit(require('fs').existsSync('DONE.txt') ? 0 : 1)"` },
+          ...extraChecks,
+        ],
+      },
+    },
+  }
+}
+
+async function linkFixture(scratch, nonce, extraChecks) {
+  const fixture = await buildFixtureRepo({ dir: path.join(scratch, 'proj'), briefNonce: nonce, gateConfig: linkGateConfig(extraChecks) })
+  await mkdir(path.join(fixture.root, 'node_modules', 'dep'), { recursive: true })
+  await writeFile(path.join(fixture.root, 'node_modules', 'dep', 'index.js'), 'original\n', 'utf8')
+  return fixture
+}
+
+test('copyPreviewPaths: the copy is writable, so a gate-style write under node_modules/.cache succeeds', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-copy-writable-'))
+  const sourceRoot = path.join(scratch, 'source')
+  await mkdir(path.join(sourceRoot, 'node_modules', 'dep'), { recursive: true })
+  await writeFile(path.join(sourceRoot, 'node_modules', 'dep', 'index.js'), 'original\n', 'utf8')
+  const cellDir = path.join(scratch, 'cell')
+  await mkdir(cellDir, { recursive: true })
+  const teardown = await copyPreviewPaths(cellDir, sourceRoot, ['node_modules'])
+  await mkdir(path.join(cellDir, 'node_modules', '.cache'), { recursive: true })
+  await writeFile(path.join(cellDir, 'node_modules', '.cache', 'x'), '1\n', 'utf8')
+  await teardown()
+  assert.deepEqual(await readdir(cellDir), [])
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('lockLinkTrees: read-only files and directories while locked; unlock restores the exact modes; symlinks untouched', { skip: ROOT_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-lock-'))
+  const cellDir = path.join(scratch, 'cell')
+  await mkdir(path.join(cellDir, 'node_modules', 'dep'), { recursive: true })
+  await writeFile(path.join(cellDir, 'node_modules', 'dep', 'index.js'), 'original\n', 'utf8')
+  await writeFile(path.join(cellDir, 'node_modules', 'dep', 'ro.js'), 'ro\n', 'utf8')
+  await chmod(path.join(cellDir, 'node_modules', 'dep', 'ro.js'), 0o444)
+  const outsideFile = path.join(scratch, 'outside.js')
+  await writeFile(outsideFile, 'outside\n', 'utf8')
+  await symlink(outsideFile, path.join(cellDir, 'node_modules', 'link.js'))
+  const modeOf = async (rel) => (await stat(path.join(cellDir, rel))).mode & 0o7777
+  const before = await Promise.all(['node_modules', 'node_modules/dep', 'node_modules/dep/index.js', 'node_modules/dep/ro.js'].map(modeOf))
+
+  const unlock = await lockLinkTrees(cellDir, ['node_modules', 'absent'])
+  await assert.rejects(writeFile(path.join(cellDir, 'node_modules', 'dep', 'index.js'), 'mutated\n'), { code: 'EACCES' })
+  await assert.rejects(writeFile(path.join(cellDir, 'node_modules', 'dep', 'new.js'), 'new\n'), { code: 'EACCES' })
+  await assert.rejects(writeFile(path.join(cellDir, 'node_modules', 'new.js'), 'new\n'), { code: 'EACCES' })
+  assert.ok((await stat(outsideFile)).mode & 0o200, 'chmod never followed the inner symlink')
+  await unlock()
+  const after = await Promise.all(['node_modules', 'node_modules/dep', 'node_modules/dep/index.js', 'node_modules/dep/ro.js'].map(modeOf))
+  assert.deepEqual(after, before)
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('fingerprintLinkTrees: changes with content, a new file, a removed file, a mode and a symlink target', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-fingerprint-'))
+  const cellDir = path.join(scratch, 'cell')
+  const nm = path.join(cellDir, 'node_modules')
+  await mkdir(path.join(nm, 'dep'), { recursive: true })
+  await writeFile(path.join(nm, 'dep', 'index.js'), 'aaaa\n', 'utf8')
+  await symlink('dep/index.js', path.join(nm, 'link.js'))
+  const fp = () => fingerprintLinkTrees(cellDir, ['node_modules', 'absent'])
+  const base = await fp()
+  assert.equal(await fp(), base, 'stable when nothing changed')
+  await writeFile(path.join(nm, 'dep', 'index.js'), 'bbbb\n', 'utf8')
+  assert.notEqual(await fp(), base, 'same size, different content')
+  await writeFile(path.join(nm, 'dep', 'index.js'), 'aaaa\n', 'utf8')
+  assert.equal(await fp(), base)
+  await chmod(path.join(nm, 'dep', 'index.js'), 0o755)
+  assert.notEqual(await fp(), base, 'mode')
+  await chmod(path.join(nm, 'dep', 'index.js'), 0o644)
+  const reset = await fp()
+  await writeFile(path.join(nm, 'dep', 'new.js'), '', 'utf8')
+  assert.notEqual(await fp(), reset, 'new file')
+  await rm(path.join(nm, 'dep', 'new.js'))
+  assert.equal(await fp(), reset)
+  await rm(path.join(nm, 'link.js'))
+  await symlink('dep/other.js', path.join(nm, 'link.js'))
+  assert.notEqual(await fp(), reset, 'symlink target')
+  await rm(path.join(nm, 'link.js'))
+  await symlink('dep/index.js', path.join(nm, 'link.js'))
+  await mkdir(path.join(cellDir, 'absent'))
+  assert.notEqual(await fp(), reset, 'a declared link that was absent and now exists')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('runTierCell: a gate command writing under node_modules/.cache passes, with no fix round', { skip: WIN32_FAKE_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-cache-write-'))
+  const fixture = await linkFixture(scratch, 'cache-write', [{
+    name: 'cache-write',
+    kind: 'command',
+    run: `node -e "const fs = require('fs'); fs.mkdirSync('node_modules/.cache', { recursive: true }); fs.writeFileSync('node_modules/.cache/x', '1')"`,
+  }])
+  const { cell, calls, tmpRoot } = await runCellWith({ scratch, fixture, queue: [passingEntry(), passingEntry()] })
+  assert.equal(cell.status, 'pass', `failReason ${cell.failReason}`)
+  assert.equal(cell.fixRound, false)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(await readdir(tmpRoot), [], 'the clone was removed')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('runTierCell: a session that leaves the link trees alone passes, and a plain write under them is refused', { skip: WIN32_FAKE_SKIP || ROOT_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-link-alone-'))
+  const fixture = await linkFixture(scratch, 'link-alone')
+  const { cell, tmpRoot } = await runCellWith({
+    scratch,
+    fixture,
+    queue: [{ ...passingEntry(), tryFiles: { 'node_modules/dep/index.js': 'mutated\n', 'node_modules/dep/new.js': 'new\n' } }],
+  })
+  const errors = await readFile(path.join(scratch, 'log.jsonl.errors'), 'utf8')
+  assert.match(errors, /node_modules\/dep\/index\.js EACCES/)
+  assert.match(errors, /node_modules\/dep\/new\.js EACCES/)
+  assert.equal(cell.status, 'pass', `failReason ${cell.failReason}`)
+  assert.deepEqual(await readdir(tmpRoot), [], 'the clone was removed')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('runTierCell: a session that chmods the link tree writable and edits it fails as link-modified, with no fix round', { skip: WIN32_FAKE_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-link-modified-'))
+  const fixture = await linkFixture(scratch, 'link-modified')
+  const { cell, calls, tmpRoot } = await runCellWith({
+    scratch,
+    fixture,
+    queue: [
+      // The session also leaves a read-only directory of its own under the link, which the
+      // unlock knows nothing about: teardown must still be able to remove it.
+      {
+        ...passingEntry(),
+        shell: 'chmod -R u+w node_modules && echo mutated > node_modules/dep/index.js'
+          + ' && mkdir node_modules/own && touch node_modules/own/f && chmod a-w node_modules/own',
+      },
+      passingEntry(),
+    ],
+  })
+  assert.equal(cell.status, 'fail')
+  assert.equal(cell.failReason, 'link-modified')
+  assert.equal(cell.fixRound, false)
+  assert.equal(calls.length, 1, 'no fix round was spent')
+  assert.deepEqual(await readdir(tmpRoot), [], 'the clone was removed')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('runTierCell: a link tree modified during the fix round also fails as link-modified', { skip: WIN32_FAKE_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-link-modified-fix-'))
+  const fixture = await linkFixture(scratch, 'link-modified-fix')
+  const { cell, calls } = await runCellWith({
+    scratch,
+    fixture,
+    queue: [
+      failingEntry(),
+      { ...passingEntry(), remove: ['WRONG.txt'], shell: 'chmod -R u+w node_modules && echo x > node_modules/dep/new.js' },
+    ],
+  })
+  assert.equal(calls.length, 2)
+  assert.equal(cell.fixRound, true)
+  assert.equal(cell.status, 'fail')
+  assert.equal(cell.failReason, 'link-modified')
+  await rm(scratch, { recursive: true, force: true })
+})
+
 
 test('runTierCell: a passing cell carries failReason null, zero denials and its turns', { skip: WIN32_FAKE_SKIP }, async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-reason-pass-'))
@@ -2757,6 +3321,8 @@ test('pickFailReason: each branch, and a failed verification with no recorded re
   assert.equal(pickFailReason({ reasons: ['no-op', 'fileset'] }, clean), 'fileset')
   assert.equal(pickFailReason({ reasons: ['command:a', 'no-op'] }, clean), 'no-op')
   assert.equal(pickFailReason({ reasons: ['command:a', 'command:b'] }, clean), 'command:a')
+  assert.equal(pickFailReason({ reasons: ['command:a', 'fileset', 'link-modified'] }, clean), 'link-modified')
+  assert.equal(pickFailReason({ reasons: ['link-modified'] }, { malformed: true, isError: false }), 'link-modified')
   assert.throws(() => pickFailReason({ reasons: [] }, clean), /no recorded reason/)
   assert.throws(() => pickFailReason({}, clean), /no recorded reason/)
 })

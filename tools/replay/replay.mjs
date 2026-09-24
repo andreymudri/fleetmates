@@ -28,8 +28,14 @@
 //     `realpath(cell/node_modules)/../.git/refs/heads` resolved straight into the source repo's
 //     own `.git`, exposing its already-solved branches — the same answer-leakage class Finding A
 //     exists to prevent, reopened by a different door. A copy has no such door: the cell's
-//     `node_modules` becomes a real, independent directory inside the isolated clone, torn down
-//     (and, either way, removed again with the whole clone) before the cell finishes;
+//     `node_modules` becomes a real, independent, writable directory inside the isolated clone,
+//     torn down (and, either way, removed again with the whole clone) before the cell finishes.
+//     It is excluded from the fileset check, so each session (the fix round too) runs between two
+//     fingerprints of the copied trees — path, type, size, mode, content sha256, symlink target —
+//     with the trees read-only only for the session itself (see lockLinkTrees). Any difference
+//     fails the cell as `link-modified`, with no fix round after it. The read-only lock alone is
+//     no guard (a bypassPermissions session can `chmod -R u+w`); the fingerprint is. Gate
+//     commands run after the unlock, on the writable trees, as the real gate's links are;
 //   - is removed afterward, regardless of outcome.
 // NOT isolated by any of this, and nothing here claims otherwise: the `claude -p` child process
 // itself is an ordinary process running with the operator's own OS permissions, no sandbox and no
@@ -54,8 +60,10 @@
 //     `$TMPDIR` that must create a file and run `git status` with zero permission denials, or the
 //     whole run is aborted before any cell starts.
 // Every `fail` record carries a `failReason` from a fixed set — `no-op`, `fileset`,
-// `command:<check name>`, `session-error`, `preview-copy` — never task text, a path or command
-// output, plus `permissionDenials` (a count) and `turns`.
+// `command:<check name>`, `session-error`, `link-modified` — never task text, a path or command output, plus
+// `permissionDenials` (a count) and `turns`. A `preview.link` copy refusal is recorded as
+// `invalid` with failReason `preview-copy` and a null cost, wall-clock and turns (no session ran),
+// and computeLoss leaves `invalid` records out.
 // Selection is restricted to LANDED tasks, located one of two ways because `prune-run` deletes a
 // task's own branch once its run integrates — on a real fleet history, that branch is gone by the
 // time this tool runs, so a scheme that depends on it existing finds nothing:
@@ -67,10 +75,11 @@
 //     whose plan text is readable at that base. A squash merge leaves no such M (no 2-parent
 //     commit at all) and is correctly reported unlocatable, not silently skipped. A bare task id
 //     is not unique across runs — reproduced directly, two runs that both had a "T1" resolved one
-//     run's T1 to the OTHER run's merge — so ties are broken by the run id, next, as a whole token
-//     in the same subject; if more than one candidate still remains, the task is `unlocatable`
-//     with every remaining merge's short sha named, never guessed at by "earliest" or anything
-//     else.
+//     run's T1 to the OTHER run's merge — so a candidate whose subject names another run is
+//     rejected, and ties are broken by the run id, next, as a whole token (hyphens included) in
+//     the same subject (see resolveBaseByMerge); if more than one candidate still remains, the
+//     task is `unlocatable` with every remaining merge's short sha named, never guessed at by
+//     "earliest" or anything else.
 // A task still pending, sitting on a run that never merged, or whose plan text is not readable at
 // the resolved base, is excluded and reported with a reason rather than guessed at.
 // Only a cell's hashed key (`sha256(repo realpath, run id, task id)`, pseudonymous and guessable —
@@ -98,7 +107,8 @@
 // seed it used in `loss.json`. Used whenever the cost-matrix formula in `computeLoss` changes but
 // the underlying replay data has not.
 import {
-  mkdtemp, mkdir, rm, readFile, writeFile, appendFile, realpath, readdir, cp, lstat,
+  mkdtemp, mkdir, rm, readFile, writeFile, appendFile, realpath, readdir, cp, lstat, chmod,
+  readlink,
 } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -270,6 +280,51 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+// A run id as a whole token. Run ids are hyphenated slugs and `\b` treats '-' as a boundary, so
+// `\bfoo\b` matched inside "foo-bar": run foo's squash-merged T1 resolved to run foo-bar's merge.
+// The anchors here treat '-' as part of the id.
+function runIdPattern(runId) {
+  return new RegExp(`(?<![\\w-])${escapeRegExp(runId)}(?![\\w-])`)
+}
+
+// The run a merge subject may name: `prefixed` from a leading `merge(<run>):`, which always names
+// a run; else `trailing` from a trailing single-token `(<x>)`, which is only a CANDIDATE — the
+// caller counts it as a run id only when x is a known run (see knownRunIdsForRoots), because an
+// integrator also titles its own merges "... (parser)", "(#12)" or "(wip)". Each is null when
+// absent.
+function runNamedInSubject(subject) {
+  const prefixed = /^merge\(([^()\s]+)\)/i.exec(subject)
+  if (prefixed) return { prefixed: prefixed[1], trailing: null }
+  const trailing = /\(([^()\s]+)\)\s*$/.exec(subject)
+  return { prefixed: null, trailing: trailing ? trailing[1] : null }
+}
+
+// Every run id any root knows of: a `.fleetmates/<run>` or `.teammates/<run>` state directory that
+// holds a `plan.json` or `status.json` (so a non-run directory such as `.fleetmates/index` never
+// counts; neither file is parsed), or a `run/<run>` branch. Read from the whole set of roots, so a run whose state lives in another
+// checkout still counts. Only the trailing `(<x>)` form consults this.
+async function knownRunIdsForRoots(roots, { gitExecFn, readdirFn = readdir }) {
+  const ids = new Set()
+  for (const root of roots) {
+    for (const stateDir of ['.fleetmates', '.teammates']) {
+      const entries = await readdirFn(path.join(root, stateDir), { withFileTypes: true }).catch(() => [])
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        const dir = path.join(root, stateDir, entry.name)
+        const isRun = await lstat(path.join(dir, 'plan.json')).then(() => true, () => false)
+          || await lstat(path.join(dir, 'status.json')).then(() => true, () => false)
+        if (isRun) ids.add(entry.name)
+      }
+    }
+    const res = await gitExecFn(['for-each-ref', '--format=%(refname)', 'refs/heads/run/'], root)
+    if (res.code !== 0) continue
+    for (const ref of res.stdout.split('\n').map((s) => s.trim()).filter(Boolean)) {
+      ids.add(ref.slice('refs/heads/run/'.length))
+    }
+  }
+  return ids
+}
+
 // Every merge commit reachable from the default branch, subject included — fetched once per root
 // (see mergeCache in locateTasks) rather than once per task, since a root with many tasks would
 // otherwise re-walk the same history for each one.
@@ -300,8 +355,15 @@ async function commitParents(root, sha, gitExecFn) {
 //       merge-base(M^1, M^2) is non-empty and touches only the task's declared files; and have
 //       the task's own planPath readable at that base. A squash merge produces no 2-parent commit
 //       at all, so `--merges` never surfaces one.
-//   (b) a candidate whose subject names a DIFFERENT known run id as a whole token — and never
-//       names THIS run's own id — is rejected outright, even when it is the only candidate left.
+//   (b) a candidate whose subject never names THIS run's own id, and names a DIFFERENT run —
+//       either a known run id (one with `.fleetmates/<run>/plan.json` under the roots) as a whole
+//       token, or any run in a leading `merge(<run>):`, or a trailing single-token `(<x>)` when x
+//       is a known run (a `.fleetmates`/`.teammates` state dir holding plan.json or status.json,
+//       or a `run/<x>` branch, in any root — see knownRunIdsForRoots) — is rejected outright,
+//       even when it is the only candidate left. A trailing `(<x>)` that is not a known run
+//       ("(parser)", "(#12)", "(index)") is an ordinary word. A whole token treats '-' as
+//       part of the id (see runIdPattern). A merge whose subject names no run in those ways is a
+//       neutral candidate, and a sole neutral candidate is accepted.
 //       Reproduced directly: run A's T1, squash-merged (leaving no valid merge of its own), still
 //       had exactly one OTHER candidate left after (a) — run B's own, unrelated "T1" — and the old
 //       code accepted whatever was left standing regardless of whose subject it actually was. If
@@ -313,6 +375,7 @@ async function commitParents(root, sha, gitExecFn) {
 //       remaining candidate's short sha named in the reason.
 async function resolveBaseByMerge({
   root, runId, taskId, declaredFiles, planPath, defaultBranch, gitExecFn, mergeCache, knownRunIds = [],
+  subjectRunIds = new Set(),
 }) {
   let merges = mergeCache.get(root)
   if (!merges) {
@@ -350,12 +413,17 @@ async function resolveBaseByMerge({
         + 'base (a squash merge, or a different task\'s merge)',
     }
   }
-  const runPattern = new RegExp(`\\b${escapeRegExp(runId)}\\b`)
+  const runPattern = runIdPattern(runId)
   const otherRunIds = knownRunIds.filter((r) => r !== runId)
-  const otherRunPatterns = otherRunIds.map((r) => new RegExp(`\\b${escapeRegExp(r)}\\b`))
-  const belongsToAnotherRun = (subject) => (
-    !runPattern.test(subject) && otherRunPatterns.some((p) => p.test(subject))
-  )
+  const otherRunPatterns = otherRunIds.map(runIdPattern)
+  const belongsToAnotherRun = (subject) => {
+    if (runPattern.test(subject)) return false
+    if (otherRunPatterns.some((p) => p.test(subject))) return true
+    // A subject naming our own run already returned above, so a run named here is another's.
+    const { prefixed, trailing } = runNamedInSubject(subject)
+    if (prefixed !== null) return true
+    return trailing !== null && subjectRunIds.has(trailing)
+  }
   const notOtherRuns = passing.filter((p) => !belongsToAnotherRun(p.subject))
   if (notOtherRuns.length === 0) {
     return {
@@ -400,6 +468,8 @@ export async function locateTasks(pool, { gitExecFn = defaultGitExec } = {}) {
     if (!runIdsByRoot.has(item.root)) runIdsByRoot.set(item.root, new Set())
     runIdsByRoot.get(item.root).add(item.runId)
   }
+  const subjectRunIds = await knownRunIdsForRoots([...runIdsByRoot.keys()], { gitExecFn })
+  for (const ids of runIdsByRoot.values()) for (const id of ids) subjectRunIds.add(id)
   const out = []
   for (const item of pool) {
     if (!defaultBranchCache.has(item.root)) {
@@ -431,6 +501,7 @@ export async function locateTasks(pool, { gitExecFn = defaultGitExec } = {}) {
           gitExecFn,
           mergeCache,
           knownRunIds: [...(runIdsByRoot.get(item.root) ?? [])],
+          subjectRunIds,
         })
         if (merged.baseSha) {
           baseSha = merged.baseSha
@@ -645,7 +716,10 @@ async function copyWithReflinkAttempt(target, dst, execFn = execCapture) {
 export async function copyPreviewPaths(dir, repoRoot, paths = []) {
   const created = []
   const teardown = async () => {
-    for (const dst of created.reverse()) await rm(dst, { recursive: true, force: true }).catch(() => {})
+    for (const dst of created.reverse()) {
+      await makeTreeWritable(dst).catch(() => {})
+      await rm(dst, { recursive: true, force: true }).catch(() => {})
+    }
   }
   const realRepoRoot = await realpath(repoRoot).catch(() => repoRoot)
   // Resolved once, and dst below is built from THIS, not `dir` — a `dst` built from `dir` and
@@ -673,7 +747,10 @@ export async function copyPreviewPaths(dir, repoRoot, paths = []) {
       throw new Error(`preview link ${JSON.stringify(entry)}: not a directory`)
     }
     const dst = path.resolve(realDir, entry)
-    if (isOutsideDir(realDir, dst)) {
+    // The textual check alone missed a nested entry under a directory the base tree holds as a
+    // symlink: `vendor/nm` with `vendor -> /elsewhere` is inside the cell as text, and the copy
+    // landed in /elsewhere/nm. The deepest existing ancestor of `dst` is resolved as well.
+    if (isOutsideDir(realDir, dst) || isOutsideDir(realDir, await realpathOfDeepestExisting(dst))) {
       await teardown()
       throw new Error(`preview link ${JSON.stringify(entry)} would be copied outside the preview tree`)
     }
@@ -698,6 +775,106 @@ export async function copyPreviewPaths(dir, repoRoot, paths = []) {
     created.push(dst)
   }
   return teardown
+}
+
+// ---------------------------------------------------------------------------------------------
+// Guarding the copied link trees during a session. They are excluded from the fileset check (see
+// verifyCell), so an edit a session made under one went unseen. runTierCell fingerprints them,
+// locks them read-only only while a session runs, unlocks them and fingerprints again; any
+// difference fails the cell as `link-modified`. The lock alone stops only an accidental write —
+// a bypassPermissions session can `chmod -R u+w` and edit — so the fingerprint is the check. Gate
+// commands run after the unlock, on the writable tree, the way the real gate's linked directories
+// are writable (a check that writes node_modules/.cache must not fail here and pass there).
+// ---------------------------------------------------------------------------------------------
+
+// Each declared link path under `dir` (resolved via realpath, as copyPreviewPaths builds them).
+async function linkTreeRoots(dir, paths) {
+  const realDir = await realpath(dir).catch(() => dir)
+  return paths.map((entry) => ({ entry, abs: path.resolve(realDir, entry) }))
+}
+
+// One line per path under each declared link, sorted: relative path, type, size, mode, and a
+// sha256 of a file's content or a symlink's target text. A declared link that is absent adds no
+// line, so a session creating one adds lines and changes the fingerprint.
+export async function fingerprintLinkTrees(dir, paths = []) {
+  const lines = []
+  const walk = async (abs, rel) => {
+    let info
+    try {
+      info = await lstat(abs)
+    } catch {
+      return
+    }
+    const mode = (info.mode & 0o7777).toString(8)
+    if (info.isSymbolicLink()) {
+      lines.push(`${rel}\u0000symlink\u0000${mode}\u0000${await readlink(abs)}`)
+    } else if (info.isDirectory()) {
+      lines.push(`${rel}\u0000dir\u0000${mode}`)
+      for (const name of (await readdir(abs)).sort()) await walk(path.join(abs, name), `${rel}/${name}`)
+    } else if (info.isFile()) {
+      const sha = createHash('sha256').update(await readFile(abs)).digest('hex')
+      lines.push(`${rel}\u0000file\u0000${info.size}\u0000${mode}\u0000${sha}`)
+    } else {
+      lines.push(`${rel}\u0000other\u0000${mode}`)
+    }
+  }
+  for (const { entry, abs } of await linkTreeRoots(dir, paths)) await walk(abs, entry)
+  return lines.join('\n')
+}
+
+// Removes every write bit from each declared link tree — files and directories; symlinks are
+// skipped, never chmod'ed, since chmod follows a symlink and an inner one kept verbatim by the
+// copy may point outside the cell. Returns `unlock`, which restores each path's exact prior mode
+// (a path the session removed meanwhile is skipped).
+export async function lockLinkTrees(dir, paths = []) {
+  const modes = []
+  const walk = async (abs) => {
+    const info = await lstat(abs).catch(() => null)
+    if (!info || info.isSymbolicLink()) return
+    const mode = info.mode & 0o7777
+    modes.push([abs, mode])
+    if (info.isDirectory()) {
+      for (const name of await readdir(abs)) await walk(path.join(abs, name))
+    }
+    await chmod(abs, mode & ~0o222)
+  }
+  const unlock = async () => {
+    for (const [abs, mode] of modes) await chmod(abs, mode).catch(() => {})
+  }
+  try {
+    for (const { abs } of await linkTreeRoots(dir, paths)) await walk(abs)
+  } catch (err) {
+    await unlock()
+    throw err
+  }
+  return unlock
+}
+
+// `path` itself when it exists, else its nearest existing ancestor, resolved via `realpath`.
+async function realpathOfDeepestExisting(target) {
+  let current = target
+  for (;;) {
+    try {
+      return await realpath(current)
+    } catch {
+      const parent = path.dirname(current)
+      if (parent === current) return current
+      current = parent
+    }
+  }
+}
+
+// Adds the owner write bit throughout a copied tree before teardown removes it: a directory
+// without write permission cannot have its entries unlinked, and a tree can still be locked (see
+// lockLinkTrees) when a session throws before its unlock. Symlinks are skipped, never chmod'ed:
+// chmod follows a symlink, and an inner symlink kept verbatim by the copy may point outside the cell.
+async function makeTreeWritable(target) {
+  const info = await lstat(target)
+  if (info.isSymbolicLink()) return
+  await chmod(target, (info.mode & 0o7777) | 0o200)
+  if (info.isDirectory()) {
+    for (const entry of await readdir(target)) await makeTreeWritable(path.join(target, entry))
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -914,7 +1091,9 @@ async function verifyCell({
   return { passed: failures.length === 0, failures, reasons }
 }
 
-// The one `failReason` a failed cell records, from a fixed set: `session-error` when the last
+// The one `failReason` a failed cell records, from a fixed set: `link-modified` when a session
+// changed a copied preview.link tree (see lockLinkTrees — it outranks everything, since no gate
+// command ran against that tree); `session-error` when the last
 // session's output was malformed or an error result; otherwise `fileset` (something outside the
 // declared files changed — the session acted, just in the wrong place), then `no-op` (nothing
 // declared changed, which usually explains any failing command check too), then the FIRST failing
@@ -924,9 +1103,10 @@ async function verifyCell({
 // has a matching `reasons.push`), so running out of reasons is a bug here, not a session outcome:
 // it throws rather than defaulting to a label that would hide which branch was missed.
 export function pickFailReason(verification, lastParsed) {
+  const reasons = verification.reasons ?? []
+  if (reasons.includes('link-modified')) return 'link-modified'
   if (lastParsed.malformed) return 'session-error'
   if (lastParsed.isError) return 'session-error'
-  const reasons = verification.reasons ?? []
   if (reasons.includes('fileset')) return 'fileset'
   if (reasons.includes('no-op')) return 'no-op'
   const command = reasons.find((r) => r.startsWith('command:'))
@@ -971,41 +1151,73 @@ export async function runTierCell({
       // honestly. What DOES throw here is one of copyPreviewPaths' own safety refusals (outside
       // the repository, not a directory, outside the cell, already present) or a genuine I/O
       // error — and swallowing THAT silently graded the cell as though its dependencies were
-      // there when they were not. It fails the cell instead, with the refusal's own reason, rather
-      // than continuing as if nothing were declared.
+      // there when they were not. The cell is `invalid` instead, with the refusal's own reason,
+      // rather than continuing as if nothing were declared. Not `fail`: no session ran, so the
+      // cell says nothing about the tier, and a `fail` with cost 0 read as a free failed attempt
+      // in the loss. Cost, wall-clock and turns are unknown (null), never 0.
       try {
         teardownLinks = await copyPreviewPathsFn(cloneDir, root, declaredLinks)
         links = declaredLinks
       } catch (err) {
         return {
           usageLimit: false,
-          status: 'fail',
-          totalCostUsd: 0,
-          costMissing: false,
-          wallClockMs: 0,
+          invalid: true,
+          status: 'invalid',
+          totalCostUsd: null,
+          costMissing: true,
+          wallClockMs: null,
           fixRound: false,
           sessionId: null,
           previewLinkError: err.message,
           failReason: 'preview-copy',
           permissionDenials: 0,
-          turns: 0,
+          deniedTools: [],
+          turns: null,
         }
       }
     }
 
-    const attempt1 = await attemptOnce({ cwd: cloneDir, prompt, model, claudeBin, spawnFn, env })
+    // Every session runs with the copied link trees locked and fingerprinted around it (see
+    // lockLinkTrees); `linkModified` is true when the tree after the session differs from before.
+    // The gate commands in verifyCell run after the unlock, on the writable tree.
+    const guardedAttempt = async (options) => {
+      if (links.length === 0) return { attempt: await attemptOnce(options), linkModified: false }
+      const before = await fingerprintLinkTrees(cloneDir, links)
+      const unlock = await lockLinkTrees(cloneDir, links)
+      let attempt
+      try {
+        attempt = await attemptOnce(options)
+      } finally {
+        await unlock()
+      }
+      const after = await fingerprintLinkTrees(cloneDir, links).catch(() => null)
+      return { attempt, linkModified: after !== before }
+    }
+    const linkModifiedVerification = {
+      passed: false,
+      failures: ['a preview.link directory was modified during the session'],
+      reasons: ['link-modified'],
+    }
+
+    const first = await guardedAttempt({ cwd: cloneDir, prompt, model, claudeBin, spawnFn, env })
+    const attempt1 = first.attempt
     if (attempt1.parsed.usageLimit) return { usageLimit: true }
     if (attempt1.parsed.permissionDenials > 0) return invalidCell(attempt1.parsed)
 
     const attempts = [attempt1]
-    let verification = attempt1.parsed.malformed
-      ? { passed: false, failures: ['claude produced output that was not valid JSON'] }
-      : await verifyCell({
+    let verification
+    if (first.linkModified) verification = linkModifiedVerification
+    else if (attempt1.parsed.malformed) verification = { passed: false, failures: ['claude produced output that was not valid JSON'] }
+    else {
+      verification = await verifyCell({
         cloneDir, baseSha: cloneBaseSha, declaredFiles, config, phaseName, links, runCheckFn, gitExecFn,
       })
+    }
 
-    if (!verification.passed && !attempt1.parsed.malformed && attempt1.parsed.sessionId) {
-      const attempt2 = await attemptOnce({
+    // No fix round after a link modification: the tree the gate commands would run against is
+    // no longer the one copied in, so nothing a second turn does could be graded fairly.
+    if (!verification.passed && !first.linkModified && !attempt1.parsed.malformed && attempt1.parsed.sessionId) {
+      const second = await guardedAttempt({
         cwd: cloneDir,
         prompt: fixMessage(verification.failures),
         model,
@@ -1014,14 +1226,17 @@ export async function runTierCell({
         spawnFn,
         env,
       })
+      const attempt2 = second.attempt
       attempts.push(attempt2)
       if (attempt2.parsed.usageLimit) return { usageLimit: true }
       if (attempt2.parsed.permissionDenials > 0) return invalidCell(attempt2.parsed)
-      verification = attempt2.parsed.malformed
-        ? { passed: false, failures: ['the fix round produced output that was not valid JSON'] }
-        : await verifyCell({
+      if (second.linkModified) verification = linkModifiedVerification
+      else if (attempt2.parsed.malformed) verification = { passed: false, failures: ['the fix round produced output that was not valid JSON'] }
+      else {
+        verification = await verifyCell({
           cloneDir, baseSha: cloneBaseSha, declaredFiles, config, phaseName, links, runCheckFn, gitExecFn,
         })
+      }
     }
 
     const anyCostMissing = attempts.some((a) => a.parsed.costMissing)
@@ -1105,6 +1320,10 @@ function formatPreflight(result, model) {
   if (result.usageLimit) why = 'usage limit'
   else if (result.malformed) why = 'the session output was not valid JSON (did claude start?)'
   return `preflight: FAILED (${why}) — ${detail}`
+}
+
+function formatPreviewCopy(key, tier, cell) {
+  return `  ${key.slice(0, 12)} ${tier}: INVALID (preview-copy), preview.link copy: ${cell.previewLinkError}`
 }
 
 function formatInvalid(key, tier, cell) {
@@ -1204,6 +1423,9 @@ function bootstrapRatioInterval(unders, overs, { seed, samples }) {
 export function computeLoss(records, {
   models, seed = DEFAULT_SEED, bootstrapSamples = DEFAULT_BOOTSTRAP_SAMPLES, now = () => new Date().toISOString(),
 } = {}) {
+  // An `invalid` record (a preview-copy refusal: no session ran) says nothing about any tier, so
+  // it is left out of everything below — not a failed attempt, and not an unresolved task.
+  records = records.filter((r) => r.status !== 'invalid')
   const byKey = new Map()
   for (const record of records) {
     if (!byKey.has(record.key)) byKey.set(record.key, {})
@@ -1275,6 +1497,10 @@ export function computeLoss(records, {
 // ---------------------------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------------------------
+// A value-taking flag with no value — last on the line, or followed by another `--flag` — throws
+// naming the flag, and main exits 2. It used to parse as `true`: a bare `--seed` became
+// Number(true) === 1 and was accepted, and a bare `--out` fell back to the committed data
+// directory and rewrote its loss.json.
 function parseArgs(argv) {
   const flags = {}
   const VALUELESS = new Set(['execute', 'dry-run', 'smoke', 'preflight', 'recompute-loss'])
@@ -1288,7 +1514,7 @@ function parseArgs(argv) {
     }
     const next = argv[i + 1]
     if (next === undefined || next.startsWith('--')) {
-      flags[name] = true
+      throw new Error(`${token} needs a value`)
     } else {
       flags[name] = next
       i += 1
@@ -1421,7 +1647,13 @@ async function readExistingLoss(lossPath, readFileFn) {
 }
 
 export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n`) }, deps = {}) {
-  const flags = parseArgs(argv)
+  let flags
+  try {
+    flags = parseArgs(argv)
+  } catch (err) {
+    io.out(err.message)
+    return 2
+  }
   const execute = flags.execute === true
   const smoke = flags.smoke === true
   const recomputeLoss = flags['recompute-loss'] === true
@@ -1593,6 +1825,10 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
       io.out('BLOCKED: usage limit during --smoke')
       return 1
     }
+    if (cell.previewLinkError) {
+      io.out(formatPreviewCopy(item.key, tier, cell))
+      return 1
+    }
     if (cell.invalid) {
       io.out(formatInvalid(item.key, tier, cell))
       return 1
@@ -1640,12 +1876,13 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
         io.out(`BLOCKED: usage limit, resume with ${buildResumeCommand(argv)}`)
         return 1
       }
-      if (cell.invalid) {
+      // A preview-copy refusal is recorded as `invalid` and the run goes on: it is a property of the
+      // task's manifest and the source checkout, so re-running the cell would only repeat it.
+      if (cell.previewLinkError) {
+        io.out(formatPreviewCopy(item.key, tier, cell))
+      } else if (cell.invalid) {
         io.out(`${formatInvalid(item.key, tier, cell)}; fix the permission setup, then resume with ${buildResumeCommand(argv)}`)
         return 1
-      }
-      if (cell.previewLinkError) {
-        io.out(`  ${item.key.slice(0, 12)} ${tier}: FAILED, preview.link copy: ${cell.previewLinkError}`)
       }
       const record = {
         key: item.key,
