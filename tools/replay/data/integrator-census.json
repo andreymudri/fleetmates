@@ -1,0 +1,1234 @@
+{
+  "date": "2026-09-24",
+  "summary": {
+    "integrations": 67,
+    "clean": 67,
+    "cleanShare": 1,
+    "conflicts": 0,
+    "escalations": 0,
+    "escalationUnrecorded": 67,
+    "blocked": 0,
+    "nonMergeCommits": 0,
+    "nonMergeUnknown": 16,
+    "offFormMessages": 12,
+    "transcripts": {
+      "sessions": 24,
+      "missingRows": 16
+    },
+    "turns": {
+      "median": 15,
+      "p90": 24
+    },
+    "modelMix": {
+      "sonnet": 24
+    }
+  },
+  "rows": [
+    {
+      "key": "74b8ef7fd542b775",
+      "run": "e9015047cac8",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "338b197b4923",
+        "model": "sonnet",
+        "turns": 18,
+        "output": 2283
+      }
+    },
+    {
+      "key": "7baadba819eca606",
+      "run": "e9015047cac8",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "338b197b4923",
+        "model": "sonnet",
+        "turns": 18,
+        "output": 2283
+      }
+    },
+    {
+      "key": "b5459874a8541ac1",
+      "run": "e9015047cac8",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "338b197b4923",
+        "model": "sonnet",
+        "turns": 18,
+        "output": 2283
+      }
+    },
+    {
+      "key": "f574e7af1e44cf4b",
+      "run": "e9015047cac8",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "338b197b4923",
+        "model": "sonnet",
+        "turns": 18,
+        "output": 2283
+      }
+    },
+    {
+      "key": "0b226c49e45c4fcc",
+      "run": "e9015047cac8",
+      "phase": 2,
+      "branchesInPhase": 1,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "766071a9b2e1",
+        "model": "sonnet",
+        "turns": 11,
+        "output": 1238
+      }
+    },
+    {
+      "key": "b66bac883a10f23f",
+      "run": "e9015047cac8",
+      "phase": 3,
+      "branchesInPhase": 1,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "900f47ec43b7",
+        "model": "sonnet",
+        "turns": 12,
+        "output": 1357
+      }
+    },
+    {
+      "key": "0c4edadd8f82b860",
+      "run": "e9015047cac8",
+      "phase": 4,
+      "branchesInPhase": 1,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "6c66cdc282bf",
+        "model": "sonnet",
+        "turns": 27,
+        "output": 4160
+      }
+    },
+    {
+      "key": "ef9fd6384e44fc44",
+      "run": "e9015047cac8",
+      "phase": 5,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "d7de6994bd6c",
+        "model": "sonnet",
+        "turns": 21,
+        "output": 2568
+      }
+    },
+    {
+      "key": "b32af2fd2cb2bca9",
+      "run": "e9015047cac8",
+      "phase": 5,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "d7de6994bd6c",
+        "model": "sonnet",
+        "turns": 21,
+        "output": 2568
+      }
+    },
+    {
+      "key": "4608097bf60a7d4a",
+      "run": "e9015047cac8",
+      "phase": 5,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "d7de6994bd6c",
+        "model": "sonnet",
+        "turns": 21,
+        "output": 2568
+      }
+    },
+    {
+      "key": "7ac98728f641f528",
+      "run": "e9015047cac8",
+      "phase": 5,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "d7de6994bd6c",
+        "model": "sonnet",
+        "turns": 21,
+        "output": 2568
+      }
+    },
+    {
+      "key": "e164fd2152204dd5",
+      "run": "56e509efbb0b",
+      "phase": 1,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "386c3e5dd748",
+        "model": "sonnet",
+        "turns": 21,
+        "output": 85
+      }
+    },
+    {
+      "key": "4031c400141fddb9",
+      "run": "56e509efbb0b",
+      "phase": 1,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "386c3e5dd748",
+        "model": "sonnet",
+        "turns": 21,
+        "output": 85
+      }
+    },
+    {
+      "key": "ab49454c54e102ba",
+      "run": "56e509efbb0b",
+      "phase": 2,
+      "branchesInPhase": 1,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "97adb2d596e8",
+        "model": "sonnet",
+        "turns": 15,
+        "output": 154
+      }
+    },
+    {
+      "key": "2897fc658f3f8e5d",
+      "run": "416623e3eb14",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "379fa4c726bc",
+        "model": "sonnet",
+        "turns": 29,
+        "output": 184
+      }
+    },
+    {
+      "key": "048da2c55c2936f5",
+      "run": "416623e3eb14",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "379fa4c726bc",
+        "model": "sonnet",
+        "turns": 29,
+        "output": 184
+      }
+    },
+    {
+      "key": "8ae5a4536bb95b11",
+      "run": "416623e3eb14",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "379fa4c726bc",
+        "model": "sonnet",
+        "turns": 29,
+        "output": 184
+      }
+    },
+    {
+      "key": "c3f5c4ae69c122a0",
+      "run": "416623e3eb14",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "379fa4c726bc",
+        "model": "sonnet",
+        "turns": 29,
+        "output": 184
+      }
+    },
+    {
+      "key": "13536ce86c93e0df",
+      "run": "416623e3eb14",
+      "phase": 2,
+      "branchesInPhase": 3,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "0ab4e15e0f5b",
+        "model": "sonnet",
+        "turns": 20,
+        "output": 141
+      }
+    },
+    {
+      "key": "30787983437dfe67",
+      "run": "416623e3eb14",
+      "phase": 2,
+      "branchesInPhase": 3,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "0ab4e15e0f5b",
+        "model": "sonnet",
+        "turns": 20,
+        "output": 141
+      }
+    },
+    {
+      "key": "c3eb58d930b28ada",
+      "run": "416623e3eb14",
+      "phase": 2,
+      "branchesInPhase": 3,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "0ab4e15e0f5b",
+        "model": "sonnet",
+        "turns": 20,
+        "output": 141
+      }
+    },
+    {
+      "key": "d5f25bd287766106",
+      "run": "416623e3eb14",
+      "phase": 3,
+      "branchesInPhase": 3,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "e57b2f0baf01",
+        "model": "sonnet",
+        "turns": 19,
+        "output": 123
+      }
+    },
+    {
+      "key": "534df43eaf3c78ec",
+      "run": "416623e3eb14",
+      "phase": 3,
+      "branchesInPhase": 3,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "e57b2f0baf01",
+        "model": "sonnet",
+        "turns": 19,
+        "output": 123
+      }
+    },
+    {
+      "key": "18f4830e8e7d9c10",
+      "run": "416623e3eb14",
+      "phase": 3,
+      "branchesInPhase": 3,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "e57b2f0baf01",
+        "model": "sonnet",
+        "turns": 19,
+        "output": 123
+      }
+    },
+    {
+      "key": "990216e7dcd8140e",
+      "run": "416623e3eb14",
+      "phase": 4,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "e1734214794c",
+        "model": "sonnet",
+        "turns": 24,
+        "output": 176
+      }
+    },
+    {
+      "key": "e33cd03c6dcfdd9d",
+      "run": "416623e3eb14",
+      "phase": 4,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "e1734214794c",
+        "model": "sonnet",
+        "turns": 24,
+        "output": 176
+      }
+    },
+    {
+      "key": "ab7f533389ffb18b",
+      "run": "416623e3eb14",
+      "phase": 5,
+      "branchesInPhase": 1,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "badd8af40a78",
+        "model": "sonnet",
+        "turns": 15,
+        "output": 103
+      }
+    },
+    {
+      "key": "9aec1b1d3f739ed7",
+      "run": "9af06a4c7cf7",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "5e77c259a93b",
+        "model": "sonnet",
+        "turns": 15,
+        "output": 2417
+      }
+    },
+    {
+      "key": "b9beccc00c812bb4",
+      "run": "9af06a4c7cf7",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "5e77c259a93b",
+        "model": "sonnet",
+        "turns": 15,
+        "output": 2417
+      }
+    },
+    {
+      "key": "b86fde488d14bfc2",
+      "run": "9af06a4c7cf7",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "5e77c259a93b",
+        "model": "sonnet",
+        "turns": 15,
+        "output": 2417
+      }
+    },
+    {
+      "key": "2a82a3eca0a4cef6",
+      "run": "9af06a4c7cf7",
+      "phase": 1,
+      "branchesInPhase": 4,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "5e77c259a93b",
+        "model": "sonnet",
+        "turns": 15,
+        "output": 2417
+      }
+    },
+    {
+      "key": "4efabc577250bd34",
+      "run": "9af06a4c7cf7",
+      "phase": 2,
+      "branchesInPhase": 1,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "ab78fa50a466",
+        "model": "sonnet",
+        "turns": 9,
+        "output": 1142
+      }
+    },
+    {
+      "key": "b1b6b15d4b6c4b06",
+      "run": "cb9ae2558915",
+      "phase": 1,
+      "branchesInPhase": 8,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "4e3632b7bd4b",
+        "model": "sonnet",
+        "turns": 22,
+        "output": 3007
+      }
+    },
+    {
+      "key": "73a8d66148df01c3",
+      "run": "cb9ae2558915",
+      "phase": 1,
+      "branchesInPhase": 8,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "4e3632b7bd4b",
+        "model": "sonnet",
+        "turns": 22,
+        "output": 3007
+      }
+    },
+    {
+      "key": "d85ee3e3ddfdd99e",
+      "run": "cb9ae2558915",
+      "phase": 1,
+      "branchesInPhase": 8,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "4e3632b7bd4b",
+        "model": "sonnet",
+        "turns": 22,
+        "output": 3007
+      }
+    },
+    {
+      "key": "70ac547548103a69",
+      "run": "cb9ae2558915",
+      "phase": 1,
+      "branchesInPhase": 8,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "4e3632b7bd4b",
+        "model": "sonnet",
+        "turns": 22,
+        "output": 3007
+      }
+    },
+    {
+      "key": "4dfbfa4d62e36c6a",
+      "run": "cb9ae2558915",
+      "phase": 1,
+      "branchesInPhase": 8,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "7dfb4c81395e1b96",
+      "run": "cb9ae2558915",
+      "phase": 1,
+      "branchesInPhase": 8,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "b8cbe8a239dba913",
+      "run": "cb9ae2558915",
+      "phase": 1,
+      "branchesInPhase": 8,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "3eb8cd4631f63fff",
+      "run": "cb9ae2558915",
+      "phase": 1,
+      "branchesInPhase": 8,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "e75d6fa1456448d2",
+      "run": "28d8601881bd",
+      "phase": 1,
+      "branchesInPhase": 1,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "0576ebcd29dc",
+        "model": "sonnet",
+        "turns": 10,
+        "output": 1378
+      }
+    },
+    {
+      "key": "ff86d2068d56370a",
+      "run": "28d8601881bd",
+      "phase": 2,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "a6294f5b6d8c",
+        "model": "sonnet",
+        "turns": 10,
+        "output": 1563
+      }
+    },
+    {
+      "key": "1339a40c721dee5b",
+      "run": "28d8601881bd",
+      "phase": 2,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "a6294f5b6d8c",
+        "model": "sonnet",
+        "turns": 10,
+        "output": 1563
+      }
+    },
+    {
+      "key": "4e649bda62caa3bb",
+      "run": "28d8601881bd",
+      "phase": 3,
+      "branchesInPhase": 1,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "ab074c9e5446",
+        "model": "sonnet",
+        "turns": 10,
+        "output": 1331
+      }
+    },
+    {
+      "key": "d5a1d7245b89194f",
+      "run": "28d8601881bd",
+      "phase": 4,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "d9874ca69254",
+        "model": "sonnet",
+        "turns": 10,
+        "output": 1140
+      }
+    },
+    {
+      "key": "25c9b7332893afdf",
+      "run": "28d8601881bd",
+      "phase": 4,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "d9874ca69254",
+        "model": "sonnet",
+        "turns": 10,
+        "output": 1140
+      }
+    },
+    {
+      "key": "632ead271e460aa0",
+      "run": "28d8601881bd",
+      "phase": 5,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "36a41d5b1ded",
+        "model": "sonnet",
+        "turns": 11,
+        "output": 1291
+      }
+    },
+    {
+      "key": "e1885a58588d9e2b",
+      "run": "28d8601881bd",
+      "phase": 5,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "36a41d5b1ded",
+        "model": "sonnet",
+        "turns": 11,
+        "output": 1291
+      }
+    },
+    {
+      "key": "df71f8ff22f11211",
+      "run": "28d8601881bd",
+      "phase": 6,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "c0e36370ee74",
+        "model": "sonnet",
+        "turns": 19,
+        "output": 1764
+      }
+    },
+    {
+      "key": "5fec1dc15dec141a",
+      "run": "28d8601881bd",
+      "phase": 6,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "c0e36370ee74",
+        "model": "sonnet",
+        "turns": 19,
+        "output": 1764
+      }
+    },
+    {
+      "key": "b3975011f8dbda41",
+      "run": "28d8601881bd",
+      "phase": 7,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "85b3970d7b66",
+        "model": "sonnet",
+        "turns": 18,
+        "output": 2092
+      }
+    },
+    {
+      "key": "67d3053d23688316",
+      "run": "28d8601881bd",
+      "phase": 7,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "85b3970d7b66",
+        "model": "sonnet",
+        "turns": 18,
+        "output": 2092
+      }
+    },
+    {
+      "key": "2f571f818dccd050",
+      "run": "28d8601881bd",
+      "phase": 8,
+      "branchesInPhase": 1,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "a98d9de14161",
+        "model": "sonnet",
+        "turns": 10,
+        "output": 1188
+      }
+    },
+    {
+      "key": "dd0946d8b0887408",
+      "run": "28d8601881bd",
+      "phase": 9,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "925be6b0ec98",
+        "model": "sonnet",
+        "turns": 18,
+        "output": 1868
+      }
+    },
+    {
+      "key": "58e2523fbbf4c36d",
+      "run": "28d8601881bd",
+      "phase": 9,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": 0,
+      "messageForm": true,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "found",
+        "session": "925be6b0ec98",
+        "model": "sonnet",
+        "turns": 18,
+        "output": 1868
+      }
+    },
+    {
+      "key": "07fd96fab204054c",
+      "run": "93f6e11d9ce3",
+      "phase": 1,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "d292da33f7e1ff84",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "53a4a27a20064d22",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "7d9913a739ef8c8f",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "1318ec4e57a7c4a0",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "5aa3be4b30b9b657",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "5ed2216cd6aa3717",
+      "run": "93f6e11d9ce3",
+      "phase": 1,
+      "branchesInPhase": 2,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "bc6afcf63390e7a2",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "6e32436438b40fb7",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "ea2ee4c50d570c35",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "2b44508a3d0b80cc",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    },
+    {
+      "key": "9e45d1e835fce61a",
+      "run": "93f6e11d9ce3",
+      "phase": 2,
+      "branchesInPhase": 10,
+      "conflict": false,
+      "nonMergeCommits": null,
+      "messageForm": false,
+      "escalated": null,
+      "blocked": null,
+      "transcript": {
+        "status": "missing",
+        "session": null,
+        "model": null,
+        "turns": null,
+        "output": null
+      }
+    }
+  ]
+}
