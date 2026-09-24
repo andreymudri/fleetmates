@@ -642,7 +642,7 @@ synthetic caps and shrank the holdout rules to 150 rows, 40 per class and 15 sou
 - Test: `tests/classifier-dataset.test.mjs`
 - Modify: `tools/classifier/README.md`
 
-**Depends:** T3
+**Depends:** T3, T6
 
 **Model:** cheap
 
