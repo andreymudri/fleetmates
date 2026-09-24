@@ -17,18 +17,29 @@ const at = (offset) => `${T0 + offset} +0000`
 // Everything after phase 1's integration happens days later, outside its transcript's window.
 const DAYS = 3 * 86_400
 
+// The fixture identity and config isolation every fixture git call runs under, including the ones
+// that are expected to fail, so a missing identity can never pass for the failure a test wants.
+function gitEnv(date) {
+  return {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+    GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+    GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date,
+    GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+  }
+}
+
 function git(cwd, args, date = at(0)) {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
-      GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
-      GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date,
-      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-    },
-  }).trim()
+  return execFileSync('git', args, { cwd, encoding: 'utf8', env: gitEnv(date) }).trim()
+}
+
+// A merge that must stop on a conflict: exit 1 with MERGE_HEAD written. Any other exit (128 for a
+// missing identity, for one) is not the conflict the fixture needs.
+function mergeExpectingConflict(cwd, args, date) {
+  const res = spawnSync('git', ['merge', ...args], { cwd, encoding: 'utf8', env: gitEnv(date) })
+  assert.equal(res.status, 1, `the fixture merge must stop on a conflict: ${res.stderr}${res.stdout}`)
+  const head = spawnSync('git', ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd, encoding: 'utf8', env: gitEnv(date) })
+  assert.equal(head.status, 0, 'a merge stopped on a conflict leaves MERGE_HEAD behind')
 }
 
 async function commitFile(dir, file, body, message, date) {
@@ -72,8 +83,7 @@ async function buildFixture() {
   git(repo, ['checkout', '-q', 'run/r1'])
   git(repo, ['merge', '-q', '--no-ff', '-m', 'merge: take the amendment into run/r1', 'main'], at(1600 + DAYS))
 
-  const conflicted = spawnSync('git', ['merge', '--no-ff', '-m', 'merge(r1): T3 three', 'fleetmates/r1/T3'], { cwd: repo })
-  assert.notEqual(conflicted.status, 0, 'the fixture needs T3 to conflict')
+  mergeExpectingConflict(repo, ['--no-ff', '-m', 'merge(r1): T3 three', 'fleetmates/r1/T3'], at(5000 + DAYS))
   await writeFile(path.join(repo, 'base.txt'), 'resolved\n', 'utf8')
   git(repo, ['add', 'base.txt'], at(5000 + DAYS))
   // An explicit -m: `--no-edit` keeps git's `# Conflicts:` block, which is not the single-line form.
@@ -167,6 +177,44 @@ test('a merge whose tree differs from a clean merge-tree needed conflict resolut
     assert.equal(r1t3.conflict, true)
     assert.equal(r2t1.conflict, false)
   })
+})
+
+// Run r3: T1 merges untouched; T2 merges cleanly too, but the integrator edits a file during a
+// `--no-commit` merge before committing it. merge-tree completes both, so only the comparison of
+// the clean tree with the recorded tree can tell them apart.
+test('a merge that merge-tree completes cleanly but that was edited before commit is a conflict', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-census-edited-'))
+  try {
+    const repo = path.join(dir, 'repo')
+    await mkdir(repo)
+    git(repo, ['init', '-q', '-b', 'main'])
+    await commitFile(repo, 'base.txt', 'one\n', 'chore: base', at(0))
+    git(repo, ['branch', 'run/r3'])
+    git(repo, ['checkout', '-q', '-b', 'fleetmates/r3/T1', 'run/r3'])
+    await commitFile(repo, 'a.txt', 'a\n', 'feat: a', at(10))
+    git(repo, ['checkout', '-q', '-b', 'fleetmates/r3/T2', 'run/r3'])
+    await commitFile(repo, 'b.txt', 'b\n', 'feat: b', at(20))
+
+    git(repo, ['checkout', '-q', 'run/r3'])
+    git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r3): T1 a', 'fleetmates/r3/T1'], at(100))
+    git(repo, ['merge', '-q', '--no-ff', '--no-commit', 'fleetmates/r3/T2'], at(200))
+    await writeFile(path.join(repo, 'base.txt'), 'edited by the integrator\n', 'utf8')
+    git(repo, ['add', 'base.txt'], at(200))
+    git(repo, ['commit', '-q', '-m', 'merge(r3): T2 b'], at(200))
+
+    // The precondition that makes this test reach the tree comparison: merge-tree exits 0 for the
+    // edited merge and writes a tree that is not the recorded one.
+    const clean = spawnSync('git', ['merge-tree', '--write-tree', 'HEAD^1', 'HEAD^2'], { cwd: repo, encoding: 'utf8', env: gitEnv(at(0)) })
+    assert.equal(clean.status, 0, 'merge-tree must complete the edited merge unaided')
+    assert.notEqual(clean.stdout.split('\n')[0].trim(), git(repo, ['rev-parse', 'HEAD^{tree}']))
+
+    const rows = await censusRoot({ root: repo, projectsDir: path.join(dir, 'nowhere') })
+    assert.equal(rows.length, 2)
+    assert.equal(rows[0].conflict, false, 'the untouched merge is clean')
+    assert.equal(rows[1].conflict, true, 'a recorded tree that differs from the clean merge-tree is a conflict')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('counts only the non-merge commits made inside the integrator session', async () => {
