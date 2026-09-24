@@ -48,8 +48,11 @@ those you execute:
   alike is how a reviewer ends up judging below its guaranteed tier:
     - `unset: agents.reviewer.tier` — dispatch at the **fixed reviewer tier, `capable`** (model
       `opus`, per the tier→model map in `parallel-execution` — remap there and this line follows).
-      Never omit the model to inherit the session's: in a `mid` session that would have
-      the reviewer grading every `agent` check a full tier below what this skill guarantees. A
+      Never omit the model to inherit the session's: in a session on a smaller model (haiku or
+      sonnet) that would have the reviewer grading every `agent` check below the model this
+      skill guarantees. The map now sends `mid` to opus as well, so `mid` and `capable`
+      resolve to the same model; the reviewer is still dispatched at `capable`, the tier this
+      skill pins. A
       configured tier replaces `capable`; nothing else does.
     - `unset: agents.reviewer.effort` — omit the `effort` option, and the dispatch inherits the
       session's effort. Only effort falls back this way.
