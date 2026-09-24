@@ -23,7 +23,8 @@ const WIN32_SKIP = process.platform === 'win32' ? 'shebang fake binaries do not 
 //   { cmd: [bin, ...args], mayFail } runs a command (a failure throws unless mayFail);
 //   { write: { relPath: content } } writes files.
 // It then prints a `claude -p --output-format json` result built from the entry's totalCostUsd,
-// numTurns, isError and permissionDenials, or `raw` verbatim.
+// numTurns, isError and permissionDenials, or `raw` verbatim, after writing the entry's `stderr`
+// to its stderr.
 const FAKE_CLAUDE_SRC = `#!/usr/bin/env node
 const fs = require('node:fs')
 const path = require('node:path')
@@ -53,6 +54,7 @@ process.stdin.on('end', () => {
       fs.writeFileSync(path.join(process.cwd(), rel), content)
     }
   }
+  if (entry.stderr) process.stderr.write(entry.stderr)
   if (entry.raw !== undefined) {
     process.stdout.write(entry.raw)
   } else {
@@ -123,7 +125,10 @@ const TWO_CHECKS = JSON.stringify({
 //           before it was merged, so the merged tip's name is found only among the live refs;
 //   run r4: no status.json and a live, merged task branch, so its phase is unknown.
 // manifestName names the file `manifest` is committed as; null commits no manifest at all.
-async function buildFixture({ manifestName = 'fleetmates.gate.json', manifest = MANIFEST, liveRuns = false } = {}) {
+// prefix and stateDir name the task branches and the status directory, so a fixture can be a
+// pre-rename run (`teammates/<run>/<task>` branches, `.teammates/` state).
+async function buildFixture({ manifestName = 'fleetmates.gate.json', manifest = MANIFEST, liveRuns = false, prefix = 'fleetmates', stateDir = '.fleetmates' } = {}) {
+  const b = (run, task) => `${prefix}/${run}/${task}`
   const dir = await mkdtemp(path.join(tmpdir(), 'fm-intreplay-'))
   const repo = path.join(dir, 'repo')
   await mkdir(repo)
@@ -136,57 +141,57 @@ async function buildFixture({ manifestName = 'fleetmates.gate.json', manifest = 
   git(repo, ['branch', 'run/r1'])
   git(repo, ['branch', 'run/r2'])
 
-  git(repo, ['checkout', '-q', '-b', 'fleetmates/r1/T1', 'run/r1'])
+  git(repo, ['checkout', '-q', '-b', b('r1', 'T1'), 'run/r1'])
   const t1 = await commitFile(repo, 'base.txt', 'from T1\n', 'feat: t1')
-  git(repo, ['checkout', '-q', '-b', 'fleetmates/r1/T2', 'run/r1'])
+  git(repo, ['checkout', '-q', '-b', b('r1', 'T2'), 'run/r1'])
   const t2 = await commitFile(repo, 'b.txt', 'b\n', 'feat: t2')
-  git(repo, ['checkout', '-q', '-b', 'fleetmates/r1/T3', 'run/r1'])
+  git(repo, ['checkout', '-q', '-b', b('r1', 'T3'), 'run/r1'])
   const t3 = await commitFile(repo, 'base.txt', 'from T3\n', 'feat: t3')
 
   git(repo, ['checkout', '-q', 'run/r1'])
-  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r1): T1 one\n\nbody line', 'fleetmates/r1/T1'])
-  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r1): T2 two', 'fleetmates/r1/T2'])
+  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r1): T1 one\n\nbody line', b('r1', 'T1')])
+  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r1): T2 two', b('r1', 'T2')])
   const p1Tip = git(repo, ['rev-parse', 'HEAD'])
-  const conflicted = spawnSync('git', ['merge', '--no-ff', '-m', 'merge(r1): T3 three', 'fleetmates/r1/T3'], { cwd: repo, env: { ...process.env, ...GIT_ENV } })
+  const conflicted = spawnSync('git', ['merge', '--no-ff', '-m', 'merge(r1): T3 three', b('r1', 'T3')], { cwd: repo, env: { ...process.env, ...GIT_ENV } })
   assert.notEqual(conflicted.status, 0, 'the fixture needs T3 to conflict')
   await writeFile(path.join(repo, 'base.txt'), 'resolved\n', 'utf8')
   git(repo, ['add', 'base.txt'])
   git(repo, ['commit', '-q', '-m', 'merge(r1): T3 three'])
   const p2Tip = git(repo, ['rev-parse', 'HEAD'])
 
-  git(repo, ['checkout', '-q', '-b', 'fleetmates/r2/T1', 'run/r2'])
+  git(repo, ['checkout', '-q', '-b', b('r2', 'T1'), 'run/r2'])
   const r2t1 = await commitFile(repo, 'c.txt', 'c\n', 'feat: c')
-  git(repo, ['checkout', '-q', '-b', 'fleetmates/r2/T2', 'run/r2'])
+  git(repo, ['checkout', '-q', '-b', b('r2', 'T2'), 'run/r2'])
   const r2t2 = await commitFile(repo, 'd.txt', 'd\n', 'feat: d')
   git(repo, ['checkout', '-q', 'run/r2'])
-  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r2): T1 c', 'fleetmates/r2/T1'])
+  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r2): T1 c', b('r2', 'T1')])
   await commitFile(repo, 'op.txt', 'op\n', 'chore: operator')
-  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r2): T2 d', 'fleetmates/r2/T2'])
+  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r2): T2 d', b('r2', 'T2')])
   git(repo, ['checkout', '-q', 'main'])
   let r3old = null
   if (liveRuns) {
     git(repo, ['branch', 'run/r3', 'main'])
-    git(repo, ['checkout', '-q', '-b', 'fleetmates/r3/T1', 'run/r3'])
+    git(repo, ['checkout', '-q', '-b', b('r3', 'T1'), 'run/r3'])
     r3old = await commitFile(repo, 'e.txt', 'e\n', 'feat: e')
     await commitFile(repo, 'e.txt', 'e2\n', 'feat: e2')
     git(repo, ['checkout', '-q', 'run/r3'])
-    git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r3): T1 e', 'fleetmates/r3/T1'])
+    git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r3): T1 e', b('r3', 'T1')])
     git(repo, ['branch', 'run/r4', 'main'])
-    git(repo, ['checkout', '-q', '-b', 'fleetmates/r4/T1', 'run/r4'])
+    git(repo, ['checkout', '-q', '-b', b('r4', 'T1'), 'run/r4'])
     await commitFile(repo, 'f.txt', 'f\n', 'feat: f')
     git(repo, ['checkout', '-q', 'run/r4'])
-    git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r4): T1 f', 'fleetmates/r4/T1'])
+    git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r4): T1 f', b('r4', 'T1')])
     git(repo, ['checkout', '-q', 'main'])
   }
-  git(repo, ['branch', '-D', 'fleetmates/r1/T1', 'fleetmates/r1/T2', 'fleetmates/r1/T3', 'fleetmates/r2/T1', 'fleetmates/r2/T2'])
+  git(repo, ['branch', '-D', b('r1', 'T1'), b('r1', 'T2'), b('r1', 'T3'), b('r2', 'T1'), b('r2', 'T2')])
 
   for (const [runId, gates] of [
-    ['r1', { 1: { verdict: 'PASS', phase: 1, branchShas: { 'fleetmates/r1/T1': t1, 'fleetmates/r1/T2': t2 } }, 2: { verdict: 'PASS', phase: 2, branchShas: { 'fleetmates/r1/T3': t3 } } }],
-    ['r2', { 1: { verdict: 'PASS', phase: 1, branchShas: { 'fleetmates/r2/T1': r2t1, 'fleetmates/r2/T2': r2t2 } } }],
-    ...(liveRuns ? [['r3', { 1: { verdict: 'PASS', phase: 1, branchShas: { 'fleetmates/r3/T1': r3old } } }]] : []),
+    ['r1', { 1: { verdict: 'PASS', phase: 1, branchShas: { [b('r1', 'T1')]: t1, [b('r1', 'T2')]: t2 } }, 2: { verdict: 'PASS', phase: 2, branchShas: { [b('r1', 'T3')]: t3 } } }],
+    ['r2', { 1: { verdict: 'PASS', phase: 1, branchShas: { [b('r2', 'T1')]: r2t1, [b('r2', 'T2')]: r2t2 } } }],
+    ...(liveRuns ? [['r3', { 1: { verdict: 'PASS', phase: 1, branchShas: { [b('r3', 'T1')]: r3old } } }]] : []),
   ]) {
-    await mkdir(path.join(repo, '.fleetmates', runId), { recursive: true })
-    await writeFile(path.join(repo, '.fleetmates', runId, 'status.json'), JSON.stringify({ runId, gates }), 'utf8')
+    await mkdir(path.join(repo, stateDir, runId), { recursive: true })
+    await writeFile(path.join(repo, stateDir, runId, 'status.json'), JSON.stringify({ runId, gates }), 'utf8')
   }
   const tmpRoot = path.join(dir, 'tmp')
   await mkdir(tmpRoot)
@@ -377,6 +382,12 @@ const FAILURES = [
     merge('fleetmates/r1/T1', 'merge(r1): T1 one\n\nCo-Authored-By: x <x@example.invalid>'), PHASE1_OK[1],
   ], 'message'],
   ['the merges in another order', 1, [PHASE1_OK[1], PHASE1_OK[0]], 'message'],
+  ['the merges in another order with the messages swapped to the dispatched order', 1, [
+    merge('fleetmates/r1/T2', 'merge(r1): T1 one'), merge('fleetmates/r1/T1', 'merge(r1): T2 two'),
+  ], 'not-merge'],
+  ['a run branch deleted after a faithful integration', 1, [
+    ...PHASE1_OK, { cmd: ['git', 'checkout', '-q', '--detach'] }, { cmd: ['git', 'branch', '-D', 'run/r1'] },
+  ], 'wrong-tree'],
   ['an extra commit that leaves the tree unchanged', 1, [
     ...PHASE1_OK, { cmd: ['git', 'commit', '-q', '--allow-empty', '-m', 'chore: note'] },
   ], 'extra-commits'],
@@ -503,6 +514,18 @@ test('the verdict is cheap only when the candidate passes as often, never builds
   // An integration either role could not judge (no manifest) is left out of the comparison.
   const invalid = [...base, row('k3', 'candidate', 'haiku', 'invalid', 'no-manifest', 0.1), row('k3', 'control', 'sonnet', 'invalid', 'no-manifest', 0.5)]
   assert.equal(buildVerdict(invalid, { models: MODELS }).sampleSize, 2)
+  // Each side's exclusion on its own. Kept, a candidate-only invalid row would be a candidate
+  // non-pass against a control pass, and a control-only invalid row would let the candidate's
+  // wrong tree veto cheap: both would turn the verdict to sonnet.
+  const candidateInvalid = [...base, row('k3', 'candidate', 'haiku', 'invalid', 'no-manifest', 0.1), row('k3', 'control', 'sonnet', 'pass', null, 0.5)]
+  assert.deepEqual([buildVerdict(candidateInvalid, { models: MODELS }).verdict, buildVerdict(candidateInvalid, { models: MODELS }).sampleSize], ['cheap', 2])
+  const controlInvalid = [...base, row('k3', 'candidate', 'haiku', 'fail', 'wrong-tree', 0.1), row('k3', 'control', 'sonnet', 'invalid', 'no-manifest', 0.5)]
+  assert.deepEqual([buildVerdict(controlInvalid, { models: MODELS }).verdict, buildVerdict(controlInvalid, { models: MODELS }).sampleSize], ['cheap', 2])
+  // An unknown control mean never makes the candidate count as cheaper.
+  const controlCostUnknown = base.map((r) => (r.role === 'control' ? { ...r, totalCostUsd: null } : r))
+  const unknownControl = buildVerdict(controlCostUnknown, { models: MODELS })
+  assert.equal(unknownControl.counts.control.meanCostUsd, null)
+  assert.equal(unknownControl.verdict, 'sonnet')
 })
 
 function io() {
@@ -638,7 +661,7 @@ for (const [name, entry] of [['unparseable output', { steps: [], raw: 'not json'
   })
 }
 
-test('the census is pointed at a directory that exists and holds no transcripts', { skip: WIN32_SKIP }, async (t) => {
+test('the census is pointed at a directory that exists, holds no transcripts and is removed afterwards', { skip: WIN32_SKIP }, async (t) => {
   const fx = await buildFixture()
   t.after(() => rm(fx.dir, { recursive: true, force: true }))
   const seen = []
@@ -650,6 +673,7 @@ test('the census is pointed at a directory that exists and holds no transcripts'
   assert.equal(code, 0)
   assert.equal(seen.length, 1)
   assert.deepEqual(seen[0].entries, [])
+  await assert.rejects(readdir(seen[0].dir), { code: 'ENOENT' }, 'the census directory is removed afterwards')
 })
 
 test('both roles escalating a conflicted integration, the candidate cheaper, gives cheap', { skip: WIN32_SKIP }, async (t) => {
@@ -705,4 +729,162 @@ test('a tree with no gate manifest at all is invalid, never a pass', { skip: WIN
   const cell = await runIntegratorCell({ integration: p1, model: 'm', tmpRoot: fx.tmpRoot, env: q.env })
   assert.equal(cell.status, 'invalid')
   assert.equal(cell.failReason, 'no-manifest')
+})
+
+test('an optional command check that fails does not fail the cell, as in the real gate', { skip: WIN32_SKIP }, async (t) => {
+  const manifest = JSON.stringify({
+    phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'true' }, { name: 'advisory', kind: 'command', run: 'false', optional: true }] } },
+  })
+  const fx = await buildFixture({ manifest })
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const p1 = byPhase(await integrationsOf(fx), 'r1', 1)
+  const q = await withQueue(fx.dir, [{ steps: PHASE1_OK }])
+  const cell = await runIntegratorCell({ integration: p1, model: 'm', tmpRoot: fx.tmpRoot, env: q.env })
+  assert.equal(cell.status, 'pass', JSON.stringify(cell))
+})
+
+test('the checks are the integration\'s own phase\'s, not the default\'s', { skip: WIN32_SKIP }, async (t) => {
+  const manifest = JSON.stringify({
+    phases: {
+      1: { checks: [{ name: 'phase-one', kind: 'command', run: 'true' }] },
+      default: { checks: [{ name: 'default-only', kind: 'command', run: 'false' }] },
+    },
+  })
+  const fx = await buildFixture({ manifest })
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const all = await integrationsOf(fx)
+  const q = await withQueue(fx.dir, [{ steps: PHASE1_OK }, { steps: PHASE2_OK }])
+  const p1 = await runIntegratorCell({ integration: byPhase(all, 'r1', 1), model: 'm', tmpRoot: fx.tmpRoot, env: q.env })
+  assert.deepEqual([p1.status, p1.failReason], ['pass', null])
+  const p2 = await runIntegratorCell({ integration: byPhase(all, 'r1', 2), model: 'm', tmpRoot: fx.tmpRoot, env: q.env })
+  assert.deepEqual([p2.status, p2.failReason], ['fail', 'command:default-only'])
+})
+
+test('a preview.link directory of the source repository is copied into the clone for the command checks', { skip: WIN32_SKIP }, async (t) => {
+  const manifest = JSON.stringify({
+    preview: { link: ['deps'] },
+    phases: { default: { checks: [{ name: 'needs-deps', kind: 'command', run: 'test -f deps/lib.txt' }] } },
+  })
+  const fx = await buildFixture({ manifest })
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  await mkdir(path.join(fx.repo, 'deps'))
+  await writeFile(path.join(fx.repo, 'deps', 'lib.txt'), 'untracked build input\n', 'utf8')
+  const p1 = byPhase(await integrationsOf(fx), 'r1', 1)
+  const q = await withQueue(fx.dir, [{ steps: PHASE1_OK }])
+  const cell = await runIntegratorCell({ integration: p1, model: 'm', tmpRoot: fx.tmpRoot, env: q.env })
+  assert.deepEqual([cell.status, cell.failReason], ['pass', null])
+  assert.equal(await readFile(path.join(fx.repo, 'deps', 'lib.txt'), 'utf8'), 'untracked build input\n', 'the source copy is left alone')
+})
+
+test('a pre-rename run (.teammates/ state, teammates/ task branches) names its merged tips', async (t) => {
+  const fx = await buildFixture({ prefix: 'teammates', stateDir: '.teammates' })
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const all = await integrationsOf(fx)
+  const p1 = byPhase(all, 'r1', 1)
+  assert.equal(p1.eligible, true, JSON.stringify(p1))
+  assert.deepEqual(p1.merges.map((m) => [m.branch, m.tip]), [['teammates/r1/T1', fx.t1], ['teammates/r1/T2', fx.t2]])
+  assert.deepEqual(byPhase(all, 'r1', 2).merges.map((m) => m.branch), ['teammates/r1/T3'])
+})
+
+test('the printed resume command survives bash with the --models JSON intact', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture()
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const out = path.join(fx.dir, "o u't")
+  const q = await withQueue(fx.dir, [
+    { steps: [], totalCostUsd: 0.01 },
+    { steps: [], isError: true, result: 'Claude AI usage limit reached' },
+  ])
+  const sink = io()
+  const argv = ['--roots', fx.repo, '--count', '1', '--out', out, '--execute', '--models', JSON.stringify(MODELS)]
+  const code = await main(argv, sink, { tmpRoot: fx.tmpRoot, claudeEnv: q.env })
+  assert.equal(code, 1)
+  const prefix = 'BLOCKED: usage limit, resume with '
+  const line = sink.lines.find((l) => l.startsWith(prefix))
+  assert.ok(line, sink.lines.join('\n'))
+  const words = spawnSync('bash', ['-c', `f() { printf '%s\\0' "$@"; }; f ${line.slice(prefix.length)}`], { encoding: 'utf8' }).stdout.split('\0').slice(0, -1)
+  assert.deepEqual(words, ['node', 'tools/replay/integrator-replay.mjs', ...argv])
+})
+
+test('a rerun with a different candidate model runs that model\'s cells and skips only what it already recorded', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture()
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const out = path.join(fx.dir, 'out')
+  const q = await withQueue(fx.dir, [
+    { steps: [], totalCostUsd: 0.01 }, { steps: [], totalCostUsd: 0.1 }, { steps: [], totalCostUsd: 0.2 },
+    { steps: [], totalCostUsd: 0.01 }, { steps: [], totalCostUsd: 0.1 },
+  ])
+  const run = (models) => main(['--roots', fx.repo, '--count', '1', '--out', out, '--execute', '--models', JSON.stringify(models)], io(), { tmpRoot: fx.tmpRoot, claudeEnv: q.env })
+  assert.equal(await run(MODELS), 0)
+  assert.equal(await run({ candidate: 'opus', control: 'sonnet' }), 0)
+  assert.deepEqual((await readLog(q.log)).map((c) => c.argv[2]), ['haiku', 'haiku', 'sonnet', 'opus', 'opus'])
+  const rows = (await readFile(path.join(out, 'integrator-replay.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
+  assert.deepEqual(rows.map((r) => [r.role, r.model]), [['candidate', 'haiku'], ['control', 'sonnet'], ['candidate', 'opus']])
+})
+
+test('a standalone preflight on a healthy session returns 0 and records nothing', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture()
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const out = path.join(fx.dir, 'out')
+  const q = await withQueue(fx.dir, [{ steps: [], totalCostUsd: 0.01, numTurns: 1 }])
+  const sink = io()
+  const code = await main(['--roots', fx.repo, '--count', '1', '--out', out, '--preflight', '--models', JSON.stringify(MODELS)], sink, { tmpRoot: fx.tmpRoot, claudeEnv: q.env })
+  assert.equal(code, 0, sink.lines.join('\n'))
+  assert.ok(sink.lines.some((l) => /^preflight: ok — model=haiku/.test(l)), sink.lines.join('\n'))
+  assert.equal((await readLog(q.log)).length, 1)
+  await assert.rejects(readdir(out))
+})
+
+test('execute prints one progress line per finished cell, made only of what the jsonl records', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture()
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const out = path.join(fx.dir, 'out')
+  const q = await withQueue(fx.dir, [
+    { steps: [], totalCostUsd: 0.01 },
+    { steps: PHASE2_OK, totalCostUsd: 0.1 },
+    { steps: PHASE2_OK, totalCostUsd: 0.4 },
+    { steps: PHASE1_OK, totalCostUsd: 0.1 },
+    { steps: [PHASE1_OK[0]], totalCostUsd: 0.4 },
+  ])
+  const sink = io()
+  const code = await main(['--roots', fx.repo, '--count', '2', '--out', out, '--execute', '--models', JSON.stringify(MODELS)], sink, { tmpRoot: fx.tmpRoot, claudeEnv: q.env })
+  assert.equal(code, 0, sink.lines.join('\n'))
+  const rows = (await readFile(path.join(out, 'integrator-replay.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
+  const expected = rows.map((r, i) => `cell ${i + 1}/4: ${r.role} ${r.model} status=${r.status} failReason=${r.failReason ?? 'none'} ${(r.wallClockMs / 1000).toFixed(1)}s`)
+  assert.deepEqual(sink.lines.filter((l) => l.startsWith('cell ')), expected)
+})
+
+// Starts with a control sequence and a newline, and is longer than the 300 characters shown.
+const NOISY_HEAD = 'boom\x1b[31m red\n'
+const NOISY_STDERR = `${NOISY_HEAD}${'x'.repeat(400)}TAIL`
+
+test('a session error prints the first 300 characters of its stderr, controls made visible, and never records it', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture()
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const out = path.join(fx.dir, 'out')
+  const q = await withQueue(fx.dir, [
+    { steps: [], totalCostUsd: 0.01 },
+    { steps: [], raw: 'not json', stderr: NOISY_STDERR },
+    { steps: [], totalCostUsd: 0.2 },
+  ])
+  const sink = io()
+  const code = await main(['--roots', fx.repo, '--count', '1', '--out', out, '--execute', '--models', JSON.stringify(MODELS)], sink, { tmpRoot: fx.tmpRoot, claudeEnv: q.env })
+  assert.equal(code, 0, sink.lines.join('\n'))
+  const line = sink.lines.find((l) => l.startsWith('cell 1/2: candidate'))
+  assert.ok(line, sink.lines.join('\n'))
+  assert.match(line, /failReason=session-error \d+\.\ds stderr: /)
+  assert.ok(line.endsWith(`stderr: boom<0x1B>[31m red<0x0A>${'x'.repeat(300 - NOISY_HEAD.length)}`), line)
+  assert.ok(!line.includes('\x1b') && !line.includes('TAIL'), line)
+  assert.ok(!sink.lines.find((l) => l.startsWith('cell 2/2: control')).includes('stderr'))
+  const text = await readFile(path.join(out, 'integrator-replay.jsonl'), 'utf8')
+  assert.ok(!text.includes('boom') && !text.includes('xxxx'), text)
+})
+
+test('a preflight session error prints the session\'s stderr', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture()
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const q = await withQueue(fx.dir, [{ steps: [], isError: true, result: 'API Error', stderr: 'Error: \x07auth failed\n' }])
+  const sink = io()
+  const code = await main(['--roots', fx.repo, '--count', '1', '--out', path.join(fx.dir, 'out'), '--preflight', '--models', JSON.stringify(MODELS)], sink, { tmpRoot: fx.tmpRoot, claudeEnv: q.env })
+  assert.equal(code, 1)
+  assert.deepEqual(sink.lines.filter((l) => l.startsWith('preflight:')), ['preflight: FAILED (session error) — model=haiku — stderr: Error: <0x07>auth failed'])
 })

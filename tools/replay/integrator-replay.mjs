@@ -25,9 +25,10 @@
 // Pass rule, all of: the run branch's final tree equals the tree of the phase's last recorded merge;
 // the commits the session added are exactly one per dispatched branch, all on the first-parent
 // chain; each is a two-parent merge whose message is exactly the dispatched single-line message
-// (so no body and no trailers), in the dispatched order; and every `command` check of the gate
-// manifest (fleetmates.gate.json, else the pre-rename teammates.gate.json) at the integrated tip
-// passes. A failed cell's `failReason`:
+// (so no body and no trailers) and whose second parent is the dispatched task tip, in the
+// dispatched order; and every `command` check of the gate manifest (fleetmates.gate.json, else the
+// pre-rename teammates.gate.json) at the integrated tip passes, except one marked `optional: true`,
+// which the real gate reports without blocking on. A failed cell's `failReason`:
 //   - run branch left at the phase's first parent (nothing merged): `session-error` when the session
 //     ended in an error or unparseable output, otherwise `escalated`;
 //   - run branch moved: the first failing one of `wrong-tree` (its final tree differs from the
@@ -44,6 +45,9 @@
 // Only a hashed key (the census key of the phase's last merge: a truncated, unsalted sha256 of the
 // run name and merge sha, so pseudonymous, not secret) and metrics are written to
 // `integrator-replay.jsonl`. `integrator-verdict.json` holds the counts, the rule and the sample.
+// Each finished cell prints one progress line built from the row it just wrote. A session error
+// also prints the first 300 characters of the session's stderr, control characters made visible,
+// there and in the preflight line; stderr is never written to the jsonl.
 
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -60,6 +64,7 @@ import { defaultGitExec } from '../../scripts/git.mjs'
 import { loadGateConfig, checksForPhase, previewLinks } from '../../scripts/gate-config.mjs'
 import { runCommandCheck } from '../../scripts/gate-runner.mjs'
 import { validateLinkPaths } from '../../scripts/preview-links.mjs'
+import { printable } from '../../scripts/reviews.mjs'
 
 export const DEFAULT_COUNT = 15
 export const ROLES = ['candidate', 'control']
@@ -239,10 +244,14 @@ function attemptOnce({ cwd, prompt, model, systemPrompt, claudeBin, env, spawnFn
     const startedAt = performance.now()
     const child = spawnFn(claudeBin, args, { cwd, env: env ? { ...process.env, ...env } : process.env })
     let stdout = ''
+    let stderr = ''
     child.stdout?.on('data', (d) => { stdout += d })
-    child.stderr?.on('data', () => {})
-    child.on('error', () => resolve({ wallClockMs: performance.now() - startedAt, parsed: parseClaudeOutput('') }))
-    child.on('close', () => resolve({ wallClockMs: performance.now() - startedAt, parsed: parseClaudeOutput(stdout) }))
+    child.stderr?.on('data', (d) => { stderr += d })
+    child.on('error', (err) => {
+      stderr += String(err?.message ?? err)
+      resolve({ stderr, wallClockMs: performance.now() - startedAt, parsed: parseClaudeOutput('') })
+    })
+    child.on('close', () => resolve({ stderr, wallClockMs: performance.now() - startedAt, parsed: parseClaudeOutput(stdout) }))
     child.stdin?.write(prompt)
     child.stdin?.end()
   })
@@ -282,6 +291,9 @@ async function verifyHistory({ cloneDir, integration, gitExecFn }) {
     if (parents.length !== 2) return { reason: 'not-merge', tip }
     const message = (await mustGit(['log', '-1', '--format=%B', sha], cloneDir, gitExecFn)).replace(/\n+$/, '')
     if (message !== integration.merges[i].message) return { reason: 'message', tip }
+    // The right message on a merge of another branch: the dispatched order, with the messages
+    // swapped to match it, would otherwise pass.
+    if (parents[1] !== integration.merges[i].tip) return { reason: 'not-merge', tip }
   }
   return { reason: null, tip }
 }
@@ -314,7 +326,8 @@ export async function runIntegratorCell({
     }
     const sessionError = parsed.malformed || parsed.isError
     const history = await verifyHistory({ cloneDir, integration, gitExecFn })
-    const done = (status, failReason) => ({ status, failReason, sessionError, ...metrics })
+    // `stderr` is for the operator's terminal only: main never copies it into a jsonl row.
+    const done = (status, failReason) => ({ status, failReason, sessionError, stderr: attempt.stderr, ...metrics })
     // A run branch left where it started is a session that merged nothing: an escalation, or an
     // error before the first merge. Neither built anything, so neither is a wrong tree.
     if (history.reason === 'unchanged') return done('fail', sessionError ? 'session-error' : 'escalated')
@@ -327,7 +340,8 @@ export async function runIntegratorCell({
     const checks = checksForPhase(config, String(integration.phase)).filter((c) => c?.kind === 'command')
     for (const check of checks) {
       const result = await runCheckFn(check, { cwd: cloneDir })
-      if (result.status !== 'pass') return done('fail', `command:${check.name}`)
+      // An optional check is advisory, as in the real gate (gate-runner's `optionalFailed`).
+      if (result.status !== 'pass' && check.optional !== true) return done('fail', `command:${check.name}`)
     }
     return done('pass', null)
   } finally {
@@ -413,6 +427,17 @@ async function readRows(file) {
 
 const short = (key) => key.slice(0, 12)
 
+// One word for a POSIX shell: bare when it holds nothing the shell would read, else single-quoted.
+const shellQuote = (s) => (/^[\w./@:+=,-]+$/.test(s) ? s : `'${String(s).replace(/'/g, `'\\''`)}'`)
+
+// A session's stderr for one printed line: the first STDERR_SHOWN characters, every control
+// character (newline included) rendered visible, so it cannot move the cursor or start a line.
+const STDERR_SHOWN = 300
+const stderrReason = (stderr) => {
+  const text = String(stderr ?? '').trim()
+  return text === '' ? '(empty)' : printable(text.slice(0, STDERR_SHOWN))
+}
+
 export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n`) }, deps = {}) {
   const {
     tmpRoot = tmpdir(), outDir = path.join(TOOL_DIR, 'data'), claudeBin = 'claude', claudeEnv, spawnFn = spawn,
@@ -488,7 +513,7 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
     const ok = !cell.usageLimit && !cell.invalid && !cell.sessionError
     const why = cell.usageLimit ? 'usage limit' : cell.invalid ? `${cell.permissionDenials} permission denial(s) (${cell.deniedTools.join(', ')})` : 'session error'
     io.out(ok ? `preflight: ok — model=${models.candidate} cost=${cell.totalCostUsd ?? 'missing'} turns=${cell.turns ?? 'unknown'}`
-      : `preflight: FAILED (${why}) — model=${models.candidate}`)
+      : `preflight: FAILED (${why}) — model=${models.candidate}${why === 'session error' ? ` — stderr: ${stderrReason(cell.stderr)}` : ''}`)
     return ok
   }
 
@@ -514,9 +539,12 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
     io.out('aborting: the preflight failed, so no cell was run')
     return 1
   }
-  const resume = `node tools/replay/integrator-replay.mjs ${argv.join(' ')}`
+  const resume = ['node', 'tools/replay/integrator-replay.mjs', ...argv].map(shellQuote).join(' ')
+  const total = sample.length * ROLES.length
+  let index = 0
   for (const integration of sample) {
     for (const role of ROLES) {
+      index += 1
       if (done.has(doneKey(integration.key, role))) continue
       const cell = await runCell(integration, role)
       if (cell.usageLimit) { io.out(`BLOCKED: usage limit, resume with ${resume}`); return 1 }
@@ -529,6 +557,10 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
       await appendFile(resultsPath, `${JSON.stringify(row)}\n`)
       done.add(doneKey(integration.key, role))
       rows.push(row)
+      // Progress, so a long run does not read as a hang: only fields of the row just written, and
+      // on a session error the session's stderr, which is printed and never recorded.
+      io.out(`cell ${index}/${total}: ${role} ${row.model} status=${row.status} failReason=${row.failReason ?? 'none'} `
+        + `${(row.wallClockMs / 1000).toFixed(1)}s${row.failReason === 'session-error' ? ` stderr: ${stderrReason(cell.stderr)}` : ''}`)
     }
   }
   const verdict = buildVerdict(rows, { models, now })
