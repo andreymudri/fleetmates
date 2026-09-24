@@ -299,15 +299,22 @@ function runNamedInSubject(subject) {
   return { prefixed: null, trailing: trailing ? trailing[1] : null }
 }
 
-// Every run id any root knows of: a `.fleetmates/<run>` or `.teammates/<run>` state directory, or a
-// `run/<run>` branch. Read from the whole set of roots, so a run whose state lives in another
+// Every run id any root knows of: a `.fleetmates/<run>` or `.teammates/<run>` state directory that
+// holds a `plan.json` or `status.json` (so a non-run directory such as `.fleetmates/index` never
+// counts; neither file is parsed), or a `run/<run>` branch. Read from the whole set of roots, so a run whose state lives in another
 // checkout still counts. Only the trailing `(<x>)` form consults this.
 async function knownRunIdsForRoots(roots, { gitExecFn, readdirFn = readdir }) {
   const ids = new Set()
   for (const root of roots) {
     for (const stateDir of ['.fleetmates', '.teammates']) {
       const entries = await readdirFn(path.join(root, stateDir), { withFileTypes: true }).catch(() => [])
-      for (const entry of entries) if (entry.isDirectory()) ids.add(entry.name)
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue
+        const dir = path.join(root, stateDir, entry.name)
+        const isRun = await lstat(path.join(dir, 'plan.json')).then(() => true, () => false)
+          || await lstat(path.join(dir, 'status.json')).then(() => true, () => false)
+        if (isRun) ids.add(entry.name)
+      }
     }
     const res = await gitExecFn(['for-each-ref', '--format=%(refname)', 'refs/heads/run/'], root)
     if (res.code !== 0) continue
@@ -351,9 +358,10 @@ async function commitParents(root, sha, gitExecFn) {
 //   (b) a candidate whose subject never names THIS run's own id, and names a DIFFERENT run —
 //       either a known run id (one with `.fleetmates/<run>/plan.json` under the roots) as a whole
 //       token, or any run in a leading `merge(<run>):`, or a trailing single-token `(<x>)` when x
-//       is a known run (a `.fleetmates`/`.teammates` state dir or a `run/<x>` branch in any root)
-//       — is rejected outright, even when it is the only candidate left. A trailing `(<x>)` that
-//       is not a known run ("(parser)", "(#12)") is an ordinary word. A whole token treats '-' as
+//       is a known run (a `.fleetmates`/`.teammates` state dir holding plan.json or status.json,
+//       or a `run/<x>` branch, in any root — see knownRunIdsForRoots) — is rejected outright,
+//       even when it is the only candidate left. A trailing `(<x>)` that is not a known run
+//       ("(parser)", "(#12)", "(index)") is an ordinary word. A whole token treats '-' as
 //       part of the id (see runIdPattern). A merge whose subject names no run in those ways is a
 //       neutral candidate, and a sole neutral candidate is accepted.
 //       Reproduced directly: run A's T1, squash-merged (leaving no valid merge of its own), still

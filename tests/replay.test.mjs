@@ -1652,8 +1652,8 @@ test('locateTasks: a subject in the "(<run>)" or "merge(<run>)" form naming the 
 // Fix round — a trailing single-token "(x)" was read as a run id whatever x was, so a task's own
 // merge titled "... (parser)" became unlocatable with a false "names a different run" reason
 // (reproduced by the phase 1 reviewers). The leading `merge(<run>):` form always counts; a
-// trailing "(x)" counts only when x is a known run: a `.fleetmates`/`.teammates` state dir or a
-// `run/<x>` branch in any root.
+// trailing "(x)" counts only when x is a known run: a `.fleetmates`/`.teammates` state dir holding
+// plan.json or status.json, or a `run/<x>` branch, in any root.
 for (const word of ['parser', '#12', 'wip']) {
   test(`locateTasks: a trailing "(${word})" that is not a known run does not make the task's own merge unlocatable`, async () => {
     const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-word-'))
@@ -1671,6 +1671,20 @@ for (const word of ['parser', '#12', 'wip']) {
   })
 }
 
+test('locateTasks: a trailing "(index)" is not a known run when .fleetmates/index holds no plan.json or status.json', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-index-'))
+  const { root } = await buildRunsCollisionFixture({
+    dir: path.join(scratch, 'proj'),
+    runs: [{ runId: 'runA', subject: 'merge: T1 edit a.js (index)' }],
+  })
+  await mkdir(path.join(root, '.fleetmates', 'index'), { recursive: true })
+  await writeFile(path.join(root, '.fleetmates', 'index', 'runs.json'), '{}\n', 'utf8')
+  await mkdir(path.join(root, '.teammates', 'index'), { recursive: true })
+  const byRun = await locateByRun(root)
+  assert.equal(byRun.runA.located, true, byRun.runA.reason)
+  await rm(scratch, { recursive: true, force: true })
+})
+
 test('locateTasks: a trailing "(runB)" with neither a state dir nor a run/runB branch is not a known run', async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-unknown-'))
   const { root } = await buildRunsCollisionFixture({
@@ -1686,22 +1700,27 @@ test('locateTasks: a trailing "(runB)" with neither a state dir nor a run/runB b
   await rm(scratch, { recursive: true, force: true })
 })
 
-test('locateTasks: a trailing "(runB)" is a known run through a .teammates state dir alone', async () => {
-  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-teammates-'))
-  const { root } = await buildRunsCollisionFixture({
-    dir: path.join(scratch, 'proj'),
-    runs: [
-      { runId: 'runA', squash: true },
-      { runId: 'runB', subject: 'Merge T1: edit a.js (runB)', state: false },
-    ],
+// The state file is what makes a state directory a run's; neither file is parsed here, so an
+// empty one counts.
+for (const [stateDir, stateFile] of [['.teammates', 'plan.json'], ['.teammates', 'status.json'], ['.fleetmates', 'status.json']]) {
+  test(`locateTasks: a trailing "(runB)" is a known run through ${stateDir}/runB/${stateFile} alone`, async () => {
+    const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-statefile-'))
+    const { root } = await buildRunsCollisionFixture({
+      dir: path.join(scratch, 'proj'),
+      runs: [
+        { runId: 'runA', squash: true },
+        { runId: 'runB', subject: 'Merge T1: edit a.js (runB)', state: false },
+      ],
+    })
+    await git(['branch', '-D', 'run/runB'], root)
+    await mkdir(path.join(root, stateDir, 'runB'), { recursive: true })
+    await writeFile(path.join(root, stateDir, 'runB', stateFile), '', 'utf8')
+    const byRun = await locateByRun(root)
+    assert.equal(byRun.runA.located, false)
+    assert.ok(byRun.runA.reason.includes('other run'), byRun.runA.reason)
+    await rm(scratch, { recursive: true, force: true })
   })
-  await git(['branch', '-D', 'run/runB'], root)
-  await mkdir(path.join(root, '.teammates', 'runB'), { recursive: true })
-  const byRun = await locateByRun(root)
-  assert.equal(byRun.runA.located, false)
-  assert.ok(byRun.runA.reason.includes('other run'), byRun.runA.reason)
-  await rm(scratch, { recursive: true, force: true })
-})
+}
 
 test('locateTasks: a trailing "(runB)" is a known run through a run/runB branch in ANOTHER root', async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-trailing-otherroot-'))
