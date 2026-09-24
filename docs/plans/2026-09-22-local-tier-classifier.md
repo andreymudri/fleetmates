@@ -707,8 +707,10 @@ Timing showed `extractFeatures` takes 32–36 ms per 100 records, and its tokeni
   - L2 regularisation strength is chosen by grouped cross-validation on train rows;
   - threshold tuning reads validation rows only and **never** holdout rows;
   - weights are rounded to 6 significant digits **before** evaluation;
-  - (retry, after the first holdout miss) a single softmax temperature is fitted on validation
-    rows only and stored in `tier-model.json`, applied identically at runtime;
+  - (retry, after the first holdout miss) a single softmax temperature T is fitted on validation
+    rows only and folded into the shipped parameters (weights and bias divided by T before
+    rounding), so the unchanged runtime `predict` computes softmax((Wx + b) / T) exactly. The
+    model schema gains no field; T is recorded in the model card;
   - (retry) validation rows are reweighted by `origin` so their own/synthetic mix matches the
     holdout's, a mix computed from split metadata alone and never from holdout labels or
     predictions;
