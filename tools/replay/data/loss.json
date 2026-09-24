@@ -1,0 +1,64 @@
+{
+  "lossVersion": 2,
+  "underOverRatio": 26.930906257490207,
+  "underOverRatioInterval": {
+    "low": -189.4377282993597,
+    "high": 256.59683345117173
+  },
+  "wallClockRatio": -11.702656785347415,
+  "tierModels": {
+    "cheap": "haiku",
+    "mid": "sonnet",
+    "capable": "opus"
+  },
+  "resolvedTaskCount": 30,
+  "unresolvedTaskCount": 0,
+  "tierMeans": {
+    "usage": {
+      "cheap": 1.0853418283333336,
+      "mid": 3.86579724,
+      "capable": 1.5211419333333334
+    },
+    "wallClock": {
+      "cheap": 636187.3821300667,
+      "mid": 848485.149540133,
+      "capable": 323410.3891152997
+    }
+  },
+  "costMatrix": {
+    "cheap": {
+      "cheap": 0,
+      "mid": 4.951139068333333,
+      "capable": 2.606483761666667
+    },
+    "mid": {
+      "cheap": 2.7804554116666664,
+      "mid": 0,
+      "capable": 5.386939173333333
+    },
+    "capable": {
+      "cheap": 0.43580010499999977,
+      "mid": 0.054267091416666684,
+      "capable": 0
+    }
+  },
+  "wallClockMatrix": {
+    "cheap": {
+      "cheap": 0,
+      "mid": 1484672.5316701997,
+      "capable": 959597.7712453664
+    },
+    "mid": {
+      "cheap": 212297.7674100662,
+      "mid": 0,
+      "capable": 1171895.5386554326
+    },
+    "capable": {
+      "cheap": 16170.519455764985,
+      "mid": 16170.519455764985,
+      "capable": 0
+    }
+  },
+  "seed": 20260922,
+  "date": "2026-09-24T16:31:49.900Z"
+}
