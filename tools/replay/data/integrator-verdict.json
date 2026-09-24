@@ -1,0 +1,30 @@
+{
+  "date": "2026-09-24T19:03:10.554Z",
+  "verdict": "cheap",
+  "rule": "cheap when the candidate passes at least as many integrations as the control, has zero wrong-tree results and a lower mean cost over the same sample; sonnet otherwise",
+  "models": {
+    "candidate": "haiku",
+    "control": "sonnet"
+  },
+  "sampleSize": 14,
+  "counts": {
+    "candidate": {
+      "cells": 14,
+      "pass": 14,
+      "fail": 0,
+      "wrongTree": 0,
+      "escalated": 0,
+      "costMissing": 0,
+      "meanCostUsd": 0.048811364285714275
+    },
+    "control": {
+      "cells": 14,
+      "pass": 14,
+      "fail": 0,
+      "wrongTree": 0,
+      "escalated": 0,
+      "costMissing": 0,
+      "meanCostUsd": 0.1711256142857143
+    }
+  }
+}
