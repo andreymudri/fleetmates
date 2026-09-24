@@ -229,7 +229,7 @@ use the 95% Wilson bound. With 150 rows, zero observed errors still has an upper
 | Catastrophic under-tier | `capable -> cheap` count is exactly 0, on judged and outcome rows alike |
 | All under-tiering | Point estimate at most 3%; Wilson upper bound at most 5% |
 | Cheap precision | Point estimate at least 90%; Wilson lower bound at least 85% |
-| Cheap recall | At least 50% |
+| Cheap recall | At least 30%. Amended from 50% by the operator after the retry's training refused on validation (best reachable 41% at ≥95% precision). The value comes from the validation frontier minus a 10-point margin, is above the first attempt's 26% holdout result, and is disclosed in the model card. |
 | Weighted loss | At least 15% below the current heuristic, with each (predicted, true) pair costed by the measured `costMatrix`. A paired bootstrap (10,000 resamples, fixed seed) must give a 95% interval for the improvement that excludes 0. |
 | Outcome rows | Weighted loss on `labelKind: "outcome"` rows no worse than the heuristic's |
 | Calibration | Top-label ECE with 10 equal-width bins at most 0.10 |
@@ -695,6 +695,8 @@ Timing showed `extractFeatures` takes 32–36 ms per 100 records, and its tokeni
 - Test: `tests/classifier-train.test.mjs`
 - Create: `classifier/tier-model.json`
 - Create: `docs/specs/2026-09-22-tier-classifier-model-card.md`
+- Modify: `tools/classifier/evaluate.mjs`
+- Test: `tests/classifier-evaluate.test.mjs`
 
 **Depends:** T1, T2, T4, T6, T7, T14, T15, T16, T17
 
@@ -715,7 +717,12 @@ Timing showed `extractFeatures` takes 32–36 ms per 100 records, and its tokeni
     holdout's, a mix computed from split metadata alone and never from holdout labels or
     predictions;
   - (retry) threshold tuning only accepts a threshold set that meets every rate gate the
-    validation rows can measure, including cheap recall of at least 50%, with a safety margin.
+    validation rows can measure, including cheap recall, with a safety margin;
+  - (gate amendment) `CHEAP_RECALL_MIN` in `evaluate.mjs` becomes 0.30 and the trainer's
+    validation margin for cheap recall becomes 0.40. The other gates are unchanged. The model
+    card states the amendment, why it was made, and that it came after a holdout miss. It also
+    reports the weighted loss of the fixed policy "always capable" next to the model's, because
+    under the measured cost matrix that policy is within a few percent of the first attempt.
 - [ ] **Step 2:** Implement `train.mjs`: full-batch gradient descent with a fixed iteration cap
   and seed, and a grid of `hashBits` in {12, 13, 14, 15}. Select the smallest configuration
   whose validation loss is within one standard error of the best.
