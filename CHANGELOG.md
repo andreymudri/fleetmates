@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.2.0
+
+### Changed
+
+- On the Claude harness, `mid` implementer tasks dispatch to opus instead of sonnet. Evidence:
+  a 30-task replay (tools/replay/data) — opus passed 29/30 at mean US$1.52 and 5.4 min vs
+  sonnet 29/30 at US$3.87 and 14.1 min. To restore sonnet, pass a different `--models` map
+  on the dispatch side (config stores tiers, not models); see README "Why mid runs on opus".
+- The integrator's fixed tier is now `cheap` (haiku), from a replay of 14 past integrations
+  across 4 repositories: haiku 14/14 vs sonnet 14/14, 0 wrong-tree, mean US$0.049 vs
+  US$0.171 (tools/replay/data/integrator-verdict.json). The sample held no conflicted
+  integration, so conflict handling on haiku is unmeasured. A configured
+  `agents.integrator.tier` still overrides it.
+
+### Added
+
+- `tools/replay/` — the replay tool, the integrator census and the integrator replay,
+  operator tools not shipped in the npm package.
+
 ## v2.1.0
 
 ### Added
