@@ -26,9 +26,20 @@
 // the commits the session added are exactly one per dispatched branch, all on the first-parent
 // chain; each is a two-parent merge whose message is exactly the dispatched single-line message
 // (so no body and no trailers), in the dispatched order; and every `command` check of the gate
-// manifest at the integrated tip passes. `failReason` is the first failing one of `wrong-tree`,
-// `session-error`, `extra-commits`, `not-merge`, `message`, `command:<check name>`. A session that
-// reports a permission denial makes the cell invalid: nothing is recorded and the run stops.
+// manifest (fleetmates.gate.json, else the pre-rename teammates.gate.json) at the integrated tip
+// passes. A failed cell's `failReason`:
+//   - run branch left at the phase's first parent (nothing merged): `session-error` when the session
+//     ended in an error or unparseable output, otherwise `escalated`;
+//   - run branch moved: the first failing one of `wrong-tree` (its final tree differs from the
+//     recorded one), `session-error`, `extra-commits`, `not-merge`, `message`, `command:<check name>`.
+// A cell whose tip carries no gate manifest at all is recorded with status `invalid` and failReason
+// `no-manifest`, never a pass. A session that reports a permission denial also makes the cell
+// invalid, but then nothing is recorded and the run stops.
+//
+// Verdict: `cheap` when the candidate passes at least as many integrations as the control, has
+// zero wrong-tree results and a known, lower mean cost, over the integrations both roles measured
+// with the current models and neither recorded as `invalid`; `sonnet` otherwise. An escalation is
+// a non-pass and is counted per role.
 //
 // Only a hashed key (the census key of the phase's last merge: a truncated, unsalted sha256 of the
 // run name and merge sha, so pseudonymous, not secret) and metrics are written to
@@ -36,7 +47,7 @@
 
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { appendFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -55,6 +66,7 @@ export const ROLES = ['candidate', 'control']
 export const VERDICT_RULE = 'cheap when the candidate passes at least as many integrations as the control, '
   + 'has zero wrong-tree results and a lower mean cost over the same sample; sonnet otherwise'
 const TASK_PREFIXES = ['fleetmates', 'teammates']
+const LEGACY_MANIFEST = 'teammates.gate.json'
 
 const TOOL_DIR = path.dirname(fileURLToPath(import.meta.url))
 const hash = (text, length) => createHash('sha256').update(text).digest('hex').slice(0, length)
@@ -236,10 +248,26 @@ function attemptOnce({ cwd, prompt, model, systemPrompt, claudeBin, env, spawnFn
   })
 }
 
+// The gate manifest in `dir`: fleetmates.gate.json, or the pre-rename teammates.gate.json that
+// older runs' trees carry. null when neither exists.
+export async function loadManifest(dir) {
+  const current = await loadGateConfig(dir)
+  if (current !== null) return current
+  try {
+    return JSON.parse(await readFile(path.join(dir, LEGACY_MANIFEST), 'utf8'))
+  } catch (err) {
+    if (err.code === 'ENOENT') return null
+    throw err
+  }
+}
+
 // The structural half of the pass rule, read from the run branch ref (wherever HEAD was left).
+// `unchanged` is a run branch still at the phase's first parent: nothing was merged. A deleted run
+// branch counts as moved, and so as a wrong tree.
 async function verifyHistory({ cloneDir, integration, gitExecFn }) {
   const tip = (await gitExecFn(['rev-parse', '--verify', '--quiet', `refs/heads/${integration.runBranch}`], cloneDir)).stdout.trim()
   if (tip === '') return { reason: 'wrong-tree', tip: null }
+  if (tip === integration.startSha) return { reason: 'unchanged', tip }
   const tree = (await mustGit(['rev-parse', `${tip}^{tree}`], cloneDir, gitExecFn)).trim()
   if (tree !== integration.finalTree) return { reason: 'wrong-tree', tip }
   const exclude = [integration.startSha, ...integration.merges.map((m) => m.tip)].map((s) => `^${s}`)
@@ -261,7 +289,7 @@ async function verifyHistory({ cloneDir, integration, gitExecFn }) {
 // One cell: clone, copy `preview.link` entries in, one session, verify, remove the clone.
 export async function runIntegratorCell({
   integration, model, tmpRoot = tmpdir(), claudeBin = 'claude', env, spawnFn = spawn,
-  gitExecFn = defaultGitExec, loadConfigFn = loadGateConfig, runCheckFn = runCommandCheck,
+  gitExecFn = defaultGitExec, loadConfigFn = loadManifest, runCheckFn = runCommandCheck,
   copyPreviewPathsFn = copyPreviewPaths, systemPrompt,
 }) {
   const system = systemPrompt ?? await integratorSystemPrompt()
@@ -284,20 +312,24 @@ export async function runIntegratorCell({
     if (parsed.permissionDenials > 0) {
       return { invalid: true, permissionDenials: parsed.permissionDenials, deniedTools: parsed.deniedTools, ...metrics }
     }
+    const sessionError = parsed.malformed || parsed.isError
     const history = await verifyHistory({ cloneDir, integration, gitExecFn })
-    let failReason = history.reason === 'wrong-tree' ? 'wrong-tree' : null
-    if (failReason === null && (parsed.malformed || parsed.isError)) failReason = 'session-error'
-    if (failReason === null) failReason = history.reason
-    if (failReason === null) {
-      await mustGit(['checkout', '--quiet', '--force', '--detach', history.tip], cloneDir, gitExecFn)
-      const config = await loadConfigFn(cloneDir)
-      const checks = config ? checksForPhase(config, String(integration.phase)).filter((c) => c?.kind === 'command') : []
-      for (const check of checks) {
-        const result = await runCheckFn(check, { cwd: cloneDir })
-        if (result.status !== 'pass') { failReason = `command:${check.name}`; break }
-      }
+    const done = (status, failReason) => ({ status, failReason, sessionError, ...metrics })
+    // A run branch left where it started is a session that merged nothing: an escalation, or an
+    // error before the first merge. Neither built anything, so neither is a wrong tree.
+    if (history.reason === 'unchanged') return done('fail', sessionError ? 'session-error' : 'escalated')
+    if (history.reason === 'wrong-tree') return done('fail', 'wrong-tree')
+    if (sessionError) return done('fail', 'session-error')
+    if (history.reason !== null) return done('fail', history.reason)
+    await mustGit(['checkout', '--quiet', '--force', '--detach', history.tip], cloneDir, gitExecFn)
+    const config = await loadConfigFn(cloneDir)
+    if (config === null) return done('invalid', 'no-manifest')
+    const checks = checksForPhase(config, String(integration.phase)).filter((c) => c?.kind === 'command')
+    for (const check of checks) {
+      const result = await runCheckFn(check, { cwd: cloneDir })
+      if (result.status !== 'pass') return done('fail', `command:${check.name}`)
     }
-    return { status: failReason === null ? 'pass' : 'fail', failReason, sessionError: parsed.malformed || parsed.isError, ...metrics }
+    return done('pass', null)
   } finally {
     if (teardownLinks) await teardownLinks().catch(() => {})
     await removeClone(cloneDir)
@@ -312,18 +344,22 @@ function roleCounts(rows) {
     pass: rows.filter((r) => r.status === 'pass').length,
     fail: rows.filter((r) => r.status !== 'pass').length,
     wrongTree: rows.filter((r) => r.failReason === 'wrong-tree').length,
+    escalated: rows.filter((r) => r.failReason === 'escalated').length,
     costMissing: costs.filter((c) => typeof c !== 'number').length,
     meanCostUsd: known && rows.length > 0 ? costs.reduce((s, c) => s + c, 0) / rows.length : null,
   }
 }
 
-// The verdict over integrations measured by both roles with the current models. A missing cost on
-// either side leaves its mean unknown, and an unknown mean never counts as lower.
+// The verdict over integrations measured by both roles with the current models, leaving out any
+// integration either role's cell could not judge (`invalid`). An escalation is a non-pass, like
+// any other failure, and is counted per role. A missing cost on either side leaves its mean
+// unknown, and an unknown mean never counts as lower.
 export function buildVerdict(rows, { models, now = () => new Date().toISOString() }) {
   const pick = (role) => new Map(rows.filter((r) => r.role === role && r.model === models[role]).map((r) => [r.key, r]))
   const candidate = pick('candidate')
   const control = pick('control')
-  const keys = [...candidate.keys()].filter((k) => control.has(k))
+  const keys = [...candidate.keys()].filter((k) => control.has(k)
+    && candidate.get(k).status !== 'invalid' && control.get(k).status !== 'invalid')
   const counts = {
     candidate: roleCounts(keys.map((k) => candidate.get(k))),
     control: roleCounts(keys.map((k) => control.get(k))),
@@ -380,7 +416,7 @@ const short = (key) => key.slice(0, 12)
 export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n`) }, deps = {}) {
   const {
     tmpRoot = tmpdir(), outDir = path.join(TOOL_DIR, 'data'), claudeBin = 'claude', claudeEnv, spawnFn = spawn,
-    runCheckFn = runCommandCheck, now = () => new Date().toISOString(),
+    runCheckFn = runCommandCheck, now = () => new Date().toISOString(), censusFn = censusRoot,
   } = deps
   let flags
   let models = null
@@ -405,17 +441,22 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
   if (!Number.isInteger(seed)) { io.out('--seed must be an integer'); return 2 }
   const dataDir = typeof flags.out === 'string' ? path.resolve(flags.out) : outDir
 
-  // The census is asked for the conflict flag and phase only; pointing it at a directory that holds
-  // no transcripts keeps it from reading the operator's session history.
-  const projectsDir = path.join(tmpRoot, 'fleetmates-integrator-replay-no-transcripts')
+  // The census is asked for the conflict flag and phase only. It is pointed at a fresh, empty
+  // directory, removed afterwards, so it reads no transcripts of the operator's session history.
+  await mkdir(tmpRoot, { recursive: true })
+  const projectsDir = await mkdtemp(path.join(tmpRoot, 'fleetmates-integrator-replay-no-transcripts-'))
   const all = []
-  for (const root of roots) {
-    try {
-      all.push(...await discoverIntegrations({ root, projectsDir }))
-    } catch (err) {
-      io.out(`${root}: ${err.message.split('\n')[0]}`)
-      return 2
+  try {
+    for (const root of roots) {
+      try {
+        all.push(...await discoverIntegrations({ root, projectsDir, censusFn }))
+      } catch (err) {
+        io.out(`${root}: ${err.message.split('\n')[0]}`)
+        return 2
+      }
     }
+  } finally {
+    await rm(projectsDir, { recursive: true, force: true })
   }
   const sample = sampleIntegrations(all, { count, seed })
   const eligible = all.filter((i) => i.eligible)

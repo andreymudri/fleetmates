@@ -12,6 +12,7 @@ import {
   discoverIntegrations, sampleIntegrations, buildIntegrationClone, integratorSystemPrompt,
   buildDispatchPrompt, runIntegratorCell, buildVerdict, main,
 } from '../tools/replay/integrator-replay.mjs'
+import { censusRoot } from '../tools/replay/integrator-census.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const AGENT_FILE = path.join(HERE, '..', 'agents', 'tm-integrator.md')
@@ -106,19 +107,31 @@ async function commitFile(dir, file, body, message) {
 const MANIFEST = JSON.stringify({
   phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'test ! -f bad.txt' }, { name: 'fileset', kind: 'fileset' }] } },
 })
+// Two command checks: the first passes everywhere, the second fails wherever b.txt exists, which
+// is every tip of run r1 from phase 1 on.
+const TWO_CHECKS = JSON.stringify({
+  phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'test ! -f bad.txt' }, { name: 'lint', kind: 'command', run: 'test ! -f b.txt' }] } },
+})
 
 // Run r1:
 //   phase 1: T1 and T2, merged consecutively and cleanly (T1's recorded message has a body);
 //   phase 2: T3, which conflicts with T1 on base.txt and was resolved by hand to "resolved".
 // Run r2: phase 1 merged T1, then an operator commit, then T2 — not consecutive, so not replayable.
 // Every task branch is pruned: tips are only in status.json.
-async function buildFixture() {
+// With liveRuns:
+//   run r3: its gate recorded T1 at an older sha, and the live branch fleetmates/r3/T1 moved on
+//           before it was merged, so the merged tip's name is found only among the live refs;
+//   run r4: no status.json and a live, merged task branch, so its phase is unknown.
+// manifestName names the file `manifest` is committed as; null commits no manifest at all.
+async function buildFixture({ manifestName = 'fleetmates.gate.json', manifest = MANIFEST, liveRuns = false } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'fm-intreplay-'))
   const repo = path.join(dir, 'repo')
   await mkdir(repo)
   git(repo, ['init', '-q', '-b', 'main'])
-  await writeFile(path.join(repo, 'fleetmates.gate.json'), MANIFEST, 'utf8')
-  git(repo, ['add', 'fleetmates.gate.json'])
+  if (manifestName !== null) {
+    await writeFile(path.join(repo, manifestName), manifest, 'utf8')
+    git(repo, ['add', manifestName])
+  }
   await commitFile(repo, 'base.txt', 'one\n', 'chore: base')
   git(repo, ['branch', 'run/r1'])
   git(repo, ['branch', 'run/r2'])
@@ -150,11 +163,27 @@ async function buildFixture() {
   await commitFile(repo, 'op.txt', 'op\n', 'chore: operator')
   git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r2): T2 d', 'fleetmates/r2/T2'])
   git(repo, ['checkout', '-q', 'main'])
+  let r3old = null
+  if (liveRuns) {
+    git(repo, ['branch', 'run/r3', 'main'])
+    git(repo, ['checkout', '-q', '-b', 'fleetmates/r3/T1', 'run/r3'])
+    r3old = await commitFile(repo, 'e.txt', 'e\n', 'feat: e')
+    await commitFile(repo, 'e.txt', 'e2\n', 'feat: e2')
+    git(repo, ['checkout', '-q', 'run/r3'])
+    git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r3): T1 e', 'fleetmates/r3/T1'])
+    git(repo, ['branch', 'run/r4', 'main'])
+    git(repo, ['checkout', '-q', '-b', 'fleetmates/r4/T1', 'run/r4'])
+    await commitFile(repo, 'f.txt', 'f\n', 'feat: f')
+    git(repo, ['checkout', '-q', 'run/r4'])
+    git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r4): T1 f', 'fleetmates/r4/T1'])
+    git(repo, ['checkout', '-q', 'main'])
+  }
   git(repo, ['branch', '-D', 'fleetmates/r1/T1', 'fleetmates/r1/T2', 'fleetmates/r1/T3', 'fleetmates/r2/T1', 'fleetmates/r2/T2'])
 
   for (const [runId, gates] of [
     ['r1', { 1: { verdict: 'PASS', phase: 1, branchShas: { 'fleetmates/r1/T1': t1, 'fleetmates/r1/T2': t2 } }, 2: { verdict: 'PASS', phase: 2, branchShas: { 'fleetmates/r1/T3': t3 } } }],
     ['r2', { 1: { verdict: 'PASS', phase: 1, branchShas: { 'fleetmates/r2/T1': r2t1, 'fleetmates/r2/T2': r2t2 } } }],
+    ...(liveRuns ? [['r3', { 1: { verdict: 'PASS', phase: 1, branchShas: { 'fleetmates/r3/T1': r3old } } }]] : []),
   ]) {
     await mkdir(path.join(repo, '.fleetmates', runId), { recursive: true })
     await writeFile(path.join(repo, '.fleetmates', runId, 'status.json'), JSON.stringify({ runId, gates }), 'utf8')
@@ -220,6 +249,32 @@ test('discovery groups a run\'s merges by phase, marks conflicts from the census
   assert.equal(r2.eligible, false)
   assert.equal(r2.reason, 'non-consecutive')
   assert.match(p1.key, /^[0-9a-f]{16}$/)
+})
+
+test('discovery names a merged tip from the live refs, and reports an unknown phase or branch without sampling it', async (t) => {
+  const fx = await buildFixture({ liveRuns: true })
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const all = await integrationsOf(fx)
+  const r3 = byPhase(all, 'r3', 1)
+  assert.equal(r3.eligible, true, JSON.stringify(r3))
+  assert.deepEqual(r3.merges.map((m) => m.branch), ['fleetmates/r3/T1'])
+  const r4 = all.filter((i) => i.runId === 'r4')
+  assert.deepEqual(r4.map((i) => [i.eligible, i.reason, i.phase]), [[false, 'phase-unknown', null]])
+  const sampled = sampleIntegrations(all, { count: 50, seed: 1 })
+  assert.ok(!sampled.some((i) => i.runId === 'r4' || i.runId === 'r2'))
+  assert.equal(sampled.length, 3)
+
+  // A merge the census counted whose second parent no source names any more: the run's status.json
+  // is gone by the time the names are read.
+  const censusFn = async (args) => {
+    const rows = await censusRoot(args)
+    await rm(path.join(fx.repo, '.fleetmates', 'r1'), { recursive: true, force: true })
+    return rows
+  }
+  const late = await discoverIntegrations({ root: fx.repo, projectsDir: path.join(fx.dir, 'no-projects'), censusFn })
+  const r1 = late.filter((i) => i.runId === 'r1')
+  assert.deepEqual(r1.map((i) => [i.eligible, i.reason]), [[false, 'branch-unknown'], [false, 'branch-unknown']])
+  assert.ok(!sampleIntegrations(late, { count: 50, seed: 1 }).some((i) => i.runId === 'r1'))
 })
 
 test('the scratch clone holds the run branch at the first parent and every task branch at its merged tip, and nothing of the recorded merges', async (t) => {
@@ -299,7 +354,21 @@ const FAILURES = [
     { write: { 'base.txt': 'other\n' } }, { cmd: ['git', 'add', 'base.txt'] }, { cmd: ['git', 'commit', '-q', '-m', 'merge(r1): T3 three'] },
   ], 'wrong-tree'],
   ['a missing branch', 1, [PHASE1_OK[0]], 'wrong-tree'],
-  ['a session that does nothing', 1, [], 'wrong-tree'],
+  ['a session that does nothing', 1, [], 'escalated'],
+  ['an escalation that aborts the conflicted merge and reports', 2, [
+    { cmd: ['git', 'merge', '-q', '--no-ff', '-m', 'merge(r1): T3 three', 'fleetmates/r1/T3'], mayFail: true },
+    { cmd: ['git', 'merge', '--abort'] },
+  ], 'escalated'],
+  ['an API error before any merge', 1, [], 'session-error', { isError: true, result: 'API Error: 529 overloaded' }],
+  ['unparseable output before any merge', 1, [], 'session-error', { raw: 'not json' }],
+  ['an API error after a faithful integration', 1, PHASE1_OK, 'session-error', { isError: true }],
+  ['an API error after a partial integration', 1, [PHASE1_OK[0]], 'wrong-tree', { isError: true }],
+  ['T1 merged into T2, and only T2 into the run branch', 1, [
+    { cmd: ['git', 'checkout', '-q', 'fleetmates/r1/T2'] },
+    merge('fleetmates/r1/T1', 'merge(r1): T1 one'),
+    { cmd: ['git', 'checkout', '-q', 'run/r1'] },
+    PHASE1_OK[1],
+  ], 'extra-commits'],
   ['a squash merge', 1, [
     { cmd: ['git', 'merge', '-q', '--squash', 'fleetmates/r1/T1'] }, { cmd: ['git', 'commit', '-q', '-m', 'merge(r1): T1 one'] },
     PHASE1_OK[1],
@@ -319,12 +388,12 @@ const FAILURES = [
   ], 'extra-commits'],
 ]
 
-for (const [name, phase, steps, reason] of FAILURES) {
+for (const [name, phase, steps, reason, extra = {}] of FAILURES) {
   test(`${name} fails with ${reason}`, { skip: WIN32_SKIP }, async (t) => {
     const fx = await buildFixture()
     t.after(() => rm(fx.dir, { recursive: true, force: true }))
     const integration = byPhase(await integrationsOf(fx), 'r1', phase)
-    const q = await withQueue(fx.dir, [{ steps, totalCostUsd: 0.1, numTurns: 2 }])
+    const q = await withQueue(fx.dir, [{ steps, totalCostUsd: 0.1, numTurns: 2, ...extra }])
     const cell = await runIntegratorCell({ integration, model: 'm', tmpRoot: fx.tmpRoot, env: q.env })
     assert.equal(cell.status, 'fail')
     assert.equal(cell.failReason, reason)
@@ -379,6 +448,15 @@ test('sampling is seeded, over-samples conflicted integrations and skips ineligi
   assert.equal(sampleIntegrations(list, { count: 50, seed: 7 }).length, 5)
 })
 
+test('the seed decides the sample order', () => {
+  const clean = 'abcdefghij'.split('').map((key) => ({ key, conflicted: false, eligible: true }))
+  const order = (seed) => sampleIntegrations(clean, { count: 10, seed }).map((i) => i.key).join('')
+  assert.equal(order(7), order(7))
+  assert.notEqual(order(7), order(8))
+  assert.notEqual(order(7), 'abcdefghij')
+  assert.notEqual(order(8), 'abcdefghij')
+})
+
 const row = (key, role, model, status, failReason, cost) => ({ key, role, model, status, failReason, turns: 1, totalCostUsd: cost, wallClockMs: 1 })
 const MODELS = { candidate: 'haiku', control: 'sonnet' }
 
@@ -414,6 +492,17 @@ test('the verdict is cheap only when the candidate passes as often, never builds
   // Rows from another model pairing are not counted.
   const stale = [...base, row('k3', 'candidate', 'opus', 'fail', 'wrong-tree', 9), row('k3', 'control', 'sonnet', 'pass', null, 0.5)]
   assert.equal(buildVerdict(stale, { models: MODELS }).verdict, 'cheap')
+
+  // Escalations are counted per role and are not passes; they do not veto cheap.
+  const escalated = [...base, row('k3', 'candidate', 'haiku', 'fail', 'escalated', 0.1), row('k3', 'control', 'sonnet', 'fail', 'escalated', 0.5)]
+  const withEscalations = buildVerdict(escalated, { models: MODELS })
+  assert.equal(withEscalations.verdict, 'cheap')
+  assert.equal(withEscalations.counts.candidate.escalated, 1)
+  assert.equal(withEscalations.counts.control.escalated, 1)
+  assert.equal(withEscalations.counts.candidate.pass, 1)
+  // An integration either role could not judge (no manifest) is left out of the comparison.
+  const invalid = [...base, row('k3', 'candidate', 'haiku', 'invalid', 'no-manifest', 0.1), row('k3', 'control', 'sonnet', 'invalid', 'no-manifest', 0.5)]
+  assert.equal(buildVerdict(invalid, { models: MODELS }).sampleSize, 2)
 })
 
 function io() {
@@ -517,8 +606,103 @@ test('smoke runs one candidate cell, prints it and records nothing', { skip: WIN
   await assert.rejects(readdir(out))
 })
 
-test('execute and smoke refuse without both models', async () => {
+for (const mode of ['--execute', '--smoke', '--preflight']) {
+  test(`${mode} refuses without both models, on a valid root`, { skip: WIN32_SKIP }, async (t) => {
+    const fx = await buildFixture()
+    t.after(() => rm(fx.dir, { recursive: true, force: true }))
+    const q = await withQueue(fx.dir, [])
+    const out = path.join(fx.dir, 'out')
+    const sink = io()
+    const code = await main(['--roots', fx.repo, '--out', out, mode, '--models', '{"candidate":"haiku"}'], sink, { tmpRoot: fx.tmpRoot, claudeEnv: q.env })
+    assert.equal(code, 2)
+    assert.deepEqual(sink.lines, [`--models must name a model for 'control', e.g. '{"candidate":"haiku","control":"sonnet"}'`])
+    const bare = io()
+    assert.equal(await main(['--roots', fx.repo, '--out', out, mode], bare, { tmpRoot: fx.tmpRoot, claudeEnv: q.env }), 2)
+    assert.deepEqual(bare.lines, [`--execute, --smoke and --preflight need --models '{"candidate":"...","control":"..."}'`])
+    assert.deepEqual(await readLog(q.log), [])
+  })
+}
+
+for (const [name, entry] of [['unparseable output', { steps: [], raw: 'not json' }], ['an is_error result', { steps: [], isError: true, result: 'API Error' }]]) {
+  test(`a preflight with ${name} aborts --execute`, { skip: WIN32_SKIP }, async (t) => {
+    const fx = await buildFixture()
+    t.after(() => rm(fx.dir, { recursive: true, force: true }))
+    const out = path.join(fx.dir, 'out')
+    const q = await withQueue(fx.dir, [entry, { steps: PHASE2_OK }, { steps: PHASE2_OK }])
+    const sink = io()
+    const code = await main(['--roots', fx.repo, '--count', '1', '--out', out, '--execute', '--models', JSON.stringify(MODELS)], sink, { tmpRoot: fx.tmpRoot, claudeEnv: q.env })
+    assert.equal(code, 1)
+    assert.equal((await readLog(q.log)).length, 1)
+    assert.ok(sink.lines.some((l) => /preflight: FAILED \(session error\)/.test(l)), sink.lines.join('\n'))
+    assert.equal(await readFile(path.join(out, 'integrator-replay.jsonl'), 'utf8').catch(() => ''), '')
+  })
+}
+
+test('the census is pointed at a directory that exists and holds no transcripts', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture()
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const seen = []
+  const censusFn = async (args) => {
+    seen.push({ dir: args.projectsDir, entries: await readdir(args.projectsDir) })
+    return censusRoot(args)
+  }
+  const code = await main(['--roots', fx.repo, '--count', '5'], io(), { tmpRoot: fx.tmpRoot, censusFn })
+  assert.equal(code, 0)
+  assert.equal(seen.length, 1)
+  assert.deepEqual(seen[0].entries, [])
+})
+
+test('both roles escalating a conflicted integration, the candidate cheaper, gives cheap', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture()
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const out = path.join(fx.dir, 'out')
+  const escalate = [
+    { cmd: ['git', 'merge', '-q', '--no-ff', '-m', 'merge(r1): T3 three', 'fleetmates/r1/T3'], mayFail: true },
+    { cmd: ['git', 'merge', '--abort'] },
+  ]
+  const q = await withQueue(fx.dir, [
+    { steps: escalate, totalCostUsd: 0.05, numTurns: 2 },
+    { steps: escalate, totalCostUsd: 0.05, numTurns: 2, result: 'escalated: semantic conflict in base.txt' },
+    { steps: escalate, totalCostUsd: 0.5, numTurns: 6, result: 'escalated: semantic conflict in base.txt' },
+  ])
   const sink = io()
-  assert.equal(await main(['--roots', '/nonexistent', '--execute', '--models', '{"candidate":"haiku"}'], sink), 2)
-  assert.equal(await main(['--execute'], io()), 2)
+  const code = await main(['--roots', fx.repo, '--count', '1', '--out', out, '--execute', '--models', JSON.stringify(MODELS)], sink, { tmpRoot: fx.tmpRoot, claudeEnv: q.env })
+  assert.equal(code, 0, sink.lines.join('\n'))
+  const rows = (await readFile(path.join(out, 'integrator-replay.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l))
+  assert.deepEqual(rows.map((r) => [r.role, r.status, r.failReason]), [['candidate', 'fail', 'escalated'], ['control', 'fail', 'escalated']])
+  const verdict = JSON.parse(await readFile(path.join(out, 'integrator-verdict.json'), 'utf8'))
+  assert.equal(verdict.verdict, 'cheap')
+  assert.equal(verdict.counts.candidate.escalated, 1)
+  assert.equal(verdict.counts.control.escalated, 1)
+  assert.equal(verdict.counts.candidate.wrongTree, 0)
+})
+
+test('every command check gates the pass, not only the first', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture({ manifest: TWO_CHECKS })
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const p1 = byPhase(await integrationsOf(fx), 'r1', 1)
+  const q = await withQueue(fx.dir, [{ steps: PHASE1_OK }])
+  const cell = await runIntegratorCell({ integration: p1, model: 'm', tmpRoot: fx.tmpRoot, env: q.env })
+  assert.equal(cell.status, 'fail')
+  assert.equal(cell.failReason, 'command:lint')
+})
+
+test('a tree that carries only the pre-rename teammates.gate.json is judged by it', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture({ manifestName: 'teammates.gate.json', manifest: TWO_CHECKS })
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const p1 = byPhase(await integrationsOf(fx), 'r1', 1)
+  const q = await withQueue(fx.dir, [{ steps: PHASE1_OK }])
+  const cell = await runIntegratorCell({ integration: p1, model: 'm', tmpRoot: fx.tmpRoot, env: q.env })
+  assert.equal(cell.status, 'fail')
+  assert.equal(cell.failReason, 'command:lint')
+})
+
+test('a tree with no gate manifest at all is invalid, never a pass', { skip: WIN32_SKIP }, async (t) => {
+  const fx = await buildFixture({ manifestName: null })
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const p1 = byPhase(await integrationsOf(fx), 'r1', 1)
+  const q = await withQueue(fx.dir, [{ steps: PHASE1_OK }])
+  const cell = await runIntegratorCell({ integration: p1, model: 'm', tmpRoot: fx.tmpRoot, env: q.env })
+  assert.equal(cell.status, 'invalid')
+  assert.equal(cell.failReason, 'no-manifest')
 })
