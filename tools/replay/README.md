@@ -29,15 +29,19 @@ is recorded and the run stops. A usage-limit error also stops the run with nothi
 that cell. Rerunning the same command resumes at the first missing `(task, tier)` pair.
 
 Only a hashed key (`sha256(repo realpath, run id, task id)`) and metrics are written to
-`data/replay-results.jsonl`. Task text, briefs and code are never written.
+`data/replay-results.jsonl`. Task text, briefs and code are never written. The key is
+pseudonymous, not secret: it is unsalted and exists for dedupe and resume, so anyone who can
+guess a repository path, run slug and task id can recompute it and match it to a record. 11 of
+the 30 committed keys were recovered that way from this repository's own run list. What such a
+match reveals is that task's metrics, nothing more.
 
 ## Running it
 
 Every mode except `--dry-run` and `--recompute-loss` starts real `claude -p` sessions under the
 account `claude` is logged into, so it uses your Claude subscription usage (a full 30-task run
-is 90 cells, each one session plus at most one fix round, plus the preflight). Sessions run with `--permission-mode bypassPermissions` and
-`--strict-mcp-config`: tool calls run unattended with your own OS permissions, and `$TMPDIR`
-is a starting directory, not a sandbox.
+is 90 cells, each one session plus at most one fix round, plus the preflight). Sessions run
+with `--permission-mode bypassPermissions` and `--strict-mcp-config`: tool calls run unattended
+with your own OS permissions, and `$TMPDIR` is a starting directory, not a sandbox.
 
 Models come from `--models '{"cheap":"...","mid":"...","capable":"..."}'`, or else from
 `harnesses.claude.tierModels` in `fleetmates.local.json` in the current directory.
@@ -56,19 +60,22 @@ node tools/replay/replay.mjs --roots ~/Work/projetos --smoke --models '{"cheap":
 node tools/replay/replay.mjs --roots ~/Work/projetos --count 30 --execute --models '{"cheap":"haiku","mid":"sonnet","capable":"opus"}'
 ```
 
-`--seed N` changes the task sample (default `20260922`). `--execute` always writes to
-`tools/replay/data/`; `--out` is read only by `--recompute-loss`.
+`--seed N` changes the task sample (default `20260922`). `--out <dir>` sets where `--execute`
+and `--recompute-loss` read and write `replay-results.jsonl` and `loss.json` (default
+`tools/replay/data/`). `--dry-run` and `--smoke` write neither file.
 
 ## Rereading the tier costs after a model or pricing change
 
 The cost of each cell is the `total_cost_usd` its session reported at the time, so neither a new
 model nor a new price list changes the committed numbers. To measure again:
 
-1. Move the committed `tools/replay/data/replay-results.jsonl` aside. `--execute` skips every
-   `(task, tier)` pair already in that file, so a run on top of it records nothing new.
-2. Run `--preflight`, then `--execute` with the new `--models` mapping and the same `--roots`,
-   `--count` and `--seed`.
-3. Read `tierMeans` and `costMatrix` in the new `tools/replay/data/loss.json`, and update the
+1. Pick an empty output directory, for example `tools/replay/data/2026-10-rerun/`. `--execute`
+   skips every `(task, tier)` pair already in the output directory's `replay-results.jsonl`, so
+   a run on top of the committed file records nothing new.
+2. Run `--preflight`, then `--execute --out <that dir>` with the new `--models` mapping and the
+   same `--roots`, `--count` and `--seed`.
+3. Read `tierMeans` and `costMatrix` in that directory's `loss.json`. To make it the committed
+   measurement, replace the two files in `tools/replay/data/` with the new ones and update the
    table below.
 
 When only the loss formula in `computeLoss` changes, the data does not need rerunning:

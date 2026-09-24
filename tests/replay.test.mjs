@@ -2200,9 +2200,28 @@ test('main --recompute-loss: refuses with exit 2 on a replay-results.jsonl with 
   await rm(scratch, { recursive: true, force: true })
 })
 
+// Three keys with several distinct under- and over-tier costs, so the bootstrap interval actually
+// depends on the seed. RECOMPUTE_RECORDS has a single key, whose interval is {low:1,high:1} for
+// every seed and so cannot tell an honoured seed from an ignored one.
+function seedSensitiveRecord(key, tier, status, cost) {
+  return {
+    key, tier, status, failReason: status === 'pass' ? null : 'command:tests', permissionDenials: 0,
+    turns: 1, totalCostUsd: cost, costMissing: false, wallClockMs: cost * 1000, fixRound: false,
+    timestamp: '2026-09-24T00:00:00.000Z',
+  }
+}
+const SEED_SENSITIVE_RECORDS = [
+  seedSensitiveRecord('A', 'cheap', 'fail', 1), seedSensitiveRecord('A', 'mid', 'pass', 2),
+  seedSensitiveRecord('A', 'capable', 'pass', 5),
+  seedSensitiveRecord('B', 'cheap', 'fail', 4), seedSensitiveRecord('B', 'mid', 'fail', 1),
+  seedSensitiveRecord('B', 'capable', 'pass', 3),
+  seedSensitiveRecord('C', 'cheap', 'pass', 1), seedSensitiveRecord('C', 'mid', 'pass', 6),
+  seedSensitiveRecord('C', 'capable', 'pass', 2),
+]
+
 test('main --recompute-loss: honours --seed and records the seed it used in loss.json', async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-recompute-seed-'))
-  const resultsText = `${RECOMPUTE_RECORDS.map((r) => JSON.stringify(r)).join('\n')}\n`
+  const resultsText = `${SEED_SENSITIVE_RECORDS.map((r) => JSON.stringify(r)).join('\n')}\n`
   await writeFile(path.join(scratch, 'replay-results.jsonl'), resultsText, 'utf8')
   const lossPath = path.join(scratch, 'loss.json')
 
@@ -2210,17 +2229,46 @@ test('main --recompute-loss: honours --seed and records the seed it used in loss
   assert.equal(code, 0)
   const seeded = JSON.parse(await readFile(lossPath, 'utf8'))
   assert.equal(seeded.seed, 7)
-  const expected = computeLoss(RECOMPUTE_RECORDS, { seed: 7, bootstrapSamples: 50 })
-  assert.deepEqual(seeded.underOverRatioInterval, expected.underOverRatioInterval)
 
   const codeDefault = await main(['--recompute-loss', '--out', scratch], { out: () => {} }, { bootstrapSamples: 50 })
   assert.equal(codeDefault, 0)
-  assert.equal(JSON.parse(await readFile(lossPath, 'utf8')).seed, DEFAULT_SEED)
+  const unseeded = JSON.parse(await readFile(lossPath, 'utf8'))
+  assert.equal(unseeded.seed, DEFAULT_SEED)
+  assert.ok(seeded.underOverRatioInterval && unseeded.underOverRatioInterval)
+  // The interval itself must move with the seed, not just the recorded `seed` field.
+  assert.notDeepEqual(seeded.underOverRatioInterval, unseeded.underOverRatioInterval)
 
   const messages = []
   const codeBad = await main(['--recompute-loss', '--out', scratch, '--seed', 'x'], { out: (s) => messages.push(s) })
   assert.equal(codeBad, 2)
   assert.ok(messages.some((m) => m.includes('--seed')), messages.join(' | '))
+  await rm(scratch, { recursive: true, force: true })
+})
+
+// `--execute` reads and writes replay-results.jsonl and loss.json in `--out` when given, never in
+// the default data directory (here the `outDir` dep, standing in for tools/replay/data/).
+test('main --execute: honours --out for replay-results.jsonl and loss.json, leaving the default data directory untouched', async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-execute-out-'))
+  const outFlagDir = path.join(scratch, 'out')
+  const defaultDir = path.join(scratch, 'default')
+  const emptyRoot = path.join(scratch, 'root')
+  await mkdir(outFlagDir, { recursive: true })
+  await mkdir(defaultDir, { recursive: true })
+  await mkdir(emptyRoot, { recursive: true })
+  const resultsText = `${RECOMPUTE_RECORDS.map((r) => JSON.stringify(r)).join('\n')}\n`
+  await writeFile(path.join(outFlagDir, 'replay-results.jsonl'), resultsText, 'utf8')
+  const spawnFn = () => { throw new Error('must not spawn a process') }
+  const messages = []
+  const code = await main(
+    ['--roots', emptyRoot, '--execute', '--out', outFlagDir, '--models', '{"cheap":"a","mid":"b","capable":"c"}'],
+    { out: (s) => messages.push(s) },
+    { outDir: defaultDir, spawnFn, bootstrapSamples: 5 },
+  )
+  assert.equal(code, 0, messages.join(' | '))
+  const loss = JSON.parse(await readFile(path.join(outFlagDir, 'loss.json'), 'utf8'))
+  assert.deepEqual(loss.tierMeans.usage, { cheap: 1, mid: 2, capable: 5 })
+  assert.equal(await readFile(path.join(outFlagDir, 'replay-results.jsonl'), 'utf8'), resultsText)
+  assert.deepEqual(await readdir(defaultDir), [])
   await rm(scratch, { recursive: true, force: true })
 })
 

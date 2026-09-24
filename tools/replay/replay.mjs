@@ -73,8 +73,9 @@
 //     else.
 // A task still pending, sitting on a run that never merged, or whose plan text is not readable at
 // the resolved base, is excluded and reported with a reason rather than guessed at.
-// Only a cell's hashed key (`sha256(repo realpath, run id, task id)`) and its metrics are ever
-// committed to `replay-results.jsonl` — never a task's title, brief or file paths. The tool is
+// Only a cell's hashed key (`sha256(repo realpath, run id, task id)`, pseudonymous and guessable —
+// see hashCellKey) and its metrics are ever committed to `replay-results.jsonl` — never a task's
+// title, brief or file paths. The tool is
 // resumable: a usage-limit error stops the whole run cleanly with nothing written for the
 // unfinished cell, and the next invocation with the same arguments picks up at the first missing
 // (key, tier) pair.
@@ -87,7 +88,9 @@
 // `--models` when given, otherwise from `harnesses.claude.tierModels` in this tool's own
 // `fleetmates.local.json`. `--preflight` runs the permission preflight alone, with the `cheap`
 // model. `--smoke` runs exactly one cell at the `capable` tier on the first selected task, prints
-// its status, `failReason`, cost and turns, and appends nothing.
+// its status, `failReason`, cost and turns, and appends nothing. `--execute` reads and appends
+// `replay-results.jsonl` and writes `loss.json` in `--out <dir>` when given, else in this tool's
+// own `data/` directory.
 // `node tools/replay/replay.mjs --recompute-loss --out <dir> [--seed N]` rewrites `loss.json`
 // from the `replay-results.jsonl` already in `<dir>` alone — it runs no cell and spawns no
 // process, and `replay-results.jsonl` itself is never modified. It exits 2 without writing
@@ -129,9 +132,12 @@ function dataDirDefault() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Privacy-safe cell identity: sha256(realpath, runId, taskId). This is the ONLY thing that ever
-// links a committed metric back to a task, and it does not reverse — nothing about the title,
-// brief or files can be recovered from it.
+// Pseudonymous cell identity: sha256(realpath, runId, taskId), unsalted. It exists for dedupe and
+// resume, not secrecy: anyone who can guess the repository path, the run slug and the task id can
+// recompute it and so reverse it by dictionary (11 of the 30 keys in data/replay-results.jsonl
+// were recovered that way from this repository's own run list). What the committed data never
+// holds is task text: a title, brief, file path or code is never written, only this key and
+// metrics. Changing the formula would orphan every committed key, so it stays as is.
 // ---------------------------------------------------------------------------------------------
 export function hashCellKey(realRoot, runId, taskId) {
   return createHash('sha256').update(`${realRoot}\u0000${runId}\u0000${taskId}`).digest('hex')
@@ -1440,12 +1446,14 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
     previewCopyBytesFn = previewCopyBytesForItem,
     runPreflightFn = runPreflight,
   } = deps
+  // Every mode that reads or writes replay-results.jsonl / loss.json (`--recompute-loss` and
+  // `--execute`) uses `--out` when given, else the tool's own data directory.
+  const dataDir = typeof flags.out === 'string' ? flags.out : outDir
 
   // `--recompute-loss --out <dir>`: reads the already-committed `replay-results.jsonl` in <dir>,
   // spawns nothing and touches no cell, and rewrites `loss.json` from `computeLoss` alone.
-  // `--out` defaults the same way every other output path here does.
   if (recomputeLoss) {
-    const dir = typeof flags.out === 'string' ? flags.out : outDir
+    const dir = dataDir
     const resultsPath = path.join(dir, 'replay-results.jsonl')
     const lossPath = path.join(dir, 'loss.json')
     const recomputeSeed = flags.seed !== undefined ? Number(flags.seed) : DEFAULT_SEED
@@ -1594,9 +1602,9 @@ export async function main(argv, io = { out: (s) => process.stdout.write(`${s}\n
     return cell.status === 'pass' ? 0 : 1
   }
 
-  await mkdir(outDir, { recursive: true })
-  const resultsPath = path.join(outDir, 'replay-results.jsonl')
-  const lossPath = path.join(outDir, 'loss.json')
+  await mkdir(dataDir, { recursive: true })
+  const resultsPath = path.join(dataDir, 'replay-results.jsonl')
+  const lossPath = path.join(dataDir, 'loss.json')
   const existing = await readExistingResults(resultsPath)
   const done = new Set(existing.map((r) => `${r.key}:${r.tier}`))
   const allRecords = [...existing]
