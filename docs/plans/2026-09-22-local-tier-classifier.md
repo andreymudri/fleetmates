@@ -658,6 +658,36 @@ synthetic caps and shrank the holdout rules to 150 rows, 40 per class and 15 sou
 - [ ] **Step 4:** `npm test` green; commit
   `feat(classifier): rescale holdout freeze rules to 150 rows, 40 per class, 15 groups`.
 
+### Task 17: feature extraction fast enough for the speed gate
+
+T8's first holdout evaluation (2026-09-24) missed the speed gate at 116.6 ms p95 against 50 ms.
+Timing showed `extractFeatures` takes 32–36 ms per 100 records, and its tokenizer only about
+3 ms of that; `loadModel` takes 2–9 ms. Retraining cannot fix this.
+
+**Files:**
+- Modify: `scripts/classifier-features.mjs`
+- Test: `tests/classifier-features.test.mjs`
+
+**Depends:** T15, T16
+
+**Model:** mid
+
+- [ ] **Step 1:** Add a golden test first: for a fixed set of at least 50 varied records (short,
+  long near the 6 KiB + 2 KiB cap, multibyte, fenced, many files, camelCase and punctuation-heavy),
+  record the exact `extractFeatures` output of the CURRENT code for `hashBits` 12 and 15 into a
+  fixture, and assert byte-identical output. It must pass before any change.
+- [ ] **Step 2:** Profile `extractFeatures` on those records and name the hot spots in the
+  commit body-free summary (for example per-token string allocation, Map churn, repeated
+  normalisation, regex construction per call).
+- [ ] **Step 3:** Optimise without changing a single output value: the golden test stays green,
+  `FEATURE_SPEC_VERSION` stays 1, and the function stays pure (no filesystem, process or config
+  access; no native addon).
+- [ ] **Step 4:** Add a timing guard test that is robust on CI: warm up, then assert the median of
+  several runs of 100 cap-length records is under 10 ms on the machine running the suite, and
+  report the measured numbers. Target: load plus classifying 100 tasks well under 50 ms p95.
+- [ ] **Step 5:** `npm test` green; commit
+  `perf(classifier): feature extraction fast enough for the speed gate`.
+
 ### Task 8: train, tune and ship the weights
 
 **Files:**
@@ -666,7 +696,7 @@ synthetic caps and shrank the holdout rules to 150 rows, 40 per class and 15 sou
 - Create: `classifier/tier-model.json`
 - Create: `docs/specs/2026-09-22-tier-classifier-model-card.md`
 
-**Depends:** T1, T2, T4, T6, T7, T14, T15, T16
+**Depends:** T1, T2, T4, T6, T7, T14, T15, T16, T17
 
 **Model:** capable
 
@@ -676,7 +706,14 @@ synthetic caps and shrank the holdout rules to 150 rows, 40 per class and 15 sou
   - the cost-weighted loss uses `costMatrix` from `loss.json` (keyed `[predicted][true]`);
   - L2 regularisation strength is chosen by grouped cross-validation on train rows;
   - threshold tuning reads validation rows only and **never** holdout rows;
-  - weights are rounded to 6 significant digits **before** evaluation.
+  - weights are rounded to 6 significant digits **before** evaluation;
+  - (retry, after the first holdout miss) a single softmax temperature is fitted on validation
+    rows only and stored in `tier-model.json`, applied identically at runtime;
+  - (retry) validation rows are reweighted by `origin` so their own/synthetic mix matches the
+    holdout's, a mix computed from split metadata alone and never from holdout labels or
+    predictions;
+  - (retry) threshold tuning only accepts a threshold set that meets every rate gate the
+    validation rows can measure, including cheap recall of at least 50%, with a safety margin.
 - [ ] **Step 2:** Implement `train.mjs`: full-batch gradient descent with a fixed iteration cap
   and seed, and a grid of `hashBits` in {12, 13, 14, 15}. Select the smallest configuration
   whose validation loss is within one standard error of the best.
