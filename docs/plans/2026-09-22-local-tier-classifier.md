@@ -621,8 +621,9 @@ T8 relies on its verdict.
     1e-12 (mutation: remove the probability comparison);
   - each rate gate is tested exactly on its threshold: cheap recall 1/2 passes, cheap precision
     270/300 passes, all-under-tiering 30/1000 passes (mutation: `>=` to `>`, `<=` to `<`);
-  - in `tests/classifier-pipeline.test.mjs`, a fenced reply whose opening prose line contains
-    ```` ```json ```` inline still parses (mutation: `isFenceLine` uses `includes`).
+  - in `tests/classifier-pipeline.test.mjs`, a fenced reply whose opening prose line mentions a
+    json fence marker inline, before the real fence line, still parses (mutation:
+    `isFenceLine` uses `includes`).
 - [ ] **Step 6:** `npm test` green; commit
   `feat(classifier): cost-matrix loss and evaluator gate fixes`.
 
