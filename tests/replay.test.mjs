@@ -2926,6 +2926,28 @@ test('lockLinkTrees: read-only files and directories while locked; unlock restor
   await rm(scratch, { recursive: true, force: true })
 })
 
+test('lockLinkTrees: unlock never chmods through a path the session swapped for a symlink', { skip: ROOT_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-unlock-swap-'))
+  const cellDir = path.join(scratch, 'cell')
+  const dep = path.join(cellDir, 'node_modules', 'dep')
+  await mkdir(dep, { recursive: true })
+  await writeFile(path.join(dep, 'index.js'), 'original\n', 'utf8')
+  await chmod(path.join(dep, 'index.js'), 0o644)
+  const outsideFile = path.join(scratch, 'outside.key')
+  await writeFile(outsideFile, 'secret\n', 'utf8')
+  await chmod(outsideFile, 0o600)
+
+  const unlock = await lockLinkTrees(cellDir, ['node_modules'])
+  // Playing the session: make the directory writable again and replace the file with a symlink
+  // that points outside the cell.
+  await chmod(dep, 0o755)
+  await rm(path.join(dep, 'index.js'))
+  await symlink(outsideFile, path.join(dep, 'index.js'))
+  await unlock()
+  assert.equal((await stat(outsideFile)).mode & 0o7777, 0o600, 'the file outside the cell keeps its mode')
+  await rm(scratch, { recursive: true, force: true })
+})
+
 test('fingerprintLinkTrees: changes with content, a new file, a removed file, a mode and a symlink target', async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-fingerprint-'))
   const cellDir = path.join(scratch, 'cell')
@@ -3011,6 +3033,21 @@ test('runTierCell: a session that chmods the link tree writable and edits it fai
   assert.equal(cell.fixRound, false)
   assert.equal(calls.length, 1, 'no fix round was spent')
   assert.deepEqual(await readdir(tmpRoot), [], 'the clone was removed')
+  await rm(scratch, { recursive: true, force: true })
+})
+
+test('runTierCell: a session that only changes a mode under a link tree fails as link-modified', { skip: WIN32_FAKE_SKIP || ROOT_SKIP }, async () => {
+  const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-link-mode-'))
+  const fixture = await linkFixture(scratch, 'link-mode')
+  // Content untouched: the unlock would restore the mode before a post-unlock fingerprint saw it.
+  const { cell, calls } = await runCellWith({
+    scratch,
+    fixture,
+    queue: [{ ...passingEntry(), shell: 'chmod u+w node_modules/dep/index.js' }, passingEntry()],
+  })
+  assert.equal(cell.status, 'fail')
+  assert.equal(cell.failReason, 'link-modified')
+  assert.equal(calls.length, 1, 'no fix round was spent')
   await rm(scratch, { recursive: true, force: true })
 })
 

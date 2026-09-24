@@ -825,21 +825,26 @@ export async function fingerprintLinkTrees(dir, paths = []) {
 // Removes every write bit from each declared link tree — files and directories; symlinks are
 // skipped, never chmod'ed, since chmod follows a symlink and an inner one kept verbatim by the
 // copy may point outside the cell. Returns `unlock`, which restores each path's exact prior mode
-// (a path the session removed meanwhile is skipped).
+// only while it is still the same file: a path the session removed, or replaced (by a symlink
+// that chmod would follow out of the cell, or by another inode), is skipped.
 export async function lockLinkTrees(dir, paths = []) {
   const modes = []
   const walk = async (abs) => {
     const info = await lstat(abs).catch(() => null)
     if (!info || info.isSymbolicLink()) return
     const mode = info.mode & 0o7777
-    modes.push([abs, mode])
+    modes.push({ abs, mode, dev: info.dev, ino: info.ino })
     if (info.isDirectory()) {
       for (const name of await readdir(abs)) await walk(path.join(abs, name))
     }
     await chmod(abs, mode & ~0o222)
   }
   const unlock = async () => {
-    for (const [abs, mode] of modes) await chmod(abs, mode).catch(() => {})
+    for (const { abs, mode, dev, ino } of modes) {
+      const now = await lstat(abs).catch(() => null)
+      if (!now || now.isSymbolicLink() || now.dev !== dev || now.ino !== ino) continue
+      await chmod(abs, mode).catch(() => {})
+    }
   }
   try {
     for (const { abs } of await linkTreeRoots(dir, paths)) await walk(abs)
@@ -1178,19 +1183,23 @@ export async function runTierCell({
     }
 
     // Every session runs with the copied link trees locked and fingerprinted around it (see
-    // lockLinkTrees); `linkModified` is true when the tree after the session differs from before.
-    // The gate commands in verifyCell run after the unlock, on the writable tree.
+    // lockLinkTrees). Both fingerprints are taken while locked — right after the lock and right
+    // after the session, before the unlock — so `linkModified` also catches a change of mode alone,
+    // which the unlock would otherwise restore unseen. The gate commands in verifyCell run after
+    // the unlock, on the writable tree.
     const guardedAttempt = async (options) => {
       if (links.length === 0) return { attempt: await attemptOnce(options), linkModified: false }
-      const before = await fingerprintLinkTrees(cloneDir, links)
       const unlock = await lockLinkTrees(cloneDir, links)
       let attempt
+      let before
+      let after = null
       try {
+        before = await fingerprintLinkTrees(cloneDir, links)
         attempt = await attemptOnce(options)
+        after = await fingerprintLinkTrees(cloneDir, links).catch(() => null)
       } finally {
         await unlock()
       }
-      const after = await fingerprintLinkTrees(cloneDir, links).catch(() => null)
       return { attempt, linkModified: after !== before }
     }
     const linkModifiedVerification = {
