@@ -14,6 +14,8 @@ const TOOL = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'tool
 // Fixed commit times, so the transcript fixture can cover phase 1's merges and not phase 2's.
 const T0 = 1_780_000_000
 const at = (offset) => `${T0 + offset} +0000`
+// Everything after phase 1's integration happens days later, outside its transcript's window.
+const DAYS = 3 * 86_400
 
 function git(cwd, args, date = at(0)) {
   return execFileSync('git', args, {
@@ -38,10 +40,11 @@ async function commitFile(dir, file, body, message, date) {
 
 // Run r1, two phases, on a repository whose task branches of phase 1 are pruned:
 //   phase 1: T1 (clean, dispatched message), T2 (clean, message with a body and a trailer),
-//            then one non-merge commit by the integrator
+//            then one non-merge commit by the integrator, and days later one by the operator
 //   phase 2: T3, which conflicts with that commit and is resolved by hand
 // plus a merge of the base branch (a plan amendment), which is not an integration.
-// Run r2 has no status.json; its one task branch is still a live `teammates/` ref.
+// Run r2 has no status.json; its one task branch is still a live `teammates/` ref, merged with a
+// single-line message that names the wrong task.
 async function buildFixture() {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-census-'))
   const repo = path.join(dir, 'repo')
@@ -62,23 +65,24 @@ async function buildFixture() {
   git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r1): T1 a', 'fleetmates/r1/T1'], at(1000))
   git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r1): T2 b\n\nbody line\n\nCo-Authored-By: x <x@example.invalid>', 'fleetmates/r1/T2'], at(1100))
   await commitFile(repo, 'base.txt', 'integrator\n', 'fix: integrator edit', at(1200))
+  await commitFile(repo, 'operator.txt', 'op\n', 'chore: operator edit', at(1300 + DAYS))
 
   git(repo, ['checkout', '-q', 'main'])
-  await commitFile(repo, 'plan.md', 'plan\n', 'docs: amend plan', at(1500))
+  await commitFile(repo, 'plan.md', 'plan\n', 'docs: amend plan', at(1500 + DAYS))
   git(repo, ['checkout', '-q', 'run/r1'])
-  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge: take the amendment into run/r1', 'main'], at(1600))
+  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge: take the amendment into run/r1', 'main'], at(1600 + DAYS))
 
   const conflicted = spawnSync('git', ['merge', '--no-ff', '-m', 'merge(r1): T3 three', 'fleetmates/r1/T3'], { cwd: repo })
   assert.notEqual(conflicted.status, 0, 'the fixture needs T3 to conflict')
   await writeFile(path.join(repo, 'base.txt'), 'resolved\n', 'utf8')
-  git(repo, ['add', 'base.txt'], at(5000))
+  git(repo, ['add', 'base.txt'], at(5000 + DAYS))
   // An explicit -m: `--no-edit` keeps git's `# Conflicts:` block, which is not the single-line form.
-  git(repo, ['commit', '-q', '-m', 'merge(r1): T3 three'], at(5000))
+  git(repo, ['commit', '-q', '-m', 'merge(r1): T3 three'], at(5000 + DAYS))
 
   git(repo, ['checkout', '-q', '-b', 'teammates/r2/T1', 'run/r2'])
-  await commitFile(repo, 'c.txt', 'c\n', 'feat: c', at(6000))
+  await commitFile(repo, 'c.txt', 'c\n', 'feat: c', at(6000 + DAYS))
   git(repo, ['checkout', '-q', 'run/r2'])
-  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r2): T1 c', 'teammates/r2/T1'], at(6100))
+  git(repo, ['merge', '-q', '--no-ff', '-m', 'merge(r2): T9 c', 'teammates/r2/T1'], at(6100 + DAYS))
   git(repo, ['checkout', '-q', 'main'])
 
   git(repo, ['branch', '-D', 'fleetmates/r1/T1', 'fleetmates/r1/T2'])
@@ -98,7 +102,8 @@ async function buildFixture() {
   }), 'utf8')
 
   // One integrator transcript spanning phase 1's merges, and one reviewer transcript over the same
-  // window that must not be joined. Phase 2 has none.
+  // window that must not be joined. The reviewer has more records, so the reader lists it first
+  // and only the agent-type filter keeps it out. Phase 2 has none.
   const projectsDir = path.join(dir, 'config', 'projects')
   const subagents = path.join(projectsDir, projectSlug(path.resolve(repo)), 'sess-1', 'subagents')
   await mkdir(subagents, { recursive: true })
@@ -108,7 +113,7 @@ async function buildFixture() {
   })
   await writeFile(path.join(subagents, 'agent-int.jsonl'), [record(990, 10), record(1050, 10), record(1210, 10)].join('\n'), 'utf8')
   await writeFile(path.join(subagents, 'agent-int.meta.json'), JSON.stringify({ agentType: 'fleetmates:tm-integrator', model: 'haiku' }), 'utf8')
-  await writeFile(path.join(subagents, 'agent-rev.jsonl'), [record(990, 99), record(1210, 99)].join('\n'), 'utf8')
+  await writeFile(path.join(subagents, 'agent-rev.jsonl'), [record(990, 99), record(1050, 99), record(1100, 99), record(1210, 99)].join('\n'), 'utf8')
   await writeFile(path.join(subagents, 'agent-rev.meta.json'), JSON.stringify({ agentType: 'fleetmates:tm-reviewer', model: 'opus' }), 'utf8')
 
   return { dir, repo, projectsDir, configDir: path.join(dir, 'config') }
@@ -164,12 +169,13 @@ test('a merge whose tree differs from a clean merge-tree needed conflict resolut
   })
 })
 
-test('counts the non-merge commits the integrator made after a merge', async () => {
+test('counts only the non-merge commits made inside the integrator session', async () => {
   await withFixture(async (fx) => {
-    const [r1t1, r1t2, r1t3] = await rowsFor(fx)
+    const [r1t1, r1t2, r1t3, r2t1] = await rowsFor(fx)
     assert.equal(r1t1.nonMergeCommits, 0)
-    assert.equal(r1t2.nonMergeCommits, 1)
-    assert.equal(r1t3.nonMergeCommits, 0)
+    assert.equal(r1t2.nonMergeCommits, 1, 'the operator commit days later is not the integrator\'s')
+    assert.equal(r1t3.nonMergeCommits, null, 'with no transcript the author is unknown, never a guess')
+    assert.equal(r2t1.nonMergeCommits, null)
   })
 })
 
@@ -179,7 +185,7 @@ test('a message is in the dispatched form only as a single line naming the task'
     assert.equal(r1t1.messageForm, true)
     assert.equal(r1t2.messageForm, false, 'a body and a trailer are not the single-line form')
     assert.equal(r1t3.messageForm, true)
-    assert.equal(r2t1.messageForm, true)
+    assert.equal(r2t1.messageForm, false, 'a single line naming another task is not the dispatched form')
   })
 })
 
@@ -244,6 +250,9 @@ test('summary reports clean share, conflicts, escalations, turn percentiles and 
     assert.equal(summary.conflicts, 1)
     assert.equal(summary.escalations, 1)
     assert.equal(summary.escalationUnrecorded, 1)
+    assert.equal(summary.nonMergeCommits, 1)
+    assert.equal(summary.nonMergeUnknown, 2)
+    assert.equal(summary.offFormMessages, 2)
     assert.equal(summary.transcripts.sessions, 1, 'turns are per integrator session, not per merge')
     assert.equal(summary.transcripts.missingRows, 2)
     assert.equal(summary.turns.median, 3)

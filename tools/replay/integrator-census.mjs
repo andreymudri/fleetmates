@@ -4,8 +4,10 @@
 //   node tools/replay/integrator-census.mjs --roots <a,b> --out <dir> [--execute]
 //
 // Dry run by default: prints the summary and writes nothing. `--execute` writes
-// `<out>/integrator-census.json`. Rows carry hashed keys and metrics only — never a run name, a
-// task id, a merge message or a path.
+// `<out>/integrator-census.json`. Rows are pseudonymous, not anonymous: they carry no task id,
+// merge message or path in plain text, but `run` is an unsalted truncated sha256 of the run name
+// and `key` one of the run name and merge sha, so either is reversed by hashing guessed run
+// names. Run names are already public in the git history of the repositories censused.
 //
 // An integration is a `--no-ff` merge on a `run/<run>` branch's first-parent chain whose second
 // parent is the tip of a `fleetmates/<run>/<task>` or `teammates/<run>/<task>` branch. Task
@@ -15,13 +17,19 @@
 //
 // Escalation and blocked are read from `status.json` `integrations.<phase>` (`escalated`, an array
 // or a boolean; `status: 'blocked'`). Where the run recorded no such entry both are null — unknown,
-// never false.
+// never false. Nothing in fleetmates writes `integrations` into status.json today, so on real runs
+// both are null for every row and the escalation count reads 0 with every row unrecorded.
 //
 // Integrator transcripts are read with `readSessionUsage`, the reader `cli.mjs usage` uses, from
 // `$CLAUDE_CONFIG_DIR/projects` (default `~/.claude/projects`). A transcript is joined to a merge
 // when its agent type is `tm-integrator` (with or without a plugin prefix) and the merge's commit
 // time falls inside the transcript's first and last record timestamps, with a minute of slack. A
 // merge with no such transcript is recorded as missing, with null metrics, never 0.
+//
+// `nonMergeCommits` counts the non-merge commits between a merge and the next merge on the
+// first-parent chain whose commit time falls inside the joined transcript's window (same slack), so
+// an operator's later direct commit is not charged to the integrator. With no joined transcript
+// the author is unknown and the count is null.
 
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -200,13 +208,19 @@ export async function censusRoot({ root, projectsDir }) {
         const owner = phases.find((p) => p.branches.some(([name]) => name === ref.name))
         phase = owner ? owner.phase : null
       }
-      let nonMergeCommits = 0
-      for (let i = index + 1; i < chain.length && chain[i].parents.length < 2; i += 1) nonMergeCommits += 1
       const rec = integrationRecord(status, phase)
       const escalated = rec === null
         ? null
         : Array.isArray(rec.escalated) ? rec.escalated.length > 0 : typeof rec.escalated === 'boolean' ? rec.escalated : false
-      const transcript = transcripts.find((t) => commit.time >= t.first - SLACK_MS && commit.time <= t.last + SLACK_MS)
+      const inside = (t, time) => time >= t.first - SLACK_MS && time <= t.last + SLACK_MS
+      const transcript = transcripts.find((t) => inside(t, commit.time))
+      let nonMergeCommits = null
+      if (transcript) {
+        nonMergeCommits = 0
+        for (let i = index + 1; i < chain.length && chain[i].parents.length < 2; i += 1) {
+          if (inside(transcript, chain[i].time)) nonMergeCommits += 1
+        }
+      }
       runRows.push({
         key: hash(`${runId}\0${commit.sha}`, 16),
         run: hash(runId, 12),
@@ -253,7 +267,8 @@ export function summarize(rows) {
     escalations: rows.filter((r) => r.escalated === true).length,
     escalationUnrecorded: rows.filter((r) => r.escalated === null).length,
     blocked: rows.filter((r) => r.blocked === true).length,
-    nonMergeCommits: rows.reduce((s, r) => s + r.nonMergeCommits, 0),
+    nonMergeCommits: rows.reduce((s, r) => s + (r.nonMergeCommits ?? 0), 0),
+    nonMergeUnknown: rows.filter((r) => r.nonMergeCommits === null).length,
     offFormMessages: rows.filter((r) => !r.messageForm).length,
     transcripts: { sessions: sessions.size, missingRows: rows.filter((r) => r.transcript.status === 'missing').length },
     turns: { median: percentile(turns, 0.5), p90: percentile(turns, 0.9) },
