@@ -618,7 +618,9 @@ export async function materializeBaseTree({
   await mkdir(tmpRoot, { recursive: true })
   const cloneDir = await mkdtemp(path.join(tmpRoot, 'fleetmates-replay-'))
   const tarPath = `${cloneDir}.tar`
-  const archiveRes = await gitExecFn(['archive', '--format=tar', '-o', tarPath, baseSha], root)
+  // core.autocrlf off: git archive applies the operator's eol conversion, and on Windows that
+  // rewrote every text file to CRLF, so the cell no longer matched the base commit's bytes.
+  const archiveRes = await gitExecFn(['-c', 'core.autocrlf=false', 'archive', '--format=tar', '-o', tarPath, baseSha], root)
   if (archiveRes.code !== 0) {
     throw new Error(`git archive ${baseSha} failed: ${(archiveRes.stderr || archiveRes.stdout).trim()}`)
   }

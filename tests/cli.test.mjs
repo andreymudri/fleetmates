@@ -9327,15 +9327,15 @@ test('a history failure leaves the generated workflow source parseable', async (
     assert.doesNotMatch(lines.join('\n'), /could not compute the blast radius/)
 
     // Substring assertions cannot catch a stray line at the top of a source file; only a parser
-    // can. `node --check` is exactly what the redirected file faces when it is run.
-    const dir = await mkdtemp(path.join(tmpdir(), 'tm-workflow-parse-'))
-    try {
-      const file = path.join(dir, 'phase.js')
-      await writeFile(file, lines.join('\n'), 'utf8')
-      execFileSync(process.execPath, ['--check', file], { encoding: 'utf8' })
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
+    // can. The source is a Workflow script — `export const meta`, top-level `await` and a
+    // top-level `return` — which no standard JavaScript goal accepts all at once, so `node
+    // --check` answers by Node version (24.21 reads it as ESM and rejects the `return`). Parse
+    // it the way the Workflow runtime runs it: the meta export as a declaration, the rest as the
+    // body of an async function.
+    const source = lines.join('\n').replace(/^export const meta\b/m, 'const meta')
+    const AsyncFunction = (async () => {}).constructor
+    assert.doesNotThrow(() => new AsyncFunction(source))
+    assert.throws(() => new AsyncFunction(`could not compute the blast radius\n${source}`), SyntaxError)
   })
 })
 

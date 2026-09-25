@@ -2864,7 +2864,8 @@ test('copyPreviewPaths: refuses a nested entry under a base-tree symlink, and wr
 // session can `chmod -R u+w` and edit anyway. Now: copies are writable; runTierCell fingerprints
 // the link trees, locks them only while a session runs, unlocks and re-fingerprints, and any
 // difference fails the cell as `link-modified`. Gate commands run on the writable tree.
-const ROOT_SKIP = process.getuid?.() === 0 ? 'root ignores file modes' : false
+const ROOT_SKIP = process.platform === 'win32' ? 'win32 has no POSIX file modes'
+  : process.getuid?.() === 0 ? 'root ignores file modes' : false
 
 function linkGateConfig(extraChecks = []) {
   return {
@@ -2948,7 +2949,7 @@ test('lockLinkTrees: unlock never chmods through a path the session swapped for 
   await rm(scratch, { recursive: true, force: true })
 })
 
-test('fingerprintLinkTrees: changes with content, a new file, a removed file, a mode and a symlink target', async () => {
+test('fingerprintLinkTrees: changes with content, a new file, a removed file, a mode and a symlink target', { skip: ROOT_SKIP }, async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'fm-replay-fingerprint-'))
   const cellDir = path.join(scratch, 'cell')
   const nm = path.join(cellDir, 'node_modules')
