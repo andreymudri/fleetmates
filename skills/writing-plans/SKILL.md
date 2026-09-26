@@ -104,7 +104,7 @@ each `### Task N: <title>` heading, and only three file-line forms are recognise
 
 A line inside a `**Files:**` block that is shaped like a file line — `- Word: \`…\`` or
 `- Word (…): \`…\`` — but is not exactly one of the recognised forms makes `init-run` refuse the
-plan, naming the line. A misspelled verb or trailing text after the path used to drop the file
+plan, naming the line, and every later command that reads the plan refuses it the same way. A misspelled verb or trailing text after the path used to drop the file
 silently, and phase assignment (`scripts/phases.mjs`) reads an empty file list as "conflicts with
 nothing", landing the task in phase 1 beside everything else. Use the forms exactly, one file per
 bullet.

@@ -217,6 +217,16 @@ What the implementation changed relative to the text above, and why:
   "explained" it — at every later gate and in `finish`. The same held for any direct write made
   before a later dispatch. On the chain, only the merge-content rule explains a commit now. A
   fast-forward integration, already outside `tm-integrator`'s contract, now fails `ownership` too.
+- **Vouching stops at each branch's floor.** The security and claims review of the first version
+  reproduced the same hole one step removed: a payload committed on a throwaway side branch and
+  merged with an ordinary `--no-ff` sits OFF the chain, and the next phase's branch vouched for it
+  again. A task branch now vouches only for commits past its floor, the latest chain commit it
+  descends from — which also covers a run tip rebuilt with `commit-tree` so its first parent is the
+  anchor (adversarial tests for both).
+- **`gate` does not print the injected line** the error table describes: its stdout is one JSON
+  document, so the names go in an `injected` field. `complete`, `finish` and `prune-run` print it.
+- **`injected` is `checksForPhase`'s mark only**; a declared entry carrying it has it stripped,
+  because the mark makes its name print as this code's own text.
 - **`--enforcement-only`'s refusal of a manifest with no enforcement check is gone.** Injection
   made that manifest shape unreachable; the tests that pinned the refusal now pin that the flag
   answers with the injected checks and never reads PASS on nothing.

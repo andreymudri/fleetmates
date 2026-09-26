@@ -244,3 +244,19 @@ test('an enforcement check carries the protected set from the top-level key, nev
     assert.deepEqual(check.protected, ['fleetmates.gate.json', 'teammates.gate.json', 'package.json'], check.name)
   }
 })
+
+test('a declared entry cannot mark itself injected: the mark is checksForPhase\'s own', () => {
+  const checks = checksForPhase({ phases: { default: { checks: [{ name: 'x\u001b[2K', kind: 'command', run: 'y', injected: true }] } } }, 'default')
+  assert.equal(checks[0].injected, undefined)
+  assert.deepEqual(checks.filter((c) => c.injected).map((c) => c.name), ['fileset', 'ownership'])
+})
+
+test('an injected check never shares a name with a declared one, whatever names are declared', () => {
+  const checks = checksForPhase({ phases: { default: { checks: [
+    { name: 'fileset', kind: 'command', run: 'x' },
+    { name: 'fileset:injected', kind: 'agent' },
+  ] } } }, 'default')
+  const names = checks.map((c) => c.name)
+  assert.equal(new Set(names).size, names.length, JSON.stringify(names))
+  assert.ok(checks.some((c) => c.kind === 'fileset' && c.injected))
+})

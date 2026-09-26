@@ -339,8 +339,10 @@ that fails adds a note: the commits it names may predate this fleetmates version
 inline run that should have passed `--no-fleet`.
 
 `ownership` explains a commit on the run branch's own first-parent chain — every integration merge,
-every direct write — only by the merge rule, never by its being reachable from a task branch: the
-next phase's branches fork from the run tip and carry every earlier write in their history.
+every direct write — only by the merge rule, and a task branch vouches only for what it carries
+past its floor, the latest chain commit it descends from: the next phase's branches fork from the
+run tip and carry every earlier write in their history, including a payload merged in from a side
+branch.
 
 **Protected paths.** `fileset` also fails a task that changes a protected path its plan line does
 not mark `(protected)`, even when the path is declared: the output line reads

@@ -1522,13 +1522,14 @@ async function mergeContentExplainedByParents(git, firstParent, secondaryParents
 // The run branch's first-parent chain inside `anchor..run`. Bounded by `commits.length` for the
 // same reason `mergedParentFiles` bounds its identical walk: a git double whose chain never reaches
 // the anchor would otherwise loop forever.
+// Returned tip-first, so the first entry that is an ancestor of a task branch is the most recent.
 async function firstParentChain(git, { anchorSha, runSha, commits }) {
   const inRange = new Set(commits)
-  const chain = new Set()
+  const chain = []
   let cursor = runSha
   let steps = 0
   while (cursor && cursor !== anchorSha && inRange.has(cursor) && steps <= commits.length) {
-    chain.add(cursor)
+    chain.push(cursor)
     const parents = await git.commitParents(cursor)
     if (parents.length === 0) break
     cursor = parents[0]
@@ -1576,7 +1577,23 @@ export async function runOwnershipCheck(check, ctx = {}) {
     // Every commit this check admitted only because of base ancestry. Reported on the pass —
     // see `baseExplainedNote`, which also records why no base sha from run start is consulted.
     const baseExplained = []
-    const chain = await firstParentChain(git, { anchorSha, runSha, commits })
+    const chainList = await firstParentChain(git, { anchorSha, runSha, commits })
+    const chain = new Set(chainList)
+    // Each task branch vouches only for what it carries past its own FLOOR: the most recent
+    // commit of the run branch's first-parent chain that is an ancestor of it (the anchor when
+    // none is). A later phase's branch forks from the run tip, so everything the run branch held
+    // at that moment — an evil merge, a direct write, or a commit an integrator placed on a side
+    // branch and merged with an ordinary --no-ff — is below its floor and vouched for by nobody.
+    const floors = []
+    for (const branchSha of shas) {
+      let floor = null
+      for (const c of chainList) {
+        if (await git.isAncestor(c, branchSha)) { floor = c; break }
+      }
+      floors.push(floor)
+    }
+    const vouches = async (sha, i) => await git.isAncestor(sha, shas[i])
+      && !(floors[i] !== null && await git.isAncestor(sha, floors[i]))
     for (const sha of commits) {
       let explained = false
       // A commit on the run branch's own first-parent chain is a write to the run branch itself,
@@ -1587,8 +1604,8 @@ export async function runOwnershipCheck(check, ctx = {}) {
       // gate nor `finish` could ever report it. On the chain, the only explanation is the merge
       // rule below.
       if (!chain.has(sha)) {
-        for (const branchSha of shas) {
-          if (await git.isAncestor(sha, branchSha)) { explained = true; break }
+        for (let i = 0; i < shas.length; i += 1) {
+          if (await vouches(sha, i)) { explained = true; break }
         }
       }
       if (!explained) {
@@ -1614,7 +1631,7 @@ export async function runOwnershipCheck(check, ctx = {}) {
           for (const parent of secondaryParents) {
             let owned = false
             for (let i = 0; i < shas.length; i += 1) {
-              if (await git.isAncestor(parent, shas[i])) {
+              if (await vouches(parent, i)) {
                 owned = true
                 // Every task whose branch carries this parent vouches for the paths it marked.
                 for (const file of taskOf[i]?.protectedFiles ?? []) authorised.add(normalizePath(file))

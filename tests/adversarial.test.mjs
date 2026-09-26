@@ -2091,3 +2091,62 @@ test('a direct write to the run branch is not explained by a task branch that fo
     assert.match(out, new RegExp(sha))
   })
 })
+
+// Review round on the first-parent rule: excluding only the chain left a side door. The integrator
+// commits the payload on a throwaway branch and merges THAT with an ordinary --no-ff, so the payload
+// sits off the chain; the next phase's branch forks after the merge and vouched for it again, and
+// the merge's secondary parent read as "owned" the same way. A branch now vouches only for what it
+// carries past its floor — the latest chain commit it descends from.
+test('an integrator payload merged in from a side branch is not vouched for by the next phase', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+    git(root, ['checkout', '--quiet', '-b', 'side'])
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [] } } }), 'utf8')
+    await writeFile(path.join(root, 'rogue.mjs'), 'smuggled\n', 'utf8')
+    git(root, ['add', '-A'])
+    git(root, ['commit', '--quiet', '-m', 'payload'])
+    const payload = git(root, ['rev-parse', 'HEAD']).trim()
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate side', 'side'])
+    git(root, ['branch', '--quiet', '-D', 'side'])
+    await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'y\n' } })
+
+    const gate = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(gate.code, 1, gate.out)
+    assert.match(gate.out, new RegExp(payload))
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T2', 'fleetmates/r1/T2'])
+    const finish = await runCliOn(root, ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+    assert.equal(finish.code, 1, finish.out)
+    assert.doesNotMatch(finish.out, /ready to land/)
+  })
+})
+
+// The first-parent chain is read from the run branch as it stands, and a hand-built commit can give
+// the run tip any first parent. Rebuilding the tip with `commit-tree` so its first parent is the
+// anchor collapses the chain to that one commit and puts every earlier write back off it — but the
+// next phase's branch forks from that forged tip, so the forged tip is its floor and it vouches for
+// nothing beneath it.
+test('a run tip rebuilt with the anchor as its first parent does not launder an earlier direct write', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    const anchor = git(root, ['rev-parse', 'HEAD']).trim()
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+    await writeFile(path.join(root, 'rogue.mjs'), 'smuggled\n', 'utf8')
+    git(root, ['add', '-A'])
+    git(root, ['commit', '--quiet', '-m', 'direct write'])
+    const tip = git(root, ['rev-parse', 'HEAD']).trim()
+    const tree = git(root, ['rev-parse', 'HEAD^{tree}']).trim()
+    const forged = git(root, ['commit-tree', tree, '-p', anchor, '-p', tip, '-m', 'forged tip']).trim()
+    git(root, ['update-ref', 'refs/heads/run-branch', forged])
+    git(root, ['reset', '--quiet', '--hard', 'run-branch'])
+    await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'y\n' } })
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1, out)
+    const ownership = JSON.parse(out).results.find((r) => r.name === 'ownership')
+    assert.equal(ownership.status, 'fail', out)
+    assert.match(ownership.output, new RegExp(tip))
+  })
+})

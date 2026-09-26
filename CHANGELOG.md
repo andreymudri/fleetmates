@@ -13,17 +13,20 @@
 
 ### Changed
 
-- `init-run` refuses a plan whose `**Files:**` block holds a line shaped like a file line that is
-  not one of the recognised forms, naming the line; it used to drop that file silently.
+- A plan whose `**Files:**` block holds a line shaped like a file line that is not one of the
+  recognised forms is refused, naming the line; it used to drop that file silently. `init-run`
+  exits 2; every command that reads the plan refuses too (`gate`, `complete`, `finish` and
+  `prune-run` fail on `derive`; `doctor`, `liveness` and `plan-drift` exit 2), so an in-flight run
+  whose anchored plan carries such a line needs the line fixed by a plan amendment on the base.
 - `--enforcement-only` no longer refuses a manifest without enforcement checks: it always has the
   injected ones to report.
 
 ### Fixed
 
-- `ownership` no longer explains a commit on the run branch's first-parent chain by its being
-  reachable from a task branch. A later phase's branches fork from the run tip, so an evil
-  integration merge or a direct write made before they were dispatched read as explained, at
-  every later gate and in `finish`.
+- `ownership` no longer lets a task branch vouch for anything below its floor — the latest commit
+  of the run branch's first-parent chain it descends from. A later phase's branches fork from the
+  run tip, so an evil integration merge, a direct write, or a payload committed on a side branch
+  and merged with an ordinary `--no-ff` read as explained, at every later gate and in `finish`.
 
 ## v2.2.0
 

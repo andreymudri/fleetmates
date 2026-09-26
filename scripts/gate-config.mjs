@@ -82,17 +82,26 @@ export function checksForPhase(config, phaseName) {
   const checks = phases[phaseName]?.checks ?? phases.default?.checks ?? []
   const fallback = Array.isArray(config?.lens) && config.lens.length ? config.lens : DEFAULT_LENS
   const guarded = protectedPaths(config)
+  // `injected` is this function's mark, never the manifest's: a declared entry carrying it would
+  // have its name printed as if this code had chosen it, and the name is manifest text.
   const result = checks.map((check) => {
-    if (check?.kind === 'agent' && !Array.isArray(check.lens)) return { ...check, lens: fallback }
-    if (ENFORCEMENT_CHECK_KINDS.includes(check?.kind)) return { ...check, protected: guarded }
-    return check
+    let out = check
+    if (out && typeof out === 'object' && Object.hasOwn(out, 'injected')) {
+      out = { ...out }
+      delete out.injected
+    }
+    if (out?.kind === 'agent' && !Array.isArray(out.lens)) return { ...out, lens: fallback }
+    if (ENFORCEMENT_CHECK_KINDS.includes(out?.kind)) return { ...out, protected: guarded }
+    return out
   })
   const names = new Set(checks.map((check) => check?.name))
   for (const kind of ENFORCEMENT_CHECK_KINDS) {
     if (checks.some((check) => check?.kind === kind)) continue
     // Results are keyed by name, so an injected check must not collide with a declared one that
     // happens to carry this name under another kind.
-    const name = names.has(kind) ? `${kind}:injected` : kind
+    let name = kind
+    for (let n = 1; names.has(name); n += 1) name = n === 1 ? `${kind}:injected` : `${kind}:injected-${n}`
+    names.add(name)
     result.push({ name, kind, injected: true, protected: guarded })
   }
   return result
