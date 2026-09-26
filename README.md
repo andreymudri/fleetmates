@@ -205,7 +205,9 @@ regardless.
 The gate merges the phase's task branches into a scratch worktree and runs its checks there, so
 `test` measures what integration will actually produce. It also checks that each teammate's
 **committed** changes stayed inside the files its task declared, and that every commit on the run
-branch is explained by a task branch or by the base. It computes all of this from git each time
+branch is explained by a task branch or by the base. Those two checks run whether or not the
+manifest lists them, and a task may change the manifest itself — or any path in its `protected`
+list — only when its plan line marks it `(protected)`. It computes all of this from git each time
 it runs, and trusts nothing an agent wrote — `.fleetmates/` state is written by the very agents
 the gate exists to enforce, so no check reads it.
 
@@ -300,6 +302,17 @@ preview:
 
 The preview contains tracked content only, so without that a command check runs against a tree
 with no dependencies installed and fails for a reason that has nothing to do with the code.
+
+`fileset` and `ownership` run on every phase even when the manifest omits them. Paths that decide
+what the gate checks can be protected; the manifest always is:
+
+```json
+{ "protected": ["package.json", "tests/conftest.py"] }
+```
+
+A task may change a protected path only when its plan line says so —
+``- Modify (protected): `package.json` `` — and the plan is read from the anchor commit, so a
+marking added mid-run counts once it is amended on the base branch.
 
 ## Configuration
 

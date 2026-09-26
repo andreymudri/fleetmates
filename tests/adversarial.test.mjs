@@ -1889,3 +1889,205 @@ test('the same reviewer tier is accepted in the tracked manifest, so the rejecti
     assert.match(out, /^agents\.reviewer\.tier {4}cheap {2}\(fleetmates\.gate\.json\)$/m)
   })
 })
+
+// ============================================================================================
+// Protected paths and non-removable enforcement checks
+// (docs/specs/2026-09-26-protected-paths-design.md).
+//
+// The gate reads the manifest from the main worktree, which holds the run branch AFTER the last
+// integration. Before `checksForPhase` injected `fileset` and `ownership`, an integrator merge that
+// rewrote the manifest switched off, at the next gate, the one check that would report that merge.
+// ============================================================================================
+
+// Integrates a task branch with `--no-ff --no-commit`, lets `tamper` change the merge's tree, then
+// completes it — the integrator's merge, carrying content no parent explains. Returns its sha.
+async function evilMerge(root, branch, tamper) {
+  git(root, ['merge', '--quiet', '--no-ff', '--no-commit', branch])
+  await tamper()
+  git(root, ['add', '-A'])
+  git(root, ['commit', '--quiet', '-m', `merge ${branch}`])
+  return git(root, ['rev-parse', 'HEAD']).trim()
+}
+
+const NARROWED_MANIFEST = {
+  phases: {
+    default: {
+      checks: [
+        { name: 'fileset', kind: 'fileset', optional: true, protected: [], scope: 'none' },
+        { name: 'ownership', kind: 'ownership', optional: true, skip: true, protected: [] },
+      ],
+    },
+  },
+}
+
+for (const [shape, manifest] of [
+  ['narrows both declared enforcement checks', NARROWED_MANIFEST],
+  ['removes both enforcement checks outright', { phases: { default: { checks: [] } } }],
+]) {
+  test(`an integrator merge that ${shape} still fails the next phase's gate`, async () => {
+    await withRepo(async (root) => {
+      await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+      await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+      const sha = await evilMerge(root, 'fleetmates/r1/T1', async () => {
+        await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(manifest), 'utf8')
+        await writeFile(path.join(root, 'rogue.mjs'), 'smuggled\n', 'utf8')
+      })
+      await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'y\n' } })
+      const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+      assert.equal(code, 1, out)
+      const verdict = JSON.parse(out)
+      assert.equal(verdict.verdict, 'FAIL')
+      assert.ok(verdict.failed.includes('ownership'), out)
+      assert.match(out, new RegExp(sha))
+    })
+  })
+}
+
+test('the same attack on the last integration is caught by finish', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+    await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'y\n' } })
+    await evilMerge(root, 'fleetmates/r1/T2', async () => {
+      await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [] } } }), 'utf8')
+      await writeFile(path.join(root, 'rogue.mjs'), 'smuggled\n', 'utf8')
+    })
+    const { code, out } = await runCliOn(root, ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+    assert.equal(code, 1, out)
+    assert.match(out, /failed: ownership/)
+    assert.doesNotMatch(out, /ready to land/)
+  })
+})
+
+// Swaps the committed plan for `plan` on the base before anything is dispatched, so the anchor
+// reads it — the only place a `(protected)` marking counts.
+function replacePlanOnBase(root, plan) {
+  git(root, ['checkout', '--quiet', 'main'])
+  execFileSync('git', ['rm', '--quiet', 'plan.md'], { cwd: root })
+  return writeFile(path.join(root, 'plan.md'), plan, 'utf8').then(() => {
+    git(root, ['add', 'plan.md'])
+    git(root, ['commit', '--quiet', '-m', 'plan'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--ff-only', 'main'])
+  })
+}
+
+const MANIFEST_TASK_PLAN = (modifier) => `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+- Modify${modifier}: \`fleetmates.gate.json\`
+`
+
+test('a teammate editing the manifest it declares but does not mark is blocked at stop time', async () => {
+  await withRepo(async (root) => {
+    await replacePlanOnBase(root, MANIFEST_TASK_PLAN(''))
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n', 'fleetmates.gate.json': '{"phases":{}}\n' } })
+    const { code, out } = await runCliOn(root, ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only'])
+    // 3 is the code the SubagentStop hook blocks on: the teammate hears it before it stops.
+    assert.equal(code, 3, out)
+    assert.match(out, /T1: protected — fleetmates\.gate\.json/)
+  })
+})
+
+test('the same edit passes once the plan on the base marks it (protected)', async () => {
+  await withRepo(async (root) => {
+    await replacePlanOnBase(root, MANIFEST_TASK_PLAN(' (protected)'))
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    // The edited manifest still declares both checks, so what is being tested is the marking.
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n', 'fleetmates.gate.json': JSON.stringify({ ...MANIFEST, protected: ['package.json'] }) } })
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 0, out)
+  })
+})
+
+test('a merge that leaves the manifest invalid records no verdict, and finish refuses', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    await evilMerge(root, 'fleetmates/r1/T1', async () => {
+      await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ ...MANIFEST, protected: 'package.json' }), 'utf8')
+    })
+    const gate = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(gate.code, 2, gate.out)
+    assert.match(gate.out, /protected must be an array/)
+    assert.equal((await readStatus(root, 'r1')).gates?.['1'], undefined)
+    const finish = await runCliOn(root, ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+    assert.notEqual(finish.code, 0, finish.out)
+    assert.doesNotMatch(finish.out, /ready to land/)
+  })
+})
+
+test('an inline run fails the injected ownership check with the note, and --no-fleet keeps today\'s behaviour', async () => {
+  await withRepo(async (root) => {
+    // The shape sideswap_rust's `mainnet-dry-run` has: a manifest with no enforcement check,
+    // `init-run` done, no task branch, and the work committed straight onto the run branch.
+    git(root, ['checkout', '--quiet', 'main'])
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } },
+    }), 'utf8')
+    git(root, ['commit', '--quiet', '-am', 'command-only manifest'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--ff-only', 'main'])
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await writeFile(path.join(root, 'a.mjs'), 'inline\n', 'utf8')
+    git(root, ['add', 'a.mjs'])
+    git(root, ['commit', '--quiet', '-m', 'inline work'])
+
+    const fleet = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(fleet.code, 1, fleet.out)
+    assert.match(fleet.out, /check injected: the manifest does not declare it/)
+    assert.deepEqual(JSON.parse(fleet.out).injected, ['fileset', 'ownership'])
+
+    const solo = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet'])
+    assert.equal(solo.code, 0, solo.out)
+    assert.match(solo.out, /--no-fleet: enforcement checks are not running/)
+  })
+})
+
+test('LIMIT (unprotected conflict): an integrator\'s hand resolution of a conflict on an unprotected path is accepted', async () => {
+  await withRepo(async (root) => {
+    await replacePlanOnBase(root, `### Task 1: A
+
+**Files:**
+- Modify: \`shared.txt\`
+
+### Task 2: B
+
+**Files:**
+- Modify: \`shared.txt\`
+
+**Depends:** T1
+`)
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await taskBranch(root, 'r1', 'T1', { files: { 'shared.txt': 'one\n' } })
+    await taskBranch(root, 'r1', 'T2', { files: { 'shared.txt': 'two\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+    try { git(root, ['merge', '--quiet', '--no-ff', 'fleetmates/r1/T2']) } catch { /* conflict, resolved below */ }
+    await writeFile(path.join(root, 'shared.txt'), 'anything the integrator chose\n', 'utf8')
+    git(root, ['add', 'shared.txt'])
+    git(root, ['commit', '--quiet', '--no-edit'])
+    const { out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    const ownership = JSON.parse(out).results.find((r) => r.name === 'ownership')
+    assert.equal(ownership.status, 'pass', out)
+  })
+})
+
+// Reachability from a task branch used to explain every commit on the run branch that a LATER
+// task branch forked past. A direct write made before the next phase was dispatched was then
+// carried in that phase's history and read as explained, by every gate and by `finish`.
+test('a direct write to the run branch is not explained by a task branch that forked after it', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await writeFile(path.join(root, 'sneaky.mjs'), 'x\n', 'utf8')
+    git(root, ['add', 'sneaky.mjs'])
+    git(root, ['commit', '--quiet', '-m', 'direct write before dispatch'])
+    const sha = git(root, ['rev-parse', 'HEAD']).trim()
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1, out)
+    assert.match(out, new RegExp(sha))
+  })
+})

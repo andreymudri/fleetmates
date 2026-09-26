@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Protected paths. A task may change the gate manifest — or a path the manifest's new top-level
+  `protected` array lists — only when its plan line carries the ` (protected)` modifier, e.g.
+  ``- Modify (protected): `fleetmates.gate.json` ``. Otherwise `fileset` fails with a
+  `protected` line, and a hand-resolved merge conflict on such a path fails `ownership`.
+- `fileset` and `ownership` are injected into every phase whose manifest omits them; `gate`
+  reports them in an `injected` field and the other commands print a line.
+
+### Changed
+
+- `init-run` refuses a plan whose `**Files:**` block holds a line shaped like a file line that is
+  not one of the recognised forms, naming the line; it used to drop that file silently.
+- `--enforcement-only` no longer refuses a manifest without enforcement checks: it always has the
+  injected ones to report.
+
+### Fixed
+
+- `ownership` no longer explains a commit on the run branch's first-parent chain by its being
+  reachable from a task branch. A later phase's branches fork from the run tip, so an evil
+  integration merge or a direct write made before they were dispatched read as explained, at
+  every later gate and in `finish`.
+
 ## v2.2.0
 
 ### Changed

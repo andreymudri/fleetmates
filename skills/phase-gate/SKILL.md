@@ -331,6 +331,25 @@ behind it — a reviewer merging task branches into `master`, a teammate landing
 The question is asked of the two refs as they stand, so there is no recorded base sha for the
 enforced party to rewrite; the cost is that it says the branch is there, not when it arrived.
 
+Both run on every phase whether or not the manifest lists them: the gate injects whichever one
+the phase's check list lacks, and `gate` names them in an `injected` field of its JSON (`complete`,
+`finish` and `prune-run` print a line). A merge can rewrite the manifest the next gate reads, so a
+check the manifest could remove is a check that merge could switch off. An injected `ownership`
+that fails adds a note: the commits it names may predate this fleetmates version, or come from an
+inline run that should have passed `--no-fleet`.
+
+`ownership` explains a commit on the run branch's own first-parent chain — every integration merge,
+every direct write — only by the merge rule, never by its being reachable from a task branch: the
+next phase's branches fork from the run tip and carry every earlier write in their history.
+
+**Protected paths.** `fileset` also fails a task that changes a protected path its plan line does
+not mark `(protected)`, even when the path is declared: the output line reads
+`T1: protected — <path> (…)`, separate from the `outside declared set` line. The manifest is always
+protected, under both its current and legacy names; its top-level `protected` array adds paths.
+`ownership` fails a merge whose hand-resolved conflict touches a protected path unless a parent
+comes from a task marking it. Approving such an escalation is a plan amendment on the base branch
+(see `parallel-execution`, "Amending a plan mid-run"), then a re-gate.
+
 Skipped only when the caller passes `--no-fleet`. Missing state is a failure, never a skip.
 
 A `fileset` or `ownership` failure is a process violation, not a code defect. Do not widen the

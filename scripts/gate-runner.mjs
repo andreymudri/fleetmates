@@ -1356,9 +1356,9 @@ export async function runFilesetCheck(check, ctx = {}) {
         // A branch integrated by FAST-FORWARD leaves no merge commit and so no secondary
         // parent, so it is not a key in `mergedFiles` and reaches this test and fails it — with
         // a message that names a cause that is not the one, since the work IS on the run
-        // branch. `tm-integrator`'s contract is `--no-ff` for exactly this reason, and no other
-        // check covers the gap: `ownership` explains a fast-forwarded branch's commits by their
-        // ancestry from the task branch, so it reports nothing. Failing closed is the intended
+        // branch. `tm-integrator`'s contract is `--no-ff` for exactly this reason. `ownership`
+        // reports the same integration too: a fast-forward puts the task's commits on the run
+        // branch's first-parent chain, where task-branch ancestry explains nothing. Failing closed is the intended
         // direction; the misleading wording is the price. A SQUASH merge likewise carries no
         // secondary parent, and this plugin's integrator never squashes.
         //
@@ -1519,6 +1519,24 @@ async function mergeContentExplainedByParents(git, firstParent, secondaryParents
   return { ok: true }
 }
 
+// The run branch's first-parent chain inside `anchor..run`. Bounded by `commits.length` for the
+// same reason `mergedParentFiles` bounds its identical walk: a git double whose chain never reaches
+// the anchor would otherwise loop forever.
+async function firstParentChain(git, { anchorSha, runSha, commits }) {
+  const inRange = new Set(commits)
+  const chain = new Set()
+  let cursor = runSha
+  let steps = 0
+  while (cursor && cursor !== anchorSha && inRange.has(cursor) && steps <= commits.length) {
+    chain.add(cursor)
+    const parents = await git.commitParents(cursor)
+    if (parents.length === 0) break
+    cursor = parents[0]
+    steps += 1
+  }
+  return chain
+}
+
 // Why an injected `ownership` may fail on a run nothing ever asked to be explained. It cannot say
 // which cause applies: knowing when this version was installed would need a record under
 // `.fleetmates/`, which is agent-writable and never consulted by an enforcement check.
@@ -1558,10 +1576,20 @@ export async function runOwnershipCheck(check, ctx = {}) {
     // Every commit this check admitted only because of base ancestry. Reported on the pass —
     // see `baseExplainedNote`, which also records why no base sha from run start is consulted.
     const baseExplained = []
+    const chain = await firstParentChain(git, { anchorSha, runSha, commits })
     for (const sha of commits) {
       let explained = false
-      for (const branchSha of shas) {
-        if (await git.isAncestor(sha, branchSha)) { explained = true; break }
+      // A commit on the run branch's own first-parent chain is a write to the run branch itself,
+      // and is never explained by being reachable from a task branch: every task branch of a
+      // later phase forks from the run tip, so it carries every earlier write to the run branch in
+      // its history. Reachability vouched for all of them — an evil merge in phase N, or a direct
+      // write, was "explained" by the phase N+1 branch that forked after it, and neither the next
+      // gate nor `finish` could ever report it. On the chain, the only explanation is the merge
+      // rule below.
+      if (!chain.has(sha)) {
+        for (const branchSha of shas) {
+          if (await git.isAncestor(sha, branchSha)) { explained = true; break }
+        }
       }
       if (!explained) {
         const parents = await git.commitParents(sha)

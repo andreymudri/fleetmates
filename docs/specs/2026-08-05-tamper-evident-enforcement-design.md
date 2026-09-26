@@ -43,7 +43,16 @@ That is a smaller claim than the previous specs made, and it is the one the code
   a violation. Renames report both pre- and post-image.
 - **V2 ownership** — no task branch may be the run branch under any alias spelling; the main
   worktree must be clean; every commit on the run branch since the anchor must be reachable
-  from a task branch.
+  from a task branch — except a commit on the run branch's own first-parent chain, which only
+  the merge-content rule can explain (2026-09-26: reachability let the next phase's branches,
+  forked from the run tip, vouch for every earlier write to the run branch).
+- **V4 non-removable enforcement** — `fileset` and `ownership` are injected into any phase whose
+  manifest omits them, so a merge that rewrites the manifest cannot switch off the check that
+  reports it. The manifest may add to them, never narrow them.
+- **V5 protected paths** — a task that changes the manifest, or a path in its `protected` list,
+  fails `fileset` unless its plan line at the anchor marks it `(protected)`; a hand-resolved
+  conflict on such a path fails `ownership` unless a parent comes from a task marking it. See
+  `docs/specs/2026-09-26-protected-paths-design.md`.
 - **V3 completion** — `complete` recomputes the gate rather than reading a recorded verdict.
   A forged or stale `status.json` PASS buys nothing.
 - **Phase derivation** — from what is actually merged, never from a stored field. Out-of-order
@@ -55,6 +64,12 @@ That is a smaller claim than the previous specs made, and it is the one the code
 
 These are known, reproduced, and deliberately out of scope. Each must appear in the docs
 where the corresponding claim is made:
+
+- **Write access to the base branch.** A `(protected)` marking is authoritative because the plan
+  is read at the anchor; whoever can commit to the base can mark anything, including a task that
+  drops every command check from the manifest.
+- **A hand-resolved conflict on an unprotected path.** Accepted unverified, as before; pinned by
+  a LIMIT test.
 
 - **A teammate that runs arbitrary code.** It has Bash with the user's permissions. It can
   write any file, including its own `package.json`, `.git/hooks/`, and `.git/config`.

@@ -321,6 +321,9 @@ Rebuilding the run branch is the orchestrator's operation, not the integrator's:
 does checkout plus `--no-ff` merge and reports `blocked` rather than reset or force-move a branch,
 so a dispatch asking it to rebuild asks for something its contract does not cover.
 
+Approving a `fileset` escalation on a protected path is this same operation: add ` (protected)` to
+that task's file line in the amended plan, then re-run the gate.
+
 Amend only when a task's declared file set is genuinely wrong. Correcting a stale *interface* — a
 signature an earlier phase's fix rounds changed — belongs in the dispatch brief, not the plan.
 

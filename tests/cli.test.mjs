@@ -4037,6 +4037,7 @@ test('finish recomputes a verdict for every phase and passes when they all hold'
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     for (const [id, file] of [['T1', 'a.mjs'], ['T2', 'b.mjs']]) {
       g(['checkout', '--quiet', '-b', `fleetmates/r1/${id}`])
       await writeFile(path.join(root, file), 'export const x = 1\n', 'utf8')
@@ -4087,6 +4088,7 @@ test('finish exits 1 and names the phase whose computed check fails', async () =
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     // T1 does real work and lands. T2's branch is created off the base with nothing on it —
     // the stale-base shape: the ref exists, it is not on the run branch, and it contributes
     // nothing, so merging it would be a no-op.
@@ -4278,6 +4280,7 @@ test('finish returns the identical exit code with and without plan notes present
       }), 'utf8')
       g(['add', 'fleetmates.gate.json'])
       g(['commit', '--quiet', '-m', 'manifest'])
+      absorbIntoBase(g)
       g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
       await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
       g(['add', 'a.mjs'])
@@ -4800,6 +4803,7 @@ test('prune-run --enforcement-only --yes will not remove a worktree on a verdict
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     g(['add', 'a.mjs'])
@@ -4887,6 +4891,7 @@ test('prune-run without --enforcement-only prunes the phase whose checks all act
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     g(['add', 'a.mjs'])
@@ -4973,6 +4978,7 @@ test('prune-run with --yes removes this run’s worktree once its phase passes',
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     g(['add', 'a.mjs'])

@@ -203,3 +203,27 @@ Decisions already taken, so they are not re-litigated:
   **permanent-skip check** (the `rustot-stats` case: five live assertions skipped at every gate
   because the environment was not provisioned) is a new consumer, not rework. That check is a
   separate item after spec 2.
+
+## Implementation notes (2026-09-26)
+
+What the implementation changed relative to the text above, and why:
+
+- **The two `fileset` classes are labelled lines, not headings.** `T1: outside declared set — …`
+  stays byte-identical to what every existing consumer matches; the new class is
+  `T1: protected — … (mark it "Modify (protected)" …)`. Same separation, no churn.
+- **`ownership` no longer lets task-branch reachability explain a commit on the run branch's own
+  first-parent chain.** Adversarial case 1 failed against the design as written: the phase N+1
+  branch forks from the run tip, so the evil phase-N merge is in its history and reachability
+  "explained" it — at every later gate and in `finish`. The same held for any direct write made
+  before a later dispatch. On the chain, only the merge-content rule explains a commit now. A
+  fast-forward integration, already outside `tm-integrator`'s contract, now fails `ownership` too.
+- **`--enforcement-only`'s refusal of a manifest with no enforcement check is gone.** Injection
+  made that manifest shape unreachable; the tests that pinned the refusal now pin that the flag
+  answers with the injected checks and never reads PASS on nothing.
+- **`init-run` reports a malformed file line as a refusal (exit 2)**, through a `PlanParseError`,
+  and the quoted line goes through `printable` inside the parser, because `doctor`, `liveness`
+  and `plan-drift` print the same message.
+- **Test fixtures that committed straight onto the run branch** (a manifest before dispatch, a
+  results file at the repository root) were passing only through the reachability hole above or
+  with no ownership check at all. They now commit on the base (`absorbIntoBase` in
+  `tests/cli.test.mjs`) and keep scratch files under the ignored state directory.
