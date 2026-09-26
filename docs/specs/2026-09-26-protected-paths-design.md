@@ -223,6 +223,11 @@ What the implementation changed relative to the text above, and why:
   again. A task branch now vouches only for commits past its floor, the latest chain commit it
   descends from — which also covers a run tip rebuilt with `commit-tree` so its first parent is the
   anchor (adversarial tests for both).
+- **A base merge may resolve a conflict on a protected path.** The correctness review reproduced a
+  false FAIL with no way out: the base changed the manifest too, the operator's amendment merge had
+  to resolve the conflict, and no marked task could ever carry the base parent. A merge with a
+  base-ancestor secondary parent is exempt from the protected-conflict guard; whoever writes the
+  base is already the trust boundary for the marking itself.
 - **`gate` does not print the injected line** the error table describes: its stdout is one JSON
   document, so the names go in an `injected` field. `complete`, `finish` and `prune-run` print it.
 - **`injected` is `checksForPhase`'s mark only**; a declared entry carrying it has it stripped,

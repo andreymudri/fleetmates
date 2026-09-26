@@ -67,7 +67,9 @@ where the corresponding claim is made:
 
 - **Write access to the base branch.** A `(protected)` marking is authoritative because the plan
   is read at the anchor; whoever can commit to the base can mark anything, including a task that
-  drops every command check from the manifest.
+  drops every command check from the manifest. For the same reason a merge whose secondary parent
+  comes from the base may hand-resolve a conflict on a protected path: that is the operator's
+  amendment merge, and no task branch could ever carry its base parent to authorise it.
 - **A hand-resolved conflict on an unprotected path.** Accepted unverified, as before; pinned by
   a LIMIT test.
 

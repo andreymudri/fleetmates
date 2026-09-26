@@ -1627,6 +1627,7 @@ export async function runOwnershipCheck(check, ctx = {}) {
           // riding in behind a second, unowned parent was never inspected.
           let allParentsOwned = true
           let usedBase = false
+          let baseParent = false
           const authorised = new Set()
           for (const parent of secondaryParents) {
             let owned = false
@@ -1643,12 +1644,20 @@ export async function runOwnershipCheck(check, ctx = {}) {
             // content is already trusted: the anchor is computed from it and `changedFiles`
             // diffs against it, so accepting base ancestry adds no new trust. It is still
             // per-parent — a rogue parent riding alongside a base parent fails the loop.
-            if (!owned && baseSha && await git.isAncestor(parent, baseSha)) { owned = true; usedBase = true }
+            if (!owned && baseSha && await git.isAncestor(parent, baseSha)) {
+              owned = true
+              usedBase = true
+              // The operator's merge of the base — how an amendment reaches the anchor — may have
+              // to resolve a conflict on a protected path the base also changed, and no task could
+              // ever mark that resolution: every marked branch forked before the base parent.
+              // Whoever writes the base is already the trust boundary for `(protected)` itself.
+              baseParent = true
+            }
             if (!owned) { allParentsOwned = false; break }
           }
           if (allParentsOwned) {
             const verdict = await mergeContentExplainedByParents(
-              git, firstParent, secondaryParents, sha, { paths: guardedSet(check), authorised },
+              git, firstParent, secondaryParents, sha, { paths: baseParent ? new Set() : guardedSet(check), authorised },
             )
             explained = verdict.ok
             if (verdict.protectedFile) protectedConflicts.push({ sha, file: verdict.protectedFile })
