@@ -4774,8 +4774,8 @@ test('an injected ownership check that fails says why it may be failing; a decla
 
 // Review round: authorisation came from every task whose branch carried the secondary parent, and
 // a later phase's branch carries every earlier parent. A later task marking the manifest therefore
-// authorised an earlier, unmarked task's hand-resolved conflict. Vouching now stops at each branch's
-// floor, so only a branch that carries the parent past its own fork point can authorise it.
+// authorised an earlier, unmarked task's hand-resolved conflict. A branch that holds the merge itself is a
+// later task, and its markings authorise nothing in that merge.
 test('a later task marking the path does not authorise an earlier unmarked task\'s conflict resolution', async () => {
   await withRepo(async (repo) => {
     await protectedConflictRun(repo, { markT2: false })
