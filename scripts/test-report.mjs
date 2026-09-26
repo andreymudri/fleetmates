@@ -6,7 +6,8 @@
 // agent-written: refusals quote a bounded, `printable` excerpt, and the parser expands no entity
 // beyond the five predefined ones and numeric references — a DOCTYPE is refused outright rather
 // than half-understood.
-import { readFile, readdir, stat, lstat } from 'node:fs/promises'
+import { open, readdir, lstat } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import path from 'node:path'
 import { printable } from './reviews.mjs'
 
@@ -181,15 +182,42 @@ export async function readReport(target, { root, maxBytes = MAX_REPORT_BYTES } =
   const units = new Map()
   let total = 0
   for (const file of files) {
-    const entry = await lstat(file)
-    if (!entry.isFile()) refuse(`holds ${path.basename(file)}, which is not a regular file`)
-    // Sized before it is read, so an oversized report is refused without being loaded.
-    total += entry.size
-    if (total > maxBytes) refuse(`is larger than ${maxBytes} bytes`)
-    const bytes = await readFile(file)
+    const bytes = await readRegularFile(file, maxBytes - total)
+    total += bytes.length
     parseJunit(bytes.toString('utf8'), { root }, units)
   }
   return { units }
+}
+
+// Opened once, then judged and read through that one handle: a check by path followed by a read
+// by path left a window in which the suite (teammate code, possibly still running a leftover
+// process) could swap in a FIFO — a read that never returns, outside the check's timeout — or a
+// link to a file outside the report (review round 3, both reproduced). O_NOFOLLOW refuses a link,
+// O_NONBLOCK keeps a FIFO from blocking the open, and fstat on the handle answers for the file
+// actually read. The size is checked before any byte is read, and the read is bounded by it.
+async function readRegularFile(file, remaining) {
+  let handle
+  try {
+    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  } catch (err) {
+    if (err?.code === 'ELOOP') refuse(`holds ${path.basename(file)}, which is a symbolic link`)
+    throw err
+  }
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) refuse(`holds ${path.basename(file)}, which is not a regular file`)
+    if (info.size > remaining) refuse(`is larger than ${MAX_REPORT_BYTES} bytes`)
+    const buffer = Buffer.alloc(info.size)
+    let offset = 0
+    while (offset < info.size) {
+      const { bytesRead } = await handle.read(buffer, offset, info.size - offset, offset)
+      if (bytesRead === 0) break
+      offset += bytesRead
+    }
+    return buffer.subarray(0, offset)
+  } finally {
+    await handle.close()
+  }
 }
 
 // The spec's rule table. `drops` and `skips` are sets of units: a drop in a unit a phase task marks

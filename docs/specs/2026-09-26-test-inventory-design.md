@@ -217,6 +217,11 @@ goes to the ordinary retry.
   the gate's own worktree. Report files must be regular files: a FIFO or a link to `/dev/zero`
   reports size 0 and then reads without bound. The suggested `node --test` rewrite matches `--test`
   as a whole flag and puts `node_modules/.bin` on `PATH`, since it no longer runs through `npm run`.
+- **Round 3 found no remaining delete outside the report location, and a read-side race**: a
+  check by path followed by a read by path let a suite swap in a FIFO (the gate hung past the
+  check's timeout) or a link to a file outside the report (its first bytes reached the parse
+  error). Each report file is now opened once with `O_NOFOLLOW | O_NONBLOCK`, judged by `fstat`
+  on that handle, and read from it within the size cap.
 - **Attributes are scanned by hand**, linear in the tag: the regex was quadratic (80 KB tag, 5.5 s).
   Report files are sized before they are read.
 - **A symlink at an in-tree report path is refused**: the suite could otherwise point the gate at a

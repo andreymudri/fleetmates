@@ -240,7 +240,8 @@ test('a report that is not a regular file is refused before it is read', async (
     await assert.rejects(readReport(path.join(dir, 'fifo.xml'), { root: dir }), /not a regular file/)
     const other = await mkdtemp(path.join(tmpdir(), 'tm-report-link-'))
     await symlink('/dev/zero', path.join(other, 'zero.xml'))
-    await assert.rejects(readReport(other, { root: other }), /not a regular file/)
+    // Refused at the open itself (O_NOFOLLOW), which is what closes the swap between check and read.
+    await assert.rejects(readReport(other, { root: other }), /zero\.xml, which is a symbolic link/)
     await assert.rejects(readReport(path.join(other, 'zero.xml'), { root: other }), /symbolic link/)
     await rm(other, { recursive: true, force: true })
   } finally {

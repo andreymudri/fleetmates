@@ -610,7 +610,8 @@ async function prepareReport(report, cwd, previewDir) {
   if (unsafe) return { refused: `the report path passes through a symbolic link (${unsafe})`, env: {}, cleanup: null }
   // A window remains between the walk and the delete: a process an earlier check left running in
   // this worktree could swap a component for a link inside it. The worktree is the gate's own and
-  // is removed after the run; that process is teammate code the gate already runs.
+  // is removed after the run; that process is teammate code the gate already runs. The read side
+  // has no such window: `readReport` opens each file once with O_NOFOLLOW and judges the handle.
   const target = path.join(cwd, ...parts)
   await rm(target, { recursive: true, force: true })
   return { target, parts, env: {}, cleanup: null }
