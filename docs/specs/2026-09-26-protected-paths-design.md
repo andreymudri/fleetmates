@@ -180,6 +180,10 @@ Per gate invocation, nothing new is read and nothing is read twice:
 
 ## Next: spec 2, weakened-test detector (recorded, not designed here)
 
+Designed since in `docs/specs/2026-09-26-test-inventory-design.md`, which revises two of the
+points below after measuring the history: the skip rule counts per test ID, and standing skips are
+in scope.
+
 Decisions already taken, so they are not re-litigated:
 
 - Primary signal is runtime: JUnit XML from the project's own runner, baseline run at `runSha`
