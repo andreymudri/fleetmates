@@ -266,3 +266,63 @@ test('the inferred node --test check writes a report the inventory reads', async
     if (context !== undefined) process.env.NODE_TEST_CONTEXT = context
   }
 })
+
+// --- adversarial ------------------------------------------------------------------------------
+
+test('a teammate that adds .skip to an existing test fails the gate, and fix escalates it', async () => {
+  const skipped = BASE_TESTS.replace("test('x', () => {})", "test.skip('x', () => {})")
+  await withRun({ plan: planWith(T1) }, write('tests/a.test.mjs', skipped), async (root) => {
+    const { code, doc, inventory } = await gate(root)
+    assert.equal(code, 1)
+    assert.match(inventory.output, /drop: tests\/a\.test\.mjs > test > x — ran at the baseline, skipped now/)
+    const decision = decideFix(doc, 1, [{ id: 'T1', phase: 1 }], 0, {})
+    assert.equal(decision.decision, 'escalate')
+    assert.equal(decision.reason, 'process-violation')
+  })
+})
+
+// `report` lives in the manifest, which spec 1 protects: a task removing it without a (protected)
+// marking fails fileset, even when it declares the manifest.
+test('removing the report contract from the manifest without (protected) fails fileset', async () => {
+  const plan = planWith(['- Create: `a.mjs`', '- Modify: `fleetmates.gate.json`'])
+  const withoutReport = manifest()
+  delete withoutReport.phases.default.checks[0].report
+  await withRun({ plan }, write('fleetmates.gate.json', JSON.stringify(withoutReport)), async (root) => {
+    const { code, doc } = await gate(root)
+    assert.equal(code, 1)
+    const fileset = doc.results.find((r) => r.kind === 'fileset')
+    assert.equal(fileset.status, 'fail')
+    assert.match(fileset.output, /T1: protected — fleetmates\.gate\.json/)
+  })
+})
+
+// LIMIT (spec, "Out of scope"): a loosened assertion keeps the test running, so the run count does
+// not move and the inventory passes. The `tests` review lens is what judges this.
+test('LIMIT: a loosened assertion passes the inventory', async () => {
+  const strict = "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('sum', () => { assert.equal(1 + 1, 2) })\n"
+  const loose = strict.replace('assert.equal(1 + 1, 2)', 'assert.ok(1 + 1)')
+  await withRun({ plan: planWith(T1), tests: strict }, write('tests/a.test.mjs', loose), async (root) => {
+    const { code, inventory } = await gate(root)
+    assert.equal(code, 0)
+    assert.equal(inventory.status, 'pass')
+  })
+})
+
+// LIMIT (spec, "Out of scope"): the report is written by a process running teammate code. A test
+// file that drops its own report into $FLEETMATES_REPORT_DIR — every *.xml there is merged — can
+// claim a deleted test still ran.
+test('LIMIT: a test file that writes its own report controls the inventory', async () => {
+  const forger = `import { writeFileSync } from 'node:fs'
+import { test } from 'node:test'
+writeFileSync(process.env.FLEETMATES_REPORT_DIR + '/forged.xml', '<testsuites><testcase classname="test" name="y" file="' + process.cwd() + '/tests/a.test.mjs"/></testsuites>')
+test('innocent', () => {})
+`
+  const plan = planWith(['- Create: `a.mjs`', '- Modify: `tests/a.test.mjs`', '- Create: `tests/forger.test.mjs`'])
+  await withRun({ plan }, async (root) => {
+    await writeFile(path.join(root, 'tests', 'a.test.mjs'), BASE_TESTS.replace("test('y', () => {})\n", ''))
+    await writeFile(path.join(root, 'tests', 'forger.test.mjs'), forger)
+  }, async (root) => {
+    const { inventory } = await gate(root)
+    assert.equal(inventory.status, 'pass', inventory.output)
+  })
+})

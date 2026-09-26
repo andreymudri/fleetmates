@@ -357,6 +357,24 @@ a merge of the base branch may resolve a conflict on a protected path that only 
 changed. Approving such an escalation is a plan amendment on the base branch
 (see `parallel-execution`, "Amending a plan mid-run"), then a re-gate.
 
+**Test inventory.** A `command` check whose manifest entry carries a `report` gets a computed result
+`<name>:inventory` right after it. The gate runs the suite twice — on the run tip before this
+phase's merges (the baseline, in a worktree of its own) and in the preview — and compares the JUnit
+reports test by test:
+
+- `drop: <id> — ran at the baseline, absent|skipped now (changed by T2)` — a test that ran is gone
+  or skipped. Approved by marking the file `- Test (drops)` in the plan on the base branch.
+- `new skip: <id>` — a test that did not exist is skipped where the gate runs. Approved by declaring
+  its unit in the manifest's `skips` with a reason; the manifest is protected, so that is an
+  operator decision.
+- `standing skip:` and `stale skips entry:` lines ride on a PASS and never fail it; `finish` names
+  the standing skips of the last phase at the end of the run.
+
+An absent or unparseable report is a FAIL. `complete` reports the inventory as `skip` (no
+baseline); so does a solo gate. An `inventory` FAIL is a process violation and escalates, like
+`fileset` and `ownership`. What it cannot see: a loosened assertion (the test still runs), and a
+test that writes its own report — the report comes from a process running teammate code.
+
 Skipped only when the caller passes `--no-fleet`. Missing state is a failure, never a skip.
 
 A `fileset` or `ownership` failure is a process violation, not a code defect. Do not widen the

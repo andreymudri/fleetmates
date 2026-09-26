@@ -315,6 +315,28 @@ A task may change a protected path only when its plan line says so —
 marking added mid-run counts once it is amended on the base branch and the base is merged into
 the run branch.
 
+A `command` check can hand the gate a JUnit report, and the gate then compares the tests that ran
+before the phase with the tests that run after it:
+
+```json
+{ "name": "test", "kind": "command",
+  "run": "NODE_OPTIONS=\"$NODE_OPTIONS --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FLEETMATES_REPORT_DIR/node.xml\" npm run test",
+  "report": { "format": "junit", "dir": true } }
+```
+
+`"dir": true` means the runner writes under `$FLEETMATES_REPORT_DIR`, a fresh directory per run;
+`"path": "build/test-results/test"` names an in-tree report instead, deleted before each run. A test
+that stops running needs its file marked ``- Test (drops): `…` `` in the plan; a new test that is
+skipped where the gate runs needs its unit declared:
+
+```json
+{ "skips": [{ "file": "tests/db/test_schema.py", "reason": "POSTGRES_ADMIN_DSN not provisioned in the gate" }] }
+```
+
+For pytest pass `-o junit_family=xunit1` so cases carry their file. Under cargo-nextest an
+`#[ignore]`d test is absent from the report, so a newly ignored test is caught but one ignored from
+birth is not seen.
+
 ## Configuration
 
 Two files, split by trust rather than by topic.

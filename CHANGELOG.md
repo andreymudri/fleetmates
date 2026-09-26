@@ -4,6 +4,12 @@
 
 ### Added
 
+- Test inventory. A `command` check may declare a JUnit `report`; the gate then runs it on the run
+  tip before the phase as well and adds `<name>:inventory`, which fails when a test that ran is gone
+  or skipped (approved by `- Test (drops)` in the plan) or a new test is skipped where the gate runs
+  (approved by the manifest's new `skips`, with a reason). Tests skipped before and after are
+  reported, never failed, and `finish` names them. `complete` skips it; the suggested manifest for
+  `node --test` carries the report, and vitest and mocha get their refusal of a focused test.
 - Protected paths. A task may change the gate manifest — or a path the manifest's new top-level
   `protected` array lists — only when its plan line carries the ` (protected)` modifier, e.g.
   ``- Modify (protected): `fleetmates.gate.json` ``. Otherwise `fileset` fails with a

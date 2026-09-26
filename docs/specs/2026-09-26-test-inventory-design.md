@@ -189,6 +189,27 @@ goes to the ordinary retry.
 - `tests/fix-loop.test.mjs`: `inventory` FAIL escalates as `process-violation`.
 - Each new test mutation-checked against the code it pins.
 
+## Implementation notes (2026-09-26)
+
+- **nextest omits ignored tests** from its JUnit report (measured on 0.9.146, above). The drop rule
+  still sees a newly ignored test; the skip rules do not see a test ignored from birth.
+- **The suggested `node --test` command goes through `NODE_OPTIONS`.** node stops reading its own
+  options at the first positional argument, so reporter flags appended with `npm run test -- …`
+  after a file pattern never reach the test runner (measured: no report written).
+- **A symlink at an in-tree report path is refused**: the suite could otherwise point the gate at a
+  file the tree does not hold.
+- **A test ID collapses adjacent repeats** (`demo::it > runs`, not `demo::it > demo::it > demo::it >
+  runs`): nextest names the unit, the suite and the classname identically.
+- **Stacked modifiers are refused** (`(drops) (protected)`): the shape pattern used to accept only
+  one parenthesised group, so the stacked line matched neither pattern and left `files` silently.
+- **`checksForPhase` hands each report-bearing check the manifest's `skips`**, overwriting the
+  entry's own, the same way it hands enforcement checks `protected`.
+- **A report directory is merged**, which is also what the forged-report LIMIT test uses: a test
+  file writing a second `*.xml` into `$FLEETMATES_REPORT_DIR` controls the inventory.
+- The end-to-end tests live in `tests/inventory-gate.test.mjs` (one harness for gate, `complete`,
+  `finish` and the adversarial cases) rather than in `tests/gate-runner.test.mjs` and
+  `tests/adversarial.test.mjs`.
+
 ## Out of scope
 
 - **A loosened or vacuous assertion.** The run count does not move. It is 20% of stored review

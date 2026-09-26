@@ -55,6 +55,10 @@ That is a smaller claim than the previous specs made, and it is the one the code
   conflict on such a path fails `ownership` unless a task the merge integrates marks it (a base
   merge may resolve one on a file only the base changed — see "Not defended against"). See
   `docs/specs/2026-09-26-protected-paths-design.md`.
+- **V6 test inventory** — a `command` check with a `report` is run again on the run tip before the
+  phase; a test that ran and is now absent or skipped fails `<name>:inventory` unless a phase task
+  marks its file `(drops)`, and a new test skipped in the gate environment fails it unless the
+  protected manifest's `skips` declares the unit. See `docs/specs/2026-09-26-test-inventory-design.md`.
 - **V3 completion** — `complete` recomputes the gate rather than reading a recorded verdict.
   A forged or stale `status.json` PASS buys nothing.
 - **Phase derivation** — from what is actually merged, never from a stored field. Out-of-order
@@ -83,6 +87,11 @@ where the corresponding claim is made:
   with the merge named, never a false PASS.
 - **A hand-resolved conflict on an unprotected path.** Accepted unverified, as before; pinned by
   a LIMIT test.
+- **A loosened assertion.** `assert.equal(x, 5)` → `assert.ok(x)` keeps the test running, so the
+  inventory does not move. Pinned by a LIMIT test; the `tests` review lens judges it.
+- **A test that writes its own report.** The JUnit report comes from a process running teammate
+  code; a test file that drops a forged report into `$FLEETMATES_REPORT_DIR` controls the
+  inventory. Pinned by a LIMIT test — the same boundary as "a teammate that runs arbitrary code".
 
 - **A teammate that runs arbitrary code.** It has Bash with the user's permissions. It can
   write any file, including its own `package.json`, `.git/hooks/`, and `.git/config`.
