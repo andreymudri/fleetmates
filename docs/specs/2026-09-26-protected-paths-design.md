@@ -244,9 +244,19 @@ What the implementation changed relative to the text above, and why:
   guard for that merge — only files no task-side parent of the same merge changed, so a base
   parent riding an octopus exempts nothing the task parent changed (round 3 reproduced the
   octopus that the first version let through).
-- **`ownership` refuses a protected path marked skip-worktree or assume-unchanged** in the main
-  worktree, where the gate reads the manifest: `status --porcelain` never shows an edit to such a
-  file, so the tree read as clean while the manifest was rewritten.
+- **The main worktree's cleanliness is computed without trusting the repo's config.** The gate
+  reads the manifest from the main worktree, and three shapes showed it rewritten while the tree
+  read as clean: skip-worktree or assume-unchanged on the manifest (index bits, so `ownership`
+  refuses the manifest carrying either — the manifest only, since a sparse checkout legitimately
+  sets skip-worktree on paths outside its cone), an `fsmonitor` hook reporting nothing changed, and
+  `checkStat=minimal` with `trustctime=false` hiding a same-size edit (every trusted `status` runs
+  with those overridden).
+- **Scope is checked per secondary parent as well as per merge.** Round 4 showed the union: in an
+  octopus, one task's declared set or marking covered a sibling parent's change. Each task-side
+  parent's own change (three-dot) must sit inside the set of the tasks that integrate it.
+- **Task chains are listed once per gate** (`rev-list --first-parent`), not walked per merge:
+  the walk made `ownership` cubic in run length (76 s at 40 tasks, against 12 s before the rule;
+  9 s after the listing).
 - **`gate` does not print the injected line** the error table describes: its stdout is one JSON
   document, so the names go in an `injected` field. `complete`, `finish` and `prune-run` print it.
 - **`injected` is `checksForPhase`'s mark only**; a declared entry carrying it has it stripped,

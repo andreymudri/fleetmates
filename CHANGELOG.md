@@ -18,9 +18,11 @@
   integration merge may carry only files the tasks it integrates declare, and a task integrates a
   parent only when it is on the task branch's own first-parent chain. Reachability from a later
   phase's branch no longer explains an earlier merge or a direct write, so a fast-forward
-  integration now fails. `ownership` also fails when a protected path is marked skip-worktree or
-  assume-unchanged in the main worktree, and `gate`'s JSON output neutralises C1 controls and
-  U+2028/U+2029.
+  integration now fails. In an octopus, each task-side parent must stay inside the declared set of
+  the tasks that integrate it.
+- The main worktree's cleanliness no longer trusts the repo's `fsmonitor`, `checkStat` or
+  `trustctime` settings, and `ownership` fails when the manifest is marked skip-worktree or
+  assume-unchanged. `gate`'s JSON output neutralises C1 controls and U+2028/U+2029.
 - A plan whose `**Files:**` block holds a line shaped like a file line that is not one of the
   recognised forms is refused, naming the line; it used to drop that file silently. `init-run`
   exits 2; every command that reads the plan refuses too (`gate`, `complete`, `finish` and

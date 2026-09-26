@@ -1345,7 +1345,8 @@ test('dirtyPaths lists the porcelain entries and exempts the harness worktree di
     stderr: '',
   })
   const paths = await createGit({ exec }).dirtyPaths()
-  assert.deepEqual(calls[0], ['-c', 'core.quotePath=false', 'status', '--porcelain'])
+  assert.deepEqual(calls[0], ['-c', 'core.fsmonitor=false', '-c', 'core.checkStat=default', '-c', 'core.trustctime=true',
+    '-c', 'core.untrackedCache=false', '-c', 'core.quotePath=false', 'status', '--porcelain'])
   assert.deepEqual(paths, [
     { status: ' M', path: 'scripts/cli.mjs' },
     { status: '??', path: 'stray.txt' },

@@ -1601,6 +1601,15 @@ export async function runOwnershipCheck(check, ctx = {}) {
     // see `baseExplainedNote`, which also records why no base sha from run start is consulted.
     const baseExplained = []
     const chain = new Set(await firstParentChain(git, { anchorSha, runSha, commits }))
+    // Each task branch's own first-parent chain above the anchor, listed once per gate rather than
+    // walked once per (merge, task) pair: the walk made ownership cubic in the run's length. A git
+    // double without the listing falls back to the bounded walk.
+    const taskChains = new Map()
+    const integrates = async (i, parent) => {
+      if (typeof git.firstParentCommits !== 'function' || !anchorSha) return onFirstParentChain(git, shas[i], parent)
+      if (!taskChains.has(i)) taskChains.set(i, new Set(await git.firstParentCommits(shas[i], anchorSha)))
+      return taskChains.get(i).has(parent)
+    }
     for (const sha of commits) {
       let explained = false
       // A commit on the run branch's own first-parent chain is a write to the run branch itself,
@@ -1645,6 +1654,10 @@ export async function runOwnershipCheck(check, ctx = {}) {
           const scope = new Set()
           const baseTouched = new Set()
           const taskTouched = new Set()
+          // Per task-side parent: what it changed, and what the tasks integrating it allow. Checked
+          // parent by parent, because in an octopus the union would let one task's declared set or
+          // marking cover a sibling parent's change.
+          const perParent = []
           // Which protected paths it may carry: those marked by a task that integrates a secondary
           // parent, by the same first-parent rule, so a later task's marking authorises nothing.
           const authorised = new Set()
@@ -1667,14 +1680,21 @@ export async function runOwnershipCheck(check, ctx = {}) {
               // already the trust boundary for `(protected)` itself. Only for those files.
               for (const file of await git.changedFiles({ base: firstParent, branch: parent })) baseTouched.add(normalizePath(file))
             } else {
+              const own = { files: [], scope: new Set(), authorised: new Set() }
               for (let i = 0; i < shas.length; i += 1) {
                 if (!(await git.isAncestor(parent, shas[i]))) continue
                 owned = true
-                if (!(await onFirstParentChain(git, shas[i], parent))) continue
-                for (const file of taskOf[i]?.files ?? []) scope.add(normalizePath(file))
-                for (const file of taskOf[i]?.protectedFiles ?? []) authorised.add(normalizePath(file))
+                if (!(await integrates(i, parent))) continue
+                for (const file of taskOf[i]?.files ?? []) own.scope.add(normalizePath(file))
+                for (const file of taskOf[i]?.protectedFiles ?? []) own.authorised.add(normalizePath(file))
               }
-              for (const file of await git.changedFiles({ base: firstParent, branch: parent })) taskTouched.add(normalizePath(file))
+              for (const file of own.scope) scope.add(file)
+              for (const file of own.authorised) authorised.add(file)
+              for (const file of await git.changedFiles({ base: firstParent, branch: parent })) {
+                taskTouched.add(normalizePath(file))
+                own.files.push(normalizePath(file))
+              }
+              perParent.push(own)
             }
             if (!owned) { allParentsOwned = false; break }
           }
@@ -1702,6 +1722,12 @@ export async function runOwnershipCheck(check, ctx = {}) {
                 const f = normalizePath(file)
                 if (baseTouched.has(f)) continue
                 if (!scope.has(f) || (guarded.has(f.toLowerCase()) && !authorised.has(f))) outside.push(f)
+              }
+              for (const own of perParent) {
+                for (const f of own.files) {
+                  if (outside.includes(f)) continue
+                  if (!own.scope.has(f) || (guarded.has(f.toLowerCase()) && !own.authorised.has(f))) outside.push(f)
+                }
               }
               if (outside.length > 0) {
                 explained = false
@@ -1740,7 +1766,10 @@ export async function runOwnershipCheck(check, ctx = {}) {
       unexplainedCommits: unexplained,
       dirty: await git.isDirty(),
     })
-    const hidden = typeof git.hiddenFromStatus === 'function' ? await git.hiddenFromStatus(check?.protected ?? protectedPaths({})) : []
+    // Only the manifest: it is the one protected file the gate reads from the main worktree. Any
+    // other protected path is judged from commits, and a sparse checkout legitimately sets the
+    // skip-worktree bit on paths outside its cone.
+    const hidden = typeof git.hiddenFromStatus === 'function' ? await git.hiddenFromStatus(protectedPaths({})) : []
     for (const file of hidden) {
       violations.push(`${file} is marked skip-worktree or assume-unchanged, so an edit to it in the main worktree is invisible to status; clear it with \`git update-index --no-skip-worktree --no-assume-unchanged -- <path>\``)
     }

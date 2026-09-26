@@ -2260,3 +2260,52 @@ test('re-merging a landed task that declares the manifest without marking it fai
     assert.match(ownership.output, /carries fleetmates\.gate\.json, which no task it integrates declares \(or marks/)
   })
 })
+
+// Review round 4: the repo config is writable by whoever the gate judges. An fsmonitor hook that
+// reports nothing changed hid a rewritten manifest from `status`; the gate now runs its trusted
+// `status` with fsmonitor off and full stat checks on.
+test('gate fails when an fsmonitor hook hides a rewritten manifest from status', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    const t1 = await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'a\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', t1])
+    const hook = path.join(root, '.fleetmates', 'fsmonitor.sh')
+    await writeFile(hook, '#!/bin/sh\nprintf "tok\\0"\n', { mode: 0o755 })
+    git(root, ['config', 'core.fsmonitor', hook])
+    git(root, ['status', '--porcelain'])
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [] } } }), 'utf8')
+    assert.equal(git(root, ['status', '--porcelain']), '')
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.notEqual(code, 0, out)
+    const ownership = JSON.parse(out).results.find((r) => r.name === 'ownership')
+    assert.match(ownership.output, /main worktree has uncommitted changes/)
+  })
+})
+
+// Review round 4: scope and authorisation were unions over the whole merge, so in an octopus one
+// task's declared set covered a sibling parent's change. T1, landed, grows a commit writing b.mjs
+// (T2's file) and is re-merged in one octopus with T2: each parent must stay inside its own set.
+test('an octopus does not let one task\'s declared set cover a sibling parent\'s change', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+    git(root, ['checkout', '--quiet', 'fleetmates/r1/T1'])
+    await writeFile(path.join(root, 'b.mjs'), 'smuggled\n', 'utf8')
+    git(root, ['add', 'b.mjs'])
+    git(root, ['commit', '--quiet', '-m', 'payload'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    const t2 = await taskBranch(root, 'r1', 'T2', { files: { 'c.txt': 'c\n' } })
+    git(root, ['checkout', '--quiet', t2])
+    git(root, ['rm', '--quiet', 'c.txt'])
+    await writeFile(path.join(root, 'b.mjs'), 'smuggled\n', 'utf8')
+    git(root, ['add', 'b.mjs'])
+    git(root, ['commit', '--quiet', '-m', 'T2 writes its own file'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'octopus', 'fleetmates/r1/T1', t2])
+    const { out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    const ownership = JSON.parse(out).results.find((r) => r.name === 'ownership')
+    assert.equal(ownership.status, 'fail', out)
+    assert.match(ownership.output, /carries b\.mjs/)
+  })
+})
