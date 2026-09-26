@@ -1168,6 +1168,9 @@ test('a command check\'s report takes exactly one of dir: true and a repo-relati
     // The gate deletes this path before each run: the tree itself, a climb, and git's store are refused.
     { format: 'junit', path: '.' }, { format: 'junit', path: 'reports/..' }, { format: 'junit', path: './' },
     { format: 'junit', path: '.git' }, { format: 'junit', path: 'sub/.GIT/x' }, { format: 'junit', path: 'a/../b.xml' },
+    // A backslash meant a separator to the safety check and part of a name to `rm` (review round 2).
+    { format: 'junit', path: 'x\\y/z' }, { format: 'junit', path: '.git./x' }, { format: 'junit', path: '.git /x' },
+    { format: 'junit', path: 'a//b' }, { format: 'junit', path: 'r\u200b/x' },
   ]) {
     assert.throws(() => ENFORCEMENT_VALIDATORS.phases(phases(bad)), (err) => err instanceof ConfigError && err.message.includes('phases.default.checks[0].report'), JSON.stringify(bad))
   }

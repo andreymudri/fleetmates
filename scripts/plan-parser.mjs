@@ -107,9 +107,10 @@ export function parsePlan(markdown) {
     if (inFiles) {
       const file = FILE_LINE.exec(line)
       if (file) {
-        // Only a numeric `:line` (or `:line-line`, `:line:col`) suffix is stripped: a `(drops)`
-        // marking can name a runner's classname unit, and `demo::it` must stay `demo::it`.
-        const declared = file[2].replace(/:\d+(?:[-:]\d+)?$/, '')
+        // Only a `:line` suffix is stripped (`:12`, `:12-20`, `:12:5-7`, `:L12`), and never after a
+        // `::` — a `(drops)` marking can name a runner's classname unit, and `demo::it` or
+        // `suite::42` must stay whole.
+        const declared = file[2].replace(/(?<!:):L?\d+(?:[-:]\d+)*$/, '')
         current.files.push(declared)
         if (file[1] === 'protected') current.protectedFiles.push(declared)
         if (file[1] === 'drops') current.dropFiles.push(declared)

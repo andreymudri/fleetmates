@@ -6,7 +6,7 @@
 // agent-written: refusals quote a bounded, `printable` excerpt, and the parser expands no entity
 // beyond the five predefined ones and numeric references — a DOCTYPE is refused outright rather
 // than half-understood.
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { readFile, readdir, stat, lstat } from 'node:fs/promises'
 import path from 'node:path'
 import { printable } from './reviews.mjs'
 
@@ -168,8 +168,12 @@ export function parseJunit(xml, { root } = {}, units = new Map()) {
 // One report file, or every `*.xml` directly under a directory (Gradle writes one per class),
 // merged in name order so the same directory always yields the same inventory.
 export async function readReport(target, { root, maxBytes = MAX_REPORT_BYTES } = {}) {
+  // lstat, and regular files only: a FIFO or a link to /dev/zero reports size 0 and then reads
+  // without bound (review: a FIFO with no writer hung the gate past the suite's own timeout).
   let info
-  try { info = await stat(target) } catch { return null }
+  try { info = await lstat(target) } catch { return null }
+  if (info.isSymbolicLink()) refuse('is a symbolic link')
+  if (!info.isDirectory() && !info.isFile()) refuse('is not a regular file')
   const files = info.isDirectory()
     ? (await readdir(target)).filter((f) => f.endsWith('.xml')).sort().map((f) => path.join(target, f))
     : [target]
@@ -177,8 +181,10 @@ export async function readReport(target, { root, maxBytes = MAX_REPORT_BYTES } =
   const units = new Map()
   let total = 0
   for (const file of files) {
+    const entry = await lstat(file)
+    if (!entry.isFile()) refuse(`holds ${path.basename(file)}, which is not a regular file`)
     // Sized before it is read, so an oversized report is refused without being loaded.
-    total += (await stat(file)).size
+    total += entry.size
     if (total > maxBytes) refuse(`is larger than ${maxBytes} bytes`)
     const bytes = await readFile(file)
     parseJunit(bytes.toString('utf8'), { root }, units)

@@ -33,12 +33,15 @@ function inferTestCheck(script) {
   // options at the first positional argument, so `npm run test -- …` never reaches the runner, and
   // NODE_OPTIONS is inherited by every nested `node --test` a suite spawns, which then writes into
   // the same report (both measured).
-  const nodeTest = /\bnode\s+--test\b/
-  if (nodeTest.test(script) && !/--test-reporter/.test(script) && !/[;&|`$]/.test(script)) {
+  // `--test` as a whole flag: `--test-concurrency` and `--test-only` must not match (review: the
+  // rewrite glued the rest of such a flag onto the report path). The script no longer runs through
+  // `npm run`, so `node_modules/.bin` is put on PATH the way npm would.
+  const nodeTest = /\bnode\s+--test(?=\s|$)/
+  if (nodeTest.test(script) && !/--test-reporter/.test(script) && !/[;&|`$\\]/.test(script)) {
     return {
       name: 'test',
       kind: 'command',
-      run: script.replace(nodeTest, 'node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$FLEETMATES_REPORT_DIR/node.xml"'),
+      run: `PATH="$PWD/node_modules/.bin:$PATH" ${script.replace(nodeTest, 'node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$FLEETMATES_REPORT_DIR/node.xml"')}`,
       report: { format: 'junit', dir: true },
     }
   }

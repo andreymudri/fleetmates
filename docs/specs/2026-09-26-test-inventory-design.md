@@ -209,6 +209,14 @@ goes to the ordinary retry.
   included. Validation now refuses a path that is the tree, climbs, or touches `.git`; the delete
   runs only in the preview or baseline worktree; and every component of the path is checked for a
   symbolic link before the delete and again before the read.
+- **Round 2 found the delete still reachable outside the tree** through a backslash, which the
+  symlink walk read as a separator and `rm` as part of a name. An in-tree `path` is now plain
+  `/`-separated segments of `[A-Za-z0-9._-]`, no `.`/`..` segment, no segment ending in a dot, no
+  `.git` in any case; the delete target is built from the same segments the walk checked. A window
+  remains between the walk and the delete, open only to a process an earlier check left running in
+  the gate's own worktree. Report files must be regular files: a FIFO or a link to `/dev/zero`
+  reports size 0 and then reads without bound. The suggested `node --test` rewrite matches `--test`
+  as a whole flag and puts `node_modules/.bin` on `PATH`, since it no longer runs through `npm run`.
 - **Attributes are scanned by hand**, linear in the tag: the regex was quadratic (80 KB tag, 5.5 s).
   Report files are sized before they are read.
 - **A symlink at an in-tree report path is refused**: the suite could otherwise point the gate at a

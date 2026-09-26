@@ -447,3 +447,24 @@ test('the inventory output caps each class of line', async () => {
     assert.match(inventory.output, /^… and 10 more drops$/m)
   })
 })
+
+// Review round 2: `x\y` was a separator to the symlink walk and a file name to `rm`, so a committed
+// symlink named `x\y` let the pre-run delete reach outside the tree. The delete is built from the
+// walked segments, and a backslash is refused outright.
+test('a report path with a backslash never reaches rm', async () => {
+  const { runCommandCheck } = await import('../scripts/gate-runner.mjs')
+  const { symlink, readFile } = await import('node:fs/promises')
+  const tree = await mkdtemp(path.join(tmpdir(), 'tm-inv-bs-'))
+  const outside = await mkdtemp(path.join(tmpdir(), 'tm-inv-out-'))
+  try {
+    await writeFile(path.join(outside, 'z'), 'keep me')
+    await symlink(outside, path.join(tree, 'x\\y'))
+    const check = { name: 'test', kind: 'command', run: 'true', report: { format: 'junit', path: 'x\\y/z' } }
+    const result = await runCommandCheck(check, { cwd: tree, previewDir: tree })
+    assert.match(result.report.error, /not a plain path/)
+    assert.equal(await readFile(path.join(outside, 'z'), 'utf8'), 'keep me')
+  } finally {
+    await rm(tree, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})

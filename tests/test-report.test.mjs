@@ -228,3 +228,22 @@ test('an authorised drop to skipped, and a declared new skip, are not standing s
   )
   assert.deepEqual([r.dropped, r.newSkips, r.standing], [[], [], []])
 })
+
+// Review round 2: a FIFO or a link to /dev/zero reports size 0 and then reads without bound.
+test('a report that is not a regular file is refused before it is read', async () => {
+  const { execFileSync } = await import('node:child_process')
+  const { symlink } = await import('node:fs/promises')
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-report-fifo-'))
+  try {
+    execFileSync('mkfifo', [path.join(dir, 'fifo.xml')])
+    await assert.rejects(readReport(dir, { root: dir }), /not a regular file/)
+    await assert.rejects(readReport(path.join(dir, 'fifo.xml'), { root: dir }), /not a regular file/)
+    const other = await mkdtemp(path.join(tmpdir(), 'tm-report-link-'))
+    await symlink('/dev/zero', path.join(other, 'zero.xml'))
+    await assert.rejects(readReport(other, { root: other }), /not a regular file/)
+    await assert.rejects(readReport(path.join(other, 'zero.xml'), { root: other }), /symbolic link/)
+    await rm(other, { recursive: true, force: true })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

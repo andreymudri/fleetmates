@@ -265,7 +265,13 @@ test('the inferred test check carries the runner\'s refusal of a focused test, a
   const test = (script) => inferGateConfig({ scripts: { test: script } }).phases.default.checks.find((c) => c.name === 'test')
   const node = test('node --test tests/*.test.mjs')
   assert.deepEqual(node.report, { format: 'junit', dir: true })
-  assert.equal(node.run, 'node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$FLEETMATES_REPORT_DIR/node.xml" tests/*.test.mjs')
+  assert.equal(node.run, 'PATH="$PWD/node_modules/.bin:$PATH" node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$FLEETMATES_REPORT_DIR/node.xml" tests/*.test.mjs')
+  // `--test` as a whole flag, written right after `node`: `--test-concurrency=1` or `--test-only`
+  // is not `--test` followed by text, and a script shaped otherwise gets the plain check.
+  for (const script of ['node --test-concurrency=1 --test tests/', 'node --test-only tests/']) {
+    assert.deepEqual(test(script), { name: 'test', kind: 'command', run: 'npm run test' }, script)
+  }
+  assert.match(test('node --test --test-concurrency=1 tests/').run, /node --test --test-reporter=spec .*node\.xml" --test-concurrency=1 tests\/$/)
   // A script naming its own reporter, or carrying shell syntax, gets no report: added reporters
   // would outnumber destinations and node refuses to start; rewriting shell is not this code's job.
   assert.deepEqual(test('node --test --test-reporter=./r.mjs tests/*.test.mjs'), { name: 'test', kind: 'command', run: 'npm run test' })

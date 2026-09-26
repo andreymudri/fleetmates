@@ -5,6 +5,7 @@ import { mkdtemp, rm, lstat, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { readReport, compareInventories } from './test-report.mjs'
+import { reportPathParts } from './config.mjs'
 import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash, normalizePath } from './enforce.mjs'
 import { GitError } from './git.mjs'
 import { protectedPaths } from './gate-config.mjs'
@@ -600,18 +601,26 @@ async function prepareReport(report, cwd, previewDir) {
   if (previewDir === null || path.resolve(cwd) !== path.resolve(previewDir)) {
     return { refused: 'an in-tree report is read only in a worktree the gate owns; this run has none', env: {}, cleanup: null }
   }
-  const target = path.join(cwd, report.path)
-  const unsafe = await symlinkOnPath(cwd, report.path)
+  // Validated again here for a caller that did not go through the manifest validator, and the
+  // delete target is built from exactly the segments the symlink walk checks — never from the raw
+  // string, which is how a backslash once meant one path to the check and another to `rm`.
+  const parts = reportPathParts(report.path)
+  if (!parts) return { refused: 'the report path is not a plain path inside the tree', env: {}, cleanup: null }
+  const unsafe = await symlinkOnPath(cwd, parts)
   if (unsafe) return { refused: `the report path passes through a symbolic link (${unsafe})`, env: {}, cleanup: null }
+  // A window remains between the walk and the delete: a process an earlier check left running in
+  // this worktree could swap a component for a link inside it. The worktree is the gate's own and
+  // is removed after the run; that process is teammate code the gate already runs.
+  const target = path.join(cwd, ...parts)
   await rm(target, { recursive: true, force: true })
-  return { target, env: {}, cleanup: null }
+  return { target, parts, env: {}, cleanup: null }
 }
 
 // Every component from the tree root down to the report, not only the last: a committed
 // `reports -> ../elsewhere` made the pre-run delete reach outside the worktree (review, reproduced).
-async function symlinkOnPath(root, relative) {
+async function symlinkOnPath(root, parts) {
   let current = root
-  for (const part of relative.replaceAll('\\', '/').split('/').filter((p) => p !== '' && p !== '.')) {
+  for (const part of parts) {
     current = path.join(current, part)
     const info = await lstat(current).catch(() => null)
     if (!info) return null
@@ -620,10 +629,10 @@ async function symlinkOnPath(root, relative) {
   return null
 }
 
-async function collectReport({ target }, cwd) {
+async function collectReport({ target, parts }, cwd) {
   try {
     // Checked again after the run: the suite is teammate code and can plant a link while it runs.
-    const unsafe = path.isAbsolute(target) && target.startsWith(cwd) ? await symlinkOnPath(cwd, path.relative(cwd, target)) : null
+    const unsafe = parts ? await symlinkOnPath(cwd, parts) : null
     if (unsafe || (await lstat(target).catch(() => null))?.isSymbolicLink()) return { error: 'the report path is a symbolic link' }
     const roots = [cwd, await realpath(cwd).catch(() => cwd)]
     const inventory = await readReport(target, { root: roots })

@@ -91,16 +91,23 @@ function validateReport(report, where) {
   const hasPath = report.path !== undefined
   if (hasDir === hasPath) throw new ConfigError(`${where} needs exactly one of "dir": true and "path"`)
   if (hasDir && report.dir !== true) throw new ConfigError(`${where}.dir must be true`)
-  if (hasPath) {
-    // The gate deletes this path before each run, so it must name something strictly inside the
-    // tree and outside git's own store. `reports/..` normalises to `.` — the whole worktree — and
-    // was accepted before this check (review: the repository, `.git` included, was deleted).
-    const normalized = repoRelative(report.path, `${where}.path`).replace(/\/+$/, '')
-    const parts = normalized.split('/')
-    if (normalized === '.' || normalized === '' || report.path.replaceAll('\\', '/').split('/').includes('..') || parts.some((p) => p.toLowerCase() === '.git')) {
-      throw new ConfigError(`${where}.path must name a report inside the tree, not the tree itself, a parent, or .git; got ${JSON.stringify(report.path)}`)
-    }
+  if (hasPath && reportPathParts(report.path) === null) {
+    throw new ConfigError(`${where}.path must be plain "/"-separated names inside the tree (letters, digits, ".", "_", "-"; no "..", no .git); got ${JSON.stringify(report.path)}`)
   }
+}
+
+// The gate deletes an in-tree report path before each run, so the path is held to the narrowest
+// shape that can name one: "/"-separated segments of a safe character set. Two review rounds found
+// a delete outside the report through a looser shape — `reports/..` normalising to the tree itself,
+// then a backslash that the safety check read as a separator and `rm` read as part of a name. A
+// segment that is `.`/`..`, ends in a dot or a space (which Windows strips), or spells `.git` in any
+// case is refused. Returns the segments, which are what the gate builds the delete target from.
+export function reportPathParts(value) {
+  if (typeof value !== 'string') return null
+  const parts = value.replace(/\/+$/, '').split('/')
+  if (parts.length === 0 || parts.some((p) => !/^[A-Za-z0-9._-]+$/.test(p) || p === '.' || p === '..' || p.endsWith('.')
+    || p.toLowerCase() === '.git')) return null
+  return parts
 }
 
 export const ENFORCEMENT_VALIDATORS = {
