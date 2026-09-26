@@ -20,7 +20,7 @@ export const ROLES = ['implementer', 'reviewer', 'integrator']
 // is gitignored, so anything it can change, a teammate can change without leaving the dirty
 // worktree that `fileset` and `ownership` detect. See SECURITY.md — the gate is
 // tamper-EVIDENT, and an untracked override surface is exactly what removes the evidence.
-export const ENFORCEMENT_KEYS = ['phases', 'lens', 'preview', 'protected']
+export const ENFORCEMENT_KEYS = ['phases', 'lens', 'preview', 'protected', 'skips']
 
 export class ConfigError extends Error {}
 
@@ -65,6 +65,35 @@ const VALIDATORS = {
 // content is not, because a lens name or a check's `run` string is policy, not structure.
 // Exported so the pairing with ENFORCEMENT_KEYS can be pinned structurally rather than by a
 // literal a maintainer would update in the same edit that breaks it.
+// A path the manifest names inside the repository: `protected` entries, `skips` units that are
+// files, a report's in-tree `path`. The manifest is hand-edited and agent-reachable, and a path that
+// escapes the repository names nothing a task diff or a report can contain.
+function repoRelative(entry, what) {
+  if (typeof entry !== 'string' || entry.trim() === '') {
+    throw new ConfigError(`${what} must be a non-empty string, got ${JSON.stringify(entry)}`)
+  }
+  const normalized = path.posix.normalize(entry.replaceAll('\\', '/'))
+  if (path.posix.isAbsolute(normalized) || /^[A-Za-z]:/.test(normalized)
+    || normalized === '..' || normalized.startsWith('../')) {
+    throw new ConfigError(`${what} must be repo-relative, got ${JSON.stringify(entry)}`)
+  }
+  return normalized
+}
+
+// A `command` check's report contract (test inventory): exactly one of `dir: true` (the runner
+// writes under $FLEETMATES_REPORT_DIR) and `path` (an in-tree report the gate deletes first).
+function validateReport(report, where) {
+  if (report === null || typeof report !== 'object' || Array.isArray(report)) {
+    throw new ConfigError(`${where} must be an object`)
+  }
+  if (report.format !== 'junit') throw new ConfigError(`${where}.format must be "junit", got ${JSON.stringify(report.format)}`)
+  const hasDir = report.dir !== undefined
+  const hasPath = report.path !== undefined
+  if (hasDir === hasPath) throw new ConfigError(`${where} needs exactly one of "dir": true and "path"`)
+  if (hasDir && report.dir !== true) throw new ConfigError(`${where}.dir must be true`)
+  if (hasPath) repoRelative(report.path, `${where}.path`)
+}
+
 export const ENFORCEMENT_VALIDATORS = {
   lens: (v) => {
     if (!Array.isArray(v) || v.length === 0 || v.some((l) => typeof l !== 'string' || l === '')) {
@@ -87,6 +116,11 @@ export const ENFORCEMENT_VALIDATORS = {
         && (!Number.isInteger(phase.fixRounds) || phase.fixRounds < 0)) {
         throw new ConfigError(`phases.${name}.fixRounds must be an integer >= 0`)
       }
+      for (const [i, check] of (phase.checks ?? []).entries()) {
+        if (check !== null && typeof check === 'object' && check.report !== undefined) {
+          validateReport(check.report, `phases.${name}.checks[${i}].report`)
+        }
+      }
     }
     return v
   },
@@ -95,14 +129,21 @@ export const ENFORCEMENT_VALIDATORS = {
   // entry that escapes the repository names nothing any task diff can contain.
   protected: (v) => {
     if (!Array.isArray(v)) throw new ConfigError('protected must be an array of repo-relative paths')
+    for (const entry of v) repoRelative(entry, 'protected entry')
+    return v
+  },
+  // Test units the gate environment is expected to skip, each with the reason. A unit is what the
+  // test inventory names — a repo-relative file, or a runner's classname — so it is held to the
+  // repo-relative rule too: a classname is never absolute and never climbs.
+  skips: (v) => {
+    if (!Array.isArray(v)) throw new ConfigError('skips must be an array of { file, reason }')
     for (const entry of v) {
-      if (typeof entry !== 'string' || entry.trim() === '') {
-        throw new ConfigError(`protected entries must be non-empty strings, got ${JSON.stringify(entry)}`)
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new ConfigError(`skips entries must be objects, got ${JSON.stringify(entry)}`)
       }
-      const normalized = path.posix.normalize(entry.replaceAll('\\', '/'))
-      if (path.posix.isAbsolute(normalized) || /^[A-Za-z]:/.test(normalized)
-        || normalized === '..' || normalized.startsWith('../')) {
-        throw new ConfigError(`protected entry must be repo-relative, got ${JSON.stringify(entry)}`)
+      repoRelative(entry.file, 'skips entry file')
+      if (typeof entry.reason !== 'string' || entry.reason.trim() === '') {
+        throw new ConfigError(`skips entry for ${JSON.stringify(entry.file)} needs a non-empty reason`)
       }
     }
     return v
