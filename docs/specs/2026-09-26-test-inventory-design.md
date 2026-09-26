@@ -74,7 +74,7 @@ Measured shapes the parser must accept (fixtures captured from the real runner i
 | `node --test --test-reporter=junit` | `file`, absolute | `describe` is a nested `testsuite`; `todo` is `<skipped type="todo">` |
 | pytest `-o junit_family=xunit1` | `file`, relative | xunit2 (the default) has no `file`: unit falls back to the dotted `classname` |
 | jest-junit `addFileAttribute=true` | `file` | fixture captured in the plan if jest is installable; otherwise documented as unmeasured |
-| cargo-nextest junit | `classname` (binary id) | fixture captured in the plan after `cargo install cargo-nextest` |
+| cargo-nextest junit | `classname` (binary id) | **Measured (0.9.146): `#[ignore]` tests are absent from the report**, with or without `--run-ignored default`. A newly ignored test reads as a drop; a test born ignored or ignored at every gate is invisible to the skip rules. `cargo nextest list --run-ignored ignored-only` names them — a second report form is the route to close it, not built in v1 |
 | gotestsum `--junitfile` | `classname` (package) | Go is not installed here; documented as unmeasured |
 
 `skips` and `(drops)` name units exactly as the parser produces them — a path for runners that

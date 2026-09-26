@@ -11,7 +11,7 @@ Spec: `docs/specs/2026-09-26-test-inventory-design.md`
 - `npm test` green at the end of every task
 - Source-text assertions strip comments before counting a symbol
 - Every value from an agent-written file (a report, the manifest, the plan) reaches stdout through `printable`/`printableBlock`
-- Literal U+2028/U+2029 never appear in source; write ` `
+- Literal U+2028/U+2029 never appear in source; write `\u2028`
 
 ## Destination
 

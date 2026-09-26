@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="2" skipped="0" failures="0" errors="0" uuid="00000000-0000-0000-0000-000000000000" timestamp="2026-09-26T00:00:00.000Z" time="0.001">
+    <testsuite name="demo::it" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="runs" classname="demo::it" timestamp="2026-09-26T00:00:00.000Z" time="0.001"/>
+    </testsuite>
+    <testsuite name="demo" tests="1" skipped="0" errors="0" failures="0">
+        <testcase name="tests::it_works" classname="demo" timestamp="2026-09-26T00:00:00.000Z" time="0.001"/>
+    </testsuite>
+</testsuites>
