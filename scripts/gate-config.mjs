@@ -82,6 +82,7 @@ export function checksForPhase(config, phaseName) {
   const checks = phases[phaseName]?.checks ?? phases.default?.checks ?? []
   const fallback = Array.isArray(config?.lens) && config.lens.length ? config.lens : DEFAULT_LENS
   const guarded = protectedPaths(config)
+  const expectedSkips = Array.isArray(config?.skips) ? config.skips.map((s) => s?.file).filter((f) => typeof f === 'string') : []
   // `injected` is this function's mark, never the manifest's: a declared entry carrying it would
   // have its name printed as if this code had chosen it, and the name is manifest text.
   const result = checks.map((check) => {
@@ -92,6 +93,9 @@ export function checksForPhase(config, phaseName) {
     }
     if (out?.kind === 'agent' && !Array.isArray(out.lens)) return { ...out, lens: fallback }
     if (ENFORCEMENT_CHECK_KINDS.includes(out?.kind)) return { ...out, protected: guarded }
+    // The inventory's expected skips come from the top-level `skips` only, overwriting anything the
+    // check entry carries — the same rule as `protected` above.
+    if (out?.kind === 'command' && out.report !== undefined) return { ...out, skips: expectedSkips }
     return out
   })
   const names = new Set(checks.map((check) => check?.name))

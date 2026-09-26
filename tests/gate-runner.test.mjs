@@ -5049,3 +5049,13 @@ test('an octopus with the base does not lend the base exemption to a task parent
     assert.match(res.output, /fleetmates\.gate\.json/)
   })
 })
+
+// The inventory is computed by the gate, like `merge`: a result list holding only computed results
+// is not a phase the manifest's checks verified, and must not PASS.
+test('an inventory pass alone does not satisfy the some-check-ran clause', () => {
+  const verdict = aggregateVerdict([
+    { name: 'merge', kind: 'merge', status: 'pass', output: '', optional: false },
+    { name: 'test:inventory', kind: 'inventory', status: 'pass', output: '', optional: false },
+  ])
+  assert.notEqual(verdict.verdict, 'PASS', JSON.stringify(verdict))
+})

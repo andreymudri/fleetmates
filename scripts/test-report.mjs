@@ -94,9 +94,13 @@ function unitOf(attrs, root) {
   if (typeof attrs.file === 'string' && attrs.file !== '') {
     const file = attrs.file.replaceAll('\\', '/')
     if (!path.posix.isAbsolute(file) && !/^[A-Za-z]:\//.test(file)) return path.posix.normalize(file)
-    const rootPosix = String(root ?? '').replaceAll('\\', '/').replace(/\/+$/, '')
-    if (rootPosix !== '' && file.startsWith(`${rootPosix}/`)) return path.posix.normalize(file.slice(rootPosix.length + 1))
-    refuse(`names a file outside the tree it ran in (${printable(rootPosix)})`, file)
+    // Several spellings of one root are accepted: a runner may report the real path of a
+    // directory the gate names through a symlink (a temp dir on macOS is one).
+    const roots = (Array.isArray(root) ? root : [root]).map((r) => String(r ?? '').replaceAll('\\', '/').replace(/\/+$/, '')).filter((r) => r !== '')
+    for (const r of roots) {
+      if (file.startsWith(`${r}/`)) return path.posix.normalize(file.slice(r.length + 1))
+    }
+    refuse(`names a file outside the tree it ran in (${printable(roots[0] ?? '')})`, file)
   }
   if (typeof attrs.classname === 'string' && attrs.classname !== '') return attrs.classname
   return null

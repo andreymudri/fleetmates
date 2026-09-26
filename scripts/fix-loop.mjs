@@ -3,7 +3,7 @@ import { normalizePath } from './enforce.mjs'
 
 // A fileset or ownership failure is a process violation, not a code defect. Retrying it would
 // apply optimisation pressure toward widening the plan's file set, which phase-gate forbids.
-const PROCESS_KINDS = new Set(['fileset', 'ownership'])
+const PROCESS_KINDS = new Set(['fileset', 'ownership', 'inventory'])
 
 const DEFAULT_FIX_ROUNDS = 2
 

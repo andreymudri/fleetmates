@@ -1,6 +1,10 @@
 import { NAMES } from './names.mjs'
 import { spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
+import { mkdtemp, rm, lstat, realpath } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { readReport, compareInventories } from './test-report.mjs'
 import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash, normalizePath } from './enforce.mjs'
 import { GitError } from './git.mjs'
 import { protectedPaths } from './gate-config.mjs'
@@ -314,11 +318,14 @@ function installTeardown() {
 // five seconds of wall clock; production callers pass neither it nor anything but `timeoutMs`
 // and `onSpawn`, and shortening it changes only when the second signal is sent, never which
 // path runs.
-export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS } = {}) {
+export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS, env = null } = {}) {
   return new Promise((resolve, reject) => {
     installTeardown()
     const child = spawn(cmd, {
       cwd,
+      // Merged over the gate's own environment: a report contract adds one variable, it does not
+      // replace PATH and everything the suite needs.
+      ...(env ? { env: { ...process.env, ...env } } : {}),
       shell: true,
       // Its own process group, which is the only thing that makes the kill above reach the
       // suite rather than just the shell.
@@ -548,10 +555,15 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
       if (err?.code !== 'EEXIST') throw err
     }
   }
+  const contract = check.report ? await prepareReport(check.report, cwd) : null
   try {
-    const { code, output } = await exec(check.run, cwd, { timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS, onSpawn })
+    const { code, output } = await exec(check.run, cwd, {
+      timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS,
+      onSpawn,
+      ...(contract ? { env: contract.env } : {}),
+    })
     const passed = code === 0
-    return {
+    const result = {
       name: check.name,
       kind: 'command',
       status: passed ? 'pass' : 'fail',
@@ -559,13 +571,43 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
       output: passed ? '' : tail(output, TAIL_LINES),
       optional: check.optional === true,
     }
+    // Read whatever the exit code: a failing suite still has an inventory. Kept off `output`, which
+    // is what a person reads; the inventory is what `runChecks` compares.
+    if (contract) result.report = await collectReport(contract, cwd)
+    return result
   } finally {
+    if (contract?.cleanup) await contract.cleanup()
     // Released whatever happened, including a throw. A claim left behind by a check that
     // returned normally is worse than no claim at all: it keeps a preview unreapable until
     // its pid is recycled.
     for (const claim of claims) {
       try { unlinkSync(claim) } catch { /* already gone */ }
     }
+  }
+}
+
+// The report contract of a `command` check (docs/specs/2026-09-26-test-inventory-design.md). The
+// dir form hands the runner a fresh directory outside every tree; the path form deletes the
+// in-tree report first, so a report left by an earlier run can never stand in for this one.
+async function prepareReport(report, cwd) {
+  if (report.dir === true) {
+    const dir = await mkdtemp(path.join(tmpdir(), 'tm-report-'))
+    return { target: dir, env: { FLEETMATES_REPORT_DIR: dir }, cleanup: () => rm(dir, { recursive: true, force: true }).catch(() => {}) }
+  }
+  const target = path.join(cwd, report.path)
+  await rm(target, { recursive: true, force: true })
+  return { target, env: {}, cleanup: null }
+}
+
+async function collectReport({ target }, cwd) {
+  try {
+    // A symlink at the report path would have the gate read a file the tree does not hold.
+    if ((await lstat(target).catch(() => null))?.isSymbolicLink()) return { error: 'the report path is a symbolic link' }
+    const roots = [cwd, await realpath(cwd).catch(() => cwd)]
+    const inventory = await readReport(target, { root: roots })
+    return inventory ? { inventory } : { error: 'absent: the suite wrote no report' }
+  } catch (err) {
+    return { error: err.message }
   }
 }
 
@@ -1868,13 +1910,122 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted, previewDir
 // a failing `merge` check carrying git's own reason, with the `command` checks skipped: they
 // must never run against the unmerged tree, and `aggregateVerdict` blocks on the fail.
 async function previewFailure(checks, ctx, reason) {
-  return [checkResult(MERGE_CHECK, 'fail', reason), ...await runCheckList(checks, ctx, ctx.cwd, true)]
+  return [checkResult(MERGE_CHECK, 'fail', reason), ...await withInventory(checks, await runCheckList(checks, ctx, ctx.cwd, true), ctx, { reason: CONFLICT_SKIP })]
+}
+
+// --- test inventory (docs/specs/2026-09-26-test-inventory-design.md) -------------------------
+
+const INVENTORY_SOLO = 'a solo gate has no run tip to baseline against'
+const INVENTORY_NO_BRANCHES = 'no phase branches to compare against the baseline'
+const INVENTORY_EARLY = 'the early check does not run the baseline; the gate does'
+const INVENTORY_LINES = 50
+
+// Each `command` check with a `report` gets a computed `<name>:inventory` result right after its
+// own. Computed like `merge`: no runner exists for the kind, so a manifest entry claiming it lands
+// pending and blocks — the manifest can neither supply nor suppress it.
+async function withInventory(checks, listed, ctx, { reason = null } = {}) {
+  const reportChecks = [...checks].filter((c) => c && typeof c === 'object' && c.kind === 'command' && c.report)
+  if (reportChecks.length === 0) return listed
+  const skipReason = reason ?? (ctx.early ? INVENTORY_EARLY : null)
+  const baseline = skipReason ? null : await baselineReports(reportChecks, ctx)
+  const out = []
+  for (const result of listed) {
+    out.push(result)
+    const check = result?.kind === 'command' ? reportChecks.find((c) => c.name === result.name) : null
+    if (check) out.push(await inventoryResult(check, result, baseline?.get(check.name), ctx, skipReason))
+  }
+  return out
+}
+
+// The suite run again on the tree the preview merges onto, in a worktree of its own, linked and
+// claimed like the preview. Nothing is cached: a baseline stored under `.fleetmates/` would be
+// agent-writable.
+async function baselineReports(reportChecks, ctx) {
+  const reports = new Map()
+  try {
+    await withMergePreview({
+      git: ctx.git,
+      base: ctx.runBranchRef ?? ctx.runBranch,
+      branches: [],
+      always: true,
+      link: ctx.previewLink ?? [],
+      repoRoot: ctx.cwd,
+      run: async ({ path: tree }) => {
+        for (const check of reportChecks) {
+          try {
+            const result = await runCommandCheck(check, { ...ctx, cwd: tree, previewDir: tree })
+            reports.set(check.name, result.report ?? { error: 'the baseline run produced no report' })
+          } catch (err) {
+            reports.set(check.name, { error: `the baseline run threw: ${err.message}` })
+          }
+        }
+      },
+    })
+  } catch (err) {
+    for (const check of reportChecks) reports.set(check.name, { error: `the baseline tree could not be built: ${err.message}` })
+  }
+  return reports
+}
+
+function capped(lines, label) {
+  if (lines.length <= INVENTORY_LINES) return lines
+  return [...lines.slice(0, INVENTORY_LINES), `… and ${lines.length - INVENTORY_LINES} more ${label}`]
+}
+
+async function inventoryResult(check, previewResult, baseline, ctx, skipReason) {
+  const self = { name: `${check.name}:inventory`, kind: 'inventory' }
+  if (skipReason) return checkResult(self, 'skip', skipReason)
+  if (previewResult.status === 'skip') return checkResult(self, 'skip', 'the suite did not run in the preview')
+  const preview = previewResult.report
+  if (!preview) return checkResult(self, 'fail', 'the preview run produced no report')
+  if (preview.error) return checkResult(self, 'fail', `preview report: ${preview.error}`)
+  if (!baseline || baseline.error) return checkResult(self, 'fail', `baseline report: ${baseline?.error ?? 'missing'}`)
+
+  const phaseTasks = scopedPhaseTasks(ctx)
+  const drops = new Set(phaseTasks.flatMap((t) => t.dropFiles ?? []).map(normalizePath))
+  const skips = new Set((check.skips ?? []).map(normalizePath))
+  const { dropped, newSkips, standing, stale } = compareInventories(baseline.inventory, preview.inventory, { drops, skips })
+
+  const notes = [
+    ...capped(standing.map((s) => `standing skip: ${s.id}`), 'standing skips'),
+    ...stale.map((s) => `stale skips entry: ${s.unit} (nothing in it is skipped)`),
+  ]
+  if (dropped.length === 0 && newSkips.length === 0) return checkResult(self, 'pass', notes.join('\n'))
+
+  const changers = await unitChangers(ctx, phaseTasks, [...dropped, ...newSkips].map((d) => d.unit))
+  const by = (unit) => (changers.get(unit)?.length ? ` (changed by ${changers.get(unit).join(', ')})` : '')
+  const lines = [
+    ...capped(dropped.map((d) => `drop: ${d.id} — ran at the baseline, ${d.now} now${by(d.unit)}`), 'drops'),
+    ...capped(newSkips.map((d) => `new skip: ${d.id}${by(d.unit)}`), 'new skips'),
+  ]
+  if (dropped.length > 0) lines.push('a drop is approved by marking the file "- Test (drops)" in the plan on the base branch')
+  if (newSkips.length > 0) lines.push('a new skip is approved by declaring its unit in the manifest\'s "skips", with the reason')
+  return checkResult(self, 'fail', [...lines, ...notes].join('\n'))
+}
+
+// Diagnosis only — authorisation never depends on it: a drop can come from a change to source,
+// not to the test file.
+async function unitChangers(ctx, phaseTasks, units) {
+  const wanted = new Set(units)
+  const changers = new Map()
+  for (const task of phaseTasks) {
+    const branch = resolveTaskBranch(task, ctx.runId)
+    try {
+      if (!branch || !(await ctx.git.branchExists(branch))) continue
+      for (const file of await ctx.git.changedFiles({ base: ctx.runBranchRef ?? ctx.runBranch, branch })) {
+        const unit = normalizePath(file)
+        if (!wanted.has(unit)) continue
+        changers.set(unit, [...(changers.get(unit) ?? []), task.id])
+      }
+    } catch { /* diagnosis only */ }
+  }
+  return changers
 }
 
 export async function runChecks(checks, ctx = {}) {
   // A solo (--no-fleet) run has no run branch, no task branches and no git in context: there
   // is nothing to preview, so the checks run where the caller stands.
-  if (!ctx.git || ctx.solo) return runCheckList(checks, ctx, ctx.cwd, false)
+  if (!ctx.git || ctx.solo) return withInventory(checks, await runCheckList(checks, ctx, ctx.cwd, false), ctx, { reason: INVENTORY_SOLO })
 
   // The same notion of "this phase's branches" the fileset check uses — same
   // resolveTaskBranch call, same branchExists guard, same phase filter, and the same
@@ -1923,7 +2074,7 @@ export async function runChecks(checks, ctx = {}) {
         if (conflict) {
           const pairs = conflictPairs(branches, conflict)
           const merged = { ...checkResult(MERGE_CHECK, 'fail', JSON.stringify(pairs, null, 2)), pairs }
-          return [merged, ...await runCheckList(checks, ctx, ctx.cwd, true)]
+          return [merged, ...await withInventory(checks, await runCheckList(checks, ctx, ctx.cwd, true), ctx, { reason: CONFLICT_SKIP })]
         }
         const merged = checkResult(MERGE_CHECK, 'pass', '')
         // `path` is the preview, or null when the phase had no branches to merge and the
@@ -1931,7 +2082,8 @@ export async function runChecks(checks, ctx = {}) {
         // claim. Passed explicitly rather than inferred from the cwd: an explicit null is
         // the difference between "not previewing" and "previewing somewhere this code
         // failed to recognise".
-        return [merged, ...await runCheckList(checks, ctx, path ?? ctx.cwd, false, path)]
+        const listed = await runCheckList(checks, ctx, path ?? ctx.cwd, false, path)
+        return [merged, ...await withInventory(checks, listed, ctx, path === null ? { reason: INVENTORY_NO_BRANCHES } : {})]
       },
     })
   } catch (err) {
@@ -1952,7 +2104,7 @@ const RECOGNIZED = new Set(['pass', 'fail', 'skip', 'pending'])
 // results — they fail, they block, they are reported — but they are not evidence that anything
 // the manifest asked for was actually verified, so they do not satisfy the fail-closed
 // "some check ran" clause below.
-const GATE_COMPUTED_KINDS = new Set(['merge'])
+const GATE_COMPUTED_KINDS = new Set(['merge', 'inventory'])
 
 export function aggregateVerdict(results) {
   // An unrecognized or missing status is a failure, never a pass. This function is the
