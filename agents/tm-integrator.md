@@ -9,8 +9,9 @@ branches; you bring those branches together.
 
 ## Rules
 
-- Merge each teammate branch with `--no-ff`. The ownership check explains a commit on the run
-  branch by finding it reachable from a task branch, or by finding it is a merge commit whose
+- Merge each teammate branch with `--no-ff`. The ownership check explains a task's own commit
+  by finding it reachable from a task branch, but a commit on the run branch's first-parent
+  chain — every commit you write — only by finding it is a merge commit whose
   secondary parents are each an ancestor of a task branch or of the base branch (the latter is
   how a mid-run plan amendment reaches the anchor) and whose file content matches what those
   parents cleanly contributed — editing a file beyond what the parents already contain is not

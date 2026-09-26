@@ -5,7 +5,7 @@ import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parsePlan } from './plan-parser.mjs'
+import { parsePlan, PlanParseError } from './plan-parser.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { renderUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
@@ -418,11 +418,12 @@ const RESULTS_COMMANDS = new Set(['gate', 'finish', 'prune-run'])
 // `aggregateVerdict` counts it toward the fail-closed "at least one check ran" clause that stops
 // a self-generated result reading as a verified phase:
 //
-//   - `enforcementOnlyRefusal` below refuses the whole invocation for a phase that declares no
-//     enforcement check at all. Without it, a manifest of nothing but a failing `command` check
-//     produced "phase 1 PASS   skipped: test" and then "the run branch is ready to land", exit 0,
-//     where the identical state without the flag exits 1 — a run declared landable having
-//     verified nothing.
+//   - Every phase has an enforcement check to report: `checksForPhase` injects `fileset` and
+//     `ownership` when the manifest lacks them. That used to be a refusal here, because a manifest
+//     of nothing but a failing `command` check produced "phase 1 PASS   skipped: test" and then
+//     "the run branch is ready to land", exit 0, where the identical state without the flag exits
+//     1 — a run declared landable having verified nothing. Injection made that shape unreachable,
+//     so the refusal went with it.
 //   - `prune-run` below refuses to PRUNE any phase whose verdict rests on a check THIS FLAG
 //     skipped. A cheap verdict is enough to report; it is never enough to run
 //     `git worktree remove --force` over a teammate's uncommitted work.
@@ -443,12 +444,6 @@ const ENFORCEMENT_ONLY_SKIP = 'skipped by --enforcement-only: this verdict repor
 // told to drop, and the only way forward would have been rewriting their `skip` as a `pass`.
 const ENFORCEMENT_ONLY_SKIPPED = Symbol('skipped by --enforcement-only')
 
-// The enforcement kinds a manifest can actually declare. `merge` is deliberately absent even
-// though it is enforced: the gate computes it for itself, `aggregateVerdict` excludes it from the
-// same "something was verified" clause for exactly that reason, and a manifest entry claiming it
-// finds no runner and lands as a blocking pending. So a phase whose only enforced kind were
-// `merge` has declared no enforcement, and counting it here would reopen the hole this closes.
-const MANIFEST_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
 
 // A MANIFEST ENTRY IS NOT KNOWN TO BE AN OBJECT. `fleetmates.gate.json` is `JSON.parse`-only and
 // `validateGate` in `scripts/config.mjs` checks only that `phases[*].checks` is an ARRAY, never
@@ -457,21 +452,11 @@ const MANIFEST_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
 // the answer the operator needs; but a bare dereference in a site that runs FIRST throws a
 // TypeError instead and the command exits with no verdict at all. Measured on three paths, each
 // crashing at a different line: `gate` in `validateSuppliedResults`, `gate --no-fleet` in the solo
-// filter, `--enforcement-only` in `enforcementOnlyRefusal`. So a kind read off an entry straight
+// filter, `--enforcement-only` in its since-removed refusal. So a kind read off an entry straight
 // out of the manifest goes through here, and `validateSuppliedResults` skips a non-object entry
 // rather than indexing it. A null-entry test drives each of those paths; add one for any new site.
 const kindOf = (check) => check?.kind
 
-// Returns the refusal message when `--enforcement-only` cannot answer for some phase, or null.
-// Checked before a single check runs, so the caller learns the flag is the wrong tool for this
-// manifest rather than reading a verdict that was never grounded in anything.
-function enforcementOnlyRefusal(config, phases) {
-  const barren = phases.filter((p) => !checksForPhase(config, String(p)).some((c) => MANIFEST_ENFORCED_KINDS.has(kindOf(c))))
-  if (barren.length === 0) return null
-  return `--enforcement-only cannot answer for phase ${barren.join(', ')}: `
-    + `that phase's manifest declares no ${[...MANIFEST_ENFORCED_KINDS].join(' or ')} check, so dropping its command checks would leave nothing verified at all.`
-    + ' Re-run without --enforcement-only, or declare an enforcement check for it.'
-}
 
 function commandChecks(checks) {
   return checks.filter((c) => kindOf(c) === 'command')
@@ -530,21 +515,29 @@ async function runPhaseChecks(checks, ctx, enforcementOnly) {
 //   - `checkCount === 0` silences the line entirely. It exists to explain a wait, and with
 //     nothing to wait for it explained nothing. This is not the "a skipped check is always
 //     reported" rule — no check is being hidden here; there is no check.
-//   - `recommendEnforcementOnly` decides only the tail. Whether the wait is worth explaining and
-//     whether the cheaper route exists are unrelated: a manifest of nothing but `command` checks
-//     has a real wait to explain AND is exactly the barren shape `enforcementOnlyRefusal` exits 2
-//     on, so it must be told about the wait and not sent to a flag that would refuse it. Gating
-//     the recommendation on the count instead only reached manifests with no command checks,
-//     which is the one case where the line is never printed at all.
-function announceCommandChecks(io, command, checkCount, phaseCount, recommendEnforcementOnly) {
+//   - The tail always recommends `--enforcement-only`: every phase has an enforcement check to
+//     report, because `checksForPhase` injects `fileset` and `ownership` when the manifest lacks
+//     them, so the cheaper route always exists.
+function announceCommandChecks(io, command, checkCount, phaseCount) {
   if (checkCount === 0) return
   io.out(
     `${command}: running ${checkCount} command check${checkCount === 1 ? '' : 's'}`
     + ` across ${phaseCount} phase${phaseCount === 1 ? '' : 's'} — this is the slow part;`
-    + (recommendEnforcementOnly
-      ? ' pass --enforcement-only to skip them and report the enforcement checks alone'
-      : ' --enforcement-only cannot shorten it, because no phase declares an enforcement check to report instead'),
+    + ' pass --enforcement-only to skip them and report the enforcement checks alone',
   )
+}
+
+// Names the enforcement checks `checksForPhase` added because the manifest does not list them, so
+// the operator sees that a check ran which the manifest does not declare. Every name is this
+// code's own constant — `fileset`, `ownership`, `<kind>:injected` or `<kind>:injected-<n>` — never
+// manifest text.
+function injectedNames(checks) {
+  return [...new Set(checks.filter((c) => c?.injected === true).map((c) => c.name))]
+}
+
+function announceInjected(io, command, names) {
+  if (names.length === 0) return
+  io.out(`${command}: injected ${names.join(', ')} — the manifest does not declare ${names.length === 1 ? 'it' : 'them'}`)
 }
 
 // A phase reports the checks it did not run, every time, whatever put them in that state:
@@ -2917,7 +2910,14 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
 
-    const tasks = assignPhases(parsePlan(planText))
+    let tasks
+    try {
+      tasks = assignPhases(parsePlan(planText))
+    } catch (err) {
+      if (!(err instanceof PlanParseError)) throw err
+      io.out(`init-run: ${err.message}`)
+      return 2
+    }
 
     // DEFENCE IN DEPTH, and stated as such rather than as a validation that earns its keep:
     // `plan-parser.mjs` builds every id as `T${digits}` from `/^###\s+Task\s+(\d+)\s*:/`, so no
@@ -4141,15 +4141,11 @@ export async function runCli(argv, io = { out: console.log }) {
     const enforcementOnly = flags['enforcement-only'] === true
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
     reportUnmatchedSuppliedPhases(io, supplied, phases)
-    // Computed either way: it decides whether the flag is refused, and — when it was not passed —
-    // whether the announcement should recommend it at all.
-    const refusal = enforcementOnlyRefusal(config, phases)
-    if (enforcementOnly) {
-      if (refusal) { io.out(refusal); return 2 }
-    } else {
+    if (!enforcementOnly) {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
-      announceCommandChecks(io, 'prune-run', total, phases.length, refusal === null)
+      announceCommandChecks(io, 'prune-run', total, phases.length)
     }
+    announceInjected(io, 'prune-run', injectedNames(phases.flatMap((p) => checksForPhase(config, String(p)))))
 
     const passedPhases = []
     for (const phase of phases) {
@@ -4501,18 +4497,11 @@ export async function runCli(argv, io = { out: console.log }) {
     reportUnmatchedSuppliedPhases(io, supplied, phases)
 
     const enforcementOnly = flags['enforcement-only'] === true
-    // Computed either way: it decides whether the flag is refused, and — when it was not passed —
-    // whether the announcement should recommend it at all.
-    const refusal = enforcementOnlyRefusal(config, phases)
-    if (enforcementOnly) {
-      // Before any check runs, and before any phase reaches the summary below: a phase with no
-      // enforcement check left to run would otherwise be summarised PASS on nothing but its own
-      // skips, and reported as "ready to land".
-      if (refusal) { io.out(refusal); return 2 }
-    } else {
+    if (!enforcementOnly) {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
-      announceCommandChecks(io, 'finish', total, phases.length, refusal === null)
+      announceCommandChecks(io, 'finish', total, phases.length)
     }
+    announceInjected(io, 'finish', injectedNames(phases.flatMap((p) => checksForPhase(config, String(p)))))
 
     const phaseResults = []
     for (const phase of phases) {
@@ -4530,7 +4519,8 @@ export async function runCli(argv, io = { out: console.log }) {
       const results = mergeSuppliedResults(await runPhaseChecks(checks, phaseCtx, enforcementOnly), forPhase)
       // `supplied` is carried into the summary so a reader can tell a recomputed pass from a
       // reported one. It changes no verdict: aggregateVerdict stays the only producer of those.
-      phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results) })
+      const standing = results.filter((r) => r?.kind === 'inventory').flatMap((r) => r.standing ?? [])
+      phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results), standing })
     }
 
     // No wrapper at this print site, because every value the table carries is wrapped where the
@@ -5640,7 +5630,7 @@ export async function runCli(argv, io = { out: console.log }) {
       try {
         ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
       } catch (err) {
-        io.out(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2))
+        io.out(printableBlock(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2)))
         return 1
       }
       // The gate runs on the run branch, once per phase, for the life of the run — so this is the
@@ -5665,6 +5655,8 @@ export async function runCli(argv, io = { out: console.log }) {
       branchShas,
       phase: ctx.currentPhase,
       phaseName,
+      // A field rather than a line: `gate`'s stdout is one JSON document a caller parses.
+      ...(injectedNames(checks).length > 0 ? { injected: injectedNames(checks) } : {}),
     }
 
     // Recorded for digests and supervision. Nothing reads this to decide anything.
@@ -5698,6 +5690,8 @@ export async function runCli(argv, io = { out: console.log }) {
         stateError = err.message
       }
     }
+    // Both documents below: check output quotes agent-chosen file names, and `JSON.stringify` leaves the C1 range and
+    // U+2028/U+2029 raw; `printableBlock` keeps the document parseable (see `usage --json`).
     if (stateError) {
       bound = {
         ...bound,
@@ -5705,10 +5699,10 @@ export async function runCli(argv, io = { out: console.log }) {
         failed: [...verdict.failed, 'run-state'],
         error: `could not read run state: ${stateError}`,
       }
-      io.out(JSON.stringify({ ...bound, results }, null, 2))
+      io.out(printableBlock(JSON.stringify({ ...bound, results }, null, 2)))
       return 1
     }
-    io.out(JSON.stringify({ ...bound, results }, null, 2))
+    io.out(printableBlock(JSON.stringify({ ...bound, results }, null, 2)))
 
     if (status) {
       status.gates = status.gates ?? {}
@@ -5734,15 +5728,7 @@ export async function runCli(argv, io = { out: console.log }) {
     if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
 
-    // Checked before a single check runs and before the context is derived, exactly as `finish`
-    // and `prune-run` check it: the caller learns the flag is the wrong tool for this manifest
-    // rather than reading a verdict that was never grounded in anything. 2, not the rejection
-    // code — this is an answer about the manifest, never about the task.
     const enforcementOnly = flags['enforcement-only'] === true
-    if (enforcementOnly) {
-      const refusal = enforcementOnlyRefusal(config, [flags.phase ?? 'default'])
-      if (refusal) { io.out(refusal); return 2 }
-    }
 
     let ctx
     try {
@@ -5794,6 +5780,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const allChecks = checksForPhase(config, flags.phase ?? 'default')
     const taskKnown = (ctx.tasks ?? []).some((t) => t.id === flags.task)
     if (!taskKnown) { io.out(`no task ${flags.task} in the plan`); return 4 }
+    announceInjected(io, 'complete', injectedNames(allChecks))
 
     // `complete` verifies the calling task, not the whole phase. Anything that walks every
     // task in the current phase — `runFilesetCheck`, and the merge preview `runChecks`
@@ -5816,7 +5803,9 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // The gate is recomputed. A PASS recorded in status.json is never consulted, so a
     // stale or forged one buys nothing.
-    const results = await runPhaseChecks(allChecks, taskCtx, enforcementOnly)
+    // `early`: the test inventory's baseline doubles the suite's time, and the gate recomputes the
+    // inventory anyway, so a teammate's own completion check reports it as skipped.
+    const results = await runPhaseChecks(allChecks, { ...taskCtx, early: true }, enforcementOnly)
     const verdict = aggregateVerdict(results)
 
     // A check that did not run is reported by name and by reason, every time and whatever the

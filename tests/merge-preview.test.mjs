@@ -655,3 +655,38 @@ test('a marker write that fails still removes the preview directory the seam han
   // withMergePreview correctly leaves it for its actual owner rather than releasing it.
   await rm(marker, { force: true })
 })
+
+// The test inventory's baseline: `always` builds the worktree at `base` even with no branches, and
+// never merges; without it an empty branch list answers `path: null` ("run where you stand").
+test('always builds a linked worktree at base with no branches, and removes it after', async () => {
+  const { createGit, defaultGitExec } = await import('../scripts/git.mjs')
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-always-'))
+  try {
+    const sh = (args) => defaultGitExec(args, root)
+    await sh(['init', '--initial-branch=main'])
+    await sh(['config', 'user.email', 't@e'])
+    await sh(['config', 'user.name', 'T'])
+    await writeFile(path.join(root, 'a.txt'), 'base\n')
+    await mkdir(path.join(root, 'deps'))
+    await writeFile(path.join(root, '.gitignore'), 'deps/\n')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await writeFile(path.join(root, 'a.txt'), 'uncommitted\n')
+    const git = createGit({ cwd: root })
+    let seen = null
+    await withMergePreview({
+      git, base: 'main', branches: [], always: true, link: ['deps'], repoRoot: root,
+      run: async ({ path: tree }) => { seen = { tree, a: await readFile(path.join(tree, 'a.txt'), 'utf8'), deps: existsSync(path.join(tree, 'deps')) } },
+    })
+    assert.notEqual(seen.tree, null)
+    assert.equal(seen.a, 'base\n')
+    assert.equal(seen.deps, true)
+    assert.equal(existsSync(seen.tree), false)
+    assert.equal((await sh(['worktree', 'list'])).stdout.trim().split('\n').length, 1)
+    let without = 'unset'
+    await withMergePreview({ git, base: 'main', branches: [], run: async ({ path: tree }) => { without = tree } })
+    assert.equal(without, null)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

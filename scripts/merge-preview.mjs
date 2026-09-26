@@ -96,6 +96,10 @@ export async function writeOwnerMarker(marker, pid) {
 // `fixloop` an entire phase gate.
 export async function withMergePreview({
   git, base, branches = [], link = [], repoRoot, run,
+  // Build the worktree even with no branches to merge: the test inventory's baseline is `base`'s
+  // own tree, linked, claimed and torn down exactly like a preview. Without it an empty branch
+  // list answers `path: null`, meaning "run where you stand".
+  always = false,
   // Injectable so a test can hand withMergePreview a directory it already controls — with a
   // marker collision already planted at previewOwnerMarkerPath(dir) — without monkey-patching
   // node:fs/promises or racing the real mkdtemp. The same seam livePreviewPaths in
@@ -114,7 +118,7 @@ export async function withMergePreview({
   if (link.length > 0 && typeof repoRoot !== 'string') {
     throw new Error('merge preview cannot resolve preview.link entries: no repoRoot was given')
   }
-  if (branches.length === 0) return run({ path: null, merged: [] })
+  if (branches.length === 0 && !always) return run({ path: null, merged: [] })
   const dir = await makeTempDir()
   // Claimed BEFORE the worktree is added, because git registers the worktree at the start of the
   // add and not at its end (see previewOwnerMarkerPath). Inside the `try`, so a write that fails
@@ -129,7 +133,7 @@ export async function withMergePreview({
     await writeOwnerMarker(marker, process.pid)
     markerHeld = true
     await git.addWorktreeDetached(dir, base)
-    const conflict = await git.mergeInto(dir, branches)
+    const conflict = branches.length === 0 ? null : await git.mergeInto(dir, branches)
     if (conflict) {
       // An empty array is not a clean merge and not a reportable conflict: an octopus merge
       // of three or more branches resets the index before exiting, and non-conflict failures

@@ -1,8 +1,14 @@
 import { NAMES } from './names.mjs'
 import { spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
+import { mkdtemp, rm, lstat, realpath } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { readReport, compareInventories } from './test-report.mjs'
+import { reportPathParts } from './config.mjs'
 import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash, normalizePath } from './enforce.mjs'
 import { GitError } from './git.mjs'
+import { protectedPaths } from './gate-config.mjs'
 import { withMergePreview, conflictPairs, previewClaimPath } from './merge-preview.mjs'
 
 // 15 minutes. A command check is the project's own suite, so the default has to clear a
@@ -313,11 +319,14 @@ function installTeardown() {
 // five seconds of wall clock; production callers pass neither it nor anything but `timeoutMs`
 // and `onSpawn`, and shortening it changes only when the second signal is sent, never which
 // path runs.
-export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS } = {}) {
+export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS, env = null } = {}) {
   return new Promise((resolve, reject) => {
     installTeardown()
     const child = spawn(cmd, {
       cwd,
+      // Merged over the gate's own environment: a report contract adds one variable, it does not
+      // replace PATH and everything the suite needs.
+      ...(env ? { env: { ...process.env, ...env } } : {}),
       shell: true,
       // Its own process group, which is the only thing that makes the kill above reach the
       // suite rather than just the shell.
@@ -547,10 +556,15 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
       if (err?.code !== 'EEXIST') throw err
     }
   }
+  const contract = check.report ? await prepareReport(check.report, cwd, previewDir) : null
   try {
-    const { code, output } = await exec(check.run, cwd, { timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS, onSpawn })
+    const { code, output } = await exec(check.run, cwd, {
+      timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS,
+      onSpawn,
+      ...(contract ? { env: contract.env } : {}),
+    })
     const passed = code === 0
-    return {
+    const result = {
       name: check.name,
       kind: 'command',
       status: passed ? 'pass' : 'fail',
@@ -558,13 +572,74 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
       output: passed ? '' : tail(output, TAIL_LINES),
       optional: check.optional === true,
     }
+    // Read whatever the exit code: a failing suite still has an inventory. Kept off `output`, which
+    // is what a person reads; the inventory is what `runChecks` compares.
+    if (contract) result.report = contract.refused ? { error: contract.refused } : await collectReport(contract, cwd)
+    return result
   } finally {
+    if (contract?.cleanup) await contract.cleanup()
     // Released whatever happened, including a throw. A claim left behind by a check that
     // returned normally is worse than no claim at all: it keeps a preview unreapable until
     // its pid is recycled.
     for (const claim of claims) {
       try { unlinkSync(claim) } catch { /* already gone */ }
     }
+  }
+}
+
+// The report contract of a `command` check (docs/specs/2026-09-26-test-inventory-design.md). The
+// dir form hands the runner a fresh directory outside every tree; the path form deletes the
+// in-tree report first, so a report left by an earlier run can never stand in for this one.
+async function prepareReport(report, cwd, previewDir) {
+  if (report.dir === true) {
+    const dir = await mkdtemp(path.join(tmpdir(), 'tm-report-'))
+    return { target: dir, env: { FLEETMATES_REPORT_DIR: dir }, cleanup: () => rm(dir, { recursive: true, force: true }).catch(() => {}) }
+  }
+  // The in-tree form deletes before it runs, so it runs only inside a worktree the gate built and
+  // owns (the preview or the baseline) — never in the tree a person works in, which is where a
+  // solo gate or a branchless phase runs its checks.
+  if (previewDir === null || path.resolve(cwd) !== path.resolve(previewDir)) {
+    return { refused: 'an in-tree report is read only in a worktree the gate owns; this run has none', env: {}, cleanup: null }
+  }
+  // Validated again here for a caller that did not go through the manifest validator, and the
+  // delete target is built from exactly the segments the symlink walk checks — never from the raw
+  // string, which is how a backslash once meant one path to the check and another to `rm`.
+  const parts = reportPathParts(report.path)
+  if (!parts) return { refused: 'the report path is not a plain path inside the tree', env: {}, cleanup: null }
+  const unsafe = await symlinkOnPath(cwd, parts)
+  if (unsafe) return { refused: `the report path passes through a symbolic link (${unsafe})`, env: {}, cleanup: null }
+  // A window remains between the walk and the delete: a process an earlier check left running in
+  // this worktree could swap a component for a link inside it. The worktree is the gate's own and
+  // is removed after the run; that process is teammate code the gate already runs. The read side
+  // has no such window: `readReport` opens each file once with O_NOFOLLOW and judges the handle.
+  const target = path.join(cwd, ...parts)
+  await rm(target, { recursive: true, force: true })
+  return { target, parts, env: {}, cleanup: null }
+}
+
+// Every component from the tree root down to the report, not only the last: a committed
+// `reports -> ../elsewhere` made the pre-run delete reach outside the worktree (review, reproduced).
+async function symlinkOnPath(root, parts) {
+  let current = root
+  for (const part of parts) {
+    current = path.join(current, part)
+    const info = await lstat(current).catch(() => null)
+    if (!info) return null
+    if (info.isSymbolicLink()) return path.relative(root, current)
+  }
+  return null
+}
+
+async function collectReport({ target, parts }, cwd) {
+  try {
+    // Checked again after the run: the suite is teammate code and can plant a link while it runs.
+    const unsafe = parts ? await symlinkOnPath(cwd, parts) : null
+    if (unsafe || (await lstat(target).catch(() => null))?.isSymbolicLink()) return { error: 'the report path is a symbolic link' }
+    const roots = [cwd, await realpath(cwd).catch(() => cwd)]
+    const inventory = await readReport(target, { root: roots })
+    return inventory ? { inventory } : { error: 'absent: the suite wrote no report' }
+  } catch (err) {
+    return { error: err.message }
   }
 }
 
@@ -1222,6 +1297,24 @@ function scopedPhaseTasks(ctx) {
   return scopedTasks(ctx).filter((t) => t.phase === ctx.currentPhase)
 }
 
+// The protected set comes from `checksForPhase`, which overwrites whatever the manifest put on the
+// entry with `protectedPaths(config)`. A caller that builds a check list by hand gets the default
+// set rather than none: the manifest itself is always protected.
+function guardedSet(check) {
+  const paths = Array.isArray(check?.protected) ? check.protected : protectedPaths({})
+  return new Set(paths.map((p) => normalizePath(p).toLowerCase()))
+}
+
+// Membership folds case: a case-insensitive filesystem (NTFS on the win32 CI, APFS on macOS) may
+// open `Fleetmates.gate.json` as the manifest. Authorisation does NOT fold case: a marking whose
+// case differs from the changed path does not authorise it, and the change escalates. Both
+// directions err toward escalation. Do not fold the authorisation side — that loosens it.
+function protectedViolations(changed, check, task) {
+  const guarded = guardedSet(check)
+  const marked = new Set((task?.protectedFiles ?? []).map(normalizePath))
+  return changed.map(normalizePath).filter((p) => guarded.has(p.toLowerCase()) && !marked.has(p))
+}
+
 export async function runFilesetCheck(check, ctx = {}) {
   const { git, runId, runSha, anchorSha, currentPhase, phaseError } = ctx
   if (!git) return checkResult(check, 'fail', 'fileset check has no git access')
@@ -1337,9 +1430,9 @@ export async function runFilesetCheck(check, ctx = {}) {
         // A branch integrated by FAST-FORWARD leaves no merge commit and so no secondary
         // parent, so it is not a key in `mergedFiles` and reaches this test and fails it — with
         // a message that names a cause that is not the one, since the work IS on the run
-        // branch. `tm-integrator`'s contract is `--no-ff` for exactly this reason, and no other
-        // check covers the gap: `ownership` explains a fast-forwarded branch's commits by their
-        // ancestry from the task branch, so it reports nothing. Failing closed is the intended
+        // branch. `tm-integrator`'s contract is `--no-ff` for exactly this reason. `ownership`
+        // reports the same integration too: a fast-forward puts the task's commits on the run
+        // branch's first-parent chain, where task-branch ancestry explains nothing. Failing closed is the intended
         // direction; the misleading wording is the price. A SQUASH merge likewise carries no
         // secondary parent, and this plugin's integrator never squashes.
         //
@@ -1383,6 +1476,13 @@ export async function runFilesetCheck(check, ctx = {}) {
       }
       const violations = filesetViolations(changed, task.files)
       if (violations.length > 0) problems.push(`${task.id}: outside declared set — ${violations.join(', ')}`)
+      // Evaluated even for a path the task DECLARES: declaring the manifest is not authorising a
+      // change to what the gate checks. A separate line with its own label, so an escalation shows
+      // at a glance whether it was scope or protection.
+      const unmarked = protectedViolations(changed, check, task)
+      if (unmarked.length > 0) {
+        problems.push(`${task.id}: protected — ${unmarked.join(', ')} (mark it "Modify (protected)" in the plan, amended on the base branch, or revert it)`)
+      }
     } catch (err) {
       if (!(err instanceof GitError)) throw err
       problems.push(`${task.id}: ${err.message}`)
@@ -1453,7 +1553,15 @@ async function contentAt(git, sha, filePath) {
 // so it would never reach the check at all if only that one diff were consulted. Deletion is
 // a content change with no legitimate source, exactly like a fabricated addition; the merge
 // commit must still explain why a file its own second parent introduced is now gone.
-async function mergeContentExplainedByParents(git, firstParent, secondaryParents, mergeSha) {
+// `guard` narrows the one acceptance this rule makes without verifying bytes — a hand-resolved
+// conflict — for a protected path: there it is accepted only when `guard.authorised` holds the file:
+// the exact paths marked `(protected)` by the tasks that integrate a secondary parent (see
+// `runOwnershipCheck`), plus the files only a base parent changed.
+// An integrator that resolves a conflict on the manifest otherwise chooses its content freely.
+//
+// Returns `{ ok: true }` or `{ ok: false, protectedFile }`, the latter only when the one failure
+// is that narrowing, so the caller can name the file.
+async function mergeContentExplainedByParents(git, firstParent, secondaryParents, mergeSha, guard = null) {
   const mergedFiles = new Set(await git.changedFiles({ base: firstParent, branch: mergeSha }))
   for (const parent of secondaryParents) {
     for (const file of await git.changedFiles({ base: firstParent, branch: parent })) mergedFiles.add(file)
@@ -1471,16 +1579,63 @@ async function mergeContentExplainedByParents(git, firstParent, secondaryParents
       if (firstContentAtBase !== baseContent) { genuineConflict = true; break }
       cleanContributions.add(parentContent)
     }
+    const unverified = genuineConflict || cleanContributions.size > 1
+    if (unverified && guard?.paths.has(normalizePath(file).toLowerCase()) && !guard.authorised.has(normalizePath(file))) {
+      return { ok: false, protectedFile: file }
+    }
     if (genuineConflict) continue
-    if (cleanContributions.size === 0) return false
-    if (cleanContributions.size === 1 && mergeContent !== [...cleanContributions][0]) return false
+    if (cleanContributions.size === 0) return { ok: false }
+    if (cleanContributions.size === 1 && mergeContent !== [...cleanContributions][0]) return { ok: false }
     // size > 1: independent secondary parents disagree without the first parent being
     // involved — git itself would have flagged this as a conflict too. Accepted, for the
     // same reason a genuine conflict is: not verifiable byte-for-byte, but every contributor
     // is already a confirmed task branch.
   }
-  return true
+  return { ok: true }
 }
+
+// The run branch's first-parent chain inside `anchor..run`. Bounded by `commits.length` for the
+// same reason `mergedParentFiles` bounds its identical walk: a git double whose chain never reaches
+// the anchor would otherwise loop forever.
+async function firstParentChain(git, { anchorSha, runSha, commits }) {
+  const inRange = new Set(commits)
+  const chain = []
+  let cursor = runSha
+  let steps = 0
+  while (cursor && cursor !== anchorSha && inRange.has(cursor) && steps <= commits.length) {
+    chain.push(cursor)
+    const parents = await git.commitParents(cursor)
+    if (parents.length === 0) break
+    cursor = parents[0]
+    steps += 1
+  }
+  return chain
+}
+
+// Whether `parent` lies on the first-parent chain of `tip` — the task's own line of work, as
+// opposed to history it merely contains. A later phase's branch forks from the run tip, so it
+// contains every earlier task's tip, but only as the second parent of that task's integration
+// merge: never on its own first-parent chain. A fix round that merges the run branch into a landed
+// task keeps the task's own commits on its chain. The walk stops at the first commit that is an
+// ancestor of `parent`, since nothing older can be `parent` itself. Bounded, and a revisited
+// commit ends the walk, so a git double whose parents never reach `parent` cannot loop forever.
+const FIRST_PARENT_WALK_LIMIT = 10000
+async function onFirstParentChain(git, tip, parent) {
+  const seen = new Set()
+  let cursor = tip
+  while (cursor && !seen.has(cursor) && seen.size < FIRST_PARENT_WALK_LIMIT) {
+    if (cursor === parent) return true
+    if (await git.isAncestor(cursor, parent)) return false
+    seen.add(cursor)
+    cursor = (await git.commitParents(cursor))[0]
+  }
+  return false
+}
+
+// Why an injected `ownership` may fail on a run nothing ever asked to be explained. It cannot say
+// which cause applies: knowing when this version was installed would need a record under
+// `.fleetmates/`, which is agent-writable and never consulted by an enforcement check.
+const INJECTED_OWNERSHIP_NOTE = 'check injected: the manifest does not declare it; the commits above may predate this fleetmates version, or come from an inline run (use --no-fleet)'
 
 export async function runOwnershipCheck(check, ctx = {}) {
   const { git, runId, runBranch, baseBranch, anchorSha, runSha, tasks } = ctx
@@ -1489,11 +1644,14 @@ export async function runOwnershipCheck(check, ctx = {}) {
   try {
     const branches = []
     const shas = []
+    // Parallel to `shas`: the task each resolved branch belongs to, for its `(protected)` markings.
+    const taskOf = []
     for (const task of tasks ?? []) {
       const branch = resolveTaskBranch(task, runId)
       if (branch && await git.branchExists(branch)) {
         branches.push(branch)
         shas.push(await git.resolveRef(`refs/heads/${branch}`))
+        taskOf.push(task)
       }
     }
 
@@ -1507,13 +1665,40 @@ export async function runOwnershipCheck(check, ctx = {}) {
 
     const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
     const unexplained = []
+    // Merges rejected only because they hand-resolved a conflict on a protected path; named below
+    // with the file, so the escalation says why, and kept out of `unexplained`.
+    const protectedConflicts = []
+    // Merges whose content is explained by their parents but carries files no integrated task
+    // declared (or a protected one no integrated task marked).
+    const outOfScopeMerges = []
     // Every commit this check admitted only because of base ancestry. Reported on the pass —
     // see `baseExplainedNote`, which also records why no base sha from run start is consulted.
     const baseExplained = []
+    const chain = new Set(await firstParentChain(git, { anchorSha, runSha, commits }))
+    // Each task branch's own first-parent chain above the anchor, listed once per gate rather than
+    // walked once per (merge, task) pair: the walk made ownership cubic in the run's length. A git
+    // double without the listing falls back to the bounded walk.
+    const taskChains = new Map()
+    const integrates = async (i, parent) => {
+      if (typeof git.firstParentCommits !== 'function' || !anchorSha) return onFirstParentChain(git, shas[i], parent)
+      if (!taskChains.has(i)) taskChains.set(i, new Set(await git.firstParentCommits(shas[i], anchorSha)))
+      return taskChains.get(i).has(parent)
+    }
     for (const sha of commits) {
       let explained = false
-      for (const branchSha of shas) {
-        if (await git.isAncestor(sha, branchSha)) { explained = true; break }
+      // A commit on the run branch's own first-parent chain is a write to the run branch itself,
+      // and is never explained by being reachable from a task branch: every task branch of a
+      // later phase forks from the run tip, so it carries every earlier write to the run branch in
+      // its history. Reachability vouched for all of them — an evil merge in phase N, or a direct
+      // write, was "explained" by the phase N+1 branch that forked after it, and neither the next
+      // gate nor `finish` could ever report it. On the chain, the only explanation is the merge
+      // rule below, and that rule judges what each merge CARRIES, so a commit off the chain may
+      // still be explained by plain reachability: whatever it holds reaches the run branch only
+      // through a chain merge that is judged on its own.
+      if (!chain.has(sha)) {
+        for (const branchSha of shas) {
+          if (await git.isAncestor(sha, branchSha)) { explained = true; break }
+        }
       }
       if (!explained) {
         const parents = await git.commitParents(sha)
@@ -1534,27 +1719,103 @@ export async function runOwnershipCheck(check, ctx = {}) {
           // riding in behind a second, unowned parent was never inspected.
           let allParentsOwned = true
           let usedBase = false
+          // What this merge may carry: the declared files of every task that integrates one of its
+          // secondary parents, plus whatever only a base parent changed. A task integrates a parent
+          // when the parent is on the task branch's own first-parent chain (`onFirstParentChain`):
+          // merely holding it is not enough, because every later phase's branch holds every
+          // earlier tip, and its declared set would widen the earlier merge — the side-branch and
+          // fix-round smuggle this rule exists to close.
+          const scope = new Set()
+          const baseTouched = new Set()
+          const taskTouched = new Set()
+          // Per task-side parent: what it changed, and what the tasks integrating it allow. Checked
+          // parent by parent, because in an octopus the union would let one task's declared set or
+          // marking cover a sibling parent's change.
+          const perParent = []
+          // Which protected paths it may carry: those marked by a task that integrates a secondary
+          // parent, by the same first-parent rule, so a later task's marking authorises nothing.
+          const authorised = new Set()
           for (const parent of secondaryParents) {
             let owned = false
-            for (const branchSha of shas) {
-              if (await git.isAncestor(parent, branchSha)) { owned = true; break }
-            }
             // A merge of the base into the run branch is how a mid-run plan amendment reaches
             // the anchor. Its secondary parent is the base, never a task branch, so without
             // this a legitimate base advance is indistinguishable from a direct write. Base
             // content is already trusted: the anchor is computed from it and `changedFiles`
-            // diffs against it, so accepting base ancestry adds no new trust. It is still
-            // per-parent — a rogue parent riding alongside a base parent fails the loop.
-            if (!owned && baseSha && await git.isAncestor(parent, baseSha)) { owned = true; usedBase = true }
+            // diffs against it, so accepting base ancestry adds no new trust. Asked FIRST: a
+            // task branch rebased after an amendment holds the base parent too, and must not
+            // lend it its declared set or its markings. A parent at or below the anchor is a base
+            // ancestor as well, and contributes nothing (it is its own merge base with the run).
+            if (baseSha && await git.isAncestor(parent, baseSha)) {
+              owned = true
+              usedBase = true
+              // Three-dot: only what the base side changed since it met the run. The operator's
+              // amendment merge may have to resolve a conflict on a protected path the base also
+              // changed, and no task could ever mark that resolution; whoever writes the base is
+              // already the trust boundary for `(protected)` itself. Only for those files.
+              for (const file of await git.changedFiles({ base: firstParent, branch: parent })) baseTouched.add(normalizePath(file))
+            } else {
+              const own = { files: [], scope: new Set(), authorised: new Set() }
+              for (let i = 0; i < shas.length; i += 1) {
+                if (!(await git.isAncestor(parent, shas[i]))) continue
+                owned = true
+                if (!(await integrates(i, parent))) continue
+                for (const file of taskOf[i]?.files ?? []) own.scope.add(normalizePath(file))
+                for (const file of taskOf[i]?.protectedFiles ?? []) own.authorised.add(normalizePath(file))
+              }
+              for (const file of own.scope) scope.add(file)
+              for (const file of own.authorised) authorised.add(file)
+              for (const file of await git.changedFiles({ base: firstParent, branch: parent })) {
+                taskTouched.add(normalizePath(file))
+                own.files.push(normalizePath(file))
+              }
+              perParent.push(own)
+            }
             if (!owned) { allParentsOwned = false; break }
           }
+          // The base exemption covers a file only when no task-side parent changed it too: in an
+          // octopus of [run, base, task] where both changed the manifest, the task side must not
+          // ride in on the base's exemption.
+          for (const file of taskTouched) baseTouched.delete(file)
           if (allParentsOwned) {
-            explained = await mergeContentExplainedByParents(git, firstParent, secondaryParents, sha)
+            const verdict = await mergeContentExplainedByParents(
+              git, firstParent, secondaryParents, sha, { paths: guardedSet(check), authorised: new Set([...authorised, ...baseTouched]) },
+            )
+            explained = verdict.ok
+            if (verdict.protectedFile) protectedConflicts.push({ sha, file: verdict.protectedFile })
+            // Content explained by its parents is not yet content the plan allowed. A task branch
+            // that already landed can grow a commit outside its declared set — the manifest, a
+            // smuggled file — and be merged again as a routine fix round, or an integrator can
+            // commit a payload on a side branch and merge that: either way the change is a clean
+            // single-side contribution and `fileset` only diffs the phase in progress. So every
+            // integration merge carries only what the tasks it integrates declare (protected paths
+            // only where marked), plus whatever the base side changed.
+            if (explained) {
+              const outside = []
+              const guarded = guardedSet(check)
+              for (const file of await git.changedFiles({ base: firstParent, branch: sha })) {
+                const f = normalizePath(file)
+                if (baseTouched.has(f)) continue
+                if (!scope.has(f) || (guarded.has(f.toLowerCase()) && !authorised.has(f))) outside.push(f)
+              }
+              for (const own of perParent) {
+                for (const f of own.files) {
+                  if (outside.includes(f)) continue
+                  if (!own.scope.has(f) || (guarded.has(f.toLowerCase()) && !own.authorised.has(f))) outside.push(f)
+                }
+              }
+              if (outside.length > 0) {
+                explained = false
+                outOfScopeMerges.push({ sha, files: outside })
+              }
+            }
             if (explained && usedBase) baseExplained.push(sha)
           }
         }
       }
-      if (!explained) unexplained.push(sha)
+      // A merge already named by one of the two specific lines below is not also given the generic
+      // "reachable from no task branch" line: both causes that line names are false for it.
+      const named = protectedConflicts.some((c) => c.sha === sha) || outOfScopeMerges.some((m) => m.sha === sha)
+      if (!explained && !named) unexplained.push(sha)
     }
 
     // Asked of every task branch of the run, not just the current phase's: a branch merged
@@ -1579,6 +1840,20 @@ export async function runOwnershipCheck(check, ctx = {}) {
       unexplainedCommits: unexplained,
       dirty: await git.isDirty(),
     })
+    // Only the manifest: it is the one protected file the gate reads from the main worktree. Any
+    // other protected path is judged from commits, and a sparse checkout legitimately sets the
+    // skip-worktree bit on paths outside its cone.
+    const hidden = typeof git.hiddenFromStatus === 'function' ? await git.hiddenFromStatus(protectedPaths({})) : []
+    for (const file of hidden) {
+      violations.push(`${file} is marked skip-worktree or assume-unchanged, so an edit to it in the main worktree is invisible to status; clear it with \`git update-index --no-skip-worktree --no-assume-unchanged -- <path>\``)
+    }
+    for (const { sha, files } of outOfScopeMerges) {
+      violations.push(`merge ${sha} carries ${files.join(', ')}, which no task it integrates declares (or marks, for a protected path)`)
+    }
+    for (const { sha, file } of protectedConflicts) {
+      violations.push(`merge ${sha} resolved a conflict on protected ${file} that no task it integrates marks (protected)`)
+    }
+    if (violations.length > 0 && check?.injected === true) violations.push(INJECTED_OWNERSHIP_NOTE)
     return violations.length === 0
       ? checkResult(check, 'pass', baseExplainedNote({ baseBranch, commits: baseExplained }))
       : checkResult(check, 'fail', violations.join('\n'))
@@ -1667,13 +1942,124 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted, previewDir
 // a failing `merge` check carrying git's own reason, with the `command` checks skipped: they
 // must never run against the unmerged tree, and `aggregateVerdict` blocks on the fail.
 async function previewFailure(checks, ctx, reason) {
-  return [checkResult(MERGE_CHECK, 'fail', reason), ...await runCheckList(checks, ctx, ctx.cwd, true)]
+  return [checkResult(MERGE_CHECK, 'fail', reason), ...await withInventory(checks, await runCheckList(checks, ctx, ctx.cwd, true), ctx, { reason: CONFLICT_SKIP })]
+}
+
+// --- test inventory (docs/specs/2026-09-26-test-inventory-design.md) -------------------------
+
+const INVENTORY_SOLO = 'a solo gate has no run tip to baseline against'
+const INVENTORY_NO_BRANCHES = 'no phase branches to compare against the baseline'
+const INVENTORY_EARLY = 'the early check does not run the baseline; the gate does'
+const INVENTORY_LINES = 50
+
+// Each `command` check with a `report` gets a computed `<name>:inventory` result right after its
+// own. Computed like `merge`: no runner exists for the kind, so a manifest entry claiming it lands
+// pending and blocks — the manifest can neither supply nor suppress it.
+async function withInventory(checks, listed, ctx, { reason = null } = {}) {
+  const reportChecks = [...checks].filter((c) => c && typeof c === 'object' && c.kind === 'command' && c.report)
+  if (reportChecks.length === 0) return listed
+  const skipReason = reason ?? (ctx.early ? INVENTORY_EARLY : null)
+  const baseline = skipReason ? null : await baselineReports(reportChecks, ctx)
+  const out = []
+  for (const result of listed) {
+    out.push(result)
+    const check = result?.kind === 'command' ? reportChecks.find((c) => c.name === result.name) : null
+    if (check) out.push(await inventoryResult(check, result, baseline?.get(check.name), ctx, skipReason))
+  }
+  return out
+}
+
+// The suite run again on the tree the preview merges onto, in a worktree of its own, linked and
+// claimed like the preview. Nothing is cached: a baseline stored under `.fleetmates/` would be
+// agent-writable.
+async function baselineReports(reportChecks, ctx) {
+  const reports = new Map()
+  try {
+    await withMergePreview({
+      git: ctx.git,
+      base: ctx.runBranchRef ?? ctx.runBranch,
+      branches: [],
+      always: true,
+      link: ctx.previewLink ?? [],
+      repoRoot: ctx.cwd,
+      run: async ({ path: tree }) => {
+        for (const check of reportChecks) {
+          try {
+            const result = await runCommandCheck(check, { ...ctx, cwd: tree, previewDir: tree })
+            reports.set(check.name, result.report ?? { error: 'the baseline run produced no report' })
+          } catch (err) {
+            reports.set(check.name, { error: `the baseline run threw: ${err.message}` })
+          }
+        }
+      },
+    })
+  } catch (err) {
+    for (const check of reportChecks) reports.set(check.name, { error: `the baseline tree could not be built: ${err.message}` })
+  }
+  return reports
+}
+
+function capped(lines, label) {
+  if (lines.length <= INVENTORY_LINES) return lines
+  return [...lines.slice(0, INVENTORY_LINES), `… and ${lines.length - INVENTORY_LINES} more ${label}`]
+}
+
+async function inventoryResult(check, previewResult, baseline, ctx, skipReason) {
+  const self = { name: `${check.name}:inventory`, kind: 'inventory' }
+  if (skipReason) return checkResult(self, 'skip', skipReason)
+  if (previewResult.status === 'skip') return checkResult(self, 'skip', 'the suite did not run in the preview')
+  const preview = previewResult.report
+  if (!preview) return checkResult(self, 'fail', 'the preview run produced no report')
+  if (preview.error) return checkResult(self, 'fail', `preview report: ${preview.error}`)
+  if (!baseline || baseline.error) return checkResult(self, 'fail', `baseline report: ${baseline?.error ?? 'missing'}`)
+
+  const phaseTasks = scopedPhaseTasks(ctx)
+  const drops = new Set(phaseTasks.flatMap((t) => t.dropFiles ?? []).map(normalizePath))
+  const skips = new Set((check.skips ?? []).map(normalizePath))
+  const { dropped, newSkips, standing, stale } = compareInventories(baseline.inventory, preview.inventory, { drops, skips })
+
+  const notes = [
+    ...capped(standing.map((s) => `standing skip: ${s.id}`), 'standing skips'),
+    ...stale.map((s) => `stale skips entry: ${s.unit} (nothing in it is skipped)`),
+  ]
+  // `standing` rides on the result like `pairs` on a conflicted merge: `finish` names the units at
+  // the end of every run, and parsing them back out of `output` would be guessing.
+  if (dropped.length === 0 && newSkips.length === 0) return { ...checkResult(self, 'pass', notes.join('\n')), standing }
+
+  const changers = await unitChangers(ctx, phaseTasks, [...dropped, ...newSkips].map((d) => d.unit))
+  const by = (unit) => (changers.get(unit)?.length ? ` (changed by ${changers.get(unit).join(', ')})` : '')
+  const lines = [
+    ...capped(dropped.map((d) => `drop: ${d.id} — ran at the baseline, ${d.now} now${by(d.unit)}`), 'drops'),
+    ...capped(newSkips.map((d) => `new skip: ${d.id}${by(d.unit)}`), 'new skips'),
+  ]
+  if (dropped.length > 0) lines.push('a drop is approved by marking the file "- Test (drops)" in the plan on the base branch')
+  if (newSkips.length > 0) lines.push('a new skip is approved by declaring its unit in the manifest\'s "skips", with the reason')
+  return { ...checkResult(self, 'fail', [...lines, ...notes].join('\n')), standing }
+}
+
+// Diagnosis only — authorisation never depends on it: a drop can come from a change to source,
+// not to the test file.
+async function unitChangers(ctx, phaseTasks, units) {
+  const wanted = new Set(units)
+  const changers = new Map()
+  for (const task of phaseTasks) {
+    const branch = resolveTaskBranch(task, ctx.runId)
+    try {
+      if (!branch || !(await ctx.git.branchExists(branch))) continue
+      for (const file of await ctx.git.changedFiles({ base: ctx.runBranchRef ?? ctx.runBranch, branch })) {
+        const unit = normalizePath(file)
+        if (!wanted.has(unit)) continue
+        changers.set(unit, [...(changers.get(unit) ?? []), task.id])
+      }
+    } catch { /* diagnosis only */ }
+  }
+  return changers
 }
 
 export async function runChecks(checks, ctx = {}) {
   // A solo (--no-fleet) run has no run branch, no task branches and no git in context: there
   // is nothing to preview, so the checks run where the caller stands.
-  if (!ctx.git || ctx.solo) return runCheckList(checks, ctx, ctx.cwd, false)
+  if (!ctx.git || ctx.solo) return withInventory(checks, await runCheckList(checks, ctx, ctx.cwd, false), ctx, { reason: INVENTORY_SOLO })
 
   // The same notion of "this phase's branches" the fileset check uses — same
   // resolveTaskBranch call, same branchExists guard, same phase filter, and the same
@@ -1722,7 +2108,7 @@ export async function runChecks(checks, ctx = {}) {
         if (conflict) {
           const pairs = conflictPairs(branches, conflict)
           const merged = { ...checkResult(MERGE_CHECK, 'fail', JSON.stringify(pairs, null, 2)), pairs }
-          return [merged, ...await runCheckList(checks, ctx, ctx.cwd, true)]
+          return [merged, ...await withInventory(checks, await runCheckList(checks, ctx, ctx.cwd, true), ctx, { reason: CONFLICT_SKIP })]
         }
         const merged = checkResult(MERGE_CHECK, 'pass', '')
         // `path` is the preview, or null when the phase had no branches to merge and the
@@ -1730,7 +2116,8 @@ export async function runChecks(checks, ctx = {}) {
         // claim. Passed explicitly rather than inferred from the cwd: an explicit null is
         // the difference between "not previewing" and "previewing somewhere this code
         // failed to recognise".
-        return [merged, ...await runCheckList(checks, ctx, path ?? ctx.cwd, false, path)]
+        const listed = await runCheckList(checks, ctx, path ?? ctx.cwd, false, path)
+        return [merged, ...await withInventory(checks, listed, ctx, path === null ? { reason: INVENTORY_NO_BRANCHES } : {})]
       },
     })
   } catch (err) {
@@ -1751,7 +2138,7 @@ const RECOGNIZED = new Set(['pass', 'fail', 'skip', 'pending'])
 // results — they fail, they block, they are reported — but they are not evidence that anything
 // the manifest asked for was actually verified, so they do not satisfy the fail-closed
 // "some check ran" clause below.
-const GATE_COMPUTED_KINDS = new Set(['merge'])
+const GATE_COMPUTED_KINDS = new Set(['merge', 'inventory'])
 
 export function aggregateVerdict(results) {
   // An unrecognized or missing status is a failure, never a pass. This function is the

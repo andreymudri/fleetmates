@@ -175,9 +175,9 @@ export async function collectDoctorReport({ git, runId, runBranch, baseBranch, t
         //     parent. Its diff is empty too (a fast-forward also makes merge-base(run, branch)
         //     the branch's own tip), so it is reported here as contributing nothing — a message
         //     that names a cause that is not the one, since the work IS on the run branch.
-        //     `tm-integrator`'s contract is `--no-ff` for exactly this reason, and no other
-        //     check covers the gap — `ownership` explains a fast-forwarded branch's commits by
-        //     their ancestry from the task branch, so it reports nothing.
+        //     `tm-integrator`'s contract is `--no-ff` for exactly this reason. `ownership` reports
+        //     it too: a fast-forward puts the task's commits on the run branch's first-parent
+        //     chain, where task-branch ancestry explains nothing.
         //   - A SQUASH merge likewise carries no secondary parent. The plugin's integrator
         //     never squashes, so that is a statement about a repository someone else merged
         //     into, not about a run this tool drove.

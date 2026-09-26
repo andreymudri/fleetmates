@@ -158,6 +158,31 @@ async function readStatus(root, runId) {
   return JSON.parse(await readFile(path.join(root, '.fleetmates', runId, 'status.json'), 'utf8'))
 }
 
+// `fileset` and `ownership` run on every manifest now — `checksForPhase` injects them when a
+// manifest omits them (docs/specs/2026-09-26-protected-paths-design.md) — so a fixture that pins
+// anything else has to be a compliant run. `absorbIntoBase` moves whatever the test committed
+// straight onto run-branch (a manifest, a plan) onto the base: main fast-forwards to it, so the
+// anchor moves past those commits and `ownership` never sees them. Valid only before any merge.
+function absorbIntoBase(g) {
+  g(['checkout', '--quiet', 'main'])
+  g(['merge', '--quiet', '--ff-only', 'run-branch'])
+  g(['checkout', '--quiet', 'run-branch'])
+}
+
+// Lands each task through its own conventional branch carrying exactly its declared file, merged
+// with --no-ff like `tm-integrator` does. `merge: false` leaves the branches unmerged — a phase
+// still in progress, which is what `complete` and a phase-1 `gate` see.
+async function landTasks(g, root, { runId = 'r1', tasks = [['T1', 'a.mjs'], ['T2', 'b.mjs']], merge = true } = {}) {
+  for (const [id, file] of tasks) {
+    g(['checkout', '--quiet', '-b', `fleetmates/${runId}/${id}`, 'run-branch'])
+    await writeFile(path.join(root, file), `export const x = '${id}'\n`, 'utf8')
+    g(['add', file])
+    g(['commit', '--quiet', '-m', `${id} work`])
+    g(['checkout', '--quiet', 'run-branch'])
+    if (merge) g(['merge', '--quiet', '--no-ff', '-m', `integrate ${id}`, `fleetmates/${runId}/${id}`])
+  }
+}
+
 // Writes a fileset+ownership gate manifest so `gate`/`complete` exercise the derived
 // checks. `--no-fleet` strips fileset/ownership regardless of what the manifest contains.
 async function writeEnforcementManifest(root) {
@@ -209,6 +234,18 @@ The gate answers PASS or FAIL from git alone.
 **Files:**
 - Create: \`a.mjs\`
 `
+
+test('init-run refuses a malformed file line with exit 2, naming the line, with no raw control byte', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    const esc = String.fromCharCode(27)
+    await writeFile(planPath, `### Task 1: A\n\n**Files:**\n- Modfy: \`a.mjs\` ${esc}[2K\r[gate] PASS\n`, 'utf8')
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /plan line 4: unrecognised file line/)
+    assert.ok(!out.includes(esc) && !out.includes('\r'), JSON.stringify(out))
+  })
+})
 
 test('init-run compiles Destination, Not Yet Specified and Out of Scope into plan.json', async () => {
   await withRepo(async ({ root, io }) => {
@@ -2161,7 +2198,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 109, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 6 }
+const CENSUS_EXPECTED = { 'cli.mjs': 112, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2361,10 +2398,22 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **127 lines: 109 in `cli.mjs`, 6 in
-// `reviews.mjs`, 6 in `digest.mjs`, 6 in `finish.mjs`**.
+// can no longer drift away from the code unnoticed. It came to **131 lines: 112 in `cli.mjs`, 6 in
+// `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **1 site in `cli.mjs`**: `message`'s sandbox-removed refusal, which wraps
+// The most recent move was **1 site in `finish.mjs`**: `renderRunSummary`'s standing-skips line,
+// which wraps each test unit — a value parsed out of a JUnit report the suite (teammate code)
+// wrote. Driven by `tests/finish.test.mjs` ("renderRunSummary names the standing skips of the last
+// phase, printable, units once each").
+//
+// The move before that was **3 sites in `cli.mjs`**, all `gate`'s JSON documents — the derive
+// failure, the run-state failure and the verdict — each a `printableBlock` over `JSON.stringify`,
+// because check output quotes file names an agent chose and `JSON.stringify` leaves the C1 range
+// and U+2028/U+2029 raw. The verdict line is driven by `tests/adversarial.test.mjs` ("gate output
+// carries no raw C1 control from an agent-chosen file name"); the two failure lines share its
+// shape and are not row-driven.
+//
+// The move before that was **1 site in `cli.mjs`**: `message`'s sandbox-removed refusal, which wraps
 // the `--task` argv value exactly like its no-session and no-session-id neighbours (Cursor adapter,
 // a finished task whose checkout the driver removed).
 //
@@ -2527,7 +2576,9 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //    nothing else, and every refusal of the form `cannot ...: ${err.message}` where `err` came
 //    from reading or phasing the plan — the only messages `parsePlan` and `assignPhases` throw
 //    with a plan value in them are `duplicate task id` and `unsatisfiable dependencies`, both
-//    built from those same ids. Named as a class rather than as a count on purpose: a count is
+//    built from those same ids — and the unrecognised-file-line refusal, which quotes a whole
+//    plan line but builds it through `printable` inside `plan-parser.mjs` itself, outside the
+//    four census files, with its row in `tests/plan-parser.test.mjs` and an `init-run` row here. Named as a class rather than as a count on purpose: a count is
 //    what this header got wrong twice. The `assert.match(t.id, /^T\d+$/)` in the first test
 //    below pins the constraint all of them rest on.
 // 7. Constrained to the canonical decimal form of an integer before the print, by
@@ -2806,8 +2857,11 @@ const SANITISED_SITES = [
     // not-a-task-rejection code, rather than 3. The verdict and the printed block are what they
     // always were; only the number carrying them changed, twice.
     exit: 4,
-    async setup({ root, planPath, io }) {
+    async setup({ root, planPath, io, git: g }) {
       await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      // T1's own work, so the injected, task-scoped `fileset` passes and the command check stays
+      // the only thing this row is about.
+      await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
       // Written as a file rather than inlined into `run`, so no shell quoting stands between the
       // test and the PAYLOAD bytes it is asserting about — the ESC sequence is built in JS by
       // `String.fromCharCode(27)` inside forge.mjs and never passes through a shell. The route is
@@ -3315,11 +3369,13 @@ test('renderRunSummary wraps a control byte in the run id, not just in check nam
 const SUMMARY_ROW_FORGERY = '  phase 9   PASS   every phase passes: the run branch is ready to land'
 const SUMMARY_ROW_FORGED_NAME = `tests\n${SUMMARY_ROW_FORGERY}`
 
-for (const { branch, exit, extraArgv, checks } of [
+for (const { branch, exit, land, extraArgv, checks } of [
   // A command check that exits non-zero.
   { branch: 'failed', exit: 1, extraArgv: [], checks: [{ name: SUMMARY_ROW_FORGED_NAME, kind: 'command', run: 'node -e "process.exit(1)"' }] },
   // An agent check: nothing runs one, so it comes back pending.
-  { branch: 'pending', exit: 4, extraArgv: [], checks: [{ name: SUMMARY_ROW_FORGED_NAME, kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] },
+  // Both tasks land, so the injected `fileset` and `ownership` pass and the pending name is the
+  // only thing keeping the phase from PASS — which is what earns 4.
+  { branch: 'pending', exit: 4, land: true, extraArgv: [], checks: [{ name: SUMMARY_ROW_FORGED_NAME, kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] },
   // `--enforcement-only` skips the command check; the fileset check is what makes that argv legal.
   {
     branch: 'skipped',
@@ -3339,6 +3395,10 @@ for (const { branch, exit, extraArgv, checks } of [
       await writeManifest(root, { phases: { default: { checks } } })
       g(['add', 'fleetmates.gate.json'])
       g(['commit', '--quiet', '-m', 'manifest'])
+      if (land) {
+        absorbIntoBase(g)
+        await landTasks(g, root)
+      }
       lines.length = 0
       const code = await runCli(
         ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, ...extraArgv],
@@ -3989,6 +4049,7 @@ test('finish recomputes a verdict for every phase and passes when they all hold'
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     for (const [id, file] of [['T1', 'a.mjs'], ['T2', 'b.mjs']]) {
       g(['checkout', '--quiet', '-b', `fleetmates/r1/${id}`])
       await writeFile(path.join(root, file), 'export const x = 1\n', 'utf8')
@@ -4018,6 +4079,8 @@ test('finish exits 4 when a phase carries a check nobody ran', async () => {
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root)
     lines.length = 0
     const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
     const out = lines.join('\n')
@@ -4037,6 +4100,7 @@ test('finish exits 1 and names the phase whose computed check fails', async () =
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     // T1 does real work and lands. T2's branch is created off the base with nothing on it —
     // the stale-base shape: the ref exists, it is not on the run branch, and it contributes
     // nothing, so merging it would be a no-op.
@@ -4096,6 +4160,8 @@ test('finish prints the destination and open fog entries when plan.json carries 
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']] })
     lines.length = 0
     const code = await runCli(['finish', '--run', 'r1', '--plan', 'foggy-plan.md', '--base', 'main', '--root', root], io)
     const out = lines.join('\n')
@@ -4124,6 +4190,8 @@ test('finish prints nothing extra when plan.json carries no destination or fog',
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root)
     lines.length = 0
     const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
     const out = lines.join('\n')
@@ -4154,6 +4222,8 @@ test('finish swallows an unparseable plan.json and still reports the verdict unc
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root)
     await writeFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), '{ not valid json', 'utf8')
     lines.length = 0
     const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
@@ -4181,6 +4251,8 @@ test('finish swallows a wrong-shaped plan.json and still reports the verdict unc
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root)
     const plan = await readPlan(root, 'r1')
     plan.notYetSpecified = [null]
     await writeFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), JSON.stringify(plan), 'utf8')
@@ -4220,6 +4292,7 @@ test('finish returns the identical exit code with and without plan notes present
       }), 'utf8')
       g(['add', 'fleetmates.gate.json'])
       g(['commit', '--quiet', '-m', 'manifest'])
+      absorbIntoBase(g)
       g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
       await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
       g(['add', 'a.mjs'])
@@ -4305,14 +4378,11 @@ test('finish names how many command checks it is about to run', async () => {
   })
 })
 
-// --- the recommendation must only name a flag that would be accepted ------------------------
-//
-// A manifest with command checks but no enforcement check is the barren shape `enforcementOnlyRefusal`
-// exists for. The announcement told the caller to pass `--enforcement-only` to shorten the wait;
-// doing so exits 2 with "cannot answer for phase 1, 2", having run nothing. Gating this on the
-// check COUNT — the round-2 fix — only covered manifests with no command checks at all, which is
-// exactly the case where the line was never printed and the flag was never recommended.
-test('finish does not recommend --enforcement-only on a manifest it would refuse', async () => {
+// A manifest with command checks and no enforcement check used to be the barren shape the flag
+// refused, so the announcement withheld the recommendation there. `checksForPhase` now injects
+// `fileset` and `ownership` into every phase, so that shape is gone and the flag is always worth
+// naming.
+test('finish recommends --enforcement-only even on a manifest that declares no enforcement check', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
@@ -4323,10 +4393,9 @@ test('finish does not recommend --enforcement-only on a manifest it would refuse
     lines.length = 0
     await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
     const out = lines.join('\n')
-    // The wait is still explained — there really are command checks about to run.
     assert.match(out, /running 2 command checks across 2 phases/)
-    // But the flag is not offered, because this manifest is exactly the one it refuses.
-    assert.doesNotMatch(out, /pass --enforcement-only/)
+    assert.match(out, /pass --enforcement-only/)
+    assert.ok(lines.includes('finish: injected fileset, ownership — the manifest does not declare them'), out)
   })
 })
 
@@ -4387,7 +4456,7 @@ test('the same-branch refusal names the integrated case and not the gate', async
   })
 })
 
-test('prune-run does not recommend --enforcement-only on a manifest it would refuse', async () => {
+test('prune-run recommends --enforcement-only even on a manifest that declares no enforcement check', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
@@ -4399,7 +4468,8 @@ test('prune-run does not recommend --enforcement-only on a manifest it would ref
     await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root], io)
     const out = lines.join('\n')
     assert.match(out, /running 2 command checks across 2 phases/)
-    assert.doesNotMatch(out, /pass --enforcement-only/)
+    assert.match(out, /pass --enforcement-only/)
+    assert.ok(lines.includes('prune-run: injected fileset, ownership — the manifest does not declare them'), out)
   })
 })
 
@@ -4425,11 +4495,13 @@ test('prune-run names how many command checks it is about to run when they are n
 // --- what --enforcement-only must never buy --------------------------------------------------
 //
 // The flag trades coverage for time, and the trade is only honest while something was actually
-// enforced. A phase whose manifest declares no enforcement check has nothing left to run once the
-// command checks are dropped, so the flag cannot answer for it at all — and the answer it used to
-// give was the worst possible one: the synthesised skips satisfied `aggregateVerdict`'s
-// fail-closed "at least one check ran" clause, so a phase that verified NOTHING read PASS.
-test('finish --enforcement-only refuses a phase whose manifest declares no enforcement check', async () => {
+// enforced. A phase whose manifest declared no enforcement check used to have nothing left to run
+// once the command checks were dropped, and the synthesised skips satisfied `aggregateVerdict`'s
+// fail-closed "at least one check ran" clause, so a phase that verified NOTHING read PASS. The
+// flag refused that shape. `checksForPhase` now injects `fileset` and `ownership`, so the shape is
+// gone: the same manifest now answers with the injected checks, which here fail on tasks that
+// never landed — never "ready to land".
+test('finish --enforcement-only on a manifest declaring no enforcement check runs the injected checks', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
@@ -4440,14 +4512,14 @@ test('finish --enforcement-only refuses a phase whose manifest declares no enfor
     lines.length = 0
     const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
     const out = lines.join('\n')
-    assert.equal(code, 2)
-    assert.match(out, /--enforcement-only cannot answer for phase 1/)
-    // The exact sentence this refusal exists to prevent.
+    assert.equal(code, 1, out)
+    assert.match(out, /phase 1\s+FAIL\s+failed: fileset/)
+    assert.match(out, /skipped: test/)
     assert.doesNotMatch(out, /ready to land/)
   })
 })
 
-test('prune-run --enforcement-only refuses a phase whose manifest declares no enforcement check', async () => {
+test('prune-run --enforcement-only on a manifest declaring no enforcement check prunes nothing on the injected FAIL', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
@@ -4457,16 +4529,15 @@ test('prune-run --enforcement-only refuses a phase whose manifest declares no en
     g(['commit', '--quiet', '-m', 'manifest'])
     lines.length = 0
     const code = await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only', '--yes'], io)
-    assert.equal(code, 2)
-    assert.match(lines.join('\n'), /--enforcement-only cannot answer for phase 1/)
+    const out = lines.join('\n')
+    assert.equal(code, 0, out)
+    assert.match(out, /nothing to prune/)
   })
 })
 
-// The refusal loops over every phase, and every other manifest in this file declares a single
-// `default` block that applies to all of them — so the loop itself went unpinned. A manifest that
-// is barren in ONE phase only is the shape that matters: relaxing the guard to fire on two or
-// more barren phases leaves this file green while phase 2 sails through having verified nothing.
-test('--enforcement-only refuses when only some phases declare no enforcement check', async () => {
+// Per phase, not per manifest: a manifest whose phase 2 block declares no enforcement check still
+// gets them injected for phase 2, so phase 2 cannot read PASS on nothing but its own skips.
+test('--enforcement-only answers for a phase whose own block declares no enforcement check', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
@@ -4480,10 +4551,8 @@ test('--enforcement-only refuses when only some phases declare no enforcement ch
     lines.length = 0
     const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
     const out = lines.join('\n')
-    assert.equal(code, 2)
-    // Phase 2 is the barren one, and the message names it rather than the phase that is fine.
-    assert.match(out, /cannot answer for phase 2\b/)
-    assert.doesNotMatch(out, /cannot answer for phase 1\b/)
+    assert.equal(code, 1, out)
+    assert.match(out, /phase 2\s+FAIL\s+failed: fileset/)
     assert.doesNotMatch(out, /ready to land/)
   })
 })
@@ -4643,11 +4712,10 @@ test('a null manifest entry is diagnosed on the --enforcement-only path', async 
   })
 })
 
-// The other direction: `merge` is enforced but the gate COMPUTES it, so a manifest cannot declare
-// it — an entry claiming that kind finds no runner and lands as a blocking pending. Counting it as
-// declared enforcement would let `[command, merge]` past the refusal into a verdict resting on
-// nothing the manifest actually asked for.
-test('--enforcement-only refuses a manifest whose only enforced kind is the computed merge check', async () => {
+// `merge` is enforced but the gate COMPUTES it, so a manifest entry claiming that kind finds no
+// runner and lands as a blocking pending. It never counted as declared enforcement, and now it does
+// not need to: `fileset` and `ownership` are injected beside it.
+test('--enforcement-only on a manifest whose only enforced kind is the computed merge check still runs fileset and ownership', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
@@ -4660,8 +4728,10 @@ test('--enforcement-only refuses a manifest whose only enforced kind is the comp
     g(['commit', '--quiet', '-m', 'manifest'])
     lines.length = 0
     const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--enforcement-only'], io)
-    assert.equal(code, 2)
-    assert.match(lines.join('\n'), /cannot answer for phase 1/)
+    const out = lines.join('\n')
+    assert.notEqual(code, 0, out)
+    assert.match(out, /failed: fileset/)
+    assert.doesNotMatch(out, /ready to land/)
   })
 })
 
@@ -4747,6 +4817,7 @@ test('prune-run --enforcement-only --yes will not remove a worktree on a verdict
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     g(['add', 'a.mjs'])
@@ -4789,6 +4860,7 @@ test('prune-run prunes a phase whose skip was supplied by the caller rather than
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     g(['add', 'a.mjs'])
@@ -4797,7 +4869,9 @@ test('prune-run prunes a phase whose skip was supplied by the caller rather than
     g(['merge', '--no-ff', '--quiet', '-m', 'integrate T1', 'fleetmates/r1/T1'])
     const wtPath = path.join(root, '.claude', 'worktrees', 'supplied-skip-t1')
     g(['worktree', 'add', '--quiet', wtPath, 'fleetmates/r1/T1'])
-    const results = path.join(root, 'r.json')
+    // Under the ignored state directory: an untracked file at the root dirties the main worktree,
+    // which the injected `ownership` check reports.
+    const results = path.join(root, '.fleetmates', 'r.json')
     await writeFile(results, JSON.stringify({
       phases: { 1: { results: [{ name: 'review', status: 'skip' }] } },
     }), 'utf8')
@@ -4831,6 +4905,7 @@ test('prune-run without --enforcement-only prunes the phase whose checks all act
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     g(['add', 'a.mjs'])
@@ -4917,6 +4992,7 @@ test('prune-run with --yes removes this run’s worktree once its phase passes',
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     g(['add', 'a.mjs'])
@@ -4949,6 +5025,7 @@ async function stagePrunableRun({ root, planPath, io, lines, git: g }, { merged 
   }), 'utf8')
   g(['add', 'fleetmates.gate.json'])
   g(['commit', '--quiet', '-m', 'manifest'])
+  absorbIntoBase(g)
   g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
   await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
   g(['add', 'a.mjs'])
@@ -4984,6 +5061,20 @@ async function stagePrunableRun({ root, planPath, io, lines, git: g }, { merged 
   lines.length = 0
 }
 
+// A manifest swapped mid-run reaches the run the way a plan amendment does: committed on the base
+// and merged into the run branch with --no-ff. Left uncommitted it would dirty the main worktree,
+// which the injected `ownership` check reports.
+function commitManifestOnBase(g) {
+  g(['stash', 'push', '--quiet', '--', 'fleetmates.gate.json'])
+  g(['checkout', '--quiet', 'main'])
+  g(['stash', 'pop', '--quiet'])
+  g(['add', 'fleetmates.gate.json'])
+  g(['commit', '--quiet', '-m', 'manifest swapped mid-run'])
+  g(['checkout', '--quiet', 'run-branch'])
+  g(['merge', '--quiet', '--no-ff', '-m', 'merge base', 'main'])
+}
+
+
 // A command check that runs WHILE `prune-run` is deciding. This is the only way to stage a
 // mid-run mutation of the refs the deletion rests on, and it is not a contrived one: `prune-run`
 // derives its context once, then runs every phase's checks — arbitrary shell commands, bounded at
@@ -5011,17 +5102,22 @@ async function stagePrunableRun({ root, planPath, io, lines, git: g }, { merged 
 // `stagePrunableRun` has built the history, and a commit here would move the very tip the caller
 // just measured. Only an `ownership` check would notice the dirty file, and this manifest
 // declares none.
-async function stageMidRunCheck({ root }, run) {
+async function stageMidRunCheck({ root, git: g }, run) {
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
     phases: {
       default: {
         checks: [
           { name: 'fileset', kind: 'fileset' },
+          // Declared ahead of `midrun` rather than left to injection, which appends it last: the
+          // command moves the checked-out run branch, which leaves the main worktree dirty for
+          // any ownership check that runs after it. What this helper pins is the prune proof.
+          { name: 'ownership', kind: 'ownership' },
           { name: 'midrun', kind: 'command', run },
         ],
       },
     },
   }), 'utf8')
+  commitManifestOnBase(g)
 }
 
 // `ctx.runSha` is captured by `derive` before any check runs. Proving containment against that
@@ -5829,13 +5925,16 @@ test('complete keeps 2, 3 and 4 for three different things', async () => {
 test('complete exits 4, not 3, when only a run-wide check fails', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // T1's own work, unmerged: the injected, task-scoped `fileset` passes, so what this test
+    // pins is the only thing that decides the code.
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
     await writeFile(
       path.join(root, 'fleetmates.gate.json'),
       JSON.stringify({ phases: { default: { checks: [{ name: 'ownership', kind: 'ownership' }] } } }),
       'utf8',
     )
     // A commit written straight to the run branch by someone who is not this teammate — the
-    // exact case review reproduced. T1 has done nothing wrong and has no branch either.
+    // exact case review reproduced. T1 has done nothing wrong.
     await writeFile(path.join(root, 'stray.mjs'), 'export const x = 1\n', 'utf8')
     g(['add', 'stray.mjs', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'direct write to the run branch'])
@@ -5997,8 +6096,11 @@ test('completeExitCode separates a built conflict from a preview that never buil
 // typo is the orchestrator's, not the teammate's, and blocking a stop on it costs a turn for
 // something the teammate cannot even see.
 test('complete exits 4 when a check could not run at all', async () => {
-  await withRepo(async ({ root, planPath, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // T1's own work, unmerged: the injected, task-scoped `fileset` passes, so what this test
+    // pins is the only thing that decides the code.
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
     await writeFile(
       path.join(root, 'fleetmates.gate.json'),
       JSON.stringify({
@@ -6026,6 +6128,9 @@ test('complete exits 4 when a check could not run at all', async () => {
 test('the exit-code mapping does not depend on --enforcement-only', async () => {
   await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    // T1's own work, unmerged: the injected, task-scoped `fileset` passes, so what this test
+    // pins is the only thing that decides the code.
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
     await writeFile(
       path.join(root, 'fleetmates.gate.json'),
       JSON.stringify({
@@ -6098,15 +6203,20 @@ test('complete --enforcement-only does not mark the task done', async () => {
 })
 
 test('complete exits 0 and marks the task done when it passes', async () => {
-  await withRepo(async ({ root, planPath, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
-    // A manifest with only a command check: nothing here depends on task branches
-    // existing, so the recomputed gate passes cleanly.
+    // A manifest with only a command check, committed on the base so the main worktree stays
+    // clean; the injected `fileset` and `ownership` pass because T1's own branch carries exactly
+    // its declared file.
     await writeFile(
       path.join(root, 'fleetmates.gate.json'),
       JSON.stringify({ phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }),
       'utf8',
     )
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
     lines.length = 0
     const code = await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io)
     assert.equal(code, 0)
@@ -6170,6 +6280,13 @@ test('gate accepts an explicit --base when both main and master exist', async ()
       JSON.stringify({ phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }),
       'utf8',
     )
+    // Committed on the base with T1's own work in place, so the injected `fileset` and `ownership`
+    // pass and the base selection is the only thing this test varies.
+    gitCmd(['add', 'fleetmates.gate.json'])
+    gitCmd(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(gitCmd)
+    gitCmd(['branch', '-f', 'master', 'main'])
+    await landTasks(gitCmd, root, { tasks: [['T1', 'a.mjs']], merge: false })
     const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--base', 'master', '--root', root], io)
     assert.equal(code, 0)
   })
@@ -6189,6 +6306,13 @@ test('--base is honoured even when it names a branch that is neither main nor ma
       JSON.stringify({ phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }),
       'utf8',
     )
+    // Committed on the base with T1's own work in place, so the injected `fileset` and `ownership`
+    // pass and the base selection is the only thing this test varies.
+    gitCmd(['add', 'fleetmates.gate.json'])
+    gitCmd(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(gitCmd)
+    gitCmd(['branch', '-f', 'trunk', 'main'])
+    await landTasks(gitCmd, root, { tasks: [['T1', 'a.mjs']], merge: false })
     const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--base', 'trunk', '--root', root], io)
     assert.equal(code, 0)
     const parsed = JSON.parse(lines.join('\n'))
@@ -7081,9 +7205,15 @@ test('gate with a pending agent check exits 1, and --results supplying it as pas
 })
 
 test('the verdict recorded into status.json after a --results run is PASS', async () => {
-  await withRepo(async ({ root, planPath, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeAgentManifest(root)
+    // Committed on the base with T1's own work in place, so the injected `fileset` and `ownership`
+    // pass and the supplied review is what decides the verdict.
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
     const resultsPath = await writeResults(root, {
       results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }],
     })
@@ -7538,7 +7668,9 @@ test('complete wires a manifest\'s preview.link through to the merge preview', a
     // makes this test pin the quoting rather than merely use it — a hostile TMPDIR is not
     // something a test can arrange for itself, but a hostile file name is.
     const onWin32 = process.platform === 'win32'
-    const sentinelPath = path.join(root, onWin32 ? 'sentinel-executed.txt' : "sentinel'executed.txt")
+    // Under the ignored state directory: a sentinel at the root would dirty the main worktree
+    // for the injected `ownership` check, which runs after this command check.
+    const sentinelPath = path.join(root, '.fleetmates', onWin32 ? 'sentinel-executed.txt' : "sentinel'executed.txt")
     await writeFile(
       path.join(root, 'fleetmates.gate.json'),
       JSON.stringify({
@@ -9978,7 +10110,11 @@ test('finish keeps supplied evidence to the phase it names', async () => {
     await writeReviewOnlyManifest(root)
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
-    const results = path.join(root, 'r.json')
+    absorbIntoBase(g)
+    await landTasks(g, root)
+    // Under the ignored state directory: an untracked file at the root dirties the main worktree,
+    // which the injected `ownership` check reports.
+    const results = path.join(root, '.fleetmates', 'r.json')
     await writeFile(results, JSON.stringify({
       phases: { 1: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } },
     }), 'utf8')
@@ -10074,6 +10210,7 @@ test('prune-run prunes a review-only phase only when the review is supplied', as
     await writeReviewOnlyManifest(root)
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
     g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
     g(['add', 'a.mjs'])
@@ -10087,7 +10224,9 @@ test('prune-run prunes a review-only phase only when the review is supplied', as
     await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
     assert.equal(hasWorktree(root, 'a1'), true, 'no review supplied: the worktree stays')
 
-    const results = path.join(root, 'r.json')
+    // Under the ignored state directory: an untracked file at the root dirties the main worktree,
+    // which the injected `ownership` check reports.
+    const results = path.join(root, '.fleetmates', 'r.json')
     await writeFile(results, JSON.stringify({
       phases: { 1: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } },
     }), 'utf8')
@@ -10584,7 +10723,7 @@ test('a preview root that cannot be read is left in place even though the sweep 
 // (`checksForPhase(config, flags.phase ?? 'default')`) — but no test in the suite passed it, so
 // dropping it from KNOWN_FLAGS broke every caller with the suite green.
 test('complete --phase selects the manifest block it names', async () => {
-  await withRepo(async ({ root, planPath, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       phases: {
@@ -10592,6 +10731,12 @@ test('complete --phase selects the manifest block it names', async () => {
         lenient: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] },
       },
     }), 'utf8')
+    // Committed on the base with T1's own work in place, so the injected `fileset` and `ownership`
+    // pass and the command checks are the only thing this test varies.
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
     lines.length = 0
     // The default block fails, so without the flag the task stays pending. 4 rather than 3: the
     // block that fails declares only a `command` check, which is not scoped to this task.
@@ -10613,13 +10758,19 @@ test('complete --phase selects the manifest block it names', async () => {
 // already on is the one base `derive` refuses — a gate run from the base branch is vacuous — so
 // the flag reaching `derive` is visible in the answer rather than merely accepted.
 test('complete --base reaches the derivation rather than being accepted and ignored', async () => {
-  await withRepo(async ({ root, planPath, io, lines }) => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(
       path.join(root, 'fleetmates.gate.json'),
       JSON.stringify({ phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }),
       'utf8',
     )
+    // Committed on the base with T1's own work in place, so the injected `fileset` and `ownership`
+    // pass and the command checks are the only thing this test varies.
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
     // --base main is the branch derive would have chosen anyway: it passes.
     lines.length = 0
     assert.equal(
@@ -12824,7 +12975,7 @@ test('brief carries the constraints committed at the anchor, not the ones in the
   })
 })
 
-test('complete --enforcement-only refuses a phase whose manifest declares no enforcement check', async () => {
+test('complete --enforcement-only on a manifest declaring no enforcement check runs the injected checks', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(
@@ -12837,11 +12988,10 @@ test('complete --enforcement-only refuses a phase whose manifest declares no enf
       ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--enforcement-only', '--root', root],
       io,
     )
-    // 2, matching `finish` and `prune-run`: the flag is the wrong tool for this manifest, and
-    // that is a configuration answer, never a verdict about the task.
-    assert.equal(code, 2)
-    assert.match(lines.join('\n'), /--enforcement-only cannot answer for phase default/)
-    assert.doesNotMatch(lines.join('\n'), /gate does not pass for phase/)
+    // T1 has no branch, so the injected, task-scoped `fileset` rejects the work: 3, the code the
+    // SubagentStop hook blocks on — never the configuration answer the old refusal gave.
+    assert.equal(code, 3, lines.join('\n'))
+    assert.match(lines.join('\n'), /gate does not pass for phase/)
   })
 })
 
@@ -14309,7 +14459,7 @@ test('locate on a detached worktree names the state rather than printing a null 
 // The command check is ordered FIRST here, unlike `stageMidRunCheck`, and that ordering is the
 // whole fixture: `prune-run` runs a phase's checks in the order the manifest lists them, so a
 // mover placed after `fileset` would move the branch only after the question had been asked.
-async function stageTaskBranchMover({ root }, run) {
+async function stageTaskBranchMover({ root, git: g }, run) {
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
     phases: {
       default: {
@@ -14320,6 +14470,7 @@ async function stageTaskBranchMover({ root }, run) {
       },
     },
   }), 'utf8')
+  commitManifestOnBase(g)
 }
 
 test('a task branch moved mid-run is judged at its new sha, so its phase fails and its worktree survives', async () => {
@@ -15511,5 +15662,65 @@ test('dispatch-integrator refuses a FAIL gate recorded under the derived numeric
     const code = await runCli(['dispatch-integrator', '--run', 'r1', '--phase', 'default', '--root', root], io)
     assert.equal(code, 4, lines.join('\n'))
     assert.match(lines.join('\n'), /no recorded PASS/)
+  })
+})
+
+// --- injected enforcement checks are named where they ran (docs/specs/2026-09-26-protected-paths-design.md)
+
+test('gate names the enforcement checks it injected in its JSON, and complete prints them', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(
+      path.join(root, 'fleetmates.gate.json'),
+      JSON.stringify({ phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }, { name: 'fileset', kind: 'fileset' }] } } }),
+      'utf8',
+    )
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
+    lines.length = 0
+    assert.equal(await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io), 0, lines.join('\n'))
+    assert.deepEqual(JSON.parse(lines.join('\n')).injected, ['ownership'])
+    lines.length = 0
+    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io), 0)
+    assert.ok(lines.includes('complete: injected ownership — the manifest does not declare it'), lines.join('\n'))
+  })
+})
+
+test('gate carries no injected field when the manifest declares both enforcement checks', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeEnforcementManifest(root)
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
+    lines.length = 0
+    assert.equal(await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io), 0, lines.join('\n'))
+    assert.equal('injected' in JSON.parse(lines.join('\n')), false)
+  })
+})
+
+// prune-run must judge each phase with the injected checks too. A command-only manifest whose
+// command passes, T1 integrated cleanly, then a direct write on the run branch: only the injected
+// `ownership` can keep T1's worktree from being removed.
+test('prune-run keeps a worktree whose phase fails only an injected check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+    }), 'utf8')
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']] })
+    await writeFile(path.join(root, 'stray.mjs'), 'export const s = 1\n', 'utf8')
+    g(['add', 'stray.mjs'])
+    g(['commit', '--quiet', '-m', 'direct write on the run branch'])
+    g(['worktree', 'add', '--quiet', path.join(root, '.claude', 'worktrees', 'inj1'), 'fleetmates/r1/T1'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(hasWorktree(root, 'inj1'), true, lines.join('\n'))
   })
 })

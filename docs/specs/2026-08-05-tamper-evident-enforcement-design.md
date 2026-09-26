@@ -43,7 +43,22 @@ That is a smaller claim than the previous specs made, and it is the one the code
   a violation. Renames report both pre- and post-image.
 - **V2 ownership** — no task branch may be the run branch under any alias spelling; the main
   worktree must be clean; every commit on the run branch since the anchor must be reachable
-  from a task branch.
+  from a task branch — except a commit on the run branch's own first-parent chain, which only
+  the merge rule can explain, and that rule also requires each integration merge to carry only
+  files the tasks it integrates declare (2026-09-26: reachability let the next phase's branches,
+  forked from the run tip, vouch for every earlier write to the run branch).
+- **V4 non-removable enforcement** — `fileset` and `ownership` are injected into any phase whose
+  manifest omits them, so a merge that rewrites the manifest cannot switch off the check that
+  reports it. The manifest may add to them, never narrow them.
+- **V5 protected paths** — a task that changes the manifest, or a path in its `protected` list,
+  fails `fileset` unless its plan line at the anchor marks it `(protected)`; a hand-resolved
+  conflict on such a path fails `ownership` unless a task the merge integrates marks it (a base
+  merge may resolve one on a file only the base changed — see "Not defended against"). See
+  `docs/specs/2026-09-26-protected-paths-design.md`.
+- **V6 test inventory** — a `command` check with a `report` is run again on the run tip before the
+  phase; a test that ran and is now absent or skipped fails `<name>:inventory` unless a phase task
+  marks its file `(drops)`, and a new test skipped in the gate environment fails it unless the
+  protected manifest's `skips` declares the unit. See `docs/specs/2026-09-26-test-inventory-design.md`.
 - **V3 completion** — `complete` recomputes the gate rather than reading a recorded verdict.
   A forged or stale `status.json` PASS buys nothing.
 - **Phase derivation** — from what is actually merged, never from a stored field. Out-of-order
@@ -55,6 +70,28 @@ That is a smaller claim than the previous specs made, and it is the one the code
 
 These are known, reproduced, and deliberately out of scope. Each must appear in the docs
 where the corresponding claim is made:
+
+- **Write access to the base branch.** A `(protected)` marking is authoritative because the plan
+  is read at the anchor; whoever can commit to the base can mark anything, including a task that
+  drops every command check from the manifest. For the same reason a merge whose secondary parent
+  comes from the base may hand-resolve a conflict on a protected path the base itself changed:
+  that is the operator's amendment merge, and no task branch could ever carry its base parent to
+  authorise it.
+- **A landed task's authority has no phase bound.** Task refs are agent-writable. An integrator
+  that extends a landed task's branch in a later phase and merges it again is judged by that
+  task's declared set and markings, as a fix round would be; a marked task can then change its
+  protected path after its own phase's review. Bounding it by refs would be forgeable by the same
+  write.
+- **A landed task's ref moved onto the run tip** loses the task's own commits from its
+  first-parent chain, so its earlier integration merge fails `ownership` — a false FAIL, reported
+  with the merge named, never a false PASS.
+- **A hand-resolved conflict on an unprotected path.** Accepted unverified, as before; pinned by
+  a LIMIT test.
+- **A loosened assertion.** `assert.equal(x, 5)` → `assert.ok(x)` keeps the test running, so the
+  inventory does not move. Pinned by a LIMIT test; the `tests` review lens judges it.
+- **A test that writes its own report.** The JUnit report comes from a process running teammate
+  code; a test file that drops a forged report into `$FLEETMATES_REPORT_DIR` controls the
+  inventory. Pinned by a LIMIT test — the same boundary as "a teammate that runs arbitrary code".
 
 - **A teammate that runs arbitrary code.** It has Bash with the user's permissions. It can
   write any file, including its own `package.json`, `.git/hooks/`, and `.git/config`.

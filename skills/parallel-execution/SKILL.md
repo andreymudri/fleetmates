@@ -321,6 +321,9 @@ Rebuilding the run branch is the orchestrator's operation, not the integrator's:
 does checkout plus `--no-ff` merge and reports `blocked` rather than reset or force-move a branch,
 so a dispatch asking it to rebuild asks for something its contract does not cover.
 
+Approving a `fileset` escalation on a protected path is this same operation: add ` (protected)` to
+that task's file line in the amended plan, then re-run the gate.
+
 Amend only when a task's declared file set is genuinely wrong. Correcting a stale *interface* — a
 signature an earlier phase's fix rounds changed — belongs in the dispatch brief, not the plan.
 
@@ -429,9 +432,9 @@ teammate automatically; a teammate never shares a worktree with another.
   `finish` and `prune-run` otherwise recompute every command check of every phase — for a
   five-phase run, five full test suites — to answer a question that usually does not need them.
   It drops only command checks; fileset, ownership, and the merge check the gate computes for
-  itself still run. Every dropped check is reported as skip, never silently omitted. It REFUSES
-  with exit 2 when a phase's manifest declares no fileset and no ownership check, because with
-  nothing else to verify the result would be meaningless. And it will not let `prune-run` remove
+  itself still run. Fileset and ownership run even when a phase's manifest omits them, because the
+  gate injects them, so the flag always has an enforcement check to report. Every dropped check is
+  reported as skip, never silently omitted. And it will not let `prune-run` remove
   a worktree for a phase whose PASS rests on a check the flag skipped — a cheap verdict is enough
   to report, not enough to delete.
 - **Prune after the phase passes its gate, not when a teammate returns:** `phase-gate` resolves a

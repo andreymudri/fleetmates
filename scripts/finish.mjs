@@ -110,6 +110,15 @@ export function renderRunSummary(runId, phaseResults = []) {
     lines.push(`  phase ${entry.phase}   ${verdict.verdict ?? 'FAIL'}${entry.supplied ? ' (review supplied)' : ''}${blocking.length ? `   ${blocking.join(', ')}` : ''}`)
   }
 
+  // A test skipped at every gate is invisible to the verdict by design (standing skips never fail),
+  // so the end of the run is where it is named: the rustot-stats case, five live assertions skipped
+  // at every gate because the environment was never provisioned.
+  const standing = phaseResults.at(-1)?.standing ?? []
+  if (standing.length > 0) {
+    const units = [...new Set(standing.map((s) => s.unit))]
+    lines.push(`standing skips at the last gate: ${standing.length} (units: ${units.map((u) => printable(u)).join(', ')})`)
+  }
+
   if (summary.complete) {
     lines.push('every phase passes: the run branch is ready to land')
     return lines.join('\n')

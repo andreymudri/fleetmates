@@ -1008,10 +1008,9 @@ test('parallel-execution states --enforcement-only drops only command checks', a
     // shares none of the claim's own wording.
     subject: /\b(fileset|ownership|command check)/i,
     allow: [
-      // Reviewed: the refusal claim below. It names fileset and ownership as what a manifest must
-      // declare for the flag to answer at all, consistent with — not qualifying — the claim that
-      // both checks still run.
-      /^It REFUSES with exit 2 when a phase's manifest declares no fileset and no ownership check, because with nothing else to verify the result would be meaningless\.$/i,
+      // Reviewed: the injection claim below. It says fileset and ownership run even when the
+      // manifest omits them — consistent with, and strengthening, the claim that both still run.
+      /^Fileset and ownership run even when a phase's manifest omits them, because the gate injects them, so the flag always has an enforcement check to report\.$/i,
       // Reviewed: the purpose sentence. It says finish/prune-run normally run every command
       // check of every phase; it says nothing about what --enforcement-only itself drops or
       // keeps, so it does not qualify this claim.
@@ -1030,23 +1029,16 @@ test('parallel-execution states every check --enforcement-only drops is reported
   )
 })
 
-test('parallel-execution states --enforcement-only refuses a phase with no enforcement check', async () => {
+// The refusal this used to pin (exit 2 for a phase declaring no fileset and no ownership check) is
+// gone: `checksForPhase` injects both, so that phase shape no longer exists.
+test('parallel-execution states fileset and ownership are injected under --enforcement-only', async () => {
   const { doc } = await skill('parallel-execution')
   const section = doc.section('Worktree mechanics')
-  assertClaim(section, {
-    label: 'enforcement-only refusal',
-    claim: /^It REFUSES with exit 2 when a phase's manifest declares no fileset and no ownership check, because with nothing else to verify the result would be meaningless\.$/i,
-    // Widened from the case-sensitive, claim-only /\bREFUSES\b/ (which even "refuses" missed) to
-    // every inflection of the verb, case-insensitively. Proven by mutation: "...and it refuses
-    // nothing when a phase declares no checks at all" is caught.
-    subject: /\brefus(e|es|ed|ing)\b/i,
-    allow: [
-      // Reviewed: the fresh-implementer exception's own justification for hand-forcing a
-      // worktree removal — an unrelated refusal (git's, on a dirty worktree) used to explain why
-      // `--force` is authorised there, not a claim about this flag's exit-2 refusal.
-      /^The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir \/AL \/S and remove the link itself with rd <link> — both from cmd\.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with "already used by worktree"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover\.$/i,
-    ],
-  })
+  assertStatement(
+    section,
+    /^Fileset and ownership run even when a phase's manifest omits them, because the gate injects them, so the flag always has an enforcement check to report\.$/i,
+    '--enforcement-only must state that the gate injects fileset and ownership',
+  )
 })
 
 test('parallel-execution states --enforcement-only never authorises a prune on a skipped check', async () => {
@@ -2052,7 +2044,7 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
   // exclusively inside `if (status)`, so no `--run` means no write — the claim above, checked
   // against the code rather than against its own restatement.
   const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
-  const persistSite = cli.slice(cli.indexOf("io.out(JSON.stringify({ ...bound, results }, null, 2))"))
+  const persistSite = cli.slice(cli.indexOf("io.out(printableBlock(JSON.stringify({ ...bound, results }, null, 2)))"))
   assert.match(persistSite.slice(0, 200), /if \(status\) \{/,
     'the gate verdict must be persisted only under `if (status)`; if that guard moves, the ' +
     'solo-gate persistence rule the skill states is no longer true and must be rewritten')

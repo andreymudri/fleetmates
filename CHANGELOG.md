@@ -1,5 +1,53 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Test inventory. A `command` check may declare a JUnit `report`; the gate then runs it on the run
+  tip before the phase as well and adds `<name>:inventory`, which fails when a test that ran is gone
+  or skipped (approved by `- Test (drops)` in the plan) or a new test is skipped where the gate runs
+  (approved by the manifest's new `skips`, with a reason). Tests skipped before and after are
+  reported, never failed, and `finish` names them. `complete` skips it; the suggested manifest for
+  `node --test` carries the report, and vitest and mocha get their refusal of a focused test.
+  cargo-nextest, which leaves ignored tests out of its JUnit, is covered by a `nextest-list.json`
+  written beside the report.
+- Protected paths. A task may change the gate manifest — or a path the manifest's new top-level
+  `protected` array lists — only when its plan line carries the ` (protected)` modifier, e.g.
+  ``- Modify (protected): `fleetmates.gate.json` ``. Otherwise `fileset` fails with a
+  `protected` line, and a hand-resolved merge conflict on such a path fails `ownership` unless a
+  task that merge integrates marks it (a base merge may resolve one on a file only the base changed).
+- `fileset` and `ownership` are injected into every phase whose manifest omits them; `gate`
+  reports them in an `injected` field and the other commands print a line.
+
+### Changed
+
+- `ownership` judges every commit on the run branch's first-parent chain by what it carries: an
+  integration merge may carry only files the tasks it integrates declare, and a task integrates a
+  parent only when it is on the task branch's own first-parent chain. Reachability from a later
+  phase's branch no longer explains an earlier merge or a direct write, so a fast-forward
+  integration now fails. In an octopus, each task-side parent must stay inside the declared set of
+  the tasks that integrate it.
+- The main worktree's cleanliness no longer trusts the repo's `fsmonitor`, `checkStat` or
+  `trustctime` settings, and `ownership` fails when the manifest is marked skip-worktree or
+  assume-unchanged. `gate`'s JSON output neutralises C1 controls and U+2028/U+2029.
+- A plan whose `**Files:**` block holds a line shaped like a file line that is not one of the
+  recognised forms is refused, naming the line; it used to drop that file silently. `init-run`
+  exits 2; every command that reads the plan refuses too (`gate`, `complete`, `finish` and
+  `prune-run` fail on `derive`; `doctor`, `liveness` and `plan-drift` exit 2), so an in-flight run
+  whose anchored plan carries such a line needs the line fixed by a plan amendment on the base.
+- `--enforcement-only` no longer refuses a manifest without enforcement checks: it always has the
+  injected ones to report.
+
+### Fixed
+
+- `ownership` no longer explains a commit on the run branch's first-parent chain by its being
+  reachable from a task branch, and an integration merge may carry only files the tasks it
+  integrates declare (plus what a base parent changed). A later phase's branches fork from the run
+  tip, so an evil integration merge, a direct write, a payload committed on a side branch and
+  merged with an ordinary `--no-ff`, or a landed task branch re-merged after growing a commit
+  outside its set, read as explained, at every later gate and in `finish`.
+
 ## v2.2.0
 
 ### Changed

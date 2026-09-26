@@ -57,6 +57,12 @@ function describeGitFailure(args, code, stderr) {
 // Where the Claude Code harness creates agent worktrees, relative to the repo root.
 const HARNESS_WORKTREES = /^\.claude\//
 
+// Every `status` whose answer an enforcement check trusts runs with these. The repo's own config is
+// writable by whoever the check judges: an `fsmonitor` hook can report nothing changed, and
+// `checkStat=minimal` with `trustctime=false` misses a same-size edit whose mtime was restored —
+// each left the manifest rewritten in the worktree with the tree reported clean.
+const STATUS_TRUST = ['-c', 'core.fsmonitor=false', '-c', 'core.checkStat=default', '-c', 'core.trustctime=true', '-c', 'core.untrackedCache=false']
+
 // Record separator for commitFileSets' `git log --name-only -z` stream. It has to be a token no
 // tracked path can ever equal, because the paths and the separator arrive in the same NUL-framed
 // stream with nothing else to tell them apart. A bare word cannot do it: with "commit" as the
@@ -355,10 +361,22 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     // Only that one path is exempt. Every other untracked file still counts: a stray file in
     // the main worktree is exactly what this check exists to catch.
     async isDirty() {
-      const lines = (await run(['-c', 'core.quotePath=false', 'status', '--porcelain']))
+      const lines = (await run([...STATUS_TRUST, '-c', 'core.quotePath=false', 'status', '--porcelain']))
         .split('\n')
         .filter((line) => line.trim() !== '')
       return lines.some((line) => !HARNESS_WORKTREES.test(line.slice(3)))
+    },
+    // Which of `paths` the index tells `status` to stop looking at: skip-worktree (`S`) or
+    // assume-unchanged (a lower-case tag). The repo config cannot turn those off the way
+    // `STATUS_TRUST` turns off fsmonitor and weak stat checks: they are index bits. An edit to such a file never shows in `isDirty`, so a
+    // protected file carrying either flag can be rewritten in the worktree the gate reads it from
+    // with the tree reported clean. `:(icase)` because membership in the protected set folds case.
+    async hiddenFromStatus(paths) {
+      if (paths.length === 0) return []
+      const out = await run(['-c', 'core.quotePath=false', 'ls-files', '-v', '-z', '--', ...paths.map((p) => `:(icase,literal)${p}`)])
+      return out.split('\0').filter(Boolean)
+        .filter((entry) => entry[0] === 'S' || /^[a-z]/.test(entry[0]))
+        .map((entry) => entry.slice(2))
     },
     // `--porcelain` here is the worktree listing's own stable format (one `key value` line per
     // attribute, entries separated by a blank line), unrelated to `status --porcelain`. Parsed
@@ -387,7 +405,7 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
     // The paths behind isDirty's boolean. Same `.claude/` exemption, for the same reason stated
     // there: the plugin chose that location, so an adopting project is not asked to ignore it.
     async dirtyPaths() {
-      return (await run(['-c', 'core.quotePath=false', 'status', '--porcelain']))
+      return (await run([...STATUS_TRUST, '-c', 'core.quotePath=false', 'status', '--porcelain']))
         .split(/\r?\n/)
         .filter((line) => line.trim() !== '')
         .map((line) => ({ status: line.slice(0, 2), path: line.slice(3) }))
@@ -623,6 +641,15 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       // directory named exactly like the "from..to" range cannot make this resolve as a
       // pathspec instead of a revision range.
       const out = await run(['rev-list', '--end-of-options', `${from}..${to}`, '--'])
+      return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+    },
+    // `tip`'s first-parent chain down to (excluding) whatever `stop` reaches — one subprocess for a
+    // whole chain, where a walk through `commitParents` costs one per commit.
+    async firstParentCommits(tip, stop) {
+      if (!isNonEmptyString(tip) || !isNonEmptyString(stop)) {
+        throw new GitError(`firstParentCommits requires non-empty refs, got tip=${JSON.stringify(tip)} stop=${JSON.stringify(stop)}`)
+      }
+      const out = await run(['rev-list', '--first-parent', '--end-of-options', tip, `^${stop}`, '--'])
       return out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
     },
     async commitParents(sha) {

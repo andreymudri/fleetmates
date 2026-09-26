@@ -45,7 +45,7 @@ test('vocabulary constants name the two layers and their domains', () => {
   assert.deepEqual(CAVEMAN_LEVELS, ['lite', 'full', 'ultra'])
   assert.deepEqual(EFFORTS, ['low', 'medium', 'high', 'xhigh', 'max'])
   assert.deepEqual(ROLES, ['implementer', 'reviewer', 'integrator'])
-  assert.deepEqual(ENFORCEMENT_KEYS, ['phases', 'lens', 'preview'])
+  assert.deepEqual(ENFORCEMENT_KEYS, ['phases', 'lens', 'preview', 'protected', 'skips'])
 })
 
 test('loadConfig lets the local layer beat the gate manifest for maxParallel', async () => {
@@ -1125,5 +1125,53 @@ test('harnesses.cursor.sandbox refuses clone and full with the reason, while cod
       (err) => err instanceof ConfigError && err.message.includes('only "files" is supported'),
     )
     assert.equal(validateKey('harnesses.codex.sandbox', mode), mode)
+  }
+})
+
+test('protected accepts repo-relative paths and refuses every other shape', () => {
+  assert.deepEqual(ENFORCEMENT_VALIDATORS.protected(['package.json', 'tests/conftest.py']), ['package.json', 'tests/conftest.py'])
+  for (const bad of ['package.json', {}, null, [1], [''], ['  '], ['/etc/passwd'], ['C:/x'], ['..'], ['../x'], ['a/../../b'], ['a\\..\\..\\b']]) {
+    assert.throws(() => ENFORCEMENT_VALIDATORS.protected(bad), ConfigError, JSON.stringify(bad))
+  }
+})
+
+test('protected is an enforcement key: the local file cannot set it', () => {
+  assert.throws(() => validateLocal({ protected: ['package.json'] }), ConfigError)
+})
+
+// --- test inventory ---------------------------------------------------------------------------
+
+test('skips accepts file + reason entries and refuses every other shape', () => {
+  const ok = [{ file: 'tests/db/test_schema.py', reason: 'POSTGRES_ADMIN_DSN not provisioned' }, { file: 'demo::it', reason: 'map outside the repo' }]
+  assert.deepEqual(ENFORCEMENT_VALIDATORS.skips(ok), ok)
+  for (const bad of [
+    'tests/db.py', {}, null, [null], ['tests/db.py'],
+    [{ file: 'tests/db.py' }], [{ file: 'tests/db.py', reason: '   ' }], [{ reason: 'x' }],
+    [{ file: '/abs/db.py', reason: 'x' }], [{ file: '../up.py', reason: 'x' }], [{ file: 'a/../../b.py', reason: 'x' }],
+  ]) {
+    assert.throws(() => ENFORCEMENT_VALIDATORS.skips(bad), ConfigError, JSON.stringify(bad))
+  }
+})
+
+test('skips is an enforcement key: the local layer may not set it', () => {
+  assert.throws(() => validateLocal({ skips: [{ file: 'a.py', reason: 'x' }] }), ConfigError)
+})
+
+test('a command check\'s report takes exactly one of dir: true and a repo-relative path', () => {
+  const phases = (report) => ({ default: { checks: [{ name: 'test', kind: 'command', run: 'x', report }] } })
+  ENFORCEMENT_VALIDATORS.phases(phases({ format: 'junit', dir: true }))
+  ENFORCEMENT_VALIDATORS.phases(phases({ format: 'junit', path: 'build/test-results/test' }))
+  for (const bad of [
+    null, 'junit', [], { dir: true }, { format: 'xunit', dir: true }, { format: 'junit' },
+    { format: 'junit', dir: true, path: 'r.xml' }, { format: 'junit', dir: 'yes' },
+    { format: 'junit', path: '/tmp/r.xml' }, { format: 'junit', path: '../r.xml' }, { format: 'junit', path: '' },
+    // The gate deletes this path before each run: the tree itself, a climb, and git's store are refused.
+    { format: 'junit', path: '.' }, { format: 'junit', path: 'reports/..' }, { format: 'junit', path: './' },
+    { format: 'junit', path: '.git' }, { format: 'junit', path: 'sub/.GIT/x' }, { format: 'junit', path: 'a/../b.xml' },
+    // A backslash meant a separator to the safety check and part of a name to `rm` (review round 2).
+    { format: 'junit', path: 'x\\y/z' }, { format: 'junit', path: '.git./x' }, { format: 'junit', path: '.git /x' },
+    { format: 'junit', path: 'a//b' }, { format: 'junit', path: 'r\u200b/x' },
+  ]) {
+    assert.throws(() => ENFORCEMENT_VALIDATORS.phases(phases(bad)), (err) => err instanceof ConfigError && err.message.includes('phases.default.checks[0].report'), JSON.stringify(bad))
   }
 })
