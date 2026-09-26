@@ -4383,6 +4383,7 @@ test('finish recommends --enforcement-only even on a manifest that declares no e
     const out = lines.join('\n')
     assert.match(out, /running 2 command checks across 2 phases/)
     assert.match(out, /pass --enforcement-only/)
+    assert.ok(lines.includes('finish: injected fileset, ownership — the manifest does not declare them'), out)
   })
 })
 
@@ -4456,6 +4457,7 @@ test('prune-run recommends --enforcement-only even on a manifest that declares n
     const out = lines.join('\n')
     assert.match(out, /running 2 command checks across 2 phases/)
     assert.match(out, /pass --enforcement-only/)
+    assert.ok(lines.includes('prune-run: injected fileset, ownership — the manifest does not declare them'), out)
   })
 })
 
@@ -15685,5 +15687,28 @@ test('gate carries no injected field when the manifest declares both enforcement
     lines.length = 0
     assert.equal(await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io), 0, lines.join('\n'))
     assert.equal('injected' in JSON.parse(lines.join('\n')), false)
+  })
+})
+
+// prune-run must judge each phase with the injected checks too. A command-only manifest whose
+// command passes, T1 integrated cleanly, then a direct write on the run branch: only the injected
+// `ownership` can keep T1's worktree from being removed.
+test('prune-run keeps a worktree whose phase fails only an injected check', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
+      phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'node -e ""' }] } },
+    }), 'utf8')
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']] })
+    await writeFile(path.join(root, 'stray.mjs'), 'export const s = 1\n', 'utf8')
+    g(['add', 'stray.mjs'])
+    g(['commit', '--quiet', '-m', 'direct write on the run branch'])
+    g(['worktree', 'add', '--quiet', path.join(root, '.claude', 'worktrees', 'inj1'), 'fleetmates/r1/T1'])
+    lines.length = 0
+    await runCli(['prune-run', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root, '--yes'], io)
+    assert.equal(hasWorktree(root, 'inj1'), true, lines.join('\n'))
   })
 })

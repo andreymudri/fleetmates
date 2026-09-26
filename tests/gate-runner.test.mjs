@@ -4829,3 +4829,48 @@ test('the operator\'s base merge may resolve a conflict on a protected path the 
     assert.equal(res.status, 'pass', res.output)
   })
 })
+
+// Membership folds case for configured entries too, not only for the lower-case default: a
+// configured `Cargo.toml` must match the path git reports.
+test('fileset guards a configured protected path that carries upper case', async () => {
+  await withRepo(async (repo) => {
+    const ctx = await protectedRun(repo, protectedPlan({ mark: true, extra: ['- Create: `Cargo.toml`'] }), async () => {
+      await writeFile(path.join(repo.root, 'Cargo.toml'), '[package]\n', 'utf8')
+      await repo.sh(['add', 'Cargo.toml'])
+    })
+    const res = await runFilesetCheck({ ...FILESET, protected: ['fleetmates.gate.json', 'Cargo.toml'] }, ctx)
+    assert.equal(res.status, 'fail', res.output)
+    assert.match(res.output, /T1: protected — Cargo\.toml/)
+  })
+})
+
+// The other unverified acceptance: two secondary parents that disagree about a protected file while
+// the first parent left it alone. Git refuses such an octopus, so the merge is built with
+// `commit-tree`, carrying content of the integrator's own choosing.
+test('ownership fails an octopus whose secondary parents disagree on a protected path when no parent marks it', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    const plan = ['### Task 1: first', '', '**Files:**', `- Modify: \`${MANIFEST_FILE}\``, '',
+      '### Task 2: second', '', '**Files:**', `- Modify: \`${MANIFEST_FILE}\``, '', '**Depends:** T1', ''].join('\n')
+    await writeFile(path.join(root, 'plan.md'), plan, 'utf8')
+    await writeFile(path.join(root, MANIFEST_FILE), 'base\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'base'])
+    await sh(['checkout', '-b', 'run'])
+    for (const [id, content] of [['T1', 'one\n'], ['T2', 'two\n']]) {
+      await sh(['checkout', '-b', `fleetmates/r1/${id}`, 'run'])
+      await writeFile(path.join(root, MANIFEST_FILE), content, 'utf8')
+      await sh(['commit', '-am', id])
+    }
+    await sh(['checkout', 'run'])
+    await writeFile(path.join(root, MANIFEST_FILE), 'integrator choice\n', 'utf8')
+    await sh(['add', MANIFEST_FILE])
+    const tree = (await sh(['write-tree'])).stdout.trim()
+    const merge = (await sh(['commit-tree', tree, '-p', 'run', '-p', 'fleetmates/r1/T1', '-p', 'fleetmates/r1/T2', '-m', 'octopus'])).stdout.trim()
+    await sh(['update-ref', 'refs/heads/run', merge])
+    await sh(['reset', '--hard', 'run'])
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck(OWNERSHIP, ctx)
+    assert.equal(res.status, 'fail', res.output)
+    assert.match(res.output, /resolved a conflict on protected fleetmates\.gate\.json/)
+  })
+})
