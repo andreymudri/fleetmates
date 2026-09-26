@@ -76,8 +76,19 @@ Measured shapes the parser must accept (fixtures captured from the real runner i
 | `node --test --test-reporter=junit` | `file`, absolute | `describe` is a nested `testsuite`; `todo` is `<skipped type="todo">` |
 | pytest `-o junit_family=xunit1` | `file`, relative | xunit2 (the default) has no `file`: unit falls back to the dotted `classname` |
 | jest-junit `addFileAttribute=true` | `file` | fixture captured in the plan if jest is installable; otherwise documented as unmeasured |
-| cargo-nextest junit | `classname` (binary id) | **Measured (0.9.146): `#[ignore]` tests are absent from the report**, with or without `--run-ignored default`. A newly ignored test reads as a drop; a test born ignored or ignored at every gate is invisible to the skip rules. `cargo nextest list --run-ignored ignored-only` names them — a second report form is the route to close it, not built in v1 |
+| cargo-nextest junit | `classname` (binary id) | **Measured (0.9.146): `#[ignore]` tests are absent from the JUnit report**, with or without `--run-ignored default`. Closed by a `nextest-list.json` beside it (below) |
 | gotestsum `--junitfile` | `classname` (package) | Go is not installed here; documented as unmeasured |
+
+**nextest listing.** A report directory may also hold `nextest-list.json`, the output of
+`cargo nextest list --message-format json`. Every test it marks `ignored: true` counts as skipped,
+under unit = binary id and the same ID the JUnit report would give it (`demo::it > heavy`); a test
+the run executed anyway is not counted twice. The recipe, in the path form because nextest writes
+its JUnit under its own target directory (`[profile.default.junit] path = "junit.xml"`):
+
+    cargo nextest run; s=$?; cargo nextest list --message-format json > target/nextest/default/nextest-list.json; exit $s
+
+with `"report": { "format": "junit", "path": "target/nextest/default" }`. Measured end to end on a
+crate with one `#[ignore]` test: the inventory holds it as skipped.
 
 `skips` and `(drops)` name units exactly as the parser produces them — a path for runners that
 emit `file`, the classname otherwise. Every `inventory` line names the unit as the parser produced
@@ -196,8 +207,8 @@ goes to the ordinary retry.
 
 ## Implementation notes (2026-09-26)
 
-- **nextest omits ignored tests** from its JUnit report (measured on 0.9.146, above). The drop rule
-  still sees a newly ignored test; the skip rules do not see a test ignored from birth.
+- **nextest omits ignored tests** from its JUnit report (measured on 0.9.146, above). First shipped
+  as a documented blind spot; closed before merge by reading `nextest-list.json` beside the report.
 - **The suggested `node --test` check rewrites the script itself**, inserting the reporter flags
   right after `node --test`, and only for a script that names no reporter and carries no shell
   syntax. Measured: flags appended with `npm run test -- …` never reach the runner (node stops

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { parseJunit, readReport, compareInventories, ReportParseError, MAX_REPORT_BYTES } from '../scripts/test-report.mjs'
+import { parseJunit, parseNextestList, readReport, compareInventories, ReportParseError, MAX_REPORT_BYTES } from '../scripts/test-report.mjs'
 
 const FIXTURES = new URL('./fixtures/junit/', import.meta.url)
 const fixture = (name) => readFile(new URL(name, FIXTURES), 'utf8')
@@ -247,4 +247,41 @@ test('a report that is not a regular file is refused before it is read', async (
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+// nextest leaves ignored tests out of its JUnit report; its listing names them. Captured from
+// `cargo nextest list --run-ignored ignored-only --message-format json` (0.9.146) over the same
+// crate as nextest.xml, absolute paths replaced.
+test('a nextest listing beside the JUnit report counts each ignored test as skipped, under the JUnit ID', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-report-nx-'))
+  try {
+    await writeFile(path.join(dir, 'junit.xml'), await fixture('nextest.xml'))
+    await writeFile(path.join(dir, 'nextest-list.json'), await fixture('nextest-list.json'))
+    const got = flat(await readReport(dir, { root: '/ROOT' }))
+    assert.deepEqual(got, {
+      'demo::it': { 'demo::it > runs': { ran: 1, skipped: 0 }, 'demo::it > heavy': { ran: 0, skipped: 1 } },
+      demo: { 'demo > tests::it_works': { ran: 1, skipped: 0 } },
+    })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('an ignored test the run executed is not also counted as skipped', () => {
+  const units = parseJunit('<testsuites><testsuite name="demo::it"><testcase classname="demo::it" name="heavy"/></testsuite></testsuites>', { root: '/' }).units
+  parseNextestList(JSON.stringify({ 'rust-suites': { 'demo::it': { 'binary-id': 'demo::it', testcases: { heavy: { ignored: true } } } } }), units)
+  assert.deepEqual(flat({ units }), { 'demo::it': { 'demo::it > heavy': { ran: 1, skipped: 0 } } })
+})
+
+test('a nextest listing that is not the expected shape is refused', () => {
+  for (const bad of ['nope', '{}', '{"rust-suites":[]}', '{"rust-suites":{"a":{"testcases":[]}}}']) {
+    assert.throws(() => parseNextestList(bad), ReportParseError, bad)
+  }
+})
+
+// Only `ignored: true` counts: a test the run filtered out (`-E`, a partition) is listed with
+// `ignored: false` and absent from the JUnit report, and it is not a skip.
+test('a listed test that is not ignored adds nothing', () => {
+  const { units } = parseNextestList(JSON.stringify({ 'rust-suites': { b: { 'binary-id': 'b', testcases: { filtered: { ignored: false, 'filter-match': { status: 'mismatch' } } } } } }))
+  assert.deepEqual(flat({ units }), {})
 })

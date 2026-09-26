@@ -334,9 +334,16 @@ skipped where the gate runs needs its unit declared:
 { "skips": [{ "file": "tests/db/test_schema.py", "reason": "POSTGRES_ADMIN_DSN not provisioned in the gate" }] }
 ```
 
-For pytest pass `-o junit_family=xunit1` so cases carry their file. Under cargo-nextest an
-`#[ignore]`d test is absent from the report, so a newly ignored test is caught but one ignored from
-birth is not seen.
+For pytest pass `-o junit_family=xunit1` so cases carry their file. cargo-nextest leaves `#[ignore]`d
+tests out of its JUnit report, so have the check also write its listing beside it:
+
+```json
+{ "name": "test", "kind": "command",
+  "run": "cargo nextest run; s=$?; cargo nextest list --message-format json > target/nextest/default/nextest-list.json; exit $s",
+  "report": { "format": "junit", "path": "target/nextest/default" } }
+```
+
+with `[profile.default.junit] path = "junit.xml"` in `.config/nextest.toml`.
 
 ## Configuration
 

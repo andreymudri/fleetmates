@@ -10,6 +10,8 @@
   (approved by the manifest's new `skips`, with a reason). Tests skipped before and after are
   reported, never failed, and `finish` names them. `complete` skips it; the suggested manifest for
   `node --test` carries the report, and vitest and mocha get their refusal of a focused test.
+  cargo-nextest, which leaves ignored tests out of its JUnit, is covered by a `nextest-list.json`
+  written beside the report.
 - Protected paths. A task may change the gate manifest — or a path the manifest's new top-level
   `protected` array lists — only when its plan line carries the ` (protected)` modifier, e.g.
   ``- Modify (protected): `fleetmates.gate.json` ``. Otherwise `fileset` fails with a

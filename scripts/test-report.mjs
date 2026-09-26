@@ -125,6 +125,12 @@ function unitOf(attrs, root) {
   return null
 }
 
+// Adjacent repeats collapse: nextest names the unit, the suite and the classname identically. The
+// nextest listing builds its IDs through this same function, so both sources name a test alike.
+function testId(parts) {
+  return parts.filter((p, i, all) => p !== '' && (i === all.length - 1 || p !== all[i - 1])).join(' > ')
+}
+
 function count(units, unit, id, skipped) {
   if (!units.has(unit)) units.set(unit, new Map())
   const ids = units.get(unit)
@@ -150,9 +156,7 @@ export function parseJunit(xml, { root } = {}, units = new Map()) {
       if (typeof el.attrs.name !== 'string' || el.attrs.name === '') refuse('has a testcase with no name')
       const unit = unitOf(el.attrs, root)
       if (unit === null) refuse('has a testcase with neither file nor classname', el.attrs.name)
-      // Adjacent repeats collapse: nextest names the unit, the suite and the classname identically.
-      const id = [unit, ...suites, el.attrs.classname ?? '', el.attrs.name]
-        .filter((p, i, parts) => p !== '' && (i === parts.length - 1 || p !== parts[i - 1])).join(' > ')
+      const id = testId([unit, ...suites, el.attrs.classname ?? '', el.attrs.name])
       if (el.selfClosing) count(units, unit, id, false)
       else testcase = { unit, id, skipped: false }
     } else if (el.open === 'skipped' && testcase) {
@@ -175,16 +179,45 @@ export async function readReport(target, { root, maxBytes = MAX_REPORT_BYTES } =
   try { info = await lstat(target) } catch { return null }
   if (info.isSymbolicLink()) refuse('is a symbolic link')
   if (!info.isDirectory() && !info.isFile()) refuse('is not a regular file')
-  const files = info.isDirectory()
-    ? (await readdir(target)).filter((f) => f.endsWith('.xml')).sort().map((f) => path.join(target, f))
-    : [target]
-  if (files.length === 0) return null
+  const names = info.isDirectory() ? (await readdir(target)).sort() : null
+  const files = names ? names.filter((f) => f.endsWith('.xml')).map((f) => path.join(target, f)) : [target]
+  const listing = names?.includes(NEXTEST_LIST) ? path.join(target, NEXTEST_LIST) : null
+  if (files.length === 0 && !listing) return null
   const units = new Map()
   let total = 0
   for (const file of files) {
     const bytes = await readRegularFile(file, maxBytes - total)
     total += bytes.length
     parseJunit(bytes.toString('utf8'), { root }, units)
+  }
+  // Read after the JUnit files, so a test the run executed (`--run-ignored all`) is not also
+  // counted as skipped.
+  if (listing) parseNextestList((await readRegularFile(listing, maxBytes - total)).toString('utf8'), units)
+  return { units }
+}
+
+// cargo-nextest leaves `#[ignore]` tests out of its JUnit report entirely (measured, 0.9.146), so
+// a test ignored from birth, or at every gate, would be invisible to the skip rules. Its listing
+// (`cargo nextest list --message-format json`) marks every test `ignored: true|false` whatever
+// filter is used; a check that writes it as `nextest-list.json` beside the JUnit report gets each
+// ignored test counted as skipped, under the ID the JUnit report would have given it.
+export const NEXTEST_LIST = 'nextest-list.json'
+
+export function parseNextestList(text, units = new Map()) {
+  let doc
+  try { doc = JSON.parse(text) } catch { refuse(`listing ${NEXTEST_LIST} is not JSON`, text.slice(0, 80)) }
+  const suites = doc?.['rust-suites']
+  if (suites === null || typeof suites !== 'object' || Array.isArray(suites)) refuse(`listing ${NEXTEST_LIST} has no rust-suites object`)
+  for (const [key, suite] of Object.entries(suites)) {
+    const binaryId = typeof suite?.['binary-id'] === 'string' && suite['binary-id'] !== '' ? suite['binary-id'] : key
+    const cases = suite?.testcases
+    if (cases === null || typeof cases !== 'object' || Array.isArray(cases)) refuse(`listing ${NEXTEST_LIST} has a suite without testcases`, binaryId)
+    for (const [name, tc] of Object.entries(cases)) {
+      if (tc?.ignored !== true) continue
+      const id = testId([binaryId, binaryId, binaryId, name])
+      if ((units.get(binaryId)?.get(id)?.ran ?? 0) > 0) continue
+      count(units, binaryId, id, true)
+    }
   }
   return { units }
 }

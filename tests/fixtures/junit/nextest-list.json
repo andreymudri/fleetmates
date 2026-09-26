@@ -1,0 +1,85 @@
+{
+ "rust-build-meta": {
+  "target-directory": "/ROOT/target",
+  "build-directory": "/ROOT/target",
+  "base-output-directories": [
+   "debug"
+  ],
+  "non-test-binaries": {},
+  "build-script-out-dirs": {},
+  "build-script-info": {},
+  "linked-paths": [],
+  "platforms": {
+   "host": {
+    "platform": {
+     "triple": "x86_64-unknown-linux-gnu",
+     "target-features": "unknown"
+    },
+    "libdir": {
+     "status": "available",
+     "path": "/HOME"
+    }
+   },
+   "targets": []
+  },
+  "target-platforms": [
+   {
+    "triple": "x86_64-unknown-linux-gnu",
+    "target-features": "unknown"
+   }
+  ],
+  "target-platform": null
+ },
+ "test-count": 3,
+ "rust-suites": {
+  "demo": {
+   "package-name": "demo",
+   "binary-id": "demo",
+   "binary-name": "demo",
+   "package-id": "path+file:///ROOT#0.1.0",
+   "kind": "lib",
+   "binary-path": "/ROOT/target/debug/deps/demo-a618f739376f8207",
+   "build-platform": "target",
+   "cwd": "/ROOT",
+   "status": "listed",
+   "testcases": {
+    "tests::it_works": {
+     "kind": "test",
+     "ignored": false,
+     "filter-match": {
+      "status": "mismatch",
+      "reason": "ignored"
+     }
+    }
+   }
+  },
+  "demo::it": {
+   "package-name": "demo",
+   "binary-id": "demo::it",
+   "binary-name": "it",
+   "package-id": "path+file:///ROOT#0.1.0",
+   "kind": "test",
+   "binary-path": "/ROOT/target/debug/deps/it-ca03041423b41257",
+   "build-platform": "target",
+   "cwd": "/ROOT",
+   "status": "listed",
+   "testcases": {
+    "heavy": {
+     "kind": "test",
+     "ignored": true,
+     "filter-match": {
+      "status": "matches"
+     }
+    },
+    "runs": {
+     "kind": "test",
+     "ignored": false,
+     "filter-match": {
+      "status": "mismatch",
+      "reason": "ignored"
+     }
+    }
+   }
+  }
+ }
+}
