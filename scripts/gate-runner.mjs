@@ -1522,7 +1522,6 @@ async function mergeContentExplainedByParents(git, firstParent, secondaryParents
 // The run branch's first-parent chain inside `anchor..run`. Bounded by `commits.length` for the
 // same reason `mergedParentFiles` bounds its identical walk: a git double whose chain never reaches
 // the anchor would otherwise loop forever.
-// Returned tip-first, so the first entry that is an ancestor of a task branch is the most recent.
 async function firstParentChain(git, { anchorSha, runSha, commits }) {
   const inRange = new Set(commits)
   const chain = []
@@ -1574,26 +1573,13 @@ export async function runOwnershipCheck(check, ctx = {}) {
     // Merges rejected only because they hand-resolved a conflict on a protected path; they are in
     // `unexplained` too, and named again below with the file so the escalation says why.
     const protectedConflicts = []
+    // Merges whose content is explained by their parents but carries files no integrated task
+    // declared (or a protected one no integrated task marked).
+    const outOfScopeMerges = []
     // Every commit this check admitted only because of base ancestry. Reported on the pass —
     // see `baseExplainedNote`, which also records why no base sha from run start is consulted.
     const baseExplained = []
-    const chainList = await firstParentChain(git, { anchorSha, runSha, commits })
-    const chain = new Set(chainList)
-    // Each task branch vouches only for what it carries past its own FLOOR: the most recent
-    // commit of the run branch's first-parent chain that is an ancestor of it (the anchor when
-    // none is). A later phase's branch forks from the run tip, so everything the run branch held
-    // at that moment — an evil merge, a direct write, or a commit an integrator placed on a side
-    // branch and merged with an ordinary --no-ff — is below its floor and vouched for by nobody.
-    const floors = []
-    for (const branchSha of shas) {
-      let floor = null
-      for (const c of chainList) {
-        if (await git.isAncestor(c, branchSha)) { floor = c; break }
-      }
-      floors.push(floor)
-    }
-    const vouches = async (sha, i) => await git.isAncestor(sha, shas[i])
-      && !(floors[i] !== null && await git.isAncestor(sha, floors[i]))
+    const chain = new Set(await firstParentChain(git, { anchorSha, runSha, commits }))
     for (const sha of commits) {
       let explained = false
       // A commit on the run branch's own first-parent chain is a write to the run branch itself,
@@ -1602,10 +1588,12 @@ export async function runOwnershipCheck(check, ctx = {}) {
       // its history. Reachability vouched for all of them — an evil merge in phase N, or a direct
       // write, was "explained" by the phase N+1 branch that forked after it, and neither the next
       // gate nor `finish` could ever report it. On the chain, the only explanation is the merge
-      // rule below.
+      // rule below, and that rule judges what each merge CARRIES, so a commit off the chain may
+      // still be explained by plain reachability: whatever it holds reaches the run branch only
+      // through a chain merge that is judged on its own.
       if (!chain.has(sha)) {
-        for (let i = 0; i < shas.length; i += 1) {
-          if (await vouches(sha, i)) { explained = true; break }
+        for (const branchSha of shas) {
+          if (await git.isAncestor(sha, branchSha)) { explained = true; break }
         }
       }
       if (!explained) {
@@ -1627,40 +1615,71 @@ export async function runOwnershipCheck(check, ctx = {}) {
           // riding in behind a second, unowned parent was never inspected.
           let allParentsOwned = true
           let usedBase = false
-          let baseParent = false
+          // What this merge may carry: the declared files of every task whose branch holds one of
+          // its secondary parents, plus whatever a base parent itself changed.
+          const scope = new Set()
+          const baseTouched = new Set()
+          // Which protected paths it may carry: those marked by a task whose branch holds a
+          // secondary parent but NOT this merge. A branch that holds the merge forked (or was
+          // moved) past it, so it is a later task, and a later task's marking must not authorise
+          // an earlier task's change.
           const authorised = new Set()
           for (const parent of secondaryParents) {
             let owned = false
-            for (let i = 0; i < shas.length; i += 1) {
-              if (await vouches(parent, i)) {
-                owned = true
-                // Every task whose branch carries this parent vouches for the paths it marked.
-                for (const file of taskOf[i]?.protectedFiles ?? []) authorised.add(normalizePath(file))
-              }
-            }
             // A merge of the base into the run branch is how a mid-run plan amendment reaches
             // the anchor. Its secondary parent is the base, never a task branch, so without
             // this a legitimate base advance is indistinguishable from a direct write. Base
             // content is already trusted: the anchor is computed from it and `changedFiles`
-            // diffs against it, so accepting base ancestry adds no new trust. It is still
-            // per-parent — a rogue parent riding alongside a base parent fails the loop.
-            if (!owned && baseSha && await git.isAncestor(parent, baseSha)) {
+            // diffs against it, so accepting base ancestry adds no new trust. Asked FIRST: a
+            // task branch rebased after an amendment holds the base parent too, and must not
+            // lend it its declared set or its markings. A parent at or below the anchor is a base
+            // ancestor as well, and contributes nothing (it is its own merge base with the run).
+            if (baseSha && await git.isAncestor(parent, baseSha)) {
               owned = true
               usedBase = true
-              // The operator's merge of the base — how an amendment reaches the anchor — may have
-              // to resolve a conflict on a protected path the base also changed, and no task could
-              // ever mark that resolution: every marked branch forked before the base parent.
-              // Whoever writes the base is already the trust boundary for `(protected)` itself.
-              baseParent = true
+              // Three-dot: only what the base side changed since it met the run. The operator's
+              // amendment merge may have to resolve a conflict on a protected path the base also
+              // changed, and no task could ever mark that resolution; whoever writes the base is
+              // already the trust boundary for `(protected)` itself. Only for those files.
+              for (const file of await git.changedFiles({ base: firstParent, branch: parent })) baseTouched.add(normalizePath(file))
+            } else {
+              for (let i = 0; i < shas.length; i += 1) {
+                if (!(await git.isAncestor(parent, shas[i]))) continue
+                owned = true
+                for (const file of taskOf[i]?.files ?? []) scope.add(normalizePath(file))
+                if (!(await git.isAncestor(sha, shas[i]))) {
+                  for (const file of taskOf[i]?.protectedFiles ?? []) authorised.add(normalizePath(file))
+                }
+              }
             }
             if (!owned) { allParentsOwned = false; break }
           }
           if (allParentsOwned) {
             const verdict = await mergeContentExplainedByParents(
-              git, firstParent, secondaryParents, sha, { paths: baseParent ? new Set() : guardedSet(check), authorised },
+              git, firstParent, secondaryParents, sha, { paths: guardedSet(check), authorised: new Set([...authorised, ...baseTouched]) },
             )
             explained = verdict.ok
             if (verdict.protectedFile) protectedConflicts.push({ sha, file: verdict.protectedFile })
+            // Content explained by its parents is not yet content the plan allowed. A task branch
+            // that already landed can grow a commit outside its declared set — the manifest, a
+            // smuggled file — and be merged again as a routine fix round, or an integrator can
+            // commit a payload on a side branch and merge that: either way the change is a clean
+            // single-side contribution and `fileset` only diffs the phase in progress. So every
+            // integration merge carries only what the tasks it integrates declare (protected paths
+            // only where marked), plus whatever the base side changed.
+            if (explained) {
+              const outside = []
+              const guarded = guardedSet(check)
+              for (const file of await git.changedFiles({ base: firstParent, branch: sha })) {
+                const f = normalizePath(file)
+                if (baseTouched.has(f)) continue
+                if (!scope.has(f) || (guarded.has(f.toLowerCase()) && !authorised.has(f))) outside.push(f)
+              }
+              if (outside.length > 0) {
+                explained = false
+                outOfScopeMerges.push({ sha, files: outside })
+              }
+            }
             if (explained && usedBase) baseExplained.push(sha)
           }
         }
@@ -1690,6 +1709,9 @@ export async function runOwnershipCheck(check, ctx = {}) {
       unexplainedCommits: unexplained,
       dirty: await git.isDirty(),
     })
+    for (const { sha, files } of outOfScopeMerges) {
+      violations.push(`merge ${sha} carries ${files.join(', ')}, which no task it integrates declares (or marks, for a protected path)`)
+    }
     for (const { sha, file } of protectedConflicts) {
       violations.push(`merge ${sha} resolved a conflict on protected ${file} with no parent from a task marking it (protected)`)
     }

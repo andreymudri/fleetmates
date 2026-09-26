@@ -44,7 +44,8 @@ That is a smaller claim than the previous specs made, and it is the one the code
 - **V2 ownership** — no task branch may be the run branch under any alias spelling; the main
   worktree must be clean; every commit on the run branch since the anchor must be reachable
   from a task branch — except a commit on the run branch's own first-parent chain, which only
-  the merge-content rule can explain (2026-09-26: reachability let the next phase's branches,
+  the merge rule can explain, and that rule also requires each integration merge to carry only
+  files the tasks it integrates declare (2026-09-26: reachability let the next phase's branches,
   forked from the run tip, vouch for every earlier write to the run branch).
 - **V4 non-removable enforcement** — `fileset` and `ownership` are injected into any phase whose
   manifest omits them, so a merge that rewrites the manifest cannot switch off the check that
@@ -68,8 +69,12 @@ where the corresponding claim is made:
 - **Write access to the base branch.** A `(protected)` marking is authoritative because the plan
   is read at the anchor; whoever can commit to the base can mark anything, including a task that
   drops every command check from the manifest. For the same reason a merge whose secondary parent
-  comes from the base may hand-resolve a conflict on a protected path: that is the operator's
-  amendment merge, and no task branch could ever carry its base parent to authorise it.
+  comes from the base may hand-resolve a conflict on a protected path the base itself changed:
+  that is the operator's amendment merge, and no task branch could ever carry its base parent to
+  authorise it.
+- **An integrator pre-writing a later task's declared file.** A merge may carry any file declared
+  by a task whose branch holds its secondary parent, and a later task forks after that merge, so
+  content written into a later task's (unprotected) declared file reads as in scope.
 - **A hand-resolved conflict on an unprotected path.** Accepted unverified, as before; pinned by
   a LIMIT test.
 

@@ -339,10 +339,11 @@ that fails adds a note: the commits it names may predate this fleetmates version
 inline run that should have passed `--no-fleet`.
 
 `ownership` explains a commit on the run branch's own first-parent chain — every integration merge,
-every direct write — only by the merge rule, and a task branch vouches only for what it carries
-past its floor, the latest chain commit it descends from: the next phase's branches fork from the
-run tip and carry every earlier write in their history, including a payload merged in from a side
-branch.
+every direct write — only by the merge rule, never by its being reachable from a task branch: the
+next phase's branches fork from the run tip and carry every earlier write in their history. And an
+integration merge may carry only files declared by the tasks whose branches hold its secondary
+parents, plus what a base parent itself changed — so a payload merged in from a side branch, or a
+landed task branch that grew a commit outside its set and was merged again, fails.
 
 **Protected paths.** `fileset` also fails a task that changes a protected path its plan line does
 not mark `(protected)`, even when the path is declared: the output line reads

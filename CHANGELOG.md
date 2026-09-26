@@ -23,10 +23,12 @@
 
 ### Fixed
 
-- `ownership` no longer lets a task branch vouch for anything below its floor — the latest commit
-  of the run branch's first-parent chain it descends from. A later phase's branches fork from the
-  run tip, so an evil integration merge, a direct write, or a payload committed on a side branch
-  and merged with an ordinary `--no-ff` read as explained, at every later gate and in `finish`.
+- `ownership` no longer explains a commit on the run branch's first-parent chain by its being
+  reachable from a task branch, and an integration merge may carry only files the tasks it
+  integrates declare (plus what a base parent changed). A later phase's branches fork from the run
+  tip, so an evil integration merge, a direct write, a payload committed on a side branch and
+  merged with an ordinary `--no-ff`, or a landed task branch re-merged after growing a commit
+  outside its set, read as explained, at every later gate and in `finish`.
 
 ## v2.2.0
 

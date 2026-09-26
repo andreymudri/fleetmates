@@ -1751,7 +1751,9 @@ test('a merge that tampers with content under an unchanged filename is unexplain
 // the second produces a real git conflict, hand-resolved and committed.
 test('a genuine hand-resolved merge conflict is explained, not flagged as tampering (real repo)', async () => {
   await withRepo(async ({ root, sh, git }) => {
-    await writeFile(path.join(root, 'plan.md'), planMarkdown(), 'utf8')
+    // Both tasks declare shared.txt: an integration merge may carry only what the tasks it
+    // integrates declare, and this test is about the conflict, not about scope.
+    await writeFile(path.join(root, 'plan.md'), planMarkdown().replaceAll('- Create: `a.mjs`', '- Create: `a.mjs`\n- Modify: `shared.txt`').replaceAll('- Create: `b.mjs`', '- Create: `b.mjs`\n- Modify: `shared.txt`'), 'utf8')
     await writeFile(path.join(root, 'shared.txt'), 'line1\nline2\nline3\n', 'utf8')
     await sh(['add', '.'])
     await sh(['commit', '-m', 'base'])
@@ -4872,5 +4874,42 @@ test('ownership fails an octopus whose secondary parents disagree on a protected
     const res = await runOwnershipCheck(OWNERSHIP, ctx)
     assert.equal(res.status, 'fail', res.output)
     assert.match(res.output, /resolved a conflict on protected fleetmates\.gate\.json/)
+  })
+})
+
+// Review round 2: an extra secondary parent at the anchor is an ancestor of every task branch, so it
+// lent every task's markings to the merge. A base ancestor is judged as the base, which marks nothing.
+test('an extra parent at the anchor does not authorise a protected conflict', async () => {
+  await withRepo(async (repo) => {
+    await protectedConflictRun(repo, { markT2: false })
+    const tree = (await repo.sh(['rev-parse', 'run^{tree}'])).stdout.trim()
+    const anchor = (await repo.sh(['rev-parse', 'main'])).stdout.trim()
+    const forged = (await repo.sh(['commit-tree', tree, '-p', 'run~1', '-p', 'fleetmates/r1/T2', '-p', anchor, '-m', 'octopus with the anchor'])).stdout.trim()
+    await repo.sh(['update-ref', 'refs/heads/run', forged])
+    await repo.sh(['reset', '--hard', 'run'])
+    const ctx = await deriveContext({ git: repo.git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck(OWNERSHIP, ctx)
+    assert.equal(res.status, 'fail', res.output)
+    assert.match(res.output, /protected fleetmates\.gate\.json/)
+  })
+})
+
+// Review round 2: the base exemption used to switch off the protected guard for a whole merge the
+// moment any secondary parent came from the base. It covers only what the base side changed.
+test('a base parent riding an octopus does not exempt the task parent\'s protected conflict', async () => {
+  await withRepo(async (repo) => {
+    await protectedConflictRun(repo, { markT2: false })
+    await repo.sh(['checkout', 'main'])
+    await writeFile(path.join(repo.root, 'unrelated.txt'), 'x\n', 'utf8')
+    await repo.sh(['add', 'unrelated.txt'])
+    await repo.sh(['commit', '-m', 'unrelated base advance'])
+    await repo.sh(['checkout', 'run'])
+    const tree = (await repo.sh(['rev-parse', 'run^{tree}'])).stdout.trim()
+    const forged = (await repo.sh(['commit-tree', tree, '-p', 'run~1', '-p', 'fleetmates/r1/T2', '-p', 'main', '-m', 'octopus with the base'])).stdout.trim()
+    await repo.sh(['update-ref', 'refs/heads/run', forged])
+    await repo.sh(['reset', '--hard', 'run'])
+    const ctx = await deriveContext({ git: repo.git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck(OWNERSHIP, ctx)
+    assert.equal(res.status, 'fail', res.output)
   })
 })

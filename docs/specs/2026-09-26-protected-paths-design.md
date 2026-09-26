@@ -217,17 +217,29 @@ What the implementation changed relative to the text above, and why:
   "explained" it — at every later gate and in `finish`. The same held for any direct write made
   before a later dispatch. On the chain, only the merge-content rule explains a commit now. A
   fast-forward integration, already outside `tm-integrator`'s contract, now fails `ownership` too.
-- **Vouching stops at each branch's floor.** The security and claims review of the first version
-  reproduced the same hole one step removed: a payload committed on a throwaway side branch and
-  merged with an ordinary `--no-ff` sits OFF the chain, and the next phase's branch vouched for it
-  again. A task branch now vouches only for commits past its floor, the latest chain commit it
-  descends from — which also covers a run tip rebuilt with `commit-tree` so its first parent is the
-  anchor (adversarial tests for both).
-- **A base merge may resolve a conflict on a protected path.** The correctness review reproduced a
-  false FAIL with no way out: the base changed the manifest too, the operator's amendment merge had
-  to resolve the conflict, and no marked task could ever carry the base parent. A merge with a
-  base-ancestor secondary parent is exempt from the protected-conflict guard; whoever writes the
-  base is already the trust boundary for the marking itself.
+- **Every integration merge is judged by what it carries.** Two review rounds reproduced the
+  same hole one step removed each time: a payload committed on a throwaway side branch and merged
+  with an ordinary `--no-ff` sits OFF the chain and the next phase's branch vouched for it; a
+  landed task branch that grew a commit outside its declared set was re-merged as a fix round and
+  its own old tip vouched for it. An interim "floor" rule (vouch only past the latest chain commit
+  a branch descends from) closed the first and broke a legitimate fix round whose ref had moved to
+  the run tip. What shipped instead: a chain merge may carry only files declared by the tasks whose
+  branches hold its secondary parents, plus what a base parent itself changed (three-dot); a
+  protected path additionally needs a marking from such a task whose branch does NOT hold the merge
+  (a branch that holds it is a later task); a secondary parent that is a base ancestor — including
+  one at or below the anchor — is judged as the base, never lent a task's set or markings. Off-chain
+  commits are explained by plain reachability again: whatever they hold reaches the run only
+  through a chain merge judged on its own. Adversarial and real-git tests cover each shape.
+- **Remaining limit, pinned in prose only:** an integrator can write content into a file a LATER
+  task declares, in a merge whose secondary parent that later task's branch will hold (it forks
+  after). The file is in scope for the merge. It is not protected, and the later task's own diff
+  then overwrites or conflicts with it.
+- **A base merge may resolve a conflict on a protected path the base changed.** The correctness
+  review reproduced a false FAIL with no way out: the base changed the manifest too, the operator's
+  amendment merge had to resolve the conflict, and no marked task could ever carry the base parent.
+  The files a base-ancestor secondary parent changed (three-dot) are exempt from the protected
+  guard for that merge — only those files, so a base parent riding an octopus exempts nothing the
+  task parent changed.
 - **`gate` does not print the injected line** the error table describes: its stdout is one JSON
   document, so the names go in an `injected` field. `complete`, `finish` and `prune-run` print it.
 - **`injected` is `checksForPhase`'s mark only**; a declared entry carrying it has it stripped,
