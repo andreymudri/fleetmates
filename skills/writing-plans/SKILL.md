@@ -102,10 +102,27 @@ each `### Task N: <title>` heading, and only three file-line forms are recognise
 - `- Modify: \`path\``
 - `- Test: \`path\``
 
-Any other bullet form is silently dropped, leaving the task with no declared files. Phase
-assignment (`scripts/phases.mjs`) reads an empty file list as "conflicts with nothing" — so
-every such task lands in phase 1 and its implementers edit the same files simultaneously.
-Use the three forms exactly, one file per bullet.
+A line inside a `**Files:**` block that is shaped like a file line — `- Word: \`…\`` or
+`- Word (…): \`…\`` — but is not exactly one of the recognised forms makes `init-run` refuse the
+plan, naming the line. A misspelled verb or trailing text after the path used to drop the file
+silently, and phase assignment (`scripts/phases.mjs`) reads an empty file list as "conflicts with
+nothing", landing the task in phase 1 beside everything else. Use the forms exactly, one file per
+bullet.
+
+### Protected paths
+
+A path the gate manifest protects — `fleetmates.gate.json` always, plus whatever its top-level
+`protected` array adds — may only be changed by a task whose file line carries the ` (protected)`
+modifier after the verb:
+
+- `- Modify (protected): \`fleetmates.gate.json\``
+
+Exact lower case only: `(Protected)` is refused like any other malformed file line. The modifier
+does not add a second file list: the path is declared in `files` like any other, and the marking
+only authorises the change. The gate reads the plan from the anchor commit, so a marking added
+mid-run counts only once it is amended on the base branch (see `parallel-execution`, "Amending a
+plan mid-run"). A task that changes a protected path without the marking fails `fileset` and
+escalates, even when the path is declared.
 
 ## Dependencies are mandatory where they exist
 

@@ -210,6 +210,18 @@ The gate answers PASS or FAIL from git alone.
 - Create: \`a.mjs\`
 `
 
+test('init-run refuses a malformed file line with exit 2, naming the line, with no raw control byte', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    const esc = String.fromCharCode(27)
+    await writeFile(planPath, `### Task 1: A\n\n**Files:**\n- Modfy: \`a.mjs\` ${esc}[2K\r[gate] PASS\n`, 'utf8')
+    const code = await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    assert.equal(code, 2)
+    const out = lines.join('\n')
+    assert.match(out, /plan line 4: unrecognised file line/)
+    assert.ok(!out.includes(esc) && !out.includes('\r'), JSON.stringify(out))
+  })
+})
+
 test('init-run compiles Destination, Not Yet Specified and Out of Scope into plan.json', async () => {
   await withRepo(async ({ root, io }) => {
     const planPath = path.join(root, 'sections-plan.md')
@@ -2527,7 +2539,9 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //    nothing else, and every refusal of the form `cannot ...: ${err.message}` where `err` came
 //    from reading or phasing the plan — the only messages `parsePlan` and `assignPhases` throw
 //    with a plan value in them are `duplicate task id` and `unsatisfiable dependencies`, both
-//    built from those same ids. Named as a class rather than as a count on purpose: a count is
+//    built from those same ids — and the unrecognised-file-line refusal, which quotes a whole
+//    plan line but builds it through `printable` inside `plan-parser.mjs` itself, outside the
+//    four census files, with its row in `tests/plan-parser.test.mjs` and an `init-run` row here. Named as a class rather than as a count on purpose: a count is
 //    what this header got wrong twice. The `assert.match(t.id, /^T\d+$/)` in the first test
 //    below pins the constraint all of them rest on.
 // 7. Constrained to the canonical decimal form of an integer before the print, by

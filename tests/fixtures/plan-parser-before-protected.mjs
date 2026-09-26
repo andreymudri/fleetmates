@@ -1,17 +1,6 @@
-// `printable` at the one place a plan's own bytes enter an error message: a plan is an
-// agent-written file, and `doctor`, `liveness`, `plan-drift` and `init-run` all print this
-// message to stdout. Neutralised here once, so no print site can forget to.
-import { printable } from './reviews.mjs'
-
 const TASK_HEADING = /^###\s+Task\s+(\d+)\s*:\s*(.+?)\s*$/
 const FILES_HEADING = /^\*\*Files:\*\*\s*$/
-// The optional ` (protected)` after the verb authorises the task to change a path the gate
-// manifest protects (docs/specs/2026-09-26-protected-paths-design.md). Exact lower case only.
-const FILE_LINE = /^-\s+(?:Create|Modify|Test)(\s+\(protected\))?\s*:\s*`([^`]+)`\s*$/
-// Anything shaped like a file line. Inside a Files block, a line of this shape that FILE_LINE
-// does not match is refused: it used to drop out of `files` silently, and with `(protected)` a
-// typo in the marking would silently remove scope permission instead of granting it.
-const FILE_LINE_SHAPE = /^-\s+[A-Za-z]+(\s*\([^)]*\))?\s*:\s*`/
+const FILE_LINE = /^-\s+(?:Create|Modify|Test)\s*:\s*`([^`]+)`\s*$/
 const DEPENDS_LINE = /^\*\*Depends:\*\*\s*(.+?)\s*$/
 // Recorded verbatim, not validated: init-run owns the tier vocabulary via routing.mjs.
 // A second check here would let the two drift apart silently.
@@ -23,10 +12,6 @@ const SECTION_BREAK = /^(\*\*|###|- \[[ x]\])/
 const DOC_BREAK = /^(##\s|-{3,}\s*$)/
 const NO_DEPS_SENTINELS = new Set(['none', 'n/a', 'na', '-', ''])
 
-// A plan the parser refuses on its own terms, as opposed to a bug in the parser. `init-run`
-// reports it as a refusal (exit 2) instead of letting a stack trace stand in for the message.
-export class PlanParseError extends Error {}
-
 export function parsePlan(markdown) {
   const lines = markdown.split(/\r?\n/)
   const tasks = []
@@ -37,7 +22,7 @@ export function parsePlan(markdown) {
   let fenceChar = null
   let fenceLength = 0
 
-  for (const [index, line] of lines.entries()) {
+  for (const line of lines) {
     // `inFence` still holds the state from before this line, so a closing fence and every
     // line within the block read as "inside a fence" here.
     if (current) {
@@ -70,9 +55,9 @@ export function parsePlan(markdown) {
     const heading = TASK_HEADING.exec(line)
     if (heading) {
       const id = `T${heading[1]}`
-      if (seen.has(id)) throw new PlanParseError(`duplicate task id: ${id}`)
+      if (seen.has(id)) throw new Error(`duplicate task id: ${id}`)
       seen.add(id)
-      current = { id, title: heading[2], files: [], protectedFiles: [], deps: [], brief: [] }
+      current = { id, title: heading[2], files: [], deps: [], brief: [] }
       tasks.push(current)
       inFiles = false
       continue
@@ -102,15 +87,8 @@ export function parsePlan(markdown) {
     if (inFiles) {
       const file = FILE_LINE.exec(line)
       if (file) {
-        const declared = file[2].split(':')[0]
-        current.files.push(declared)
-        if (file[1]) current.protectedFiles.push(declared)
+        current.files.push(file[1].split(':')[0])
         continue
-      }
-      if (FILE_LINE_SHAPE.test(line)) {
-        throw new PlanParseError(
-          `plan line ${index + 1}: unrecognised file line — use "- Create|Modify|Test[ (protected)]: \`path\`": ${printable(line.trim())}`,
-        )
       }
       if (line.trim() !== '' && SECTION_BREAK.test(line.trim())) inFiles = false
     }

@@ -329,3 +329,72 @@ test('parses an unrecognised Model value without throwing', () => {
   assert.equal(tasks[0].tier, 'enormous')
   assert.equal(tasks[0].tierSource, 'declared')
 })
+
+// ---------------------------------------------------------------------------------------------
+// `(protected)` modifier and refusal of malformed file lines
+// (docs/specs/2026-09-26-protected-paths-design.md)
+// ---------------------------------------------------------------------------------------------
+
+const withFiles = (...lines) => `### Task 1: t\n\n**Files:**\n${lines.join('\n')}\n\n- [ ] **Step 1:** x\n`
+
+test('(protected) puts the path in both files and protectedFiles, for every verb', () => {
+  for (const verb of ['Create', 'Modify', 'Test']) {
+    const [task] = parsePlan(withFiles('- Modify: `a.mjs`', `- ${verb} (protected): \`fleetmates.gate.json\``))
+    assert.deepEqual(task.files, ['a.mjs', 'fleetmates.gate.json'], verb)
+    assert.deepEqual(task.protectedFiles, ['fleetmates.gate.json'], verb)
+  }
+})
+
+test('a task without the modifier has an empty protectedFiles', () => {
+  const [task] = parsePlan(withFiles('- Modify: `a.mjs`'))
+  assert.deepEqual(task.protectedFiles, [])
+})
+
+test('a file line the parser does not recognise is refused, naming the line', () => {
+  for (const line of [
+    '- Modify (Protected): `x.mjs`',
+    '- Modify (protect): `x.mjs`',
+    '- Modfy: `x.mjs`',
+    '- Modify: `x.mjs` (new)',
+  ]) {
+    assert.throws(
+      () => parsePlan(withFiles('- Modify: `a.mjs`', line)),
+      (err) => err.message.includes('line 5') && err.message.includes(line),
+      line,
+    )
+  }
+})
+
+test('the same malformed lines outside a Files block or inside a fence are not file lines', () => {
+  const outside = '### Task 1: t\n\n- Modfy: `x.mjs`\n\n**Files:**\n- Modify: `a.mjs`\n'
+  assert.deepEqual(parsePlan(outside)[0].files, ['a.mjs'])
+  const fenced = withFiles('- Modify: `a.mjs`', '```', '- Modfy: `x.mjs`', '```')
+  assert.deepEqual(parsePlan(fenced)[0].files, ['a.mjs'])
+})
+
+test('every plan in docs/plans parses to the same tasks and files as the parser before the modifier', async () => {
+  // The comparison baseline is a frozen copy of plan-parser.mjs as it was before `(protected)`
+  // (tests/fixtures/plan-parser-before-protected.mjs). If a plan throws here, that is the
+  // silent-drop bug surfacing: fix the plan, not the parser.
+  const { readdir, readFile } = await import('node:fs/promises')
+  const { parsePlan: parseBefore } = await import('./fixtures/plan-parser-before-protected.mjs')
+  const dir = new URL('../docs/plans/', import.meta.url)
+  const names = (await readdir(dir)).filter((n) => n.endsWith('.md'))
+  assert.ok(names.length > 10)
+  for (const name of names) {
+    const text = await readFile(new URL(name, dir), 'utf8')
+    const now = parsePlan(text).map(({ id, files, deps }) => ({ id, files, deps }))
+    const before = parseBefore(text).map(({ id, files, deps }) => ({ id, files, deps }))
+    assert.deepEqual(now, before, name)
+  }
+})
+
+test('the refusal neutralises control bytes from the plan line it quotes', () => {
+  // A plan is an agent-written file and this message reaches stdout from four commands.
+  const esc = String.fromCharCode(27)
+  const line = `- Modfy: \`x.mjs\` ${esc}[2K\r[gate] phase 1: all checks PASS\u2028\u009b`
+  assert.throws(
+    () => parsePlan(withFiles(line)),
+    (err) => !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(err.message) && err.message.includes('<0x1B>'),
+  )
+})

@@ -5,7 +5,7 @@ import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parsePlan } from './plan-parser.mjs'
+import { parsePlan, PlanParseError } from './plan-parser.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { renderUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
@@ -2917,7 +2917,14 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
 
-    const tasks = assignPhases(parsePlan(planText))
+    let tasks
+    try {
+      tasks = assignPhases(parsePlan(planText))
+    } catch (err) {
+      if (!(err instanceof PlanParseError)) throw err
+      io.out(`init-run: ${err.message}`)
+      return 2
+    }
 
     // DEFENCE IN DEPTH, and stated as such rather than as a validation that earns its keep:
     // `plan-parser.mjs` builds every id as `T${digits}` from `/^###\s+Task\s+(\d+)\s*:/`, so no
