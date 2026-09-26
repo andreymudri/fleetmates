@@ -555,7 +555,7 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
       if (err?.code !== 'EEXIST') throw err
     }
   }
-  const contract = check.report ? await prepareReport(check.report, cwd) : null
+  const contract = check.report ? await prepareReport(check.report, cwd, previewDir) : null
   try {
     const { code, output } = await exec(check.run, cwd, {
       timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS,
@@ -573,7 +573,7 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
     }
     // Read whatever the exit code: a failing suite still has an inventory. Kept off `output`, which
     // is what a person reads; the inventory is what `runChecks` compares.
-    if (contract) result.report = await collectReport(contract, cwd)
+    if (contract) result.report = contract.refused ? { error: contract.refused } : await collectReport(contract, cwd)
     return result
   } finally {
     if (contract?.cleanup) await contract.cleanup()
@@ -589,20 +589,42 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
 // The report contract of a `command` check (docs/specs/2026-09-26-test-inventory-design.md). The
 // dir form hands the runner a fresh directory outside every tree; the path form deletes the
 // in-tree report first, so a report left by an earlier run can never stand in for this one.
-async function prepareReport(report, cwd) {
+async function prepareReport(report, cwd, previewDir) {
   if (report.dir === true) {
     const dir = await mkdtemp(path.join(tmpdir(), 'tm-report-'))
     return { target: dir, env: { FLEETMATES_REPORT_DIR: dir }, cleanup: () => rm(dir, { recursive: true, force: true }).catch(() => {}) }
   }
+  // The in-tree form deletes before it runs, so it runs only inside a worktree the gate built and
+  // owns (the preview or the baseline) — never in the tree a person works in, which is where a
+  // solo gate or a branchless phase runs its checks.
+  if (previewDir === null || path.resolve(cwd) !== path.resolve(previewDir)) {
+    return { refused: 'an in-tree report is read only in a worktree the gate owns; this run has none', env: {}, cleanup: null }
+  }
   const target = path.join(cwd, report.path)
+  const unsafe = await symlinkOnPath(cwd, report.path)
+  if (unsafe) return { refused: `the report path passes through a symbolic link (${unsafe})`, env: {}, cleanup: null }
   await rm(target, { recursive: true, force: true })
   return { target, env: {}, cleanup: null }
 }
 
+// Every component from the tree root down to the report, not only the last: a committed
+// `reports -> ../elsewhere` made the pre-run delete reach outside the worktree (review, reproduced).
+async function symlinkOnPath(root, relative) {
+  let current = root
+  for (const part of relative.replaceAll('\\', '/').split('/').filter((p) => p !== '' && p !== '.')) {
+    current = path.join(current, part)
+    const info = await lstat(current).catch(() => null)
+    if (!info) return null
+    if (info.isSymbolicLink()) return path.relative(root, current)
+  }
+  return null
+}
+
 async function collectReport({ target }, cwd) {
   try {
-    // A symlink at the report path would have the gate read a file the tree does not hold.
-    if ((await lstat(target).catch(() => null))?.isSymbolicLink()) return { error: 'the report path is a symbolic link' }
+    // Checked again after the run: the suite is teammate code and can plant a link while it runs.
+    const unsafe = path.isAbsolute(target) && target.startsWith(cwd) ? await symlinkOnPath(cwd, path.relative(cwd, target)) : null
+    if (unsafe || (await lstat(target).catch(() => null))?.isSymbolicLink()) return { error: 'the report path is a symbolic link' }
     const roots = [cwd, await realpath(cwd).catch(() => cwd)]
     const inventory = await readReport(target, { root: roots })
     return inventory ? { inventory } : { error: 'absent: the suite wrote no report' }

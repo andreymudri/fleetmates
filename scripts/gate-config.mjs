@@ -27,14 +27,18 @@ export async function loadGateConfig(root) {
 // ignores `.only` unless `--test-only` is given, so it needs no flag; Jest has no refusal at all,
 // and a focused Jest suite shows up as drops in the inventory instead.
 function inferTestCheck(script) {
-  if (/\bnode\s+--test\b/.test(script)) {
+  // Only a script that names no reporter of its own: added reporters would leave node with more
+  // reporters than destinations, and it refuses to start (review, reproduced on this repository).
+  // The flags go right after `node --test` in the script itself — node stops reading its own
+  // options at the first positional argument, so `npm run test -- …` never reaches the runner, and
+  // NODE_OPTIONS is inherited by every nested `node --test` a suite spawns, which then writes into
+  // the same report (both measured).
+  const nodeTest = /\bnode\s+--test\b/
+  if (nodeTest.test(script) && !/--test-reporter/.test(script) && !/[;&|`$]/.test(script)) {
     return {
       name: 'test',
       kind: 'command',
-      // Through NODE_OPTIONS, not `npm run test -- …`: node stops reading its own options at the
-      // first positional argument, so reporter flags appended after `tests/*.test.mjs` never reach
-      // the test runner (measured: no report written).
-      run: 'NODE_OPTIONS="$NODE_OPTIONS --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FLEETMATES_REPORT_DIR/node.xml" npm run test',
+      run: script.replace(nodeTest, 'node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$FLEETMATES_REPORT_DIR/node.xml"'),
       report: { format: 'junit', dir: true },
     }
   }

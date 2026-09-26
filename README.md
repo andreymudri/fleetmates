@@ -320,12 +320,13 @@ before the phase with the tests that run after it:
 
 ```json
 { "name": "test", "kind": "command",
-  "run": "NODE_OPTIONS=\"$NODE_OPTIONS --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FLEETMATES_REPORT_DIR/node.xml\" npm run test",
+  "run": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=\"$FLEETMATES_REPORT_DIR/node.xml\" tests/*.test.mjs",
   "report": { "format": "junit", "dir": true } }
 ```
 
 `"dir": true` means the runner writes under `$FLEETMATES_REPORT_DIR`, a fresh directory per run;
-`"path": "build/test-results/test"` names an in-tree report instead, deleted before each run. A test
+`"path": "build/test-results/test"` names an in-tree report instead, deleted before each run — only
+ever inside the gate's own preview and baseline worktrees, and never through a symbolic link. A test
 that stops running needs its file marked ``- Test (drops): `…` `` in the plan; a new test that is
 skipped where the gate runs needs its unit declared:
 

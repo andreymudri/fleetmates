@@ -1165,6 +1165,9 @@ test('a command check\'s report takes exactly one of dir: true and a repo-relati
     null, 'junit', [], { dir: true }, { format: 'xunit', dir: true }, { format: 'junit' },
     { format: 'junit', dir: true, path: 'r.xml' }, { format: 'junit', dir: 'yes' },
     { format: 'junit', path: '/tmp/r.xml' }, { format: 'junit', path: '../r.xml' }, { format: 'junit', path: '' },
+    // The gate deletes this path before each run: the tree itself, a climb, and git's store are refused.
+    { format: 'junit', path: '.' }, { format: 'junit', path: 'reports/..' }, { format: 'junit', path: './' },
+    { format: 'junit', path: '.git' }, { format: 'junit', path: 'sub/.GIT/x' }, { format: 'junit', path: 'a/../b.xml' },
   ]) {
     assert.throws(() => ENFORCEMENT_VALIDATORS.phases(phases(bad)), (err) => err instanceof ConfigError && err.message.includes('phases.default.checks[0].report'), JSON.stringify(bad))
   }

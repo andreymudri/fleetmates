@@ -169,3 +169,16 @@ test('nextest: classname is the unit, and an ignored test is absent rather than 
     demo: { 'demo > tests::it_works': { ran: 1, skipped: 0 } },
   })
 })
+
+// Review round: the attribute regex was quadratic in a tag's length (an 80 KB tag took 5.5 s).
+test('a long tag parses in linear time', () => {
+  const start = Date.now()
+  const xml = `<testsuite name="s"><testcase classname="C" name="x" ${'a'.repeat(400_000)}/></testsuite>`
+  parseJunit(xml, { root: '/' })
+  assert.ok(Date.now() - start < 1000, `${Date.now() - start} ms`)
+})
+
+test('attribute scanning: spaces around =, both quote styles, valueless names, and a > inside a value', () => {
+  const inv = flat(parseJunit(`<testsuite name = 's'><testcase disabled classname= "C" name ='a>b' /></testsuite>`, { root: '/' }))
+  assert.deepEqual(Object.keys(inv.C), ['C > s > C > a>b'])
+})

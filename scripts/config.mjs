@@ -91,7 +91,16 @@ function validateReport(report, where) {
   const hasPath = report.path !== undefined
   if (hasDir === hasPath) throw new ConfigError(`${where} needs exactly one of "dir": true and "path"`)
   if (hasDir && report.dir !== true) throw new ConfigError(`${where}.dir must be true`)
-  if (hasPath) repoRelative(report.path, `${where}.path`)
+  if (hasPath) {
+    // The gate deletes this path before each run, so it must name something strictly inside the
+    // tree and outside git's own store. `reports/..` normalises to `.` — the whole worktree — and
+    // was accepted before this check (review: the repository, `.git` included, was deleted).
+    const normalized = repoRelative(report.path, `${where}.path`).replace(/\/+$/, '')
+    const parts = normalized.split('/')
+    if (normalized === '.' || normalized === '' || report.path.replaceAll('\\', '/').split('/').includes('..') || parts.some((p) => p.toLowerCase() === '.git')) {
+      throw new ConfigError(`${where}.path must name a report inside the tree, not the tree itself, a parent, or .git; got ${JSON.stringify(report.path)}`)
+    }
+  }
 }
 
 export const ENFORCEMENT_VALIDATORS = {

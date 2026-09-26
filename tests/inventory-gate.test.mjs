@@ -252,6 +252,7 @@ test('finish names the standing skips at the last gate', async () => {
 test('the inferred node --test check writes a report the inventory reads', async () => {
   const { inferGateConfig } = await import('../scripts/gate-config.mjs')
   const inferred = inferGateConfig({ scripts: { test: 'node --test tests/*.test.mjs' } }).phases.default.checks.find((c) => c.name === 'test')
+  assert.ok(inferred.report, JSON.stringify(inferred))
   const gateManifest = { phases: { default: { checks: [inferred] } } }
   const context = process.env.NODE_TEST_CONTEXT
   delete process.env.NODE_TEST_CONTEXT
@@ -325,4 +326,42 @@ test('innocent', () => {})
     const { inventory } = await gate(root)
     assert.equal(inventory.status, 'pass', inventory.output)
   })
+})
+
+// Review round: a committed `reports -> ../victim` made the pre-run delete reach outside the tree.
+test('a report path through a symlinked directory is refused and deletes nothing outside the tree', async () => {
+  const victimRoot = await mkdtemp(path.join(tmpdir(), 'tm-inv-victim-'))
+  try {
+    await writeFile(path.join(victimRoot, 'junit.xml'), 'keep me')
+    const gateManifest = manifest({ run: 'true', report: { format: 'junit', path: 'reports/junit.xml' } })
+    await withRun({ plan: planWith(['- Create: `a.mjs`', '- Create: `reports`']), gate: gateManifest }, async (root) => {
+      const { symlink } = await import('node:fs/promises')
+      await symlink(victimRoot, path.join(root, 'reports'))
+    }, async (root) => {
+      const { inventory } = await gate(root)
+      assert.equal(inventory.status, 'fail')
+      assert.match(inventory.output, /symbolic link/)
+    })
+    const { readFile } = await import('node:fs/promises')
+    assert.equal(await readFile(path.join(victimRoot, 'junit.xml'), 'utf8'), 'keep me')
+  } finally {
+    await rm(victimRoot, { recursive: true, force: true })
+  }
+})
+
+// The in-tree form deletes before it runs, so it never runs outside a worktree the gate owns.
+test('the in-tree report is never deleted in a tree the gate does not own', async () => {
+  const { runCommandCheck } = await import('../scripts/gate-runner.mjs')
+  const { readFile } = await import('node:fs/promises')
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-inv-own-'))
+  try {
+    await mkdir(path.join(dir, 'reports'))
+    await writeFile(path.join(dir, 'reports', 'junit.xml'), 'a person\'s file')
+    const check = { name: 'test', kind: 'command', run: 'true', report: { format: 'junit', path: 'reports/junit.xml' } }
+    const result = await runCommandCheck(check, { cwd: dir, previewDir: null })
+    assert.match(result.report.error, /worktree the gate owns/)
+    assert.equal(await readFile(path.join(dir, 'reports', 'junit.xml'), 'utf8'), 'a person\'s file')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

@@ -193,9 +193,19 @@ goes to the ordinary retry.
 
 - **nextest omits ignored tests** from its JUnit report (measured on 0.9.146, above). The drop rule
   still sees a newly ignored test; the skip rules do not see a test ignored from birth.
-- **The suggested `node --test` command goes through `NODE_OPTIONS`.** node stops reading its own
-  options at the first positional argument, so reporter flags appended with `npm run test -- …`
-  after a file pattern never reach the test runner (measured: no report written).
+- **The suggested `node --test` check rewrites the script itself**, inserting the reporter flags
+  right after `node --test`, and only for a script that names no reporter and carries no shell
+  syntax. Measured: flags appended with `npm run test -- …` never reach the runner (node stops
+  reading options at the first positional argument); `NODE_OPTIONS` reaches every nested
+  `node --test` a suite spawns, which then writes into the same report; and a script with its own
+  reporter plus two more has more reporters than destinations, so node refuses to start.
+- **The in-tree report form is safe to delete only where the gate owns the tree.** Review found
+  `report.path: "reports/.."` accepted, and the pre-run delete removed the repository, `.git`
+  included. Validation now refuses a path that is the tree, climbs, or touches `.git`; the delete
+  runs only in the preview or baseline worktree; and every component of the path is checked for a
+  symbolic link before the delete and again before the read.
+- **Attributes are scanned by hand**, linear in the tag: the regex was quadratic (80 KB tag, 5.5 s).
+  Report files are sized before they are read.
 - **A symlink at an in-tree report path is refused**: the suite could otherwise point the gate at a
   file the tree does not hold.
 - **A test ID collapses adjacent repeats** (`demo::it > runs`, not `demo::it > demo::it > demo::it >

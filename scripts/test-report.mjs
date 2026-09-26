@@ -32,11 +32,29 @@ function decode(text) {
   })
 }
 
-const ATTR = /([^\s=/>]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
-
+// A hand scanner, linear in the tag's length. The regex it replaces was quadratic on a long run of
+// name characters with no `=` (review: an 80 KB tag took 5.5 s), and the report is agent-written.
 function attributes(source) {
   const attrs = {}
-  for (const m of source.matchAll(ATTR)) attrs[m[1]] = decode(m[2] ?? m[3] ?? '')
+  let i = 0
+  const n = source.length
+  const space = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r'
+  while (i < n) {
+    while (i < n && (space(source[i]) || source[i] === '/')) i += 1
+    const start = i
+    while (i < n && !space(source[i]) && source[i] !== '=' && source[i] !== '/' && source[i] !== '>') i += 1
+    const name = source.slice(start, i)
+    while (i < n && space(source[i])) i += 1
+    if (name === '' || source[i] !== '=') { if (name === '' && i === start) i += 1; continue }
+    i += 1
+    while (i < n && space(source[i])) i += 1
+    const quote = source[i]
+    if (quote !== '"' && quote !== "'") continue
+    const end = source.indexOf(quote, i + 1)
+    if (end === -1) break
+    attrs[name] = decode(source.slice(i + 1, end))
+    i = end + 1
+  }
   return attrs
 }
 
@@ -159,9 +177,10 @@ export async function readReport(target, { root } = {}) {
   const units = new Map()
   let total = 0
   for (const file of files) {
-    const bytes = await readFile(file)
-    total += bytes.length
+    // Sized before it is read, so an oversized report is refused without being loaded.
+    total += (await stat(file)).size
     if (total > MAX_REPORT_BYTES) refuse(`is larger than ${MAX_REPORT_BYTES} bytes`)
+    const bytes = await readFile(file)
     parseJunit(bytes.toString('utf8'), { root }, units)
   }
   return { units }

@@ -265,7 +265,11 @@ test('the inferred test check carries the runner\'s refusal of a focused test, a
   const test = (script) => inferGateConfig({ scripts: { test: script } }).phases.default.checks.find((c) => c.name === 'test')
   const node = test('node --test tests/*.test.mjs')
   assert.deepEqual(node.report, { format: 'junit', dir: true })
-  assert.match(node.run, /^NODE_OPTIONS="\$NODE_OPTIONS --test-reporter=spec .*--test-reporter=junit --test-reporter-destination=\$FLEETMATES_REPORT_DIR\/node\.xml" npm run test$/)
+  assert.equal(node.run, 'node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$FLEETMATES_REPORT_DIR/node.xml" tests/*.test.mjs')
+  // A script naming its own reporter, or carrying shell syntax, gets no report: added reporters
+  // would outnumber destinations and node refuses to start; rewriting shell is not this code's job.
+  assert.deepEqual(test('node --test --test-reporter=./r.mjs tests/*.test.mjs'), { name: 'test', kind: 'command', run: 'npm run test' })
+  assert.deepEqual(test('node --test tests/ && echo done'), { name: 'test', kind: 'command', run: 'npm run test' })
   assert.deepEqual(test('vitest run'), { name: 'test', kind: 'command', run: 'npm run test -- --allowOnly=false' })
   assert.deepEqual(test('mocha'), { name: 'test', kind: 'command', run: 'npm run test -- --forbid-only' })
   assert.deepEqual(test('jest'), { name: 'test', kind: 'command', run: 'npm run test' })
