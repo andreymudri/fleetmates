@@ -365,3 +365,85 @@ test('the in-tree report is never deleted in a tree the gate does not own', asyn
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+// --- review round: fail-closed baseline, phase-scoped authorisation, every skip path ----------
+
+// The suite writes a report only where T1's file exists: the preview has one, the baseline not.
+test('a baseline run that writes no report fails the inventory, never passes it', async () => {
+  const gateManifest = manifest({ run: `if [ -f a.mjs ]; then ${SUITE}; fi` })
+  await withRun({ plan: planWith(['- Create: `a.mjs`']), gate: gateManifest }, write('a.mjs', 'export {}\n'), async (root) => {
+    const { inventory } = await gate(root)
+    assert.equal(inventory.status, 'fail')
+    assert.match(inventory.output, /^baseline report: absent/)
+  })
+})
+
+test('a baseline tree that cannot be built fails the inventory', async () => {
+  const { runChecks, deriveContext } = await import('../scripts/gate-runner.mjs')
+  const { createGit } = await import('../scripts/git.mjs')
+  await withRun({ plan: planWith(['- Create: `a.mjs`']) }, write('a.mjs', 'export {}\n'), async (root) => {
+    const real = createGit({ cwd: root })
+    let adds = 0
+    // The preview's worktree is the first add; the baseline's is the second, and it fails.
+    const git = Object.assign(Object.create(real), {
+      addWorktreeDetached: async (...args) => { adds += 1; if (adds === 2) throw new Error('disk full'); return real.addWorktreeDetached(...args) },
+    })
+    for (const key of Object.keys(real)) if (key !== 'addWorktreeDetached') git[key] = real[key]
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run-branch', baseBranch: 'main', planPath: 'plan.md' })
+    const results = await runChecks(manifest().phases.default.checks, { ...ctx, git, cwd: root })
+    const inventory = results.find((r) => r.kind === 'inventory')
+    assert.equal(inventory.status, 'fail')
+    assert.match(inventory.output, /baseline report: the baseline tree could not be built: disk full/)
+  })
+})
+
+// Authorisation comes from the tasks of the phase being gated only: a later task marking the same
+// file must not approve an earlier phase's drop.
+test('a (drops) marking on a task of another phase authorises nothing', async () => {
+  const plan = ['### Task 1: A', '', '**Files:**', ...T1, '', '### Task 2: B', '', '**Files:**', '- Test (drops): `tests/a.test.mjs`', '- Create: `b.mjs`', '', '**Depends:** T1', ''].join('\n')
+  await withRun({ plan }, write('tests/a.test.mjs', BASE_TESTS.replace("test('y', () => {})\n", '')), async (root) => {
+    const { inventory } = await gate(root)
+    assert.equal(inventory.status, 'fail', inventory.output)
+    assert.match(inventory.output, /drop: tests\/a\.test\.mjs > test > y/)
+  })
+})
+
+test('a solo gate reports the inventory as skipped', async () => {
+  await withRun({ plan: planWith(['- Create: `a.mjs`']) }, write('a.mjs', 'export {}\n'), async (root) => {
+    const lines = []
+    await runCli(['gate', '--no-fleet', '--run', 'r1', '--plan', 'plan.md', '--root', root], { out: (t) => lines.push(t) })
+    const doc = JSON.parse(lines.filter((l) => !l.startsWith('--no-fleet')).join('\n'))
+    const inventory = doc.results.find((r) => r.kind === 'inventory')
+    assert.equal(inventory.status, 'skip')
+    assert.match(inventory.output, /solo gate/)
+  })
+})
+
+test('a phase with no branch to merge reports the inventory as skipped', async () => {
+  await withRun({ plan: planWith(['- Create: `a.mjs`']) }, write('a.mjs', 'export {}\n'), async (root) => {
+    git(root, ['branch', '-D', 'fleetmates/r1/T1'])
+    const { inventory } = await gate(root)
+    assert.equal(inventory.status, 'skip')
+    assert.match(inventory.output, /no phase branches/)
+  })
+})
+
+test('a phase that does not merge cleanly reports the inventory as skipped', async () => {
+  await withRun({ plan: planWith(T1) }, write('tests/a.test.mjs', BASE_TESTS.replace("'x'", "'x from T1'")), async (root) => {
+    await writeFile(path.join(root, 'tests', 'a.test.mjs'), BASE_TESTS.replace("'x'", "'x from the run branch'"))
+    git(root, ['commit', '--quiet', '-am', 'a conflicting write on the run branch'])
+    const { inventory, doc } = await gate(root)
+    assert.equal(doc.results.find((r) => r.kind === 'merge').status, 'fail')
+    assert.equal(inventory.status, 'skip')
+    assert.match(inventory.output, /does not merge cleanly/)
+  })
+})
+
+test('the inventory output caps each class of line', async () => {
+  const many = "import { test } from 'node:test'\n" + Array.from({ length: 60 }, (_, i) => `test('t${i}', () => {})\n`).join('')
+  await withRun({ plan: planWith(T1), tests: many }, write('tests/a.test.mjs', "import { test } from 'node:test'\ntest('only', () => {})\n"), async (root) => {
+    const { inventory } = await gate(root)
+    assert.equal(inventory.output.split('\n').filter((l) => l.startsWith('drop: ')).length, 50)
+    assert.match(inventory.output, /^… and 10 more drops$/m)
+  })
+})

@@ -59,7 +59,9 @@ cheap to mark.
   `file`. `root` is the directory the suite ran in, stripped from absolute paths — the baseline and
   the preview run in different directories, and `node --test` writes absolute paths (measured). A
   `file` outside `root` is a parse failure.
-- **ID** = `unit` + ` > ` + the enclosing `testsuite` names + ` > ` + the case `name`. Counts, not
+- **ID** = `unit`, the enclosing `testsuite` names, the case `classname` and its `name`, joined by
+  ` > ` with empty parts dropped and adjacent repeats collapsed (node's constant classname is why its
+  IDs read `tests/a.test.mjs > test > y`). Counts, not
   booleans: a parametrised name can repeat, so an ID's drop is a fall in its `ran` count.
 - A report is one file, or every `*.xml` under a directory (Gradle writes one per class), merged.
 - Refused, as a parse failure: not XML, no `testsuites`/`testsuite` root, a case with no `name`,
@@ -178,16 +180,19 @@ goes to the ordinary retry.
 - `tests/test-report.test.mjs`: fixtures captured from real runners (node, pytest xunit1 and
   xunit2, nextest if installable); root stripping, nested suites, todo, parametrised repeats, merge
   of a report directory; each refusal.
-- `tests/gate-runner.test.mjs`: the rule table as pure cases over two parsed reports, then real-git
-  cases with `node --test` as the suite: a phase that deletes a test (drop, FAIL), the same with
-  `(drops)` (PASS), a new test born skipped (FAIL), the same unit in `skips` (PASS), a standing skip
-  (PASS, reported), a renamed test (drop), a report the suite never writes (FAIL).
-- `tests/adversarial.test.mjs`: a teammate adds `.skip` to an existing test → FAIL escalated as
-  process violation; a teammate removes `report` from the manifest without `(protected)` → fileset
-  FAIL (spec 1); LIMIT: a loosened assertion (`assert.equal(x, 5)` → `assert.ok(x)`) passes;
-  LIMIT: a test file that writes its own report into `$FLEETMATES_REPORT_DIR` controls the verdict.
-- `tests/fix-loop.test.mjs`: `inventory` FAIL escalates as `process-violation`.
-- Each new test mutation-checked against the code it pins.
+- `tests/test-report.test.mjs` also holds the rule table as pure cases over two inventories.
+- `tests/inventory-gate.test.mjs`, real git with `node --test` as the suite: a phase that deletes a
+  test (drop, FAIL), the same with `(drops)` (PASS) and with `(drops)` on another phase's task
+  (FAIL), a new test born skipped (FAIL), the same unit in `skips` (PASS), a standing skip (PASS,
+  reported), a renamed test (drop), a report the suite never writes (FAIL), a baseline that writes
+  none or whose tree cannot be built (FAIL), the solo, branchless and conflicted skips, `complete`,
+  `finish`, the path form, and the process-violation escalation. Adversarial cases in the same file:
+  `.skip` added to an existing test → FAIL escalated; `report` removed from the manifest without
+  `(protected)` → fileset FAIL (spec 1); LIMIT: a loosened assertion passes; LIMIT: a test file that
+  writes its own report into `$FLEETMATES_REPORT_DIR` controls the verdict.
+- Mutation-checked: every guard and rule was broken against its tests; each mutant a review round
+  found surviving got a test. The one survivor kept is the size check before a report is read —
+  without it the report is still refused, only after it is loaded, which no test observes.
 
 ## Implementation notes (2026-09-26)
 

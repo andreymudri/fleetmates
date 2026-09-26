@@ -107,7 +107,9 @@ export function parsePlan(markdown) {
     if (inFiles) {
       const file = FILE_LINE.exec(line)
       if (file) {
-        const declared = file[2].split(':')[0]
+        // Only a numeric `:line` (or `:line-line`, `:line:col`) suffix is stripped: a `(drops)`
+        // marking can name a runner's classname unit, and `demo::it` must stay `demo::it`.
+        const declared = file[2].replace(/:\d+(?:[-:]\d+)?$/, '')
         current.files.push(declared)
         if (file[1] === 'protected') current.protectedFiles.push(declared)
         if (file[1] === 'drops') current.dropFiles.push(declared)
@@ -115,7 +117,7 @@ export function parsePlan(markdown) {
       }
       if (FILE_LINE_SHAPE.test(line)) {
         throw new PlanParseError(
-          `plan line ${index + 1}: unrecognised file line — use "- Create|Modify|Test[ (protected|drops)]: \`path\`": ${printable(line.trim())}`,
+          `plan line ${index + 1}: unrecognised file line — use "- Create|Modify|Test[ (protected|drops)]: \`path\`", one modifier per line (a file needing both goes on two lines): ${printable(line.trim())}`,
         )
       }
       if (line.trim() !== '' && SECTION_BREAK.test(line.trim())) inFiles = false

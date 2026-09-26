@@ -182,3 +182,49 @@ test('attribute scanning: spaces around =, both quote styles, valueless names, a
   const inv = flat(parseJunit(`<testsuite name = 's'><testcase disabled classname= "C" name ='a>b' /></testsuite>`, { root: '/' }))
   assert.deepEqual(Object.keys(inv.C), ['C > s > C > a>b'])
 })
+
+// --- review round: rows and parser details the first suite left unpinned ------------------------
+
+test('a self-closing testsuite does not enter the suite path of later cases', () => {
+  const inv = flat(parseJunit('<testsuites><testsuite name="empty"/><testsuite name="s"><testcase classname="C" name="x"/></testsuite></testsuites>', { root: '/' }))
+  assert.deepEqual(Object.keys(inv.C), ['C > s > C > x'])
+})
+
+test('a relative file is normalised, and a drive-letter file is absolute', () => {
+  const rel = flat(parseJunit('<testsuite><testcase file="./tests/./a.test.mjs" name="x"/></testsuite>', { root: '/' }))
+  assert.deepEqual(Object.keys(rel), ['tests/a.test.mjs'])
+  const win = flat(parseJunit('<testsuite><testcase file="C:\\work\\repo\\tests\\a.test.mjs" name="x"/></testsuite>', { root: 'C:\\work\\repo' }))
+  assert.deepEqual(Object.keys(win), ['tests/a.test.mjs'])
+  assert.throws(() => parseJunit('<testsuite><testcase file="D:/other/a.test.mjs" name="x"/></testsuite>', { root: 'C:/work/repo' }), ReportParseError)
+})
+
+test('an unterminated comment is refused', () => {
+  assert.throws(() => parseJunit('<testsuite><!-- open <testcase classname="C" name="x"/></testsuite>', { root: '/' }), /unterminated comment/)
+})
+
+test('the size cap is cumulative over a report directory', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-report-cap-'))
+  try {
+    const one = '<testsuite><testcase classname="A" name="x"/></testsuite>'
+    await writeFile(path.join(dir, 'a.xml'), one)
+    await writeFile(path.join(dir, 'b.xml'), one)
+    await readReport(dir, { root: dir, maxBytes: one.length * 2 })
+    await assert.rejects(readReport(dir, { root: dir, maxBytes: one.length * 2 - 1 }), /larger than/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a skips unit whose tests all run is stale', () => {
+  const r = compareInventories(inv({ 'db.py': { 'db > x': S } }), inv({ 'db.py': { 'db > x': R } }), { skips: new Set(['db.py']) })
+  assert.deepEqual(r.stale, [{ unit: 'db.py' }])
+})
+
+test('an authorised drop to skipped, and a declared new skip, are not standing skips', () => {
+  const r = compareInventories(
+    inv({ 'a.mjs': { 'a > x': R } }),
+    inv({ 'a.mjs': { 'a > x': S }, 'db.py': { 'db > n': S } }),
+    { drops: new Set(['a.mjs']), skips: new Set(['db.py']) },
+  )
+  assert.deepEqual([r.dropped, r.newSkips, r.standing], [[], [], []])
+})

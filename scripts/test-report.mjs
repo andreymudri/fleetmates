@@ -167,7 +167,7 @@ export function parseJunit(xml, { root } = {}, units = new Map()) {
 
 // One report file, or every `*.xml` directly under a directory (Gradle writes one per class),
 // merged in name order so the same directory always yields the same inventory.
-export async function readReport(target, { root } = {}) {
+export async function readReport(target, { root, maxBytes = MAX_REPORT_BYTES } = {}) {
   let info
   try { info = await stat(target) } catch { return null }
   const files = info.isDirectory()
@@ -179,7 +179,7 @@ export async function readReport(target, { root } = {}) {
   for (const file of files) {
     // Sized before it is read, so an oversized report is refused without being loaded.
     total += (await stat(file)).size
-    if (total > MAX_REPORT_BYTES) refuse(`is larger than ${MAX_REPORT_BYTES} bytes`)
+    if (total > maxBytes) refuse(`is larger than ${maxBytes} bytes`)
     const bytes = await readFile(file)
     parseJunit(bytes.toString('utf8'), { root }, units)
   }

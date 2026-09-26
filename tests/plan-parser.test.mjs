@@ -362,6 +362,14 @@ test('(drops) puts the path in both files and dropFiles, for every verb', () => 
   }
 })
 
+// A `(drops)` marking may name a runner's classname unit (nextest: `demo::it`); only a numeric
+// `:line` suffix is stripped, so the unit survives intact.
+test('(drops) keeps a classname unit with colons, and strips only a numeric :line suffix', () => {
+  const [task] = parsePlan(withFiles('- Test (drops): `demo::it`', '- Modify: `a.mjs:12-20`', '- Modify: `b.mjs:3:7`'))
+  assert.deepEqual(task.dropFiles, ['demo::it'])
+  assert.deepEqual(task.files, ['demo::it', 'a.mjs', 'b.mjs'])
+})
+
 test('a task marking one file (protected) and another (drops) keeps them apart', () => {
   const [task] = parsePlan(withFiles('- Modify (protected): `fleetmates.gate.json`', '- Test (drops): `t.test.mjs`', '- Modify: `a.mjs`'))
   assert.deepEqual(task.protectedFiles, ['fleetmates.gate.json'])
