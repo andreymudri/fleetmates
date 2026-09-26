@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parsePlan } from '../scripts/plan-parser.mjs'
+import { parsePlan, PlanParseError } from '../scripts/plan-parser.mjs'
 import { assignPhases } from '../scripts/phases.mjs'
 
 const PLAN = `
@@ -353,9 +353,32 @@ test('(protected) strips a :line suffix from the marking as from the declared pa
   assert.deepEqual(task.protectedFiles, ['fleetmates.gate.json'])
 })
 
+test('(drops) puts the path in both files and dropFiles, for every verb', () => {
+  for (const verb of ['Create', 'Modify', 'Test']) {
+    const [task] = parsePlan(withFiles('- Modify: `a.mjs`', `- ${verb} (drops): \`tests/old.test.mjs:4\``))
+    assert.deepEqual(task.files, ['a.mjs', 'tests/old.test.mjs'], verb)
+    assert.deepEqual(task.dropFiles, ['tests/old.test.mjs'], verb)
+    assert.deepEqual(task.protectedFiles, [], verb)
+  }
+})
+
+test('a task marking one file (protected) and another (drops) keeps them apart', () => {
+  const [task] = parsePlan(withFiles('- Modify (protected): `fleetmates.gate.json`', '- Test (drops): `t.test.mjs`', '- Modify: `a.mjs`'))
+  assert.deepEqual(task.protectedFiles, ['fleetmates.gate.json'])
+  assert.deepEqual(task.dropFiles, ['t.test.mjs'])
+  assert.deepEqual(task.files, ['fleetmates.gate.json', 't.test.mjs', 'a.mjs'])
+})
+
+for (const bad of ['- Test (Drops): `t.test.mjs`', '- Test (drop): `t.test.mjs`', '- Test (protected, drops): `t.test.mjs`', '- Test (drops) (protected): `t.test.mjs`']) {
+  test(`(drops) spelled otherwise is refused, naming the line: ${bad}`, () => {
+    assert.throws(() => parsePlan(withFiles(bad)), (err) => err instanceof PlanParseError && err.message.includes(bad))
+  })
+}
+
 test('a task without the modifier has an empty protectedFiles', () => {
   const [task] = parsePlan(withFiles('- Modify: `a.mjs`'))
   assert.deepEqual(task.protectedFiles, [])
+  assert.deepEqual(task.dropFiles, [])
 })
 
 test('a file line the parser does not recognise is refused, naming the line', () => {

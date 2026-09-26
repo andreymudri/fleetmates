@@ -7,11 +7,16 @@ const TASK_HEADING = /^###\s+Task\s+(\d+)\s*:\s*(.+?)\s*$/
 const FILES_HEADING = /^\*\*Files:\*\*\s*$/
 // The optional ` (protected)` after the verb authorises the task to change a path the gate
 // manifest protects (docs/specs/2026-09-26-protected-paths-design.md). Exact lower case only.
-const FILE_LINE = /^-\s+(?:Create|Modify|Test)(\s+\(protected\))?\s*:\s*`([^`]+)`\s*$/
+// One modifier at most: `(protected)` authorises changing a protected path, `(drops)` authorises
+// the gate's test inventory to see tests in that file stop running. A task needing both writes the
+// path on two lines; a combined `(protected, drops)` is refused like any other malformed line.
+const FILE_LINE = /^-\s+(?:Create|Modify|Test)(?:\s+\((protected|drops)\))?\s*:\s*`([^`]+)`\s*$/
 // Anything shaped like a file line. Inside a Files block, a line of this shape that FILE_LINE
 // does not match is refused: it used to drop out of `files` silently, and with `(protected)` a
 // typo in the marking would silently remove scope permission instead of granting it.
-const FILE_LINE_SHAPE = /^-\s+[A-Za-z]+(\s*\([^)]*\))?\s*:\s*`/
+// Any number of parenthesised groups, so a stacked `(drops) (protected)` is refused rather than
+// matching neither pattern and dropping out of `files` silently.
+const FILE_LINE_SHAPE = /^-\s+[A-Za-z]+(\s*\([^)]*\))*\s*:\s*`/
 const DEPENDS_LINE = /^\*\*Depends:\*\*\s*(.+?)\s*$/
 // Recorded verbatim, not validated: init-run owns the tier vocabulary via routing.mjs.
 // A second check here would let the two drift apart silently.
@@ -72,7 +77,7 @@ export function parsePlan(markdown) {
       const id = `T${heading[1]}`
       if (seen.has(id)) throw new PlanParseError(`duplicate task id: ${id}`)
       seen.add(id)
-      current = { id, title: heading[2], files: [], protectedFiles: [], deps: [], brief: [] }
+      current = { id, title: heading[2], files: [], protectedFiles: [], dropFiles: [], deps: [], brief: [] }
       tasks.push(current)
       inFiles = false
       continue
@@ -104,12 +109,13 @@ export function parsePlan(markdown) {
       if (file) {
         const declared = file[2].split(':')[0]
         current.files.push(declared)
-        if (file[1]) current.protectedFiles.push(declared)
+        if (file[1] === 'protected') current.protectedFiles.push(declared)
+        if (file[1] === 'drops') current.dropFiles.push(declared)
         continue
       }
       if (FILE_LINE_SHAPE.test(line)) {
         throw new PlanParseError(
-          `plan line ${index + 1}: unrecognised file line — use "- Create|Modify|Test[ (protected)]: \`path\`": ${printable(line.trim())}`,
+          `plan line ${index + 1}: unrecognised file line — use "- Create|Modify|Test[ (protected|drops)]: \`path\`": ${printable(line.trim())}`,
         )
       }
       if (line.trim() !== '' && SECTION_BREAK.test(line.trim())) inFiles = false

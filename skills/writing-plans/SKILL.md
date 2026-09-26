@@ -125,6 +125,19 @@ branch (see `parallel-execution`, "Amending a
 plan mid-run"). A task that changes a protected path without the marking fails `fileset` and
 escalates, even when the path is declared.
 
+### Dropped tests
+
+When the gate's manifest gives a `command` check a `report`, the gate compares the suite's tests
+before and after the phase. A task that deletes a test, renames one, or makes one stop running must
+mark the test file with ` (drops)`:
+
+- `- Test (drops): \`tests/old-parse.test.mjs\``
+
+Exact lower case, read from the plan at the anchor like `(protected)`, and one modifier per line:
+a file that needs both markings goes on two lines. Without it the gate's inventory result fails and
+the phase escalates. A test that is skipped where the gate runs — no database, no GPU — is not a
+plan matter: it is declared in the manifest's `skips`, which is protected.
+
 ## Dependencies are mandatory where they exist
 
 A task that builds on another must carry `**Depends:** T1, T3`. Without it, the dependent
