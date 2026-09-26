@@ -418,11 +418,12 @@ const RESULTS_COMMANDS = new Set(['gate', 'finish', 'prune-run'])
 // `aggregateVerdict` counts it toward the fail-closed "at least one check ran" clause that stops
 // a self-generated result reading as a verified phase:
 //
-//   - `enforcementOnlyRefusal` below refuses the whole invocation for a phase that declares no
-//     enforcement check at all. Without it, a manifest of nothing but a failing `command` check
-//     produced "phase 1 PASS   skipped: test" and then "the run branch is ready to land", exit 0,
-//     where the identical state without the flag exits 1 — a run declared landable having
-//     verified nothing.
+//   - Every phase has an enforcement check to report: `checksForPhase` injects `fileset` and
+//     `ownership` when the manifest lacks them. That used to be a refusal here, because a manifest
+//     of nothing but a failing `command` check produced "phase 1 PASS   skipped: test" and then
+//     "the run branch is ready to land", exit 0, where the identical state without the flag exits
+//     1 — a run declared landable having verified nothing. Injection made that shape unreachable,
+//     so the refusal went with it.
 //   - `prune-run` below refuses to PRUNE any phase whose verdict rests on a check THIS FLAG
 //     skipped. A cheap verdict is enough to report; it is never enough to run
 //     `git worktree remove --force` over a teammate's uncommitted work.
@@ -443,12 +444,6 @@ const ENFORCEMENT_ONLY_SKIP = 'skipped by --enforcement-only: this verdict repor
 // told to drop, and the only way forward would have been rewriting their `skip` as a `pass`.
 const ENFORCEMENT_ONLY_SKIPPED = Symbol('skipped by --enforcement-only')
 
-// The enforcement kinds a manifest can actually declare. `merge` is deliberately absent even
-// though it is enforced: the gate computes it for itself, `aggregateVerdict` excludes it from the
-// same "something was verified" clause for exactly that reason, and a manifest entry claiming it
-// finds no runner and lands as a blocking pending. So a phase whose only enforced kind were
-// `merge` has declared no enforcement, and counting it here would reopen the hole this closes.
-const MANIFEST_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
 
 // A MANIFEST ENTRY IS NOT KNOWN TO BE AN OBJECT. `fleetmates.gate.json` is `JSON.parse`-only and
 // `validateGate` in `scripts/config.mjs` checks only that `phases[*].checks` is an ARRAY, never
@@ -457,21 +452,11 @@ const MANIFEST_ENFORCED_KINDS = new Set(['fileset', 'ownership'])
 // the answer the operator needs; but a bare dereference in a site that runs FIRST throws a
 // TypeError instead and the command exits with no verdict at all. Measured on three paths, each
 // crashing at a different line: `gate` in `validateSuppliedResults`, `gate --no-fleet` in the solo
-// filter, `--enforcement-only` in `enforcementOnlyRefusal`. So a kind read off an entry straight
+// filter, `--enforcement-only` in its since-removed refusal. So a kind read off an entry straight
 // out of the manifest goes through here, and `validateSuppliedResults` skips a non-object entry
 // rather than indexing it. A null-entry test drives each of those paths; add one for any new site.
 const kindOf = (check) => check?.kind
 
-// Returns the refusal message when `--enforcement-only` cannot answer for some phase, or null.
-// Checked before a single check runs, so the caller learns the flag is the wrong tool for this
-// manifest rather than reading a verdict that was never grounded in anything.
-function enforcementOnlyRefusal(config, phases) {
-  const barren = phases.filter((p) => !checksForPhase(config, String(p)).some((c) => MANIFEST_ENFORCED_KINDS.has(kindOf(c))))
-  if (barren.length === 0) return null
-  return `--enforcement-only cannot answer for phase ${barren.join(', ')}: `
-    + `that phase's manifest declares no ${[...MANIFEST_ENFORCED_KINDS].join(' or ')} check, so dropping its command checks would leave nothing verified at all.`
-    + ' Re-run without --enforcement-only, or declare an enforcement check for it.'
-}
 
 function commandChecks(checks) {
   return checks.filter((c) => kindOf(c) === 'command')
@@ -530,20 +515,15 @@ async function runPhaseChecks(checks, ctx, enforcementOnly) {
 //   - `checkCount === 0` silences the line entirely. It exists to explain a wait, and with
 //     nothing to wait for it explained nothing. This is not the "a skipped check is always
 //     reported" rule — no check is being hidden here; there is no check.
-//   - `recommendEnforcementOnly` decides only the tail. Whether the wait is worth explaining and
-//     whether the cheaper route exists are unrelated: a manifest of nothing but `command` checks
-//     has a real wait to explain AND is exactly the barren shape `enforcementOnlyRefusal` exits 2
-//     on, so it must be told about the wait and not sent to a flag that would refuse it. Gating
-//     the recommendation on the count instead only reached manifests with no command checks,
-//     which is the one case where the line is never printed at all.
-function announceCommandChecks(io, command, checkCount, phaseCount, recommendEnforcementOnly) {
+//   - The tail always recommends `--enforcement-only`: every phase has an enforcement check to
+//     report, because `checksForPhase` injects `fileset` and `ownership` when the manifest lacks
+//     them, so the cheaper route always exists.
+function announceCommandChecks(io, command, checkCount, phaseCount) {
   if (checkCount === 0) return
   io.out(
     `${command}: running ${checkCount} command check${checkCount === 1 ? '' : 's'}`
     + ` across ${phaseCount} phase${phaseCount === 1 ? '' : 's'} — this is the slow part;`
-    + (recommendEnforcementOnly
-      ? ' pass --enforcement-only to skip them and report the enforcement checks alone'
-      : ' --enforcement-only cannot shorten it, because no phase declares an enforcement check to report instead'),
+    + ' pass --enforcement-only to skip them and report the enforcement checks alone',
   )
 }
 
@@ -4148,14 +4128,9 @@ export async function runCli(argv, io = { out: console.log }) {
     const enforcementOnly = flags['enforcement-only'] === true
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
     reportUnmatchedSuppliedPhases(io, supplied, phases)
-    // Computed either way: it decides whether the flag is refused, and — when it was not passed —
-    // whether the announcement should recommend it at all.
-    const refusal = enforcementOnlyRefusal(config, phases)
-    if (enforcementOnly) {
-      if (refusal) { io.out(refusal); return 2 }
-    } else {
+    if (!enforcementOnly) {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
-      announceCommandChecks(io, 'prune-run', total, phases.length, refusal === null)
+      announceCommandChecks(io, 'prune-run', total, phases.length)
     }
 
     const passedPhases = []
@@ -4508,17 +4483,9 @@ export async function runCli(argv, io = { out: console.log }) {
     reportUnmatchedSuppliedPhases(io, supplied, phases)
 
     const enforcementOnly = flags['enforcement-only'] === true
-    // Computed either way: it decides whether the flag is refused, and — when it was not passed —
-    // whether the announcement should recommend it at all.
-    const refusal = enforcementOnlyRefusal(config, phases)
-    if (enforcementOnly) {
-      // Before any check runs, and before any phase reaches the summary below: a phase with no
-      // enforcement check left to run would otherwise be summarised PASS on nothing but its own
-      // skips, and reported as "ready to land".
-      if (refusal) { io.out(refusal); return 2 }
-    } else {
+    if (!enforcementOnly) {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
-      announceCommandChecks(io, 'finish', total, phases.length, refusal === null)
+      announceCommandChecks(io, 'finish', total, phases.length)
     }
 
     const phaseResults = []
@@ -5741,15 +5708,7 @@ export async function runCli(argv, io = { out: console.log }) {
     if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) { io.out('no gate manifest — cannot verify completion'); return 4 }
 
-    // Checked before a single check runs and before the context is derived, exactly as `finish`
-    // and `prune-run` check it: the caller learns the flag is the wrong tool for this manifest
-    // rather than reading a verdict that was never grounded in anything. 2, not the rejection
-    // code — this is an answer about the manifest, never about the task.
     const enforcementOnly = flags['enforcement-only'] === true
-    if (enforcementOnly) {
-      const refusal = enforcementOnlyRefusal(config, [flags.phase ?? 'default'])
-      if (refusal) { io.out(refusal); return 2 }
-    }
 
     let ctx
     try {

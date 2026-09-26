@@ -20,7 +20,7 @@ export const ROLES = ['implementer', 'reviewer', 'integrator']
 // is gitignored, so anything it can change, a teammate can change without leaving the dirty
 // worktree that `fileset` and `ownership` detect. See SECURITY.md — the gate is
 // tamper-EVIDENT, and an untracked override surface is exactly what removes the evidence.
-export const ENFORCEMENT_KEYS = ['phases', 'lens', 'preview']
+export const ENFORCEMENT_KEYS = ['phases', 'lens', 'preview', 'protected']
 
 export class ConfigError extends Error {}
 
@@ -86,6 +86,23 @@ export const ENFORCEMENT_VALIDATORS = {
       if (phase.fixRounds !== undefined
         && (!Number.isInteger(phase.fixRounds) || phase.fixRounds < 0)) {
         throw new ConfigError(`phases.${name}.fixRounds must be an integer >= 0`)
+      }
+    }
+    return v
+  },
+  // Paths a task may change only when the plan marks it `(protected)`. Validated as repo-relative
+  // for the same reason `preview.link` is: the manifest is hand-edited and agent-reachable, and an
+  // entry that escapes the repository names nothing any task diff can contain.
+  protected: (v) => {
+    if (!Array.isArray(v)) throw new ConfigError('protected must be an array of repo-relative paths')
+    for (const entry of v) {
+      if (typeof entry !== 'string' || entry.trim() === '') {
+        throw new ConfigError(`protected entries must be non-empty strings, got ${JSON.stringify(entry)}`)
+      }
+      const normalized = path.posix.normalize(entry.replaceAll('\\', '/'))
+      if (path.posix.isAbsolute(normalized) || /^[A-Za-z]:/.test(normalized)
+        || normalized === '..' || normalized.startsWith('../')) {
+        throw new ConfigError(`protected entry must be repo-relative, got ${JSON.stringify(entry)}`)
       }
     }
     return v

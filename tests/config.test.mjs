@@ -45,7 +45,7 @@ test('vocabulary constants name the two layers and their domains', () => {
   assert.deepEqual(CAVEMAN_LEVELS, ['lite', 'full', 'ultra'])
   assert.deepEqual(EFFORTS, ['low', 'medium', 'high', 'xhigh', 'max'])
   assert.deepEqual(ROLES, ['implementer', 'reviewer', 'integrator'])
-  assert.deepEqual(ENFORCEMENT_KEYS, ['phases', 'lens', 'preview'])
+  assert.deepEqual(ENFORCEMENT_KEYS, ['phases', 'lens', 'preview', 'protected'])
 })
 
 test('loadConfig lets the local layer beat the gate manifest for maxParallel', async () => {
@@ -1126,4 +1126,15 @@ test('harnesses.cursor.sandbox refuses clone and full with the reason, while cod
     )
     assert.equal(validateKey('harnesses.codex.sandbox', mode), mode)
   }
+})
+
+test('protected accepts repo-relative paths and refuses every other shape', () => {
+  assert.deepEqual(ENFORCEMENT_VALIDATORS.protected(['package.json', 'tests/conftest.py']), ['package.json', 'tests/conftest.py'])
+  for (const bad of ['package.json', {}, null, [1], [''], ['  '], ['/etc/passwd'], ['C:/x'], ['..'], ['../x'], ['a/../../b'], ['a\\..\\..\\b']]) {
+    assert.throws(() => ENFORCEMENT_VALIDATORS.protected(bad), ConfigError, JSON.stringify(bad))
+  }
+})
+
+test('protected is an enforcement key: the local file cannot set it', () => {
+  assert.throws(() => validateLocal({ protected: ['package.json'] }), ConfigError)
 })

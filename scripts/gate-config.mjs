@@ -1,4 +1,5 @@
-import { NAMES } from './names.mjs'
+import { LEGACY, NAMES } from './names.mjs'
+import { normalizePath } from './enforce.mjs'
 import { readFile } from 'node:fs/promises'
 import { availableParallelism } from 'node:os'
 import path from 'node:path'
@@ -57,15 +58,44 @@ export function previewLinks(config) {
   return Array.isArray(link) ? link : []
 }
 
+// The two checks no manifest can remove. Everything they decide is computed from git; the only
+// thing the manifest contributes is the protected set, and only through its top-level key.
+export const ENFORCEMENT_CHECK_KINDS = ['fileset', 'ownership']
+
+// The gate manifest is always protected, under both names: the current one is what the gate
+// reads, and the legacy one is what a later migration would adopt. `protected` only adds.
+export function protectedPaths(config) {
+  const extra = Array.isArray(config?.protected) ? config.protected : []
+  return [...new Set([NAMES.gateFile, LEGACY.gateFile, ...extra].map(normalizePath))]
+}
+
+// `fileset` and `ownership` are injected when the phase's list lacks them. The manifest the gate
+// reads is the run tip's, AFTER the last integration: a merge that removed `ownership` from it
+// would otherwise switch off, at the next gate, the one check that reports that merge. Every
+// consumer (`gate`, `complete`, `finish`, `prune-run`) reads its checks through here, so this is
+// the single injection point. The operator's `--no-fleet` flag stays the only way not to run them.
+//
+// A declared entry of either kind gets `protected` overwritten, not merged: the manifest widens the
+// set through its top-level key only, so no per-check field can narrow what these checks enforce.
 export function checksForPhase(config, phaseName) {
   const phases = config?.phases ?? {}
   const checks = phases[phaseName]?.checks ?? phases.default?.checks ?? []
   const fallback = Array.isArray(config?.lens) && config.lens.length ? config.lens : DEFAULT_LENS
-  return checks.map((check) => (
-    check?.kind === 'agent' && !Array.isArray(check.lens)
-      ? { ...check, lens: fallback }
-      : check
-  ))
+  const guarded = protectedPaths(config)
+  const result = checks.map((check) => {
+    if (check?.kind === 'agent' && !Array.isArray(check.lens)) return { ...check, lens: fallback }
+    if (ENFORCEMENT_CHECK_KINDS.includes(check?.kind)) return { ...check, protected: guarded }
+    return check
+  })
+  const names = new Set(checks.map((check) => check?.name))
+  for (const kind of ENFORCEMENT_CHECK_KINDS) {
+    if (checks.some((check) => check?.kind === kind)) continue
+    // Results are keyed by name, so an injected check must not collide with a declared one that
+    // happens to carry this name under another kind.
+    const name = names.has(kind) ? `${kind}:injected` : kind
+    result.push({ name, kind, injected: true, protected: guarded })
+  }
+  return result
 }
 
 // A fix-round budget is only meaningful as a non-negative whole number: the loop

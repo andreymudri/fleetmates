@@ -9,6 +9,7 @@ import {
   checksForPhase,
   fixRoundsForPhase,
   previewLinks,
+  protectedPaths,
 } from '../scripts/gate-config.mjs'
 
 async function withTempRoot(fn) {
@@ -77,8 +78,11 @@ test('checksForPhase prefers a named phase over default', () => {
   assert.equal(checksForPhase(config, 'phase-2')[0].name, 'a')
 })
 
-test('checksForPhase returns an empty array when nothing is configured', () => {
-  assert.deepEqual(checksForPhase({ phases: {} }, 'default'), [])
+test('checksForPhase returns only the injected enforcement checks when nothing is configured', () => {
+  assert.deepEqual(checksForPhase({ phases: {} }, 'default').map((c) => [c.name, c.kind, c.injected]), [
+    ['fileset', 'fileset', true],
+    ['ownership', 'ownership', true],
+  ])
 })
 
 test('inferGateConfig emits fixRounds: 2 on the default phase', () => {
@@ -203,4 +207,40 @@ test('inferGateConfig emits preview.link with node_modules when given a package'
 test('inferGateConfig emits no preview key when given no package', () => {
   assert.equal(inferGateConfig(null).preview, undefined)
   assert.equal(inferGateConfig(undefined).preview, undefined)
+})
+
+// --- protected paths and implicit enforcement checks (docs/specs/2026-09-26-protected-paths-design.md)
+
+test('protectedPaths always holds the manifest under both names and adds the manifest key, normalised', () => {
+  assert.deepEqual(protectedPaths({}), ['fleetmates.gate.json', 'teammates.gate.json'])
+  assert.deepEqual(
+    protectedPaths({ protected: ['package.json', './package.json', 'tests\\conftest.py', 'fleetmates.gate.json'] }),
+    ['fleetmates.gate.json', 'teammates.gate.json', 'package.json', 'tests/conftest.py'],
+  )
+})
+
+test('checksForPhase injects fileset and ownership after the declared checks, never duplicating one', () => {
+  const only = (checks) => ({ phases: { default: { checks } } })
+  const cmd = { name: 'test', kind: 'command', run: 'x' }
+  assert.deepEqual(checksForPhase(only([cmd]), 'default').map((c) => c.name), ['test', 'fileset', 'ownership'])
+  const both = checksForPhase(only([{ name: 'fileset', kind: 'fileset' }, cmd, { name: 'own', kind: 'ownership' }]), 'default')
+  assert.deepEqual(both.map((c) => c.name), ['fileset', 'test', 'own'])
+  assert.ok(both.every((c) => c.injected === undefined))
+  const one = checksForPhase(only([{ name: 'fs', kind: 'fileset' }]), 'default')
+  assert.deepEqual(one.map((c) => [c.name, c.injected]), [['fs', undefined], ['ownership', true]])
+})
+
+test('an injected check whose name is taken by another kind gets a distinct name', () => {
+  const checks = checksForPhase({ phases: { default: { checks: [{ name: 'ownership', kind: 'command', run: 'x' }] } } }, 'default')
+  assert.deepEqual(checks.map((c) => [c.name, c.kind]), [['ownership', 'command'], ['fileset', 'fileset'], ['ownership:injected', 'ownership']])
+})
+
+test('an enforcement check carries the protected set from the top-level key, never its own', () => {
+  const config = {
+    protected: ['package.json'],
+    phases: { default: { checks: [{ name: 'fileset', kind: 'fileset', protected: [] }] } },
+  }
+  for (const check of checksForPhase(config, 'default')) {
+    assert.deepEqual(check.protected, ['fleetmates.gate.json', 'teammates.gate.json', 'package.json'], check.name)
+  }
 })
