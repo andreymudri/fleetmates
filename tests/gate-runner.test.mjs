@@ -4733,7 +4733,7 @@ test('ownership fails a hand-resolved conflict on a protected path when no paren
     const ctx = await protectedConflictRun(repo, { markT2: false })
     const res = await runOwnershipCheck(OWNERSHIP, ctx)
     assert.equal(res.status, 'fail', res.output)
-    assert.match(res.output, /resolved a conflict on protected fleetmates\.gate\.json with no parent from a task marking it/)
+    assert.match(res.output, /resolved a conflict on protected fleetmates\.gate\.json that no task it integrates marks/)
   })
 })
 
@@ -4911,5 +4911,141 @@ test('a base parent riding an octopus does not exempt the task parent\'s protect
     const ctx = await deriveContext({ git: repo.git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
     const res = await runOwnershipCheck(OWNERSHIP, ctx)
     assert.equal(res.status, 'fail', res.output)
+  })
+})
+
+// Review round 3: a merge's scope was the declared set of every task whose branch HELD a secondary
+// parent, and a later phase's branch holds every earlier tip — so dispatching phase 2 widened
+// phase 1's merges to phase 2's files, and a side-branch payload or fix-round smuggle of a file a
+// later task declares passed. Only a task with the parent on its own first-parent chain counts.
+async function laterTaskPlanRepo({ root, sh }) {
+  const plan = ['### Task 1: first', '', '**Files:**', '- Create: `a.mjs`', '',
+    '### Task 2: second', '', '**Files:**', '- Create: `b.mjs`', '- Create: `c.mjs`', '', '**Depends:** T1', ''].join('\n')
+  await writeFile(path.join(root, 'plan.md'), plan, 'utf8')
+  await sh(['add', 'plan.md'])
+  await sh(['commit', '-m', 'plan'])
+  await sh(['checkout', '-b', 'run'])
+  await sh(['checkout', '-b', 'fleetmates/r1/T1'])
+  await writeFile(path.join(root, 'a.mjs'), 'a\n', 'utf8')
+  await sh(['add', 'a.mjs'])
+  await sh(['commit', '-m', 'T1'])
+  await sh(['checkout', 'run'])
+  await sh(['merge', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+}
+
+async function forkT2({ root, sh }) {
+  await sh(['checkout', '-b', 'fleetmates/r1/T2', 'run'])
+  await writeFile(path.join(root, 'c.mjs'), 'c\n', 'utf8')
+  await sh(['add', 'c.mjs'])
+  await sh(['commit', '-m', 'T2'])
+  await sh(['checkout', 'run'])
+}
+
+test('a later task\'s declared set does not widen an earlier side-branch merge', async () => {
+  await withRepo(async (repo) => {
+    await laterTaskPlanRepo(repo)
+    await repo.sh(['checkout', '-b', 'side', 'run'])
+    await writeFile(path.join(repo.root, 'b.mjs'), 'smuggled by the integrator\n', 'utf8')
+    await repo.sh(['add', 'b.mjs'])
+    await repo.sh(['commit', '-m', 'payload'])
+    await repo.sh(['checkout', 'run'])
+    await repo.sh(['merge', '--no-ff', '-m', 'merge side', 'side'])
+    await repo.sh(['branch', '-D', 'side'])
+    await forkT2(repo)
+    const ctx = await deriveContext({ git: repo.git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck(OWNERSHIP, ctx)
+    assert.equal(res.status, 'fail', res.output)
+    assert.match(res.output, /carries b\.mjs/)
+  })
+})
+
+test('a later task\'s declared set does not widen an earlier task\'s fix-round re-merge', async () => {
+  await withRepo(async (repo) => {
+    await laterTaskPlanRepo(repo)
+    await repo.sh(['checkout', 'fleetmates/r1/T1'])
+    await writeFile(path.join(repo.root, 'b.mjs'), 'smuggled in a fix round\n', 'utf8')
+    await repo.sh(['add', 'b.mjs'])
+    await repo.sh(['commit', '-m', 'T1 fix'])
+    await repo.sh(['checkout', 'run'])
+    await repo.sh(['merge', '--no-ff', '-m', 're-integrate T1', 'fleetmates/r1/T1'])
+    await forkT2(repo)
+    const ctx = await deriveContext({ git: repo.git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck(OWNERSHIP, ctx)
+    assert.equal(res.status, 'fail', res.output)
+    assert.match(res.output, /carries b\.mjs/)
+    // Named once, by the line that is true for it: the merge is --no-ff from a task branch.
+    assert.doesNotMatch(res.output, /reachable from no task branch/)
+  })
+})
+
+// The other side of the same rule: a fix round that merges the run branch into the landed task
+// branch leaves that branch holding its own integration merge, and its marking must still count.
+test('a marked task that merged the run branch in a fix round still authorises its own merge', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    const plan = ['### Task 1: first', '', '**Files:**', '- Create: `a.mjs`', `- Modify (protected): \`${MANIFEST_FILE}\``, '',
+      '### Task 2: second', '', '**Files:**', '- Create: `b.mjs`', '', '**Depends:** T1', ''].join('\n')
+    await writeFile(path.join(root, 'plan.md'), plan, 'utf8')
+    await writeFile(path.join(root, MANIFEST_FILE), '{}\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'plan'])
+    await sh(['checkout', '-b', 'run'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
+    await writeFile(path.join(root, MANIFEST_FILE), '{"maxParallel":2}\n', 'utf8')
+    await writeFile(path.join(root, 'a.mjs'), 'a\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T1'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+    await sh(['checkout', 'fleetmates/r1/T1'])
+    await sh(['merge', '--no-ff', '-m', 'sync run', 'run'])
+    await writeFile(path.join(root, 'a.mjs'), 'a fixed\n', 'utf8')
+    await sh(['commit', '-am', 'T1 fix'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 're-integrate T1', 'fleetmates/r1/T1'])
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck(OWNERSHIP, ctx)
+    assert.equal(res.status, 'pass', res.output)
+  })
+})
+
+// The base exemption covers what only the base changed. In an octopus of [run, base, task] where
+// both the base and the task side changed the manifest, the merge's manifest is unverified, and
+// the base's exemption must not stand in for a marking the task does not have.
+test('an octopus with the base does not lend the base exemption to a task parent', async () => {
+  await withRepo(async ({ root, sh, git }) => {
+    const plan = ['### Task 1: first', '', '**Files:**', '- Create: `a.mjs`', '',
+      '### Task 2: second', '', '**Files:**', '- Create: `b.mjs`', '', '**Depends:** T1', ''].join('\n')
+    await writeFile(path.join(root, 'plan.md'), plan, 'utf8')
+    await writeFile(path.join(root, MANIFEST_FILE), '{"checks":["tests"]}\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'plan'])
+    await sh(['checkout', '-b', 'run'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T1'])
+    await writeFile(path.join(root, 'a.mjs'), 'a\n', 'utf8')
+    await sh(['add', 'a.mjs'])
+    await sh(['commit', '-m', 'T1'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+    await sh(['checkout', 'main'])
+    await writeFile(path.join(root, MANIFEST_FILE), '{"checks":["tests","lint"]}\n', 'utf8')
+    await sh(['commit', '-am', 'operator adds lint'])
+    await sh(['checkout', '-b', 'fleetmates/r1/T2', 'run'])
+    await writeFile(path.join(root, MANIFEST_FILE), '{"checks":["tests","x"]}\n', 'utf8')
+    await writeFile(path.join(root, 'b.mjs'), 'b\n', 'utf8')
+    await sh(['add', '.'])
+    await sh(['commit', '-m', 'T2'])
+    await sh(['checkout', 'run'])
+    await sh(['merge', '--no-ff', '--no-commit', 'main', 'fleetmates/r1/T2']).catch(() => {})
+    await writeFile(path.join(root, MANIFEST_FILE), '{"checks":[]}\n', 'utf8')
+    await writeFile(path.join(root, 'b.mjs'), 'b\n', 'utf8')
+    await sh(['add', '.'])
+    const tree = (await sh(['write-tree'])).stdout.trim()
+    const [runTip, mainTip, t2Tip] = await Promise.all(['run', 'main', 'fleetmates/r1/T2'].map((r) => git.resolveRef(`refs/heads/${r}`)))
+    const merge = (await sh(['commit-tree', tree, '-p', runTip, '-p', mainTip, '-p', t2Tip, '-m', 'octopus'])).stdout.trim()
+    await sh(['reset', '--hard', merge])
+    const ctx = await deriveContext({ git, runId: 'r1', runBranch: 'run', baseBranch: 'main', planPath: 'plan.md' })
+    const res = await runOwnershipCheck(OWNERSHIP, ctx)
+    assert.equal(res.status, 'fail', res.output)
+    assert.match(res.output, /fleetmates\.gate\.json/)
   })
 })

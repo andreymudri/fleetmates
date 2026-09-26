@@ -7,12 +7,20 @@
 - Protected paths. A task may change the gate manifest — or a path the manifest's new top-level
   `protected` array lists — only when its plan line carries the ` (protected)` modifier, e.g.
   ``- Modify (protected): `fleetmates.gate.json` ``. Otherwise `fileset` fails with a
-  `protected` line, and a hand-resolved merge conflict on such a path fails `ownership`.
+  `protected` line, and a hand-resolved merge conflict on such a path fails `ownership` unless a
+  task that merge integrates marks it (a base merge may resolve one on a file only the base changed).
 - `fileset` and `ownership` are injected into every phase whose manifest omits them; `gate`
   reports them in an `injected` field and the other commands print a line.
 
 ### Changed
 
+- `ownership` judges every commit on the run branch's first-parent chain by what it carries: an
+  integration merge may carry only files the tasks it integrates declare, and a task integrates a
+  parent only when it is on the task branch's own first-parent chain. Reachability from a later
+  phase's branch no longer explains an earlier merge or a direct write, so a fast-forward
+  integration now fails. `ownership` also fails when a protected path is marked skip-worktree or
+  assume-unchanged in the main worktree, and `gate`'s JSON output neutralises C1 controls and
+  U+2028/U+2029.
 - A plan whose `**Files:**` block holds a line shaped like a file line that is not one of the
   recognised forms is refused, naming the line; it used to drop that file silently. `init-run`
   exits 2; every command that reads the plan refuses too (`gate`, `complete`, `finish` and

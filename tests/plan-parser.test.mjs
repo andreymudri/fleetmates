@@ -345,6 +345,14 @@ test('(protected) puts the path in both files and protectedFiles, for every verb
   }
 })
 
+// A `:line` suffix is stripped from the marking exactly as from the declared path; kept, the
+// marking would never match the changed file and a legitimately marked edit would escalate.
+test('(protected) strips a :line suffix from the marking as from the declared path', () => {
+  const [task] = parsePlan(withFiles('- Modify (protected): `fleetmates.gate.json:12`'))
+  assert.deepEqual(task.files, ['fleetmates.gate.json'])
+  assert.deepEqual(task.protectedFiles, ['fleetmates.gate.json'])
+})
+
 test('a task without the modifier has an empty protectedFiles', () => {
   const [task] = parsePlan(withFiles('- Modify: `a.mjs`'))
   assert.deepEqual(task.protectedFiles, [])

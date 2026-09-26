@@ -529,7 +529,8 @@ function announceCommandChecks(io, command, checkCount, phaseCount) {
 
 // Names the enforcement checks `checksForPhase` added because the manifest does not list them, so
 // the operator sees that a check ran which the manifest does not declare. Every name is this
-// code's own constant — `fileset`, `ownership`, or `<kind>:injected` — never manifest text.
+// code's own constant — `fileset`, `ownership`, `<kind>:injected` or `<kind>:injected-<n>` — never
+// manifest text.
 function injectedNames(checks) {
   return [...new Set(checks.filter((c) => c?.injected === true).map((c) => c.name))]
 }
@@ -5628,7 +5629,7 @@ export async function runCli(argv, io = { out: console.log }) {
       try {
         ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
       } catch (err) {
-        io.out(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2))
+        io.out(printableBlock(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2)))
         return 1
       }
       // The gate runs on the run branch, once per phase, for the life of the run — so this is the
@@ -5688,6 +5689,8 @@ export async function runCli(argv, io = { out: console.log }) {
         stateError = err.message
       }
     }
+    // Both documents below: check output quotes agent-chosen file names, and `JSON.stringify` leaves the C1 range and
+    // U+2028/U+2029 raw; `printableBlock` keeps the document parseable (see `usage --json`).
     if (stateError) {
       bound = {
         ...bound,
@@ -5695,10 +5698,10 @@ export async function runCli(argv, io = { out: console.log }) {
         failed: [...verdict.failed, 'run-state'],
         error: `could not read run state: ${stateError}`,
       }
-      io.out(JSON.stringify({ ...bound, results }, null, 2))
+      io.out(printableBlock(JSON.stringify({ ...bound, results }, null, 2)))
       return 1
     }
-    io.out(JSON.stringify({ ...bound, results }, null, 2))
+    io.out(printableBlock(JSON.stringify({ ...bound, results }, null, 2)))
 
     if (status) {
       status.gates = status.gates ?? {}

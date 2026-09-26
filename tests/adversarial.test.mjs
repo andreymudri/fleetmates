@@ -2175,10 +2175,12 @@ test('re-merging an integrated task branch that grew a commit outside its declar
   })
 })
 
-// The legitimate neighbour of the case above: a fix round on a landed task, its ref moved up to the
-// run tip first, that stays inside its declared set. Its first integration and the re-merge are
-// both explained.
-test('a fix round on a landed task whose ref moved to the run tip, inside its declared set, passes ownership', async () => {
+// LIMIT (tamper-evident spec, "Not defended against"): a landed task's ref moved onto the run tip
+// no longer has its own commits on its first-parent chain, so its first integration merge is
+// integrated by no task. A fix round never does this — `brief --fix-round` keeps the branch — and
+// round 3 showed that crediting a branch for what it merely holds lets every later phase's branch
+// widen every earlier merge. The cost is a false FAIL that names the merge, never a false PASS.
+test('LIMIT: a landed task whose ref was moved to the run tip fails ownership on its first merge', async () => {
   await withRepo(async (root) => {
     await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
@@ -2192,6 +2194,69 @@ test('a fix round on a landed task whose ref moved to the run tip, inside its de
     await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'y\n' } })
     const { out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
     const ownership = JSON.parse(out).results.find((r) => r.name === 'ownership')
-    assert.equal(ownership.status, 'pass', out)
+    assert.equal(ownership.status, 'fail', out)
+    assert.match(ownership.output, /merge [0-9a-f]{40} carries a\.mjs, which no task it integrates declares/)
+  })
+})
+
+// Review round 3: with skip-worktree (or assume-unchanged) on the manifest, an edit to it in the
+// main worktree never reaches `status --porcelain`, so the gate read a rewritten manifest from a
+// tree it reported clean. `ownership` now names the flag.
+test('gate fails when the manifest is hidden from status by skip-worktree', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    const t1 = await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'a\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', t1])
+    git(root, ['update-index', '--skip-worktree', 'fleetmates.gate.json'])
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [] } } }), 'utf8')
+    assert.equal(git(root, ['status', '--porcelain']), '')
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.notEqual(code, 0, out)
+    assert.match(out, /fleetmates\.gate\.json is marked skip-worktree or assume-unchanged/)
+  })
+})
+
+// The gate prints its verdict as JSON, and check output quotes file names an agent chose.
+// `JSON.stringify` leaves the C1 range raw, and U+009B is CSI to a terminal decoding C1.
+test('gate output carries no raw C1 control from an agent-chosen file name', async () => {
+  await withRepo(async (root) => {
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    const t1 = await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'a\n', 'z\u009b2J': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', t1])
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.notEqual(code, 0, out)
+    assert.doesNotMatch(out, /[\u0080-\u009f\u2028\u2029]/)
+    assert.match(out, /z<0x9B>2J/)
+    JSON.parse(out)
+  })
+})
+
+// Review round 3 (tests lens): the per-merge scope rule's protected clause had no test of its own.
+// A task that declares the manifest without marking it, landed, grows a manifest edit and is merged
+// again: the file is in the task's declared set, so only the protected clause can fail it.
+test('re-merging a landed task that declares the manifest without marking it fails ownership', async () => {
+  const plan = PLAN.replace('- Create: `a.mjs`', '- Create: `a.mjs`\n- Modify: `fleetmates.gate.json`')
+  assert.notEqual(plan, PLAN)
+  await withRepo(async (root) => {
+    // On the base, since the plan is read at the anchor; run-branch has no commits of its own yet.
+    git(root, ['checkout', '--quiet', 'main'])
+    await writeFile(path.join(root, 'plan.md'), plan, 'utf8')
+    git(root, ['commit', '--quiet', '-am', 'declare the manifest in T1'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--ff-only', 'main'])
+    await runCliOn(root, ['init-run', path.join(root, 'plan.md'), '--run', 'r1'])
+    await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+    git(root, ['checkout', '--quiet', 'fleetmates/r1/T1'])
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [] } } }), 'utf8')
+    git(root, ['commit', '--quiet', '-am', 'manifest edit on a landed branch'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 're-integrate T1', 'fleetmates/r1/T1'])
+    await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'y\n' } })
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1, out)
+    const ownership = JSON.parse(out).results.find((r) => r.name === 'ownership')
+    assert.equal(ownership.status, 'fail', out)
+    assert.match(ownership.output, /carries fleetmates\.gate\.json, which no task it integrates declares \(or marks/)
   })
 })

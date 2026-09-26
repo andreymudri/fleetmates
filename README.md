@@ -312,7 +312,8 @@ what the gate checks can be protected; the manifest always is:
 
 A task may change a protected path only when its plan line says so —
 ``- Modify (protected): `package.json` `` — and the plan is read from the anchor commit, so a
-marking added mid-run counts once it is amended on the base branch.
+marking added mid-run counts once it is amended on the base branch and the base is merged into
+the run branch.
 
 ## Configuration
 

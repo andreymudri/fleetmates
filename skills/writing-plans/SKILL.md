@@ -120,7 +120,8 @@ modifier after the verb:
 Exact lower case only: `(Protected)` is refused like any other malformed file line. The modifier
 does not add a second file list: the path is declared in `files` like any other, and the marking
 only authorises the change. The gate reads the plan from the anchor commit, so a marking added
-mid-run counts only once it is amended on the base branch (see `parallel-execution`, "Amending a
+mid-run counts only once it is amended on the base branch and the base is merged into the run
+branch (see `parallel-execution`, "Amending a
 plan mid-run"). A task that changes a protected path without the marking fails `fileset` and
 escalates, even when the path is declared.
 

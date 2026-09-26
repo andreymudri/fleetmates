@@ -341,16 +341,20 @@ inline run that should have passed `--no-fleet`.
 `ownership` explains a commit on the run branch's own first-parent chain — every integration merge,
 every direct write — only by the merge rule, never by its being reachable from a task branch: the
 next phase's branches fork from the run tip and carry every earlier write in their history. And an
-integration merge may carry only files declared by the tasks whose branches hold its secondary
-parents, plus what a base parent itself changed — so a payload merged in from a side branch, or a
-landed task branch that grew a commit outside its set and was merged again, fails.
+integration merge may carry only files declared by the tasks it integrates — a task integrates a
+secondary parent when the parent is on its branch's own first-parent chain, which a later phase's
+branch, forked from the run tip, never has — plus what only a base parent changed. So a payload
+merged in from a side branch, or a landed task branch that grew a commit outside its set and was
+merged again, fails, and dispatching the next phase does not change that.
 
 **Protected paths.** `fileset` also fails a task that changes a protected path its plan line does
 not mark `(protected)`, even when the path is declared: the output line reads
 `T1: protected — <path> (…)`, separate from the `outside declared set` line. The manifest is always
 protected, under both its current and legacy names; its top-level `protected` array adds paths.
-`ownership` fails a merge whose hand-resolved conflict touches a protected path unless a parent
-comes from a task marking it. Approving such an escalation is a plan amendment on the base branch
+`ownership` fails a merge whose hand-resolved conflict touches a protected path unless a task it
+integrates marks the path; a later task's marking does not count. The one exception is the base:
+a merge of the base branch may resolve a conflict on a protected path that only the base side
+changed. Approving such an escalation is a plan amendment on the base branch
 (see `parallel-execution`, "Amending a plan mid-run"), then a re-gate.
 
 Skipped only when the caller passes `--no-fleet`. Missing state is a failure, never a skip.

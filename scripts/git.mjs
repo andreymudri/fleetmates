@@ -360,6 +360,17 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
         .filter((line) => line.trim() !== '')
       return lines.some((line) => !HARNESS_WORKTREES.test(line.slice(3)))
     },
+    // Which of `paths` the index tells `status` to stop looking at: skip-worktree (`S`) or
+    // assume-unchanged (a lower-case tag). An edit to such a file never shows in `isDirty`, so a
+    // protected file carrying either flag can be rewritten in the worktree the gate reads it from
+    // with the tree reported clean. `:(icase)` because membership in the protected set folds case.
+    async hiddenFromStatus(paths) {
+      if (paths.length === 0) return []
+      const out = await run(['-c', 'core.quotePath=false', 'ls-files', '-v', '-z', '--', ...paths.map((p) => `:(icase,literal)${p}`)])
+      return out.split('\0').filter(Boolean)
+        .filter((entry) => entry[0] === 'S' || /^[a-z]/.test(entry[0]))
+        .map((entry) => entry.slice(2))
+    },
     // `--porcelain` here is the worktree listing's own stable format (one `key value` line per
     // attribute, entries separated by a blank line), unrelated to `status --porcelain`. Parsed
     // rather than regexed so a path containing a space — the normal case on Windows — stays one

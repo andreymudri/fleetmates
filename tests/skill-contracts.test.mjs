@@ -2044,7 +2044,7 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
   // exclusively inside `if (status)`, so no `--run` means no write — the claim above, checked
   // against the code rather than against its own restatement.
   const cli = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
-  const persistSite = cli.slice(cli.indexOf("io.out(JSON.stringify({ ...bound, results }, null, 2))"))
+  const persistSite = cli.slice(cli.indexOf("io.out(printableBlock(JSON.stringify({ ...bound, results }, null, 2)))"))
   assert.match(persistSite.slice(0, 200), /if \(status\) \{/,
     'the gate verdict must be persisted only under `if (status)`; if that guard moves, the ' +
     'solo-gate persistence rule the skill states is no longer true and must be rewritten')

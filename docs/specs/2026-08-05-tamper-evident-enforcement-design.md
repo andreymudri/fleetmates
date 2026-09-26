@@ -52,7 +52,8 @@ That is a smaller claim than the previous specs made, and it is the one the code
   reports it. The manifest may add to them, never narrow them.
 - **V5 protected paths** — a task that changes the manifest, or a path in its `protected` list,
   fails `fileset` unless its plan line at the anchor marks it `(protected)`; a hand-resolved
-  conflict on such a path fails `ownership` unless a parent comes from a task marking it. See
+  conflict on such a path fails `ownership` unless a task the merge integrates marks it (a base
+  merge may resolve one on a file only the base changed — see "Not defended against"). See
   `docs/specs/2026-09-26-protected-paths-design.md`.
 - **V3 completion** — `complete` recomputes the gate rather than reading a recorded verdict.
   A forged or stale `status.json` PASS buys nothing.
@@ -72,9 +73,14 @@ where the corresponding claim is made:
   comes from the base may hand-resolve a conflict on a protected path the base itself changed:
   that is the operator's amendment merge, and no task branch could ever carry its base parent to
   authorise it.
-- **An integrator pre-writing a later task's declared file.** A merge may carry any file declared
-  by a task whose branch holds its secondary parent, and a later task forks after that merge, so
-  content written into a later task's (unprotected) declared file reads as in scope.
+- **A landed task's authority has no phase bound.** Task refs are agent-writable. An integrator
+  that extends a landed task's branch in a later phase and merges it again is judged by that
+  task's declared set and markings, as a fix round would be; a marked task can then change its
+  protected path after its own phase's review. Bounding it by refs would be forgeable by the same
+  write.
+- **A landed task's ref moved onto the run tip** loses the task's own commits from its
+  first-parent chain, so its earlier integration merge fails `ownership` — a false FAIL, reported
+  with the merge named, never a false PASS.
 - **A hand-resolved conflict on an unprotected path.** Accepted unverified, as before; pinned by
   a LIMIT test.
 

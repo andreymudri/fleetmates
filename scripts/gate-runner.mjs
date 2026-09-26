@@ -1480,8 +1480,9 @@ async function contentAt(git, sha, filePath) {
 // a content change with no legitimate source, exactly like a fabricated addition; the merge
 // commit must still explain why a file its own second parent introduced is now gone.
 // `guard` narrows the one acceptance this rule makes without verifying bytes — a hand-resolved
-// conflict — for a protected path: there it is accepted only when `guard.authorised` (the exact
-// paths marked `(protected)` by the tasks whose branches carry a secondary parent) holds the file.
+// conflict — for a protected path: there it is accepted only when `guard.authorised` holds the file:
+// the exact paths marked `(protected)` by the tasks that integrate a secondary parent (see
+// `runOwnershipCheck`), plus the files only a base parent changed.
 // An integrator that resolves a conflict on the manifest otherwise chooses its content freely.
 //
 // Returns `{ ok: true }` or `{ ok: false, protectedFile }`, the latter only when the one failure
@@ -1537,6 +1538,26 @@ async function firstParentChain(git, { anchorSha, runSha, commits }) {
   return chain
 }
 
+// Whether `parent` lies on the first-parent chain of `tip` — the task's own line of work, as
+// opposed to history it merely contains. A later phase's branch forks from the run tip, so it
+// contains every earlier task's tip, but only as the second parent of that task's integration
+// merge: never on its own first-parent chain. A fix round that merges the run branch into a landed
+// task keeps the task's own commits on its chain. The walk stops at the first commit that is an
+// ancestor of `parent`, since nothing older can be `parent` itself. Bounded, and a revisited
+// commit ends the walk, so a git double whose parents never reach `parent` cannot loop forever.
+const FIRST_PARENT_WALK_LIMIT = 10000
+async function onFirstParentChain(git, tip, parent) {
+  const seen = new Set()
+  let cursor = tip
+  while (cursor && !seen.has(cursor) && seen.size < FIRST_PARENT_WALK_LIMIT) {
+    if (cursor === parent) return true
+    if (await git.isAncestor(cursor, parent)) return false
+    seen.add(cursor)
+    cursor = (await git.commitParents(cursor))[0]
+  }
+  return false
+}
+
 // Why an injected `ownership` may fail on a run nothing ever asked to be explained. It cannot say
 // which cause applies: knowing when this version was installed would need a record under
 // `.fleetmates/`, which is agent-writable and never consulted by an enforcement check.
@@ -1570,8 +1591,8 @@ export async function runOwnershipCheck(check, ctx = {}) {
 
     const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
     const unexplained = []
-    // Merges rejected only because they hand-resolved a conflict on a protected path; they are in
-    // `unexplained` too, and named again below with the file so the escalation says why.
+    // Merges rejected only because they hand-resolved a conflict on a protected path; named below
+    // with the file, so the escalation says why, and kept out of `unexplained`.
     const protectedConflicts = []
     // Merges whose content is explained by their parents but carries files no integrated task
     // declared (or a protected one no integrated task marked).
@@ -1615,14 +1636,17 @@ export async function runOwnershipCheck(check, ctx = {}) {
           // riding in behind a second, unowned parent was never inspected.
           let allParentsOwned = true
           let usedBase = false
-          // What this merge may carry: the declared files of every task whose branch holds one of
-          // its secondary parents, plus whatever a base parent itself changed.
+          // What this merge may carry: the declared files of every task that integrates one of its
+          // secondary parents, plus whatever only a base parent changed. A task integrates a parent
+          // when the parent is on the task branch's own first-parent chain (`onFirstParentChain`):
+          // merely holding it is not enough, because every later phase's branch holds every
+          // earlier tip, and its declared set would widen the earlier merge — the side-branch and
+          // fix-round smuggle this rule exists to close.
           const scope = new Set()
           const baseTouched = new Set()
-          // Which protected paths it may carry: those marked by a task whose branch holds a
-          // secondary parent but NOT this merge. A branch that holds the merge forked (or was
-          // moved) past it, so it is a later task, and a later task's marking must not authorise
-          // an earlier task's change.
+          const taskTouched = new Set()
+          // Which protected paths it may carry: those marked by a task that integrates a secondary
+          // parent, by the same first-parent rule, so a later task's marking authorises nothing.
           const authorised = new Set()
           for (const parent of secondaryParents) {
             let owned = false
@@ -1646,14 +1670,18 @@ export async function runOwnershipCheck(check, ctx = {}) {
               for (let i = 0; i < shas.length; i += 1) {
                 if (!(await git.isAncestor(parent, shas[i]))) continue
                 owned = true
+                if (!(await onFirstParentChain(git, shas[i], parent))) continue
                 for (const file of taskOf[i]?.files ?? []) scope.add(normalizePath(file))
-                if (!(await git.isAncestor(sha, shas[i]))) {
-                  for (const file of taskOf[i]?.protectedFiles ?? []) authorised.add(normalizePath(file))
-                }
+                for (const file of taskOf[i]?.protectedFiles ?? []) authorised.add(normalizePath(file))
               }
+              for (const file of await git.changedFiles({ base: firstParent, branch: parent })) taskTouched.add(normalizePath(file))
             }
             if (!owned) { allParentsOwned = false; break }
           }
+          // The base exemption covers a file only when no task-side parent changed it too: in an
+          // octopus of [run, base, task] where both changed the manifest, the task side must not
+          // ride in on the base's exemption.
+          for (const file of taskTouched) baseTouched.delete(file)
           if (allParentsOwned) {
             const verdict = await mergeContentExplainedByParents(
               git, firstParent, secondaryParents, sha, { paths: guardedSet(check), authorised: new Set([...authorised, ...baseTouched]) },
@@ -1684,7 +1712,10 @@ export async function runOwnershipCheck(check, ctx = {}) {
           }
         }
       }
-      if (!explained) unexplained.push(sha)
+      // A merge already named by one of the two specific lines below is not also given the generic
+      // "reachable from no task branch" line: both causes that line names are false for it.
+      const named = protectedConflicts.some((c) => c.sha === sha) || outOfScopeMerges.some((m) => m.sha === sha)
+      if (!explained && !named) unexplained.push(sha)
     }
 
     // Asked of every task branch of the run, not just the current phase's: a branch merged
@@ -1709,11 +1740,15 @@ export async function runOwnershipCheck(check, ctx = {}) {
       unexplainedCommits: unexplained,
       dirty: await git.isDirty(),
     })
+    const hidden = typeof git.hiddenFromStatus === 'function' ? await git.hiddenFromStatus(check?.protected ?? protectedPaths({})) : []
+    for (const file of hidden) {
+      violations.push(`${file} is marked skip-worktree or assume-unchanged, so an edit to it in the main worktree is invisible to status; clear it with \`git update-index --no-skip-worktree --no-assume-unchanged -- <path>\``)
+    }
     for (const { sha, files } of outOfScopeMerges) {
       violations.push(`merge ${sha} carries ${files.join(', ')}, which no task it integrates declares (or marks, for a protected path)`)
     }
     for (const { sha, file } of protectedConflicts) {
-      violations.push(`merge ${sha} resolved a conflict on protected ${file} with no parent from a task marking it (protected)`)
+      violations.push(`merge ${sha} resolved a conflict on protected ${file} that no task it integrates marks (protected)`)
     }
     if (violations.length > 0 && check?.injected === true) violations.push(INJECTED_OWNERSHIP_NOTE)
     return violations.length === 0

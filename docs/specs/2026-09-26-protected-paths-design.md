@@ -123,7 +123,7 @@ Per gate invocation, nothing new is read and nothing is read twice:
 |---|---|
 | Task changes a protected path without `(protected)` | `fileset` FAIL, "protected" class; `fix` escalates as `process-violation` |
 | Task marks a path `(protected)` with different case than the change | Not authorised; same FAIL |
-| Protected path in a hand-resolved conflict, no parent from a task marking it | `ownership` FAIL naming file and merge |
+| Protected path in a hand-resolved conflict that no task the merge integrates marks | `ownership` FAIL naming file and merge |
 | Merge content on a protected path explained by no parent | `ownership` FAIL — today's behaviour, now pinned with the manifest as the target |
 | Manifest lacks `fileset` and/or `ownership` | Injected; the gate prints one line naming what it injected |
 | Injected `ownership` fails | FAIL with the injected-check note |
@@ -223,23 +223,30 @@ What the implementation changed relative to the text above, and why:
   landed task branch that grew a commit outside its declared set was re-merged as a fix round and
   its own old tip vouched for it. An interim "floor" rule (vouch only past the latest chain commit
   a branch descends from) closed the first and broke a legitimate fix round whose ref had moved to
-  the run tip. What shipped instead: a chain merge may carry only files declared by the tasks whose
-  branches hold its secondary parents, plus what a base parent itself changed (three-dot); a
-  protected path additionally needs a marking from such a task whose branch does NOT hold the merge
-  (a branch that holds it is a later task); a secondary parent that is a base ancestor — including
+  the run tip. What shipped instead: a chain merge may carry only files declared by the tasks it
+  integrates, plus what only a base parent changed (three-dot); a protected path additionally needs
+  a marking from such a task. A task integrates a secondary parent when that parent is on the task
+  branch's own first-parent chain — a third review round showed that "the branch holds the parent"
+  let every later phase's branch, which forks from the run tip and so holds every earlier tip,
+  widen the earlier merge to its own declared set, and that "holds it but not the merge" broke a
+  fix round that merged the run branch into the landed task. A secondary parent that is a base ancestor — including
   one at or below the anchor — is judged as the base, never lent a task's set or markings. Off-chain
   commits are explained by plain reachability again: whatever they hold reaches the run only
   through a chain merge judged on its own. Adversarial and real-git tests cover each shape.
-- **Remaining limit, pinned in prose only:** an integrator can write content into a file a LATER
-  task declares, in a merge whose secondary parent that later task's branch will hold (it forks
-  after). The file is in scope for the merge. It is not protected, and the later task's own diff
-  then overwrites or conflicts with it.
+- **Remaining limits, pinned in prose only** (tamper-evident spec, "Not defended against"): a
+  landed task's authority has no phase bound, since task refs are agent-writable; and a landed
+  task's ref moved onto the run tip loses its commits from its first-parent chain, failing its
+  earlier merge (a false FAIL, never a false PASS).
 - **A base merge may resolve a conflict on a protected path the base changed.** The correctness
   review reproduced a false FAIL with no way out: the base changed the manifest too, the operator's
   amendment merge had to resolve the conflict, and no marked task could ever carry the base parent.
   The files a base-ancestor secondary parent changed (three-dot) are exempt from the protected
-  guard for that merge — only those files, so a base parent riding an octopus exempts nothing the
-  task parent changed.
+  guard for that merge — only files no task-side parent of the same merge changed, so a base
+  parent riding an octopus exempts nothing the task parent changed (round 3 reproduced the
+  octopus that the first version let through).
+- **`ownership` refuses a protected path marked skip-worktree or assume-unchanged** in the main
+  worktree, where the gate reads the manifest: `status --porcelain` never shows an edit to such a
+  file, so the tree read as clean while the manifest was rewritten.
 - **`gate` does not print the injected line** the error table describes: its stdout is one JSON
   document, so the names go in an `injected` field. `complete`, `finish` and `prune-run` print it.
 - **`injected` is `checksForPhase`'s mark only**; a declared entry carrying it has it stripped,
