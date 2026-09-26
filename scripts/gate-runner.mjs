@@ -1990,7 +1990,9 @@ async function inventoryResult(check, previewResult, baseline, ctx, skipReason) 
     ...capped(standing.map((s) => `standing skip: ${s.id}`), 'standing skips'),
     ...stale.map((s) => `stale skips entry: ${s.unit} (nothing in it is skipped)`),
   ]
-  if (dropped.length === 0 && newSkips.length === 0) return checkResult(self, 'pass', notes.join('\n'))
+  // `standing` rides on the result like `pairs` on a conflicted merge: `finish` names the units at
+  // the end of every run, and parsing them back out of `output` would be guessing.
+  if (dropped.length === 0 && newSkips.length === 0) return { ...checkResult(self, 'pass', notes.join('\n')), standing }
 
   const changers = await unitChangers(ctx, phaseTasks, [...dropped, ...newSkips].map((d) => d.unit))
   const by = (unit) => (changers.get(unit)?.length ? ` (changed by ${changers.get(unit).join(', ')})` : '')
@@ -2000,7 +2002,7 @@ async function inventoryResult(check, previewResult, baseline, ctx, skipReason) 
   ]
   if (dropped.length > 0) lines.push('a drop is approved by marking the file "- Test (drops)" in the plan on the base branch')
   if (newSkips.length > 0) lines.push('a new skip is approved by declaring its unit in the manifest\'s "skips", with the reason')
-  return checkResult(self, 'fail', [...lines, ...notes].join('\n'))
+  return { ...checkResult(self, 'fail', [...lines, ...notes].join('\n')), standing }
 }
 
 // Diagnosis only — authorisation never depends on it: a drop can come from a change to source,

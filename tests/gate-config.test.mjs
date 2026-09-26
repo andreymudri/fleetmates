@@ -260,3 +260,23 @@ test('an injected check never shares a name with a declared one, whatever names 
   assert.equal(new Set(names).size, names.length, JSON.stringify(names))
   assert.ok(checks.some((c) => c.kind === 'fileset' && c.injected))
 })
+
+test('the inferred test check carries the runner\'s refusal of a focused test, and a report for node --test', () => {
+  const test = (script) => inferGateConfig({ scripts: { test: script } }).phases.default.checks.find((c) => c.name === 'test')
+  const node = test('node --test tests/*.test.mjs')
+  assert.deepEqual(node.report, { format: 'junit', dir: true })
+  assert.match(node.run, /^NODE_OPTIONS="\$NODE_OPTIONS --test-reporter=spec .*--test-reporter=junit --test-reporter-destination=\$FLEETMATES_REPORT_DIR\/node\.xml" npm run test$/)
+  assert.deepEqual(test('vitest run'), { name: 'test', kind: 'command', run: 'npm run test -- --allowOnly=false' })
+  assert.deepEqual(test('mocha'), { name: 'test', kind: 'command', run: 'npm run test -- --forbid-only' })
+  assert.deepEqual(test('jest'), { name: 'test', kind: 'command', run: 'npm run test' })
+})
+
+test('checksForPhase hands a report-bearing command check the top-level skips, overwriting its own', () => {
+  const config = {
+    skips: [{ file: 'tests/db.py', reason: 'no db' }],
+    phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'x', report: { format: 'junit', dir: true }, skips: ['forged.py'] }, { name: 'lint', kind: 'command', run: 'y' }] } },
+  }
+  const checks = checksForPhase(config, 'default')
+  assert.deepEqual(checks.find((c) => c.name === 'test').skips, ['tests/db.py'])
+  assert.equal(checks.find((c) => c.name === 'lint').skips, undefined)
+})

@@ -22,11 +22,32 @@ export async function loadGateConfig(root) {
   }
 }
 
+// The suggested `test` check carries the runner's own refusal of a focused test and, where the
+// runner writes JUnit without a dependency, the test inventory's report contract. `node --test`
+// ignores `.only` unless `--test-only` is given, so it needs no flag; Jest has no refusal at all,
+// and a focused Jest suite shows up as drops in the inventory instead.
+function inferTestCheck(script) {
+  if (/\bnode\s+--test\b/.test(script)) {
+    return {
+      name: 'test',
+      kind: 'command',
+      // Through NODE_OPTIONS, not `npm run test -- …`: node stops reading its own options at the
+      // first positional argument, so reporter flags appended after `tests/*.test.mjs` never reach
+      // the test runner (measured: no report written).
+      run: 'NODE_OPTIONS="$NODE_OPTIONS --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=$FLEETMATES_REPORT_DIR/node.xml" npm run test',
+      report: { format: 'junit', dir: true },
+    }
+  }
+  if (/\bvitest\b/.test(script)) return { name: 'test', kind: 'command', run: 'npm run test -- --allowOnly=false' }
+  if (/\bmocha\b/.test(script)) return { name: 'test', kind: 'command', run: 'npm run test -- --forbid-only' }
+  return { name: 'test', kind: 'command', run: 'npm run test' }
+}
+
 export function inferGateConfig(pkg) {
   const scripts = pkg?.scripts ?? {}
   const checks = INFERRED_ORDER
     .filter((name) => typeof scripts[name] === 'string')
-    .map((name) => ({ name, kind: 'command', run: `npm run ${name}` }))
+    .map((name) => (name === 'test' ? inferTestCheck(scripts.test) : { name, kind: 'command', run: `npm run ${name}` }))
 
   checks.push({ name: 'fileset', kind: 'fileset' })
   checks.push({ name: 'ownership', kind: 'ownership' })

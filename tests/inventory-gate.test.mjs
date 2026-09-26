@@ -219,3 +219,50 @@ test('a report path the suite turned into a symlink is refused', async () => {
     assert.match(inventory.output, /symbolic link/)
   })
 })
+
+// --- CLI: the early check, finish, and the suggested manifest --------------------------------
+
+test('complete reports the inventory as skipped: the early check runs no baseline', async () => {
+  await withRun({ plan: planWith(T1) }, write('tests/a.test.mjs', BASE_TESTS.replace("test('y', () => {})\n", '')), async (root) => {
+    const lines = []
+    await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], { out: (t) => lines.push(t) })
+    const text = lines.join('\n')
+    assert.match(text, /test:inventory/)
+    assert.match(text, /early check does not run the baseline/)
+    assert.doesNotMatch(text, /drop: /)
+  })
+})
+
+test('finish names the standing skips at the last gate', async () => {
+  await withRun({ plan: planWith(['- Create: `a.mjs`']) }, write('a.mjs', 'export {}\n'), async (root) => {
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', 'fleetmates/r1/T1'])
+    git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T2'])
+    await writeFile(path.join(root, 'b.mjs'), 'export {}\n')
+    git(root, ['add', 'b.mjs'])
+    git(root, ['commit', '--quiet', '-m', 'T2'])
+    git(root, ['checkout', '--quiet', 'run-branch'])
+    const lines = []
+    await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--root', root], { out: (t) => lines.push(t) })
+    assert.match(lines.join('\n'), /^standing skips at the last gate: 1 \(units: tests\/a\.test\.mjs\)$/m)
+  })
+})
+
+// The suggested command is run exactly as inferred, so it is measured here rather than trusted:
+// reporter flags appended after node's positional file pattern never reach the test runner.
+test('the inferred node --test check writes a report the inventory reads', async () => {
+  const { inferGateConfig } = await import('../scripts/gate-config.mjs')
+  const inferred = inferGateConfig({ scripts: { test: 'node --test tests/*.test.mjs' } }).phases.default.checks.find((c) => c.name === 'test')
+  const gateManifest = { phases: { default: { checks: [inferred] } } }
+  const context = process.env.NODE_TEST_CONTEXT
+  delete process.env.NODE_TEST_CONTEXT
+  try {
+    await withRun({ plan: planWith(T1), gate: gateManifest, extra: { 'package.json': JSON.stringify({ name: 'x', scripts: { test: 'node --test tests/*.test.mjs' } }) } },
+      write('tests/a.test.mjs', BASE_TESTS.replace("test('y', () => {})\n", '')), async (root) => {
+        const { inventory } = await gate(root)
+        assert.equal(inventory.status, 'fail', inventory.output)
+        assert.match(inventory.output, /drop: tests\/a\.test\.mjs > test > y/)
+      })
+  } finally {
+    if (context !== undefined) process.env.NODE_TEST_CONTEXT = context
+  }
+})

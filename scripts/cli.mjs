@@ -4519,7 +4519,8 @@ export async function runCli(argv, io = { out: console.log }) {
       const results = mergeSuppliedResults(await runPhaseChecks(checks, phaseCtx, enforcementOnly), forPhase)
       // `supplied` is carried into the summary so a reader can tell a recomputed pass from a
       // reported one. It changes no verdict: aggregateVerdict stays the only producer of those.
-      phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results) })
+      const standing = results.filter((r) => r?.kind === 'inventory').flatMap((r) => r.standing ?? [])
+      phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results), standing })
     }
 
     // No wrapper at this print site, because every value the table carries is wrapped where the
@@ -5802,7 +5803,9 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // The gate is recomputed. A PASS recorded in status.json is never consulted, so a
     // stale or forged one buys nothing.
-    const results = await runPhaseChecks(allChecks, taskCtx, enforcementOnly)
+    // `early`: the test inventory's baseline doubles the suite's time, and the gate recomputes the
+    // inventory anyway, so a teammate's own completion check reports it as skipped.
+    const results = await runPhaseChecks(allChecks, { ...taskCtx, early: true }, enforcementOnly)
     const verdict = aggregateVerdict(results)
 
     // A check that did not run is reported by name and by reason, every time and whatever the

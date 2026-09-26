@@ -372,3 +372,15 @@ test('renderPlanNotes says "entries" when more than one is unreadable', () => {
   assert.match(out, /2 unreadable entries\b/)
   assert.doesNotMatch(out, /2 unreadable entry\b/, 'the plural branch was not taken')
 })
+
+// A standing skip never fails a gate, so the end of the run is where it is named.
+test('renderRunSummary names the standing skips of the last phase, printable, units once each', () => {
+  const pass = { verdict: 'PASS', failed: [], pending: [], skipped: [] }
+  const out = renderRunSummary('r1', [
+    { phase: 1, verdict: pass, standing: [{ unit: 'old.py', id: 'old.py > a' }] },
+    { phase: 2, verdict: pass, standing: [{ unit: 'db.py', id: 'db.py > a' }, { unit: 'db.py', id: 'db.py > b' }, { unit: 'x\u001b[2K.py', id: 'x > c' }] },
+  ])
+  assert.match(out, /^standing skips at the last gate: 3 \(units: db\.py, x<0x1B>\[2K\.py\)$/m)
+  assert.doesNotMatch(out, /old\.py/)
+  assert.doesNotMatch(renderRunSummary('r1', [{ phase: 1, verdict: pass, standing: [] }]), /standing skips/)
+})
