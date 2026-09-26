@@ -15644,3 +15644,40 @@ test('dispatch-integrator refuses a FAIL gate recorded under the derived numeric
     assert.match(lines.join('\n'), /no recorded PASS/)
   })
 })
+
+// --- injected enforcement checks are named where they ran (docs/specs/2026-09-26-protected-paths-design.md)
+
+test('gate names the enforcement checks it injected in its JSON, and complete prints them', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeFile(
+      path.join(root, 'fleetmates.gate.json'),
+      JSON.stringify({ phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }, { name: 'fileset', kind: 'fileset' }] } } }),
+      'utf8',
+    )
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
+    lines.length = 0
+    assert.equal(await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io), 0, lines.join('\n'))
+    assert.deepEqual(JSON.parse(lines.join('\n')).injected, ['ownership'])
+    lines.length = 0
+    assert.equal(await runCli(['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--root', root], io), 0)
+    assert.ok(lines.includes('complete: injected ownership — the manifest does not declare it'), lines.join('\n'))
+  })
+})
+
+test('gate carries no injected field when the manifest declares both enforcement checks', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git: g }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    await writeEnforcementManifest(root)
+    g(['add', 'fleetmates.gate.json'])
+    g(['commit', '--quiet', '-m', 'manifest'])
+    absorbIntoBase(g)
+    await landTasks(g, root, { tasks: [['T1', 'a.mjs']], merge: false })
+    lines.length = 0
+    assert.equal(await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io), 0, lines.join('\n'))
+    assert.equal('injected' in JSON.parse(lines.join('\n')), false)
+  })
+})

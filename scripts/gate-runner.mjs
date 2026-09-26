@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash, normalizePath } from './enforce.mjs'
 import { GitError } from './git.mjs'
+import { protectedPaths } from './gate-config.mjs'
 import { withMergePreview, conflictPairs, previewClaimPath } from './merge-preview.mjs'
 
 // 15 minutes. A command check is the project's own suite, so the default has to clear a
@@ -1222,6 +1223,24 @@ function scopedPhaseTasks(ctx) {
   return scopedTasks(ctx).filter((t) => t.phase === ctx.currentPhase)
 }
 
+// The protected set comes from `checksForPhase`, which overwrites whatever the manifest put on the
+// entry with `protectedPaths(config)`. A caller that builds a check list by hand gets the default
+// set rather than none: the manifest itself is always protected.
+function guardedSet(check) {
+  const paths = Array.isArray(check?.protected) ? check.protected : protectedPaths({})
+  return new Set(paths.map((p) => normalizePath(p).toLowerCase()))
+}
+
+// Membership folds case: a case-insensitive filesystem (NTFS on the win32 CI, APFS on macOS) may
+// open `Fleetmates.gate.json` as the manifest. Authorisation does NOT fold case: a marking whose
+// case differs from the changed path does not authorise it, and the change escalates. Both
+// directions err toward escalation. Do not fold the authorisation side — that loosens it.
+function protectedViolations(changed, check, task) {
+  const guarded = guardedSet(check)
+  const marked = new Set((task?.protectedFiles ?? []).map(normalizePath))
+  return changed.map(normalizePath).filter((p) => guarded.has(p.toLowerCase()) && !marked.has(p))
+}
+
 export async function runFilesetCheck(check, ctx = {}) {
   const { git, runId, runSha, anchorSha, currentPhase, phaseError } = ctx
   if (!git) return checkResult(check, 'fail', 'fileset check has no git access')
@@ -1383,6 +1402,13 @@ export async function runFilesetCheck(check, ctx = {}) {
       }
       const violations = filesetViolations(changed, task.files)
       if (violations.length > 0) problems.push(`${task.id}: outside declared set — ${violations.join(', ')}`)
+      // Evaluated even for a path the task DECLARES: declaring the manifest is not authorising a
+      // change to what the gate checks. A separate line with its own label, so an escalation shows
+      // at a glance whether it was scope or protection.
+      const unmarked = protectedViolations(changed, check, task)
+      if (unmarked.length > 0) {
+        problems.push(`${task.id}: protected — ${unmarked.join(', ')} (mark it "Modify (protected)" in the plan, amended on the base branch, or revert it)`)
+      }
     } catch (err) {
       if (!(err instanceof GitError)) throw err
       problems.push(`${task.id}: ${err.message}`)
@@ -1453,7 +1479,14 @@ async function contentAt(git, sha, filePath) {
 // so it would never reach the check at all if only that one diff were consulted. Deletion is
 // a content change with no legitimate source, exactly like a fabricated addition; the merge
 // commit must still explain why a file its own second parent introduced is now gone.
-async function mergeContentExplainedByParents(git, firstParent, secondaryParents, mergeSha) {
+// `guard` narrows the one acceptance this rule makes without verifying bytes — a hand-resolved
+// conflict — for a protected path: there it is accepted only when `guard.authorised` (the exact
+// paths marked `(protected)` by the tasks whose branches carry a secondary parent) holds the file.
+// An integrator that resolves a conflict on the manifest otherwise chooses its content freely.
+//
+// Returns `{ ok: true }` or `{ ok: false, protectedFile }`, the latter only when the one failure
+// is that narrowing, so the caller can name the file.
+async function mergeContentExplainedByParents(git, firstParent, secondaryParents, mergeSha, guard = null) {
   const mergedFiles = new Set(await git.changedFiles({ base: firstParent, branch: mergeSha }))
   for (const parent of secondaryParents) {
     for (const file of await git.changedFiles({ base: firstParent, branch: parent })) mergedFiles.add(file)
@@ -1471,16 +1504,25 @@ async function mergeContentExplainedByParents(git, firstParent, secondaryParents
       if (firstContentAtBase !== baseContent) { genuineConflict = true; break }
       cleanContributions.add(parentContent)
     }
+    const unverified = genuineConflict || cleanContributions.size > 1
+    if (unverified && guard?.paths.has(normalizePath(file).toLowerCase()) && !guard.authorised.has(normalizePath(file))) {
+      return { ok: false, protectedFile: file }
+    }
     if (genuineConflict) continue
-    if (cleanContributions.size === 0) return false
-    if (cleanContributions.size === 1 && mergeContent !== [...cleanContributions][0]) return false
+    if (cleanContributions.size === 0) return { ok: false }
+    if (cleanContributions.size === 1 && mergeContent !== [...cleanContributions][0]) return { ok: false }
     // size > 1: independent secondary parents disagree without the first parent being
     // involved — git itself would have flagged this as a conflict too. Accepted, for the
     // same reason a genuine conflict is: not verifiable byte-for-byte, but every contributor
     // is already a confirmed task branch.
   }
-  return true
+  return { ok: true }
 }
+
+// Why an injected `ownership` may fail on a run nothing ever asked to be explained. It cannot say
+// which cause applies: knowing when this version was installed would need a record under
+// `.fleetmates/`, which is agent-writable and never consulted by an enforcement check.
+const INJECTED_OWNERSHIP_NOTE = 'check injected: the manifest does not declare it; the commits above may predate this fleetmates version, or come from an inline run (use --no-fleet)'
 
 export async function runOwnershipCheck(check, ctx = {}) {
   const { git, runId, runBranch, baseBranch, anchorSha, runSha, tasks } = ctx
@@ -1489,11 +1531,14 @@ export async function runOwnershipCheck(check, ctx = {}) {
   try {
     const branches = []
     const shas = []
+    // Parallel to `shas`: the task each resolved branch belongs to, for its `(protected)` markings.
+    const taskOf = []
     for (const task of tasks ?? []) {
       const branch = resolveTaskBranch(task, runId)
       if (branch && await git.branchExists(branch)) {
         branches.push(branch)
         shas.push(await git.resolveRef(`refs/heads/${branch}`))
+        taskOf.push(task)
       }
     }
 
@@ -1507,6 +1552,9 @@ export async function runOwnershipCheck(check, ctx = {}) {
 
     const commits = await git.commitsBetween({ from: anchorSha, to: runSha })
     const unexplained = []
+    // Merges rejected only because they hand-resolved a conflict on a protected path; they are in
+    // `unexplained` too, and named again below with the file so the escalation says why.
+    const protectedConflicts = []
     // Every commit this check admitted only because of base ancestry. Reported on the pass —
     // see `baseExplainedNote`, which also records why no base sha from run start is consulted.
     const baseExplained = []
@@ -1534,10 +1582,15 @@ export async function runOwnershipCheck(check, ctx = {}) {
           // riding in behind a second, unowned parent was never inspected.
           let allParentsOwned = true
           let usedBase = false
+          const authorised = new Set()
           for (const parent of secondaryParents) {
             let owned = false
-            for (const branchSha of shas) {
-              if (await git.isAncestor(parent, branchSha)) { owned = true; break }
+            for (let i = 0; i < shas.length; i += 1) {
+              if (await git.isAncestor(parent, shas[i])) {
+                owned = true
+                // Every task whose branch carries this parent vouches for the paths it marked.
+                for (const file of taskOf[i]?.protectedFiles ?? []) authorised.add(normalizePath(file))
+              }
             }
             // A merge of the base into the run branch is how a mid-run plan amendment reaches
             // the anchor. Its secondary parent is the base, never a task branch, so without
@@ -1549,7 +1602,11 @@ export async function runOwnershipCheck(check, ctx = {}) {
             if (!owned) { allParentsOwned = false; break }
           }
           if (allParentsOwned) {
-            explained = await mergeContentExplainedByParents(git, firstParent, secondaryParents, sha)
+            const verdict = await mergeContentExplainedByParents(
+              git, firstParent, secondaryParents, sha, { paths: guardedSet(check), authorised },
+            )
+            explained = verdict.ok
+            if (verdict.protectedFile) protectedConflicts.push({ sha, file: verdict.protectedFile })
             if (explained && usedBase) baseExplained.push(sha)
           }
         }
@@ -1579,6 +1636,10 @@ export async function runOwnershipCheck(check, ctx = {}) {
       unexplainedCommits: unexplained,
       dirty: await git.isDirty(),
     })
+    for (const { sha, file } of protectedConflicts) {
+      violations.push(`merge ${sha} resolved a conflict on protected ${file} with no parent from a task marking it (protected)`)
+    }
+    if (violations.length > 0 && check?.injected === true) violations.push(INJECTED_OWNERSHIP_NOTE)
     return violations.length === 0
       ? checkResult(check, 'pass', baseExplainedNote({ baseBranch, commits: baseExplained }))
       : checkResult(check, 'fail', violations.join('\n'))

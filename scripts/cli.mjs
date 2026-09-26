@@ -527,6 +527,18 @@ function announceCommandChecks(io, command, checkCount, phaseCount) {
   )
 }
 
+// Names the enforcement checks `checksForPhase` added because the manifest does not list them, so
+// the operator sees that a check ran which the manifest does not declare. Every name is this
+// code's own constant — `fileset`, `ownership`, or `<kind>:injected` — never manifest text.
+function injectedNames(checks) {
+  return [...new Set(checks.filter((c) => c?.injected === true).map((c) => c.name))]
+}
+
+function announceInjected(io, command, names) {
+  if (names.length === 0) return
+  io.out(`${command}: injected ${names.join(', ')} — the manifest does not declare ${names.length === 1 ? 'it' : 'them'}`)
+}
+
 // A phase reports the checks it did not run, every time, whatever put them in that state:
 // `--enforcement-only` here, and the merge-conflict skip `runChecks` produces on its own.
 //
@@ -4132,6 +4144,7 @@ export async function runCli(argv, io = { out: console.log }) {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
       announceCommandChecks(io, 'prune-run', total, phases.length)
     }
+    announceInjected(io, 'prune-run', injectedNames(phases.flatMap((p) => checksForPhase(config, String(p)))))
 
     const passedPhases = []
     for (const phase of phases) {
@@ -4487,6 +4500,7 @@ export async function runCli(argv, io = { out: console.log }) {
       const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
       announceCommandChecks(io, 'finish', total, phases.length)
     }
+    announceInjected(io, 'finish', injectedNames(phases.flatMap((p) => checksForPhase(config, String(p)))))
 
     const phaseResults = []
     for (const phase of phases) {
@@ -5639,6 +5653,8 @@ export async function runCli(argv, io = { out: console.log }) {
       branchShas,
       phase: ctx.currentPhase,
       phaseName,
+      // A field rather than a line: `gate`'s stdout is one JSON document a caller parses.
+      ...(injectedNames(checks).length > 0 ? { injected: injectedNames(checks) } : {}),
     }
 
     // Recorded for digests and supervision. Nothing reads this to decide anything.
@@ -5760,6 +5776,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const allChecks = checksForPhase(config, flags.phase ?? 'default')
     const taskKnown = (ctx.tasks ?? []).some((t) => t.id === flags.task)
     if (!taskKnown) { io.out(`no task ${flags.task} in the plan`); return 4 }
+    announceInjected(io, 'complete', injectedNames(allChecks))
 
     // `complete` verifies the calling task, not the whole phase. Anything that walks every
     // task in the current phase — `runFilesetCheck`, and the merge preview `runChecks`
