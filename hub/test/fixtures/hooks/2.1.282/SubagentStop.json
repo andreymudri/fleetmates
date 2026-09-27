@@ -1,0 +1,19 @@
+{
+  "session_id": "01J00000000000000000000001",
+  "transcript_path": "/home/you/.claude/projects/fixture/01J00000000000000000000001.jsonl",
+  "cwd": "/home/you/fixture-repo",
+  "scratchpad_dir": "/tmp/claude-1000/-home-you-fixture-repo/01J00000000000000000000001/scratchpad",
+  "prompt_id": "01JP0000000000000000000003",
+  "permission_mode": "auto",
+  "agent_id": "a0f4edcc96a4c9d3b",
+  "agent_type": "",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/home/you/.claude/projects/-home-you-fixture-repo/01J00000000000000000000001/subagents/agent-a0f4edcc96a4c9d3b.jsonl",
+  "last_assistant_message": "REDACTED",
+  "background_tasks": [],
+  "session_crons": []
+}

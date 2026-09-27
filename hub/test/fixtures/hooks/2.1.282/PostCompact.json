@@ -1,0 +1,10 @@
+{
+  "session_id": "01J00000000000000000000001",
+  "transcript_path": "/home/you/.claude/projects/fixture/01J00000000000000000000001.jsonl",
+  "cwd": "/home/you/fixture-repo",
+  "scratchpad_dir": "/tmp/claude-1000/-home-you-fixture-repo/01J00000000000000000000001/scratchpad",
+  "prompt_id": "01JP0000000000000000000003",
+  "hook_event_name": "PostCompact",
+  "trigger": "manual",
+  "compact_summary": "REDACTED"
+}

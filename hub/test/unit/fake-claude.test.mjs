@@ -7,7 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pty from 'node-pty'
 import { fakeBin } from '../helpers/fake-bin.mjs'
-import { createRedactor, readAccount, redactTokens, REDACTIONS } from '../capture/capture-cc.mjs'
+import { acceptTrust, childEnv, createRedactor, readAccount, redactTokens, REDACTIONS } from '../capture/capture-cc.mjs'
 
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const scriptsDir = path.join(hubDir, 'test', 'fixtures', 'scripts')
@@ -390,6 +390,116 @@ test('capture-cc removes its temp dirs when the capture throws', async () => {
   }
 })
 
+/**
+ * A trust dialog laid out as 2.1.282 renders it, with the ❯ marker on `selected`.
+ * Test stimulus for the startup step, not a captured frame.
+ * @param {'no' | 'yes'} selected
+ */
+const trustDialog = selected => [
+  '\x1b[2J\x1b[H',
+  'Accessing workspace:\r\n\r\n',
+  'Quick safety check: Is this a project you created or one you trust?\r\n\r\n',
+  `${selected === 'no' ? '❯' : ' '} No, exit\r\n`,
+  `${selected === 'yes' ? '❯' : ' '} Yes, I trust this folder\r\n\r\n`,
+  'Enter to confirm · Esc to cancel\r\n'
+].join('')
+
+test('capture-cc startup moves ❯ to "Yes, I trust" when the dialog preselects "No, exit"', async () => {
+  const t = await tempDir('deck-capture-trust-')
+  /** @type {Awaited<ReturnType<typeof fakeBin>> | undefined} */
+  let bin
+  try {
+    const log = path.join(t.dir, 'fake.jsonl')
+    const script = path.join(t.dir, 'trust.json')
+    await writeFile(script, JSON.stringify({
+      steps: [
+        { print: trustDialog('no') },
+        { expectKey: { '\r': 'enter', B: 'down', A: 'up', timeoutMs: 20000 } },
+        {
+          branch: {
+            enter: [{ exit: { code: 1, stderr: 'declined trust' } }],
+            up: [{ exit: { code: 1, stderr: 'moved away from Yes' } }],
+            down: [
+              { print: trustDialog('yes') },
+              { expectKey: { '\r': 'enter', B: 'down', A: 'up', timeoutMs: 20000 } },
+              {
+                branch: {
+                  enter: [{ hook: 'SessionStart', with: { source: 'startup' } }, { print: '> \r\n' }, { sleep: 500 }, { exit: { code: 0 } }],
+                  down: [{ exit: { code: 1, stderr: 'moved past Yes' } }],
+                  up: [{ exit: { code: 1, stderr: 'moved back to No' } }]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }))
+    bin = await fakeBin({ script, log })
+    const home = path.join(t.dir, 'home')
+    const tmp = path.join(t.dir, 'tmp')
+    const out = path.join(t.dir, 'out')
+    for (const d of [home, tmp, out]) await mkdir(d)
+    const env = { ...bin.env, HOME: home, TMPDIR: tmp, FAKE_CLAUDE_FIXTURES: path.join(t.dir, 'fixtures'), CAPTURE_STEP_TIMEOUT_MS: '5000' }
+    const run = await new Promise(resolve => {
+      execFile(process.execPath, [captureCc, '--unattended', '--out', out], { env, timeout: 60000 },
+        (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }))
+    })
+    assert.equal(run.code, 0, run.stderr)
+    const entries = await readLog(log)
+    const ready = entries.find(e => e.ready)
+    assert.deepEqual(ready?.argv, ['--permission-mode', 'manual'], 'claude is spawned in the prompting permission mode')
+    const inputs = entries.filter(e => 'input' in e).map(e => e.input)
+    assert.equal(inputs[0], '\x1b[B', 'the first key moves the marker down, not Enter on "No, exit"')
+    assert.ok(inputs.includes('\r'), 'Enter confirms once ❯ is on "Yes, I trust"')
+    const dir = path.join(out, 'hooks', '2.1.282')
+    assert.equal(JSON.parse(await readFile(path.join(dir, 'SessionStart.startup.json'), 'utf8')).source, 'startup')
+    const manifest = JSON.parse(await readFile(path.join(dir, 'MANIFEST.json'), 'utf8'))
+    assert.ok(!manifest.skipped.some(s => s.step === 'startup'), JSON.stringify(manifest.skipped))
+    assert.ok(manifest.frames['trust-folder'], 'the dialog was saved as the trust-folder frame')
+  } finally {
+    await bin?.cleanup()
+    await t.cleanup()
+  }
+})
+
+test('acceptTrust fails, sending nothing, when no option starts with "Yes, I trust"', async () => {
+  /** @type {string[]} */
+  const sent = []
+  const r = await acceptTrust({ screen: () => '❯ No, exit\n  Maybe later', write: s => { sent.push(s) }, settle: async () => {} })
+  assert.match(String(r), /Yes, I trust/)
+  assert.deepEqual(sent, [])
+})
+
+test('acceptTrust gives up when the marker never reaches "Yes, I trust"', async () => {
+  /** @type {string[]} */
+  const sent = []
+  const r = await acceptTrust({ screen: () => '❯ No, exit\n  Yes, I trust this folder', write: s => { sent.push(s) }, settle: async () => {} })
+  assert.notEqual(r, true)
+  assert.ok(!sent.includes('\r'), 'never confirms while ❯ is on "No, exit"')
+})
+
+test('childEnv drops the parent session variables and keeps the rest', () => {
+  const parent = {
+    PATH: '/usr/bin',
+    HOME: '/home/x',
+    CLAUDECODE: '1',
+    CLAUDE_CODE_ENTRYPOINT: 'cli',
+    CLAUDE_CODE_SESSION_ID: 's',
+    CLAUDE_CODE_SESSION_ATTENDED: '1',
+    CLAUDE_CODE_CHILD_SESSION: '1',
+    CLAUDE_PID: '42',
+    CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/s',
+    CLAUDE_CODE_MESSAGING_TOKEN: 't',
+    CLAUDE_CODE_BRIDGE_SESSION_ID: 'b',
+    CLAUDE_CODE_EXECPATH: '/x',
+    CLAUDE_EFFORT: 'high',
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    CLAUDE_CODE_USE_BEDROCK: '1',
+    ANTHROPIC_MODEL: 'm'
+  }
+  assert.deepEqual(childEnv(parent), { PATH: '/usr/bin', HOME: '/home/x', CLAUDE_CODE_USE_BEDROCK: '1', ANTHROPIC_MODEL: 'm' })
+})
+
 test('fake claude exits 97 when expectInput times out', async () => {
   const t = await tempDir('deck-fake-97-')
   const script = path.join(t.dir, 's.json')
@@ -428,5 +538,58 @@ test('fake claude exits 2 on a bad script', async () => {
   } finally {
     await bin.cleanup()
     await t.cleanup()
+  }
+})
+
+// Fixture consistency: every captured set under test/fixtures/hooks/<version> keeps its
+// MANIFEST true and its hand redactions in place.
+const fixturesDir = path.join(hubDir, 'test', 'fixtures')
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+
+/**
+ * Versions that have a hooks/<version>/MANIFEST.json.
+ * @returns {Promise<string[]>}
+ */
+async function capturedVersions () {
+  const dirs = await readdir(path.join(fixturesDir, 'hooks')).catch(() => [])
+  const out = []
+  for (const d of dirs) {
+    if (await readFile(path.join(fixturesDir, 'hooks', d, 'MANIFEST.json')).then(() => true, () => false)) out.push(d)
+  }
+  return out
+}
+
+test('fixture sets: MANIFEST matches the files and the redactions hold', async () => {
+  const versions = await capturedVersions()
+  assert.ok(versions.length > 0, 'at least one captured fixture set')
+  for (const v of versions) {
+    const hooksDir = path.join(fixturesDir, 'hooks', v)
+    const screensDir = path.join(fixturesDir, 'screens', v)
+    const manifest = JSON.parse(await readFile(path.join(hooksDir, 'MANIFEST.json'), 'utf8'))
+    for (const [name, frame] of Object.entries(manifest.frames ?? {})) {
+      const bytes = (await readFile(path.join(screensDir, `${name}.ansi`))).length
+      assert.equal(frame.bytes, bytes, `${v} MANIFEST frames.${name}.bytes vs ${name}.ansi`)
+    }
+    const hookFiles = (await readdir(hooksDir)).filter(f => f.endsWith('.json') && f !== 'MANIFEST.json').sort()
+    assert.deepEqual([...manifest.hooks].filter(f => f.endsWith('.json')).sort(), hookFiles, `${v} MANIFEST hooks vs files`)
+    for (const f of hookFiles) {
+      const text = await readFile(path.join(hooksDir, f), 'utf8')
+      const payload = JSON.parse(text)
+      assert.equal(payload.hook_event_name, f.split('.')[0], `${v}/${f} hook_event_name`)
+      assert.doesNotMatch(text, UUID_RE, `${v}/${f} holds a UUID`)
+      assert.doesNotMatch(text, /\/home\/(?!you\b)/, `${v}/${f} holds a /home/ path other than /home/you`)
+    }
+    const screenFiles = await readdir(screensDir).catch(() => [])
+    for (const [dir, files] of [[hooksDir, await readdir(hooksDir)], [screensDir, screenFiles]]) {
+      for (const f of files) {
+        const text = (await readFile(path.join(dir, f))).toString('latin1')
+        assert.doesNotMatch(text, /deck-capture-repo/, `${v}/${f} holds the throwaway repo name`)
+        if (dir !== screensDir) continue
+        for (const m of text.matchAll(/claude\.ai\/code\/session_/g)) {
+          const at = /** @type {number} */ (m.index) + m[0].length
+          assert.equal(text.slice(at, at + 8), 'REDACTED', `${v}/${f} session URL`)
+        }
+      }
+    }
   }
 })

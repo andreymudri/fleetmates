@@ -1,0 +1,18 @@
+{
+  "session_id": "01J00000000000000000000001",
+  "transcript_path": "/home/you/.claude/projects/fixture/01J00000000000000000000001.jsonl",
+  "cwd": "/home/you/fixture-repo",
+  "scratchpad_dir": "/tmp/claude-1000/-home-you-fixture-repo/01J00000000000000000000001/scratchpad",
+  "prompt_id": "01JP0000000000000000000004",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo capture-ok",
+    "description": "Print a confirmation string"
+  },
+  "tool_use_id": "toolu_01JSavsbgyR6e25L6zdRfpTH"
+}
