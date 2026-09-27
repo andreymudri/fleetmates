@@ -1,0 +1,11 @@
+#!/usr/bin/env node
+// Stand-in for `claude` in the deckd integration tests only: prints READY,
+// echoes every input byte, and reports its window size on SIGWINCH.
+if (process.stdin.isTTY) process.stdin.setRawMode(true)
+process.stdout.write('READY\r\n')
+process.stdin.on('data', (chunk) => process.stdout.write(chunk))
+process.stdin.on('end', () => process.exit(0))
+process.on('SIGWINCH', () => {
+  const [cols, rows] = process.stdout.isTTY ? process.stdout.getWindowSize() : [0, 0]
+  process.stdout.write(`SIZE ${cols}x${rows}\r\n`)
+})
