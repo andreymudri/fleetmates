@@ -6,10 +6,14 @@
 // no prompt (`null`). Whether real Claude Code ever draws such a box is
 // unverified.
 //
-// Every row is trimmed before matching and every pattern is anchored with
-// no nested or adjacent unbounded quantifiers over the same characters, and
-// the screen is scanned a fixed number of times: parsing is linear in the
-// screen size, whatever the PTY printed (docs/deck/08-security.md).
+// PTY screen text is untrusted data (docs/deck/08-security.md:95), so a row
+// the agent printed must not make parsing slow. No pattern here has nested
+// or adjacent unbounded quantifiers that can match the same characters, and
+// each row is matched a fixed number of times. The tests "a hostile screen
+// parses in linear time" and "long near-miss rows for every screen pattern
+// parse fast" in hub/test/unit/screen-parsers.test.mjs pin this with long
+// rows that almost match each pattern and fail on their last characters.
+import { inputRow } from './status-region.mjs'
 
 /**
  * @typedef {{ key: string | null, label: string }} PromptOption
@@ -32,18 +36,24 @@ const QUESTION_TAB = /[☐☒]/
 /**
  * Find the prompt box on screen. Returns `null` when there is none, or when
  * its footer is not visible (a box cut off at the bottom is never returned
- * as a partial option list).
+ * as a partial option list), or when the cursor sits in an input box below
+ * the footer (a real prompt box replaces the input box, so a box above a
+ * live input box is transcript text).
  * @param {string[]} lines rendered rows
+ * @param {{ x: number, y: number }} [cursor]
  * @returns {Prompt | null}
  */
-export function parsePrompt (lines) {
+export function parsePrompt (lines, cursor) {
   const trimmed = lines.map((l) => l.trim())
-  const found = numberedOptions(trimmed) ?? unnumberedOptions(lines, trimmed)
+  const found = numberedOptions(lines, trimmed) ?? unnumberedOptions(lines, trimmed)
   if (!found) return null
   const { rows, options } = found
   const first = rows[0]
   const last = rows[rows.length - 1]
-  if (!trimmed.slice(last + 1).some((l) => FOOTER.test(l))) return null
+  let footer = last + 1
+  while (footer < trimmed.length && !FOOTER.test(trimmed[footer])) footer++
+  if (footer === trimmed.length) return null
+  if (cursor && inputRow(lines, cursor) > footer) return null
   // The box top is the nearest `─` rule above the FIRST option, so a rule
   // inside the box (AskUserQuestion draws one above "Chat about this") is
   // never mistaken for it.
@@ -58,17 +68,28 @@ export function parsePrompt (lines) {
  * the `❯` cursor. Rows between options (descriptions, rules) are skipped.
  * A number that does not continue the run ends it: a gap (1, 2, 4) leaves
  * no run, so the screen is not a prompt rather than a list that drops or
- * invents an option.
+ * invents an option. Only rows whose number starts in the same column as
+ * the number on the last `❯` row count, so an indented description that
+ * starts with "1. " is not an option.
+ * @param {string[]} lines
  * @param {string[]} trimmed
  * @returns {{ rows: number[], options: PromptOption[] } | null}
  */
-function numberedOptions (trimmed) {
-  /** @type {{ row: number, n: number, selected: boolean, label: string }[]} */
-  let run = []
+function numberedOptions (lines, trimmed) {
+  /** @type {{ row: number, n: number, selected: boolean, label: string, col: number }[]} */
+  const numbered = []
   for (let r = 0; r < trimmed.length; r++) {
     const m = NUMBERED.exec(trimmed[r])
     if (!m) continue
-    const opt = { row: r, n: Number(m[2]), selected: Boolean(m[1]), label: m[3] }
+    const col = lines[r].length - lines[r].trimStart().length + (m[1]?.length ?? 0)
+    numbered.push({ row: r, n: Number(m[2]), selected: Boolean(m[1]), label: m[3], col })
+  }
+  const cursorRow = numbered.findLast((o) => o.selected)
+  if (!cursorRow) return null
+  /** @type {typeof numbered} */
+  let run = []
+  for (const opt of numbered) {
+    if (opt.col !== cursorRow.col) continue
     if (opt.n === 1) run = [opt]
     else if (run.length > 0 && opt.n === run[run.length - 1].n + 1) run.push(opt)
     else run = []

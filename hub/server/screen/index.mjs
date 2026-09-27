@@ -16,7 +16,7 @@ import { statusRows } from './status-region.mjs'
  * @returns {ParsedScreen}
  */
 export function parseScreen (lines, cursor) {
-  const prompt = parsePrompt(lines)
+  const prompt = parsePrompt(lines, cursor)
   return {
     prompt,
     idle: prompt === null && isIdle(lines, cursor),

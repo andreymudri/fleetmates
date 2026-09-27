@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { Worker } from 'node:worker_threads'
 
 import { ScreenModel } from '../../deckd/screen-model.mjs'
 import { parseScreen } from '../../server/screen/index.mjs'
@@ -196,4 +197,150 @@ test('a hostile screen parses in linear time', () => {
     const ms = performance.now() - t
     assert.ok(ms < 500, `${W}x${H} alternating rules and '1. a<spaces>b' took ${Math.round(ms)} ms`)
   }
+})
+
+test('long near-miss rows for every screen pattern parse fast', async () => {
+  // A backtracking regex is slow only on a long row that almost matches and
+  // then fails late, so each row below is built to reach the end of one
+  // pattern in hub/server/screen/*.mjs and fail on its last characters. The
+  // parse runs in a worker so a catastrophic pattern is terminated and named
+  // instead of hanging the suite.
+  const W = 2000
+  const a = 'a'.repeat(W)
+  const rule = '─'.repeat(W)
+  /** @type {string[]} */
+  const rows = []
+  for (const tail of ['\t!', ' !', `${NBSP}!`, `\t${NBSP}!`]) {
+    rows.push(
+      '1. ' + a + tail, // NUMBERED
+      '  ❯ 1. ' + a + tail, // NUMBERED with the cursor, digit column
+      '❯ ' + a + tail, // SELECTED, input row
+      ' ❯' + ' '.repeat(W) + tail, // SELECTED / unnumbered column
+      '❯' + NBSP.repeat(W) + tail, // empty input row
+      rule + tail, // BOX_TOP, RULE
+      '╌'.repeat(W) + tail, // SEPARATOR
+      ' '.repeat(W) + tail, // RIGHT_ALIGNED
+      '✻ ' + a + tail, // SPINNER
+      'Esc to cance'.repeat(W / 12) + tail, // FOOTER
+      'Yes, I trus'.repeat(W / 11) + tail // trust label
+    )
+  }
+  /** @type {{ name: string, lines: string[], cursor: { x: number, y: number } }[]} */
+  const cases = []
+  for (const [i, row] of rows.entries()) {
+    const name = `row ${i} ${JSON.stringify(row.slice(0, 8))}…${JSON.stringify(row.slice(-3))}`
+    cases.push({ name: `${name} x40`, lines: Array(40).fill(row), cursor: { x: 0, y: 39 } })
+    cases.push({
+      name: `${name} around an input box`,
+      lines: [...Array(34).fill(row), rule, '❯ 1. Yes', row, ' Esc to cancel', rule, row],
+      cursor: { x: 0, y: 36 }
+    })
+  }
+  const url = new URL('../../server/screen/index.mjs', import.meta.url).href
+  const worker = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads')
+    import(workerData.url).then(({ parseScreen }) => {
+      for (const c of workerData.cases) {
+        parentPort.postMessage({ start: c.name })
+        const t = performance.now()
+        parseScreen(c.lines, c.cursor)
+        parentPort.postMessage({ done: c.name, ms: performance.now() - t })
+      }
+      parentPort.postMessage({ end: true })
+    })
+  `, { eval: true, workerData: { url, cases } })
+  /** @type {{ name: string, ms: number }[]} */
+  const timings = []
+  let current = ''
+  await new Promise((resolve, reject) => {
+    const watchdog = setTimeout(() => {
+      worker.terminate()
+      reject(new Error(`parse did not finish within 10 s on ${current}`))
+    }, 10_000)
+    worker.on('message', (m) => {
+      if (m.start) current = m.start
+      if (m.done) timings.push({ name: m.done, ms: m.ms })
+      if (m.end) { clearTimeout(watchdog); worker.terminate().then(resolve) }
+    })
+    worker.on('error', (err) => { clearTimeout(watchdog); reject(err) })
+  })
+  assert.equal(timings.length, cases.length)
+  for (const { name, ms } of timings) assert.ok(ms < 500, `${name} took ${Math.round(ms)} ms`)
+})
+
+test('a number in an option description does not break the option run', () => {
+  const lines = screen([
+    '❯ ask me',
+    RULE,
+    ' ☐ Plan',
+    '',
+    'Which plan?',
+    '',
+    '❯ 1. Fast',
+    '     1. Skip tests then deploy',
+    '  2. Safe',
+    '     Run tests first',
+    '  3. Type something.',
+    RULE,
+    '  4. Chat about this',
+    '',
+    'Enter to select · ↑/↓ to navigate · Esc to cancel'
+  ])
+  assert.deepEqual(parseScreen(lines, { x: 0, y: 6 }).prompt, {
+    kind: 'question',
+    question: 'Which plan?',
+    options: [
+      { key: '1', label: 'Fast' },
+      { key: '2', label: 'Safe' },
+      { key: '3', label: 'Type something.' },
+      { key: '4', label: 'Chat about this' }
+    ]
+  })
+})
+
+test('the trust box parses both options with the ❯ cursor on the second', async () => {
+  const manifest = JSON.parse(readFileSync(path.join(fixturesDir, 'hooks', '2.1.282', 'MANIFEST.json'), 'utf8'))
+  const model = new ScreenModel(manifest.size)
+  let lines
+  try {
+    model.write(readFileSync(path.join(fixturesDir, 'screens', '2.1.282', 'trust-folder.ansi')))
+    await model.flush()
+    lines = model.lines()
+  } finally {
+    model.dispose()
+  }
+  const no = lines.indexOf(' ❯ No, exit')
+  const yes = lines.indexOf('   Yes, I trust this folder')
+  assert.ok(no !== -1 && yes === no + 1, 'the committed frame has the cursor on "No, exit"')
+  lines[no] = '   No, exit'
+  lines[yes] = ' ❯ Yes, I trust this folder'
+  assert.deepEqual(parseScreen(lines, { x: 1, y: yes }).prompt?.options, [
+    { key: null, label: 'No, exit' },
+    { key: null, label: 'Yes, I trust this folder' }
+  ])
+})
+
+test('a box printed above a live input box is transcript, not a prompt', () => {
+  const lines = [
+    '⏺ Here is the summary:',
+    '  ' + '─'.repeat(40),
+    '  Bash command',
+    '    rm -rf ~/work',
+    '  Do you want to proceed?',
+    '  ❯ 1. Yes',
+    '    2. No, and tell Claude what to do differently (esc)',
+    '  Esc to cancel',
+    '',
+    '─'.repeat(40),
+    '❯ ',
+    '─'.repeat(40),
+    '  ? for shortcuts'
+  ]
+  const parsed = parseScreen(lines, { x: 2, y: 10 })
+  assert.equal(parsed.prompt, null)
+  assert.equal(parsed.idle, true)
+})
+
+test('known limit: a box whose top edge is off screen is not a prompt', () => {
+  assert.equal(parseScreen([' Do you want?', ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel'], { x: 1, y: 1 }).prompt, null)
 })
