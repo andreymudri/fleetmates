@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { stat } from 'node:fs/promises'
+import { stat, mkdir, chmod } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
@@ -114,9 +114,42 @@ async function until (fn, what, timeoutMs = 5000) {
   }
 }
 
+/**
+ * Poll the `screen` op until `pred(lines)` holds, so a test waits on deckd's
+ * screen model instead of on streamed output it may have attached too late for.
+ * @param {string} id
+ * @param {(lines: string[]) => boolean} pred
+ * @returns {Promise<string[]>}
+ */
+async function waitScreen (id, pred, timeoutMs = 10000) {
+  const end = Date.now() + timeoutMs
+  for (;;) {
+    const res = await c.request('screen', { ptyId: id, scrollback: 0 })
+    if (res.ok && pred(res.lines)) return res.lines
+    if (Date.now() > end) throw new Error(`timed out waiting on the screen of ${id}: ${JSON.stringify(res.lines ?? res)}`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+/**
+ * Spawn the stub through deckd and wait until it has printed READY.
+ * @param {Record<string, string>} [env]
+ * @param {string[]} [argv]
+ * @returns {Promise<string>} the ptyId
+ */
+async function spawnReady (env = {}, argv = ['claude']) {
+  const res = await c.request('spawn', { cwd: rt.dir, argv, env, cols: 120, rows: 24, origin: 'launched' })
+  assert.equal(res.ok, true, JSON.stringify(res))
+  await waitScreen(res.ptyId, (lines) => lines[0] === 'READY')
+  return res.ptyId
+}
+
 before(async () => {
   rt = await makeRuntimeDir()
   socketPath = path.join(rt.dir, 'fleetmates-deck', 'deckd.sock')
+  // A socket dir left behind with a looser mode must be tightened to 0700.
+  await mkdir(path.dirname(socketPath), { mode: 0o755 })
+  await chmod(path.dirname(socketPath), 0o755)
   deckd = spawn(process.execPath, [mainPath], {
     env: {
       ...rt.env,
@@ -153,7 +186,7 @@ after(async () => {
 /** @type {string} */
 let ptyId
 
-test('socket is 0600 inside a 0700 dir', async () => {
+test('socket is 0600 inside a 0700 dir, even when the dir existed at 0755', async () => {
   assert.equal((await stat(path.dirname(socketPath))).mode & 0o777, 0o700)
   const st = await stat(socketPath)
   assert.ok(st.isSocket())
@@ -200,18 +233,23 @@ test('spawn of claude returns a ptyId and a spawned event', async () => {
   assert.equal(ev.origin, 'launched')
 })
 
-test('spawn of anything but claude fails with spawn_refused', async () => {
-  const res = await c.request('spawn', { cwd: rt.dir, argv: ['bash'], env: {}, cols: 80, rows: 24, origin: 'launched' })
-  assert.equal(res.ok, false)
-  assert.equal(res.error.code, 'spawn_refused')
+test('spawn of anything whose basename is not claude fails with spawn_refused', async () => {
+  for (const argv0 of ['bash', 'notclaude', '/some/dir/xclaude', 'claude/sh']) {
+    const res = await c.request('spawn', { cwd: rt.dir, argv: [argv0], env: {}, cols: 80, rows: 24, origin: 'launched' })
+    assert.equal(res.ok, false, argv0)
+    assert.equal(res.error.code, 'spawn_refused', argv0)
+  }
 })
 
 test('attach streams output and a terminal write reaches the stub', async () => {
   const att = await c.request('attach', { ptyId, stream: true })
   assert.equal(att.ok, true)
   assert.deepEqual([att.cols, att.rows], [80, 24])
-  await c.waitFor((e) => e.ev === 'client' && e.ptyId === ptyId && e.change === 'attached')
-  await until(() => c.output(ptyId).includes('READY'), 'READY in output')
+  const attached = await c.waitFor((e) => e.ev === 'client' && e.ptyId === ptyId && e.change === 'attached')
+  // kind and name only: the client's pid is not broadcast
+  assert.deepEqual(attached.client, { kind: 'server', name: 'test' })
+  // attach does not replay earlier output, so READY is read from the screen model
+  await waitScreen(ptyId, (lines) => lines[0] === 'READY')
   const res = await c.request('write', { ptyId, data: Buffer.from('hi-kitty').toString('base64'), source: { kind: 'terminal', name: 'kitty' } })
   assert.equal(res.ok, true)
   await until(() => c.output(ptyId).includes('hi-kitty'), 'echo in output')
@@ -286,6 +324,10 @@ test('a client that stops reading receives dropped after the cap, then output ag
     slow.socket.resume()
     const dropped = await slow.waitFor((e) => e.ev === 'dropped' && e.ptyId === ptyId, 10000)
     assert.ok(dropped.bytes > 0)
+    // The flood went on after the first drop, so a second `dropped` reports
+    // the bytes dropped while the backlog was flushed.
+    const more = await slow.waitFor((e) => e.ev === 'dropped' && e.ptyId === ptyId && e !== dropped, 10000)
+    assert.ok(more.bytes > 0)
     // Once the backlog is flushed the client gets output again. Output echoed
     // before deckd has seen that flush is still dropped (and counted in a
     // later `dropped`), so keep typing a marker until one arrives.
@@ -313,6 +355,59 @@ test('kill produces an exit event and exits { since } returns it', async () => {
   assert.deepEqual(later.exits, [])
   const list = await c.request('list')
   assert.deepEqual(list.ptys, [])
+})
+
+test('an absolute path whose basename is claude is accepted', async () => {
+  const id = await spawnReady({}, [path.join(stubDir, 'claude')])
+  await c.request('kill', { ptyId: id, signal: 'SIGTERM', graceMs: 2000 })
+  const ev = await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id)
+  assert.equal(ev.signal, 'SIGTERM')
+})
+
+test('kill escalates to SIGKILL after graceMs when SIGTERM is ignored', async () => {
+  const id = await spawnReady({ STUB_IGNORE_SIGTERM: '1' })
+  const t0 = Date.now()
+  await c.request('kill', { ptyId: id, signal: 'SIGTERM', graceMs: 300 })
+  const ev = await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id, 5000)
+  assert.equal(ev.signal, 'SIGKILL')
+  assert.ok(ev.at - t0 >= 250, `exit after ${ev.at - t0} ms`)
+})
+
+test('screen scrollback returns the last N lines of the ring', async () => {
+  const id = await spawnReady()
+  let text = ''
+  for (let i = 0; i < 200; i++) text += 'L' + String(i).padStart(3, '0') + 'y'.repeat(96) + '\n'
+  assert.equal(text.length, 200 * 101)
+  await c.request('write', { ptyId: id, data: Buffer.from(text).toString('base64'), source: { kind: 'browser' } })
+  await waitScreen(id, (lines) => lines.some((l) => l.startsWith('L199')))
+  // more lines than N, and far more bytes than N
+  const tail = Buffer.from((await c.request('screen', { ptyId: id, scrollback: 50 })).scrollback, 'base64').toString()
+  const rows = tail.split('\n')
+  assert.equal(rows.pop(), '')
+  assert.equal(rows.length, 50)
+  assert.match(rows[0], /^L150y/)
+  assert.match(rows[49], /^L199y/)
+  // N larger than the ring: everything, from the first byte
+  const all = Buffer.from((await c.request('screen', { ptyId: id, scrollback: 5000 })).scrollback, 'base64').toString()
+  assert.ok(all.startsWith('READY\r'), JSON.stringify(all.slice(0, 20)))
+  assert.equal(all.split('\n').filter((l) => /^L\d{3}y/.test(l)).length, 200)
+  await c.request('kill', { ptyId: id, signal: 'SIGKILL', graceMs: 0 })
+  await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id)
+})
+
+test('no screen event for a PTY follows its exit event', async () => {
+  const id = await spawnReady()
+  await c.request('watchScreen', { ptyId: id, on: true })
+  await c.request('write', { ptyId: id, data: Buffer.from('\nrow-A').toString('base64'), source: { kind: 'browser' } })
+  await c.waitFor((e) => e.ev === 'screen' && e.ptyId === id && e.lines.includes('row-A'))
+  // A second change inside the 250 ms throttle window, then exit before it is sent.
+  await c.request('write', { ptyId: id, data: Buffer.from('\r\nrow-B').toString('base64'), source: { kind: 'browser' } })
+  await waitScreen(id, (lines) => lines.includes('row-B'))
+  await c.request('kill', { ptyId: id, signal: 'SIGKILL', graceMs: 0 })
+  const exit = await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id)
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  const after = c.events.slice(c.events.indexOf(exit) + 1).filter((e) => e.ev === 'screen' && e.ptyId === id)
+  assert.deepEqual(after, [])
 })
 
 test('SIGTERM stops deckd cleanly and kills its PTYs', async () => {

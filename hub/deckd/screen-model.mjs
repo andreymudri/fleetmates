@@ -20,6 +20,8 @@ export class ScreenModel {
     this.rev = 0
     /** @type {Set<() => void>} */
     this.listeners = new Set()
+    /** Unsubscribe functions of active watches. @type {Set<() => void>} */
+    this.watches = new Set()
   }
 
   get cols () { return this.term.cols }
@@ -105,14 +107,18 @@ export class ScreenModel {
       timer.unref()
     }
     this.listeners.add(listener)
-    return () => {
+    const unsubscribe = () => {
       this.listeners.delete(listener)
+      this.watches.delete(unsubscribe)
       if (timer) clearTimeout(timer)
       timer = null
     }
+    this.watches.add(unsubscribe)
+    return unsubscribe
   }
 
   dispose () {
+    for (const unsubscribe of [...this.watches]) unsubscribe()
     this.listeners.clear()
     this.term.dispose()
   }

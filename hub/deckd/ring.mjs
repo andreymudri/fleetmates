@@ -29,6 +29,8 @@ export class Ring {
     this.chunks = []
     this.bytes = 0
     this.lines = 0
+    /** False once a byte trim has cut the oldest retained line. */
+    this.startsAtLine = true
   }
 
   /**
@@ -54,6 +56,28 @@ export class Ring {
     return Buffer.concat(this.chunks.map((c) => c.buf), this.bytes)
   }
 
+  /**
+   * The newest `n` lines, starting at a line boundary. A trailing newline
+   * ends the last line; an unterminated tail counts as a line. With fewer
+   * than `n` lines retained it returns them all, minus a first line that a
+   * byte trim cut short.
+   * @param {number} n
+   * @returns {Buffer}
+   */
+  tail (n) {
+    const buf = this.snapshot()
+    if (n <= 0 || buf.length === 0) return Buffer.alloc(0)
+    let pos = buf[buf.length - 1] === 0x0a ? buf.length - 1 : buf.length
+    for (let k = 0; k < n; k++) {
+      pos = pos === 0 ? -1 : buf.lastIndexOf(0x0a, pos - 1)
+      if (pos === -1) break
+    }
+    if (pos !== -1) return buf.subarray(pos + 1)
+    if (this.startsAtLine) return buf
+    const nl = buf.indexOf(0x0a)
+    return nl === -1 ? Buffer.alloc(0) : buf.subarray(nl + 1)
+  }
+
   #trimBytes () {
     while (this.bytes > this.maxBytes) {
       const first = this.chunks[0]
@@ -62,7 +86,9 @@ export class Ring {
         this.chunks.shift()
         this.bytes -= first.buf.length
         this.lines -= first.nl
+        this.startsAtLine = first.buf[first.buf.length - 1] === 0x0a
       } else {
+        this.startsAtLine = first.buf[excess - 1] === 0x0a
         const rest = first.buf.subarray(excess)
         const nl = countNewlines(rest)
         this.lines -= first.nl - nl
@@ -73,6 +99,8 @@ export class Ring {
   }
 
   #trimLines () {
+    // this trim always cuts right after a newline
+    if (this.lines > this.maxLines) this.startsAtLine = true
     while (this.lines > this.maxLines) {
       const first = this.chunks[0]
       const need = this.lines - this.maxLines

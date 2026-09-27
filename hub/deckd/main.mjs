@@ -225,6 +225,11 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
           exits = exits.filter((e) => e.at >= cutoff)
           exits.push(rec)
           ptys.delete(h.ptyId)
+          // Cancel a throttled screen event still pending, so no `screen`
+          // for this PTY follows its `exit`.
+          if (h.unwatchScreen) h.unwatchScreen()
+          h.unwatchScreen = null
+          h.watchers.clear()
           h.dispose()
           broadcast({ ev: 'exit', ...rec })
         }
@@ -255,15 +260,15 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
     screen: async (_conn, req) => {
       const host = getHost(req.ptyId)
       await host.screen.flush()
-      const max = Number.isInteger(req.scrollback) && req.scrollback > 0 ? req.scrollback : 0
-      const snap = max > 0 ? host.ring.snapshot() : Buffer.alloc(0)
+      // `scrollback` is a line count: the newest N lines of raw output.
+      const n = Number.isInteger(req.scrollback) && req.scrollback > 0 ? req.scrollback : 0
       return {
         rev: host.screen.rev,
         cols: host.cols,
         rows: host.rows,
         cursor: host.screen.cursor(),
         lines: host.screen.lines(),
-        scrollback: snap.subarray(Math.max(0, snap.length - max)).toString('base64')
+        scrollback: host.ring.tail(n).toString('base64')
       }
     },
     watchScreen: (conn, req) => {

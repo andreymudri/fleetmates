@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP } from '../../deckd/protocol.mjs'
+import { Ring } from '../../deckd/ring.mjs'
 
 /**
  * Build a decoder that records what it produced.
@@ -60,4 +61,32 @@ test('decoder reports bad JSON and keeps decoding', () => {
   r.feed('[]]\n' + encode({ again: 1 }))
   assert.equal(r.errors.length, 2)
   assert.deepEqual(r.messages, [{ ok: true }, { again: 1 }])
+})
+
+// `screen { scrollback: N }` returns Ring.tail(N).
+test('screen scrollback: Ring.tail returns the last N lines from a line boundary', () => {
+  const r = new Ring()
+  r.push(Buffer.from('a\nb\nc\n'))
+  assert.equal(r.tail(2).toString(), 'b\nc\n')
+  assert.equal(r.tail(3).toString(), 'a\nb\nc\n')
+  assert.equal(r.tail(99).toString(), 'a\nb\nc\n')
+  assert.equal(r.tail(0).toString(), '')
+  r.push(Buffer.from('d'))
+  assert.equal(r.tail(2).toString(), 'c\nd')
+})
+
+test('screen scrollback: Ring.tail drops a first line cut short by the byte cap', () => {
+  const cut = new Ring({ maxBytes: 9 })
+  cut.push(Buffer.from('first\nsecond\n'))
+  assert.equal(cut.snapshot().toString(), 't\nsecond\n')
+  assert.equal(cut.tail(99).toString(), 'second\n')
+  // a byte trim that lands right after a newline keeps the first line
+  const clean = new Ring({ maxBytes: 7 })
+  clean.push(Buffer.from('first\n'))
+  clean.push(Buffer.from('second\n'))
+  assert.equal(clean.snapshot().toString(), 'second\n')
+  assert.equal(clean.tail(99).toString(), 'second\n')
+  clean.push(Buffer.from('xy'))
+  assert.equal(clean.snapshot().toString(), 'cond\nxy')
+  assert.equal(clean.tail(99).toString(), 'xy')
 })
