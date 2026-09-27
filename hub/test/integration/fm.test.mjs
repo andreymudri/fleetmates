@@ -435,6 +435,28 @@ test('fm claude and fm attach exit 2 when deckd is not running', async () => {
   }
 })
 
+test('typing in fm attach moves the PTY to the fm terminal size, which fm reported on attach', async () => {
+  const res = await browser.request('spawn', { cwd: tmp, argv: ['claude'], cols: 120, rows: 30, origin: 'launched' })
+  const id = res.ptyId
+  try {
+    await browser.request('resize', { ptyId: id, cols: 120, rows: 30, source: { kind: 'browser' } })
+    await browser.request('write', { ptyId: id, data: b64('from-browser'), source: { kind: 'browser' } })
+    const attach = runInPty(process.execPath, [fmPath, 'attach', id], { cols: 80, rows: 24, env: { ...env, TERM_PROGRAM: 'rvterm' } })
+    await until(async () => (await listed(id))?.clients.some((/** @type {any} */ c) => c.kind === 'terminal' && c.name === 'rvterm'), 'fm attach to attach')
+    attach.pty.write('typed-in-fm\r')
+    await until(async () => (await fakeInput()).includes('typed-in-fm'), 'typed-in-fm in the fake log')
+    await until(async () => {
+      const p = await listed(id)
+      return p.cols === 80 && p.rows === 24
+    }, async () => `the PTY to become 80x24: ${JSON.stringify(await listed(id))}`)
+    assert.deepEqual((await listed(id)).lastInputFrom, { kind: 'terminal', name: 'rvterm' })
+    await browser.request('kill', { ptyId: id, signal: 'SIGKILL', graceMs: 0 })
+    await attach.exited()
+  } finally {
+    await browser.request('kill', { ptyId: id, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+  }
+})
+
 /**
  * Run fm without a TTY and collect its exit code and stderr.
  * @param {string[]} args

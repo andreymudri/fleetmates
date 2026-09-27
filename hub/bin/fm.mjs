@@ -145,6 +145,11 @@ async function main (argv) {
     // the same read.
     const attached = deckd.request('attach', { ptyId: id, stream: true })
     const screen = deckd.request('screen', { ptyId: id, scrollback: REPLAY_LINES })
+    // deckd sizes the PTY to a source only from sizes that source reported
+    // with `resize`; the size in `spawn` is not one. Report it now, so typing
+    // here moves the PTY to this terminal's size (SM-O12).
+    const size = termSize()
+    if (size) deckd.request('resize', { ptyId: id, ...size, source }).catch(() => {})
     await attached
     const snap = await screen
     const cut = /** @type {number} */ (deckd.seqOf(snap))
