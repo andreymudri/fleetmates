@@ -1,0 +1,14 @@
+{
+  "prompt": {
+    "kind": "question",
+    "question": "Which do you pick, A or B?",
+    "options": [
+      { "key": "1", "label": "A" },
+      { "key": "2", "label": "B" },
+      { "key": "3", "label": "Type something." },
+      { "key": "4", "label": "Chat about this" }
+    ]
+  },
+  "idle": false,
+  "statusRows": []
+}
