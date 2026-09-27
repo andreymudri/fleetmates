@@ -1,4 +1,4 @@
-import { test, before, after } from 'node:test'
+import { test, before, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import path from 'node:path'
@@ -7,6 +7,7 @@ import { stat, mkdir, chmod } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
+import { PtyHost, RESIZE_MIN_INTERVAL_MS } from '../../deckd/pty-host.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const mainPath = path.resolve(here, '..', '..', 'deckd', 'main.mjs')
@@ -40,6 +41,13 @@ async function connect (socketPath) {
       for (const w of waiters) w()
     }
   }, () => {}))
+  // When deckd goes away, answer every pending and later request with
+  // `closed` instead of leaving the test waiting on it forever.
+  const closedAnswer = { ok: false, error: { code: 'closed', message: 'deckd connection closed' } }
+  socket.on('close', () => {
+    for (const resolve of pending.values()) resolve(closedAnswer)
+    pending.clear()
+  })
   return {
     socket,
     events,
@@ -50,6 +58,7 @@ async function connect (socketPath) {
      */
     request (op, fields = {}) {
       const id = nextId++
+      if (socket.destroyed) return Promise.resolve(closedAnswer)
       return new Promise((resolve) => {
         pending.set(id, resolve)
         socket.write(encode({ id, op, ...fields }))
@@ -100,6 +109,11 @@ let deckd
 let socketPath
 /** @type {Awaited<ReturnType<typeof connect>>} */
 let c
+let deckdStderr = ''
+/** Set by a test that stops deckd on purpose, and by after(). */
+let stoppingDeckd = false
+/** @type {string | null} */
+let deckdDied = null
 
 /**
  * Poll until `fn` returns true.
@@ -158,23 +172,36 @@ before(async () => {
     },
     stdio: ['ignore', 'ignore', 'pipe']
   })
-  let stderr = ''
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`deckd did not start: ${stderr}`)), 5000)
+    const timer = setTimeout(() => reject(new Error(`deckd did not start: ${deckdStderr}`)), 5000)
     deckd.stderr?.on('data', (d) => {
-      stderr += d
-      if (stderr.includes('deckd listening on')) {
+      deckdStderr += d
+      if (deckdStderr.includes('deckd listening on')) {
         clearTimeout(timer)
         resolve(undefined)
       }
     })
-    deckd.once('exit', (code) => reject(new Error(`deckd exited ${code}: ${stderr}`)))
+    deckd.once('exit', (code) => reject(new Error(`deckd exited ${code}: ${deckdStderr}`)))
+  })
+  // A deckd that dies mid-file takes every later test down with it; print
+  // why at once, and fail every test that ends after it (afterEach below).
+  deckd.on('exit', (code, signal) => {
+    if (stoppingDeckd) return
+    deckdDied = `deckd exited unexpectedly (code ${code}, signal ${signal}); its stderr:\n${deckdStderr}`
+    process.stderr.write(deckdDied + '\n')
   })
   c = await connect(socketPath)
 })
 
+// A throw in a top-level after() did not fail the run (node 26.7.0), so the
+// check runs after each test instead.
+afterEach(() => {
+  if (deckdDied) throw new Error(deckdDied)
+})
+
 after(async () => {
   c?.close()
+  stoppingDeckd = true
   if (deckd && deckd.exitCode === null) {
     const exited = new Promise((resolve) => deckd.once('exit', resolve))
     deckd.kill('SIGTERM')
@@ -410,10 +437,96 @@ test('no screen event for a PTY follows its exit event', async () => {
   assert.deepEqual(after, [])
 })
 
+test('a resize deferred by the once-per-second rule, then kill: deckd stays up and reports the exit', async () => {
+  const id = await spawnReady()
+  await c.request('write', { ptyId: id, data: Buffer.from('x').toString('base64'), source: { kind: 'browser', name: 'r' } })
+  await c.request('resize', { ptyId: id, cols: 100, rows: 30, source: { kind: 'browser', name: 'r' } })
+  // Inside the interval: this one waits on the resize timer.
+  const deferred = await c.request('resize', { ptyId: id, cols: 110, rows: 33, source: { kind: 'browser', name: 'r' } })
+  assert.deepEqual([deferred.cols, deferred.rows], [100, 30])
+  await c.request('kill', { ptyId: id, signal: 'SIGKILL', graceMs: 0 })
+  await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id)
+  // Past the moment the deferred resize was due.
+  await new Promise((resolve) => setTimeout(resolve, RESIZE_MIN_INTERVAL_MS + 200))
+  assert.equal((await c.request('ping')).ok, true)
+  assert.equal(deckd.exitCode, null)
+  assert.equal(deckdDied, null)
+})
+
+/**
+ * Spawn the stub in this process through PtyHost and wait for READY.
+ * @param {Record<string, string>} [env]
+ */
+async function localHost (env = {}) {
+  /** @type {(v: { code: number, signal: string | null }) => void} */
+  let onExit = () => {}
+  /** @type {Promise<{ code: number, signal: string | null }>} */
+  const exited = new Promise((resolve) => { onExit = resolve })
+  const host = PtyHost.spawn({ cwd: rt.dir, argv: [path.join(stubDir, 'claude')], env, cols: 80, rows: 24 }, {
+    onOutput: () => {},
+    onExit: (_h, exit) => onExit(exit)
+  })
+  await until(() => host.ring.snapshot().toString().includes('READY'), 'READY from the local stub')
+  return { host, exited }
+}
+
+test('a deferred resize whose PTY fd is already closed does not throw out of its timer', async () => {
+  // The crash seen under load: the timer fires after node-pty closed the fd
+  // but before onExit marked the PTY exited, and resize throws EBADF. That
+  // window cannot be hit on demand, so proc.resize is replaced with one that
+  // throws what node-pty throws there.
+  const { host, exited } = await localHost()
+  try {
+    host.requestResize(100, 30, { kind: 'browser' })
+    host.requestResize(110, 33, { kind: 'browser' })
+    assert.ok(host.resizeTimer, 'the second resize is deferred')
+    let calls = 0
+    host.proc.resize = () => {
+      calls++
+      throw new Error('ioctl(2) failed, EBADF')
+    }
+    await until(() => calls > 0, 'the deferred resize to run', RESIZE_MIN_INTERVAL_MS + 5000)
+    await new Promise((resolve) => setImmediate(resolve))
+    // The size did not change, and no later resize reaches the dead fd.
+    assert.deepEqual([host.cols, host.rows], [100, 30])
+    host.lastResizeAt = 0
+    host.requestResize(120, 40, { kind: 'browser' })
+    assert.equal(calls, 1)
+  } finally {
+    host.kill('SIGKILL', 0)
+    await exited
+    host.dispose()
+  }
+})
+
+test('kill cancels a deferred resize and ignores later ones', async () => {
+  // SIGTERM is ignored by the stub, so the PTY stays alive after kill and
+  // only the kill itself can have cancelled the timer.
+  const { host, exited } = await localHost({ STUB_IGNORE_SIGTERM: '1' })
+  try {
+    host.requestResize(100, 30, { kind: 'browser' })
+    host.requestResize(110, 33, { kind: 'browser' })
+    assert.ok(host.resizeTimer, 'the second resize is deferred')
+    let calls = 0
+    host.proc.resize = () => { calls++ }
+    host.kill('SIGTERM', 60000)
+    assert.equal(host.resizeTimer, null)
+    host.lastResizeAt = 0
+    host.requestResize(120, 40, { kind: 'browser' })
+    assert.equal(calls, 0)
+    assert.deepEqual([host.cols, host.rows], [100, 30])
+  } finally {
+    host.kill('SIGKILL', 0)
+    await exited
+    host.dispose()
+  }
+})
+
 test('SIGTERM stops deckd cleanly and kills its PTYs', async () => {
   const res = await c.request('spawn', { cwd: rt.dir, argv: ['claude'], env: {}, cols: 80, rows: 24, origin: 'launched' })
   assert.equal(res.ok, true)
   const exited = new Promise((resolve) => deckd.once('exit', (code) => resolve(code)))
+  stoppingDeckd = true
   deckd.kill('SIGTERM')
   assert.equal(await exited, 0)
   assert.throws(() => process.kill(res.pid, 0), { code: 'ESRCH' })

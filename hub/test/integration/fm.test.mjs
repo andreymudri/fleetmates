@@ -1,4 +1,4 @@
-import { test, before, after } from 'node:test'
+import { test, before, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import net from 'node:net'
@@ -35,6 +35,9 @@ let deckd
 let browser
 /** @type {ReturnType<typeof runInPty>[]} */
 const ptys = []
+let stoppingDeckd = false
+/** @type {string | null} */
+let deckdDied = null
 
 /**
  * Poll until `fn` resolves truthy, or throw after the deadline.
@@ -158,9 +161,22 @@ before(async () => {
     })
     deckd.once('exit', (code) => reject(new Error(`deckd exited ${code}: ${stderr}`)))
   })
+  // A deckd that dies mid-file takes every later test down with it; print
+  // why at once, and fail every test that ends after it (afterEach below).
+  deckd.on('exit', (code, signal) => {
+    if (stoppingDeckd) return
+    deckdDied = `deckd exited unexpectedly (code ${code}, signal ${signal}); its stderr:\n${stderr}`
+    process.stderr.write(deckdDied + '\n')
+  })
   // hello accepts only `server` and `terminal` clients; a browser is served
   // through a `server` connection that stamps its writes `source.kind: 'browser'`.
   browser = await connectDeckd({ runtimeDir: rt.dir, kind: 'server', name: 'fm-test-browser' })
+})
+
+// A throw in a top-level after() did not fail the run (node 26.7.0), so the
+// check runs after each test instead.
+afterEach(() => {
+  if (deckdDied) throw new Error(deckdDied)
 })
 
 after(async () => {
@@ -168,6 +184,7 @@ after(async () => {
     try { pty.kill('SIGKILL') } catch {}
   }
   browser?.close()
+  stoppingDeckd = true
   if (deckd && deckd.exitCode === null) {
     const exited = new Promise((resolve) => deckd.once('exit', resolve))
     deckd.kill('SIGTERM')

@@ -108,6 +108,11 @@ export class PtyHost {
     this.resizeTarget = null
     /** @type {NodeJS.Timeout | null} */
     this.killTimer = null
+    /**
+     * Set by kill(), and when a resize finds the PTY fd closed: the PTY is
+     * going away, so no resize reaches it any more. @type {boolean}
+     */
+    this.closing = false
     /** Attached connections and whether each wants `output`. @type {Map<object, { client: ClientInfo, stream: boolean }>} */
     this.clients = new Map()
     /** Connections with `watchScreen` on. @type {Set<object>} */
@@ -210,9 +215,19 @@ export class PtyHost {
   #doResize () {
     const target = this.resizeTarget
     this.resizeTarget = null
-    if (!target || this.exited) return
+    if (!target || this.exited || this.closing) return
     if (target.cols === this.cols && target.rows === this.rows) return
-    this.proc.resize(target.cols, target.rows)
+    // This runs from a timer, where a throw would end deckd and every
+    // session in it. node-pty's resize throws `ioctl(2) failed, EBADF` on a
+    // closed fd, and the phase 3 review caught that between node-pty closing
+    // the fd of an exited child and onExit marking it exited.
+    try {
+      this.proc.resize(target.cols, target.rows)
+    } catch (err) {
+      this.closing = true
+      console.error(`deckd: resize of ${this.ptyId} failed, no more resizes for it: ${/** @type {Error} */ (err).message}`)
+      return
+    }
     this.screen.resize(target.cols, target.rows)
     this.cols = target.cols
     this.rows = target.rows
@@ -226,6 +241,12 @@ export class PtyHost {
    */
   kill (signal = 'SIGTERM', graceMs = 5000) {
     if (this.exited) return
+    // A PTY being killed takes no more resizes: a deferred one could fire
+    // after its fd is closed.
+    this.closing = true
+    if (this.resizeTimer) clearTimeout(this.resizeTimer)
+    this.resizeTimer = null
+    this.resizeTarget = null
     this.#signalGroup(signal)
     if (this.killTimer) clearTimeout(this.killTimer)
     this.killTimer = setTimeout(() => this.#signalGroup('SIGKILL'), graceMs)
