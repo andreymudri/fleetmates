@@ -2272,7 +2272,9 @@ test('gate fails when an fsmonitor hook hides a rewritten manifest from status',
     git(root, ['merge', '--quiet', '--no-ff', '-m', 'integrate T1', t1])
     const hook = path.join(root, '.fleetmates', 'fsmonitor.sh')
     await writeFile(hook, '#!/bin/sh\nprintf "tok\\0"\n', { mode: 0o755 })
-    git(root, ['config', 'core.fsmonitor', hook])
+    // Relative: git runs the hook through a shell from the top of the worktree, and an absolute path
+    // under the hostile-TMPDIR sweep's directory would be shell syntax, not a path.
+    git(root, ['config', 'core.fsmonitor', '.fleetmates/fsmonitor.sh'])
     git(root, ['status', '--porcelain'])
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [] } } }), 'utf8')
     assert.equal(git(root, ['status', '--porcelain']), '')
