@@ -1,0 +1,8 @@
+{
+  "sessionId": "auto",
+  "steps": [
+    { "hook": "SessionStart", "with": { "source": "startup" } },
+    { "hook": "Stop", "with": { "stop_hook_active": false } },
+    { "exit": { "code": 0 } }
+  ]
+}
