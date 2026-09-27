@@ -540,3 +540,56 @@ test('fake claude exits 2 on a bad script', async () => {
     await t.cleanup()
   }
 })
+
+// Fixture consistency: every captured set under test/fixtures/hooks/<version> keeps its
+// MANIFEST true and its hand redactions in place.
+const fixturesDir = path.join(hubDir, 'test', 'fixtures')
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+
+/**
+ * Versions that have a hooks/<version>/MANIFEST.json.
+ * @returns {Promise<string[]>}
+ */
+async function capturedVersions () {
+  const dirs = await readdir(path.join(fixturesDir, 'hooks')).catch(() => [])
+  const out = []
+  for (const d of dirs) {
+    if (await readFile(path.join(fixturesDir, 'hooks', d, 'MANIFEST.json')).then(() => true, () => false)) out.push(d)
+  }
+  return out
+}
+
+test('fixture sets: MANIFEST matches the files and the redactions hold', async () => {
+  const versions = await capturedVersions()
+  assert.ok(versions.length > 0, 'at least one captured fixture set')
+  for (const v of versions) {
+    const hooksDir = path.join(fixturesDir, 'hooks', v)
+    const screensDir = path.join(fixturesDir, 'screens', v)
+    const manifest = JSON.parse(await readFile(path.join(hooksDir, 'MANIFEST.json'), 'utf8'))
+    for (const [name, frame] of Object.entries(manifest.frames ?? {})) {
+      const bytes = (await readFile(path.join(screensDir, `${name}.ansi`))).length
+      assert.equal(frame.bytes, bytes, `${v} MANIFEST frames.${name}.bytes vs ${name}.ansi`)
+    }
+    const hookFiles = (await readdir(hooksDir)).filter(f => f.endsWith('.json') && f !== 'MANIFEST.json').sort()
+    assert.deepEqual([...manifest.hooks].filter(f => f.endsWith('.json')).sort(), hookFiles, `${v} MANIFEST hooks vs files`)
+    for (const f of hookFiles) {
+      const text = await readFile(path.join(hooksDir, f), 'utf8')
+      const payload = JSON.parse(text)
+      assert.equal(payload.hook_event_name, f.split('.')[0], `${v}/${f} hook_event_name`)
+      assert.doesNotMatch(text, UUID_RE, `${v}/${f} holds a UUID`)
+      assert.doesNotMatch(text, /\/home\/(?!you\b)/, `${v}/${f} holds a /home/ path other than /home/you`)
+    }
+    const screenFiles = await readdir(screensDir).catch(() => [])
+    for (const [dir, files] of [[hooksDir, await readdir(hooksDir)], [screensDir, screenFiles]]) {
+      for (const f of files) {
+        const text = (await readFile(path.join(dir, f))).toString('latin1')
+        assert.doesNotMatch(text, /deck-capture-repo/, `${v}/${f} holds the throwaway repo name`)
+        if (dir !== screensDir) continue
+        for (const m of text.matchAll(/claude\.ai\/code\/session_/g)) {
+          const at = /** @type {number} */ (m.index) + m[0].length
+          assert.equal(text.slice(at, at + 8), 'REDACTED', `${v}/${f} session URL`)
+        }
+      }
+    }
+  }
+})
