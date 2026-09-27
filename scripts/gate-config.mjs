@@ -26,7 +26,7 @@ export async function loadGateConfig(root) {
 // runner writes JUnit without a dependency, the test inventory's report contract. `node --test`
 // ignores `.only` unless `--test-only` is given, so it needs no flag; Jest has no refusal at all,
 // and a focused Jest suite shows up as drops in the inventory instead.
-function inferTestCheck(script) {
+function inferTestCheck(script, platform) {
   // Only a script that names no reporter of its own: added reporters would leave node with more
   // reporters than destinations, and it refuses to start (review, reproduced on this repository).
   // The flags go right after `node --test` in the script itself — node stops reading its own
@@ -36,8 +36,12 @@ function inferTestCheck(script) {
   // `--test` as a whole flag: `--test-concurrency` and `--test-only` must not match (review: the
   // rewrite glued the rest of such a flag onto the report path). The script no longer runs through
   // `npm run`, so `node_modules/.bin` is put on PATH the way npm would.
+  // The rewrite is sh (`PATH=…`, `$FLEETMATES_REPORT_DIR`), and win32 runs checks through cmd.exe,
+  // which expands neither — the suite would write its report to a literal `$FLEETMATES_REPORT_DIR`
+  // directory and the inventory would fail every gate (measured on the release CI). There the
+  // plain check is suggested and the report left for the user to add in cmd syntax.
   const nodeTest = /\bnode\s+--test(?=\s|$)/
-  if (nodeTest.test(script) && !/--test-reporter/.test(script) && !/[;&|`$\\]/.test(script)) {
+  if (platform !== 'win32' && nodeTest.test(script) && !/--test-reporter/.test(script) && !/[;&|`$\\]/.test(script)) {
     return {
       name: 'test',
       kind: 'command',
@@ -50,11 +54,11 @@ function inferTestCheck(script) {
   return { name: 'test', kind: 'command', run: 'npm run test' }
 }
 
-export function inferGateConfig(pkg) {
+export function inferGateConfig(pkg, { platform = process.platform } = {}) {
   const scripts = pkg?.scripts ?? {}
   const checks = INFERRED_ORDER
     .filter((name) => typeof scripts[name] === 'string')
-    .map((name) => (name === 'test' ? inferTestCheck(scripts.test) : { name, kind: 'command', run: `npm run ${name}` }))
+    .map((name) => (name === 'test' ? inferTestCheck(scripts.test, platform) : { name, kind: 'command', run: `npm run ${name}` }))
 
   checks.push({ name: 'fileset', kind: 'fileset' })
   checks.push({ name: 'ownership', kind: 'ownership' })

@@ -9,10 +9,18 @@ import { execFileSync } from 'node:child_process'
 import { runCli } from '../scripts/cli.mjs'
 import { decideFix } from '../scripts/fix-loop.mjs'
 
-// `env -u NODE_TEST_CONTEXT`: this file runs under `node --test`, and a child `node --test`
-// inheriting that variable reports to the parent runner instead of writing its reporter's file.
-const NODE_TEST = 'env -u NODE_TEST_CONTEXT node --test'
-const SUITE = `${NODE_TEST} --test-reporter=junit --test-reporter-destination="$FLEETMATES_REPORT_DIR/node.xml" tests/*.test.mjs`
+// This file runs under `node --test`, and a child `node --test` inheriting NODE_TEST_CONTEXT
+// reports to the parent runner instead of writing its reporter's file. `withRun` drops it from the
+// environment the gate hands its checks, which works under cmd.exe as well as sh (`env -u` did not).
+const NODE_TEST = 'node --test'
+// Checks run through `sh` on POSIX and `cmd.exe` on win32, which expand variables differently.
+const REPORT_DIR = process.platform === 'win32' ? '%FLEETMATES_REPORT_DIR%' : '$FLEETMATES_REPORT_DIR'
+const SUITE = `${NODE_TEST} --test-reporter=junit --test-reporter-destination="${REPORT_DIR}/node.xml" tests/*.test.mjs`
+// Portable no-op and mkdir -p: neither `true` nor `mkdir -p` is cmd.exe.
+const NOOP = 'node -e 0'
+const MKDIR_REPORTS = `node -e "require('fs').mkdirSync('reports', { recursive: true })"`
+// Links need privileges on win32; the tests that plant one run where links can be made.
+const POSIX_LINKS = { skip: process.platform === 'win32' && 'planting a symlink needs privileges on win32' }
 
 function manifest({ report = { format: 'junit', dir: true }, run = SUITE, skips } = {}) {
   return {
@@ -61,7 +69,13 @@ async function withRun({ plan, gate = manifest(), tests = BASE_TESTS, extra = {}
     git(root, ['add', '-A'])
     git(root, ['commit', '--quiet', '--allow-empty', '-m', 'T1'])
     git(root, ['checkout', '--quiet', 'run-branch'])
-    await fn(root)
+    const context = process.env.NODE_TEST_CONTEXT
+    delete process.env.NODE_TEST_CONTEXT
+    try {
+      await fn(root)
+    } finally {
+      if (context !== undefined) process.env.NODE_TEST_CONTEXT = context
+    }
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -158,7 +172,7 @@ test('a suite that writes no report fails the inventory', async () => {
 // ran must not stand in for a suite that wrote nothing.
 test('the path form never reads a report left in the tree', async () => {
   const stale = '<testsuites><testcase classname="C" name="x"/></testsuites>'
-  const gateManifest = manifest({ run: 'true', report: { format: 'junit', path: 'reports/junit.xml' } })
+  const gateManifest = manifest({ run: NOOP, report: { format: 'junit', path: 'reports/junit.xml' } })
   await withRun({ plan: planWith(['- Create: `a.mjs`']), gate: gateManifest, extra: { 'reports/junit.xml': stale } }, write('a.mjs', 'export {}\n'), async (root) => {
     const { inventory } = await gate(root)
     assert.equal(inventory.status, 'fail')
@@ -167,7 +181,7 @@ test('the path form never reads a report left in the tree', async () => {
 })
 
 test('the path form reads the report the suite wrote in the tree', async () => {
-  const run = `mkdir -p reports && ${NODE_TEST} --test-reporter=junit --test-reporter-destination=reports/junit.xml tests/*.test.mjs`
+  const run = `${MKDIR_REPORTS} && ${NODE_TEST} --test-reporter=junit --test-reporter-destination=reports/junit.xml tests/*.test.mjs`
   const gateManifest = manifest({ run, report: { format: 'junit', path: 'reports/junit.xml' } })
   await withRun({ plan: planWith(T1), gate: gateManifest }, write('tests/a.test.mjs', BASE_TESTS.replace("test('y', () => {})\n", '')), async (root) => {
     const { inventory } = await gate(root)
@@ -210,7 +224,7 @@ test('an inventory FAIL escalates as a process violation', () => {
 
 // The suite runs teammate code, and a symlink it plants at the in-tree report path would have the
 // gate read whatever file the link names instead of a report the tree holds.
-test('a report path the suite turned into a symlink is refused', async () => {
+test('a report path the suite turned into a symlink is refused', POSIX_LINKS, async () => {
   const run = 'mkdir -p reports && printf \'<testsuites><testcase classname="C" name="x"/></testsuites>\' > ../planted.xml && ln -s "$PWD/../planted.xml" reports/junit.xml'
   const gateManifest = manifest({ run, report: { format: 'junit', path: 'reports/junit.xml' } })
   await withRun({ plan: planWith(['- Create: `a.mjs`']), gate: gateManifest }, write('a.mjs', 'export {}\n'), async (root) => {
@@ -248,24 +262,19 @@ test('finish names the standing skips at the last gate', async () => {
 })
 
 // The suggested command is run exactly as inferred, so it is measured here rather than trusted:
-// reporter flags appended after node's positional file pattern never reach the test runner.
-test('the inferred node --test check writes a report the inventory reads', async () => {
+// reporter flags appended after node's positional file pattern never reach the test runner. win32
+// is suggested no report (gate-config.test.mjs pins that), so there is nothing to run there.
+test('the inferred node --test check writes a report the inventory reads', { skip: process.platform === 'win32' && 'no report is inferred on win32' }, async () => {
   const { inferGateConfig } = await import('../scripts/gate-config.mjs')
   const inferred = inferGateConfig({ scripts: { test: 'node --test tests/*.test.mjs' } }).phases.default.checks.find((c) => c.name === 'test')
   assert.ok(inferred.report, JSON.stringify(inferred))
   const gateManifest = { phases: { default: { checks: [inferred] } } }
-  const context = process.env.NODE_TEST_CONTEXT
-  delete process.env.NODE_TEST_CONTEXT
-  try {
-    await withRun({ plan: planWith(T1), gate: gateManifest, extra: { 'package.json': JSON.stringify({ name: 'x', scripts: { test: 'node --test tests/*.test.mjs' } }) } },
-      write('tests/a.test.mjs', BASE_TESTS.replace("test('y', () => {})\n", '')), async (root) => {
-        const { inventory } = await gate(root)
-        assert.equal(inventory.status, 'fail', inventory.output)
-        assert.match(inventory.output, /drop: tests\/a\.test\.mjs > test > y/)
-      })
-  } finally {
-    if (context !== undefined) process.env.NODE_TEST_CONTEXT = context
-  }
+  await withRun({ plan: planWith(T1), gate: gateManifest, extra: { 'package.json': JSON.stringify({ name: 'x', scripts: { test: 'node --test tests/*.test.mjs' } }) } },
+    write('tests/a.test.mjs', BASE_TESTS.replace("test('y', () => {})\n", '')), async (root) => {
+      const { inventory } = await gate(root)
+      assert.equal(inventory.status, 'fail', inventory.output)
+      assert.match(inventory.output, /drop: tests\/a\.test\.mjs > test > y/)
+    })
 })
 
 // --- adversarial ------------------------------------------------------------------------------
@@ -333,7 +342,7 @@ test('a report path through a symlinked directory is refused and deletes nothing
   const victimRoot = await mkdtemp(path.join(tmpdir(), 'tm-inv-victim-'))
   try {
     await writeFile(path.join(victimRoot, 'junit.xml'), 'keep me')
-    const gateManifest = manifest({ run: 'true', report: { format: 'junit', path: 'reports/junit.xml' } })
+    const gateManifest = manifest({ run: NOOP, report: { format: 'junit', path: 'reports/junit.xml' } })
     await withRun({ plan: planWith(['- Create: `a.mjs`', '- Create: `reports`']), gate: gateManifest }, async (root) => {
       const { symlink } = await import('node:fs/promises')
       await symlink(victimRoot, path.join(root, 'reports'))
@@ -357,7 +366,7 @@ test('the in-tree report is never deleted in a tree the gate does not own', asyn
   try {
     await mkdir(path.join(dir, 'reports'))
     await writeFile(path.join(dir, 'reports', 'junit.xml'), 'a person\'s file')
-    const check = { name: 'test', kind: 'command', run: 'true', report: { format: 'junit', path: 'reports/junit.xml' } }
+    const check = { name: 'test', kind: 'command', run: NOOP, report: { format: 'junit', path: 'reports/junit.xml' } }
     const result = await runCommandCheck(check, { cwd: dir, previewDir: null })
     assert.match(result.report.error, /worktree the gate owns/)
     assert.equal(await readFile(path.join(dir, 'reports', 'junit.xml'), 'utf8'), 'a person\'s file')
@@ -370,7 +379,7 @@ test('the in-tree report is never deleted in a tree the gate does not own', asyn
 
 // The suite writes a report only where T1's file exists: the preview has one, the baseline not.
 test('a baseline run that writes no report fails the inventory, never passes it', async () => {
-  const gateManifest = manifest({ run: `if [ -f a.mjs ]; then ${SUITE}; fi` })
+  const gateManifest = manifest({ run: `node -e "process.exit(require('fs').existsSync('a.mjs') ? 0 : 1)" && ${SUITE}` })
   await withRun({ plan: planWith(['- Create: `a.mjs`']), gate: gateManifest }, write('a.mjs', 'export {}\n'), async (root) => {
     const { inventory } = await gate(root)
     assert.equal(inventory.status, 'fail')
@@ -450,8 +459,9 @@ test('the inventory output caps each class of line', async () => {
 
 // Review round 2: `x\y` was a separator to the symlink walk and a file name to `rm`, so a committed
 // symlink named `x\y` let the pre-run delete reach outside the tree. The delete is built from the
-// walked segments, and a backslash is refused outright.
-test('a report path with a backslash never reaches rm', async () => {
+// walked segments, and a backslash is refused outright. On win32 a backslash is a separator, so the
+// planted name cannot be built there.
+test('a report path with a backslash never reaches rm', POSIX_LINKS, async () => {
   const { runCommandCheck } = await import('../scripts/gate-runner.mjs')
   const { symlink, readFile } = await import('node:fs/promises')
   const tree = await mkdtemp(path.join(tmpdir(), 'tm-inv-bs-'))
@@ -459,7 +469,7 @@ test('a report path with a backslash never reaches rm', async () => {
   try {
     await writeFile(path.join(outside, 'z'), 'keep me')
     await symlink(outside, path.join(tree, 'x\\y'))
-    const check = { name: 'test', kind: 'command', run: 'true', report: { format: 'junit', path: 'x\\y/z' } }
+    const check = { name: 'test', kind: 'command', run: NOOP, report: { format: 'junit', path: 'x\\y/z' } }
     const result = await runCommandCheck(check, { cwd: tree, previewDir: tree })
     assert.match(result.report.error, /not a plain path/)
     assert.equal(await readFile(path.join(outside, 'z'), 'utf8'), 'keep me')

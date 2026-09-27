@@ -666,6 +666,8 @@ test('always builds a linked worktree at base with no branches, and removes it a
     await sh(['init', '--initial-branch=main'])
     await sh(['config', 'user.email', 't@e'])
     await sh(['config', 'user.name', 'T'])
+    // The runner's git checks out CRLF on win32; the assertion is about which content, not line ends.
+    await sh(['config', 'core.autocrlf', 'false'])
     await writeFile(path.join(root, 'a.txt'), 'base\n')
     await mkdir(path.join(root, 'deps'))
     await writeFile(path.join(root, '.gitignore'), 'deps/\n')

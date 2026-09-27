@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { parseJunit, parseNextestList, readReport, compareInventories, ReportParseError, MAX_REPORT_BYTES } from '../scripts/test-report.mjs'
+import { parseJunit, parseNextestList, readReport, openReportFile, compareInventories, ReportParseError, MAX_REPORT_BYTES } from '../scripts/test-report.mjs'
 
 const FIXTURES = new URL('./fixtures/junit/', import.meta.url)
 const fixture = (name) => readFile(new URL(name, FIXTURES), 'utf8')
@@ -230,7 +230,8 @@ test('an authorised drop to skipped, and a declared new skip, are not standing s
 })
 
 // Review round 2: a FIFO or a link to /dev/zero reports size 0 and then reads without bound.
-test('a report that is not a regular file is refused before it is read', async () => {
+// No mkfifo and no unprivileged file symlinks on win32; the portable cases are the two tests below.
+test('a report that is not a regular file is refused before it is read', { skip: process.platform === 'win32' }, async () => {
   const { execFileSync } = await import('node:child_process')
   const { symlink } = await import('node:fs/promises')
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-report-fifo-'))
@@ -244,6 +245,32 @@ test('a report that is not a regular file is refused before it is read', async (
     await assert.rejects(readReport(other, { root: other }), /zero\.xml, which is a symbolic link/)
     await assert.rejects(readReport(path.join(other, 'zero.xml'), { root: other }), /symbolic link/)
     await rm(other, { recursive: true, force: true })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a directory named like a report is refused, not read', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-report-dir-'))
+  try {
+    await mkdir(path.join(dir, 'nested.xml'))
+    await assert.rejects(readReport(dir, { root: dir }), /nested\.xml, which is not a regular file/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+// win32 has no O_NOFOLLOW; the fallback is forced here so it runs where links can be made.
+test('without O_NOFOLLOW a link is refused by lstat, and a regular file still opens', { skip: process.platform === 'win32' }, async () => {
+  const { symlink } = await import('node:fs/promises')
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-report-nofollow-'))
+  try {
+    await writeFile(path.join(dir, 'real.xml'), '<testsuites/>')
+    await symlink(path.join(dir, 'real.xml'), path.join(dir, 'link.xml'))
+    await assert.rejects(openReportFile(path.join(dir, 'link.xml'), { noFollow: null }), /link\.xml, which is a symbolic link/)
+    const handle = await openReportFile(path.join(dir, 'real.xml'), { noFollow: null })
+    assert.equal((await handle.readFile('utf8')), '<testsuites/>')
+    await handle.close()
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

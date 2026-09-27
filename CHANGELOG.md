@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.3.1
+
+### Fixed
+
+- Windows. The suggested manifest no longer gives a `node --test` suite a report in sh syntax, which
+  `cmd.exe` does not expand; reading a report refuses a link there too, where there is no
+  `O_NOFOLLOW`, by checking the file before opening it and matching the opened handle to it. The
+  new tests run under `cmd.exe`. v2.3.0 was tagged but never published: its Windows tests failed.
+
 ## v2.3.0
 
 ### Added

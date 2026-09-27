@@ -229,13 +229,7 @@ export function parseNextestList(text, units = new Map()) {
 // O_NONBLOCK keeps a FIFO from blocking the open, and fstat on the handle answers for the file
 // actually read. The size is checked before any byte is read, and the read is bounded by it.
 async function readRegularFile(file, remaining) {
-  let handle
-  try {
-    handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
-  } catch (err) {
-    if (err?.code === 'ELOOP') refuse(`holds ${path.basename(file)}, which is a symbolic link`)
-    throw err
-  }
+  const handle = await openReportFile(file)
   try {
     const info = await handle.stat()
     if (!info.isFile()) refuse(`holds ${path.basename(file)}, which is not a regular file`)
@@ -251,6 +245,29 @@ async function readRegularFile(file, remaining) {
   } finally {
     await handle.close()
   }
+}
+
+// win32 has neither O_NOFOLLOW nor O_NONBLOCK (both undefined there, and a FIFO cannot sit in a
+// directory). What stands in for the refusing open: lstat first and refuse a link, open, then
+// require the handle to be the very file lstat saw, so a link swapped in between is caught after
+// the open rather than at it. `noFollow: null` forces that path, so both run in every platform's tests.
+export async function openReportFile(file, { noFollow = constants.O_NOFOLLOW } = {}) {
+  const name = path.basename(file)
+  const opened = (flags) => open(file, flags).catch((err) => {
+    if (err?.code === 'ELOOP') refuse(`holds ${name}, which is a symbolic link`)
+    if (err?.code === 'EISDIR') refuse(`holds ${name}, which is not a regular file`)
+    throw err
+  })
+  if (noFollow != null) return opened(constants.O_RDONLY | noFollow | (constants.O_NONBLOCK ?? 0))
+  const seen = await lstat(file, { bigint: true })
+  if (seen.isSymbolicLink()) refuse(`holds ${name}, which is a symbolic link`)
+  const handle = await opened(constants.O_RDONLY)
+  const now = await handle.stat({ bigint: true })
+  if (now.dev !== seen.dev || now.ino !== seen.ino) {
+    await handle.close()
+    refuse(`holds ${name}, which was replaced while it was being opened`)
+  }
+  return handle
 }
 
 // The spec's rule table. `drops` and `skips` are sets of units: a drop in a unit a phase task marks

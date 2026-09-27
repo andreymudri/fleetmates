@@ -262,8 +262,10 @@ test('an injected check never shares a name with a declared one, whatever names 
 })
 
 test('the inferred test check carries the runner\'s refusal of a focused test, and a report for node --test', () => {
-  const test = (script) => inferGateConfig({ scripts: { test: script } }).phases.default.checks.find((c) => c.name === 'test')
+  const test = (script, platform = 'linux') => inferGateConfig({ scripts: { test: script } }, { platform }).phases.default.checks.find((c) => c.name === 'test')
   const node = test('node --test tests/*.test.mjs')
+  // cmd.exe expands neither `PATH=…` nor `$FLEETMATES_REPORT_DIR`: win32 gets the plain check.
+  assert.deepEqual(test('node --test tests/*.test.mjs', 'win32'), { name: 'test', kind: 'command', run: 'npm run test' })
   assert.deepEqual(node.report, { format: 'junit', dir: true })
   assert.equal(node.run, 'PATH="$PWD/node_modules/.bin:$PATH" node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination="$FLEETMATES_REPORT_DIR/node.xml" tests/*.test.mjs')
   // `--test` as a whole flag, written right after `node`: `--test-concurrency=1` or `--test-only`
