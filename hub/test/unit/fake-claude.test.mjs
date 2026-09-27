@@ -7,7 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pty from 'node-pty'
 import { fakeBin } from '../helpers/fake-bin.mjs'
-import { createRedactor, redactTokens, REDACTIONS } from '../capture/capture-cc.mjs'
+import { createRedactor, readAccount, redactTokens, REDACTIONS } from '../capture/capture-cc.mjs'
 
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const scriptsDir = path.join(hubDir, 'test', 'fixtures', 'scripts')
@@ -260,8 +260,173 @@ test('redaction: ordinary paths and file names are kept', () => {
   for (const k of kept) assert.equal(redactText(k), k)
 })
 
+test('redaction: a run with one 40+ char secret piece is redacted whole, leading / included', () => {
+  assert.equal(redactTokens('GET /v1/keys/ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0 done'), 'GET REDACTED done')
+  assert.equal(redactTokens('at /Q2xhdWRlQ29kZVNlY3JldFRva2VuVmFsdWUxMjM0/NTY3 x'), 'at REDACTED x')
+})
+
+test('redaction: token runs split by escape sequences are redacted, the escapes kept', () => {
+  const { redactText } = redactorFor()
+  const split = 'sk-ant-api03-AbCdEfGhIjKlMnOp\x1b[39mQrStUvWxYz0123456789_abcdefghijk\x1b[2Clmnopqrstuvwxyz'
+  assert.equal(redactText(`key ${split} end`), 'key REDACTED\x1b[39m\x1b[2C end')
+  assert.equal(redactText('\x1b[1mplain words\x1b[0m'), '\x1b[1mplain words\x1b[0m')
+})
+
+test('redaction: the account email, display name and org become placeholders, username any case', () => {
+  const { redactText } = createRedactor({
+    repo: '/tmp/deck-capture-repo-Ab12Cd',
+    home: '/var/lib/u1000',
+    user: 'alice',
+    account: { emailAddress: 'Alice.Smith@Example.org', displayName: 'Alice Smith', organizationName: 'Acme Research' }
+  })
+  assert.equal(
+    redactText('alice.smith@example.org | Alice Smith | ACME RESEARCH | Alice | ALICE'),
+    'you@example.com | You | Example Org | you | you')
+})
+
+test('redaction: readAccount takes oauthAccount from <home>/.claude.json, else nothing', async () => {
+  const t = await tempDir('deck-capture-account-')
+  try {
+    assert.deepEqual(await readAccount(t.dir), {})
+    await writeFile(path.join(t.dir, '.claude.json'), JSON.stringify({
+      oauthAccount: { emailAddress: 'a@b.example', displayName: 'Ann', organizationName: 'Org X', accountUuid: 'u' }
+    }))
+    assert.deepEqual(await readAccount(t.dir), { emailAddress: 'a@b.example', displayName: 'Ann', organizationName: 'Org X' })
+  } finally {
+    await t.cleanup()
+  }
+})
+
 test('redaction: MANIFEST.redactions names every rule pinned above', () => {
-  for (const want of [/\$HOME -> \/home\/you/, /session ids -> fixed ULIDs/, /transcript_path ->/, /JWTs/, /token-like runs/]) {
+  for (const want of [/\$HOME -> \/home\/you/, /session ids -> fixed ULIDs/, /transcript_path ->/, /JWTs/, /token-like runs/, /email/, /display name/, /organization/]) {
     assert.ok(REDACTIONS.some(r => want.test(r)), String(want))
+  }
+})
+
+/**
+ * Put a stub `claude` first on PATH: `--version` prints 2.1.282, anything else appends
+ * `hookLine` to $CAPTURE_OUT/hooks.jsonl and exits 0.
+ * @param {string} dir
+ * @param {string} hookLine
+ */
+async function captureStub (dir, hookLine) {
+  const bin = path.join(dir, 'bin')
+  await mkdir(bin)
+  const js = path.join(bin, 'stub.mjs')
+  await writeFile(js, [
+    "import { appendFileSync } from 'node:fs'",
+    "if (process.argv.includes('--version')) { process.stdout.write('2.1.282 (Claude Code)\\n'); process.exit(0) }",
+    `appendFileSync(process.env.CAPTURE_OUT + '/hooks.jsonl', ${JSON.stringify(hookLine)}.replaceAll('@CWD@', process.cwd()) + '\\n')`
+  ].join('\n'))
+  await writeFile(path.join(bin, 'claude'), `#!/bin/sh\nexec '${process.execPath}' '${js}' "$@"\n`, { mode: 0o755 })
+  return bin
+}
+
+/**
+ * Run capture-cc unattended with a fake HOME and TMPDIR under dir.
+ * @param {string} dir
+ * @param {string} bin
+ */
+async function runCapture (dir, bin) {
+  const home = path.join(dir, 'home')
+  const tmp = path.join(dir, 'tmp')
+  const out = path.join(dir, 'out')
+  await mkdir(home)
+  await mkdir(tmp)
+  await mkdir(out)
+  await writeFile(path.join(home, '.claude.json'), JSON.stringify({
+    oauthAccount: { emailAddress: 'alice.smith@example.org', displayName: 'Alice Smith', organizationName: 'Acme Research' }
+  }))
+  const env = { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, HOME: home, TMPDIR: tmp, CAPTURE_STEP_TIMEOUT_MS: '3000' }
+  const result = await new Promise(resolve => {
+    execFile(process.execPath, [captureCc, '--unattended', '--out', out], { env, timeout: 60000 },
+      (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }))
+  })
+  return { ...result, home, tmp, out }
+}
+
+test('capture-cc past the version gate writes redacted hooks and MANIFEST, leaving no temp dirs', async () => {
+  const t = await tempDir('deck-capture-e2e-')
+  try {
+    const payload = {
+      hook_event_name: 'SessionStart',
+      source: 'startup',
+      session_id: 'abc-123',
+      cwd: '@CWD@',
+      transcript_path: '/x/abc-123.jsonl',
+      banner: 'Alice.Smith@example.org | Alice Smith | Acme Research'
+    }
+    const bin = await captureStub(t.dir, JSON.stringify({ receivedAt: 1, payload }))
+    const run = await runCapture(t.dir, bin)
+    assert.equal(run.code, 0, run.stderr)
+    const dir = path.join(run.out, 'hooks', '2.1.282')
+    assert.deepEqual(JSON.parse(await readFile(path.join(dir, 'SessionStart.startup.json'), 'utf8')), {
+      hook_event_name: 'SessionStart',
+      source: 'startup',
+      session_id: '01J00000000000000000000001',
+      cwd: '/home/you/fixture-repo',
+      transcript_path: '/home/you/.claude/projects/fixture/01J00000000000000000000001.jsonl',
+      banner: 'you@example.com | You | Example Org'
+    })
+    const manifest = JSON.parse(await readFile(path.join(dir, 'MANIFEST.json'), 'utf8'))
+    assert.equal(manifest.version, '2.1.282')
+    assert.deepEqual(manifest.hooks, ['SessionStart.startup.json'])
+    assert.deepEqual(await readdir(run.tmp), [], 'no deck-capture-* dirs left behind')
+  } finally {
+    await t.cleanup()
+  }
+})
+
+test('capture-cc removes its temp dirs when the capture throws', async () => {
+  const t = await tempDir('deck-capture-throw-')
+  try {
+    const bin = await captureStub(t.dir, '{ not json')
+    const run = await runCapture(t.dir, bin)
+    assert.notEqual(run.code, 0)
+    assert.match(run.stderr, /SyntaxError/)
+    assert.deepEqual(await readdir(run.tmp), [], 'no deck-capture-* dirs left behind')
+  } finally {
+    await t.cleanup()
+  }
+})
+
+test('fake claude exits 97 when expectInput times out', async () => {
+  const t = await tempDir('deck-fake-97-')
+  const script = path.join(t.dir, 's.json')
+  await writeFile(script, JSON.stringify({ steps: [{ expectInput: { match: 'never', timeoutMs: 100 } }] }))
+  const bin = await fakeBin({ script, log: path.join(t.dir, 'log.jsonl') })
+  try {
+    const run = runFake({ env: bin.env })
+    assert.equal((await run.exited).exitCode, 97)
+    assert.match(run.output(), /expectInput timed out after 100 ms/)
+  } finally {
+    await bin.cleanup()
+    await t.cleanup()
+  }
+})
+
+test('fake claude exits 98 on -p', async () => {
+  const bin = await fakeBin({})
+  try {
+    const run = runFake({ env: bin.env, args: ['-p', 'x'] })
+    assert.equal((await run.exited).exitCode, 98)
+    assert.match(run.output(), /no -p/)
+  } finally {
+    await bin.cleanup()
+  }
+})
+
+test('fake claude exits 2 on a bad script', async () => {
+  const t = await tempDir('deck-fake-2-')
+  const script = path.join(t.dir, 'bad.json')
+  await writeFile(script, JSON.stringify({ steps: [{ nonsense: true }] }))
+  const bin = await fakeBin({ script, log: path.join(t.dir, 'log.jsonl') })
+  try {
+    const run = runFake({ env: bin.env })
+    assert.equal((await run.exited).exitCode, 2)
+    assert.match(run.output(), /unknown step/)
+  } finally {
+    await bin.cleanup()
+    await t.cleanup()
   }
 })
