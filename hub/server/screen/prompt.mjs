@@ -1,6 +1,15 @@
 // Permission, question and trust prompt boxes on a rendered Claude Code
 // screen (docs/deck/04-integrations.md 2.3). Written against the 2.1.282
 // frames in hub/test/fixtures/screens/2.1.282/.
+//
+// Known limit: a box whose top edge has scrolled off the screen parses as
+// no prompt (`null`). Whether real Claude Code ever draws such a box is
+// unverified.
+//
+// Every row is trimmed before matching and every pattern is anchored with
+// no nested or adjacent unbounded quantifiers over the same characters, and
+// the screen is scanned a fixed number of times: parsing is linear in the
+// screen size, whatever the PTY printed (docs/deck/08-security.md).
 
 /**
  * @typedef {{ key: string | null, label: string }} PromptOption
@@ -9,10 +18,10 @@
 
 /** Top edge of a prompt box (and of the input box): a full row of `─`. */
 const BOX_TOP = /^─{10,}$/
-/** A numbered option: optional `❯` cursor, the digit as printed, the label. */
-const NUMBERED = /^\s*(❯\s*)?(\d+)\.\s+(\S.*?)\s*$/
-/** The selected row of an unnumbered option list (the trust dialog). */
-const SELECTED = /^(\s*❯\s+)(\S.*?)\s*$/
+/** A numbered option on a trimmed row: optional `❯` cursor, the digit as printed, the label. */
+const NUMBERED = /^(❯ *)?(\d+)\. +(\S.*)$/
+/** The selected row of an unnumbered option list (the trust dialog), on a trimmed row. */
+const SELECTED = /^❯ +(\S.*)$/
 /** Every complete 2.1.282 prompt box ends with a hint row naming Esc. */
 const FOOTER = /Esc to cancel/
 /** A row that separates paragraphs inside a box. */
@@ -24,45 +33,40 @@ const QUESTION_TAB = /[☐☒]/
  * Find the prompt box on screen. Returns `null` when there is none, or when
  * its footer is not visible (a box cut off at the bottom is never returned
  * as a partial option list).
- * @param {string[]} lines rendered rows, trailing blanks trimmed
+ * @param {string[]} lines rendered rows
  * @returns {Prompt | null}
  */
 export function parsePrompt (lines) {
-  for (let top = lines.length - 1; top >= 0; top--) {
-    if (!BOX_TOP.test(lines[top])) continue
-    const prompt = parseBox(lines, top)
-    if (prompt) return prompt
-  }
-  return null
-}
-
-/**
- * @param {string[]} lines
- * @param {number} top row of the box's top edge
- * @returns {Prompt | null}
- */
-function parseBox (lines, top) {
-  const found = numberedOptions(lines, top) ?? unnumberedOptions(lines, top)
+  const trimmed = lines.map((l) => l.trim())
+  const found = numberedOptions(trimmed) ?? unnumberedOptions(lines, trimmed)
   if (!found) return null
   const { rows, options } = found
-  const last = rows[rows.length - 1]
-  if (!lines.slice(last + 1).some((l) => FOOTER.test(l))) return null
   const first = rows[0]
-  return { kind: kindOf(lines, top, first, options), question: question(lines, top, first), options }
+  const last = rows[rows.length - 1]
+  if (!trimmed.slice(last + 1).some((l) => FOOTER.test(l))) return null
+  // The box top is the nearest `─` rule above the FIRST option, so a rule
+  // inside the box (AskUserQuestion draws one above "Chat about this") is
+  // never mistaken for it.
+  let top = first - 1
+  while (top >= 0 && !BOX_TOP.test(trimmed[top])) top--
+  if (top === -1) return null
+  return { kind: kindOf(trimmed, top, first, options), question: question(trimmed, top, first), options }
 }
 
 /**
- * The last run of rows numbered 1, 2, ... n below `top`, one of them carrying
+ * The last run of rows numbered 1, 2, ... n on screen, one of them carrying
  * the `❯` cursor. Rows between options (descriptions, rules) are skipped.
- * @param {string[]} lines
- * @param {number} top
+ * A number that does not continue the run ends it: a gap (1, 2, 4) leaves
+ * no run, so the screen is not a prompt rather than a list that drops or
+ * invents an option.
+ * @param {string[]} trimmed
  * @returns {{ rows: number[], options: PromptOption[] } | null}
  */
-function numberedOptions (lines, top) {
+function numberedOptions (trimmed) {
   /** @type {{ row: number, n: number, selected: boolean, label: string }[]} */
   let run = []
-  for (let r = top + 1; r < lines.length; r++) {
-    const m = NUMBERED.exec(lines[r])
+  for (let r = 0; r < trimmed.length; r++) {
+    const m = NUMBERED.exec(trimmed[r])
     if (!m) continue
     const opt = { row: r, n: Number(m[2]), selected: Boolean(m[1]), label: m[3] }
     if (opt.n === 1) run = [opt]
@@ -77,30 +81,31 @@ function numberedOptions (lines, top) {
 }
 
 /**
- * Options without digits (the trust dialog): the `❯` row and the rows around
- * it whose text starts at the same column. `key` is `null`: none is printed.
+ * Options without digits (the trust dialog): the last `❯` row and the rows
+ * around it whose text starts at the same column. `key` is `null`: none is
+ * printed. A row that looks numbered ("N. label") is never one of these.
  * @param {string[]} lines
- * @param {number} top
+ * @param {string[]} trimmed
  * @returns {{ rows: number[], options: PromptOption[] } | null}
  */
-function unnumberedOptions (lines, top) {
-  let sel = -1
-  for (let r = top + 1; r < lines.length; r++) {
-    if (SELECTED.test(lines[r])) { sel = r; break }
-  }
+function unnumberedOptions (lines, trimmed) {
+  let sel = trimmed.length - 1
+  while (sel >= 0 && !SELECTED.test(trimmed[sel])) sel--
   if (sel === -1) return null
-  const col = /** @type {RegExpExecArray} */ (SELECTED.exec(lines[sel]))[1].length
-  /** @param {string} l */
-  const sibling = (l) => l.trim() !== '' && l.search(/\S/) === col
+  const col = /** @type {RegExpExecArray} */ (/^\s*❯\s+/.exec(lines[sel]))[0].length
+  /** @param {number} r */
+  const sibling = (r) => trimmed[r] !== '' && !trimmed[r].startsWith('❯') && lines[r].search(/\S/) === col
   let first = sel
-  while (first - 1 > top && sibling(lines[first - 1])) first--
+  while (first - 1 >= 0 && sibling(first - 1)) first--
   let last = sel
-  while (last + 1 < lines.length && sibling(lines[last + 1])) last++
+  while (last + 1 < lines.length && sibling(last + 1)) last++
   const rows = []
   const options = []
   for (let r = first; r <= last; r++) {
+    const label = r === sel ? /** @type {RegExpExecArray} */ (SELECTED.exec(trimmed[r]))[1] : trimmed[r]
+    if (NUMBERED.test(label)) return null
     rows.push(r)
-    options.push({ key: null, label: r === sel ? /** @type {RegExpExecArray} */ (SELECTED.exec(lines[r]))[2] : lines[r].trim() })
+    options.push({ key: null, label })
   }
   return { rows, options }
 }
@@ -108,12 +113,12 @@ function unnumberedOptions (lines, top) {
 /**
  * The nearest paragraph above the options that asks something (holds a `?`),
  * else the nearest paragraph. Wrapped rows are joined with one space.
- * @param {string[]} lines
+ * @param {string[]} trimmed
  * @param {number} top
  * @param {number} first row of the first option
  * @returns {string}
  */
-function question (lines, top, first) {
+function question (trimmed, top, first) {
   /** @type {string[]} */
   const paragraphs = []
   /** @type {string[]} */
@@ -123,7 +128,7 @@ function question (lines, top, first) {
     cur = []
   }
   for (let r = first - 1; r > top; r--) {
-    const l = lines[r].trim()
+    const l = trimmed[r]
     if (l === '' || SEPARATOR.test(l)) flush()
     else cur.push(l)
   }
@@ -132,14 +137,14 @@ function question (lines, top, first) {
 }
 
 /**
- * @param {string[]} lines
+ * @param {string[]} trimmed
  * @param {number} top
  * @param {number} first
  * @param {PromptOption[]} options
  * @returns {Prompt['kind']}
  */
-function kindOf (lines, top, first, options) {
+function kindOf (trimmed, top, first, options) {
   if (options.some((o) => /^Yes, I trust/.test(o.label))) return 'trust'
-  if (lines.slice(top + 1, first).some((l) => QUESTION_TAB.test(l))) return 'question'
+  if (trimmed.slice(top + 1, first).some((l) => QUESTION_TAB.test(l))) return 'question'
   return 'permission'
 }
