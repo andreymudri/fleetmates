@@ -68,7 +68,7 @@
       "placeholders": {}
     },
     "idle-input": {
-      "bytes": 2199,
+      "bytes": 2183,
       "placeholders": {}
     },
     "spinner": {
@@ -98,7 +98,7 @@
   "notes": [
     "Everything else in this set comes from the capture at 2026-09-27T20:19:27.535Z; its claude child inherited permission_mode \"auto\", so no permission prompt appeared (see \"skipped\").",
     "permission-edit.ansi comes from a later capture at 2026-09-27T20:46:08.908Z with --permission-mode manual (payloads show permission_mode \"default\"). There the edit step succeeded, and bash-1, bash-2 and bash-3 were skipped again with \"no PermissionRequest(Bash); was the command already allowed?\": echo capture-ok ran without a prompt.",
-    "Hand fixes after capture: prompt_id UUIDs -> fixed 01JP ULIDs; the dash-mangled throwaway repo name in scratchpad_dir and agent_transcript_path -> -home-you-fixture-repo; a claude.ai/code session URL in an OSC 8 link on idle-input -> session_REDACTED; the git author surname -> You; PostCompact.compact_summary and SubagentStop.last_assistant_message -> REDACTED (they restated the owner private instructions).",
+    "Hand fixes after capture, each still visible in the committed files: prompt_id UUIDs -> fixed 01JP ULIDs; the dash-mangled throwaway repo name in scratchpad_dir and agent_transcript_path -> -home-you-fixture-repo; a claude.ai/code session URL in an OSC 8 link on idle-input -> session_REDACTED; PostCompact.compact_summary and SubagentStop.last_assistant_message -> REDACTED (they restated the owner private instructions and named the owner).",
     "The trust-folder frame quotes two allow-rule warnings from the capturing user global settings; kept on purpose."
   ]
 }

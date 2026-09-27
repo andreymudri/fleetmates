@@ -406,6 +406,8 @@ const trustDialog = selected => [
 
 test('capture-cc startup moves ❯ to "Yes, I trust" when the dialog preselects "No, exit"', async () => {
   const t = await tempDir('deck-capture-trust-')
+  /** @type {Awaited<ReturnType<typeof fakeBin>> | undefined} */
+  let bin
   try {
     const log = path.join(t.dir, 'fake.jsonl')
     const script = path.join(t.dir, 'trust.json')
@@ -432,7 +434,7 @@ test('capture-cc startup moves ❯ to "Yes, I trust" when the dialog preselects 
         }
       ]
     }))
-    const bin = await fakeBin({ script, log })
+    bin = await fakeBin({ script, log })
     const home = path.join(t.dir, 'home')
     const tmp = path.join(t.dir, 'tmp')
     const out = path.join(t.dir, 'out')
@@ -454,8 +456,8 @@ test('capture-cc startup moves ❯ to "Yes, I trust" when the dialog preselects 
     const manifest = JSON.parse(await readFile(path.join(dir, 'MANIFEST.json'), 'utf8'))
     assert.ok(!manifest.skipped.some(s => s.step === 'startup'), JSON.stringify(manifest.skipped))
     assert.ok(manifest.frames['trust-folder'], 'the dialog was saved as the trust-folder frame')
-    await bin.cleanup()
   } finally {
+    await bin?.cleanup()
     await t.cleanup()
   }
 })
