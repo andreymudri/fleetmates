@@ -1,0 +1,22 @@
+<!doctype html>
+<!-- Spike only; deleted at M1. Open /?pty=<id> or /?spawn=1&cwd=<path>. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>deck spike</title>
+  <link rel="stylesheet" href="/xterm/xterm.css">
+  <style>
+    html, body { height: 100%; margin: 0; background: #000; color: #ccc; font-family: monospace; }
+    body { display: flex; flex-direction: column; }
+    #term { flex: 1; min-height: 0; }
+    #status { padding: 2px 6px; background: #222; }
+  </style>
+</head>
+<body>
+  <div id="term"></div>
+  <div id="status">lastInputFrom: none</div>
+  <script src="/xterm/xterm.js"></script>
+  <script src="/xterm/addon-fit.js"></script>
+  <script src="/main.js"></script>
+</body>
+</html>
