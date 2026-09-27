@@ -44,7 +44,17 @@ in `hub/package.json`, and prints both. It works in a throwaway git repo in a te
 
 The output is not safe to commit unreviewed. Redaction is by string replacement
 (throwaway repo path, `$HOME`, your username, session ids, transcript paths, typed prompts,
-token-like runs); anything else in the payloads or on screen is kept as printed. Which other
+JWTs, token-like runs); anything else in the payloads or on screen is kept as printed. The
+rules are exported from `capture-cc.mjs` (`createRedactor`, `redactTokens`) and pinned in
+`test/unit/fake-claude.test.mjs`.
+
+Token-like runs are runs of 40 or more base64, base64url or hex characters (`/` and `=`
+included) with a letter and a digit. So that paths such as
+`/home/you/.claude/projects/fixture/<id>.jsonl` survive, a run that starts with `/` or follows a
+`.` or `~` is only redacted when one of its `/`-separated pieces is 40 or more such characters
+by itself. A secret split by `/` into pieces all shorter than 40 that starts with `/` (or follows
+a `.`) is therefore kept, and so is anything shorter than 40 characters that is not a JWT;
+the reviewer's grep below is what catches those. Which other
 personal strings a real 2.1.282 session prints has not been checked yet (Task 4 does that). Read every file, and grep them for `/home/`, your username and long
 base64 or hex runs before `git add`. A placeholder count of 0 in `MANIFEST.json` means the text
 was split by escape sequences and the frame still holds the literal text.
