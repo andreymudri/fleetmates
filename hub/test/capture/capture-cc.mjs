@@ -147,6 +147,60 @@ const replaceAnyCase = (s, literal, replacement) =>
  * @param {{ repo: string, home?: string, user?: string, prompts?: Record<string, string>,
  *   account?: { emailAddress?: string, displayName?: string, organizationName?: string } }} opts
  */
+// Variables a parent Claude Code session sets for its own children. Left in place, the nested
+// claude treats itself as a child of that session instead of a fresh interactive one.
+const PARENT_SESSION_VARS = new Set([
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_CODE_CHILD_SESSION',
+  'CLAUDE_CODE_EXECPATH',
+  'CLAUDE_PID',
+  'CLAUDE_EFFORT',
+  'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS'
+])
+const PARENT_SESSION_PREFIXES = ['CLAUDE_CODE_SESSION_', 'CLAUDE_CODE_MESSAGING_', 'CLAUDE_CODE_BRIDGE_']
+
+/**
+ * The environment for the captured claude: the parent's, minus the parent session's own variables.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function childEnv (env) {
+  return Object.fromEntries(Object.entries(env).filter(([k]) =>
+    !PARENT_SESSION_VARS.has(k) && !PARENT_SESSION_PREFIXES.some(p => k.startsWith(p))))
+}
+
+// The captured claude must ask for permission, whatever mode the owner's settings default to:
+// under an inherited `auto` mode no permission prompt, PermissionRequest or Notification appears.
+// `manual` is 2.1.282's name for the prompting mode.
+export const CLAUDE_ARGS = ['--permission-mode', 'manual']
+
+const TRUST_YES =/^\s*(?:❯\s*)?(?:\d+\.\s*)?Yes, I trust/
+
+/**
+ * Answer the trust dialog with "Yes, I trust": move the ❯ marker onto that option with arrow
+ * keys, re-reading the screen after each move, then confirm. 2.1.282 preselects "No, exit", so a
+ * bare Enter declines trust and the session exits.
+ * @param {{ screen: () => string, write: (s: string) => void, settle: () => Promise<void>, maxMoves?: number }} io
+ * @returns {Promise<true | string>} true once confirmed, else the reason it did not confirm
+ */
+export async function acceptTrust ({ screen, write, settle, maxMoves = 10 }) {
+  for (let moves = 0; ; moves++) {
+    const lines = screen().split('\n')
+    const yes = lines.findIndex(l => TRUST_YES.test(l))
+    if (yes < 0) return 'no option starting with "Yes, I trust" on screen'
+    const marker = lines.findIndex(l => l.trimStart().startsWith('❯'))
+    if (marker < 0) return 'no ❯ marker in the trust dialog'
+    if (marker === yes) {
+      write('\r')
+      return true
+    }
+    if (moves >= maxMoves) return `❯ did not reach "Yes, I trust" after ${maxMoves} moves`
+    write(marker < yes ? '\x1b[B' : '\x1b[A')
+    await settle()
+  }
+}
+
 export function createRedactor ({ repo, home, user, prompts = {}, account = {} }) {
   /** @type {Map<string, string>} */
   const sessionMap = new Map()
@@ -270,16 +324,14 @@ async function main () {
 
     // Step 2: the real claude in node-pty at a fixed size, with a headless terminal attached.
     /** @type {NodeJS.ProcessEnv} */
-    const env = { ...process.env, CAPTURE_OUT: raw }
-    delete env.CLAUDECODE
-    delete env.CLAUDE_CODE_ENTRYPOINT
+    const env = { ...childEnv(process.env), CAPTURE_OUT: raw }
     const term = new Terminal({ cols, rows, allowProposedApi: true, scrollback: 0 })
     /** @type {Buffer[]} */
     const chunks = []
     let total = 0
     let lastOutputAt = Date.now()
     let exited = false
-    const child = pty.spawn('claude', [], { cwd: repo, env: /** @type {Record<string, string>} */ (env), cols, rows, name: 'xterm-256color' })
+    const child = pty.spawn('claude', CLAUDE_ARGS, { cwd: repo, env: /** @type {Record<string, string>} */ (env), cols, rows, name: 'xterm-256color' })
     killChild = () => { try { child.kill('SIGKILL') } catch {} }
     child.onData(d => {
       const b = Buffer.from(d, 'utf8')
@@ -468,7 +520,12 @@ async function main () {
       if (/trust (this|the files in this) folder/i.test(screenText())) {
         await saveFrame('trust-folder', 0)
         idleMark = mark()
-        child.write('\r')
+        const trusted = await acceptTrust({
+          screen: screenText,
+          write: k => child.write(k),
+          settle: async () => { await sleep(300); await waitQuiet(300, 5000) }
+        })
+        if (trusted !== true) return trusted
       }
       if (!await waitHook(h, p => p.hook_event_name === 'SessionStart')) return 'no SessionStart'
       await waitQuiet(1500)

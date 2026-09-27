@@ -1,0 +1,104 @@
+{
+  "claudeVersion": "2.1.282 (Claude Code)",
+  "version": "2.1.282",
+  "capturedAt": "2026-09-27T20:19:27.535Z",
+  "scriptVersion": "0.1.0",
+  "os": "Linux 7.2.5-3-omarchy x64",
+  "node": "v26.7.0",
+  "size": {
+    "cols": 120,
+    "rows": 40
+  },
+  "redactions": [
+    "throwaway repo path -> /home/you/fixture-repo",
+    "$HOME -> /home/you",
+    "account email (~/.claude.json oauthAccount) -> you@example.com, any case",
+    "account display name -> You, any case",
+    "account organization name -> Example Org, any case",
+    "username -> you, any case",
+    "session ids -> fixed ULIDs",
+    "transcript_path -> /home/you/.claude/projects/fixture/<id>.jsonl",
+    "typed prompts -> \"fixture prompt: <step>\"",
+    "JWTs (eyJ...eyJ...sig) -> REDACTED",
+    "token-like runs (40+ base64, base64url or hex chars with a letter and a digit, / included, matched across escape sequences) -> REDACTED"
+  ],
+  "skipped": [
+    {
+      "step": "bash-1",
+      "reason": "no PermissionRequest(Bash); was the command already allowed?"
+    },
+    {
+      "step": "bash-2",
+      "reason": "no PermissionRequest(Bash); was the command already allowed?"
+    },
+    {
+      "step": "bash-3",
+      "reason": "no PermissionRequest(Bash); was the command already allowed?"
+    },
+    {
+      "step": "edit",
+      "reason": "no PermissionRequest(Edit)"
+    }
+  ],
+  "hooks": [
+    "Notification.idle_prompt.json",
+    "PermissionRequest.AskUserQuestion.json",
+    "PostCompact.json",
+    "PostToolUse.AskUserQuestion.json",
+    "PostToolUse.Bash.json",
+    "PostToolUse.Edit.json",
+    "PostToolUse.Read.json",
+    "PreCompact.json",
+    "PreToolUse.AskUserQuestion.json",
+    "PreToolUse.Bash.json",
+    "PreToolUse.Edit.json",
+    "PreToolUse.Read.json",
+    "SessionEnd.clear.json",
+    "SessionEnd.prompt_input_exit.json",
+    "SessionStart.clear.json",
+    "SessionStart.compact.json",
+    "SessionStart.startup.json",
+    "Stop.json",
+    "SubagentStop.json",
+    "UserPromptSubmit.json"
+  ],
+  "frames": {
+    "trust-folder": {
+      "bytes": 1927,
+      "placeholders": {}
+    },
+    "idle-input": {
+      "bytes": 2199,
+      "placeholders": {}
+    },
+    "spinner": {
+      "bytes": 4912,
+      "placeholders": {}
+    },
+    "question-options": {
+      "bytes": 13656,
+      "placeholders": {}
+    },
+    "question-text": {
+      "bytes": 3011,
+      "placeholders": {
+        "question": 2
+      }
+    },
+    "compacting": {
+      "bytes": 5576,
+      "placeholders": {}
+    },
+    "permission-edit": {
+      "bytes": 16593,
+      "placeholders": {},
+      "capturedAt": "2026-09-27T20:46:08.908Z"
+    }
+  },
+  "notes": [
+    "Everything else in this set comes from the capture at 2026-09-27T20:19:27.535Z; its claude child inherited permission_mode \"auto\", so no permission prompt appeared (see \"skipped\").",
+    "permission-edit.ansi comes from a later capture at 2026-09-27T20:46:08.908Z with --permission-mode manual (payloads show permission_mode \"default\"). There the edit step succeeded, and bash-1, bash-2 and bash-3 were skipped again with \"no PermissionRequest(Bash); was the command already allowed?\": echo capture-ok ran without a prompt.",
+    "Hand fixes after capture: prompt_id UUIDs -> fixed 01JP ULIDs; the dash-mangled throwaway repo name in scratchpad_dir and agent_transcript_path -> -home-you-fixture-repo; a claude.ai/code session URL in an OSC 8 link on idle-input -> session_REDACTED; the git author surname -> You; PostCompact.compact_summary and SubagentStop.last_assistant_message -> REDACTED (they restated the owner private instructions).",
+    "The trust-folder frame quotes two allow-rule warnings from the capturing user global settings; kept on purpose."
+  ]
+}

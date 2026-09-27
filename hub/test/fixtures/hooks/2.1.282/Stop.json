@@ -1,0 +1,16 @@
+{
+  "session_id": "01J00000000000000000000001",
+  "transcript_path": "/home/you/.claude/projects/fixture/01J00000000000000000000001.jsonl",
+  "cwd": "/home/you/fixture-repo",
+  "scratchpad_dir": "/tmp/claude-1000/-home-you-fixture-repo/01J00000000000000000000001/scratchpad",
+  "prompt_id": "01JP0000000000000000000004",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "I ran the command and it printed `capture-ok`.",
+  "background_tasks": [],
+  "session_crons": []
+}
