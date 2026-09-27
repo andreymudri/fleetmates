@@ -1,5 +1,6 @@
 <!doctype html>
-<!-- Spike only; deleted at M1. Open http://127.0.0.1:<port>/?pty=<id> or ?spawn=1&cwd=<absolute dir>; any other host name (localhost too) is refused. -->
+<!-- Spike only; deleted at M1. Open the URL the server prints (http://127.0.0.1:<port>/#token=<t>),
+     then add ?pty=<id>, or ?spawn=1&cwd=<absolute dir> and press Start. Any other host name (localhost too) is refused. -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -15,6 +16,7 @@
 <body>
   <div id="term"></div>
   <div id="status">lastInputFrom: none</div>
+  <button id="start" type="button" hidden></button>
   <script src="/xterm/xterm.js"></script>
   <script src="/xterm/addon-fit.js"></script>
   <script src="/main.js"></script>

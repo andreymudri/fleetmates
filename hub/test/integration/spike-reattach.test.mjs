@@ -8,8 +8,9 @@ import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import vm from 'node:vm'
 import { spawn } from 'node:child_process'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { WebSocket } from 'ws'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
@@ -34,25 +35,27 @@ let deckd
 const spikes = new Set()
 
 /**
- * Start a child and resolve once its stderr matches `ready`.
+ * Start a child (cwd: hub/) and resolve once its stdout or stderr matches `ready`.
  * @param {string} script
  * @param {NodeJS.ProcessEnv} env
  * @param {RegExp} ready
  * @returns {Promise<{ proc: import('node:child_process').ChildProcess, match: RegExpMatchArray }>}
  */
 function startChild (script, env, ready) {
-  const proc = spawn(process.execPath, [script], { env, stdio: ['ignore', 'ignore', 'pipe'] })
+  const proc = spawn(process.execPath, [script], { env, cwd: hubDir, stdio: ['ignore', 'pipe', 'pipe'] })
+  let out = ''
   let stderr = ''
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${script} did not start: ${stderr}`)), DEADLINE)
-    proc.stderr?.on('data', (d) => {
-      stderr += d
-      const match = stderr.match(ready)
+    const check = () => {
+      const match = out.match(ready) ?? stderr.match(ready)
       if (match) {
         clearTimeout(timer)
         resolve({ proc, match })
       }
-    })
+    }
+    proc.stdout?.on('data', (d) => { out += d; check() })
+    proc.stderr?.on('data', (d) => { stderr += d; check() })
     proc.once('exit', (code) => {
       clearTimeout(timer)
       reject(new Error(`${script} exited ${code}: ${stderr}`))
@@ -65,9 +68,9 @@ function startChild (script, env, ready) {
  * @param {NodeJS.ProcessEnv} [extra]
  */
 async function startSpike (extra = {}) {
-  const { proc, match } = await startChild(spikeMain, { ...rt.env, SPIKE_PORT: '0', ...extra }, /spike listening on http:\/\/(\S+):(\d+)\//)
+  const { proc, match } = await startChild(spikeMain, { ...rt.env, SPIKE_PORT: '0', ...extra }, /^http:\/\/(\S+):(\d+)\/#token=([A-Za-z0-9_-]{43})\n/m)
   spikes.add(proc)
-  return { proc, host: match[1], port: Number(match[2]) }
+  return { proc, host: match[1], port: Number(match[2]), token: match[3] }
 }
 
 /**
@@ -131,14 +134,14 @@ async function deckdClient (socketPath) {
  * Try a WebSocket upgrade and report the HTTP status of a refusal, or 101.
  * @param {number} port
  * @param {string} query
- * @param {{ origin?: string, host?: string }} headers
+ * @param {{ origin?: string, host?: string, protocols?: string[] }} headers
  * @returns {Promise<number>}
  */
-function upgradeStatus (port, query, { origin, host }) {
+function upgradeStatus (port, query, { origin, host, protocols = [] }) {
   /** @type {Record<string, string>} */
   const extra = {}
   if (host !== undefined) extra.host = host
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${query}`, origin === undefined ? { headers: extra } : { origin, headers: extra })
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${query}`, protocols, origin === undefined ? { headers: extra } : { origin, headers: extra })
   return new Promise((resolve, reject) => {
     ws.once('open', () => { ws.terminate(); resolve(101) })
     ws.once('unexpected-response', (_req, res) => { res.resume(); ws.terminate(); resolve(res.statusCode ?? 0) })
@@ -151,13 +154,13 @@ function upgradeStatus (port, query, { origin, host }) {
  * @param {number} port
  * @param {string} p
  * @param {string} host
- * @returns {Promise<number>}
+ * @returns {Promise<{ status: number, headers: import('node:http').IncomingHttpHeaders }>}
  */
-function httpStatus (port, p, host) {
+function httpGet (port, p, host) {
   return new Promise((resolve, reject) => {
     const req = http.get({ host: '127.0.0.1', port, path: p, headers: { host } }, (res) => {
       res.resume()
-      resolve(res.statusCode ?? 0)
+      resolve({ status: res.statusCode ?? 0, headers: res.headers })
     })
     req.once('error', reject)
   })
@@ -165,12 +168,12 @@ function httpStatus (port, p, host) {
 
 /**
  * A browser stand-in: collects spike messages and the terminal bytes it got.
- * It sends the Origin the spike page itself would send.
- * @param {number} port
+ * It sends the Origin and token subprotocol the spike page itself would send.
+ * @param {{ port: number, token: string }} spike
  * @param {string} query
  */
-async function browser (port, query) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${query}`, { origin: `http://127.0.0.1:${port}` })
+async function browser ({ port, token }, query) {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${query}`, [token], { origin: `http://127.0.0.1:${port}` })
   /** @type {any[]} */
   const msgs = []
   /** @type {Set<() => void>} */
@@ -320,7 +323,7 @@ test('a PTY survives the spike server being SIGKILLed and a new server reattache
   const direct = await deckdClient(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
   try {
     const first = await startSpike()
-    const b1 = await browser(first.port, new URLSearchParams({ spawn: '1', cwd: rt.dir }).toString())
+    const b1 = await browser(first, new URLSearchParams({ spawn: '1', cwd: rt.dir }).toString())
     const { ptyId } = await b1.waitMsg((m) => m.t === 'pty', 'the pty message')
     assert.match(ptyId, /^pty_[0-9a-f]{8}$/)
     await b1.waitMsg((m) => m.t === 'replay', 'the first replay')
@@ -340,7 +343,7 @@ test('a PTY survives the spike server being SIGKILLed and a new server reattache
     assert.equal(process.kill(pty.pid, 0), true)
 
     const second = await startSpike()
-    const b2 = await browser(second.port, new URLSearchParams({ pty: ptyId }).toString())
+    const b2 = await browser(second, new URLSearchParams({ pty: ptyId }).toString())
     const replay = await b2.waitMsg((m) => m.t === 'replay', 'the reattach replay')
     assert.match(Buffer.from(replay.data, 'base64').toString('utf8'), /abc/)
     const hello = await b2.waitMsg((m) => m.t === 'pty', 'the pty message after reattach')
@@ -399,7 +402,7 @@ test('output deckd sends before the screen response is not forwarded twice', asy
     emit({ ev: 'output', ptyId: 'pty_00000000', data: b64('Y') })
   })
   try {
-    const b = await browser(d.spike.port, 'pty=pty_00000000')
+    const b = await browser(d.spike, 'pty=pty_00000000')
     await b.until(() => b.text().includes('Y'), 'output Y')
     assert.equal(b.text(), 'XY')
     b.close()
@@ -414,7 +417,7 @@ test('after a dropped event a live viewer gets a fresh replay', async () => {
     if (n === 1) emit({ ev: 'dropped', ptyId: 'pty_00000000', bytes: 10 })
   })
   try {
-    const b = await browser(d.spike.port, 'pty=pty_00000000')
+    const b = await browser(d.spike, 'pty=pty_00000000')
     const replays = await b.until(() => {
       const r = b.msgs.filter((m) => m.t === 'replay')
       return r.length === 2 ? r : undefined
@@ -426,26 +429,37 @@ test('after a dropped event a live viewer gets a fresh replay', async () => {
   }
 })
 
+/**
+ * The ptyIds deckd knows about.
+ * @param {Awaited<ReturnType<typeof deckdClient>>} direct
+ * @returns {Promise<string[]>}
+ */
+async function ptyIds (direct) {
+  const res = await direct.request('list')
+  assert.equal(res.ok, true)
+  return res.ptys.map((/** @type {any} */ p) => p.ptyId)
+}
+
 test('the spike server refuses foreign or missing Origin and foreign Host, and spawns nothing', async () => {
   const direct = await deckdClient(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
   const spike = await startSpike()
   try {
-    const before = (await direct.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId)
+    const before = await ptyIds(direct)
     const port = spike.port
     const good = `http://127.0.0.1:${port}`
+    const protocols = [spike.token]
     const q = new URLSearchParams({ spawn: '1', cwd: rt.dir }).toString()
-    assert.equal(await upgradeStatus(port, q, { origin: 'https://evil.example' }), 401, 'foreign Origin')
-    assert.equal(await upgradeStatus(port, q, {}), 401, 'missing Origin')
-    assert.equal(await upgradeStatus(port, q, { origin: `http://localhost:${port}` }), 401, 'localhost Origin')
-    assert.equal(await upgradeStatus(port, q, { origin: good, host: `evil.example:${port}` }), 401, 'evil Host on WS')
-    assert.equal(await upgradeStatus(port, q, { origin: good, host: `localhost:${port}` }), 401, 'localhost Host on WS')
-    assert.equal(await httpStatus(port, '/', `evil.example:${port}`), 403, 'evil Host on HTTP')
-    assert.equal(await httpStatus(port, '/', `localhost:${port}`), 403, 'localhost Host on HTTP')
-    assert.equal(await httpStatus(port, '/', `127.0.0.1:${port}`), 200, 'own Host on HTTP')
-    const after = (await direct.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId)
-    assert.deepEqual(after, before, 'a refused upgrade spawned a PTY')
-    // The correct Host and Origin pair is accepted.
-    const b = await browser(port, new URLSearchParams({ pty: 'pty_ffffffff' }).toString())
+    assert.equal(await upgradeStatus(port, q, { origin: 'https://evil.example', protocols }), 401, 'foreign Origin')
+    assert.equal(await upgradeStatus(port, q, { protocols }), 401, 'missing Origin')
+    assert.equal(await upgradeStatus(port, q, { origin: `http://localhost:${port}`, protocols }), 401, 'localhost Origin')
+    assert.equal(await upgradeStatus(port, q, { origin: good, host: `evil.example:${port}`, protocols }), 401, 'evil Host on WS')
+    assert.equal(await upgradeStatus(port, q, { origin: good, host: `localhost:${port}`, protocols }), 401, 'localhost Host on WS')
+    assert.equal((await httpGet(port, '/', `evil.example:${port}`)).status, 403, 'evil Host on HTTP')
+    assert.equal((await httpGet(port, '/', `localhost:${port}`)).status, 403, 'localhost Host on HTTP')
+    assert.equal((await httpGet(port, '/', `127.0.0.1:${port}`)).status, 200, 'own Host on HTTP')
+    assert.deepEqual(await ptyIds(direct), before, 'a refused upgrade spawned a PTY')
+    // The correct Host, Origin and token are accepted.
+    const b = await browser(spike, new URLSearchParams({ pty: 'pty_ffffffff' }).toString())
     await b.waitMsg((m) => m.t === 'error', 'the not-found error from an accepted upgrade')
     b.close()
   } finally {
@@ -455,19 +469,133 @@ test('the spike server refuses foreign or missing Origin and foreign Host, and s
   }
 })
 
+test('a /ws upgrade without the exact per-launch token is refused and spawns nothing', async () => {
+  const direct = await deckdClient(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
+  const spike = await startSpike()
+  try {
+    const before = await ptyIds(direct)
+    const port = spike.port
+    const origin = `http://127.0.0.1:${port}`
+    const q = new URLSearchParams({ spawn: '1', cwd: rt.dir }).toString()
+    const flipped = (spike.token[0] === 'A' ? 'B' : 'A') + spike.token.slice(1)
+    assert.equal(await upgradeStatus(port, q, { origin }), 401, 'no token')
+    assert.equal(await upgradeStatus(port, q, { origin, protocols: [flipped] }), 401, 'token with one character changed')
+    assert.equal(await upgradeStatus(port, q, { origin, protocols: [spike.token.slice(0, -1)] }), 401, 'token prefix')
+    assert.equal(await upgradeStatus(port, q, { origin, protocols: ['x' + spike.token] }), 401, 'token with a prefix')
+    assert.deepEqual(await ptyIds(direct), before, 'a refused upgrade spawned a PTY')
+    assert.equal(await upgradeStatus(port, 'pty=pty_ffffffff', { origin, protocols: [spike.token] }), 101, 'the right token')
+  } finally {
+    direct.close()
+    spike.proc.kill('SIGKILL')
+    await exited(spike.proc)
+  }
+})
+
+test('every HTTP response forbids framing and inline script', async () => {
+  const spike = await startSpike()
+  try {
+    const port = spike.port
+    const cases = [
+      ['/?spawn=1&cwd=/var', `127.0.0.1:${port}`, 200],
+      ['/main.js', `127.0.0.1:${port}`, 200],
+      ['/nope', `127.0.0.1:${port}`, 404],
+      ['/', `evil.example:${port}`, 403]
+    ]
+    for (const [p, host, status] of cases) {
+      const res = await httpGet(port, String(p), String(host))
+      assert.equal(res.status, status, `${p} ${host}`)
+      assert.equal(res.headers['x-frame-options'], 'DENY', `${p} ${host}`)
+      const csp = String(res.headers['content-security-policy'])
+      assert.match(csp, /frame-ancestors 'none'/, `${p} ${host}`)
+      assert.match(csp, /default-src 'self'/, `${p} ${host}`)
+      assert.match(csp, /script-src 'self'(;|$)/, `${p} ${host}`)
+    }
+  } finally {
+    spike.proc.kill('SIGKILL')
+    await exited(spike.proc)
+  }
+})
+
+test('loading the page with ?spawn=1 spawns nothing until Start is clicked', async () => {
+  const direct = await deckdClient(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
+  const spike = await startSpike()
+  try {
+    const before = await ptyIds(direct)
+    const page = await httpGet(spike.port, `/?spawn=1&cwd=${encodeURIComponent(rt.dir)}`, `127.0.0.1:${spike.port}`)
+    assert.equal(page.status, 200)
+    assert.deepEqual(await ptyIds(direct), before, 'loading the page spawned a PTY')
+  } finally {
+    direct.close()
+    spike.proc.kill('SIGKILL')
+    await exited(spike.proc)
+  }
+  // The page script itself, run against stub DOM and WebSocket globals.
+  const source = await readFile(path.join(hubDir, 'spike', 'main.js'), 'utf8')
+  /**
+   * @param {string} search
+   */
+  const runPage = (search) => {
+    /** @type {{ url: string, protocols: string[] }[]} */
+    const sockets = []
+    /** @type {Record<string, any>} */
+    const els = {}
+    const el = () => {
+      /** @type {Record<string, () => void>} */
+      const handlers = {}
+      return { textContent: '', hidden: true, handlers, addEventListener (/** @type {string} */ t, /** @type {() => void} */ fn) { handlers[t] = fn } }
+    }
+    for (const id of ['term', 'status', 'start']) els[id] = el()
+    const store = new Map()
+    /** @type {string[]} */
+    const replaced = []
+    const ctx = {
+      URLSearchParams,
+      atob,
+      location: { hash: '#token=TKN', search, pathname: '/', host: '127.0.0.1:1' },
+      history: { replaceState: (/** @type {any} */ _s, /** @type {any} */ _t, /** @type {string} */ u) => { replaced.push(u) } },
+      sessionStorage: { setItem: (/** @type {string} */ k, /** @type {string} */ v) => store.set(k, v), getItem: (/** @type {string} */ k) => store.get(k) ?? null },
+      document: { getElementById: (/** @type {string} */ id) => els[id] },
+      window: { addEventListener () {} },
+      Terminal: class { cols = 80; rows = 24; loadAddon () {} open () {} reset () {} write () {} onData () {} },
+      FitAddon: { FitAddon: class { fit () {} } },
+      WebSocket: Object.assign(class {
+        /** @param {string} url @param {string[]} protocols */
+        constructor (url, protocols) { sockets.push({ url, protocols }) }
+        addEventListener () {}
+      }, { OPEN: 1 })
+    }
+    vm.runInNewContext(source, ctx)
+    return { sockets, els, replaced, store }
+  }
+  const spawnPage = runPage(`?spawn=1&cwd=${encodeURIComponent('/some/dir')}`)
+  assert.equal(spawnPage.sockets.length, 0, 'the page opened a WebSocket on load with ?spawn=1')
+  assert.equal(spawnPage.els.start.hidden, false)
+  assert.equal(spawnPage.els.start.textContent, 'Start claude in /some/dir')
+  assert.equal(spawnPage.store.get('spikeToken'), 'TKN')
+  assert.deepEqual([...spawnPage.replaced], ['/?spawn=1&cwd=%2Fsome%2Fdir'], 'the token was not removed from the address bar')
+  spawnPage.els.start.handlers.click()
+  assert.equal(spawnPage.sockets.length, 1)
+  assert.match(spawnPage.sockets[0].url, /^ws:\/\/127\.0\.0\.1:1\/ws\?spawn=1&cwd=%2Fsome%2Fdir&cols=80&rows=24$/)
+  assert.deepEqual([...spawnPage.sockets[0].protocols], ['TKN'])
+  const attachPage = runPage('?pty=pty_00000001')
+  assert.equal(attachPage.sockets.length, 1, 'a ?pty= page connects on load')
+  assert.deepEqual([...attachPage.sockets[0].protocols], ['TKN'])
+})
+
 test('spawn refuses a cwd that is relative, missing or not a directory', async () => {
   const direct = await deckdClient(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
   const spike = await startSpike()
   try {
-    const before = (await direct.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId)
-    for (const cwd of ['', 'relative/dir', path.join(rt.dir, 'nope'), echoScript]) {
-      const b = await browser(spike.port, new URLSearchParams({ spawn: '1', cwd }).toString())
+    const before = await ptyIds(direct)
+    // The spike process runs with cwd hub/, where '.', 'spike' and
+    // 'test/fixtures' are existing relative directories.
+    for (const cwd of ['', '.', 'spike', 'test/fixtures', 'relative/dir', path.join(rt.dir, 'nope'), echoScript]) {
+      const b = await browser(spike, new URLSearchParams({ spawn: '1', cwd }).toString())
       const err = await b.waitMsg((m) => m.t === 'error', `the refusal for cwd ${JSON.stringify(cwd)}`)
       assert.match(err.message, /absolute path of an existing directory/)
       b.close()
     }
-    const after = (await direct.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId)
-    assert.deepEqual(after, before, 'a refused spawn created a PTY')
+    assert.deepEqual(await ptyIds(direct), before, 'a refused spawn created a PTY')
   } finally {
     direct.close()
     spike.proc.kill('SIGKILL')

@@ -4,7 +4,9 @@
 // deckd connection as `kind: 'server'`, fanned out to browser WebSockets.
 // Run as `node hub/spike/server.mjs` with XDG_RUNTIME_DIR pointing at the
 // runtime dir deckd uses. SPIKE_PORT picks the port (default 47899, 0 for
-// any free port); SPIKE_HOST, when set, must be 127.0.0.1.
+// any free port); SPIKE_HOST, when set, must be 127.0.0.1. It prints one
+// line to stdout, `http://127.0.0.1:<port>/#token=<token>`, the only way to
+// learn the per-launch token that /ws requires.
 //
 // The deckd client lives in this file, not in hub/deckd/client.mjs: that
 // client belongs to another task and did not exist when the spike was built.
@@ -13,6 +15,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { readFile, stat } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { WebSocketServer } from 'ws'
 import { encode, createLineDecoder, PROTO } from '../deckd/protocol.mjs'
 import { socketPaths } from '../deckd/main.mjs'
@@ -22,6 +25,15 @@ const hubDir = path.resolve(here, '..')
 const LOOPBACK = '127.0.0.1'
 const DEFAULT_PORT = 47899
 const REPLAY_LINES = 5000
+
+/**
+ * Sent on every HTTP response: no page may frame the spike, and the page
+ * loads only its own files (no inline script).
+ */
+const SECURITY_HEADERS = {
+  'x-frame-options': 'DENY',
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+}
 
 /** Fixed map of served files: nothing outside it is reachable. */
 const STATIC = new Map([
@@ -101,11 +113,27 @@ function wsSend (ws, msg) {
 
 /**
  * Start the spike server. Binds 127.0.0.1 only and refuses any other host.
+ * Every /ws upgrade must offer the returned `token` as a WebSocket
+ * subprotocol.
  * @param {{ runtimeDir: string, host?: string, port?: number, onDeckdClose?: () => void }} opts
- * @returns {Promise<{ port: number, address: string, close: () => Promise<void> }>}
+ * @returns {Promise<{ port: number, address: string, token: string, close: () => Promise<void> }>}
  */
 export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DEFAULT_PORT, onDeckdClose = () => {} }) {
   if (host !== LOOPBACK) throw new Error(`spike binds ${LOOPBACK} only, refusing host ${host}`)
+  const token = randomBytes(32).toString('base64url')
+  const tokenBuf = Buffer.from(token)
+  /**
+   * The offered subprotocol equal to the token, compared in constant time.
+   * @param {Iterable<string>} offered
+   * @returns {string | undefined}
+   */
+  const matchToken = (offered) => {
+    for (const p of offered) {
+      const b = Buffer.from(p)
+      if (b.length === tokenBuf.length && timingSafeEqual(b, tokenBuf)) return p
+    }
+    return undefined
+  }
 
   /**
    * Per PTY: the browsers watching it and whether their replay has been
@@ -176,7 +204,7 @@ export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DE
       ptyId = res.ptyId
     }
     if (!ptyId) {
-      wsSend(ws, { t: 'error', message: 'use ?pty=<id> or ?spawn=1&cwd=<path>' })
+      wsSend(ws, { t: 'error', message: 'use ?pty=<id>, or ?spawn=1&cwd=<absolute dir> and press the Start button' })
       ws.close()
       return
     }
@@ -217,12 +245,15 @@ export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DE
   // Any web page can make a browser open ws:// or http:// to loopback, and a
   // DNS-rebound name can reach 127.0.0.1 too. Only requests whose Host is
   // exactly 127.0.0.1:<port> are served, and a WebSocket upgrade must also
-  // carry Origin http://127.0.0.1:<port>, the page this server serves.
+  // carry Origin http://127.0.0.1:<port>, the page this server serves, and
+  // offer the per-launch token as a subprotocol. Non-browser clients can set
+  // Host and Origin freely; the token is what keeps them out.
   let boundPort = -1
   const hostOk = (/** @type {string | undefined} */ h) => h === `${LOOPBACK}:${boundPort}`
   const originOk = (/** @type {string | undefined} */ o) => o === `http://${LOOPBACK}:${boundPort}`
 
   const server = http.createServer(async (req, res) => {
+    for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v)
     if (!hostOk(req.headers.host)) {
       res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden host\n')
       return
@@ -243,7 +274,9 @@ export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DE
   const wss = new WebSocketServer({
     server,
     path: '/ws',
-    verifyClient: (info) => hostOk(info.req.headers.host) && originOk(info.req.headers.origin)
+    verifyClient: (info) => hostOk(info.req.headers.host) && originOk(info.req.headers.origin) &&
+      matchToken(String(info.req.headers['sec-websocket-protocol'] ?? '').split(',').map((p) => p.trim())) !== undefined,
+    handleProtocols: (protocols) => matchToken(protocols) ?? false
   })
   wss.on('connection', (ws, req) => {
     const q = new URL(req.url ?? '/ws', `http://${LOOPBACK}`).searchParams
@@ -269,7 +302,7 @@ export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DE
     await new Promise((resolve) => server.close(() => resolve(undefined)))
     deckd.close()
   }
-  return { port: addr.port, address: addr.address, close }
+  return { port: addr.port, address: addr.address, token, close }
 }
 
 async function main () {
@@ -293,7 +326,7 @@ async function main () {
       process.exit(1)
     }
   })
-  console.error(`spike listening on http://${spike.address}:${spike.port}/`)
+  process.stdout.write(`http://${spike.address}:${spike.port}/#token=${spike.token}\n`)
   const stop = () => { spike.close().then(() => process.exit(0), () => process.exit(1)) }
   process.on('SIGTERM', stop)
   process.on('SIGINT', stop)
