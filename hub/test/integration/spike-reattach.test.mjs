@@ -4,6 +4,7 @@
 // reattaches to the same PTY.
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
+import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
@@ -127,12 +128,49 @@ async function deckdClient (socketPath) {
 }
 
 /**
+ * Try a WebSocket upgrade and report the HTTP status of a refusal, or 101.
+ * @param {number} port
+ * @param {string} query
+ * @param {{ origin?: string, host?: string }} headers
+ * @returns {Promise<number>}
+ */
+function upgradeStatus (port, query, { origin, host }) {
+  /** @type {Record<string, string>} */
+  const extra = {}
+  if (host !== undefined) extra.host = host
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${query}`, origin === undefined ? { headers: extra } : { origin, headers: extra })
+  return new Promise((resolve, reject) => {
+    ws.once('open', () => { ws.terminate(); resolve(101) })
+    ws.once('unexpected-response', (_req, res) => { res.resume(); ws.terminate(); resolve(res.statusCode ?? 0) })
+    ws.once('error', (err) => reject(err))
+  })
+}
+
+/**
+ * GET a path with an explicit Host header.
+ * @param {number} port
+ * @param {string} p
+ * @param {string} host
+ * @returns {Promise<number>}
+ */
+function httpStatus (port, p, host) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path: p, headers: { host } }, (res) => {
+      res.resume()
+      resolve(res.statusCode ?? 0)
+    })
+    req.once('error', reject)
+  })
+}
+
+/**
  * A browser stand-in: collects spike messages and the terminal bytes it got.
+ * It sends the Origin the spike page itself would send.
  * @param {number} port
  * @param {string} query
  */
 async function browser (port, query) {
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${query}`)
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws?${query}`, { origin: `http://127.0.0.1:${port}` })
   /** @type {any[]} */
   const msgs = []
   /** @type {Set<() => void>} */
@@ -315,36 +353,124 @@ test('a PTY survives the spike server being SIGKILLed and a new server reattache
   }
 })
 
-test('output deckd sends before the screen response is not forwarded twice', async () => {
-  // A scripted deckd: while answering `screen` it first emits output X, which
-  // the replay already holds, then the response, then output Y.
+
+/**
+ * A scripted deckd on its own runtime dir, with a spike server in this
+ * process connected to it. `onScreen(n, reply, emit)` answers the n-th
+ * `screen` request (1-based).
+ * @param {(n: number, reply: (fields: object) => void, emit: (ev: object) => void) => void} onScreen
+ */
+async function scriptedDeckd (onScreen) {
   const own = await makeRuntimeDir()
   await mkdir(path.join(own.dir, 'fleetmates-deck'), { mode: 0o700 })
-  const b64 = (/** @type {string} */ s) => Buffer.from(s).toString('base64')
+  let screens = 0
   const fakeDeckd = net.createServer((socket) => {
     socket.on('data', createLineDecoder((req) => {
       const reply = (/** @type {object} */ fields) => socket.write(encode({ id: req.id, ok: true, ...fields }))
+      const emit = (/** @type {object} */ ev) => socket.write(encode(ev))
       if (req.op === 'hello') reply({ proto: 1, deckdVersion: 'fake', bootId: '0' })
       else if (req.op === 'attach') reply({ cols: 80, rows: 24 })
       else if (req.op === 'list') reply({ ptys: [] })
-      else if (req.op === 'screen') {
-        socket.write(encode({ ev: 'output', ptyId: 'pty_00000000', data: b64('X') }))
-        reply({ rev: 1, cols: 80, rows: 24, cursor: { x: 1, y: 0 }, lines: ['X'], scrollback: b64('X') })
-        socket.write(encode({ ev: 'output', ptyId: 'pty_00000000', data: b64('Y') }))
-      }
+      else if (req.op === 'screen') onScreen(++screens, reply, emit)
     }, () => {}))
     socket.on('error', () => {})
   })
   await new Promise((resolve) => fakeDeckd.listen(path.join(own.dir, 'fleetmates-deck', 'deckd.sock'), () => resolve(undefined)))
   const spike = await startSpikeServer({ runtimeDir: own.dir, port: 0 })
+  return {
+    spike,
+    async close () {
+      await spike.close()
+      await new Promise((resolve) => fakeDeckd.close(() => resolve(undefined)))
+      await own.cleanup()
+    }
+  }
+}
+
+const b64 = (/** @type {string} */ s) => Buffer.from(s).toString('base64')
+const screenReply = (/** @type {string} */ s) => ({ rev: 1, cols: 80, rows: 24, cursor: { x: 0, y: 0 }, lines: [s], scrollback: b64(s) })
+
+test('output deckd sends before the screen response is not forwarded twice', async () => {
+  // While answering `screen`, deckd first emits output X, which the replay
+  // already holds, then the response, then output Y.
+  const d = await scriptedDeckd((_n, reply, emit) => {
+    emit({ ev: 'output', ptyId: 'pty_00000000', data: b64('X') })
+    reply(screenReply('X'))
+    emit({ ev: 'output', ptyId: 'pty_00000000', data: b64('Y') })
+  })
   try {
-    const b = await browser(spike.port, 'pty=pty_00000000')
+    const b = await browser(d.spike.port, 'pty=pty_00000000')
     await b.until(() => b.text().includes('Y'), 'output Y')
     assert.equal(b.text(), 'XY')
     b.close()
   } finally {
-    await spike.close()
-    await new Promise((resolve) => fakeDeckd.close(() => resolve(undefined)))
-    await own.cleanup()
+    await d.close()
+  }
+})
+
+test('after a dropped event a live viewer gets a fresh replay', async () => {
+  const d = await scriptedDeckd((n, reply, emit) => {
+    reply(screenReply(n === 1 ? 'first' : 'second'))
+    if (n === 1) emit({ ev: 'dropped', ptyId: 'pty_00000000', bytes: 10 })
+  })
+  try {
+    const b = await browser(d.spike.port, 'pty=pty_00000000')
+    const replays = await b.until(() => {
+      const r = b.msgs.filter((m) => m.t === 'replay')
+      return r.length === 2 ? r : undefined
+    }, 'a second replay')
+    assert.deepEqual(replays.map((m) => Buffer.from(m.data, 'base64').toString()), ['first', 'second'])
+    b.close()
+  } finally {
+    await d.close()
+  }
+})
+
+test('the spike server refuses foreign or missing Origin and foreign Host, and spawns nothing', async () => {
+  const direct = await deckdClient(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
+  const spike = await startSpike()
+  try {
+    const before = (await direct.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId)
+    const port = spike.port
+    const good = `http://127.0.0.1:${port}`
+    const q = new URLSearchParams({ spawn: '1', cwd: rt.dir }).toString()
+    assert.equal(await upgradeStatus(port, q, { origin: 'https://evil.example' }), 401, 'foreign Origin')
+    assert.equal(await upgradeStatus(port, q, {}), 401, 'missing Origin')
+    assert.equal(await upgradeStatus(port, q, { origin: `http://localhost:${port}` }), 401, 'localhost Origin')
+    assert.equal(await upgradeStatus(port, q, { origin: good, host: `evil.example:${port}` }), 401, 'evil Host on WS')
+    assert.equal(await upgradeStatus(port, q, { origin: good, host: `localhost:${port}` }), 401, 'localhost Host on WS')
+    assert.equal(await httpStatus(port, '/', `evil.example:${port}`), 403, 'evil Host on HTTP')
+    assert.equal(await httpStatus(port, '/', `localhost:${port}`), 403, 'localhost Host on HTTP')
+    assert.equal(await httpStatus(port, '/', `127.0.0.1:${port}`), 200, 'own Host on HTTP')
+    const after = (await direct.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId)
+    assert.deepEqual(after, before, 'a refused upgrade spawned a PTY')
+    // The correct Host and Origin pair is accepted.
+    const b = await browser(port, new URLSearchParams({ pty: 'pty_ffffffff' }).toString())
+    await b.waitMsg((m) => m.t === 'error', 'the not-found error from an accepted upgrade')
+    b.close()
+  } finally {
+    direct.close()
+    spike.proc.kill('SIGKILL')
+    await exited(spike.proc)
+  }
+})
+
+test('spawn refuses a cwd that is relative, missing or not a directory', async () => {
+  const direct = await deckdClient(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
+  const spike = await startSpike()
+  try {
+    const before = (await direct.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId)
+    for (const cwd of ['', 'relative/dir', path.join(rt.dir, 'nope'), echoScript]) {
+      const b = await browser(spike.port, new URLSearchParams({ spawn: '1', cwd }).toString())
+      const err = await b.waitMsg((m) => m.t === 'error', `the refusal for cwd ${JSON.stringify(cwd)}`)
+      assert.match(err.message, /absolute path of an existing directory/)
+      b.close()
+    }
+    const after = (await direct.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId)
+    assert.deepEqual(after, before, 'a refused spawn created a PTY')
+  } finally {
+    direct.close()
+    spike.proc.kill('SIGKILL')
+    await exited(spike.proc)
   }
 })

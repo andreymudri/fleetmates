@@ -11,7 +11,7 @@
 import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { WebSocketServer } from 'ws'
 import { encode, createLineDecoder, PROTO } from '../deckd/protocol.mjs'
@@ -108,8 +108,9 @@ export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DE
   if (host !== LOOPBACK) throw new Error(`spike binds ${LOOPBACK} only, refusing host ${host}`)
 
   /**
-   * Per PTY: the browsers watching it, whether their replay has been sent,
-   * and output held back while a browser waits for its replay.
+   * Per PTY: the browsers watching it and whether their replay has been
+   * sent. Output that arrives while a browser waits for its replay is
+   * dropped for that browser, not queued: the replay already holds it.
    * @type {Map<string, Set<{ ws: import('ws').WebSocket, live: boolean }>>}
    */
   const viewers = new Map()
@@ -157,9 +158,16 @@ export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DE
   const onConnection = async (ws, q) => {
     let ptyId = q.get('pty')
     if (!ptyId && q.get('spawn') === '1') {
+      const cwd = q.get('cwd') ?? ''
+      const isDir = path.isAbsolute(cwd) && await stat(cwd).then((st) => st.isDirectory(), () => false)
+      if (!isDir) {
+        wsSend(ws, { t: 'error', message: 'spawn needs cwd to be an absolute path of an existing directory' })
+        ws.close()
+        return
+      }
       const cols = Number(q.get('cols')) || 120
       const rows = Number(q.get('rows')) || 30
-      const res = await deckd.request('spawn', { cwd: q.get('cwd') || process.cwd(), argv: ['claude'], env: {}, cols, rows, origin: 'launched' })
+      const res = await deckd.request('spawn', { cwd, argv: ['claude'], env: {}, cols, rows, origin: 'launched' })
       if (!res.ok) {
         wsSend(ws, { t: 'error', message: res.error.message })
         ws.close()
@@ -206,7 +214,19 @@ export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DE
     await replay(id, v)
   }
 
+  // Any web page can make a browser open ws:// or http:// to loopback, and a
+  // DNS-rebound name can reach 127.0.0.1 too. Only requests whose Host is
+  // exactly 127.0.0.1:<port> are served, and a WebSocket upgrade must also
+  // carry Origin http://127.0.0.1:<port>, the page this server serves.
+  let boundPort = -1
+  const hostOk = (/** @type {string | undefined} */ h) => h === `${LOOPBACK}:${boundPort}`
+  const originOk = (/** @type {string | undefined} */ o) => o === `http://${LOOPBACK}:${boundPort}`
+
   const server = http.createServer(async (req, res) => {
+    if (!hostOk(req.headers.host)) {
+      res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden host\n')
+      return
+    }
     const url = new URL(req.url ?? '/', `http://${LOOPBACK}`)
     const entry = STATIC.get(url.pathname)
     if (!entry || req.method !== 'GET') {
@@ -220,7 +240,11 @@ export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DE
       res.writeHead(500, { 'content-type': 'text/plain' }).end('cannot read file\n')
     }
   })
-  const wss = new WebSocketServer({ server, path: '/ws' })
+  const wss = new WebSocketServer({
+    server,
+    path: '/ws',
+    verifyClient: (info) => hostOk(info.req.headers.host) && originOk(info.req.headers.origin)
+  })
   wss.on('connection', (ws, req) => {
     const q = new URL(req.url ?? '/ws', `http://${LOOPBACK}`).searchParams
     onConnection(ws, q).catch((err) => {
@@ -237,6 +261,7 @@ export async function startSpikeServer ({ runtimeDir, host = LOOPBACK, port = DE
     })
   })
   const addr = /** @type {net.AddressInfo} */ (server.address())
+  boundPort = addr.port
 
   const close = async () => {
     for (const ws of wss.clients) ws.terminate()
