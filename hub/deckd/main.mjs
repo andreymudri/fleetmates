@@ -108,8 +108,14 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
   }
   /**
    * Queue output for one client, or drop it when the client's queue is over
-   * the cap. The first drop of an episode is reported at once; bytes dropped
-   * after that are reported when the queue drains.
+   * the cap. The first drop of an episode is reported at once. The episode
+   * ends in the write callback of that `dropped` event, so only after the
+   * backlog queued before it has been written (the callback can come later
+   * than the client reads the event); bytes dropped meanwhile are reported
+   * in a second `dropped`, and output flows again. The socket's 'drain'
+   * event is not used: it fires only after a write returned false, and with
+   * a cap below the socket's highWaterMark the cap is reached first, so
+   * the episode never ended.
    * @param {Conn} conn
    * @param {string} ptyId
    * @param {Buffer} data
@@ -124,7 +130,11 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
     }
     if (already === undefined) {
       conn.dropped.set(ptyId, 0)
-      send(conn, { ev: 'dropped', ptyId, bytes: data.length })
+      conn.socket.write(encode({ ev: 'dropped', ptyId, bytes: data.length }), (err) => {
+        const more = conn.dropped.get(ptyId)
+        conn.dropped.delete(ptyId)
+        if (!err && more) send(conn, { ev: 'dropped', ptyId, bytes: more })
+      })
     } else {
       conn.dropped.set(ptyId, already + data.length)
     }
@@ -325,12 +335,6 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       (e) => send(conn, { ok: false, error: { code: e.code, message: 'line is not JSON' } })
     )
     socket.on('data', decode)
-    socket.on('drain', () => {
-      for (const [ptyId, bytes] of conn.dropped) {
-        if (bytes > 0) send(conn, { ev: 'dropped', ptyId, bytes })
-      }
-      conn.dropped.clear()
-    })
     socket.on('error', () => {})
     socket.on('close', () => {
       conns.delete(conn)

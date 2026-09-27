@@ -11,7 +11,7 @@ import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const mainPath = path.resolve(here, '..', '..', 'deckd', 'main.mjs')
 const stubDir = path.join(here, 'stubs')
-const QUEUE_CAP = 64 * 1024
+const QUEUE_CAP = 16 * 1024
 
 /**
  * A deckd client for tests: request/response by id, events collected in order.
@@ -260,20 +260,41 @@ test('resize follows the last input source only', async () => {
   assert.ok(!c.output(ptyId).includes('SIZE 90x20'))
 })
 
-test('a client that stops reading receives dropped after the cap', async () => {
+test('a client that stops reading receives dropped after the cap, then output again', async () => {
+  // The main client stops streaming so that only `slow` is subject to the cap
+  // here; the test then waits on deckd's own screen model, never on how fast
+  // this process reads.
+  await c.request('attach', { ptyId, stream: false })
   const slow = await connect(socketPath)
   try {
     await slow.request('hello', { proto: 1, client: { kind: 'terminal', name: 'slow' } })
     await slow.request('attach', { ptyId, stream: true })
     slow.socket.pause()
+    // 2 MiB of echo: far more than the kernel socket buffer plus the cap.
     const chunk = Buffer.alloc(32 * 1024, 'x').toString('base64')
     for (let i = 0; i < 64; i++) {
       await c.request('write', { ptyId, data: chunk, source: { kind: 'browser', name: 'chromium' } })
     }
-    await until(() => c.output(ptyId).length > 1.5 * 1024 * 1024, 'the fast client to see the flood', 15000)
+    await c.request('write', { ptyId, data: Buffer.from('END-FLOOD').toString('base64'), source: { kind: 'browser', name: 'chromium' } })
+    // Output reaches every client before the screen model parses it, so once
+    // the marker is on screen deckd has already queued or dropped the flood for `slow`.
+    const deadline = Date.now() + 30000
+    while (!(await c.request('screen', { ptyId, scrollback: 0 })).lines.some((/** @type {string} */ l) => l.includes('END-FLOOD'))) {
+      if (Date.now() > deadline) throw new Error('END-FLOOD never reached the screen model')
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
     slow.socket.resume()
     const dropped = await slow.waitFor((e) => e.ev === 'dropped' && e.ptyId === ptyId, 10000)
     assert.ok(dropped.bytes > 0)
+    // Once the backlog is flushed the client gets output again. Output echoed
+    // before deckd has seen that flush is still dropped (and counted in a
+    // later `dropped`), so keep typing a marker until one arrives.
+    const deadline2 = Date.now() + 10000
+    while (!slow.output(ptyId).includes('AFTER-DROP')) {
+      if (Date.now() > deadline2) throw new Error('output never reached the client again after the drop')
+      await c.request('write', { ptyId, data: Buffer.from('AFTER-DROP').toString('base64'), source: { kind: 'browser', name: 'chromium' } })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
   } finally {
     slow.close()
   }
