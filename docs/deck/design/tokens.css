@@ -1,0 +1,541 @@
+/* fleetmates deck design tokens. GENERATED from tokens.json by tools/build-tokens.mjs (design-system.md section 2.3). Do not edit by hand. */
+/* Single fixed dark theme (Decided). No light mode, no theme switching. */
+
+/* Fonts are self-hosted (08-security.md CSP: font-src self). The app imports the @font-face rules from the geist npm package; no CDN. */
+
+:root {
+  color-scheme: dark;
+
+  /* color */
+  --color-ink-400: #666e94;
+  --color-ink-500: #3a3f5c;
+  --color-ink-600: #2b2f45;
+  --color-ink-700: #22243a;
+  --color-ink-800: #1b1c26;
+  --color-ink-850: #181922;
+  --color-ink-900: #15161e;
+  --color-ink-950: #0f1016;
+  --color-fog-100: #e6e9f7;
+  --color-fog-300: #c8d0f0;
+  --color-fog-400: #b4bbdb;
+  --color-fog-500: #8f96b8;
+  --color-teal-100: #9fd6d6;
+  --color-teal-150: #bdeeee;
+  --color-teal-200: #a6f0f0;
+  --color-teal-300: #7fe3e3;
+  --color-teal-400: #59d0d0;
+  --color-teal-500: #3cc8c8;
+  --color-teal-600: #35b0b0;
+  --color-teal-700: #2f5f5f;
+  --color-teal-850: #1d3a3a;
+  --color-teal-900: #16302f;
+  --color-teal-950: #0e2a2b;
+  --color-green-200: #b9d98f;
+  --color-green-400: #9ece6a;
+  --color-green-700: #3f5a2e;
+  --color-green-900: #1f2a1c;
+  --color-amber-100: #f0dcb4;
+  --color-amber-200: #e8c690;
+  --color-amber-250: #c59a5c;
+  --color-amber-300: #e5bb7f;
+  --color-amber-400: #e0af68;
+  --color-amber-500: #d6a86a;
+  --color-amber-700: #7a6036;
+  --color-amber-750: #4d3f28;
+  --color-amber-800: #3a3120;
+  --color-amber-900: #2c261c;
+  --color-purple-250: #a588d9;
+  --color-purple-300: #c5a9f8;
+  --color-purple-400: #bb9af7;
+  --color-purple-700: #5b4a86;
+  --color-purple-900: #231f33;
+  --color-purple-950: #1d1530;
+  --color-red-100: #c48d98;
+  --color-red-150: #e7c3ca;
+  --color-red-200: #f4b3be;
+  --color-red-250: #d9687d;
+  --color-red-300: #f88b9f;
+  --color-red-400: #f7768e;
+  --color-red-700: #6b2d3a;
+  --color-red-850: #4a2630;
+  --color-red-900: #2e1c22;
+  --color-red-950: #2a0f15;
+  --color-blue-300: #9db8f8;
+  --color-blue-400: #7aa2f7;
+  --color-blue-900: #1f2740;
+  --color-cyan-400: #7dcfff;
+  --color-orange-400: #ff9e64;
+  --color-black: #000000;
+  --color-white: #ffffff;
+
+  /* crew */
+  --crew-slot-0: #ff9e64;
+  --crew-slot-1: #f7768e;
+  --crew-slot-2: #7aa2f7;
+  --crew-slot-3: #73daca;
+  --crew-slot-4: #bb9af7;
+  --crew-slot-5: #7dcfff;
+  --crew-slot-6: #c3e88d;
+  --crew-slot-7: #e0c98a;
+  --crew-slot-8: #f5a3d7;
+  --crew-research: #c0caf5;
+  --crew-ink: var(--color-ink-900);
+  --crew-hat-team: var(--color-teal-500);
+  --crew-signal-needs: var(--color-amber-400);
+  --crew-signal-idle: var(--color-fog-500);
+  --crew-signal-crashed: var(--color-red-400);
+  --crew-shade-light: 0.35;
+  --crew-shade-dark: 0.35;
+  --crew-size-sm: 27px;
+  --crew-size-md: 36px;
+  --crew-size-lg: 45px;
+  --crew-size-xl: 72px;
+
+  /* bg */
+  --bg-sunken: var(--color-ink-950);
+  --bg-canvas: var(--color-ink-900);
+  --bg-sidebar: var(--color-ink-850);
+  --bg-surface: var(--color-ink-800);
+  --bg-raised: var(--color-ink-700);
+  --bg-control: var(--color-ink-600);
+  --bg-hover: rgba(200, 208, 240, 0.06);
+  --bg-press: rgba(200, 208, 240, 0.10);
+  --bg-selected: var(--color-ink-700);
+  --bg-skeleton: var(--color-ink-700);
+  --bg-skeleton-highlight: var(--color-ink-600);
+  --bg-mark: var(--color-teal-900);
+
+  /* text */
+  --text-strong: var(--color-fog-100);
+  --text-default: var(--color-fog-300);
+  --text-secondary: var(--color-fog-400);
+  --text-muted: var(--color-fog-500);
+  --text-link: var(--color-teal-300);
+  --text-link-hover: var(--color-teal-200);
+  --text-on-primary: var(--color-teal-950);
+  --text-on-primary-disabled: var(--color-teal-100);
+  --text-on-amber: var(--color-ink-900);
+  --text-on-danger: var(--color-red-950);
+  --text-on-danger-disabled: var(--color-red-100);
+  --text-on-purple: var(--color-purple-950);
+  --text-on-teal-tint: var(--color-teal-150);
+  --text-on-amber-tint: var(--color-amber-100);
+  --text-on-amber-tint-secondary: var(--color-amber-200);
+  --text-on-green-tint: var(--color-green-200);
+  --text-on-red-tint: var(--color-red-200);
+  --text-on-red-tint-secondary: var(--color-red-150);
+  --text-on-blue-tint: var(--color-blue-300);
+  --text-code: var(--color-cyan-400);
+  --text-diff-add: var(--color-green-400);
+  --text-diff-del: var(--color-red-400);
+
+  /* border */
+  --border-subtle: var(--color-ink-700);
+  --border-default: var(--color-ink-600);
+  --border-strong: var(--color-ink-500);
+  --border-field: var(--color-ink-400);
+  --border-field-focus: var(--color-teal-500);
+
+  /* brand */
+  --brand-accent: var(--color-teal-500);
+  --brand-accent-hover: var(--color-teal-400);
+  --brand-accent-press: var(--color-teal-600);
+  --brand-accent-tint: var(--color-teal-900);
+  --brand-accent-border: var(--color-teal-700);
+  --brand-accent-strong-tint: var(--color-teal-850);
+
+  /* focus */
+  --focus-ring: var(--color-teal-300);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* state */
+  --state-starting-fg: var(--color-green-400);
+  --state-starting-bg: var(--color-green-900);
+  --state-starting-border: var(--color-ink-600);
+  --state-running-fg: var(--color-green-400);
+  --state-running-bg: var(--color-green-900);
+  --state-running-border: var(--color-ink-600);
+  --state-needs-approval-fg: var(--color-amber-400);
+  --state-needs-approval-bg: var(--color-amber-900);
+  --state-needs-approval-border: var(--color-amber-700);
+  --state-asked-you-fg: var(--color-amber-400);
+  --state-asked-you-bg: var(--color-amber-900);
+  --state-asked-you-border: var(--color-amber-700);
+  --state-done-fg: var(--color-purple-400);
+  --state-done-bg: var(--color-purple-900);
+  --state-done-border: var(--color-purple-700);
+  --state-stale-fg: var(--color-amber-500);
+  --state-stale-bg: var(--color-amber-900);
+  --state-stale-border: var(--color-amber-750);
+  --state-idle-fg: var(--color-fog-500);
+  --state-idle-bg: var(--color-ink-700);
+  --state-idle-border: var(--color-ink-600);
+  --state-reviewed-fg: var(--color-purple-400);
+  --state-reviewed-bg: var(--color-purple-900);
+  --state-reviewed-border: var(--color-ink-600);
+  --state-crashed-fg: var(--color-red-400);
+  --state-crashed-bg: var(--color-red-900);
+  --state-crashed-border: var(--color-red-700);
+  --state-ended-fg: var(--color-fog-500);
+  --state-ended-bg: var(--color-ink-700);
+  --state-ended-border: var(--color-ink-600);
+  --state-draft-fg: var(--color-purple-400);
+  --state-draft-bg: var(--color-purple-900);
+  --state-draft-border: var(--color-purple-700);
+
+  /* tier */
+  --tier-safe-fg: var(--color-green-400);
+  --tier-safe-bg: var(--color-green-900);
+  --tier-safe-border: var(--color-green-700);
+  --tier-caution-fg: var(--color-amber-400);
+  --tier-caution-bg: var(--color-amber-900);
+  --tier-caution-border: var(--color-amber-700);
+  --tier-destructive-fg: var(--color-red-400);
+  --tier-destructive-bg: var(--color-red-900);
+  --tier-destructive-border: var(--color-red-700);
+  --tier-question-fg: var(--color-amber-400);
+  --tier-question-bg: var(--color-amber-900);
+  --tier-question-border: var(--color-amber-700);
+
+  /* domain */
+  --domain-index: var(--color-fog-300);
+  --domain-nestjs: var(--color-blue-400);
+  --domain-docker: var(--color-cyan-400);
+  --domain-patterns: var(--color-purple-400);
+  --domain-concorrencia: var(--color-orange-400);
+  --domain-projects: var(--color-green-400);
+
+  /* overlay */
+  --overlay-scrim: rgba(10, 11, 16, 0.66);
+  --overlay-on-primary-kbd: rgba(14, 42, 43, 0.18);
+
+  /* shadow */
+  --shadow-dialog: 0px 24px 80px 0px rgba(0, 0, 0, 0.5);
+  --shadow-drawer: -24px 0px 60px 0px rgba(0, 0, 0, 0.4);
+  --shadow-toast: 0px 12px 40px 0px rgba(0, 0, 0, 0.45);
+  --shadow-ring-selected: inset 3px 0px 0px 0px var(--color-teal-500);
+  --shadow-ring-needs: inset 0px 0px 0px 1px var(--color-amber-700);
+  --shadow-glow-cited: 0px 0px 0px 3px var(--color-ink-900), 0px 0px 0px 5px var(--color-teal-500), 0px 0px 24px 6px rgba(60, 200, 200, 0.35);
+
+  /* space */
+  --space-0: 0px;
+  --space-2: 2px;
+  --space-4: 4px;
+  --space-6: 6px;
+  --space-8: 8px;
+  --space-10: 10px;
+  --space-12: 12px;
+  --space-14: 14px;
+  --space-16: 16px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-28: 28px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+  --space-56: 56px;
+  --space-64: 64px;
+  --space-72: 72px;
+
+  /* radius */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-2xl: 14px;
+  --radius-3xl: 16px;
+  --radius-pill: 999px;
+  --radius-round: 50%;
+  --radius-bubble: 12px 12px 4px 12px;
+
+  /* size */
+  --size-control-xs: 28px;
+  --size-control-sm: 32px;
+  --size-control-md: 36px;
+  --size-control-lg: 40px;
+  --size-control-xl: 44px;
+  --size-control-hero: 48px;
+  --size-icon-xs: 12px;
+  --size-icon-sm: 14px;
+  --size-icon-md: 16px;
+  --size-icon-lg: 20px;
+  --size-icon-logo: 22px;
+  --size-dot-sm: 6px;
+  --size-dot-md: 8px;
+  --size-dot-lg: 10px;
+  --size-bar-sm: 6px;
+  --size-bar-md: 8px;
+
+  /* font */
+  --font-family-sans: Geist, system-ui, sans-serif;
+  --font-family-mono: 'Geist Mono', ui-monospace, monospace;
+  --font-weight-regular: 400;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --font-size-2xs: 11px;
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-md: 15px;
+  --font-size-lg: 16px;
+  --font-size-xl: 18px;
+  --font-size-2xl: 20px;
+  --font-size-3xl: 22px;
+  --font-size-4xl: 28px;
+  --font-size-5xl: 34px;
+  --font-size-6xl: 40px;
+  --font-line-height-tight: 1.3;
+  --font-line-height-snug: 1.4;
+  --font-line-height-normal: 1.5;
+  --font-line-height-code: 1.6;
+  --font-line-height-prose: 1.65;
+  --font-letter-spacing-display: -0.02em;
+  --font-letter-spacing-title: -0.01em;
+  --font-letter-spacing-normal: 0em;
+  --font-letter-spacing-eyebrow: 0.06em;
+  --font-letter-spacing-cluster: 0.1em;
+
+  /* type */
+  --type-display: var(--font-weight-semibold) var(--font-size-6xl)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-display-tracking: var(--font-letter-spacing-display);
+  --type-welcome: var(--font-weight-semibold) var(--font-size-5xl)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-welcome-tracking: var(--font-letter-spacing-display);
+  --type-heading-detail: var(--font-weight-semibold) var(--font-size-4xl)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-heading-detail-tracking: var(--font-letter-spacing-title);
+  --type-page-title: var(--font-weight-semibold) var(--font-size-3xl)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-page-title-tracking: var(--font-letter-spacing-title);
+  --type-dialog-title: var(--font-weight-semibold) var(--font-size-2xl)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-dialog-title-tracking: var(--font-letter-spacing-normal);
+  --type-section-title: var(--font-weight-semibold) var(--font-size-xl)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-section-title-tracking: var(--font-letter-spacing-normal);
+  --type-panel-title: var(--font-weight-semibold) var(--font-size-lg)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-panel-title-tracking: var(--font-letter-spacing-normal);
+  --type-card-title: var(--font-weight-semibold) var(--font-size-md)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-card-title-tracking: var(--font-letter-spacing-normal);
+  --type-prose: var(--font-weight-regular) var(--font-size-lg)/var(--font-line-height-prose) var(--font-family-sans);
+  --type-prose-tracking: var(--font-letter-spacing-normal);
+  --type-body: var(--font-weight-regular) var(--font-size-base)/var(--font-line-height-normal) var(--font-family-sans);
+  --type-body-tracking: var(--font-letter-spacing-normal);
+  --type-body-sm: var(--font-weight-regular) var(--font-size-sm)/var(--font-line-height-normal) var(--font-family-sans);
+  --type-body-sm-tracking: var(--font-letter-spacing-normal);
+  --type-label: var(--font-weight-semibold) var(--font-size-sm)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-label-tracking: var(--font-letter-spacing-normal);
+  --type-meta: var(--font-weight-regular) var(--font-size-xs)/var(--font-line-height-normal) var(--font-family-sans);
+  --type-meta-tracking: var(--font-letter-spacing-normal);
+  --type-pill: var(--font-weight-semibold) var(--font-size-xs)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-pill-tracking: var(--font-letter-spacing-normal);
+  --type-eyebrow: var(--font-weight-semibold) var(--font-size-xs)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-eyebrow-tracking: var(--font-letter-spacing-eyebrow);
+  --type-badge: var(--font-weight-bold) var(--font-size-2xs)/var(--font-line-height-tight) var(--font-family-sans);
+  --type-badge-tracking: var(--font-letter-spacing-normal);
+  --type-mono: var(--font-weight-regular) var(--font-size-xs)/var(--font-line-height-code) var(--font-family-mono);
+  --type-mono-tracking: var(--font-letter-spacing-normal);
+  --type-mono-md: var(--font-weight-regular) var(--font-size-sm)/var(--font-line-height-normal) var(--font-family-mono);
+  --type-mono-md-tracking: var(--font-letter-spacing-normal);
+  --type-kbd: var(--font-weight-regular) var(--font-size-2xs)/var(--font-line-height-tight) var(--font-family-mono);
+  --type-kbd-tracking: var(--font-letter-spacing-normal);
+  --type-terminal: var(--font-weight-regular) var(--font-size-base)/1.2 var(--font-family-mono);
+  --type-terminal-tracking: var(--font-letter-spacing-normal);
+
+  /* motion */
+  --motion-duration-instant: 0ms;
+  --motion-duration-fast: 100ms;
+  --motion-duration-normal: 160ms;
+  --motion-duration-moderate: 200ms;
+  --motion-duration-slow: 280ms;
+  --motion-duration-loop-blink: 1100ms;
+  --motion-duration-loop-alert: 1600ms;
+  --motion-duration-loop-ambient: 2400ms;
+  --motion-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --motion-easing-enter: cubic-bezier(0, 0, 0.2, 1);
+  --motion-easing-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-easing-ambient: cubic-bezier(0.37, 0, 0.63, 1);
+  --motion-easing-linear: cubic-bezier(0, 0, 1, 1);
+  --motion-distance-dialog: 8px;
+  --motion-distance-toast: 12px;
+  --motion-distance-press: 1px;
+
+  /* z */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-drawer: 30;
+  --z-dialog: 40;
+  --z-palette: 50;
+  --z-toast: 60;
+  --z-tooltip: 70;
+
+  /* layout */
+  --layout-rail: 64px;
+  --layout-rail-item: 44px;
+  --layout-rail-collapsed-list: 72px;
+  --layout-list: 264px;
+  --layout-nav: 300px;
+  --layout-aside: 380px;
+  --layout-panel-sm: 440px;
+  --layout-panel-md: 600px;
+  --layout-dialog: 700px;
+  --layout-readable: 820px;
+  --layout-content: 980px;
+  --layout-header-lg: 84px;
+  --layout-header-md: 72px;
+  --layout-header-sm: 64px;
+  --layout-toolbar: 52px;
+  --layout-rec-bar: 40px;
+  --layout-quiet-row: 176px;
+  --layout-gate-lane: 104px;
+  --layout-chat-bubble-max: 420px;
+
+  /* breakpoint */
+  --breakpoint-wide: 1920px;
+  --breakpoint-desktop: 1440px;
+  --breakpoint-laptop: 1280px;
+  --breakpoint-short: 1000px;
+
+  /* component */
+  --component-button-primary-bg: var(--brand-accent);
+  --component-button-primary-bg-hover: var(--brand-accent-hover);
+  --component-button-primary-bg-press: var(--brand-accent-press);
+  --component-button-primary-bg-disabled: var(--color-teal-850);
+  --component-button-amber-bg: var(--color-amber-400);
+  --component-button-amber-bg-hover: var(--color-amber-300);
+  --component-button-amber-bg-press: var(--color-amber-250);
+  --component-button-danger-bg: var(--color-red-400);
+  --component-button-danger-bg-hover: var(--color-red-300);
+  --component-button-danger-bg-press: var(--color-red-250);
+  --component-button-danger-bg-disabled: var(--color-red-850);
+  --component-button-purple-bg: var(--color-purple-400);
+  --component-button-purple-bg-hover: var(--color-purple-300);
+  --component-button-purple-bg-press: var(--color-purple-250);
+  --component-pill-padding-y: var(--space-4);
+  --component-pill-padding-x: var(--space-10);
+  --component-pill-gap: var(--space-6);
+  --component-badge-padding-y: var(--space-2);
+  --component-badge-padding-x: var(--space-6);
+  --component-kbd-bg: var(--bg-control);
+  --component-kbd-fg: var(--text-secondary);
+  --component-kbd-padding-x: var(--space-6);
+  --component-card-padding: var(--space-20);
+  --component-card-padding-quiet: 14px 16px;
+  --component-card-gap: var(--space-12);
+  --component-terminal-background: var(--bg-sunken);
+  --component-terminal-foreground: var(--text-default);
+  --component-terminal-cursor: var(--text-default);
+  --component-terminal-selection: rgba(122, 162, 247, 0.30);
+  --component-terminal-black: var(--color-ink-600);
+  --component-terminal-red: var(--color-red-400);
+  --component-terminal-green: var(--color-green-400);
+  --component-terminal-yellow: var(--color-amber-400);
+  --component-terminal-blue: var(--color-blue-400);
+  --component-terminal-magenta: var(--color-purple-400);
+  --component-terminal-cyan: var(--color-cyan-400);
+  --component-terminal-white: var(--color-fog-400);
+  --component-terminal-bright-black: var(--color-fog-500);
+  --component-terminal-bright-white: var(--color-fog-100);
+  --component-log-prompt: var(--color-blue-400);
+  --component-log-tool: var(--text-muted);
+  --component-log-prose: var(--text-default);
+  --component-log-success: var(--color-green-400);
+  --component-log-waiting: var(--color-amber-400);
+  --component-log-memory: var(--color-teal-300);
+  --component-log-error: var(--color-red-400);
+  --component-log-stale: var(--color-amber-500);
+  --component-log-reviewed: var(--color-purple-400);
+  --component-graph-edge: #353a55;
+  --component-graph-edge-lit: var(--color-teal-500);
+  --component-graph-label-new: var(--text-strong);
+  --component-graph-arrive-ring: rgba(230, 233, 247, 0.35);
+
+  /* composed motion shorthands */
+  --transition-hover: background-color var(--motion-duration-fast) var(--motion-easing-standard), color var(--motion-duration-fast) var(--motion-easing-standard), border-color var(--motion-duration-fast) var(--motion-easing-standard);
+  --transition-press: transform var(--motion-duration-fast) var(--motion-easing-standard);
+}
+
+html { font-size: var(--font-size-base); }
+body {
+  margin: 0;
+  background: var(--bg-canvas);
+  color: var(--text-default);
+  font: var(--type-body);
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--text-link); }
+a:hover { color: var(--text-link-hover); }
+
+/* Focus: one ring for everything interactive (Proposed). Never remove outlines without this replacement. */
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+.focus-inset:focus-visible { outline-offset: calc(var(--focus-ring-width) * -1); }
+
+/* Visually hidden but announced. Replaces the canvas "left: -9999px" labels. */
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.sr-only-focusable:focus,
+.sr-only-focusable:focus-within {
+  position: static !important;
+  width: auto;
+  height: auto;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: normal;
+}
+
+/* Named motions (design-system.md section 9). */
+@keyframes deck-breathe { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.75); } }
+@keyframes deck-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(224, 175, 104, 0); } 50% { box-shadow: 0 0 0 5px rgba(224, 175, 104, 0.16); } }
+@keyframes deck-rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes deck-arrive { 0%, 100% { box-shadow: 0 0 0 3px rgba(230, 233, 247, 0.35), 0 0 16px 4px rgba(230, 233, 247, 0.25); } 50% { box-shadow: 0 0 0 7px rgba(230, 233, 247, 0.08), 0 0 26px 8px rgba(230, 233, 247, 0.12); } }
+@keyframes deck-caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@keyframes deck-shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+@keyframes deck-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes deck-rise-in { from { opacity: 0; transform: translateY(var(--motion-distance-dialog)) scale(0.98); } to { opacity: 1; transform: none; } }
+@keyframes deck-drawer-in { from { transform: translateX(100%); } to { transform: none; } }
+@keyframes deck-toast-in { from { opacity: 0; transform: translateX(var(--motion-distance-toast)); } to { opacity: 1; transform: none; } }
+
+.motion-breathe { animation: deck-breathe var(--motion-duration-loop-ambient) var(--motion-easing-ambient) infinite; }
+.motion-pulse { animation: deck-pulse var(--motion-duration-loop-ambient) var(--motion-easing-ambient) infinite; }
+.motion-rec-pulse { animation: deck-rec-pulse var(--motion-duration-loop-alert) var(--motion-easing-ambient) infinite; }
+.motion-arrive { animation: deck-arrive var(--motion-duration-loop-ambient) var(--motion-easing-ambient) infinite; }
+.motion-caret { animation: deck-caret var(--motion-duration-loop-blink) steps(1, end) infinite; }
+.motion-shimmer {
+  background: linear-gradient(90deg, var(--bg-skeleton) 0, var(--bg-skeleton-highlight) 40%, var(--bg-skeleton) 80%);
+  background-size: 800px 100%;
+  animation: deck-shimmer var(--motion-duration-loop-alert) linear infinite;
+}
+
+/* Reduced motion: handled once, here. Loops stop in a static state that still carries the meaning
+   (every animated signal also has a label or icon). Transforms are removed; short opacity fades stay. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration-fast: 0ms;
+    --motion-duration-normal: 100ms;
+    --motion-duration-moderate: 100ms;
+    --motion-duration-slow: 100ms;
+    --motion-distance-dialog: 0px;
+    --motion-distance-toast: 0px;
+    --motion-distance-press: 0px;
+  }
+  .motion-breathe,
+  .motion-pulse,
+  .motion-rec-pulse,
+  .motion-caret,
+  .motion-shimmer { animation: none; }
+  .motion-pulse { box-shadow: 0 0 0 1px var(--color-amber-700); }
+  .motion-arrive { animation: none; box-shadow: 0 0 0 3px rgba(230, 233, 247, 0.35); }
+  .motion-shimmer { background: var(--bg-skeleton); }
+  @keyframes deck-drawer-in { from { opacity: 0; } to { opacity: 1; } }
+  *, *::before, *::after { scroll-behavior: auto !important; }
+}

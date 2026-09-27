@@ -1,0 +1,524 @@
+[
+ [
+  "text.strong",
+  "bg.canvas",
+  "Commands, focused input",
+  "body"
+ ],
+ [
+  "text.strong",
+  "bg.surface",
+  "Commands in request rows",
+  "body"
+ ],
+ [
+  "text.strong",
+  "bg.raised",
+  "Palette input, dialog emphasis",
+  "body"
+ ],
+ [
+  "text.strong",
+  "bg.sunken",
+  "Terminal bright white",
+  "body"
+ ],
+ [
+  "text.default",
+  "bg.canvas",
+  "Body on page",
+  "body"
+ ],
+ [
+  "text.default",
+  "bg.sidebar",
+  "Sidebar rows, quiet cards",
+  "body"
+ ],
+ [
+  "text.default",
+  "bg.surface",
+  "Body in cards and panels",
+  "body"
+ ],
+ [
+  "text.default",
+  "bg.raised",
+  "Chips, dialogs, selected rows",
+  "body"
+ ],
+ [
+  "text.default",
+  "bg.control",
+  "User chat bubble, selected tab",
+  "body"
+ ],
+ [
+  "text.default",
+  "bg.sunken",
+  "Terminal foreground, diff context",
+  "body"
+ ],
+ [
+  "text.secondary",
+  "bg.canvas",
+  "Secondary lines on page",
+  "body"
+ ],
+ [
+  "text.secondary",
+  "bg.sidebar",
+  "Quiet card line",
+  "body"
+ ],
+ [
+  "text.secondary",
+  "bg.surface",
+  "Secondary lines in cards",
+  "body"
+ ],
+ [
+  "text.secondary",
+  "bg.raised",
+  "Tag property chip",
+  "body"
+ ],
+ [
+  "text.secondary",
+  "bg.control",
+  "kbd chip",
+  "body"
+ ],
+ [
+  "text.secondary",
+  "bg.sunken",
+  "Frontmatter block",
+  "body"
+ ],
+ [
+  "text.muted",
+  "bg.canvas",
+  "Meta on page, wells inside cards",
+  "body"
+ ],
+ [
+  "text.muted",
+  "bg.sidebar",
+  "Meta in sidebars",
+  "body"
+ ],
+ [
+  "text.muted",
+  "bg.surface",
+  "Meta in cards, eyebrows",
+  "body"
+ ],
+ [
+  "text.muted",
+  "bg.raised",
+  "Meta in dialogs and palette",
+  "body"
+ ],
+ [
+  "text.muted",
+  "bg.control",
+  "Muted text on a selected row",
+  "body"
+ ],
+ [
+  "text.muted",
+  "bg.sunken",
+  "Tool lines in terminals and tails",
+  "body"
+ ],
+ [
+  "text.link",
+  "bg.canvas",
+  "Links",
+  "body"
+ ],
+ [
+  "text.link",
+  "bg.surface",
+  "Links in cards",
+  "body"
+ ],
+ [
+  "text.link",
+  "bg.raised",
+  "Backlink rows, glyph tiles",
+  "body"
+ ],
+ [
+  "text.link",
+  "bg.sunken",
+  "Memory lines in logs",
+  "body"
+ ],
+ [
+  "text.link",
+  "brand.accent-strong-tint",
+  "Active rail icon",
+  "ui"
+ ],
+ [
+  "text.link-hover",
+  "bg.surface",
+  "Link hover",
+  "body"
+ ],
+ [
+  "text.on-teal-tint",
+  "brand.accent-tint",
+  "Citations, callouts, search marks",
+  "body"
+ ],
+ [
+  "text.link",
+  "brand.accent-tint",
+  "Learned chip, timestamps in callouts",
+  "body"
+ ],
+ [
+  "text.on-primary",
+  "brand.accent",
+  "Primary button label",
+  "body"
+ ],
+ [
+  "text.on-primary",
+  "brand.accent-hover",
+  "Primary button hover",
+  "body"
+ ],
+ [
+  "text.on-primary",
+  "brand.accent-press",
+  "Primary button pressed",
+  "body"
+ ],
+ [
+  "text.on-primary-disabled",
+  "component.button.primary-bg-disabled",
+  "Disabled primary (kept readable, exempt from 1.4.3)",
+  "body"
+ ],
+ [
+  "text.on-amber",
+  "component.button.amber-bg",
+  "Amber filled button, rail count badge",
+  "body"
+ ],
+ [
+  "text.on-amber",
+  "component.button.amber-bg-hover",
+  "Amber filled hover",
+  "body"
+ ],
+ [
+  "text.on-amber",
+  "component.button.amber-bg-press",
+  "Amber filled pressed",
+  "body"
+ ],
+ [
+  "text.on-danger",
+  "component.button.danger-bg",
+  "Danger filled button",
+  "body"
+ ],
+ [
+  "text.on-danger",
+  "component.button.danger-bg-hover",
+  "Danger filled hover",
+  "body"
+ ],
+ [
+  "text.on-danger",
+  "component.button.danger-bg-press",
+  "Danger filled pressed",
+  "body"
+ ],
+ [
+  "text.on-danger-disabled",
+  "component.button.danger-bg-disabled",
+  "Disabled destructive Allow once",
+  "body"
+ ],
+ [
+  "text.on-purple",
+  "component.button.purple-bg",
+  "Review changes",
+  "body"
+ ],
+ [
+  "text.on-purple",
+  "component.button.purple-bg-hover",
+  "Review changes hover",
+  "body"
+ ],
+ [
+  "state.running.fg",
+  "state.running.bg",
+  "Running pill (fixed tint)",
+  "body"
+ ],
+ [
+  "state.running.fg",
+  "bg.surface",
+  "Running text state",
+  "body"
+ ],
+ [
+  "state.running.fg",
+  "bg.sunken",
+  "Success lines in logs",
+  "body"
+ ],
+ [
+  "state.needs-approval.fg",
+  "state.needs-approval.bg",
+  "Needs approval and Asked you pills",
+  "body"
+ ],
+ [
+  "state.needs-approval.fg",
+  "bg.surface",
+  "Amber text states",
+  "body"
+ ],
+ [
+  "state.needs-approval.fg",
+  "bg.sunken",
+  "Waiting lines in logs",
+  "body"
+ ],
+ [
+  "state.done.fg",
+  "state.done.bg",
+  "Done, Reviewed and Draft pills",
+  "body"
+ ],
+ [
+  "state.done.fg",
+  "bg.surface",
+  "Done text state",
+  "body"
+ ],
+ [
+  "state.done.fg",
+  "bg.sidebar",
+  "Reviewed on quiet card",
+  "body"
+ ],
+ [
+  "state.stale.fg",
+  "state.stale.bg",
+  "No activity pill",
+  "body"
+ ],
+ [
+  "state.stale.fg",
+  "bg.sidebar",
+  "No activity on quiet card",
+  "body"
+ ],
+ [
+  "state.stale.fg",
+  "bg.sunken",
+  "Stale lines in logs",
+  "body"
+ ],
+ [
+  "state.idle.fg",
+  "state.idle.bg",
+  "Idle and Ended pills",
+  "body"
+ ],
+ [
+  "state.idle.fg",
+  "bg.sidebar",
+  "Idle on quiet card",
+  "body"
+ ],
+ [
+  "state.crashed.fg",
+  "state.crashed.bg",
+  "Crashed pill, destructive badge",
+  "body"
+ ],
+ [
+  "state.crashed.fg",
+  "bg.surface",
+  "Danger ghost button label",
+  "body"
+ ],
+ [
+  "state.crashed.fg",
+  "bg.sunken",
+  "Error lines, diff deletions on terminal bg",
+  "body"
+ ],
+ [
+  "tier.safe.fg",
+  "tier.safe.bg",
+  "SAFE badge, diff additions on tint",
+  "body"
+ ],
+ [
+  "tier.caution.fg",
+  "color.amber.800",
+  "Tier chip on compact action strip",
+  "body"
+ ],
+ [
+  "tier.destructive.fg",
+  "tier.destructive.bg",
+  "DESTRUCTIVE badge, diff deletions on tint",
+  "body"
+ ],
+ [
+  "text.on-amber-tint",
+  "color.amber.900",
+  "Question text, banners, miss card title",
+  "body"
+ ],
+ [
+  "text.on-amber-tint-secondary",
+  "color.amber.900",
+  "Wants to run, rule suggestion link",
+  "body"
+ ],
+ [
+  "text.on-green-tint",
+  "color.green.900",
+  "Gate info banner",
+  "body"
+ ],
+ [
+  "text.on-red-tint",
+  "color.red.900",
+  "Recording label and timer, confirm checkbox label",
+  "body"
+ ],
+ [
+  "text.on-red-tint",
+  "bg.sunken",
+  "Error excerpt",
+  "body"
+ ],
+ [
+  "text.on-red-tint-secondary",
+  "color.red.900",
+  "Recording bar secondary text",
+  "body"
+ ],
+ [
+  "text.on-blue-tint",
+  "color.blue.900",
+  "Tag chip",
+  "body"
+ ],
+ [
+  "text.code",
+  "bg.surface",
+  "Inline code in answers",
+  "body"
+ ],
+ [
+  "text.code",
+  "bg.canvas",
+  "Inline code in Settings intro",
+  "body"
+ ],
+ [
+  "component.log.prompt",
+  "bg.sunken",
+  "Prompt and edit lines",
+  "body"
+ ],
+ [
+  "component.log.prompt",
+  "bg.canvas",
+  "Prompt lines in card step lists",
+  "body"
+ ],
+ [
+  "focus.ring",
+  "bg.canvas",
+  "Focus ring on page",
+  "ui"
+ ],
+ [
+  "focus.ring",
+  "bg.surface",
+  "Focus ring in cards",
+  "ui"
+ ],
+ [
+  "focus.ring",
+  "bg.raised",
+  "Focus ring in dialogs",
+  "ui"
+ ],
+ [
+  "focus.ring",
+  "bg.sunken",
+  "Focus ring on terminals",
+  "ui"
+ ],
+ [
+  "focus.ring",
+  "bg.control",
+  "Focus ring on a selected row",
+  "ui"
+ ],
+ [
+  "border.field",
+  "bg.canvas",
+  "Input boundary on page wells",
+  "ui"
+ ],
+ [
+  "border.field",
+  "bg.surface",
+  "Input boundary in cards and drawers",
+  "ui"
+ ],
+ [
+  "border.field",
+  "bg.raised",
+  "Input boundary in dialogs",
+  "ui"
+ ],
+ [
+  "border.field-focus",
+  "bg.canvas",
+  "Focused input boundary",
+  "ui"
+ ],
+ [
+  "brand.accent",
+  "bg.canvas",
+  "Progress fill, phase bar, cited dot",
+  "ui"
+ ],
+ [
+  "brand.accent",
+  "bg.control",
+  "Progress fill against its track",
+  "ui"
+ ],
+ [
+  "state.needs-approval.fg",
+  "bg.canvas",
+  "Needs flag pixels, rail badge",
+  "ui"
+ ],
+ [
+  "text.muted",
+  "color.amber.900",
+  "Muted text on amber tint (avoid if under 4.5)",
+  "body"
+ ]
+]
