@@ -148,9 +148,12 @@ test('hook envelope excludes unneeded tool responses before socket or spool deli
     session_id: 's', transcript_path: '/home/you/t', cwd: '/repo', hook_event_name: 'PostToolUse',
     tool_name: 'Read', tool_input: { file_path: '/repo/a' },
     tool_response: { content: 'SYNTHETIC_CONFIDENTIAL_NOTE_123' },
+    api_key: 'SYNTHETIC_API_KEY_456',
   }, { hookTs: 1 })
   assert.equal(envelope.hook.tool_response, undefined)
+  assert.equal(envelope.hook.api_key, undefined)
   assert.equal(JSON.stringify(envelope).includes('SYNTHETIC_CONFIDENTIAL_NOTE_123'), false)
+  assert.equal(JSON.stringify(envelope).includes('SYNTHETIC_API_KEY_456'), false)
   assert.deepEqual(envelope.hook.tool_input, { file_path: '/repo/a' })
 })
 
