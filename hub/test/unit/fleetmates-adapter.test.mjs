@@ -149,7 +149,7 @@ test('run file changes are debounced and refresh rows without another git poll',
   })
 })
 
-test('completed run stays complete after integrated task branches are pruned', async () => {
+test('missing task branch with done status has an unknown derived phase', async () => {
   await withRepo(async (repo) => {
     execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
     await writeFile(path.join(repo, 'readme.txt'), 'run')
@@ -159,7 +159,11 @@ test('completed run stays complete after integrated task branches are pruned', a
       runId: 'r1', tasks: [{ id: 'T1', state: 'done' }],
     })
     const reader = createFleetmatesReader({ repoRoots: [repo] })
-    try { assert.equal((await reader.list())[0].derivedPhase, null) } finally { reader.close() }
+    try {
+      const [run] = await reader.list()
+      assert.equal(run.derivedPhase, null)
+      assert.equal(run.phaseDerivation, 'unknown')
+    } finally { reader.close() }
   })
 })
 
@@ -178,7 +182,11 @@ test('an unmerged task branch keeps the phase open even when status says done', 
       runId: 'r1', tasks: [{ id: 'T1', state: 'done' }],
     })
     const reader = createFleetmatesReader({ repoRoots: [repo] })
-    try { assert.equal((await reader.list())[0].derivedPhase, 1) } finally { reader.close() }
+    try {
+      const [run] = await reader.list()
+      assert.equal(run.derivedPhase, 1)
+      assert.equal(run.phaseDerivation, 'verified')
+    } finally { reader.close() }
   })
 })
 

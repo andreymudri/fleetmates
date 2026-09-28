@@ -104,26 +104,30 @@ async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
     } catch {}
   }
   let derivedPhase = null
+  let phaseDerivation = 'unknown'
   if (typeof plan?.runBranch === 'string' && plan.runBranch) {
     try {
       const runSha = await git.resolveRef(`refs/heads/${plan.runBranch}`)
       const phases = [...new Set(tasks.map((task) => task.phase).filter(Number.isInteger))].sort((a, b) => a - b)
+      let missingBranch = false
       for (const phase of phases) {
         const phaseTasks = tasks.filter((task) => task.phase === phase)
         let integrated = true
         for (const task of phaseTasks) {
           const sha = shas.get(task.id)
+          if (!sha) missingBranch = true
           if (sha ? !await git.isAncestor(sha, runSha) : statusById.get(task.id)?.state !== 'done') integrated = false
         }
         if (!integrated) { derivedPhase = phase; break }
       }
+      phaseDerivation = missingBranch ? 'unknown' : 'verified'
     } catch {}
   }
   const liveness = livenessRows({
     tasks: Array.isArray(status?.tasks) ? status.tasks : [],
     tips, now, staleMinutes: DEFAULT_STALE_MINUTES,
   })
-  return { derivedPhase, liveness }
+  return { derivedPhase, phaseDerivation, liveness }
 }
 
 async function projectRun(entry, planResult, statusResult, polled) {
@@ -159,6 +163,7 @@ async function projectRun(entry, planResult, statusResult, polled) {
     kind: 'build',
     leadSessionId: null,
     derivedPhase: finiteNumber(polled?.derivedPhase),
+    phaseDerivation: polled?.phaseDerivation === 'verified' ? 'verified' : 'unknown',
     totalPhases: finiteNumber(plan.totalPhases ?? status.totalPhases) ?? 0,
     maxParallel: finiteNumber(status.maxParallel),
     planPath: plan.planPath == null ? null : safeText(plan.planPath),
