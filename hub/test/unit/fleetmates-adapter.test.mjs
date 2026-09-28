@@ -151,6 +151,25 @@ test('completed run stays complete after integrated task branches are pruned', a
   })
 })
 
+test('an unmerged task branch keeps the phase open even when status says done', async () => {
+  await withRepo(async (repo) => {
+    execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
+    await writeFile(path.join(repo, 'readme.txt'), 'run')
+    execFileSync('git', ['add', 'readme.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'run'], { cwd: repo })
+    execFileSync('git', ['switch', '-q', '-c', 'fleetmates/r1/T1'], { cwd: repo })
+    await writeFile(path.join(repo, 'task.txt'), 'unmerged')
+    execFileSync('git', ['add', 'task.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'task'], { cwd: repo })
+    execFileSync('git', ['switch', '-q', 'run/r1'], { cwd: repo })
+    await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'done' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo] })
+    try { assert.equal((await reader.list())[0].derivedPhase, 1) } finally { reader.close() }
+  })
+})
+
 test('recorded gate keyed by a manifest phase name remains visible', async () => {
   await withRepo(async (repo) => {
     await writeRun(repo, 'r1', { runId: 'r1', tasks: [] }, {
