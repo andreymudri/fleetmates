@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdi
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createContext, runInContext } from 'node:vm'
 import test from 'node:test'
 import { chromium } from 'playwright-core'
 import { renderUnit } from '../../server/setup/units.mjs'
@@ -138,9 +139,13 @@ test('open uses a private bootstrap file after identity proof and reaches the de
     assert.equal(statSync(path.join(s.state, 'fleetmates/deck')).mode & 0o777, 0o700)
     assert.doesNotMatch(result.stdout + result.stderr, new RegExp(token))
     const bootstrap = readFileSync(argument, 'utf8')
-    const redirect = bootstrap.match(/location\.replace\(("[^\n]+")\)<\/script>/)
-    assert.ok(redirect)
-    const url = JSON.parse(redirect[1])
+    const script = bootstrap.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+    assert.ok(script)
+    const redirects = []
+    const context = createContext({ location: { replace(value) { redirects.push(value) } } }, { codeGeneration: { strings: false, wasm: false } })
+    runInContext(script, context, { timeout: 1000 })
+    assert.equal(redirects.length, 1)
+    const url = redirects[0]
     assert.equal(url, `http://127.0.0.1:${server.port}/#token=${token}`)
     const response = await fetch(url)
     assert.equal(response.headers.get('content-type'), 'text/html')
