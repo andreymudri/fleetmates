@@ -22,12 +22,13 @@ function listen(server, socketPath) {
 /** Create a common ingest path for live socket and spool envelopes. */
 export function createIngestor({ onEvent, onRejected, reorderMs = 250, now = Date.now }) {
   const seen = new Set()
-  const buffer = createReorderBuffer(rows => {
-    for (let index = 0; index < rows.length; index++) {
-      try { onEvent(rows[index]) } catch (error) {
-        for (const unhandled of rows.slice(index)) seen.delete(unhandled.dedupeKey)
+  const buffer = createReorderBuffer((rows, fromTimer) => {
+    while (rows.length) {
+      try { onEvent(rows[0]) } catch (error) {
+        if (!fromTimer) for (const unhandled of rows) seen.delete(unhandled.dedupeKey)
         throw error
       }
+      rows.shift()
     }
   }, { windowMs: reorderMs })
   function reject(raw, via, reason) {

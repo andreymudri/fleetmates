@@ -67,6 +67,28 @@ test('reorder buffer sorts timestamps and event rank within one session', () => 
   buffer.close()
 })
 
+test('timed ingest retries failed delivery without crashing or repeating applied rows', async () => {
+  const accepted = []
+  let fail = true
+  const ingest = createIngestor({
+    onEvent: row => {
+      if (row.hookTs === 2 && fail) throw Error('database busy')
+      accepted.push(row.hookTs)
+    },
+    onRejected: () => {}, reorderMs: 1,
+  })
+  try {
+    assert.equal(ingest.receive(line(1)), true)
+    assert.equal(ingest.receive(line(2)), true)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.deepEqual(accepted, [1])
+    fail = false
+    await new Promise(resolve => setTimeout(resolve, 150))
+    assert.deepEqual(accepted, [1, 2])
+    assert.equal(ingest.receive(line(2)), false)
+  } finally { ingest.close() }
+})
+
 test('socket rejects partial lines and accepts complete lines', async () => {
   const dir = await mkdtemp(path.join('/tmp/hx', 'ingest-'))
   const accepted = []

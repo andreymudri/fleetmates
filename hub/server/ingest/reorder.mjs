@@ -8,20 +8,31 @@ function compare(a, b) {
 export function createReorderBuffer(onBatch, { windowMs = 250 } = {}) {
   const pending = new Map()
   const timers = new Map()
-  function flush(sessionId) {
+  function schedule(sessionId, delay = windowMs) {
+    timers.set(sessionId, setTimeout(() => flush(sessionId, true), delay))
+  }
+  function flush(sessionId, fromTimer = false) {
     const rows = pending.get(sessionId)
     if (!rows?.length) return
     pending.delete(sessionId)
     clearTimeout(timers.get(sessionId))
     timers.delete(sessionId)
-    onBatch(rows.sort(compare))
+    try {
+      onBatch(rows.sort(compare), fromTimer)
+    } catch (error) {
+      if (!fromTimer) throw error
+      if (rows.length) {
+        pending.set(sessionId, rows)
+        schedule(sessionId, Math.max(windowMs, 100))
+      }
+    }
   }
   return {
     push(row) {
       const sessionId = row.hook.session_id
       if (!pending.has(sessionId)) {
         pending.set(sessionId, [])
-        timers.set(sessionId, setTimeout(() => flush(sessionId), windowMs))
+        schedule(sessionId)
       }
       pending.get(sessionId).push(row)
     },
