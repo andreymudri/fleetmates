@@ -10,11 +10,17 @@ function execArg(value) {
   return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%').replaceAll('$', '$$')}"`
 }
 
+function conditionPath(value) {
+  if (!path.isAbsolute(value) || /[\r\n\0]/.test(value)) throw new Error('unit path must be absolute and one line')
+  return value.replaceAll('%', '%%')
+}
+
 /** Render the shipped unit with absolute executable and hub paths. */
 export function renderUnit(name, nodePath, hubPath) {
   if (!UNIT_NAMES.includes(name)) throw new Error(`unknown unit: ${name}`)
   const entry = name === 'fleetmates-deckd.service' ? 'deckd/main.mjs' : 'server/main.mjs'
-  return fs.readFileSync(path.join(templateDir, name), 'utf8').replaceAll('@NODE@', execArg(nodePath)).replaceAll('@ENTRY@', execArg(path.join(hubPath, entry)))
+  const entryPath = path.join(hubPath, entry)
+  return fs.readFileSync(path.join(templateDir, name), 'utf8').replaceAll('@NODE@', execArg(nodePath)).replaceAll('@ENTRY@', execArg(entryPath)).replaceAll('@ENTRY_PATH@', conditionPath(entryPath))
 }
 
 /** Write a unit when its rendered content differs. */

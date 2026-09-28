@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -13,10 +13,9 @@ import { setupPaths } from '../../server/setup/paths.mjs'
 import { renderUnit } from '../../server/setup/units.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
-const cli = path.join(hub, 'bin/fleetmates-deck.mjs')
 const fixtures = path.join(hub, 'test/fixtures/settings')
 
-function sandbox(fixture = 'empty.json') {
+function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'deck-setup-'))
   const home = path.join(root, 'home')
   const config = path.join(root, 'config')
@@ -29,14 +28,21 @@ function sandbox(fixture = 'empty.json') {
   writeFileSync(settings, readFileSync(path.join(fixtures, fixture)))
   for (const name of ['systemctl', 'xdg-open', 'claude', 'notify-send']) {
     const file = path.join(bin, name)
-    writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$DECK_TEST_CALLS"\nif [ '${name}' = claude ]; then echo '2.1.282 (Claude Code)'; fi\nif [ '${name}' = systemctl ] && [ "$2" = is-active ]; then if [ "$3" = fleetmates-deck.service ] && [ "$DECK_TEST_WEB_ACTIVE" = 1 ]; then exit 0; fi; exit 3; fi\n`)
+    writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$DECK_TEST_CALLS"\nif [ '${name}' = claude ]; then echo '2.1.282 (Claude Code)'; fi\nif [ '${name}' = systemctl ] && [ "$2" = is-active ]; then if [ "$3" = fleetmates-deck.service ] && [ "$DECK_TEST_WEB_ACTIVE" = 1 ]; then exit 0; fi; exit 3; fi\nif [ '${name}' = systemctl ] && [ "$DECK_TEST_MODEL_WEB" = 1 ] && [ "$2" = enable ]; then\n  if [ -e "$DECK_TEST_WEB_ENTRY" ]; then\n    printf active > "$DECK_TEST_WEB_STATE"\n  elif grep -Fqx "ConditionPathExists=$DECK_TEST_WEB_ENTRY" "$XDG_CONFIG_HOME/systemd/user/fleetmates-deck.service"; then\n    printf skipped > "$DECK_TEST_WEB_STATE"\n  else\n    printf failed > "$DECK_TEST_WEB_STATE"\n    exit 1\n  fi\nfi\n`)
     execFileSync('chmod', ['700', file])
   }
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: config, XDG_STATE_HOME: state, XDG_DATA_HOME: path.join(root, 'data'), XDG_RUNTIME_DIR: runtime, PATH: `${bin}:${process.env.PATH}`, DECK_TEST_CALLS: calls, CLAUDE_CONFIG_DIR: path.join(home, '.claude') }
   delete env.DECK_PORT
-  const run = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8', timeout: 8000 })
-  const runWith = (override, ...args) => spawnSync(process.execPath, [cli, ...args], { env: { ...env, ...override }, encoding: 'utf8', timeout: 8000 })
-  return { root, home, config, state, runtime, calls, settings, env, run, runWith }
+  const hubPath = isolatedHub || webEntry ? path.join(root, 'hub') : hub
+  if (hubPath !== hub) {
+    mkdirSync(hubPath)
+    for (const name of ['bin', 'server', 'deckd', 'hook', 'systemd']) cpSync(path.join(hub, name), path.join(hubPath, name), { recursive: true, filter: source => !isolatedHub || source !== path.join(hub, 'server/main.mjs') })
+    if (webEntry) writeFileSync(path.join(hubPath, 'server/main.mjs'), '')
+  }
+  const cliPath = path.join(hubPath, 'bin/fleetmates-deck.mjs')
+  const run = (...args) => spawnSync(process.execPath, [cliPath, ...args], { env, encoding: 'utf8', timeout: 8000 })
+  const runWith = (override, ...args) => spawnSync(process.execPath, [cliPath, ...args], { env: { ...env, ...override }, encoding: 'utf8', timeout: 8000 })
+  return { root, home, config, state, runtime, calls, settings, env, hubPath, run, runWith }
 }
 
 async function listener(s, token, valid, delayMs = 0) {
@@ -95,6 +101,28 @@ test('init merges hooks, preserves existing order and is byte identical twice', 
   assert.equal(calls.includes('restart fleetmates-deckd'), false)
 })
 
+test('init skips the absent web entry and starts it after installation', () => {
+  const s = sandbox('empty.json', { isolatedHub: true })
+  const entry = path.join(s.hubPath, 'server/main.mjs')
+  const serviceState = path.join(s.root, 'web-service-state')
+  const model = { DECK_TEST_MODEL_WEB: '1', DECK_TEST_WEB_ENTRY: entry, DECK_TEST_WEB_STATE: serviceState }
+  assert.equal(existsSync(entry), false)
+  const first = s.runWith(model, 'init')
+  assert.equal(first.status, 0, first.stderr)
+  assert.equal(readFileSync(serviceState, 'utf8'), 'skipped')
+  const unit = readFileSync(path.join(s.config, 'systemd/user/fleetmates-deck.service'), 'utf8')
+  assert.ok(unit.split('\n').includes(`ConditionPathExists=${entry}`))
+  writeFileSync(s.calls, '')
+  const open = s.runWith(model, 'open')
+  assert.equal(open.status, 1)
+  assert.match(open.stderr, /web server entrypoint is not installed/)
+  assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /systemctl:--user start fleetmates-deck\.service/)
+  writeFileSync(entry, '')
+  const second = s.runWith(model, 'init')
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(readFileSync(serviceState, 'utf8'), 'active')
+})
+
 test('fresh home without settings.json installs hooks without a backup', () => {
   const s = sandbox()
   unlinkSync(s.settings)
@@ -137,7 +165,7 @@ test('uninstall removes deck hooks and keeps other hook entries', () => {
 })
 
 test('open uses a private bootstrap file after identity proof and reaches the deck', async () => {
-  const s = sandbox()
+  const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
   const server = await listener(s, token, true)
@@ -180,7 +208,7 @@ test('open uses a private bootstrap file after identity proof and reaches the de
 })
 
 test('open uses validated DECK_PORT ahead of config port', async () => {
-  const s = sandbox()
+  const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
   const server = await listener(s, token, true)
@@ -198,7 +226,7 @@ test('open uses validated DECK_PORT ahead of config port', async () => {
 })
 
 test('open refuses a loopback listener without the token proof', async () => {
-  const s = sandbox()
+  const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
   const server = await listener(s, token, false)
@@ -211,7 +239,7 @@ test('open refuses a loopback listener without the token proof', async () => {
 })
 
 test('open waits for a valid listener after systemctl start returns', async () => {
-  const s = sandbox()
+  const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
   const server = await listener(s, token, true, 350)
@@ -225,7 +253,7 @@ test('open waits for a valid listener after systemctl start returns', async () =
 })
 
 test('open stops retrying when no listener appears', async () => {
-  const s = sandbox()
+  const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
   const server = await listener(s, token, true, 10000)
@@ -349,6 +377,7 @@ test('both unit templates quote executable and entry paths with spaces', () => {
   for (const [name, entry] of [['fleetmates-deck.service', 'server/main.mjs'], ['fleetmates-deckd.service', 'deckd/main.mjs']]) {
     const rendered = renderUnit(name, nodePath, hubPath)
     assert.ok(rendered.includes(`ExecStart="${nodePath}" "${hubPath}/${entry}"`))
+    if (name === 'fleetmates-deck.service') assert.ok(rendered.split('\n').includes(`ConditionPathExists=${hubPath}/${entry}`))
     assert.equal(rendered.includes('@NODE@') || rendered.includes('@ENTRY@'), false)
   }
 })

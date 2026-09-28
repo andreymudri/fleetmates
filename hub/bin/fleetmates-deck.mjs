@@ -132,6 +132,7 @@ async function main() {
   }
   if (name === 'status' && rest.length === 0) { process.stdout.write(`${JSON.stringify(await status(paths, command), null, 2)}\n`); return }
   if (name === 'open' && rest.length === 0) {
+    if (!fs.existsSync(path.join(hub, 'server/main.mjs'))) throw new Error('web server entrypoint is not installed')
     if (!fs.lstatSync(paths.state).isDirectory()) throw new Error('deck state directory is not a directory')
     fs.chmodSync(paths.state, 0o700)
     const token = fs.readFileSync(paths.token, 'utf8').trim()

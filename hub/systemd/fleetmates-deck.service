@@ -2,6 +2,7 @@
 Description=fleetmates deck web server (127.0.0.1)
 Wants=fleetmates-deckd.service
 After=fleetmates-deckd.service
+ConditionPathExists=@ENTRY_PATH@
 
 [Service]
 Type=simple
