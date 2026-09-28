@@ -89,6 +89,10 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
         const style = getComputedStyle(element)
         if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') visible = false
       }
+      const bounds = heading.getBoundingClientRect()
+      visible &&= bounds.width > 0 && bounds.height > 0
+        && bounds.right > 0 && bounds.bottom > 0
+        && bounds.left < innerWidth && bounds.top < innerHeight
       return {
         heading: heading.textContent,
         visible,
@@ -112,8 +116,7 @@ test('deck CI declares pinned Node, build, and tests on Linux and macOS', async 
   assert.doesNotMatch(workflow, /windows-latest/)
   const hubJob = workflow.split(/^  hub:\s*$/m)[1]?.split(/^  [\w-]+:\s*$/m)[0]
   assert.ok(hubJob)
-  assert.match(hubJob, /^        os: \[ubuntu-latest, macos-latest\]$/m)
-  assert.match(hubJob, /^    runs-on: \$\{\{ matrix\.os \}\}$/m)
+  assert.match(hubJob, /^      matrix:\n        os: \[ubuntu-latest, macos-latest\]\n    runs-on: \$\{\{ matrix\.os \}\}$/m)
   assert.match(hubJob, /^      TMPDIR: \/tmp\/hx$/m)
   const steps = hubJob.match(/^    steps:\n[\s\S]*$/m)?.[0].trimEnd()
   assert.equal(steps, [
@@ -131,4 +134,5 @@ test('deck CI declares pinned Node, build, and tests on Linux and macOS', async 
   ].join('\n'))
   assert.doesNotMatch(hubJob, /^\s+(?:-\s+)?if:/m)
   assert.doesNotMatch(hubJob, /^\s+(?:-\s+)?continue-on-error:/m)
+  assert.doesNotMatch(hubJob, /^    defaults:/m)
 })
