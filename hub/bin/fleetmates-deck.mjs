@@ -1,0 +1,102 @@
+#!/usr/bin/env node
+import fs from 'node:fs'
+import path from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { setupPaths } from '../server/setup/paths.mjs'
+import { readSettings, transformHooks, writeSettings } from '../server/setup/hooks.mjs'
+import { UNIT_NAMES, renderUnit, writeUnit } from '../server/setup/units.mjs'
+import { doctor, status } from '../server/setup/doctor.mjs'
+
+const hub = fileURLToPath(new URL('..', import.meta.url))
+const paths = setupPaths()
+const command = `node ${paths.hook}`
+const args = process.argv.slice(2)
+
+function run(file, argv) {
+  const result = spawnSync(file, argv, { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })
+  if (result.error || result.status !== 0) throw new Error(`${file} failed: ${result.error?.message || result.stderr?.trim() || `exit ${result.status}`}`)
+  return result
+}
+
+function privateDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  fs.chmodSync(dir, 0o700)
+}
+
+function writeIfMissing(file, content, mode = 0o600) {
+  try { fs.writeFileSync(file, content, { flag: 'wx', mode }); return true } catch (error) { if (error.code === 'EEXIST') return false; throw error }
+}
+
+async function init(dryRun, rotateToken) {
+  const current = readSettings(paths.settings)
+  const merged = transformHooks(current.value, command)
+  const changes = JSON.stringify(current.value) !== JSON.stringify(merged)
+  const hookSource = path.join(hub, 'hook/deck-hook.mjs')
+  const source = fs.readFileSync(hookSource)
+  const unitChanges = UNIT_NAMES.map(name => {
+    const content = renderUnit(name, process.execPath, hub)
+    let changed = true
+    try { changed = fs.readFileSync(path.join(paths.units, name), 'utf8') !== content } catch (error) { if (error.code !== 'ENOENT') throw error }
+    return { name, content, changed }
+  })
+  if (dryRun) {
+    process.stdout.write(`directories: ${paths.config}, ${paths.state}, ${paths.share}\n`)
+    process.stdout.write(`hook script: ${paths.hook}\n`)
+    process.stdout.write(`settings: ${changes ? 'would update' : 'unchanged'}\n${changes ? JSON.stringify(merged, null, 2) : ''}\n`)
+    process.stdout.write(`token: ${rotateToken ? 'would rotate' : 'would create if missing'}\n`)
+    for (const unit of unitChanges) process.stdout.write(`${unit.name}: ${unit.changed ? 'would write' : 'unchanged'}\n`)
+    return
+  }
+  for (const dir of [paths.config, paths.state, paths.spool, paths.logs, paths.share, path.dirname(paths.hook)]) privateDir(dir)
+  if (!fs.existsSync(paths.hook) || !fs.readFileSync(paths.hook).equals(source)) fs.writeFileSync(paths.hook, source, { mode: 0o600 })
+  fs.chmodSync(paths.hook, 0o600)
+  const backup = writeSettings(paths.settings, current, merged)
+  if (backup) process.stdout.write(`settings backup: ${backup}\n`)
+  if (rotateToken) {
+    const temp = `${paths.token}.${process.pid}.tmp`
+    fs.writeFileSync(temp, `${randomBytes(32).toString('base64url')}\n`, { mode: 0o600 })
+    fs.renameSync(temp, paths.token)
+  } else writeIfMissing(paths.token, `${randomBytes(32).toString('base64url')}\n`)
+  fs.chmodSync(paths.token, 0o600)
+  let changedUnit = false
+  for (const unit of unitChanges) changedUnit = writeUnit(path.join(paths.units, unit.name), unit.content) || changedUnit
+  if (changedUnit) run('systemctl', ['--user', 'daemon-reload'])
+  run('systemctl', ['--user', 'enable', '--now', ...UNIT_NAMES])
+  process.stdout.write('deckd remains running if it was already active\n')
+  const checks = await doctor(paths, command)
+  for (const check of checks) process.stdout.write(`${check.id}: ${check.state} (${check.detail})\n`)
+  if (checks.find(check => check.id === 'hooks')?.state !== 'ok') process.exitCode = 1
+}
+
+async function main() {
+  const [name, ...rest] = args
+  if (name === 'init' && rest.every(arg => ['--dry-run', '--rotate-token'].includes(arg))) return init(rest.includes('--dry-run'), rest.includes('--rotate-token'))
+  if (name === 'uninstall-hooks' && rest.length === 0) {
+    const current = readSettings(paths.settings)
+    const backup = writeSettings(paths.settings, current, transformHooks(current.value, command, true))
+    process.stdout.write(backup ? `settings backup: ${backup}\n` : 'hooks unchanged\n')
+    return
+  }
+  if (name === 'doctor' && rest.length === 0) {
+    const checks = await doctor(paths, command)
+    for (const check of checks) process.stdout.write(`${check.id}: ${check.state} (${check.detail})\n`)
+    if (checks.find(check => check.id === 'hooks')?.state !== 'ok') process.exitCode = 1
+    return
+  }
+  if (name === 'status' && rest.length === 0) { process.stdout.write(`${JSON.stringify(await status(paths, command), null, 2)}\n`); return }
+  if (name === 'open' && rest.length === 0) {
+    const token = fs.readFileSync(paths.token, 'utf8').trim()
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error('invalid deck token')
+    run('systemctl', ['--user', 'start', 'fleetmates-deck.service'])
+    let port = 47800
+    try { port = JSON.parse(fs.readFileSync(path.join(paths.config, 'config.json'), 'utf8')).port || port } catch (error) { if (error.code !== 'ENOENT') throw error }
+    const result = spawnSync('xdg-open', [`http://127.0.0.1:${port}/#token=${token}`], { stdio: 'ignore', timeout: 10000 })
+    if (result.error || result.status !== 0) throw new Error('could not open browser')
+    return
+  }
+  throw new Error('usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | uninstall-hooks')
+}
+
+main().catch(error => { process.stderr.write(`fleetmates-deck: ${error.message}\n`); process.exitCode = 1 })
