@@ -1,0 +1,13 @@
+{"line": "{\"cmd\": \"explode\"}", "side": "command", "message": "cmd desconhecido: 'explode' (conhecidos: ['ask', 'history', 'start', 'status', 'stop', 'subscribe', 'tail'])"}
+{"line": "{\"type\": \"boom\"}", "side": "event", "message": "type desconhecido: 'boom' (conhecidos: ['ask_delta', 'ask_done', 'error', 'history', 'ok', 'status', 'tail', 'transcript'])"}
+{"line": "nao e json", "side": "command", "message": "linha não é JSON válido: Expecting value: line 1 column 1 (char 0)"}
+{"line": "nao e json", "side": "event", "message": "linha não é JSON válido: Expecting value: line 1 column 1 (char 0)"}
+{"line": "[\"lista\"]", "side": "command", "message": "esperado objeto JSON, veio list"}
+{"line": "[\"lista\"]", "side": "event", "message": "esperado objeto JSON, veio list"}
+{"line": "{\"sem\": \"discriminador\"}", "side": "command", "message": "mensagem sem discriminador: falta 'cmd' ou 'type'"}
+{"line": "{\"sem\": \"discriminador\"}", "side": "event", "message": "mensagem sem discriminador: falta 'cmd' ou 'type'"}
+{"line": "{\"cmd\": \"start\", \"tag\": \"optimas\"}", "side": "event", "message": "esperado Event, veio StartCmd"}
+{"line": "{\"type\": \"ask_done\"}", "side": "command", "message": "esperado Command, veio AskDone"}
+{"line": "{\"cmd\": \"start\"}", "side": "command", "message": "start: chave 'tag' ausente"}
+{"line": "{\"cmd\": \"tail\", \"minutes\": \"cinco\"}", "side": "command", "message": "tail.minutes: esperado número, veio str"}
+{"line": "{\"type\": \"history\", \"asks\": [{\"t\": 1.0}]}", "side": "event", "message": "AskRecord: chave 'question' ausente"}

@@ -1,0 +1,8 @@
+{"cmd": "start", "tag": "optimas"}
+{"cmd": "stop"}
+{"cmd": "status"}
+{"cmd": "tail", "minutes": 5}
+{"cmd": "ask", "question": "como resolvo esse erro de terraform?"}
+{"cmd": "subscribe"}
+{"cmd": "history"}
+{"cmd": "ask", "question": "q"}
