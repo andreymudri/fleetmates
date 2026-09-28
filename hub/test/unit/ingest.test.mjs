@@ -255,6 +255,18 @@ test('atomic spool files replay together in event order without per-file delay',
   } finally { ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
+test('mixed legacy and atomic spool files replay in hook-time order', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-spool-mixed-'))
+  const accepted = []
+  const ingest = createIngestor({ onEvent: row => accepted.push(`${row.hookTs}:${row.hook.hook_event_name}`), onRejected: () => {}, reorderMs: 0 })
+  try {
+    await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(2, { ...hook, hook_event_name: 'UserPromptSubmit', prompt: 'next' }))
+    await writeFile(path.join(dir, 'hooks-20260928-0000000000001-aaaaaaaaaaaa.jsonl'), line(1, { ...hook, hook_event_name: 'SessionStart', source: 'startup' }))
+    await drainSpool(dir, ingest)
+    assert.deepEqual(accepted, ['1:SessionStart', '2:UserPromptSubmit'])
+  } finally { ingest.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
 test('startup spool drain applies rows before returning and leaves failed files for retry', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-spool-start-'))
   try {

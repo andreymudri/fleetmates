@@ -14,7 +14,8 @@ export async function drainSpool(dir, ingest) {
   const sorted = names.filter(name => spoolName.test(name)).sort((a, b) => a.replace('.draining', '').localeCompare(b.replace('.draining', '')) || Number(b.endsWith('.draining')) - Number(a.endsWith('.draining')))
   const ordered = [...sorted.filter(name => legacyName.test(name)), ...sorted.filter(name => !legacyName.test(name))]
   const completed = []
-  const atomicLines = []
+  const legacyFiles = []
+  const pendingLines = []
   for (const name of ordered) {
     const source = path.join(dir, name)
     const legacy = legacyName.test(name)
@@ -34,32 +35,46 @@ export async function drainSpool(dir, ingest) {
       try { content = await readFile(draining, 'utf8') } catch (error) { if (error.code === 'ENOENT') break; throw error }
       const lines = content.split('\n')
       const complete = lines.slice(0, -1)
+      if (consumed > complete.length) consumed = 0
       const fresh = complete.slice(consumed)
       fresh.sort((a, b) => {
         const time = raw => { try { return JSON.parse(raw).hookTs ?? Infinity } catch { return Infinity } }
         return time(a) - time(b)
       })
-      for (const line of fresh) {
-        if (legacy) ingest.receive(line, 'spool')
-        else atomicLines.push(line)
-      }
-      if (legacy) ingest.flush()
+      for (const line of fresh) pendingLines.push(line)
       consumed = complete.length
       const latest = await readFile(draining, 'utf8')
       if (latest !== content) continue
       if (lines.at(-1)) ingest.rejectRaw(lines.at(-1), 'spool', 'partial_line')
       break
     }
-    if (legacy) {
-      legacyOffsets.set(draining, { ino: info.ino, lines: consumed })
-      if (Date.now() - (await stat(draining)).mtimeMs > thirtyDays) {
-        await rm(draining)
-        legacyOffsets.delete(draining)
-      }
-    } else completed.push(draining)
+    if (legacy) legacyFiles.push({ file: draining, ino: info.ino, consumed })
+    else completed.push(draining)
   }
-  for (const line of atomicLines) ingest.receive(line, 'spool')
+  for (const line of pendingLines) ingest.receive(line, 'spool')
   ingest.flush()
+  for (let pass = 0; pass < 10; pass++) {
+    const late = []
+    const next = new Map()
+    for (const legacy of legacyFiles) {
+      const content = await readFile(legacy.file, 'utf8')
+      const complete = content.split('\n').slice(0, -1)
+      const from = legacy.consumed <= complete.length ? legacy.consumed : 0
+      for (const line of complete.slice(from)) late.push(line)
+      next.set(legacy, complete.length)
+    }
+    if (!late.length) break
+    for (const line of late) ingest.receive(line, 'spool')
+    ingest.flush()
+    for (const legacy of legacyFiles) legacy.consumed = next.get(legacy)
+  }
+  for (const legacy of legacyFiles) {
+    legacyOffsets.set(legacy.file, { ino: legacy.ino, lines: legacy.consumed })
+    if (Date.now() - (await stat(legacy.file)).mtimeMs > thirtyDays) {
+      await rm(legacy.file)
+      legacyOffsets.delete(legacy.file)
+    }
+  }
   for (const file of completed) await rm(file)
 }
 
