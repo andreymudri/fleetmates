@@ -188,6 +188,14 @@ function notificationToolName(message) {
   return typeof message === 'string' ? message.match(/\bAllow\s+(Bash|Write|Edit|Read|MultiEdit|NotebookEdit|Glob|Grep|WebFetch|WebSearch|Task|Skill)\b/i)?.[1] ?? null : null
 }
 
+function notificationMatchesTool(message, toolName, input) {
+  const named = notificationToolName(message)
+  if (named && (!toolName || named.toLowerCase() !== toolName.toLowerCase())) return false
+  const target = typeof message === 'string' ? message.match(/\bAllow\s+[A-Za-z]\w*\s+to\s+(.+)\?$/i)?.[1]?.trim().replace(/^['"`]|['"`]$/g, '') : null
+  if (!target) return true
+  return target === (input?.file_path ?? input?.notebook_path ?? input?.path)
+}
+
 /** Open, answer and expire observe-only requests inside the caller's transaction. */
 export function applyRequestHook(store, session, envelope) {
   const hook = envelope.hook
@@ -203,12 +211,12 @@ export function applyRequestHook(store, session, envelope) {
   if (kind) {
     const toolName = source === 'notification' ? notificationToolName(hook.message) : hook.tool_name ?? null
     if (source === 'notification') {
-      const recent = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND created_at BETWEEN ? AND ? AND ((source = ? AND summary = ?) OR (source = ? AND tool_name IS NOT NULL AND LOWER(tool_name) = LOWER(?))) ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', at - 2000, at + 2000, 'notification', hook.message ?? 'Needs your answer', 'permission_request', toolName)
+      const recent = store.all('SELECT source, summary, tool_name, detail FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND created_at BETWEEN ? AND ?', session.id, 'permission', 'open', at - 2000, at + 2000).some(row => row.source === 'notification' ? row.summary === (hook.message ?? 'Needs your answer') : row.source === 'permission_request' && notificationMatchesTool(hook.message, row.tool_name, JSON.parse(row.detail)))
       if (recent) return false
     }
     const summary = source === 'notification' ? hook.message ?? 'Needs your answer' : toolName ? `${toolName}: ${JSON.stringify(hook.tool_input ?? {}).slice(0, 160)}` : hook.message ?? 'Needs your answer'
     if (source === 'permission_request') {
-      const fallback = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND (tool_name IS NULL OR LOWER(tool_name) = LOWER(?)) AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', toolName, at - 2000, at + 2000)
+      const fallback = store.all('SELECT id, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC', session.id, 'permission', 'open', 'notification', at - 2000, at + 2000).find(row => notificationMatchesTool(row.summary, toolName, hook.tool_input))
       if (fallback) {
         store.run('UPDATE requests SET source = ?, tool_name = ?, summary = ?, detail = ?, match_key = ?, tier = ? WHERE id = ?', source, hook.tool_name, summary, JSON.stringify(hook.tool_input ?? {}), key, permissionTier(hook, { repoRoot: session.repo_id }), fallback.id)
         return true
@@ -219,7 +227,7 @@ export function applyRequestHook(store, session, envelope) {
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
     const row = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? ORDER BY created_at LIMIT 1', session.id, 'open', key)
-      ?? store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND (tool_name IS NULL OR LOWER(tool_name) = LOWER(?)) AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', hook.tool_name ?? null, at - 2000, at)
+      ?? store.all('SELECT id, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC', session.id, 'permission', 'open', 'notification', at - 2000, at).find(candidate => notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
     if (!row) return false
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: event === 'PermissionDenied' ? 'deny' : 'allow' }), at, row.id)
     return true

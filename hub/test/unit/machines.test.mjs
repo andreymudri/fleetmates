@@ -192,6 +192,43 @@ test('different permission notifications stay open while a matching repeat is de
   } finally { afterRequest.close() }
 })
 
+test('Write notifications match the requested file before dedupe or outcome fallback', () => {
+  const write = (file_path, at) => {
+    const event = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Write', tool_input: { file_path } })
+    event.hookTs = at
+    return event
+  }
+  const notification = (file_path, at) => {
+    const event = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: `Allow Write to ${file_path}?`, tool_name: undefined })
+    event.hookTs = at
+    return event
+  }
+  for (const [first, second, expected] of [
+    [write('file A', 1000), notification('file B', 1001), 2],
+    [write('file A', 1000), notification('file A', 1001), 1],
+    [notification('file A', 1000), write('file B', 1001), 2],
+    [notification('file A', 1000), write('file A', 1001), 1]
+  ]) {
+    const h = harness()
+    try {
+      h.projector.applyHooks([first, second])
+      assert.equal(h.projector.snapshot().counts.openRequests, expected, `${first.hook.hook_event_name} to ${second.hook.hook_event_name}: ${expected}`)
+    } finally { h.close() }
+  }
+  const h = harness()
+  try {
+    h.projector.applyHooks([notification('file A', 1000)])
+    const other = fixture('PostToolUse.Edit.json', { tool_name: 'Write', tool_input: { file_path: 'file B' } })
+    other.hookTs = 1001
+    h.projector.applyHooks([other])
+    assert.equal(h.projector.snapshot().counts.openRequests, 1)
+    const matching = fixture('PostToolUse.Edit.json', { tool_name: 'Write', tool_input: { file_path: 'file A' } })
+    matching.hookTs = 1002
+    h.projector.applyHooks([matching])
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+  } finally { h.close() }
+})
+
 test('two identical permission prompts retain one open request after one outcome', () => {
   const h = harness()
   try {
