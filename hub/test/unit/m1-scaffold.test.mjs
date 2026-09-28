@@ -1,10 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
+import { access, readFile, mkdtemp, rm } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
+import { chromium } from 'playwright-core'
 
 // The phase gate runs this file through its hub-test check; root npm test does not run hub tests.
 
@@ -13,7 +15,7 @@ const root = path.dirname(hub)
 
 const json = async (file) => JSON.parse(await readFile(file, 'utf8'))
 
-test('M1 build emits a React entry script that mounts a heading', async () => {
+test('M1 build mounts a visible React heading in Chromium', async () => {
   const pkg = await json(path.join(hub, 'package.json'))
   const lock = await json(path.join(hub, 'package-lock.json'))
   const rootPkg = await json(path.join(root, 'package.json'))
@@ -33,61 +35,71 @@ test('M1 build emits a React entry script that mounts a heading', async () => {
   assert.equal(path.relative(hub, path.resolve(viteConfig.root, viteConfig.build.outDir)), path.join('web', 'dist'))
 
   const out = await mkdtemp(path.join(tmpdir(), 'deck-build-'))
+  let browser
+  let server
   try {
     execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
-    await writeFile(path.join(out, 'package.json'), '{"type":"module"}')
     const html = await readFile(path.join(out, 'index.html'), 'utf8')
     assert.match(html, /<div id="root"><\/div>/)
-    const script = html.match(/<script\b[^>]*\bsrc="([^"]+\.js)"[^>]*><\/script>/)
-    assert.ok(script)
-    assert.match(script[1], /^\.\/assets\/[^/]+\.js$/)
-    const { JSDOM, VirtualConsole } = await import('jsdom')
-    const errors = []
-    const virtualConsole = new VirtualConsole()
-    virtualConsole.on('jsdomError', (error) => errors.push(error.message))
-    const dom = new JSDOM(html, {
-      url: 'http://127.0.0.1/',
-      runScripts: 'outside-only',
-      virtualConsole,
-    })
-    try {
-      assert.equal(dom.window.document.querySelector('script[src]')?.type, 'module')
-      for (const link of dom.window.document.querySelectorAll('link[rel="stylesheet"]')) {
-        assert.match(link.getAttribute('href'), /^\.\/assets\/[^/]+\.css$/)
-        const style = dom.window.document.createElement('style')
-        style.textContent = await readFile(path.join(out, link.getAttribute('href').slice(2)), 'utf8')
-        dom.window.document.head.append(style)
-      }
-      for (const link of dom.window.document.querySelectorAll('link[rel="modulepreload"]')) link.remove()
-      const globals = new Map()
-      for (const name of ['window', 'document', 'navigator', 'MutationObserver']) {
-        globals.set(name, Object.getOwnPropertyDescriptor(globalThis, name))
-        Object.defineProperty(globalThis, name, { configurable: true, value: dom.window[name] })
+    server = createServer(async (request, response) => {
+      const pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname)
+      const relative = pathname === '/' ? 'index.html' : pathname.slice(1)
+      if (relative.split('/').includes('..')) {
+        response.writeHead(404).end()
+        return
       }
       try {
-        await import(pathToFileURL(path.join(out, script[1].slice(2))).href)
-      } finally {
-        for (const [name, descriptor] of globals) {
-          if (descriptor) Object.defineProperty(globalThis, name, descriptor)
-          else delete globalThis[name]
-        }
+        const body = await readFile(path.join(out, relative))
+        const type = relative.endsWith('.js') ? 'text/javascript'
+          : relative.endsWith('.css') ? 'text/css' : 'text/html'
+        response.writeHead(200, { 'Content-Type': type }).end(body)
+      } catch {
+        response.writeHead(404).end()
       }
-      await new Promise((resolve) => setTimeout(resolve, 30))
-      assert.deepEqual(errors, [])
-      const heading = dom.window.document.querySelector('main h1')
-      assert.equal(heading?.textContent, 'Fleetmates Deck')
-      const root = dom.window.document.getElementById('root')
-      assert.ok(Object.keys(root).some((key) => key.startsWith('__reactContainer$')))
-      for (let element = heading; element; element = element.parentElement) {
-        const style = dom.window.getComputedStyle(element)
-        assert.notEqual(style.display, 'none')
-        assert.notEqual(style.visibility, 'hidden')
-        assert.notEqual(style.opacity, '0')
-      }
-    } finally {
-      dom.window.close()
+    })
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const candidates = [
+      process.env.CHROMIUM_PATH,
+      '/usr/bin/chromium',
+      '/usr/bin/google-chrome',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
+    ]
+    let executablePath
+    for (const candidate of candidates) {
+      if (!candidate) continue
+      try {
+        await access(candidate)
+        executablePath = candidate
+        break
+      } catch {}
     }
+    assert.ok(executablePath, 'Chromium or Chrome is required for the build smoke test')
+    browser = await chromium.launch({ executablePath, headless: true })
+    const page = await browser.newPage()
+    const errors = []
+    page.on('pageerror', (error) => errors.push(error.message))
+    await page.goto(`http://127.0.0.1:${server.address().port}/`)
+    await page.waitForSelector('main h1', { timeout: 5000 })
+    const result = await page.evaluate(() => {
+      const heading = document.querySelector('main h1')
+      const root = document.getElementById('root')
+      let visible = true
+      for (let element = heading; element; element = element.parentElement) {
+        const style = getComputedStyle(element)
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') visible = false
+      }
+      return {
+        heading: heading.textContent,
+        visible,
+        react: Object.keys(root).some((key) => key.startsWith('__reactContainer$')),
+      }
+    })
+    assert.deepEqual(errors, [])
+    assert.deepEqual(result, { heading: 'Fleetmates Deck', visible: true, react: true })
   } finally {
+    if (browser) await browser.close()
+    if (server) await new Promise((resolve) => server.close(resolve))
     await rm(out, { recursive: true, force: true })
   }
 })
