@@ -102,6 +102,18 @@ test('reorder buffer sorts timestamps and event rank within one session', () => 
   buffer.close()
 })
 
+test('unlisted hook events follow SessionStart at equal timestamps', () => {
+  const output = []
+  const buffer = createReorderBuffer(batch => output.push(...batch.map(row => row.hook.hook_event_name)), { windowMs: 250 })
+  try {
+    for (const event of ['SubagentStart', 'CwdChanged', 'SessionStart']) {
+      buffer.push({ hookTs: 100, hook: { session_id: 's1', hook_event_name: event } })
+    }
+    buffer.flushAll()
+    assert.deepEqual(output, ['SessionStart', 'SubagentStart', 'CwdChanged'])
+  } finally { buffer.close() }
+})
+
 test('timed ingest retries failed delivery without crashing or repeating applied rows', async () => {
   const accepted = []
   let fail = true

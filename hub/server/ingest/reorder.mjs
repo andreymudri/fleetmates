@@ -1,7 +1,11 @@
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
+const rank = event => {
+  const index = ranks.indexOf(event)
+  return index < 0 ? 1 : index === 0 ? 0 : index + 1
+}
 
 function compare(a, b) {
-  return a.hookTs - b.hookTs || ranks.indexOf(a.hook.hook_event_name) - ranks.indexOf(b.hook.hook_event_name)
+  return a.hookTs - b.hookTs || rank(a.hook.hook_event_name) - rank(b.hook.hook_event_name)
 }
 
 /** Hold each session's events briefly, then deliver them in hook-time order. */
