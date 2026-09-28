@@ -4,6 +4,19 @@ const maxLine = 1024 * 1024
 const knownEvents = new Set(['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied', 'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'CwdChanged', 'PreCompact', 'PostCompact', 'WorktreeCreate', 'WorktreeRemove'])
 const toolEvents = new Set(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied'])
 
+function safeDepth(value) {
+  const stack = [[value, 0]]
+  let visited = 0
+  while (stack.length) {
+    const [item, depth] = stack.pop()
+    if (++visited > 20_000 || depth > 64) return false
+    if (item && typeof item === 'object') {
+      for (const child of Object.values(item)) stack.push([child, depth + 1])
+    }
+  }
+  return true
+}
+
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
   if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]))
@@ -24,6 +37,7 @@ export function validateEnvelope(raw) {
   if (typeof value.truncated !== 'boolean') return { ok: false, reason: 'invalid_truncated' }
   const hook = value.hook
   if (!hook || typeof hook !== 'object' || Array.isArray(hook)) return { ok: false, reason: 'missing_field:hook' }
+  if (!safeDepth(hook)) return { ok: false, reason: 'too_deep' }
   for (const key of ['session_id', 'transcript_path', 'cwd', 'hook_event_name']) {
     if (typeof hook[key] !== 'string' || !hook[key]) return { ok: false, reason: `invalid_${key}` }
   }

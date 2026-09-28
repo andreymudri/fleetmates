@@ -22,6 +22,24 @@ test('validation accepts fixture shape and rejects drift, unknown events and mal
   assert.match(validateEnvelope(line(1).repeat(20000)).reason, /too_large/)
 })
 
+test('deep nested hook input is rejected without crashing ingestion', () => {
+  let nested = {}
+  for (let depth = 0; depth < 3000; depth++) nested = { x: nested }
+  const deep = line(1, { ...hook, hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: nested })
+  assert.ok(Buffer.byteLength(deep) < 1024 * 1024)
+  assert.match(validateEnvelope(deep).reason, /too_deep/)
+  const accepted = []
+  const rejected = []
+  const ingest = createIngestor({ onEvent: row => accepted.push(row), onRejected: row => rejected.push(row), reorderMs: 0 })
+  try {
+    assert.equal(ingest.receive(deep), false)
+    ingest.receive(line(2))
+    ingest.flush()
+    assert.equal(accepted.length, 1)
+    assert.equal(rejected[0].reason, 'too_deep')
+  } finally { ingest.close() }
+})
+
 test('ingestor deduplicates and keeps hook and receive times separate', () => {
   const accepted = []
   const rejected = []
@@ -59,11 +77,15 @@ test('socket rejects partial lines and accepts complete lines', async () => {
     assert.equal((await stat(server.path)).mode & 0o777, 0o600)
     assert.equal((await stat(path.dirname(server.path))).mode & 0o777, 0o700)
     const { connect } = await import('node:net')
+    let nested = {}
+    for (let depth = 0; depth < 3000; depth++) nested = { x: nested }
+    const deep = line(0, { ...hook, hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: nested })
+    await new Promise(resolve => { const socket = connect(server.path); socket.on('connect', () => socket.end(deep)); socket.on('close', resolve) })
     await new Promise(resolve => { const socket = connect(server.path); socket.on('connect', () => socket.end(line())); socket.on('close', resolve) })
     await new Promise(resolve => { const socket = connect(server.path); socket.on('connect', () => socket.end('{')); socket.on('close', resolve) })
     ingest.flush()
     assert.equal(accepted.length, 1)
-    assert.equal(rejected.length, 1)
+    assert.deepEqual(rejected.map(row => row.reason), ['too_deep', 'partial_line'])
   } finally { await server.close(); ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
