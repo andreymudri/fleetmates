@@ -83,7 +83,6 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
     await page.waitForSelector('#root main h1', { timeout: 5000 })
     const result = await page.evaluate(() => {
       const heading = document.querySelector('#root main h1')
-      const root = document.getElementById('root')
       let visible = true
       for (let element = heading; element; element = element.parentElement) {
         const style = getComputedStyle(element)
@@ -96,7 +95,7 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
       return {
         heading: heading.textContent,
         visible,
-        react: Object.keys(root).some((key) => key.startsWith('__reactContainer$')),
+        react: Object.keys(heading).some((key) => key.startsWith('__reactFiber$')),
       }
     })
     assert.deepEqual(errors, [])
