@@ -274,6 +274,33 @@ test('notification-only approval closes on a recent observed tool outcome', () =
   } finally { h.close() }
 })
 
+test('a delayed tool outcome closes only its matching notification approval', () => {
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('SessionStart.startup.json')])
+    const notification = (message, at) => {
+      const event = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message, tool_name: undefined })
+      event.hookTs = at
+      return event
+    }
+    h.projector.applyHooks([
+      notification('Allow Bash?', 1000),
+      notification('Allow Write to secret.txt?', 1100),
+      notification('Permission required', 1200)
+    ])
+    const outcome = fixture('PostToolUse.Bash.json', { tool_input: { command: 'pwd' } })
+    outcome.hookTs = 5000
+    h.projector.applyHooks([outcome])
+    assert.deepEqual(h.projector.snapshot().requests.map(row => [row.summary, row.state]), [
+      ['Allow Bash?', 'answered'],
+      ['Allow Write to secret.txt?', 'open'],
+      ['Permission required', 'open']
+    ])
+    assert.equal(h.projector.snapshot().counts.openRequests, 2)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'needs_approval')
+  } finally { h.close() }
+})
+
 test('notification-only approval waits for an outcome from its named tool', () => {
   for (const [message, expectedOpen] of [['Allow Write to secret.txt?', 1], ['Allow Bash?', 0]]) {
     const h = harness()
