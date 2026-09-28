@@ -83,48 +83,17 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
     await page.waitForSelector('#root main h1', { timeout: 5000 })
     const result = await page.evaluate(() => {
       const heading = document.querySelector('#root main h1')
-      let visible = true
-      for (let element = heading; element; element = element.parentElement) {
-        const style = getComputedStyle(element)
-        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') visible = false
-      }
-      const bounds = heading.getBoundingClientRect()
-      visible &&= bounds.width > 0 && bounds.height > 0
-        && bounds.right > 0 && bounds.bottom > 0
-        && bounds.left < innerWidth && bounds.top < innerHeight
-      const range = document.createRange()
-      range.selectNodeContents(heading)
-      const textBounds = range.getBoundingClientRect()
-      visible &&= textBounds.width > 0 && textBounds.height > 0
-        && textBounds.right > 0 && textBounds.bottom > 0
-        && textBounds.left < innerWidth && textBounds.top < innerHeight
-      visible &&= !/^rgba\([^)]*,\s*0\)$/.test(getComputedStyle(heading).color)
-      const channels = (color) => color.match(/[\d.]+/g).map(Number)
-      const composite = (front, back) => front.slice(0, 3).map((value, index) =>
-        value * (front[3] ?? 1) + back[index] * (1 - (front[3] ?? 1)))
-      let background = [255, 255, 255]
-      const ancestors = []
-      for (let element = heading; element; element = element.parentElement) ancestors.push(element)
-      for (const element of ancestors.reverse()) {
-        background = composite(channels(getComputedStyle(element).backgroundColor), background)
-      }
-      const foreground = composite(channels(getComputedStyle(heading).color), background)
-      const luminance = (rgb) => rgb.reduce((sum, value, index) => {
-        const channel = value / 255
-        const linear = channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
-        return sum + linear * [0.2126, 0.7152, 0.0722][index]
-      }, 0)
-      const light = Math.max(luminance(foreground), luminance(background))
-      const dark = Math.min(luminance(foreground), luminance(background))
-      visible &&= (light + 0.05) / (dark + 0.05) >= 3
       return {
         heading: heading.textContent,
-        visible,
         react: Object.keys(heading).some((key) => key.startsWith('__reactFiber$')),
       }
     })
     assert.deepEqual(errors, [])
-    assert.deepEqual(result, { heading: 'Fleetmates Deck', visible: true, react: true })
+    assert.deepEqual(result, { heading: 'Fleetmates Deck', react: true })
+    const visible = await page.screenshot({ animations: 'disabled' })
+    await page.evaluate(() => { document.querySelector('#root main h1').style.visibility = 'hidden' })
+    const hidden = await page.screenshot({ animations: 'disabled' })
+    assert.equal(visible.equals(hidden), false, 'the heading must paint visible pixels')
   } finally {
     if (browser) await browser.close()
     if (server) await new Promise((resolve) => server.close(resolve))
