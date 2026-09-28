@@ -213,6 +213,40 @@ test('missing task branch with done status has an unknown derived phase', async 
   })
 })
 
+test('task branch at the run tip stays in its pending phase', async () => {
+  await withRepo(async (repo) => {
+    execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
+    await writeFile(path.join(repo, 'readme.txt'), 'run')
+    execFileSync('git', ['add', 'readme.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'run'], { cwd: repo })
+    execFileSync('git', ['branch', 'fleetmates/r1/T1'], { cwd: repo })
+    await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'pending' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo] })
+    try { assert.equal((await reader.list())[0].derivedPhase, 1) } finally { reader.close() }
+  })
+})
+
+test('fresh edits in a task worktree count as working with an old branch tip', async () => {
+  await withRepo(async (repo) => {
+    execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
+    await writeFile(path.join(repo, 'readme.txt'), 'run')
+    execFileSync('git', ['add', 'readme.txt'], { cwd: repo })
+    const old = new Date(Date.now() - 25 * 60_000).toISOString()
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'run'], { cwd: repo, env: { ...process.env, GIT_AUTHOR_DATE: old, GIT_COMMITTER_DATE: old } })
+    const worktree = path.join(repo, 'tasks', 'T1')
+    await mkdir(path.dirname(worktree), { recursive: true })
+    execFileSync('git', ['worktree', 'add', '-q', '-b', 'fleetmates/r1/T1', worktree], { cwd: repo })
+    await writeFile(path.join(worktree, 'active-edit.txt'), 'now')
+    await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'running' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo] })
+    try { assert.equal((await reader.list())[0].teammates[0].liveness, 'working') } finally { reader.close() }
+  })
+})
+
 test('an unmerged task branch keeps the phase open even when status says done', async () => {
   await withRepo(async (repo) => {
     execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })

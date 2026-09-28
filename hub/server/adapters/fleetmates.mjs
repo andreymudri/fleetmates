@@ -1,5 +1,5 @@
 import { constants, watch as fsWatch } from 'node:fs'
-import { open, readdir, realpath } from 'node:fs/promises'
+import { open, readdir, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { NAMES } from '../../../scripts/names.mjs'
 import { livenessRows, DEFAULT_STALE_MINUTES } from '../../../scripts/liveness.mjs'
@@ -7,6 +7,7 @@ import { createGit } from '../../../scripts/git.mjs'
 
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_DISCOVERY_DEPTH = 16
+const MAX_TOUCH_ENTRIES = 5000
 const RUN_INTERNAL_DIRS = new Set(['claims', 'clones', 'index', 'reviews', 'sessions', 'worktrees'])
 const READ_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0)
 
@@ -68,6 +69,31 @@ async function discover(repoRoot) {
   return found
 }
 
+async function newestWorktreeMtime(dir, ignored) {
+  let newest = null
+  let visited = 0
+  const stack = [dir]
+  while (stack.length) {
+    let entries
+    const current = stack.pop()
+    try { entries = await readdir(current, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      if (++visited > MAX_TOUCH_ENTRIES) return { at: newest, floored: true }
+      if (entry.name === '.git' || entry.isSymbolicLink()) continue
+      const full = path.join(current, entry.name)
+      const rel = path.relative(dir, full).split(path.sep).join('/')
+      if (ignored.has(rel) || ignored.has(`${rel}/`)) continue
+      if (entry.isDirectory()) { stack.push(full); continue }
+      if (!entry.isFile()) continue
+      try {
+        const mtime = (await stat(full)).mtimeMs
+        if (newest === null || mtime > newest) newest = mtime
+      } catch {}
+    }
+  }
+  return { at: newest, floored: false }
+}
+
 function gateRows(gates) {
   const result = {}
   if (!gates || typeof gates !== 'object' || Array.isArray(gates)) return result
@@ -118,16 +144,27 @@ async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
         for (const task of phaseTasks) {
           const sha = shas.get(task.id)
           if (!sha) missingBranch = true
-          if (sha ? !await git.isAncestor(sha, runSha) : statusById.get(task.id)?.state !== 'done') integrated = false
+          if (sha ? sha === runSha || !await git.isAncestor(sha, runSha) : statusById.get(task.id)?.state !== 'done') integrated = false
         }
         if (!integrated) { derivedPhase = phase; break }
       }
       phaseDerivation = missingBranch ? 'unknown' : 'verified'
     } catch {}
   }
+  const touches = {}
+  try {
+    const byBranch = new Map((await git.worktrees()).filter((wt) => wt.branch).map((wt) => [wt.branch, wt.path]))
+    for (const task of tasks) {
+      const branch = `${NAMES.branchPrefix}/${runId}/${task.id}`
+      const dir = byBranch.get(branch)
+      if (!dir) continue
+      const ignored = new Set(await git.ignoredPaths(dir).catch(() => []))
+      touches[task.id] = { branch, ...await newestWorktreeMtime(dir, ignored) }
+    }
+  } catch {}
   const liveness = livenessRows({
     tasks: Array.isArray(status?.tasks) ? status.tasks : [],
-    tips, now, staleMinutes: DEFAULT_STALE_MINUTES,
+    tips, touches, now, staleMinutes: DEFAULT_STALE_MINUTES,
   })
   return { derivedPhase, phaseDerivation, liveness }
 }
