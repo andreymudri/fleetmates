@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -135,7 +135,10 @@ test('reader polls an active run at most once per 60 seconds and never edits run
     const dir = await writeRun(repo, 'r1', { runId: 'r1', totalPhases: 2, tasks: [] }, {
       runId: 'r1', tasks: [], gates: { 1: { verdict: 'PASS', phase: 1 } },
     })
+    const old = new Date('2020-01-01T00:00:00.000Z')
+    await Promise.all(['plan.json', 'status.json'].map((name) => utimes(path.join(dir, name), old, old)))
     const before = await Promise.all(['plan.json', 'status.json'].map((name) => readFile(path.join(dir, name))))
+    const mtimeBefore = await Promise.all(['plan.json', 'status.json'].map(async (name) => (await stat(path.join(dir, name))).mtimeMs))
     const entriesBefore = (await readdir(dir, { recursive: true })).sort()
     let now = 1_000_000
     let polls = 0
@@ -154,6 +157,7 @@ test('reader polls an active run at most once per 60 seconds and never edits run
       assert.equal(polls, 2)
       const after = await Promise.all(['plan.json', 'status.json'].map((name) => readFile(path.join(dir, name))))
       assert.deepEqual(after, before)
+      assert.deepEqual(await Promise.all(['plan.json', 'status.json'].map(async (name) => (await stat(path.join(dir, name))).mtimeMs)), mtimeBefore)
       assert.deepEqual((await readdir(dir, { recursive: true })).sort(), entriesBefore)
     } finally {
       reader.close()
