@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -43,6 +43,15 @@ test('opening an existing permissive state directory makes it private', async ()
 test('database rejects relative paths before changing the current directory', () => {
   assert.throws(() => openDeckDb('deck.db'), /absolute file path/)
 })
+
+test('opening an existing permissive database file makes it private', async () => withDatabase(async file => {
+  await mkdir(path.dirname(file), { recursive: true })
+  await writeFile(file, '')
+  await chmod(file, 0o644)
+  assert.equal((await stat(file)).mode & 0o777, 0o644)
+  const store = openDeckDb(file)
+  try { assert.equal((await stat(file)).mode & 0o777, 0o600) } finally { store.close() }
+}))
 
 test('schema refuses duplicate exclusive crew slots and live process keys', async () => withDatabase(async file => {
   const store = openDeckDb(file)
