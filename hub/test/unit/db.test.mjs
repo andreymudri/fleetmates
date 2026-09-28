@@ -138,11 +138,11 @@ test('retention keeps summaries, open requests and recent replay while pruning o
   const now = 50 * day
   try {
     store.run("INSERT INTO repos(id,name,crew_slot,crew_seed,first_seen_at) VALUES('/repo','repo',0,'repo',0)")
-    for (const [id, state, endedAt] of [['old','ended',19 * day], ['recent','ended',21 * day], ['active','needs_approval',null]]) {
+    for (const [id, state, endedAt] of [['old','ended',19 * day], ['old-open','ended',19 * day], ['recent','ended',21 * day], ['active','needs_approval',null]]) {
       store.run('INSERT INTO sessions(id,origin,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at,ended_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', id, 'wrapped', '/repo', '/repo', state, 0, 0, 0, state === 'ended' ? 0 : 1, 0, endedAt)
     }
     store.run("INSERT INTO session_summaries(session_id,repo_id,repo_name,task,origin,role,outcome,started_at,ended_at,duration_ms) VALUES('old','/repo','repo','task','wrapped','solo','ended',0,1,1)")
-    store.run("INSERT INTO requests(id,session_id,kind,tier,summary,state,source,match_key,created_at) VALUES('open','active','permission','safe','ok','open','permission_request','one',1)")
+    store.run("INSERT INTO requests(id,session_id,kind,tier,summary,state,source,match_key,created_at) VALUES('open','old-open','permission','safe','ok','open','permission_request','one',1)")
     store.run("INSERT INTO requests(id,session_id,kind,tier,summary,state,source,match_key,created_at,answer) VALUES('closed','active','permission','safe','ok','answered','permission_request','two',1,'{}')")
     store.run("INSERT INTO events(at,type,data) VALUES(1,'counts','{}'),(?, 'counts','{}')", now)
     store.run("INSERT INTO hook_events(dedupe_key,session_id,claude_session_id,event,hook_ts,received_at,via,applied,payload) VALUES('old-hook','active','cc','Stop',1,1,'socket',1,'{}')")
@@ -150,6 +150,7 @@ test('retention keeps summaries, open requests and recent replay while pruning o
     store.run("INSERT INTO session_scrollback(session_id,captured_at,text,truncated) VALUES('active',1,'old screen',0)")
     runRetention(store, { now })
     assert.equal(store.get("SELECT count(*) AS n FROM sessions WHERE id='old'").n, 0)
+    assert.equal(store.get("SELECT count(*) AS n FROM sessions WHERE id='old-open'").n, 1)
     assert.equal(store.get("SELECT count(*) AS n FROM sessions WHERE id='recent'").n, 1)
     assert.equal(store.get("SELECT count(*) AS n FROM session_summaries WHERE session_id='old'").n, 1)
     assert.equal(store.get("SELECT count(*) AS n FROM requests WHERE id='open'").n, 1)
