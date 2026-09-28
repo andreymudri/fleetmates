@@ -85,6 +85,14 @@ test('hook truncates long tool input and stays within the line limit', () => {
   assert.equal(validateEnvelope(JSON.stringify(huge)).ok, true)
 })
 
+test('deep tool input reaches validation instead of being dropped by the hook', () => {
+  let nested = {}
+  for (let depth = 0; depth < 3000; depth++) nested = { x: nested }
+  const hook = { session_id: 's', transcript_path: '/home/you/t', cwd: '/repo', hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: nested }
+  const envelope = makeEnvelope(hook, { hookTs: 1 })
+  assert.equal(validateEnvelope(JSON.stringify(envelope)).reason, 'too_deep')
+})
+
 test('hook exits silently when stdin never finishes', async () => {
   const child = spawn(process.execPath, [executable], { stdio: ['pipe', 'pipe', 'pipe'] })
   const output = []

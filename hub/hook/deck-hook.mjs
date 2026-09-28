@@ -9,6 +9,18 @@ const maxLine = 1024 * 1024
 const maxString = 64 * 1024
 const maxSpool = 32 * 1024 * 1024
 
+function tooDeep(value) {
+  const stack = [[value, 0]]
+  while (stack.length) {
+    const [item, depth] = stack.pop()
+    if (depth > 64) return true
+    if (item && typeof item === 'object') {
+      for (const child of Object.values(item)) stack.push([child, depth + 1])
+    }
+  }
+  return false
+}
+
 function ancestry() {
   const pidChain = [process.pid]
   let claudePid = null
@@ -43,7 +55,7 @@ function truncateInput(value, state) {
 export function makeEnvelope(hook, { hookTs = Date.now(), ptyId = process.env.FLEETMATES_DECK_PTY ?? null } = {}) {
   const state = { truncated: false }
   const copy = { ...hook }
-  if (copy.tool_input !== undefined) copy.tool_input = truncateInput(copy.tool_input, state)
+  if (copy.tool_input !== undefined && !tooDeep(copy.tool_input)) copy.tool_input = truncateInput(copy.tool_input, state)
   const envelope = { v: 1, deckHookVersion: '0.1.0', hookTs, ptyId, ...ancestry(), truncated: state.truncated, hook: copy }
   if (Buffer.byteLength(JSON.stringify(envelope)) > maxLine) {
     delete copy.tool_input
