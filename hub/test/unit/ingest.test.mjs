@@ -156,13 +156,20 @@ test('spool drain replays sorted lines and retains a new append file', async () 
   const ingest = createIngestor({ onEvent: row => accepted.push(row), onRejected: row => rejected.push(row), reorderMs: 0 })
   try {
     await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(3) + line(1, { ...hook, session_id: 's2' }) + '{\n')
-    await drainSpool(dir, ingest)
+    const draining = drainSpool(dir, ingest)
+    let renamed = false
+    for (let attempt = 0; attempt < 40; attempt++) {
+      if ((await readdir(dir)).includes('hooks-20260928.jsonl.draining')) { renamed = true; break }
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    assert.equal(renamed, true)
+    await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(4))
+    await draining
     ingest.flush()
     assert.deepEqual(accepted.map(row => row.hookTs), [1, 3])
     assert.equal(rejected.length, 1)
-    assert.deepEqual(await readdir(dir), [])
-    await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(4))
-    assert.ok((await readFile(path.join(dir, 'hooks-20260928.jsonl'))).length > 0)
+    assert.deepEqual(await readdir(dir), ['hooks-20260928.jsonl'])
+    assert.equal(await readFile(path.join(dir, 'hooks-20260928.jsonl'), 'utf8'), line(4))
   } finally { ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
