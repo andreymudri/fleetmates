@@ -4,9 +4,42 @@ import path from 'node:path'
 /** Events observed by the deck hook. */
 export const HOOK_EVENTS = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied', 'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'CwdChanged', 'PreCompact', 'PostCompact', 'WorktreeCreate', 'WorktreeRemove']
 
+function shellWords(command) {
+  const words = []
+  let word = ''
+  let quote = null
+  let started = false
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]
+    if (quote) {
+      if (char === quote) quote = null
+      else if (quote === '"' && char === '\\') {
+        if (++i === command.length) return null
+        word += command[i]
+      } else if (quote === '"' && (char === '$' || char === '`')) return null
+      else word += char
+    } else if (char === "'" || char === '"') { quote = char; started = true }
+    else if (char === '\\') {
+      if (++i === command.length) return null
+      word += command[i]
+      started = true
+    } else if (/\s/.test(char)) {
+      if (started) { words.push(word); word = ''; started = false }
+    } else if (/[;&|<>`$()]/.test(char)) return null
+    else { word += char; started = true }
+  }
+  if (quote) return null
+  if (started) words.push(word)
+  return words
+}
+
 /** Check whether a command names a deck hook script. */
 export function isDeckHook(command) {
-  return typeof command === 'string' && /(?:^|[/\\])deck-hook\.mjs(?:[\s'" ]|$)/.test(command) && command.includes('fleetmates-deck')
+  if (typeof command !== 'string' || /[\r\n]/.test(command)) return false
+  const words = shellWords(command)
+  if (words?.length !== 2) return false
+  const [node, script] = words
+  return (node === 'node' || (path.isAbsolute(node) && path.basename(node) === 'node')) && path.isAbsolute(script) && /\/(?:hub|fleetmates-deck)\/hook\/deck-hook\.mjs$/.test(script)
 }
 
 /** Merge or remove deck hooks without moving unrelated groups. */

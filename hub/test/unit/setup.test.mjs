@@ -291,6 +291,29 @@ test('init updates an old deck hook in place', () => {
   assert.equal(groups[0].hooks[1].command, 'node /home/you/other.mjs')
 })
 
+test('init replaces an old hub path hook and preserves unrelated commands', () => {
+  const s = sandbox()
+  const old = 'node /tmp/old-install/hub/hook/deck-hook.mjs'
+  const unrelated = ['node /home/you/other/hook/deck-hook.mjs', 'echo /tmp/old-install/hub/hook/deck-hook.mjs', 'node\n/tmp/old-install/hub/hook/deck-hook.mjs', 'node /home/you/other.mjs']
+  writeFileSync(s.settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: '*', hooks: [old, ...unrelated].map(command => ({ type: 'command', command })) }] } }))
+  assert.equal(s.run('init').status, 0)
+  const groups = JSON.parse(readFileSync(s.settings)).hooks.PreToolUse
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].hooks.length, 5)
+  assert.match(groups[0].hooks[0].command, /fleetmates-deck\/hook\/deck-hook\.mjs'$/)
+  assert.deepEqual(groups[0].hooks.slice(1).map(hook => hook.command), unrelated)
+})
+
+test('uninstall removes an old hub path hook and preserves unrelated commands', () => {
+  const s = sandbox()
+  const old = 'node /tmp/old-install/hub/hook/deck-hook.mjs'
+  const unrelated = ['node /home/you/other/hook/deck-hook.mjs', 'echo /tmp/old-install/hub/hook/deck-hook.mjs', 'node\n/tmp/old-install/hub/hook/deck-hook.mjs', 'node /home/you/other.mjs']
+  writeFileSync(s.settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: '*', hooks: [old, ...unrelated].map(command => ({ type: 'command', command })) }] } }))
+  assert.equal(s.run('uninstall-hooks').status, 0)
+  const groups = JSON.parse(readFileSync(s.settings)).hooks.PreToolUse
+  assert.deepEqual(groups[0].hooks.map(hook => hook.command), unrelated)
+})
+
 test('restricted old hook gains wildcard coverage without widening unrelated hooks', () => {
   const s = sandbox()
   writeFileSync(s.settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [
