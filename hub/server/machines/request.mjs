@@ -158,6 +158,31 @@ function namesDeckControl(input) {
     || /systemctl\s+--user\s+[^"']*fleetmates-deck/.test(text)
 }
 
+function namesRelativeDeckControl(hook) {
+  if (!path.isAbsolute(hook.cwd ?? '')) return false
+  const namesControl = value => typeof value === 'string' && value && !path.isAbsolute(value) && !/[$*?`]/.test(value) && namesDeckControl({ path: path.resolve(hook.cwd, value) })
+  if (['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(hook.tool_name)) {
+    return namesControl(hook.tool_input?.file_path ?? hook.tool_input?.notebook_path)
+  }
+  if (hook.tool_name !== 'Bash' || typeof hook.tool_input?.command !== 'string') return false
+  const fileCommands = ['cat', 'head', 'tail', 'less', 'more', 'bat', 'stat', 'file', 'wc', 'nl', 'cp', 'mv', 'tee']
+  const tokens = shellTokens(hook.tool_input.command)
+  let segment = []
+  const accessesControl = words => {
+    let index = 0
+    while (words[index] && (/^[A-Za-z_]\w*=/.test(words[index].value) || ['env', 'command', 'builtin', 'sudo', 'doas'].includes(path.posix.basename(words[index].value)))) index++
+    if (!fileCommands.includes(path.posix.basename(words[index]?.value ?? ''))) return false
+    return words.slice(index + 1).some(word => !word.value.startsWith('-') && namesControl(word.value))
+  }
+  for (const token of tokens) {
+    if (token.separator) {
+      if (accessesControl(segment)) return true
+      segment = []
+    } else segment.push(token)
+  }
+  return accessesControl(segment)
+}
+
 function sensitiveWrite(hook, repoRoot) {
   const tool = hook.tool_name
   const fileTool = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(tool)
@@ -177,7 +202,7 @@ function sensitiveWrite(hook, repoRoot) {
 
 /** Classify a permission conservatively; unknown commands remain Caution. */
 export function permissionTier(hook, { repoRoot } = {}) {
-  if (namesDeckControl(hook.tool_input) || sensitiveWrite(hook, repoRoot)) return 'destructive'
+  if (namesDeckControl(hook.tool_input) || namesRelativeDeckControl(hook) || sensitiveWrite(hook, repoRoot)) return 'destructive'
   const mcpTool = /^mcp__.+?__(.+)$/.exec(hook.tool_name ?? '')?.[1]
   if (mcpTool && /delete|remove|drop|destroy|purge|truncate|wipe|reset/i.test(mcpTool)) return 'destructive'
   if (hook.tool_name === 'Bash' && destructiveShell(hook.tool_input?.command)) return 'destructive'

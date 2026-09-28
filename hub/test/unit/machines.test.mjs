@@ -334,6 +334,26 @@ test('configured XDG state token path has a destructive floor', () => {
   }
 })
 
+test('relative deck control paths resolve against hook cwd', () => {
+  const cwd = '/home/you/.local/state/fleetmates/deck'
+  for (const [tool_name, tool_input] of [
+    ['Read', { file_path: 'token' }],
+    ['Read', { file_path: './token' }],
+    ['Bash', { command: 'cat token' }],
+    ['Bash', { command: 'cat ./token' }]
+  ]) assert.equal(permissionTier({ cwd, tool_name, tool_input }), 'destructive', `${tool_name}: ${JSON.stringify(tool_input)}`)
+  assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command: 'echo token' } }), 'caution')
+  assert.equal(permissionTier({ cwd: '/home/you/project', tool_name: 'Read', tool_input: { file_path: 'token' } }), 'caution')
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    process.env.XDG_STATE_HOME = '/tmp/deck-xdg'
+    assert.equal(permissionTier({ cwd: '/tmp/deck-xdg/fleetmates/deck', tool_name: 'Bash', tool_input: { command: 'cat token' } }), 'destructive')
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+  }
+})
+
 test('clear starts alias wait at the end hook timestamp', () => {
   const h = harness()
   try {
