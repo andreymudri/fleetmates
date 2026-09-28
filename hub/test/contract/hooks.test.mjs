@@ -114,12 +114,14 @@ test('hook sends one complete line to the runtime socket without creating spool'
     await new Promise(resolve => server.listen(socketPath, resolve))
     await chmod(socketPath, 0o600)
     const hook = JSON.parse(await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
+    const started = Date.now()
     const child = spawn(process.execPath, [executable], { env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: runtime }, stdio: ['pipe', 'pipe', 'pipe'] })
     child.stdin.end(JSON.stringify(hook))
     const output = []
     child.stdout.on('data', chunk => output.push(chunk))
     child.stderr.on('data', chunk => output.push(chunk))
     const exit = await new Promise(resolve => child.on('close', resolve))
+    assert.ok(Date.now() - started < 200, 'socket hook exceeded its 200 ms budget')
     assert.equal(exit, 0)
     assert.equal(Buffer.concat(output).length, 0)
     const wire = await wireDone
