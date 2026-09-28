@@ -199,7 +199,7 @@ test('run file changes are debounced and refresh rows without another git poll',
   })
 })
 
-test('missing task branch with done status has an unknown derived phase', async () => {
+test('missing task branch with done status keeps the phase open as unknown', async () => {
   await withRepo(async (repo) => {
     execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
     await writeFile(path.join(repo, 'readme.txt'), 'run')
@@ -207,6 +207,24 @@ test('missing task branch with done status has an unknown derived phase', async 
     execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'run'], { cwd: repo })
     await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
       runId: 'r1', tasks: [{ id: 'T1', state: 'done' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo] })
+    try {
+      const [run] = await reader.list()
+      assert.equal(run.derivedPhase, 1)
+      assert.equal(run.phaseDerivation, 'unknown')
+    } finally { reader.close() }
+  })
+})
+
+test('a passed gate permits a pruned task branch to appear complete but unverified', async () => {
+  await withRepo(async (repo) => {
+    execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
+    await writeFile(path.join(repo, 'readme.txt'), 'run')
+    execFileSync('git', ['add', 'readme.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'run'], { cwd: repo })
+    await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'done' }], gates: { 1: { verdict: 'PASS', phase: 1 } },
     })
     const reader = createFleetmatesReader({ repoRoots: [repo] })
     try {

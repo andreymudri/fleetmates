@@ -149,11 +149,13 @@ async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
       let missingBranch = false
       for (const phase of phases) {
         const phaseTasks = tasks.filter((task) => task.phase === phase)
+        const gatePassed = status?.gates?.[phase]?.verdict === 'PASS'
         let integrated = true
         for (const task of phaseTasks) {
           const sha = shas.get(task.id)
           if (!sha || started.get(task.id) === null) missingBranch = true
-          if (statusById.get(task.id)?.state !== 'done' || (sha && (started.get(task.id) !== true || !await git.isAncestor(sha, runSha)))) integrated = false
+          if (statusById.get(task.id)?.state !== 'done'
+            || (sha ? started.get(task.id) === false || (started.get(task.id) === null && !gatePassed) || !await git.isAncestor(sha, runSha) : !gatePassed)) integrated = false
         }
         if (!integrated) { derivedPhase = phase; break }
       }
