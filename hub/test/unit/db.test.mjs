@@ -162,3 +162,20 @@ test('retention keeps summaries, open requests and recent replay while pruning o
     assert.equal(store.get("SELECT value FROM meta WHERE key='last_retention_at'").value, String(now))
   } finally { store.close() }
 }))
+
+test('retention rolls back earlier deletions when a later deletion fails', async () => withDatabase(async file => {
+  const store = openDeckDb(file)
+  try {
+    store.run("INSERT INTO repos(id,name,crew_slot,crew_seed,first_seen_at) VALUES('/repo','repo',0,'repo',0)")
+    store.run("INSERT INTO sessions(id,origin,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at,ended_at) VALUES('old','wrapped','/repo','/repo','ended',0,0,0,0,0,1)")
+    const originalRun = store.run
+    store.run = (sql, ...args) => {
+      if (sql.startsWith('DELETE FROM hook_events')) throw Error('storage failure')
+      return originalRun(sql, ...args)
+    }
+    assert.throws(() => runRetention(store, { now: 50 * 86_400_000 }), /storage failure/)
+    store.run = originalRun
+    assert.equal(store.get("SELECT count(*) AS n FROM sessions WHERE id='old'").n, 1)
+    assert.equal(store.get("SELECT count(*) AS n FROM events WHERE type='session.removed'").n, 0)
+  } finally { store.close() }
+}))
