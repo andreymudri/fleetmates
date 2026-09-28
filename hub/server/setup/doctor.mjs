@@ -14,9 +14,16 @@ export async function doctor(paths, command, { run = probe } = {}) {
   const claude = run('claude', ['--version'])
   const version = claude.status === 0 ? claude.stdout.match(/\d+\.\d+\.\d+/)?.[0] : null
   const checks = [{ id: 'claude', state: version === '2.1.282' ? 'ok' : 'failed', blocking: false, detail: version ? `Claude Code ${version}; tested 2.1.282` : 'Claude Code unavailable; tested 2.1.282' }]
-  let installed = false
-  try { installed = hooksInstalled(readSettings(paths.settings).value, command) } catch {}
-  checks.push({ id: 'hooks', state: installed ? 'ok' : 'failed', blocking: true, detail: installed ? 'Observation hooks installed' : 'Observation hooks missing' })
+  let configured = false
+  try { configured = hooksInstalled(readSettings(paths.settings).value, command) } catch {}
+  let usable = false
+  if (configured) {
+    try {
+      usable = fs.statSync(paths.hook).isFile()
+      if (usable) fs.accessSync(paths.hook, fs.constants.R_OK)
+    } catch { usable = false }
+  }
+  checks.push({ id: 'hooks', state: configured && usable ? 'ok' : 'failed', blocking: true, detail: !configured ? 'Observation hooks missing' : usable ? 'Observation hooks installed' : 'Observation hook script missing or unreadable' })
   const unit = run('systemctl', ['--user', 'is-active', 'fleetmates-deckd.service'])
   let socket = false
   if (unit.status === 0 && paths.runtime) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -364,6 +364,32 @@ test('doctor and status read setup state without service mutations', () => {
     'systemctl:--user is-active fleetmates-deckd.service',
     'systemctl:--user is-active fleetmates-deck.service'
   ])
+})
+
+test('doctor fails when the configured hook script is missing or not a file', () => {
+  const s = sandbox()
+  assert.equal(s.run('init').status, 0)
+  const hook = setupPaths(s.env).hook
+  unlinkSync(hook)
+  const missing = s.run('doctor')
+  assert.equal(missing.status, 1)
+  assert.match(missing.stdout, /hooks: failed \(Observation hook script missing or unreadable\)/)
+  mkdirSync(hook)
+  const directory = s.run('doctor')
+  assert.equal(directory.status, 1)
+  assert.match(directory.stdout, /hooks: failed \(Observation hook script missing or unreadable\)/)
+})
+
+test('doctor fails when the configured hook script is unreadable', () => {
+  const s = sandbox()
+  assert.equal(s.run('init').status, 0)
+  const hook = setupPaths(s.env).hook
+  chmodSync(hook, 0o000)
+  try {
+    const result = s.run('doctor')
+    assert.equal(result.status, 1)
+    assert.match(result.stdout, /hooks: failed \(Observation hook script missing or unreadable\)/)
+  } finally { chmodSync(hook, 0o600) }
 })
 
 test('doctor finds the scribed Unix listener in the runtime directory', async () => {
