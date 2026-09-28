@@ -13,7 +13,7 @@ const root = path.dirname(hub)
 
 const json = async (file) => JSON.parse(await readFile(file, 'utf8'))
 
-test('M1 build emits an entry script that mounts a heading', async () => {
+test('M1 build emits a React entry script that mounts a heading', async () => {
   const pkg = await json(path.join(hub, 'package.json'))
   const lock = await json(path.join(hub, 'package-lock.json'))
   const rootPkg = await json(path.join(root, 'package.json'))
@@ -76,6 +76,8 @@ test('M1 build emits an entry script that mounts a heading', async () => {
       assert.deepEqual(errors, [])
       const heading = dom.window.document.querySelector('main h1')
       assert.equal(heading?.textContent, 'Fleetmates Deck')
+      const root = dom.window.document.getElementById('root')
+      assert.ok(Object.keys(root).some((key) => key.startsWith('__reactContainer$')))
       for (let element = heading; element; element = element.parentElement) {
         const style = dom.window.getComputedStyle(element)
         assert.notEqual(style.display, 'none')
