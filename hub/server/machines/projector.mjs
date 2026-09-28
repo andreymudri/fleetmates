@@ -78,8 +78,9 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
         }
         for (const row of store.all('SELECT * FROM sessions WHERE origin = ? AND alive = 1 AND process_key IS NULL AND ? - last_activity_at >= ?', 'observed', at, 86_400_000)) {
-          expireRequests(store, row.id, 'process_ended')
+          closeRequests(row.id, 'process_ended', at)
           store.run('UPDATE sessions SET state = ?, alive = 0, ended_at = ?, since_ts = ? WHERE id = ?', 'ended', at, at, row.id)
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
         }
         store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
       })

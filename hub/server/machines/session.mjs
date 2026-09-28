@@ -19,10 +19,15 @@ export function resolveSession(store, envelope) {
     const found = store.get('SELECT * FROM sessions WHERE process_key = ? AND alive = 1', String(envelope.claudePid))
     if (found) return found
   }
-  const direct = store.get('SELECT * FROM sessions WHERE claude_session_id = ? ORDER BY started_at DESC LIMIT 1', hook.session_id)
+  const direct = store.get('SELECT * FROM sessions WHERE claude_session_id = ? AND alive = 1 ORDER BY started_at DESC LIMIT 1', hook.session_id)
   if (direct) return direct
-  const alias = store.get('SELECT s.* FROM sessions s JOIN session_aliases a ON a.session_id = s.id WHERE a.claude_session_id = ? LIMIT 1', hook.session_id)
+  const alias = store.get('SELECT s.* FROM sessions s JOIN session_aliases a ON a.session_id = s.id WHERE a.claude_session_id = ? AND s.alive = 1 LIMIT 1', hook.session_id)
   if (alias) return alias
+  if (hook.hook_event_name === 'SessionStart' && hook.source === 'resume') {
+    const ended = store.get('SELECT * FROM sessions WHERE claude_session_id = ? AND alive = 0 ORDER BY ended_at DESC LIMIT 1', hook.session_id)
+      ?? store.get('SELECT s.* FROM sessions s JOIN session_aliases a ON a.session_id = s.id WHERE a.claude_session_id = ? AND s.alive = 0 ORDER BY s.ended_at DESC LIMIT 1', hook.session_id)
+    if (ended) return ended
+  }
   if (hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source)) {
     const dirname = hook.transcript_path?.slice(0, hook.transcript_path.lastIndexOf('/'))
     const rows = store.all('SELECT * FROM sessions WHERE cwd = ? AND alive = 1 AND end_reason IN (?, ?) ORDER BY state_since DESC', hook.cwd, 'clear', 'resume')
@@ -56,7 +61,16 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   let task = existing.task
   let cwd = existing.cwd
   let repoId = existing.repo_id
+  let processKey = existing.process_key
+  let ptyId = existing.pty_id
   if (event === 'SessionStart') {
+    if (!alive && hook.source === 'resume') {
+      alive = 1
+      endedAt = null
+      endAnnounced = 0
+      processKey = envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null)
+      ptyId = envelope.ptyId ?? null
+    }
     if (hook.session_id !== claudeId) {
       store.run('INSERT OR IGNORE INTO session_aliases(claude_session_id,session_id,replaced_at,source) VALUES(?,?,?,?)', claudeId, existing.id, at, hook.source === 'compact' ? 'compact' : ['clear', 'resume', 'fork'].includes(hook.source) ? hook.source : 'heuristic')
       claudeId = hook.session_id
@@ -87,6 +101,6 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   else if (open.some(row => row.kind === 'question')) state = 'asked_you'
   else if (['needs_approval', 'asked_you'].includes(state)) state = event === 'Notification' && hook.notification_type === 'idle_prompt' ? 'idle' : 'running'
   const since = state !== existing.state ? at : existing.since_ts
-  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=? WHERE id=?', claudeId, state, state !== existing.state ? at : existing.state_since, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, repoId === existing.repo_id ? existing.review_baseline : null, existing.id)
+  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=?,process_key=?,pty_id=? WHERE id=?', claudeId, state, state !== existing.state ? at : existing.state_since, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, repoId === existing.repo_id ? existing.review_baseline : null, processKey, ptyId, existing.id)
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
 }

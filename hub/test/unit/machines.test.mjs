@@ -35,6 +35,92 @@ test('first SessionStart is idle and not joined mid-life; later first hook is jo
   } finally { h.close() }
 })
 
+test('startup in a new process does not reuse an ended conversation', () => {
+  const h = harness()
+  try {
+    const first = fixture('SessionStart.startup.json')
+    first.claudePid = 41
+    h.projector.applyHooks([first])
+    const end = fixture('SessionEnd.prompt_input_exit.json', { reason: 'logout' })
+    end.claudePid = 41
+    end.hookTs = 2000
+    h.projector.applyHooks([end])
+    const next = fixture('SessionStart.startup.json')
+    next.claudePid = 42
+    next.hookTs = 3000
+    h.projector.applyHooks([next])
+    const sessions = h.projector.snapshot().sessions
+    assert.equal(sessions.length, 2)
+    assert.equal(sessions.filter(row => row.alive).length, 1)
+    assert.equal(sessions.find(row => row.alive).state, 'idle')
+  } finally { h.close() }
+})
+
+test('explicit resume reopens an ended conversation with a new process', () => {
+  const h = harness()
+  try {
+    const first = fixture('SessionStart.startup.json')
+    first.claudePid = 41
+    h.projector.applyHooks([first])
+    const end = fixture('SessionEnd.prompt_input_exit.json', { reason: 'logout' })
+    end.claudePid = 41
+    end.hookTs = 2000
+    h.projector.applyHooks([end])
+    const resume = fixture('SessionStart.startup.json', { source: 'resume' })
+    resume.claudePid = 42
+    resume.hookTs = 3000
+    h.projector.applyHooks([resume])
+    const sessions = h.projector.snapshot().sessions
+    assert.equal(sessions.length, 1)
+    assert.equal(sessions[0].alive, true)
+    assert.equal(sessions[0].state, 'idle')
+    assert.equal(h.store.get('SELECT process_key FROM sessions WHERE id = ?', sessions[0].id).process_key, '42')
+  } finally { h.close() }
+})
+
+test('ended alias is ignored on startup and reused on explicit resume', () => {
+  for (const source of ['startup', 'resume']) {
+    const h = harness()
+    try {
+      const first = fixture('SessionStart.startup.json', { session_id: 'old-id' })
+      first.claudePid = 41
+      h.projector.applyHooks([first])
+      const clear = fixture('SessionStart.clear.json', { session_id: 'current-id' })
+      clear.claudePid = 41
+      clear.hookTs = 1500
+      h.projector.applyHooks([clear])
+      const end = fixture('SessionEnd.prompt_input_exit.json', { session_id: 'current-id', reason: 'logout' })
+      end.claudePid = 41
+      end.hookTs = 2000
+      h.projector.applyHooks([end])
+      const next = fixture('SessionStart.startup.json', { session_id: 'old-id', source })
+      next.claudePid = 42
+      next.hookTs = 3000
+      h.projector.applyHooks([next])
+      assert.equal(h.projector.snapshot().sessions.length, source === 'resume' ? 1 : 2)
+      assert.equal(h.projector.snapshot().sessions.filter(row => row.alive).length, 1)
+    } finally { h.close() }
+  }
+})
+
+test('silent observed expiry publishes request closure and ended session', () => {
+  const h = harness()
+  try {
+    const events = []
+    const projector = createProjector({ store: h.store, publish: event => events.push(event) })
+    const request = fixture('PermissionRequest.AskUserQuestion.json')
+    request.claudePid = null
+    projector.applyHooks([request])
+    events.length = 0
+    projector.tick(86_401_001)
+    const view = projector.snapshot()
+    assert.equal(view.sessions[0].state, 'ended')
+    assert.equal(view.requests[0].state, 'expired')
+    assert.equal(events.filter(event => event.type === 'request.closed').length, 1)
+    assert.equal(events.filter(event => event.type === 'session.upserted' && event.data.state === 'ended').length, 1)
+  } finally { h.close() }
+})
+
 test('observed hook opens and closes a request, and restart keeps the projection', () => {
   const h = harness()
   try {
