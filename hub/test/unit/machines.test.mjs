@@ -289,6 +289,37 @@ test('notification-only approval waits for an outcome from its named tool', () =
   }
 })
 
+test('generic permission notification ignores unidentified outcomes until an explicit request or expiry', () => {
+  const notification = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Permission required', tool_name: undefined })
+  const unrelated = fixture('PostToolUse.Bash.json', { tool_input: { command: 'pwd' } })
+  unrelated.hookTs = 1200
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('SessionStart.startup.json'), { ...notification, hookTs: 1100 }, unrelated])
+    assert.equal(h.projector.snapshot().requests[0].state, 'open')
+    assert.equal(h.projector.snapshot().counts.openRequests, 1)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'needs_approval')
+    const idle = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'idle_prompt' })
+    idle.hookTs = 1300
+    h.projector.applyHooks([idle])
+    assert.equal(h.projector.snapshot().requests[0].state, 'expired')
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+  } finally { h.close() }
+  const upgraded = harness()
+  try {
+    upgraded.projector.applyHooks([{ ...notification, hookTs: 1100 }])
+    const request = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'echo ready' } })
+    request.hookTs = 1200
+    upgraded.projector.applyHooks([request])
+    assert.equal(upgraded.projector.snapshot().counts.openRequests, 1)
+    const outcome = fixture('PostToolUse.Bash.json', { tool_input: { command: 'echo ready' } })
+    outcome.hookTs = 1300
+    upgraded.projector.applyHooks([outcome])
+    assert.equal(upgraded.projector.snapshot().requests[0].state, 'answered')
+    assert.equal(upgraded.projector.snapshot().counts.openRequests, 0)
+  } finally { upgraded.close() }
+})
+
 test('different permission notifications stay open while a matching repeat is deduped', () => {
   const h = harness()
   try {
