@@ -129,9 +129,14 @@ async function main() {
     fs.chmodSync(paths.state, 0o700)
     const token = fs.readFileSync(paths.token, 'utf8').trim()
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error('invalid deck token')
-    run('systemctl', ['--user', 'start', 'fleetmates-deck.service'])
     let port = 47800
     try { port = JSON.parse(fs.readFileSync(path.join(paths.config, 'config.json'), 'utf8')).port || port } catch (error) { if (error.code !== 'ENOENT') throw error }
+    if (process.env.DECK_PORT !== undefined) {
+      if (!/^[1-9][0-9]{0,4}$/.test(process.env.DECK_PORT)) throw new Error('invalid DECK_PORT')
+      port = Number(process.env.DECK_PORT)
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid deck port')
+    run('systemctl', ['--user', 'start', 'fleetmates-deck.service'])
     await verifyListener(port, token)
     const url = `http://127.0.0.1:${port}/#token=${token}`
     const bootstrap = path.join(paths.state, 'open.html')

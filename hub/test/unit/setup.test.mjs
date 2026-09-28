@@ -28,13 +28,15 @@ function sandbox(fixture = 'empty.json') {
     execFileSync('chmod', ['700', file])
   }
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: config, XDG_STATE_HOME: state, XDG_DATA_HOME: path.join(root, 'data'), XDG_RUNTIME_DIR: runtime, PATH: `${bin}:${process.env.PATH}`, DECK_TEST_CALLS: calls, CLAUDE_CONFIG_DIR: path.join(home, '.claude') }
+  delete env.DECK_PORT
   const run = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8', timeout: 8000 })
-  return { root, home, config, state, runtime, calls, settings, run }
+  const runWith = (override, ...args) => spawnSync(process.execPath, [cli, ...args], { env: { ...env, ...override }, encoding: 'utf8', timeout: 8000 })
+  return { root, home, config, state, runtime, calls, settings, run, runWith }
 }
 
 async function listener(s, token, valid, delayMs = 0) {
   const script = path.join(s.root, 'listener.mjs')
-  writeFileSync(script, `import http from 'node:http'\nimport fs from 'node:fs'\nimport { createHmac } from 'node:crypto'\nconst server = http.createServer((req, res) => {\n  fs.writeFileSync(process.env.REQUEST_FILE, req.url)\n  const nonce = new URL(req.url, 'http://127.0.0.1').searchParams.get('nonce')\n  const mac = createHmac('sha256', process.env.TEST_TOKEN).update('fleetmates-deck-open:' + nonce).digest('hex')\n  res.setHeader('content-type', 'application/json')\n  res.end(JSON.stringify({ nonce, mac: process.env.VALID === 'yes' ? mac : '0'.repeat(64) }))\n})\nserver.listen(0, '127.0.0.1', () => {\n  const port = server.address().port\n  if (Number(process.env.DELAY_MS)) server.close(() => {\n    process.stdout.write(String(port) + '\\n')\n    setTimeout(() => server.listen(port, '127.0.0.1'), Number(process.env.DELAY_MS))\n  })\n  else process.stdout.write(String(port) + '\\n')\n})\n`)
+  writeFileSync(script, `import http from 'node:http'\nimport fs from 'node:fs'\nimport { createHmac } from 'node:crypto'\nconst server = http.createServer((req, res) => {\n  fs.writeFileSync(process.env.REQUEST_FILE, req.url)\n  if (req.url === '/') {\n    res.setHeader('content-type', 'text/html')\n    res.end('<main id="deck-ready">Fleetmates Deck</main>')\n    return\n  }\n  const nonce = new URL(req.url, 'http://127.0.0.1').searchParams.get('nonce')\n  const mac = createHmac('sha256', process.env.TEST_TOKEN).update('fleetmates-deck-open:' + nonce).digest('hex')\n  res.setHeader('content-type', 'application/json')\n  res.end(JSON.stringify({ nonce, mac: process.env.VALID === 'yes' ? mac : '0'.repeat(64) }))\n})\nserver.listen(0, '127.0.0.1', () => {\n  const port = server.address().port\n  if (Number(process.env.DELAY_MS)) server.close(() => {\n    process.stdout.write(String(port) + '\\n')\n    setTimeout(() => server.listen(port, '127.0.0.1'), Number(process.env.DELAY_MS))\n  })\n  else process.stdout.write(String(port) + '\\n')\n})\n`)
   const requestFile = path.join(s.root, 'request-url')
   const child = spawn(process.execPath, [script], { env: { ...process.env, TEST_TOKEN: token, VALID: valid ? 'yes' : 'no', DELAY_MS: String(delayMs), REQUEST_FILE: requestFile }, stdio: ['ignore', 'pipe', 'pipe'] })
   const port = await new Promise((resolve, reject) => {
@@ -112,8 +114,27 @@ test('open uses a private bootstrap file after identity proof and reaches the de
       const page = await browser.newPage()
       await page.goto(pathToFileURL(argument).href)
       await page.waitForURL(`http://127.0.0.1:${server.port}/#token=${token}`)
+      assert.equal(await page.locator('#deck-ready').textContent({ timeout: 1500 }), 'Fleetmates Deck')
     } finally { await browser.close() }
     assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
+  } finally { server.child.kill() }
+})
+
+test('open uses validated DECK_PORT ahead of config port', async () => {
+  const s = sandbox()
+  assert.equal(s.run('init').status, 0)
+  const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
+  const server = await listener(s, token, true)
+  try {
+    writeFileSync(path.join(s.config, 'fleetmates/deck/config.json'), JSON.stringify({ port: 9 }))
+    const result = s.runWith({ DECK_PORT: String(server.port) }, 'open')
+    assert.equal(result.status, 0, result.stderr)
+    const argument = readFileSync(s.calls, 'utf8').split('\n').find(line => line.startsWith('xdg-open:'))?.slice('xdg-open:'.length)
+    assert.ok(argument)
+    assert.ok(readFileSync(argument, 'utf8').includes(`http://127.0.0.1:${server.port}/#token=${token}`))
+    assert.equal(argument.includes(token), false)
+    assert.equal(s.runWith({ DECK_PORT: 'invalid' }, 'open').status, 1)
+    assert.equal(s.runWith({ DECK_PORT: '65536' }, 'open').status, 1)
   } finally { server.child.kill() }
 })
 
