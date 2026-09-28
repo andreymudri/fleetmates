@@ -151,7 +151,7 @@ function destructiveSegment(words, depth) {
 function destructiveShell(command, depth = 0) {
   if (typeof command !== 'string' || depth > 4) return false
   if (/\bcd\s+(?:[^\s;]*\/)?\.git(?:\/[^\s;]*)?\s*(?:&&|;|\n)[^;\n]*(?:>|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)/.test(command)) return true
-  if (/\b(?:curl|wget)\b[^|\n]*\|\s*(?:(?:\/[\w.-]+)*\/?(?:env|command|sudo|doas)\s+(?:(?:-[\w-]+|[A-Za-z_]\w*=\S+)\s+)*)*(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python|node|perl)\b/.test(command) || /\b(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python|node|perl)\s+<\(\s*(?:curl|wget)\b/.test(command)) return true
+  if (/\b(?:curl|wget)\b[^|\n]*\|\s*(?:(?:\/[\w.-]+)*\/?(?:env|command|sudo|doas)\s+(?:(?:-[\w-]+|[A-Za-z_]\w*=\S+)\s+)*)*(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python(?:\d+(?:\.\d+)*)?|node|perl)\b/.test(command) || /\b(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python(?:\d+(?:\.\d+)*)?|node|perl)\s+<\(\s*(?:curl|wget)\b/.test(command)) return true
   if (embeddedCommands(command).some(inner => destructiveShell(inner, depth + 1))) return true
   const tokens = shellTokens(command)
   let segment = []
@@ -252,11 +252,60 @@ function sensitiveWrite(hook, repoRoot) {
   return location !== path.join(root, 'CLAUDE.md') && !location.startsWith(`${root}${path.sep}`)
 }
 
+function sqlCode(sql) {
+  let code = ''
+  for (let i = 0; i < sql.length;) {
+    if (sql.startsWith('--', i)) {
+      i = sql.indexOf('\n', i + 2)
+      if (i < 0) break
+      code += ' '
+    } else if (sql.startsWith('/*', i)) {
+      let depth = 1
+      i += 2
+      while (depth && i < sql.length) {
+        if (sql.startsWith('/*', i)) { depth++; i += 2 }
+        else if (sql.startsWith('*/', i)) { depth--; i += 2 }
+        else i++
+      }
+      if (depth) return null
+      code += ' '
+    } else if (sql[i] === "'" || sql[i] === '"') {
+      const quote = sql[i++]
+      let closed = false
+      while (i < sql.length) {
+        if (sql[i] === quote) {
+          if (sql[i + 1] === quote) { i += 2; continue }
+          i++
+          closed = true
+          break
+        }
+        i++
+      }
+      if (!closed) return null
+      code += ' '
+    } else if (sql[i] === '$' && /^\$[A-Za-z_0-9]*\$/.test(sql.slice(i))) {
+      const marker = /^\$[A-Za-z_0-9]*\$/.exec(sql.slice(i))[0]
+      const end = sql.indexOf(marker, i + marker.length)
+      if (end < 0) return null
+      i = end + marker.length
+      code += ' '
+    } else code += sql[i++]
+  }
+  return code
+}
+
+function destructiveSql(sql) {
+  const code = sqlCode(sql)
+  return code === null || /\b(?:INSERT|UPDATE|DELETE|MERGE|UPSERT|DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|VACUUM|REINDEX|CALL|DO)\b/i.test(code)
+    || /\bCOPY\b[\s\S]*\bFROM\b/i.test(code) || /\bEXPLAIN\s+ANALYZE\b/i.test(code)
+}
+
 /** Classify a permission conservatively; unknown commands remain Caution. */
 export function permissionTier(hook, { repoRoot } = {}) {
   if (namesDeckControl(hook.tool_input) || namesRelativeDeckControl(hook) || sensitiveWrite(hook, repoRoot)) return 'destructive'
   const mcpTool = /^mcp__.+?__(.+)$/.exec(hook.tool_name ?? '')?.[1]
   if (mcpTool && /delete|remove|drop|destroy|purge|truncate|wipe|reset/i.test(mcpTool)) return 'destructive'
+  if (mcpTool && typeof hook.tool_input?.sql === 'string' && destructiveSql(hook.tool_input.sql)) return 'destructive'
   if (hook.tool_name === 'Bash' && destructiveShell(hook.tool_input?.command)) return 'destructive'
   return 'caution'
 }
