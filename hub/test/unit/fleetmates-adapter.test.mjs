@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -71,6 +71,17 @@ test('reader returns an error for truncated JSON or a FIFO without hanging', asy
     } finally {
       reader.close()
     }
+  })
+})
+
+test('reader refuses a run file symlink even when its target is valid JSON', async () => {
+  await withRepo(async (repo) => {
+    const dir = await writeRun(repo, 'r1', { runId: 'r1', tasks: [] })
+    const outside = path.join(repo, 'outside.json')
+    await writeFile(outside, JSON.stringify({ runId: 'r1', tasks: [] }))
+    await symlink(outside, path.join(dir, 'status.json'))
+    const reader = createFleetmatesReader({ repoRoots: [repo], pollRun: async () => ({ derivedPhase: null }) })
+    try { assert.equal((await reader.list())[0].readError.file, 'status.json') } finally { reader.close() }
   })
 })
 
