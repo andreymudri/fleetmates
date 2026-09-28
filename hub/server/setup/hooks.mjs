@@ -22,7 +22,7 @@ export function transformHooks(settings, command, remove = false) {
       const hooks = []
       for (const hook of group.hooks) {
         if (isDeckHook(hook?.command)) {
-          if (!remove && !found) {
+          if (!remove && !found && group.matcher === '*') {
             hooks.push({ type: 'command', command, async: true, timeout: 5 })
             found = true
           }
@@ -78,5 +78,5 @@ export function writeSettings(file, current, next) {
 
 /** Check that every subscribed event has the installed command. */
 export function hooksInstalled(settings, command) {
-  return HOOK_EVENTS.every(event => Array.isArray(settings.hooks?.[event]) && settings.hooks[event].some(group => group.hooks?.some(hook => hook.command === command && hook.async === true)))
+  return HOOK_EVENTS.every(event => Array.isArray(settings.hooks?.[event]) && settings.hooks[event].some(group => group.matcher === '*' && group.hooks?.some(hook => hook.command === command && hook.async === true)))
 }

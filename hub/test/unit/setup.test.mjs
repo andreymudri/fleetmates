@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -31,6 +31,20 @@ function sandbox(fixture = 'empty.json') {
   return { root, home, config, state, runtime, calls, settings, run }
 }
 
+async function listener(s, token, valid) {
+  const script = path.join(s.root, 'listener.mjs')
+  writeFileSync(script, `import http from 'node:http'\nimport fs from 'node:fs'\nimport { createHmac } from 'node:crypto'\nconst server = http.createServer((req, res) => {\n  fs.writeFileSync(process.env.REQUEST_FILE, req.url)\n  const nonce = new URL(req.url, 'http://127.0.0.1').searchParams.get('nonce')\n  const mac = createHmac('sha256', process.env.TEST_TOKEN).update('fleetmates-deck-open:' + nonce).digest('hex')\n  res.setHeader('content-type', 'application/json')\n  res.end(JSON.stringify({ nonce, mac: process.env.VALID === 'yes' ? mac : '0'.repeat(64) }))\n})\nserver.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'))\n`)
+  const requestFile = path.join(s.root, 'request-url')
+  const child = spawn(process.execPath, [script], { env: { ...process.env, TEST_TOKEN: token, VALID: valid ? 'yes' : 'no', REQUEST_FILE: requestFile }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const port = await new Promise((resolve, reject) => {
+    child.stdout.once('data', chunk => resolve(Number(String(chunk).trim())))
+    child.once('error', reject)
+    child.once('exit', code => reject(new Error(`listener exited ${code}`)))
+  })
+  writeFileSync(path.join(s.config, 'fleetmates/deck/config.json'), JSON.stringify({ port }))
+  return { child, port, requestFile }
+}
+
 test('dry run leaves settings, directories and services untouched', () => {
   const s = sandbox()
   const before = readFileSync(s.settings)
@@ -53,9 +67,13 @@ test('init merges hooks, preserves existing order and is byte identical twice', 
   assert.equal(parsed.hooks.PreToolUse.filter(group => group.hooks.some(h => h.command?.includes('deck-hook.mjs'))).length, 1)
   assert.equal(s.run('init').status, 0)
   assert.deepEqual(readFileSync(s.settings), first)
-  assert.equal(readdirSync(path.dirname(s.settings)).filter(name => name.includes('deck-backup-')).length, 1)
+  const backups = readdirSync(path.dirname(s.settings)).filter(name => name.includes('deck-backup-'))
+  assert.equal(backups.length, 1)
+  assert.deepEqual(readFileSync(path.join(path.dirname(s.settings), backups[0])), readFileSync(path.join(fixtures, 'existing-hooks.json')))
   assert.equal(statSync(path.join(s.state, 'fleetmates/deck/token')).mode & 0o777, 0o600)
-  assert.equal(readFileSync(s.calls, 'utf8').includes('restart fleetmates-deckd'), false)
+  const calls = readFileSync(s.calls, 'utf8')
+  assert.match(calls, /^systemctl:--user enable --now fleetmates-deckd.service fleetmates-deck.service$/m)
+  assert.equal(calls.includes('restart fleetmates-deckd'), false)
 })
 
 test('uninstall removes deck hooks and keeps other hook entries', () => {
@@ -68,14 +86,31 @@ test('uninstall removes deck hooks and keeps other hook entries', () => {
   assert.equal(Object.values(parsed.hooks).flatMap(groups => groups.flatMap(group => group.hooks)).some(h => h.command?.includes('deck-hook.mjs')), false)
 })
 
-test('open starts the web unit and passes the token only in the browser URL', () => {
+test('open starts the web unit and passes the token only after identity proof', async () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
-  assert.equal(s.run('open').status, 0)
-  const calls = readFileSync(s.calls, 'utf8')
-  assert.match(calls, /systemctl:--user start fleetmates-deck.service/)
-  assert.ok(calls.includes(`xdg-open:http://127.0.0.1:47800/#token=${token}`))
+  const server = await listener(s, token, true)
+  try {
+    assert.equal(s.run('open').status, 0)
+    const calls = readFileSync(s.calls, 'utf8')
+    assert.match(calls, /systemctl:--user start fleetmates-deck.service/)
+    assert.ok(calls.includes(`xdg-open:http://127.0.0.1:${server.port}/#token=${token}`))
+    assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
+  } finally { server.child.kill() }
+})
+
+test('open refuses a loopback listener without the token proof', async () => {
+  const s = sandbox()
+  assert.equal(s.run('init').status, 0)
+  const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
+  const server = await listener(s, token, false)
+  try {
+    const result = s.run('open')
+    assert.equal(result.status, 1)
+    assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /xdg-open:/)
+    assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
+  } finally { server.child.kill() }
 })
 
 test('invalid settings stops init before it writes directories or services', () => {
@@ -101,6 +136,20 @@ test('init updates an old deck hook in place', () => {
   assert.equal(groups[0].hooks.length, 2)
   assert.match(groups[0].hooks[0].command, /fleetmates-deck\/hook\/deck-hook\.mjs$/)
   assert.equal(groups[0].hooks[1].command, 'node /home/you/other.mjs')
+})
+
+test('restricted old hook gains wildcard coverage without widening unrelated hooks', () => {
+  const s = sandbox()
+  writeFileSync(s.settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [
+    { type: 'command', command: 'node /home/you/fleetmates-deck/hook/deck-hook.mjs', async: true, timeout: 5 },
+    { type: 'command', command: 'node /home/you/other.mjs' }
+  ] }] } }))
+  assert.equal(s.run('init').status, 0)
+  const groups = JSON.parse(readFileSync(s.settings)).hooks.PreToolUse
+  assert.equal(groups[0].matcher, 'Bash')
+  assert.deepEqual(groups[0].hooks.map(hook => hook.command), ['node /home/you/other.mjs'])
+  assert.equal(groups.filter(group => group.matcher === '*' && group.hooks.some(hook => hook.command?.endsWith('deck-hook.mjs'))).length, 1)
+  assert.match(s.run('doctor').stdout, /hooks: ok/)
 })
 
 test('doctor and status read setup state without service mutations', () => {

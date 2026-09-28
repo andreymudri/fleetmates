@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
 import path from 'node:path'
-import { randomBytes } from 'node:crypto'
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { setupPaths } from '../server/setup/paths.mjs'
 import { readSettings, transformHooks, writeSettings } from '../server/setup/hooks.mjs'
@@ -27,6 +28,33 @@ function privateDir(dir) {
 
 function writeIfMissing(file, content, mode = 0o600) {
   try { fs.writeFileSync(file, content, { flag: 'wx', mode }); return true } catch (error) { if (error.code === 'EEXIST') return false; throw error }
+}
+
+async function verifyListener(port, token) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid deck port')
+  const nonce = randomBytes(24).toString('base64url')
+  const expected = createHmac('sha256', token).update(`fleetmates-deck-open:${nonce}`).digest()
+  const body = await new Promise((resolve, reject) => {
+    const req = http.get({ hostname: '127.0.0.1', port, path: `/.well-known/fleetmates-deck/identity?nonce=${nonce}`, timeout: 2000, agent: false }, res => {
+      if (res.statusCode !== 200 || res.headers['content-type']?.split(';')[0] !== 'application/json') {
+        res.resume()
+        reject(new Error('deck identity endpoint unavailable'))
+        return
+      }
+      let content = ''
+      res.on('data', chunk => {
+        content += chunk
+        if (content.length > 1024) { req.destroy(new Error('deck identity response too large')) }
+      })
+      res.on('end', () => resolve(content))
+    })
+    req.on('timeout', () => req.destroy(new Error('deck identity timed out')))
+    req.on('error', reject)
+  })
+  let reply
+  try { reply = JSON.parse(body) } catch { throw new Error('invalid deck identity response') }
+  if (reply?.nonce !== nonce || typeof reply.mac !== 'string' || !/^[a-f0-9]{64}$/.test(reply.mac)) throw new Error('deck identity proof missing')
+  if (!timingSafeEqual(Buffer.from(reply.mac, 'hex'), expected)) throw new Error('deck identity proof failed')
 }
 
 async function init(dryRun, rotateToken) {
@@ -92,6 +120,7 @@ async function main() {
     run('systemctl', ['--user', 'start', 'fleetmates-deck.service'])
     let port = 47800
     try { port = JSON.parse(fs.readFileSync(path.join(paths.config, 'config.json'), 'utf8')).port || port } catch (error) { if (error.code !== 'ENOENT') throw error }
+    await verifyListener(port, token)
     const result = spawnSync('xdg-open', [`http://127.0.0.1:${port}/#token=${token}`], { stdio: 'ignore', timeout: 10000 })
     if (result.error || result.status !== 0) throw new Error('could not open browser')
     return
