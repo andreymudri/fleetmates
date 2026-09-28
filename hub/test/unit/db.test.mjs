@@ -68,13 +68,17 @@ test('schema refuses duplicate exclusive crew slots and live process keys', asyn
 test('migration makes a backup and rejects a newer schema', async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
-  db.exec('CREATE TABLE legacy_probe (id INTEGER PRIMARY KEY)')
+  db.exec("CREATE TABLE legacy_probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL); INSERT INTO legacy_probe VALUES (7, 'recover me')")
   db.close()
   let store = openDeckDb(file)
   store.close()
   const backups = (await readdir(path.dirname(file))).filter(name => name.includes('.pre-0001.bak'))
   assert.equal(backups.length, 1)
-  assert.ok((await readFile(path.join(path.dirname(file), backups[0]))).length > 0)
+  const backup = new DatabaseSync(path.join(path.dirname(file), backups[0]), { readOnly: true })
+  try {
+    assert.equal(backup.prepare('SELECT value FROM legacy_probe WHERE id = 7').get().value, 'recover me')
+    assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 0)
+  } finally { backup.close() }
   const future = new DatabaseSync(file)
   future.exec('PRAGMA user_version = 99')
   future.close()
