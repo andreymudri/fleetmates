@@ -100,8 +100,14 @@ async function init(dryRun, rotateToken) {
   } else writeIfMissing(paths.token, `${randomBytes(32).toString('base64url')}\n`)
   fs.chmodSync(paths.token, 0o600)
   let changedUnit = false
-  for (const unit of unitChanges) changedUnit = writeUnit(path.join(paths.units, unit.name), unit.content) || changedUnit
+  let webUnitChanged = false
+  for (const unit of unitChanges) {
+    const changed = writeUnit(path.join(paths.units, unit.name), unit.content)
+    changedUnit = changed || changedUnit
+    if (unit.name === 'fleetmates-deck.service') webUnitChanged = changed
+  }
   if (changedUnit) run('systemctl', ['--user', 'daemon-reload'])
+  if (webUnitChanged) run('systemctl', ['--user', 'try-restart', 'fleetmates-deck.service'])
   run('systemctl', ['--user', 'enable', '--now', ...UNIT_NAMES])
   process.stdout.write('deckd remains running if it was already active\n')
   const checks = await doctor(paths, command)

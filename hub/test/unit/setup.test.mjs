@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -25,7 +25,7 @@ function sandbox(fixture = 'empty.json') {
   writeFileSync(settings, readFileSync(path.join(fixtures, fixture)))
   for (const name of ['systemctl', 'xdg-open', 'claude', 'notify-send']) {
     const file = path.join(bin, name)
-    writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$DECK_TEST_CALLS"\nif [ '${name}' = claude ]; then echo '2.1.282 (Claude Code)'; fi\nif [ '${name}' = systemctl ] && [ "$2" = is-active ]; then exit 3; fi\n`)
+    writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$DECK_TEST_CALLS"\nif [ '${name}' = claude ]; then echo '2.1.282 (Claude Code)'; fi\nif [ '${name}' = systemctl ] && [ "$2" = is-active ]; then if [ "$3" = fleetmates-deck.service ] && [ "$DECK_TEST_WEB_ACTIVE" = 1 ]; then exit 0; fi; exit 3; fi\n`)
     execFileSync('chmod', ['700', file])
   }
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: config, XDG_STATE_HOME: state, XDG_DATA_HOME: path.join(root, 'data'), XDG_RUNTIME_DIR: runtime, PATH: `${bin}:${process.env.PATH}`, DECK_TEST_CALLS: calls, CLAUDE_CONFIG_DIR: path.join(home, '.claude') }
@@ -78,6 +78,37 @@ test('init merges hooks, preserves existing order and is byte identical twice', 
   const calls = readFileSync(s.calls, 'utf8')
   assert.match(calls, /^systemctl:--user enable --now fleetmates-deckd.service fleetmates-deck.service$/m)
   assert.equal(calls.includes('restart fleetmates-deckd'), false)
+})
+
+test('fresh home without settings.json installs hooks without a backup', () => {
+  const s = sandbox()
+  unlinkSync(s.settings)
+  assert.equal(existsSync(s.settings), false)
+  const result = s.run('init')
+  assert.equal(result.status, 0, result.stderr)
+  const settings = JSON.parse(readFileSync(s.settings, 'utf8'))
+  assert.equal(settings.hooks.SessionStart[0].matcher, '*')
+  assert.equal(settings.hooks.SessionStart[0].hooks[0].async, true)
+  assert.equal(readdirSync(path.dirname(s.settings)).filter(name => name.includes('deck-backup-')).length, 0)
+})
+
+test('changed web unit triggers try-restart only for web while active', () => {
+  const s = sandbox()
+  assert.equal(s.run('init').status, 0)
+  const webUnit = path.join(s.config, 'systemd/user/fleetmates-deck.service')
+  writeFileSync(webUnit, readFileSync(webUnit, 'utf8') + '# old entry\n')
+  writeFileSync(s.calls, '')
+  const result = s.runWith({ DECK_TEST_WEB_ACTIVE: '1' }, 'init')
+  assert.equal(result.status, 0, result.stderr)
+  const calls = readFileSync(s.calls, 'utf8').trim().split('\n')
+  const reload = calls.indexOf('systemctl:--user daemon-reload')
+  const webRestart = calls.indexOf('systemctl:--user try-restart fleetmates-deck.service')
+  const enable = calls.indexOf('systemctl:--user enable --now fleetmates-deckd.service fleetmates-deck.service')
+  assert.ok(reload >= 0 && webRestart > reload && enable > webRestart)
+  assert.equal(calls.some(call => /restart fleetmates-deckd\.service/.test(call)), false)
+  writeFileSync(s.calls, '')
+  assert.equal(s.runWith({ DECK_TEST_WEB_ACTIVE: '1' }, 'init').status, 0)
+  assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /try-restart/)
 })
 
 test('uninstall removes deck hooks and keeps other hook entries', () => {
