@@ -166,3 +166,18 @@ test('startup spool drain applies rows before returning and leaves failed files 
     } finally { watcher.close(); ingest.close() }
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+
+test('a failed spool apply can retry on the same ingestor without losing its dedupe key', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-spool-retry-'))
+  let fail = true
+  const accepted = []
+  const ingest = createIngestor({ onEvent: row => { if (fail) throw Error('store unavailable'); accepted.push(row.hookTs) }, onRejected: () => {} })
+  try {
+    await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(1))
+    await assert.rejects(drainSpool(dir, ingest), /store unavailable/)
+    fail = false
+    await drainSpool(dir, ingest)
+    assert.deepEqual(accepted, [1])
+    assert.deepEqual(await readdir(dir), [])
+  } finally { ingest.close(); await rm(dir, { recursive: true, force: true }) }
+})
