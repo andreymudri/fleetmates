@@ -36,6 +36,37 @@ function shellTokens(command) {
   return tokens
 }
 
+function embeddedCommands(command) {
+  const found = []
+  let quote = null
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]
+    if (char === '\\' && quote !== "'" && i + 1 < command.length) { i++; continue }
+    if (char === "'" && quote !== '"') { quote = quote === "'" ? null : "'"; continue }
+    if (quote === "'") continue
+    if (char === '"') { quote = quote === '"' ? null : '"'; continue }
+    if (char === '`') {
+      const start = i + 1
+      let end = start
+      while (end < command.length && command[end] !== '`') {
+        if (command[end] === '\\') end++
+        end++
+      }
+      if (end < command.length) { found.push(command.slice(start, end)); i = end }
+    } else if (char === '$' && command[i + 1] === '(') {
+      const start = i + 2
+      let depth = 1
+      let end = start
+      for (; end < command.length; end++) {
+        if (command[end] === '(') depth++
+        if (command[end] === ')' && --depth === 0) break
+      }
+      if (depth === 0) { found.push(command.slice(start, end)); i = end }
+    }
+  }
+  return found
+}
+
 function destructiveSegment(words, depth) {
   if (depth > 4 || !words.length) return false
   let index = 0
@@ -56,7 +87,8 @@ function destructiveSegment(words, depth) {
   }))) return true
   if (command === 'xargs' && destructiveSegment(words.slice(index + 1), depth + 1)) return true
   if (command === 'rsync' && args.some(arg => arg.startsWith('--delete'))) return true
-  if (command === 'git' && args[0] === 'push' && args.slice(1).some(arg => ['-f', '-d', '--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete'].includes(arg) || arg.startsWith('+') || arg.startsWith(':'))) return true
+  if (command === 'git' && args[0] === 'push' && args.slice(1).some(arg => ['--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete'].includes(arg) || /^-[A-Za-z]*[fd]/.test(arg) || arg.startsWith('+') || arg.startsWith(':'))) return true
+  if (command === 'git' && args[0] === 'clean' && args.slice(1).some(arg => arg === '--force' || /^-[A-Za-z]*f/.test(arg))) return true
   if (command === 'git' && args[0] === 'reset' && args.some(arg => ['--hard', '--keep', '--merge'].includes(arg))) return true
   if (['sh', 'bash', 'zsh'].includes(command)) {
     const at = args.indexOf('-c')
@@ -68,6 +100,7 @@ function destructiveSegment(words, depth) {
 
 function destructiveShell(command, depth = 0) {
   if (typeof command !== 'string' || depth > 4) return false
+  if (embeddedCommands(command).some(inner => destructiveShell(inner, depth + 1))) return true
   const tokens = shellTokens(command)
   let segment = []
   for (const token of tokens) {
@@ -79,8 +112,18 @@ function destructiveShell(command, depth = 0) {
   return destructiveSegment(segment, depth)
 }
 
+function namesDeckControl(input) {
+  const text = JSON.stringify(input ?? {})
+  return /(?:\.local\/state|\.config)\/fleetmates\/deck(?:\/|\b)/.test(text)
+    || /(?:\$XDG_RUNTIME_DIR|\/run\/user\/\d+)\/fleetmates-deck(?:\/|\b)/.test(text)
+    || /https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(?::\d+)?\/api(?:\/|\b)/i.test(text)
+    || /(?:127\.0\.0\.1|localhost|\[::1\]):47800\b/i.test(text)
+    || /systemctl\s+--user\s+[^"']*fleetmates-deck/.test(text)
+}
+
 /** Classify a permission conservatively; unknown commands remain Caution. */
 export function permissionTier(hook) {
+  if (namesDeckControl(hook.tool_input)) return 'destructive'
   if (hook.tool_name === 'Bash' && destructiveShell(hook.tool_input?.command)) return 'destructive'
   return 'caution'
 }

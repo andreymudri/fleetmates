@@ -1,8 +1,22 @@
 import { randomUUID } from 'node:crypto'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
+import path from 'node:path'
 import { expireRequests } from './request.mjs'
 
 function repo(store, cwd, at) {
-  const id = cwd || '/unknown'
+  let id = cwd || '/unknown'
+  let current
+  try { current = realpathSync(id) } catch { current = null }
+  for (let depth = 0; current && depth < 32; depth++) {
+    const marker = path.join(current, '.git')
+    try {
+      const stat = statSync(marker)
+      if (stat.isDirectory() || stat.isFile() && stat.size <= 4096 && readFileSync(marker, 'utf8').startsWith('gitdir:')) { id = current; break }
+    } catch {}
+    const parent = path.dirname(current)
+    if (parent === current) break
+    current = parent
+  }
   store.run('INSERT OR IGNORE INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', id, id, 0, 1, id, at)
   return id
 }

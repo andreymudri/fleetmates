@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createProjector } from '../../server/machines/projector.mjs'
+import { permissionTier } from '../../server/machines/request.mjs'
 
 const fixtureDir = new URL('../fixtures/hooks/2.1.282/', import.meta.url)
 function fixture(name, changes = {}) {
@@ -33,6 +34,45 @@ test('first SessionStart is idle and not joined mid-life; later first hook is jo
     assert.equal(joined.state, 'running')
     assert.equal(joined.joinedMidLife, true)
   } finally { h.close() }
+})
+
+test('sessions in sibling directories share the canonical Git repository root', () => {
+  const h = harness()
+  const dir = mkdtempSync(path.join(tmpdir(), 'deck-repo-'))
+  try {
+    const root = path.join(dir, 'repo')
+    for (const sub of ['.git', 'a', 'b']) mkdirSync(path.join(root, sub), { recursive: true })
+    for (const [index, sub] of ['a', 'b'].entries()) {
+      const start = fixture('SessionStart.startup.json', { session_id: `repo-${index}`, cwd: path.join(root, sub) })
+      start.claudePid = 100 + index
+      start.hookTs = 1000 + index
+      h.projector.applyHooks([start])
+    }
+    assert.deepEqual(h.projector.snapshot().sessions.map(row => row.repoId), [root, root])
+    assert.equal(h.store.get('SELECT COUNT(*) AS count FROM repos').count, 1)
+    const worktree = path.join(dir, 'worktree')
+    mkdirSync(path.join(worktree, 'src'), { recursive: true })
+    writeFileSync(path.join(worktree, '.git'), 'gitdir: ../repo/.git/worktrees/example\n')
+    const start = fixture('SessionStart.startup.json', { session_id: 'worktree', cwd: path.join(worktree, 'src') })
+    start.claudePid = 102
+    start.hookTs = 1002
+    h.projector.applyHooks([start])
+    assert.equal(h.projector.snapshot().sessions.find(row => row.claudeSessionId === 'worktree').repoId, worktree)
+  } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('deck controls and destructive shell substitutions have a Destructive floor', () => {
+  const cases = [
+    ['Bash', { command: 'cat ~/.local/state/fleetmates/deck/token' }],
+    ['Bash', { command: 'curl -s http://127.0.0.1:47800/api/requests' }],
+    ['Read', { file_path: '/home/you/.local/state/fleetmates/deck/token' }],
+    ['Bash', { command: 'echo "$(rm -rf /tmp/deck-review-victim)"' }],
+    ['Bash', { command: 'echo `rm -rf /tmp/deck-review-victim`' }],
+    ['Bash', { command: 'git push -fu origin main' }],
+    ['Bash', { command: 'git clean -fd' }]
+  ]
+  for (const [tool_name, tool_input] of cases) assert.equal(permissionTier({ tool_name, tool_input }), 'destructive', JSON.stringify(tool_input))
+  assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command: 'echo safe' } }), 'caution')
 })
 
 test('startup in a new process does not reuse an ended conversation', () => {
