@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import os from 'node:os'
@@ -44,6 +44,24 @@ test('malformed stdin does not change hook exit status or write output', () => {
   assert.equal(child.status, 0)
   assert.equal(child.stdout, '')
   assert.equal(child.stderr, '')
+})
+
+test('hook finds a node process running a claude entrypoint in its parent chain', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'deck-hook-parent-'))
+  try {
+    const fakeClaude = path.join(home, 'claude')
+    await writeFile(path.join(home, 'package.json'), '{"type":"module"}')
+    await writeFile(fakeClaude, "import { spawnSync } from 'node:child_process'\nconst result = spawnSync(process.execPath, [process.argv[2]], { input: process.argv[3], encoding: 'utf8', env: process.env })\nprocess.stdout.write(String(process.pid))\nprocess.exit(result.status ?? 1)\n")
+    const hook = JSON.parse(await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
+    const child = spawnSync(process.execPath, [fakeClaude, executable, JSON.stringify(hook)], {
+      encoding: 'utf8', env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: path.join(home, 'runtime') }, timeout: 3000,
+    })
+    assert.equal(child.status, 0)
+    const dir = path.join(home, 'state/fleetmates/deck/spool')
+    const [name] = await readdir(dir)
+    const envelope = JSON.parse(await readFile(path.join(dir, name), 'utf8'))
+    assert.equal(envelope.claudePid, Number(child.stdout))
+  } finally { await rm(home, { recursive: true, force: true }) }
 })
 
 test('hook sends one complete line to the runtime socket without creating spool', async () => {

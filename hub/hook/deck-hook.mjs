@@ -1,5 +1,6 @@
 import { readFileSync, mkdirSync, openSync, writeSync, closeSync, statSync, existsSync, chmodSync } from 'node:fs'
 import { connect } from 'node:net'
+import { execFileSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -28,11 +29,24 @@ function ancestry() {
   while (pid > 1 && pidChain.length < 8) {
     pidChain.push(pid)
     try {
-      const status = readFileSync(`/proc/${pid}/status`, 'utf8')
-      const name = status.match(/^Name:\s*(.*)$/m)?.[1]
-      if (name === 'claude' && claudePid === null) claudePid = pid
-      if (claudePid !== null && name !== 'claude') break
-      pid = Number(status.match(/^PPid:\s*(\d+)$/m)?.[1] ?? 0)
+      let parentPid
+      let command
+      try {
+        const status = readFileSync(`/proc/${pid}/status`, 'utf8')
+        parentPid = Number(status.match(/^PPid:\s*(\d+)$/m)?.[1] ?? 0)
+        command = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean)
+      } catch {
+        const row = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'ppid=', '-o', 'command='], { encoding: 'utf8', timeout: 80, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+        const match = row.match(/^(\d+)\s+(.+)$/)
+        if (!match) break
+        parentPid = Number(match[1])
+        command = match[2].split(/\s+/)
+      }
+      const name = path.basename(command[0] ?? '')
+      const isClaude = name === 'claude' || (name === 'node' && command.slice(1).some((arg) => path.basename(arg) === 'claude'))
+      if (isClaude && claudePid === null) claudePid = pid
+      if (claudePid !== null && !isClaude) break
+      pid = parentPid
     } catch { break }
   }
   return { pidChain, claudePid }
