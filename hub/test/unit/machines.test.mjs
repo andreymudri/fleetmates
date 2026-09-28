@@ -288,6 +288,55 @@ test('permission notification before tool request leaves one approval that close
   } finally { h.close() }
 })
 
+test('Bash destructive commands keep the destructive tier through wrappers and compounds', () => {
+  const commands = [
+    ['rm -rf /home/you/work', 'destructive'],
+    ['env FOO=1 /usr/bin/rm -rf /home/you/work', 'destructive'],
+    ['echo ready && rm -rf /home/you/work', 'destructive'],
+    ["sh -c 'rm -rf /home/you/work'", 'destructive'],
+    ['find . -name old -delete', 'destructive'],
+    ['echo rm', 'caution'],
+    ['unknown-command arg', 'caution']
+  ]
+  for (const [command, tier] of commands) {
+    const h = harness()
+    try {
+      const request = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command } })
+      h.projector.applyHooks([request])
+      assert.equal(h.projector.snapshot().requests[0].tier, tier, command)
+    } finally { h.close() }
+  }
+})
+
+test('alias timeout publishes closure for its expired request', () => {
+  const h = harness()
+  try {
+    const events = []
+    const projector = createProjector({ store: h.store, publish: event => events.push(event) })
+    projector.applyHooks([fixture('PermissionRequest.AskUserQuestion.json')])
+    const end = fixture('SessionEnd.clear.json')
+    end.hookTs = 2000
+    projector.applyHooks([end])
+    events.length = 0
+    projector.tick(7000)
+    assert.equal(projector.snapshot().requests[0].state, 'expired')
+    assert.equal(events.filter(event => event.type === 'request.closed').length, 1)
+    assert.equal(events.find(event => event.type === 'request.closed').data.expiredReason, 'process_ended')
+  } finally { h.close() }
+})
+
+test('a notification upgraded by a destructive tool request gains the destructive tier', () => {
+  const h = harness()
+  try {
+    const notification = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Allow command?' })
+    const request = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'rm old.log' } })
+    request.hookTs = 1001
+    h.projector.applyHooks([notification, request])
+    assert.equal(h.projector.snapshot().counts.openRequests, 1)
+    assert.equal(h.projector.snapshot().requests[0].tier, 'destructive')
+  } finally { h.close() }
+})
+
 test('process exit publishes closure for every expired request', () => {
   const h = harness()
   try {

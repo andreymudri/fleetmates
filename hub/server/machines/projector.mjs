@@ -69,7 +69,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
     tick(at = now()) {
       return commit(() => {
         for (const row of store.all('SELECT * FROM sessions WHERE origin = ? AND alive = 1 AND end_reason IN (?, ?) AND ? - state_since >= ?', 'observed', 'clear', 'resume', at, 5000)) {
-          expireRequests(store, row.id, 'process_ended')
+          closeRequests(row.id, 'process_ended', at)
           store.run('UPDATE sessions SET state = ?, alive = 0, ended_at = ?, since_ts = ? WHERE id = ?', JSON.parse(row.changed_files).length ? 'done' : 'ended', at, at, row.id)
           store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
         }
