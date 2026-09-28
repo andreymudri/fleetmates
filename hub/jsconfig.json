@@ -7,5 +7,5 @@
     "target": "es2024",
     "noEmit": true
   },
-  "include": ["bin", "deckd", "server", "spike", "test"]
+  "include": ["bin", "deckd", "server", "spike", "test", "web/src", "web/vite.config.mjs"]
 }

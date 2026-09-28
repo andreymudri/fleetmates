@@ -1,0 +1,27 @@
+name: deck
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  hub:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      TMPDIR: /tmp/hx
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: hub/.node-version
+          cache: npm
+          cache-dependency-path: hub/package-lock.json
+      - run: mkdir -p /tmp/hx
+      - run: npm ci --prefix hub
+      - run: npm --prefix hub run build
+      - run: npm --prefix hub test
