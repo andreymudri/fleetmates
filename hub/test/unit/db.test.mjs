@@ -22,6 +22,7 @@ test('opens strict M1 schema with private files, WAL, foreign keys and a stable 
     assert.equal(store.get('PRAGMA auto_vacuum').auto_vacuum, 2)
     const tables = new Set(store.all("SELECT name FROM sqlite_schema WHERE type = 'table'").map(row => row.name))
     for (const name of ['meta', 'repos', 'sessions', 'session_summaries', 'requests', 'events', 'hook_events', 'rejected_events', 'runs', 'prefs', 'notification_history']) assert.ok(tables.has(name), name)
+    for (const row of store.all('PRAGMA table_list').filter(row => row.schema === 'main' && !row.name.startsWith('sqlite_'))) assert.equal(row.strict, 1, row.name)
     const epoch = store.get("SELECT value FROM meta WHERE key = 'epoch'").value
     assert.match(epoch, /^[0-9A-HJKMNP-TV-Z]{26}$/)
     assert.equal((await stat(file)).mode & 0o777, 0o600)
