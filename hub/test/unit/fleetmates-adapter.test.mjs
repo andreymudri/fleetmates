@@ -74,6 +74,40 @@ test('reader returns an error for truncated JSON or a FIFO without hanging', asy
   })
 })
 
+test('temporary status read error keeps the last good task state', async () => {
+  await withRepo(async (repo) => {
+    const dir = await writeRun(repo, 'r1', { runId: 'r1', tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'running' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo], pollRun: async () => ({ derivedPhase: 1 }) })
+    try {
+      assert.equal((await reader.list())[0].tasks[0].state, 'running')
+      await writeFile(path.join(dir, 'status.json'), '{invalid')
+      reader.invalidate(repo, 'r1')
+      const [stale] = await reader.list()
+      assert.equal(stale.tasks[0].state, 'running')
+      assert.equal(stale.readError.file, 'status.json')
+      await writeFile(path.join(dir, 'status.json'), JSON.stringify({ runId: 'r1', tasks: [{ id: 'T1', state: 'done' }] }))
+      reader.invalidate(repo, 'r1')
+      assert.equal((await reader.list())[0].tasks[0].state, 'done')
+    } finally { reader.close() }
+  })
+})
+
+test('malformed agent title cannot crash run discovery', async () => {
+  await withRepo(async (repo) => {
+    await writeRun(repo, 'r1', { runId: 'r1', tasks: [{ id: 'T1', title: { toString: null }, phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'running' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo], pollRun: async () => ({ derivedPhase: 1 }) })
+    try {
+      const [run] = await reader.list()
+      assert.equal(run.tasks[0].title, '')
+      assert.equal(run.tasks[0].state, 'running')
+    } finally { reader.close() }
+  })
+})
+
 test('reader does not create a missing status file', async () => {
   await withRepo(async (repo) => {
     const dir = await writeRun(repo, 'r1', { runId: 'r1', tasks: [] })

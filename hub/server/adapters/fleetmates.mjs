@@ -10,7 +10,9 @@ const MAX_DISCOVERY_DEPTH = 16
 const RUN_INTERNAL_DIRS = new Set(['claims', 'clones', 'index', 'reviews', 'sessions', 'worktrees'])
 const READ_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0)
 
-const safeText = (value) => String(value ?? '').replace(/[\p{Bidi_Control}\p{Cc}]/gu, '')
+const safeText = (value) => {
+  try { return String(value ?? '').replace(/[\p{Bidi_Control}\p{Cc}]/gu, '') } catch { return '' }
+}
 const finiteNumber = (value) => Number.isFinite(value) ? value : null
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -237,7 +239,11 @@ export function createFleetmatesReader({ repoRoots = [], clock = Date.now, pollR
             polled = null
           }
         }
-        const run = await projectRun(entry, planResult, statusResult, polled)
+        const readError = planResult.error ? { file: 'plan.json', message: planResult.error }
+          : statusResult.error ? { file: 'status.json', message: statusResult.error } : null
+        const run = readError && previous
+          ? { ...previous.run, readError }
+          : await projectRun(entry, planResult, statusResult, polled)
         cache.set(key, { entry, run, polled, polledAt: due ? now : previous.polledAt, dirty: false })
         rows.push(run)
         attachWatcher(entry)
