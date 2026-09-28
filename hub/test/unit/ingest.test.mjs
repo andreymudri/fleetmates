@@ -56,6 +56,18 @@ test('ingestor deduplicates and keeps hook and receive times separate', () => {
   ingest.close()
 })
 
+test('dedupe identity ignores JSON object key order across transports', () => {
+  const accepted = []
+  const ingest = createIngestor({ onEvent: row => accepted.push(row), onRejected: () => {}, reorderMs: 0 })
+  try {
+    const reordered = Object.fromEntries(Object.entries(hook).reverse())
+    assert.equal(ingest.receive(line(10, hook), 'socket'), true)
+    assert.equal(ingest.receive(line(10, reordered), 'spool'), false)
+    ingest.flush()
+    assert.equal(accepted.length, 1)
+  } finally { ingest.close() }
+})
+
 test('reorder buffer sorts timestamps and event rank within one session', () => {
   const output = []
   const buffer = createReorderBuffer(batch => output.push(...batch), { windowMs: 250 })
