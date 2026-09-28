@@ -19,6 +19,22 @@ function harness() {
   return { store, projector, file, close() { store.close(); rmSync(dir, { recursive: true, force: true }) } }
 }
 
+test('first SessionStart is idle and not joined mid-life; later first hook is joined', () => {
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('SessionStart.startup.json')])
+    const started = h.projector.snapshot().sessions[0]
+    assert.equal(started.state, 'idle')
+    assert.equal(started.joinedMidLife, false)
+    const later = fixture('UserPromptSubmit.json', { session_id: 'late-session' })
+    later.claudePid = 99
+    h.projector.applyHooks([later])
+    const joined = h.projector.snapshot().sessions.find(row => row.claudeSessionId === 'late-session')
+    assert.equal(joined.state, 'running')
+    assert.equal(joined.joinedMidLife, true)
+  } finally { h.close() }
+})
+
 test('observed hook opens and closes a request, and restart keeps the projection', () => {
   const h = harness()
   try {

@@ -39,9 +39,9 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   if (!existing) {
     if (event === 'SessionEnd') return null
     const id = randomUUID()
-    const initial = event === 'PermissionRequest' || hook.notification_type === 'permission_prompt' ? 'needs_approval' : event === 'PreToolUse' && hook.tool_name === 'AskUserQuestion' || hook.notification_type === 'elicitation_dialog' ? 'asked_you' : event === 'Stop' || hook.notification_type === 'idle_prompt' ? 'idle' : 'running'
+    const initial = event === 'SessionStart' || event === 'Stop' || hook.notification_type === 'idle_prompt' ? 'idle' : event === 'PermissionRequest' || hook.notification_type === 'permission_prompt' ? 'needs_approval' : event === 'PreToolUse' && hook.tool_name === 'AskUserQuestion' || hook.notification_type === 'elicitation_dialog' ? 'asked_you' : 'running'
     const origin = envelope.ptyId ? 'wrapped' : 'observed'
-    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repo(store, hook.cwd, at), hook.cwd, 'Untitled', initial, at, at, at, 1, 1, at, hook.transcript_path)
+    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repo(store, hook.cwd, at), hook.cwd, 'Untitled', initial, at, at, at, 1, event === 'SessionStart' ? 0 : 1, at, hook.transcript_path)
     return store.get('SELECT * FROM sessions WHERE id = ?', id)
   }
   if (at < existing.since_ts) return existing
