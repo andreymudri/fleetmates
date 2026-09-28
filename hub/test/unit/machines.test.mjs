@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openDeckDb } from '../../server/db/index.mjs'
@@ -425,6 +425,32 @@ test('known XDG state shell variables retain the deck token floor', () => {
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
+  }
+})
+
+test('symlinked parents retain the deck control floor for reads and new writes', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-tier-link-'))
+  const stateHome = path.join(root, 'state')
+  const deck = path.join(stateHome, 'fleetmates', 'deck')
+  const project = path.join(root, 'project')
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    mkdirSync(deck, { recursive: true })
+    mkdirSync(project)
+    writeFileSync(path.join(deck, 'token'), 'test-token')
+    symlinkSync(deck, path.join(project, 'cache'))
+    process.env.XDG_STATE_HOME = stateHome
+    for (const file_path of ['cache/token', path.join(project, 'cache', 'token')]) {
+      assert.equal(permissionTier({ cwd: project, tool_name: 'Read', tool_input: { file_path } }, { repoRoot: project }), 'destructive', file_path)
+    }
+    for (const file_path of ['cache/new.json', 'cache/new/subdir/new.json']) {
+      assert.equal(permissionTier({ cwd: project, tool_name: 'Write', tool_input: { file_path, content: 'x' } }, { repoRoot: project }), 'destructive', file_path)
+    }
+    assert.equal(permissionTier({ cwd: project, tool_name: 'Read', tool_input: { file_path: 'ordinary.txt' } }, { repoRoot: project }), 'caution')
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+    rmSync(root, { recursive: true, force: true })
   }
 })
 

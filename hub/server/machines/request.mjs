@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import path from 'node:path'
 
 function canonical(value) {
@@ -158,14 +159,28 @@ function namesDeckControl(input) {
     || /systemctl\s+--user\s+[^"']*fleetmates-deck/.test(text)
 }
 
+function canonicalExistingPath(location) {
+  let current = path.resolve(location)
+  const missing = []
+  for (;;) {
+    try { return path.join(realpathSync(current), ...missing.reverse()) }
+    catch {
+      const parent = path.dirname(current)
+      if (parent === current) return path.resolve(location)
+      missing.push(path.basename(current))
+      current = parent
+    }
+  }
+}
+
 function namesRelativeDeckControl(hook) {
   const namesControl = (value, shell = false) => {
     if (typeof value !== 'string' || !value) return false
     const state = process.env.XDG_STATE_HOME
     const expanded = shell && state && path.isAbsolute(state) ? value.replace(/^\$(?:XDG_STATE_HOME|\{XDG_STATE_HOME\})(?=\/)/, state) : value
     if (/[$*?`]/.test(expanded)) return false
-    if (path.isAbsolute(expanded)) return namesDeckControl({ path: expanded })
-    return path.isAbsolute(hook.cwd ?? '') && namesDeckControl({ path: path.resolve(hook.cwd, expanded) })
+    if (path.isAbsolute(expanded)) return namesDeckControl({ path: canonicalExistingPath(expanded) })
+    return path.isAbsolute(hook.cwd ?? '') && namesDeckControl({ path: canonicalExistingPath(path.resolve(hook.cwd, expanded)) })
   }
   if (['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(hook.tool_name)) {
     return namesControl(hook.tool_input?.file_path ?? hook.tool_input?.notebook_path)
