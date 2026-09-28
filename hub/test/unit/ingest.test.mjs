@@ -22,6 +22,17 @@ test('validation accepts fixture shape and rejects drift, unknown events and mal
   assert.match(validateEnvelope(line(1).repeat(20000)).reason, /too_large/)
 })
 
+test('rejected event diagnostics do not retain raw hook content', () => {
+  const rejected = []
+  const ingest = createIngestor({ onEvent: () => {}, onRejected: row => rejected.push(row) })
+  try {
+    const raw = line(1, { ...hook, transcript_path: undefined, tool_response: { content: 'SYNTHETIC_SECRET_456' } })
+    assert.equal(ingest.receive(raw), false)
+    assert.equal(rejected[0].reason, 'invalid_transcript_path')
+    assert.equal(rejected[0].raw.includes('SYNTHETIC_SECRET_456'), false)
+  } finally { ingest.close() }
+})
+
 test('deep nested hook input is rejected without crashing ingestion', () => {
   let nested = {}
   for (let depth = 0; depth < 3000; depth++) nested = { x: nested }

@@ -32,7 +32,7 @@ export function createIngestor({ onEvent, onRejected, reorderMs = 250, now = Dat
     }
   }, { windowMs: reorderMs })
   function reject(raw, via, reason) {
-    onRejected({ receivedAt: now(), via, reason, raw: raw.slice(0, 16 * 1024) })
+    onRejected({ receivedAt: now(), via, reason, raw: '' })
   }
   return {
     receive(raw, via = 'socket') {

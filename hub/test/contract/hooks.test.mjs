@@ -38,6 +38,13 @@ test('hook without a socket spools privately and exits silently', async () => {
     const envelope = validateEnvelope(await readFile(path.join(dir, names[0]), 'utf8'))
     assert.equal(envelope.ok, true)
     assert.equal(envelope.value.hook.hook_event_name, 'Stop')
+    const responseHook = JSON.parse(await readFile(path.join(fixtures, 'PostToolUse.Read.json'), 'utf8'))
+    responseHook.tool_response = { content: 'SYNTHETIC_CONFIDENTIAL_NOTE_123' }
+    const responseChild = spawnSync(process.execPath, [executable], { input: JSON.stringify(responseHook), encoding: 'utf8', env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: path.join(home, 'runtime') }, timeout: 2000 })
+    assert.equal(responseChild.status, 0)
+    const spool = await readFile(path.join(dir, names[0]), 'utf8')
+    assert.equal(spool.includes('SYNTHETIC_CONFIDENTIAL_NOTE_123'), false)
+    assert.equal(spool.trimEnd().split('\n').length, 2)
   } finally { await rm(home, { recursive: true, force: true }) }
 })
 
@@ -129,6 +136,17 @@ test('hook truncates long tool input and stays within the line limit', () => {
   assert.equal(huge.hook.tool_input, undefined)
   assert.ok(Buffer.byteLength(JSON.stringify(huge)) < 1024 * 1024)
   assert.equal(validateEnvelope(JSON.stringify(huge)).ok, true)
+})
+
+test('hook envelope excludes unneeded tool responses before socket or spool delivery', () => {
+  const envelope = makeEnvelope({
+    session_id: 's', transcript_path: '/home/you/t', cwd: '/repo', hook_event_name: 'PostToolUse',
+    tool_name: 'Read', tool_input: { file_path: '/repo/a' },
+    tool_response: { content: 'SYNTHETIC_CONFIDENTIAL_NOTE_123' },
+  }, { hookTs: 1 })
+  assert.equal(envelope.hook.tool_response, undefined)
+  assert.equal(JSON.stringify(envelope).includes('SYNTHETIC_CONFIDENTIAL_NOTE_123'), false)
+  assert.deepEqual(envelope.hook.tool_input, { file_path: '/repo/a' })
 })
 
 test('deep tool input reaches validation instead of being dropped by the hook', () => {
