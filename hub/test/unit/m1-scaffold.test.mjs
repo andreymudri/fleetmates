@@ -99,6 +99,24 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
         && textBounds.right > 0 && textBounds.bottom > 0
         && textBounds.left < innerWidth && textBounds.top < innerHeight
       visible &&= !/^rgba\([^)]*,\s*0\)$/.test(getComputedStyle(heading).color)
+      const channels = (color) => color.match(/[\d.]+/g).map(Number)
+      const composite = (front, back) => front.slice(0, 3).map((value, index) =>
+        value * (front[3] ?? 1) + back[index] * (1 - (front[3] ?? 1)))
+      let background = [255, 255, 255]
+      const ancestors = []
+      for (let element = heading; element; element = element.parentElement) ancestors.push(element)
+      for (const element of ancestors.reverse()) {
+        background = composite(channels(getComputedStyle(element).backgroundColor), background)
+      }
+      const foreground = composite(channels(getComputedStyle(heading).color), background)
+      const luminance = (rgb) => rgb.reduce((sum, value, index) => {
+        const channel = value / 255
+        const linear = channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+        return sum + linear * [0.2126, 0.7152, 0.0722][index]
+      }, 0)
+      const light = Math.max(luminance(foreground), luminance(background))
+      const dark = Math.min(luminance(foreground), luminance(background))
+      visible &&= (light + 0.05) / (dark + 0.05) >= 3
       return {
         heading: heading.textContent,
         visible,
