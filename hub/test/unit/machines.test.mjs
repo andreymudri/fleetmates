@@ -117,6 +117,47 @@ test('notification-only approval closes on a recent observed tool outcome', () =
   } finally { h.close() }
 })
 
+test('two identical permission prompts retain one open request after one outcome', () => {
+  const h = harness()
+  try {
+    const first = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'echo ready' } })
+    const second = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'echo ready' } })
+    second.hookTs = 1001
+    h.projector.applyHooks([first, second])
+    assert.equal(h.projector.snapshot().counts.openRequests, 2)
+    const outcome = fixture('PostToolUse.Bash.json', { tool_input: { command: 'echo ready' } })
+    outcome.hookTs = 1002
+    h.projector.applyHooks([outcome])
+    assert.deepEqual(h.projector.snapshot().requests.map(row => row.state), ['answered', 'open'])
+    assert.equal(h.projector.snapshot().counts.openRequests, 1)
+    assert.equal(h.projector.snapshot().counts.needYouSessions, 1)
+  } finally { h.close() }
+})
+
+test('SubagentStart moves an idle session to running', () => {
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('SessionStart.startup.json')])
+    const start = fixture('UserPromptSubmit.json', { hook_event_name: 'SubagentStart' })
+    start.hookTs = 1001
+    h.projector.applyHooks([start])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+    assert.equal(h.projector.snapshot().counts.running, 1)
+    assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 1)
+  } finally { h.close() }
+})
+
+test('Git config execution controls and writes inside .git are destructive', () => {
+  const commands = [
+    'git config --local core.hooksPath /tmp/evil',
+    'git config --local core.fsmonitor /tmp/evil',
+    'git -C /home/you/project config --local core.hooksPath /tmp/evil',
+    'cd .git && printf x > config'
+  ]
+  for (const command of commands) assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
+  assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command: 'git config --get core.hooksPath' } }), 'caution')
+})
+
 test('one SubagentStart applies once even with no request', () => {
   const h = harness()
   try {

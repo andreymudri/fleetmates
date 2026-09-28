@@ -100,6 +100,11 @@ function destructiveSegment(words, depth) {
   if (command === 'git' && gitArgs[0] === 'push' && gitArgs.slice(1).some(arg => ['--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete'].includes(arg) || /^-[A-Za-z]*[fd]/.test(arg) || arg.startsWith('+') || arg.startsWith(':'))) return true
   if (command === 'git' && gitArgs[0] === 'clean' && gitArgs.slice(1).some(arg => arg === '--force' || /^-[A-Za-z]*f/.test(arg))) return true
   if (command === 'git' && gitArgs[0] === 'reset' && gitArgs.some(arg => ['--hard', '--keep', '--merge'].includes(arg))) return true
+  if (command === 'git' && gitArgs[0] === 'config') {
+    const options = gitArgs.slice(1)
+    if (options.some(arg => ['--unset', '--unset-all', '--remove-section', '--rename-section', '--add', '--replace-all', '--edit'].includes(arg))) return true
+    if (!options.some(arg => ['--get', '--get-all', '--get-regexp', '--list', '-l', '--get-urlmatch'].includes(arg)) && options.filter(arg => !arg.startsWith('-')).length >= 2) return true
+  }
   if (['sh', 'bash', 'zsh'].includes(command)) {
     const at = args.findIndex(arg => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))
     if (at >= 0 && words[index + at + 2]?.quoted && destructiveShell(args[at + 1], depth + 1)) return true
@@ -110,6 +115,7 @@ function destructiveSegment(words, depth) {
 
 function destructiveShell(command, depth = 0) {
   if (typeof command !== 'string' || depth > 4) return false
+  if (/\bcd\s+(?:[^\s;]*\/)?\.git(?:\/[^\s;]*)?\s*(?:&&|;|\n)[^;\n]*(?:>|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)/.test(command)) return true
   if (/\b(?:curl|wget)\b[^|\n]*\|\s*(?:sh|bash|zsh|python|node|perl)\b/.test(command) || /\b(?:sh|bash|zsh|python|node|perl)\s+<\(\s*(?:curl|wget)\b/.test(command)) return true
   if (embeddedCommands(command).some(inner => destructiveShell(inner, depth + 1))) return true
   const tokens = shellTokens(command)
@@ -185,8 +191,6 @@ export function applyRequestHook(store, session, envelope) {
       const recent = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', at - 2000, at + 2000)
       if (recent) return false
     }
-    const existing = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? ORDER BY created_at LIMIT 1', session.id, 'open', key)
-    if (existing) return false
     const summary = hook.tool_name ? `${hook.tool_name}: ${JSON.stringify(hook.tool_input ?? {}).slice(0, 160)}` : hook.message ?? 'Needs your answer'
     if (source === 'permission_request') {
       const fallback = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', at - 2000, at + 2000)

@@ -110,7 +110,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
     if (task === 'Untitled') task = hook.prompt?.split('\n')[0].slice(0, 120) || task
   } else if (event === 'PermissionRequest' || event === 'Notification' && hook.notification_type === 'permission_prompt') state = 'needs_approval'
   else if (event === 'PreToolUse' && hook.tool_name === 'AskUserQuestion' || event === 'Notification' && hook.notification_type === 'elicitation_dialog') state = 'asked_you'
-  else if (event === 'SubagentStart') subagents++
+  else if (event === 'SubagentStart') { subagents++; if (!['needs_approval', 'asked_you'].includes(state)) state = 'running' }
   else if (event === 'SubagentStop') subagents = Math.max(0, subagents - 1)
   else if (event === 'PreCompact') activity = 'compacting'
   else if (event === 'PostCompact') activity = null
