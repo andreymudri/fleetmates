@@ -203,7 +203,7 @@ export function applyRequestHook(store, session, envelope) {
   if (kind) {
     const toolName = source === 'notification' ? notificationToolName(hook.message) : hook.tool_name ?? null
     if (source === 'notification') {
-      const recent = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', at - 2000, at + 2000)
+      const recent = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND created_at BETWEEN ? AND ? AND ((source = ? AND summary = ?) OR (source = ? AND tool_name IS NOT NULL AND LOWER(tool_name) = LOWER(?))) ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', at - 2000, at + 2000, 'notification', hook.message ?? 'Needs your answer', 'permission_request', toolName)
       if (recent) return false
     }
     const summary = source === 'notification' ? hook.message ?? 'Needs your answer' : toolName ? `${toolName}: ${JSON.stringify(hook.tool_input ?? {}).slice(0, 160)}` : hook.message ?? 'Needs your answer'

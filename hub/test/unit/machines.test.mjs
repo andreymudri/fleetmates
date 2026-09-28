@@ -162,6 +162,36 @@ test('notification-only approval waits for an outcome from its named tool', () =
   }
 })
 
+test('different permission notifications stay open while a matching repeat is deduped', () => {
+  const h = harness()
+  try {
+    const notification = (message, at) => {
+      const event = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message, tool_name: undefined })
+      event.hookTs = at
+      return event
+    }
+    h.projector.applyHooks([
+      notification('Allow Bash?', 1000),
+      notification('Allow Write?', 1001),
+      notification('Allow Bash?', 1002)
+    ])
+    assert.deepEqual(h.projector.snapshot().requests.map(row => row.summary), ['Allow Bash?', 'Allow Write?'])
+    assert.equal(h.projector.snapshot().counts.openRequests, 2)
+  } finally { h.close() }
+  const afterRequest = harness()
+  try {
+    afterRequest.projector.applyHooks([fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'pwd' } })])
+    const notification = (message, at) => {
+      const event = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message, tool_name: undefined })
+      event.hookTs = at
+      return event
+    }
+    afterRequest.projector.applyHooks([notification('Allow Write?', 1001), notification('Allow Bash?', 1002)])
+    assert.equal(afterRequest.projector.snapshot().counts.openRequests, 2)
+    assert.deepEqual(afterRequest.projector.snapshot().requests.map(row => row.summary), ['Bash: {"command":"pwd"}', 'Allow Write?'])
+  } finally { afterRequest.close() }
+})
+
 test('two identical permission prompts retain one open request after one outcome', () => {
   const h = harness()
   try {
@@ -524,6 +554,37 @@ test('clear expires requests, resume reuses process, and late outcomes do not mo
     h.projector.applyHooks([resume])
     assert.equal(h.projector.snapshot().sessions[0].claudeSessionId, 'third')
   } finally { h.close() }
+})
+
+test('clear, resume and fork retain unreviewed edits in done', () => {
+  for (const source of ['clear', 'resume', 'fork']) {
+    const h = harness()
+    try {
+      h.projector.applyHooks([fixture('SessionStart.startup.json')])
+      const edit = fixture('PostToolUse.Edit.json', { tool_input: { file_path: '/tmp/changed.txt' } })
+      edit.hookTs = 1001
+      const stop = fixture('Stop.json')
+      stop.hookTs = 1002
+      h.projector.applyHooks([edit, stop])
+      if (source !== 'fork') {
+        const end = fixture('SessionEnd.clear.json', { reason: source })
+        end.hookTs = 1003
+        h.projector.applyHooks([end])
+      }
+      const start = fixture('SessionStart.clear.json', { source, session_id: `${source}-new` })
+      start.hookTs = 1004
+      h.projector.applyHooks([start])
+      assert.equal(h.projector.snapshot().sessions[0].state, 'done', source)
+      assert.equal(h.projector.snapshot().counts.toReview, 1, source)
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(file => file.path), ['/tmp/changed.txt'], source)
+      h.projector.signal(h.projector.snapshot().sessions[0].id, { type: 'review' }, 1005)
+      const reviewedStart = fixture('SessionStart.clear.json', { source, session_id: `${source}-reviewed` })
+      reviewedStart.hookTs = 1006
+      h.projector.applyHooks([reviewedStart])
+      assert.equal(h.projector.snapshot().sessions[0].state, 'idle', source)
+      assert.equal(h.projector.snapshot().counts.toReview, 0, source)
+    } finally { h.close() }
+  }
 })
 
 test('observed end and lost process expire requests and leave no needs-you count', () => {

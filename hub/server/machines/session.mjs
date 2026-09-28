@@ -109,7 +109,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
       claudeId = hook.session_id
       if (hook.source !== 'compact') expireRequests(store, existing.id, 'session_replaced')
     }
-    if (hook.source === 'clear' || hook.source === 'resume' || hook.source === 'fork') { state = 'idle'; subagents = 0; endReason = null }
+    if (hook.source === 'clear' || hook.source === 'resume' || hook.source === 'fork') { state = changedFiles.length ? 'done' : 'idle'; subagents = 0; endReason = null }
     if (hook.source === 'compact') activity = null
   } else if (event === 'UserPromptSubmit') {
     state = 'running'
