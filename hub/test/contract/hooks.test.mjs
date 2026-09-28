@@ -15,7 +15,9 @@ const executable = fileURLToPath(new URL('../../hook/deck-hook.mjs', import.meta
 test('every committed Claude Code hook fixture validates in an envelope', async () => {
   for (const name of (await readdir(fixtures)).filter(name => name.endsWith('.json') && name !== 'MANIFEST.json')) {
     const hook = JSON.parse(await readFile(path.join(fixtures, name), 'utf8'))
-    const envelope = { v: 1, deckHookVersion: '0.1.0', hookTs: 100, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook }
+    const envelope = makeEnvelope(hook, { hookTs: 100, ptyId: null })
+    assert.equal(envelope.hook.session_id, hook.session_id, name)
+    assert.equal(envelope.hook.hook_event_name, hook.hook_event_name, name)
     assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true, name)
   }
 })
