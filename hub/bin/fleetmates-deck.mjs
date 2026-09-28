@@ -83,7 +83,7 @@ async function init(dryRun, rotateToken) {
   if (dryRun) {
     process.stdout.write(`directories: ${paths.config}, ${paths.state}, ${paths.share}\n`)
     process.stdout.write(`hook script: ${paths.hook}\n`)
-    process.stdout.write(`settings: ${changes ? 'would update' : 'unchanged'}\n${changes ? JSON.stringify(merged, null, 2) : ''}\n`)
+    process.stdout.write(`settings: ${changes ? 'would update' : 'unchanged'}\n`)
     process.stdout.write(`token: ${rotateToken ? 'would rotate' : 'would create if missing'}\n`)
     for (const unit of unitChanges) process.stdout.write(`${unit.name}: ${unit.changed ? 'would write' : 'unchanged'}\n`)
     return

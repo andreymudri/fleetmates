@@ -62,6 +62,17 @@ test('dry run leaves settings, directories and services untouched', () => {
   assert.equal(readdirSync(s.root).includes('calls'), false)
 })
 
+test('dry run reports pending changes without exposing settings secrets', () => {
+  const s = sandbox()
+  const secret = 'sentinel-service-api-key-7f3e'
+  writeFileSync(s.settings, JSON.stringify({ env: { SERVICE_API_KEY: secret } }))
+  const result = s.run('init', '--dry-run')
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /settings: would update/)
+  assert.match(result.stdout, /fleetmates-deck\.service: would write/)
+  assert.doesNotMatch(result.stdout + result.stderr, new RegExp(secret))
+})
+
 test('init merges hooks, preserves existing order and is byte identical twice', () => {
   const s = sandbox('existing-hooks.json')
   assert.equal(s.run('init').status, 0)
