@@ -70,9 +70,10 @@ function gateRows(gates) {
   const result = {}
   if (!gates || typeof gates !== 'object' || Array.isArray(gates)) return result
   for (const [phase, gate] of Object.entries(gates)) {
-    if (!/^\d+$/.test(phase) || !gate || typeof gate !== 'object') continue
+    const key = safeText(phase)
+    if (!key || Object.prototype.hasOwnProperty.call(Object.prototype, key) || !gate || typeof gate !== 'object') continue
     if (gate.verdict !== 'PASS' && gate.verdict !== 'FAIL') continue
-    result[phase] = {
+    result[key] = {
       verdict: gate.verdict,
       failed: Array.isArray(gate.failed) ? gate.failed.map(safeText) : [],
       optionalFailed: Array.isArray(gate.optionalFailed) ? gate.optionalFailed.map(safeText) : [],
@@ -89,6 +90,7 @@ function gateRows(gates) {
 async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
   const git = createGit({ cwd: repoRoot })
   const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
+  const statusById = new Map((Array.isArray(status?.tasks) ? status.tasks : []).filter((task) => task && typeof task.id === 'string').map((task) => [task.id, task]))
   const tips = {}
   const shas = new Map()
   for (const task of tasks) {
@@ -111,7 +113,7 @@ async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
         let integrated = true
         for (const task of phaseTasks) {
           const sha = shas.get(task.id)
-          if (!sha || !await git.isAncestor(sha, runSha)) integrated = false
+          if (sha ? !await git.isAncestor(sha, runSha) : statusById.get(task.id)?.state !== 'done') integrated = false
         }
         if (!integrated) { derivedPhase = phase; break }
       }

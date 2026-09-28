@@ -136,3 +136,31 @@ test('run file changes are debounced and refresh rows without another git poll',
     }
   })
 })
+
+test('completed run stays complete after integrated task branches are pruned', async () => {
+  await withRepo(async (repo) => {
+    execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
+    await writeFile(path.join(repo, 'readme.txt'), 'run')
+    execFileSync('git', ['add', 'readme.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'run'], { cwd: repo })
+    await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'done' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo] })
+    try { assert.equal((await reader.list())[0].derivedPhase, null) } finally { reader.close() }
+  })
+})
+
+test('recorded gate keyed by a manifest phase name remains visible', async () => {
+  await withRepo(async (repo) => {
+    await writeRun(repo, 'r1', { runId: 'r1', tasks: [] }, {
+      runId: 'r1', tasks: [], gates: { default: { verdict: 'PASS', phase: null, phaseName: 'default', recordedAt: 1000 } },
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo], pollRun: async () => ({ derivedPhase: null, liveness: [] }) })
+    try {
+      const gate = (await reader.list())[0].gates.default
+      assert.equal(gate.verdict, 'PASS')
+      assert.equal(gate.phaseName, 'default')
+    } finally { reader.close() }
+  })
+})
