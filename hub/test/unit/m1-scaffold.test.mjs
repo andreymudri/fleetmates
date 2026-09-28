@@ -80,9 +80,9 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
     const errors = []
     page.on('pageerror', (error) => errors.push(error.message))
     await page.goto(`http://127.0.0.1:${server.address().port}/`)
-    await page.waitForSelector('main h1', { timeout: 5000 })
+    await page.waitForSelector('#root main h1', { timeout: 5000 })
     const result = await page.evaluate(() => {
-      const heading = document.querySelector('main h1')
+      const heading = document.querySelector('#root main h1')
       const root = document.getElementById('root')
       let visible = true
       for (let element = heading; element; element = element.parentElement) {
