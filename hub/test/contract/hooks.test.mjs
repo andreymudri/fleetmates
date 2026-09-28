@@ -39,6 +39,24 @@ test('hook without a socket spools privately and exits silently', async () => {
   } finally { await rm(home, { recursive: true, force: true }) }
 })
 
+test('hook tightens a preexisting permissive spool file before appending', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'deck-hook-mode-'))
+  try {
+    const dir = path.join(home, 'state/fleetmates/deck/spool')
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    const day = new Date().toISOString().slice(0, 10).replaceAll('-', '')
+    const file = path.join(dir, `hooks-${day}.jsonl`)
+    await writeFile(file, '')
+    await chmod(file, 0o644)
+    assert.equal((await stat(file)).mode & 0o777, 0o644)
+    const hook = JSON.parse(await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
+    const child = spawnSync(process.execPath, [executable], { input: JSON.stringify(hook), encoding: 'utf8', env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: path.join(home, 'runtime') }, timeout: 2000 })
+    assert.equal(child.status, 0)
+    assert.equal((await stat(file)).mode & 0o777, 0o600)
+    assert.equal(validateEnvelope(await readFile(file, 'utf8')).ok, true)
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
+
 test('malformed stdin does not change hook exit status or write output', () => {
   const child = spawnSync(process.execPath, [executable], { input: '{', encoding: 'utf8', timeout: 2000 })
   assert.equal(child.status, 0)
