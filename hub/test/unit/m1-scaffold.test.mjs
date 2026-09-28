@@ -11,7 +11,7 @@ const root = path.dirname(hub)
 
 const json = async (file) => JSON.parse(await readFile(file, 'utf8'))
 
-test('M1 build stays in hub and emits a runnable shell', async () => {
+test('M1 build stays in hub and mounts visible content', async () => {
   const pkg = await json(path.join(hub, 'package.json'))
   const lock = await json(path.join(hub, 'package-lock.json'))
   const rootPkg = await json(path.join(root, 'package.json'))
@@ -36,13 +36,31 @@ test('M1 build stays in hub and emits a runnable shell', async () => {
     const html = await readFile(path.join(out, 'index.html'), 'utf8')
     assert.match(html, /<div id="root"><\/div>/)
     assert.match(html, /assets\/[^" ]+\.js/)
-    assert.ok((await readdir(path.join(out, 'assets'))).some((name) => name.endsWith('.js')))
+    const asset = (await readdir(path.join(out, 'assets'))).find((name) => name.endsWith('.js'))
+    assert.ok(asset)
+    const { JSDOM, VirtualConsole } = await import('jsdom')
+    const errors = []
+    const virtualConsole = new VirtualConsole()
+    virtualConsole.on('jsdomError', (error) => errors.push(error.message))
+    const dom = new JSDOM(html, {
+      url: 'http://127.0.0.1/',
+      runScripts: 'outside-only',
+      virtualConsole,
+    })
+    try {
+      dom.window.eval(await readFile(path.join(out, 'assets', asset), 'utf8'))
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      assert.deepEqual(errors, [])
+      assert.equal(dom.window.document.querySelector('main h1')?.textContent, 'Fleetmates Deck')
+    } finally {
+      dom.window.close()
+    }
   } finally {
     await rm(out, { recursive: true, force: true })
   }
 })
 
-test('deck CI pins Node and runs hub build and tests on Linux and macOS', async () => {
+test('deck CI declares pinned Node, build, and tests on Linux and macOS', async () => {
   const version = (await readFile(path.join(hub, '.node-version'), 'utf8')).trim()
   const workflow = await readFile(path.join(root, '.github/workflows/deck.yml'), 'utf8')
   assert.match(version, /^24\.\d+\.\d+$/)
@@ -54,4 +72,5 @@ test('deck CI pins Node and runs hub build and tests on Linux and macOS', async 
   assert.match(workflow, /npm --prefix hub run build/)
   assert.match(workflow, /npm --prefix hub test/)
   assert.match(workflow, /TMPDIR: \/tmp\/hx/)
+  assert.doesNotMatch(workflow, /^\s+if:\s*(?:false|0)\s*$/m)
 })
