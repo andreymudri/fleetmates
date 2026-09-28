@@ -5,8 +5,11 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createContext, runInContext } from 'node:vm'
+import { createServer } from 'node:net'
 import test from 'node:test'
 import { chromium } from 'playwright-core'
+import { doctor } from '../../server/setup/doctor.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { renderUnit } from '../../server/setup/units.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
@@ -297,6 +300,18 @@ test('doctor and status read setup state without service mutations', () => {
   ])
 })
 
+test('doctor finds the scribed Unix listener in the runtime directory', async () => {
+  const s = sandbox()
+  const server = createServer(socket => socket.end())
+  await new Promise((resolve, reject) => server.listen(path.join(s.runtime, 'turbidassist.sock'), resolve).once('error', reject))
+  try {
+    const checks = await doctor(setupPaths(s.env), 'unused', { run: file => file === 'claude' ? { status: 0, stdout: '2.1.282' } : { status: 3 } })
+    assert.equal(checks.find(check => check.id === 'scribed').state, 'ok')
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+  }
+})
+
 test('installed units use absolute Node and hub paths with private umask', () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
@@ -317,9 +332,15 @@ test('installed hook command runs from an XDG data directory with spaces', () =>
   const result = s.runWith({ XDG_DATA_HOME: data }, 'init')
   assert.equal(result.status, 0, result.stderr)
   const command = JSON.parse(readFileSync(s.settings, 'utf8')).hooks.SessionStart.at(-1).hooks[0].command
-  const hook = spawnSync('/bin/sh', ['-c', command], { env: { ...s.env, XDG_DATA_HOME: data }, input: '{}', encoding: 'utf8', timeout: 3000 })
+  const hook = spawnSync('/bin/sh', ['-c', command], { env: { ...s.env, XDG_DATA_HOME: data }, input: JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'installed-hook-session', cwd: s.root }), encoding: 'utf8', timeout: 3000 })
   assert.equal(hook.status, 0, hook.stderr)
   assert.equal(hook.stdout, '')
+  const spool = path.join(s.state, 'fleetmates/deck/spool')
+  const files = readdirSync(spool)
+  assert.equal(files.length, 1)
+  const event = JSON.parse(readFileSync(path.join(spool, files[0]), 'utf8'))
+  assert.equal(event.hook.hook_event_name, 'SessionStart')
+  assert.equal(event.hook.session_id, 'installed-hook-session')
 })
 
 test('both unit templates quote executable and entry paths with spaces', () => {

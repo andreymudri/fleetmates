@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { connectDeckd } from '../../deckd/client.mjs'
+import { SOCKET_NAME } from '../adapters/scribed.mjs'
 import { hooksInstalled, readSettings } from './hooks.mjs'
 
 function probe(file, args, timeout = 2000) {
@@ -27,7 +28,7 @@ export async function doctor(paths, command, { run = probe } = {}) {
   }
   checks.push({ id: 'deckd', state: unit.status === 0 && socket ? 'ok' : 'failed', blocking: false, detail: unit.status === 0 && socket ? 'deckd running' : 'deckd unavailable' })
   checks.push({ id: 'vault', state: 'optional_skipped', blocking: false, detail: 'vault-mcp not checked by terminal setup' })
-  checks.push({ id: 'scribed', state: paths.runtime && fs.existsSync(path.join(paths.runtime, 'scribed.sock')) ? 'ok' : 'optional_skipped', blocking: false, detail: 'scribed socket optional' })
+  checks.push({ id: 'scribed', state: paths.runtime && fs.existsSync(path.join(path.dirname(paths.runtime), SOCKET_NAME)) ? 'ok' : 'optional_skipped', blocking: false, detail: 'scribed socket optional' })
   checks.push({ id: 'notify', state: 'pending', blocking: false, detail: 'Send a test ping from Settings' })
   return checks
 }
