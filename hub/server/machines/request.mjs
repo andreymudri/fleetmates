@@ -124,7 +124,7 @@ function destructiveSegment(words, depth) {
 function destructiveShell(command, depth = 0) {
   if (typeof command !== 'string' || depth > 4) return false
   if (/\bcd\s+(?:[^\s;]*\/)?\.git(?:\/[^\s;]*)?\s*(?:&&|;|\n)[^;\n]*(?:>|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)/.test(command)) return true
-  if (/\b(?:curl|wget)\b[^|\n]*\|\s*(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python|node|perl)\b/.test(command) || /\b(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python|node|perl)\s+<\(\s*(?:curl|wget)\b/.test(command)) return true
+  if (/\b(?:curl|wget)\b[^|\n]*\|\s*(?:(?:\/[\w.-]+)*\/?(?:env|command|sudo|doas)\s+(?:(?:-[\w-]+|[A-Za-z_]\w*=\S+)\s+)*)*(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python|node|perl)\b/.test(command) || /\b(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python|node|perl)\s+<\(\s*(?:curl|wget)\b/.test(command)) return true
   if (embeddedCommands(command).some(inner => destructiveShell(inner, depth + 1))) return true
   const tokens = shellTokens(command)
   let segment = []
@@ -178,6 +178,8 @@ function sensitiveWrite(hook, repoRoot) {
 /** Classify a permission conservatively; unknown commands remain Caution. */
 export function permissionTier(hook, { repoRoot } = {}) {
   if (namesDeckControl(hook.tool_input) || sensitiveWrite(hook, repoRoot)) return 'destructive'
+  const mcpTool = /^mcp__.+?__(.+)$/.exec(hook.tool_name ?? '')?.[1]
+  if (mcpTool && /delete|remove|drop|destroy|purge|truncate|wipe|reset/i.test(mcpTool)) return 'destructive'
   if (hook.tool_name === 'Bash' && destructiveShell(hook.tool_input?.command)) return 'destructive'
   return 'caution'
 }
