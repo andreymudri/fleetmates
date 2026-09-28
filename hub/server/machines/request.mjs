@@ -110,6 +110,7 @@ function destructiveSegment(words, depth) {
 
 function destructiveShell(command, depth = 0) {
   if (typeof command !== 'string' || depth > 4) return false
+  if (/\b(?:curl|wget)\b[^|\n]*\|\s*(?:sh|bash|zsh|python|node|perl)\b/.test(command) || /\b(?:sh|bash|zsh|python|node|perl)\s+<\(\s*(?:curl|wget)\b/.test(command)) return true
   if (embeddedCommands(command).some(inner => destructiveShell(inner, depth + 1))) return true
   const tokens = shellTokens(command)
   let segment = []
@@ -122,21 +123,47 @@ function destructiveShell(command, depth = 0) {
   return destructiveSegment(segment, depth)
 }
 
+function containsDirectory(text, directory) {
+  return !!directory && path.isAbsolute(directory) && (text.includes(`${path.normalize(directory)}/`) || text.includes(`${path.normalize(directory)}"`))
+}
+
 function namesDeckControl(input) {
   const text = JSON.stringify(input ?? {})
   const configuredState = process.env.XDG_STATE_HOME
   const deckState = configuredState && path.isAbsolute(configuredState) ? path.join(configuredState, 'fleetmates', 'deck') : null
-  return deckState && (text.includes(`${deckState}/`) || text.includes(`${deckState}"`))
+  const configuredConfig = process.env.XDG_CONFIG_HOME
+  const deckConfig = configuredConfig && path.isAbsolute(configuredConfig) ? path.join(configuredConfig, 'fleetmates', 'deck') : null
+  const configuredRuntime = process.env.XDG_RUNTIME_DIR
+  const deckRuntime = configuredRuntime && path.isAbsolute(configuredRuntime) ? path.join(configuredRuntime, 'fleetmates-deck') : null
+  const deckPort = process.env.DECK_PORT ?? '47800'
+  return containsDirectory(text, deckState) || containsDirectory(text, deckConfig) || containsDirectory(text, deckRuntime)
     || /(?:\.local\/state|\.config)\/fleetmates\/deck(?:\/|\b)/.test(text)
     || /(?:\$XDG_RUNTIME_DIR|\/run\/user\/\d+)\/fleetmates-deck(?:\/|\b)/.test(text)
     || /https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(?::\d+)?\/api(?:\/|\b)/i.test(text)
-    || /(?:127\.0\.0\.1|localhost|\[::1\]):47800\b/i.test(text)
+    || (text.includes(`:${deckPort}`) && /(?:127\.0\.0\.1|localhost|\[::1\]):\d+\b/i.test(text))
     || /systemctl\s+--user\s+[^"']*fleetmates-deck/.test(text)
 }
 
+function sensitiveWrite(hook, repoRoot) {
+  const tool = hook.tool_name
+  const fileTool = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(tool)
+  if (!fileTool && tool !== 'Bash') return false
+  const raw = fileTool ? hook.tool_input?.file_path ?? hook.tool_input?.notebook_path ?? '' : hook.tool_input?.command ?? ''
+  if (typeof raw !== 'string') return false
+  const normalized = raw.replaceAll('\\', '/')
+  if (/(?:^|\/)\.git\//.test(normalized)) return true
+  if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true
+  if (/(?:^|\/)\.mcp\.json(?:\b|$)/.test(normalized)) return true
+  if (!fileTool || path.posix.basename(normalized) !== 'CLAUDE.md') return false
+  if (!repoRoot) return true
+  const location = path.resolve(hook.cwd ?? repoRoot, raw)
+  const root = path.resolve(repoRoot)
+  return location !== path.join(root, 'CLAUDE.md') && !location.startsWith(`${root}${path.sep}`)
+}
+
 /** Classify a permission conservatively; unknown commands remain Caution. */
-export function permissionTier(hook) {
-  if (namesDeckControl(hook.tool_input)) return 'destructive'
+export function permissionTier(hook, { repoRoot } = {}) {
+  if (namesDeckControl(hook.tool_input) || sensitiveWrite(hook, repoRoot)) return 'destructive'
   if (hook.tool_name === 'Bash' && destructiveShell(hook.tool_input?.command)) return 'destructive'
   return 'caution'
 }
@@ -164,11 +191,11 @@ export function applyRequestHook(store, session, envelope) {
     if (source === 'permission_request') {
       const fallback = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', at - 2000, at + 2000)
       if (fallback) {
-        store.run('UPDATE requests SET source = ?, tool_name = ?, summary = ?, detail = ?, match_key = ?, tier = ? WHERE id = ?', source, hook.tool_name, summary, JSON.stringify(hook.tool_input ?? {}), key, permissionTier(hook), fallback.id)
+        store.run('UPDATE requests SET source = ?, tool_name = ?, summary = ?, detail = ?, match_key = ?, tier = ? WHERE id = ?', source, hook.tool_name, summary, JSON.stringify(hook.tool_input ?? {}), key, permissionTier(hook, { repoRoot: session.repo_id }), fallback.id)
         return true
       }
     }
-    store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? permissionTier(hook) : null, hook.tool_name ?? null, summary, JSON.stringify(hook.tool_input ?? {}), JSON.stringify(hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, at)
+    store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? permissionTier(hook, { repoRoot: session.repo_id }) : null, hook.tool_name ?? null, summary, JSON.stringify(hook.tool_input ?? {}), JSON.stringify(hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, at)
     return true
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {

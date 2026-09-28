@@ -4,6 +4,10 @@ import { applyRequestHook, expireRequests } from './request.mjs'
 import { applySessionHook, resolveSession } from './session.mjs'
 
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
+const rank = event => {
+  const index = ranks.indexOf(event)
+  return index < 0 ? 1 : index === 0 ? 0 : index + 1
+}
 
 function sessionView(row) {
   return { id: row.id, claudeSessionId: row.claude_session_id, origin: row.origin, repoId: row.repo_id, cwd: row.cwd, task: row.task, state: row.state, stateSince: row.state_since, lastActivityAt: row.last_activity_at, alive: !!row.alive, joinedMidLife: !!row.joined_mid_life, changedFiles: JSON.parse(row.changed_files) }
@@ -37,7 +41,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
     snapshot,
     applyHooks(batch) {
       return commit(() => {
-        for (const envelope of [...batch].sort((a, b) => a.hookTs - b.hookTs || ranks.indexOf(a.hook.hook_event_name) - ranks.indexOf(b.hook.hook_event_name))) {
+        for (const envelope of [...batch].sort((a, b) => a.hookTs - b.hookTs || rank(a.hook.hook_event_name) - rank(b.hook.hook_event_name))) {
           const hook = envelope.hook
           const key = envelope.dedupeKey ?? dedupeKey(envelope)
           if (store.get('SELECT id FROM hook_events WHERE dedupe_key = ?', key)) continue

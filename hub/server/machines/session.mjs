@@ -74,6 +74,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   }
   if (at < existing.since_ts) return existing
   let state = existing.state
+  let stateSince = existing.state_since
   let alive = existing.alive
   let activity = existing.activity
   let subagents = existing.subagents_active
@@ -118,7 +119,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   else if (event === 'Notification' && hook.notification_type === 'idle_prompt' && state === 'running') state = 'idle'
   else if (event === 'SessionEnd') {
     endReason = hook.reason
-    if (['clear', 'resume'].includes(hook.reason)) store.run('UPDATE sessions SET state_since = ? WHERE id = ?', at, existing.id)
+    if (['clear', 'resume'].includes(hook.reason)) stateSince = at
     else if (existing.origin !== 'observed') endAnnounced = 1
     if (!['clear', 'resume'].includes(hook.reason) && existing.origin === 'observed') { state = changedFiles.length ? 'done' : 'ended'; alive = 0; endedAt = at; expireRequests(store, existing.id, 'process_ended') }
   } else if (['PreToolUse', 'PostToolUse', 'PostToolUseFailure'].includes(event) && !requestChanged && !['needs_approval', 'asked_you'].includes(state)) state = 'running'
@@ -127,6 +128,6 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   else if (open.some(row => row.kind === 'question')) state = 'asked_you'
   else if (['needs_approval', 'asked_you'].includes(state)) state = event === 'Notification' && hook.notification_type === 'idle_prompt' ? 'idle' : 'running'
   const since = state !== existing.state ? at : existing.since_ts
-  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : existing.state_since, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, repoId === existing.repo_id ? existing.review_baseline : null, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
+  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : stateSince, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, repoId === existing.repo_id ? existing.review_baseline : null, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
 }
