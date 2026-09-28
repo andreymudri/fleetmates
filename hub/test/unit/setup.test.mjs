@@ -182,6 +182,7 @@ test('open uses a private bootstrap file after identity proof and reaches the de
     assert.equal(statSync(path.join(s.state, 'fleetmates/deck')).mode & 0o777, 0o700)
     assert.doesNotMatch(result.stdout + result.stderr, new RegExp(token))
     const bootstrap = readFileSync(argument, 'utf8')
+    assert.doesNotMatch(bootstrap, /content-security-policy/i)
     const script = bootstrap.match(/<script>([\s\S]*?)<\/script>/)?.[1]
     assert.ok(script)
     const redirects = []
