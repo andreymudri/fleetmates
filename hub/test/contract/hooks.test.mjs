@@ -90,8 +90,14 @@ test('hook sends one complete line to the runtime socket without creating spool'
   const socketDir = path.join(runtime, 'fleetmates-deck')
   const socketPath = path.join(socketDir, 'hooks.sock')
   await mkdir(socketDir, { recursive: true, mode: 0o700 })
-  const received = []
-  const server = createServer(socket => { socket.setEncoding('utf8'); socket.on('data', chunk => received.push(chunk)) })
+  let resolveWire
+  const wireDone = new Promise(resolve => { resolveWire = resolve })
+  const server = createServer(socket => {
+    const chunks = []
+    socket.setEncoding('utf8')
+    socket.on('data', chunk => chunks.push(chunk))
+    socket.on('end', () => resolveWire(chunks.join('')))
+  })
   try {
     await new Promise(resolve => server.listen(socketPath, resolve))
     await chmod(socketPath, 0o600)
@@ -104,8 +110,10 @@ test('hook sends one complete line to the runtime socket without creating spool'
     const exit = await new Promise(resolve => child.on('close', resolve))
     assert.equal(exit, 0)
     assert.equal(Buffer.concat(output).length, 0)
-    assert.equal(received.length, 1)
-    assert.equal(validateEnvelope(received[0]).ok, true)
+    const wire = await wireDone
+    assert.equal(wire.endsWith('\n'), true)
+    assert.equal(wire.indexOf('\n'), wire.length - 1)
+    assert.equal(validateEnvelope(wire).ok, true)
     await assert.rejects(readdir(path.join(home, 'state/fleetmates/deck/spool')), { code: 'ENOENT' })
   } finally { await new Promise(resolve => server.close(resolve)); await rm(home, { recursive: true, force: true }) }
 })
