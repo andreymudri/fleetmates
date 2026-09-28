@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { chromium } from 'playwright-core'
+import { renderUnit } from '../../server/setup/units.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const cli = path.join(hub, 'bin/fleetmates-deck.mjs')
@@ -31,7 +32,7 @@ function sandbox(fixture = 'empty.json') {
   delete env.DECK_PORT
   const run = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8', timeout: 8000 })
   const runWith = (override, ...args) => spawnSync(process.execPath, [cli, ...args], { env: { ...env, ...override }, encoding: 'utf8', timeout: 8000 })
-  return { root, home, config, state, runtime, calls, settings, run, runWith }
+  return { root, home, config, state, runtime, calls, settings, env, run, runWith }
 }
 
 async function listener(s, token, valid, delayMs = 0) {
@@ -106,16 +107,23 @@ test('open uses a private bootstrap file after identity proof and reaches the de
     assert.equal(statSync(path.join(s.state, 'fleetmates/deck')).mode & 0o777, 0o700)
     assert.doesNotMatch(result.stdout + result.stderr, new RegExp(token))
     const bootstrap = readFileSync(argument, 'utf8')
-    assert.ok(bootstrap.includes(`http://127.0.0.1:${server.port}/#token=${token}`))
-    const executablePath = [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'].find(candidate => candidate && existsSync(candidate))
-    assert.ok(executablePath)
-    const browser = await chromium.launch({ executablePath, headless: true })
-    try {
-      const page = await browser.newPage()
-      await page.goto(pathToFileURL(argument).href)
-      await page.waitForURL(`http://127.0.0.1:${server.port}/#token=${token}`)
-      assert.equal(await page.locator('#deck-ready').textContent({ timeout: 1500 }), 'Fleetmates Deck')
-    } finally { await browser.close() }
+    const redirect = bootstrap.match(/location\.replace\(("[^\n]+")\)<\/script>/)
+    assert.ok(redirect)
+    const url = JSON.parse(redirect[1])
+    assert.equal(url, `http://127.0.0.1:${server.port}/#token=${token}`)
+    const response = await fetch(url)
+    assert.equal(response.headers.get('content-type'), 'text/html')
+    assert.match(await response.text(), /<main id="deck-ready">Fleetmates Deck<\/main>/)
+    const executablePath = process.env.DECK_TEST_NO_BROWSER === '1' ? undefined : [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'].find(candidate => candidate && existsSync(candidate))
+    if (executablePath) {
+      const browser = await chromium.launch({ executablePath, headless: true })
+      try {
+        const page = await browser.newPage()
+        await page.goto(pathToFileURL(argument).href)
+        await page.waitForURL(url)
+        assert.equal(await page.locator('#deck-ready').textContent({ timeout: 1500 }), 'Fleetmates Deck')
+      } finally { await browser.close() }
+    }
     assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
   } finally { server.child.kill() }
 })
@@ -200,7 +208,7 @@ test('init updates an old deck hook in place', () => {
   const groups = JSON.parse(readFileSync(s.settings)).hooks.PreToolUse
   assert.equal(groups.length, 1)
   assert.equal(groups[0].hooks.length, 2)
-  assert.match(groups[0].hooks[0].command, /fleetmates-deck\/hook\/deck-hook\.mjs$/)
+  assert.match(groups[0].hooks[0].command, /fleetmates-deck\/hook\/deck-hook\.mjs'$/)
   assert.equal(groups[0].hooks[1].command, 'node /home/you/other.mjs')
 })
 
@@ -214,7 +222,7 @@ test('restricted old hook gains wildcard coverage without widening unrelated hoo
   const groups = JSON.parse(readFileSync(s.settings)).hooks.PreToolUse
   assert.equal(groups[0].matcher, 'Bash')
   assert.deepEqual(groups[0].hooks.map(hook => hook.command), ['node /home/you/other.mjs'])
-  assert.equal(groups.filter(group => group.matcher === '*' && group.hooks.some(hook => hook.command?.endsWith('deck-hook.mjs'))).length, 1)
+  assert.equal(groups.filter(group => group.matcher === '*' && group.hooks.some(hook => hook.command?.endsWith("deck-hook.mjs'"))).length, 1)
   assert.match(s.run('doctor').stdout, /hooks: ok/)
 })
 
@@ -242,10 +250,31 @@ test('installed units use absolute Node and hub paths with private umask', () =>
   const unitDir = path.join(s.config, 'systemd/user')
   const deckd = readFileSync(path.join(unitDir, 'fleetmates-deckd.service'), 'utf8')
   const web = readFileSync(path.join(unitDir, 'fleetmates-deck.service'), 'utf8')
-  assert.ok(deckd.includes(`ExecStart=${process.execPath} ${hub}/deckd/main.mjs`))
-  assert.ok(web.includes(`ExecStart=${process.execPath} ${hub}/server/main.mjs`))
+  assert.ok(deckd.includes(`ExecStart="${process.execPath}" "${path.join(hub, 'deckd/main.mjs')}"`))
+  assert.ok(web.includes(`ExecStart="${process.execPath}" "${path.join(hub, 'server/main.mjs')}"`))
   assert.match(deckd, /UMask=0077/)
   assert.match(web, /UMask=0077/)
   assert.doesNotMatch(deckd, /^Documentation=/m)
   assert.doesNotMatch(web, /^Documentation=/m)
+})
+
+test('installed hook command runs from an XDG data directory with spaces', () => {
+  const s = sandbox()
+  const data = path.join(s.root, "deck review home's")
+  const result = s.runWith({ XDG_DATA_HOME: data }, 'init')
+  assert.equal(result.status, 0, result.stderr)
+  const command = JSON.parse(readFileSync(s.settings, 'utf8')).hooks.SessionStart.at(-1).hooks[0].command
+  const hook = spawnSync('/bin/sh', ['-c', command], { env: { ...s.env, XDG_DATA_HOME: data }, input: '{}', encoding: 'utf8', timeout: 3000 })
+  assert.equal(hook.status, 0, hook.stderr)
+  assert.equal(hook.stdout, '')
+})
+
+test('both unit templates quote executable and entry paths with spaces', () => {
+  const nodePath = '/tmp/node install/bin/node'
+  const hubPath = '/tmp/deck review home/hub'
+  for (const [name, entry] of [['fleetmates-deck.service', 'server/main.mjs'], ['fleetmates-deckd.service', 'deckd/main.mjs']]) {
+    const rendered = renderUnit(name, nodePath, hubPath)
+    assert.ok(rendered.includes(`ExecStart="${nodePath}" "${hubPath}/${entry}"`))
+    assert.equal(rendered.includes('@NODE@') || rendered.includes('@ENTRY@'), false)
+  }
 })

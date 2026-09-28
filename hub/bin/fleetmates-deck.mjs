@@ -12,7 +12,8 @@ import { doctor, status } from '../server/setup/doctor.mjs'
 
 const hub = fileURLToPath(new URL('..', import.meta.url))
 const paths = setupPaths()
-const command = `node ${paths.hook}`
+const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
+const command = `${shellQuote(process.execPath)} ${shellQuote(paths.hook)}`
 const args = process.argv.slice(2)
 
 function run(file, argv) {

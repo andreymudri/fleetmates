@@ -5,7 +5,7 @@ After=fleetmates-deckd.service
 
 [Service]
 Type=simple
-ExecStart=@NODE@ @HUB@/server/main.mjs
+ExecStart=@NODE@ @ENTRY@
 Restart=on-failure
 RestartSec=2
 UMask=0077

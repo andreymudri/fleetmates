@@ -3,7 +3,7 @@ Description=fleetmates deck PTY daemon (deckd)
 
 [Service]
 Type=simple
-ExecStart=@NODE@ @HUB@/deckd/main.mjs
+ExecStart=@NODE@ @ENTRY@
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=15

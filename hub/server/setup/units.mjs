@@ -5,11 +5,16 @@ import { fileURLToPath } from 'node:url'
 const templateDir = fileURLToPath(new URL('../../systemd/', import.meta.url))
 export const UNIT_NAMES = ['fleetmates-deckd.service', 'fleetmates-deck.service']
 
+function execArg(value) {
+  if (!path.isAbsolute(value) || /[\r\n\0]/.test(value)) throw new Error('unit path must be absolute and one line')
+  return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%').replaceAll('$', '$$')}"`
+}
+
 /** Render the shipped unit with absolute executable and hub paths. */
 export function renderUnit(name, nodePath, hubPath) {
   if (!UNIT_NAMES.includes(name)) throw new Error(`unknown unit: ${name}`)
-  if (/\s/.test(nodePath) || /\s/.test(hubPath)) throw new Error('unit paths cannot contain whitespace')
-  return fs.readFileSync(path.join(templateDir, name), 'utf8').replaceAll('@NODE@', nodePath).replaceAll('@HUB@', hubPath)
+  const entry = name === 'fleetmates-deckd.service' ? 'deckd/main.mjs' : 'server/main.mjs'
+  return fs.readFileSync(path.join(templateDir, name), 'utf8').replaceAll('@NODE@', execArg(nodePath)).replaceAll('@ENTRY@', execArg(path.join(hubPath, entry)))
 }
 
 /** Write a unit when its rendered content differs. */
