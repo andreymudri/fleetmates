@@ -120,11 +120,25 @@ test('hook sends one complete line to the runtime socket without creating spool'
     const output = []
     child.stdout.on('data', chunk => output.push(chunk))
     child.stderr.on('data', chunk => output.push(chunk))
-    const exit = await new Promise(resolve => child.on('close', resolve))
+    let childTimer
+    let exit
+    try {
+      exit = await Promise.race([
+        new Promise(resolve => child.on('close', resolve)),
+        new Promise((_, reject) => { childTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook did not exit')) }, 500) }),
+      ])
+    } finally { clearTimeout(childTimer) }
     assert.ok(Date.now() - started < 200, 'socket hook exceeded its 200 ms budget')
     assert.equal(exit, 0)
     assert.equal(Buffer.concat(output).length, 0)
-    const wire = await wireDone
+    let wireTimer
+    let wire
+    try {
+      wire = await Promise.race([
+        wireDone,
+        new Promise((_, reject) => { wireTimer = setTimeout(() => reject(Error('socket hook did not deliver a line')), 300) }),
+      ])
+    } finally { clearTimeout(wireTimer) }
     assert.equal(wire.endsWith('\n'), true)
     assert.equal(wire.indexOf('\n'), wire.length - 1)
     assert.equal(validateEnvelope(wire).ok, true)
