@@ -144,7 +144,7 @@ async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
         for (const task of phaseTasks) {
           const sha = shas.get(task.id)
           if (!sha) missingBranch = true
-          if (sha ? sha === runSha || !await git.isAncestor(sha, runSha) : statusById.get(task.id)?.state !== 'done') integrated = false
+          if (statusById.get(task.id)?.state !== 'done' || (sha && !await git.isAncestor(sha, runSha))) integrated = false
         }
         if (!integrated) { derivedPhase = phase; break }
       }
@@ -158,8 +158,7 @@ async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
       const branch = `${NAMES.branchPrefix}/${runId}/${task.id}`
       const dir = byBranch.get(branch)
       if (!dir) continue
-      const ignored = new Set(await git.ignoredPaths(dir).catch(() => []))
-      touches[task.id] = { branch, ...await newestWorktreeMtime(dir, ignored) }
+      touches[task.id] = { branch, ...await newestWorktreeMtime(dir, new Set()) }
     }
   } catch {}
   const liveness = livenessRows({

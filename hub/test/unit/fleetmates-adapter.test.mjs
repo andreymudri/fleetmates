@@ -228,6 +228,48 @@ test('task branch at the run tip stays in its pending phase', async () => {
   })
 })
 
+test('base-only task branch remains pending after an unrelated run commit', async () => {
+  await withRepo(async (repo) => {
+    execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
+    await writeFile(path.join(repo, 'base.txt'), 'base')
+    execFileSync('git', ['add', 'base.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'base'], { cwd: repo })
+    execFileSync('git', ['branch', 'fleetmates/r1/T1'], { cwd: repo })
+    await writeFile(path.join(repo, 'unrelated.txt'), 'run only')
+    execFileSync('git', ['add', 'unrelated.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'unrelated'], { cwd: repo })
+    await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'pending' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo] })
+    try { assert.equal((await reader.list())[0].derivedPhase, 1) } finally { reader.close() }
+  })
+})
+
+test('run polling does not execute repository fsmonitor commands', async () => {
+  await withRepo(async (repo) => {
+    execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
+    await writeFile(path.join(repo, 'base.txt'), 'base')
+    execFileSync('git', ['add', 'base.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'base'], { cwd: repo })
+    const worktree = path.join(repo, 'tasks', 'T1')
+    await mkdir(path.dirname(worktree), { recursive: true })
+    execFileSync('git', ['worktree', 'add', '-q', '-b', 'fleetmates/r1/T1', worktree], { cwd: repo })
+    const script = path.join(repo, 'fsmonitor.sh')
+    await writeFile(script, `#!/bin/sh\ntouch ${path.join(repo, 'fsmonitor-executed')}\n`)
+    await chmod(script, 0o700)
+    execFileSync('git', ['config', 'core.fsmonitor', script], { cwd: repo })
+    await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'running' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo] })
+    try {
+      await reader.list()
+      assert.equal((await readdir(repo)).includes('fsmonitor-executed'), false)
+    } finally { reader.close() }
+  })
+})
+
 test('fresh edits in a task worktree count as working with an old branch tip', async () => {
   await withRepo(async (repo) => {
     execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
@@ -265,6 +307,30 @@ test('an unmerged task branch keeps the phase open even when status says done', 
     try {
       const [run] = await reader.list()
       assert.equal(run.derivedPhase, 1)
+      assert.equal(run.phaseDerivation, 'verified')
+    } finally { reader.close() }
+  })
+})
+
+test('a merged task branch marked done closes its phase', async () => {
+  await withRepo(async (repo) => {
+    execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
+    await writeFile(path.join(repo, 'base.txt'), 'base')
+    execFileSync('git', ['add', 'base.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'base'], { cwd: repo })
+    execFileSync('git', ['switch', '-q', '-c', 'fleetmates/r1/T1'], { cwd: repo })
+    await writeFile(path.join(repo, 'task.txt'), 'task')
+    execFileSync('git', ['add', 'task.txt'], { cwd: repo })
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'task'], { cwd: repo })
+    execFileSync('git', ['switch', '-q', 'run/r1'], { cwd: repo })
+    execFileSync('git', ['merge', '-q', '--ff-only', 'fleetmates/r1/T1'], { cwd: repo })
+    await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
+      runId: 'r1', tasks: [{ id: 'T1', state: 'done' }],
+    })
+    const reader = createFleetmatesReader({ repoRoots: [repo] })
+    try {
+      const [run] = await reader.list()
+      assert.equal(run.derivedPhase, null)
       assert.equal(run.phaseDerivation, 'verified')
     } finally { reader.close() }
   })
