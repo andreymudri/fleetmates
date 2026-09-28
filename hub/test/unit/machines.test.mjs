@@ -694,6 +694,39 @@ test('two live processes with one conversation remain separate sessions', () => 
   } finally { h.close() }
 })
 
+test('wrapped and observed processes sharing a conversation keep their PID routing', () => {
+  const h = harness()
+  try {
+    const first = fixture('SessionStart.startup.json', { session_id: 'same-conversation' })
+    first.ptyId = 'pty_first'
+    first.claudePid = 41
+    h.projector.applyHooks([first])
+    const wrappedId = h.projector.snapshot().sessions[0].id
+    const noPid = fixture('UserPromptSubmit.json', { session_id: 'same-conversation', prompt: 'Missing PID' })
+    noPid.claudePid = null
+    noPid.hookTs = 1500
+    h.projector.applyHooks([noPid])
+    assert.equal(h.store.get('SELECT session_id FROM hook_events WHERE hook_ts = ?', 1500).session_id, wrappedId)
+    const second = fixture('SessionStart.startup.json', { session_id: 'same-conversation' })
+    second.claudePid = 42
+    second.hookTs = 2000
+    h.projector.applyHooks([second])
+    const sessions = h.store.all('SELECT id, origin, pty_id, process_key FROM sessions ORDER BY started_at').map(row => ({ ...row }))
+    assert.equal(sessions.length, 2)
+    assert.deepEqual(sessions.map(row => [row.origin, row.pty_id, row.process_key]), [['wrapped', 'pty_first', 'pty_first'], ['observed', null, '42']])
+    const wrappedFollowup = fixture('UserPromptSubmit.json', { session_id: 'same-conversation', prompt: 'Wrapped work' })
+    wrappedFollowup.claudePid = 41
+    wrappedFollowup.hookTs = 2100
+    const observedFollowup = fixture('UserPromptSubmit.json', { session_id: 'same-conversation', prompt: 'Observed work' })
+    observedFollowup.claudePid = 42
+    observedFollowup.hookTs = 2200
+    h.projector.applyHooks([wrappedFollowup, observedFollowup])
+    assert.equal(h.store.get('SELECT session_id FROM hook_events WHERE hook_ts = ?', 2100).session_id, sessions[0].id)
+    assert.equal(h.store.get('SELECT session_id FROM hook_events WHERE hook_ts = ?', 2200).session_id, sessions[1].id)
+    assert.equal(h.projector.snapshot().sessions.length, 2)
+  } finally { h.close() }
+})
+
 test('a delayed Stop cannot idle newer submitted work', () => {
   const h = harness()
   try {
