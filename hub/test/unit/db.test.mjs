@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -34,6 +34,8 @@ test('opens strict M1 schema with private files, WAL, foreign keys and a stable 
 
 test('opening an existing permissive state directory makes it private', async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o755 })
+  await chmod(path.dirname(file), 0o755)
+  assert.equal((await stat(path.dirname(file))).mode & 0o777, 0o755)
   const store = openDeckDb(file)
   try { assert.equal((await stat(path.dirname(file))).mode & 0o777, 0o700) } finally { store.close() }
 }))
