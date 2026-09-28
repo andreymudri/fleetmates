@@ -11,7 +11,11 @@ const legacyName = /^hooks-\d{8}\.jsonl(?:\.draining)?$/
 export async function drainSpool(dir, ingest) {
   let names
   try { names = await readdir(dir) } catch (error) { if (error.code === 'ENOENT') return; throw error }
-  for (const name of names.filter(name => spoolName.test(name)).sort((a, b) => a.replace('.draining', '').localeCompare(b.replace('.draining', '')) || Number(b.endsWith('.draining')) - Number(a.endsWith('.draining')))) {
+  const sorted = names.filter(name => spoolName.test(name)).sort((a, b) => a.replace('.draining', '').localeCompare(b.replace('.draining', '')) || Number(b.endsWith('.draining')) - Number(a.endsWith('.draining')))
+  const ordered = [...sorted.filter(name => legacyName.test(name)), ...sorted.filter(name => !legacyName.test(name))]
+  const completed = []
+  const atomicLines = []
+  for (const name of ordered) {
     const source = path.join(dir, name)
     const legacy = legacyName.test(name)
     let draining = name.endsWith('.draining') ? source : `${source}.draining`
@@ -21,7 +25,7 @@ export async function drainSpool(dir, ingest) {
       if (occupied) draining = source
       else await rename(source, draining)
     }
-    await delay(220)
+    if (legacy) await delay(220)
     const info = await stat(draining)
     const previous = legacy ? legacyOffsets.get(draining) : null
     let consumed = previous?.ino === info.ino && previous.lines >= 0 ? previous.lines : 0
@@ -35,8 +39,11 @@ export async function drainSpool(dir, ingest) {
         const time = raw => { try { return JSON.parse(raw).hookTs ?? Infinity } catch { return Infinity } }
         return time(a) - time(b)
       })
-      for (const line of fresh) ingest.receive(line, 'spool')
-      ingest.flush()
+      for (const line of fresh) {
+        if (legacy) ingest.receive(line, 'spool')
+        else atomicLines.push(line)
+      }
+      if (legacy) ingest.flush()
       consumed = complete.length
       const latest = await readFile(draining, 'utf8')
       if (latest !== content) continue
@@ -49,8 +56,11 @@ export async function drainSpool(dir, ingest) {
         await rm(draining)
         legacyOffsets.delete(draining)
       }
-    } else await rm(draining)
+    } else completed.push(draining)
   }
+  for (const line of atomicLines) ingest.receive(line, 'spool')
+  ingest.flush()
+  for (const file of completed) await rm(file)
 }
 
 /** Drain before serving clients, then poll for spooled hooks every minute. */

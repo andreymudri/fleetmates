@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { closeSync, openSync, writeSync } from 'node:fs'
+import { closeSync, openSync, writeFileSync, writeSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -175,18 +175,14 @@ test('spool drain replays sorted lines and retains a new append file', async () 
   const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-spool-'))
   const accepted = []
   const rejected = []
-  const ingest = createIngestor({ onEvent: row => accepted.push(row), onRejected: row => rejected.push(row), reorderMs: 0 })
+  let replaced = false
+  const ingest = createIngestor({ onEvent: row => {
+    accepted.push(row)
+    if (!replaced) { writeFileSync(path.join(dir, uniqueSpool), line(4)); replaced = true }
+  }, onRejected: row => rejected.push(row), reorderMs: 0 })
   try {
     await writeFile(path.join(dir, uniqueSpool), line(3) + line(1, { ...hook, session_id: 's2' }) + '{\n')
-    const draining = drainSpool(dir, ingest)
-    let renamed = false
-    for (let attempt = 0; attempt < 40; attempt++) {
-      if ((await readdir(dir)).includes(`${uniqueSpool}.draining`)) { renamed = true; break }
-      await new Promise(resolve => setTimeout(resolve, 5))
-    }
-    assert.equal(renamed, true)
-    await writeFile(path.join(dir, uniqueSpool), line(4))
-    await draining
+    await drainSpool(dir, ingest)
     ingest.flush()
     assert.deepEqual(accepted.map(row => row.hookTs), [1, 3])
     assert.equal(rejected.length, 1)
@@ -239,6 +235,24 @@ test('spool drain can replay a late write through an open legacy descriptor', as
     await drainSpool(dir, ingest)
     assert.deepEqual(accepted, [1, 2])
   } finally { if (fd !== undefined && fd !== null) closeSync(fd); ingest.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('atomic spool files replay together in event order without per-file delay', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-spool-atomic-'))
+  const accepted = []
+  const ingest = createIngestor({ onEvent: row => accepted.push(row.hook.hook_event_name), onRejected: () => {}, reorderMs: 0 })
+  try {
+    const prefix = 'hooks-20260928-1790000000000-'
+    await writeFile(path.join(dir, `${prefix}aaaaaaaaaaaa.jsonl`), line(1, hook))
+    await writeFile(path.join(dir, `${prefix}bbbbbbbbbbbb.jsonl`), line(1, { ...hook, hook_event_name: 'SessionStart', source: 'startup' }))
+    await writeFile(path.join(dir, `${prefix}cccccccccccc.jsonl`), line(2, { ...hook, hook_event_name: 'SessionEnd', reason: 'exit' }))
+    await writeFile(path.join(dir, `${prefix}dddddddddddd.jsonl`), line(3, { ...hook, hook_event_name: 'UserPromptSubmit', prompt: 'next' }))
+    const started = Date.now()
+    await drainSpool(dir, ingest)
+    assert.ok(Date.now() - started < 650, 'atomic files should not wait for legacy append grace periods')
+    assert.deepEqual(accepted, ['SessionStart', 'Stop', 'SessionEnd', 'UserPromptSubmit'])
+    assert.deepEqual(await readdir(dir), [])
+  } finally { ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
 test('startup spool drain applies rows before returning and leaves failed files for retry', async () => {
