@@ -102,6 +102,7 @@ test('reader polls an active run at most once per 60 seconds and never edits run
       runId: 'r1', tasks: [], gates: { 1: { verdict: 'PASS', phase: 1 } },
     })
     const before = await Promise.all(['plan.json', 'status.json'].map((name) => readFile(path.join(dir, name))))
+    const entriesBefore = (await readdir(dir, { recursive: true })).sort()
     let now = 1_000_000
     let polls = 0
     const reader = createFleetmatesReader({
@@ -119,6 +120,7 @@ test('reader polls an active run at most once per 60 seconds and never edits run
       assert.equal(polls, 2)
       const after = await Promise.all(['plan.json', 'status.json'].map((name) => readFile(path.join(dir, name))))
       assert.deepEqual(after, before)
+      assert.deepEqual((await readdir(dir, { recursive: true })).sort(), entriesBefore)
     } finally {
       reader.close()
     }
