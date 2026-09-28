@@ -96,6 +96,7 @@ test('deck CI declares pinned Node, build, and tests on Linux and macOS', async 
   assert.match(version, /^24\.\d+\.\d+$/)
   assert.match(workflow, /^on:\n  push:\n/m)
   assert.match(workflow, /^  pull_request:\s*$/m)
+  assert.doesNotMatch(workflow, /^\s+paths(?:-ignore)?:/m)
   assert.doesNotMatch(workflow, /windows-latest/)
   const hubJob = workflow.split(/^  hub:\s*$/m)[1]?.split(/^  [\w-]+:\s*$/m)[0]
   assert.ok(hubJob)
