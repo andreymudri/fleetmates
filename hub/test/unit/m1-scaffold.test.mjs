@@ -53,7 +53,14 @@ test('M1 build stays in hub and mounts visible content', async () => {
       dom.window.eval(await readFile(path.join(out, script[1].slice(2)), 'utf8'))
       await new Promise((resolve) => setTimeout(resolve, 30))
       assert.deepEqual(errors, [])
-      assert.equal(dom.window.document.querySelector('main h1')?.textContent, 'Fleetmates Deck')
+      const heading = dom.window.document.querySelector('main h1')
+      assert.equal(heading?.textContent, 'Fleetmates Deck')
+      for (let element = heading; element; element = element.parentElement) {
+        const style = dom.window.getComputedStyle(element)
+        assert.notEqual(style.display, 'none')
+        assert.notEqual(style.visibility, 'hidden')
+        assert.notEqual(style.opacity, '0')
+      }
     } finally {
       dom.window.close()
     }
