@@ -92,6 +92,13 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
       visible &&= bounds.width > 0 && bounds.height > 0
         && bounds.right > 0 && bounds.bottom > 0
         && bounds.left < innerWidth && bounds.top < innerHeight
+      const range = document.createRange()
+      range.selectNodeContents(heading)
+      const textBounds = range.getBoundingClientRect()
+      visible &&= textBounds.width > 0 && textBounds.height > 0
+        && textBounds.right > 0 && textBounds.bottom > 0
+        && textBounds.left < innerWidth && textBounds.top < innerHeight
+      visible &&= !/^rgba\([^)]*,\s*0\)$/.test(getComputedStyle(heading).color)
       return {
         heading: heading.textContent,
         visible,
