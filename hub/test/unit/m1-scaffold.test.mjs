@@ -101,6 +101,7 @@ test('deck CI declares pinned Node, build, and tests on Linux and macOS', async 
   assert.match(hubJob, /^        os: \[ubuntu-latest, macos-latest\]$/m)
   assert.match(hubJob, /^    runs-on: \$\{\{ matrix\.os \}\}$/m)
   assert.match(hubJob, /^      TMPDIR: \/tmp\/hx$/m)
+  assert.match(hubJob, /^    steps:\n      - uses: actions\/checkout@v4$/m)
   assert.match(hubJob, /^          node-version-file: hub\/\.node-version$/m)
   assert.match(hubJob, /^      - run: npm ci --prefix hub$/m)
   assert.match(hubJob, /^      - run: npm --prefix hub run build$/m)
