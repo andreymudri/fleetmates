@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { closeSync, openSync, writeSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
@@ -56,6 +56,8 @@ test('socket rejects partial lines and accepts complete lines', async () => {
   const ingest = createIngestor({ onEvent: row => accepted.push(row), onRejected: row => rejected.push(row), reorderMs: 0 })
   const server = await startHookSocket({ runtimeDir: dir, ingest })
   try {
+    assert.equal((await stat(server.path)).mode & 0o777, 0o600)
+    assert.equal((await stat(path.dirname(server.path))).mode & 0o777, 0o700)
     const { connect } = await import('node:net')
     await new Promise(resolve => { const socket = connect(server.path); socket.on('connect', () => socket.end(line())); socket.on('close', resolve) })
     await new Promise(resolve => { const socket = connect(server.path); socket.on('connect', () => socket.end('{')); socket.on('close', resolve) })

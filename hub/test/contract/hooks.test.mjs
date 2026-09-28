@@ -39,6 +39,13 @@ test('hook without a socket spools privately and exits silently', async () => {
   } finally { await rm(home, { recursive: true, force: true }) }
 })
 
+test('malformed stdin does not change hook exit status or write output', () => {
+  const child = spawnSync(process.execPath, [executable], { input: '{', encoding: 'utf8', timeout: 2000 })
+  assert.equal(child.status, 0)
+  assert.equal(child.stdout, '')
+  assert.equal(child.stderr, '')
+})
+
 test('hook sends one complete line to the runtime socket without creating spool', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'deck-hook-socket-'))
   const runtime = path.join(home, 'runtime')
