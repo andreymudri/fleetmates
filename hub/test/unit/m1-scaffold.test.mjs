@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, mkdtemp, readdir, rm } from 'node:fs/promises'
+import { readFile, mkdtemp, rm } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -37,9 +37,9 @@ test('M1 build stays in hub and mounts visible content', async () => {
     execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
     const html = await readFile(path.join(out, 'index.html'), 'utf8')
     assert.match(html, /<div id="root"><\/div>/)
-    assert.match(html, /assets\/[^" ]+\.js/)
-    const asset = (await readdir(path.join(out, 'assets'))).find((name) => name.endsWith('.js'))
-    assert.ok(asset)
+    const script = html.match(/<script\b[^>]*\bsrc="([^"]+\.js)"[^>]*><\/script>/)
+    assert.ok(script)
+    assert.match(script[1], /^\.\/assets\/[^/]+\.js$/)
     const { JSDOM, VirtualConsole } = await import('jsdom')
     const errors = []
     const virtualConsole = new VirtualConsole()
@@ -50,7 +50,7 @@ test('M1 build stays in hub and mounts visible content', async () => {
       virtualConsole,
     })
     try {
-      dom.window.eval(await readFile(path.join(out, 'assets', asset), 'utf8'))
+      dom.window.eval(await readFile(path.join(out, script[1].slice(2)), 'utf8'))
       await new Promise((resolve) => setTimeout(resolve, 30))
       assert.deepEqual(errors, [])
       assert.equal(dom.window.document.querySelector('main h1')?.textContent, 'Fleetmates Deck')
