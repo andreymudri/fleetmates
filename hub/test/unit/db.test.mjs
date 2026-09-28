@@ -42,6 +42,18 @@ test('database rejects relative paths before changing the current directory', ()
   assert.throws(() => openDeckDb('deck.db'), /absolute file path/)
 })
 
+test('schema refuses duplicate exclusive crew slots and live process keys', async () => withDatabase(async file => {
+  const store = openDeckDb(file)
+  try {
+    store.run("INSERT INTO repos(id,name,crew_slot,crew_seed,first_seen_at) VALUES('/a','a',0,'a',1)")
+    assert.throws(() => store.run("INSERT INTO repos(id,name,crew_slot,crew_seed,first_seen_at) VALUES('/b','b',0,'b',1)"), /UNIQUE/)
+    store.run("INSERT INTO repos(id,name,crew_slot,crew_seed,first_seen_at) VALUES('/b','b',1,'b',1)")
+    const insert = "INSERT INTO sessions(id,origin,process_key,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at) VALUES(?, 'wrapped', 'pty-1', ?, '/repo', 'running', 1, 1, 1, 1, 1)"
+    store.run(insert, 's1', '/a')
+    assert.throws(() => store.run(insert, 's2', '/b'), /UNIQUE/)
+  } finally { store.close() }
+}))
+
 test('migration makes a backup and rejects a newer schema', async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
