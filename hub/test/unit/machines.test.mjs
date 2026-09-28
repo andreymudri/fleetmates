@@ -448,6 +448,18 @@ test('network downloads piped through env to interpreters are destructive', () =
   ]) assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
 })
 
+test('command wrapper options preserve execution and lookup semantics', () => {
+  for (const command of [
+    'command -p rm -rf /tmp/victim',
+    'command -- rm -rf /tmp/victim',
+    'command -p -- git push --force origin main',
+    "command -p bash -lc 'rm -rf /tmp/victim'"
+  ]) assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
+  for (const command of ['command -v rm', 'command -V rm', 'command -pv rm']) {
+    assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'caution', command)
+  }
+})
+
 test('destructive MCP operation names have a destructive tier', () => {
   for (const tool_name of ['mcp__vault__vault_delete', 'mcp__db__drop_table', 'mcp__store__remove_item', 'mcp__store__reset_all']) {
     assert.equal(permissionTier({ tool_name, tool_input: {} }), 'destructive', tool_name)

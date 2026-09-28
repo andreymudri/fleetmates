@@ -73,7 +73,15 @@ function destructiveSegment(words, depth) {
   let index = 0
   while (index < words.length) {
     const word = words[index].value
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || ['env', 'command', 'builtin', 'time', 'nice', 'nohup', 'sudo', 'doas'].includes(word)) { index++; continue }
+    if (word === 'command') {
+      index++
+      while (words[index]?.value === '--' || /^-[pVv]+$/.test(words[index]?.value ?? '')) {
+        if (/[Vv]/.test(words[index].value)) return false
+        if (words[index++].value === '--') break
+      }
+      continue
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || ['env', 'builtin', 'time', 'nice', 'nohup', 'sudo', 'doas'].includes(word)) { index++; continue }
     if (word === 'timeout') { index += 2; continue }
     if (word === 'stdbuf') { index++; while (words[index]?.value.startsWith('-')) index++; continue }
     if (['uv', 'poetry'].includes(word) && words[index + 1]?.value === 'run' || word === 'pnpm' && words[index + 1]?.value === 'exec' || word === 'npx' && words[index + 1]?.value === '--no-install') { index += 2; continue }
