@@ -54,7 +54,7 @@ test('opening an existing permissive database file makes it private', async () =
   try { assert.equal((await stat(file)).mode & 0o777, 0o600) } finally { store.close() }
 }))
 
-test('schema refuses duplicate exclusive crew slots and live process keys', async () => withDatabase(async file => {
+test('schema refuses duplicate crew slots, live process keys and hook events', async () => withDatabase(async file => {
   const store = openDeckDb(file)
   try {
     store.run("INSERT INTO repos(id,name,crew_slot,crew_seed,first_seen_at) VALUES('/a','a',0,'a',1)")
@@ -63,6 +63,9 @@ test('schema refuses duplicate exclusive crew slots and live process keys', asyn
     const insert = "INSERT INTO sessions(id,origin,process_key,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at) VALUES(?, 'wrapped', 'pty-1', ?, '/repo', 'running', 1, 1, 1, 1, 1)"
     store.run(insert, 's1', '/a')
     assert.throws(() => store.run(insert, 's2', '/b'), /UNIQUE/)
+    const hookInsert = "INSERT INTO hook_events(dedupe_key,claude_session_id,event,hook_ts,received_at,via,applied,payload) VALUES(?, 'cc','Stop',1,1,'socket',1,'{}')"
+    store.run(hookInsert, 'same-hook')
+    assert.throws(() => store.run(hookInsert, 'same-hook'), /UNIQUE/)
   } finally { store.close() }
 }))
 
