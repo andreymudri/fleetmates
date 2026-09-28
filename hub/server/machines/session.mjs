@@ -21,6 +21,13 @@ function repo(store, cwd, at) {
   return id
 }
 
+function editedPath(hook) {
+  if (hook.hook_event_name !== 'PostToolUse' || !['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(hook.tool_name)) return null
+  const file = hook.tool_input?.file_path ?? hook.tool_input?.notebook_path
+  if (typeof file !== 'string' || !file) return null
+  return path.resolve(hook.cwd, file)
+}
+
 /** Resolve a hook by PTY, process, current conversation, aliases, then end/start path fallback. */
 export function resolveSession(store, envelope) {
   const hook = envelope.hook
@@ -60,7 +67,9 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
     const id = randomUUID()
     const initial = event === 'SessionStart' || event === 'Stop' || hook.notification_type === 'idle_prompt' ? 'idle' : event === 'PermissionRequest' || hook.notification_type === 'permission_prompt' ? 'needs_approval' : event === 'PreToolUse' && hook.tool_name === 'AskUserQuestion' || hook.notification_type === 'elicitation_dialog' ? 'asked_you' : 'running'
     const origin = envelope.ptyId ? 'wrapped' : 'observed'
-    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repo(store, hook.cwd, at), hook.cwd, 'Untitled', initial, at, at, at, 1, event === 'SessionStart' ? 0 : 1, at, hook.transcript_path)
+    const edited = editedPath(hook)
+    const task = event === 'UserPromptSubmit' ? hook.prompt?.split('\n')[0].slice(0, 120) || 'Untitled' : 'Untitled'
+    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path,subagents_active,activity,changed_files) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repo(store, hook.cwd, at), hook.cwd, task, initial, at, at, at, 1, event === 'SessionStart' ? 0 : 1, at, hook.transcript_path, event === 'SubagentStart' ? 1 : 0, event === 'PreCompact' ? 'compacting' : null, JSON.stringify(edited ? [{ path: edited, adds: null, dels: null }] : []))
     return store.get('SELECT * FROM sessions WHERE id = ?', id)
   }
   if (at < existing.since_ts) return existing
@@ -77,6 +86,9 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   let repoId = existing.repo_id
   let processKey = existing.process_key
   let ptyId = existing.pty_id
+  const changedFiles = JSON.parse(existing.changed_files)
+  const edited = editedPath(hook)
+  if (edited && !changedFiles.some(file => file.path === edited)) changedFiles.push({ path: edited, adds: null, dels: null })
   if (event === 'SessionStart') {
     if (!alive && hook.source === 'resume') {
       alive = 1
@@ -102,19 +114,19 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   else if (event === 'PreCompact') activity = 'compacting'
   else if (event === 'PostCompact') activity = null
   else if (event === 'CwdChanged') { cwd = hook.cwd; repoId = repo(store, cwd, at) }
-  else if (event === 'Stop' && !subagents && !['needs_approval', 'asked_you'].includes(state)) state = JSON.parse(existing.changed_files).length ? 'done' : 'idle'
+  else if (event === 'Stop' && !subagents && !['needs_approval', 'asked_you'].includes(state)) state = changedFiles.length ? 'done' : 'idle'
   else if (event === 'Notification' && hook.notification_type === 'idle_prompt' && state === 'running') state = 'idle'
   else if (event === 'SessionEnd') {
     endReason = hook.reason
     if (['clear', 'resume'].includes(hook.reason)) store.run('UPDATE sessions SET state_since = ? WHERE id = ?', at, existing.id)
     else if (existing.origin !== 'observed') endAnnounced = 1
-    if (!['clear', 'resume'].includes(hook.reason) && existing.origin === 'observed') { state = JSON.parse(existing.changed_files).length ? 'done' : 'ended'; alive = 0; endedAt = at; expireRequests(store, existing.id, 'process_ended') }
+    if (!['clear', 'resume'].includes(hook.reason) && existing.origin === 'observed') { state = changedFiles.length ? 'done' : 'ended'; alive = 0; endedAt = at; expireRequests(store, existing.id, 'process_ended') }
   } else if (['PreToolUse', 'PostToolUse', 'PostToolUseFailure'].includes(event) && !requestChanged && !['needs_approval', 'asked_you'].includes(state)) state = 'running'
   const open = store.all('SELECT kind FROM requests WHERE session_id = ? AND state = ?', existing.id, 'open')
   if (open.some(row => row.kind === 'permission')) state = 'needs_approval'
   else if (open.some(row => row.kind === 'question')) state = 'asked_you'
   else if (['needs_approval', 'asked_you'].includes(state)) state = event === 'Notification' && hook.notification_type === 'idle_prompt' ? 'idle' : 'running'
   const since = state !== existing.state ? at : existing.since_ts
-  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=?,process_key=?,pty_id=? WHERE id=?', claudeId, state, state !== existing.state ? at : existing.state_since, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, repoId === existing.repo_id ? existing.review_baseline : null, processKey, ptyId, existing.id)
+  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : existing.state_since, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, repoId === existing.repo_id ? existing.review_baseline : null, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
 }

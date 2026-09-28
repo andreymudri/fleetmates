@@ -75,6 +75,76 @@ test('deck controls and destructive shell substitutions have a Destructive floor
   assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command: 'echo safe' } }), 'caution')
 })
 
+test('new deck has zero counts before any session arrives', () => {
+  const h = harness()
+  try {
+    assert.deepEqual(h.projector.snapshot().counts, {
+      needYouSessions: 0, running: 0, toReview: 0, openRequests: 0,
+      requestSessions: 0, oldestRequestAt: null, perRun: []
+    })
+  } finally { h.close() }
+})
+
+test('a successful Edit outcome reaches done and can be reviewed', () => {
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('UserPromptSubmit.json', { prompt: 'edit' })])
+    const edit = fixture('PostToolUse.Edit.json', { tool_input: { file_path: '/tmp/demo.txt' } })
+    edit.hookTs = 1001
+    h.projector.applyHooks([edit])
+    const stop = fixture('Stop.json')
+    stop.hookTs = 1002
+    h.projector.applyHooks([stop])
+    const session = h.projector.snapshot().sessions[0]
+    assert.equal(session.state, 'done')
+    assert.deepEqual(session.changedFiles.map(file => file.path), ['/tmp/demo.txt'])
+    h.projector.signal(session.id, { type: 'review' }, 1003)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'reviewed')
+  } finally { h.close() }
+})
+
+test('notification-only approval closes on a recent observed tool outcome', () => {
+  const h = harness()
+  try {
+    const notification = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Allow Bash?' })
+    h.projector.applyHooks([notification])
+    const outcome = fixture('PostToolUse.Bash.json', { tool_input: { command: 'pwd' } })
+    outcome.hookTs = 1001
+    h.projector.applyHooks([outcome])
+    assert.equal(h.projector.snapshot().requests[0].state, 'answered')
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+  } finally { h.close() }
+})
+
+test('one SubagentStart applies once even with no request', () => {
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('UserPromptSubmit.json')])
+    const start = fixture('UserPromptSubmit.json', { hook_event_name: 'SubagentStart' })
+    start.hookTs = 1001
+    h.projector.applyHooks([start])
+    assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 1)
+  } finally { h.close() }
+})
+
+test('shell option bundles and Git global options keep destructive tier', () => {
+  for (const command of ["bash -lc 'rm -rf /home/you/work'", 'git -C /home/you/work push --force origin main']) {
+    assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
+  }
+})
+
+test('configured XDG state token path has a destructive floor', () => {
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    process.env.XDG_STATE_HOME = '/tmp/deck-xdg'
+    assert.equal(permissionTier({ tool_name: 'Read', tool_input: { file_path: '/tmp/deck-xdg/fleetmates/deck/token' } }), 'destructive')
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+  }
+})
+
 test('startup in a new process does not reuse an ended conversation', () => {
   const h = harness()
   try {

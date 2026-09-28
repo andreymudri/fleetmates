@@ -80,6 +80,16 @@ function destructiveSegment(words, depth) {
   }
   const command = path.posix.basename(words[index]?.value ?? '')
   const args = words.slice(index + 1).map(word => word.value)
+  let gitArgs = args
+  if (command === 'git') {
+    let offset = 0
+    while (offset < args.length) {
+      if (['-C', '-c', '--git-dir', '--work-tree', '--config-env', '--namespace'].includes(args[offset])) { offset += 2; continue }
+      if (/^(?:--git-dir|--work-tree|--config-env|--namespace)=/.test(args[offset])) { offset++; continue }
+      break
+    }
+    gitArgs = args.slice(offset)
+  }
   if (['rm', 'shred', 'dd', 'wipefs', 'truncate', 'shutdown', 'reboot'].includes(command) || command.startsWith('mkfs')) return true
   if (command === 'find' && (args.includes('-delete') || ['-exec', '-execdir', '-ok'].some(flag => {
     const at = args.indexOf(flag)
@@ -87,11 +97,11 @@ function destructiveSegment(words, depth) {
   }))) return true
   if (command === 'xargs' && destructiveSegment(words.slice(index + 1), depth + 1)) return true
   if (command === 'rsync' && args.some(arg => arg.startsWith('--delete'))) return true
-  if (command === 'git' && args[0] === 'push' && args.slice(1).some(arg => ['--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete'].includes(arg) || /^-[A-Za-z]*[fd]/.test(arg) || arg.startsWith('+') || arg.startsWith(':'))) return true
-  if (command === 'git' && args[0] === 'clean' && args.slice(1).some(arg => arg === '--force' || /^-[A-Za-z]*f/.test(arg))) return true
-  if (command === 'git' && args[0] === 'reset' && args.some(arg => ['--hard', '--keep', '--merge'].includes(arg))) return true
+  if (command === 'git' && gitArgs[0] === 'push' && gitArgs.slice(1).some(arg => ['--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete'].includes(arg) || /^-[A-Za-z]*[fd]/.test(arg) || arg.startsWith('+') || arg.startsWith(':'))) return true
+  if (command === 'git' && gitArgs[0] === 'clean' && gitArgs.slice(1).some(arg => arg === '--force' || /^-[A-Za-z]*f/.test(arg))) return true
+  if (command === 'git' && gitArgs[0] === 'reset' && gitArgs.some(arg => ['--hard', '--keep', '--merge'].includes(arg))) return true
   if (['sh', 'bash', 'zsh'].includes(command)) {
-    const at = args.indexOf('-c')
+    const at = args.findIndex(arg => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))
     if (at >= 0 && words[index + at + 2]?.quoted && destructiveShell(args[at + 1], depth + 1)) return true
   }
   if (command === 'eval' && words[index + 1]?.quoted && destructiveShell(args[0], depth + 1)) return true
@@ -114,7 +124,10 @@ function destructiveShell(command, depth = 0) {
 
 function namesDeckControl(input) {
   const text = JSON.stringify(input ?? {})
-  return /(?:\.local\/state|\.config)\/fleetmates\/deck(?:\/|\b)/.test(text)
+  const configuredState = process.env.XDG_STATE_HOME
+  const deckState = configuredState && path.isAbsolute(configuredState) ? path.join(configuredState, 'fleetmates', 'deck') : null
+  return deckState && (text.includes(`${deckState}/`) || text.includes(`${deckState}"`))
+    || /(?:\.local\/state|\.config)\/fleetmates\/deck(?:\/|\b)/.test(text)
     || /(?:\$XDG_RUNTIME_DIR|\/run\/user\/\d+)\/fleetmates-deck(?:\/|\b)/.test(text)
     || /https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(?::\d+)?\/api(?:\/|\b)/i.test(text)
     || /(?:127\.0\.0\.1|localhost|\[::1\]):47800\b/i.test(text)
@@ -160,6 +173,7 @@ export function applyRequestHook(store, session, envelope) {
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
     const row = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? ORDER BY created_at LIMIT 1', session.id, 'open', key)
+      ?? store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', at - 2000, at)
     if (!row) return false
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: event === 'PermissionDenied' ? 'deny' : 'allow' }), at, row.id)
     return true

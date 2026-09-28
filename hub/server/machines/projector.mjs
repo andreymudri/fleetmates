@@ -45,13 +45,12 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           if (!session && hook.hook_event_name === 'SessionEnd') continue
           const late = !!session && envelope.hookTs < session.since_ts
           const beforeRequests = session ? new Map(store.all('SELECT id, state FROM requests WHERE session_id = ?', session.id).map(row => [row.id, row.state])) : new Map()
-          if (!late && session) applyRequestHook(store, session, envelope)
           if (!late) {
-            session = applySessionHook(store, envelope, session, false)
-            if (session && !store.get('SELECT id FROM hook_events WHERE dedupe_key = ?', key) && !store.get('SELECT id FROM requests WHERE session_id = ? AND created_at = ? AND state = ?', session.id, envelope.hookTs, 'open')) {
-              // A newly discovered request needs the session row before its foreign key can be inserted.
-              applyRequestHook(store, session, envelope)
-              session = applySessionHook(store, envelope, session, true)
+            const known = !!session
+            if (!known) session = applySessionHook(store, envelope, null, false)
+            if (session) {
+              const requestChanged = applyRequestHook(store, session, envelope)
+              if (known) session = applySessionHook(store, envelope, session, requestChanged)
             }
           }
           store.run('INSERT INTO hook_events(dedupe_key,session_id,claude_session_id,event,hook_ts,received_at,via,pty_id,claude_pid,applied,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)', key, session?.id ?? null, hook.session_id, hook.hook_event_name, envelope.hookTs, envelope.receivedAt ?? now(), envelope.via ?? 'socket', envelope.ptyId ?? null, envelope.claudePid ?? null, late ? 0 : 1, JSON.stringify(hook))
