@@ -137,6 +137,7 @@ test('retention keeps summaries, open requests and recent replay while pruning o
     assert.equal(store.get("SELECT count(*) AS n FROM requests WHERE id='open'").n, 1)
     assert.equal(store.get("SELECT count(*) AS n FROM requests WHERE id='closed'").n, 0)
     assert.equal(store.get("SELECT count(*) AS n FROM rejected_events").n, 0)
+    assert.equal(store.get("SELECT count(*) AS n FROM events WHERE at=1").n, 0)
     assert.equal(store.get("SELECT count(*) AS n FROM events WHERE at=? AND type='counts'", now).n, 1)
     assert.equal(store.get("SELECT count(*) AS n FROM events WHERE at=? AND type='session.removed'", now).n, 1)
     assert.equal(store.get("SELECT value FROM meta WHERE key='last_retention_at'").value, String(now))
