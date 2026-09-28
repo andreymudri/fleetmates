@@ -277,7 +277,12 @@ test('doctor and status read setup state without service mutations', () => {
   assert.equal(summary.claudeVersion, '2.1.282')
   assert.equal(summary.testedClaudeVersion, '2.1.282')
   assert.equal(summary.livePtys, 0)
-  assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /enable|start|restart|daemon-reload/)
+  const serviceCalls = readFileSync(s.calls, 'utf8').trim().split('\n').filter(call => call.startsWith('systemctl:'))
+  assert.deepEqual(serviceCalls, [
+    'systemctl:--user is-active fleetmates-deckd.service',
+    'systemctl:--user is-active fleetmates-deckd.service',
+    'systemctl:--user is-active fleetmates-deck.service'
+  ])
 })
 
 test('installed units use absolute Node and hub paths with private umask', () => {
