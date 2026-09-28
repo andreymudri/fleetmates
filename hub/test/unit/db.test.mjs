@@ -32,6 +32,16 @@ test('opens strict M1 schema with private files, WAL, foreign keys and a stable 
   } finally { store.close() }
 }))
 
+test('opening an existing permissive state directory makes it private', async () => withDatabase(async file => {
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o755 })
+  const store = openDeckDb(file)
+  try { assert.equal((await stat(path.dirname(file))).mode & 0o777, 0o700) } finally { store.close() }
+}))
+
+test('database rejects relative paths before changing the current directory', () => {
+  assert.throws(() => openDeckDb('deck.db'), /absolute file path/)
+})
+
 test('migration makes a backup and rejects a newer schema', async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)

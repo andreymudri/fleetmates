@@ -33,7 +33,8 @@ function backupBeforeMigration(db, file, version) {
   const name = `${path.basename(file)}.pre-${String(version).padStart(4, '0')}.bak`
   let target = path.join(dir, name)
   for (let n = 1; existsSync(target); n++) target = path.join(dir, `${name}.${n}`)
-  db.prepare('VACUUM INTO ?').run(target)
+  const previousUmask = process.umask(0o077)
+  try { db.prepare('VACUUM INTO ?').run(target) } finally { process.umask(previousUmask) }
   chmodSync(target, 0o600)
   const backups = readdirSync(dir)
     .filter(entry => entry.startsWith(`${path.basename(file)}.pre-`) && entry.includes('.bak'))
@@ -44,8 +45,11 @@ function backupBeforeMigration(db, file, version) {
 
 /** Open the deck database, applying forward migrations before returning a writer. */
 export function openDeckDb(file) {
-  if (typeof file !== 'string' || !file || file === ':memory:') throw new TypeError('deck database needs a file path')
-  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  if (typeof file !== 'string' || !path.isAbsolute(file)) throw new TypeError('deck database needs an absolute file path')
+  const dir = path.dirname(file)
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  if (statSync(dir).uid !== process.getuid()) throw Error('deck database directory must be owned by the current user')
+  chmodSync(dir, 0o700)
   const previousUmask = process.umask(0o077)
   let db
   try { db = new DatabaseSync(file) } finally { process.umask(previousUmask) }
