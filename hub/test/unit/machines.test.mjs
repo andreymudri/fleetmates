@@ -103,6 +103,63 @@ test('a successful Edit outcome reaches done and can be reviewed', () => {
   } finally { h.close() }
 })
 
+test('idle_prompt keeps unreviewed edits visible after work or an interrupted approval', () => {
+  for (const pendingApproval of [false, true]) {
+    const h = harness()
+    try {
+      h.projector.applyHooks([fixture('SessionStart.startup.json')])
+      const prompt = fixture('UserPromptSubmit.json')
+      prompt.hookTs = 1100
+      const edit = fixture('PostToolUse.Edit.json', { tool_input: { file_path: '/tmp/example.txt' } })
+      edit.hookTs = 1200
+      h.projector.applyHooks([prompt, edit])
+      if (pendingApproval) {
+        const request = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+        request.hookTs = 1250
+        h.projector.applyHooks([request])
+      }
+      const idle = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'idle_prompt' })
+      idle.hookTs = 1300
+      h.projector.applyHooks([idle])
+      assert.equal(h.projector.snapshot().sessions[0].state, 'done', String(pendingApproval))
+      assert.equal(h.projector.snapshot().counts.toReview, 1, String(pendingApproval))
+      if (pendingApproval) assert.equal(h.projector.snapshot().requests[0].state, 'expired')
+    } finally { h.close() }
+  }
+})
+
+test('manual compaction from idle becomes running', () => {
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('SessionStart.startup.json')])
+    const pre = fixture('PreCompact.json')
+    pre.hookTs = 1100
+    h.projector.applyHooks([pre])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+    assert.equal(h.projector.snapshot().counts.running, 1)
+    assert.equal(h.store.get('SELECT activity FROM sessions').activity, 'compacting')
+    const post = fixture('PostCompact.json')
+    post.hookTs = 1200
+    h.projector.applyHooks([post])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+    assert.equal(h.store.get('SELECT activity FROM sessions').activity, null)
+  } finally { h.close() }
+})
+
+test('PostToolUseFailure closes its matching permission request', () => {
+  const h = harness()
+  try {
+    const request = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'false' } })
+    h.projector.applyHooks([request])
+    const failed = fixture('PostToolUse.Bash.json', { hook_event_name: 'PostToolUseFailure', tool_input: { command: 'false' } })
+    failed.hookTs = 1100
+    h.projector.applyHooks([failed])
+    assert.equal(h.projector.snapshot().requests[0].state, 'answered')
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+  } finally { h.close() }
+})
+
 test('a reviewed edit is not counted again after an unchanged turn', () => {
   const h = harness()
   try {

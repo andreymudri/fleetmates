@@ -118,11 +118,11 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   else if (event === 'PreToolUse' && hook.tool_name === 'AskUserQuestion' || event === 'Notification' && hook.notification_type === 'elicitation_dialog') state = 'asked_you'
   else if (event === 'SubagentStart') { subagents++; if (!['needs_approval', 'asked_you'].includes(state)) state = 'running' }
   else if (event === 'SubagentStop') subagents = Math.max(0, subagents - 1)
-  else if (event === 'PreCompact') activity = 'compacting'
-  else if (event === 'PostCompact') activity = null
+  else if (event === 'PreCompact') { activity = 'compacting'; state = 'running' }
+  else if (event === 'PostCompact') { activity = null; state = 'running' }
   else if (event === 'CwdChanged') { cwd = hook.cwd; repoId = repo(store, cwd, at) }
   else if (event === 'Stop' && !subagents && !['needs_approval', 'asked_you'].includes(state)) state = changedFiles.length ? 'done' : 'idle'
-  else if (event === 'Notification' && hook.notification_type === 'idle_prompt' && state === 'running') state = 'idle'
+  else if (event === 'Notification' && hook.notification_type === 'idle_prompt') state = changedFiles.length ? 'done' : 'idle'
   else if (event === 'SessionEnd') {
     endReason = hook.reason
     if (['clear', 'resume'].includes(hook.reason)) stateSince = at
