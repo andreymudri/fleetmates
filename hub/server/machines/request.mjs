@@ -68,6 +68,23 @@ function embeddedCommands(command) {
   return found
 }
 
+function skipWrapperOptions(words, index, wrapper) {
+  let offset = index + 1
+  const takesValue = wrapper === 'env'
+    ? ['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-a', '--argv0']
+    : ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-r', '--role', '-t', '--type']
+  while (offset < words.length) {
+    const word = words[offset].value
+    if (word === '--') return offset + 1
+    if (wrapper === 'env' && /^[A-Za-z_]\w*=/.test(word)) { offset++; continue }
+    if (takesValue.includes(word)) { offset += 2; continue }
+    if (/^--[a-z][a-z-]*=/.test(word) || wrapper === 'env' && /^-[uCSa].+/.test(word) || wrapper !== 'env' && /^-[ughCpDrt].+/.test(word)) { offset++; continue }
+    if (word.startsWith('-') && word !== '-') { offset++; continue }
+    break
+  }
+  return offset
+}
+
 function destructiveSegment(words, depth) {
   if (depth > 4 || !words.length) return false
   let index = 0
@@ -81,7 +98,8 @@ function destructiveSegment(words, depth) {
       }
       continue
     }
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || ['env', 'builtin', 'time', 'nice', 'nohup', 'sudo', 'doas'].includes(word)) { index++; continue }
+    if (['env', 'sudo', 'doas'].includes(word)) { index = skipWrapperOptions(words, index, word); continue }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || ['builtin', 'time', 'nice', 'nohup'].includes(word)) { index++; continue }
     if (word === 'timeout') { index += 2; continue }
     if (word === 'stdbuf') { index++; while (words[index]?.value.startsWith('-')) index++; continue }
     if (['uv', 'poetry'].includes(word) && words[index + 1]?.value === 'run' || word === 'pnpm' && words[index + 1]?.value === 'exec' || word === 'npx' && words[index + 1]?.value === '--no-install') { index += 2; continue }
@@ -194,13 +212,18 @@ function namesRelativeDeckControl(hook) {
     return namesControl(hook.tool_input?.file_path ?? hook.tool_input?.notebook_path)
   }
   if (hook.tool_name !== 'Bash' || typeof hook.tool_input?.command !== 'string') return false
-  const fileCommands = ['cat', 'head', 'tail', 'less', 'more', 'bat', 'stat', 'file', 'wc', 'nl', 'cp', 'mv', 'tee']
   const tokens = shellTokens(hook.tool_input.command)
   let segment = []
   const accessesControl = words => {
     let index = 0
-    while (words[index] && (/^[A-Za-z_]\w*=/.test(words[index].value) || ['env', 'command', 'builtin', 'sudo', 'doas'].includes(path.posix.basename(words[index].value)))) index++
-    if (!fileCommands.includes(path.posix.basename(words[index]?.value ?? ''))) return false
+    while (words[index]) {
+      const wrapper = path.posix.basename(words[index].value)
+      if (['env', 'sudo', 'doas'].includes(wrapper)) { index = skipWrapperOptions(words, index, wrapper); continue }
+      if (/^[A-Za-z_]\w*=/.test(words[index].value) || ['command', 'builtin'].includes(wrapper)) { index++; continue }
+      break
+    }
+    const command = path.posix.basename(words[index]?.value ?? '')
+    if (['echo', 'printf'].includes(command) && !words.some(word => ['>', '>>', '<', '<<'].includes(word.value))) return false
     return words.slice(index + 1).some(word => !word.value.startsWith('-') && namesControl(word.value, true))
   }
   for (const token of tokens) {

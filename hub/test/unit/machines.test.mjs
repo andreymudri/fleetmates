@@ -460,6 +460,21 @@ test('command wrapper options preserve execution and lookup semantics', () => {
   }
 })
 
+test('environment and privilege wrappers expose the executed command after options', () => {
+  for (const command of [
+    'env -i rm -rf /tmp/demo',
+    'env -u HOME rm -rf /tmp/demo',
+    'env --unset=HOME MODE=test rm -rf /tmp/demo',
+    'sudo -u root rm -rf /tmp/demo',
+    'sudo --user=root -- rm -rf /tmp/demo',
+    'doas -u root rm -rf /tmp/demo',
+    'env -i sudo -u root rm -rf /tmp/demo'
+  ]) assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
+  for (const command of ['sudo -u rm echo safe', 'env -u rm echo safe']) {
+    assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'caution', command)
+  }
+})
+
 test('destructive MCP operation names have a destructive tier', () => {
   for (const tool_name of ['mcp__vault__vault_delete', 'mcp__db__drop_table', 'mcp__store__remove_item', 'mcp__store__reset_all']) {
     assert.equal(permissionTier({ tool_name, tool_input: {} }), 'destructive', tool_name)
@@ -521,6 +536,27 @@ test('relative deck control paths resolve against hook cwd', () => {
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
+  }
+})
+
+test('relative deck token operands remain protected across file-reading commands', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-token-read-'))
+  const cwd = path.join(root, 'fleetmates', 'deck')
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(path.join(cwd, 'token'), 'test-token')
+    process.env.XDG_STATE_HOME = root
+    for (const command of ['sed -n 1p token', "awk '1' ./token", 'cut -c1 token', 'sudo -u root sed -n 1p token']) {
+      assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
+    }
+    for (const command of ['echo token', 'printf token']) {
+      assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }), 'caution', command)
+    }
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+    rmSync(root, { recursive: true, force: true })
   }
 })
 
