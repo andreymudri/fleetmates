@@ -524,6 +524,25 @@ test('symlinked parents retain the deck control floor for reads and new writes',
   }
 })
 
+test('symlinked Git control files and parents retain the destructive write floor', () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'deck-git-link-'))
+  try {
+    mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true })
+    mkdirSync(path.join(repo, '.claude'), { recursive: true })
+    writeFileSync(path.join(repo, '.git', 'config'), '[core]\n')
+    writeFileSync(path.join(repo, '.claude', 'settings.json'), '{}\n')
+    writeFileSync(path.join(repo, '.mcp.json'), '{}\n')
+    symlinkSync('.git/config', path.join(repo, 'config-link'))
+    symlinkSync('.git/hooks', path.join(repo, 'hooks-link'))
+    symlinkSync('.claude/settings.json', path.join(repo, 'settings-link'))
+    symlinkSync('.mcp.json', path.join(repo, 'mcp-link'))
+    for (const file_path of ['config-link', 'hooks-link/pre-commit', path.join(repo, 'config-link'), 'settings-link', 'mcp-link']) {
+      assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path, content: '[core]' } }, { repoRoot: repo }), 'destructive', file_path)
+    }
+    assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path: 'ordinary.txt', content: 'x' } }, { repoRoot: repo }), 'caution')
+  } finally { rmSync(repo, { recursive: true, force: true }) }
+})
+
 test('clear starts alias wait at the end hook timestamp', () => {
   const h = harness()
   try {

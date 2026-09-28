@@ -210,14 +210,14 @@ function sensitiveWrite(hook, repoRoot) {
   if (!fileTool && tool !== 'Bash') return false
   const raw = fileTool ? hook.tool_input?.file_path ?? hook.tool_input?.notebook_path ?? '' : hook.tool_input?.command ?? ''
   if (typeof raw !== 'string') return false
-  const normalized = raw.replaceAll('\\', '/')
+  const location = fileTool ? canonicalExistingPath(path.resolve(hook.cwd ?? repoRoot ?? '', raw)) : null
+  const normalized = (location ?? raw).replaceAll('\\', '/')
   if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true
   if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true
   if (/(?:^|\/)\.mcp\.json(?:\b|$)/.test(normalized)) return true
   if (!fileTool || path.posix.basename(normalized) !== 'CLAUDE.md') return false
   if (!repoRoot) return true
-  const location = path.resolve(hook.cwd ?? repoRoot, raw)
-  const root = path.resolve(repoRoot)
+  const root = canonicalExistingPath(path.resolve(repoRoot))
   return location !== path.join(root, 'CLAUDE.md') && !location.startsWith(`${root}${path.sep}`)
 }
 
