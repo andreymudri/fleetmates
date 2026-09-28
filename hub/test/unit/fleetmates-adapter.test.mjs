@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -83,6 +83,16 @@ test('reader does not create a missing status file', async () => {
       await reader.list()
       assert.deepEqual(await readdir(dir), before)
     } finally { reader.close() }
+  })
+})
+
+test('reader can open run files that have no write permission', async () => {
+  await withRepo(async (repo) => {
+    const dir = await writeRun(repo, 'r1', { runId: 'r1', tasks: [] }, { runId: 'r1', tasks: [] })
+    await chmod(path.join(dir, 'plan.json'), 0o444)
+    await chmod(path.join(dir, 'status.json'), 0o444)
+    const reader = createFleetmatesReader({ repoRoots: [repo], pollRun: async () => ({ derivedPhase: null, liveness: [] }) })
+    try { assert.equal((await reader.list())[0].readError, null) } finally { reader.close() }
   })
 })
 
