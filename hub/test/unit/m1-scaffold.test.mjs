@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// The phase gate runs this file through its hub-test check; root npm test does not run hub tests.
+
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const root = path.dirname(hub)
 
@@ -72,5 +74,7 @@ test('deck CI declares pinned Node, build, and tests on Linux and macOS', async 
   assert.match(workflow, /npm --prefix hub run build/)
   assert.match(workflow, /npm --prefix hub test/)
   assert.match(workflow, /TMPDIR: \/tmp\/hx/)
-  assert.doesNotMatch(workflow, /^\s+if:\s*(?:false|0)\s*$/m)
+  const hubJob = workflow.split(/^  hub:\s*$/m)[1]?.split(/^  [\w-]+:\s*$/m)[0]
+  assert.ok(hubJob)
+  assert.doesNotMatch(hubJob, /^\s+(?:-\s+)?if:/m)
 })
