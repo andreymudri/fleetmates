@@ -1,6 +1,5 @@
 [Unit]
 Description=fleetmates deck PTY daemon (deckd)
-Documentation=https://github.com/andreymudri/fleetmates/tree/master/docs/deck
 
 [Service]
 Type=simple

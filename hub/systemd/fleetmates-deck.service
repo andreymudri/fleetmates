@@ -1,6 +1,5 @@
 [Unit]
 Description=fleetmates deck web server (127.0.0.1)
-Documentation=https://github.com/andreymudri/fleetmates/tree/master/docs/deck
 Wants=fleetmates-deckd.service
 After=fleetmates-deckd.service
 

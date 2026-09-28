@@ -27,15 +27,15 @@ function sandbox(fixture = 'empty.json') {
     execFileSync('chmod', ['700', file])
   }
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: config, XDG_STATE_HOME: state, XDG_DATA_HOME: path.join(root, 'data'), XDG_RUNTIME_DIR: runtime, PATH: `${bin}:${process.env.PATH}`, DECK_TEST_CALLS: calls, CLAUDE_CONFIG_DIR: path.join(home, '.claude') }
-  const run = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8' })
+  const run = (...args) => spawnSync(process.execPath, [cli, ...args], { env, encoding: 'utf8', timeout: 8000 })
   return { root, home, config, state, runtime, calls, settings, run }
 }
 
-async function listener(s, token, valid) {
+async function listener(s, token, valid, delayMs = 0) {
   const script = path.join(s.root, 'listener.mjs')
-  writeFileSync(script, `import http from 'node:http'\nimport fs from 'node:fs'\nimport { createHmac } from 'node:crypto'\nconst server = http.createServer((req, res) => {\n  fs.writeFileSync(process.env.REQUEST_FILE, req.url)\n  const nonce = new URL(req.url, 'http://127.0.0.1').searchParams.get('nonce')\n  const mac = createHmac('sha256', process.env.TEST_TOKEN).update('fleetmates-deck-open:' + nonce).digest('hex')\n  res.setHeader('content-type', 'application/json')\n  res.end(JSON.stringify({ nonce, mac: process.env.VALID === 'yes' ? mac : '0'.repeat(64) }))\n})\nserver.listen(0, '127.0.0.1', () => process.stdout.write(String(server.address().port) + '\\n'))\n`)
+  writeFileSync(script, `import http from 'node:http'\nimport fs from 'node:fs'\nimport { createHmac } from 'node:crypto'\nconst server = http.createServer((req, res) => {\n  fs.writeFileSync(process.env.REQUEST_FILE, req.url)\n  const nonce = new URL(req.url, 'http://127.0.0.1').searchParams.get('nonce')\n  const mac = createHmac('sha256', process.env.TEST_TOKEN).update('fleetmates-deck-open:' + nonce).digest('hex')\n  res.setHeader('content-type', 'application/json')\n  res.end(JSON.stringify({ nonce, mac: process.env.VALID === 'yes' ? mac : '0'.repeat(64) }))\n})\nserver.listen(0, '127.0.0.1', () => {\n  const port = server.address().port\n  if (Number(process.env.DELAY_MS)) server.close(() => {\n    process.stdout.write(String(port) + '\\n')\n    setTimeout(() => server.listen(port, '127.0.0.1'), Number(process.env.DELAY_MS))\n  })\n  else process.stdout.write(String(port) + '\\n')\n})\n`)
   const requestFile = path.join(s.root, 'request-url')
-  const child = spawn(process.execPath, [script], { env: { ...process.env, TEST_TOKEN: token, VALID: valid ? 'yes' : 'no', REQUEST_FILE: requestFile }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, [script], { env: { ...process.env, TEST_TOKEN: token, VALID: valid ? 'yes' : 'no', DELAY_MS: String(delayMs), REQUEST_FILE: requestFile }, stdio: ['ignore', 'pipe', 'pipe'] })
   const port = await new Promise((resolve, reject) => {
     child.stdout.once('data', chunk => resolve(Number(String(chunk).trim())))
     child.once('error', reject)
@@ -113,6 +113,32 @@ test('open refuses a loopback listener without the token proof', async () => {
   } finally { server.child.kill() }
 })
 
+test('open waits for a valid listener after systemctl start returns', async () => {
+  const s = sandbox()
+  assert.equal(s.run('init').status, 0)
+  const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
+  const server = await listener(s, token, true, 350)
+  try {
+    assert.equal(s.run('open').status, 0)
+    assert.ok(readFileSync(s.calls, 'utf8').includes(`xdg-open:http://127.0.0.1:${server.port}/#token=${token}`))
+    assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
+  } finally { server.child.kill() }
+})
+
+test('open stops retrying when no listener appears', async () => {
+  const s = sandbox()
+  assert.equal(s.run('init').status, 0)
+  const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
+  const server = await listener(s, token, true, 10000)
+  try {
+    const started = Date.now()
+    const result = s.run('open')
+    assert.equal(result.status, 1)
+    assert.ok(Date.now() - started < 5000)
+    assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /xdg-open:/)
+  } finally { server.child.kill() }
+})
+
 test('invalid settings stops init before it writes directories or services', () => {
   const s = sandbox()
   writeFileSync(s.settings, '{ broken')
@@ -180,4 +206,6 @@ test('installed units use absolute Node and hub paths with private umask', () =>
   assert.ok(web.includes(`ExecStart=${process.execPath} ${hub}/server/main.mjs`))
   assert.match(deckd, /UMask=0077/)
   assert.match(web, /UMask=0077/)
+  assert.doesNotMatch(deckd, /^Documentation=/m)
+  assert.doesNotMatch(web, /^Documentation=/m)
 })

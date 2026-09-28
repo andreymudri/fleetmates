@@ -34,23 +34,33 @@ async function verifyListener(port, token) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid deck port')
   const nonce = randomBytes(24).toString('base64url')
   const expected = createHmac('sha256', token).update(`fleetmates-deck-open:${nonce}`).digest()
-  const body = await new Promise((resolve, reject) => {
-    const req = http.get({ hostname: '127.0.0.1', port, path: `/.well-known/fleetmates-deck/identity?nonce=${nonce}`, timeout: 2000, agent: false }, res => {
-      if (res.statusCode !== 200 || res.headers['content-type']?.split(';')[0] !== 'application/json') {
-        res.resume()
-        reject(new Error('deck identity endpoint unavailable'))
-        return
-      }
-      let content = ''
-      res.on('data', chunk => {
-        content += chunk
-        if (content.length > 1024) { req.destroy(new Error('deck identity response too large')) }
+  const deadline = Date.now() + 3000
+  let body
+  for (;;) {
+    try {
+      body = await new Promise((resolve, reject) => {
+        const req = http.get({ hostname: '127.0.0.1', port, path: `/.well-known/fleetmates-deck/identity?nonce=${nonce}`, timeout: Math.max(1, Math.min(500, deadline - Date.now())), signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())), agent: false }, res => {
+          if (res.statusCode !== 200 || res.headers['content-type']?.split(';')[0] !== 'application/json') {
+            res.resume()
+            reject(new Error('deck identity endpoint unavailable'))
+            return
+          }
+          let content = ''
+          res.on('data', chunk => {
+            content += chunk
+            if (content.length > 1024) req.destroy(new Error('deck identity response too large'))
+          })
+          res.on('end', () => resolve(content))
+        })
+        req.on('timeout', () => req.destroy(Object.assign(new Error('deck identity timed out'), { code: 'ETIMEDOUT' })))
+        req.on('error', reject)
       })
-      res.on('end', () => resolve(content))
-    })
-    req.on('timeout', () => req.destroy(new Error('deck identity timed out')))
-    req.on('error', reject)
-  })
+      break
+    } catch (error) {
+      if (!['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT'].includes(error.code) || Date.now() >= deadline) throw error
+      await new Promise(resolve => setTimeout(resolve, Math.min(100, deadline - Date.now())))
+    }
+  }
   let reply
   try { reply = JSON.parse(body) } catch { throw new Error('invalid deck identity response') }
   if (reply?.nonce !== nonce || typeof reply.mac !== 'string' || !/^[a-f0-9]{64}$/.test(reply.mac)) throw new Error('deck identity proof missing')
