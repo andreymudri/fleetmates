@@ -12,6 +12,7 @@ import { validateEnvelope } from '../../server/ingest/validate.mjs'
 
 const hook = { session_id: 's1', transcript_path: '/home/you/.claude/projects/x/a.jsonl', cwd: '/repo', hook_event_name: 'Stop', stop_hook_active: false }
 const line = (hookTs = 1, payload = hook) => JSON.stringify({ v: 1, deckHookVersion: '0.1.0', hookTs, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: payload }) + '\n'
+const uniqueSpool = 'hooks-20260928-1790000000000-aabbccddeeff.jsonl'
 
 test('validation accepts fixture shape and rejects drift, unknown events and malformed lines', () => {
   assert.equal(validateEnvelope(line()).ok, true)
@@ -30,6 +31,17 @@ test('rejected event diagnostics do not retain raw hook content', () => {
     assert.equal(ingest.receive(raw), false)
     assert.equal(rejected[0].reason, 'invalid_transcript_path')
     assert.equal(rejected[0].raw.includes('SYNTHETIC_SECRET_456'), false)
+  } finally { ingest.close() }
+})
+
+test('failed rejection storage does not throw from socket ingestion', () => {
+  const accepted = []
+  const ingest = createIngestor({ onEvent: row => accepted.push(row), onRejected: () => { throw Error('database busy') }, reorderMs: 0 })
+  try {
+    assert.equal(ingest.receive('{'), false)
+    assert.equal(ingest.receive(line(2)), true)
+    ingest.flush()
+    assert.equal(accepted.length, 1)
   } finally { ingest.close() }
 })
 
@@ -140,7 +152,17 @@ test('socket listener restarts after an unclean exit without replacing a live li
   const childScript = `import {startHookSocket} from ${JSON.stringify(moduleUrl)}; await startHookSocket({runtimeDir:process.argv[1],ingest:{receive(){},rejectRaw(){}}}); console.log('ready')`
   const child = spawn(process.execPath, ['--input-type=module', '-e', childScript, dir], { stdio: ['ignore', 'pipe', 'pipe'] })
   try {
-    await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('error', reject) })
+    let timer
+    try {
+      await Promise.race([
+        new Promise((resolve, reject) => {
+          child.stdout.once('data', resolve)
+          child.once('error', reject)
+          child.once('close', code => reject(Error(`socket setup exited before ready: ${code}`)))
+        }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(Error('socket setup did not become ready')), 1000) }),
+      ])
+    } finally { clearTimeout(timer) }
     child.kill('SIGKILL')
     await new Promise(resolve => child.once('close', resolve))
     const ingest = createIngestor({ onEvent: () => {}, onRejected: () => {} })
@@ -155,21 +177,21 @@ test('spool drain replays sorted lines and retains a new append file', async () 
   const rejected = []
   const ingest = createIngestor({ onEvent: row => accepted.push(row), onRejected: row => rejected.push(row), reorderMs: 0 })
   try {
-    await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(3) + line(1, { ...hook, session_id: 's2' }) + '{\n')
+    await writeFile(path.join(dir, uniqueSpool), line(3) + line(1, { ...hook, session_id: 's2' }) + '{\n')
     const draining = drainSpool(dir, ingest)
     let renamed = false
     for (let attempt = 0; attempt < 40; attempt++) {
-      if ((await readdir(dir)).includes('hooks-20260928.jsonl.draining')) { renamed = true; break }
+      if ((await readdir(dir)).includes(`${uniqueSpool}.draining`)) { renamed = true; break }
       await new Promise(resolve => setTimeout(resolve, 5))
     }
     assert.equal(renamed, true)
-    await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(4))
+    await writeFile(path.join(dir, uniqueSpool), line(4))
     await draining
     ingest.flush()
     assert.deepEqual(accepted.map(row => row.hookTs), [1, 3])
     assert.equal(rejected.length, 1)
-    assert.deepEqual(await readdir(dir), ['hooks-20260928.jsonl'])
-    assert.equal(await readFile(path.join(dir, 'hooks-20260928.jsonl'), 'utf8'), line(4))
+    assert.deepEqual(await readdir(dir), [uniqueSpool])
+    assert.equal(await readFile(path.join(dir, uniqueSpool), 'utf8'), line(4))
   } finally { ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
@@ -178,8 +200,8 @@ test('spool drain reads an interrupted drain before a newer same-day spool', asy
   const accepted = []
   const ingest = createIngestor({ onEvent: row => accepted.push(row), onRejected: () => {}, reorderMs: 0 })
   try {
-    await writeFile(path.join(dir, 'hooks-20260928.jsonl.draining'), line(1, { ...hook, session_id: 'old' }))
-    await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(2, { ...hook, session_id: 'new' }))
+    await writeFile(path.join(dir, `${uniqueSpool}.draining`), line(1, { ...hook, session_id: 'old' }))
+    await writeFile(path.join(dir, uniqueSpool), line(2, { ...hook, session_id: 'new' }))
     await drainSpool(dir, ingest)
     ingest.flush()
     assert.deepEqual(accepted.map(row => row.hook.session_id), ['old', 'new'])
@@ -197,18 +219,36 @@ test('spool drain reads a line appended through a descriptor opened before renam
   try {
     await drainSpool(dir, ingest)
     assert.deepEqual(accepted, [1, 2])
-    assert.deepEqual(await readdir(dir), [])
+    assert.deepEqual(await readdir(dir), ['hooks-20260928.jsonl.draining'])
   } finally { closeSync(fd); ingest.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('spool drain can replay a late write through an open legacy descriptor', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-spool-late-'))
+  const file = path.join(dir, 'hooks-20260928.jsonl')
+  const accepted = []
+  const ingest = createIngestor({ onEvent: row => accepted.push(row.hookTs), onRejected: () => {}, reorderMs: 0 })
+  let fd
+  try {
+    await writeFile(file, line(1))
+    fd = openSync(file, 'a')
+    await drainSpool(dir, ingest)
+    writeSync(fd, line(2))
+    closeSync(fd)
+    fd = null
+    await drainSpool(dir, ingest)
+    assert.deepEqual(accepted, [1, 2])
+  } finally { if (fd !== undefined && fd !== null) closeSync(fd); ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
 test('startup spool drain applies rows before returning and leaves failed files for retry', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-spool-start-'))
   try {
-    await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(1))
+    await writeFile(path.join(dir, uniqueSpool), line(1))
     const failing = createIngestor({ onEvent: () => { throw Error('store unavailable') }, onRejected: () => {} })
     await assert.rejects(drainSpool(dir, failing), /store unavailable/)
     failing.close()
-    assert.deepEqual(await readdir(dir), ['hooks-20260928.jsonl.draining'])
+    assert.deepEqual(await readdir(dir), [`${uniqueSpool}.draining`])
     const accepted = []
     const ingest = createIngestor({ onEvent: row => accepted.push(row), onRejected: () => {} })
     const watcher = await startSpoolDrain({ dir, ingest, intervalMs: 60_000 })
@@ -225,7 +265,7 @@ test('a failed spool apply can retry on the same ingestor without losing its ded
   const accepted = []
   const ingest = createIngestor({ onEvent: row => { if (fail) throw Error('store unavailable'); accepted.push(row.hookTs) }, onRejected: () => {} })
   try {
-    await writeFile(path.join(dir, 'hooks-20260928.jsonl'), line(1))
+    await writeFile(path.join(dir, uniqueSpool), line(1))
     await assert.rejects(drainSpool(dir, ingest), /store unavailable/)
     fail = false
     await drainSpool(dir, ingest)

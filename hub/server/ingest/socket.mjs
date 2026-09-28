@@ -32,7 +32,7 @@ export function createIngestor({ onEvent, onRejected, reorderMs = 250, now = Dat
     }
   }, { windowMs: reorderMs })
   function reject(raw, via, reason) {
-    onRejected({ receivedAt: now(), via, reason, raw: '' })
+    try { onRejected({ receivedAt: now(), via, reason, raw: '' }) } catch { /* A rejected hook must not stop live ingestion. */ }
   }
   return {
     receive(raw, via = 'socket') {

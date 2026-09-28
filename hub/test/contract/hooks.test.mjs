@@ -42,9 +42,12 @@ test('hook without a socket spools privately and exits silently', async () => {
     responseHook.tool_response = { content: 'SYNTHETIC_CONFIDENTIAL_NOTE_123' }
     const responseChild = spawnSync(process.execPath, [executable], { input: JSON.stringify(responseHook), encoding: 'utf8', env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: path.join(home, 'runtime') }, timeout: 2000 })
     assert.equal(responseChild.status, 0)
-    const spool = await readFile(path.join(dir, names[0]), 'utf8')
+    const after = await readdir(dir)
+    assert.equal(after.length, 2)
+    const responseFile = after.find(name => name !== names[0])
+    const spool = await readFile(path.join(dir, responseFile), 'utf8')
     assert.equal(spool.includes('SYNTHETIC_CONFIDENTIAL_NOTE_123'), false)
-    assert.equal(spool.trimEnd().split('\n').length, 2)
+    assert.equal(spool.trimEnd().split('\n').length, 1)
   } finally { await rm(home, { recursive: true, force: true }) }
 })
 
@@ -62,7 +65,9 @@ test('hook tightens a preexisting permissive spool file before appending', async
     const child = spawnSync(process.execPath, [executable], { input: JSON.stringify(hook), encoding: 'utf8', env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: path.join(home, 'runtime') }, timeout: 2000 })
     assert.equal(child.status, 0)
     assert.equal((await stat(file)).mode & 0o777, 0o600)
-    assert.equal(validateEnvelope(await readFile(file, 'utf8')).ok, true)
+    const created = (await readdir(dir)).find(name => name !== path.basename(file))
+    assert.match(created, /^hooks-\d{8}-\d{13}-[a-f0-9]{12}\.jsonl$/)
+    assert.equal(validateEnvelope(await readFile(path.join(dir, created), 'utf8')).ok, true)
   } finally { await rm(home, { recursive: true, force: true }) }
 })
 
@@ -163,7 +168,14 @@ test('hook exits silently when stdin never finishes', async () => {
   child.stdout.on('data', chunk => output.push(chunk))
   child.stderr.on('data', chunk => output.push(chunk))
   const started = Date.now()
-  const code = await new Promise(resolve => child.on('close', resolve))
+  let timer
+  let code
+  try {
+    code = await Promise.race([
+      new Promise(resolve => child.on('close', resolve)),
+      new Promise((_, reject) => { timer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('hook exceeded its exit budget')) }, 1000) }),
+    ])
+  } finally { clearTimeout(timer); if (child.exitCode === null) child.kill('SIGKILL') }
   assert.equal(code, 0)
   assert.equal(Buffer.concat(output).length, 0)
   assert.ok(Date.now() - started < 1000)

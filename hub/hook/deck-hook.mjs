@@ -1,4 +1,5 @@
-import { readFileSync, mkdirSync, openSync, writeSync, closeSync, statSync, existsSync, chmodSync } from 'node:fs'
+import { constants, readFileSync, mkdirSync, openSync, writeSync, closeSync, fstatSync, fchmodSync, readdirSync, renameSync, existsSync, unlinkSync, chmodSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { connect } from 'node:net'
 import { execFileSync } from 'node:child_process'
 import os from 'node:os'
@@ -109,10 +110,34 @@ function spool(line, env, hookTs) {
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   chmodSync(dir, 0o700)
   const day = new Date(hookTs).toISOString().slice(0, 10).replaceAll('-', '')
-  const file = path.join(dir, `hooks-${day}.jsonl`)
-  if (existsSync(file) && statSync(file).size + Buffer.byteLength(line) > maxSpool) return
-  const fd = openSync(file, 'a', 0o600)
-  try { chmodSync(file, 0o600); writeSync(fd, line) } finally { closeSync(fd) }
+  const bytes = readdirSync(dir).filter(name => name.startsWith('hooks-')).reduce((total, name) => {
+    const file = path.join(dir, name)
+    let fd
+    try {
+      fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0))
+      const info = fstatSync(fd)
+      if (!info.isFile()) return total
+      fchmodSync(fd, 0o600)
+      return total + info.size
+    } catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ELOOP') return total
+      throw error
+    } finally { if (fd !== undefined) closeSync(fd) }
+  }, 0)
+  if (bytes + Buffer.byteLength(line) > maxSpool) return
+  const file = path.join(dir, `hooks-${day}-${String(hookTs).padStart(13, '0')}-${randomBytes(6).toString('hex')}.jsonl`)
+  const temporary = `${file}.tmp`
+  let fd
+  try {
+    fd = openSync(temporary, 'wx', 0o600)
+    writeSync(fd, line)
+    closeSync(fd)
+    fd = null
+    renameSync(temporary, file)
+  } finally {
+    if (fd !== null && fd !== undefined) closeSync(fd)
+    if (existsSync(temporary)) unlinkSync(temporary)
+  }
 }
 
 /** Send one stdin hook payload within the hook budget, falling back to private spool. */
