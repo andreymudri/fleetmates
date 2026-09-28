@@ -101,6 +101,20 @@ test('init merges hooks, preserves existing order and is byte identical twice', 
   assert.equal(calls.includes('restart fleetmates-deckd'), false)
 })
 
+test('init rotate token replaces the token and keeps private file mode', () => {
+  const s = sandbox()
+  assert.equal(s.run('init').status, 0)
+  const tokenFile = path.join(s.state, 'fleetmates/deck/token')
+  const original = readFileSync(tokenFile, 'utf8').trim()
+  assert.match(original, /^[A-Za-z0-9_-]{43}$/)
+  const result = s.run('init', '--rotate-token')
+  assert.equal(result.status, 0, result.stderr)
+  const replacement = readFileSync(tokenFile, 'utf8').trim()
+  assert.match(replacement, /^[A-Za-z0-9_-]{43}$/)
+  assert.notEqual(replacement, original)
+  assert.equal(statSync(tokenFile).mode & 0o777, 0o600)
+})
+
 test('init skips the absent web entry and starts it after installation', () => {
   const s = sandbox('empty.json', { isolatedHub: true })
   const entry = path.join(s.hubPath, 'server/main.mjs')
