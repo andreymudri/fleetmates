@@ -50,6 +50,7 @@ test('M1 build emits an entry script that mounts a heading', async () => {
       virtualConsole,
     })
     try {
+      assert.equal(dom.window.document.querySelector('script[src]')?.type, 'module')
       for (const link of dom.window.document.querySelectorAll('link[rel="stylesheet"]')) {
         assert.match(link.getAttribute('href'), /^\.\/assets\/[^/]+\.css$/)
         const style = dom.window.document.createElement('style')
