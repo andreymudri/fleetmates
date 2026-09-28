@@ -31,6 +31,13 @@ export function applyRequestHook(store, session, envelope) {
     const existing = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? ORDER BY created_at LIMIT 1', session.id, 'open', key)
     if (existing) return false
     const summary = hook.tool_name ? `${hook.tool_name}: ${JSON.stringify(hook.tool_input ?? {}).slice(0, 160)}` : hook.message ?? 'Needs your answer'
+    if (source === 'permission_request') {
+      const fallback = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', at - 2000, at + 2000)
+      if (fallback) {
+        store.run('UPDATE requests SET source = ?, tool_name = ?, summary = ?, detail = ?, match_key = ? WHERE id = ?', source, hook.tool_name, summary, JSON.stringify(hook.tool_input ?? {}), key, fallback.id)
+        return true
+      }
+    }
     store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? 'caution' : null, hook.tool_name ?? null, summary, JSON.stringify(hook.tool_input ?? {}), JSON.stringify(hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, at)
     return true
   }

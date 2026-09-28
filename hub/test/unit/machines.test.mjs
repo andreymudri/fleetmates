@@ -108,9 +108,13 @@ test('observed end and lost process expire requests and leave no needs-you count
 
 test('published sequences are committed and a failed batch rolls back', () => {
   const h = harness()
+  const reader = openDeckDb(h.file)
   try {
     const published = []
-    const projector = createProjector({ store: h.store, now: () => 1000, publish: event => published.push(event.seq) })
+    const projector = createProjector({ store: h.store, now: () => 1000, publish: event => {
+      assert.ok(Number(reader.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq) >= event.seq)
+      published.push(event.seq)
+    } })
     projector.applyHooks([fixture('UserPromptSubmit.json')])
     assert.deepEqual(published, [1, 2])
     const before = projector.snapshot()
@@ -121,7 +125,7 @@ test('published sequences are committed and a failed batch rolls back', () => {
     assert.equal(projector.snapshot().seq, before.seq)
     assert.equal(projector.snapshot().sessions.length, before.sessions.length)
     assert.deepEqual(published, [1, 2])
-  } finally { h.close() }
+  } finally { reader.close(); h.close() }
 })
 
 test('observed clear without a new start ends after alias wait', () => {
@@ -163,5 +167,67 @@ test('request open and close are published after commit', () => {
     projector.applyHooks([outcome])
     assert.ok(events.some(event => event.type === 'request.closed'))
     assert.deepEqual(events.map(event => event.seq), events.map((_, index) => index + 1))
+  } finally { h.close() }
+})
+
+test('permission notification before tool request leaves one approval that closes on outcome', () => {
+  const h = harness()
+  try {
+    const notification = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Allow Bash?' })
+    const request = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    request.hookTs = 1001
+    const outcome = fixture('PostToolUse.Bash.json', { tool_input: request.hook.tool_input })
+    outcome.hookTs = 1002
+    h.projector.applyHooks([notification, request])
+    assert.equal(h.projector.snapshot().counts.openRequests, 1)
+    h.projector.applyHooks([outcome])
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+  } finally { h.close() }
+})
+
+test('process exit publishes closure for every expired request', () => {
+  const h = harness()
+  try {
+    const events = []
+    const projector = createProjector({ store: h.store, publish: event => events.push(event) })
+    projector.applyHooks([fixture('PermissionRequest.AskUserQuestion.json')])
+    const id = projector.snapshot().sessions[0].id
+    events.length = 0
+    projector.signal(id, { type: 'exit', code: 1 }, 2000)
+    assert.equal(projector.snapshot().requests[0].state, 'expired')
+    assert.equal(events.filter(event => event.type === 'request.closed').length, 1)
+    assert.equal(events.find(event => event.type === 'request.closed').data.expiredReason, 'process_ended')
+  } finally { h.close() }
+})
+
+test('CwdChanged moves the session to its new repository', () => {
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('SessionStart.startup.json', { cwd: '/home/you/old' })])
+    const changed = fixture('SessionStart.startup.json', { hook_event_name: 'CwdChanged', cwd: '/home/you/new' })
+    changed.hookTs = 2000
+    h.projector.applyHooks([changed])
+    const session = h.projector.snapshot().sessions[0]
+    assert.equal(session.cwd, '/home/you/new')
+    assert.equal(session.repoId, '/home/you/new')
+    assert.equal(h.store.get('SELECT COUNT(*) AS count FROM repos').count, 2)
+  } finally { h.close() }
+})
+
+test('announced PTY end with nonzero exit is ended', () => {
+  const h = harness()
+  try {
+    const start = fixture('SessionStart.startup.json')
+    start.ptyId = 'pty-two'
+    h.projector.applyHooks([start])
+    const end = fixture('SessionEnd.prompt_input_exit.json', { reason: 'logout' })
+    end.ptyId = 'pty-two'
+    end.hookTs = 2000
+    h.projector.applyHooks([end])
+    const id = h.projector.snapshot().sessions[0].id
+    h.projector.signal(id, { type: 'exit', code: 1 }, 3000)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'ended')
+    assert.equal(h.store.get('SELECT end_announced FROM sessions WHERE id = ?', id).end_announced, 1)
   } finally { h.close() }
 })

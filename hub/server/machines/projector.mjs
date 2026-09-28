@@ -25,6 +25,14 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
     for (const event of events) publish(event)
     return events
   }
+  function closeRequests(sessionId, reason, at) {
+    const open = store.all('SELECT id FROM requests WHERE session_id = ? AND state = ?', sessionId, 'open')
+    expireRequests(store, sessionId, reason)
+    for (const request of open) {
+      const row = store.get('SELECT * FROM requests WHERE id = ?', request.id)
+      store.appendEvent({ at, type: 'request.closed', entityId: row.id, data: requestView(row) })
+    }
+  }
   return {
     snapshot,
     applyHooks(batch) {
@@ -81,10 +89,10 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
         const row = store.get('SELECT * FROM sessions WHERE id = ?', sessionId)
         if (!row) return
         if (signal.type === 'pid_gone' && row.origin === 'observed' && row.alive) {
-          expireRequests(store, row.id, 'process_ended')
+          closeRequests(row.id, 'process_ended', at)
           store.run('UPDATE sessions SET state=?,alive=0,crash_kind=?,since_ts=? WHERE id=?', 'crashed', 'lost', at, row.id)
         } else if (signal.type === 'exit' && row.alive) {
-          expireRequests(store, row.id, 'process_ended')
+          closeRequests(row.id, 'process_ended', at)
           const crashed = signal.code !== 0 && !row.user_stop_requested && !row.end_announced
           store.run('UPDATE sessions SET state=?,alive=0,ended_at=?,exit_code=?,crash_kind=?,since_ts=? WHERE id=?', crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended', at, signal.code ?? null, crashed ? 'exit' : null, at, row.id)
         } else if (signal.type === 'review' && row.state === 'done') {
