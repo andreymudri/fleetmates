@@ -100,7 +100,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           const crashed = signal.code !== 0 && !row.user_stop_requested && !row.end_announced
           store.run('UPDATE sessions SET state=?,alive=0,ended_at=?,exit_code=?,crash_kind=?,since_ts=? WHERE id=?', crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended', at, signal.code ?? null, crashed ? 'exit' : null, at, row.id)
         } else if (signal.type === 'review' && row.state === 'done') {
-          store.run('UPDATE sessions SET state=?,reviewed_at=?,state_since=?,since_ts=? WHERE id=?', row.alive ? 'reviewed' : 'ended', at, at, at, row.id)
+          store.run('UPDATE sessions SET state=?,reviewed_at=?,state_since=?,since_ts=?,changed_files=? WHERE id=?', row.alive ? 'reviewed' : 'ended', at, at, at, '[]', row.id)
         }
         store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
         store.appendEvent({ at, type: 'counts', data: projectCounts(store) })

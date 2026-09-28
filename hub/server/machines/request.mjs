@@ -95,7 +95,15 @@ function destructiveSegment(words, depth) {
     const at = args.indexOf(flag)
     return at >= 0 && destructiveSegment(words.slice(index + at + 2), depth + 1)
   }))) return true
-  if (command === 'xargs' && destructiveSegment(words.slice(index + 1), depth + 1)) return true
+  if (command === 'xargs') {
+    const valueOptions = ['-a', '--arg-file', '-d', '--delimiter', '-E', '--eof', '-I', '--replace', '-L', '--max-lines', '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars']
+    let offset = index + 1
+    while (words[offset]?.value.startsWith('-') && words[offset].value !== '-') {
+      if (words[offset].value === '--') { offset++; break }
+      offset += valueOptions.includes(words[offset].value) ? 2 : 1
+    }
+    if (destructiveSegment(words.slice(offset), depth + 1)) return true
+  }
   if (command === 'rsync' && args.some(arg => arg.startsWith('--delete'))) return true
   if (command === 'git' && gitArgs[0] === 'push' && gitArgs.slice(1).some(arg => ['--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete'].includes(arg) || /^--(?:force-with-lease|force-if-includes|force|mirror|delete)=/.test(arg) || /^-[A-Za-z]*[fd]/.test(arg) || arg.startsWith('+') || arg.startsWith(':'))) return true
   if (command === 'git' && gitArgs[0] === 'clean' && gitArgs.slice(1).some(arg => arg === '--force' || /^-[A-Za-z]*f/.test(arg))) return true
