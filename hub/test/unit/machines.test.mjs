@@ -354,6 +354,23 @@ test('relative deck control paths resolve against hook cwd', () => {
   }
 })
 
+test('known XDG state shell variables retain the deck token floor', () => {
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    process.env.XDG_STATE_HOME = '/tmp/deck-xdg'
+    for (const command of [
+      'cat "$XDG_STATE_HOME/fleetmates/deck/token"',
+      'cat "${XDG_STATE_HOME}/fleetmates/deck/token"'
+    ]) assert.equal(permissionTier({ cwd: '/home/you/project', tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
+    assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command: 'cat "$XDG_STATE_HOME/fleetmates/deck/token"' } }), 'destructive')
+    assert.equal(permissionTier({ cwd: '/home/you/project', tool_name: 'Bash', tool_input: { command: 'echo "$XDG_STATE_HOME/fleetmates/deck/token"' } }), 'caution')
+    assert.equal(permissionTier({ cwd: '/home/you/project', tool_name: 'Read', tool_input: { file_path: '$XDG_STATE_HOME/fleetmates/deck/token' } }), 'caution')
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+  }
+})
+
 test('clear starts alias wait at the end hook timestamp', () => {
   const h = harness()
   try {

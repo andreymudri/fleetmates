@@ -159,8 +159,14 @@ function namesDeckControl(input) {
 }
 
 function namesRelativeDeckControl(hook) {
-  if (!path.isAbsolute(hook.cwd ?? '')) return false
-  const namesControl = value => typeof value === 'string' && value && !path.isAbsolute(value) && !/[$*?`]/.test(value) && namesDeckControl({ path: path.resolve(hook.cwd, value) })
+  const namesControl = (value, shell = false) => {
+    if (typeof value !== 'string' || !value) return false
+    const state = process.env.XDG_STATE_HOME
+    const expanded = shell && state && path.isAbsolute(state) ? value.replace(/^\$(?:XDG_STATE_HOME|\{XDG_STATE_HOME\})(?=\/)/, state) : value
+    if (/[$*?`]/.test(expanded)) return false
+    if (path.isAbsolute(expanded)) return namesDeckControl({ path: expanded })
+    return path.isAbsolute(hook.cwd ?? '') && namesDeckControl({ path: path.resolve(hook.cwd, expanded) })
+  }
   if (['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(hook.tool_name)) {
     return namesControl(hook.tool_input?.file_path ?? hook.tool_input?.notebook_path)
   }
@@ -172,7 +178,7 @@ function namesRelativeDeckControl(hook) {
     let index = 0
     while (words[index] && (/^[A-Za-z_]\w*=/.test(words[index].value) || ['env', 'command', 'builtin', 'sudo', 'doas'].includes(path.posix.basename(words[index].value)))) index++
     if (!fileCommands.includes(path.posix.basename(words[index]?.value ?? ''))) return false
-    return words.slice(index + 1).some(word => !word.value.startsWith('-') && namesControl(word.value))
+    return words.slice(index + 1).some(word => !word.value.startsWith('-') && namesControl(word.value, true))
   }
   for (const token of tokens) {
     if (token.separator) {
