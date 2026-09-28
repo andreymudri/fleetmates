@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -188,6 +189,75 @@ test('a reviewed edit is not counted again after an unchanged turn', () => {
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
     assert.equal(h.projector.snapshot().counts.toReview, 1)
   } finally { h.close() }
+})
+
+test('Bash-created untracked files enter review and the review baseline advances', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'deck-bash-review-'))
+  const repo = path.join(dir, 'repo')
+  const h = harness()
+  try {
+    mkdirSync(repo)
+    execFileSync('git', ['init', '-q', repo], { timeout: 2000 })
+    execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'initial'], { timeout: 2000 })
+    const hook = (name, at, changes = {}) => {
+      const event = fixture('SessionStart.startup.json', { hook_event_name: name, cwd: repo, ...changes })
+      event.hookTs = at
+      return event
+    }
+    h.projector.applyHooks([hook('SessionStart', 1000), hook('UserPromptSubmit', 1001, { prompt: 'Create a file' })])
+    const file = path.join(repo, 'created.txt')
+    writeFileSync(file, 'first\n')
+    h.projector.applyHooks([hook('PostToolUse', 1002, { tool_name: 'Bash', tool_input: { command: 'printf first > created.txt' } }), hook('Stop', 1003)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file])
+    assert.equal(h.projector.snapshot().counts.toReview, 1)
+    const id = h.projector.snapshot().sessions[0].id
+    h.projector.signal(id, { type: 'review' }, 1004)
+    h.projector.applyHooks([hook('UserPromptSubmit', 1005, { prompt: 'Answer only' }), hook('Stop', 1006)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.equal(h.projector.snapshot().counts.toReview, 0)
+    writeFileSync(file, 'second\n')
+    h.projector.applyHooks([hook('PostToolUse', 1007, { tool_name: 'Bash', tool_input: { command: 'printf second > created.txt' } }), hook('Stop', 1008)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.equal(h.projector.snapshot().counts.toReview, 1)
+    h.projector.signal(id, { type: 'review' }, 1009)
+    execFileSync('git', ['-C', repo, 'add', '--', 'created.txt'], { timeout: 2000 })
+    execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'record file'], { timeout: 2000 })
+    h.projector.applyHooks([hook('UserPromptSubmit', 1010, { prompt: 'No more edits' }), hook('Stop', 1011)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.equal(h.projector.snapshot().counts.toReview, 0)
+    const late = path.join(repo, 'late.txt')
+    writeFileSync(late, 'late\n')
+    h.projector.applyHooks([hook('UserPromptSubmit', 1012, { prompt: 'Another file' }), hook('Stop', 1013)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [late])
+    h.projector.signal(id, { type: 'review' }, 1014)
+    writeFileSync(file, 'third\n')
+    h.projector.applyHooks([hook('UserPromptSubmit', 1015, { prompt: 'Change tracked file' }), hook('Stop', 1016)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file])
+  } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('an unborn Git repository still reports Bash-created files at Stop', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'deck-unborn-review-'))
+  const repo = path.join(dir, 'repo')
+  const h = harness()
+  try {
+    mkdirSync(repo)
+    execFileSync('git', ['init', '-q', repo], { timeout: 2000 })
+    const hook = (name, at, changes = {}) => {
+      const event = fixture('SessionStart.startup.json', { hook_event_name: name, cwd: repo, ...changes })
+      event.hookTs = at
+      return event
+    }
+    h.projector.applyHooks([hook('SessionStart', 1000), hook('UserPromptSubmit', 1001, { prompt: 'Create a file' })])
+    const file = path.join(repo, 'created.txt')
+    writeFileSync(file, 'created\n')
+    h.projector.applyHooks([hook('PostToolUse', 1002, { tool_name: 'Bash', tool_input: { command: 'printf created > created.txt' } }), hook('Stop', 1003)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file])
+  } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('notification-only approval closes on a recent observed tool outcome', () => {

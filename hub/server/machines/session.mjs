@@ -1,7 +1,83 @@
-import { randomUUID } from 'node:crypto'
-import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
+import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { expireRequests } from './request.mjs'
+
+const maxGitOutput = 1024 * 1024
+const maxChangedPaths = 512
+const maxHashedFile = 8 * 1024 * 1024
+
+function git(root, args) {
+  try {
+    return execFileSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args], {
+      cwd: root,
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' },
+      timeout: 1500,
+      maxBuffer: maxGitOutput,
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+  } catch { return null }
+}
+
+function gitHead(root) {
+  const output = git(root, ['rev-parse', '--verify', 'HEAD'])?.toString('utf8').trim()
+  if (/^[0-9a-f]{40,64}$/.test(output ?? '')) return output
+  return git(root, ['rev-parse', '--is-inside-work-tree'])?.toString('utf8').trim() === 'true' ? 'unborn' : null
+}
+
+function baseline(value) {
+  try {
+    const parsed = JSON.parse(value)
+    return (parsed.head === 'unborn' || /^[0-9a-f]{40,64}$/.test(parsed.head)) && parsed.files && typeof parsed.files === 'object' && !Array.isArray(parsed.files) ? parsed : null
+  } catch { return null }
+}
+
+function gitPaths(root, head) {
+  const diff = head === 'unborn' ? git(root, ['ls-files', '--cached', '-z']) : git(root, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--numstat', '-z', head, '--'])
+  const untracked = git(root, ['ls-files', '--others', '--exclude-standard', '-z'])
+  if (!diff || !untracked) return null
+  const paths = new Map()
+  for (const record of diff.toString('utf8').split('\0').filter(Boolean)) {
+    if (head === 'unborn') { paths.set(record, { adds: null, dels: null }); continue }
+    const match = /^([0-9-]+)\t([0-9-]+)\t([\s\S]+)$/.exec(record)
+    if (!match) return null
+    paths.set(match[3], { adds: match[1] === '-' ? null : Number(match[1]), dels: match[2] === '-' ? null : Number(match[2]) })
+  }
+  for (const name of untracked.toString('utf8').split('\0').filter(Boolean)) if (!paths.has(name)) paths.set(name, { adds: null, dels: null })
+  return paths.size <= maxChangedPaths ? paths : null
+}
+
+function fileFingerprint(root, name) {
+  const file = path.resolve(root, name)
+  if (!file.startsWith(`${root}${path.sep}`)) return null
+  try {
+    const stat = lstatSync(file)
+    if (stat.isSymbolicLink()) return `link:${createHash('sha256').update(readlinkSync(file)).digest('hex')}`
+    if (!stat.isFile()) return `other:${stat.mode}:${stat.size}:${stat.mtimeMs}`
+    if (stat.size > maxHashedFile) return `large:${stat.size}:${stat.mtimeMs}`
+    return `file:${createHash('sha256').update(readFileSync(file)).digest('hex')}`
+  } catch { return null }
+}
+
+/** Capture the current Git changes as a review boundary. */
+export function captureReviewBaseline(root, previous = null, includeExisting = true) {
+  const head = baseline(previous)?.head ?? gitHead(root)
+  if (!head) return null
+  const paths = includeExisting ? gitPaths(root, head) : new Map()
+  if (!paths) return null
+  return JSON.stringify({ head, files: Object.fromEntries([...paths.keys()].map(name => [name, fileFingerprint(root, name)])) })
+}
+
+function gitChangedFiles(root, value) {
+  const saved = baseline(value)
+  if (!saved) return null
+  const paths = gitPaths(root, saved.head)
+  if (!paths) return null
+  for (const name of Object.keys(saved.files)) if (!paths.has(name)) paths.set(name, { adds: null, dels: null })
+  if (paths.size > maxChangedPaths) return null
+  return [...paths].filter(([name]) => !Object.hasOwn(saved.files, name) || saved.files[name] !== fileFingerprint(root, name)).map(([name, diff]) => ({ path: path.resolve(root, name), ...diff }))
+}
 
 function repo(store, cwd, at) {
   let id = cwd || '/unknown'
@@ -75,7 +151,10 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
     const origin = envelope.ptyId ? 'wrapped' : 'observed'
     const edited = editedPath(hook)
     const task = event === 'UserPromptSubmit' ? hook.prompt?.split('\n')[0].slice(0, 120) || 'Untitled' : 'Untitled'
-    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path,subagents_active,activity,changed_files) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repo(store, hook.cwd, at), hook.cwd, task, initial, at, at, at, 1, event === 'SessionStart' ? 0 : 1, at, hook.transcript_path, event === 'SubagentStart' ? 1 : 0, event === 'PreCompact' ? 'compacting' : null, JSON.stringify(edited ? [{ path: edited, adds: null, dels: null }] : []))
+    const repoId = repo(store, hook.cwd, at)
+    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path,subagents_active,activity,changed_files) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repoId, hook.cwd, task, initial, at, at, at, 1, event === 'SessionStart' ? 0 : 1, at, hook.transcript_path, event === 'SubagentStart' ? 1 : 0, event === 'PreCompact' ? 'compacting' : null, JSON.stringify(edited ? [{ path: edited, adds: null, dels: null }] : []))
+    const reviewBaseline = captureReviewBaseline(repoId, null, event !== 'SessionStart')
+    if (reviewBaseline) store.run('UPDATE sessions SET review_baseline = ? WHERE id = ?', reviewBaseline, id)
     return store.get('SELECT * FROM sessions WHERE id = ?', id)
   }
   if (at < existing.since_ts) return existing
@@ -93,9 +172,15 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   let repoId = existing.repo_id
   let processKey = existing.process_key
   let ptyId = existing.pty_id
-  const changedFiles = JSON.parse(existing.changed_files)
+  let changedFiles = JSON.parse(existing.changed_files)
+  let reviewBaseline = existing.review_baseline
   const edited = editedPath(hook)
   if (edited && !changedFiles.some(file => file.path === edited)) changedFiles.push({ path: edited, adds: null, dels: null })
+  if (event === 'Stop' || event === 'SessionEnd' || event === 'Notification' && hook.notification_type === 'idle_prompt' || event === 'PostToolUse' && hook.tool_name === 'Bash' || event === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source)) {
+    reviewBaseline ??= captureReviewBaseline(repoId, null, false)
+    const detected = gitChangedFiles(repoId, reviewBaseline)
+    if (detected) changedFiles = detected
+  }
   if (event === 'SessionStart') {
     if (!alive && hook.source === 'resume') {
       alive = 1
@@ -120,7 +205,11 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   else if (event === 'SubagentStop') subagents = Math.max(0, subagents - 1)
   else if (event === 'PreCompact') { activity = 'compacting'; state = 'running' }
   else if (event === 'PostCompact') { activity = null; state = 'running' }
-  else if (event === 'CwdChanged') { cwd = hook.cwd; repoId = repo(store, cwd, at) }
+  else if (event === 'CwdChanged') {
+    cwd = hook.cwd
+    repoId = repo(store, cwd, at)
+    if (repoId !== existing.repo_id) { reviewBaseline = captureReviewBaseline(repoId); changedFiles = [] }
+  }
   else if (event === 'Stop' && !subagents && !['needs_approval', 'asked_you'].includes(state)) state = changedFiles.length ? 'done' : 'idle'
   else if (event === 'Notification' && hook.notification_type === 'idle_prompt') state = changedFiles.length ? 'done' : 'idle'
   else if (event === 'SessionEnd') {
@@ -134,6 +223,6 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   else if (open.some(row => row.kind === 'question')) state = 'asked_you'
   else if (['needs_approval', 'asked_you'].includes(state)) state = event === 'Notification' && hook.notification_type === 'idle_prompt' ? 'idle' : 'running'
   const since = at
-  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : stateSince, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, repoId === existing.repo_id ? existing.review_baseline : null, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
+  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : stateSince, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, reviewBaseline, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
 }
