@@ -116,7 +116,7 @@ function destructiveSegment(words, depth) {
 function destructiveShell(command, depth = 0) {
   if (typeof command !== 'string' || depth > 4) return false
   if (/\bcd\s+(?:[^\s;]*\/)?\.git(?:\/[^\s;]*)?\s*(?:&&|;|\n)[^;\n]*(?:>|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)/.test(command)) return true
-  if (/\b(?:curl|wget)\b[^|\n]*\|\s*(?:sh|bash|zsh|python|node|perl)\b/.test(command) || /\b(?:sh|bash|zsh|python|node|perl)\s+<\(\s*(?:curl|wget)\b/.test(command)) return true
+  if (/\b(?:curl|wget)\b[^|\n]*\|\s*(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python|node|perl)\b/.test(command) || /\b(?:\/[\w.-]+)*\/?(?:sh|bash|zsh|python|node|perl)\s+<\(\s*(?:curl|wget)\b/.test(command)) return true
   if (embeddedCommands(command).some(inner => destructiveShell(inner, depth + 1))) return true
   const tokens = shellTokens(command)
   let segment = []
@@ -157,7 +157,7 @@ function sensitiveWrite(hook, repoRoot) {
   const raw = fileTool ? hook.tool_input?.file_path ?? hook.tool_input?.notebook_path ?? '' : hook.tool_input?.command ?? ''
   if (typeof raw !== 'string') return false
   const normalized = raw.replaceAll('\\', '/')
-  if (/(?:^|\/)\.git\//.test(normalized)) return true
+  if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true
   if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true
   if (/(?:^|\/)\.mcp\.json(?:\b|$)/.test(normalized)) return true
   if (!fileTool || path.posix.basename(normalized) !== 'CLAUDE.md') return false

@@ -133,7 +133,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   if (open.some(row => row.kind === 'permission')) state = 'needs_approval'
   else if (open.some(row => row.kind === 'question')) state = 'asked_you'
   else if (['needs_approval', 'asked_you'].includes(state)) state = event === 'Notification' && hook.notification_type === 'idle_prompt' ? 'idle' : 'running'
-  const since = state !== existing.state ? at : existing.since_ts
+  const since = at
   store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : stateSince, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, repoId === existing.repo_id ? existing.review_baseline : null, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
 }
