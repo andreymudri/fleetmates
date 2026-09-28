@@ -1,5 +1,6 @@
 import { readFile, readdir, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 /** Drain completed spool files through the same validator and reorder buffer as the socket. */
 export async function drainSpool(dir, ingest) {
@@ -9,17 +10,26 @@ export async function drainSpool(dir, ingest) {
     const source = path.join(dir, name)
     const draining = name.endsWith('.draining') ? source : `${source}.draining`
     if (source !== draining) await rename(source, draining)
-    let content
-    try { content = await readFile(draining, 'utf8') } catch (error) { if (error.code === 'ENOENT') continue; throw error }
-    const lines = content.split('\n')
-    const complete = lines.slice(0, -1)
-    if (lines.at(-1)) ingest.rejectRaw(lines.at(-1), 'spool', 'partial_line')
-    complete.sort((a, b) => {
-      const time = raw => { try { return JSON.parse(raw).hookTs ?? Infinity } catch { return Infinity } }
-      return time(a) - time(b)
-    })
-    for (const line of complete) ingest.receive(line, 'spool')
-    ingest.flush()
+    await delay(220)
+    let consumed = 0
+    while (true) {
+      let content
+      try { content = await readFile(draining, 'utf8') } catch (error) { if (error.code === 'ENOENT') break; throw error }
+      const lines = content.split('\n')
+      const complete = lines.slice(0, -1)
+      const fresh = complete.slice(consumed)
+      fresh.sort((a, b) => {
+        const time = raw => { try { return JSON.parse(raw).hookTs ?? Infinity } catch { return Infinity } }
+        return time(a) - time(b)
+      })
+      for (const line of fresh) ingest.receive(line, 'spool')
+      ingest.flush()
+      consumed = complete.length
+      const latest = await readFile(draining, 'utf8')
+      if (latest !== content) continue
+      if (lines.at(-1)) ingest.rejectRaw(lines.at(-1), 'spool', 'partial_line')
+      break
+    }
     await rm(draining)
   }
 }

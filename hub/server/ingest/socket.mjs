@@ -1,10 +1,23 @@
-import { chmodSync, mkdirSync } from 'node:fs'
-import { createServer } from 'node:net'
+import { chmodSync, lstatSync, mkdirSync, unlinkSync } from 'node:fs'
+import { connect, createServer } from 'node:net'
 import path from 'node:path'
 import { createReorderBuffer } from './reorder.mjs'
 import { dedupeKey, validateEnvelope } from './validate.mjs'
 
 const maxLine = 1024 * 1024
+
+function staleSocket(socketPath) {
+  return new Promise(resolve => {
+    const probe = connect(socketPath)
+    probe.setTimeout(100, () => { probe.destroy(); resolve(false) })
+    probe.once('connect', () => { probe.destroy(); resolve(false) })
+    probe.once('error', error => resolve(error.code === 'ECONNREFUSED'))
+  })
+}
+
+function listen(server, socketPath) {
+  return new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, () => { server.off('error', reject); resolve() }) })
+}
 
 /** Create a common ingest path for live socket and spool envelopes. */
 export function createIngestor({ onEvent, onRejected, reorderMs = 250, now = Date.now }) {
@@ -56,7 +69,17 @@ export async function startHookSocket({ runtimeDir, ingest }) {
     })
     socket.on('end', () => { if (pending) ingest.rejectRaw(pending, 'socket', 'partial_line') })
   })
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, () => { server.off('error', reject); resolve() }) })
+  try {
+    await listen(server, socketPath)
+  } catch (error) {
+    if (error.code !== 'EADDRINUSE') throw error
+    const before = lstatSync(socketPath)
+    if (!before.isSocket() || before.uid !== process.getuid() || !(await staleSocket(socketPath))) throw error
+    const after = lstatSync(socketPath)
+    if (before.dev !== after.dev || before.ino !== after.ino) throw error
+    unlinkSync(socketPath)
+    await listen(server, socketPath)
+  }
   chmodSync(socketPath, 0o600)
   return { path: socketPath, close: () => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 }

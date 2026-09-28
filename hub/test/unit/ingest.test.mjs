@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { closeSync, openSync, writeSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -63,6 +65,21 @@ test('socket rejects partial lines and accepts complete lines', async () => {
   } finally { await server.close(); ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
+test('socket listener restarts after an unclean exit without replacing a live listener', async () => {
+  const dir = await mkdtemp(path.join('/tmp/hx', 'stale-socket-'))
+  const moduleUrl = new URL('../../server/ingest/socket.mjs', import.meta.url).href
+  const childScript = `import {startHookSocket} from ${JSON.stringify(moduleUrl)}; await startHookSocket({runtimeDir:process.argv[1],ingest:{receive(){},rejectRaw(){}}}); console.log('ready')`
+  const child = spawn(process.execPath, ['--input-type=module', '-e', childScript, dir], { stdio: ['ignore', 'pipe', 'pipe'] })
+  try {
+    await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('error', reject) })
+    child.kill('SIGKILL')
+    await new Promise(resolve => child.once('close', resolve))
+    const ingest = createIngestor({ onEvent: () => {}, onRejected: () => {} })
+    const server = await startHookSocket({ runtimeDir: dir, ingest })
+    try { await assert.rejects(startHookSocket({ runtimeDir: dir, ingest }), { code: 'EADDRINUSE' }) } finally { await server.close(); ingest.close() }
+  } finally { if (child.exitCode === null) child.kill('SIGKILL'); await rm(dir, { recursive: true, force: true }) }
+})
+
 test('spool drain replays sorted lines and retains a new append file', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-spool-'))
   const accepted = []
@@ -92,6 +109,20 @@ test('spool drain reads an interrupted drain before a newer same-day spool', asy
     assert.deepEqual(accepted.map(row => row.hook.session_id), ['old', 'new'])
     assert.deepEqual(await readdir(dir), [])
   } finally { ingest.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('spool drain reads a line appended through a descriptor opened before rename', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-spool-open-'))
+  const file = path.join(dir, 'hooks-20260928.jsonl')
+  await writeFile(file, line(1))
+  const fd = openSync(file, 'a')
+  const accepted = []
+  const ingest = createIngestor({ onEvent: row => { accepted.push(row.hookTs); if (row.hookTs === 1) writeSync(fd, line(2)) }, onRejected: () => {}, reorderMs: 0 })
+  try {
+    await drainSpool(dir, ingest)
+    assert.deepEqual(accepted, [1, 2])
+    assert.deepEqual(await readdir(dir), [])
+  } finally { closeSync(fd); ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
 test('startup spool drain applies rows before returning and leaves failed files for retry', async () => {
