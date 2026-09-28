@@ -3,7 +3,7 @@ import { open, readdir, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { NAMES } from '../../../scripts/names.mjs'
 import { livenessRows, DEFAULT_STALE_MINUTES } from '../../../scripts/liveness.mjs'
-import { createGit } from '../../../scripts/git.mjs'
+import { createGit, defaultGitExec } from '../../../scripts/git.mjs'
 
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_DISCOVERY_DEPTH = 16
@@ -94,6 +94,13 @@ async function newestWorktreeMtime(dir, ignored) {
   return { at: newest, floored: false }
 }
 
+async function branchHasTaskCommit(repoRoot, branch, tip) {
+  const result = await defaultGitExec(['reflog', 'show', '--format=%H', `refs/heads/${branch}`], repoRoot)
+  if (result.code !== 0) return null
+  const creationTip = result.stdout.trim().split('\n').at(-1)
+  return creationTip ? creationTip !== tip : null
+}
+
 function gateRows(gates) {
   const result = {}
   if (!gates || typeof gates !== 'object' || Array.isArray(gates)) return result
@@ -121,6 +128,7 @@ async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
   const statusById = new Map((Array.isArray(status?.tasks) ? status.tasks : []).filter((task) => task && typeof task.id === 'string').map((task) => [task.id, task]))
   const tips = {}
   const shas = new Map()
+  const started = new Map()
   for (const task of tasks) {
     if (typeof task.id !== 'string' || !/^T\d+$/.test(task.id)) continue
     const branch = `${NAMES.branchPrefix}/${runId}/${task.id}`
@@ -128,6 +136,7 @@ async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
       if (!await git.branchExists(branch)) continue
       const sha = await git.resolveRef(`refs/heads/${branch}`)
       shas.set(task.id, sha)
+      started.set(task.id, await branchHasTaskCommit(repoRoot, branch, sha))
       tips[task.id] = { branch, at: await git.commitTime(sha) }
     } catch {}
   }
@@ -143,8 +152,8 @@ async function defaultPollRun({ repoRoot, runId, plan, status, now }) {
         let integrated = true
         for (const task of phaseTasks) {
           const sha = shas.get(task.id)
-          if (!sha) missingBranch = true
-          if (statusById.get(task.id)?.state !== 'done' || (sha && !await git.isAncestor(sha, runSha))) integrated = false
+          if (!sha || started.get(task.id) === null) missingBranch = true
+          if (statusById.get(task.id)?.state !== 'done' || (sha && (started.get(task.id) !== true || !await git.isAncestor(sha, runSha)))) integrated = false
         }
         if (!integrated) { derivedPhase = phase; break }
       }

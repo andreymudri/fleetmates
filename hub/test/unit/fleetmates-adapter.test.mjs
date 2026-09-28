@@ -223,8 +223,15 @@ test('task branch at the run tip stays in its pending phase', async () => {
     await writeRun(repo, 'r1', { runId: 'r1', runBranch: 'run/r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }, {
       runId: 'r1', tasks: [{ id: 'T1', state: 'pending' }],
     })
-    const reader = createFleetmatesReader({ repoRoots: [repo] })
-    try { assert.equal((await reader.list())[0].derivedPhase, 1) } finally { reader.close() }
+    let now = Date.now()
+    const reader = createFleetmatesReader({ repoRoots: [repo], clock: () => now })
+    try {
+      assert.equal((await reader.list())[0].derivedPhase, 1)
+      await writeFile(path.join(repo, '.fleetmates', 'r1', 'status.json'), JSON.stringify({ runId: 'r1', tasks: [{ id: 'T1', state: 'done' }] }))
+      now += 60_000
+      reader.invalidate(repo, 'r1')
+      assert.equal((await reader.list())[0].derivedPhase, 1)
+    } finally { reader.close() }
   })
 })
 
