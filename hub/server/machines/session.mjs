@@ -28,6 +28,12 @@ function editedPath(hook) {
   return path.resolve(hook.cwd, file)
 }
 
+function sameKnownProcess(row, envelope) {
+  if (envelope.ptyId && row.pty_id && envelope.ptyId !== row.pty_id) return false
+  if (envelope.claudePid && !row.pty_id && row.process_key && String(envelope.claudePid) !== row.process_key) return false
+  return true
+}
+
 /** Resolve a hook by PTY, process, current conversation, aliases, then end/start path fallback. */
 export function resolveSession(store, envelope) {
   const hook = envelope.hook
@@ -41,9 +47,9 @@ export function resolveSession(store, envelope) {
     if (found) return found
   }
   const direct = store.get('SELECT * FROM sessions WHERE claude_session_id = ? AND alive = 1 ORDER BY started_at DESC LIMIT 1', hook.session_id)
-  if (direct) return direct
+  if (direct && sameKnownProcess(direct, envelope)) return direct
   const alias = store.get('SELECT s.* FROM sessions s JOIN session_aliases a ON a.session_id = s.id WHERE a.claude_session_id = ? AND s.alive = 1 LIMIT 1', hook.session_id)
-  if (alias) return alias
+  if (alias && sameKnownProcess(alias, envelope)) return alias
   if (hook.hook_event_name === 'SessionStart' && hook.source === 'resume') {
     const ended = store.get('SELECT * FROM sessions WHERE claude_session_id = ? AND alive = 0 ORDER BY ended_at DESC LIMIT 1', hook.session_id)
       ?? store.get('SELECT s.* FROM sessions s JOIN session_aliases a ON a.session_id = s.id WHERE a.claude_session_id = ? AND s.alive = 0 ORDER BY s.ended_at DESC LIMIT 1', hook.session_id)

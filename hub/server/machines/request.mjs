@@ -97,7 +97,7 @@ function destructiveSegment(words, depth) {
   }))) return true
   if (command === 'xargs' && destructiveSegment(words.slice(index + 1), depth + 1)) return true
   if (command === 'rsync' && args.some(arg => arg.startsWith('--delete'))) return true
-  if (command === 'git' && gitArgs[0] === 'push' && gitArgs.slice(1).some(arg => ['--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete'].includes(arg) || /^-[A-Za-z]*[fd]/.test(arg) || arg.startsWith('+') || arg.startsWith(':'))) return true
+  if (command === 'git' && gitArgs[0] === 'push' && gitArgs.slice(1).some(arg => ['--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete'].includes(arg) || /^--(?:force-with-lease|force-if-includes|force|mirror|delete)=/.test(arg) || /^-[A-Za-z]*[fd]/.test(arg) || arg.startsWith('+') || arg.startsWith(':'))) return true
   if (command === 'git' && gitArgs[0] === 'clean' && gitArgs.slice(1).some(arg => arg === '--force' || /^-[A-Za-z]*f/.test(arg))) return true
   if (command === 'git' && gitArgs[0] === 'reset' && gitArgs.some(arg => ['--hard', '--keep', '--merge'].includes(arg))) return true
   if (command === 'git' && gitArgs[0] === 'config') {
@@ -174,6 +174,10 @@ export function permissionTier(hook, { repoRoot } = {}) {
   return 'caution'
 }
 
+function notificationToolName(message) {
+  return typeof message === 'string' ? message.match(/\bAllow\s+(Bash|Write|Edit|Read|MultiEdit|NotebookEdit|Glob|Grep|WebFetch|WebSearch|Task|Skill)\b/i)?.[1] ?? null : null
+}
+
 /** Open, answer and expire observe-only requests inside the caller's transaction. */
 export function applyRequestHook(store, session, envelope) {
   const hook = envelope.hook
@@ -187,24 +191,25 @@ export function applyRequestHook(store, session, envelope) {
   if (event === 'Notification' && hook.notification_type === 'permission_prompt') { kind = 'permission'; source = 'notification' }
   if (event === 'Notification' && hook.notification_type === 'elicitation_dialog') { kind = 'question'; source = 'elicitation' }
   if (kind) {
+    const toolName = source === 'notification' ? notificationToolName(hook.message) : hook.tool_name ?? null
     if (source === 'notification') {
       const recent = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', at - 2000, at + 2000)
       if (recent) return false
     }
-    const summary = hook.tool_name ? `${hook.tool_name}: ${JSON.stringify(hook.tool_input ?? {}).slice(0, 160)}` : hook.message ?? 'Needs your answer'
+    const summary = source === 'notification' ? hook.message ?? 'Needs your answer' : toolName ? `${toolName}: ${JSON.stringify(hook.tool_input ?? {}).slice(0, 160)}` : hook.message ?? 'Needs your answer'
     if (source === 'permission_request') {
-      const fallback = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', at - 2000, at + 2000)
+      const fallback = store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND (tool_name IS NULL OR LOWER(tool_name) = LOWER(?)) AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', toolName, at - 2000, at + 2000)
       if (fallback) {
         store.run('UPDATE requests SET source = ?, tool_name = ?, summary = ?, detail = ?, match_key = ?, tier = ? WHERE id = ?', source, hook.tool_name, summary, JSON.stringify(hook.tool_input ?? {}), key, permissionTier(hook, { repoRoot: session.repo_id }), fallback.id)
         return true
       }
     }
-    store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? permissionTier(hook, { repoRoot: session.repo_id }) : null, hook.tool_name ?? null, summary, JSON.stringify(hook.tool_input ?? {}), JSON.stringify(hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, at)
+    store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? permissionTier(hook, { repoRoot: session.repo_id }) : null, toolName, summary, JSON.stringify(hook.tool_input ?? {}), JSON.stringify(hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, at)
     return true
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
     const row = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? ORDER BY created_at LIMIT 1', session.id, 'open', key)
-      ?? store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', at - 2000, at)
+      ?? store.get('SELECT id FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND (tool_name IS NULL OR LOWER(tool_name) = LOWER(?)) AND created_at BETWEEN ? AND ? ORDER BY created_at DESC LIMIT 1', session.id, 'permission', 'open', 'notification', hook.tool_name ?? null, at - 2000, at)
     if (!row) return false
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: event === 'PermissionDenied' ? 'deny' : 'allow' }), at, row.id)
     return true

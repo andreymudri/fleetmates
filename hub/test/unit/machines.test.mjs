@@ -117,6 +117,21 @@ test('notification-only approval closes on a recent observed tool outcome', () =
   } finally { h.close() }
 })
 
+test('notification-only approval waits for an outcome from its named tool', () => {
+  for (const [message, expectedOpen] of [['Allow Write to secret.txt?', 1], ['Allow Bash?', 0]]) {
+    const h = harness()
+    try {
+      const notification = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message, tool_name: undefined })
+      h.projector.applyHooks([notification])
+      const outcome = fixture('PostToolUse.Bash.json', { tool_input: { command: 'pwd' } })
+      outcome.hookTs = 1500
+      h.projector.applyHooks([outcome])
+      assert.equal(h.projector.snapshot().counts.openRequests, expectedOpen, message)
+      assert.equal(h.projector.snapshot().requests[0].state, expectedOpen ? 'open' : 'answered', message)
+    } finally { h.close() }
+  }
+})
+
 test('two identical permission prompts retain one open request after one outcome', () => {
   const h = harness()
   try {
@@ -156,6 +171,11 @@ test('Git config execution controls and writes inside .git are destructive', () 
   ]
   for (const command of commands) assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
   assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command: 'git config --get core.hooksPath' } }), 'caution')
+})
+
+test('force-with-lease with a ref value is destructive', () => {
+  const command = 'git push --force-with-lease=refs/heads/main origin main'
+  assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'destructive')
 })
 
 test('one SubagentStart applies once even with no request', () => {
@@ -269,6 +289,28 @@ test('startup in a new process does not reuse an ended conversation', () => {
     assert.equal(sessions.length, 2)
     assert.equal(sessions.filter(row => row.alive).length, 1)
     assert.equal(sessions.find(row => row.alive).state, 'idle')
+  } finally { h.close() }
+})
+
+test('two live processes with one conversation remain separate sessions', () => {
+  const h = harness()
+  try {
+    const first = fixture('SessionStart.startup.json')
+    first.claudePid = 101
+    const second = fixture('SessionStart.startup.json')
+    second.claudePid = 202
+    second.hookTs = 2000
+    h.projector.applyHooks([first, second])
+    const followup = fixture('UserPromptSubmit.json', { prompt: 'Second process work' })
+    followup.claudePid = 202
+    followup.hookTs = 2100
+    h.projector.applyHooks([followup])
+    const sessions = h.store.all('SELECT process_key, task, state FROM sessions ORDER BY process_key').map(row => ({ ...row }))
+    assert.deepEqual(sessions, [
+      { process_key: '101', task: 'Untitled', state: 'idle' },
+      { process_key: '202', task: 'Second process work', state: 'running' }
+    ])
+    assert.equal(h.projector.snapshot().sessions.length, 2)
   } finally { h.close() }
 })
 
