@@ -125,13 +125,22 @@ async function main() {
   }
   if (name === 'status' && rest.length === 0) { process.stdout.write(`${JSON.stringify(await status(paths, command), null, 2)}\n`); return }
   if (name === 'open' && rest.length === 0) {
+    if (!fs.lstatSync(paths.state).isDirectory()) throw new Error('deck state directory is not a directory')
+    fs.chmodSync(paths.state, 0o700)
     const token = fs.readFileSync(paths.token, 'utf8').trim()
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error('invalid deck token')
     run('systemctl', ['--user', 'start', 'fleetmates-deck.service'])
     let port = 47800
     try { port = JSON.parse(fs.readFileSync(path.join(paths.config, 'config.json'), 'utf8')).port || port } catch (error) { if (error.code !== 'ENOENT') throw error }
     await verifyListener(port, token)
-    const result = spawnSync('xdg-open', [`http://127.0.0.1:${port}/#token=${token}`], { stdio: 'ignore', timeout: 10000 })
+    const url = `http://127.0.0.1:${port}/#token=${token}`
+    const bootstrap = path.join(paths.state, 'open.html')
+    const temp = path.join(paths.state, `.open-${randomBytes(12).toString('hex')}.tmp`)
+    try {
+      fs.writeFileSync(temp, `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${JSON.stringify(url)})</script>\n`, { flag: 'wx', mode: 0o600 })
+      fs.renameSync(temp, bootstrap)
+    } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp) }
+    const result = spawnSync('xdg-open', [bootstrap], { stdio: 'ignore', timeout: 10000 })
     if (result.error || result.status !== 0) throw new Error('could not open browser')
     return
   }

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
+import { chromium } from 'playwright-core'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const cli = path.join(hub, 'bin/fleetmates-deck.mjs')
@@ -86,16 +87,32 @@ test('uninstall removes deck hooks and keeps other hook entries', () => {
   assert.equal(Object.values(parsed.hooks).flatMap(groups => groups.flatMap(group => group.hooks)).some(h => h.command?.includes('deck-hook.mjs')), false)
 })
 
-test('open starts the web unit and passes the token only after identity proof', async () => {
+test('open uses a private bootstrap file after identity proof and reaches the deck', async () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
   const server = await listener(s, token, true)
   try {
-    assert.equal(s.run('open').status, 0)
+    const result = s.run('open')
+    assert.equal(result.status, 0)
     const calls = readFileSync(s.calls, 'utf8')
     assert.match(calls, /systemctl:--user start fleetmates-deck.service/)
-    assert.ok(calls.includes(`xdg-open:http://127.0.0.1:${server.port}/#token=${token}`))
+    const argument = calls.split('\n').find(line => line.startsWith('xdg-open:'))?.slice('xdg-open:'.length)
+    assert.ok(argument?.startsWith(path.join(s.state, 'fleetmates/deck/')))
+    assert.equal(argument.includes(token), false)
+    assert.equal(statSync(argument).mode & 0o777, 0o600)
+    assert.equal(statSync(path.join(s.state, 'fleetmates/deck')).mode & 0o777, 0o700)
+    assert.doesNotMatch(result.stdout + result.stderr, new RegExp(token))
+    const bootstrap = readFileSync(argument, 'utf8')
+    assert.ok(bootstrap.includes(`http://127.0.0.1:${server.port}/#token=${token}`))
+    const executablePath = [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'].find(candidate => candidate && existsSync(candidate))
+    assert.ok(executablePath)
+    const browser = await chromium.launch({ executablePath, headless: true })
+    try {
+      const page = await browser.newPage()
+      await page.goto(pathToFileURL(argument).href)
+      await page.waitForURL(`http://127.0.0.1:${server.port}/#token=${token}`)
+    } finally { await browser.close() }
     assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
   } finally { server.child.kill() }
 })
@@ -120,7 +137,9 @@ test('open waits for a valid listener after systemctl start returns', async () =
   const server = await listener(s, token, true, 350)
   try {
     assert.equal(s.run('open').status, 0)
-    assert.ok(readFileSync(s.calls, 'utf8').includes(`xdg-open:http://127.0.0.1:${server.port}/#token=${token}`))
+    const argument = readFileSync(s.calls, 'utf8').split('\n').find(line => line.startsWith('xdg-open:'))?.slice('xdg-open:'.length)
+    assert.ok(argument?.startsWith(path.join(s.state, 'fleetmates/deck/')))
+    assert.equal(argument.includes(token), false)
     assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
   } finally { server.child.kill() }
 })
