@@ -101,11 +101,20 @@ test('deck CI declares pinned Node, build, and tests on Linux and macOS', async 
   assert.match(hubJob, /^        os: \[ubuntu-latest, macos-latest\]$/m)
   assert.match(hubJob, /^    runs-on: \$\{\{ matrix\.os \}\}$/m)
   assert.match(hubJob, /^      TMPDIR: \/tmp\/hx$/m)
-  assert.match(hubJob, /^    steps:\n      - uses: actions\/checkout@v4$/m)
-  assert.match(hubJob, /^          node-version-file: hub\/\.node-version$/m)
-  assert.match(hubJob, /^      - run: npm ci --prefix hub$/m)
-  assert.match(hubJob, /^      - run: npm --prefix hub run build$/m)
-  assert.match(hubJob, /^      - run: npm --prefix hub test$/m)
+  const steps = hubJob.match(/^    steps:\n[\s\S]*$/m)?.[0].trimEnd()
+  assert.equal(steps, [
+    '    steps:',
+    '      - uses: actions/checkout@v4',
+    '      - uses: actions/setup-node@v4',
+    '        with:',
+    '          node-version-file: hub/.node-version',
+    '          cache: npm',
+    '          cache-dependency-path: hub/package-lock.json',
+    '      - run: mkdir -p /tmp/hx',
+    '      - run: npm ci --prefix hub',
+    '      - run: npm --prefix hub run build',
+    '      - run: npm --prefix hub test',
+  ].join('\n'))
   assert.doesNotMatch(hubJob, /^\s+(?:-\s+)?if:/m)
   assert.doesNotMatch(hubJob, /^\s+(?:-\s+)?continue-on-error:/m)
 })
