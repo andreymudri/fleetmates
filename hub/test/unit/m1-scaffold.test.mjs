@@ -50,6 +50,12 @@ test('M1 build emits an entry script that mounts a heading', async () => {
       virtualConsole,
     })
     try {
+      for (const link of dom.window.document.querySelectorAll('link[rel="stylesheet"]')) {
+        assert.match(link.getAttribute('href'), /^\.\/assets\/[^/]+\.css$/)
+        const style = dom.window.document.createElement('style')
+        style.textContent = await readFile(path.join(out, link.getAttribute('href').slice(2)), 'utf8')
+        dom.window.document.head.append(style)
+      }
       dom.window.eval(await readFile(path.join(out, script[1].slice(2)), 'utf8'))
       await new Promise((resolve) => setTimeout(resolve, 30))
       assert.deepEqual(errors, [])
