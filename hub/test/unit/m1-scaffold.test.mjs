@@ -1,10 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, mkdtemp, rm } from 'node:fs/promises'
+import { readFile, writeFile, mkdtemp, rm } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // The phase gate runs this file through its hub-test check; root npm test does not run hub tests.
 
@@ -35,6 +35,7 @@ test('M1 build emits an entry script that mounts a heading', async () => {
   const out = await mkdtemp(path.join(tmpdir(), 'deck-build-'))
   try {
     execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
+    await writeFile(path.join(out, 'package.json'), '{"type":"module"}')
     const html = await readFile(path.join(out, 'index.html'), 'utf8')
     assert.match(html, /<div id="root"><\/div>/)
     const script = html.match(/<script\b[^>]*\bsrc="([^"]+\.js)"[^>]*><\/script>/)
@@ -57,7 +58,20 @@ test('M1 build emits an entry script that mounts a heading', async () => {
         style.textContent = await readFile(path.join(out, link.getAttribute('href').slice(2)), 'utf8')
         dom.window.document.head.append(style)
       }
-      dom.window.eval(await readFile(path.join(out, script[1].slice(2)), 'utf8'))
+      for (const link of dom.window.document.querySelectorAll('link[rel="modulepreload"]')) link.remove()
+      const globals = new Map()
+      for (const name of ['window', 'document', 'navigator', 'MutationObserver']) {
+        globals.set(name, Object.getOwnPropertyDescriptor(globalThis, name))
+        Object.defineProperty(globalThis, name, { configurable: true, value: dom.window[name] })
+      }
+      try {
+        await import(pathToFileURL(path.join(out, script[1].slice(2))).href)
+      } finally {
+        for (const [name, descriptor] of globals) {
+          if (descriptor) Object.defineProperty(globalThis, name, descriptor)
+          else delete globalThis[name]
+        }
+      }
       await new Promise((resolve) => setTimeout(resolve, 30))
       assert.deepEqual(errors, [])
       const heading = dom.window.document.querySelector('main h1')
