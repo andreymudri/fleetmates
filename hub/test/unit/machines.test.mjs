@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, sy
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openDeckDb } from '../../server/db/index.mjs'
+import { runRetention } from '../../server/db/retention.mjs'
 import { createProjector } from '../../server/machines/projector.mjs'
 import { expireRequests, permissionTier } from '../../server/machines/request.mjs'
 
@@ -1414,13 +1415,19 @@ test('process exit publishes closure for every expired request', () => {
   try {
     const events = []
     const projector = createProjector({ store: h.store, publish: event => events.push(event) })
-    projector.applyHooks([fixture('PermissionRequest.AskUserQuestion.json')])
+    const first = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    const second = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'ls' } })
+    second.hookTs = 1001
+    projector.applyHooks([first, second])
+    assert.equal(projector.snapshot().counts.openRequests, 2)
     const id = projector.snapshot().sessions[0].id
     events.length = 0
     projector.signal(id, { type: 'exit', code: 1 }, 2000)
-    assert.equal(projector.snapshot().requests[0].state, 'expired')
-    assert.equal(events.filter(event => event.type === 'request.closed').length, 1)
-    assert.equal(events.find(event => event.type === 'request.closed').data.expiredReason, 'process_ended')
+    const expired = projector.snapshot().requests.filter(row => row.state === 'expired')
+    assert.equal(expired.length, 2)
+    const closed = events.filter(event => event.type === 'request.closed')
+    assert.deepEqual(closed.map(event => event.entityId).sort(), expired.map(row => row.id).sort())
+    assert.ok(closed.every(event => event.data.expiredReason === 'process_ended'))
   } finally { h.close() }
 })
 
@@ -1453,4 +1460,142 @@ test('announced PTY end with nonzero exit is ended', () => {
     assert.equal(h.projector.snapshot().sessions[0].state, 'ended')
     assert.equal(h.store.get('SELECT end_announced FROM sessions WHERE id = ?', id).end_announced, 1)
   } finally { h.close() }
+})
+
+
+test('late matching outcomes close only their request without rewinding newer activity', () => {
+  for (const event of ['PostToolUse', 'PostToolUseFailure', 'PermissionDenied']) {
+    const h = harness()
+    try {
+      h.projector.applyHooks([fixture('SessionStart.startup.json')])
+      const permission = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      permission.hookTs = 1100
+      h.projector.applyHooks([permission])
+      const read = fixture('PreToolUse.AskUserQuestion.json', { tool_name: 'Read', tool_input: { file_path: '/tmp/example' } })
+      read.hookTs = 1300
+      h.projector.applyHooks([read])
+      const before = h.store.get('SELECT * FROM sessions')
+      const outcome = fixture('PostToolUse.Bash.json', { hook_event_name: event, tool_input: { command: 'pwd' } })
+      outcome.hookTs = 1200
+      const events = h.projector.applyHooks([outcome])
+      assert.equal(h.projector.snapshot().requests[0].state, 'answered')
+      assert.equal(events.filter(event => event.type === 'request.closed').length, 1)
+      const after = h.store.get('SELECT * FROM sessions')
+      assert.equal(after.since_ts, before.since_ts)
+      assert.equal(after.last_activity_at, before.last_activity_at)
+      assert.equal(after.state_since, before.state_since)
+      assert.equal(after.state, 'running')
+      assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    } finally { h.close() }
+  }
+})
+
+test('late outcomes preserve unrelated and later matching approvals', () => {
+  const h = harness()
+  try {
+    const request = command => fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command } })
+    const first = request('pwd')
+    first.hookTs = 1100
+    const later = request('pwd')
+    later.hookTs = 1300
+    const unrelated = request('ls')
+    unrelated.hookTs = 1400
+    h.projector.applyHooks([first, later, unrelated])
+    const outcome = fixture('PostToolUse.Bash.json', { tool_input: { command: 'pwd' } })
+    outcome.hookTs = 1200
+    h.projector.applyHooks([outcome])
+    assert.deepEqual(h.projector.snapshot().requests.map(row => row.state), ['answered', 'open', 'open'])
+    const repeated = { ...outcome, hookTs: 1201 }
+    h.projector.applyHooks([repeated])
+    assert.deepEqual(h.projector.snapshot().requests.map(row => row.state), ['answered', 'open', 'open'])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'needs_approval')
+  } finally { h.close() }
+})
+
+test('SubagentStop restores running after stale without losing active subagents', () => {
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('SessionStart.startup.json')])
+    const started = fixture('SessionStart.startup.json', { hook_event_name: 'SubagentStart' })
+    started.hookTs = 1500
+    const another = { ...started, hookTs: 1501 }
+    h.projector.applyHooks([started, another])
+    h.projector.tick(1201501)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'stale')
+    const stopped = fixture('Stop.json', { hook_event_name: 'SubagentStop' })
+    stopped.hookTs = 1201600
+    h.projector.applyHooks([stopped])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+    assert.equal(h.projector.snapshot().counts.running, 1)
+    assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 1)
+    assert.equal(h.projector.snapshot().sessions[0].lastActivityAt, 1201600)
+  } finally { h.close() }
+})
+
+test('every process end path commits a permanent summary that survives detail retention', async t => {
+  for (const ending of ['observed', 'exit', 'crash', 'lost', 'clear', 'resume', 'silent', 'unreviewed', 'wrapped_exit', 'wrapped_signal']) await t.test(ending, () => {
+    const h = harness()
+    const reader = openDeckDb(h.file)
+    try {
+      const start = fixture('SessionStart.startup.json')
+      if (ending === 'silent') start.claudePid = null
+      if (ending.startsWith('wrapped_')) start.ptyId = 'summary-pty'
+      const projector = createProjector({ store: h.store, publish: event => {
+        if (event.type === 'session.upserted' && !event.data.alive) {
+          assert.ok(reader.get('SELECT * FROM session_summaries WHERE session_id = ?', event.entityId), ending)
+        }
+      } })
+      projector.applyHooks([start])
+      const id = projector.snapshot().sessions[0].id
+      let endedAt = 2000
+      if (ending === 'unreviewed') {
+        const edit = fixture('PostToolUse.Edit.json', { tool_input: { file_path: '/tmp/summary-edit.txt' } })
+        edit.hookTs = 1500
+        projector.applyHooks([edit])
+      }
+      if (['observed', 'unreviewed', 'clear', 'resume'].includes(ending)) {
+        const end = fixture('SessionEnd.prompt_input_exit.json', { reason: ['clear', 'resume'].includes(ending) ? ending : 'prompt_input_exit' })
+        end.hookTs = 2000
+        projector.applyHooks([end])
+        if (['clear', 'resume'].includes(ending)) { endedAt = 7000; projector.tick(endedAt) }
+      } else if (ending === 'silent') { endedAt = 86401000; projector.tick(endedAt) }
+      else projector.signal(id, ending === 'lost' ? { type: 'pid_gone' } : { type: 'exit', code: ending === 'crash' ? 1 : 0, signal: ending === 'wrapped_signal' ? 'SIGKILL' : null }, endedAt)
+      const row = h.store.get('SELECT * FROM session_summaries WHERE session_id = ?', id)
+      assert.ok(row, ending)
+      assert.equal(row.ended_at, endedAt, ending)
+      assert.equal(row.duration_ms, endedAt - 1000, ending)
+      assert.equal(row.outcome, ending === 'lost' ? 'lost' : ['crash', 'wrapped_signal'].includes(ending) ? 'crashed' : 'ended', ending)
+      assert.equal(row.origin, ending.startsWith('wrapped_') ? 'wrapped' : 'observed')
+      assert.deepEqual(JSON.parse(row.claude_session_ids), [start.hook.session_id])
+      assert.equal(row.files_changed, ending === 'unreviewed' ? 1 : 0)
+      if (ending === 'unreviewed') {
+        projector.signal(id, { type: 'review' }, endedAt + 1)
+        const reviewed = h.store.get('SELECT * FROM session_summaries WHERE session_id = ?', id)
+        assert.equal(reviewed.reviewed_at, endedAt + 1)
+        assert.equal(reviewed.files_changed, 1)
+      }
+      runRetention(h.store, { now: endedAt + 31 * 86400000 })
+      assert.ok(h.store.get('SELECT * FROM session_summaries WHERE session_id = ?', id), ending)
+      if (!['crash', 'lost', 'wrapped_signal'].includes(ending)) assert.equal(h.store.get('SELECT * FROM sessions WHERE id = ?', id), undefined, ending)
+    } finally { reader.close(); h.close() }
+  })
+})
+
+test('Bash writes after cd protect Claude settings and symlinked controls', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-cd-controls-'))
+  try {
+    mkdirSync(path.join(root, '.claude'))
+    mkdirSync(path.join(root, '.git'))
+    symlinkSync('.claude', path.join(root, 'control-alias'))
+    const commands = [
+      `cd .claude && printf '%s' '{"permissions":{"allow":["Bash(*)"]}}' > settings.local.json`,
+      'cd .claude; tee settings.json',
+      'cd control-alias && touch settings.local.json',
+      'cd .git && printf x > config'
+    ]
+    for (const command of commands) {
+      assert.equal(permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root }), 'destructive', command)
+    }
+    assert.equal(permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command: 'cd ordinary && printf x > output.txt' } }, { repoRoot: root }), 'caution')
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })

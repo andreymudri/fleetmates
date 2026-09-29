@@ -240,7 +240,10 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   } else if (event === 'PermissionRequest' || event === 'Notification' && hook.notification_type === 'permission_prompt') state = 'needs_approval'
   else if (event === 'PreToolUse' && hook.tool_name === 'AskUserQuestion' || event === 'Notification' && hook.notification_type === 'elicitation_dialog') state = 'asked_you'
   else if (event === 'SubagentStart') { subagents++; if (!['needs_approval', 'asked_you'].includes(state)) state = 'running' }
-  else if (event === 'SubagentStop') subagents = Math.max(0, subagents - 1)
+  else if (event === 'SubagentStop') {
+    subagents = Math.max(0, subagents - 1)
+    if (state === 'stale') state = 'running'
+  }
   else if (event === 'PreCompact') { activity = 'compacting'; state = 'running' }
   else if (event === 'PostCompact') { activity = null; state = 'running' }
   else if (event === 'CwdChanged') {
@@ -263,4 +266,25 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   const since = at
   store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : stateSince, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, reviewBaseline, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
+}
+
+/** Persist ended process history independently of retained session detail. */
+export function persistSessionSummary(store, row) {
+  if (row.alive || row.ended_at === null) return
+  const repository = store.get('SELECT name FROM repos WHERE id = ?', row.repo_id)
+  const files = JSON.parse(row.changed_files)
+  const ids = [...new Set([...store.all('SELECT claude_session_id FROM session_aliases WHERE session_id = ? ORDER BY replaced_at', row.id).map(alias => alias.claude_session_id), row.claude_session_id].filter(Boolean))]
+  const gate = row.run_id ? store.get('SELECT last_gate FROM runs WHERE repo_id = ? AND run_id = ?', row.run_repo_id, row.run_id) : null
+  const verdict = gate?.last_gate ? JSON.parse(gate.last_gate).verdict : null
+  const outcome = row.crash_kind === 'lost' ? 'lost' : row.crash_kind ? 'crashed' : row.user_stop_requested ? 'stopped' : 'ended'
+  store.run(`INSERT INTO session_summaries(session_id,repo_id,repo_name,branch,task,origin,role,outcome,exit_code,exit_signal,started_at,ended_at,duration_ms,reviewed_at,run_id,run_task_id,gate_result,files_changed,adds,dels,claude_session_ids,transcript_path)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      outcome=excluded.outcome,exit_code=excluded.exit_code,exit_signal=excluded.exit_signal,
+      duration_ms=excluded.duration_ms,reviewed_at=excluded.reviewed_at,
+      files_changed=CASE WHEN excluded.ended_at > session_summaries.ended_at THEN excluded.files_changed ELSE session_summaries.files_changed END,
+      adds=CASE WHEN excluded.ended_at > session_summaries.ended_at THEN excluded.adds ELSE session_summaries.adds END,
+      dels=CASE WHEN excluded.ended_at > session_summaries.ended_at THEN excluded.dels ELSE session_summaries.dels END,
+      ended_at=excluded.ended_at,claude_session_ids=excluded.claude_session_ids`,
+  row.id, row.repo_id, repository.name, row.branch, row.task, row.origin, row.role, outcome, row.exit_code, row.exit_signal, row.started_at, row.ended_at, Math.max(0, row.ended_at - row.started_at), row.reviewed_at, row.run_id, row.run_task_id, ['PASS', 'FAIL'].includes(verdict) ? verdict : null, files.length, files.reduce((sum, file) => sum + (file.adds ?? 0), 0), files.reduce((sum, file) => sum + (file.dels ?? 0), 0), JSON.stringify(ids), row.transcript_path)
 }

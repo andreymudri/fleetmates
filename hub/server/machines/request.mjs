@@ -241,16 +241,18 @@ function namesRelativeDeckControl(hook) {
   return accessesControl(segment)
 }
 
-function shellWriteTargets(command) {
+function shellWriteTargets(command, cwd) {
+  let directory = cwd
   const targets = []
+  const add = target => targets.push({ file_path: target, cwd: directory })
   const tokens = shellTokens(command)
-  for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].value !== '>' || tokens[i].quoted) continue
-    while (tokens[i + 1]?.value === '>' && !tokens[i + 1].quoted) i++
-    const target = tokens[i + 1]
-    if (target && !target.separator && target.value !== '&') targets.push(target.value)
-  }
   const inspect = words => {
+    for (let i = 0; i < words.length; i++) {
+      if (words[i].value !== '>' || words[i].quoted) continue
+      while (words[i + 1]?.value === '>' && !words[i + 1].quoted) i++
+      const target = words[i + 1]
+      if (target && !target.separator && target.value !== '&') add(target.value)
+    }
     let index = 0
     while (words[index]) {
       const wrapper = path.posix.basename(words[index].value)
@@ -269,14 +271,18 @@ function shellWriteTargets(command) {
     }
     const executable = path.posix.basename(words[index]?.value ?? '')
     const args = words.slice(index + 1).map(word => word.value)
+    if (executable === 'cd') {
+      const target = args.find(arg => arg !== '--' && !arg.startsWith('-'))
+      if (target && !/[$*?`]/.test(target)) directory = path.resolve(directory ?? '', target)
+    }
     if (executable === 'dd') {
-      for (const arg of args) if (arg.startsWith('of=')) targets.push(arg.slice(3))
+      for (const arg of args) if (arg.startsWith('of=')) add(arg.slice(3))
     }
     const editsInPlace = ['sed', 'perl'].includes(executable) && args.some(arg => arg === '--in-place' || arg.startsWith('--in-place=') || /^-i/.test(arg))
     if (['tee', 'cp', 'mv', 'install', 'touch', 'truncate'].includes(executable) || editsInPlace) {
       for (const arg of args) {
-        if (arg.startsWith('--target-directory=')) targets.push(arg.slice('--target-directory='.length))
-        else if (!arg.startsWith('-') && !['<', '>'].includes(arg)) targets.push(arg)
+        if (arg.startsWith('--target-directory=')) add(arg.slice('--target-directory='.length))
+        else if (!arg.startsWith('-') && !['<', '>'].includes(arg)) add(arg)
       }
     }
   }
@@ -286,7 +292,7 @@ function shellWriteTargets(command) {
     else segment.push(token)
   }
   inspect(segment)
-  return targets.filter(target => target && !/[$*?`]/.test(target))
+  return targets.filter(target => target.file_path && !/[$*?`]/.test(target.file_path))
 }
 
 function sensitiveWrite(hook, repoRoot) {
@@ -301,7 +307,7 @@ function sensitiveWrite(hook, repoRoot) {
   if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true
   if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true
   if (/(?:^|\/)\.mcp\.json(?:\b|$)/.test(normalized)) return true
-  if (!fileTool) return shellWriteTargets(raw).some(file_path => sensitiveWrite({ ...hook, tool_name: 'Write', tool_input: { file_path } }, repoRoot))
+  if (!fileTool) return shellWriteTargets(raw, hook.cwd ?? repoRoot).some(target => sensitiveWrite({ ...hook, cwd: target.cwd, tool_name: 'Write', tool_input: { file_path: target.file_path } }, repoRoot))
   if (!fileTool || path.posix.basename(normalized) !== 'CLAUDE.md') return false
   if (!repoRoot) return true
   const root = canonicalExistingPath(path.resolve(repoRoot))
@@ -409,14 +415,14 @@ export function applyRequestHook(store, session, envelope) {
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
     const outcomeKind = event !== 'PermissionDenied' && hook.tool_name === 'AskUserQuestion' ? 'question' : 'permission'
-    const row = store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind)
-      ?? (outcomeKind === 'question' ? store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission') : null)
+    const row = store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind, at)
+      ?? (outcomeKind === 'question' ? store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission', at) : null)
       ?? store.all('SELECT id, kind, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
     if (!row) return false
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: event === 'PermissionDenied' ? 'deny' : 'allow' }), at, row.id)
     if (hook.tool_name === 'AskUserQuestion') {
       const relatedKind = row.kind === 'permission' ? 'question' : 'permission'
-      const related = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind)
+      const related = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind, at)
       if (related) {
         if (event === 'PermissionDenied') store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE id = ?', 'expired', 'interrupted', related.id)
         else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'allow' }), at, related.id)
