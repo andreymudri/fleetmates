@@ -89,7 +89,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
           store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
         }
-        for (const row of store.all('SELECT * FROM sessions WHERE state = ? AND ? - last_activity_at >= ?', 'running', at, 1_200_000)) {
+        for (const row of store.all('SELECT * FROM sessions WHERE state = ? AND (activity IS NULL OR activity <> ?) AND ? - last_activity_at >= ?', 'running', 'compacting', at, 1_200_000)) {
           store.run('UPDATE sessions SET state = ?, state_since = last_activity_at, since_ts = ? WHERE id = ?', 'stale', at, row.id)
           store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
         }

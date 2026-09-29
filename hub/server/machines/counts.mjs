@@ -1,3 +1,5 @@
+const chipPriority = { crashed: 4, stale: 3, starting: 2, running: 2, done: 1 }
+
 /** Read the Home, Rail and drawer counts from one database projection. */
 export function projectCounts(store) {
   const sessions = store.all('SELECT id, state, run_repo_id, run_id FROM sessions WHERE state <> ?', 'ended')
@@ -8,7 +10,7 @@ export function projectCounts(store) {
   const chips = new Map()
   for (const row of sessions) {
     const chipKey = row.run_id ? JSON.stringify([row.run_repo_id, row.run_id]) : row.id
-    const priority = requestSessions.has(row.id) ? 3 : row.state === 'starting' || row.state === 'running' ? 2 : row.state === 'done' ? 1 : 0
+    const priority = requestSessions.has(row.id) ? 5 : chipPriority[row.state] ?? 0
     chips.set(chipKey, Math.max(chips.get(chipKey) ?? 0, priority))
     if (!row.run_id) continue
     const key = JSON.stringify([row.run_repo_id, row.run_id])
@@ -18,7 +20,7 @@ export function projectCounts(store) {
     runs.set(key, run)
   }
   for (const priority of chips.values()) {
-    if (priority === 3) counts.needYouSessions++
+    if (priority === 5) counts.needYouSessions++
     else if (priority === 2) counts.running++
     else if (priority === 1) counts.toReview++
   }

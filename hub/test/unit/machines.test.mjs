@@ -1687,3 +1687,108 @@ test('Bash writes after cd protect Claude settings and symlinked controls', () =
     assert.equal(permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command: 'cd ordinary && printf x > output.txt' } }, { repoRoot: root }), 'caution')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+
+test('active compaction suppresses stale until a completion hook rearms the timer', () => {
+  for (const completion of ['PostCompact', 'SessionStart']) {
+    const h = harness()
+    try {
+      h.projector.applyHooks([fixture('SessionStart.startup.json')])
+      const compact = fixture('SessionStart.startup.json', { hook_event_name: 'PreCompact' })
+      compact.hookTs = 2000
+      h.projector.applyHooks([compact])
+      h.projector.tick(1202000)
+      assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+      assert.equal(h.store.get('SELECT activity FROM sessions').activity, 'compacting')
+      assert.equal(h.projector.snapshot().counts.running, 1)
+      assert.equal(h.projector.snapshot().home.grid.length, 1)
+      assert.equal(h.projector.snapshot().home.quiet.length, 0)
+      const completed = fixture('SessionStart.startup.json', { hook_event_name: completion, source: 'compact' })
+      completed.hookTs = 1202001
+      h.projector.applyHooks([completed])
+      assert.equal(h.store.get('SELECT activity FROM sessions').activity, null)
+      h.projector.tick(2402000)
+      assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+      h.projector.tick(2402001)
+      assert.equal(h.projector.snapshot().sessions[0].state, 'stale')
+      assert.equal(h.projector.snapshot().counts.running, 0)
+      assert.equal(h.projector.snapshot().home.quiet.length, 1)
+    } finally { h.close() }
+  }
+})
+
+test('team chip counts use crashed and stale before running or done', async t => {
+  for (const urgent of ['crashed', 'stale']) for (const other of ['running', 'done']) await t.test(`${urgent} with ${other}`, () => {
+    const h = harness()
+    try {
+      const cwd = path.dirname(h.file)
+      const first = fixture('UserPromptSubmit.json', { session_id: 'urgent', cwd })
+      const second = fixture('UserPromptSubmit.json', { session_id: 'other', cwd })
+      second.claudePid = 43
+      h.projector.applyHooks([first, second])
+      h.store.run('UPDATE sessions SET run_repo_id = repo_id, run_id = ?', 'shared-run')
+      const id = h.projector.snapshot().sessions.find(row => row.claudeSessionId === 'urgent').id
+      if (urgent === 'crashed') h.projector.signal(id, { type: 'pid_gone' }, 2000)
+      else h.projector.tick(1201000)
+      const resumed = fixture('UserPromptSubmit.json', { session_id: 'other', cwd })
+      resumed.claudePid = 43
+      resumed.hookTs = 1201001
+      h.projector.applyHooks([resumed])
+      if (other === 'done') {
+        const edited = fixture('PostToolUse.Edit.json', { session_id: 'other', cwd, tool_input: { file_path: path.join(cwd, 'changed.txt') } })
+        edited.claudePid = 43
+        edited.hookTs = 1201002
+        const stopped = fixture('Stop.json', { session_id: 'other', cwd })
+        stopped.claudePid = 43
+        stopped.hookTs = 1201003
+        h.projector.applyHooks([edited, stopped])
+      }
+      assert.equal(h.projector.snapshot().sessions.find(row => row.id === id).state, urgent)
+      assert.equal(h.projector.snapshot().sessions.find(row => row.claudeSessionId === 'other').state, other)
+      const counts = h.projector.snapshot().counts
+      assert.equal(counts.running, 0)
+      assert.equal(counts.toReview, 0)
+      assert.equal(counts.needYouSessions, 0)
+      assert.deepEqual(counts.perRun, [{ repoId: cwd, runId: 'shared-run', needYou: 0, total: 2 }])
+      const approval = fixture('PermissionRequest.AskUserQuestion.json', { session_id: 'other', cwd, tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      approval.claudePid = 43
+      approval.hookTs = 1201004
+      h.projector.applyHooks([approval])
+      assert.equal(h.projector.snapshot().counts.needYouSessions, 1)
+      assert.equal(h.projector.snapshot().counts.running, 0)
+      assert.equal(h.projector.snapshot().counts.toReview, 0)
+      assert.equal(h.projector.snapshot().counts.perRun[0].needYou, 1)
+    } finally { h.close() }
+  })
+})
+
+test('identical run IDs in two repositories keep independent chips and perRun counts', () => {
+  const h = harness()
+  try {
+    const repoA = path.join(path.dirname(h.file), 'repo-a')
+    const repoB = path.join(path.dirname(h.file), 'repo-b')
+    const one = fixture('UserPromptSubmit.json', { session_id: 'a-one', cwd: repoA })
+    const two = fixture('UserPromptSubmit.json', { session_id: 'a-two', cwd: repoA })
+    two.claudePid = 43
+    const three = fixture('UserPromptSubmit.json', { session_id: 'b-one', cwd: repoB })
+    three.claudePid = 44
+    h.projector.applyHooks([one, two, three])
+    h.store.run('UPDATE sessions SET run_repo_id = repo_id, run_id = ?', 'same-run-id')
+    const expected = [
+      { repoId: repoA, runId: 'same-run-id', needYou: 0, total: 2 },
+      { repoId: repoB, runId: 'same-run-id', needYou: 0, total: 1 }
+    ]
+    const perRun = () => h.projector.snapshot().counts.perRun.sort((a, b) => a.repoId.localeCompare(b.repoId))
+    assert.deepEqual(perRun(), expected)
+    assert.equal(h.projector.snapshot().counts.running, 2)
+    const approval = fixture('PermissionRequest.AskUserQuestion.json', { session_id: 'a-two', cwd: repoA, tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    approval.claudePid = 43
+    approval.hookTs = 2000
+    h.projector.applyHooks([approval])
+    assert.deepEqual(perRun(), [{ ...expected[0], needYou: 1 }, expected[1]])
+    assert.equal(h.projector.snapshot().counts.running, 1)
+    assert.equal(h.projector.snapshot().counts.needYouSessions, 1)
+    assert.equal(h.projector.snapshot().counts.openRequests, 1)
+    assert.equal(h.projector.snapshot().counts.requestSessions, 1)
+  } finally { h.close() }
+})
