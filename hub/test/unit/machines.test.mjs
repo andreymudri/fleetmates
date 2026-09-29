@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createProjector } from '../../server/machines/projector.mjs'
-import { permissionTier } from '../../server/machines/request.mjs'
+import { expireRequests, permissionTier } from '../../server/machines/request.mjs'
 
 const fixtureDir = new URL('../fixtures/hooks/2.1.282/', import.meta.url)
 function fixture(name, changes = {}) {
@@ -20,6 +20,70 @@ function harness() {
   const projector = createProjector({ store, now: () => 1000 })
   return { store, projector, file, close() { store.close(); rmSync(dir, { recursive: true, force: true }) } }
 }
+
+test('captured AskUserQuestion answers close the question without rewriting outcome input', () => {
+  for (const withPermission of [false, true]) {
+    const h = harness()
+    try {
+      h.projector.applyHooks([fixture('PreToolUse.AskUserQuestion.json')])
+      if (withPermission) {
+        const permission = fixture('PermissionRequest.AskUserQuestion.json')
+        permission.hookTs = 1001
+        h.projector.applyHooks([permission])
+      }
+      const answered = fixture('PostToolUse.AskUserQuestion.json')
+      answered.hookTs = 1002
+      const stop = fixture('Stop.json')
+      stop.hookTs = 1003
+      h.projector.applyHooks([answered, stop])
+      assert.deepEqual(h.projector.snapshot().requests.map(row => row.state), withPermission ? ['answered', 'answered'] : ['answered'])
+      assert.equal(h.projector.snapshot().counts.openRequests, 0)
+      assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    } finally { h.close() }
+  }
+})
+
+test('PermissionDenied closes its permission and interrupts only the matching question', () => {
+  const h = harness()
+  try {
+    const opened = fixture('PreToolUse.AskUserQuestion.json')
+    const unrelated = fixture('PreToolUse.AskUserQuestion.json', { tool_input: { questions: [{ question: 'Another question?', options: [] }] } })
+    unrelated.hookTs = 1001
+    const permission = fixture('PermissionRequest.AskUserQuestion.json')
+    permission.hookTs = 1002
+    const denied = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'PermissionDenied' })
+    denied.hookTs = 1003
+    h.projector.applyHooks([opened, unrelated, permission, denied])
+    const requests = h.projector.snapshot().requests
+    assert.equal(requests[0].state, 'expired')
+    assert.equal(requests[0].expiredReason, 'interrupted')
+    assert.equal(requests[1].state, 'open')
+    assert.equal(requests[2].kind, 'permission')
+    assert.equal(requests[2].state, 'answered')
+    assert.equal(requests[2].answer.choice, 'deny')
+    assert.equal(h.projector.snapshot().counts.openRequests, 1)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'asked_you')
+  } finally { h.close() }
+})
+
+test('expiry closes every open request for its session and preserves other sessions', () => {
+  const h = harness()
+  try {
+    const first = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    const second = fixture('PreToolUse.AskUserQuestion.json')
+    second.hookTs = 1001
+    const other = fixture('PermissionRequest.AskUserQuestion.json', { session_id: 'other-session', tool_name: 'Bash', tool_input: { command: 'ls' } })
+    other.claudePid = 99
+    other.hookTs = 1002
+    h.projector.applyHooks([first, second, other])
+    const id = h.projector.snapshot().requests[0].sessionId
+    assert.equal(expireRequests(h.store, id, 'process_ended'), true)
+    assert.deepEqual(h.projector.snapshot().requests.map(row => [row.state, row.expiredReason]), [
+      ['expired', 'process_ended'], ['expired', 'process_ended'], ['open', null]
+    ])
+    assert.equal(expireRequests(h.store, id, 'process_ended'), false)
+  } finally { h.close() }
+})
 
 test('first SessionStart is idle and not joined mid-life; later first hook is joined', () => {
   const h = harness()
@@ -258,6 +322,44 @@ test('an unborn Git repository still reports Bash-created files at Stop', () => 
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
     assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file])
   } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('Git change projection never executes repository clean filters', () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'deck-clean-filter-'))
+  const h = harness()
+  try {
+    const runGit = (...args) => execFileSync('git', args, { cwd: repo, timeout: 2000, stdio: 'pipe' })
+    runGit('init', '-q')
+    writeFileSync(path.join(repo, 'file.txt'), 'initial\n')
+    writeFileSync(path.join(repo, 'clean.sh'), 'cat\n')
+    writeFileSync(path.join(repo, '.gitattributes'), 'file.txt filter=review\n')
+    runGit('config', 'filter.review.clean', 'sh clean.sh')
+    runGit('add', '.')
+    runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial')
+    const hook = (event, at) => {
+      const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo })
+      envelope.hookTs = at
+      return envelope
+    }
+    h.projector.applyHooks([hook('SessionStart', 1000)])
+    writeFileSync(path.join(repo, 'clean.sh'), 'touch executed; cat\n')
+    writeFileSync(path.join(repo, 'file.txt'), 'changed\n')
+    assert.equal(existsSync(path.join(repo, 'executed')), false)
+    h.projector.applyHooks([hook('Stop', 2000)])
+    assert.equal(existsSync(path.join(repo, 'executed')), false)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => path.basename(row.path)).sort(), ['clean.sh', 'file.txt'])
+    h.projector.signal(h.projector.snapshot().sessions[0].id, { type: 'review' }, 2001)
+    h.projector.applyHooks([hook('Stop', 2002)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.equal(existsSync(path.join(repo, 'executed')), false)
+    writeFileSync(path.join(repo, 'process.sh'), 'touch executed\n')
+    runGit('config', 'filter.review.process', 'sh process.sh')
+    writeFileSync(path.join(repo, 'file.txt'), 'another change\n')
+    h.projector.applyHooks([hook('Stop', 2003)])
+    assert.equal(existsSync(path.join(repo, 'executed')), false)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
 })
 
 test('notification-only approval closes on a recent observed tool outcome', () => {

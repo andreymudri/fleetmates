@@ -10,7 +10,12 @@ function canonical(value) {
 
 /** Match a tool outcome with the request that opened it. */
 export function matchKey(hook) {
-  return createHash('sha1').update(JSON.stringify([hook.tool_name, canonical(hook.tool_input ?? {})])).digest('hex')
+  let input = hook.tool_input ?? {}
+  if (hook.tool_name === 'AskUserQuestion') {
+    const { answers, annotations, ...questionInput } = input
+    input = questionInput
+  }
+  return createHash('sha1').update(JSON.stringify([hook.tool_name, canonical(input)])).digest('hex')
 }
 
 function shellTokens(command) {
@@ -353,10 +358,20 @@ export function applyRequestHook(store, session, envelope) {
     return true
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
-    const row = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? ORDER BY created_at LIMIT 1', session.id, 'open', key)
-      ?? store.all('SELECT id, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
+    const outcomeKind = event !== 'PermissionDenied' && hook.tool_name === 'AskUserQuestion' ? 'question' : 'permission'
+    const row = store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind)
+      ?? (outcomeKind === 'question' ? store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission') : null)
+      ?? store.all('SELECT id, kind, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
     if (!row) return false
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: event === 'PermissionDenied' ? 'deny' : 'allow' }), at, row.id)
+    if (hook.tool_name === 'AskUserQuestion') {
+      const relatedKind = row.kind === 'permission' ? 'question' : 'permission'
+      const related = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind)
+      if (related) {
+        if (event === 'PermissionDenied') store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE id = ?', 'expired', 'interrupted', related.id)
+        else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'allow' }), at, related.id)
+      }
+    }
     return true
   }
   if (event === 'UserPromptSubmit') {

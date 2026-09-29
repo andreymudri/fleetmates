@@ -7,6 +7,8 @@ import { expireRequests } from './request.mjs'
 const maxGitOutput = 1024 * 1024
 const maxChangedPaths = 512
 const maxHashedFile = 8 * 1024 * 1024
+const maxScannedPaths = 4096
+const maxScannedBytes = 32 * 1024 * 1024
 
 function git(root, args) {
   try {
@@ -34,17 +36,45 @@ function baseline(value) {
 }
 
 function gitPaths(root, head) {
-  const diff = head === 'unborn' ? git(root, ['ls-files', '--cached', '-z']) : git(root, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', '--numstat', '-z', head, '--'])
-  const untracked = git(root, ['ls-files', '--others', '--exclude-standard', '-z'])
-  if (!diff || !untracked) return null
-  const paths = new Map()
-  for (const record of diff.toString('utf8').split('\0').filter(Boolean)) {
-    if (head === 'unborn') { paths.set(record, { adds: null, dels: null }); continue }
-    const match = /^([0-9-]+)\t([0-9-]+)\t([\s\S]+)$/.exec(record)
+  const tree = head === 'unborn' ? Buffer.alloc(0) : git(root, ['ls-tree', '-r', '-z', head])
+  const listed = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'])
+  if (!tree || !listed) return null
+  const entries = new Map()
+  for (const record of tree.toString('utf8').split('\0').filter(Boolean)) {
+    const match = /^(\d+) (blob|commit) ([0-9a-f]{40,64})\t([\s\S]+)$/.exec(record)
     if (!match) return null
-    paths.set(match[3], { adds: match[1] === '-' ? null : Number(match[1]), dels: match[2] === '-' ? null : Number(match[2]) })
+    entries.set(match[4], { mode: match[1], type: match[2], oid: match[3] })
   }
-  for (const name of untracked.toString('utf8').split('\0').filter(Boolean)) if (!paths.has(name)) paths.set(name, { adds: null, dels: null })
+  const names = new Set([...entries.keys(), ...listed.toString('utf8').split('\0').filter(Boolean)])
+  if (names.size > maxScannedPaths) return null
+  const paths = new Map()
+  let scannedBytes = 0
+  for (const name of names) {
+    const entry = entries.get(name)
+    if (entry?.type === 'commit') continue
+    let unchanged = false
+    if (entry) {
+      try {
+        const location = path.resolve(root, name)
+        if (!location.startsWith(`${root}${path.sep}`)) return null
+        const stat = lstatSync(location)
+        let content = null
+        let mode = null
+        if (stat.isSymbolicLink()) { content = Buffer.from(readlinkSync(location)); mode = '120000' }
+        else if (stat.isFile() && stat.size <= maxHashedFile) {
+          scannedBytes += stat.size
+          if (scannedBytes > maxScannedBytes) return null
+          content = readFileSync(location)
+          mode = stat.mode & 0o111 ? '100755' : '100644'
+        }
+        if (content) {
+          const oid = createHash(entry.oid.length === 64 ? 'sha256' : 'sha1').update(`blob ${content.length}\0`).update(content).digest('hex')
+          unchanged = oid === entry.oid && mode === entry.mode
+        }
+      } catch {}
+    }
+    if (!unchanged) paths.set(name, { adds: null, dels: null })
+  }
   return paths.size <= maxChangedPaths ? paths : null
 }
 
