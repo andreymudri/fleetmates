@@ -9,12 +9,18 @@ import { createServer } from 'node:net'
 import test from 'node:test'
 import { chromium } from 'playwright-core'
 import { doctor, status } from '../../server/setup/doctor.mjs'
-import { HOOK_EVENTS, hooksInstalled } from '../../server/setup/hooks.mjs'
+import { hooksInstalled } from '../../server/setup/hooks.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
 import { renderUnit } from '../../server/setup/units.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const fixtures = path.join(hub, 'test/fixtures/settings')
+const requiredHookEvents = [
+  'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse',
+  'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied',
+  'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'CwdChanged',
+  'PreCompact', 'PostCompact', 'WorktreeCreate', 'WorktreeRemove'
+]
 
 function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'deck-setup-'))
@@ -76,18 +82,33 @@ test('dry run leaves settings, directories and services untouched', () => {
 test('hooksInstalled requires the installed command for every subscribed event', () => {
   const command = 'node /tmp/fleetmates-deck/hook/deck-hook.mjs'
   const settings = {
-    hooks: Object.fromEntries(HOOK_EVENTS.map(event => [event, [
+    hooks: Object.fromEntries(requiredHookEvents.map(event => [event, [
       { matcher: '*', hooks: [{ type: 'command', command, async: true }] }
     ]]))
   }
   assert.equal(hooksInstalled(settings, command), true)
-  for (const event of HOOK_EVENTS) {
+  for (const event of requiredHookEvents) {
     const missing = structuredClone(settings)
     delete missing.hooks[event]
     assert.equal(hooksInstalled(missing, command), false, `missing ${event}`)
     const wrongCommand = structuredClone(settings)
     wrongCommand.hooks[event][0].hooks[0].command = 'node /tmp/unrelated-hook.mjs'
     assert.equal(hooksInstalled(wrongCommand, command), false, `wrong command for ${event}`)
+  }
+})
+
+test('init installs every event required by the hook integration contract', () => {
+  const s = sandbox()
+  const result = s.run('init')
+  assert.equal(result.status, 0, result.stderr)
+  const settings = JSON.parse(readFileSync(s.settings, 'utf8'))
+  assert.deepEqual(Object.keys(settings.hooks).sort(), [...requiredHookEvents].sort())
+  const command = [process.execPath, setupPaths(s.env).hook]
+    .map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' ')
+  for (const event of requiredHookEvents) {
+    assert.deepEqual(settings.hooks[event], [
+      { matcher: '*', hooks: [{ type: 'command', command, async: true, timeout: 5 }] }
+    ], event)
   }
 })
 
