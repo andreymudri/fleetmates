@@ -90,6 +90,26 @@ test('command substitutions reading the relative deck token retain the Destructi
   }
 })
 
+test('literal nested shell writes protect Claude permission settings', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-nested-shell-'))
+  try {
+    const cwd = path.join(root, '.claude')
+    mkdirSync(cwd)
+    const commands = [
+      "sh -c 'printf x > settings.local.json'",
+      "env A=1 bash -lc 'tee settings.local.json'",
+      "command sh -c 'cd ..; sh -c \"printf x > .claude/settings.json\"'",
+      "eval 'printf x > settings.local.json'"
+    ]
+    for (const command of commands) {
+      assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root }), 'destructive', command)
+    }
+    for (const command of ["printf '%s' 'sh -c printf x > settings.local.json'", "sh -c 'printf x > ordinary.txt'"]) {
+      assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root }), 'caution', command)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('captured AskUserQuestion answers close the question without rewriting outcome input', () => {
   for (const withPermission of [false, true]) {
     const h = harness()

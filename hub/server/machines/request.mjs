@@ -273,6 +273,11 @@ function shellWriteTargets(command, cwd) {
     }
     const executable = path.posix.basename(words[index]?.value ?? '')
     const args = words.slice(index + 1).map(word => word.value)
+    if (['sh', 'bash', 'zsh'].includes(executable)) {
+      const at = args.findIndex(arg => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))
+      if (at >= 0 && words[index + at + 2]?.quoted) targets.push({ command: args[at + 1], cwd: directory })
+    }
+    if (executable === 'eval' && words[index + 1]?.quoted) targets.push({ command: args[0], cwd: directory })
     if (executable === 'cd') {
       const target = args.find(arg => arg !== '--' && !arg.startsWith('-'))
       if (target && !/[$*?`]/.test(target)) directory = path.resolve(directory ?? '', target)
@@ -294,10 +299,11 @@ function shellWriteTargets(command, cwd) {
     else segment.push(token)
   }
   inspect(segment)
-  return targets.filter(target => target.file_path && !/[$*?`]/.test(target.file_path))
+  return targets.filter(target => typeof target.command === 'string' || target.file_path && !/[$*?`]/.test(target.file_path))
 }
 
-function sensitiveWrite(hook, repoRoot) {
+function sensitiveWrite(hook, repoRoot, depth = 0) {
+  if (depth > 4) return true
   const tool = hook.tool_name
   const fileTool = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(tool)
   if (!fileTool && tool !== 'Bash') return false
@@ -309,7 +315,7 @@ function sensitiveWrite(hook, repoRoot) {
   if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true
   if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true
   if (/(?:^|\/)\.mcp\.json(?:\b|$)/.test(normalized)) return true
-  if (!fileTool) return shellWriteTargets(raw, hook.cwd ?? repoRoot).some(target => sensitiveWrite({ ...hook, cwd: target.cwd, tool_name: 'Write', tool_input: { file_path: target.file_path } }, repoRoot))
+  if (!fileTool) return shellWriteTargets(raw, hook.cwd ?? repoRoot).some(target => sensitiveWrite({ ...hook, cwd: target.cwd, tool_name: target.command === undefined ? 'Write' : 'Bash', tool_input: target.command === undefined ? { file_path: target.file_path } : { command: target.command } }, repoRoot, depth + 1))
   if (!fileTool || path.posix.basename(normalized) !== 'CLAUDE.md') return false
   if (!repoRoot) return true
   const root = canonicalExistingPath(path.resolve(repoRoot))
