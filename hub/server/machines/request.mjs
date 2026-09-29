@@ -209,8 +209,11 @@ function namesRelativeDeckControl(hook, depth = 0) {
   if (depth > 4) return true
   const namesControl = (value, shell = false) => {
     if (typeof value !== 'string' || !value) return false
-    const state = process.env.XDG_STATE_HOME
-    const expanded = shell && state && path.isAbsolute(state) ? value.replace(/^\$(?:XDG_STATE_HOME|\{XDG_STATE_HOME\})(?=\/)/, state) : value
+    const expanded = shell ? value.replace(/^\$(?:([A-Z_]+)|\{([A-Z_]+)\})(?=\/)/, (match, plain, braced) => {
+      const variable = plain ?? braced
+      const configured = ['XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'].includes(variable) ? process.env[variable] : null
+      return configured && path.isAbsolute(configured) ? configured : match
+    }) : value
     if (/[$*?`]/.test(expanded)) return false
     if (path.isAbsolute(expanded)) return namesDeckControl({ path: canonicalExistingPath(expanded) })
     return path.isAbsolute(hook.cwd ?? '') && namesDeckControl({ path: canonicalExistingPath(path.resolve(hook.cwd, expanded)) })
@@ -220,6 +223,7 @@ function namesRelativeDeckControl(hook, depth = 0) {
   }
   if (hook.tool_name !== 'Bash' || typeof hook.tool_input?.command !== 'string') return false
   if (embeddedCommands(hook.tool_input.command).some(command => namesRelativeDeckControl({ ...hook, tool_input: { command } }, depth + 1))) return true
+  if (shellWriteTargets(hook.tool_input.command, hook.cwd).some(target => typeof target.command === 'string' && namesRelativeDeckControl({ ...hook, cwd: target.cwd, tool_input: { command: target.command } }, depth + 1))) return true
   const tokens = shellTokens(hook.tool_input.command)
   let segment = []
   const accessesControl = words => {

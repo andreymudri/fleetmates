@@ -1792,3 +1792,38 @@ test('identical run IDs in two repositories keep independent chips and perRun co
     assert.equal(h.projector.snapshot().counts.requestSessions, 1)
   } finally { h.close() }
 })
+
+
+for (const [variable, suffix] of [
+  ['XDG_STATE_HOME', '/fleetmates/deck/token'],
+  ['XDG_CONFIG_HOME', '/fleetmates/deck/tiers.json'],
+  ['XDG_RUNTIME_DIR', '/fleetmates-deck/hooks.sock']
+]) test(`known ${variable} shell paths protect deck controls through substitutions and nested shells`, () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-xdg-expansion-'))
+  const previous = process.env[variable]
+  try {
+    process.env[variable] = root
+    const tier = command => permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } })
+    assert.equal(tier(`printf x > "${root}${suffix}"`), 'destructive')
+    for (const value of [`$${variable}${suffix}`, '${' + variable + '}' + suffix]) {
+      const commands = [
+        `printf x > "${value}"`,
+        `cat "${value}"`,
+        `printf "%s" "$(cat "${value}")"`,
+        `printf "%s" "\`cat "${value}"\`"`,
+        `sh -c 'printf x > "${value}"'`,
+        `sh -c 'cat "${value}"'`,
+        `bash -lc 'sh -c "cat \\"${value}\\""'`
+      ]
+      for (const command of commands) assert.equal(tier(command), 'destructive', command)
+    }
+    assert.equal(tier(`printf x > "$${variable}/ordinary.txt"`), 'caution')
+    assert.equal(tier('printf x > "$UNKNOWN_DECK_ROOT/fleetmates/deck/tiers.json"'), 'caution')
+    assert.equal(tier('printf x > "${UNKNOWN_DECK_ROOT}/fleetmates/deck/tiers.json"'), 'caution')
+    assert.equal(permissionTier({ cwd: root, tool_name: 'Read', tool_input: { file_path: `$${variable}${suffix}` } }), variable === 'XDG_RUNTIME_DIR' ? 'destructive' : 'caution')
+  } finally {
+    if (previous === undefined) delete process.env[variable]
+    else process.env[variable] = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})
