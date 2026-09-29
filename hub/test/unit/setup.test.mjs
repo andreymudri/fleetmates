@@ -9,6 +9,7 @@ import { createServer } from 'node:net'
 import test from 'node:test'
 import { chromium } from 'playwright-core'
 import { doctor } from '../../server/setup/doctor.mjs'
+import { HOOK_EVENTS, hooksInstalled } from '../../server/setup/hooks.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
 import { renderUnit } from '../../server/setup/units.mjs'
 
@@ -67,8 +68,27 @@ test('dry run leaves settings, directories and services untouched', () => {
   assert.deepEqual(readFileSync(s.settings), before)
   assert.equal(readdirSync(s.config).length, 0)
   assert.equal(readdirSync(s.state).length, 0)
+  assert.equal(existsSync(s.env.XDG_DATA_HOME), false)
   assert.equal(readdirSync(s.home).includes('.local'), false)
   assert.equal(readdirSync(s.root).includes('calls'), false)
+})
+
+test('hooksInstalled requires the installed command for every subscribed event', () => {
+  const command = 'node /tmp/fleetmates-deck/hook/deck-hook.mjs'
+  const settings = {
+    hooks: Object.fromEntries(HOOK_EVENTS.map(event => [event, [
+      { matcher: '*', hooks: [{ type: 'command', command, async: true }] }
+    ]]))
+  }
+  assert.equal(hooksInstalled(settings, command), true)
+  for (const event of HOOK_EVENTS) {
+    const missing = structuredClone(settings)
+    delete missing.hooks[event]
+    assert.equal(hooksInstalled(missing, command), false, `missing ${event}`)
+    const wrongCommand = structuredClone(settings)
+    wrongCommand.hooks[event][0].hooks[0].command = 'node /tmp/unrelated-hook.mjs'
+    assert.equal(hooksInstalled(wrongCommand, command), false, `wrong command for ${event}`)
+  }
 })
 
 test('dry run reports pending changes without exposing settings secrets', () => {
