@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import fs from 'node:fs'
 import { chmodSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,7 +10,7 @@ import { createServer } from 'node:net'
 import test from 'node:test'
 import { chromium } from 'playwright-core'
 import { doctor, status } from '../../server/setup/doctor.mjs'
-import { hooksInstalled } from '../../server/setup/hooks.mjs'
+import { hooksInstalled, readSettings, writeSettings } from '../../server/setup/hooks.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
 import { renderUnit } from '../../server/setup/units.mjs'
 
@@ -140,6 +141,53 @@ test('init merges hooks, preserves existing order and is byte identical twice', 
   const calls = readFileSync(s.calls, 'utf8')
   assert.match(calls, /^systemctl:--user enable --now fleetmates-deckd.service fleetmates-deck.service$/m)
   assert.equal(calls.includes('restart fleetmates-deckd'), false)
+})
+
+test('settings replacement is atomic and preserves originals through interrupted writes', { concurrency: false }, () => {
+  const s = sandbox('existing-hooks.json')
+  const original = readFileSync(s.settings)
+  const current = readSettings(s.settings)
+  const next = { ...current.value, enabledPlugins: { 'example-plugin': true } }
+  const methods = { writeFileSync: fs.writeFileSync, renameSync: fs.renameSync, copyFileSync: fs.copyFileSync }
+  const interruption = new Error('simulated settings interruption')
+  for (const stage of ['write', 'rename']) {
+    try {
+      fs.writeFileSync = (file, ...args) => {
+        if (stage === 'write' && String(file).startsWith(`${s.settings}.deck-`) && String(file).endsWith('.tmp')) {
+          methods.writeFileSync(file, '{', args[1])
+          throw interruption
+        }
+        return methods.writeFileSync(file, ...args)
+      }
+      fs.renameSync = (source, destination) => {
+        if (stage === 'rename' && destination === s.settings) throw interruption
+        return methods.renameSync(source, destination)
+      }
+      fs.copyFileSync = (source, destination, ...args) => {
+        if (destination === s.settings) {
+          methods.writeFileSync(destination, '{')
+          throw interruption
+        }
+        return methods.copyFileSync(source, destination, ...args)
+      }
+      assert.throws(() => writeSettings(s.settings, current, next), error => error === interruption)
+      assert.deepEqual(readFileSync(s.settings), original, `${stage} interruption preserves settings bytes`)
+      assert.deepEqual(readSettings(s.settings).value, current.value)
+      assert.equal(readdirSync(path.dirname(s.settings)).some(name => name.endsWith('.tmp')), false)
+    } finally {
+      Object.assign(fs, methods)
+    }
+  }
+  const descriptor = fs.openSync(s.settings, 'r')
+  try {
+    const backup = writeSettings(s.settings, current, next)
+    assert.deepEqual(readFileSync(backup), original)
+    assert.deepEqual(readSettings(s.settings).value, next)
+    assert.deepEqual(readFileSync(descriptor), original, 'existing readers retain the original file after replacement')
+    assert.equal(readdirSync(path.dirname(s.settings)).some(name => name.endsWith('.tmp')), false)
+  } finally {
+    fs.closeSync(descriptor)
+  }
 })
 
 test('init rotate token replaces the token and keeps private file mode', () => {
