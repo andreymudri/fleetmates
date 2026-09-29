@@ -1827,3 +1827,84 @@ for (const [variable, suffix] of [
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+
+test('SubagentStop restores active states while preserving request precedence and dead sessions', async t => {
+  for (const initial of ['idle', 'done', 'reviewed', 'running', 'stale', 'needs_approval', 'asked_you', 'ended', 'crashed', 'dead_done']) await t.test(initial, () => {
+    const h = harness()
+    try {
+      const hook = (event, at, fields = {}) => ({ ...fixture('SessionStart.startup.json', { hook_event_name: event, cwd: path.dirname(h.file), ...fields }), hookTs: at })
+      h.projector.applyHooks([hook('SessionStart', 1000), hook('SubagentStart', 2000)])
+      if (['done', 'reviewed', 'dead_done'].includes(initial)) h.projector.applyHooks([hook('PostToolUse', 2500, { tool_name: 'Edit', tool_input: { file_path: path.join(path.dirname(h.file), 'changed.txt') } })])
+      if (['idle', 'done', 'reviewed', 'dead_done'].includes(initial)) h.projector.applyHooks([hook('Notification', 3000, { notification_type: 'idle_prompt', message: 'Waiting for input' })])
+      const id = h.projector.snapshot().sessions[0].id
+      if (initial === 'reviewed') h.projector.signal(id, { type: 'review' }, 3500)
+      if (initial === 'needs_approval') h.projector.applyHooks([hook('PermissionRequest', 3000, { tool_name: 'Bash', tool_input: { command: 'pwd' } })])
+      if (initial === 'asked_you') h.projector.applyHooks([{ ...fixture('PreToolUse.AskUserQuestion.json', { cwd: path.dirname(h.file) }), hookTs: 3000 }])
+      if (initial === 'stale') h.projector.tick(1202000)
+      if (['ended', 'crashed', 'dead_done'].includes(initial)) h.projector.signal(id, { type: 'exit', code: initial === 'crashed' ? 1 : 0 }, 4000)
+      const before = h.store.get('SELECT * FROM sessions WHERE id = ?', id)
+      assert.equal(before.state, initial === 'dead_done' ? 'done' : initial)
+      const at = initial === 'stale' ? 1202001 : 4000
+      h.projector.applyHooks([hook('SubagentStop', at, { stop_hook_active: false })])
+      const after = h.store.get('SELECT * FROM sessions WHERE id = ?', id)
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+      if (!before.alive) {
+        assert.deepEqual(after, before)
+      } else {
+        const waiting = ['needs_approval', 'asked_you'].includes(initial)
+        assert.equal(after.state, waiting ? initial : 'running')
+        assert.equal(after.state_since, waiting || initial === 'running' ? before.state_since : at)
+        assert.equal(after.last_activity_at, at)
+        assert.equal(after.subagents_active, 0)
+        assert.equal(h.projector.snapshot().counts.running, waiting ? 0 : 1)
+        assert.equal(h.projector.snapshot().counts.openRequests, waiting ? 1 : 0)
+        if (waiting) assert.equal(h.projector.snapshot().requests[0].state, 'open')
+        assert.equal(after.changed_files, before.changed_files)
+        assert.equal(after.review_baseline, before.review_baseline)
+      }
+    } finally { h.close() }
+  })
+})
+
+test('process end state timing records transitions and preserves an unchanged done timestamp', async t => {
+  for (const ending of ['exit_done', 'exit_done_unchanged', 'exit_crashed', 'exit_ended', 'lost', 'alias_done', 'alias_done_unchanged', 'alias_ended', 'silent', 'observed']) await t.test(ending, () => {
+    const h = harness()
+    try {
+      const hook = (event, at, fields = {}) => ({ ...fixture('SessionStart.startup.json', { hook_event_name: event, cwd: path.dirname(h.file), ...fields }), hookTs: at, claudePid: ending === 'silent' ? null : 42 })
+      h.projector.applyHooks([hook('SessionStart', 1000), hook('UserPromptSubmit', 2000, { prompt: 'Work' })])
+      if (ending.includes('done')) h.projector.applyHooks([hook('PostToolUse', 3000, { tool_name: 'Write', tool_input: { file_path: path.join(path.dirname(h.file), 'changed.txt') } })])
+      if (ending.endsWith('unchanged')) h.projector.applyHooks([hook('Stop', 4000, { stop_hook_active: false })])
+      const id = h.projector.snapshot().sessions[0].id
+      if (ending.startsWith('alias')) h.projector.applyHooks([hook('SessionEnd', 5000, { reason: 'clear' })])
+      const before = h.store.get('SELECT * FROM sessions WHERE id = ?', id)
+      const at = ending === 'silent' ? 86402000 : 10000
+      if (ending.startsWith('alias') || ending === 'silent') h.projector.tick(at)
+      else if (ending === 'observed') h.projector.applyHooks([hook('SessionEnd', at, { reason: 'prompt_input_exit' })])
+      else h.projector.signal(id, ending === 'lost' ? { type: 'pid_gone' } : { type: 'exit', code: ending === 'exit_crashed' ? 1 : 0 }, at)
+      const expected = ending.includes('done') ? 'done' : ['lost', 'exit_crashed'].includes(ending) ? 'crashed' : 'ended'
+      const after = h.store.get('SELECT * FROM sessions WHERE id = ?', id)
+      assert.equal(after.state, expected)
+      assert.equal(after.state_since, before.state === expected ? before.state_since : at)
+      assert.equal(after.since_ts, at)
+      assert.equal(after.ended_at, at)
+      assert.equal(h.projector.snapshot().sessions[0].stateSince, after.state_since)
+      h.projector.tick(at + 1000)
+      h.projector.signal(id, { type: 'exit', code: 1 }, at + 2000)
+      assert.equal(h.store.get('SELECT state_since FROM sessions WHERE id = ?', id).state_since, after.state_since)
+    } finally { h.close() }
+  })
+})
+
+test('stale timing remains anchored to last activity across repeated ticks', () => {
+  const h = harness()
+  try {
+    const prompt = { ...fixture('UserPromptSubmit.json'), hookTs: 2000 }
+    h.projector.applyHooks([fixture('SessionStart.startup.json'), prompt])
+    h.projector.tick(1202000)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'stale')
+    assert.equal(h.projector.snapshot().sessions[0].stateSince, 2000)
+    h.projector.tick(1203000)
+    assert.equal(h.projector.snapshot().sessions[0].stateSince, 2000)
+  } finally { h.close() }
+})

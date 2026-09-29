@@ -251,7 +251,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   else if (event === 'SubagentStart') { subagents++; if (!['needs_approval', 'asked_you'].includes(state)) state = 'running' }
   else if (event === 'SubagentStop') {
     subagents = Math.max(0, subagents - 1)
-    if (state === 'stale') state = 'running'
+    if (['running', 'stale', 'idle', 'done', 'reviewed'].includes(state)) state = 'running'
   }
   else if (event === 'PreCompact') { activity = 'compacting'; state = 'running' }
   else if (event === 'PostCompact') { activity = null; state = 'running' }

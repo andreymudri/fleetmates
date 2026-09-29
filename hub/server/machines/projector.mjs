@@ -85,7 +85,8 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
       return commit(() => {
         for (const row of store.all('SELECT * FROM sessions WHERE origin = ? AND alive = 1 AND end_reason IN (?, ?) AND ? - state_since >= ?', 'observed', 'clear', 'resume', at, 5000)) {
           closeRequests(row.id, 'process_ended', at)
-          store.run('UPDATE sessions SET state = ?, alive = 0, ended_at = ?, since_ts = ? WHERE id = ?', JSON.parse(row.changed_files).length ? 'done' : 'ended', at, at, row.id)
+          const state = JSON.parse(row.changed_files).length ? 'done' : 'ended'
+          store.run('UPDATE sessions SET state = ?, state_since = ?, alive = 0, ended_at = ?, since_ts = ? WHERE id = ?', state, state === row.state ? row.state_since : at, at, at, row.id)
           persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
           store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
         }
@@ -95,7 +96,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
         }
         for (const row of store.all('SELECT * FROM sessions WHERE origin = ? AND alive = 1 AND process_key IS NULL AND ? - last_activity_at >= ?', 'observed', at, 86_400_000)) {
           closeRequests(row.id, 'process_ended', at)
-          store.run('UPDATE sessions SET state = ?, alive = 0, ended_at = ?, since_ts = ? WHERE id = ?', 'ended', at, at, row.id)
+          store.run('UPDATE sessions SET state = ?, state_since = ?, alive = 0, ended_at = ?, since_ts = ? WHERE id = ?', 'ended', row.state === 'ended' ? row.state_since : at, at, at, row.id)
           persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
           store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
         }
@@ -108,12 +109,13 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
         if (!row) return
         if (signal.type === 'pid_gone' && row.origin === 'observed' && row.alive) {
           closeRequests(row.id, 'process_ended', at)
-          store.run('UPDATE sessions SET state=?,alive=0,crash_kind=?,ended_at=?,since_ts=? WHERE id=?', 'crashed', 'lost', at, at, row.id)
+          store.run('UPDATE sessions SET state=?,state_since=?,alive=0,crash_kind=?,ended_at=?,since_ts=? WHERE id=?', 'crashed', row.state === 'crashed' ? row.state_since : at, 'lost', at, at, row.id)
         } else if (signal.type === 'exit' && row.alive) {
           closeRequests(row.id, 'process_ended', at)
           const exitSignal = signal.signal && signal.signal !== '0' ? String(signal.signal) : null
           const crashed = (signal.code !== 0 || exitSignal !== null) && !row.user_stop_requested && !row.end_announced
-          store.run('UPDATE sessions SET state=?,alive=0,ended_at=?,exit_code=?,exit_signal=?,crash_kind=?,since_ts=? WHERE id=?', crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended', at, signal.code ?? null, exitSignal, crashed ? exitSignal ? 'signal' : 'exit' : null, at, row.id)
+          const state = crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended'
+          store.run('UPDATE sessions SET state=?,state_since=?,alive=0,ended_at=?,exit_code=?,exit_signal=?,crash_kind=?,since_ts=? WHERE id=?', state, state === row.state ? row.state_since : at, at, signal.code ?? null, exitSignal, crashed ? exitSignal ? 'signal' : 'exit' : null, at, row.id)
         } else if (signal.type === 'review' && row.state === 'done') {
           const baseline = captureReviewBaseline(row.repo_id, row.review_baseline)
           store.run('UPDATE sessions SET state=?,reviewed_at=?,state_since=?,since_ts=?,changed_files=?,review_baseline=? WHERE id=?', row.alive ? 'reviewed' : 'ended', at, at, at, '[]', baseline ?? row.review_baseline, row.id)
