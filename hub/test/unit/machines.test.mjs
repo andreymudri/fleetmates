@@ -613,6 +613,26 @@ test('relative deck token operands remain protected across file-reading commands
   }
 })
 
+test('unspaced input redirections retain the protected token tier', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-token-redirect-'))
+  const cwd = path.join(root, 'fleetmates', 'deck')
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(path.join(cwd, 'token'), 'synthetic-token\n')
+    process.env.XDG_STATE_HOME = root
+    for (const command of ['cat<token', 'cat <token', 'cat<./token']) {
+      assert.equal(execFileSync('/bin/sh', ['-c', command], { cwd, encoding: 'utf8', timeout: 1000 }), 'synthetic-token\n')
+      assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
+    }
+    assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command: "echo 'cat<token'" } }), 'caution')
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('known XDG state shell variables retain the deck token floor', () => {
   const previous = process.env.XDG_STATE_HOME
   try {
@@ -696,11 +716,44 @@ test('SessionStart sorts before an unranked hook at the same timestamp', () => {
   try {
     const start = fixture('SessionStart.startup.json')
     const changed = fixture('SessionStart.startup.json', { hook_event_name: 'CwdChanged', cwd: '/home/you/another' })
-    h.projector.applyHooks([start, changed])
+    h.projector.applyHooks([changed, start])
     const session = h.projector.snapshot().sessions[0]
     assert.equal(session.state, 'idle')
     assert.equal(session.joinedMidLife, false)
     assert.deepEqual(h.store.all('SELECT event FROM hook_events ORDER BY id').map(row => row.event), ['SessionStart', 'CwdChanged'])
+  } finally { h.close() }
+})
+
+test('delayed hooks stay attached to their ended process without creating approvals', () => {
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('SessionStart.startup.json')])
+    const id = h.projector.snapshot().sessions[0].id
+    const end = fixture('SessionEnd.prompt_input_exit.json', { reason: 'logout' })
+    end.hookTs = 2000
+    h.projector.applyHooks([end])
+    const delayed = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    delayed.hookTs = 1500
+    h.projector.applyHooks([delayed])
+    assert.equal(h.projector.snapshot().sessions.length, 1)
+    assert.equal(h.projector.snapshot().sessions[0].alive, false)
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    assert.deepEqual({ ...h.store.get('SELECT session_id, applied FROM hook_events WHERE hook_ts = ?', 1500) }, { session_id: id, applied: 0 })
+    const equalEnd = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'echo end' } })
+    equalEnd.hookTs = 2000
+    h.projector.applyHooks([equalEnd])
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    assert.equal(h.store.get('SELECT applied FROM hook_events WHERE event = ? AND hook_ts = ?', 'PermissionRequest', 2000).applied, 0)
+    const restart = fixture('SessionStart.startup.json')
+    restart.hookTs = 3000
+    h.projector.applyHooks([restart])
+    const anotherLate = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'echo late' } })
+    anotherLate.hookTs = 1600
+    h.projector.applyHooks([anotherLate])
+    assert.equal(h.projector.snapshot().sessions.length, 2)
+    assert.equal(h.projector.snapshot().sessions.filter(row => row.alive).length, 1)
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    assert.equal(h.store.get('SELECT session_id FROM hook_events WHERE hook_ts = ?', 1600).session_id, id)
   } finally { h.close() }
 })
 
@@ -1145,6 +1198,51 @@ test('a notification upgraded by a destructive tool request gains the destructiv
     h.projector.applyHooks([notification, request])
     assert.equal(h.projector.snapshot().counts.openRequests, 1)
     assert.equal(h.projector.snapshot().requests[0].tier, 'destructive')
+  } finally { h.close() }
+})
+
+test('notification upgrades publish the updated request after commit', () => {
+  const h = harness()
+  const reader = openDeckDb(h.file)
+  try {
+    const events = []
+    const projector = createProjector({ store: h.store, publish: event => {
+      if (event.type === 'request.updated') {
+        assert.equal(reader.get('SELECT tier FROM requests WHERE id = ?', event.entityId).tier, 'destructive')
+        assert.ok(reader.get('SELECT seq FROM events WHERE seq = ?', event.seq))
+      }
+      events.push(event)
+    } })
+    const notification = fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Allow command?' })
+    projector.applyHooks([notification])
+    const id = projector.snapshot().requests[0].id
+    events.length = 0
+    const request = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'rm old.log' } })
+    request.hookTs = 1001
+    projector.applyHooks([request])
+    const updates = events.filter(event => event.type === 'request.updated')
+    assert.equal(updates.length, 1)
+    assert.equal(updates[0].entityId, id)
+    assert.deepEqual(updates[0].data, projector.snapshot().requests[0])
+    assert.equal(updates[0].data.tier, 'destructive')
+    assert.equal(updates[0].data.summary, 'Bash: {"command":"rm old.log"}')
+    assert.equal(events.filter(event => event.type === 'request.opened' || event.type === 'request.closed').length, 0)
+  } finally { reader.close(); h.close() }
+})
+
+test('an unrequested signal exit is crashed even with exit code zero', () => {
+  const h = harness()
+  try {
+    const start = fixture('SessionStart.startup.json')
+    start.ptyId = 'signal-pty'
+    h.projector.applyHooks([start])
+    const id = h.projector.snapshot().sessions[0].id
+    h.projector.signal(id, { type: 'exit', code: 0, signal: 'SIGKILL' }, 2000)
+    assert.deepEqual({ ...h.store.get('SELECT state, alive, crash_kind, exit_code, exit_signal FROM sessions WHERE id = ?', id) }, {
+      state: 'crashed', alive: 0, crash_kind: 'signal', exit_code: 0, exit_signal: 'SIGKILL'
+    })
+    assert.equal(h.projector.snapshot().sessions[0].crashKind, 'signal')
+    assert.equal(h.projector.snapshot().sessions[0].exitSignal, 'SIGKILL')
   } finally { h.close() }
 })
 

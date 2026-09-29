@@ -26,11 +26,12 @@ function shellTokens(command) {
       else value += char
     } else if (char === "'" || char === '"') { quote = char; quoted = true }
     else if (char === '\\' && i + 1 < command.length) value += command[++i]
-    else if (/\s/.test(char) || ';|&()'.includes(char)) {
+    else if (/\s/.test(char) || ';|&()<>'.includes(char)) {
       if (value) tokens.push({ value, quoted })
       value = ''
       quoted = false
-      if (';|&()'.includes(char) || char === '\n') tokens.push({ value: char, separator: true })
+      if ('<>'.includes(char)) tokens.push({ value: char })
+      else if (';|&()'.includes(char) || char === '\n') tokens.push({ value: char, separator: true })
     } else value += char
   }
   if (value) tokens.push({ value, quoted })

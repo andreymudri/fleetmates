@@ -119,6 +119,8 @@ function sameKnownProcess(store, row, envelope) {
 export function resolveSession(store, envelope) {
   const hook = envelope.hook
   const pty = envelope.ptyId
+  const historical = store.all('SELECT DISTINCT s.* FROM sessions s LEFT JOIN session_aliases a ON a.session_id = s.id WHERE s.alive = 0 AND s.started_at <= ? AND COALESCE(s.ended_at, s.since_ts) >= ? AND (s.claude_session_id = ? OR a.claude_session_id = ? OR s.pty_id = ? OR s.process_key = ?) ORDER BY s.started_at DESC', envelope.hookTs, envelope.hookTs, hook.session_id, hook.session_id, pty ?? null, envelope.claudePid ? String(envelope.claudePid) : null).find(row => sameKnownProcess(store, row, envelope))
+  if (historical) return historical
   if (pty) {
     const found = store.get('SELECT * FROM sessions WHERE pty_id = ? AND alive = 1', pty)
     if (found) return found

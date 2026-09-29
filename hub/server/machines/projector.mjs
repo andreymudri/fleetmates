@@ -10,7 +10,7 @@ const rank = event => {
 }
 
 function sessionView(row) {
-  return { id: row.id, claudeSessionId: row.claude_session_id, origin: row.origin, repoId: row.repo_id, cwd: row.cwd, task: row.task, state: row.state, stateSince: row.state_since, lastActivityAt: row.last_activity_at, alive: !!row.alive, joinedMidLife: !!row.joined_mid_life, changedFiles: JSON.parse(row.changed_files) }
+  return { id: row.id, claudeSessionId: row.claude_session_id, origin: row.origin, repoId: row.repo_id, cwd: row.cwd, task: row.task, state: row.state, stateSince: row.state_since, lastActivityAt: row.last_activity_at, alive: !!row.alive, joinedMidLife: !!row.joined_mid_life, changedFiles: JSON.parse(row.changed_files), crashKind: row.crash_kind, exitCode: row.exit_code, exitSignal: row.exit_signal }
 }
 function requestView(row) {
   return { id: row.id, sessionId: row.session_id, kind: row.kind, tier: row.tier, state: row.state, answer: row.answer ? JSON.parse(row.answer) : null, expiredReason: row.expired_reason, createdAt: row.created_at, summary: row.summary }
@@ -47,8 +47,8 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           if (store.get('SELECT id FROM hook_events WHERE dedupe_key = ?', key)) continue
           let session = resolveSession(store, envelope)
           if (!session && hook.hook_event_name === 'SessionEnd') continue
-          const late = !!session && envelope.hookTs < session.since_ts
-          const beforeRequests = session ? new Map(store.all('SELECT id, state FROM requests WHERE session_id = ?', session.id).map(row => [row.id, row.state])) : new Map()
+          const late = !!session && (envelope.hookTs < session.since_ts || !session.alive && !(hook.hook_event_name === 'SessionStart' && hook.source === 'resume'))
+          const beforeRequests = session ? new Map(store.all('SELECT * FROM requests WHERE session_id = ?', session.id).map(row => [row.id, requestView(row)])) : new Map()
           if (!late) {
             const known = !!session
             if (!known) session = applySessionHook(store, envelope, null, false)
@@ -61,7 +61,8 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           if (session && !late) {
             for (const row of store.all('SELECT * FROM requests WHERE session_id = ?', session.id)) {
               if (!beforeRequests.has(row.id)) store.appendEvent({ at: envelope.hookTs, type: 'request.opened', entityId: row.id, data: requestView(row) })
-              else if (beforeRequests.get(row.id) === 'open' && row.state !== 'open') store.appendEvent({ at: envelope.hookTs, type: 'request.closed', entityId: row.id, data: requestView(row) })
+              else if (beforeRequests.get(row.id).state === 'open' && row.state !== 'open') store.appendEvent({ at: envelope.hookTs, type: 'request.closed', entityId: row.id, data: requestView(row) })
+              else if (JSON.stringify(beforeRequests.get(row.id)) !== JSON.stringify(requestView(row))) store.appendEvent({ at: envelope.hookTs, type: 'request.updated', entityId: row.id, data: requestView(row) })
             }
           }
           if (session && !late) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session) })
@@ -97,8 +98,9 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           store.run('UPDATE sessions SET state=?,alive=0,crash_kind=?,since_ts=? WHERE id=?', 'crashed', 'lost', at, row.id)
         } else if (signal.type === 'exit' && row.alive) {
           closeRequests(row.id, 'process_ended', at)
-          const crashed = signal.code !== 0 && !row.user_stop_requested && !row.end_announced
-          store.run('UPDATE sessions SET state=?,alive=0,ended_at=?,exit_code=?,crash_kind=?,since_ts=? WHERE id=?', crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended', at, signal.code ?? null, crashed ? 'exit' : null, at, row.id)
+          const exitSignal = signal.signal && signal.signal !== '0' ? String(signal.signal) : null
+          const crashed = (signal.code !== 0 || exitSignal !== null) && !row.user_stop_requested && !row.end_announced
+          store.run('UPDATE sessions SET state=?,alive=0,ended_at=?,exit_code=?,exit_signal=?,crash_kind=?,since_ts=? WHERE id=?', crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended', at, signal.code ?? null, exitSignal, crashed ? exitSignal ? 'signal' : 'exit' : null, at, row.id)
         } else if (signal.type === 'review' && row.state === 'done') {
           const baseline = captureReviewBaseline(row.repo_id, row.review_baseline)
           store.run('UPDATE sessions SET state=?,reviewed_at=?,state_since=?,since_ts=?,changed_files=?,review_baseline=? WHERE id=?', row.alive ? 'reviewed' : 'ended', at, at, at, '[]', baseline ?? row.review_baseline, row.id)
