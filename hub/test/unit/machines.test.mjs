@@ -44,6 +44,30 @@ test('resume clears the previous process crash before recording a clean end', ()
   }
 })
 
+test('late hooks from a replaced process stay attached to its resumed conversation', () => {
+  const h = harness()
+  try {
+    const start = fixture('SessionStart.startup.json')
+    start.claudePid = 41
+    h.projector.applyHooks([start])
+    const id = h.projector.snapshot().sessions[0].id
+    h.projector.signal(id, { type: 'pid_gone' }, 2000)
+    const resume = fixture('SessionStart.startup.json', { source: 'resume' })
+    resume.hookTs = 3000
+    h.projector.applyHooks([resume])
+    const late = fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    late.claudePid = 41
+    late.hookTs = 1500
+    h.projector.applyHooks([late])
+    assert.equal(h.projector.snapshot().sessions.length, 1)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    const recorded = h.store.get('SELECT session_id, applied FROM hook_events WHERE event = ?', 'PermissionRequest')
+    assert.deepEqual({ ...recorded }, { session_id: id, applied: 0 })
+    assert.equal(h.store.get('SELECT process_key FROM sessions WHERE id = ?', id).process_key, '42')
+  } finally { h.close() }
+})
+
 test('captured AskUserQuestion answers close the question without rewriting outcome input', () => {
   for (const withPermission of [false, true]) {
     const h = harness()

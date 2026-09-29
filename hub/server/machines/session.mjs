@@ -150,6 +150,14 @@ function sameKnownProcess(store, row, envelope) {
 export function resolveSession(store, envelope) {
   const hook = envelope.hook
   const pty = envelope.ptyId
+  const identity = envelope.claudePid ?? pty
+  if (identity) {
+    const column = envelope.claudePid ? 'claude_pid' : 'pty_id'
+    const previous = store.get(`SELECT s.* FROM sessions s JOIN hook_events e ON e.session_id = s.id
+      WHERE e.${column} = ? AND e.claude_session_id = ? AND e.hook_ts <= ? AND s.since_ts > ?
+      ORDER BY e.hook_ts DESC LIMIT 1`, identity, hook.session_id, envelope.hookTs, envelope.hookTs)
+    if (previous) return previous
+  }
   const historical = store.all('SELECT DISTINCT s.* FROM sessions s LEFT JOIN session_aliases a ON a.session_id = s.id WHERE s.alive = 0 AND s.started_at <= ? AND COALESCE(s.ended_at, s.since_ts) >= ? AND (s.claude_session_id = ? OR a.claude_session_id = ? OR s.pty_id = ? OR s.process_key = ?) ORDER BY s.started_at DESC', envelope.hookTs, envelope.hookTs, hook.session_id, hook.session_id, pty ?? null, envelope.claudePid ? String(envelope.claudePid) : null).find(row => sameKnownProcess(store, row, envelope))
   if (historical) return historical
   if (pty) {
