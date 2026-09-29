@@ -224,6 +224,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
       alive = 1
       endedAt = null
       endAnnounced = 0
+      store.run('UPDATE sessions SET crash_kind=NULL,exit_code=NULL,exit_signal=NULL,user_stop_requested=0 WHERE id=?', existing.id)
       processKey = envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null)
       ptyId = envelope.ptyId ?? null
     }

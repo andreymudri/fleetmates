@@ -22,6 +22,28 @@ function harness() {
   return { store, projector, file, close() { store.close(); rmSync(dir, { recursive: true, force: true }) } }
 }
 
+test('resume clears the previous process crash before recording a clean end', () => {
+  for (const signal of [{ type: 'pid_gone' }, { type: 'exit', code: 1 }, { type: 'exit', code: 0, signal: 'SIGKILL' }]) {
+    const h = harness()
+    try {
+      const start = fixture('SessionStart.startup.json')
+      start.claudePid = 41
+      h.projector.applyHooks([start])
+      const id = h.projector.snapshot().sessions[0].id
+      h.projector.signal(id, signal, 2000)
+      const resume = fixture('SessionStart.startup.json', { source: 'resume' })
+      resume.hookTs = 3000
+      h.projector.applyHooks([resume])
+      const row = h.store.get('SELECT crash_kind, exit_code, exit_signal FROM sessions WHERE id = ?', id)
+      assert.deepEqual({ ...row }, { crash_kind: null, exit_code: null, exit_signal: null })
+      const end = fixture('SessionEnd.prompt_input_exit.json')
+      end.hookTs = 4000
+      h.projector.applyHooks([end])
+      assert.equal(h.store.get('SELECT outcome FROM session_summaries WHERE session_id = ?', id).outcome, 'ended')
+    } finally { h.close() }
+  }
+})
+
 test('captured AskUserQuestion answers close the question without rewriting outcome input', () => {
   for (const withPermission of [false, true]) {
     const h = harness()
