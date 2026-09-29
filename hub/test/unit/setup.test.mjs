@@ -8,7 +8,7 @@ import { createContext, runInContext } from 'node:vm'
 import { createServer } from 'node:net'
 import test from 'node:test'
 import { chromium } from 'playwright-core'
-import { doctor } from '../../server/setup/doctor.mjs'
+import { doctor, status } from '../../server/setup/doctor.mjs'
 import { HOOK_EVENTS, hooksInstalled } from '../../server/setup/hooks.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
 import { renderUnit } from '../../server/setup/units.mjs'
@@ -385,6 +385,60 @@ test('doctor and status read setup state without service mutations', () => {
     'systemctl:--user is-active fleetmates-deck.service'
   ])
 })
+
+for (const stall of ['hello', 'list', null]) {
+  test(`setup socket probe ${stall ? `bounds stalled ${stall}` : 'reads a responsive daemon'}`, async () => {
+    const s = sandbox()
+    const paths = setupPaths(s.env)
+    mkdirSync(paths.runtime, { recursive: true })
+    const sockets = new Set()
+    const requests = []
+    const server = createServer(socket => {
+      sockets.add(socket)
+      socket.on('close', () => sockets.delete(socket))
+      let buffer = ''
+      socket.on('data', chunk => {
+        buffer += chunk
+        let newline
+        while ((newline = buffer.indexOf('\n')) !== -1) {
+          const message = JSON.parse(buffer.slice(0, newline))
+          buffer = buffer.slice(newline + 1)
+          requests.push(message.op)
+          if (message.op === stall) continue
+          assert.equal(message.op === 'hello' || message.op === 'list', true)
+          if (message.op === 'hello') {
+            assert.equal(message.proto, 1)
+            assert.equal(message.client.kind, 'terminal')
+          }
+          socket.write(`${JSON.stringify({ id: message.id, ok: true, ptys: [{ id: 'one' }, { id: 'two' }] })}\n`)
+        }
+      })
+    })
+    await new Promise((resolve, reject) => server.listen(path.join(paths.runtime, 'deckd.sock'), resolve).once('error', reject))
+    const run = file => ({ status: 0, stdout: file === 'claude' ? '2.1.282' : 'active' })
+    async function bounded(pending) {
+      let timer
+      try {
+        return await Promise.race([pending, new Promise((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('setup socket probe exceeded 3 seconds')), 3000)
+        })])
+      } finally { clearTimeout(timer) }
+    }
+    try {
+      const checks = await bounded(doctor(paths, 'unused', { run }))
+      assert.equal(checks.find(check => check.id === 'deckd').state, stall === 'hello' ? 'failed' : 'ok')
+      const summary = await bounded(status(paths, 'unused', { run }))
+      assert.equal(summary.livePtys, stall ? 0 : 2)
+      assert.equal(summary.socket, true)
+      assert.deepEqual(requests, stall === 'hello' ? ['hello', 'hello'] : ['hello', 'hello', 'list'])
+      await new Promise(resolve => setTimeout(resolve, 30))
+      assert.equal(sockets.size, 0, 'probe closes connections after success or timeout')
+    } finally {
+      for (const socket of sockets) socket.destroy()
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+}
 
 test('doctor fails when the configured hook script is missing or not a file', () => {
   const s = sandbox()

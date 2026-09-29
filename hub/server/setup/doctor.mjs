@@ -1,12 +1,46 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import net from 'node:net'
 import { spawnSync } from 'node:child_process'
-import { connectDeckd } from '../../deckd/client.mjs'
+import { createLineDecoder, encode, PROTO } from '../../deckd/protocol.mjs'
 import { SOCKET_NAME } from '../adapters/scribed.mjs'
 import { hooksInstalled, readSettings } from './hooks.mjs'
 
 function probe(file, args, timeout = 2000) {
   return spawnSync(file, args, { encoding: 'utf8', timeout, env: process.env })
+}
+
+function probeDeckd(paths, list = false) {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(path.join(paths.runtime, 'deckd.sock'))
+    let settled = false
+    let expectedId = 1
+    const finish = (error, result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      if (error) reject(error)
+      else resolve(result)
+    }
+    const timer = setTimeout(() => finish(new Error('deckd probe timed out')), 2000)
+    socket.once('connect', () => {
+      socket.write(encode({ id: 1, op: 'hello', proto: PROTO, client: { kind: 'terminal', pid: process.pid } }))
+    })
+    socket.on('data', createLineDecoder(message => {
+      if (settled || message?.id !== expectedId) return
+      if (message.ok !== true) {
+        finish(new Error('deckd probe refused'))
+      } else if (expectedId === 1 && list) {
+        expectedId = 2
+        socket.write(encode({ id: 2, op: 'list' }))
+      } else {
+        finish(null, message)
+      }
+    }, () => finish(new Error('invalid deckd response'))))
+    socket.once('error', error => finish(error))
+    socket.once('close', () => finish(new Error('deckd probe closed')))
+  })
 }
 
 /** Run the six terminal setup checks without changing local state. */
@@ -28,8 +62,7 @@ export async function doctor(paths, command, { run = probe } = {}) {
   let socket = false
   if (unit.status === 0 && paths.runtime) {
     try {
-      const client = await connectDeckd({ runtimeDir: path.dirname(paths.runtime), kind: 'terminal' })
-      client.close()
+      await probeDeckd(paths)
       socket = true
     } catch {}
   }
@@ -51,8 +84,7 @@ export async function status(paths, command, { run = probe } = {}) {
   let livePtys = 0
   if (socket) {
     try {
-      const client = await connectDeckd({ runtimeDir: path.dirname(paths.runtime), kind: 'terminal' })
-      try { livePtys = (await client.request('list')).ptys.length } finally { client.close() }
+      livePtys = (await probeDeckd(paths, true)).ptys.length
     } catch {}
   }
   return { units, hooks, socket, livePtys, claudeVersion, testedClaudeVersion: '2.1.282' }
