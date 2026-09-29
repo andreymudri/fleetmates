@@ -241,6 +241,54 @@ function namesRelativeDeckControl(hook) {
   return accessesControl(segment)
 }
 
+function shellWriteTargets(command) {
+  const targets = []
+  const tokens = shellTokens(command)
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i].value !== '>' || tokens[i].quoted) continue
+    while (tokens[i + 1]?.value === '>' && !tokens[i + 1].quoted) i++
+    const target = tokens[i + 1]
+    if (target && !target.separator && target.value !== '&') targets.push(target.value)
+  }
+  const inspect = words => {
+    let index = 0
+    while (words[index]) {
+      const wrapper = path.posix.basename(words[index].value)
+      if (['env', 'sudo', 'doas'].includes(wrapper)) { index = skipWrapperOptions(words, index, wrapper); continue }
+      if (/^[A-Za-z_]\w*=/.test(words[index].value) || ['command', 'builtin'].includes(wrapper)) {
+        index++
+        if (wrapper === 'command') {
+          while (words[index]?.value === '--' || /^-[pVv]+$/.test(words[index]?.value ?? '')) {
+            if (/[Vv]/.test(words[index].value)) return
+            if (words[index++].value === '--') break
+          }
+        }
+        continue
+      }
+      break
+    }
+    const executable = path.posix.basename(words[index]?.value ?? '')
+    const args = words.slice(index + 1).map(word => word.value)
+    if (executable === 'dd') {
+      for (const arg of args) if (arg.startsWith('of=')) targets.push(arg.slice(3))
+    }
+    const editsInPlace = ['sed', 'perl'].includes(executable) && args.some(arg => arg === '--in-place' || arg.startsWith('--in-place=') || /^-i/.test(arg))
+    if (['tee', 'cp', 'mv', 'install', 'touch', 'truncate'].includes(executable) || editsInPlace) {
+      for (const arg of args) {
+        if (arg.startsWith('--target-directory=')) targets.push(arg.slice('--target-directory='.length))
+        else if (!arg.startsWith('-') && !['<', '>'].includes(arg)) targets.push(arg)
+      }
+    }
+  }
+  let segment = []
+  for (const token of tokens) {
+    if (token.separator) { inspect(segment); segment = [] }
+    else segment.push(token)
+  }
+  inspect(segment)
+  return targets.filter(target => target && !/[$*?`]/.test(target))
+}
+
 function sensitiveWrite(hook, repoRoot) {
   const tool = hook.tool_name
   const fileTool = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(tool)
@@ -249,9 +297,11 @@ function sensitiveWrite(hook, repoRoot) {
   if (typeof raw !== 'string') return false
   const location = fileTool ? canonicalExistingPath(path.resolve(hook.cwd ?? repoRoot ?? '', raw)) : null
   const normalized = (location ?? raw).replaceAll('\\', '/')
+  if (fileTool && /(?:^|\/)(?:\.git|\.claude)(?:\/hooks)?$/.test(normalized)) return true
   if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true
   if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true
   if (/(?:^|\/)\.mcp\.json(?:\b|$)/.test(normalized)) return true
+  if (!fileTool) return shellWriteTargets(raw).some(file_path => sensitiveWrite({ ...hook, tool_name: 'Write', tool_input: { file_path } }, repoRoot))
   if (!fileTool || path.posix.basename(normalized) !== 'CLAUDE.md') return false
   if (!repoRoot) return true
   const root = canonicalExistingPath(path.resolve(repoRoot))

@@ -85,8 +85,9 @@ function fileFingerprint(root, name) {
     const stat = lstatSync(file)
     if (stat.isSymbolicLink()) return `link:${createHash('sha256').update(readlinkSync(file)).digest('hex')}`
     if (!stat.isFile()) return `other:${stat.mode}:${stat.size}:${stat.mtimeMs}`
-    if (stat.size > maxHashedFile) return `large:${stat.size}:${stat.mtimeMs}`
-    return `file:${createHash('sha256').update(readFileSync(file)).digest('hex')}`
+    const executable = stat.mode & 0o111 ? 'x' : '-'
+    if (stat.size > maxHashedFile) return `large:${executable}:${stat.size}:${stat.mtimeMs}`
+    return `file:${executable}:${createHash('sha256').update(readFileSync(file)).digest('hex')}`
   } catch { return null }
 }
 

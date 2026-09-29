@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openDeckDb } from '../../server/db/index.mjs'
@@ -358,6 +358,40 @@ test('Git change projection never executes repository clean filters', () => {
     writeFileSync(path.join(repo, 'file.txt'), 'another change\n')
     h.projector.applyHooks([hook('Stop', 2003)])
     assert.equal(existsSync(path.join(repo, 'executed')), false)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+})
+
+test('review fingerprints retain later executable-mode changes', () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'deck-review-mode-'))
+  const h = harness()
+  try {
+    const file = path.join(repo, 'script.sh')
+    writeFileSync(file, 'echo initial\n')
+    chmodSync(file, 0o644)
+    execFileSync('git', ['init', '-q', repo], { timeout: 2000 })
+    execFileSync('git', ['-C', repo, 'add', '.'], { timeout: 2000 })
+    execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial'], { timeout: 2000 })
+    const hook = (event, at) => {
+      const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo })
+      envelope.hookTs = at
+      return envelope
+    }
+    h.projector.applyHooks([hook('SessionStart', 1000)])
+    writeFileSync(file, 'echo reviewed\n')
+    h.projector.applyHooks([hook('Stop', 1001)])
+    const id = h.projector.snapshot().sessions[0].id
+    h.projector.signal(id, { type: 'review' }, 1002)
+    chmodSync(file, 0o755)
+    h.projector.applyHooks([hook('Stop', 1003)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.equal(h.projector.snapshot().counts.toReview, 1)
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file])
+    h.projector.signal(id, { type: 'review' }, 1004)
+    h.projector.applyHooks([hook('Stop', 1005)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    chmodSync(file, 0o644)
+    h.projector.applyHooks([hook('Stop', 1006)])
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
   } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
 })
@@ -794,6 +828,33 @@ test('symlinked Git control files and parents retain the destructive write floor
       assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path, content: '[core]' } }, { repoRoot: repo }), 'destructive', file_path)
     }
     assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path: 'ordinary.txt', content: 'x' } }, { repoRoot: repo }), 'caution')
+  } finally { rmSync(repo, { recursive: true, force: true }) }
+})
+
+test('Bash writes resolve relative sensitive targets and symlink aliases', () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'deck-shell-controls-'))
+  try {
+    mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true })
+    mkdirSync(path.join(repo, '.claude'), { recursive: true })
+    writeFileSync(path.join(repo, '.git', 'config'), '[core]\n')
+    symlinkSync('.git/config', path.join(repo, 'config-link'))
+    symlinkSync('.git/hooks', path.join(repo, 'hooks-link'))
+    symlinkSync('.git', path.join(repo, 'git-link'))
+    symlinkSync('.claude', path.join(repo, 'claude-link'))
+    const configWrite = "printf '[core]\\n' >config-link"
+    execFileSync('/bin/sh', ['-c', configWrite], { cwd: repo, timeout: 1000 })
+    assert.equal(readFileSync(path.join(repo, '.git', 'config'), 'utf8'), '[core]\n')
+    for (const command of [configWrite, 'printf x > hooks-link/pre-commit', 'tee -a config-link', 'cp ordinary.txt config-link', 'cp ordinary.txt git-link', 'cp settings.local.json claude-link', "sed -i 's/x/y/' config-link", 'dd if=ordinary.txt of=config-link']) {
+      assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), 'destructive', command)
+    }
+    const settingsWrite = "printf '{}' > settings.local.json"
+    const cwd = path.join(repo, '.claude')
+    execFileSync('/bin/sh', ['-c', settingsWrite], { cwd, timeout: 1000 })
+    assert.equal(readFileSync(path.join(cwd, 'settings.local.json'), 'utf8'), '{}')
+    assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command: settingsWrite } }, { repoRoot: repo }), 'destructive')
+    for (const command of ["printf 'config-link'", 'cat config-link', 'printf x > ordinary.txt']) {
+      assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), 'caution', command)
+    }
   } finally { rmSync(repo, { recursive: true, force: true }) }
 })
 
