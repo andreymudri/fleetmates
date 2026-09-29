@@ -68,6 +68,28 @@ test('late hooks from a replaced process stay attached to its resumed conversati
   } finally { h.close() }
 })
 
+test('command substitutions reading the relative deck token retain the Destructive floor', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-substitution-'))
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    process.env.XDG_STATE_HOME = root
+    const cwd = path.join(root, 'fleetmates', 'deck')
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(path.join(cwd, 'token'), 'synthetic-token')
+    const commands = ['printf "%s" "$(cat token)"', 'printf "%s" "`cat token`"', 'printf "%s" "$(printf "%s" "$(cat token)")"']
+    for (const command of commands) {
+      assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
+    }
+    for (const command of ["printf '%s' '$(cat token)'", 'printf "%s" "$(cat ../../ordinary.txt)"']) {
+      assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }), 'caution', command)
+    }
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('captured AskUserQuestion answers close the question without rewriting outcome input', () => {
   for (const withPermission of [false, true]) {
     const h = harness()

@@ -205,7 +205,8 @@ function canonicalExistingPath(location) {
   }
 }
 
-function namesRelativeDeckControl(hook) {
+function namesRelativeDeckControl(hook, depth = 0) {
+  if (depth > 4) return true
   const namesControl = (value, shell = false) => {
     if (typeof value !== 'string' || !value) return false
     const state = process.env.XDG_STATE_HOME
@@ -218,6 +219,7 @@ function namesRelativeDeckControl(hook) {
     return namesControl(hook.tool_input?.file_path ?? hook.tool_input?.notebook_path)
   }
   if (hook.tool_name !== 'Bash' || typeof hook.tool_input?.command !== 'string') return false
+  if (embeddedCommands(hook.tool_input.command).some(command => namesRelativeDeckControl({ ...hook, tool_input: { command } }, depth + 1))) return true
   const tokens = shellTokens(hook.tool_input.command)
   let segment = []
   const accessesControl = words => {
