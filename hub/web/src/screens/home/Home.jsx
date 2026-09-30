@@ -96,7 +96,8 @@ export function teamCards(runs = [], sessions = [], requests = []) {
       else if (!QUIET_TASKS.has(mate.state)) tiles.push({ key: mate.taskId, kind: 'running', taskId: mate.taskId })
     }
     const needing = tiles.filter(tile => tile.kind === 'needs').length + (lead && NEEDS.has(lead.state) && !open.some(row => row.taskId) ? 1 : 0)
-    const state = open.length || needing ? (open.length && open.every(row => row.kind === 'question') ? 'asked_you' : 'needs_approval')
+    const waits = open.length ? open.map(row => row.kind === 'question' ? 'asked_you' : 'needs_approval') : members.filter(row => NEEDS.has(row.state)).map(row => row.state)
+    const state = open.length || needing ? (waits.length && !waits.includes('needs_approval') ? 'asked_you' : 'needs_approval')
       : lead?.state === 'crashed' ? 'crashed' : 'running'
     const tasks = run.tasks ?? []
     const gate = Object.values(run.gates ?? {}).filter(row => Number.isFinite(row?.phase)).sort((a, b) => (b.recordedAt ?? 0) - (a.recordedAt ?? 0))[0] ?? null

@@ -202,6 +202,16 @@ test('team card text renders as text and a lone active run keeps Home out of cal
   assert.match(html, /T4 · running|T4&lt;U\+202E&gt; · running/)
 })
 
+test('a teammate that is waiting marks its tile, and the team reads as the kind of wait', async () => {
+  const { teamCards } = await load('screens/home/Home.jsx')
+  const run = { repoId: '/r', runId: 'r1', leadSessionId: null, tasks: [], teammates: [{ taskId: 'T2', state: 'running' }, { taskId: 'T3', state: 'pending' }] }
+  const mate = state => [{ id: 'm', state, role: 'teammate', runRef: { repoId: '/r', runId: 'r1', taskId: 'T2' } }]
+  const [asked] = teamCards([run], mate('asked_you'), [])
+  assert.deepEqual([asked.tiles.map(tile => `${tile.taskId}:${tile.kind}`), asked.state, asked.needs], [['T2:needs'], 'asked_you', 1], 'pending tasks get no tile')
+  assert.equal(teamCards([run], mate('needs_approval'), [])[0].state, 'needs_approval')
+  assert.deepEqual(teamCards([run], mate('running'), [])[0].tiles.map(tile => tile.kind), ['running'])
+})
+
 test('Review N opens the drawer on the named request', async () => {
   const { openOverlay, drawerFocusTarget } = await load('screens/drawer/NeedsYouDrawer.jsx')
   const calls = []

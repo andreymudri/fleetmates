@@ -47,8 +47,9 @@
 @media (max-width: 1439px) {
   .home-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-/* 1440 wide and 1000 tall or more: two rows share the height left by the header and the quiet row, so six
-   cards and three quiet cards fit without scrolling (home.md 3.4). Content taller than that still scrolls. */
+/* 1440 wide and 1000 tall or more (home.md 3.4): rows drop the 360px minimum, taking their content height
+   plus a share (1fr) of the fleet's spare height, so the busy fixture fits 1920 x 1080 with nothing
+   scrolling (Home AC1, checked in hub/test/e2e/observe.spec.mjs). */
 @media (min-width: 1440px) and (min-height: 1000px) {
   .home-grid { grid-auto-rows: minmax(min-content, 1fr); flex: 1 1 0; }
 }
