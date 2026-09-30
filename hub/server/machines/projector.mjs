@@ -20,7 +20,8 @@ function requestView(row) {
 export function createProjector({ store, now = Date.now, publish = () => {} }) {
   function snapshot() {
     const sessions = store.all('SELECT * FROM sessions ORDER BY started_at, id').map(sessionView)
-    return { seq: Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq), sessions, requests: store.all('SELECT * FROM requests ORDER BY created_at, id').map(requestView), counts: projectCounts(store), home: projectHome(sessions) }
+    const requests = store.all('SELECT * FROM requests ORDER BY created_at, id').map(requestView)
+    return { seq: Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq), sessions, requests, counts: projectCounts(store), home: projectHome(sessions, requests) }
   }
   function commit(fn) {
     const before = Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq)

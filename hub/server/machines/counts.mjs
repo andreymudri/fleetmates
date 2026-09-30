@@ -28,11 +28,23 @@ export function projectCounts(store) {
   return counts
 }
 
-const urgency = ['needs_approval', 'asked_you', 'crashed', 'running', 'starting', 'done', 'stale', 'idle', 'reviewed', 'ended']
+const urgency = { needs_approval: 0, asked_you: 1, crashed: 2, starting: 3, running: 3, done: 4, stale: 5, idle: 6, reviewed: 7, ended: 8 }
 
 /** Derive grid, quiet row and Rail order from persisted session states. */
-export function projectHome(sessions) {
-  const ordered = [...sessions].sort((a, b) => urgency.indexOf(a.state) - urgency.indexOf(b.state) || b.lastActivityAt - a.lastActivityAt || a.id.localeCompare(b.id))
+export function projectHome(sessions, requests = []) {
+  const oldestRequest = new Map()
+  for (const request of requests) {
+    if (request.state !== 'open') continue
+    oldestRequest.set(request.sessionId, Math.min(oldestRequest.get(request.sessionId) ?? Infinity, request.createdAt))
+  }
+  const ordered = [...sessions].sort((a, b) => {
+    const rank = urgency[a.state] - urgency[b.state]
+    if (rank) return rank
+    const age = ['needs_approval', 'asked_you'].includes(a.state)
+      ? (oldestRequest.get(a.id) ?? Infinity) - (oldestRequest.get(b.id) ?? Infinity)
+      : b.stateSince - a.stateSince
+    return age || a.id.localeCompare(b.id)
+  })
   const quiet = ordered.filter(row => ['stale', 'idle', 'reviewed'].includes(row.state))
   return { order: ordered.filter(row => row.state !== 'ended').map(row => row.id), grid: ordered.filter(row => !['stale', 'idle', 'reviewed', 'ended'].includes(row.state)), quiet, rail: ordered.filter(row => row.state !== 'ended') }
 }

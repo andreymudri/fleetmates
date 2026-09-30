@@ -7,6 +7,7 @@ import path from 'node:path'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { runRetention } from '../../server/db/retention.mjs'
 import { createProjector } from '../../server/machines/projector.mjs'
+import { projectHome } from '../../server/machines/counts.mjs'
 import { expireRequests, permissionTier } from '../../server/machines/request.mjs'
 
 const fixtureDir = new URL('../fixtures/hooks/2.1.282/', import.meta.url)
@@ -2063,4 +2064,90 @@ test('destructive wrapper classification normalizes basenames and consumes nice 
   for (const command of ['command -v rm', 'command -V rm', '/usr/bin/env command -v rm', 'nice -n 1 command -v rm', 'timeout --signal=TERM 2 command -V rm']) {
     assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'caution', command)
   }
+})
+
+
+function homeOrderingFixture() {
+  const rows = [
+    ['ended', 'ended', 10000], ['reviewed-old', 'reviewed', 100], ['running-old', 'running', 100],
+    ['approval-new', 'needs_approval', 9000], ['idle-old', 'idle', 100], ['stale-old', 'stale', 100],
+    ['done-old', 'done', 100], ['crash-old', 'crashed', 100], ['question-new', 'asked_you', 9000],
+    ['starting-new', 'starting', 200], ['approval-old', 'needs_approval', 100],
+    ['reviewed-new', 'reviewed', 200], ['idle-new', 'idle', 200], ['stale-new', 'stale', 200],
+    ['done-new', 'done', 200], ['crash-new', 'crashed', 200], ['question-old', 'asked_you', 100],
+    ['starting-old', 'starting', 50], ['running-new', 'running', 300],
+    ['done-tie-b', 'done', 150], ['done-tie-a', 'done', 150],
+    ['approval-tie-b', 'needs_approval', 500], ['approval-tie-a', 'needs_approval', 500],
+    ['stale-tie-b', 'stale', 150], ['stale-tie-a', 'stale', 150],
+    ['idle-tie-b', 'idle', 150], ['idle-tie-a', 'idle', 150],
+    ['reviewed-tie-b', 'reviewed', 150], ['reviewed-tie-a', 'reviewed', 150]
+  ].map(([id, state, stateSince]) => ({ id, state, stateSince, lastActivityAt: ['needs_approval', 'asked_you'].includes(state) ? stateSince : 10000 - stateSince }))
+  const requests = [
+    { sessionId: 'approval-old', state: 'open', createdAt: 100 },
+    { sessionId: 'approval-old', state: 'open', createdAt: 900 },
+    { sessionId: 'approval-new', state: 'open', createdAt: 200 },
+    { sessionId: 'approval-new', state: 'answered', createdAt: 0 },
+    { sessionId: 'question-old', state: 'open', createdAt: 300 },
+    { sessionId: 'question-new', state: 'open', createdAt: 400 },
+    { sessionId: 'approval-tie-b', state: 'open', createdAt: 150 },
+    { sessionId: 'approval-tie-a', state: 'open', createdAt: 150 }
+  ]
+  const expected = [
+    'approval-old', 'approval-tie-a', 'approval-tie-b', 'approval-new', 'question-old', 'question-new',
+    'crash-new', 'crash-old', 'running-new', 'starting-new', 'running-old', 'starting-old',
+    'done-new', 'done-tie-a', 'done-tie-b', 'done-old',
+    'stale-new', 'stale-tie-a', 'stale-tie-b', 'stale-old',
+    'idle-new', 'idle-tie-a', 'idle-tie-b', 'idle-old',
+    'reviewed-new', 'reviewed-tie-a', 'reviewed-tie-b', 'reviewed-old'
+  ]
+  return { rows, requests, expected }
+}
+
+test('Home projection pins urgency, shared starting/running rank, request age and deterministic ties', () => {
+  const { rows, requests, expected } = homeOrderingFixture()
+  const home = projectHome(rows, requests)
+  assert.deepEqual(home.order, expected)
+  assert.deepEqual(home.rail.map(row => row.id), expected)
+  assert.deepEqual(home.grid.map(row => row.id), expected.slice(0, 16))
+  assert.deepEqual(home.quiet.map(row => row.id), expected.slice(16))
+  assert.deepEqual(projectHome([...rows].reverse(), [...requests].reverse()), home)
+  assert.equal(rows[0].id, 'ended')
+})
+
+test('projector snapshot supplies open request ages for the shared Home, Rail and quiet ordering', () => {
+  const h = harness()
+  try {
+    const { rows, requests, expected } = homeOrderingFixture()
+    h.store.tx(() => {
+      h.store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', 'test-repo', 'test-repo', 0, 1, 'test-repo', 0)
+      for (const row of rows) h.store.run('INSERT INTO sessions(id,claude_session_id,origin,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', row.id, row.id, 'wrapped', 'test-repo', path.dirname(h.file), row.state, row.stateSince, row.stateSince, row.lastActivityAt, row.state === 'ended' ? 0 : 1, 0)
+      for (const [index, request] of requests.entries()) h.store.run('INSERT INTO requests(id,session_id,kind,tier,summary,state,answer,source,match_key,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)', `request-${index}`, request.sessionId, request.sessionId.startsWith('question') ? 'question' : 'permission', 'caution', 'Synthetic request', request.state, request.state === 'answered' ? JSON.stringify({ via: 'terminal', choice: 'allow' }) : null, 'permission_request', `match-${index}`, request.createdAt)
+    })
+    const snapshot = h.projector.snapshot()
+    assert.deepEqual(snapshot.home.order, expected)
+    assert.deepEqual(snapshot.home.rail.map(row => row.id), expected)
+    assert.deepEqual(snapshot.home.grid.map(row => row.id), expected.slice(0, 16))
+    assert.deepEqual(snapshot.home.quiet.map(row => row.id), expected.slice(16))
+    assert.deepEqual(projectHome(snapshot.sessions, snapshot.requests), snapshot.home)
+    const reopened = openDeckDb(h.file)
+    try { assert.deepEqual(createProjector({ store: reopened }).snapshot().home.order, expected) } finally { reopened.close() }
+  } finally { h.close() }
+})
+
+test('newer running state sorts before older work with more recent hook activity', () => {
+  const h = harness()
+  try {
+    const older = { ...fixture('UserPromptSubmit.json', { session_id: 'older' }), hookTs: 1000 }
+    const newer = { ...fixture('UserPromptSubmit.json', { session_id: 'newer' }), hookTs: 2000, claudePid: 43 }
+    h.projector.applyHooks([older, newer])
+    h.projector.applyHooks([{ ...older, hookTs: 3000 }])
+    const snapshot = h.projector.snapshot()
+    const oldSession = snapshot.sessions.find(row => row.claudeSessionId === 'older')
+    const newSession = snapshot.sessions.find(row => row.claudeSessionId === 'newer')
+    assert.equal(oldSession.stateSince, 1000)
+    assert.equal(oldSession.lastActivityAt, 3000)
+    assert.deepEqual(snapshot.home.order, [newSession.id, oldSession.id])
+    assert.deepEqual(snapshot.home.grid.map(row => row.id), [newSession.id, oldSession.id])
+    assert.deepEqual(snapshot.home.rail.map(row => row.id), [newSession.id, oldSession.id])
+  } finally { h.close() }
 })
