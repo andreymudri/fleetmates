@@ -497,6 +497,152 @@ test('Git scans refuse symlinked ancestors without reading or retaining syntheti
   }
 })
 
+test('literal shell groups and control prefixes preserve executable risk without treating text as commands', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-shell-prefix-'))
+  try {
+    const tier = command => permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root })
+    for (const command of ['{ rm victim.txt; }', 'if true; then rm victim.txt; fi', 'if rm victim.txt; then true; fi', 'false || { command -p rm victim.txt; }', 'while false; do rm victim.txt; done', 'until true; do env rm victim.txt; done', 'for x in one; do rm victim.txt; done', '! rm victim.txt', '( rm victim.txt )', "sh -c 'if true; then rm victim.txt; fi'", 'if false; then true; elif true; then rm victim.txt; else true; fi']) assert.equal(tier(command), 'destructive', command)
+    for (const command of ['{ tee .claude/settings.json; }', 'if true; then tee .claude/settings.json; fi', 'if true; then cd .claude; tee settings.json; fi', 'echo "$(if true; then tee .claude/settings.json; fi)"']) assert.equal(tier(command), 'destructive', command)
+    for (const command of ["echo '{ rm victim.txt; }'", "printf '%s' 'if true; then rm victim.txt; fi'", '{ printf rm; }', 'if true; then printf rm; fi', 'for x in rm; do echo "$x"; done', 'if true; then tee ordinary/settings.json; fi']) assert.equal(tier(command), 'caution', command)
+    assert.equal(existsSync(path.join(root, 'victim.txt')), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('delayed unresolved user-input openings publish committed requests without rewinding newer clocks', () => {
+  for (const kind of ['permission', 'question', 'notification']) for (const delayed of [false, true]) {
+    const h = harness()
+    const reader = openDeckDb(h.file)
+    try {
+      const events = []
+      const projector = createProjector({ store: h.store, publish: event => {
+        assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))
+        if (event.type === 'request.opened') assert.equal(reader.get('SELECT state FROM requests WHERE id=?', event.entityId).state, 'open')
+        events.push(event)
+      } })
+      const opening = kind === 'question' ? fixture('PreToolUse.AskUserQuestion.json') : fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: kind === 'notification' ? 'Notification' : 'PermissionRequest', notification_type: 'permission_prompt', message: 'Allow Bash?', tool_name: 'Bash', tool_input: { command: 'rm /tmp/synthetic-target' } })
+      opening.hookTs = 2000
+      const unrelated = fixture('PostToolUse.Edit.json', { tool_name: 'Read', tool_input: { file_path: '/tmp/unrelated-synthetic' } })
+      unrelated.hookTs = 2100
+      for (const envelope of [opening, unrelated]) assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true)
+      projector.applyHooks([fixture('SessionStart.startup.json'), { ...fixture('UserPromptSubmit.json'), hookTs: 1500 }])
+      if (delayed) projector.applyHooks([unrelated])
+      const before = { ...h.store.get('SELECT * FROM sessions') }
+      events.length = 0
+      projector.applyHooks(delayed ? [opening] : [opening, unrelated])
+      const snapshot = projector.snapshot()
+      assert.equal(snapshot.sessions[0].state, kind === 'question' ? 'asked_you' : 'needs_approval', `${kind}/${delayed}`)
+      assert.equal(snapshot.counts.openRequests, 1)
+      assert.equal(snapshot.counts.needYouSessions, 1)
+      assert.equal(snapshot.requests[0].createdAt, 2000)
+      if (kind === 'permission') assert.equal(snapshot.requests[0].tier, 'destructive')
+      assert.equal(events.filter(event => event.type === 'request.opened').length, 1)
+      assert.deepEqual(events.at(-1).data, snapshot.counts)
+      assert.deepEqual(events.findLast(event => event.type === 'session.upserted').data, snapshot.sessions[0])
+      if (delayed) {
+        const row = h.store.get('SELECT * FROM sessions')
+        for (const field of ['since_ts', 'state_since', 'last_activity_at']) assert.equal(row[field], before[field], field)
+      }
+      projector.applyHooks([opening])
+      assert.equal(projector.snapshot().counts.openRequests, 1)
+    } finally { reader.close(); h.close() }
+  }
+})
+
+test('late openings respect terminal outcomes prompts replacements and process lifetimes', () => {
+  for (const kind of ['permission', 'question']) for (const closing of ['matched', 'failed', 'denied', 'prompt', 'idle', 'replacement', 'pre-generation', 'old-conversation', 'dead', 'old-process', 'pending-end', 'unrelated', 'answered-row', 'expired-row', 'newer-opening']) {
+    const h = harness()
+    try {
+      const opening = kind === 'question' ? fixture('PreToolUse.AskUserQuestion.json') : fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      opening.hookTs = 2000
+      const start = fixture('SessionStart.startup.json')
+      const prompt = { ...fixture('UserPromptSubmit.json'), hookTs: 1500 }
+      if (closing === 'old-process') {
+        start.claudePid = 41
+        start.pidChain = [41]
+        prompt.claudePid = 41
+        prompt.pidChain = [41]
+      }
+      h.projector.applyHooks([start, prompt])
+      const id = h.projector.snapshot().sessions[0].id
+      if (['answered-row', 'expired-row'].includes(closing)) {
+        h.projector.applyHooks([opening])
+        if (closing === 'answered-row') h.projector.applyHooks([{ ...fixture('PostToolUse.Edit.json', { tool_name: opening.hook.tool_name, tool_input: opening.hook.tool_input }), hookTs: 2100 }])
+        else h.projector.applyHooks([{ ...fixture('Notification.idle_prompt.json'), hookTs: 2100 }])
+        opening.hook.message = 'Repeated delivery with extra metadata'
+      } else if (closing === 'newer-opening') {
+        h.projector.applyHooks([{ ...fixture('UserPromptSubmit.json'), hookTs: 2100 }, { ...opening, hookTs: 2300 }])
+      } else if (['matched', 'failed', 'denied'].includes(closing)) {
+        const outcome = fixture('PostToolUse.Edit.json', { hook_event_name: closing === 'failed' ? 'PostToolUseFailure' : closing === 'denied' ? 'PermissionDenied' : 'PostToolUse', tool_name: opening.hook.tool_name, tool_input: opening.hook.tool_input })
+        outcome.hookTs = 2100
+        h.projector.applyHooks([outcome])
+      } else if (closing === 'prompt') h.projector.applyHooks([{ ...fixture('UserPromptSubmit.json'), hookTs: 2100 }])
+      else if (closing === 'idle') h.projector.applyHooks([{ ...fixture('Notification.idle_prompt.json'), hookTs: 2100 }])
+      else if (closing === 'dead') h.projector.signal(id, { type: 'pid_gone' }, 2100)
+      else if (closing === 'old-process') {
+        h.projector.signal(id, { type: 'pid_gone' }, 1700)
+        h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { source: 'resume' }), hookTs: 1900 }])
+        opening.claudePid = 41
+        opening.hookTs = 2000
+        h.projector.applyHooks([{ ...fixture('PostToolUse.Edit.json', { tool_name: 'Read' }), hookTs: 2100 }])
+      } else if (['replacement', 'pre-generation', 'old-conversation', 'pending-end'].includes(closing)) {
+        h.projector.applyHooks([{ ...fixture('SessionEnd.clear.json'), hookTs: 2100 }])
+        if (closing !== 'pending-end') h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { session_id: 'replacement-for-late', source: 'clear' }), hookTs: 2200 }])
+        if (closing === 'pre-generation') opening.hook.session_id = 'replacement-for-late'
+        if (closing === 'old-conversation') {
+          opening.hookTs = 2300
+          h.projector.applyHooks([{ ...fixture('PostToolUse.Edit.json', { session_id: 'replacement-for-late', tool_name: 'Read' }), hookTs: 2400 }])
+        }
+      } else h.projector.applyHooks([{ ...fixture('PostToolUse.Edit.json', { tool_name: 'Read', tool_input: { file_path: '/tmp/unrelated' } }), hookTs: 2100 }])
+      const before = { ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }
+      h.projector.applyHooks([opening])
+      const expected = ['unrelated', 'pending-end', 'newer-opening'].includes(closing) || kind === 'question' && closing === 'denied' ? 1 : 0
+      assert.equal(h.projector.snapshot().counts.openRequests, expected, `${kind}/${closing}`)
+      const after = h.store.get('SELECT * FROM sessions WHERE id=?', id)
+      for (const field of ['since_ts', 'state_since', 'last_activity_at', 'process_key', 'claude_session_id', 'end_reason']) assert.equal(after[field], before[field], `${kind}/${closing}/${field}`)
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+    } finally { h.close() }
+  }
+  for (const reverse of [false, true]) for (const tool_name of ['Bash', 'AskUserQuestion']) {
+    const h = harness()
+    try {
+      h.projector.applyHooks([fixture('SessionStart.startup.json'), { ...fixture('UserPromptSubmit.json'), hookTs: 1500 }])
+      const tool_input = tool_name === 'Bash' ? { command: 'pwd' } : { questions: [{ question: 'Continue?' }] }
+      const opening = fixture('PermissionRequest.AskUserQuestion.json', { tool_name, tool_input })
+      const first = { ...opening, hookTs: 2000 }
+      const second = { ...opening, hookTs: 2001 }
+      h.projector.applyHooks([{ ...fixture('PostToolUse.Edit.json', { tool_name, tool_input }), hookTs: 2100 }])
+      h.projector.applyHooks([reverse ? second : first])
+      h.projector.applyHooks([reverse ? first : second])
+      assert.equal(h.projector.snapshot().counts.openRequests, 1)
+      assert.equal(h.projector.snapshot().requests[0].createdAt, 2001)
+      assert.equal(h.projector.snapshot().sessions[0].lastActivityAt, 2100)
+    } finally { h.close() }
+  }
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('SessionStart.startup.json'), { ...fixture('UserPromptSubmit.json'), hookTs: 1500 }])
+    h.projector.applyHooks([{ ...fixture('PostToolUse.Edit.json', { tool_name: 'Read' }), hookTs: 2100 }])
+    h.projector.applyHooks([{ ...fixture('Notification.idle_prompt.json', { notification_type: 'elicitation_dialog', message: 'Answer please' }), hookTs: 2000 }])
+    assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+  } finally { h.close() }
+  const upgraded = harness()
+  try {
+    upgraded.projector.applyHooks([fixture('SessionStart.startup.json'), { ...fixture('UserPromptSubmit.json'), hookTs: 1500 }])
+    upgraded.projector.applyHooks([{ ...fixture('Notification.idle_prompt.json', { notification_type: 'permission_prompt', message: 'Allow Bash?' }), hookTs: 1999 }])
+    upgraded.projector.applyHooks([{ ...fixture('PostToolUse.Edit.json', { tool_name: 'Read' }), hookTs: 2100 }])
+    const events = upgraded.projector.applyHooks([{ ...fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command: 'rm /tmp/synthetic-target' } }), hookTs: 2000 }])
+    assert.equal(upgraded.projector.snapshot().counts.openRequests, 1)
+    assert.equal(upgraded.projector.snapshot().requests[0].tier, 'destructive')
+    assert.equal(events.filter(event => event.type === 'request.updated').length, 1)
+    upgraded.projector.applyHooks([{ ...fixture('PreToolUse.AskUserQuestion.json'), hookTs: 2050 }])
+    assert.equal(upgraded.projector.snapshot().counts.openRequests, 2)
+    assert.equal(upgraded.projector.snapshot().requests.filter(request => request.kind === 'permission').length, 1)
+    assert.equal(upgraded.projector.snapshot().sessions[0].state, 'needs_approval')
+    assert.equal(upgraded.projector.snapshot().sessions[0].lastActivityAt, 2100)
+  } finally { upgraded.close() }
+})
+
 test('resume clears the previous process crash before recording a clean end', () => {
   for (const signal of [{ type: 'pid_gone' }, { type: 'exit', code: 1 }, { type: 'exit', code: 0, signal: 'SIGKILL' }]) {
     const h = harness()
@@ -2514,7 +2660,10 @@ test('late resumed activity closes older free questions but leaves newer request
     h.projector.applyHooks([hook('SessionStart', 1000, { source: 'startup' }), hook('Notification', 2000, { notification_type: 'elicitation_dialog', message: 'Older question?' }), hook('Notification', 4000, { notification_type: 'elicitation_dialog', message: 'Newer question?' }), hook('PermissionRequest', 5000, { tool_name: 'Bash', tool_input: { command: 'pwd' } })])
     const before = h.store.get('SELECT * FROM sessions')
     const events = h.projector.applyHooks([hook('PreToolUse', 3000, { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Late tool question?' }] } })])
-    assert.deepEqual(h.projector.snapshot().requests.map(row => row.state), ['answered', 'open', 'open'])
+    assert.deepEqual(h.projector.snapshot().requests.map(row => row.state), ['answered', 'open', 'open', 'open'])
+    assert.equal(h.projector.snapshot().requests[1].createdAt, 3000)
+    assert.equal(h.projector.snapshot().requests[1].kind, 'question')
+    assert.equal(events.filter(row => row.type === 'request.opened').length, 1)
     assert.equal(events.filter(row => row.type === 'request.closed').length, 1)
     assert.equal(h.store.get('SELECT state_since FROM sessions').state_since, before.state_since)
     assert.equal(h.store.get('SELECT since_ts FROM sessions').since_ts, before.since_ts)

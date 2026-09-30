@@ -1,6 +1,6 @@
 import { dedupeKey } from '../ingest/validate.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
-import { applyRequestHook, expireRequests, resumedActivityEvents } from './request.mjs'
+import { applyRequestHook, expireRequests, isRequestOpening, reconcileRequestOpenings, resumedActivityEvents } from './request.mjs'
 import { applySessionHook, applySubagentLifecycle, captureReviewBaseline, ignoresSessionHook, isObsoleteSessionStart, persistSessionSummary, recordSessionIdentity, refreshSessionChanges, resolveSession, sameKnownProcess } from './session.mjs'
 
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
@@ -91,6 +91,24 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           const lifecycleEvent = ['SubagentStart', 'SubagentStop'].includes(hook.hook_event_name)
           let lifecycleAccepted = false
           let lifecycleChanged = false
+          let openingApplied = false
+          if (late && session.alive && isRequestOpening(hook) && sameKnownProcess(store, session, envelope)) {
+            const boundary = Math.max(session.joined_mid_life ? 0 : session.started_at, store.get("SELECT COALESCE(MAX(hook_ts),0) AS at FROM hook_events WHERE session_id=? AND applied=1 AND event='SessionStart' AND COALESCE(json_extract(payload,'$.source'),'startup')<>'compact'", session.id).at)
+            const currentConversation = candidate => candidate.session_id === session.claude_session_id || !!store.get('SELECT claude_session_id FROM session_aliases WHERE session_id=? AND claude_session_id=? AND source=?', session.id, candidate.session_id, 'compact')
+            if (envelope.hookTs >= boundary && currentConversation(hook)) {
+              const history = store.all('SELECT hook_ts,payload,pty_id,claude_pid FROM hook_events WHERE session_id=? AND hook_ts>=? ORDER BY hook_ts,id', session.id, boundary)
+                .map(row => ({ hookTs: row.hook_ts, hook: JSON.parse(row.payload), ptyId: row.pty_id, claudePid: row.claude_pid }))
+                .filter(item => sameKnownProcess(store, session, item) && currentConversation(item.hook))
+              requestChanged = reconcileRequestOpenings(store, session, [...history, envelope].sort((a, b) => a.hookTs - b.hookTs || rank(a.hook.hook_event_name) - rank(b.hook.hook_event_name))) || requestChanged
+              openingApplied = requestChanged
+              if (requestChanged) {
+                const open = store.all('SELECT kind FROM requests WHERE session_id=? AND state=?', session.id, 'open')
+                const state = open.some(row => row.kind === 'permission') ? 'needs_approval' : open.length ? 'asked_you' : session.state
+                store.run('UPDATE sessions SET state=? WHERE id=?', state, session.id)
+                session = store.get('SELECT * FROM sessions WHERE id=?', session.id)
+              }
+            }
+          }
           if (late && lifecycleEvent) {
             const result = applySubagentLifecycle(store, session, envelope, true)
             session = result.session
@@ -98,7 +116,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
             lifecycleChanged = result.changed
           }
           if (late && session.alive && (!lifecycleEvent || lifecycleAccepted) && [...resumedActivityEvents, 'PermissionDenied'].includes(hook.hook_event_name) && (hook.hook_event_name !== 'UserPromptSubmit' || sameKnownProcess(store, session, envelope))) {
-            requestChanged = applyRequestHook(store, session, envelope, { late: true })
+            requestChanged = applyRequestHook(store, session, envelope, { late: true }) || requestChanged
             if (requestChanged && ['needs_approval', 'asked_you'].includes(session.state)) {
               const open = store.all('SELECT kind FROM requests WHERE session_id = ? AND state = ?', session.id, 'open')
               const state = open.some(row => row.kind === 'permission') ? 'needs_approval' : open.length ? 'asked_you' : 'running'
@@ -126,7 +144,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
               if (known) session = applySessionHook(store, envelope, session, requestChanged)
             }
           }
-          store.run('INSERT INTO hook_events(dedupe_key,session_id,claude_session_id,event,hook_ts,received_at,via,pty_id,claude_pid,applied,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)', key, session?.id ?? null, hook.session_id, hook.hook_event_name, envelope.hookTs, envelope.receivedAt ?? now(), envelope.via ?? 'socket', envelope.ptyId ?? null, envelope.claudePid ?? null, lifecycleEvent ? lifecycleAccepted ? 1 : 0 : late ? 0 : 1, JSON.stringify(hook))
+          store.run('INSERT INTO hook_events(dedupe_key,session_id,claude_session_id,event,hook_ts,received_at,via,pty_id,claude_pid,applied,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)', key, session?.id ?? null, hook.session_id, hook.hook_event_name, envelope.hookTs, envelope.receivedAt ?? now(), envelope.via ?? 'socket', envelope.ptyId ?? null, envelope.claudePid ?? null, lifecycleEvent ? lifecycleAccepted ? 1 : 0 : openingApplied || !late ? 1 : 0, JSON.stringify(hook))
           if (session && (!late || requestChanged)) {
             for (const row of store.all('SELECT * FROM requests WHERE session_id = ?', session.id)) {
               if (!beforeRequests.has(row.id)) store.appendEvent({ at: envelope.hookTs, type: 'request.opened', entityId: row.id, data: requestView(row) })

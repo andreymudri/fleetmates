@@ -46,6 +46,12 @@ function shellTokens(command) {
   return tokens
 }
 
+function executableWords(words) {
+  let index = 0
+  while (words[index] && !words[index].quoted && ['{', '}', 'if', 'then', 'elif', 'else', 'do', 'while', 'until', '!'].includes(words[index].value)) index++
+  return words.slice(index)
+}
+
 function embeddedCommands(command, onFound = () => {}) {
   const found = []
   let quote = null
@@ -227,6 +233,7 @@ function gitSubcommandArgs(args) {
 }
 
 function destructiveSegment(words, depth) {
+  words = executableWords(words)
   if (depth > 4 || !words.length) return false
   let index = 0
   while (index < words.length) {
@@ -370,6 +377,7 @@ function namesRelativeDeckControl(hook, depth = 0) {
   let cdMayFail = false
   let segment = []
   const accessesControl = words => {
+    words = executableWords(words)
     cdMayFail = false
     if (!words.length) return false
     const raw = commandText.slice(words[0].start, words.at(-1).end)
@@ -473,6 +481,7 @@ function shellWriteTargets(command, cwd, requestedCwd = cwd) {
   for (const inner of embedded) masked = masked.slice(0, inner.start) + 'x'.repeat(inner.end - inner.start) + masked.slice(inner.end)
   const tokens = shellTokens(masked)
   const inspect = words => {
+    words = executableWords(words)
     if (!words.length) return
     for (const inner of embedded) {
       if (inner.start >= words[0].start && inner.end <= words.at(-1).end) targets.push({ command: inner.command, cwd: directory, requestedCwd: requestedDirectory })
@@ -648,6 +657,66 @@ function notificationMatchesTool(message, toolName, input) {
 
 /** Hook events that provide evidence of resumed work. */
 export const resumedActivityEvents = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PreCompact', 'PostCompact', 'SubagentStart', 'SubagentStop']
+
+/** Identify hook signals that can open a permission or question request. */
+export function isRequestOpening(hook) {
+  return hook.hook_event_name === 'PermissionRequest'
+    || hook.hook_event_name === 'PreToolUse' && hook.tool_name === 'AskUserQuestion'
+    || hook.hook_event_name === 'Notification' && ['permission_prompt', 'elicitation_dialog'].includes(hook.notification_type)
+}
+
+/** Reconcile delayed openings against accepted process and conversation history. */
+export function reconcileRequestOpenings(store, session, history) {
+  const queue = []
+  for (const item of history) {
+    const hook = item.hook
+    const event = hook.hook_event_name
+    if (resumedActivityEvents.includes(event)) {
+      for (let index = queue.length - 1; index >= 0; index--) if (queue[index].hook.notification_type === 'elicitation_dialog') queue.splice(index, 1)
+    }
+    if (event === 'UserPromptSubmit' || event === 'Notification' && hook.notification_type === 'idle_prompt' || event === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source) || event === 'SessionEnd' && !['clear', 'resume'].includes(hook.reason)) {
+      queue.length = 0
+      continue
+    }
+    if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
+      const kind = event !== 'PermissionDenied' && hook.tool_name === 'AskUserQuestion' ? 'question' : 'permission'
+      const matches = candidate => matchKey(candidate.hook) === matchKey(hook)
+        || candidate.hook.notification_type === 'permission_prompt' && notificationToolName(candidate.hook.message) && notificationMatchesTool(candidate.hook.message, hook.tool_name, hook.tool_input)
+      const index = queue.findIndex(candidate => candidate.kind === kind && matches(candidate))
+      const fallback = index < 0 && kind === 'question' ? queue.findIndex(candidate => candidate.kind === 'permission' && matches(candidate)) : index
+      if (fallback >= 0) {
+        const answeredKind = queue[fallback].kind
+        queue.splice(fallback, 1)
+        if (hook.tool_name === 'AskUserQuestion') {
+          const related = queue.findIndex(candidate => candidate.kind !== answeredKind && matches(candidate))
+          if (related >= 0) queue.splice(related, 1)
+        }
+      }
+      continue
+    }
+    if (!isRequestOpening(hook)) continue
+    const kind = event === 'PermissionRequest' || hook.notification_type === 'permission_prompt' ? 'permission' : 'question'
+    let createdAt = item.hookTs
+    if (hook.notification_type === 'permission_prompt') {
+      if (queue.some(candidate => candidate.kind === 'permission' && Math.abs(item.hookTs - candidate.hookTs) <= 2000 && (candidate.hook.notification_type === 'permission_prompt' ? candidate.hook.message === hook.message : notificationMatchesTool(hook.message, candidate.hook.tool_name, candidate.hook.tool_input)))) continue
+    }
+    if (event === 'PermissionRequest') {
+      const fallback = queue.findIndex(candidate => candidate.hook.notification_type === 'permission_prompt' && Math.abs(item.hookTs - candidate.hookTs) <= 2000 && notificationMatchesTool(candidate.hook.message, hook.tool_name, hook.tool_input))
+      if (fallback >= 0) {
+        createdAt = queue[fallback].createdAt
+        queue.splice(fallback, 1)
+      }
+    }
+    queue.push({ ...item, kind, createdAt })
+  }
+  let changed = false
+  for (const pending of queue) {
+    const hook = pending.hook
+    const existing = store.get('SELECT id FROM requests WHERE session_id=? AND kind=? AND match_key=? AND created_at=?', session.id, pending.kind, matchKey(hook), pending.createdAt)
+    if (!existing) changed = applyRequestHook(store, session, pending) || changed
+  }
+  return changed
+}
 
 function transcriptQuestion(location) {
   if (typeof location !== 'string' || !path.isAbsolute(location)) return null
