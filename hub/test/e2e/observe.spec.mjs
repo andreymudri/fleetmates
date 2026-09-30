@@ -348,7 +348,7 @@ if (import.meta.main) {
     assert.deepEqual(page.errors, [])
   })
 
-  spec('Home AC1: nothing scrolls with busy at 1920 x 1080', { todo: 'defect: .shell-content scrolls, 1112 px of content in 1080 px (measured in this suite)' }, async t => {
+  spec('Home AC1: nothing scrolls with busy at 1920 x 1080', async t => {
     const h = await busyDeck(t)
     const page = await openDeck(browser, h)
     await page.waitForSelector('.home-grid > article')
@@ -388,14 +388,14 @@ if (import.meta.main) {
     await h.hook('portfolio-site', { e: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'npm run build' } })
     await card(page, portfolio).and(page.locator('.session-card--approval')).waitFor({ timeout: 5000 })
     const elapsed = Date.now() - sent
-    assert.ok(elapsed < 1000 + 300, `the card became approval ${elapsed} ms after the hook (budget 1 s plus the 250 ms reorder window)`)
+    assert.ok(elapsed < 1000, `the card became approval ${elapsed} ms after the hook (budget 1 s; PermissionRequest flushes the reorder buffer early)`)
     assert.deepEqual(await chipTexts(page), ['4 need you', '1 running', '1 to review'])
     assert.equal(await badge(page), '4')
     const frames = await page.evaluate(() => window.__frames)
     assert.ok(!frames.some(([chip, badge]) => chip === '4 need you' && badge === '3' || chip === '3 need you' && badge === '4'), 'no frame shows the chip and the badge disagreeing')
   })
 
-  spec('Home AC3: the card that starts needing you moves ahead of the running research card', { todo: 'defect: the server never publishes order.changed (grep hub/server finds none), so the page keeps the snapshot order until a reload' }, async t => {
+  spec('Home AC3: the card that starts needing you moves ahead of the running research card', async t => {
     const h = await busyDeck(t)
     const page = await openDeck(browser, h)
     await h.hook('portfolio-site', { e: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'npm run build' } })
@@ -406,14 +406,35 @@ if (import.meta.main) {
     assert.ok(order.indexOf('portfolio-site') < order.indexOf('research'), `portfolio-site moves ahead of research: ${order.join(', ')}`)
   })
 
-  spec('Home AC4 (pointer hysteresis): no card moves while the pointer is over the grid', { todo: 'gap: Home.jsx has no pointer handling for the home.md 7.3 freeze; this test passes only because the order never changes live (see AC3)' }, async t => {
+  spec('Home AC4 (pointer hysteresis): no card moves while the pointer is over the grid, until it leaves or 5 s pass', async t => {
     const h = await busyDeck(t)
-    const page = await openDeck(browser, h)
+    // The live order.changed messages as they reach the page, so each check runs after the reorder arrived.
+    const orders = []
+    const page = await openDeck(browser, h, '/', { rewrite: message => { if (message.t === 'order.changed') orders.push(message.data.order)
+      return message } })
+    const ahead = async (first, second) => { const order = keys(h, await gridIds(page))
+      return order.indexOf(first) < order.indexOf(second) }
     const before = await gridIds(page)
     await page.hover(`#card-title-${domId(h.ids.get('research'))}`)
     await h.hook('portfolio-site', { e: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'npm run build' } })
+    await until(() => orders.length === 1, { message: 'the reorder to reach the page' })
     await card(page, h.ids.get('portfolio-site')).and(page.locator('.session-card--approval')).waitFor({ timeout: 5000 })
-    assert.deepEqual(await gridIds(page), before)
+    await page.waitForTimeout(300)
+    assert.deepEqual(await gridIds(page), before, 'no card moves while the pointer is over the grid')
+    await page.mouse.move(5, 5)
+    await until(() => ahead('portfolio-site', 'research'), { timeout: 2000, message: 'the reorder to apply once the pointer leaves the grid' })
+
+    await page.hover(`#card-title-${domId(h.ids.get('vault-mcp'))}`)
+    const held = await gridIds(page)
+    assert.equal(await ahead('research', 'discord-audit'), false)
+    await h.hook('research', { e: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'curl https://example.test' } })
+    const sent = Date.now()
+    await until(() => orders.length === 2, { message: 'the second reorder to reach the page' })
+    await page.waitForTimeout(1000)
+    assert.deepEqual(await gridIds(page), held, 'still held a second later')
+    await until(() => ahead('research', 'discord-audit'), { timeout: 8000, interval: 50, message: 'the reorder to apply within 5 s with the pointer still over the grid' })
+    const waited = Date.now() - sent
+    assert.ok(waited >= 4500 && waited < 6500, `the held reorder applied ${waited} ms after the event (at most 5 s)`)
   })
 
   spec('Home AC8 and read-only: observed cards with open requests say "Answer in your terminal" and hold no buttons or inputs', async t => {
@@ -474,7 +495,7 @@ if (import.meta.main) {
     assert.ok(await page.evaluate(() => [...document.querySelectorAll('*')].every(el => !(el.scrollWidth > el.clientWidth + 1 && /(auto|scroll)/.test(getComputedStyle(el).overflowX)))), 'no element scrolls sideways')
   })
 
-  spec('Home AC14: at 1280 x 800 the fleet scrolls and the header stays', { todo: 'defect: .shell-content scrolls as one block, so the Home header scrolls away with the cards (measured here)' }, async t => {
+  spec('Home AC14: at 1280 x 800 the fleet scrolls and the header stays', async t => {
     const h = await busyDeck(t)
     const page = await openDeck(browser, h, '/', { viewport: { width: 1280, height: 800 } })
     await page.waitForSelector('.home-grid > article')
@@ -521,7 +542,7 @@ if (import.meta.main) {
     assert.deepEqual(running, [])
     const ring = await page.$eval('.session-card--approval', el => getComputedStyle(el).boxShadow)
     t.diagnostic(`needs-you card ring under reduced motion: ${ring}`)
-    assert.notEqual(ring, 'none', 'needs-you cards keep a static ring')
+    assert.match(ring, /\binset\b/, 'needs-you cards keep a static ring drawn inset')
     const loading = await openDeck(browser, h, '/', { reducedMotion: 'reduce', wait: false, init: () => { window.WebSocket = class { constructor() {} close() {} send() {} addEventListener() {} } } })
     await loading.waitForSelector('.skeleton-card')
     assert.deepEqual(await loading.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running').length), 0)
@@ -551,7 +572,7 @@ if (import.meta.main) {
     assert.ok(took < 160, `palette focused in ${took.toFixed(1)} ms`)
     assert.equal(await page.locator('[role="dialog"] .palette-input').count(), 1)
     const first = await page.textContent('#palette-opt-0 .palette-row-title')
-    assert.match(first, /^rustot · Bash: /, 'the first option is the oldest request, rustot')
+    assert.equal(first, 'rustot · cargo test --release combat::', 'the first option is the oldest request, rustot, read as its command')
     await page.fill('.palette-input', 'rus')
     assert.deepEqual(await page.$$eval('.palette-group-title', rows => rows.map(row => row.textContent)), ['Needs you', 'Sessions'])
     const sessions = await page.$$eval('.palette-group--sessions .palette-row--session', rows => rows.map(row => [row.querySelector('.palette-row-title').textContent, row.querySelector('kbd')?.textContent ?? null]))
@@ -666,7 +687,7 @@ if (import.meta.main) {
     assert.equal(moving, 0)
   })
 
-  spec('Drawer AC11: with reduced motion the drawer fades in', { todo: 'gap: no stylesheet applies deck-drawer-in (tokens.css defines it), so the drawer neither slides nor fades' }, async t => {
+  spec('Drawer AC11: with reduced motion the drawer fades in', async t => {
     const h = await busyDeck(t)
     const page = await openDeck(browser, h, '/', { reducedMotion: 'reduce' })
     await page.keyboard.press('Alt+KeyU')
@@ -756,7 +777,7 @@ if (import.meta.main) {
     assert.equal(await page.getAttribute('.focus-tab[aria-selected="true"]', 'id'), 'focus-tab-changes')
   })
 
-  spec('Focus activity log: steps recorded from tool hooks are listed', { todo: 'no server code writes session_steps (grep INSERT INTO session_steps in hub/server finds nothing), so the log and the tool-call count stay empty' }, async t => {
+  spec('Focus activity log: steps recorded from tool hooks are listed', async t => {
     const h = await busyDeck(t)
     const page = await openDeck(browser, h, `/s/${h.ids.get('rustot')}`)
     await page.waitForSelector('.focus-steps, .focus-log-empty', { timeout: 5000 })
@@ -820,7 +841,7 @@ if (import.meta.main) {
     await page.waitForFunction(() => document.title.startsWith('(130) '), null, { timeout: 5000 })
   })
 
-  spec('Drawer and cards: a question request reads as its question, not as the tool input', { todo: 'defect: hub/server/machines/request.mjs:802 builds every tool request summary as `${toolName}: ${JSON.stringify(tool_input)}`, so AskUserQuestion shows raw JSON cut at 160 characters' }, async t => {
+  spec('Drawer and cards: a question request reads as its question, not as the tool input', async t => {
     const h = await busyDeck(t)
     const page = await openDeck(browser, h)
     await page.keyboard.press('Alt+KeyU')
@@ -848,7 +869,7 @@ if (import.meta.main) {
     await page.waitForSelector('.banner--deckd', { state: 'detached', timeout: 3000 })
   })
 
-  spec('Failures AC3: Retry now during an outage keeps the banner on screen', { todo: 'defect: the API publishes the deckd row as checking, bannerFor shows no banner for checking, so the banner vanishes until the attempt fails' }, async t => {
+  spec('Failures AC3: Retry now during an outage keeps the banner on screen', async t => {
     const deckd = fakeDeckd({ up: false })
     const h = await startDeck(t, { web: web.dir, deckd })
     await h.load('busy')

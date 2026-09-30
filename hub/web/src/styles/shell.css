@@ -222,6 +222,10 @@ body,
 .toast-actions { display: flex; gap: var(--space-8); margin-top: var(--space-8); }
 .toast-more { margin: 0; color: var(--text-muted); }
 
+/* Overlay entries, like the toast's: the Needs-you drawer slides in from the right, and under reduced
+   motion tokens.css redefines deck-drawer-in as a fade (needs-you-drawer.md, Drawer AC11). */
+.drawer { animation: deck-drawer-in var(--motion-duration-moderate) var(--motion-easing-enter) both; }
+
 /* Full-page fatal states: no shell, no retry. */
 .fatal {
   display: grid;

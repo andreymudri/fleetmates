@@ -1,7 +1,7 @@
 import { dedupeKey } from '../ingest/validate.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
 import { applyRequestHook, expireRequests, isRequestOpening, reconcileRequestOpenings, resumedActivityEvents } from './request.mjs'
-import { applySessionHook, applySubagentLifecycle, captureReviewBaseline, ignoresSessionHook, isObsoleteSessionStart, persistSessionSummary, recordSessionIdentity, refreshSessionChanges, workingRoot, resolveSession, sameKnownProcess } from './session.mjs'
+import { applySessionHook, applySubagentLifecycle, captureReviewBaseline, ignoresSessionHook, isObsoleteSessionStart, persistSessionSummary, recordSessionIdentity, recordToolStep, refreshSessionChanges, workingRoot, resolveSession, sameKnownProcess } from './session.mjs'
 
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
 const rank = event => {
@@ -76,9 +76,31 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
     const requests = store.all('SELECT * FROM requests ORDER BY created_at, id').map(requestView)
     return { seq: Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq), sessions, requests, counts: projectCounts(store), home: projectHome(sessions, requests) }
   }
+  // The urgency order is the snapshot's `home.order`; only the fields it sorts on are read here.
+  function urgencyOrder() {
+    const sessions = store.all('SELECT id, state, state_since FROM sessions').map(row => ({ id: row.id, state: row.state, stateSince: row.state_since }))
+    const requests = store.all('SELECT session_id, created_at FROM requests WHERE state = ?', 'open').map(row => ({ sessionId: row.session_id, createdAt: row.created_at, state: 'open' }))
+    return projectHome(sessions, requests).order
+  }
+  let publishedOrder = null
+  // order.changed (05-api 3.4) when the order differs from the last one clients were given. A session that
+  // only leaves the order (it ended) moves nobody, so that alone publishes nothing; clients drop ended rows.
+  function orderEvent(at) {
+    const order = urgencyOrder()
+    const current = new Set(order)
+    const kept = publishedOrder.filter(id => current.has(id))
+    if (kept.length !== order.length || kept.some((id, index) => id !== order[index])) store.appendEvent({ at, type: 'order.changed', data: { order } })
+    return order
+  }
   function commit(fn) {
     const before = Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq)
-    store.tx(fn)
+    publishedOrder ??= urgencyOrder()
+    let order
+    store.tx(() => {
+      fn()
+      order = orderEvent(now())
+    })
+    publishedOrder = order
     const events = store.all('SELECT seq, at, type, entity_id, data FROM events WHERE seq > ? ORDER BY seq', before).map(row => ({ seq: Number(row.seq), at: row.at, type: row.type, entityId: row.entity_id, data: JSON.parse(row.data) }))
     for (const event of events) publish(event)
     return events
@@ -166,6 +188,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
               if (known) session = applySessionHook(store, envelope, session, requestChanged)
             }
           }
+          if (session && (!late || session.alive && sameKnownProcess(store, session, envelope))) recordToolStep(store, session, envelope)
           store.run('INSERT INTO hook_events(dedupe_key,session_id,claude_session_id,event,hook_ts,received_at,via,pty_id,claude_pid,applied,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)', key, session?.id ?? null, hook.session_id, hook.hook_event_name, envelope.hookTs, envelope.receivedAt ?? now(), envelope.via ?? 'socket', envelope.ptyId ?? null, envelope.claudePid ?? null, lifecycleEvent ? lifecycleAccepted ? 1 : 0 : openingApplied || !late ? 1 : 0, JSON.stringify(hook))
           if (session && (!late || requestChanged)) {
             for (const row of store.all('SELECT * FROM requests WHERE session_id = ?', session.id)) {

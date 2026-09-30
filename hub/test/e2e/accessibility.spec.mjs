@@ -105,7 +105,7 @@ test('axe: Home busy, calm, crowded and empty, with the palette open', { skip: s
   audit.done()
 })
 
-test('axe: the Needs-you drawer', { skip: skipAxe, todo: skipAxe ? false : 'defect: NeedsYouDrawer.jsx:116 gives each drawer <li> role="group", so its <ul> holds no list items (axe list, serious)' }, async t => {
+test('axe: the Needs-you drawer', { skip: skipAxe }, async t => {
   const audit = auditor()
   const h = await startDeck(t, { web: web.dir })
   await h.load('busy')

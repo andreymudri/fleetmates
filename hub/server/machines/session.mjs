@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
-import { expireRequests } from './request.mjs'
+import { expireRequests, matchKey, toolLine } from './request.mjs'
 
 const maxGitOutput = 1024 * 1024
 const maxChangedPaths = 512
@@ -737,6 +737,54 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   const since = at
   store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,last_input_from=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,branch=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : stateSince, since, Math.max(at, existing.last_activity_at), alive, activity, lastInputFrom, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, branch, reviewBaseline, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
+}
+
+/** Steps kept per session; older ones are trimmed after each insert (06-storage `session_steps`). */
+export const STEP_LIMIT = 200
+const STEP_LABELS = { Edit: 'Update', MultiEdit: 'Update' }
+const STEP_OUTCOMES = { PostToolUse: 'ok', PostToolUseFailure: 'failed', PermissionDenied: 'failed' }
+
+function patchCounts(response) {
+  const patch = Array.isArray(response?.structuredPatch) ? response.structuredPatch : null
+  if (!patch) return { adds: null, dels: null }
+  let adds = 0
+  let dels = 0
+  for (const hunk of patch) for (const line of Array.isArray(hunk?.lines) ? hunk.lines : []) {
+    if (typeof line !== 'string') continue
+    if (line.startsWith('+')) adds++
+    else if (line.startsWith('-')) dels++
+  }
+  return { adds, dels }
+}
+
+/**
+ * Record a tool step inside the caller's transaction: `PreToolUse` opens a `running` step; `PostToolUse`,
+ * `PostToolUseFailure` and `PermissionDenied` settle the oldest running step with the same match key, or
+ * record one settled step when its `PreToolUse` was never seen. Keeps the newest {@link STEP_LIMIT}.
+ * @param {object} store
+ * @param {object | null} session the sessions row
+ * @param {{ hook: object, hookTs: number }} envelope
+ * @returns {boolean} whether a step was written
+ */
+export function recordToolStep(store, session, envelope) {
+  const hook = envelope.hook
+  const event = hook.hook_event_name
+  if (!session || !hook.tool_name || (event !== 'PreToolUse' && !STEP_OUTCOMES[event])) return false
+  const key = matchKey(hook)
+  const counts = event === 'PostToolUse' ? patchCounts(hook.tool_response) : { adds: null, dels: null }
+  if (event !== 'PreToolUse') {
+    const open = store.get('SELECT seq FROM session_steps WHERE session_id=? AND status=? AND match_key=? ORDER BY seq LIMIT 1', session.id, 'running', key)
+    if (open) {
+      store.run('UPDATE session_steps SET status=?,adds=?,dels=? WHERE session_id=? AND seq=?', STEP_OUTCOMES[event], counts.adds, counts.dels, session.id, open.seq)
+      return true
+    }
+  }
+  const seq = store.get('SELECT COALESCE(MAX(seq),0)+1 AS seq FROM session_steps WHERE session_id=?', session.id).seq
+  store.run('INSERT INTO session_steps(session_id,seq,at,tool_name,line,adds,dels,status,match_key,task_id) VALUES(?,?,?,?,?,?,?,?,?,?)',
+    session.id, seq, envelope.hookTs, String(hook.tool_name), toolLine(hook.tool_name, hook.tool_input, hook.cwd ?? session.cwd, STEP_LABELS),
+    counts.adds, counts.dels, event === 'PreToolUse' ? 'running' : STEP_OUTCOMES[event], key, session.run_task_id ?? null)
+  store.run('DELETE FROM session_steps WHERE session_id=? AND seq<=?', session.id, seq - STEP_LIMIT)
+  return true
 }
 
 /** Persist ended process history independently of retained session detail. */
