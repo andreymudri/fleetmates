@@ -1,0 +1,166 @@
+{
+  "about": "UI fixtures for the M1 Observe end-to-end suites (docs/deck/screens/README.md section 4). Each session is a list of hook events that the e2e harness turns into deck-hook envelopes: the payload starts from the pinned Claude Code 2.1.282 hook fixture for the event, then takes the fields given here. `ago` is seconds before load time. Every path uses the /home/you placeholder, and the repo names are neutral canvas names. `busy` differs from the canvas in one way: the server has no Safe tier and no team card in M1, so the fleetmates lead is a plain session with two Caution requests and the rustot request is the oldest.",
+  "claudeCodeVersion": "2.1.282",
+  "home": "/home/you/dev",
+  "fixtures": {
+    "busy": {
+      "sessions": [
+        { "key": "rustot", "hooks": [
+          { "e": "SessionStart", "ago": 1500 },
+          { "e": "UserPromptSubmit", "ago": 1400, "prompt": "combat-tick" },
+          { "e": "PreToolUse", "ago": 720, "tool_name": "Bash", "tool_input": { "command": "cargo build" } },
+          { "e": "PostToolUse", "ago": 700, "tool_name": "Bash", "tool_input": { "command": "cargo build" } },
+          { "e": "PreToolUse", "ago": 560, "tool_name": "Bash", "tool_input": { "command": "cargo test --release combat::" } },
+          { "e": "PermissionRequest", "ago": 540, "tool_name": "Bash", "tool_input": { "command": "cargo test --release combat::" } }
+        ] },
+        { "key": "fleetmates", "hooks": [
+          { "e": "SessionStart", "ago": 3000 },
+          { "e": "UserPromptSubmit", "ago": 2900, "prompt": "phase 2 lead" },
+          { "e": "PermissionRequest", "ago": 200, "tool_name": "Bash", "tool_input": { "command": "npm test" } },
+          { "e": "PermissionRequest", "ago": 120, "tool_name": "Bash", "tool_input": { "command": "git fetch origin" } }
+        ] },
+        { "key": "discord-audit", "hooks": [
+          { "e": "SessionStart", "ago": 2000 },
+          { "e": "UserPromptSubmit", "ago": 1900, "prompt": "export audit" },
+          { "e": "PreToolUse", "ago": 300, "tool_name": "AskUserQuestion", "tool_input": { "questions": [{ "question": "Which export format should the audit use?", "header": "Format", "options": [{ "label": "CSV", "description": "One row per message" }, { "label": "JSON", "description": "Nested threads" }], "multiSelect": false }] } }
+        ] },
+        { "key": "research", "hooks": [
+          { "e": "SessionStart", "ago": 900 },
+          { "e": "UserPromptSubmit", "ago": 360, "prompt": "retry policies survey" },
+          { "e": "PreToolUse", "ago": 30, "tool_name": "Read", "tool_input": { "file_path": "/home/you/dev/research/notes.md" } }
+        ] },
+        { "key": "portfolio-site", "hooks": [
+          { "e": "SessionStart", "ago": 1200 },
+          { "e": "UserPromptSubmit", "ago": 900, "prompt": "landing page copy" },
+          { "e": "PreToolUse", "ago": 20, "tool_name": "Bash", "tool_input": { "command": "npm run build" } }
+        ] },
+        { "key": "vault-mcp", "hooks": [
+          { "e": "SessionStart", "ago": 4000 },
+          { "e": "UserPromptSubmit", "ago": 3900, "prompt": "golden queries" },
+          { "e": "PostToolUse", "ago": 3000, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/vault-mcp/src/search.mjs", "old_string": "a", "new_string": "b", "replace_all": false } },
+          { "e": "Stop", "ago": 2400 }
+        ] },
+        { "key": "rustot-client", "hooks": [
+          { "e": "SessionStart", "ago": 2000 },
+          { "e": "UserPromptSubmit", "ago": 1320, "prompt": "ui/inventory" }
+        ] },
+        { "key": "turbidassist", "hooks": [
+          { "e": "SessionStart", "ago": 4000 },
+          { "e": "UserPromptSubmit", "ago": 3800, "prompt": "tidy config" },
+          { "e": "Stop", "ago": 3600 }
+        ] },
+        { "key": "axios-like", "hooks": [
+          { "e": "SessionStart", "ago": 5000 },
+          { "e": "UserPromptSubmit", "ago": 4900, "prompt": "retry adapter" },
+          { "e": "PostToolUse", "ago": 4000, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/axios-like/lib/retry.js", "old_string": "a", "new_string": "b", "replace_all": false } },
+          { "e": "Stop", "ago": 3700 }
+        ] }
+      ],
+      "review": ["axios-like"],
+      "expect": {
+        "grid": ["rustot", "fleetmates", "discord-audit", "research", "portfolio-site", "vault-mcp"],
+        "quiet": ["rustot-client", "turbidassist", "axios-like"],
+        "chips": ["3 need you", "2 running", "1 to review"],
+        "badge": "3",
+        "drawerSubtitle": "4 requests from 3 ships · oldest waiting 9m",
+        "drawerSections": [["caution", 3], ["question", 1]],
+        "states": { "rustot": "needs_approval", "fleetmates": "needs_approval", "discord-audit": "asked_you", "research": "running", "portfolio-site": "running", "vault-mcp": "done", "rustot-client": "stale", "turbidassist": "idle", "axios-like": "reviewed" }
+      }
+    },
+    "calm": {
+      "sessions": [
+        { "key": "vault-mcp", "hooks": [
+          { "e": "SessionStart", "ago": 4000 },
+          { "e": "UserPromptSubmit", "ago": 3900, "prompt": "golden queries" },
+          { "e": "PostToolUse", "ago": 3000, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/vault-mcp/src/search.mjs", "old_string": "a", "new_string": "b", "replace_all": false } },
+          { "e": "Stop", "ago": 2400 }
+        ] },
+        { "key": "turbidassist", "hooks": [
+          { "e": "SessionStart", "ago": 4000 },
+          { "e": "UserPromptSubmit", "ago": 3800, "prompt": "tidy config" },
+          { "e": "Stop", "ago": 3600 }
+        ] },
+        { "key": "axios-like", "hooks": [
+          { "e": "SessionStart", "ago": 5000 },
+          { "e": "UserPromptSubmit", "ago": 4900, "prompt": "retry adapter" },
+          { "e": "PostToolUse", "ago": 4000, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/axios-like/lib/retry.js", "old_string": "a", "new_string": "b", "replace_all": false } },
+          { "e": "Stop", "ago": 3700 }
+        ] }
+      ],
+      "review": ["axios-like"],
+      "expect": { "states": { "vault-mcp": "done", "turbidassist": "idle", "axios-like": "reviewed" } }
+    },
+    "crowded12": {
+      "sessions": [
+        { "key": "atlas", "hooks": [
+          { "e": "SessionStart", "ago": 3000 }, { "e": "UserPromptSubmit", "ago": 2900, "prompt": "route table" },
+          { "e": "PermissionRequest", "ago": 400, "tool_name": "Bash", "tool_input": { "command": "cargo build" } }
+        ] },
+        { "key": "beacon", "hooks": [
+          { "e": "SessionStart", "ago": 3000 }, { "e": "UserPromptSubmit", "ago": 2900, "prompt": "signal parser" },
+          { "e": "PermissionRequest", "ago": 300, "tool_name": "Bash", "tool_input": { "command": "go test ./..." } }
+        ] },
+        { "key": "compass", "hooks": [
+          { "e": "SessionStart", "ago": 3000 }, { "e": "UserPromptSubmit", "ago": 2900, "prompt": "heading fix" },
+          { "e": "PreToolUse", "ago": 200, "tool_name": "AskUserQuestion", "tool_input": { "questions": [{ "question": "Keep the old heading format?", "header": "Format", "options": [{ "label": "Yes", "description": "Keep" }, { "label": "No", "description": "Replace" }], "multiSelect": false }] } }
+        ] },
+        { "key": "delta", "hooks": [
+          { "e": "SessionStart", "ago": 900 }, { "e": "UserPromptSubmit", "ago": 600, "prompt": "river model" }
+        ] },
+        { "key": "ember", "hooks": [
+          { "e": "SessionStart", "ago": 900 }, { "e": "UserPromptSubmit", "ago": 500, "prompt": "heat map" }
+        ] },
+        { "key": "fjord", "hooks": [
+          { "e": "SessionStart", "ago": 4000 }, { "e": "UserPromptSubmit", "ago": 3900, "prompt": "coastline" },
+          { "e": "PostToolUse", "ago": 3500, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/fjord/src/coast.rs", "old_string": "a", "new_string": "b", "replace_all": false } },
+          { "e": "Stop", "ago": 3000 }
+        ] },
+        { "key": "harbor", "hooks": [
+          { "e": "SessionStart", "ago": 4000 }, { "e": "UserPromptSubmit", "ago": 3900, "prompt": "dock queue" },
+          { "e": "PostToolUse", "ago": 3500, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/harbor/queue.py", "old_string": "a", "new_string": "b", "replace_all": false } },
+          { "e": "Stop", "ago": 2000 }
+        ] },
+        { "key": "isle", "hooks": [
+          { "e": "SessionStart", "ago": 5000 }, { "e": "UserPromptSubmit", "ago": 4900, "prompt": "island map" }, { "e": "Stop", "ago": 4500 }
+        ] },
+        { "key": "jetty", "hooks": [
+          { "e": "SessionStart", "ago": 5000 }, { "e": "UserPromptSubmit", "ago": 4900, "prompt": "pier loads" }, { "e": "Stop", "ago": 4000 }
+        ] },
+        { "key": "keel", "hooks": [
+          { "e": "SessionStart", "ago": 5000 }, { "e": "UserPromptSubmit", "ago": 4900, "prompt": "hull check" }, { "e": "Stop", "ago": 3500 }
+        ] },
+        { "key": "lagoon", "hooks": [
+          { "e": "SessionStart", "ago": 6000 }, { "e": "UserPromptSubmit", "ago": 5900, "prompt": "tide tables" },
+          { "e": "PostToolUse", "ago": 5500, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/lagoon/tides.js", "old_string": "a", "new_string": "b", "replace_all": false } },
+          { "e": "Stop", "ago": 5000 }
+        ] },
+        { "key": "mast", "hooks": [
+          { "e": "SessionStart", "ago": 3000 }, { "e": "UserPromptSubmit", "ago": 1500, "prompt": "rigging" }
+        ] }
+      ],
+      "review": ["lagoon"],
+      "expect": {
+        "grid": ["atlas", "beacon", "compass", "ember", "delta"],
+        "strip": ["mast", "harbor", "fjord", "keel", "jetty", "isle", "lagoon"],
+        "stripStates": ["stale", "done", "done", "idle", "idle", "idle", "reviewed"],
+        "states": { "atlas": "needs_approval", "beacon": "needs_approval", "compass": "asked_you", "delta": "running", "ember": "running", "fjord": "done", "harbor": "done", "isle": "idle", "jetty": "idle", "keel": "idle", "lagoon": "reviewed", "mast": "stale" }
+      }
+    },
+    "fifteen": {
+      "extends": "crowded12",
+      "sessions": [
+        { "key": "north", "hooks": [{ "e": "SessionStart", "ago": 800 }, { "e": "UserPromptSubmit", "ago": 400, "prompt": "star chart" }] },
+        { "key": "oar", "hooks": [{ "e": "SessionStart", "ago": 800 }, { "e": "UserPromptSubmit", "ago": 300, "prompt": "stroke rate" }] },
+        { "key": "pier", "hooks": [{ "e": "SessionStart", "ago": 800 }, { "e": "UserPromptSubmit", "ago": 200, "prompt": "pile driver" }] }
+      ],
+      "expect": { "sessions": 15 }
+    }
+  },
+  "xss": [
+    "<img src=x onerror=alert(1)>",
+    "<script>alert(2)</script>",
+    "<a href=\"javascript:alert(3)\">click</a>",
+    "evil‮txt.exe",
+    "\u001b[31mred\u001b[0m \u001b]0;title\u0007"
+  ]
+}
