@@ -3436,3 +3436,142 @@ test('requested and canonical CLAUDE.md paths preserve local and global repo bou
     assert.equal(readFileSync(path.join(repo, 'plain'), 'utf8'), 'synthetic')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('delayed prompts cancel older permissions and AskUserQuestion without rewinding activity', () => {
+  for (const question of [false, true]) for (const requestAt of [2000, 3000]) for (const late of [false, true]) {
+    const h = harness()
+    try {
+      const send = (name, at, fields = {}) => h.projector.applyHooks([{ ...fixture(name, fields), hookTs: at }])
+      send('SessionStart.startup.json', 1000)
+      send(question ? 'PreToolUse.AskUserQuestion.json' : 'PermissionRequest.AskUserQuestion.json', requestAt, question ? {} : { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      if (!late) send('UserPromptSubmit.json', 3000, { prompt: 'Skip this and list files' })
+      send('PreToolUse.Read.json', 4000, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+      const before = h.store.get('SELECT since_ts,state_since,last_activity_at,review_baseline,process_key FROM sessions')
+      if (late) send('UserPromptSubmit.json', 3000, { prompt: 'Skip this and list files' })
+      const after = h.store.get('SELECT * FROM sessions')
+      assert.equal(after.state, 'running', `question=${question}, requestAt=${requestAt}, late=${late}`)
+      for (const key of Object.keys(before)) assert.equal(after[key], before[key], key)
+      const request = h.store.get('SELECT * FROM requests')
+      assert.equal(request.state, 'answered')
+      assert.equal(request.answered_at, 3000)
+      assert.deepEqual(JSON.parse(request.answer), { via: 'terminal', choice: 'deny' })
+      assert.equal(h.projector.snapshot().counts.openRequests, 0)
+      assert.equal(h.projector.snapshot().counts.needYouSessions, 0)
+    } finally { h.close() }
+  }
+})
+
+test('late prompt cancellation retains every newer request and derives remaining priority', () => {
+  for (const remaining of ['permission', 'question', 'both']) {
+    const h = harness()
+    try {
+      const send = (name, at, fields = {}) => h.projector.applyHooks([{ ...fixture(name, fields), hookTs: at }])
+      send('SessionStart.startup.json', 1000)
+      send('PermissionRequest.AskUserQuestion.json', 2000, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      send('PreToolUse.AskUserQuestion.json', 3000)
+      if (remaining !== 'question') send('PermissionRequest.AskUserQuestion.json', 3500, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+      if (remaining !== 'permission') send('PreToolUse.AskUserQuestion.json', 3600, { tool_input: { questions: [{ question: 'New question?', options: [] }] } })
+      send('PreToolUse.Read.json', 4000)
+      const newer = h.store.all('SELECT * FROM requests WHERE created_at>3000 ORDER BY created_at')
+      const clocks = h.store.get('SELECT since_ts,state_since,last_activity_at,review_baseline,process_key FROM sessions')
+      send('UserPromptSubmit.json', 3000, { prompt: 'Cancel the earlier choices' })
+      assert.deepEqual(h.store.all('SELECT * FROM requests WHERE created_at>3000 ORDER BY created_at'), newer)
+      const older = h.store.all('SELECT state,answered_at,answer FROM requests WHERE created_at<=3000')
+      assert.equal(older.length, 2)
+      for (const row of older) {
+        assert.equal(row.state, 'answered')
+        assert.equal(row.answered_at, 3000)
+        assert.equal(JSON.parse(row.answer).choice, 'deny')
+      }
+      assert.deepEqual(h.store.get('SELECT since_ts,state_since,last_activity_at,review_baseline,process_key FROM sessions'), clocks)
+      assert.equal(h.projector.snapshot().sessions[0].state, remaining === 'question' ? 'asked_you' : 'needs_approval')
+      assert.equal(h.projector.snapshot().counts.openRequests, newer.length)
+      assert.equal(h.projector.snapshot().counts.needYouSessions, 1)
+    } finally { h.close() }
+  }
+})
+
+test('late prompt publishes all cancellations and derived state only after SQLite commit', () => {
+  const h = harness()
+  const reader = openDeckDb(h.file)
+  try {
+    const events = []
+    const projector = createProjector({ store: h.store, publish: event => {
+      assert.ok(Number(reader.get('SELECT COALESCE(MAX(seq),0) AS seq FROM events').seq) >= event.seq)
+      if (event.type === 'request.closed') {
+        const row = reader.get('SELECT state,answered_at FROM requests WHERE id=?', event.entityId)
+        assert.equal(row.state, 'answered')
+        assert.equal(row.answered_at, 3000)
+        assert.equal(reader.get('SELECT state,last_activity_at FROM sessions').state, 'running')
+        assert.equal(reader.get('SELECT state,last_activity_at FROM sessions').last_activity_at, 4000)
+      }
+      events.push(event)
+    } })
+    const send = (name, at, fields = {}) => projector.applyHooks([{ ...fixture(name, fields), hookTs: at }])
+    send('SessionStart.startup.json', 1000)
+    send('PermissionRequest.AskUserQuestion.json', 2000, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    send('PreToolUse.AskUserQuestion.json', 2500)
+    send('PreToolUse.Read.json', 4000)
+    const ids = projector.snapshot().requests.map(row => row.id).sort()
+    events.length = 0
+    const delivered = send('UserPromptSubmit.json', 3000, { prompt: 'Cancel both' })
+    assert.deepEqual(events, delivered)
+    assert.deepEqual(events.filter(event => event.type === 'request.closed').map(event => event.entityId).sort(), ids)
+    assert.equal(events.filter(event => event.type === 'session.upserted').length, 1)
+    assert.equal(events.find(event => event.type === 'session.upserted').data.state, 'running')
+    assert.equal(events.find(event => event.type === 'session.upserted').data.lastActivityAt, 4000)
+    assert.equal(events.filter(event => event.type === 'counts').length, 1)
+    assert.equal(events.find(event => event.type === 'counts').data.openRequests, 0)
+    assert.equal(events.find(event => event.type === 'counts').data.needYouSessions, 0)
+    assert.deepEqual(events.map(event => event.seq), [...events.map(event => event.seq)].sort((a, b) => a - b))
+  } finally { reader.close(); h.close() }
+})
+
+test('late prompts reject prior processes and preserve pending replacement bookkeeping', () => {
+  for (const wrapped of [false, true]) {
+    const h = harness()
+    try {
+      const send = (name, at, pid, fields = {}) => h.projector.applyHooks([{ ...fixture(name, fields), claudePid: pid, ptyId: wrapped ? `prompt-pty-${pid}` : null, hookTs: at }])
+      send('SessionStart.startup.json', 1000, 41)
+      const id = h.projector.snapshot().sessions[0].id
+      h.projector.signal(id, { type: 'exit', code: 1 }, 2000)
+      send('SessionStart.startup.json', 3000, 42, { source: 'resume' })
+      send('PermissionRequest.AskUserQuestion.json', 3500, 42, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      send('PreToolUse.Read.json', 4000, 42)
+      const before = h.projector.snapshot()
+      send('UserPromptSubmit.json', 3600, 41, { prompt: 'Obsolete process prompt' })
+      const after = h.projector.snapshot()
+      assert.deepEqual(after.sessions, before.sessions)
+      assert.deepEqual(after.requests, before.requests)
+      assert.deepEqual(after.counts, before.counts)
+    } finally { h.close() }
+  }
+  for (const reason of ['clear', 'resume']) {
+    const h = harness()
+    try {
+      const send = (name, at, fields = {}) => h.projector.applyHooks([{ ...fixture(name, fields), hookTs: at }])
+      send('SessionStart.startup.json', 1000, { session_id: 'old' })
+      const id = h.projector.snapshot().sessions[0].id
+      send('PermissionRequest.AskUserQuestion.json', 2000, { session_id: 'old', tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      send('SessionEnd.clear.json', 2500, { session_id: 'old', reason })
+      send('PreToolUse.Read.json', 4000, { session_id: 'new' })
+      send('PermissionRequest.AskUserQuestion.json', 4200, { session_id: 'new', tool_name: 'Bash', tool_input: { command: 'ls' } })
+      const newer = h.store.get('SELECT * FROM requests WHERE created_at=4200')
+      const clocks = h.store.get('SELECT since_ts,state_since,last_activity_at FROM sessions')
+      send('UserPromptSubmit.json', 3000, { session_id: 'new', prompt: 'Resume with new work' })
+      assert.equal(h.store.get('SELECT state FROM requests WHERE created_at=2000').state, 'answered')
+      assert.deepEqual(h.store.get('SELECT * FROM requests WHERE created_at=4200'), newer)
+      assert.deepEqual(h.store.get('SELECT since_ts,state_since,last_activity_at FROM sessions'), clocks)
+      assert.equal(h.store.get('SELECT end_reason FROM sessions').end_reason, reason)
+      send('SessionStart.startup.json', 2800, { session_id: 'new', source: reason })
+      assert.equal(h.store.get('SELECT end_reason FROM sessions').end_reason, null)
+      h.projector.tick(10000)
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+      assert.equal(h.projector.snapshot().sessions[0].id, id)
+      assert.equal(h.projector.snapshot().sessions[0].alive, true)
+      assert.equal(h.projector.snapshot().sessions[0].claudeSessionId, 'new')
+      assert.deepEqual(h.store.get('SELECT * FROM requests WHERE created_at=4200'), newer)
+      assert.deepEqual(h.store.get('SELECT since_ts,state_since,last_activity_at FROM sessions'), clocks)
+    } finally { h.close() }
+  }
+})

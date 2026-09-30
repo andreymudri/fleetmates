@@ -251,7 +251,8 @@ function editedPath(hook) {
   return path.resolve(hook.cwd, file)
 }
 
-function sameKnownProcess(store, row, envelope) {
+/** Check whether supplied PTY and PID identities conflict with the session's process. */
+export function sameKnownProcess(store, row, envelope) {
   if (envelope.ptyId && row.pty_id && envelope.ptyId !== row.pty_id) return false
   if (envelope.claudePid) {
     const knownPid = row.pty_id

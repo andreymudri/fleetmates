@@ -1,7 +1,7 @@
 import { dedupeKey } from '../ingest/validate.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
 import { applyRequestHook, expireRequests, resumedActivityEvents } from './request.mjs'
-import { applySessionHook, captureReviewBaseline, ignoresSessionHook, isObsoleteSessionStart, persistSessionSummary, recordSessionIdentity, refreshSessionChanges, resolveSession } from './session.mjs'
+import { applySessionHook, captureReviewBaseline, ignoresSessionHook, isObsoleteSessionStart, persistSessionSummary, recordSessionIdentity, refreshSessionChanges, resolveSession, sameKnownProcess } from './session.mjs'
 
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
 const rank = event => {
@@ -57,7 +57,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           const replacementChanged = !!session && session.end_reason !== previousEndReason
           const late = !!session && (obsoleteStart || envelope.hookTs < session.since_ts || !session.alive && !(hook.hook_event_name === 'SessionStart' && hook.source === 'resume'))
           let requestChanged = replacementChanged && [...beforeRequests].some(([id, row]) => row.state === 'open' && store.get('SELECT state FROM requests WHERE id=?', id)?.state !== 'open')
-          if (late && session.alive && [...resumedActivityEvents, 'PermissionDenied'].includes(hook.hook_event_name)) {
+          if (late && session.alive && [...resumedActivityEvents, 'PermissionDenied'].includes(hook.hook_event_name) && (hook.hook_event_name !== 'UserPromptSubmit' || sameKnownProcess(store, session, envelope))) {
             requestChanged = applyRequestHook(store, session, envelope, { late: true })
             if (requestChanged && ['needs_approval', 'asked_you'].includes(session.state)) {
               const open = store.all('SELECT kind FROM requests WHERE session_id = ? AND state = ?', session.id, 'open')

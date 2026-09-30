@@ -646,7 +646,7 @@ export function applyRequestHook(store, session, envelope, { late = false } = {}
   const at = envelope.hookTs
   const key = matchKey(hook)
   const resumed = resumedActivityEvents.includes(event) && store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'observed' }), at, session.id, 'question', 'open', 'stop_question', 'elicitation', at).changes > 0
-  if (late && !['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) return resumed
+  if (late && !['PostToolUse', 'PostToolUseFailure', 'PermissionDenied', 'UserPromptSubmit'].includes(event)) return resumed
   let question = null
   if (event === 'Stop' && ['running', 'stale'].includes(session.state) && !session.subagents_active && !store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? LIMIT 1', session.id, 'open')) question = transcriptQuestion(hook.transcript_path ?? session.transcript_path)
   let kind = null
@@ -691,8 +691,7 @@ export function applyRequestHook(store, session, envelope, { late = false } = {}
     return true
   }
   if (event === 'UserPromptSubmit') {
-    store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND state = ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'deny' }), at, session.id, 'open')
-    return true
+    return store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND state = ? AND created_at <= ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'deny' }), at, session.id, 'open', at).changes > 0 || resumed
   }
   if (event === 'Notification' && hook.notification_type === 'idle_prompt') return store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE session_id = ? AND state = ? AND source <> ?', 'expired', 'interrupted', session.id, 'open', 'stop_question').changes > 0
   return resumed
