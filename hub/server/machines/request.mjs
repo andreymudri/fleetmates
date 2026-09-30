@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 
 function canonical(value) {
@@ -23,23 +23,25 @@ function shellTokens(command) {
   let value = ''
   let quoted = false
   let quote = null
+  let start = 0
   for (let i = 0; i < command.length; i++) {
     const char = command[i]
     if (quote) {
       if (char === quote) { quote = null; quoted = true }
       else if (char === '\\' && quote === '"' && i + 1 < command.length) value += command[++i]
       else value += char
-    } else if (char === "'" || char === '"') { quote = char; quoted = true }
+    } else if (char === "'" || char === '"' || char === '`' && command.indexOf('`', i + 1) >= 0) { quote = char; quoted = true }
     else if (char === '\\' && i + 1 < command.length) value += command[++i]
     else if (/\s/.test(char) || ';|&()<>'.includes(char)) {
-      if (value) tokens.push({ value, quoted })
+      if (value) tokens.push({ value, quoted, start, end: i })
       value = ''
       quoted = false
-      if ('<>'.includes(char)) tokens.push({ value: char })
+      start = i + 1
+      if ('<>'.includes(char)) tokens.push({ value: char, start: i, end: i + 1 })
       else if (';|&()'.includes(char) || char === '\n') tokens.push({ value: char, separator: true })
     } else value += char
   }
-  if (value) tokens.push({ value, quoted })
+  if (value) tokens.push({ value, quoted, start, end: command.length })
   return tokens
 }
 
@@ -221,7 +223,7 @@ function canonicalExistingPath(location) {
 
 function namesRelativeDeckControl(hook, depth = 0) {
   if (depth > 4) return true
-  const namesControl = (value, shell = false) => {
+  const namesControl = (value, shell = false, directory = hook.cwd) => {
     if (typeof value !== 'string' || !value) return false
     const expanded = shell ? value.replace(/^\$(?:([A-Z_]+)|\{([A-Z_]+)\})(?=\/)/, (match, plain, braced) => {
       const variable = plain ?? braced
@@ -230,7 +232,7 @@ function namesRelativeDeckControl(hook, depth = 0) {
     }) : value
     if (shell && /[$*?`]/.test(expanded)) return false
     if (path.isAbsolute(expanded)) return namesDeckControl({ path: canonicalExistingPath(expanded) })
-    return path.isAbsolute(hook.cwd ?? '') && namesDeckControl({ path: canonicalExistingPath(path.resolve(hook.cwd, expanded)) })
+    return path.isAbsolute(directory ?? '') && namesDeckControl({ path: canonicalExistingPath(path.resolve(directory, expanded)) })
   }
   if (['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(hook.tool_name)) {
     return namesControl(hook.tool_input?.file_path ?? hook.tool_input?.notebook_path)
@@ -239,27 +241,79 @@ function namesRelativeDeckControl(hook, depth = 0) {
     return namesControl(hook.tool_input?.path ?? hook.cwd)
   }
   if (hook.tool_name !== 'Bash' || typeof hook.tool_input?.command !== 'string') return false
-  if (embeddedCommands(hook.tool_input.command).some(command => namesRelativeDeckControl({ ...hook, tool_input: { command } }, depth + 1))) return true
-  if (shellWriteTargets(hook.tool_input.command, hook.cwd).some(target => typeof target.command === 'string' && namesRelativeDeckControl({ ...hook, cwd: target.cwd, tool_input: { command: target.command } }, depth + 1))) return true
-  const tokens = shellTokens(hook.tool_input.command)
+  const commandText = hook.tool_input.command
+  const tokens = shellTokens(commandText)
+  let directories = new Set([hook.cwd])
+  const scopes = []
+  let cdMayFail = false
   let segment = []
   const accessesControl = words => {
+    cdMayFail = false
+    if (!words.length) return false
+    const raw = commandText.slice(words[0].start, words.at(-1).end)
+    for (const cwd of directories) {
+      if (embeddedCommands(raw).some(command => namesRelativeDeckControl({ ...hook, cwd, tool_input: { command } }, depth + 1))) return true
+    }
     let index = 0
     while (words[index]) {
       const wrapper = path.posix.basename(words[index].value)
       if (!/^[A-Za-z_]\w*=/.test(words[index].value) && executionWrappers.includes(wrapper)) { index = skipWrapperOptions(words, index, wrapper); continue }
-      if (/^[A-Za-z_]\w*=/.test(words[index].value) || ['command', 'builtin'].includes(wrapper)) { index++; continue }
+      if (/^[A-Za-z_]\w*=/.test(words[index].value) || ['command', 'builtin'].includes(wrapper)) {
+        index++
+        if (wrapper === 'command') {
+          while (words[index]?.value === '--' || /^-[pVv]+$/.test(words[index]?.value ?? '')) {
+            if (/[Vv]/.test(words[index].value)) return false
+            if (words[index++].value === '--') break
+          }
+        }
+        continue
+      }
       break
     }
-    const command = path.posix.basename(words[index]?.value ?? '')
-    if (['echo', 'printf'].includes(command) && !words.some(word => ['>', '>>', '<', '<<'].includes(word.value))) return false
-    return words.slice(index + 1).some(word => !word.value.startsWith('-') && namesControl(word.value, true))
+    const executable = path.posix.basename(words[index]?.value ?? '')
+    const args = words.slice(index + 1)
+    if (['sh', 'bash', 'zsh'].includes(executable) || executable === 'eval') {
+      const at = executable === 'eval' ? -1 : args.findIndex(word => /^-[A-Za-z]*c[A-Za-z]*$/.test(word.value))
+      const inner = args[at + 1]
+      if ((executable === 'eval' || at >= 0) && inner?.quoted) {
+        for (const cwd of directories) if (namesRelativeDeckControl({ ...hook, cwd, tool_input: { command: inner.value } }, depth + 1)) return true
+      }
+    }
+    if (!['echo', 'printf'].includes(executable) || words.some(word => ['>', '>>', '<', '<<'].includes(word.value))) {
+      for (const cwd of directories) if (args.some(word => !word.value.startsWith('-') && namesControl(word.value, true, cwd))) return true
+    }
+    if (executable === 'cd') {
+      const target = args.find(word => word.value !== '--' && !word.value.startsWith('-'))?.value
+      if (target && !/[$*?`]/.test(target)) {
+        const next = new Set()
+        for (const cwd of directories) {
+          if (!path.isAbsolute(cwd ?? '')) { next.add(cwd); continue }
+          let directory = path.resolve(cwd, target)
+          if (args.some(word => word.value === '-P')) directory = canonicalExistingPath(directory)
+          next.add(directory)
+          try { if (!statSync(directory).isDirectory()) cdMayFail = true } catch { cdMayFail = true }
+        }
+        directories = next
+      } else cdMayFail = true
+    }
+    return false
   }
-  for (const token of tokens) {
-    if (token.separator) {
-      if (accessesControl(segment)) return true
-      segment = []
-    } else segment.push(token)
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (!token.separator) { segment.push(token); continue }
+    const before = directories
+    if (accessesControl(segment)) return true
+    segment = []
+    const paired = ['&', '|'].includes(token.value) && tokens[i + 1]?.separator && tokens[i + 1].value === token.value
+    if (paired) i++
+    if (token.value === '(') {
+      if (scopes.length >= 32) return true
+      scopes.push(directories)
+      directories = new Set(directories)
+    } else if (token.value === ')') directories = scopes.pop() ?? directories
+    else if (token.value === '|' && paired || [';', '\n'].includes(token.value) && cdMayFail) directories = new Set([...before, ...directories])
+    else if (['|', '&'].includes(token.value) && !paired) directories = before
+    if (directories.size > 32) return true
   }
   return accessesControl(segment)
 }

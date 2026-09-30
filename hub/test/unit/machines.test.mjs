@@ -2422,3 +2422,56 @@ test('reviewed sessions ignore repeated idle notifications without moving the re
     } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
   }
 })
+
+test('Bash control reads track literal directory changes and nested shell scopes', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-read-cd-'))
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    process.env.XDG_STATE_HOME = root
+    mkdirSync(path.join(root, 'fleetmates', 'deck'), { recursive: true })
+    mkdirSync(path.join(root, 'ordinary', 'fleetmates', 'deck'), { recursive: true })
+    mkdirSync(path.join(root, 'ordinary', 'deck'))
+    writeFileSync(path.join(root, 'fleetmates', 'deck', 'token'), 'SYNTHETIC_TOKEN\n')
+    writeFileSync(path.join(root, 'ordinary', 'fleetmates', 'deck', 'token'), 'ordinary\n')
+    writeFileSync(path.join(root, 'ordinary', 'deck', 'token'), 'ordinary\n')
+    symlinkSync(path.join(root, 'fleetmates'), path.join(root, 'cache'))
+    const tier = command => permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root })
+    for (const command of [
+      'cat fleetmates/deck/token',
+      'cd fleetmates && cat deck/token',
+      'cd -- fleetmates && sed -n 1p deck/token',
+      'cd fleetmates; cat deck/token',
+      'cd ordinary && cd .. && cd -- fleetmates && cat deck/token',
+      'cd cache && cat deck/token',
+      "cd fleetmates && sh -c 'cat deck/token'",
+      "cd fleetmates && bash -lc 'cat deck/token'",
+      "sh -c 'cd fleetmates && cat deck/token'",
+      'cd fleetmates && echo "$(cat deck/token)"',
+      'cd fleetmates && echo `cat deck/token`',
+      'echo "$(cd fleetmates && cat deck/token)"',
+      'echo `cd fleetmates && cat deck/token`',
+      '(cd fleetmates && cat deck/token)',
+      '(cd ordinary && cat deck/token); cat fleetmates/deck/token',
+      'cd ordinary | cat fleetmates/deck/token',
+      'cd missing || cat fleetmates/deck/token',
+      'cd missing; cat fleetmates/deck/token',
+      'cd missing\ncat fleetmates/deck/token'
+    ]) assert.equal(tier(command), 'destructive', command)
+    for (const command of [
+      'cd ordinary && cat deck/token',
+      'cd ordinary && cat fleetmates/deck/token',
+      "cd ordinary && sh -c 'cat fleetmates/deck/token'",
+      'cd ordinary && echo "$(cat fleetmates/deck/token)"',
+      'cd ordinary && echo `cat fleetmates/deck/token`',
+      '(cd ordinary && cat deck/token); cat ordinary/fleetmates/deck/token',
+      'command -v cd && cat ordinary/deck/token',
+      'echo "$(touch executed)"',
+      "echo '$(cat fleetmates/deck/token)'"
+    ]) assert.equal(tier(command), 'caution', command)
+    assert.equal(existsSync(path.join(root, 'executed')), false)
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})
