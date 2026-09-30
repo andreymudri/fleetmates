@@ -137,7 +137,9 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
         if (!row) return
         if (signal.type === 'pid_gone' && row.origin === 'observed' && row.alive) {
           closeRequests(row.id, 'process_ended', at)
-          store.run('UPDATE sessions SET state=?,state_since=?,alive=0,crash_kind=?,ended_at=?,since_ts=? WHERE id=?', 'crashed', row.state === 'crashed' ? row.state_since : at, 'lost', at, at, row.id)
+          const announced = ['clear', 'resume'].includes(row.end_reason)
+          const state = announced ? JSON.parse(row.changed_files).length ? 'done' : 'ended' : 'crashed'
+          store.run('UPDATE sessions SET state=?,state_since=?,alive=0,crash_kind=?,ended_at=?,since_ts=? WHERE id=?', state, row.state === state ? row.state_since : at, announced ? null : 'lost', at, at, row.id)
         } else if (signal.type === 'exit' && row.alive) {
           row = refreshSessionChanges(store, row)
           closeRequests(row.id, 'process_ended', at)

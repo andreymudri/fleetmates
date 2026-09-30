@@ -25,6 +25,118 @@ function harness() {
   return { store, projector, file, close() { store.close(); rmSync(dir, { recursive: true, force: true }) } }
 }
 
+test('observed PID loss during announced replacement finishes normally with committed history and closures', () => {
+  for (const reason of ['clear', 'resume']) for (const changed of [false, true]) for (const ending of ['pid_gone', 'timeout']) {
+    const h = harness()
+    const reader = openDeckDb(h.file)
+    try {
+      const events = []
+      const projector = createProjector({ store: h.store, publish: event => {
+        assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))
+        if (event.type === 'request.closed') assert.equal(reader.get('SELECT state FROM requests WHERE id=?', event.entityId).state, 'expired')
+        if (event.type === 'session.upserted' && !event.data.alive) assert.equal(reader.get('SELECT outcome FROM session_summaries WHERE session_id=?', event.entityId).outcome, 'ended')
+        events.push(event)
+      } })
+      const send = (name, at, extra = {}) => {
+        const envelope = fixture('SessionStart.startup.json', { hook_event_name: name, cwd: path.dirname(h.file), ...extra })
+        envelope.hookTs = at
+        projector.applyHooks([envelope])
+      }
+      send('SessionStart', 1000)
+      send('UserPromptSubmit', 2000, { prompt: 'work' })
+      if (changed) send('PostToolUse', 2500, { tool_name: 'Edit', tool_input: { file_path: 'changed.txt' }, tool_response: { success: true } })
+      send('PermissionRequest', 2600, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      send('PreToolUse', 2700, { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Continue?' }] } })
+      send('SessionEnd', 3000, { reason })
+      const id = projector.snapshot().sessions[0].id
+      assert.equal(projector.snapshot().counts.openRequests, 2)
+      events.length = 0
+      const at = ending === 'pid_gone' ? 4000 : 8000
+      if (ending === 'pid_gone') projector.signal(id, { type: 'pid_gone' }, at)
+      else projector.tick(at)
+      const session = projector.snapshot().sessions[0]
+      assert.equal(session.state, changed ? 'done' : 'ended', `${reason}/${ending}/${changed}`)
+      assert.equal(session.alive, false)
+      assert.equal(session.crashKind, null)
+      assert.equal(session.stateSince, at)
+      assert.equal(session.lastActivityAt, 3000)
+      assert.equal(session.changedFiles.length, changed ? 1 : 0)
+      const row = h.store.get('SELECT end_reason,ended_at,since_ts,exit_code,exit_signal FROM sessions WHERE id=?', id)
+      assert.deepEqual({ ...row }, { end_reason: reason, ended_at: at, since_ts: at, exit_code: null, exit_signal: null })
+      const history = h.store.get('SELECT outcome,ended_at,duration_ms,files_changed FROM session_summaries WHERE session_id=?', id)
+      assert.deepEqual({ ...history }, { outcome: 'ended', ended_at: at, duration_ms: at - 1000, files_changed: changed ? 1 : 0 })
+      assert.equal(projector.snapshot().counts.toReview, changed ? 1 : 0)
+      assert.equal(projector.snapshot().counts.running, 0)
+      assert.equal(projector.snapshot().counts.openRequests, 0)
+      assert.deepEqual(events.map(event => event.type), ['request.closed', 'request.closed', 'session.upserted', 'counts'])
+      assert.ok(events.filter(event => event.type === 'request.closed').every(event => event.data.expiredReason === 'process_ended'))
+      assert.deepEqual(events.find(event => event.type === 'session.upserted').data, session)
+      assert.deepEqual(events.at(-1).data, projector.snapshot().counts)
+      projector.tick(at + 10000)
+      projector.signal(id, { type: 'pid_gone' }, at + 11000)
+      assert.deepEqual(projector.snapshot().sessions[0], session)
+      assert.equal(h.store.get('SELECT ended_at FROM session_summaries WHERE session_id=?', id).ended_at, at)
+    } finally { reader.close(); h.close() }
+  }
+  for (const reason of ['clear', 'resume']) {
+    const h = harness()
+    try {
+      const send = (name, at, extra = {}) => {
+        const envelope = fixture('SessionStart.startup.json', { hook_event_name: name, cwd: path.dirname(h.file), ...extra })
+        envelope.hookTs = at
+        h.projector.applyHooks([envelope])
+      }
+      send('SessionStart', 1000)
+      send('PostToolUse', 2000, { tool_name: 'Write', tool_input: { file_path: 'pending.txt' }, tool_response: { success: true } })
+      send('Stop', 2500)
+      send('SessionEnd', 3000, { reason })
+      const before = h.projector.snapshot().sessions[0]
+      assert.equal(before.state, 'done')
+      h.projector.signal(before.id, { type: 'pid_gone' }, 4000)
+      const after = h.projector.snapshot().sessions[0]
+      assert.equal(after.state, 'done')
+      assert.equal(after.stateSince, before.stateSince)
+      assert.equal(after.lastActivityAt, before.lastActivityAt)
+      assert.equal(after.alive, false)
+      assert.equal(h.projector.snapshot().counts.toReview, 1)
+    } finally { h.close() }
+  }
+  for (const control of ['unannounced', 'replacement', 'wrapped-failure']) {
+    const h = harness()
+    try {
+      const start = fixture('SessionStart.startup.json')
+      if (control === 'wrapped-failure') start.ptyId = 'pending-end-pty'
+      h.projector.applyHooks([start])
+      const id = h.projector.snapshot().sessions[0].id
+      if (control !== 'unannounced') {
+        const end = fixture('SessionEnd.clear.json')
+        end.hookTs = 3000
+        end.ptyId = start.ptyId
+        h.projector.applyHooks([end])
+      }
+      if (control === 'replacement') {
+        const replacement = fixture('SessionStart.startup.json', { session_id: 'replacement-conversation', source: 'clear' })
+        replacement.hookTs = 3500
+        h.projector.applyHooks([replacement])
+        assert.equal(h.store.get('SELECT end_reason FROM sessions WHERE id=?', id).end_reason, null)
+      }
+      if (control === 'wrapped-failure') {
+        const before = h.projector.snapshot().sessions[0]
+        h.projector.signal(id, { type: 'pid_gone' }, 3500)
+        assert.deepEqual(h.projector.snapshot().sessions[0], before)
+        assert.equal(h.store.get('SELECT session_id FROM session_summaries WHERE session_id=?', id), undefined)
+      }
+      h.projector.signal(id, control === 'wrapped-failure' ? { type: 'exit', code: 0, signal: 'SIGKILL' } : { type: 'pid_gone' }, 4000)
+      const session = h.projector.snapshot().sessions[0]
+      assert.equal(session.state, 'crashed', control)
+      assert.equal(session.crashKind, control === 'wrapped-failure' ? 'signal' : 'lost', control)
+      assert.equal(session.stateSince, 4000)
+      assert.equal(h.store.get('SELECT outcome FROM session_summaries WHERE session_id=?', id).outcome, control === 'wrapped-failure' ? 'crashed' : 'lost')
+      assert.equal(h.projector.snapshot().counts.toReview, 0)
+    } finally { h.close() }
+  }
+})
+
 test('resume clears the previous process crash before recording a clean end', () => {
   for (const signal of [{ type: 'pid_gone' }, { type: 'exit', code: 1 }, { type: 'exit', code: 0, signal: 'SIGKILL' }]) {
     const h = harness()
