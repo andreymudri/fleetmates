@@ -1,12 +1,11 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { expireRequests } from './request.mjs'
 
 const maxGitOutput = 1024 * 1024
 const maxChangedPaths = 512
-const maxHashedFile = 8 * 1024 * 1024
 const maxScannedPaths = 4096
 const maxScannedBytes = 32 * 1024 * 1024
 
@@ -35,20 +34,73 @@ function baseline(value) {
   } catch { return null }
 }
 
+function scanBudget() {
+  return { remaining: maxScannedBytes, deadline: Date.now() + 1500 }
+}
+
+function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false) {
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  try {
+    const before = fstatSync(fd)
+    if (!before.isFile() || before.size > budget.remaining) throw new Error('scan limit')
+    const buffer = Buffer.alloc(64 * 1024)
+    const pass = consume => {
+      let position = 0
+      let pendingCR = false
+      while (position < before.size) {
+        if (Date.now() > budget.deadline) throw new Error('scan timeout')
+        const length = readSync(fd, buffer, 0, Math.min(buffer.length, before.size - position), position)
+        if (!length || length > budget.remaining) throw new Error('scan limit')
+        budget.remaining -= length
+        position += length
+        const chunk = buffer.subarray(0, length)
+        if (!normalize) { consume(chunk); continue }
+        const output = Buffer.alloc(length + 1)
+        let used = 0
+        for (const byte of chunk) {
+          if (pendingCR && byte !== 10) output[used++] = 13
+          pendingCR = byte === 13
+          if (!pendingCR) output[used++] = byte
+        }
+        consume(output.subarray(0, used))
+      }
+      if (pendingCR) consume(Buffer.from([13]))
+    }
+    let size = before.size
+    if (blob && normalize) { size = 0; pass(chunk => { size += chunk.length }) }
+    const hash = createHash(algorithm)
+    if (blob) hash.update(`blob ${size}\0`)
+    pass(chunk => hash.update(chunk))
+    const after = fstatSync(fd)
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error('file changed during scan')
+    return hash.digest('hex')
+  } finally { closeSync(fd) }
+}
+
 function gitPaths(root, head) {
   const tree = head === 'unborn' ? Buffer.alloc(0) : git(root, ['ls-tree', '-r', '-z', head])
-  const listed = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'])
+  const listed = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '--eol', '-z'])
   if (!tree || !listed) return null
+  const autoCRLF = /^(true|input)$/.test(git(root, ['config', '--get', 'core.autocrlf'])?.toString('utf8').trim() ?? '')
   const entries = new Map()
   for (const record of tree.toString('utf8').split('\0').filter(Boolean)) {
     const match = /^(\d+) (blob|commit) ([0-9a-f]{40,64})\t([\s\S]+)$/.exec(record)
     if (!match) return null
     entries.set(match[4], { mode: match[1], type: match[2], oid: match[3] })
   }
-  const names = new Set([...entries.keys(), ...listed.toString('utf8').split('\0').filter(Boolean)])
+  const normalization = new Map()
+  for (const record of listed.toString('utf8').split('\0').filter(Boolean)) {
+    const match = /^i\/(\S*)\s+w\/(\S*)\s+attr\/(.*?)\s*\t([\s\S]+)$/.exec(record)
+    if (!match) return null
+    const [, indexEol, worktreeEol, attr, name] = match
+    const explicitText = /^text(?: |$)/.test(attr) || /^eol=/.test(attr)
+    const autoText = attr.startsWith('text=auto') || !attr && autoCRLF
+    normalization.set(name, explicitText || autoText && worktreeEol !== '-text' && !['crlf', 'mixed'].includes(indexEol))
+  }
+  const names = new Set([...entries.keys(), ...normalization.keys()])
   if (names.size > maxScannedPaths) return null
   const paths = new Map()
-  let scannedBytes = 0
+  const budget = scanBudget()
   for (const name of names) {
     const entry = entries.get(name)
     if (entry?.type === 'commit') continue
@@ -58,56 +110,62 @@ function gitPaths(root, head) {
         const location = path.resolve(root, name)
         if (!location.startsWith(`${root}${path.sep}`)) return null
         const stat = lstatSync(location)
-        let content = null
+        let oid = null
         let mode = null
-        if (stat.isSymbolicLink()) { content = Buffer.from(readlinkSync(location)); mode = '120000' }
-        else if (stat.isFile() && stat.size <= maxHashedFile) {
-          scannedBytes += stat.size
-          if (scannedBytes > maxScannedBytes) return null
-          content = readFileSync(location)
+        const algorithm = entry.oid.length === 64 ? 'sha256' : 'sha1'
+        if (stat.isSymbolicLink()) {
+          const content = Buffer.from(readlinkSync(location))
+          oid = createHash(algorithm).update(`blob ${content.length}\0`).update(content).digest('hex')
+          mode = '120000'
+        } else if (stat.isFile()) {
+          oid = hashFile(location, normalization.get(name) ?? false, budget, algorithm, true)
           mode = stat.mode & 0o111 ? '100755' : '100644'
-        }
-        if (content) {
-          const oid = createHash(entry.oid.length === 64 ? 'sha256' : 'sha1').update(`blob ${content.length}\0`).update(content).digest('hex')
-          unchanged = oid === entry.oid && mode === entry.mode
-        }
-      } catch {}
+        } else return null
+        unchanged = oid === entry.oid && mode === entry.mode
+      } catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') return null }
     }
     if (!unchanged) paths.set(name, { adds: null, dels: null })
   }
-  return paths.size <= maxChangedPaths ? paths : null
+  return paths.size <= maxChangedPaths ? { paths, normalization, budget } : null
 }
 
-function fileFingerprint(root, name) {
+function fileFingerprint(root, name, scan) {
   const file = path.resolve(root, name)
-  if (!file.startsWith(`${root}${path.sep}`)) return null
+  if (!file.startsWith(`${root}${path.sep}`)) throw new Error('path outside repository')
   try {
     const stat = lstatSync(file)
     if (stat.isSymbolicLink()) return `link:${createHash('sha256').update(readlinkSync(file)).digest('hex')}`
-    if (!stat.isFile()) return `other:${stat.mode}:${stat.size}:${stat.mtimeMs}`
+    if (!stat.isFile()) throw new Error('unsupported file')
     const executable = stat.mode & 0o111 ? 'x' : '-'
-    if (stat.size > maxHashedFile) return `large:${executable}:${stat.size}:${stat.mtimeMs}`
-    return `file:${executable}:${createHash('sha256').update(readFileSync(file)).digest('hex')}`
-  } catch { return null }
+    return `file:${executable}:${hashFile(file, scan.normalization.get(name) ?? false, scan.budget)}`
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null
+    throw error
+  }
 }
 
 /** Capture the current Git changes as a review boundary. */
 export function captureReviewBaseline(root, previous = null, includeExisting = true) {
   const head = baseline(previous)?.head ?? gitHead(root)
   if (!head) return null
-  const paths = includeExisting ? gitPaths(root, head) : new Map()
-  if (!paths) return null
-  return JSON.stringify({ head, files: Object.fromEntries([...paths.keys()].map(name => [name, fileFingerprint(root, name)])) })
+  const scan = includeExisting ? gitPaths(root, head) : { paths: new Map(), normalization: new Map(), budget: scanBudget() }
+  if (!scan) return null
+  try {
+    return JSON.stringify({ head, files: Object.fromEntries([...scan.paths.keys()].map(name => [name, fileFingerprint(root, name, scan)])) })
+  } catch { return null }
 }
 
 function gitChangedFiles(root, value) {
   const saved = baseline(value)
   if (!saved) return null
-  const paths = gitPaths(root, saved.head)
-  if (!paths) return null
+  const scan = gitPaths(root, saved.head)
+  if (!scan) return null
+  const { paths } = scan
   for (const name of Object.keys(saved.files)) if (!paths.has(name)) paths.set(name, { adds: null, dels: null })
   if (paths.size > maxChangedPaths) return null
-  return [...paths].filter(([name]) => !Object.hasOwn(saved.files, name) || saved.files[name] !== fileFingerprint(root, name)).map(([name, diff]) => ({ path: path.resolve(root, name), ...diff }))
+  try {
+    return [...paths].filter(([name]) => !Object.hasOwn(saved.files, name) || saved.files[name] !== fileFingerprint(root, name, scan)).map(([name, diff]) => ({ path: path.resolve(root, name), ...diff }))
+  } catch { return null }
 }
 
 function repo(store, cwd, at) {

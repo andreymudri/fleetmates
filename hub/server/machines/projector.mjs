@@ -119,6 +119,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           store.run('UPDATE sessions SET state=?,state_since=?,alive=0,ended_at=?,exit_code=?,exit_signal=?,crash_kind=?,since_ts=? WHERE id=?', state, state === row.state ? row.state_since : at, at, signal.code ?? null, exitSignal, crashed ? exitSignal ? 'signal' : 'exit' : null, at, row.id)
         } else if (signal.type === 'review' && row.state === 'done') {
           const baseline = captureReviewBaseline(row.repo_id, row.review_baseline)
+          if (!baseline && row.review_baseline) return
           store.run('UPDATE sessions SET state=?,reviewed_at=?,state_since=?,since_ts=?,changed_files=?,review_baseline=? WHERE id=?', row.alive ? 'reviewed' : 'ended', at, at, at, '[]', baseline ?? row.review_baseline, row.id)
         }
         persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))

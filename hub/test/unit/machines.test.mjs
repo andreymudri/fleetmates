@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { runRetention } from '../../server/db/retention.mjs'
 import { createProjector } from '../../server/machines/projector.mjs'
+import { captureReviewBaseline } from '../../server/machines/session.mjs'
 import { projectHome } from '../../server/machines/counts.mjs'
 import { expireRequests, permissionTier } from '../../server/machines/request.mjs'
 
@@ -2150,4 +2151,147 @@ test('newer running state sorts before older work with more recent hook activity
     assert.deepEqual(snapshot.home.grid.map(row => row.id), [newSession.id, oldSession.id])
     assert.deepEqual(snapshot.home.rail.map(row => row.id), [newSession.id, oldSession.id])
   } finally { h.close() }
+})
+
+for (const kind of ['large', 'crlf']) test(`clean ${kind} checkout stays idle and later edits cross the review boundary`, () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'deck-normalize-'))
+  const h = harness()
+  try {
+    const runGit = (...args) => execFileSync('git', args, { cwd: repo, timeout: 3000, stdio: 'pipe' })
+    runGit('init', '-q')
+    const file = path.join(repo, kind === 'large' ? 'file.bin' : 'file.txt')
+    const initial = kind === 'large' ? Buffer.alloc(8 * 1024 * 1024 + 1, 65) : 'hello\n'
+    if (kind === 'crlf') writeFileSync(path.join(repo, '.gitattributes'), '*.txt text eol=crlf\n')
+    writeFileSync(file, initial)
+    runGit('add', '.')
+    runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial')
+    if (kind === 'crlf') {
+      rmSync(file)
+      runGit('restore', 'file.txt')
+      assert.equal(readFileSync(file, 'utf8'), 'hello\r\n')
+    }
+    assert.equal(runGit('status', '--porcelain').toString(), '')
+    const hook = (event, at) => {
+      const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo, prompt: 'Say hello', stop_hook_active: false })
+      envelope.hookTs = at
+      return envelope
+    }
+    h.projector.applyHooks([hook('SessionStart', 1000), hook('UserPromptSubmit', 2000), hook('Stop', 3000)])
+    const id = h.projector.snapshot().sessions[0].id
+    const assertClean = () => {
+      assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
+      assert.equal(h.projector.snapshot().counts.toReview, 0)
+    }
+    const assertChanged = () => {
+      assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file])
+      assert.equal(h.projector.snapshot().counts.toReview, 1)
+    }
+    assertClean()
+    const changed = kind === 'large' ? Buffer.from(initial) : `${'x'.repeat(65535)}\r\nchanged\r\n`
+    if (kind === 'large') changed[changed.length - 1] = 66
+    writeFileSync(file, changed)
+    h.projector.applyHooks([hook('UserPromptSubmit', 4000), hook('Stop', 5000)])
+    assertChanged()
+    h.projector.signal(id, { type: 'review' }, 6000)
+    h.projector.applyHooks([hook('UserPromptSubmit', 7000), hook('Stop', 8000)])
+    assertClean()
+    if (kind === 'crlf') {
+      writeFileSync(file, changed.replaceAll('\r\n', '\n'))
+      h.projector.applyHooks([hook('Stop', 9000)])
+      assertClean()
+    }
+    if (kind === 'large') changed[0] = 67
+    writeFileSync(file, kind === 'large' ? changed : 'next\r\n')
+    runGit('add', '.')
+    runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'later edit')
+    h.projector.applyHooks([hook('Stop', 10000)])
+    assertChanged()
+    h.projector.signal(id, { type: 'review' }, 11000)
+    h.projector.applyHooks([hook('Stop', 12000)])
+    assertClean()
+    rmSync(file)
+    h.projector.applyHooks([hook('Stop', 13000)])
+    assertChanged()
+  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+})
+
+
+test('an incomplete bounded scan cannot advance a Git review boundary or discard known edits', () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'deck-scan-limit-'))
+  const h = harness()
+  try {
+    const runGit = (...args) => execFileSync('git', args, { cwd: repo, timeout: 3000, stdio: 'pipe' })
+    runGit('init', '-q')
+    const file = path.join(repo, 'small.txt')
+    writeFileSync(file, 'initial\n')
+    runGit('add', '.')
+    runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial')
+    const hook = (event, at, fields = {}) => {
+      const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo, ...fields })
+      envelope.hookTs = at
+      return envelope
+    }
+    h.projector.applyHooks([hook('SessionStart', 1000)])
+    writeFileSync(file, 'changed\n')
+    h.projector.applyHooks([hook('PostToolUse', 2000, { tool_name: 'Edit', tool_input: { file_path: file } }), hook('Stop', 3000)])
+    const before = h.projector.snapshot().sessions[0]
+    const saved = h.store.get('SELECT review_baseline FROM sessions WHERE id=?', before.id).review_baseline
+    const oversized = path.join(repo, 'over-budget.bin')
+    writeFileSync(oversized, '')
+    truncateSync(oversized, 32 * 1024 * 1024 + 1)
+    assert.equal(captureReviewBaseline(repo, saved), null)
+    h.projector.signal(before.id, { type: 'review' }, 4000)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, before.changedFiles)
+    assert.equal(h.store.get('SELECT review_baseline FROM sessions WHERE id=?', before.id).review_baseline, saved)
+    h.projector.applyHooks([hook('Stop', 5000)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    rmSync(oversized)
+    h.projector.signal(before.id, { type: 'review' }, 6000)
+    h.projector.applyHooks([hook('Stop', 7000)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
+  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+})
+
+test('streaming Git scans preserve symlink targets and never invoke repository execution controls', () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'deck-safe-scan-'))
+  const h = harness()
+  try {
+    const runGit = (...args) => execFileSync('git', args, { cwd: repo, timeout: 3000, stdio: 'pipe' })
+    runGit('init', '-q')
+    writeFileSync(path.join(repo, '.gitattributes'), '*.txt text eol=crlf filter=unsafe\n')
+    writeFileSync(path.join(repo, 'file.txt'), 'initial\n')
+    symlinkSync('file.txt', path.join(repo, 'link'))
+    runGit('add', '.')
+    runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial')
+    const sentinel = path.join(repo, 'executed')
+    for (const key of ['filter.unsafe.clean', 'filter.unsafe.smudge', 'filter.unsafe.process', 'core.fsmonitor']) runGit('config', key, 'touch executed; cat')
+    writeFileSync(path.join(repo, '.git/hooks/post-index-change'), '#!/bin/sh\ntouch executed\n')
+    chmodSync(path.join(repo, '.git/hooks/post-index-change'), 0o755)
+    const hook = (event, at) => {
+      const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo })
+      envelope.hookTs = at
+      return envelope
+    }
+    h.projector.applyHooks([hook('SessionStart', 1000), hook('UserPromptSubmit', 2000), hook('Stop', 3000)])
+    assert.equal(existsSync(sentinel), false)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    rmSync(path.join(repo, 'link'))
+    symlinkSync('other.txt', path.join(repo, 'link'))
+    h.projector.applyHooks([hook('Stop', 4000)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => path.basename(row.path)), ['link'])
+    const id = h.projector.snapshot().sessions[0].id
+    h.projector.signal(id, { type: 'review' }, 5000)
+    h.projector.applyHooks([hook('Stop', 6000)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    rmSync(path.join(repo, 'link'))
+    symlinkSync('file.txt', path.join(repo, 'link'))
+    h.projector.applyHooks([hook('Stop', 7000)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.equal(existsSync(sentinel), false)
+  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
 })
