@@ -43,14 +43,18 @@ const ICONS = {
   reviewed: 'check-check', crashed: 'x', ended: 'square', draft: 'file-pen'
 }
 
+// String params (exit code, signal, duration) come from session data; numbers stay numbers for plurals.
+const safeParams = params => Object.fromEntries(Object.entries(params ?? {}).map(([key, value]) => [key, typeof value === 'string' ? shown(value) : value]))
+
 /**
- * The literal pill label for a state (never themed).
+ * The literal pill label for a state (never themed). String params pass through `shown`.
  * @param {string} state
  * @param {{ n?: number, duration?: string, code?: number|string, kind?: 'exit'|'signal'|'lost', signal?: string }} [params]
  * @param {(key: string, params?: object) => string} [t]
  * @returns {string}
  */
-export function stateLabel(state, params = {}, t) {
+export function stateLabel(state, raw = {}, t) {
+  const params = safeParams(raw)
   if (state === 'crashed') {
     const kind = params.kind ?? (params.signal ? 'signal' : params.code === undefined || params.code === null ? 'lost' : 'exit')
     return translate(t, STATE_COPY, `state.crashed.${kind}`, params)

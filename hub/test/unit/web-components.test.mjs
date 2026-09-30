@@ -199,6 +199,10 @@ test('every agent-supplied card string passes through its sanitizer', async () =
   assert.equal(hint, 'The session exited with code 1&lt;U+202E&gt;.', 'crash code')
   const signalled = card({ session: { ...base, state: 'crashed', crashKind: 'signal', exitSignal: `SIG${RLO}X` } })
   assert.equal(/<p class="card-hint">([^<]*)<\/p>/.exec(signalled)?.[1], 'The session was stopped by signal SIG&lt;U+202E&gt;X.', 'crash signal')
+  assert.doesNotMatch(crashed, raw, 'crash code anywhere on the card, pill included')
+  assert.doesNotMatch(signalled, raw, 'crash signal anywhere on the card, pill included')
+  assert.ok(crashed.includes('<span class="status-label">Crashed · exit 1&lt;U+202E&gt;</span>'), crashed)
+  assert.ok(signalled.includes('<span class="status-label">Crashed · signal SIG&lt;U+202E&gt;X</span>'), signalled)
 })
 
 test('only open requests of this session reach the card', async () => {
