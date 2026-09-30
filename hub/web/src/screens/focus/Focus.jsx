@@ -253,12 +253,15 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
   const client = api ?? deckApi()
   const session = state.data.sessions.find(row => row.id === id)
   const [steps, setSteps] = useState(null)
-  const [tab, setTab] = useState(() => new URLSearchParams(search).get('tab') === 'facts' ? 'facts' : 'changes')
+  const wanted = new URLSearchParams(search).get('tab') === 'facts' ? 'facts' : 'changes'
+  const [tab, setTab] = useState(wanted)
   const [reviewing, setReviewing] = useState(false)
   const [reviewError, setReviewError] = useState(null)
   const known = !!session
   const activity = session?.lastActivityAt
   useEffect(() => { setSteps(null) }, [id])
+  // A followed link such as `?tab=changes` selects its tab even when this Focus instance stays mounted.
+  useEffect(() => { setTab(wanted) }, [wanted, search])
   useEffect(() => {
     if (!known) return undefined
     let current = true

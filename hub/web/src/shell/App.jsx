@@ -57,9 +57,10 @@ function Loading({ route, t }) {
   )
 }
 
-function Screen({ route, state, t, navigate, screens }) {
+function Screen({ route, path, search, state, t, navigate, screens }) {
   const Custom = screens?.[route.name]
-  if (Custom) return <Custom route={route} state={state} t={t} navigate={navigate} />
+  // Keyed by path so /s/a and /s/b each get their own instance and no local state carries over.
+  if (Custom) return <Custom key={path} route={route} search={search} state={state} t={t} navigate={navigate} />
   if (route.name === 'notFound') {
     return (
       <section className="screen screen--not-found">
@@ -113,9 +114,9 @@ function Toasts({ toasts, t, navigate, dismiss }) {
 /**
  * The shell for one route: skip link, Rail, banners, main, toasts and the live region.
  * Renders without a window so it can be tested with `renderToStaticMarkup`.
- * @param {{ store: object, path: string, navigate: (to: string) => void, onRetry: (kind: string) => void, onReload?: () => void, announcement?: string, now?: number, screens?: Record<string, Function> }} props
+ * @param {{ store: object, path: string, search?: string, navigate: (to: string) => void, onRetry: (kind: string) => void, onReload?: () => void, announcement?: string, now?: number, screens?: Record<string, Function> }} props
  */
-export function App({ store, path, navigate, onRetry, onReload = () => {}, announcement = '', now, screens }) {
+export function App({ store, path, search = '', navigate, onRetry, onReload = () => {}, announcement = '', now, screens }) {
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState)
   const language = selectLanguage(state.data.prefs)
   const t = makeTranslator(language)
@@ -133,7 +134,7 @@ export function App({ store, path, navigate, onRetry, onReload = () => {}, annou
         {banner ? <Banner banner={banner} t={t} lastEventAt={state.lastEventAt} lang={language.lang} onRetry={onRetry} /> : null}
         {language.fallback ? <p className="shell-notice" role="note">{t('shell.lang.fallback')}</p> : null}
         <div className="shell-content">
-          {state.loaded ? <Screen route={route} state={state} t={t} navigate={navigate} screens={screens} /> : <Loading route={route.name} t={t} />}
+          {state.loaded ? <Screen route={route} path={path} search={search} state={state} t={t} navigate={navigate} screens={screens} /> : <Loading route={route.name} t={t} />}
         </div>
       </main>
       <Toasts toasts={state.toasts} t={t} navigate={navigate} dismiss={dismiss} />
@@ -149,6 +150,7 @@ export function App({ store, path, navigate, onRetry, onReload = () => {}, annou
  */
 export function Shell({ store, connection, api, screens }) {
   const [path, setPath] = useState(() => window.location.pathname)
+  const [search, setSearch] = useState(() => window.location.search)
   const [announcement, setAnnouncement] = useState('')
   const [now, setNow] = useState(() => Date.now())
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState)
@@ -158,12 +160,14 @@ export function Shell({ store, connection, api, screens }) {
     if (replace) window.history.replaceState(null, '', to)
     else window.history.pushState(null, '', to)
     setPath(window.location.pathname)
+    setSearch(window.location.search)
   }, [])
 
   useEffect(() => {
     const onPop = event => {
       overlayRef.current = event.state?.overlay ?? null
       setPath(window.location.pathname)
+      setSearch(window.location.search)
       store.dispatch({ type: 'view', path: window.location.pathname, overlay: overlayRef.current })
     }
     window.addEventListener('popstate', onPop)
@@ -189,6 +193,8 @@ export function Shell({ store, connection, api, screens }) {
     const onKey = event => {
       const action = keyAction(event, store.getState())
       if (!action) return
+      // An overlay that is already open handles its own chord (Alt K moves the palette highlight, palette.md 4).
+      if (action.type === 'overlay' && store.getState().view.overlay === action.overlay) return
       event.preventDefault()
       event.stopPropagation()
       if (action.type === 'navigate') navigate(action.to)
@@ -236,5 +242,5 @@ export function Shell({ store, connection, api, screens }) {
     if (kind === 'server') connection.retryNow()
     else api?.post('/api/deps/deckd/retry').catch(() => {})
   }, [connection, api])
-  return <App store={store} path={path} navigate={navigate} onRetry={onRetry} onReload={() => window.location.reload()} announcement={announcement} now={now} screens={screens} />
+  return <App store={store} path={path} navigate={navigate} onRetry={onRetry} onReload={() => window.location.reload()} announcement={announcement} now={now} screens={screens} search={search} />
 }

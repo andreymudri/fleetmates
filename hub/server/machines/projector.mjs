@@ -218,6 +218,11 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           const crashed = (signal.code !== 0 || exitSignal !== null) && !row.user_stop_requested && !row.end_announced
           const state = crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended'
           store.run('UPDATE sessions SET state=?,state_since=?,alive=0,activity=NULL,ended_at=?,exit_code=?,exit_signal=?,crash_kind=?,since_ts=? WHERE id=?', state, state === row.state ? row.state_since : at, at, signal.code ?? null, exitSignal, crashed ? exitSignal ? 'signal' : 'exit' : null, at, row.id)
+        } else if (signal.type === 'lost' && row.origin !== 'observed' && row.alive) {
+          // Reconciliation rule 5(c): deckd no longer knows the PTY and kept no exit record for it.
+          row = refreshSessionChanges(store, row)
+          closeRequests(row.id, 'process_ended', at)
+          store.run('UPDATE sessions SET state=?,state_since=?,alive=0,activity=NULL,ended_at=?,exit_code=NULL,exit_signal=NULL,crash_kind=?,since_ts=? WHERE id=?', 'crashed', row.state === 'crashed' ? row.state_since : at, at, 'lost', at, row.id)
         } else if (signal.type === 'review' && row.state === 'done') {
           const baseline = captureReviewBaseline(workingRoot(row.cwd), row.review_baseline)
           if (!baseline && row.review_baseline) return

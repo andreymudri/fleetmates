@@ -119,8 +119,8 @@ test('REST calls carry the bearer token and API version, and 401 reports an inva
   const seen = []
   let failures = 0
   const responses = [
-    { status: 200, body: { data: { apiVersion: 1 } } },
-    { status: 200, body: { data: { prefs: {} } } },
+    { status: 200, body: { apiVersion: 1 } },
+    { status: 200, body: { prefs: {} } },
     { status: 401, body: { error: { code: 'unauthorized', message: 'unauthorized', retryable: false } } }
   ]
   const client = createApiClient({

@@ -7,7 +7,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createContext, runInContext } from 'node:vm'
 import { createServer } from 'node:net'
-import test from 'node:test'
+import test, { afterEach } from 'node:test'
 import { chromium } from 'playwright-core'
 import { doctor, status } from '../../server/setup/doctor.mjs'
 import { hooksInstalled, isDeckHook, readSettings, transformHooks, writeSettings } from '../../server/setup/hooks.mjs'
@@ -23,8 +23,17 @@ const requiredHookEvents = [
   'PreCompact', 'PostCompact'
 ]
 
+// Every sandbox root, and the ones the current test has not yet had removed.
+const sandboxRoots = []
+const pendingRoots = []
+afterEach(() => {
+  for (const root of pendingRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
+})
+
 function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'deck-setup-'))
+  sandboxRoots.push(root)
+  pendingRoots.push(root)
   const home = path.join(root, 'home')
   const config = path.join(root, 'config')
   const state = path.join(root, 'state')
@@ -775,4 +784,12 @@ test('both unit templates quote executable and entry paths with spaces', () => {
     if (name === 'fleetmates-deck.service') assert.ok(rendered.split('\n').includes(`ConditionPathExists=${hubPath}/${entry}`))
     assert.equal(rendered.includes('@NODE@') || rendered.includes('@ENTRY@'), false)
   }
+})
+
+test('each deck-setup sandbox is removed once the test that made it finishes', () => {
+  const current = sandbox()
+  assert.ok(sandboxRoots.length > 1, 'the earlier tests in this file created sandboxes')
+  const left = sandboxRoots.filter(root => root !== current.root && existsSync(root))
+  assert.deepEqual(left, [])
+  assert.ok(existsSync(current.root), 'a sandbox stays while its own test runs')
 })
