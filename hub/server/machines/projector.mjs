@@ -1,0 +1,232 @@
+import { dedupeKey } from '../ingest/validate.mjs'
+import { projectCounts, projectHome } from './counts.mjs'
+import { applyRequestHook, expireRequests, isRequestOpening, reconcileRequestOpenings, resumedActivityEvents } from './request.mjs'
+import { applySessionHook, applySubagentLifecycle, captureReviewBaseline, ignoresSessionHook, isObsoleteSessionStart, persistSessionSummary, recordSessionIdentity, refreshSessionChanges, workingRoot, resolveSession, sameKnownProcess } from './session.mjs'
+
+const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
+const rank = event => {
+  const index = ranks.indexOf(event)
+  return index < 0 ? 1 : index === 0 ? 0 : index + 1
+}
+
+function sessionView(row, store) {
+  return {
+    id: row.id,
+    claudeSessionId: row.claude_session_id,
+    sessionAliases: store.all('SELECT claude_session_id FROM session_aliases WHERE session_id=? ORDER BY replaced_at,claude_session_id', row.id).map(alias => alias.claude_session_id),
+    origin: row.origin,
+    ptyId: row.pty_id,
+    repoId: row.repo_id,
+    cwd: row.cwd,
+    branch: row.branch,
+    task: row.task,
+    runRef: row.run_id ? { repoId: row.run_repo_id, runId: row.run_id, taskId: row.run_task_id } : null,
+    role: row.role,
+    state: row.state,
+    stateSince: row.state_since,
+    lastActivityAt: row.last_activity_at,
+    alive: !!row.alive,
+    processKey: row.process_key,
+    activity: row.activity,
+    subagentsActive: row.subagents_active,
+    joinedMidLife: !!row.joined_mid_life,
+    changedFiles: JSON.parse(row.changed_files),
+    crashKind: row.crash_kind,
+    exitCode: row.exit_code,
+    exitSignal: row.exit_signal,
+    lastInputFrom: row.last_input_from,
+    lastInputName: row.last_input_name,
+    transcriptPath: row.transcript_path,
+    reviewedAt: row.reviewed_at,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    toolCalls: store.get('SELECT COUNT(*) AS n FROM session_steps WHERE session_id=?', row.id).n
+  }
+}
+function requestView(row) {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    kind: row.kind,
+    tier: row.tier,
+    toolName: row.tool_name,
+    summary: row.summary,
+    detail: JSON.parse(row.detail),
+    why: row.why,
+    options: JSON.parse(row.options),
+    state: row.state,
+    expiredReason: row.expired_reason,
+    answer: row.answer ? JSON.parse(row.answer) : null,
+    source: row.source,
+    matchKey: row.match_key,
+    delivery: row.delivery,
+    screenMatch: row.screen_match,
+    taskId: row.task_id,
+    createdAt: row.created_at,
+    answeredAt: row.answered_at,
+    notifiedAt: row.notified_at,
+    renotifiedAt: row.renotified_at
+  }
+}
+
+/** Persist ordered hook batches and publish only sequences from committed transactions. */
+export function createProjector({ store, now = Date.now, publish = () => {} }) {
+  function snapshot() {
+    const sessions = store.all('SELECT * FROM sessions ORDER BY started_at, id').map(row => sessionView(row, store))
+    const requests = store.all('SELECT * FROM requests ORDER BY created_at, id').map(requestView)
+    return { seq: Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq), sessions, requests, counts: projectCounts(store), home: projectHome(sessions, requests) }
+  }
+  function commit(fn) {
+    const before = Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq)
+    store.tx(fn)
+    const events = store.all('SELECT seq, at, type, entity_id, data FROM events WHERE seq > ? ORDER BY seq', before).map(row => ({ seq: Number(row.seq), at: row.at, type: row.type, entityId: row.entity_id, data: JSON.parse(row.data) }))
+    for (const event of events) publish(event)
+    return events
+  }
+  function closeRequests(sessionId, reason, at) {
+    const open = store.all('SELECT id FROM requests WHERE session_id = ? AND state = ?', sessionId, 'open')
+    expireRequests(store, sessionId, reason)
+    for (const request of open) {
+      const row = store.get('SELECT * FROM requests WHERE id = ?', request.id)
+      store.appendEvent({ at, type: 'request.closed', entityId: row.id, data: requestView(row) })
+    }
+  }
+  return {
+    snapshot,
+    applyHooks(batch) {
+      return commit(() => {
+        for (const envelope of [...batch].sort((a, b) => a.hookTs - b.hookTs || rank(a.hook.hook_event_name) - rank(b.hook.hook_event_name))) {
+          const hook = envelope.hook
+          const key = envelope.dedupeKey ?? dedupeKey(envelope)
+          if (store.get('SELECT id FROM hook_events WHERE dedupe_key = ?', key)) continue
+          let session = resolveSession(store, envelope)
+          if (!session && hook.hook_event_name === 'SessionEnd') continue
+          const beforeRequests = session ? new Map(store.all('SELECT * FROM requests WHERE session_id = ?', session.id).map(row => [row.id, requestView(row)])) : new Map()
+          const previousEndReason = session?.end_reason
+          const previousConversation = session?.claude_session_id
+          const obsoleteStart = isObsoleteSessionStart(store, session, envelope)
+          if (session && !obsoleteStart && (hook.hook_event_name !== 'SessionStart' || envelope.hookTs < session.since_ts)) session = recordSessionIdentity(store, session, envelope)
+          const identityChanged = !!session && session.claude_session_id !== previousConversation
+          const replacementChanged = !!session && session.end_reason !== previousEndReason
+          const late = !!session && (obsoleteStart || envelope.hookTs < session.since_ts || !session.alive && !(hook.hook_event_name === 'SessionStart' && hook.source === 'resume'))
+          let requestChanged = replacementChanged && [...beforeRequests].some(([id, row]) => row.state === 'open' && store.get('SELECT state FROM requests WHERE id=?', id)?.state !== 'open')
+          const lifecycleEvent = ['SubagentStart', 'SubagentStop'].includes(hook.hook_event_name)
+          let lifecycleAccepted = false
+          let lifecycleChanged = false
+          let openingApplied = false
+          if (late && session.alive && isRequestOpening(hook) && sameKnownProcess(store, session, envelope)) {
+            const boundary = Math.max(session.joined_mid_life ? 0 : session.started_at, store.get("SELECT COALESCE(MAX(hook_ts),0) AS at FROM hook_events WHERE session_id=? AND applied=1 AND event='SessionStart' AND COALESCE(json_extract(payload,'$.source'),'startup')<>'compact'", session.id).at)
+            const currentConversation = candidate => candidate.session_id === session.claude_session_id || !!store.get('SELECT claude_session_id FROM session_aliases WHERE session_id=? AND claude_session_id=? AND source=?', session.id, candidate.session_id, 'compact')
+            if (envelope.hookTs >= boundary && currentConversation(hook)) {
+              const history = store.all('SELECT hook_ts,payload,pty_id,claude_pid FROM hook_events WHERE session_id=? AND hook_ts>=? ORDER BY hook_ts,id', session.id, boundary)
+                .map(row => ({ hookTs: row.hook_ts, hook: JSON.parse(row.payload), ptyId: row.pty_id, claudePid: row.claude_pid }))
+                .filter(item => sameKnownProcess(store, session, item) && currentConversation(item.hook))
+              requestChanged = reconcileRequestOpenings(store, { ...session, repo_id: workingRoot(session.cwd) }, [...history, envelope].sort((a, b) => a.hookTs - b.hookTs || rank(a.hook.hook_event_name) - rank(b.hook.hook_event_name))) || requestChanged
+              openingApplied = requestChanged
+              if (requestChanged) {
+                const open = store.all('SELECT kind FROM requests WHERE session_id=? AND state=?', session.id, 'open')
+                const state = open.some(row => row.kind === 'permission') ? 'needs_approval' : open.length ? 'asked_you' : session.state
+                store.run('UPDATE sessions SET state=? WHERE id=?', state, session.id)
+                session = store.get('SELECT * FROM sessions WHERE id=?', session.id)
+              }
+            }
+          }
+          if (late && lifecycleEvent) {
+            const result = applySubagentLifecycle(store, session, envelope, true)
+            session = result.session
+            lifecycleAccepted = result.accepted
+            lifecycleChanged = result.changed
+          }
+          if (late && session.alive && (!lifecycleEvent || lifecycleAccepted) && [...resumedActivityEvents, 'PermissionDenied'].includes(hook.hook_event_name) && (hook.hook_event_name !== 'UserPromptSubmit' || sameKnownProcess(store, session, envelope))) {
+            requestChanged = applyRequestHook(store, { ...session, repo_id: workingRoot(session.cwd) }, envelope, { late: true }) || requestChanged
+            if (requestChanged && ['needs_approval', 'asked_you'].includes(session.state)) {
+              const open = store.all('SELECT kind FROM requests WHERE session_id = ? AND state = ?', session.id, 'open')
+              const state = open.some(row => row.kind === 'permission') ? 'needs_approval' : open.length ? 'asked_you' : 'running'
+              store.run('UPDATE sessions SET state = ? WHERE id = ?', state, session.id)
+              session = store.get('SELECT * FROM sessions WHERE id = ?', session.id)
+            }
+          }
+          if (late && requestChanged && hook.hook_event_name === 'SessionStart' && ['needs_approval', 'asked_you'].includes(session.state)) {
+            const open = store.all('SELECT kind FROM requests WHERE session_id=? AND state=?', session.id, 'open')
+            const state = open.some(row => row.kind === 'permission') ? 'needs_approval' : open.length ? 'asked_you' : 'running'
+            store.run('UPDATE sessions SET state=? WHERE id=?', state, session.id)
+            session = store.get('SELECT * FROM sessions WHERE id=?', session.id)
+          }
+          if (!late) {
+            const known = !!session
+            if (!known) session = applySessionHook(store, envelope, null, false)
+            if (session && lifecycleEvent) {
+              const result = applySubagentLifecycle(store, session, envelope)
+              session = result.session
+              lifecycleAccepted = result.accepted
+              lifecycleChanged = result.changed
+            }
+            if (session && (!lifecycleEvent || lifecycleAccepted) && !ignoresSessionHook(store, session, hook)) {
+              requestChanged = applyRequestHook(store, { ...session, repo_id: workingRoot(session.cwd) }, envelope)
+              if (known) session = applySessionHook(store, envelope, session, requestChanged)
+            }
+          }
+          store.run('INSERT INTO hook_events(dedupe_key,session_id,claude_session_id,event,hook_ts,received_at,via,pty_id,claude_pid,applied,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)', key, session?.id ?? null, hook.session_id, hook.hook_event_name, envelope.hookTs, envelope.receivedAt ?? now(), envelope.via ?? 'socket', envelope.ptyId ?? null, envelope.claudePid ?? null, lifecycleEvent ? lifecycleAccepted ? 1 : 0 : openingApplied || !late ? 1 : 0, JSON.stringify(hook))
+          if (session && (!late || requestChanged)) {
+            for (const row of store.all('SELECT * FROM requests WHERE session_id = ?', session.id)) {
+              if (!beforeRequests.has(row.id)) store.appendEvent({ at: envelope.hookTs, type: 'request.opened', entityId: row.id, data: requestView(row) })
+              else if (beforeRequests.get(row.id).state === 'open' && row.state !== 'open') store.appendEvent({ at: envelope.hookTs, type: 'request.closed', entityId: row.id, data: requestView(row) })
+              else if (JSON.stringify(beforeRequests.get(row.id)) !== JSON.stringify(requestView(row))) store.appendEvent({ at: envelope.hookTs, type: 'request.updated', entityId: row.id, data: requestView(row) })
+            }
+          }
+          if (session) persistSessionSummary(store, session)
+          if (session && (!late || requestChanged || identityChanged || replacementChanged || lifecycleChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session, store) })
+        }
+        store.appendEvent({ at: now(), type: 'counts', data: projectCounts(store) })
+      })
+    },
+    tick(at = now()) {
+      return commit(() => {
+        for (const row of store.all('SELECT * FROM sessions WHERE origin = ? AND alive = 1 AND end_reason IN (?, ?) AND ? - state_since >= ?', 'observed', 'clear', 'resume', at, 5000)) {
+          closeRequests(row.id, 'process_ended', at)
+          const state = JSON.parse(row.changed_files).length ? 'done' : 'ended'
+          store.run('UPDATE sessions SET state = ?, state_since = ?, alive = 0, activity = NULL, ended_at = ?, since_ts = ? WHERE id = ?', state, state === row.state ? row.state_since : at, at, at, row.id)
+          persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
+        }
+        for (const row of store.all('SELECT * FROM sessions WHERE state = ? AND (activity IS NULL OR activity <> ?) AND ? - last_activity_at >= ?', 'running', 'compacting', at, 1_200_000)) {
+          store.run('UPDATE sessions SET state = ?, state_since = last_activity_at WHERE id = ?', 'stale', row.id)
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
+        }
+        for (const row of store.all('SELECT * FROM sessions WHERE origin = ? AND alive = 1 AND process_key IS NULL AND ? - last_activity_at >= ?', 'observed', at, 86_400_000)) {
+          closeRequests(row.id, 'process_ended', at)
+          store.run('UPDATE sessions SET state = ?, state_since = ?, alive = 0, activity = NULL, ended_at = ?, since_ts = ? WHERE id = ?', 'ended', row.state === 'ended' ? row.state_since : at, at, at, row.id)
+          persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
+        }
+        store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
+      })
+    },
+    signal(sessionId, signal, at = now()) {
+      return commit(() => {
+        let row = store.get('SELECT * FROM sessions WHERE id = ?', sessionId)
+        if (!row) return
+        if (signal.type === 'pid_gone' && row.origin === 'observed' && row.alive) {
+          closeRequests(row.id, 'process_ended', at)
+          const announced = ['clear', 'resume'].includes(row.end_reason)
+          const state = announced ? JSON.parse(row.changed_files).length ? 'done' : 'ended' : 'crashed'
+          store.run('UPDATE sessions SET state=?,state_since=?,alive=0,activity=NULL,crash_kind=?,ended_at=?,since_ts=? WHERE id=?', state, row.state === state ? row.state_since : at, announced ? null : 'lost', at, at, row.id)
+        } else if (signal.type === 'exit' && row.alive) {
+          row = refreshSessionChanges(store, row)
+          closeRequests(row.id, 'process_ended', at)
+          const exitSignal = signal.signal && signal.signal !== '0' ? String(signal.signal) : null
+          const crashed = (signal.code !== 0 || exitSignal !== null) && !row.user_stop_requested && !row.end_announced
+          const state = crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended'
+          store.run('UPDATE sessions SET state=?,state_since=?,alive=0,activity=NULL,ended_at=?,exit_code=?,exit_signal=?,crash_kind=?,since_ts=? WHERE id=?', state, state === row.state ? row.state_since : at, at, signal.code ?? null, exitSignal, crashed ? exitSignal ? 'signal' : 'exit' : null, at, row.id)
+        } else if (signal.type === 'review' && row.state === 'done') {
+          const baseline = captureReviewBaseline(workingRoot(row.cwd), row.review_baseline)
+          if (!baseline && row.review_baseline) return
+          store.run('UPDATE sessions SET state=?,reviewed_at=?,state_since=?,since_ts=?,changed_files=?,review_baseline=? WHERE id=?', row.alive ? 'reviewed' : 'ended', at, at, at, '[]', baseline ?? row.review_baseline, row.id)
+        }
+        persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
+        store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
+        store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
+      })
+    }
+  }
+}
