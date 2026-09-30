@@ -4675,3 +4675,93 @@ test('stale recovery uses real activity time and retains old-hook and terminal f
     } finally { h.close() }
   }
 })
+
+test('session discovery projects safe Git branch metadata for nested unborn named and detached repositories', () => {
+  for (const mode of ['unborn', 'named', 'detached', 'non-git', 'joined']) {
+    const h = harness()
+    const root = path.dirname(h.file)
+    try {
+      const git = args => execFileSync('git', ['-C', root, ...args], { timeout: 2000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } })
+      if (mode !== 'non-git') {
+        git(['init', '-q', '--initial-branch=fixture-branch'])
+        if (mode !== 'unborn') git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'fixture'])
+        if (mode === 'detached') git(['checkout', '-q', '--detach'])
+        const sentinel = path.join(root, '.git', 'unexpected-execution')
+        const program = path.join(root, '.git', 'probe')
+        writeFileSync(program, `#!/bin/sh\nprintf executed > '${sentinel}'\n`, { mode: 0o700 })
+        git(['config', 'core.fsmonitor', program])
+        git(['config', 'core.hooksPath', program])
+      }
+      const cwd = path.join(root, 'a', 'b')
+      mkdirSync(cwd, { recursive: true })
+      const hook = fixture('SessionStart.startup.json', { cwd, transcript_path: path.join(root, 'absent.jsonl'),
+        ...(mode === 'joined' ? { hook_event_name: 'UserPromptSubmit', prompt: 'joined' } : {}) })
+      const checked = validateEnvelope(JSON.stringify(hook))
+      assert.equal(checked.ok, true)
+      h.projector.applyHooks([checked.value])
+      const expected = mode === 'non-git' ? null : mode === 'detached' ? 'HEAD' : 'fixture-branch'
+      const session = h.projector.snapshot().sessions[0]
+      assert.equal(session.branch, expected)
+      assert.equal(h.store.get('SELECT branch FROM sessions WHERE id=?', session.id).branch, expected)
+      assert.equal(existsSync(path.join(root, '.git', 'unexpected-execution')), false)
+    } finally { h.close() }
+  }
+})
+
+test('legitimate start and cwd changes refresh branch and resumed history without following tool cwd or old hooks', () => {
+  const h = harness()
+  const reader = openDeckDb(h.file)
+  const root = path.dirname(h.file)
+  const first = path.join(root, 'first')
+  const second = path.join(root, 'second')
+  const ordinary = path.join(root, 'ordinary')
+  try {
+    const git = (cwd, args) => execFileSync('git', ['-C', cwd, ...args], { timeout: 2000 })
+    for (const [cwd, branch] of [[first, 'branch-a'], [second, 'branch-b']]) {
+      mkdirSync(cwd)
+      git(cwd, ['init', '-q', `--initial-branch=${branch}`])
+      git(cwd, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'fixture'])
+    }
+    mkdirSync(ordinary)
+    const publications = []
+    const projector = createProjector({ store: h.store, publish: event => {
+      assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))
+      if (event.type === 'session.upserted') assert.equal(reader.get('SELECT branch FROM sessions WHERE id=?', event.entityId).branch, event.data.branch)
+      publications.push(event)
+    } })
+    const send = (name, at, cwd, extra = {}, pid = 42) => {
+      const checked = validateEnvelope(JSON.stringify({ ...fixture('SessionStart.startup.json', { hook_event_name: name, cwd,
+        transcript_path: path.join(root, 'absent.jsonl'), ...extra }), hookTs: at, claudePid: pid, pidChain: [pid] }))
+      assert.equal(checked.ok, true)
+      projector.applyHooks([checked.value])
+    }
+    send('SessionStart', 1000, first)
+    const id = projector.snapshot().sessions[0].id
+    h.store.run('UPDATE sessions SET branch=? WHERE id=?', 'branch-a', id)
+    send('CwdChanged', 2000, second)
+    assert.equal(projector.snapshot().sessions[0].branch, 'branch-b')
+    git(second, ['branch', '-m', 'branch-renamed'])
+    send('SessionStart', 2500, second)
+    assert.equal(projector.snapshot().sessions[0].branch, 'branch-renamed')
+    send('PostToolUse', 3000, first, { tool_name: 'Read', tool_input: { file_path: 'example' } })
+    send('CwdChanged', 1500, first)
+    assert.equal(projector.snapshot().sessions[0].branch, 'branch-renamed')
+    send('SessionEnd', 4000, second, { reason: 'prompt_input_exit' })
+    assert.equal(h.store.get('SELECT branch FROM session_summaries WHERE session_id=?', id).branch, 'branch-renamed')
+    send('SessionStart', 5000, first, { source: 'resume' }, 43)
+    assert.equal(projector.snapshot().sessions[0].id, id)
+    assert.equal(projector.snapshot().sessions[0].branch, 'branch-a')
+    send('SessionEnd', 6000, first, { reason: 'prompt_input_exit' }, 43)
+    assert.equal(h.store.get('SELECT branch FROM session_summaries WHERE session_id=?', id).branch, 'branch-a')
+    send('SessionStart', 7000, second, { source: 'resume' }, 44)
+    send('CwdChanged', 8000, ordinary, {}, 44)
+    assert.equal(projector.snapshot().sessions[0].branch, null)
+    send('CwdChanged', 9000, first, {}, 44)
+    assert.equal(projector.snapshot().sessions[0].branch, 'branch-a')
+    writeFileSync(path.join(first, '.git', 'HEAD'), 'invalid head\n')
+    send('CwdChanged', 10000, first, {}, 44)
+    assert.equal(projector.snapshot().sessions[0].branch, null)
+    assert.equal(projector.snapshot().sessions.length, 1)
+    assert.ok(publications.some(event => event.type === 'session.upserted' && event.at === 2000 && event.data.branch === 'branch-b'))
+  } finally { reader.close(); h.close() }
+})
