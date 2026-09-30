@@ -1,0 +1,126 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import http from 'node:http'
+import { once } from 'node:events'
+import { WebSocket } from 'ws'
+import { createDeckServer, startDeckServer } from '../../server/main.mjs'
+const token = 'a'.repeat(43)
+async function harness(t, options = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sec-'))
+  const state = path.join(dir, '.local/state/fleetmates/deck')
+  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
+  const tokenFile = path.join(state, 'token')
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 })
+  const deck = await startDeckServer({ env: { HOME: dir }, port: 0, notifications: false, connectDeckd: async () => { throw Error('offline') }, tokenPollMs: 20, helloTimeoutMs: 30, ...options })
+  t.after(async () => { await deck.close()
+    fs.rmSync(dir, { recursive: true, force: true }) })
+  const port = deck.address().port
+  const request = (route, headers = {}, method = 'GET', body = '') => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: route, method,
+      headers: { Authorization: `Bearer ${token}`, Host: `127.0.0.1:${port}`, Origin: `http://127.0.0.1:${port}`, ...headers } }, res => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, data: data ? JSON.parse(data) : null }))
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+  const ws = (headers = {}, protocols = ['deck.v1', `deck.auth.${token}`]) => {
+    const client = new WebSocket(`ws://127.0.0.1:${port}/api/ws`, protocols, { headers: { Origin: `http://127.0.0.1:${port}`, ...headers } })
+    client.on('error', () => {})
+    t.after(() => client.terminate())
+    return client
+  }
+  return { deck, dir, tokenFile, port, request, ws }
+}
+for (const [name, headers, status, code] of [
+  ['bearer', { Authorization: 'Bearer wrong' }, 401, 'unauthorized'],
+  ['query token', { Authorization: '' }, 401, 'unauthorized'],
+  ['host', { Host: 'attacker.test:47800' }, 403, 'forbidden_host'],
+  ['localhost redirect', { Host: 'localhost:PORT' }, 421, 'forbidden_host'],
+  ['origin', { Origin: 'https://attacker.test' }, 403, 'forbidden_origin'],
+  ['different port', { Origin: 'http://127.0.0.1:1' }, 403, 'forbidden_origin'],
+  ['fetch site', { 'Sec-Fetch-Site': 'cross-site' }, 403, 'forbidden_origin']
+]) test(`HTTP rejects ${name} on every API path including unknown routes`, async t => {
+  const h = await harness(t)
+  const actual = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key, value.replace('PORT', h.port)]))
+  for (const route of ['/api/health', '/api/missing', `/api/version?token=${token}`]) {
+    const response = await h.request(route, actual)
+    assert.equal(response.status, status)
+    assert.equal(response.data.error.code, code)
+    assert.equal(response.headers['cache-control'], 'no-store')
+    assert.equal(response.headers['access-control-allow-origin'], undefined)
+  }
+})
+test('writes reject missing Origin and preflights; GET and HEAD require no Origin and HEAD has no body', async t => {
+  const h = await harness(t)
+  assert.equal((await h.request('/api/prefs', { Origin: '' }, 'PATCH', '{}')).status, 403)
+  assert.equal((await h.request('/api/prefs', {}, 'OPTIONS')).status, 403)
+  assert.equal((await h.request('/api/version', { Origin: '' })).status, 200)
+  const head = await h.request('/api/version', { Origin: '' }, 'HEAD')
+  assert.equal(head.status, 200)
+  assert.equal(head.data, null)
+})
+test('JSON body type, schema and one MiB streamed limit are enforced before writes', async t => {
+  const h = await harness(t)
+  assert.equal((await h.request('/api/prefs', { 'Content-Type': 'text/plain' }, 'PATCH', '{}')).status, 415)
+  for (const body of ['{', '[]', 'null', '{"textSize":99}', '{"unknown":true}', '{"constructor":"x"}', '{"__proto__":"x"}']) {
+    assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json' }, 'PATCH', body)).status, 422)
+  }
+  assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked' }, 'PATCH', '{"scanRoot":"' + 'x'.repeat(1024 * 1024) + '"}')).status, 413)
+  const body = JSON.stringify({ scanRoot: 'x'.repeat(300_000) })
+  assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json' }, 'PATCH', body)).status, 200)
+})
+for (const [name, headers, protocols, status] of [
+  ['token', {}, ['deck.v1', 'deck.auth.wrong'], 401],
+  ['protocol', {}, [`deck.auth.${token}`], 401],
+  ['Origin', { Origin: '' }, undefined, 403],
+  ['cross origin', { Origin: 'https://attacker.test' }, undefined, 403],
+  ['Host', { Host: 'attacker.test' }, undefined, 403],
+  ['fetch site', { 'Sec-Fetch-Site': 'cross-site' }, undefined, 403]
+]) test(`WebSocket upgrade rejects ${name}`, async t => {
+  const h = await harness(t)
+  const client = h.ws(headers, protocols)
+  const [, response] = await Promise.race([once(client, 'unexpected-response'), once(client, 'open').then(() => [null, { statusCode: 101, headers: {} }])]).catch(() => [null, { statusCode: 101, headers: {} }])
+  assert.equal(response.statusCode, status)
+  assert.equal(response.headers['cache-control'], 'no-store')
+  response.resume()
+})
+test('token rotation closes existing sockets and invalidates old HTTP tokens', async t => {
+  const h = await harness(t)
+  const ws = h.ws()
+  await once(ws, 'open')
+  const closing = once(ws, 'close')
+  const fresh = 'b'.repeat(43)
+  fs.writeFileSync(h.tokenFile + '.new', fresh, { mode: 0o600 })
+  fs.renameSync(h.tokenFile + '.new', h.tokenFile)
+  const [code] = await closing
+  assert.equal(code, 4401)
+  assert.equal((await h.request('/api/version')).status, 401)
+  assert.equal((await h.request('/api/version', { Authorization: `Bearer ${fresh}` })).status, 200)
+})
+test('bad, missing and incompatible WebSocket hello messages close with specified codes', async t => {
+  const h = await harness(t)
+  for (const [message, expected] of [[null, 4400], ['{', 4400], [{ t: 'hello', apiVersion: 2, epoch: null, lastSeq: 0 }, 4410], [{ t: 'hello', apiVersion: 1, epoch: null, lastSeq: -1 }, 4400]]) {
+    const ws = h.ws()
+    await once(ws, 'open')
+    const closing = once(ws, 'close')
+    if (message !== null) ws.send(typeof message === 'string' ? message : JSON.stringify(message))
+    assert.equal((await closing)[0], expected)
+  }
+})
+test('server refuses non-loopback binds and unsafe token files', async t => {
+  const h = await harness(t)
+  await assert.rejects(async () => {
+    const candidate = await createDeckServer({ host: '0.0.0.0', env: { HOME: h.dir }, port: 0, notifications: false, connectDeckd: async () => { throw Error('offline') } })
+    await candidate.close()
+  }, /loopback/)
+  fs.chmodSync(h.tokenFile, 0o644)
+  await assert.rejects(async () => {
+    const candidate = await startDeckServer({ env: { HOME: h.dir }, port: 0, notifications: false })
+    await candidate.close()
+  }, /private|0600/)
+})
