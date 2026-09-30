@@ -1,8 +1,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-/** Events observed by the deck hook. */
-export const HOOK_EVENTS = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied', 'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'CwdChanged', 'PreCompact', 'PostCompact', 'WorktreeCreate', 'WorktreeRemove']
+/** Observation events installed by setup. */
+export const HOOK_EVENTS = ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied', 'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'CwdChanged', 'PreCompact', 'PostCompact']
+
+const lifecycleEvents = ['WorktreeCreate', 'WorktreeRemove']
 
 function shellWords(command) {
   const words = []
@@ -47,24 +49,28 @@ export function isDeckHook(command, installedCommand) {
 export function transformHooks(settings, command, remove = false) {
   const result = structuredClone(settings)
   if (!result.hooks || typeof result.hooks !== 'object' || Array.isArray(result.hooks)) result.hooks = {}
-  for (const event of HOOK_EVENTS) {
+  for (const event of [...HOOK_EVENTS, ...lifecycleEvents]) {
+    const install = !remove && HOOK_EVENTS.includes(event)
+    if (!install && !Array.isArray(result.hooks[event])) continue
     const groups = Array.isArray(result.hooks[event]) ? result.hooks[event] : []
     let found = false
     const next = []
     for (const group of groups) {
       if (!Array.isArray(group?.hooks)) { next.push(group); continue }
       const hooks = []
+      let touched = false
       for (const hook of group.hooks) {
-        if (isDeckHook(hook?.command, command)) {
-          if (!remove && !found && group.matcher === '*') {
+        if (hook?.type === 'command' && isDeckHook(hook.command, command)) {
+          touched = true
+          if (install && !found && group.matcher === '*') {
             hooks.push({ type: 'command', command, async: true, timeout: 5 })
             found = true
           }
         } else hooks.push(hook)
       }
-      if (hooks.length || (!remove && group.hooks.length === 0)) next.push({ ...group, hooks })
+      if (!touched || hooks.length) next.push({ ...group, hooks })
     }
-    if (!remove && !found) next.push({ matcher: '*', hooks: [{ type: 'command', command, async: true, timeout: 5 }] })
+    if (install && !found) next.push({ matcher: '*', hooks: [{ type: 'command', command, async: true, timeout: 5 }] })
     if (next.length) result.hooks[event] = next
     else delete result.hooks[event]
   }
@@ -112,5 +118,6 @@ export function writeSettings(file, current, next) {
 
 /** Check that every subscribed event has the installed command. */
 export function hooksInstalled(settings, command) {
+  if (lifecycleEvents.some(event => Array.isArray(settings.hooks?.[event]) && settings.hooks[event].some(group => Array.isArray(group?.hooks) && group.hooks.some(hook => hook?.type === 'command' && isDeckHook(hook.command, command))))) return false
   return HOOK_EVENTS.every(event => Array.isArray(settings.hooks?.[event]) && settings.hooks[event].some(group => group.matcher === '*' && group.hooks?.some(hook => hook.command === command && hook.async === true)))
 }

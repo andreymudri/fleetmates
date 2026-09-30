@@ -20,7 +20,7 @@ const requiredHookEvents = [
   'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse',
   'PostToolUse', 'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied',
   'Notification', 'Stop', 'SubagentStart', 'SubagentStop', 'CwdChanged',
-  'PreCompact', 'PostCompact', 'WorktreeCreate', 'WorktreeRemove'
+  'PreCompact', 'PostCompact'
 ]
 
 function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false } = {}) {
@@ -97,6 +97,11 @@ test('hooksInstalled requires the installed command for every subscribed event',
     wrongCommand.hooks[event][0].hooks[0].command = 'node /tmp/unrelated-hook.mjs'
     assert.equal(hooksInstalled(wrongCommand, command), false, `wrong command for ${event}`)
   }
+  for (const event of ['WorktreeCreate', 'WorktreeRemove']) {
+    const intercepted = structuredClone(settings)
+    intercepted.hooks[event] = [{ hooks: [{ type: 'command', command, async: true }] }]
+    assert.equal(hooksInstalled(intercepted, command), false, `deck must not intercept ${event}`)
+  }
 })
 
 test('init installs every event required by the hook integration contract', () => {
@@ -104,6 +109,8 @@ test('init installs every event required by the hook integration contract', () =
   const result = s.run('init')
   assert.equal(result.status, 0, result.stderr)
   const settings = JSON.parse(readFileSync(s.settings, 'utf8'))
+  assert.equal(Object.hasOwn(settings.hooks, 'WorktreeCreate'), false)
+  assert.equal(Object.hasOwn(settings.hooks, 'WorktreeRemove'), false)
   assert.deepEqual(Object.keys(settings.hooks).sort(), [...requiredHookEvents].sort())
   const command = [process.execPath, setupPaths(s.env).hook]
     .map(value => `'${value.replaceAll("'", "'\\''")}'`).join(' ')
@@ -111,6 +118,76 @@ test('init installs every event required by the hook integration contract', () =
     assert.deepEqual(settings.hooks[event], [
       { matcher: '*', hooks: [{ type: 'command', command, async: true, timeout: 5 }] }
     ], event)
+  }
+})
+
+function dispatchSyntheticWorktree(settings, event, s, directory) {
+  const handlers = (settings.hooks?.[event] ?? []).flatMap(group => group.hooks ?? [])
+  if (!handlers.length) {
+    if (event === 'WorktreeCreate') mkdirSync(directory)
+    else fs.rmSync(directory, { recursive: true })
+    return { defaultUsed: true, directoryExists: existsSync(directory) }
+  }
+  for (const hook of handlers) {
+    const result = spawnSync('/bin/sh', ['-c', hook.command], {
+      env: s.env, encoding: 'utf8', timeout: 3000,
+      input: JSON.stringify({ hook_event_name: event, session_id: 'synthetic-worktree', cwd: s.root, name: 'fixture', worktree_path: directory })
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, '')
+  }
+  return { defaultUsed: false, directoryExists: existsSync(directory) }
+}
+
+for (const event of ['WorktreeCreate', 'WorktreeRemove']) {
+  test(`init preserves default ${event} dispatch instead of registering a silent observer`, () => {
+    const s = sandbox()
+    assert.equal(s.run('init').status, 0)
+    const settings = JSON.parse(readFileSync(s.settings, 'utf8'))
+    const directory = path.join(s.root, 'synthetic-worktree')
+    if (event === 'WorktreeRemove') mkdirSync(directory)
+    const legacy = { hooks: { [event]: [{ hooks: settings.hooks.SessionStart[0].hooks }] } }
+    assert.deepEqual(dispatchSyntheticWorktree(legacy, event, s, directory), {
+      defaultUsed: false, directoryExists: event === 'WorktreeRemove'
+    })
+    assert.deepEqual(dispatchSyntheticWorktree(settings, event, s, directory), {
+      defaultUsed: true, directoryExists: event === 'WorktreeCreate'
+    })
+  })
+}
+
+test('init and uninstall remove only legacy deck worktree handlers and preserve opaque groups', () => {
+  for (const action of ['init', 'uninstall-hooks']) {
+    const s = sandbox()
+    const installed = `'${process.execPath}' '${setupPaths(s.env).hook}'`
+    const preserved = { env: { KEEP: 'unchanged' }, hooks: {} }
+    const legacy = []
+    for (const event of ['WorktreeCreate', 'WorktreeRemove']) {
+      const other = { type: 'command', command: 'nodejs /tmp/third-party/worktree-handler.mjs', custom: { keep: true } }
+      const opaque = { matcher: 'vendor', hooks: [{ type: 'http', url: 'http://127.0.0.1:9/hooks', command: installed }, { command: installed, vendorField: true }, null], custom: 'opaque' }
+      const empty = { matcher: 'empty', hooks: [], extra: true }
+      preserved.hooks[event] = [{ matcher: 'custom', hooks: [other], metadata: 'keep' }, opaque, empty, { matcher: 'unknown', vendorField: true }, null]
+      legacy.push(['node /tmp/old-install/hub/hook/deck-hook.mjs', 'nodejs /tmp/old/fleetmates-deck/hook/deck-hook.mjs', installed])
+    }
+    const input = structuredClone(preserved)
+    for (const [index, event] of ['WorktreeCreate', 'WorktreeRemove'].entries()) {
+      input.hooks[event][0].hooks.unshift({ type: 'command', command: legacy[index][0] })
+      input.hooks[event].splice(1, 0, { matcher: '*', hooks: legacy[index].slice(1).map(command => ({ type: 'command', command })) })
+    }
+    const originalBytes = Buffer.from(JSON.stringify(input))
+    writeFileSync(s.settings, originalBytes)
+    const result = s.run(action)
+    assert.equal(result.status, 0, result.stderr)
+    const updated = readFileSync(s.settings)
+    const parsed = JSON.parse(updated)
+    for (const event of ['WorktreeCreate', 'WorktreeRemove']) assert.deepEqual(parsed.hooks[event], preserved.hooks[event], `${action} ${event}`)
+    assert.deepEqual(readFileSync(path.join(path.dirname(s.settings), readdirSync(path.dirname(s.settings)).find(name => name.includes('deck-backup-')))), originalBytes)
+    assert.equal(s.run(action).status, 0)
+    assert.deepEqual(readFileSync(s.settings), updated)
+    if (action === 'init') assert.match(s.run('doctor').stdout, /hooks: ok/)
+    const opaqueEvents = { hooks: { WorktreeCreate: { vendorField: true }, WorktreeRemove: 'vendor-owned' } }
+    const transformed = transformHooks(opaqueEvents, installed, action === 'uninstall-hooks')
+    for (const event of ['WorktreeCreate', 'WorktreeRemove']) assert.deepEqual(transformed.hooks[event], opaqueEvents.hooks[event])
   }
 })
 
