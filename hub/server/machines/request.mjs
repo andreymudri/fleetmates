@@ -46,7 +46,7 @@ function shellTokens(command) {
   return tokens
 }
 
-function embeddedCommands(command) {
+function embeddedCommands(command, onFound = () => {}) {
   const found = []
   let quote = null
   for (let i = 0; i < command.length; i++) {
@@ -62,7 +62,12 @@ function embeddedCommands(command) {
         if (command[end] === '\\') end++
         end++
       }
-      if (end < command.length) { found.push(command.slice(start, end)); i = end }
+      if (end < command.length) {
+        const inner = command.slice(start, end)
+        found.push(inner)
+        onFound(inner, start - 1, end + 1)
+        i = end
+      }
     } else if (char === '$' && command[i + 1] === '(') {
       const start = i + 2
       let depth = 1
@@ -71,7 +76,12 @@ function embeddedCommands(command) {
         if (command[end] === '(') depth++
         if (command[end] === ')' && --depth === 0) break
       }
-      if (depth === 0) { found.push(command.slice(start, end)); i = end }
+      if (depth === 0) {
+        const inner = command.slice(start, end)
+        found.push(inner)
+        onFound(inner, start - 2, end + 1)
+        i = end
+      }
     }
   }
   return found
@@ -324,8 +334,8 @@ function canonicalExistingPath(location) {
 function knownShellPath(value) {
   return value.replace(/^\$(?:([A-Z_]+)|\{([A-Z_]+)\})(?=\/|$)/, (match, plain, braced) => {
     const variable = plain ?? braced
-    const configured = ['HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'].includes(variable) ? process.env[variable] : null
-    return configured && path.isAbsolute(configured) ? configured : match
+    const configured = ['HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR', 'CLAUDE_CONFIG_DIR'].includes(variable) ? process.env[variable] : null
+    return configured && (path.isAbsolute(configured) || variable === 'CLAUDE_CONFIG_DIR') ? configured : match
   })
 }
 
@@ -457,8 +467,16 @@ function shellWriteTargets(command, cwd, requestedCwd = cwd) {
   let requestedDirectory = requestedCwd
   const targets = []
   const add = (target, cwd = directory, quoted = false, requestedCwd = requestedDirectory) => targets.push({ file_path: target, cwd, quoted, requestedCwd })
-  const tokens = shellTokens(command)
+  const embedded = []
+  embeddedCommands(command, (command, start, end) => embedded.push({ command, start, end }))
+  let masked = command
+  for (const inner of embedded) masked = masked.slice(0, inner.start) + 'x'.repeat(inner.end - inner.start) + masked.slice(inner.end)
+  const tokens = shellTokens(masked)
   const inspect = words => {
+    if (!words.length) return
+    for (const inner of embedded) {
+      if (inner.start >= words[0].start && inner.end <= words.at(-1).end) targets.push({ command: inner.command, cwd: directory, requestedCwd: requestedDirectory })
+    }
     for (let i = 0; i < words.length; i++) {
       if (words[i].value !== '>' || words[i].quoted) continue
       while (words[i + 1]?.value === '>' && !words[i + 1].quoted) i++
@@ -540,9 +558,12 @@ function sensitiveWrite(hook, repoRoot, depth = 0, requestedCwd = hook.cwd ?? re
   const data = process.env.XDG_DATA_HOME && path.isAbsolute(process.env.XDG_DATA_HOME) ? process.env.XDG_DATA_HOME : path.join(home, '.local', 'share')
   const installedHook = path.join(data, 'fleetmates-deck', 'hook', 'deck-hook.mjs')
   const hookPaths = new Set([installedHook, path.dirname(installedHook), canonicalExistingPath(installedHook), canonicalExistingPath(path.dirname(installedHook))])
+  const configuredSettings = path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(home, '.claude'), 'settings.json')
+  const settingsPaths = new Set([configuredSettings, canonicalExistingPath(configuredSettings)])
   return [requested, location].some((candidate, index) => {
     const normalized = candidate.replaceAll('\\', '/')
     if (hookPaths.has(candidate)) return true
+    if (settingsPaths.has(candidate)) return true
     if (/(?:^|\/)\.local\/share\/fleetmates-deck\/hook(?:\/deck-hook\.mjs)?$/.test(normalized)) return true
     if (/(?:^|\/)(?:\.git|\.claude)(?:\/hooks)?$/.test(normalized)) return true
     if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true

@@ -137,6 +137,106 @@ test('observed PID loss during announced replacement finishes normally with comm
   }
 })
 
+test('log-only agent notifications preserve ordering projections and stale deadlines', () => {
+  for (const subtype of ['agent_needs_input', 'agent_completed']) for (const finish of ['stop', 'stale']) {
+    const h = harness()
+    try {
+      h.projector.applyHooks([fixture('SessionStart.startup.json'), { ...fixture('UserPromptSubmit.json'), hookTs: 2000 }])
+      const before = h.projector.snapshot()
+      const row = { ...h.store.get('SELECT * FROM sessions') }
+      for (const at of [4000, 4000, 1500, 8000]) {
+        h.projector.applyHooks([{ ...fixture('Notification.idle_prompt.json', { notification_type: subtype, message: 'Background notification' }), hookTs: at }])
+        const after = h.projector.snapshot()
+        assert.deepEqual(after.sessions, before.sessions, subtype)
+        assert.deepEqual(after.requests, before.requests)
+        assert.deepEqual(after.counts, before.counts)
+        assert.deepEqual(after.home, before.home)
+        assert.deepEqual({ ...h.store.get('SELECT * FROM sessions') }, row)
+      }
+      assert.equal(h.store.get('SELECT COUNT(*) AS n FROM hook_events WHERE event=?', 'Notification').n, 3)
+      if (finish === 'stop') {
+        h.projector.applyHooks([{ ...fixture('Stop.json'), hookTs: 3000 }])
+        assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+        assert.equal(h.store.get('SELECT applied FROM hook_events WHERE event=?', 'Stop').applied, 1)
+        assert.equal(h.projector.snapshot().counts.running, 0)
+      } else {
+        h.projector.tick(1201999)
+        assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+        h.projector.tick(1202000)
+        assert.equal(h.projector.snapshot().sessions[0].state, 'stale')
+        assert.equal(h.projector.snapshot().sessions[0].stateSince, 2000)
+      }
+    } finally { h.close() }
+  }
+})
+
+test('literal embedded shell writes retain sensitive floors and command-local directory scope', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-embedded-write-'))
+  try {
+    const controls = path.join(root, '.claude')
+    mkdirSync(controls)
+    mkdirSync(path.join(root, 'ordinary'))
+    symlinkSync(controls, path.join(root, 'controls'))
+    const tier = command => permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root })
+    const direct = `printf '%s' '{"permissions":{"allow":["Bash(*)"]}}' > '${controls}/settings.json'`
+    assert.equal(tier(direct), 'destructive')
+    for (const command of [
+      `echo "$(${direct})"`, `echo \`${direct}\``,
+      'cd .claude && echo "$(printf x > settings.json)"',
+      'cd controls && echo `printf x > settings.local.json`',
+      'echo $(cd .claude && printf x > settings.json)',
+      "sh -c 'echo \"$(printf x > .claude/settings.json)\"'",
+      "env -C controls sh -c 'echo \"$(tee settings.json)\"'",
+      "env -S 'sh -c \"echo `tee .claude/settings.json`\"'",
+      'echo "$(env -C controls tee settings.json)"'
+    ]) assert.equal(tier(command), 'destructive', command)
+    for (const command of [
+      'echo "$(printf x > ordinary/settings.json)"', 'echo `tee ordinary/settings.json`',
+      'echo "$(cd ordinary && tee settings.json)"',
+      'env -C controls echo "$(tee settings.json)"',
+      'echo "$(cd controls && true)"; tee settings.json',
+      'echo $(cd controls && true); tee settings.json',
+      "echo '$(tee .claude/settings.json)'", 'echo "$(tee $UNKNOWN/settings.json)"'
+    ]) assert.equal(tier(command), 'caution', command)
+    assert.equal(existsSync(path.join(controls, 'settings.json')), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('configured Claude settings retain the write floor for literal aliases and known shell paths', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-configured-claude-'))
+  const previous = process.env.CLAUDE_CONFIG_DIR
+  try {
+    const selected = path.join(root, 'custom-config')
+    mkdirSync(selected)
+    mkdirSync(path.join(root, 'ordinary'))
+    writeFileSync(path.join(selected, 'settings.json'), '{}')
+    symlinkSync(selected, path.join(root, 'config-alias'))
+    symlinkSync(path.join(selected, 'settings.json'), path.join(root, 'settings-alias'))
+    for (const configured of [selected, path.relative(process.cwd(), selected)]) {
+      process.env.CLAUDE_CONFIG_DIR = configured
+      for (const tool_name of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) for (const file of [path.join(selected, 'settings.json'), 'custom-config/settings.json', 'config-alias/settings.json', 'settings-alias']) {
+        const tool_input = tool_name === 'NotebookEdit' ? { notebook_path: file } : { file_path: file, content: '{"permissions":{"allow":["Bash(*)"]}}' }
+        assert.equal(permissionTier({ cwd: root, tool_name, tool_input }, { repoRoot: root }), 'destructive', `${configured}/${tool_name}/${file}`)
+      }
+      const tier = (command, cwd = root) => permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root })
+      assert.equal(tier('tee custom-config/settings.json'), 'destructive')
+      assert.equal(tier('echo "$(tee config-alias/settings.json)"'), 'destructive')
+      for (const reference of ['$CLAUDE_CONFIG_DIR', '${CLAUDE_CONFIG_DIR}']) {
+        for (const command of [`tee "${reference}/settings.json"`, `echo "$(tee \"${reference}/settings.json\")"`, `sh -c 'tee "${reference}/settings.json"'`, `env -S 'tee "\${CLAUDE_CONFIG_DIR}/settings.json"'`]) assert.equal(tier(command, process.cwd()), 'destructive', command)
+      }
+      assert.equal(tier('tee ordinary/settings.json'), 'caution')
+      assert.equal(tier('tee custom-config/notes.json'), 'caution')
+      assert.equal(tier('tee "$UNKNOWN/settings.json"'), 'caution')
+      assert.equal(permissionTier({ cwd: root, tool_name: 'Write', tool_input: { file_path: 'ordinary/settings.json' } }, { repoRoot: root }), 'caution')
+    }
+    assert.equal(readFileSync(path.join(selected, 'settings.json'), 'utf8'), '{}')
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('resume clears the previous process crash before recording a clean end', () => {
   for (const signal of [{ type: 'pid_gone' }, { type: 'exit', code: 1 }, { type: 'exit', code: 0, signal: 'SIGKILL' }]) {
     const h = harness()

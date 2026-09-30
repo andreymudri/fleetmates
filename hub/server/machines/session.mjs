@@ -492,7 +492,7 @@ export function ignoresSessionHook(store, session, hook) {
   if (!session) return false
   const event = hook.hook_event_name
   if (['WorktreeCreate', 'WorktreeRemove'].includes(event)) return true
-  if (event === 'Notification' && hook.notification_type === 'agent_completed') return true
+  if (event === 'Notification' && ['agent_completed', 'agent_needs_input'].includes(hook.notification_type)) return true
   if (event === 'Stop' && ['idle', 'done', 'reviewed'].includes(session.state)) return true
   if (event === 'Notification' && hook.notification_type === 'idle_prompt') {
     if (['idle', 'done', 'reviewed'].includes(session.state)) return true
