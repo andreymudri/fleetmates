@@ -132,11 +132,12 @@ function Steps({ steps }) {
   )
 }
 
-function RequestBox({ session, open, t }) {
+function RequestBox({ session, open, t, navigate }) {
   const [request] = open
   const question = request.kind === 'question'
   const tier = question ? 'question' : request.tier ?? 'caution'
   const more = open.length - 1
+  const href = sessionHref(session.id)
   return (
     <div className={`request-box request-box--${question ? 'question' : 'permission'}`} data-request={request.id}>
       <p className="request-head">
@@ -148,14 +149,14 @@ function RequestBox({ session, open, t }) {
         : <code className="request-command">{shown(request.summary)}</code>}
       <div className="request-actions">
         <span className="request-terminal">{translate(t, CARD_COPY, 'home.card.request.answerInTerminal')}</span>
-        <a className="button button--ghost button--xs" href={sessionHref(session.id)}>{translate(t, CARD_COPY, 'home.card.request.open')}</a>
+        <a className="button button--ghost button--xs" href={href} onClick={navigate ? linkHandler(navigate, href) : undefined}>{translate(t, CARD_COPY, 'home.card.request.open')}</a>
       </div>
       {more > 0 ? <p className="request-more">{translate(t, CARD_COPY, 'home.card.request.more', { n: more })}</p> : null}
     </div>
   )
 }
 
-function FileChips({ session, t }) {
+function FileChips({ session, t, navigate }) {
   const files = session.changedFiles ?? []
   if (!files.length) return null
   const base = `${sessionHref(session.id)}?tab=changes`
@@ -163,16 +164,19 @@ function FileChips({ session, t }) {
     <div className="card-files">
       <p className="eyebrow">{translate(t, CARD_COPY, 'home.card.files.eyebrow')}</p>
       <ul className="file-chips">
-        {files.slice(0, MAX_FILES).map(file => (
-          <li key={file.path}>
-            <a className="file-chip" href={`${base}&file=${encodeURIComponent(file.path)}`} title={shown(file.path)}>
-              <span className="file-name">{shown(String(file.path).split('/').at(-1))}</span>
-              {file.adds ? <> <span className="diff-add">{`+${file.adds}`}</span></> : null}
-              {file.dels ? <> <span className="diff-del">{`−${file.dels}`}</span></> : null}
-            </a>
-          </li>
-        ))}
-        {files.length > MAX_FILES ? <li><a className="file-chip file-chip--more" href={base}>{translate(t, CARD_COPY, 'home.card.files.more', { n: files.length - MAX_FILES })}</a></li> : null}
+        {files.slice(0, MAX_FILES).map(file => {
+          const href = `${base}&file=${encodeURIComponent(file.path)}`
+          return (
+            <li key={file.path}>
+              <a className="file-chip" href={href} title={shown(file.path)} onClick={navigate ? linkHandler(navigate, href) : undefined}>
+                <span className="file-name">{shown(String(file.path).split('/').at(-1))}</span>
+                {file.adds ? <> <span className="diff-add">{`+${file.adds}`}</span></> : null}
+                {file.dels ? <> <span className="diff-del">{`−${file.dels}`}</span></> : null}
+              </a>
+            </li>
+          )
+        })}
+        {files.length > MAX_FILES ? <li><a className="file-chip file-chip--more" href={base} onClick={navigate ? linkHandler(navigate, base) : undefined}>{translate(t, CARD_COPY, 'home.card.files.more', { n: files.length - MAX_FILES })}</a></li> : null}
       </ul>
     </div>
   )
@@ -200,6 +204,7 @@ export function SessionCard({ session, repo, requests = [], steps, now = Date.no
     ? translate(t, CARD_COPY, 'home.card.crashed.title', { repo: repoLabel(repo, session) })
     : session.task || translate(t, CARD_COPY, 'home.card.untitled')
   const now_ = activityText(session.activity, t)
+  const changesHref = `${sessionHref(session.id)}?tab=changes`
   const classes = ['session-card', `session-card--${variant}`, `session-card--${tone}`]
   if (NEEDS.has(session.state)) classes.push('motion-pulse')
   return (
@@ -207,9 +212,9 @@ export function SessionCard({ session, repo, requests = [], steps, now = Date.no
       <CardHeader session={session} repo={repo} title={title} t={t} now={now} navigate={navigate} size="md" pillVariant="pill" />
       <Steps steps={steps} />
       {now_ ? <p className="card-now">{now_}</p> : null}
-      {open.length && NEEDS.has(session.state) ? <RequestBox session={session} open={open} t={t} /> : null}
+      {open.length && NEEDS.has(session.state) ? <RequestBox session={session} open={open} t={t} navigate={navigate} /> : null}
       {variant === 'crashed' ? <p className="card-hint">{crashLine(session, t)}</p> : null}
-      {variant === 'solo-running' || variant === 'done' ? <FileChips session={session} t={t} /> : null}
+      {variant === 'solo-running' || variant === 'done' ? <FileChips session={session} t={t} navigate={navigate} /> : null}
       {session.joinedMidLife ? <p className="card-note">{translate(t, CARD_COPY, 'home.card.joinedLate', { time: clock(session.startedAt, lang) })}</p> : null}
       {variant === 'solo-running' ? (
         <footer className="card-footer">
@@ -222,7 +227,7 @@ export function SessionCard({ session, repo, requests = [], steps, now = Date.no
       {variant === 'done' ? (
         <footer className="card-footer">
           <span className="card-footer-meta">{translate(t, CARD_COPY, 'home.card.done.finished', { relative: relative(now - (session.stateSince ?? now), lang) })}</span>
-          <a className="button button--purple button--xs" href={`${sessionHref(session.id)}?tab=changes`}>{translate(t, CARD_COPY, 'home.card.done.review')}</a>
+          <a className="button button--purple button--xs" href={changesHref} onClick={navigate ? linkHandler(navigate, changesHref) : undefined}>{translate(t, CARD_COPY, 'home.card.done.review')}</a>
         </footer>
       ) : null}
     </article>

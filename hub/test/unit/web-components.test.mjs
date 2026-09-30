@@ -166,6 +166,95 @@ test('isolates and non-format default-ignorables are tokenized by titleText and 
   assert.equal(shown('xㅤyᅟz'), 'x<U+3164>y<U+115F>z', 'Hangul fillers are default-ignorable but not Cf')
 })
 
+// One titleText vector per HIDDEN_BIDI entry, with both ends of each range, so dropping any entry fails.
+const BIDI_VECTORS = [
+  ['C0 controls', [0x0000, 0x0007, 0x001B, 0x001F]],
+  ['DEL and C1 controls', [0x007F, 0x009B, 0x009F]],
+  ['ARABIC LETTER MARK', [0x061C]],
+  ['LEFT-TO-RIGHT MARK', [0x200E]],
+  ['RIGHT-TO-LEFT MARK', [0x200F]],
+  ['embeddings and overrides', [0x202A, 0x202C, 0x202E]],
+  ['isolates', [0x2066, 0x2069]]
+]
+
+test('titleText tokenizes every C0, C1 and bidi control it lists, and a card title keeps none raw', async () => {
+  const { SessionCard } = await load('SessionCard.jsx')
+  const { titleText } = await load('StatusPill.jsx')
+  for (const [name, points] of BIDI_VECTORS) {
+    for (const cp of points) {
+      const hex = cp.toString(16).toUpperCase().padStart(4, '0')
+      assert.equal(titleText(`a${String.fromCodePoint(cp)}b`), `a<U+${hex}>b`, `${name}: titleText U+${hex}`)
+    }
+  }
+  assert.equal(titleText('a\u0007b'), 'a<U+0007>b')
+  assert.equal(titleText('a\u001Bb'), 'a<U+001B>b')
+  assert.equal(titleText('a\u007Fb'), 'a<U+007F>b')
+  assert.equal(titleText('a\u009Bb'), 'a<U+009B>b')
+  assert.equal(titleText('a؜b‎c‏d'), 'a<U+061C>b<U+200E>c<U+200F>d')
+
+  const session = { id: 'bel', repoId: '/home/you/dev/api', task: 'ring\u0007bell\u001B[2J', branch: 'main', state: 'running', origin: 'observed', changedFiles: [], startedAt: NOW, stateSince: NOW }
+  const html = render(SessionCard, { session, repo: { id: session.repoId, name: 'api', crewSlot: 2 }, now: NOW })
+  const bdi = /<a class="card-link"[^>]*><bdi>([^<]*)<\/bdi><\/a>/.exec(html)?.[1]
+  assert.equal(bdi, 'ring&lt;U+0007&gt;bell&lt;U+001B&gt;[2J', 'the title shows each control as a token')
+  assert.doesNotMatch(html, /[\u0000-\u001F\u007F-\u009F]/u, 'no raw control reaches the card')
+})
+
+test('shown tokenizes each HIDDEN_ALL class on its own: Cc, Cf and default-ignorable', async () => {
+  const { shown } = await load('StatusPill.jsx')
+  // Each vector belongs to exactly one of the three classes, so dropping any class leaves its vector raw.
+  assert.equal(shown('a\u0007b\u009Bc'), 'a<U+0007>b<U+009B>c', 'Cc only (not Cf, not default-ignorable)')
+  assert.equal(shown('a؀b￹c'), 'a<U+0600>b<U+FFF9>c', 'Cf only (not default-ignorable)')
+  assert.equal(shown('a️bᅟc'), 'a<U+FE0F>b<U+115F>c', 'default-ignorable only (not Cc, not Cf)')
+})
+
+// SessionCard and QuietCard use no hooks outside CrewAvatar, so calling each function component
+// yields the element tree with every anchor's own onClick.
+function anchors(node, out = []) {
+  if (Array.isArray(node)) {
+    for (const child of node) anchors(child, out)
+    return out
+  }
+  if (!node || typeof node !== 'object') return out
+  if (typeof node.type === 'function') {
+    if (node.type.name !== 'CrewAvatar') anchors(node.type(node.props), out)
+    return out
+  }
+  if (node.type === 'a') out.push(node)
+  anchors(node.props?.children, out)
+  return out
+}
+
+test('every in-app card link routes through navigate and prevents the full page load', async () => {
+  const { SessionCard, QuietCard } = await load('SessionCard.jsx')
+  const repo = { id: '/home/you/dev/api', name: 'api', crewSlot: 2 }
+  const base = { id: 'n1', repoId: repo.id, task: 'route me', branch: 'main', origin: 'observed', changedFiles: [], startedAt: NOW - MIN, stateSince: NOW - MIN }
+  const changedFiles = Array.from({ length: 7 }, (_, i) => ({ path: `src/f${i}.rs`, adds: 1, dels: 0 }))
+  const cases = [
+    ['request Open', SessionCard, { session: { ...base, state: 'needs_approval' }, requests: [{ id: 'r', sessionId: 'n1', kind: 'permission', tier: 'safe', summary: 'ls', state: 'open', createdAt: NOW }] },
+      ['/s/n1', '/s/n1']],
+    ['file chips and +N more', SessionCard, { session: { ...base, state: 'running', changedFiles } },
+      ['/s/n1', ...changedFiles.slice(0, 6).map(file => `/s/n1?tab=changes&file=${encodeURIComponent(file.path)}`), '/s/n1?tab=changes']],
+    ['Review changes', SessionCard, { session: { ...base, state: 'done' } },
+      ['/s/n1', '/s/n1?tab=changes']],
+    ['quiet Open', QuietCard, { session: { ...base, state: 'idle' } },
+      ['/s/n1', '/s/n1']]
+  ]
+  for (const [name, Card, props, hrefs] of cases) {
+    const calls = []
+    const links = anchors(Card({ repo, now: NOW, ...props, navigate: to => calls.push(to) }))
+    assert.deepEqual(links.map(link => link.props.href), hrefs, `${name}: the card's links`)
+    for (const link of links) {
+      assert.equal(typeof link.props.onClick, 'function', `${name}: ${link.props.className} ${link.props.href} has a click handler`)
+      let prevented = false
+      link.props.onClick({ button: 0, defaultPrevented: false, preventDefault: () => { prevented = true } })
+      assert.ok(prevented, `${name}: ${link.props.className} prevents the default`)
+    }
+    assert.deepEqual(calls, hrefs, `${name}: navigate receives each link's href`)
+    const bare = anchors(Card({ repo, now: NOW, ...props }))
+    assert.ok(bare.every(link => link.props.onClick === undefined), `${name}: without navigate the links stay plain anchors`)
+  }
+})
+
 test('every agent-supplied card string passes through its sanitizer', async () => {
   const { SessionCard } = await load('SessionCard.jsx')
   const RLO = '‮'
