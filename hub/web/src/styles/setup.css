@@ -1,0 +1,189 @@
+/* First run, Settings (Notifications, Connections) and the screen-placed failure notices.
+   docs/deck/screens/first-run.md, settings.md, failures-and-loading.md. Tokens only. */
+
+/* First run is full-bleed: the Rail is hidden while the checklist page is mounted. */
+.shell:has(.first-run) .rail { display: none; }
+
+.button--xl { min-height: var(--size-control-xl); padding: 0 var(--space-20); }
+.button[aria-disabled='true'] {
+  background: var(--bg-control);
+  color: var(--text-muted);
+  border-color: var(--border-default);
+  cursor: not-allowed;
+}
+.button[aria-busy='true'] { cursor: progress; }
+
+.first-run {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-24);
+  width: 100%;
+  max-width: var(--layout-readable);
+  margin: 0 auto;
+  padding: var(--space-32) 0;
+}
+.first-run-hero { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-8); }
+.first-run-crew { display: flex; gap: var(--space-8); }
+.first-run-title {
+  margin: 0;
+  font: var(--type-welcome);
+  letter-spacing: var(--type-welcome-tracking);
+  color: var(--text-strong);
+}
+.first-run-subtitle { margin: 0; color: var(--text-secondary); }
+
+.checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-12);
+  padding: var(--space-14) var(--space-16);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+}
+.check-status {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: var(--size-control-xs);
+  height: var(--size-control-xs);
+  border-radius: var(--radius-round);
+  font-weight: var(--font-weight-bold);
+}
+.check-status--ok { background: var(--state-running-bg); color: var(--state-running-fg); }
+.check-status--bad { background: var(--state-crashed-bg); color: var(--state-crashed-fg); }
+.check-status--warn { background: var(--state-stale-bg); color: var(--state-stale-fg); }
+.check-status--todo,
+.check-status--checking { background: var(--bg-raised); color: var(--text-muted); }
+.check-text { flex: 1; min-width: 0; }
+.check-title { margin: 0; font: var(--type-label); color: var(--text-strong); overflow-wrap: anywhere; }
+.check-optional { color: var(--text-muted); font-weight: var(--font-weight-regular); }
+.check-sub { margin: var(--space-4) 0 0; color: var(--text-secondary); overflow-wrap: anywhere; }
+.check-sub--mono {
+  margin: var(--space-4) 0 0;
+  font: var(--type-mono);
+  font-family: var(--font-family-mono);
+  color: var(--text-on-red-tint);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.check-row .check-sub--mono {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.check-more summary { cursor: pointer; color: var(--text-link); font: var(--type-meta); }
+.check-actions { flex: 0 0 auto; }
+.check-spinner { display: inline-block; }
+
+.first-run-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-12);
+}
+.first-run-note { flex: 1; margin: 0; color: var(--text-muted); }
+.first-run-buttons { display: flex; gap: var(--space-12); margin-left: auto; }
+.first-run-error { flex-basis: 100%; margin: 0; color: var(--text-on-red-tint); }
+.checklist-inline { display: flex; flex-direction: column; gap: var(--space-16); margin-top: var(--space-16); }
+
+/* Settings: nav + content (settings.md 3). */
+.settings { display: flex; min-height: 100%; gap: var(--space-32); }
+.settings-nav {
+  flex: 0 0 var(--layout-nav);
+  padding: var(--space-8) 0;
+  background: var(--bg-sidebar);
+  border-radius: var(--radius-lg);
+}
+.settings-title {
+  margin: 0 var(--space-16) var(--space-16);
+  font: var(--type-page-title);
+  letter-spacing: var(--type-page-title-tracking);
+  color: var(--text-strong);
+}
+.settings-nav-list { list-style: none; margin: 0; padding: 0; }
+.settings-nav-link {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-10) var(--space-16);
+  color: var(--text-default);
+  text-decoration: none;
+}
+.settings-nav-link:hover { background: var(--bg-hover); }
+.settings-nav-link[aria-current='page'] { background: var(--bg-selected); color: var(--text-strong); }
+.settings-nav-title { font: var(--type-label); }
+.settings-nav-sub { font: var(--type-meta); color: var(--text-muted); overflow-wrap: anywhere; }
+.settings-content { flex: 1; min-width: 0; max-width: var(--layout-content); }
+.settings-section { display: flex; flex-direction: column; gap: var(--space-16); }
+.settings-heading {
+  margin: 0;
+  font: var(--type-heading-detail);
+  letter-spacing: var(--type-heading-detail-tracking);
+  color: var(--text-strong);
+}
+.settings-subheading { margin: var(--space-8) 0 0; font: var(--type-section-title); color: var(--text-strong); }
+.setting-row { display: flex; flex-direction: column; gap: var(--space-4); }
+.setting-inline { flex-direction: row; align-items: center; gap: var(--space-12); }
+.setting-check,
+.setting-select,
+.setting-label { display: flex; align-items: center; gap: var(--space-8); color: var(--text-default); }
+.setting-select select,
+.text-input {
+  min-height: var(--size-control-md);
+  padding: 0 var(--space-10);
+  background: var(--bg-control);
+  color: var(--text-strong);
+  border: 1px solid var(--border-field);
+  border-radius: var(--radius-md);
+  font: inherit;
+}
+.text-input { flex: 1; min-width: 0; font-family: var(--font-family-mono); }
+.text-input:focus,
+.setting-select select:focus { border-color: var(--border-field-focus); outline: none; }
+.text-input[readonly] { color: var(--text-muted); }
+.setting-field { display: flex; gap: var(--space-8); }
+.setting-hint { margin: 0; color: var(--text-muted); font: var(--type-meta); overflow-wrap: anywhere; }
+.setting-error { margin: 0; color: var(--text-on-red-tint); font: var(--type-meta); overflow-wrap: anywhere; }
+.setting-status { display: flex; align-items: center; gap: var(--space-12); }
+.setting-status-text { flex: 1; margin: 0; }
+.setting-status--ok .setting-status-text { color: var(--text-on-green-tint); }
+.setting-status--bad .setting-status-text { color: var(--text-on-red-tint); }
+.dep-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-8); }
+.dep-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-12); }
+.dep-text { flex: 1; }
+.dep-row--ok .dep-text { color: var(--text-on-green-tint); }
+.dep-row--bad .dep-text { color: var(--text-on-red-tint); }
+.skeleton-panel {
+  height: var(--layout-quiet-row);
+  margin-bottom: var(--space-16);
+  border-radius: var(--radius-xl);
+}
+
+/* Screen-placed failure notices (failures-and-loading.md 2 and 4.3). */
+.fail-notices { display: flex; flex-direction: column; gap: var(--space-12); margin-bottom: var(--space-24); }
+.fail-card {
+  margin: 0;
+  padding: var(--space-16) var(--space-20);
+  background: var(--bg-surface);
+  border: 1px solid var(--state-stale-border);
+  border-radius: var(--radius-lg);
+}
+.fail-card--notify { border-color: var(--state-crashed-border); }
+.fail-card-title { margin: 0 0 var(--space-8); font: var(--type-section-title); color: var(--text-strong); }
+.fail-card-body { margin: 0 0 var(--space-8); color: var(--text-default); }
+.fail-card-reason { margin: 0 0 var(--space-8); font: var(--type-mono); font-family: var(--font-family-mono); color: var(--text-secondary); overflow-wrap: anywhere; }
+.fail-history { margin-top: var(--space-16); }
+.fail-history-title { margin: 0 0 var(--space-8); font: var(--type-panel-title); color: var(--text-strong); }
+.fail-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-6); }
+.fail-history-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
+.fail-history-row a { color: var(--text-link); overflow-wrap: anywhere; }
