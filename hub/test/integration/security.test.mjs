@@ -124,3 +124,14 @@ test('server refuses non-loopback binds and unsafe token files', async t => {
     await candidate.close()
   }, /private|0600/)
 })
+test('server refuses a token path that is a symlink to a private token file', async t => {
+  const h = await harness(t)
+  const target = path.join(h.dir, 'elsewhere-token')
+  fs.writeFileSync(target, 'b'.repeat(43), { mode: 0o600 })
+  fs.rmSync(h.tokenFile)
+  fs.symlinkSync(target, h.tokenFile)
+  await assert.rejects(async () => {
+    const candidate = await startDeckServer({ env: { HOME: h.dir }, port: 0, notifications: false, connectDeckd: async () => { throw Error('offline') } })
+    await candidate.close()
+  }, /private 0600 file/)
+})

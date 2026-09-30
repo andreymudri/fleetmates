@@ -311,6 +311,22 @@ test('built relative SPA assets resolve from nested history routes', async t => 
   assert.match(html, /href="\/app.css"/)
   assert.match((await fetch(base + '/app.js')).headers.get('content-type'), /javascript/)
 })
+test('SPA fallback refuses an index.html symlink that escapes the static root', async t => {
+  const h = await harness(t)
+  const outside = path.join(h.dir, 'outside.html')
+  fs.writeFileSync(outside, 'OUTSIDE_PRIVATE_CONTENT')
+  fs.rmSync(path.join(h.dir, 'web/index.html'))
+  fs.symlinkSync(outside, path.join(h.dir, 'web/index.html'))
+  fs.symlinkSync(outside, path.join(h.dir, 'web/leak.js'))
+  const base = `http://127.0.0.1:${h.deck.address().port}`
+  for (const route of ['/', '/s/example', '/leak.js']) {
+    const response = await fetch(base + route)
+    const body = await response.text()
+    assert.equal(response.status, 404, route)
+    assert.doesNotMatch(body, /OUTSIDE_PRIVATE_CONTENT/)
+  }
+  assert.equal(await (await fetch(base + '/app.js')).text(), 'export const deck = true')
+})
 test('default server process delivers T7 popups, suppresses recording bells and resumes normal bells', { timeout: 15_000 }, async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proc-'))
   const runtime = path.join(dir, 'r')
