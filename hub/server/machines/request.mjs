@@ -149,6 +149,7 @@ function destructiveSegment(words, depth) {
     }
     gitArgs = args.slice(offset)
   }
+  if (command === 'systemctl' && args.some(arg => /^fleetmates-deck/.test(path.posix.basename(arg)))) return true
   if (['rm', 'shred', 'dd', 'wipefs', 'truncate', 'shutdown', 'reboot'].includes(command) || command.startsWith('mkfs')) return true
   if (command === 'find' && (args.includes('-delete') || ['-exec', '-execdir', '-ok'].some(flag => {
     const at = args.indexOf(flag)
@@ -214,7 +215,6 @@ function namesDeckControl(input) {
     || /(?:\$XDG_RUNTIME_DIR|\/run\/user\/\d+)\/fleetmates-deck(?:\/|\b)/.test(text)
     || /https?:\/\/(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(?::\d+)?\/api(?:\/|\b)/i.test(text)
     || (text.includes(`:${deckPort}`) && /(?:127\.0\.0\.1|localhost|\[::1\]):\d+\b/i.test(text))
-    || /systemctl\s+--user\s+[^"']*fleetmates-deck/.test(text)
 }
 
 function canonicalExistingPath(location) {

@@ -2332,7 +2332,7 @@ for (const tool_name of ['Grep', 'Glob']) test(`${tool_name} resolves literal qu
       assert.equal(tier(undefined, directory), 'destructive')
       assert.equal(tier('.', directory), 'destructive')
     }
-    if (tool_name === 'Grep') assert.equal(execFileSync('rg', ['--no-heading', '.+', 'cache-0/token'], { cwd: project, encoding: 'utf8', timeout: 2000 }).trim(), 'SYNTHETIC_CONTROL')
+    assert.equal(readFileSync(path.join(project, 'cache-0', 'token'), 'utf8'), 'SYNTHETIC_CONTROL\n')
     for (const name of ['ordinary', 'ordinary?file', 'ordinary$file', 'ordinary`file', 'ordinary*file']) {
       writeFileSync(path.join(project, name), 'ordinary\n')
       for (const queryPath of [name, path.join(project, name)]) assert.equal(tier(queryPath), 'caution', queryPath)
@@ -2843,4 +2843,38 @@ test('Stop row guards retain pending requests and active subagents while stale w
       assert.equal(h.store.get('SELECT subagents_active FROM sessions WHERE id = ?', id).subagents_active, scenario === 'subagent' ? 1 : 0)
     } finally { h.close() }
   }
+})
+
+test('literal systemctl deck controls retain their floor across quoting options and wrappers', () => {
+  const tier = command => permissionTier({ cwd: '/tmp', tool_name: 'Bash', tool_input: { command } })
+  for (const unit of ['fleetmates-deck.service', 'fleetmates-deckd.service', 'fleetmates-deck.socket', 'fleetmates-deck@work.service', 'fleetmates-deck*']) {
+    for (const command of [
+      `systemctl --user stop ${unit}`,
+      `systemctl --user stop '${unit}'`,
+      `systemctl stop --user "${unit}"`,
+      `systemctl --user --no-pager status '${unit}'`,
+      `systemctl --no-block restart '${unit}' --user`,
+      `/usr/bin/systemctl --user reload-or-restart '${unit}'`,
+      `'systemctl' --user show '${unit}'`,
+      `systemctl --user enable --now '${unit}'`,
+      `systemctl --user disable '${unit}'`,
+      `systemctl --user link '/tmp/${unit}'`,
+      `env -i /usr/bin/systemctl stop --user '${unit}'`,
+      `command -p systemctl --user stop '${unit}'`,
+      `sudo -u root systemctl --user stop '${unit}'`,
+      `nice -n 1 timeout --signal=TERM 2 systemctl stop --user '${unit}'`,
+      `bash -lc 'systemctl stop --user "${unit}"'`,
+      `printf '%s' "$(systemctl stop --user '${unit}')"`,
+      `printf '%s' \`systemctl stop --user '${unit}'\``
+    ]) assert.equal(tier(command), 'destructive', command)
+  }
+  for (const command of [
+    'systemctl --user stop ordinary.service',
+    'systemctl stop --user ordinary.service',
+    "printf '%s' 'systemctl --user stop fleetmates-deck.service'",
+    'command -v systemctl fleetmates-deck.service',
+    'command -V systemctl fleetmates-deck.service',
+    'systemctl --user stop "$UNKNOWN_UNIT"',
+    'systemctl --user status unrelated-fleetmates-deck.service'
+  ]) assert.equal(tier(command), 'caution', command)
 })
