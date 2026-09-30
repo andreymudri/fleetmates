@@ -322,3 +322,35 @@ test('team cards: "+N" past five tiles, the latest gate failed, and a question-o
   assert.match(html, /Gate 2 failed/)
   assert.match(html, /session-card--team session-card--asked-you/)
 })
+
+test('a lead needs you by its state when it has no open request of its own', async () => {
+  const { teamCards } = await load('screens/home/Home.jsx')
+  const run = { repoId: '/r', runId: 'r1', leadSessionId: 'lead', tasks: [], teammates: [{ taskId: 'T4', state: 'running' }] }
+  const lead = { id: 'lead', state: 'needs_approval', role: 'lead', runRef: { repoId: '/r', runId: 'r1', taskId: 'T6' } }
+  const [alone] = teamCards([{ ...run, teammates: [] }], [lead], [])
+  assert.deepEqual([alone.needs, alone.state], [1, 'needs_approval'], 'no request rows: the lead\'s state still needs you')
+  const mate = { id: 't4', state: 'needs_approval', role: 'teammate', runRef: { repoId: '/r', runId: 'r1', taskId: 'T4' } }
+  const [both] = teamCards([run], [lead, mate], [{ id: 'q', sessionId: 't4', kind: 'permission', state: 'open', createdAt: 1, taskId: 'T4' }])
+  assert.deepEqual([both.needs, both.total], [2, 2], 'a teammate\'s open request does not stop the lead counting by state')
+})
+
+test('notification text strips ALM and LRM in both the title and the body', async () => {
+  const { notificationText, TITLE_MAX, BODY_MAX } = await import('../../server/adapters/notify.mjs')
+  assert.equal(notificationText('a؜b‎c', TITLE_MAX), 'abc')
+  assert.equal(notificationText('a؜b‎c\nd', BODY_MAX, { keepLineFeeds: true }), 'abc\nd')
+})
+
+test('a done or crash popup keeps its own words after a long task', async () => {
+  const { terminalPopupTitle } = await import('../../server/machines/notification.mjs')
+  const task = 'y'.repeat(88)
+  assert.equal(terminalPopupTitle(task, 'done'), `${'y'.repeat(69)}… made port`)
+  assert.equal(terminalPopupTitle(task, 'crash'), `${'y'.repeat(71)}… crashed`)
+  assert.equal(terminalPopupTitle('short', 'done'), 'short made port')
+})
+
+test('a tool path outside the working directory stays absolute', async () => {
+  const { toolLine } = await import('../../server/machines/request.mjs')
+  assert.equal(toolLine('Read', { file_path: '/etc/passwd' }, '/home/you/proj'), 'Read /etc/passwd')
+  assert.equal(toolLine('Read', { file_path: '/home/you/project2/a.txt' }, '/home/you/proj'), 'Read /home/you/project2/a.txt')
+  assert.equal(toolLine('Read', { file_path: '/home/you/proj/src/a.txt' }, '/home/you/proj'), 'Read src/a.txt')
+})

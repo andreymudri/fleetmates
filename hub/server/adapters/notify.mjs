@@ -62,9 +62,22 @@ const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '
  * @returns {string}
  */
 export function notificationText(text, max, { keepLineFeeds = false } = {}) {
+  return clipText(text, max, { keepLineFeeds }).replace(/[&<>"']/g, char => ENTITIES[char])
+}
+
+/**
+ * The strip and cap steps of {@link notificationText}, without escaping: controls and bidi characters removed
+ * (line feeds kept only with `keepLineFeeds`), then at most `max` characters ending in `…`. Callers compose
+ * popup text from clipped parts so that the fixed parts they add always fit the final caps.
+ * @param {unknown} text
+ * @param {number} max
+ * @param {{ keepLineFeeds?: boolean }} [options]
+ * @returns {string}
+ */
+export function clipText(text, max, { keepLineFeeds = false } = {}) {
   const chars = Array.from(String(text ?? '').replace(keepLineFeeds ? CONTROLS_BUT_LF : CONTROLS, ''))
-  const capped = chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : chars.join('')
-  return capped.replace(/[&<>"']/g, char => ENTITIES[char])
+  if (max <= 0) return ''
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : chars.join('')
 }
 
 /** Create popup, dismissal, test-ping and bell commands with injectable executables and runner. */

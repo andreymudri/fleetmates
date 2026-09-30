@@ -1,4 +1,53 @@
-import { createNotifier } from '../adapters/notify.mjs'
+import { BODY_MAX, TITLE_MAX, clipText, createNotifier } from '../adapters/notify.mjs'
+
+/** The shortest summary worth showing; a request that cannot get this much room moves into "+N more". */
+const SUMMARY_MIN = 24
+const HINT = '\nAnswer in your terminal'
+const length = text => Array.from(text).length
+
+/**
+ * Title and body of a needs-you popup. Only the agent-written parts (the task and each summary) are cut, so
+ * " needs you", every tier and the terminal hint always fit notify.mjs's final caps (08-security 4.9, T13).
+ * Requests that cannot keep a readable summary are left out whole and counted as "+N more".
+ * @param {string} task
+ * @param {{ summary: string, tier?: string | null }[]} requests
+ * @param {boolean} observed whether to end with the terminal hint
+ * @returns {{ title: string, body: string }}
+ */
+export function requestPopupText(task, requests, observed) {
+  const suffix = ` needs you${requests.length > 1 ? ` (${requests.length} requests)` : ''}`
+  const title = clipText(task, TITLE_MAX - length(suffix)) + suffix
+  const tail = observed ? HINT : ''
+  const lines = []
+  let used = length(tail)
+  for (let i = 0; i < requests.length; i++) {
+    const tier = requests[i].tier ? ` · ${requests[i].tier}` : ''
+    const separator = lines.length ? 1 : 0
+    const rest = requests.length - i - 1
+    // Keep room for the "+N more" line a later stop would add.
+    const reserve = rest ? length(`\n+${rest} more`) : 0
+    const room = BODY_MAX - used - separator - length(tier) - reserve
+    if (lines.length && room < SUMMARY_MIN) {
+      lines.push(`+${requests.length - i} more`)
+      break
+    }
+    const line = clipText(requests[i].summary, room) + tier
+    lines.push(line)
+    used += separator + length(line)
+  }
+  return { title, body: lines.join('\n') + tail }
+}
+
+/**
+ * Title of a done or crash popup, with the task cut so the deck's own words always fit.
+ * @param {string} task
+ * @param {'done'|'crash'} kind
+ * @returns {string}
+ */
+export function terminalPopupTitle(task, kind) {
+  const suffix = kind === 'done' ? ' made port' : ' crashed'
+  return clipText(task, TITLE_MAX - length(suffix)) + suffix
+}
 
 const graceMs = 3000
 const prefix = 'notify:popup:'
@@ -68,8 +117,7 @@ export function createNotificationMachine({ store, notifier = createNotifier(), 
       return true
     })
     if (!claim) return false
-    const title = `${session.task} needs you${requests.length > 1 ? ` (${requests.length} requests)` : ''}`
-    const body = requests.map(row => `${row.summary}${row.tier ? ` · ${row.tier}` : ''}`).join('\n') + (session.origin === 'observed' ? '\nAnswer in your terminal' : '')
+    const { title, body } = requestPopupText(session.task, requests, session.origin === 'observed')
     let result
     try { result = await notifier.popup({ title, body, replaceId: replacing?.id ?? null }) } catch { result = { ok: false } }
     if (!result.ok) {
@@ -132,7 +180,7 @@ export function createNotificationMachine({ store, notifier = createNotifier(), 
     if (delivered(key)) return
     const claimed = store.run('INSERT OR IGNORE INTO notification_history(dedupe_key,kind,session_id,delivered_at) VALUES(?,?,?,?)', key, kind, session.id, at).changes
     if (!claimed) return
-    const title = `${session.task} ${kind === 'done' ? 'made port' : 'crashed'}`
+    const title = terminalPopupTitle(session.task, kind)
     const body = kind === 'done' ? `${JSON.parse(session.changed_files).length} files changed · Review changes` : 'The session stopped unexpectedly · Open the session'
     let result
     try { result = await notifier.popup({ title, body, urgency: kind === 'done' ? 'low' : 'normal' }) } catch { result = { ok: false } }
