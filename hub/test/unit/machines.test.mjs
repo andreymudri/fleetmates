@@ -2351,3 +2351,74 @@ for (const tool_name of ['Grep', 'Glob']) test(`${tool_name} resolves literal qu
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('reviewed sessions ignore repeated idle notifications without moving the review or activity boundary', () => {
+  for (const activity of ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
+    const repo = mkdtempSync(path.join(tmpdir(), 'deck-reviewed-idle-'))
+    const h = harness()
+    try {
+      execFileSync('git', ['init', '-q', repo], { timeout: 2000 })
+      const file = path.join(repo, 'file.txt')
+      const hook = (event, at, fields = {}) => {
+        const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo, ...fields })
+        envelope.hookTs = at
+        return envelope
+      }
+      h.projector.applyHooks([hook('SessionStart', 1000)])
+      writeFileSync(file, 'first\n')
+      h.projector.applyHooks([
+        hook('PostToolUse', 1500, { tool_name: 'Write', tool_input: { file_path: file, content: 'first\n' } }),
+        hook('Stop', 2000, { stop_hook_active: false })
+      ])
+      assert.equal(h.projector.snapshot().sessions[0].state, 'done', activity)
+      assert.equal(h.projector.snapshot().counts.toReview, 1, activity)
+      const id = h.projector.snapshot().sessions[0].id
+      h.projector.signal(id, { type: 'review' }, 3000)
+      const boundary = () => {
+        const row = h.store.get('SELECT * FROM sessions WHERE id=?', id)
+        return [row.state, row.reviewed_at, row.review_baseline, row.state_since, row.since_ts, row.last_activity_at, row.changed_files]
+      }
+      const reviewed = boundary()
+      assert.equal(reviewed[0], 'reviewed')
+      assert.equal(reviewed[1], 3000)
+      assert.equal(reviewed[3], 3000)
+      assert.equal(reviewed[4], 3000)
+      const quiet = hook('Notification', 4000, { notification_type: 'idle_prompt', message: 'Waiting for input' })
+      for (const event of [quiet, quiet, { ...quiet, hookTs: 5000 }, { ...quiet, hookTs: 2500 }]) {
+        h.projector.applyHooks([event])
+        assert.deepEqual(boundary(), reviewed, activity)
+        assert.equal(h.projector.snapshot().counts.toReview, 0, activity)
+        assert.equal(h.projector.snapshot().counts.running, 0, activity)
+        assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [], activity)
+      }
+      h.projector.applyHooks([hook(activity, 3500, { prompt: 'Continue without editing', tool_name: 'Bash', tool_input: { command: 'pwd' } })])
+      const running = h.projector.snapshot().sessions[0]
+      assert.equal(running.state, 'running', activity)
+      assert.equal(running.stateSince, 3500, activity)
+      assert.equal(running.lastActivityAt, 3500, activity)
+      assert.equal(h.projector.snapshot().counts.running, 1, activity)
+      assert.equal(h.projector.snapshot().counts.toReview, 0, activity)
+      assert.equal(boundary()[1], 3000, activity)
+      assert.equal(boundary()[2], reviewed[2], activity)
+      h.projector.applyHooks([hook('Stop', 6000, { stop_hook_active: false })])
+      assert.equal(h.projector.snapshot().sessions[0].state, 'idle', activity)
+      assert.equal(h.projector.snapshot().counts.toReview, 0, activity)
+      writeFileSync(file, 'second\n')
+      h.projector.applyHooks([
+        hook('PostToolUse', 7000, { tool_name: 'Edit', tool_input: { file_path: file } }),
+        hook('Stop', 8000, { stop_hook_active: false })
+      ])
+      assert.equal(h.projector.snapshot().sessions[0].state, 'done', activity)
+      assert.equal(h.projector.snapshot().counts.toReview, 1, activity)
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file], activity)
+      h.projector.signal(id, { type: 'review' }, 9000)
+      const nextReview = boundary()
+      assert.equal(nextReview[1], 9000, activity)
+      assert.equal(nextReview[3], 9000, activity)
+      assert.notEqual(nextReview[2], reviewed[2], activity)
+      h.projector.applyHooks([{ ...quiet, hookTs: 10000 }])
+      assert.deepEqual(boundary(), nextReview, activity)
+      assert.equal(h.projector.snapshot().counts.toReview, 0, activity)
+    } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+  }
+})

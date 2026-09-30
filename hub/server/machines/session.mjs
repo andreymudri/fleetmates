@@ -262,6 +262,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
     return store.get('SELECT * FROM sessions WHERE id = ?', id)
   }
   if (at < existing.since_ts) return existing
+  if (event === 'Notification' && hook.notification_type === 'idle_prompt' && existing.state === 'reviewed') return existing
   let state = existing.state
   let stateSince = existing.state_since
   let alive = existing.alive
