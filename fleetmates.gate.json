@@ -17,7 +17,7 @@
         }
       ]
     },
-    "9": {
+    "10": {
       "fixRounds": 3,
       "checks": [
         { "name": "test", "kind": "command", "run": "npm test" },
