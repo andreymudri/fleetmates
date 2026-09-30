@@ -301,13 +301,28 @@ export function resolveSession(store, envelope) {
   return null
 }
 
+function acceptsDelayedAliasResume(store, session, envelope) {
+  if (envelope.hook.source !== 'resume' || !['clear', 'resume'].includes(session.end_reason)) return false
+  const processMatches = envelope.ptyId && envelope.ptyId === session.pty_id
+    || envelope.claudePid && (session.pty_id || String(envelope.claudePid) === session.process_key)
+  if (!processMatches || !sameKnownProcess(store, session, envelope)) return false
+  const pendingEnd = store.get('SELECT hook_ts,claude_session_id FROM hook_events WHERE session_id=? AND event=? AND applied=1 ORDER BY hook_ts DESC,id DESC LIMIT 1', session.id, 'SessionEnd')
+  if (!pendingEnd || pendingEnd.claude_session_id !== session.claude_session_id || envelope.hookTs <= pendingEnd.hook_ts) return false
+  const activity = store.get(`SELECT claude_session_id,claude_pid,pty_id FROM hook_events
+    WHERE session_id=? AND applied=1 AND hook_ts>=? AND event IN ('UserPromptSubmit','PreToolUse','PostToolUse','PostToolUseFailure','PermissionRequest')
+    ORDER BY hook_ts DESC,id DESC LIMIT 1`, session.id, envelope.hookTs)
+  if (!activity || activity.claude_session_id !== envelope.hook.session_id) return false
+  if (envelope.claudePid && activity.claude_pid) return envelope.claudePid === activity.claude_pid
+  return !!envelope.ptyId && envelope.ptyId === activity.pty_id
+}
+
 /** Recognize starts from obsolete conversations or conflicting live processes. */
 export function isObsoleteSessionStart(store, session, envelope) {
   if (!session?.alive || envelope.hook.hook_event_name !== 'SessionStart') return false
   if (!sameKnownProcess(store, session, envelope)) return true
   if (envelope.hook.session_id === session.claude_session_id) return false
   const alias = store.get('SELECT claude_session_id FROM session_aliases WHERE session_id=? AND claude_session_id=?', session.id, envelope.hook.session_id)
-  return !!alias && (envelope.hook.source !== 'resume' || envelope.hookTs < session.since_ts)
+  return !!alias && (envelope.hook.source !== 'resume' || envelope.hookTs < session.since_ts && !acceptsDelayedAliasResume(store, session, envelope))
 }
 
 /** Record a current process conversation without changing its activity or state. */
@@ -324,7 +339,7 @@ export function recordSessionIdentity(store, session, envelope) {
     const boundary = store.get('SELECT MAX(replaced_at) AS at FROM session_aliases WHERE session_id=?', session.id).at ?? session.started_at
     if (envelope.hookTs < boundary) return session
     const oldAlias = store.get('SELECT claude_session_id FROM session_aliases WHERE session_id=? AND claude_session_id=?', session.id, hook.session_id)
-    if (oldAlias && !(hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source) && envelope.hookTs >= session.since_ts)) return session
+    if (oldAlias && !(hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source) && (envelope.hookTs >= session.since_ts || acceptsDelayedAliasResume(store, session, envelope)))) return session
     const source = hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork', 'compact'].includes(hook.source) ? hook.source : 'heuristic'
     store.run('INSERT OR IGNORE INTO session_aliases(claude_session_id,session_id,replaced_at,source) VALUES(?,?,?,?)', session.claude_session_id, session.id, envelope.hookTs, source)
     store.run('UPDATE sessions SET claude_session_id=?,transcript_path=? WHERE id=?', hook.session_id, hook.transcript_path ?? session.transcript_path, session.id)

@@ -3269,3 +3269,68 @@ test('an on-time same-process resume may legitimately select a prior conversatio
     assert.deepEqual(h.store.all('SELECT claude_session_id FROM session_aliases WHERE session_id=? ORDER BY replaced_at', id).map(row => row.claude_session_id), ['old', 'current'])
   } finally { h.close() }
 })
+
+test('prior-alias replacement accepts delayed starts proven by current process activity', () => {
+  for (const late of [false, true]) for (const reason of ['resume', 'clear']) for (const wrapped of [false, true]) for (const pending of [false, true]) {
+    const h = harness()
+    try {
+      const send = (event, conversation, at, fields = {}) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { hook_event_name: event, session_id: conversation, ...fields }), ptyId: wrapped ? 'prior-alias-pty' : null, hookTs: at }])
+      send('SessionStart', 'old', 1000)
+      const id = h.projector.snapshot().sessions[0].id
+      send('SessionEnd', 'old', 1800, { reason: 'clear' })
+      send('SessionStart', 'new', 2000, { source: 'clear' })
+      send('SessionEnd', 'new', 3000, { reason })
+      if (!late) send('SessionStart', 'old', 4000, { source: 'resume' })
+      send('UserPromptSubmit', 'old', 4100, { prompt: 'Continue the earlier conversation' })
+      if (pending) send('PermissionRequest', 'old', 4200, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      const requestBefore = h.store.all('SELECT * FROM requests WHERE session_id=?', id)
+      const before = h.store.get('SELECT since_ts,state_since,last_activity_at,review_baseline,process_key FROM sessions WHERE id=?', id)
+      if (late) send('SessionStart', 'old', 4000, { source: 'resume' })
+      const row = h.store.get('SELECT * FROM sessions WHERE id=?', id)
+      assert.equal(row.claude_session_id, 'old', `late=${late}, reason=${reason}, wrapped=${wrapped}`)
+      assert.equal(row.end_reason, null)
+      assert.equal(row.state, pending ? 'needs_approval' : 'running')
+      assert.deepEqual(h.store.all('SELECT * FROM requests WHERE session_id=?', id), requestBefore)
+      for (const key of Object.keys(before)) assert.equal(row[key], before[key], key)
+      assert.deepEqual(h.store.all('SELECT claude_session_id FROM session_aliases WHERE session_id=? ORDER BY replaced_at', id).map(alias => alias.claude_session_id), ['old', 'new'])
+      h.projector.tick(10000)
+      send('PreToolUse', 'old', 10100, { tool_name: 'Read', tool_input: { file_path: '/tmp/plain' } })
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+      const current = h.projector.snapshot().sessions[0]
+      assert.equal(current.id, id)
+      assert.equal(current.claudeSessionId, 'old')
+      assert.equal(current.alive, true)
+      assert.equal(current.state, pending ? 'needs_approval' : 'running')
+      assert.equal(current.lastActivityAt, 10100)
+      assert.equal(h.store.all('SELECT * FROM session_summaries').length, 0)
+      if (!pending) send('PermissionRequest', 'old', 10200, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      assert.equal(h.projector.snapshot().counts.openRequests, 1)
+      send('PostToolUse', 'old', 10300, { tool_name: 'Bash', tool_input: { command: 'pwd' }, tool_response: 'synthetic' })
+      assert.equal(h.projector.snapshot().counts.openRequests, 0)
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+    } finally { h.close() }
+  }
+})
+
+test('prior-alias delayed starts cannot cancel a different conversation or process replacement', () => {
+  for (const scenario of ['different-conversation', 'superseded-activity', 'conflicting-pid', 'before-end', 'startup']) {
+    const h = harness()
+    try {
+      const send = (event, conversation, at, fields = {}, pid = 42) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { hook_event_name: event, session_id: conversation, ...fields }), claudePid: pid, hookTs: at }])
+      send('SessionStart', 'old', 1000)
+      const id = h.projector.snapshot().sessions[0].id
+      send('SessionEnd', 'old', 1800, { reason: 'clear' })
+      send('SessionStart', 'new', 2000, { source: 'clear' })
+      send('SessionEnd', 'new', 3000, { reason: 'resume' })
+      send('UserPromptSubmit', scenario === 'different-conversation' ? 'new' : 'old', 4100, { prompt: 'Continue working' })
+      if (scenario === 'superseded-activity') send('UserPromptSubmit', 'new', 4200, { prompt: 'Return to the current conversation' })
+      const before = h.store.get('SELECT * FROM sessions WHERE id=?', id)
+      send('SessionStart', 'old', scenario === 'before-end' ? 2500 : 4000, { source: scenario === 'startup' ? 'startup' : 'resume' }, scenario === 'conflicting-pid' ? 41 : 42)
+      assert.deepEqual(h.store.get('SELECT * FROM sessions WHERE id=?', id), before, scenario)
+      assert.equal(h.store.all('SELECT * FROM session_aliases').length, 1)
+      h.projector.tick(10000)
+      assert.equal(h.store.get('SELECT alive,end_reason FROM sessions WHERE id=?', id).alive, 0, scenario)
+      assert.equal(h.store.get('SELECT COUNT(*) AS n FROM sessions').n, 1)
+    } finally { h.close() }
+  }
+})
