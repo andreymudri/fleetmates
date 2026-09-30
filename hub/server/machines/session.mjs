@@ -608,6 +608,10 @@ export function persistSessionSummary(store, row) {
   store.run(`INSERT INTO session_summaries(session_id,repo_id,repo_name,branch,task,origin,role,outcome,exit_code,exit_signal,started_at,ended_at,duration_ms,reviewed_at,run_id,run_task_id,gate_result,files_changed,adds,dels,claude_session_ids,transcript_path)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(session_id) DO UPDATE SET
+      repo_id=excluded.repo_id,repo_name=excluded.repo_name,branch=excluded.branch,
+      task=excluded.task,origin=excluded.origin,role=excluded.role,started_at=excluded.started_at,
+      run_id=excluded.run_id,run_task_id=excluded.run_task_id,gate_result=excluded.gate_result,
+      transcript_path=excluded.transcript_path,
       outcome=excluded.outcome,exit_code=excluded.exit_code,exit_signal=excluded.exit_signal,
       duration_ms=excluded.duration_ms,reviewed_at=excluded.reviewed_at,
       files_changed=CASE WHEN excluded.ended_at > session_summaries.ended_at THEN excluded.files_changed ELSE session_summaries.files_changed END,

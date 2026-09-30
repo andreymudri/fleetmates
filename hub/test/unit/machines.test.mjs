@@ -237,6 +237,107 @@ test('configured Claude settings retain the write floor for literal aliases and 
   }
 })
 
+test('reopened lifecycle replaces permanent history metadata while retaining session values and end statistics', () => {
+  for (const retainTask of [false, true]) for (const wrapped of [false, true]) {
+    const h = harness()
+    const reader = openDeckDb(h.file)
+    try {
+      const root = path.dirname(h.file)
+      const repos = [path.join(root, 'repo-a'), path.join(root, 'repo-b')]
+      for (const repo of repos) {
+        mkdirSync(repo)
+        execFileSync('git', ['init', '-q', repo], { timeout: 2000 })
+        writeFileSync(path.join(repo, 'file.txt'), 'old\n')
+        execFileSync('git', ['-C', repo, 'add', 'file.txt'], { timeout: 2000 })
+        execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture'], { timeout: 2000 })
+      }
+      const publications = []
+      const projector = createProjector({ store: h.store, publish: event => {
+        assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))
+        if (event.type === 'session.upserted' && !event.data.alive) {
+          const summary = reader.get('SELECT * FROM session_summaries WHERE session_id=?', event.entityId)
+          const row = reader.get('SELECT * FROM sessions WHERE id=?', event.entityId)
+          for (const field of ['repo_id', 'branch', 'task', 'origin', 'role', 'exit_code', 'exit_signal', 'started_at', 'ended_at', 'reviewed_at', 'run_id', 'run_task_id', 'transcript_path']) assert.equal(summary[field], row[field], field)
+          assert.equal(summary.repo_name, reader.get('SELECT name FROM repos WHERE id=?', row.repo_id).name)
+          assert.equal(summary.duration_ms, row.ended_at - row.started_at)
+          publications.push(summary)
+        }
+      } })
+      const send = (name, at, pid, repo, extra = {}) => {
+        const envelope = fixture('SessionStart.startup.json', { session_id: 'summary-conversation', hook_event_name: name, cwd: repo, transcript_path: path.join(repo, `transcript-${pid}.jsonl`), ...extra })
+        envelope.claudePid = pid
+        envelope.pidChain = [pid]
+        envelope.ptyId = wrapped ? `summary-pty-${pid}` : null
+        envelope.hookTs = at
+        assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true)
+        projector.applyHooks([envelope])
+      }
+      const end = (at, pid, repo) => {
+        send('SessionEnd', at, pid, repo, { reason: 'prompt_input_exit' })
+        if (wrapped) projector.signal(id, { type: 'exit', code: 0 }, at)
+      }
+      send('SessionStart', 1000, 41, repos[0])
+      const id = projector.snapshot().sessions[0].id
+      if (retainTask) send('UserPromptSubmit', 1200, 41, repos[0], { prompt: 'Original task\nDetails' })
+      h.store.run('INSERT INTO runs(repo_id,run_id,first_seen_at,last_seen_at,last_gate) VALUES(?,?,?,?,?)', repos[0], 'old-run', 1000, 1000, JSON.stringify({ verdict: 'FAIL' }))
+      h.store.run('UPDATE sessions SET branch=?,role=?,run_repo_id=?,run_id=?,run_task_id=? WHERE id=?', 'old-branch', 'lead', repos[0], 'old-run', 'T1', id)
+      end(2000, 41, repos[0])
+      const first = { ...h.store.get('SELECT * FROM session_summaries WHERE session_id=?', id) }
+      assert.equal(first.task, retainTask ? 'Original task' : 'Untitled')
+      assert.equal(first.gate_result, 'FAIL')
+      send('SessionStart', 3000, 42, repos[1], { source: 'resume' })
+      send('UserPromptSubmit', 4000, 42, repos[1], { prompt: 'Work in repo B\nMore details' })
+      assert.equal(projector.snapshot().sessions.length, 1)
+      assert.equal(projector.snapshot().sessions[0].id, id)
+      assert.deepEqual({ ...h.store.get('SELECT * FROM session_summaries WHERE session_id=?', id) }, first)
+      h.store.run('INSERT INTO runs(repo_id,run_id,first_seen_at,last_seen_at,last_gate) VALUES(?,?,?,?,?)', repos[1], 'new-run', 3000, 4000, JSON.stringify({ verdict: 'PASS' }))
+      h.store.run('UPDATE sessions SET branch=?,role=?,run_repo_id=?,run_id=?,run_task_id=? WHERE id=?', 'new-branch', 'research', repos[1], 'new-run', 'T8', id)
+      writeFileSync(path.join(repos[1], 'file.txt'), 'new\nsecond\nthird\n')
+      send('PostToolUse', 4500, 42, repos[1], { tool_name: 'Bash', tool_input: { command: 'synthetic edit outcome' }, tool_response: {} })
+      end(5000, 42, repos[1])
+      const second = { ...h.store.get('SELECT * FROM session_summaries WHERE session_id=?', id) }
+      assert.equal(second.repo_id, repos[1])
+      assert.equal(second.repo_name, repos[1])
+      assert.equal(second.task, retainTask ? 'Original task' : 'Work in repo B')
+      assert.equal(second.origin, wrapped ? 'wrapped' : 'observed')
+      assert.equal(second.started_at, 1000)
+      assert.equal(second.gate_result, 'PASS')
+      assert.equal(second.outcome, 'ended')
+      assert.deepEqual([second.files_changed, second.adds, second.dels], [1, 3, 1])
+      assert.deepEqual(JSON.parse(second.claude_session_ids), ['summary-conversation'])
+      projector.signal(id, { type: 'review' }, 5100)
+      const reviewed = { ...h.store.get('SELECT * FROM session_summaries WHERE session_id=?', id) }
+      assert.equal(reviewed.reviewed_at, 5100)
+      assert.deepEqual([reviewed.files_changed, reviewed.adds, reviewed.dels], [1, 3, 1])
+      assert.equal(reviewed.ended_at, 5000)
+      send('SessionStart', 6000, 43, repos[1], { source: 'resume' })
+      send('PermissionRequest', 1500, 41, repos[0], { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      send('SessionEnd', 1900, 41, repos[0], { reason: 'prompt_input_exit' })
+      assert.equal(projector.snapshot().counts.openRequests, 0)
+      assert.equal(projector.snapshot().sessions[0].alive, true)
+      assert.equal(projector.snapshot().sessions[0].cwd, repos[1])
+      assert.deepEqual({ ...h.store.get('SELECT * FROM session_summaries WHERE session_id=?', id) }, reviewed)
+      h.store.run('UPDATE sessions SET branch=NULL,role=?,run_repo_id=NULL,run_id=NULL,run_task_id=NULL WHERE id=?', 'solo', id)
+      send('UserPromptSubmit', 7000, 43, repos[1], { prompt: 'Next prompt retains task' })
+      end(8000, 43, repos[1])
+      const third = h.store.get('SELECT * FROM session_summaries WHERE session_id=?', id)
+      assert.equal(third.branch, null)
+      assert.equal(third.role, 'solo')
+      assert.equal(third.run_id, null)
+      assert.equal(third.run_task_id, null)
+      assert.equal(third.gate_result, null)
+      assert.equal(third.task, second.task)
+      assert.equal(third.reviewed_at, 5100)
+      assert.deepEqual([third.files_changed, third.adds, third.dels], [0, 0, 0])
+      assert.equal(h.store.get('SELECT COUNT(*) AS n FROM session_summaries').n, 1)
+      assert.equal(projector.snapshot().sessions.length, 1)
+      assert.equal(projector.snapshot().counts.toReview, 0)
+      assert.ok(publications.some(summary => summary.ended_at === 5000))
+      assert.ok(publications.some(summary => summary.ended_at === 8000))
+    } finally { reader.close(); h.close() }
+  }
+})
+
 test('resume clears the previous process crash before recording a clean end', () => {
   for (const signal of [{ type: 'pid_gone' }, { type: 'exit', code: 1 }, { type: 'exit', code: 0, signal: 'SIGKILL' }]) {
     const h = harness()
