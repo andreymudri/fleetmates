@@ -25,6 +25,8 @@ const MIN = 60_000
 const RLO = '‮'
 const RAW = /‮/u
 const TOKEN = '&lt;U\\+202E&gt;' // regex source for the visible <U+202E> token
+// titleText keeps U+200B but shown tokenizes it, so it pins each `shown` call even under a titleText wrapper.
+const HIDDEN = [{ ch: RLO, raw: RAW, token: TOKEN }, { ch: '\u200b', raw: /\u200b/u, token: '&lt;U\\+200B&gt;' }]
 
 // Walk a tree of pure components (no hooks), expanding function components; CrewAvatar is skipped.
 function walk(node, visit) {
@@ -288,26 +290,29 @@ test('every server string in the checklist is shown with visible tokens, one fie
   const { ChecklistView, ChecklistRow, rowView } = first
   const noop = () => {}
   const row = c => render(ChecklistRow, { view: rowView(c), navigate: noop, onAction: noop })
-  const cases = {
-    version: check('claude', 'failed', { detail: `Claude Code 2.2.0${RLO}; tested`, version: `2.2.0${RLO}` }),
-    missingDetail: check('claude', 'failed', { detail: `unavailable ${RLO}` }),
-    claudeError: check('claude', 'failed', { detail: 'Claude Code 2.2.0', error: `boom ${RLO}` }),
-    hooksError: check('hooks', 'failed', { error: `EACCES ${RLO}` }),
-    deckdError: check('deckd', 'failed', { error: `no unit ${RLO}` }),
-    deckdPid: check('deckd', 'ok', { pid: `48213${RLO}`, uptime: '2 min' }),
-    deckdUptime: check('deckd', 'ok', { pid: 48213, uptime: `2 min${RLO}` }),
-    vaultPath: check('vault', 'ok', { path: `/home/you/${RLO}vault`, notes: 3 }),
-    vaultError: check('vault', 'failed', { error: `spawn ${RLO}` }),
-    vaultDetail: check('vault', 'failed', { detail: `not a dir ${RLO}` }),
-    vaultSkipped: check('vault', 'optional_skipped', { detail: `skipped ${RLO}` }),
-    scribedError: check('scribed', 'failed', { error: `no socket ${RLO}` }),
-    notifyError: check('notify', 'failed', { error: `stderr ${RLO}` }),
-    notifyDetail: check('notify', 'failed', { detail: `detail ${RLO}` })
-  }
-  for (const [name, c] of Object.entries(cases)) {
-    const html = row(c)
-    assert.doesNotMatch(html, RAW, `${name} leaks a raw bidi control`)
-    assert.match(html, new RegExp(TOKEN), `${name} is shown as a visible token`)
+  const cases = ch => ({
+    version: check('claude', 'failed', { detail: `Claude Code 2.2.0${ch}; tested`, version: `2.2.0${ch}` }),
+    missingDetail: check('claude', 'failed', { detail: `unavailable ${ch}` }),
+    okVersion: check('claude', 'ok', { version: `2.1.282${ch}` }),
+    claudeError: check('claude', 'failed', { detail: 'Claude Code 2.2.0', error: `boom ${ch}` }),
+    hooksError: check('hooks', 'failed', { error: `EACCES ${ch}` }),
+    deckdError: check('deckd', 'failed', { error: `no unit ${ch}` }),
+    deckdPid: check('deckd', 'ok', { pid: `48213${ch}`, uptime: '2 min' }),
+    deckdUptime: check('deckd', 'ok', { pid: 48213, uptime: `2 min${ch}` }),
+    vaultPath: check('vault', 'ok', { path: `/home/you/${ch}vault`, notes: 3 }),
+    vaultError: check('vault', 'failed', { error: `spawn ${ch}` }),
+    vaultDetail: check('vault', 'failed', { detail: `not a dir ${ch}` }),
+    vaultSkipped: check('vault', 'optional_skipped', { detail: `skipped ${ch}` }),
+    scribedError: check('scribed', 'failed', { error: `no socket ${ch}` }),
+    notifyError: check('notify', 'failed', { error: `stderr ${ch}` }),
+    notifyDetail: check('notify', 'failed', { detail: `detail ${ch}` })
+  })
+  for (const { ch, raw, token } of HIDDEN) {
+    for (const [name, c] of Object.entries(cases(ch))) {
+      const html = row(c)
+      assert.doesNotMatch(html, raw, `${name} leaks a raw hidden character ${token}`)
+      assert.match(html, new RegExp(token), `${name} shows ${token} as a visible token`)
+    }
   }
   const sail = render(ChecklistView, { checks: checks(), navigate: noop, onAction: noop, onCheckAgain: noop, onSetSail: noop, onDone: noop, sailError: `precondition${RLO}` })
   assert.doesNotMatch(sail, RAW)
@@ -467,10 +472,15 @@ test('Connections edits folders and the commands the server runs only through it
 test('every server string in Settings is shown with visible tokens, one field at a time', () => {
   const { ConnectionsSection, NotificationsSection, SettingsView, notifyStatus } = settings
   const noop = () => {}
-  for (const key of ['scanRoot', 'vaultPath', 'obsidianVaultName', 'turbidassistConfig', 'claudeCommand', 'scribedCommand']) {
-    const html = render(ConnectionsSection, { prefs: { ...prefs, [key]: `x${RLO}y` }, onSave: noop, onRescan: noop, onStart: noop, onChecklist: noop })
-    assert.doesNotMatch(html, RAW, `${key} leaks a raw bidi control`)
-    assert.match(html, new RegExp(`x${TOKEN}y`), `${key} is shown as a visible token`)
+  for (const { ch, raw, token } of HIDDEN) {
+    for (const key of ['scanRoot', 'vaultPath', 'obsidianVaultName', 'turbidassistConfig', 'claudeCommand', 'scribedCommand']) {
+      const html = render(ConnectionsSection, { prefs: { ...prefs, [key]: `x${ch}y` }, onSave: noop, onRescan: noop, onStart: noop, onChecklist: noop })
+      assert.doesNotMatch(html, raw, `${key} leaks a raw hidden character`)
+      assert.match(html, new RegExp(`x${token}y`), `${key} shows ${token} as a visible token`)
+    }
+    const navHtml = render(SettingsView, { section: 'rules', prefs: { ...prefs, scanRoot: `~/d${ch}ev` }, navigate: noop })
+    assert.doesNotMatch(navHtml, raw, 'nav subtitle')
+    assert.match(navHtml, new RegExp(`~/d${token}ev, vault`))
   }
   const argv = render(ConnectionsSection, { prefs: { ...prefs, vaultCommand: ['npx', `x${RLO}y`] }, onSave: noop, onRescan: noop, onStart: noop, onChecklist: noop })
   assert.doesNotMatch(argv, RAW, 'vaultCommand leaks a raw bidi control')
