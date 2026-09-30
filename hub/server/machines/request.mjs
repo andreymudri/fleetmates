@@ -439,10 +439,11 @@ function namesRelativeDeckControl(hook, depth = 0) {
   return accessesControl(segment)
 }
 
-function shellWriteTargets(command, cwd) {
+function shellWriteTargets(command, cwd, requestedCwd = cwd) {
   let directory = cwd
+  let requestedDirectory = requestedCwd
   const targets = []
-  const add = (target, cwd = directory, quoted = false) => targets.push({ file_path: target, cwd, quoted })
+  const add = (target, cwd = directory, quoted = false, requestedCwd = requestedDirectory) => targets.push({ file_path: target, cwd, quoted, requestedCwd })
   const tokens = shellTokens(command)
   const inspect = words => {
     for (let i = 0; i < words.length; i++) {
@@ -452,13 +453,17 @@ function shellWriteTargets(command, cwd) {
       if (target && !target.separator && target.value !== '&') add(target.value, directory, target.quoted)
     }
     let commandDirectory = directory
+    let commandRequestedDirectory = requestedDirectory
     let wrapped = false
     let index = 0
     while (words[index]) {
       const wrapper = path.posix.basename(words[index].value)
       if (!/^[A-Za-z_]\w*=/.test(words[index].value) && executionWrappers.includes(wrapper)) {
         wrapped = true
-        index = skipWrapperOptions(words, index, wrapper, target => { commandDirectory = wrapperDirectory(target, commandDirectory) })
+        index = skipWrapperOptions(words, index, wrapper, target => {
+          commandDirectory = wrapperDirectory(target, commandDirectory)
+          commandRequestedDirectory = commandDirectory && commandRequestedDirectory ? path.resolve(commandRequestedDirectory, knownShellPath(target)) : null
+        })
         continue
       }
       if (/^[A-Za-z_]\w*=/.test(words[index].value) || ['command', 'builtin'].includes(wrapper)) {
@@ -477,22 +482,25 @@ function shellWriteTargets(command, cwd) {
     const args = words.slice(index + 1).map(word => word.value)
     if (['sh', 'bash', 'zsh'].includes(executable)) {
       const at = args.findIndex(arg => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))
-      if (at >= 0 && words[index + at + 2]?.quoted) targets.push({ command: args[at + 1], cwd: commandDirectory })
+      if (at >= 0 && words[index + at + 2]?.quoted) targets.push({ command: args[at + 1], cwd: commandDirectory, requestedCwd: commandRequestedDirectory })
     }
-    if (executable === 'eval' && words[index + 1]?.quoted) targets.push({ command: args[0], cwd: commandDirectory })
+    if (executable === 'eval' && words[index + 1]?.quoted) targets.push({ command: args[0], cwd: commandDirectory, requestedCwd: commandRequestedDirectory })
     if (executable === 'cd' && !wrapped) {
       const target = args.find(arg => arg !== '--' && !arg.startsWith('-'))
-      if (target && !/[$*?`]/.test(target)) directory = path.resolve(directory ?? '', target)
+      if (target && !/[$*?`]/.test(target)) {
+        directory = path.resolve(directory ?? '', target)
+        requestedDirectory = path.resolve(requestedDirectory ?? '', target)
+      }
     }
     if (executable === 'dd') {
-      for (const [at, arg] of args.entries()) if (arg.startsWith('of=')) add(arg.slice(3), commandDirectory, words[index + at + 1].quoted)
+      for (const [at, arg] of args.entries()) if (arg.startsWith('of=')) add(arg.slice(3), commandDirectory, words[index + at + 1].quoted, commandRequestedDirectory)
     }
     const editsInPlace = ['sed', 'perl'].includes(executable) && args.some(arg => arg === '--in-place' || arg.startsWith('--in-place=') || /^-i/.test(arg))
     if (['tee', 'cp', 'mv', 'install', 'touch', 'truncate'].includes(executable) || editsInPlace) {
       for (const [at, arg] of args.entries()) {
         const quoted = words[index + at + 1].quoted
-        if (arg.startsWith('--target-directory=')) add(arg.slice('--target-directory='.length), commandDirectory, quoted)
-        else if (!arg.startsWith('-') && !['<', '>'].includes(arg)) add(arg, commandDirectory, quoted)
+        if (arg.startsWith('--target-directory=')) add(arg.slice('--target-directory='.length), commandDirectory, quoted, commandRequestedDirectory)
+        else if (!arg.startsWith('-') && !['<', '>'].includes(arg)) add(arg, commandDirectory, quoted, commandRequestedDirectory)
       }
     }
   }
@@ -505,30 +513,33 @@ function shellWriteTargets(command, cwd) {
   return targets.map(target => target.file_path ? { ...target, file_path: knownShellPath(target.file_path) } : target).filter(target => typeof target.command === 'string' || target.file_path && !/[$`]/.test(target.file_path) && (target.quoted || !/[*?]/.test(target.file_path)))
 }
 
-function sensitiveWrite(hook, repoRoot, depth = 0) {
+function sensitiveWrite(hook, repoRoot, depth = 0, requestedCwd = hook.cwd ?? repoRoot) {
   if (depth > 4) return true
   const tool = hook.tool_name
   const fileTool = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(tool)
   if (!fileTool && tool !== 'Bash') return false
   const raw = fileTool ? hook.tool_input?.file_path ?? hook.tool_input?.notebook_path ?? '' : hook.tool_input?.command ?? ''
   if (typeof raw !== 'string') return false
-  if (!fileTool) return shellWriteTargets(raw, hook.cwd ?? repoRoot).some(target => sensitiveWrite({ ...hook, cwd: target.cwd, tool_name: target.command === undefined ? 'Write' : 'Bash', tool_input: target.command === undefined ? { file_path: target.file_path } : { command: target.command } }, repoRoot, depth + 1))
-  const location = fileTool ? canonicalExistingPath(path.resolve(hook.cwd ?? repoRoot ?? '', raw)) : null
-  const normalized = (location ?? raw).replaceAll('\\', '/')
+  if (!fileTool) return shellWriteTargets(raw, hook.cwd ?? repoRoot, requestedCwd).some(target => sensitiveWrite({ ...hook, cwd: target.cwd, tool_name: target.command === undefined ? 'Write' : 'Bash', tool_input: target.command === undefined ? { file_path: target.file_path } : { command: target.command } }, repoRoot, depth + 1, target.requestedCwd))
+  const requested = path.resolve(requestedCwd ?? hook.cwd ?? repoRoot ?? '', raw)
+  const location = canonicalExistingPath(path.resolve(hook.cwd ?? repoRoot ?? '', raw))
   const home = process.env.HOME && path.isAbsolute(process.env.HOME) ? process.env.HOME : homedir()
   const data = process.env.XDG_DATA_HOME && path.isAbsolute(process.env.XDG_DATA_HOME) ? process.env.XDG_DATA_HOME : path.join(home, '.local', 'share')
   const installedHook = path.join(data, 'fleetmates-deck', 'hook', 'deck-hook.mjs')
-  if (location === canonicalExistingPath(installedHook) || location === canonicalExistingPath(path.dirname(installedHook))) return true
-  if (/(?:^|\/)\.local\/share\/fleetmates-deck\/hook(?:\/deck-hook\.mjs)?$/.test(normalized)) return true
-
-  if (fileTool && /(?:^|\/)(?:\.git|\.claude)(?:\/hooks)?$/.test(normalized)) return true
-  if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true
-  if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true
-  if (/(?:^|\/)\.mcp\.json(?:\b|$)/.test(normalized)) return true
-  if (!fileTool || path.posix.basename(normalized) !== 'CLAUDE.md') return false
-  if (!repoRoot) return true
-  const root = canonicalExistingPath(path.resolve(repoRoot))
-  return location !== path.join(root, 'CLAUDE.md') && !location.startsWith(`${root}${path.sep}`)
+  const hookPaths = new Set([installedHook, path.dirname(installedHook), canonicalExistingPath(installedHook), canonicalExistingPath(path.dirname(installedHook))])
+  return [requested, location].some((candidate, index) => {
+    const normalized = candidate.replaceAll('\\', '/')
+    if (hookPaths.has(candidate)) return true
+    if (/(?:^|\/)\.local\/share\/fleetmates-deck\/hook(?:\/deck-hook\.mjs)?$/.test(normalized)) return true
+    if (/(?:^|\/)(?:\.git|\.claude)(?:\/hooks)?$/.test(normalized)) return true
+    if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true
+    if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true
+    if (/(?:^|\/)\.mcp\.json(?:\b|$)/.test(normalized)) return true
+    if (path.posix.basename(normalized) !== 'CLAUDE.md') return false
+    if (!repoRoot) return true
+    const root = index === 0 ? path.resolve(repoRoot) : canonicalExistingPath(path.resolve(repoRoot))
+    return candidate !== path.join(root, 'CLAUDE.md') && !candidate.startsWith(`${root}${path.sep}`)
+  })
 }
 
 function sqlCode(sql) {

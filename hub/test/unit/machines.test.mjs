@@ -3334,3 +3334,105 @@ test('prior-alias delayed starts cannot cancel a different conversation or proce
     } finally { h.close() }
   }
 })
+
+test('sensitive requested names and canonical targets both enforce file write floors', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-spelled-controls-'))
+  const previousHome = process.env.HOME
+  const previousData = process.env.XDG_DATA_HOME
+  try {
+    process.env.HOME = path.join(root, 'home')
+    process.env.XDG_DATA_HOME = path.join(root, 'data')
+    const sensitive = ['.git/config', '.git/hooks/pre-commit', '.claude/settings.local.json', '.claude/hooks/hook.mjs', '.mcp.json']
+    const targets = []
+    for (const [index, name] of sensitive.entries()) {
+      const requested = path.join(root, 'requested', name)
+      const canonical = path.join(root, 'canonical', name)
+      const ordinary = path.join(root, `plain-${index}`)
+      mkdirSync(path.dirname(requested), { recursive: true })
+      mkdirSync(path.dirname(canonical), { recursive: true })
+      writeFileSync(ordinary, 'synthetic')
+      writeFileSync(canonical, 'synthetic')
+      symlinkSync(ordinary, requested)
+      const alias = path.join(root, `alias-${index}`)
+      symlinkSync(canonical, alias)
+      targets.push(requested, alias)
+    }
+    for (const data of [process.env.XDG_DATA_HOME, path.join(process.env.HOME, '.local/share')]) {
+      const program = path.join(data, 'fleetmates-deck/hook/deck-hook.mjs')
+      mkdirSync(path.dirname(program), { recursive: true })
+      const ordinary = path.join(root, data === process.env.XDG_DATA_HOME ? 'installed-plain' : 'default-installed-plain')
+      writeFileSync(ordinary, 'synthetic')
+      symlinkSync(ordinary, program)
+      targets.push(program)
+    }
+    const ordinary = path.join(root, 'ordinary')
+    writeFileSync(ordinary, 'synthetic')
+    symlinkSync(ordinary, path.join(root, 'ordinary-alias'))
+    for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
+      const tier = file => permissionTier({ cwd: root, tool_name: tool, tool_input: tool === 'NotebookEdit' ? { notebook_path: file, new_source: 'synthetic' } : { file_path: file, content: 'synthetic', edits: [] } }, { repoRoot: root })
+      for (const target of targets) for (const file of [target, path.relative(root, target)]) assert.equal(tier(file), 'destructive', `${tool} ${file}`)
+      for (const file of ['ordinary', 'ordinary-alias', path.join(root, 'ordinary-alias')]) assert.equal(tier(file), 'caution', `${tool} ${file}`)
+    }
+    for (const target of targets) for (const file of [target, path.relative(root, target)]) {
+      for (const command of [`tee '${file}'`, `sh -c 'printf x > "${file}"'`]) assert.equal(permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root }), 'destructive', command)
+    }
+    for (const target of targets) assert.equal(readFileSync(target, 'utf8'), 'synthetic')
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+    if (previousData === undefined) delete process.env.XDG_DATA_HOME
+    else process.env.XDG_DATA_HOME = previousData
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('literal and nested shell writes retain sensitive names through file and parent symlinks', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-shell-spelling-'))
+  try {
+    const ordinary = path.join(root, 'plain')
+    mkdirSync(ordinary)
+    writeFileSync(path.join(ordinary, 'config'), 'synthetic')
+    writeFileSync(path.join(ordinary, 'settings.local.json'), 'synthetic')
+    symlinkSync(ordinary, path.join(root, '.git'))
+    symlinkSync(ordinary, path.join(root, '.claude'))
+    writeFileSync(path.join(root, 'ordinary'), 'synthetic')
+    symlinkSync(path.join(root, 'ordinary'), path.join(root, '.mcp.json'))
+    symlinkSync(path.join(root, 'ordinary'), path.join(root, 'ordinary-alias'))
+    const tier = command => permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root })
+    for (const file of ['.git/config', '.claude/settings.local.json', '.mcp.json']) for (const target of [file, path.join(root, file)]) {
+      for (const command of [`printf x > '${target}'`, `tee '${target}'`, `sh -c 'printf x > "${target}"'`, `sh -c 'bash -c "tee ${target}"'`]) assert.equal(tier(command), 'destructive', command)
+    }
+    for (const command of ['cd .git && tee config', 'cd .claude && tee settings.local.json', 'env -C .git tee config', 'env -C .claude sh -c "tee settings.local.json"', "env -S '-C .git tee config'"]) assert.equal(tier(command), 'destructive', command)
+    for (const command of ['tee ordinary-alias', 'sh -c "printf x > ordinary-alias"', 'env -C plain tee config', 'env -C .git printf x; tee ordinary-alias']) assert.equal(tier(command), 'caution', command)
+    assert.equal(readFileSync(path.join(root, '.git/config'), 'utf8'), 'synthetic')
+    assert.equal(readFileSync(path.join(root, 'ordinary'), 'utf8'), 'synthetic')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('requested and canonical CLAUDE.md paths preserve local and global repo boundaries', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-claude-boundary-'))
+  try {
+    const repo = path.join(root, 'repo')
+    const outside = path.join(root, 'outside')
+    mkdirSync(repo)
+    mkdirSync(outside)
+    writeFileSync(path.join(repo, 'plain'), 'synthetic')
+    writeFileSync(path.join(outside, 'plain'), 'synthetic')
+    symlinkSync('plain', path.join(repo, 'CLAUDE.md'))
+    symlinkSync(path.join(repo, 'plain'), path.join(outside, 'CLAUDE.md'))
+    const other = path.join(root, 'other')
+    mkdirSync(other)
+    writeFileSync(path.join(other, 'CLAUDE.md'), 'synthetic')
+    symlinkSync(path.join(other, 'CLAUDE.md'), path.join(repo, 'global-alias'))
+    symlinkSync(repo, path.join(root, 'repo-alias'))
+    const tier = (file, repoRoot = repo, cwd = repo) => permissionTier({ cwd, tool_name: 'Write', tool_input: { file_path: file, content: 'synthetic' } }, { repoRoot })
+    for (const file of [path.join(outside, 'CLAUDE.md'), '../outside/CLAUDE.md', 'global-alias']) assert.equal(tier(file), 'destructive', file)
+    for (const file of ['CLAUDE.md', path.join(repo, 'CLAUDE.md'), 'plain']) assert.equal(tier(file), 'caution', file)
+    assert.equal(tier('CLAUDE.md', path.join(root, 'repo-alias'), path.join(root, 'repo-alias')), 'caution')
+    for (const file of [path.join(outside, 'CLAUDE.md'), '../outside/CLAUDE.md', 'global-alias', 'CLAUDE.md', 'plain']) {
+      const expected = ['CLAUDE.md', 'plain'].includes(file) ? 'caution' : 'destructive'
+      for (const command of [`tee '${file}'`, `sh -c 'printf x > "${file}"'`]) assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), expected, command)
+    }
+    assert.equal(readFileSync(path.join(repo, 'plain'), 'utf8'), 'synthetic')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
