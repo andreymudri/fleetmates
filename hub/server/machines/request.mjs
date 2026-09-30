@@ -194,6 +194,28 @@ function skipWrapperOptions(words, index, wrapper, onDirectory = () => {}) {
   return wrapper === 'timeout' && words[offset] ? offset + 1 : offset
 }
 
+const gitBooleanOptions = new Set(['--no-pager', '-P', '--paginate', '-p', '--no-optional-locks', '--no-replace-objects', '--no-lazy-fetch', '--no-advice', '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs', '--bare'])
+const gitValueOptions = new Set(['-C', '-c', '--git-dir', '--work-tree', '--config-env', '--namespace', '--attr-source'])
+const gitTerminalOptions = new Set(['--exec-path', '--html-path', '--man-path', '--info-path', '--version', '-v', '--help', '-h'])
+
+function gitSubcommandArgs(args) {
+  let offset = 0
+  while (offset < args.length && args[offset].startsWith('-')) {
+    const option = args[offset]
+    if (gitTerminalOptions.has(option) || option.startsWith('--list-cmds=')) return []
+    if (gitBooleanOptions.has(option)) { offset++; continue }
+    if (gitValueOptions.has(option)) {
+      if (offset + 1 >= args.length) return []
+      offset += 2
+      continue
+    }
+    const equal = option.indexOf('=')
+    if (option.startsWith('--') && equal >= 0 && (gitValueOptions.has(option.slice(0, equal)) || option.slice(0, equal) === '--exec-path')) { offset++; continue }
+    return []
+  }
+  return args.slice(offset)
+}
+
 function destructiveSegment(words, depth) {
   if (depth > 4 || !words.length) return false
   let index = 0
@@ -216,21 +238,7 @@ function destructiveSegment(words, depth) {
   }
   const command = path.posix.basename(words[index]?.value ?? '')
   const args = words.slice(index + 1).map(word => word.value)
-  let gitArgs = args
-  if (command === 'git') {
-    let offset = 0
-    while (offset < args.length) {
-      if (['--no-pager', '-P', '--paginate', '-p', '--no-optional-locks', '--no-replace-objects', '--no-lazy-fetch', '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs', '--bare'].includes(args[offset])) { offset++; continue }
-      if (['-C', '-c', '--git-dir', '--work-tree', '--config-env', '--namespace'].includes(args[offset])) {
-        if (offset + 1 >= args.length) return false
-        offset += 2
-        continue
-      }
-      if (/^(?:--git-dir|--work-tree|--config-env|--namespace)=/.test(args[offset]) || /^-[Cc].+/.test(args[offset])) { offset++; continue }
-      break
-    }
-    gitArgs = args.slice(offset)
-  }
+  const gitArgs = command === 'git' ? gitSubcommandArgs(args) : args
   if (command === 'systemctl' && args.some(arg => /^fleetmates-deck/.test(path.posix.basename(arg)))) return true
   if (['rm', 'shred', 'dd', 'wipefs', 'truncate', 'shutdown', 'reboot'].includes(command) || command.startsWith('mkfs')) return true
   if (command === 'find' && (args.includes('-delete') || ['-exec', '-execdir', '-ok'].some(flag => {

@@ -3695,7 +3695,7 @@ test('valid Git global flags preserve destructive subcommands across ordering wr
         assert.equal(tier(`sh -c '${prefix.replaceAll("'", '"')} clean -fd'`), 'destructive')
       }
     }
-    for (const options of ['--no-pager --no-optional-locks -C . -P', '-P -c color.ui=false --no-pager -C . --no-optional-locks', '-P -C. --no-optional-locks', '--literal-pathspecs --no-replace-objects --no-lazy-fetch --no-pager']) assert.equal(tier(`git ${options} clean -fd`), 'destructive', options)
+    for (const options of ['--no-pager --no-optional-locks -C . -P', '-P -c color.ui=false --no-pager -C . --no-optional-locks', '-P -C . --no-optional-locks', '--literal-pathspecs --no-replace-objects --no-lazy-fetch --no-pager']) assert.equal(tier(`git ${options} clean -fd`), 'destructive', options)
     for (const command of ['git --unknown-global clean -fd', 'git --no-pager --help', 'git -P status', 'git --version clean -fd', 'git -c', 'git -C']) assert.equal(tier(command), 'caution', command)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
@@ -3731,4 +3731,84 @@ test('line statistics limits retain changed paths and review boundaries instead 
     assert.deepEqual([files[0].adds, files[0].dels], [null, null])
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
   } finally { h.close(); rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Git no-advice and documented boolean global options retain destructive operations', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-git-booleans-'))
+  try {
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
+    execFileSync('git', ['init', '-q', root], { env })
+    execFileSync('git', ['-C', root, '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'fixture'], { env })
+    const tier = command => permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root })
+    for (const flag of ['--no-advice', '--no-pager', '-P', '--paginate', '-p', '--no-replace-objects', '--no-lazy-fetch', '--no-optional-locks', '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs']) {
+      writeFileSync(path.join(root, 'synthetic.txt'), 'synthetic\n')
+      execFileSync('git', [flag, '-C', root, 'clean', '-fd'], { env, timeout: 1000, stdio: ['ignore', 'pipe', 'pipe'] })
+      assert.equal(existsSync(path.join(root, 'synthetic.txt')), false, flag)
+      for (const prefix of [`git ${flag}`, `git -C '${root}' ${flag} -c color.ui=false`, `env /usr/bin/git -P ${flag}`, `nice -n 1 git ${flag}`]) {
+        for (const operation of ['clean -fd', 'push --force', 'reset --hard', 'config --local core.hooksPath /tmp/synthetic-hooks']) assert.equal(tier(`${prefix} ${operation}`), 'destructive', `${prefix} ${operation}`)
+        assert.equal(tier(`sh -c '${prefix.replaceAll("'", '"')} clean -fd'`), 'destructive')
+        assert.equal(tier(`${prefix} status --short`), 'caution')
+      }
+    }
+    assert.equal(tier('git --no-advice --no-optional-locks -P --no-lazy-fetch clean -fd'), 'destructive')
+    for (const command of ['git --no-advice=true clean -fd', 'git --unknown-global clean -fd', 'git -pP clean -fd', 'git -- clean -fd']) assert.equal(tier(command), 'caution', command)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Git attr-source and required global values consume one argument across accepted forms', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-git-values-'))
+  try {
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', FIXTURE_COLOR: 'false' }
+    execFileSync('git', ['init', '-q', root], { env })
+    execFileSync('git', ['-C', root, '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'fixture'], { env })
+    const tier = command => permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root })
+    const quote = word => `'${word.replaceAll("'", "'\\''")}'`
+    for (const options of [['--attr-source=HEAD'], ['--attr-source='], ['--bare', `--git-dir=${root}/.git`, `--work-tree=${root}`], ['--attr-source', 'HEAD'], ['-C', root], ['-c', 'color.ui=false'], ['--git-dir', path.join(root, '.git')], [`--git-dir=${root}/.git`], ['--work-tree', root], [`--work-tree=${root}`], ['--namespace', 'fixture'], ['--namespace=fixture'], ['--namespace', '--no-advice'], ['--namespace', '--exec-path'], ['--namespace', '--html-path'], ['--config-env', 'color.ui=FIXTURE_COLOR'], ['--config-env=color.ui=FIXTURE_COLOR']]) {
+      writeFileSync(path.join(root, 'synthetic.txt'), 'synthetic\n')
+      execFileSync('git', [...options, '-C', root, 'clean', '-fd'], { env, timeout: 1000, stdio: ['ignore', 'pipe', 'pipe'] })
+      assert.equal(existsSync(path.join(root, 'synthetic.txt')), false, JSON.stringify(options))
+      const prefix = `git ${options.map(quote).join(' ')}`
+      assert.equal(tier(`${prefix} clean -fd`), 'destructive', prefix)
+      assert.equal(tier(`env ${prefix} reset --hard`), 'destructive', prefix)
+      assert.equal(tier(`bash -lc "${prefix} push --force"`), 'destructive', prefix)
+    }
+    for (const option of [`-C${root}`, '-C.', '-ccolor.ui=false', `-C=${root}`, '-c=color.ui=false']) {
+      writeFileSync(path.join(root, 'synthetic.txt'), 'synthetic\n')
+      assert.throws(() => execFileSync('git', [option, '-C', root, 'clean', '-fd'], { env, timeout: 1000, stdio: ['ignore', 'pipe', 'pipe'] }), error => error.status === 129)
+      assert.equal(existsSync(path.join(root, 'synthetic.txt')), true)
+      assert.equal(tier(`git ${quote(option)} clean -fd`), 'caution')
+    }
+    for (const command of ['git --attr-source', 'git --attr-source clean -fd', 'git --git-dir clean -fd', 'git --namespace clean -fd', 'git --config-env clean -fd', 'git -C', 'git -c', 'git --attr-source=HEAD --unknown-option clean -fd']) assert.equal(tier(command), 'caution', command)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('Git exec-path assignment executes builtins while bare and information options stop dispatch', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-git-dispatch-'))
+  try {
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
+    execFileSync('git', ['init', '-q', root], { env })
+    execFileSync('git', ['-C', root, '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'fixture'], { env })
+    const tier = command => permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root })
+    for (const flag of ['--exec-path=/tmp/unused', '--exec-path=']) {
+      writeFileSync(path.join(root, 'synthetic.txt'), 'synthetic\n')
+      execFileSync('git', [flag, '-C', root, 'clean', '-fd'], { env, timeout: 1000, stdio: ['ignore', 'pipe', 'pipe'] })
+      assert.equal(existsSync(path.join(root, 'synthetic.txt')), false)
+      assert.equal(tier(`git ${flag} clean -fd`), 'destructive', flag)
+      assert.equal(tier(`env git -P ${flag} -C '${root}' clean -fd`), 'destructive')
+      assert.equal(tier(`sh -c 'git ${flag} clean -fd'`), 'destructive')
+    }
+    for (const options of [['--exec-path'], ['--exec-path', '/tmp/unused'], ['--html-path'], ['--man-path'], ['--info-path'], ['--list-cmds=builtins'], ['--version'], ['-v'], ['--help'], ['-h']]) {
+      writeFileSync(path.join(root, 'synthetic.txt'), 'synthetic\n')
+      try { execFileSync('git', [...options, '-C', root, 'clean', '-fd'], { env, timeout: 1000, stdio: ['ignore', 'pipe', 'pipe'] }) }
+      catch (error) { assert.equal(error.status, 129) }
+      assert.equal(existsSync(path.join(root, 'synthetic.txt')), true, JSON.stringify(options))
+      const prefix = `git ${options.join(' ')}`
+      assert.equal(tier(`${prefix} clean -fd`), 'caution', prefix)
+      assert.equal(tier(`env ${prefix} reset --hard`), 'caution')
+      assert.equal(tier(`sh -c '${prefix} push --force'`), 'caution')
+    }
+    assert.equal(tier('git --exec-path=/tmp/unused --exec-path clean -fd'), 'caution')
+    assert.equal(tier('git --attr-source=HEAD --no-advice --exec-path clean -fd'), 'caution')
+    assert.equal(tier('git --exec-path=/tmp/unused --unknown-global clean -fd'), 'caution')
+  } finally { rmSync(root, { recursive: true, force: true }) }
 })
