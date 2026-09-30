@@ -32,7 +32,7 @@ function privateDir(dir) {
 /** Create a deck server with injectable processes, readers and dependency services. */
 export async function createDeckServer(options = {}) {
   const { env = process.env, host = '127.0.0.1', now = Date.now, connectDeckd = defaultConnectDeckd,
-    reconnectMs = 1000, tokenPollMs = 250, runCommand: command = runCommand } = options
+    reconnectMs = 1000, maxReconnectMs = 60_000, tokenPollMs = 250, runCommand: command = runCommand } = options
   if (host !== '127.0.0.1') throw Error('deck server requires IPv4 loopback 127.0.0.1')
   const paths = options.paths ?? setupPaths(env)
   privateDir(paths.state)
@@ -178,7 +178,12 @@ export async function createDeckServer(options = {}) {
     finally { clearTimeout(timeout) }
   }
   const request = (client, op, fields = {}) => bounded(client.request(op, fields))
+  let published = null
+  // Append health.changed only when the state or reason changes (state-machines 5.2), not per retry.
   const stateEvent = () => {
+    const key = `${healthState.state}:${healthState.reason}`
+    if (key === published) return
+    published = key
     const at = now()
     publish({ seq: Number(store.appendEvent({ at, type: 'health.changed', data: { ...healthState } })), at, type: 'health.changed', data: { ...healthState } })
   }
@@ -188,12 +193,15 @@ export async function createDeckServer(options = {}) {
     const previous = link
     link = null
     previous?.close()
+    if (healthState.state !== 'down' || healthState.reason !== 'deckd_unavailable') healthState.since = now()
     healthState.state = 'down'
     healthState.reason = 'deckd_unavailable'
-    healthState.since = now()
+    // Retry after reconnectMs, doubling per failed attempt up to maxReconnectMs (state-machines 4.2 and 5.2).
+    const delay = Math.min(reconnectMs * 2 ** Math.max(0, healthState.attempt - 1), Math.max(reconnectMs, maxReconnectMs))
+    healthState.nextProbeAt = stopped ? null : now() + delay
     if (!stopped) { stateEvent()
       clearTimeout(reconnect)
-      reconnect = setTimeout(() => { void connect() }, reconnectMs)
+      reconnect = setTimeout(() => { void connect() }, delay)
       reconnect.unref() }
   }
   function publishSession(id) {
@@ -248,10 +256,12 @@ export async function createDeckServer(options = {}) {
       for (const pty of live.ptys ?? []) restorePty(pty)
       for (const exit of ended.exits ?? []) applyExit(exit)
       const ids = new Set((live.ptys ?? []).map(pty => pty.ptyId))
-      for (const row of store.all('SELECT id,pty_id FROM sessions WHERE alive=1 AND origin<>?', 'observed')) if (!ids.has(row.pty_id)) projector.signal(row.id, { type: 'exit', code: null, signal: null }, now())
+      for (const row of store.all('SELECT id,pty_id FROM sessions WHERE alive=1 AND origin<>?', 'observed')) if (!ids.has(row.pty_id)) projector.signal(row.id, { type: 'lost' }, now())
       healthState.state = 'ok'
       healthState.reason = null
       healthState.since = now()
+      healthState.attempt = 0
+      healthState.nextProbeAt = null
       stateEvent()
     } catch {
       if (!stopped) { healthState.attempt++
