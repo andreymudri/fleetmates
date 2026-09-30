@@ -255,9 +255,9 @@ test('notify-send gets a title and body stripped of controls and bidi, capped, t
     assert.equal(calls[0].at(-3), '--', '-- ends option parsing before title and body')
     return calls[0].slice(-2)
   }
-  let [title, body] = await popup('a‮b⁦c\x1b[31m\r\nd\u0085e<i>&"\'', 'ok')
+  let [title, body] = await popup('a\u202eb\u2066c\x1b[31m\r\nd\u0085e<i>&"\'', 'ok')
   assert.equal(title, 'abc[31mde&lt;i&gt;&amp;&quot;&#39;', 'title: C0 (line breaks too), C1 and bidi removed, markup escaped')
-  ;[title, body] = await popup('t', 'one\r\n\x1b[2Ktwo\u0085‏<b>‪')
+  ;[title, body] = await popup('t', 'one\r\n\x1b[2Ktwo\u0085\u200f<b>\u202a')
   assert.equal(body, 'one\n[2Ktwo&lt;b&gt;', 'body: line feeds kept between lines, other controls and bidi removed')
   ;[title] = await popup('\x1b'.repeat(50) + 'x'.repeat(79) + '&y', 'b')
   assert.equal(title, `${'x'.repeat(79)}…`, 'the 80-character title cap counts characters after stripping')
@@ -293,13 +293,13 @@ test('team card text goes through titleText and shown, and the needs count inclu
   const { HomeView } = await load('screens/home/Home.jsx')
   const state = teamState()
   const lead = state.data.sessions[0]
-  lead.task = 'Phase‮2'
+  lead.task = 'Phase\u202e2'
   lead.state = 'needs_approval'
-  state.data.requests.push({ id: 'q0', sessionId: 'lead', kind: 'permission', tier: 'caution', summary: 'rm‮ -rf', state: 'open', createdAt: 1 })
+  state.data.requests.push({ id: 'q0', sessionId: 'lead', kind: 'permission', tier: 'caution', summary: 'rm\u202e -rf', state: 'open', createdAt: 1 })
   const html = render(HomeView, { state, now: 1000, navigate: () => {} })
   assert.match(html, /<bdi>Phase&lt;U\+202E&gt;2<\/bdi>/, 'the team title renders its bidi control as a token')
   assert.match(html, /<code class="request-command">rm&lt;U\+202E&gt; -rf<\/code>/, 'a summary without a task id renders its control as a token')
-  assert.doesNotMatch(html, /‮/u)
+  assert.doesNotMatch(html, /\u202e/u)
   assert.match(html, /3 of 4 need you/, 'lead, T4 and T5 all need you')
   const { teamCards } = await load('screens/home/Home.jsx')
   const run = { repoId: '/r', runId: 'r1', leadSessionId: 'lead', tasks: [], teammates: [{ taskId: 'T4', state: 'running' }] }
@@ -336,8 +336,16 @@ test('a lead needs you by its state when it has no open request of its own', asy
 
 test('notification text strips ALM and LRM in both the title and the body', async () => {
   const { notificationText, TITLE_MAX, BODY_MAX } = await import('../../server/adapters/notify.mjs')
-  assert.equal(notificationText('a؜b‎c', TITLE_MAX), 'abc')
-  assert.equal(notificationText('a؜b‎c\nd', BODY_MAX, { keepLineFeeds: true }), 'abc\nd')
+  assert.equal(notificationText('a\u061cb\u200ec', TITLE_MAX), 'abc')
+  assert.equal(notificationText('a\u061cb\u200ec\nd', BODY_MAX, { keepLineFeeds: true }), 'abc\nd')
+})
+
+test('a grouped popup body keeps room for its "+N more" line, so the whole body fits 200 characters', async () => {
+  const { requestPopupText } = await import('../../server/machines/notification.mjs')
+  const { body } = requestPopupText('t', [{ summary: 'a'.repeat(300), tier: 'safe' }, { summary: 'b'.repeat(50), tier: 'destructive' }], true)
+  const lines = body.split('\n')
+  assert.deepEqual([lines[0], lines.slice(1)], [`${'a'.repeat(160)}… · safe`, ['+1 more', 'Answer in your terminal']])
+  assert.equal(Array.from(body).length, 200)
 })
 
 test('a done or crash popup keeps its own words after a long task', async () => {

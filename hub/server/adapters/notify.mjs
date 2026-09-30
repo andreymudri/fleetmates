@@ -47,8 +47,8 @@ function bellAudio() {
 export const TITLE_MAX = 80
 export const BODY_MAX = 200
 // C0 controls and DEL, C1 controls, and the bidi controls (ALM, LRM, RLM, LRE..RLO, LRI..PDI).
-const CONTROLS = /[\u0000-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]/gu
-const CONTROLS_BUT_LF = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]/gu
+const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
+const CONTROLS_BUT_LF = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu
 const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
 
 /**
