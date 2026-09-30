@@ -301,6 +301,20 @@ export function resolveSession(store, envelope) {
   return null
 }
 
+/** Identify hooks that leave session state and activity unchanged. */
+export function ignoresSessionHook(store, session, hook) {
+  if (!session) return false
+  const event = hook.hook_event_name
+  if (['WorktreeCreate', 'WorktreeRemove'].includes(event)) return true
+  if (event === 'Notification' && hook.notification_type === 'agent_completed') return true
+  if (event === 'Stop' && ['idle', 'done', 'reviewed'].includes(session.state)) return true
+  if (event === 'Notification' && hook.notification_type === 'idle_prompt') {
+    if (['idle', 'done', 'reviewed'].includes(session.state)) return true
+    if (session.state === 'asked_you' && store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND source = ? LIMIT 1', session.id, 'open', 'stop_question')) return true
+  }
+  return false
+}
+
 /** Apply an observed hook to a session inside the caller's transaction. */
 export function applySessionHook(store, envelope, existing, requestChanged) {
   const hook = envelope.hook
@@ -320,7 +334,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
     return store.get('SELECT * FROM sessions WHERE id = ?', id)
   }
   if (at < existing.since_ts) return existing
-  if (event === 'Notification' && hook.notification_type === 'idle_prompt' && existing.state === 'reviewed') return existing
+  if (ignoresSessionHook(store, existing, hook)) return existing
   let state = existing.state
   let stateSince = existing.state_since
   let alive = existing.alive

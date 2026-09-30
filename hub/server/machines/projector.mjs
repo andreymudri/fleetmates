@@ -1,7 +1,7 @@
 import { dedupeKey } from '../ingest/validate.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
 import { applyRequestHook, expireRequests, resumedActivityEvents } from './request.mjs'
-import { applySessionHook, captureReviewBaseline, persistSessionSummary, refreshSessionChanges, resolveSession } from './session.mjs'
+import { applySessionHook, captureReviewBaseline, ignoresSessionHook, persistSessionSummary, refreshSessionChanges, resolveSession } from './session.mjs'
 
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
 const rank = event => {
@@ -63,7 +63,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           if (!late) {
             const known = !!session
             if (!known) session = applySessionHook(store, envelope, null, false)
-            if (session) {
+            if (session && !ignoresSessionHook(store, session, hook)) {
               requestChanged = applyRequestHook(store, session, envelope)
               if (known) session = applySessionHook(store, envelope, session, requestChanged)
             }
