@@ -2475,3 +2475,192 @@ test('Bash control reads track literal directory changes and nested shell scopes
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('Gitlink commit and dirty submodule changes survive review boundaries without executing child controls', () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'deck-gitlink-review-'))
+  const sub = path.join(repo, 'sub')
+  const h = harness()
+  try {
+    const runGit = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args], { cwd, timeout: 3000, stdio: 'pipe' }).toString().trim()
+    mkdirSync(sub)
+    runGit(repo, 'init', '-q')
+    runGit(sub, 'init', '-q')
+    const file = path.join(sub, 'file.txt')
+    writeFileSync(file, 'initial\n')
+    runGit(sub, 'add', '.')
+    runGit(sub, 'commit', '-qm', 'initial')
+    runGit(repo, 'update-index', '--add', '--cacheinfo', `160000,${runGit(sub, 'rev-parse', 'HEAD')},sub`)
+    runGit(repo, 'commit', '-qm', 'submodule')
+    const hook = (event, at) => {
+      const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo, prompt: 'Work', stop_hook_active: false })
+      envelope.hookTs = at
+      return envelope
+    }
+    h.projector.applyHooks([hook('SessionStart', 1000), hook('UserPromptSubmit', 2000), hook('Stop', 2500)])
+    const id = h.projector.snapshot().sessions[0].id
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
+    writeFileSync(file, 'dirty before commit\n')
+    h.projector.applyHooks([hook('UserPromptSubmit', 2700), hook('Stop', 2800)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [sub])
+    assert.equal(h.projector.snapshot().counts.toReview, 1)
+    writeFileSync(file, 'initial\n')
+    h.projector.applyHooks([hook('Stop', 2900)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
+    writeFileSync(file, 'committed change\n')
+    runGit(sub, 'add', '.')
+    runGit(sub, 'commit', '-qm', 'change')
+    assert.equal(runGit(repo, 'diff', '--name-only'), 'sub')
+    h.projector.applyHooks([hook('UserPromptSubmit', 2960), hook('Stop', 3000)])
+    const assertChanged = () => {
+      assert.equal(existsSync(path.join(repo, 'executed')), false)
+      assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [sub])
+      assert.equal(h.projector.snapshot().counts.toReview, 1)
+    }
+    const reviewAndStop = at => {
+      h.projector.signal(id, { type: 'review' }, at)
+      h.projector.applyHooks([hook('Stop', at + 1)])
+      assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
+      assert.equal(h.projector.snapshot().counts.toReview, 0)
+    }
+    assertChanged()
+    reviewAndStop(4000)
+    writeFileSync(file, 'later committed change\n')
+    runGit(sub, 'add', '.')
+    runGit(sub, 'commit', '-qm', 'later change')
+    h.projector.applyHooks([hook('Stop', 4100)])
+    assertChanged()
+    reviewAndStop(4200)
+    writeFileSync(path.join(sub, '.gitattributes'), '*.txt filter=unsafe\n')
+    for (const key of ['filter.unsafe.clean', 'filter.unsafe.process', 'filter.unsafe.smudge', 'core.fsmonitor']) runGit(sub, 'config', key, 'touch ../executed; cat')
+    writeFileSync(path.join(sub, '.git/hooks/post-index-change'), '#!/bin/sh\ntouch ../executed\n')
+    chmodSync(path.join(sub, '.git/hooks/post-index-change'), 0o755)
+    writeFileSync(file, 'dirty tracked edit\n')
+    h.projector.applyHooks([hook('UserPromptSubmit', 4500), hook('Stop', 5000)])
+    assertChanged()
+    reviewAndStop(6000)
+    writeFileSync(file, 'later tracked edit\n')
+    h.projector.applyHooks([hook('Stop', 7000)])
+    assertChanged()
+    reviewAndStop(8000)
+    writeFileSync(path.join(sub, 'untracked.txt'), 'first untracked\n')
+    h.projector.applyHooks([hook('Stop', 9000)])
+    assertChanged()
+    reviewAndStop(10000)
+    writeFileSync(path.join(sub, 'untracked.txt'), 'later untracked\n')
+    h.projector.applyHooks([hook('Stop', 11000)])
+    assertChanged()
+    assert.equal(existsSync(path.join(repo, 'executed')), false)
+    rmSync(sub, { recursive: true, force: true })
+    h.projector.applyHooks([hook('Stop', 12000)])
+    assertChanged()
+    reviewAndStop(13000)
+    mkdirSync(sub)
+    const start = hook('SessionStart', 14000)
+    start.claudePid = 43
+    start.hook.session_id = 'uninitialized'
+    const stop = { ...start, hookTs: 15000, hook: { ...start.hook, hook_event_name: 'Stop' } }
+    h.projector.applyHooks([start, stop])
+    const uninitialized = h.projector.snapshot().sessions.find(row => row.claudeSessionId === 'uninitialized')
+    assert.equal(uninitialized.state, 'idle')
+    assert.deepEqual(uninitialized.changedFiles, [])
+    assert.equal(h.projector.snapshot().counts.toReview, 0)
+  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+})
+
+test('clean PTY exit refreshes final Git changes for state, history, counts and committed publication', () => {
+  for (const scenario of ['clean', 'edit', 'reviewed', 'incomplete']) {
+    const repo = mkdtempSync(path.join(tmpdir(), 'deck-exit-git-'))
+    const h = harness()
+    const reader = openDeckDb(h.file)
+    const published = []
+    const projector = createProjector({ store: h.store, publish: event => {
+      assert.equal(reader.get('SELECT seq FROM events WHERE seq=?', event.seq)?.seq, event.seq)
+      published.push(event)
+    } })
+    try {
+      const file = path.join(repo, 'file.txt')
+      writeFileSync(file, 'initial\n')
+      execFileSync('git', ['init', '-q', repo], { timeout: 2000 })
+      execFileSync('git', ['-C', repo, 'add', '.'], { timeout: 2000 })
+      execFileSync('git', ['-C', repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial'], { timeout: 2000 })
+      const hook = (event, at, fields = {}) => ({ ...fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo, ...fields }), hookTs: at, ptyId: 'test-pty' })
+      projector.applyHooks([hook('SessionStart', 1000), hook('UserPromptSubmit', 2000)])
+      const id = projector.snapshot().sessions[0].id
+      if (scenario !== 'clean') writeFileSync(file, 'changed\n')
+      if (['reviewed', 'incomplete'].includes(scenario)) projector.applyHooks([hook('PostToolUse', 2200, { tool_name: 'Edit', tool_input: { file_path: file } }), hook('Stop', 2300)])
+      if (scenario === 'reviewed') projector.signal(id, { type: 'review' }, 2400)
+      if (scenario === 'incomplete') {
+        truncateSync(file, 32 * 1024 * 1024 + 1)
+        assert.equal(captureReviewBaseline(repo, h.store.get('SELECT review_baseline FROM sessions WHERE id=?', id).review_baseline), null)
+      }
+      projector.applyHooks([hook('PreToolUse', 2500, { tool_name: 'Bash', tool_input: { command: 'printf changed > file.txt' } })])
+      assert.equal(projector.snapshot().sessions[0].changedFiles.length, scenario === 'incomplete' ? 1 : 0)
+      const fromSeq = projector.snapshot().seq
+      projector.signal(id, { type: 'exit', code: 0 }, 3000)
+      const changed = ['edit', 'incomplete'].includes(scenario)
+      const snapshot = projector.snapshot()
+      assert.equal(snapshot.sessions[0].state, changed ? 'done' : 'ended', scenario)
+      assert.equal(snapshot.sessions[0].alive, false, scenario)
+      assert.equal(snapshot.sessions[0].stateSince, 3000, scenario)
+      assert.deepEqual(snapshot.sessions[0].changedFiles.map(row => row.path), changed ? [file] : [], scenario)
+      assert.equal(snapshot.counts.toReview, changed ? 1 : 0, scenario)
+      const summary = reader.get('SELECT * FROM session_summaries WHERE session_id=?', id)
+      assert.equal(summary.files_changed, changed ? 1 : 0, scenario)
+      assert.equal(summary.outcome, 'ended', scenario)
+      assert.equal(summary.ended_at, 3000, scenario)
+      const events = published.filter(event => event.seq > fromSeq)
+      assert.equal(events.find(event => event.type === 'session.upserted').data.state, snapshot.sessions[0].state, scenario)
+      assert.deepEqual(events.find(event => event.type === 'session.upserted').data.changedFiles, snapshot.sessions[0].changedFiles, scenario)
+      assert.equal(events.find(event => event.type === 'counts').data.toReview, snapshot.counts.toReview, scenario)
+      projector.applyHooks([hook('PostToolUse', 2600, { tool_name: 'Bash', tool_input: { command: 'printf changed > file.txt' } }), hook('Stop', 2700)])
+      assert.deepEqual(projector.snapshot().sessions[0], snapshot.sessions[0], scenario)
+      assert.equal(reader.get('SELECT files_changed FROM session_summaries WHERE session_id=?', id).files_changed, summary.files_changed, scenario)
+      if (scenario === 'edit') {
+        projector.signal(id, { type: 'review' }, 4000)
+        assert.equal(projector.snapshot().sessions[0].state, 'ended')
+        assert.equal(projector.snapshot().counts.toReview, 0)
+        assert.equal(reader.get('SELECT reviewed_at FROM session_summaries WHERE session_id=?', id).reviewed_at, 4000)
+        assert.equal(reader.get('SELECT files_changed FROM session_summaries WHERE session_id=?', id).files_changed, 1)
+      }
+    } finally { reader.close(); h.close(); rmSync(repo, { recursive: true, force: true }) }
+  }
+})
+
+test('Git mode comparison and review fingerprints honor core.filemode true and false', () => {
+  for (const enabled of [false, true]) {
+    const repo = mkdtempSync(path.join(tmpdir(), 'deck-filemode-'))
+    const h = harness()
+    try {
+      const runGit = (...args) => execFileSync('git', args, { cwd: repo, timeout: 2000, stdio: 'pipe' }).toString().trim()
+      const file = path.join(repo, 'script.sh')
+      writeFileSync(file, 'initial\n')
+      chmodSync(file, 0o644)
+      runGit('init', '-q')
+      runGit('config', 'core.filemode', String(enabled))
+      runGit('add', '.')
+      runGit('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial')
+      const hook = (event, at) => ({ ...fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo }), hookTs: at })
+      h.projector.applyHooks([hook('SessionStart', 1000), hook('UserPromptSubmit', 2000)])
+      chmodSync(file, 0o755)
+      assert.equal(runGit('diff', '--name-only'), enabled ? 'script.sh' : '')
+      h.projector.applyHooks([hook('Stop', 3000)])
+      assert.equal(h.projector.snapshot().sessions[0].state, enabled ? 'done' : 'idle')
+      assert.equal(h.projector.snapshot().counts.toReview, enabled ? 1 : 0)
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), enabled ? [file] : [])
+      writeFileSync(file, 'reviewed content\n')
+      h.projector.applyHooks([hook('Stop', 4000)])
+      const id = h.projector.snapshot().sessions[0].id
+      assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+      h.projector.signal(id, { type: 'review' }, 5000)
+      chmodSync(file, 0o644)
+      h.projector.applyHooks([hook('Stop', 6000)])
+      assert.equal(h.projector.snapshot().sessions[0].state, enabled ? 'done' : 'idle')
+      assert.equal(h.projector.snapshot().counts.toReview, enabled ? 1 : 0)
+    } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+  }
+})

@@ -1,7 +1,7 @@
 import { dedupeKey } from '../ingest/validate.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
 import { applyRequestHook, expireRequests, resumedActivityEvents } from './request.mjs'
-import { applySessionHook, captureReviewBaseline, persistSessionSummary, resolveSession } from './session.mjs'
+import { applySessionHook, captureReviewBaseline, persistSessionSummary, refreshSessionChanges, resolveSession } from './session.mjs'
 
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
 const rank = event => {
@@ -106,12 +106,13 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
     },
     signal(sessionId, signal, at = now()) {
       return commit(() => {
-        const row = store.get('SELECT * FROM sessions WHERE id = ?', sessionId)
+        let row = store.get('SELECT * FROM sessions WHERE id = ?', sessionId)
         if (!row) return
         if (signal.type === 'pid_gone' && row.origin === 'observed' && row.alive) {
           closeRequests(row.id, 'process_ended', at)
           store.run('UPDATE sessions SET state=?,state_since=?,alive=0,crash_kind=?,ended_at=?,since_ts=? WHERE id=?', 'crashed', row.state === 'crashed' ? row.state_since : at, 'lost', at, at, row.id)
         } else if (signal.type === 'exit' && row.alive) {
+          row = refreshSessionChanges(store, row)
           closeRequests(row.id, 'process_ended', at)
           const exitSignal = signal.signal && signal.signal !== '0' ? String(signal.signal) : null
           const crashed = (signal.code !== 0 || exitSignal !== null) && !row.user_stop_requested && !row.end_announced

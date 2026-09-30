@@ -9,22 +9,23 @@ const maxChangedPaths = 512
 const maxScannedPaths = 4096
 const maxScannedBytes = 32 * 1024 * 1024
 
-function git(root, args) {
+function git(root, args, budget = null) {
+  if (budget && Date.now() >= budget.deadline) return null
   try {
     return execFileSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args], {
       cwd: root,
       env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' },
-      timeout: 1500,
+      timeout: budget ? Math.max(1, Math.min(1500, budget.deadline - Date.now())) : 1500,
       maxBuffer: maxGitOutput,
       stdio: ['ignore', 'pipe', 'ignore']
     })
   } catch { return null }
 }
 
-function gitHead(root) {
-  const output = git(root, ['rev-parse', '--verify', 'HEAD'])?.toString('utf8').trim()
+function gitHead(root, budget = null) {
+  const output = git(root, ['rev-parse', '--verify', 'HEAD'], budget)?.toString('utf8').trim()
   if (/^[0-9a-f]{40,64}$/.test(output ?? '')) return output
-  return git(root, ['rev-parse', '--is-inside-work-tree'])?.toString('utf8').trim() === 'true' ? 'unborn' : null
+  return git(root, ['rev-parse', '--is-inside-work-tree'], budget)?.toString('utf8').trim() === 'true' ? 'unborn' : null
 }
 
 function baseline(value) {
@@ -35,14 +36,14 @@ function baseline(value) {
 }
 
 function scanBudget() {
-  return { remaining: maxScannedBytes, deadline: Date.now() + 1500 }
+  return { remaining: maxScannedBytes, remainingPaths: maxScannedPaths, deadline: Date.now() + 1500 }
 }
 
 function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false) {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const before = fstatSync(fd)
-    if (!before.isFile() || before.size > budget.remaining) throw new Error('scan limit')
+    if (Date.now() >= budget.deadline || !before.isFile() || before.size > budget.remaining) throw new Error('scan limit')
     const buffer = Buffer.alloc(64 * 1024)
     const pass = consume => {
       let position = 0
@@ -77,11 +78,13 @@ function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false) {
   } finally { closeSync(fd) }
 }
 
-function gitPaths(root, head) {
-  const tree = head === 'unborn' ? Buffer.alloc(0) : git(root, ['ls-tree', '-r', '-z', head])
-  const listed = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '--eol', '-z'])
+function gitPaths(root, head, budget = scanBudget(), depth = 0) {
+  if (depth > 4 || Date.now() >= budget.deadline) return null
+  const tree = head === 'unborn' ? Buffer.alloc(0) : git(root, ['ls-tree', '-r', '-z', head], budget)
+  const listed = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '--eol', '-z'], budget)
   if (!tree || !listed) return null
-  const autoCRLF = /^(true|input)$/.test(git(root, ['config', '--get', 'core.autocrlf'])?.toString('utf8').trim() ?? '')
+  const autoCRLF = /^(true|input)$/.test(git(root, ['config', '--get', 'core.autocrlf'], budget)?.toString('utf8').trim() ?? '')
+  const fileMode = git(root, ['config', '--bool', '--get', 'core.filemode'], budget)?.toString('utf8').trim() !== 'false'
   const entries = new Map()
   for (const record of tree.toString('utf8').split('\0').filter(Boolean)) {
     const match = /^(\d+) (blob|commit) ([0-9a-f]{40,64})\t([\s\S]+)$/.exec(record)
@@ -98,12 +101,21 @@ function gitPaths(root, head) {
     normalization.set(name, explicitText || autoText && worktreeEol !== '-text' && !['crlf', 'mixed'].includes(indexEol))
   }
   const names = new Set([...entries.keys(), ...normalization.keys()])
-  if (names.size > maxScannedPaths) return null
+  budget.remainingPaths -= names.size
+  if (budget.remainingPaths < 0 || Date.now() >= budget.deadline) return null
   const paths = new Map()
-  const budget = scanBudget()
+  const gitlinks = new Map()
   for (const name of names) {
     const entry = entries.get(name)
-    if (entry?.type === 'commit') continue
+    if (entry?.type === 'commit') {
+      const location = path.resolve(root, name)
+      if (!location.startsWith(`${root}${path.sep}`)) return null
+      const link = gitlinkState(location, budget, depth + 1)
+      if (!link) return null
+      gitlinks.set(name, link)
+      if (!link.uninitialized && (link.head !== entry.oid || link.dirty)) paths.set(name, { adds: null, dels: null })
+      continue
+    }
     let unchanged = false
     if (entry) {
       try {
@@ -121,26 +133,62 @@ function gitPaths(root, head) {
           oid = hashFile(location, normalization.get(name) ?? false, budget, algorithm, true)
           mode = stat.mode & 0o111 ? '100755' : '100644'
         } else return null
-        unchanged = oid === entry.oid && mode === entry.mode
+        unchanged = oid === entry.oid && (mode === entry.mode || !fileMode && ['100644', '100755'].includes(mode) && ['100644', '100755'].includes(entry.mode))
       } catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') return null }
     }
     if (!unchanged) paths.set(name, { adds: null, dels: null })
   }
-  return paths.size <= maxChangedPaths ? { paths, normalization, budget } : null
+  return paths.size <= maxChangedPaths ? { paths, normalization, budget, fileMode, gitlinks, depth } : null
 }
 
 function fileFingerprint(root, name, scan) {
   const file = path.resolve(root, name)
   if (!file.startsWith(`${root}${path.sep}`)) throw new Error('path outside repository')
+  if (scan.gitlinks?.has(name)) return scan.gitlinks.get(name).fingerprint
   try {
     const stat = lstatSync(file)
+    if (stat.isDirectory()) {
+      const link = gitlinkState(file, scan.budget, scan.depth + 1)
+      if (!link) throw new Error('incomplete submodule scan')
+      return link.fingerprint
+    }
     if (stat.isSymbolicLink()) return `link:${createHash('sha256').update(readlinkSync(file)).digest('hex')}`
     if (!stat.isFile()) throw new Error('unsupported file')
-    const executable = stat.mode & 0o111 ? 'x' : '-'
+    const executable = scan.fileMode && stat.mode & 0o111 ? 'x' : '-'
     return `file:${executable}:${hashFile(file, scan.normalization.get(name) ?? false, scan.budget)}`
   } catch (error) {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null
     throw error
+  }
+}
+
+function gitlinkState(directory, budget, depth) {
+  if (depth > 4 || Date.now() >= budget.deadline) return null
+  try {
+    const stat = lstatSync(directory)
+    if (!stat.isDirectory()) {
+      const fingerprint = stat.isSymbolicLink()
+        ? `link:${createHash('sha256').update(readlinkSync(directory)).digest('hex')}`
+        : `file:${hashFile(directory, false, budget)}`
+      return { head: null, dirty: true, fingerprint }
+    }
+    try { lstatSync(path.join(directory, '.git')) }
+    catch (error) {
+      if (error.code === 'ENOENT') return { uninitialized: true, fingerprint: 'uninitialized' }
+      return null
+    }
+    const top = git(directory, ['rev-parse', '--show-toplevel'], budget)?.toString('utf8').trim()
+    if (!top || realpathSync(top) !== realpathSync(directory)) return null
+    const head = gitHead(directory, budget)
+    if (!head || head === 'unborn') return null
+    const scan = gitPaths(directory, head, budget, depth)
+    if (!scan) return null
+    const files = [...scan.paths.keys()].sort().map(name => [name, fileFingerprint(directory, name, scan)])
+    const fingerprint = `gitlink:${head}:${createHash('sha256').update(JSON.stringify(files)).digest('hex')}`
+    return { head, dirty: files.length > 0, fingerprint }
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return { head: null, dirty: true, fingerprint: null }
+    return null
   }
 }
 
@@ -166,6 +214,16 @@ function gitChangedFiles(root, value) {
   try {
     return [...paths].filter(([name]) => !Object.hasOwn(saved.files, name) || saved.files[name] !== fileFingerprint(root, name, scan)).map(([name, diff]) => ({ path: path.resolve(root, name), ...diff }))
   } catch { return null }
+}
+
+/** Refresh final Git changes, retaining known changes if the bounded scan is incomplete. */
+export function refreshSessionChanges(store, session) {
+  const boundary = session.review_baseline ?? captureReviewBaseline(session.repo_id, null, false)
+  const files = gitChangedFiles(session.repo_id, boundary)
+  if (files === null) return session
+  const changedFiles = JSON.stringify(files)
+  store.run('UPDATE sessions SET changed_files=?,review_baseline=? WHERE id=?', changedFiles, boundary, session.id)
+  return { ...session, changed_files: changedFiles, review_baseline: boundary }
 }
 
 function repo(store, cwd, at) {
