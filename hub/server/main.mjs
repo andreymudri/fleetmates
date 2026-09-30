@@ -29,10 +29,23 @@ function privateDir(dir) {
   if (!info.isDirectory() || info.uid !== process.getuid()) throw Error('deck directory must be private and owner-owned')
   fs.chmodSync(dir, 0o700)
 }
+/**
+ * Delay before deckd reconnect attempt `attempt + 1`: min(2^(attempt-1), 30) units of `baseMs` with
+ * ±20% jitter (failures-and-loading 3.3, state-machines 4.2), bounded for setTimeout.
+ * @param {number} attempt failed attempts so far, 1 or more
+ * @param {number} baseMs one backoff unit, 1000 in production
+ * @param {() => number} [random] source in [0, 1) for the jitter
+ * @returns {number} milliseconds, at most 2^31-1
+ */
+export function reconnectDelay(attempt, baseMs, random = Math.random) {
+  const steps = Math.min(2 ** Math.min(Math.max(0, attempt - 1), 5), 30)
+  const jitter = 0.8 + 0.4 * random()
+  return Math.max(0, Math.min(Math.round(baseMs * steps * jitter), 2 ** 31 - 1))
+}
 /** Create a deck server with injectable processes, readers and dependency services. */
 export async function createDeckServer(options = {}) {
   const { env = process.env, host = '127.0.0.1', now = Date.now, connectDeckd = defaultConnectDeckd,
-    reconnectMs = 1000, maxReconnectMs = 60_000, tokenPollMs = 250, runCommand: command = runCommand } = options
+    reconnectMs = 1000, random = Math.random, tokenPollMs = 250, runCommand: command = runCommand } = options
   if (host !== '127.0.0.1') throw Error('deck server requires IPv4 loopback 127.0.0.1')
   const paths = options.paths ?? setupPaths(env)
   privateDir(paths.state)
@@ -106,11 +119,11 @@ export async function createDeckServer(options = {}) {
     async startDependency(dep) {
       const result = dep === 'deckd' ? run('systemctl', ['--user', 'start', 'fleetmates-deckd.service']) : run(api.preferences().prefs.scribedCommand, ['start'])
       if (result.status !== 0) throw apiError(502, 'dependency_start_failed')
-      if (dep === 'deckd') void connect()
+      if (dep === 'deckd') return retryDeckd()
       return { dep, state: 'checking', reason: null, since: now(), nextProbeAt: now(), attempt: 0 }
     },
     async retryDependency(dep) {
-      if (dep === 'deckd') void connect()
+      if (dep === 'deckd') return retryDeckd()
       return { dep, state: 'checking', reason: null, since: now(), nextProbeAt: now(), attempt: 0 }
     },
     async notify() {
@@ -178,14 +191,20 @@ export async function createDeckServer(options = {}) {
     finally { clearTimeout(timeout) }
   }
   const request = (client, op, fields = {}) => bounded(client.request(op, fields))
-  let published = null
-  // Append health.changed only when the state or reason changes (state-machines 5.2), not per retry.
-  const stateEvent = () => {
-    const key = `${healthState.state}:${healthState.reason}`
-    if (key === published) return
-    published = key
-    const at = now()
+  // One health.changed per connect outcome, so the banner's attempt and countdown advance (failures-and-loading 3.3).
+  const stateEvent = (at = now()) => {
     publish({ seq: Number(store.appendEvent({ at, type: 'health.changed', data: { ...healthState } })), at, type: 'health.changed', data: { ...healthState } })
+  }
+  // "Retry now" and "Start": the API publishes the returned 'checking' row itself, so the probe runs on a
+  // later macrotask and its outcome is published after that row; with no probe to run, republish the true state.
+  function retryDeckd() {
+    setImmediate(() => {
+      if (stopped) return
+      if (link || !env.XDG_RUNTIME_DIR) return stateEvent()
+      clearTimeout(reconnect)
+      void connect()
+    })
+    return { ...healthState, state: 'checking', reason: null, nextProbeAt: now() }
   }
   function disconnect() {
     generation++
@@ -193,13 +212,15 @@ export async function createDeckServer(options = {}) {
     const previous = link
     link = null
     previous?.close()
-    if (healthState.state !== 'down' || healthState.reason !== 'deckd_unavailable') healthState.since = now()
+    const at = now()
+    if (healthState.state !== 'down' || healthState.reason !== 'deckd_unavailable') healthState.since = at
     healthState.state = 'down'
     healthState.reason = 'deckd_unavailable'
-    // Retry after reconnectMs, doubling per failed attempt up to maxReconnectMs (state-machines 4.2 and 5.2).
-    const delay = Math.min(reconnectMs * 2 ** Math.max(0, healthState.attempt - 1), Math.max(reconnectMs, maxReconnectMs))
-    healthState.nextProbeAt = stopped ? null : now() + delay
-    if (!stopped) { stateEvent()
+    // Each disconnect or failed connect is one attempt: a live link that drops reports attempt 1.
+    healthState.attempt++
+    const delay = reconnectDelay(healthState.attempt, reconnectMs, random)
+    healthState.nextProbeAt = stopped ? null : at + delay
+    if (!stopped) { stateEvent(at)
       clearTimeout(reconnect)
       reconnect = setTimeout(() => { void connect() }, delay)
       reconnect.unref() }
@@ -264,8 +285,7 @@ export async function createDeckServer(options = {}) {
       healthState.nextProbeAt = null
       stateEvent()
     } catch {
-      if (!stopped) { healthState.attempt++
-        disconnect() }
+      if (!stopped) disconnect()
       client?.close()
     } finally { connecting = false }
   }
