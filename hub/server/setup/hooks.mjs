@@ -34,12 +34,13 @@ function shellWords(command) {
 }
 
 /** Check whether a command names a deck hook script. */
-export function isDeckHook(command) {
+export function isDeckHook(command, installedCommand) {
   if (typeof command !== 'string' || /[\r\n]/.test(command)) return false
   const words = shellWords(command)
   if (words?.length !== 2) return false
   const [node, script] = words
-  return (node === 'node' || (path.isAbsolute(node) && path.basename(node) === 'node')) && path.isAbsolute(script) && /\/(?:hub|fleetmates-deck)\/hook\/deck-hook\.mjs$/.test(script)
+  const knownNode = node === process.execPath || ['node', 'nodejs'].includes(node) || (path.isAbsolute(node) && ['node', 'nodejs'].includes(path.basename(node)))
+  return (knownNode || command === installedCommand) && path.isAbsolute(script) && /\/(?:hub|fleetmates-deck)\/hook\/deck-hook\.mjs$/.test(script)
 }
 
 /** Merge or remove deck hooks without moving unrelated groups. */
@@ -54,7 +55,7 @@ export function transformHooks(settings, command, remove = false) {
       if (!Array.isArray(group?.hooks)) { next.push(group); continue }
       const hooks = []
       for (const hook of group.hooks) {
-        if (isDeckHook(hook?.command)) {
+        if (isDeckHook(hook?.command, command)) {
           if (!remove && !found && group.matcher === '*') {
             hooks.push({ type: 'command', command, async: true, timeout: 5 })
             found = true

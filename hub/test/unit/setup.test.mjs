@@ -10,7 +10,7 @@ import { createServer } from 'node:net'
 import test from 'node:test'
 import { chromium } from 'playwright-core'
 import { doctor, status } from '../../server/setup/doctor.mjs'
-import { hooksInstalled, readSettings, writeSettings } from '../../server/setup/hooks.mjs'
+import { hooksInstalled, isDeckHook, readSettings, transformHooks, writeSettings } from '../../server/setup/hooks.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
 import { renderUnit } from '../../server/setup/units.mjs'
 
@@ -393,6 +393,62 @@ test('init updates an old deck hook in place', () => {
   assert.equal(groups[0].hooks.length, 2)
   assert.match(groups[0].hooks[0].command, /fleetmates-deck\/hook\/deck-hook\.mjs'$/)
   assert.equal(groups[0].hooks[1].command, 'node /home/you/other.mjs')
+})
+
+test('renamed Node init is idempotent and uninstall preserves unrelated groups', () => {
+  const s = sandbox('existing-hooks.json')
+  const executable = path.join(s.root, 'deck-node-runtime')
+  fs.copyFileSync(process.execPath, executable)
+  chmodSync(executable, 0o700)
+  const original = JSON.parse(readFileSync(s.settings, 'utf8'))
+  const target = setupPaths(s.env).hook
+  const unrelated = [
+    `echo '${target}'`, `/bin/sh '${target}'`,
+    `'${executable}' /tmp/unrelated-hook.mjs`,
+    `node '${target}'; echo unrelated`, `nodejs '${target}' extra`
+  ]
+  original.hooks.PreToolUse.push({ matcher: 'Bash', hooks: unrelated.map(command => ({ type: 'command', command })) })
+  writeFileSync(s.settings, JSON.stringify(original))
+  const run = (...args) => spawnSync(executable, [path.join(hub, 'bin/fleetmates-deck.mjs'), ...args], { env: s.env, encoding: 'utf8', timeout: 8000 })
+  const first = run('init')
+  assert.equal(first.status, 0, first.stderr)
+  const installed = readFileSync(s.settings)
+  const command = `'${executable}' '${target}'`
+  const second = run('init')
+  assert.equal(second.status, 0, second.stderr)
+  assert.deepEqual(readFileSync(s.settings), installed)
+  for (const event of requiredHookEvents) {
+    const entries = JSON.parse(installed).hooks[event].flatMap(group => group.hooks)
+    assert.equal(entries.filter(hook => hook.command === command).length, 1, event)
+  }
+  assert.equal(isDeckHook(command, command), true)
+  for (const other of unrelated) assert.equal(isDeckHook(other, command), false, other)
+  const removed = run('uninstall-hooks')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(s.settings)), original)
+})
+
+test('legacy node and nodejs hooks merge once and uninstall without removing other commands', () => {
+  const command = "'/opt/deck/node-runtime' '/tmp/fleetmates-deck/hook/deck-hook.mjs'"
+  const unrelated = [
+    'echo /tmp/old/hub/hook/deck-hook.mjs',
+    '/bin/sh /tmp/old/hub/hook/deck-hook.mjs',
+    'nodejs /tmp/other/hook/deck-hook.mjs',
+    'node /tmp/old/hub/hook/deck-hook.mjs && echo unrelated',
+    'nodejs /tmp/old/hub/hook/deck-hook.mjs extra'
+  ]
+  for (const executable of ['node', 'nodejs', '/usr/bin/node', '/usr/bin/nodejs']) {
+    const legacy = `${executable} /tmp/old/hub/hook/deck-hook.mjs`
+    assert.equal(isDeckHook(legacy), true, executable)
+    const preserved = { hooks: { SessionStart: [{ matcher: 'Bash', hooks: unrelated.map(command => ({ type: 'command', command })) }] } }
+    const original = structuredClone(preserved)
+    original.hooks.SessionStart.unshift({ matcher: '*', hooks: [{ type: 'command', command: legacy }] })
+    const once = transformHooks(original, command)
+    assert.deepEqual(transformHooks(once, command), once, executable)
+    assert.deepEqual(transformHooks(original, command, true), preserved, executable)
+    assert.deepEqual(transformHooks(once, command, true), preserved, executable)
+    for (const other of unrelated) assert.equal(isDeckHook(other, command), false, other)
+  }
 })
 
 test('init replaces an old hub path hook and preserves unrelated commands', () => {
