@@ -95,7 +95,11 @@ export function teamCards(runs = [], sessions = [], requests = []) {
       else if (mate.state === 'done') tiles.push({ key: mate.taskId, kind: 'done', taskId: mate.taskId })
       else if (!QUIET_TASKS.has(mate.state)) tiles.push({ key: mate.taskId, kind: 'running', taskId: mate.taskId })
     }
-    const needing = tiles.filter(tile => tile.kind === 'needs').length + (lead && NEEDS.has(lead.state) && !open.some(row => row.taskId) ? 1 : 0)
+    // The lead needs you for its own requests (no task id), or by state when it has no open request at all;
+    // requests it carries for a task are counted on that task's tile.
+    const leadOpen = lead ? open.filter(row => row.sessionId === lead.id) : []
+    const leadNeeds = !!lead && (leadOpen.some(row => !row.taskId) || NEEDS.has(lead.state) && !leadOpen.length)
+    const needing = tiles.filter(tile => tile.kind === 'needs').length + (leadNeeds ? 1 : 0)
     const waits = open.length ? open.map(row => row.kind === 'question' ? 'asked_you' : 'needs_approval') : members.filter(row => NEEDS.has(row.state)).map(row => row.state)
     const state = open.length || needing ? (waits.length && !waits.includes('needs_approval') ? 'asked_you' : 'needs_approval')
       : lead?.state === 'crashed' ? 'crashed' : 'running'

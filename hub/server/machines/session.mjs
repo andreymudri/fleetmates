@@ -760,7 +760,8 @@ function patchCounts(response) {
 /**
  * Record a tool step inside the caller's transaction: `PreToolUse` opens a `running` step; `PostToolUse`,
  * `PostToolUseFailure` and `PermissionDenied` settle the oldest running step with the same match key, or
- * record one settled step when its `PreToolUse` was never seen. Keeps the newest {@link STEP_LIMIT}.
+ * record one settled step when its `PreToolUse` was never seen; that `PreToolUse`, if it arrives later with
+ * an earlier or equal hook time, adds nothing. Keeps the newest {@link STEP_LIMIT}.
  * @param {object} store
  * @param {object | null} session the sessions row
  * @param {{ hook: object, hookTs: number }} envelope
@@ -772,6 +773,9 @@ export function recordToolStep(store, session, envelope) {
   if (!session || !hook.tool_name || (event !== 'PreToolUse' && !STEP_OUTCOMES[event])) return false
   const key = matchKey(hook)
   const counts = event === 'PostToolUse' ? patchCounts(hook.tool_response) : { adds: null, dels: null }
+  // A PreToolUse delivered after its outcome (the early flush on Stop can send PostToolUse and Stop first):
+  // the outcome already recorded the step, at the same or a later hook time, so open no second one.
+  if (event === 'PreToolUse' && store.get('SELECT seq FROM session_steps WHERE session_id=? AND match_key=? AND status<>? AND at>=? LIMIT 1', session.id, key, 'running', envelope.hookTs)) return false
   if (event !== 'PreToolUse') {
     const open = store.get('SELECT seq FROM session_steps WHERE session_id=? AND status=? AND match_key=? ORDER BY seq LIMIT 1', session.id, 'running', key)
     if (open) {

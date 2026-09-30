@@ -243,3 +243,82 @@ test('stylesheets: the fleet scrolls under the header, the drawer animates in, a
   // The pulse animation overrides this while it runs; reduced motion stops it and this inset line shows.
   assert.match(rule(await css('components.css'), '.session-card.motion-pulse'), /box-shadow:\s*inset\b/)
 })
+
+test('notify-send gets a title and body stripped of controls and bidi, capped, then escaped (08-security 4.9)', async () => {
+  const { createNotifier } = await import('../../server/adapters/notify.mjs')
+  const calls = []
+  const notifier = createNotifier({ run: async (command, args) => { calls.push(args)
+    return { ok: true, exitCode: 0, stdout: '7\n' } } })
+  const popup = async (title, body) => {
+    calls.length = 0
+    await notifier.popup({ title, body })
+    assert.equal(calls[0].at(-3), '--', '-- ends option parsing before title and body')
+    return calls[0].slice(-2)
+  }
+  let [title, body] = await popup('a‮b⁦c\x1b[31m\r\nd\u0085e<i>&"\'', 'ok')
+  assert.equal(title, 'abc[31mde&lt;i&gt;&amp;&quot;&#39;', 'title: C0 (line breaks too), C1 and bidi removed, markup escaped')
+  ;[title, body] = await popup('t', 'one\r\n\x1b[2Ktwo\u0085‏<b>‪')
+  assert.equal(body, 'one\n[2Ktwo&lt;b&gt;', 'body: line feeds kept between lines, other controls and bidi removed')
+  ;[title] = await popup('\x1b'.repeat(50) + 'x'.repeat(79) + '&y', 'b')
+  assert.equal(title, `${'x'.repeat(79)}…`, 'the 80-character title cap counts characters after stripping')
+  ;[title] = await popup(`${'x'.repeat(78)}&${'y'.repeat(5)}`, 'b')
+  assert.equal(title, `${'x'.repeat(78)}&amp;…`, 'escaping after the cap never cuts an entity')
+  ;[title] = await popup('x'.repeat(80), 'b')
+  assert.equal(title, 'x'.repeat(80))
+  ;[, body] = await popup('t', `${'y'.repeat(198)}<${'z'.repeat(60)}`)
+  assert.equal(body, `${'y'.repeat(198)}&lt;…`, 'the body caps at 200 characters')
+  ;[, body] = await popup('t', 'y'.repeat(200))
+  assert.equal(body, 'y'.repeat(200))
+})
+
+test('oneLine folds line breaks and caps a summary at 4000 characters', async () => {
+  const { oneLine } = await import('../../server/machines/request.mjs')
+  assert.equal(oneLine('  a\n  b\r\nc  '), 'a ↵ b ↵ c')
+  assert.equal(oneLine('x'.repeat(4000)), 'x'.repeat(4000))
+  assert.equal(oneLine('x'.repeat(5000)), `${'x'.repeat(3999)}…`)
+})
+
+test('the hook latency budget is judged only on the early-flushed events (TEST-O2)', async () => {
+  const { budgetVerdict } = await import('../perf/hook-latency.mjs')
+  const many = (event, total, n = 20) => Array.from({ length: n }, () => ({ event, total }))
+  assert.equal(budgetVerdict(many('PostToolUse', 10)).withinBudget, false, 'no early-flushed sample: no verdict to pass')
+  assert.equal(budgetVerdict(many('PostToolUse', 10)).total, null)
+  assert.equal(budgetVerdict([...many('PermissionRequest', 50), ...many('Stop', 350)]).withinBudget, false, 'early p95 over budget')
+  const under = budgetVerdict([...many('PermissionRequest', 50), ...many('Notification', 60), ...many('PostToolUse', 400, 100)])
+  assert.deepEqual([under.withinBudget, under.total.n, under.total.max], [true, 40, 60], 'PostToolUse samples are ignored')
+  assert.equal(budgetVerdict(many('Stop', 300)).withinBudget, false, 'the budget is strict: p95 must be under 300')
+})
+
+test('team card text goes through titleText and shown, and the needs count includes a waiting lead', async () => {
+  const { HomeView } = await load('screens/home/Home.jsx')
+  const state = teamState()
+  const lead = state.data.sessions[0]
+  lead.task = 'Phase‮2'
+  lead.state = 'needs_approval'
+  state.data.requests.push({ id: 'q0', sessionId: 'lead', kind: 'permission', tier: 'caution', summary: 'rm‮ -rf', state: 'open', createdAt: 1 })
+  const html = render(HomeView, { state, now: 1000, navigate: () => {} })
+  assert.match(html, /<bdi>Phase&lt;U\+202E&gt;2<\/bdi>/, 'the team title renders its bidi control as a token')
+  assert.match(html, /<code class="request-command">rm&lt;U\+202E&gt; -rf<\/code>/, 'a summary without a task id renders its control as a token')
+  assert.doesNotMatch(html, /‮/u)
+  assert.match(html, /3 of 4 need you/, 'lead, T4 and T5 all need you')
+  const { teamCards } = await load('screens/home/Home.jsx')
+  const run = { repoId: '/r', runId: 'r1', leadSessionId: 'lead', tasks: [], teammates: [{ taskId: 'T4', state: 'running' }] }
+  const [attributed] = teamCards([run], [{ id: 'lead', state: 'needs_approval', role: 'lead', runRef: { repoId: '/r', runId: 'r1', taskId: 'T6' } }],
+    [{ id: 'r', sessionId: 'lead', kind: 'permission', state: 'open', createdAt: 1, taskId: 'T4' }])
+  assert.equal(attributed.needs, 1, 'a lead waiting only on a teammate\'s request is not counted twice')
+})
+
+test('team cards: "+N" past five tiles, the latest gate failed, and a question-only wait reads asked_you', async () => {
+  const { HomeView } = await load('screens/home/Home.jsx')
+  const state = teamState()
+  const run = state.data.runs[0]
+  run.teammates = ['T1', 'T2', 'T3', 'T4', 'T5', 'T7'].map(taskId => ({ taskId, state: 'running' }))
+  run.gates = { 1: { verdict: 'PASS', phase: 1, recordedAt: 5 }, 2: { verdict: 'FAIL', phase: 2, recordedAt: 9 } }
+  state.data.sessions = state.data.sessions.filter(row => row.id === 'lead')
+  state.data.requests = [{ id: 'q', sessionId: 'lead', kind: 'question', tier: null, summary: 'Which format?', state: 'open', createdAt: 1 }]
+  const html = render(HomeView, { state, now: 1000, navigate: () => {} })
+  const tiles = [...html.matchAll(/<li class="team-tile team-tile--(\w+)">([^<]*)<\/li>/g)].map(match => match[2])
+  assert.deepEqual(tiles, ['lead · T6', 'T1 · running', 'T2 · running', 'T3 · running', '+3'])
+  assert.match(html, /Gate 2 failed/)
+  assert.match(html, /session-card--team session-card--asked-you/)
+})

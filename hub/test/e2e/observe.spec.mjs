@@ -421,8 +421,9 @@ if (import.meta.main) {
     await card(page, h.ids.get('portfolio-site')).and(page.locator('.session-card--approval')).waitFor({ timeout: 5000 })
     await page.waitForTimeout(300)
     assert.deepEqual(await gridIds(page), before, 'no card moves while the pointer is over the grid')
+    // Leaving applies the held order at once, well before the 5 s cap would.
     await page.mouse.move(5, 5)
-    await until(() => ahead('portfolio-site', 'research'), { timeout: 2000, message: 'the reorder to apply once the pointer leaves the grid' })
+    await until(() => ahead('portfolio-site', 'research'), { timeout: 500, message: 'the reorder to apply within 500 ms of the pointer leaving the grid' })
 
     await page.hover(`#card-title-${domId(h.ids.get('vault-mcp'))}`)
     const held = await gridIds(page)
