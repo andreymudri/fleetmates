@@ -235,6 +235,9 @@ function namesRelativeDeckControl(hook, depth = 0) {
   if (['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(hook.tool_name)) {
     return namesControl(hook.tool_input?.file_path ?? hook.tool_input?.notebook_path)
   }
+  if (['Grep', 'Glob'].includes(hook.tool_name)) {
+    return namesControl(hook.tool_input?.path ?? hook.cwd)
+  }
   if (hook.tool_name !== 'Bash' || typeof hook.tool_input?.command !== 'string') return false
   if (embeddedCommands(hook.tool_input.command).some(command => namesRelativeDeckControl({ ...hook, tool_input: { command } }, depth + 1))) return true
   if (shellWriteTargets(hook.tool_input.command, hook.cwd).some(target => typeof target.command === 'string' && namesRelativeDeckControl({ ...hook, cwd: target.cwd, tool_input: { command: target.command } }, depth + 1))) return true

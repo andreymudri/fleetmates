@@ -2295,3 +2295,59 @@ test('streaming Git scans preserve symlink targets and never invoke repository e
     assert.equal(existsSync(sentinel), false)
   } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
 })
+
+for (const tool_name of ['Grep', 'Glob']) test(`${tool_name} resolves literal query paths to deck controls without executing patterns`, () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-query-controls-'))
+  const variables = ['XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR']
+  const previous = variables.map(name => process.env[name])
+  try {
+    const project = path.join(root, 'project')
+    mkdirSync(project)
+    for (const [index, variable] of variables.entries()) process.env[variable] = path.join(root, `xdg-${index}`)
+    const controls = [
+      path.join(process.env.XDG_STATE_HOME, 'fleetmates', 'deck'),
+      path.join(process.env.XDG_CONFIG_HOME, 'fleetmates', 'deck'),
+      path.join(process.env.XDG_RUNTIME_DIR, 'fleetmates-deck')
+    ]
+    const input = queryPath => tool_name === 'Grep'
+      ? { path: queryPath, pattern: '.+', output_mode: 'content' }
+      : { path: queryPath, pattern: '**/*' }
+    const tier = (queryPath, cwd = project, pattern) => permissionTier({ cwd, tool_name, tool_input: { ...input(queryPath), ...(pattern === undefined ? {} : { pattern }) } }, { repoRoot: project })
+    for (const [index, directory] of controls.entries()) {
+      mkdirSync(directory, { recursive: true, mode: 0o700 })
+      const file = path.join(directory, index === 0 ? 'token' : index === 1 ? 'tiers.json' : 'deckd.sock')
+      writeFileSync(file, 'SYNTHETIC_CONTROL\n', { mode: 0o600 })
+      for (const target of [directory, file]) assert.equal(tier(target), 'destructive', target)
+      for (const name of [`cache-${index}`, `cache?${index}`, `cache$${index}`, `cache\`${index}`, `cache*${index}`]) {
+        const alias = path.join(project, name)
+        symlinkSync(directory, alias)
+        for (const queryPath of [name, alias, `${name}/${path.basename(file)}`, path.join(alias, path.basename(file))]) {
+          assert.equal(tier(queryPath), 'destructive', queryPath)
+        }
+      }
+      const fileAlias = `file?${index}$\`*`
+      symlinkSync(file, path.join(project, fileAlias))
+      for (const queryPath of [fileAlias, path.join(project, fileAlias)]) assert.equal(tier(queryPath), 'destructive', queryPath)
+      assert.equal(tier(undefined, directory), 'destructive')
+      assert.equal(tier('.', directory), 'destructive')
+    }
+    if (tool_name === 'Grep') assert.equal(execFileSync('rg', ['--no-heading', '.+', 'cache-0/token'], { cwd: project, encoding: 'utf8', timeout: 2000 }).trim(), 'SYNTHETIC_CONTROL')
+    for (const name of ['ordinary', 'ordinary?file', 'ordinary$file', 'ordinary`file', 'ordinary*file']) {
+      writeFileSync(path.join(project, name), 'ordinary\n')
+      for (const queryPath of [name, path.join(project, name)]) assert.equal(tier(queryPath), 'caution', queryPath)
+    }
+    const sentinel = path.join(project, 'executed')
+    for (const pattern of ['.+', '**/*', '$(touch executed)', '`touch executed`']) {
+      assert.equal(tier(project, project, pattern), 'caution', pattern)
+      assert.equal(tier('cache-0/token', project, pattern), 'destructive', pattern)
+    }
+    assert.equal(tier(undefined), 'caution')
+    assert.equal(existsSync(sentinel), false)
+  } finally {
+    for (const [index, variable] of variables.entries()) {
+      if (previous[index] === undefined) delete process.env[variable]
+      else process.env[variable] = previous[index]
+    }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
