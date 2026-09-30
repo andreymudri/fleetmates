@@ -354,6 +354,38 @@ function wrapperDirectory(value, cwd) {
   return path.isAbsolute(cwd ?? '') ? canonicalExistingPath(path.resolve(cwd, expanded)) : null
 }
 
+function optionPaths(executable, words, writesOnly = false) {
+  const rules = {
+    grep: { read: ['--file', '-f'], flags: 'EFGPivwxnsrlLchHbBoqUaIRzZ' },
+    sed: { read: ['--file', '-f'], flags: 'Enru' },
+    awk: { read: ['--file', '-f'] },
+    gawk: { read: ['--file', '-f'] },
+    curl: { read: ['--config', '-K', '--netrc-file', '--cacert', '--cert', '--key'], write: ['--output', '-o', '--cookie-jar', '-c', '--dump-header', '-D'] },
+    wget: { read: ['--input-file', '-i', '--load-cookies', '--ca-certificate', '--certificate', '--private-key'], write: ['--output-document', '-O', '--output-file', '-o', '--save-cookies'] },
+    sort: { read: ['--files0-from'], write: ['--output', '-o'] }
+  }
+  const rule = rules[executable]
+  if (!rule) return []
+  const options = writesOnly ? rule.write ?? [] : [...rule.read ?? [], ...rule.write ?? []]
+  const targets = []
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]
+    if (word.value === '--') break
+    for (const option of options) {
+      if (word.value === option && words[i + 1]) { targets.push(words[++i]); break }
+      if (option.startsWith('--') && word.value.startsWith(`${option}=`)) { targets.push({ ...word, value: word.value.slice(option.length + 1) }); break }
+      if (option.length === 2 && word.value.startsWith('-') && !word.value.startsWith('--')) {
+        const at = word.value.indexOf(option[1], 1)
+        if (at < 1 || [...word.value.slice(1, at)].some(flag => !rule.flags?.includes(flag))) continue
+        if (at + 1 < word.value.length) targets.push({ ...word, value: word.value.slice(at + 1) })
+        else if (words[i + 1]) targets.push(words[++i])
+        break
+      }
+    }
+  }
+  return targets
+}
+
 function namesRelativeDeckControl(hook, depth = 0) {
   if (depth > 4) return true
   const namesControl = (value, shell = false, directory = hook.cwd) => {
@@ -431,6 +463,7 @@ function namesRelativeDeckControl(hook, depth = 0) {
         for (const cwd of commandDirectories) if (namesRelativeDeckControl({ ...hook, cwd, tool_input: { command: inner.value } }, depth + 1)) return true
       }
     }
+    for (const target of optionPaths(executable, args)) for (const cwd of commandDirectories) if (namesControl(target.value, true, cwd)) return true
     if (!['echo', 'printf'].includes(executable)) {
       for (const cwd of commandDirectories) if (args.some(word => word !== scriptArgument && !redirected.has(word) && (word.quoted || !['<', '>'].includes(word.value)) && !word.value.startsWith('-') && namesControl(word.value, true, cwd))) return true
     }
@@ -520,6 +553,7 @@ function shellWriteTargets(command, cwd, requestedCwd = cwd) {
     }
     const executable = path.posix.basename(words[index]?.value ?? '')
     const args = words.slice(index + 1).map(word => word.value)
+    for (const target of optionPaths(executable, words.slice(index + 1), true)) add(target.value, commandDirectory, target.quoted, commandRequestedDirectory)
     if (['sh', 'bash', 'zsh'].includes(executable)) {
       const at = args.findIndex(arg => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))
       if (at >= 0 && words[index + at + 2]?.quoted) targets.push({ command: args[at + 1], cwd: commandDirectory, requestedCwd: commandRequestedDirectory })

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync as executeFile } from 'node:child_process'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { test } from 'node:test'
@@ -13,6 +13,13 @@ import { createProjector } from '../../server/machines/projector.mjs'
 import { applySessionHook, captureReviewBaseline } from '../../server/machines/session.mjs'
 import { projectHome } from '../../server/machines/counts.mjs'
 import { expireRequests, permissionTier } from '../../server/machines/request.mjs'
+
+function execFileSync(file, args, options = {}) {
+  if (path.basename(file) !== 'git') return executeFile(file, args, options)
+  const env = { ...process.env, ...options.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0' }
+  for (const key of Object.keys(env)) if (/^GIT_CONFIG_(?:COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)$/.test(key)) delete env[key]
+  return executeFile(file, ['-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', ...args], { ...options, env })
+}
 
 const fixtureDir = new URL('../fixtures/hooks/2.1.282/', import.meta.url)
 function fixture(name, changes = {}) {
@@ -4929,5 +4936,206 @@ test('observed repo display names and persistent crew slots distinguish collisio
     const before = rows.map(row => ({ ...row }))
     h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { session_id: 'crew-0', cwd: directories[0] }), hookTs: 2000, claudePid: 100, pidChain: [100] }])
     assert.deepEqual(h.store.all('SELECT * FROM repos ORDER BY first_seen_at').map(row => ({ ...row })), before)
+  } finally { h.close() }
+})
+
+test('builtin ident checkout stays clean while edits and reviewed contents use normalized bytes', () => {
+  const h = harness()
+  const root = path.join(path.dirname(h.file), 'repo')
+  mkdirSync(root)
+  try {
+    const git = args => execFileSync('git', ['-C', root, ...args], { timeout: 2000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } })
+    git(['init', '-q'])
+    writeFileSync(path.join(root, '.gitattributes'), 'file.txt ident text eol=crlf\nboundary.txt ident\n')
+    const file = path.join(root, 'file.txt')
+    writeFileSync(file, '$Id$\n')
+    const boundary = path.join(root, 'boundary.txt')
+    writeFileSync(boundary, `${'x'.repeat(65534)}$Id$\n`)
+    git(['add', '.'])
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
+    rmSync(file)
+    rmSync(boundary)
+    git(['restore', 'file.txt', 'boundary.txt'])
+    assert.match(readFileSync(boundary, 'utf8').slice(65534), /^\$Id: [0-9a-f]+ \$\n$/)
+    assert.match(readFileSync(file, 'utf8'), /^\$Id: [0-9a-f]+ \$\r\n$/)
+    assert.equal(git(['status', '--porcelain']).toString(), '')
+    const send = (name, at) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { cwd: root, hook_event_name: name, prompt: 'work', stop_hook_active: false }), hookTs: at }])
+    send('SessionStart', 1000)
+    send('UserPromptSubmit', 2000)
+    send('Stop', 3000)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
+    assert.equal(h.projector.snapshot().counts.toReview, 0)
+    const sentinel = path.join(root, '.git', 'executed')
+    const program = path.join(root, '.git', 'probe')
+    writeFileSync(program, `#!/bin/sh\nprintf executed > '${sentinel}'\ncat\n`, { mode: 0o700 })
+    for (const setting of ['filter.probe.clean', 'filter.probe.smudge', 'filter.probe.process', 'core.fsmonitor', 'diff.external', 'diff.probe.textconv']) git(['config', setting, program])
+    writeFileSync(path.join(root, '.gitattributes'), 'file.txt ident text eol=crlf filter=probe diff=probe\nboundary.txt ident\n')
+    writeFileSync(file, readFileSync(file, 'utf8') + 'second\r\nthird\r\n')
+    send('UserPromptSubmit', 4000)
+    send('Stop', 5000)
+    const session = h.projector.snapshot().sessions[0]
+    const changed = session.changedFiles.find(row => row.path === file)
+    assert.deepEqual([changed.adds, changed.dels], [2, 0])
+    assert.equal(session.state, 'done')
+    h.projector.signal(session.id, { type: 'review' }, 6000)
+    writeFileSync(file, readFileSync(file, 'utf8').replace(/\$Id: [0-9a-f]+ \$/, `$Id: ${'f'.repeat(40)} $`))
+    send('UserPromptSubmit', 7000)
+    send('Stop', 8000)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    writeFileSync(file, readFileSync(file, 'utf8') + 'fourth\r\n')
+    send('UserPromptSubmit', 9000)
+    send('Stop', 10000)
+    const after = h.projector.snapshot().sessions[0].changedFiles.find(row => row.path === file)
+    assert.deepEqual([after.adds, after.dels], [1, 0])
+    assert.equal(existsSync(sentinel), false)
+  } finally { h.close() }
+})
+
+test('sparse omitted tracked files stay clean while present edits real deletions and staged omissions remain reviewable', () => {
+  const h = harness()
+  const root = path.join(path.dirname(h.file), 'repo')
+  mkdirSync(root)
+  try {
+    const git = args => execFileSync('git', ['-C', root, ...args], { timeout: 2000, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } })
+    git(['init', '-q'])
+    for (const directory of ['keep', 'omit']) mkdirSync(path.join(root, directory))
+    writeFileSync(path.join(root, 'keep', 'a.txt'), 'original\n')
+    writeFileSync(path.join(root, 'keep', 'deleted.txt'), 'delete me\n')
+    writeFileSync(path.join(root, 'omit', 'b.txt'), 'omitted\n')
+    git(['add', '.'])
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
+    git(['sparse-checkout', 'init', '--cone'])
+    git(['sparse-checkout', 'set', 'keep'])
+    assert.equal(existsSync(path.join(root, 'omit', 'b.txt')), false)
+    assert.equal(git(['status', '--porcelain']).toString(), '')
+    const send = (name, at) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { cwd: root, hook_event_name: name, prompt: 'work', stop_hook_active: false }), hookTs: at }])
+    send('SessionStart', 1000)
+    send('UserPromptSubmit', 2000)
+    send('Stop', 3000)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
+    assert.equal(h.projector.snapshot().counts.toReview, 0)
+    writeFileSync(path.join(root, 'keep', 'a.txt'), 'new\nsecond\n')
+    rmSync(path.join(root, 'keep', 'deleted.txt'))
+    send('UserPromptSubmit', 4000)
+    send('Stop', 5000)
+    let session = h.projector.snapshot().sessions[0]
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]).sort(), [['keep/a.txt', 2, 1], ['keep/deleted.txt', 0, 1]])
+    h.projector.signal(session.id, { type: 'review' }, 6000)
+    send('UserPromptSubmit', 7000)
+    send('Stop', 8000)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    mkdirSync(path.join(root, 'omit'))
+    writeFileSync(path.join(root, 'omit', 'b.txt'), 'present edit\n')
+    send('UserPromptSubmit', 9000)
+    send('Stop', 10000)
+    session = h.projector.snapshot().sessions[0]
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [['omit/b.txt', 1, 1]])
+    h.projector.signal(session.id, { type: 'review' }, 11000)
+    rmSync(path.join(root, 'omit', 'b.txt'))
+    git(['update-index', '--force-remove', 'omit/b.txt'])
+    send('UserPromptSubmit', 12000)
+    send('Stop', 13000)
+    session = h.projector.snapshot().sessions[0]
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [['omit/b.txt', 0, 1]])
+    assert.equal(session.state, 'done')
+  } finally { h.close() }
+})
+
+test('literal path-valued options enforce control floors without interpreting ordinary option text', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-option-controls-'))
+  const old = process.env.XDG_STATE_HOME
+  try {
+    process.env.XDG_STATE_HOME = path.join(root, 'state')
+    const deck = path.join(process.env.XDG_STATE_HOME, 'fleetmates', 'deck')
+    const project = path.join(root, 'project')
+    mkdirSync(deck, { recursive: true })
+    mkdirSync(project)
+    mkdirSync(path.join(project, '.claude'))
+    writeFileSync(path.join(deck, 'token'), 'synthetic-token\n', { mode: 0o600 })
+    symlinkSync(deck, path.join(project, 'cache'))
+    writeFileSync(path.join(project, '.claude', 'settings.json'), '{}\n')
+    symlinkSync(path.join(project, '.claude', 'settings.json'), path.join(project, 'settings-link'))
+    const tier = command => permissionTier({ cwd: project, tool_name: 'Bash', tool_input: { command } }, { repoRoot: project })
+    for (const command of ['grep --file=cache/token', 'grep --file="cache/token"', 'grep -fcache/token', 'sed --file=cache/token', 'awk -fcache/token', 'curl --config=cache/token', 'curl -Kcache/token', 'env -C cache grep --file=token', 'sh -c \'grep --file="$XDG_STATE_HOME/fleetmates/deck/token"\'', 'curl --output=settings-link https://example.invalid', 'curl -osettings-link https://example.invalid']) assert.equal(tier(command), 'destructive', command)
+    for (const command of ['grep --file=ordinary.txt', 'grep --regexp=cache/token', 'sed --expression=cache/token', 'curl --output=ordinary.txt https://example.invalid', 'unknown --file=cache/token']) assert.equal(tier(command), 'caution', command)
+    assert.equal(readFileSync(path.join(project, 'cache', 'token'), 'utf8'), 'synthetic-token\n')
+  } finally { old === undefined ? delete process.env.XDG_STATE_HOME : process.env.XDG_STATE_HOME = old; rmSync(root, { recursive: true, force: true }) }
+})
+
+test('fixture Git ignores private hostile global system and signing configuration while retaining local config', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-fixture-config-'))
+  try {
+    const sentinel = path.join(root, 'executed')
+    const program = path.join(root, 'synthetic-hook')
+    writeFileSync(program, `#!/bin/sh\nprintf executed > '${sentinel}'\n`, { mode: 0o700 })
+    const global = path.join(root, 'global-config')
+    const system = path.join(root, 'system-config')
+    const contents = `[commit]\n gpgsign = true\n[gpg]\n program = /bin/false\n[core]\n hooksPath = ${program}\n fsmonitor = ${program}\n[fixture]\n owner = forbidden\n`
+    writeFileSync(global, contents)
+    writeFileSync(system, contents)
+    const repo = path.join(root, 'repo')
+    mkdirSync(repo)
+    const env = { ...process.env, HOME: root, XDG_CONFIG_HOME: root, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_SYSTEM: system, GIT_CONFIG_NOSYSTEM: '0' }
+    const git = args => execFileSync('git', ['-C', repo, ...args], { timeout: 2000, env })
+    git(['init', '-q', '--initial-branch=fixture-branch'])
+    git(['config', 'commit.gpgsign', 'true'])
+    git(['config', 'gpg.program', '/bin/false'])
+    assert.doesNotThrow(() => git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'fixture']))
+    assert.equal(git(['log', '-1', '--format=%s']).toString().trim(), 'fixture')
+    git(['config', 'core.filemode', 'false'])
+    assert.equal(git(['config', '--bool', '--get', 'core.filemode']).toString().trim(), 'false')
+    assert.throws(() => git(['config', '--get', 'fixture.owner']), error => error.status === 1)
+    assert.equal(existsSync(sentinel), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('sparse staged blobs retain accurate totals review boundaries and known edits on missing objects', () => {
+  const h = harness()
+  const root = path.join(path.dirname(h.file), 'repo')
+  mkdirSync(root)
+  try {
+    const git = (args, input) => execFileSync('git', ['-C', root, ...args], { timeout: 2000, input })
+    git(['init', '-q'])
+    for (const directory of ['keep', 'omit']) mkdirSync(path.join(root, directory))
+    writeFileSync(path.join(root, 'keep', 'a'), 'keep\n')
+    writeFileSync(path.join(root, 'omit', 'b'), 'original\n')
+    git(['add', '.'])
+    git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
+    git(['sparse-checkout', 'init', '--cone'])
+    git(['sparse-checkout', 'set', 'keep'])
+    const stage = contents => {
+      const oid = git(['hash-object', '-w', '--stdin'], contents).toString().trim()
+      git(['update-index', '--cacheinfo', `100644,${oid},omit/b`])
+      git(['update-index', '--skip-worktree', 'omit/b'])
+      assert.equal(git(['ls-files', '-t', 'omit/b']).toString(), 'S omit/b\n')
+      assert.equal(existsSync(path.join(root, 'omit', 'b')), false)
+      return oid
+    }
+    stage('new\nsecond\n')
+    const send = (name, at) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { cwd: root, hook_event_name: name, prompt: 'work', stop_hook_active: false }), hookTs: at }])
+    send('SessionStart', 1000)
+    send('UserPromptSubmit', 2000)
+    send('Stop', 3000)
+    let session = h.projector.snapshot().sessions[0]
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [['omit/b', 2, 1]])
+    h.projector.signal(session.id, { type: 'review' }, 4000)
+    send('UserPromptSubmit', 5000)
+    send('Stop', 6000)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    const oid = stage('new\nthird\n')
+    send('UserPromptSubmit', 7000)
+    send('Stop', 8000)
+    session = h.projector.snapshot().sessions[0]
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [['omit/b', 1, 1]])
+    const boundary = h.store.get('SELECT review_baseline FROM sessions WHERE id=?', session.id).review_baseline
+    rmSync(path.join(root, '.git', 'objects', oid.slice(0, 2), oid.slice(2)))
+    send('UserPromptSubmit', 9000)
+    send('Stop', 10000)
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, session.changedFiles)
+    h.projector.signal(session.id, { type: 'review' }, 11000)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+    assert.equal(h.store.get('SELECT review_baseline FROM sessions WHERE id=?', session.id).review_baseline, boundary)
   } finally { h.close() }
 })

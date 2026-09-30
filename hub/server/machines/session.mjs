@@ -71,7 +71,7 @@ function workingPath(root, name, budget) {
   return file
 }
 
-function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false) {
+function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false, ident = false) {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const before = fstatSync(fd)
@@ -80,6 +80,23 @@ function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false) {
     const pass = consume => {
       let position = 0
       let pendingCR = false
+      let marker = []
+      const send = chunk => {
+        if (!ident) { consume(chunk); return }
+        const output = []
+        for (const byte of chunk) {
+          if (!marker.length) { if (byte === 36) marker.push(byte); else output.push(byte); continue }
+          if (marker.length < 4) {
+            if (byte === [36, 73, 100, 58][marker.length]) { marker.push(byte); continue }
+            output.push(...marker)
+            marker = byte === 36 ? [byte] : []
+            if (byte !== 36) output.push(byte)
+          } else if (byte === 36) { output.push(36, 73, 100, 36); marker = [] }
+          else if (byte === 10) { output.push(...marker, byte); marker = [] }
+          else { marker.push(byte); if (marker.length > 4096) throw new Error('ident scan limit') }
+        }
+        consume(Buffer.from(output))
+      }
       while (position < before.size) {
         if (Date.now() > budget.deadline) throw new Error('scan timeout')
         const length = readSync(fd, buffer, 0, Math.min(buffer.length, before.size - position), position)
@@ -87,7 +104,7 @@ function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false) {
         budget.remaining -= length
         position += length
         const chunk = buffer.subarray(0, length)
-        if (!normalize) { consume(chunk); continue }
+        if (!normalize) { send(chunk); continue }
         const output = Buffer.alloc(length + 1)
         let used = 0
         for (const byte of chunk) {
@@ -95,12 +112,13 @@ function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false) {
           pendingCR = byte === 13
           if (!pendingCR) output[used++] = byte
         }
-        consume(output.subarray(0, used))
+        send(output.subarray(0, used))
       }
-      if (pendingCR) consume(Buffer.from([13]))
+      if (pendingCR) send(Buffer.from([13]))
+      if (marker.length) consume(Buffer.from(marker))
     }
     let size = before.size
-    if (blob && normalize) { size = 0; pass(chunk => { size += chunk.length }) }
+    if (blob && (normalize || ident)) { size = 0; pass(chunk => { size += chunk.length }) }
     const hash = createHash(algorithm)
     if (blob) hash.update(`blob ${size}\0`)
     pass(chunk => hash.update(chunk))
@@ -114,7 +132,13 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
   if (depth > 4 || Date.now() >= budget.deadline) return null
   const tree = head === 'unborn' ? Buffer.alloc(0) : git(root, ['ls-tree', '-r', '-z', head], budget)
   const namesOnly = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], budget)
-  if (!tree || !namesOnly) return null
+  const indexOutput = git(root, ['ls-files', '--stage', '-t', '-z'], budget)
+  if (!tree || !namesOnly || !indexOutput) return null
+  const sparse = new Map()
+  for (const record of indexOutput.toString('utf8').split('\0').filter(Boolean)) {
+    const match = /^S (\d+) ([0-9a-f]{40,64}) 0\t([\s\S]+)$/.exec(record)
+    if (match) sparse.set(match[3], { mode: match[1], oid: match[2] })
+  }
   const autoCRLF = /^(true|input)$/.test(git(root, ['config', '--get', 'core.autocrlf'], budget)?.toString('utf8').trim() ?? '')
   const fileMode = git(root, ['config', '--bool', '--get', 'core.filemode'], budget)?.toString('utf8').trim() !== 'false'
   const entries = new Map()
@@ -130,7 +154,7 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
   catch { return null }
   const listed = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '--eol', '-z'], budget)
   if (!listed) return null
-  const blobs = [...new Set([...entries.values()].filter(entry => entry.type === 'blob').map(entry => entry.oid))]
+  const blobs = [...new Set([...entries.values()].filter(entry => entry.type === 'blob').map(entry => entry.oid).concat([...sparse.values()].filter(entry => entry.mode !== '160000').map(entry => entry.oid)))]
   if (blobs.length) {
     const checked = git(root, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], budget, false, `${blobs.join('\n')}\n`)?.toString('utf8').trim().split('\n')
     if (!checked || checked.length !== blobs.length || checked.some((line, index) => line !== `${blobs[index]} blob`)) return null
@@ -145,12 +169,27 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
     normalization.set(name, explicitText || autoText && worktreeEol !== '-text' && !['crlf', 'mixed'].includes(indexEol))
   }
   const names = new Set([...entries.keys(), ...normalization.keys()])
+  const ident = new Set()
+  if (names.size) {
+    const attributes = git(root, ['check-attr', '-z', '--stdin', 'ident'], budget, false, `${[...names].join('\0')}\0`)?.toString('utf8').split('\0')
+    if (!attributes) return null
+    for (let i = 0; i + 2 < attributes.length; i += 3) if (attributes[i + 2] === 'set') ident.add(attributes[i])
+  }
   budget.remainingPaths -= names.size
   if (budget.remainingPaths < 0 || Date.now() >= budget.deadline) return null
   const paths = new Map()
   const gitlinks = new Map()
   for (const name of names) {
     const entry = entries.get(name)
+    const skipped = sparse.get(name)
+    if (skipped) {
+      try { lstatSync(workingPath(root, name, budget)) }
+      catch (error) {
+        if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return null
+        if (!entry || entry.oid !== skipped.oid || entry.mode !== skipped.mode) paths.set(name, { adds: null, dels: null })
+        continue
+      }
+    }
     if (entry?.type === 'commit') {
       let location
       try { location = workingPath(root, name, budget) } catch { return null }
@@ -173,7 +212,7 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
           oid = createHash(algorithm).update(`blob ${content.length}\0`).update(content).digest('hex')
           mode = '120000'
         } else if (stat.isFile()) {
-          oid = hashFile(location, normalization.get(name) ?? false, budget, algorithm, true)
+          oid = hashFile(location, normalization.get(name) ?? false, budget, algorithm, true, ident.has(name))
           mode = stat.mode & 0o111 ? '100755' : '100644'
         } else return null
         unchanged = oid === entry.oid && (mode === entry.mode || !fileMode && ['100644', '100755'].includes(mode) && ['100644', '100755'].includes(entry.mode))
@@ -181,7 +220,7 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
     }
     if (!unchanged) paths.set(name, { adds: null, dels: null })
   }
-  return paths.size <= maxChangedPaths ? { paths, normalization, budget, fileMode, gitlinks, depth, entries } : null
+  return paths.size <= maxChangedPaths ? { paths, normalization, ident, sparse, budget, fileMode, gitlinks, depth, entries } : null
 }
 
 function fileFingerprint(root, name, scan) {
@@ -197,9 +236,12 @@ function fileFingerprint(root, name, scan) {
     if (stat.isSymbolicLink()) return `link:${createHash('sha256').update(readlinkSync(file)).digest('hex')}`
     if (!stat.isFile()) throw new Error('unsupported file')
     const executable = scan.fileMode && stat.mode & 0o111 ? 'x' : '-'
-    return `file:${executable}:${hashFile(file, scan.normalization.get(name) ?? false, scan.budget)}`
+    return `file:${executable}:${hashFile(file, scan.normalization.get(name) ?? false, scan.budget, 'sha256', false, scan.ident?.has(name))}`
   } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+      const skipped = scan.sparse?.get(name)
+      return skipped ? `sparse:${skipped.mode}:${skipped.oid}` : null
+    }
     throw error
   }
 }
@@ -265,16 +307,23 @@ function lineBytes(root, name, scan, budget) {
     budget.remaining -= bytes.length
     const after = fstatSync(fd)
     if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) return null
-    if (!scan.normalization.get(name)) return bytes
+    const finish = value => scan.ident?.has(name) ? Buffer.from(value.toString('latin1').replace(/\$Id:[^\n$]*\$/g, '$Id$'), 'latin1') : value
+    if (!scan.normalization.get(name)) return finish(bytes)
     const normalized = Buffer.alloc(bytes.length)
     let used = 0
     for (let index = 0; index < bytes.length; index++) {
       if (bytes[index] === 13 && bytes[index + 1] === 10) continue
       normalized[used++] = bytes[index]
     }
-    return normalized.subarray(0, used)
+    return finish(normalized.subarray(0, used))
   } catch (error) {
-    return ['ENOENT', 'ENOTDIR'].includes(error.code) ? Buffer.alloc(0) : null
+    if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return null
+    const skipped = scan.sparse?.get(name)
+    if (!skipped) return Buffer.alloc(0)
+    const bytes = git(root, ['cat-file', 'blob', skipped.oid], budget)
+    if (!bytes || bytes.length > budget.remaining) return null
+    budget.remaining -= bytes.length
+    return bytes
   } finally { if (fd !== undefined) closeSync(fd) }
 }
 
@@ -320,7 +369,9 @@ export function captureReviewBaseline(root, previous = null, includeExisting = t
     const contents = Object.fromEntries(Object.keys(files).map(name => {
       const bytes = lineBytes(root, name, scan, budget)
       const digest = bytes && createHash('sha256').update(bytes).digest('hex')
-      const consistent = files[name] === null && bytes?.length === 0 || files[name]?.endsWith(digest ?? '-')
+      const skipped = scan.sparse?.get(name)
+      const sparseContent = skipped && bytes && files[name] === `sparse:${skipped.mode}:${skipped.oid}` && createHash(skipped.oid.length === 64 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex') === skipped.oid
+      const consistent = files[name] === null && bytes?.length === 0 || files[name]?.endsWith(digest ?? '-') || sparseContent
       return [name, bytes && consistent ? bytes.toString('base64') : null]
     }))
     return JSON.stringify({ head, files, contents })
