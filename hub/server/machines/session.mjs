@@ -301,20 +301,38 @@ export function resolveSession(store, envelope) {
   return null
 }
 
+/** Recognize starts from obsolete conversations or conflicting live processes. */
+export function isObsoleteSessionStart(store, session, envelope) {
+  if (!session?.alive || envelope.hook.hook_event_name !== 'SessionStart') return false
+  if (!sameKnownProcess(store, session, envelope)) return true
+  if (envelope.hook.session_id === session.claude_session_id) return false
+  const alias = store.get('SELECT claude_session_id FROM session_aliases WHERE session_id=? AND claude_session_id=?', session.id, envelope.hook.session_id)
+  return !!alias && (envelope.hook.source !== 'resume' || envelope.hookTs < session.since_ts)
+}
+
 /** Record a current process conversation without changing its activity or state. */
 export function recordSessionIdentity(store, session, envelope) {
   const hook = envelope.hook
-  if (!session.alive || hook.session_id === session.claude_session_id || !sameKnownProcess(store, session, envelope)) return session
+  if (!session.alive || isObsoleteSessionStart(store, session, envelope) || !sameKnownProcess(store, session, envelope)) return session
   const processMatches = envelope.ptyId && envelope.ptyId === session.pty_id
     || envelope.claudePid && (session.pty_id || String(envelope.claudePid) === session.process_key)
   if (!processMatches) return session
-  const boundary = store.get('SELECT MAX(replaced_at) AS at FROM session_aliases WHERE session_id=?', session.id).at ?? session.started_at
-  if (envelope.hookTs < boundary) return session
-  const oldAlias = store.get('SELECT claude_session_id FROM session_aliases WHERE session_id=? AND claude_session_id=?', session.id, hook.session_id)
-  if (oldAlias && !(hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source) && envelope.hookTs >= session.since_ts)) return session
-  const source = hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork', 'compact'].includes(hook.source) ? hook.source : 'heuristic'
-  store.run('INSERT OR IGNORE INTO session_aliases(claude_session_id,session_id,replaced_at,source) VALUES(?,?,?,?)', session.claude_session_id, session.id, envelope.hookTs, source)
-  store.run('UPDATE sessions SET claude_session_id=?,transcript_path=? WHERE id=?', hook.session_id, hook.transcript_path ?? session.transcript_path, session.id)
+  const replacement = hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source) && ['clear', 'resume'].includes(session.end_reason)
+  const pendingEnd = replacement ? store.get('SELECT hook_ts FROM hook_events WHERE session_id=? AND event=? AND applied=1 ORDER BY hook_ts DESC,id DESC LIMIT 1', session.id, 'SessionEnd') : null
+  if (replacement && (!pendingEnd || envelope.hookTs < pendingEnd.hook_ts)) return session
+  if (hook.session_id !== session.claude_session_id) {
+    const boundary = store.get('SELECT MAX(replaced_at) AS at FROM session_aliases WHERE session_id=?', session.id).at ?? session.started_at
+    if (envelope.hookTs < boundary) return session
+    const oldAlias = store.get('SELECT claude_session_id FROM session_aliases WHERE session_id=? AND claude_session_id=?', session.id, hook.session_id)
+    if (oldAlias && !(hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source) && envelope.hookTs >= session.since_ts)) return session
+    const source = hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork', 'compact'].includes(hook.source) ? hook.source : 'heuristic'
+    store.run('INSERT OR IGNORE INTO session_aliases(claude_session_id,session_id,replaced_at,source) VALUES(?,?,?,?)', session.claude_session_id, session.id, envelope.hookTs, source)
+    store.run('UPDATE sessions SET claude_session_id=?,transcript_path=? WHERE id=?', hook.session_id, hook.transcript_path ?? session.transcript_path, session.id)
+  }
+  if (replacement) {
+    store.run('UPDATE sessions SET end_reason=NULL WHERE id=?', session.id)
+    store.run('UPDATE requests SET state=?,expired_reason=? WHERE session_id=? AND state=? AND created_at < ?', 'expired', 'session_replaced', session.id, 'open', envelope.hookTs)
+  }
   return store.get('SELECT * FROM sessions WHERE id=?', session.id)
 }
 

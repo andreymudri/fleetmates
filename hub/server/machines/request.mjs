@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { homedir } from 'node:os'
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
@@ -98,7 +99,15 @@ function envSplitTokens(text, location) {
       if (!quote) { quote = char; active = true; continue }
       if (quote === char) { quote = null; continue }
     }
-    if (char === '$' && quote !== "'") return null
+    if (char === '$' && quote !== "'") {
+      const reference = /^\$\{[A-Z_]+\}/.exec(text.slice(i))?.[0]
+      const expanded = reference && knownShellPath(reference)
+      if (!expanded || expanded === reference) return null
+      value += expanded
+      active = true
+      i += reference.length - 1
+      continue
+    }
     if (char === '\\') {
       const next = text[i + 1]
       if (next === undefined) return null
@@ -302,7 +311,7 @@ function canonicalExistingPath(location) {
 function knownShellPath(value) {
   return value.replace(/^\$(?:([A-Z_]+)|\{([A-Z_]+)\})(?=\/|$)/, (match, plain, braced) => {
     const variable = plain ?? braced
-    const configured = ['XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'].includes(variable) ? process.env[variable] : null
+    const configured = ['HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'].includes(variable) ? process.env[variable] : null
     return configured && path.isAbsolute(configured) ? configured : match
   })
 }
@@ -433,14 +442,14 @@ function namesRelativeDeckControl(hook, depth = 0) {
 function shellWriteTargets(command, cwd) {
   let directory = cwd
   const targets = []
-  const add = (target, cwd = directory) => targets.push({ file_path: target, cwd })
+  const add = (target, cwd = directory, quoted = false) => targets.push({ file_path: target, cwd, quoted })
   const tokens = shellTokens(command)
   const inspect = words => {
     for (let i = 0; i < words.length; i++) {
       if (words[i].value !== '>' || words[i].quoted) continue
       while (words[i + 1]?.value === '>' && !words[i + 1].quoted) i++
       const target = words[i + 1]
-      if (target && !target.separator && target.value !== '&') add(target.value)
+      if (target && !target.separator && target.value !== '&') add(target.value, directory, target.quoted)
     }
     let commandDirectory = directory
     let wrapped = false
@@ -476,13 +485,14 @@ function shellWriteTargets(command, cwd) {
       if (target && !/[$*?`]/.test(target)) directory = path.resolve(directory ?? '', target)
     }
     if (executable === 'dd') {
-      for (const arg of args) if (arg.startsWith('of=')) add(arg.slice(3), commandDirectory)
+      for (const [at, arg] of args.entries()) if (arg.startsWith('of=')) add(arg.slice(3), commandDirectory, words[index + at + 1].quoted)
     }
     const editsInPlace = ['sed', 'perl'].includes(executable) && args.some(arg => arg === '--in-place' || arg.startsWith('--in-place=') || /^-i/.test(arg))
     if (['tee', 'cp', 'mv', 'install', 'touch', 'truncate'].includes(executable) || editsInPlace) {
-      for (const arg of args) {
-        if (arg.startsWith('--target-directory=')) add(arg.slice('--target-directory='.length), commandDirectory)
-        else if (!arg.startsWith('-') && !['<', '>'].includes(arg)) add(arg, commandDirectory)
+      for (const [at, arg] of args.entries()) {
+        const quoted = words[index + at + 1].quoted
+        if (arg.startsWith('--target-directory=')) add(arg.slice('--target-directory='.length), commandDirectory, quoted)
+        else if (!arg.startsWith('-') && !['<', '>'].includes(arg)) add(arg, commandDirectory, quoted)
       }
     }
   }
@@ -492,7 +502,7 @@ function shellWriteTargets(command, cwd) {
     else segment.push(token)
   }
   inspect(segment)
-  return targets.filter(target => typeof target.command === 'string' || target.file_path && !/[$*?`]/.test(target.file_path))
+  return targets.map(target => target.file_path ? { ...target, file_path: knownShellPath(target.file_path) } : target).filter(target => typeof target.command === 'string' || target.file_path && !/[$`]/.test(target.file_path) && (target.quoted || !/[*?]/.test(target.file_path)))
 }
 
 function sensitiveWrite(hook, repoRoot, depth = 0) {
@@ -505,6 +515,12 @@ function sensitiveWrite(hook, repoRoot, depth = 0) {
   if (!fileTool) return shellWriteTargets(raw, hook.cwd ?? repoRoot).some(target => sensitiveWrite({ ...hook, cwd: target.cwd, tool_name: target.command === undefined ? 'Write' : 'Bash', tool_input: target.command === undefined ? { file_path: target.file_path } : { command: target.command } }, repoRoot, depth + 1))
   const location = fileTool ? canonicalExistingPath(path.resolve(hook.cwd ?? repoRoot ?? '', raw)) : null
   const normalized = (location ?? raw).replaceAll('\\', '/')
+  const home = process.env.HOME && path.isAbsolute(process.env.HOME) ? process.env.HOME : homedir()
+  const data = process.env.XDG_DATA_HOME && path.isAbsolute(process.env.XDG_DATA_HOME) ? process.env.XDG_DATA_HOME : path.join(home, '.local', 'share')
+  const installedHook = path.join(data, 'fleetmates-deck', 'hook', 'deck-hook.mjs')
+  if (location === canonicalExistingPath(installedHook) || location === canonicalExistingPath(path.dirname(installedHook))) return true
+  if (/(?:^|\/)\.local\/share\/fleetmates-deck\/hook(?:\/deck-hook\.mjs)?$/.test(normalized)) return true
+
   if (fileTool && /(?:^|\/)(?:\.git|\.claude)(?:\/hooks)?$/.test(normalized)) return true
   if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true
   if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true

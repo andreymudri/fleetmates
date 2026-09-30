@@ -3107,3 +3107,165 @@ test('env split string controls honor command-local cwd and nested read write sc
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+test('delayed replacement starts disarm only their accepted process timer and preserve newer requests', () => {
+  for (const reason of ['clear', 'resume']) for (const late of [false, true]) for (const requests of [false, 'older-only', true]) for (const wrapped of [false, true]) {
+    const h = harness()
+    try {
+      const send = (event, conversation, at, fields = {}) => {
+        const envelope = { ...fixture('SessionStart.startup.json', { hook_event_name: event, session_id: conversation, cwd: path.dirname(h.file), ...fields }), hookTs: at, ptyId: wrapped ? 'replacement-pty' : null }
+        assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true)
+        return h.projector.applyHooks([envelope])
+      }
+      send('SessionStart', 'old', 1000)
+      const id = h.projector.snapshot().sessions[0].id
+      if (requests) send('PermissionRequest', 'old', 2500, { tool_name: 'Bash', tool_input: { command: 'old command' } })
+      send('SessionEnd', 'old', 3000, { reason })
+      if (!late) send('SessionStart', 'new', 4000, { source: reason })
+      if (requests) send('PreToolUse', 'new', 4100, { tool_name: 'Read', tool_input: { file_path: '/tmp/plain' } })
+      else send('UserPromptSubmit', 'new', 4100, { prompt: 'Continue working' })
+      if (requests === true) send('PermissionRequest', 'new', 4200, { tool_name: 'Bash', tool_input: { command: 'new command' } })
+      const before = h.store.get('SELECT * FROM sessions WHERE id=?', id)
+      const currentRequest = h.store.get('SELECT * FROM requests WHERE session_id=? AND created_at=?', id, 4200)
+      const events = late ? send('SessionStart', 'new', 4000, { source: reason }) : []
+      const after = h.store.get('SELECT * FROM sessions WHERE id=?', id)
+      assert.equal(after.end_reason, null, `${reason} late=${late} requests=${requests}`)
+      for (const key of ['state', 'state_since', 'since_ts', 'last_activity_at', 'process_key', 'pty_id', 'review_baseline']) assert.equal(after[key], key === 'state' && late && requests === 'older-only' ? 'running' : before[key], key)
+      if (requests) {
+        if (requests === true) assert.deepEqual(h.store.get('SELECT * FROM requests WHERE id=?', currentRequest.id), currentRequest)
+        assert.equal(h.store.get('SELECT state FROM requests WHERE session_id=? AND created_at=?', id, 2500).state, 'expired')
+        assert.equal(h.store.get('SELECT expired_reason FROM requests WHERE session_id=? AND created_at=?', id, 2500).expired_reason, 'session_replaced')
+        if (late) assert.equal(events.filter(event => event.type === 'request.closed').length, 1)
+      }
+      h.projector.tick(10000)
+      send('PreToolUse', 'new', 10100, { tool_name: 'Read', tool_input: { file_path: '/tmp/plain' } })
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+      assert.equal(h.projector.snapshot().sessions[0].id, id)
+      assert.equal(h.projector.snapshot().sessions[0].alive, true)
+      assert.equal(h.projector.snapshot().sessions[0].state, requests === true ? 'needs_approval' : 'running')
+      assert.equal(h.projector.snapshot().sessions[0].lastActivityAt, 10100)
+      assert.equal(h.store.get('SELECT COUNT(*) AS n FROM session_summaries').n, 0)
+      assert.deepEqual(h.store.all('SELECT claude_session_id FROM session_aliases WHERE session_id=?', id).map(row => row.claude_session_id), ['old'])
+      if (requests === true) send('PostToolUse', 'new', 11000, { tool_name: 'Bash', tool_input: { command: 'new command' }, tool_response: 'ok' })
+      send('SessionEnd', 'new', 12000, { reason: 'logout' })
+      if (wrapped) h.projector.signal(id, { type: 'exit', code: 0 }, 12001)
+      assert.deepEqual(JSON.parse(h.store.get('SELECT claude_session_ids FROM session_summaries WHERE session_id=?', id).claude_session_ids), ['old', 'new'])
+      send('SessionStart', 'new', 13000, { source: 'resume' })
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+      assert.equal(h.projector.snapshot().sessions[0].id, id)
+      assert.equal(h.projector.snapshot().sessions[0].alive, true)
+    } finally { h.close() }
+  }
+})
+
+test('obsolete conversation and process starts leave a legitimate alias timer armed', () => {
+  for (const reason of ['clear', 'resume']) for (const stale of ['conversation', 'process', 'before-end']) for (const wrapped of [false, true]) for (const newerActivity of [false, true]) {
+    const h = harness()
+    try {
+      const send = (event, conversation, at, fields = {}, pid = 42) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { hook_event_name: event, session_id: conversation, cwd: path.dirname(h.file), ...fields }), hookTs: at, ptyId: wrapped ? 'timer-pty' : null, claudePid: pid }])
+      send('SessionStart', 'old', 1000)
+      send('SessionStart', 'current', 2000, { source: reason })
+      const id = h.projector.snapshot().sessions[0].id
+      send('SessionEnd', 'current', 3000, { reason })
+      if (newerActivity) send('UserPromptSubmit', 'current', 4100, { prompt: 'Working' })
+      const before = { ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }
+      send('SessionStart', stale === 'conversation' ? 'old' : stale === 'before-end' ? 'obsolete' : 'current', stale === 'before-end' ? 2500 : 3500, { source: stale === 'conversation' ? 'startup' : reason }, stale === 'process' ? 41 : 42)
+      assert.deepEqual({ ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }, before, stale)
+      assert.equal(h.store.get('SELECT COUNT(*) AS n FROM session_aliases WHERE session_id=?', id).n, 1)
+      send('Notification', 'current', 4200, { notification_type: 'permission_prompt', message: 'Allow Bash?' })
+      h.projector.tick(10000)
+      assert.equal(h.projector.snapshot().sessions[0].alive, wrapped)
+      assert.equal(h.store.get('SELECT end_reason FROM sessions WHERE id=?', id).end_reason, reason)
+      if (wrapped) h.projector.signal(id, { type: 'exit', code: 0 }, 11000)
+      assert.equal(h.projector.snapshot().sessions[0].alive, false)
+      assert.equal(h.projector.snapshot().counts.openRequests, 0)
+    } finally { h.close() }
+  }
+})
+
+test('registered deck hook programs have a write floor across configured roots and literal aliases', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-hook-floor-'))
+  const variables = ['HOME', 'XDG_DATA_HOME']
+  const previous = variables.map(name => process.env[name])
+  try {
+    process.env.HOME = path.join(root, 'home')
+    const project = path.join(root, 'project')
+    mkdirSync(project)
+    for (const configured of [false, true]) {
+      if (configured) process.env.XDG_DATA_HOME = path.join(root, 'data root')
+      else delete process.env.XDG_DATA_HOME
+      const data = configured ? process.env.XDG_DATA_HOME : path.join(process.env.HOME, '.local', 'share')
+      const directory = path.join(data, 'fleetmates-deck', 'hook')
+      const program = path.join(directory, 'deck-hook.mjs')
+      mkdirSync(directory, { recursive: true })
+      writeFileSync(program, 'SYNTHETIC_HOOK_CONTENT', { mode: 0o600 })
+      assert.equal(permissionTier({ cwd: project, tool_name: 'Read', tool_input: { file_path: program } }), 'caution')
+      if (configured) assert.equal(permissionTier({ cwd: project, tool_name: 'Write', tool_input: { file_path: path.join(process.env.HOME, '.local/share/fleetmates-deck/hook/deck-hook.mjs') } }), 'destructive')
+      const alias = path.join(project, configured ? 'installed?hook$`*' : 'installed-hook')
+      symlinkSync(program, alias)
+      const dirAlias = path.join(project, configured ? 'hook-dir?alias' : 'hook-dir')
+      symlinkSync(directory, dirAlias)
+      for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
+        const input = file => tool === 'NotebookEdit' ? { notebook_path: file, new_source: 'synthetic' } : { file_path: file, content: 'synthetic', edits: [] }
+        for (const file of [program, path.relative(project, program), alias, path.basename(alias), path.join(dirAlias, 'deck-hook.mjs'), path.join(path.basename(dirAlias), 'deck-hook.mjs')]) assert.equal(permissionTier({ cwd: project, tool_name: tool, tool_input: input(file) }, { repoRoot: project }), 'destructive', `${tool} ${file}`)
+        for (const file of [path.join(directory, 'ordinary.txt'), path.join(data, 'fleetmates-deck', 'ordinary.txt'), path.join(project, 'deck-hook.mjs')]) assert.equal(permissionTier({ cwd: project, tool_name: tool, tool_input: input(file) }, { repoRoot: project }), 'caution', `${tool} ${file}`)
+      }
+      const tier = command => permissionTier({ cwd: project, tool_name: 'Bash', tool_input: { command } }, { repoRoot: project })
+      for (const command of [
+        `printf x > '${program}'`,
+        `tee '${program}'`,
+        `cp ordinary '${directory}'`,
+        `env -C '${directory}' tee deck-hook.mjs`,
+        `env -S '-C "${directory}" tee deck-hook.mjs'`,
+        `env -C '${directory}' -S 'sh -c "printf x > deck-hook.mjs"'`,
+        `sh -c 'cd "${directory}" && printf x > deck-hook.mjs'`,
+        `tee '${path.basename(dirAlias)}/deck-hook.mjs'`
+      ]) assert.equal(tier(command), 'destructive', command)
+      const variable = configured ? 'XDG_DATA_HOME' : 'HOME'
+      const suffix = configured ? '/fleetmates-deck/hook' : '/.local/share/fleetmates-deck/hook'
+      for (const reference of [`$${variable}`, '${' + variable + '}']) {
+        for (const command of [
+          `printf x > "${reference}${suffix}/deck-hook.mjs"`,
+          `env -C "${reference}${suffix}" tee deck-hook.mjs`,
+          `env -C "${reference}${suffix}" -S 'tee deck-hook.mjs'`,
+          `sh -c 'printf x > "${reference}${suffix}/deck-hook.mjs"'`
+        ]) assert.equal(tier(command), 'destructive', command)
+      }
+      const braced = '${' + variable + '}'
+      for (const command of [
+        `env -S '-C "${braced}${suffix}" tee deck-hook.mjs'`,
+        `env -S 'env -C "${braced}${suffix}" tee deck-hook.mjs'`,
+        `env -S '-C "${braced}${suffix}" sh -c "printf x > deck-hook.mjs"'`
+      ]) assert.equal(tier(command), 'destructive', command)
+      for (const command of [`printf x > '${directory}/ordinary.txt'`, `env -C '${directory}' tee ordinary.txt`, `env -C '${directory}' -S 'printf x'; tee deck-hook.mjs`, 'printf x > "$UNKNOWN/fleetmates-deck/hook/deck-hook.mjs"']) assert.equal(tier(command), 'caution', command)
+      assert.equal(readFileSync(program, 'utf8'), 'SYNTHETIC_HOOK_CONTENT')
+    }
+  } finally {
+    for (const [index, variable] of variables.entries()) {
+      if (previous[index] === undefined) delete process.env[variable]
+      else process.env[variable] = previous[index]
+    }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('an on-time same-process resume may legitimately select a prior conversation alias', () => {
+  const h = harness()
+  try {
+    const send = (event, conversation, at, fields = {}) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { hook_event_name: event, session_id: conversation, ...fields }), hookTs: at }])
+    send('SessionStart', 'old', 1000)
+    const id = h.projector.snapshot().sessions[0].id
+    send('SessionStart', 'current', 2000, { source: 'clear' })
+    send('SessionEnd', 'current', 3000, { reason: 'resume' })
+    send('SessionStart', 'old', 4000, { source: 'resume' })
+    send('UserPromptSubmit', 'old', 4100, { prompt: 'Resume earlier work' })
+    h.projector.tick(10000)
+    assert.equal(h.projector.snapshot().sessions.length, 1)
+    assert.equal(h.projector.snapshot().sessions[0].id, id)
+    assert.equal(h.projector.snapshot().sessions[0].claudeSessionId, 'old')
+    assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+    assert.equal(h.projector.snapshot().sessions[0].alive, true)
+    assert.equal(h.store.get('SELECT end_reason FROM sessions WHERE id=?', id).end_reason, null)
+    assert.deepEqual(h.store.all('SELECT claude_session_id FROM session_aliases WHERE session_id=? ORDER BY replaced_at', id).map(row => row.claude_session_id), ['old', 'current'])
+  } finally { h.close() }
+})
