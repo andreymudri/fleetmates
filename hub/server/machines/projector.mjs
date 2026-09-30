@@ -1,7 +1,7 @@
 import { dedupeKey } from '../ingest/validate.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
 import { applyRequestHook, expireRequests, resumedActivityEvents } from './request.mjs'
-import { applySessionHook, captureReviewBaseline, ignoresSessionHook, persistSessionSummary, refreshSessionChanges, resolveSession } from './session.mjs'
+import { applySessionHook, captureReviewBaseline, ignoresSessionHook, persistSessionSummary, recordSessionIdentity, refreshSessionChanges, resolveSession } from './session.mjs'
 
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
 const rank = event => {
@@ -48,6 +48,9 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           if (store.get('SELECT id FROM hook_events WHERE dedupe_key = ?', key)) continue
           let session = resolveSession(store, envelope)
           if (!session && hook.hook_event_name === 'SessionEnd') continue
+          const previousConversation = session?.claude_session_id
+          if (session && (hook.hook_event_name !== 'SessionStart' || envelope.hookTs < session.since_ts)) session = recordSessionIdentity(store, session, envelope)
+          const identityChanged = !!session && session.claude_session_id !== previousConversation
           const late = !!session && (envelope.hookTs < session.since_ts || !session.alive && !(hook.hook_event_name === 'SessionStart' && hook.source === 'resume'))
           const beforeRequests = session ? new Map(store.all('SELECT * FROM requests WHERE session_id = ?', session.id).map(row => [row.id, requestView(row)])) : new Map()
           let requestChanged = false
@@ -77,7 +80,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
             }
           }
           if (session) persistSessionSummary(store, session)
-          if (session && (!late || requestChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session) })
+          if (session && (!late || requestChanged || identityChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session) })
         }
         store.appendEvent({ at: now(), type: 'counts', data: projectCounts(store) })
       })

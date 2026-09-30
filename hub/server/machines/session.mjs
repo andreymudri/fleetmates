@@ -255,7 +255,7 @@ function sameKnownProcess(store, row, envelope) {
   if (envelope.ptyId && row.pty_id && envelope.ptyId !== row.pty_id) return false
   if (envelope.claudePid) {
     const knownPid = row.pty_id
-      ? store.get('SELECT claude_pid FROM hook_events WHERE session_id = ? AND claude_pid IS NOT NULL ORDER BY id DESC LIMIT 1', row.id)?.claude_pid
+      ? store.get('SELECT claude_pid FROM hook_events WHERE session_id = ? AND claude_pid IS NOT NULL ORDER BY hook_ts DESC, id DESC LIMIT 1', row.id)?.claude_pid
       : row.process_key
     if (knownPid && String(envelope.claudePid) !== String(knownPid)) return false
   }
@@ -270,8 +270,8 @@ export function resolveSession(store, envelope) {
   if (identity) {
     const column = envelope.claudePid ? 'claude_pid' : 'pty_id'
     const previous = store.get(`SELECT s.* FROM sessions s JOIN hook_events e ON e.session_id = s.id
-      WHERE e.${column} = ? AND e.claude_session_id = ? AND e.hook_ts <= ? AND s.since_ts > ?
-      ORDER BY e.hook_ts DESC LIMIT 1`, identity, hook.session_id, envelope.hookTs, envelope.hookTs)
+      WHERE e.${column} = ? AND e.hook_ts <= ? AND s.since_ts > ?
+      ORDER BY e.hook_ts DESC LIMIT 1`, identity, envelope.hookTs, envelope.hookTs)
     if (previous) return previous
   }
   const historical = store.all('SELECT DISTINCT s.* FROM sessions s LEFT JOIN session_aliases a ON a.session_id = s.id WHERE s.alive = 0 AND s.started_at <= ? AND COALESCE(s.ended_at, s.since_ts) >= ? AND (s.claude_session_id = ? OR a.claude_session_id = ? OR s.pty_id = ? OR s.process_key = ?) ORDER BY s.started_at DESC', envelope.hookTs, envelope.hookTs, hook.session_id, hook.session_id, pty ?? null, envelope.claudePid ? String(envelope.claudePid) : null).find(row => sameKnownProcess(store, row, envelope))
@@ -299,6 +299,23 @@ export function resolveSession(store, envelope) {
     return rows.find(row => row.transcript_path?.slice(0, row.transcript_path.lastIndexOf('/')) === dirname && envelope.hookTs - row.state_since <= 5000) ?? null
   }
   return null
+}
+
+/** Record a current process conversation without changing its activity or state. */
+export function recordSessionIdentity(store, session, envelope) {
+  const hook = envelope.hook
+  if (!session.alive || hook.session_id === session.claude_session_id || !sameKnownProcess(store, session, envelope)) return session
+  const processMatches = envelope.ptyId && envelope.ptyId === session.pty_id
+    || envelope.claudePid && (session.pty_id || String(envelope.claudePid) === session.process_key)
+  if (!processMatches) return session
+  const boundary = store.get('SELECT MAX(replaced_at) AS at FROM session_aliases WHERE session_id=?', session.id).at ?? session.started_at
+  if (envelope.hookTs < boundary) return session
+  const oldAlias = store.get('SELECT claude_session_id FROM session_aliases WHERE session_id=? AND claude_session_id=?', session.id, hook.session_id)
+  if (oldAlias && !(hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source) && envelope.hookTs >= session.since_ts)) return session
+  const source = hook.hook_event_name === 'SessionStart' && ['clear', 'resume', 'fork', 'compact'].includes(hook.source) ? hook.source : 'heuristic'
+  store.run('INSERT OR IGNORE INTO session_aliases(claude_session_id,session_id,replaced_at,source) VALUES(?,?,?,?)', session.claude_session_id, session.id, envelope.hookTs, source)
+  store.run('UPDATE sessions SET claude_session_id=?,transcript_path=? WHERE id=?', hook.session_id, hook.transcript_path ?? session.transcript_path, session.id)
+  return store.get('SELECT * FROM sessions WHERE id=?', session.id)
 }
 
 /** Identify hooks that leave session state and activity unchanged. */
@@ -351,6 +368,14 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   let ptyId = existing.pty_id
   let changedFiles = JSON.parse(existing.changed_files)
   let reviewBaseline = existing.review_baseline
+  if (['SessionStart', 'CwdChanged'].includes(event)) {
+    cwd = hook.cwd
+    repoId = repo(store, cwd, at)
+    if (repoId !== existing.repo_id) {
+      reviewBaseline = captureReviewBaseline(repoId, null, false)
+      changedFiles = []
+    }
+  }
   const edited = editedPath(hook)
   if (edited && !changedFiles.some(file => file.path === edited)) changedFiles.push({ path: edited, adds: null, dels: null })
   if (event === 'Stop' || event === 'SessionEnd' || event === 'Notification' && hook.notification_type === 'idle_prompt' || event === 'PostToolUse' && hook.tool_name === 'Bash' || event === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source)) {
@@ -386,11 +411,6 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   }
   else if (event === 'PreCompact') { activity = 'compacting'; state = 'running' }
   else if (event === 'PostCompact') { activity = null; state = 'running' }
-  else if (event === 'CwdChanged') {
-    cwd = hook.cwd
-    repoId = repo(store, cwd, at)
-    if (repoId !== existing.repo_id) { reviewBaseline = captureReviewBaseline(repoId); changedFiles = [] }
-  }
   else if (event === 'Stop' && !subagents && !['needs_approval', 'asked_you'].includes(state)) state = changedFiles.length ? 'done' : 'idle'
   else if (event === 'Notification' && hook.notification_type === 'idle_prompt') state = changedFiles.length ? 'done' : 'idle'
   else if (event === 'SessionEnd') {

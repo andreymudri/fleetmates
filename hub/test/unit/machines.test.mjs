@@ -1645,7 +1645,7 @@ test('every process end path commits a permanent summary that survives detail re
         projector.applyHooks([edit])
       }
       if (['observed', 'unreviewed', 'clear', 'resume'].includes(ending)) {
-        const end = fixture('SessionEnd.prompt_input_exit.json', { reason: ['clear', 'resume'].includes(ending) ? ending : 'prompt_input_exit' })
+        const end = fixture('SessionEnd.prompt_input_exit.json', { session_id: start.hook.session_id, reason: ['clear', 'resume'].includes(ending) ? ending : 'prompt_input_exit' })
         end.hookTs = 2000
         projector.applyHooks([end])
         if (['clear', 'resume'].includes(ending)) { endedAt = 7000; projector.tick(endedAt) }
@@ -2877,4 +2877,134 @@ test('literal systemctl deck controls retain their floor across quoting options 
     'systemctl --user stop "$UNKNOWN_UNIT"',
     'systemctl --user status unrelated-fleetmates-deck.service'
   ]) assert.equal(tier(command), 'caution', command)
+})
+
+test('resuming another repository updates only authorized cwd and Git review boundaries', () => {
+  for (const wrapped of [false, true]) {
+    const h = harness()
+    try {
+      const root = path.dirname(h.file)
+      const repos = ['repo-a', 'repo-b'].map(name => path.join(root, name))
+      for (const directory of repos) {
+        mkdirSync(directory)
+        execFileSync('git', ['init', '-q', directory], { timeout: 2000 })
+        writeFileSync(path.join(directory, 'file.txt'), `${path.basename(directory)} initial\n`)
+        execFileSync('git', ['-C', directory, 'add', '.'], { timeout: 2000 })
+        execFileSync('git', ['-C', directory, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'initial'], { timeout: 2000 })
+      }
+      const send = (event, at, pid, cwd, fields = {}) => {
+        const envelope = { ...fixture('SessionStart.startup.json', { hook_event_name: event, session_id: 'one', cwd, ...fields }), hookTs: at, claudePid: pid, ptyId: wrapped ? `pty-${pid}` : null }
+        assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true)
+        h.projector.applyHooks([envelope])
+      }
+      send('SessionStart', 1000, 41, repos[0])
+      const id = h.projector.snapshot().sessions[0].id
+      const oldBaseline = h.store.get('SELECT review_baseline FROM sessions WHERE id=?', id).review_baseline
+      send('SessionEnd', 2000, 41, repos[0], { reason: 'prompt_input_exit' })
+      if (wrapped) h.projector.signal(id, { type: 'exit', code: 0 }, 2001)
+      send('SessionStart', 3000, 42, repos[1], { source: 'resume' })
+      let row = h.projector.snapshot().sessions[0]
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+      assert.equal(row.id, id)
+      assert.equal(row.cwd, repos[1])
+      assert.equal(row.repoId, repos[1])
+      assert.equal(row.alive, true)
+      assert.equal(row.state, 'idle')
+      const baseline = h.store.get('SELECT review_baseline FROM sessions WHERE id=?', id).review_baseline
+      assert.notEqual(baseline, oldBaseline)
+      writeFileSync(path.join(repos[0], 'old.txt'), 'old repo edit\n')
+      send('UserPromptSubmit', 4000, 42, repos[0], { prompt: 'Work' })
+      send('PostToolUse', 4100, 42, repos[0], { tool_name: 'Bash', tool_input: { command: 'pwd' }, tool_response: '' })
+      assert.equal(h.projector.snapshot().sessions[0].cwd, repos[1])
+      send('Stop', 4200, 42, repos[0], { stop_hook_active: false })
+      assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+      writeFileSync(path.join(repos[1], 'file.txt'), 'new repo edit\n')
+      send('UserPromptSubmit', 5000, 42, repos[1], { prompt: 'Edit' })
+      send('Stop', 6000, 42, repos[1], { stop_hook_active: false })
+      row = h.projector.snapshot().sessions[0]
+      assert.equal(row.state, 'done')
+      assert.deepEqual(row.changedFiles.map(file => file.path), [path.join(repos[1], 'file.txt')])
+      assert.equal(h.projector.snapshot().counts.toReview, 1)
+      h.projector.signal(id, { type: 'review' }, 7000)
+      send('UserPromptSubmit', 8000, 42, repos[1], { prompt: 'Continue' })
+      send('Stop', 9000, 42, repos[1], { stop_hook_active: false })
+      assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
+      send('CwdChanged', 10000, 42, repos[0])
+      send('UserPromptSubmit', 11000, 42, repos[0], { prompt: 'Return' })
+      send('Stop', 12000, 42, repos[0], { stop_hook_active: false })
+      assert.equal(h.projector.snapshot().sessions[0].repoId, repos[0])
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(file => file.path), [path.join(repos[0], 'old.txt')])
+
+    } finally { h.close() }
+  }
+})
+
+test('process aliases survive activity before delayed start and further process resume', () => {
+  for (const wrapped of [false, true]) {
+    const h = harness()
+    try {
+      const cwd = path.dirname(h.file)
+      const send = (event, at, conversation, pid, fields = {}) => {
+        const envelope = { ...fixture('SessionStart.startup.json', { hook_event_name: event, session_id: conversation, cwd, ...fields }), hookTs: at, claudePid: pid, ptyId: wrapped ? `pty-${pid}` : null }
+        assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true)
+        return h.projector.applyHooks([envelope])
+      }
+      send('SessionStart', 1000, 'old', 41)
+      const id = h.projector.snapshot().sessions[0].id
+      send('UserPromptSubmit', 2100, 'new', 41, { prompt: 'Continue' })
+      assert.equal(h.projector.snapshot().sessions[0].claudeSessionId, 'new')
+      const before = { ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }
+      send('SessionStart', 2000, 'new', 41, { source: 'clear' })
+      assert.deepEqual({ ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }, before)
+      assert.equal(before.state, 'running')
+      assert.equal(before.state_since, 2100)
+      assert.equal(before.since_ts, 2100)
+      assert.deepEqual(h.store.all('SELECT claude_session_id FROM session_aliases WHERE session_id=?', id).map(row => row.claude_session_id), ['old'])
+      send('SessionStart', 1500, 'old', 41)
+      send('SessionStart', 1501, 'too-old', 41, { source: 'clear' })
+      assert.equal(h.projector.snapshot().sessions[0].claudeSessionId, 'new')
+      send('Notification', 2800, 'old', 41, { notification_type: 'agent_completed', message: 'Old task completed' })
+      assert.deepEqual({ ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }, before)
+      send('SessionEnd', 3000, 'new', 41, { reason: 'prompt_input_exit' })
+      if (wrapped) h.projector.signal(id, { type: 'exit', code: 0 }, 3001)
+      assert.deepEqual(JSON.parse(h.store.get('SELECT claude_session_ids FROM session_summaries WHERE session_id=?', id).claude_session_ids), ['old', 'new'])
+      send('SessionStart', 4000, 'new', 42, { source: 'resume' })
+      send('UserPromptSubmit', 4100, 'new', 42, { prompt: 'Resume work' })
+      const resumed = { ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }
+      send('SessionStart', 2500, 'obsolete', 41, { source: 'clear' })
+      send('PermissionRequest', 2600, 'old', 41, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      assert.deepEqual({ ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }, resumed)
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+      assert.equal(h.projector.snapshot().sessions[0].id, id)
+      assert.equal(h.projector.snapshot().counts.openRequests, 0)
+      assert.equal(h.store.get('SELECT COUNT(*) AS n FROM session_aliases WHERE session_id=?', id).n, 1)
+      send('UserPromptSubmit', 4200, 'next', 42, { prompt: 'Still current' })
+      assert.equal(h.projector.snapshot().sessions[0].claudeSessionId, 'next')
+      assert.equal(h.store.get('SELECT COUNT(*) AS n FROM session_aliases WHERE session_id=?', id).n, 2)
+      assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+      assert.equal(h.projector.snapshot().sessions[0].lastActivityAt, 4200)
+    } finally { h.close() }
+  }
+})
+
+test('late SessionStart repairs process identity and publishes without rewinding activity', () => {
+  for (const wrapped of [false, true]) {
+    const h = harness()
+    try {
+      const envelope = (event, at, conversation, fields = {}) => ({ ...fixture('SessionStart.startup.json', { hook_event_name: event, session_id: conversation, ...fields }), hookTs: at, ptyId: wrapped ? 'identity-pty' : null })
+      h.projector.applyHooks([envelope('SessionStart', 1000, 'old'), envelope('UserPromptSubmit', 2100, 'old', { prompt: 'Continue' })])
+      const before = h.store.get('SELECT * FROM sessions')
+      const events = h.projector.applyHooks([envelope('SessionStart', 2000, 'new', { source: 'clear' })])
+      const after = h.store.get('SELECT * FROM sessions')
+      assert.equal(after.claude_session_id, 'new')
+      assert.equal(after.id, before.id)
+      for (const field of ['state', 'state_since', 'since_ts', 'last_activity_at', 'process_key', 'pty_id', 'review_baseline', 'cwd', 'repo_id']) assert.equal(after[field], before[field], field)
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+      assert.deepEqual({ ...h.store.get('SELECT claude_session_id, source, replaced_at FROM session_aliases WHERE session_id=?', before.id) }, { claude_session_id: 'old', source: 'clear', replaced_at: 2000 })
+      assert.equal(h.store.get('SELECT applied FROM hook_events WHERE event=? AND hook_ts=?', 'SessionStart', 2000).applied, 0)
+      assert.equal(events.find(event => event.type === 'session.upserted')?.data.claudeSessionId, 'new')
+      assert.equal(events.find(event => event.type === 'session.upserted')?.data.stateSince, 2100)
+    } finally { h.close() }
+  }
 })
