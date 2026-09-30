@@ -3812,3 +3812,154 @@ test('Git exec-path assignment executes builtins while bare and information opti
     assert.equal(tier('git --exec-path=/tmp/unused --unknown-global clean -fd'), 'caution')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('late subagent starts keep a live background agent visible through Stop without rewinding clocks', () => {
+  for (const delivery of ['ordered', 'after-tool', 'after-stop']) {
+    const h = harness()
+    try {
+      const send = (event, at, fields = {}) => h.projector.applyHooks([{ ...fixture('SubagentStop.json', { hook_event_name: event, ...fields }), hookTs: at }])
+      send('SessionStart', 1000, { source: 'startup' })
+      send('UserPromptSubmit', 2000, { prompt: 'Background work' })
+      if (delivery === 'ordered') send('SubagentStart', 3000, { agent_id: 'background-1' })
+      send('PostToolUse', 4000, { tool_name: 'Read', tool_input: { file_path: '/tmp/example' } })
+      if (delivery === 'after-stop') send('Stop', 4500, { stop_hook_active: false })
+      const clocks = h.store.get('SELECT since_ts,state_since,last_activity_at FROM sessions')
+      if (delivery !== 'ordered') send('SubagentStart', 3000, { agent_id: 'background-1' })
+      assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 1)
+      assert.deepEqual(h.store.get('SELECT since_ts,state_since,last_activity_at FROM sessions'), clocks)
+      send('Stop', 5000, { stop_hook_active: false })
+      assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+      assert.equal(h.projector.snapshot().counts.running, 1)
+    } finally { h.close() }
+  }
+})
+
+test('subagent IDs reconcile delayed stops starts and replays independently after commit', () => {
+  const h = harness()
+  const reader = openDeckDb(h.file)
+  try {
+    const events = []
+    const p = createProjector({ store: h.store, publish: event => {
+      assert.ok(Number(reader.get('SELECT COALESCE(MAX(seq),0) AS seq FROM events').seq) >= event.seq)
+      events.push(event)
+    } })
+    const send = (event, at, id, fields = {}) => p.applyHooks([{ ...fixture('SubagentStop.json', { hook_event_name: event, agent_id: id, ...fields }), hookTs: at }])
+    send('SessionStart', 1000, undefined, { source: 'startup' })
+    send('UserPromptSubmit', 2000, undefined, { prompt: 'Two agents' })
+    send('SubagentStart', 3000, 'a')
+    send('SubagentStart', 3100, 'b')
+    send('PostToolUse', 5000, undefined, { tool_name: 'Read', tool_input: { file_path: '/tmp/example' } })
+    const clocks = h.store.get('SELECT since_ts,state_since,last_activity_at FROM sessions')
+    events.length = 0
+    send('SubagentStop', 4000, 'a')
+    assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 1)
+    assert.deepEqual(h.store.get('SELECT since_ts,state_since,last_activity_at FROM sessions'), clocks)
+    assert.equal(events.filter(event => event.type === 'session.upserted').length, 1)
+    send('SubagentStart', 3000, 'a', { agent_type: 'replayed' })
+    send('SubagentStart', 3200, 'b', { agent_type: 'repeated' })
+    send('SubagentStop', 4000, 'a', { agent_type: 'replayed' })
+    send('SubagentStop', 4100, 'unknown')
+    assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 1)
+    send('SubagentStop', 4500, 'b')
+    send('SubagentStart', 3500, 'c')
+    send('SubagentStop', 3500, 'c')
+    send('SubagentStart', 3500, 'c', { agent_type: 'replayed' })
+    assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 0)
+    assert.deepEqual(h.store.get('SELECT since_ts,state_since,last_activity_at FROM sessions'), clocks)
+    send('Stop', 6000, undefined)
+    assert.equal(p.snapshot().sessions[0].state, 'idle')
+  } finally { reader.close(); h.close() }
+})
+
+test('late subagent lifecycle rejects replaced processes and preserves request precedence', () => {
+  for (const wrapped of [false, true]) for (const question of [false, true]) {
+    const h = harness()
+    try {
+      const send = (event, at, id, pid = 42, fields = {}) => h.projector.applyHooks([{ ...fixture('SubagentStop.json', { hook_event_name: event, agent_id: id, ...fields }), claudePid: pid, ptyId: wrapped ? 'lifecycle-pty' : null, hookTs: at }])
+      send('SessionStart', 1000, undefined, 41, { source: 'startup' })
+      const id = h.projector.snapshot().sessions[0].id
+      send('SubagentStart', 1500, 'old', 41)
+      h.projector.signal(id, { type: 'exit', code: 1 }, 2000)
+      send('SessionStart', 3000, undefined, 42, { source: 'resume' })
+      send(question ? 'PreToolUse' : 'PermissionRequest', 3500, undefined, 42, question ? { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Which option?', options: [] }] } } : { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+      send('PostToolUse', 5000, undefined, 42, { tool_name: 'Read', tool_input: { file_path: '/tmp/example' } })
+      const before = h.projector.snapshot()
+      send('SubagentStart', 4000, 'old', 41)
+      assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 0)
+      send('SubagentStop', 4500, 'old', 41)
+      assert.deepEqual(h.projector.snapshot().sessions, before.sessions)
+      assert.deepEqual(h.projector.snapshot().requests, before.requests)
+      send('SubagentStart', 4000, 'new')
+      assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 1)
+      assert.equal(h.projector.snapshot().sessions[0].state, question ? 'asked_you' : 'needs_approval')
+      send('SubagentStart', 5500, 'obsolete-future', 41)
+      send('SubagentStop', 5600, 'obsolete-future', 41)
+      assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 1)
+      send('SubagentStart', 6500, 'new-second')
+      assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 2)
+      send('SessionEnd', 8000, undefined, 42, { reason: 'clear' })
+      send('SessionStart', 9000, undefined, 42, { source: 'clear', session_id: 'replacement' })
+      send('PostToolUse', 11000, undefined, 42, { session_id: 'replacement', tool_name: 'Read', tool_input: { file_path: '/tmp/example' } })
+      send('SubagentStart', 7500, 'new')
+      send('SubagentStart', 7500, 'pre-generation', 42, { session_id: 'replacement' })
+      send('SubagentStart', 10500, 'obsolete-conversation')
+      assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 0)
+      send('SubagentStart', 9500, 'current', 42, { session_id: 'replacement' })
+      assert.equal(h.store.get('SELECT subagents_active FROM sessions').subagents_active, 1)
+      assert.equal(h.projector.snapshot().sessions.length, 1)
+    } finally { h.close() }
+  }
+})
+
+test('promisor missing trees and blobs cannot launch remote helpers despite ambient lazy-fetch settings', () => {
+  const previous = process.env.GIT_NO_LAZY_FETCH
+  try {
+    for (const missing of ['tree', 'blob']) {
+      const root = mkdtempSync(path.join(tmpdir(), 'deck-promisor-'))
+      const h = harness()
+      try {
+        const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_NO_LAZY_FETCH: '1' }
+        const git = (args, input) => execFileSync('git', ['-C', root, '-c', 'core.hooksPath=/dev/null', ...args], { env, input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim()
+        git(['init', '-q'])
+        writeFileSync(path.join(root, 'file.txt'), 'before\n')
+        git(['add', '.'])
+        git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
+        const send = (event, at, fields = {}) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { hook_event_name: event, cwd: root, ...fields }), hookTs: at }])
+        send('SessionStart', 1000)
+        send('UserPromptSubmit', 2000, { prompt: 'Edit before incomplete scan' })
+        writeFileSync(path.join(root, 'file.txt'), 'after\nsecond\n')
+        send('PostToolUse', 2500, { tool_name: 'Edit', tool_input: { file_path: path.join(root, 'file.txt') } })
+        send('Stop', 3000)
+        const before = h.store.get('SELECT changed_files,review_baseline FROM sessions')
+        const marker = path.join(root, '.git', 'helper-executed')
+        if (missing === 'tree') {
+          const commit = git(['hash-object', '-t', 'commit', '-w', '--stdin'], `tree ${'1'.repeat(40)}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nfixture\n`)
+          writeFileSync(path.join(root, '.git', 'HEAD'), `${commit}\n`)
+          const saved = JSON.parse(before.review_baseline)
+          saved.head = commit
+          h.store.run('UPDATE sessions SET review_baseline=?', JSON.stringify(saved))
+          before.review_baseline = JSON.stringify(saved)
+        } else {
+          const oid = git(['rev-parse', 'HEAD:file.txt'])
+          rmSync(path.join(root, '.git', 'objects', oid.slice(0, 2), oid.slice(2)))
+        }
+        git(['config', 'remote.origin.promisor', 'true'])
+        git(['config', 'remote.origin.url', `ext::sh -c touch% ${marker}`])
+        git(['config', 'protocol.ext.allow', 'always'])
+        process.env.GIT_NO_LAZY_FETCH = '0'
+        assert.equal(captureReviewBaseline(root), null, missing)
+        assert.equal(existsSync(marker), false, missing)
+        send('UserPromptSubmit', 3500, { prompt: 'Continue with missing objects' })
+        send('Stop', 4000)
+        assert.deepEqual(h.store.get('SELECT changed_files,review_baseline FROM sessions'), before)
+        h.projector.signal(h.projector.snapshot().sessions[0].id, { type: 'review' }, 4500)
+        assert.deepEqual(h.store.get('SELECT changed_files,review_baseline FROM sessions'), before)
+        assert.equal(h.projector.snapshot().sessions[0].state, 'done')
+        assert.equal(existsSync(marker), false, missing)
+      } finally { h.close(); rmSync(root, { recursive: true, force: true }) }
+    }
+  } finally {
+    if (previous === undefined) delete process.env.GIT_NO_LAZY_FETCH
+    else process.env.GIT_NO_LAZY_FETCH = previous
+  }
+})

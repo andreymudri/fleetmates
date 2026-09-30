@@ -10,15 +10,16 @@ const maxChangedPaths = 512
 const maxScannedPaths = 4096
 const maxScannedBytes = 32 * 1024 * 1024
 
-function git(root, args, budget = null, differences = false) {
+function git(root, args, budget = null, differences = false, input = undefined) {
   if (budget && Date.now() >= budget.deadline) return null
   try {
     return execFileSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args], {
       cwd: root,
-      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' },
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' },
       timeout: budget ? Math.max(1, Math.min(1500, budget.deadline - Date.now())) : 1500,
       maxBuffer: maxGitOutput,
-      stdio: ['ignore', 'pipe', 'ignore']
+      input,
+      stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore']
     })
   } catch (error) {
     if (differences && error.status === 1 && Buffer.isBuffer(error.stdout)) return error.stdout
@@ -94,6 +95,12 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
     const match = /^(\d+) (blob|commit) ([0-9a-f]{40,64})\t([\s\S]+)$/.exec(record)
     if (!match) return null
     entries.set(match[4], { mode: match[1], type: match[2], oid: match[3] })
+  }
+  if (entries.size > budget.remainingPaths) return null
+  const blobs = [...new Set([...entries.values()].filter(entry => entry.type === 'blob').map(entry => entry.oid))]
+  if (blobs.length) {
+    const checked = git(root, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], budget, false, `${blobs.join('\n')}\n`)?.toString('utf8').trim().split('\n')
+    if (!checked || checked.length !== blobs.length || checked.some((line, index) => line !== `${blobs[index]} blob`)) return null
   }
   const normalization = new Map()
   for (const record of listed.toString('utf8').split('\0').filter(Boolean)) {
@@ -348,7 +355,7 @@ export function sameKnownProcess(store, row, envelope) {
   if (envelope.ptyId && row.pty_id && envelope.ptyId !== row.pty_id) return false
   if (envelope.claudePid) {
     const knownPid = row.pty_id
-      ? store.get('SELECT claude_pid FROM hook_events WHERE session_id = ? AND claude_pid IS NOT NULL ORDER BY hook_ts DESC, id DESC LIMIT 1', row.id)?.claude_pid
+      ? store.get('SELECT claude_pid FROM hook_events WHERE session_id = ? AND claude_pid IS NOT NULL AND applied=1 ORDER BY hook_ts DESC, id DESC LIMIT 1', row.id)?.claude_pid
       : row.process_key
     if (knownPid && String(envelope.claudePid) !== String(knownPid)) return false
   }
@@ -360,6 +367,12 @@ export function resolveSession(store, envelope) {
   const hook = envelope.hook
   const pty = envelope.ptyId
   const identity = envelope.claudePid ?? pty
+  if (identity && ['SubagentStart', 'SubagentStop'].includes(hook.hook_event_name)) {
+    const column = envelope.claudePid ? 'claude_pid' : 'pty_id'
+    const previous = store.get(`SELECT s.* FROM sessions s JOIN hook_events e ON e.session_id=s.id
+      WHERE e.${column}=? AND e.applied=1 AND e.hook_ts<=? ORDER BY e.hook_ts DESC,e.id DESC LIMIT 1`, identity, envelope.hookTs)
+    if (previous && !sameKnownProcess(store, previous, envelope)) return previous
+  }
   if (identity) {
     const column = envelope.claudePid ? 'claude_pid' : 'pty_id'
     const previous = store.get(`SELECT s.* FROM sessions s JOIN hook_events e ON e.session_id = s.id
@@ -444,6 +457,36 @@ export function recordSessionIdentity(store, session, envelope) {
   return store.get('SELECT * FROM sessions WHERE id=?', session.id)
 }
 
+/** Reconcile accepted agent lifecycles while retaining newer session clocks. */
+export function applySubagentLifecycle(store, session, envelope, late = false) {
+  const hook = envelope.hook
+  const unchanged = { session, accepted: false, changed: false }
+  if (!session.alive || !sameKnownProcess(store, session, envelope)) return unchanged
+  if (hook.session_id !== session.claude_session_id && !store.get('SELECT claude_session_id FROM session_aliases WHERE session_id=? AND claude_session_id=? AND source=?', session.id, hook.session_id, 'compact')) return unchanged
+  const boundary = Math.max(session.joined_mid_life ? 0 : session.started_at, store.get(`SELECT COALESCE(MAX(hook_ts),0) AS at FROM hook_events
+    WHERE session_id=? AND applied=1 AND (event='SessionEnd' OR event='SessionStart' AND COALESCE(json_extract(payload,'$.source'),'startup')<>'compact')`, session.id).at)
+  if (envelope.hookTs < boundary) return unchanged
+  const history = store.all("SELECT event,hook_ts,payload,pty_id,claude_pid FROM hook_events WHERE session_id=? AND applied=1 AND hook_ts>=? AND event IN ('SubagentStart','SubagentStop') ORDER BY hook_ts,id", session.id, boundary)
+  const agents = new Map()
+  const anonymous = new Map()
+  const record = (event, at, id) => {
+    if (!id) { anonymous.set(`${at}:${event}`, { event, at }); return }
+    const previous = agents.get(id)
+    if (!previous || at > previous.at || at === previous.at && event === 'SubagentStop') agents.set(id, { event, at })
+  }
+  for (const row of history) {
+    if (sameKnownProcess(store, session, { ptyId: row.pty_id, claudePid: row.claude_pid })) record(row.event, row.hook_ts, JSON.parse(row.payload).agent_id)
+  }
+  record(hook.hook_event_name, envelope.hookTs, hook.agent_id)
+  let active = 0
+  for (const event of [...anonymous.values()].sort((a, b) => a.at - b.at || (a.event === 'SubagentStart' ? -1 : 1))) active = event.event === 'SubagentStart' ? active + 1 : Math.max(0, active - 1)
+  active += [...agents.values()].filter(event => event.event === 'SubagentStart').length
+  const state = late && active && ['idle', 'done', 'reviewed', 'stale'].includes(session.state) ? 'running' : session.state
+  const changed = active !== session.subagents_active || state !== session.state
+  if (changed) store.run('UPDATE sessions SET subagents_active=?,state=? WHERE id=?', active, state, session.id)
+  return { session: changed ? store.get('SELECT * FROM sessions WHERE id=?', session.id) : session, accepted: true, changed }
+}
+
 /** Identify hooks that leave session state and activity unchanged. */
 export function ignoresSessionHook(store, session, hook) {
   if (!session) return false
@@ -471,7 +514,7 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
     const edited = editedPath(hook)
     const task = event === 'UserPromptSubmit' ? hook.prompt?.split('\n')[0].slice(0, 120) || 'Untitled' : 'Untitled'
     const repoId = repo(store, hook.cwd, at)
-    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path,subagents_active,activity,changed_files) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repoId, hook.cwd, task, initial, at, at, at, 1, event === 'SessionStart' ? 0 : 1, at, hook.transcript_path, event === 'SubagentStart' ? 1 : 0, event === 'PreCompact' ? 'compacting' : null, JSON.stringify(edited ? [{ path: edited, adds: null, dels: null }] : []))
+    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path,subagents_active,activity,changed_files) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repoId, hook.cwd, task, initial, at, at, at, 1, event === 'SessionStart' ? 0 : 1, at, hook.transcript_path, 0, event === 'PreCompact' ? 'compacting' : null, JSON.stringify(edited ? [{ path: edited, adds: null, dels: null }] : []))
     const reviewBaseline = captureReviewBaseline(repoId, null, event !== 'SessionStart')
     if (reviewBaseline) store.run('UPDATE sessions SET review_baseline = ? WHERE id = ?', reviewBaseline, id)
     return store.get('SELECT * FROM sessions WHERE id = ?', id)
@@ -530,9 +573,8 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
     if (task === 'Untitled') task = hook.prompt?.split('\n')[0].slice(0, 120) || task
   } else if (event === 'PermissionRequest' || event === 'Notification' && hook.notification_type === 'permission_prompt') state = 'needs_approval'
   else if (event === 'PreToolUse' && hook.tool_name === 'AskUserQuestion' || event === 'Notification' && hook.notification_type === 'elicitation_dialog') state = 'asked_you'
-  else if (event === 'SubagentStart') { subagents++; if (!['needs_approval', 'asked_you'].includes(state)) state = 'running' }
+  else if (event === 'SubagentStart') { if (!['needs_approval', 'asked_you'].includes(state)) state = 'running' }
   else if (event === 'SubagentStop') {
-    subagents = Math.max(0, subagents - 1)
     if (['running', 'stale', 'idle', 'done', 'reviewed'].includes(state)) state = 'running'
   }
   else if (event === 'PreCompact') { activity = 'compacting'; state = 'running' }
