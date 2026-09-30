@@ -348,30 +348,83 @@ function gitChangedFiles(root, value) {
 
 /** Refresh final Git changes, retaining known changes if the bounded scan is incomplete. */
 export function refreshSessionChanges(store, session) {
-  const boundary = session.review_baseline ?? captureReviewBaseline(session.repo_id, null, false)
-  const files = gitChangedFiles(session.repo_id, boundary)
+  const boundary = session.review_baseline ?? captureReviewBaseline(workingRoot(session.cwd), null, false)
+  const files = gitChangedFiles(workingRoot(session.cwd), boundary)
   if (files === null) return session
   const changedFiles = JSON.stringify(files)
   store.run('UPDATE sessions SET changed_files=?,review_baseline=? WHERE id=?', changedFiles, boundary, session.id)
   return { ...session, changed_files: changedFiles, review_baseline: boundary }
 }
 
-function repo(store, cwd, at) {
-  let id = cwd || '/unknown'
-  let current
-  try { current = realpathSync(id) } catch { current = null }
-  for (let depth = 0; current && depth < 32; depth++) {
+/** Resolve the bounded canonical working tree used for filesystem observations. */
+export function workingRoot(cwd) {
+  let root = cwd || '/unknown'
+  try { root = realpathSync(root) } catch {}
+  let current = root
+  for (let depth = 0; depth < 32; depth++) {
     const marker = path.join(current, '.git')
     try {
       const stat = statSync(marker)
-      if (stat.isDirectory() || stat.isFile() && stat.size <= 4096 && readFileSync(marker, 'utf8').startsWith('gitdir:')) { id = current; break }
+      if (stat.isDirectory() || stat.isFile() && stat.size <= 4096 && readFileSync(marker, 'utf8').startsWith('gitdir:')) return current
     } catch {}
     const parent = path.dirname(current)
     if (parent === current) break
     current = parent
   }
-  store.run('INSERT OR IGNORE INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', id, id, 0, 1, id, at)
+  return root
+}
+
+function repo(store, cwd, at) {
+  const root = workingRoot(cwd)
+  let id = root
+  const common = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir'])?.toString('utf8').trim()
+  if (common && path.isAbsolute(common) && path.basename(common) === '.git') {
+    try { id = realpathSync(path.dirname(common)) } catch {}
+  }
+  if (store.get('SELECT id FROM repos WHERE id=?', id)) return id
+  let name = path.basename(id) || id
+  const collisions = store.all('SELECT id,name,crew_seed FROM repos WHERE archived_at IS NULL').filter(row => path.basename(row.id) === name)
+  if (collisions.length) {
+    const group = [...collisions, { id }]
+    let depth = 2
+    const display = value => value.split(path.sep).filter(Boolean).slice(-depth).join('/')
+    while (depth < 32 && new Set(group.map(row => display(row.id))).size !== group.length) depth++
+    for (const row of collisions) store.run('UPDATE repos SET name=?,crew_seed=? WHERE id=?', display(row.id), row.crew_seed === row.name ? display(row.id) : row.crew_seed, row.id)
+    name = display(id)
+  }
+  const used = new Set(store.all('SELECT crew_slot FROM repos WHERE archived_at IS NULL').map(row => row.crew_slot))
+  let slot = Array.from({ length: 9 }, (_, i) => i).find(i => !used.has(i))
+  const shared = slot === undefined
+  if (shared) {
+    let hash = 2166136261
+    for (let i = 0; i < name.length; i++) hash = Math.imul(hash ^ name.charCodeAt(i), 16777619) >>> 0
+    slot = hash % 9
+  }
+  store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', id, name, slot, shared ? 1 : 0, name, at)
   return id
+}
+
+function sessionActivity(store, session, envelope) {
+  if (!session.alive) return null
+  const history = store.all('SELECT payload,hook_ts,pty_id,claude_pid FROM hook_events WHERE session_id=? AND applied=1 ORDER BY hook_ts DESC,id DESC LIMIT 512', session.id)
+    .map(row => ({ hook: JSON.parse(row.payload), hookTs: row.hook_ts, ptyId: row.pty_id, claudePid: row.claude_pid }))
+    .filter(item => sameKnownProcess(store, session, item))
+  const tools = []
+  let compacting = false
+  for (const { hook } of [...history.reverse(), envelope].sort((a, b) => a.hookTs - b.hookTs)) {
+    const event = hook.hook_event_name
+    if (['SessionStart', 'UserPromptSubmit', 'SessionEnd'].includes(event)) { tools.length = 0; compacting = false }
+    if (event === 'PreCompact') compacting = true
+    if (event === 'PostCompact') compacting = false
+    if (event === 'Stop' || event === 'Notification' && hook.notification_type === 'idle_prompt') tools.length = 0
+    if (event === 'PreToolUse' && hook.tool_name) tools.push({ id: hook.tool_use_id, name: hook.tool_name, input: JSON.stringify(hook.tool_input ?? {}) })
+    if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
+      const index = tools.findIndex(tool => hook.tool_use_id ? tool.id === hook.tool_use_id : tool.name === hook.tool_name && tool.input === JSON.stringify(hook.tool_input ?? {}))
+      if (index >= 0) tools.splice(index, 1)
+    }
+  }
+  if (!compacting && ['SubagentStart', 'SubagentStop'].includes(envelope.hook.hook_event_name) && session.activity?.startsWith('tool:')) return session.activity
+  return compacting ? 'compacting' : tools.length ? `tool:${tools.at(-1).name}` : session.subagents_active ? `subagents:${session.subagents_active}` : null
 }
 
 function editedPath(hook) {
@@ -513,8 +566,9 @@ export function applySubagentLifecycle(store, session, envelope, late = false) {
   for (const event of [...anonymous.values()].sort((a, b) => a.at - b.at || (a.event === 'SubagentStart' ? -1 : 1))) active = event.event === 'SubagentStart' ? active + 1 : Math.max(0, active - 1)
   active += [...agents.values()].filter(event => event.event === 'SubagentStart').length
   const state = late && active && ['idle', 'done', 'reviewed', 'stale'].includes(session.state) ? 'running' : session.state
-  const changed = active !== session.subagents_active || state !== session.state
-  if (changed) store.run('UPDATE sessions SET subagents_active=?,state=? WHERE id=?', active, state, session.id)
+  const activity = sessionActivity(store, { ...session, subagents_active: active }, envelope)
+  const changed = active !== session.subagents_active || state !== session.state || activity !== session.activity
+  if (changed) store.run('UPDATE sessions SET subagents_active=?,state=?,activity=? WHERE id=?', active, state, activity, session.id)
   return { session: changed ? store.get('SELECT * FROM sessions WHERE id=?', session.id) : session, accepted: true, changed }
 }
 
@@ -545,9 +599,11 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
     const edited = editedPath(hook)
     const task = event === 'UserPromptSubmit' ? hook.prompt?.split('\n')[0].slice(0, 120) || 'Untitled' : 'Untitled'
     const repoId = repo(store, hook.cwd, at)
-    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,branch,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path,subagents_active,activity,changed_files) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repoId, hook.cwd, gitBranch(repoId), task, initial, at, at, at, 1, event === 'SessionStart' ? 0 : 1, at, hook.transcript_path, 0, event === 'PreCompact' ? 'compacting' : null, JSON.stringify(edited ? [{ path: edited, adds: null, dels: null }] : []))
-    const reviewBaseline = captureReviewBaseline(repoId, null, event !== 'SessionStart')
+    store.run('INSERT INTO sessions(id,claude_session_id,origin,pty_id,process_key,repo_id,cwd,branch,task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at,transcript_path,subagents_active,activity,changed_files) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, hook.session_id, origin, envelope.ptyId, envelope.ptyId ?? (envelope.claudePid ? String(envelope.claudePid) : null), repoId, hook.cwd, gitBranch(workingRoot(hook.cwd)), task, initial, at, at, at, 1, event === 'SessionStart' ? 0 : 1, at, hook.transcript_path, 0, event === 'PreCompact' ? 'compacting' : null, JSON.stringify(edited ? [{ path: edited, adds: null, dels: null }] : []))
+    const reviewBaseline = captureReviewBaseline(workingRoot(hook.cwd), null, event !== 'SessionStart')
     if (reviewBaseline) store.run('UPDATE sessions SET review_baseline = ? WHERE id = ?', reviewBaseline, id)
+    if (event === 'UserPromptSubmit') store.run('UPDATE sessions SET last_input_from=? WHERE id=?', 'terminal', id)
+    if (event === 'PreToolUse' && hook.tool_name) store.run('UPDATE sessions SET activity=? WHERE id=?', `tool:${hook.tool_name}`, id)
     return store.get('SELECT * FROM sessions WHERE id = ?', id)
   }
   if (at < existing.since_ts) return existing
@@ -572,17 +628,17 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   if (['SessionStart', 'CwdChanged'].includes(event)) {
     cwd = hook.cwd
     repoId = repo(store, cwd, at)
-    branch = gitBranch(repoId)
-    if (repoId !== existing.repo_id) {
-      reviewBaseline = captureReviewBaseline(repoId, null, false)
+    branch = gitBranch(workingRoot(cwd))
+    if (repoId !== existing.repo_id || workingRoot(cwd) !== workingRoot(existing.cwd)) {
+      reviewBaseline = captureReviewBaseline(workingRoot(cwd), null, false)
       changedFiles = []
     }
   }
   const edited = editedPath(hook)
   if (edited && !changedFiles.some(file => file.path === edited)) changedFiles.push({ path: edited, adds: null, dels: null })
   if (event === 'Stop' || event === 'SessionEnd' || event === 'Notification' && hook.notification_type === 'idle_prompt' || event === 'PostToolUse' && hook.tool_name === 'Bash' || event === 'SessionStart' && ['clear', 'resume', 'fork'].includes(hook.source)) {
-    reviewBaseline ??= captureReviewBaseline(repoId, null, false)
-    const detected = gitChangedFiles(repoId, reviewBaseline)
+    reviewBaseline ??= captureReviewBaseline(workingRoot(cwd), null, false)
+    const detected = gitChangedFiles(workingRoot(cwd), reviewBaseline)
     if (detected) changedFiles = detected
   }
   if (event === 'SessionStart') {
@@ -624,8 +680,11 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   if (open.some(row => row.kind === 'permission')) state = 'needs_approval'
   else if (open.some(row => row.kind === 'question')) state = 'asked_you'
   else if (['needs_approval', 'asked_you'].includes(state)) state = event === 'Notification' && hook.notification_type === 'idle_prompt' ? 'idle' : 'running'
+  activity = sessionActivity(store, { ...existing, alive, subagents_active: subagents, process_key: processKey, pty_id: ptyId }, envelope)
+  const terminalAnswer = requestChanged && store.get("SELECT id FROM requests WHERE session_id=? AND state='answered' AND answered_at=? AND json_extract(answer,'$.via')='terminal' LIMIT 1", existing.id, at)
+  const lastInputFrom = event === 'UserPromptSubmit' || terminalAnswer ? 'terminal' : existing.last_input_from
   const since = at
-  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,branch=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : stateSince, since, Math.max(at, existing.last_activity_at), alive, activity, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, branch, reviewBaseline, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
+  store.run('UPDATE sessions SET claude_session_id=?,state=?,state_since=?,since_ts=?,last_activity_at=?,alive=?,activity=?,last_input_from=?,subagents_active=?,end_reason=?,end_announced=?,ended_at=?,task=?,transcript_path=?,cwd=?,repo_id=?,branch=?,review_baseline=?,process_key=?,pty_id=?,changed_files=? WHERE id=?', claudeId, state, state !== existing.state ? at : stateSince, since, Math.max(at, existing.last_activity_at), alive, activity, lastInputFrom, subagents, endReason, endAnnounced, endedAt, task, hook.transcript_path ?? existing.transcript_path, cwd, repoId, branch, reviewBaseline, processKey, ptyId, JSON.stringify(changedFiles), existing.id)
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
 }
 

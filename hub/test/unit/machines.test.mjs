@@ -299,7 +299,7 @@ test('reopened lifecycle replaces permanent history metadata while retaining ses
       end(5000, 42, repos[1])
       const second = { ...h.store.get('SELECT * FROM session_summaries WHERE session_id=?', id) }
       assert.equal(second.repo_id, repos[1])
-      assert.equal(second.repo_name, repos[1])
+      assert.equal(second.repo_name, path.basename(repos[1]))
       assert.equal(second.task, retainTask ? 'Original task' : 'Work in repo B')
       assert.equal(second.origin, wrapped ? 'wrapped' : 'observed')
       assert.equal(second.started_at, 1000)
@@ -4764,4 +4764,170 @@ test('legitimate start and cwd changes refresh branch and resumed history withou
     assert.equal(projector.snapshot().sessions.length, 1)
     assert.ok(publications.some(event => event.type === 'session.upserted' && event.at === 2000 && event.data.branch === 'branch-b'))
   } finally { reader.close(); h.close() }
+})
+
+test('observed tools subagents and compaction publish current activity and terminal prompt provenance', () => {
+  const h = harness()
+  const reader = openDeckDb(h.file)
+  try {
+    const projector = createProjector({ store: h.store, publish: event => {
+      assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))
+      if (event.type === 'session.upserted') {
+        const row = reader.get('SELECT activity,last_input_from FROM sessions WHERE id=?', event.entityId)
+        assert.equal(event.data.activity, row.activity)
+        assert.equal(event.data.lastInputFrom, row.last_input_from)
+      }
+    } })
+    const send = (event, at, extra = {}) => projector.applyHooks([{ ...fixture('SessionStart.startup.json', { hook_event_name: event, cwd: path.dirname(h.file), ...extra }), hookTs: at }])
+    const activity = () => projector.snapshot().sessions[0].activity
+    send('SessionStart', 1000)
+    send('UserPromptSubmit', 2000, { prompt: 'fixture work' })
+    assert.equal(projector.snapshot().sessions[0].lastInputFrom, 'terminal')
+    assert.equal(projector.snapshot().sessions[0].lastInputName, null)
+    send('PreToolUse', 3000, { tool_name: 'Bash', tool_use_id: 'outer', tool_input: { command: 'pwd' } })
+    assert.equal(activity(), 'tool:Bash')
+    send('PreToolUse', 3100, { tool_name: 'Read', tool_use_id: 'inner', tool_input: { file_path: 'example' } })
+    assert.equal(activity(), 'tool:Read')
+    send('PostToolUse', 3200, { tool_name: 'Read', tool_use_id: 'inner', tool_input: { file_path: 'example' } })
+    assert.equal(activity(), 'tool:Bash')
+    send('SubagentStart', 3300, { agent_id: 'one' })
+    assert.equal(activity(), 'tool:Bash')
+    send('PostToolUseFailure', 3400, { tool_name: 'Bash', tool_use_id: 'outer', tool_input: { command: 'pwd' }, error: 'fixture error' })
+    assert.equal(activity(), 'subagents:1')
+    send('PreCompact', 3500)
+    send('SubagentStart', 3600, { agent_id: 'two' })
+    send('PreToolUse', 3700, { tool_name: 'Read', tool_use_id: 'during', tool_input: { file_path: 'example' } })
+    assert.equal(activity(), 'compacting')
+    send('PostToolUse', 3800, { tool_name: 'Read', tool_use_id: 'during', tool_input: { file_path: 'example' } })
+    send('PostCompact', 3900)
+    assert.equal(activity(), 'subagents:2')
+    send('SubagentStop', 4000, { agent_id: 'one' })
+    assert.equal(activity(), 'subagents:1')
+    send('SubagentStop', 4100, { agent_id: 'two' })
+    assert.equal(activity(), null)
+    send('PreToolUse', 4200, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    send('Stop', 4300, { stop_hook_active: false })
+    assert.equal(activity(), null)
+    const completed = { ...h.store.get('SELECT * FROM sessions') }
+    send('PreToolUse', 4250, { tool_name: 'Read', tool_input: { file_path: 'older' } })
+    assert.deepEqual({ ...h.store.get('SELECT * FROM sessions') }, completed)
+    assert.equal(h.store.get('SELECT applied FROM hook_events ORDER BY id DESC LIMIT 1').applied, 0)
+    send('SessionEnd', 4400, { reason: 'prompt_input_exit' })
+    assert.equal(activity(), null)
+  } finally { reader.close(); h.close() }
+})
+
+test('public requests retain stored drawer matching delivery and notification fields through updates and closure', () => {
+  const h = harness()
+  const reader = openDeckDb(h.file)
+  try {
+    const expected = row => ({ id: row.id, sessionId: row.session_id, kind: row.kind, tier: row.tier,
+      toolName: row.tool_name, summary: row.summary, detail: JSON.parse(row.detail), why: row.why,
+      options: JSON.parse(row.options), state: row.state, expiredReason: row.expired_reason,
+      answer: row.answer ? JSON.parse(row.answer) : null, source: row.source, matchKey: row.match_key,
+      delivery: row.delivery, screenMatch: row.screen_match, taskId: row.task_id, createdAt: row.created_at,
+      answeredAt: row.answered_at, notifiedAt: row.notified_at, renotifiedAt: row.renotified_at })
+    const events = []
+    const projector = createProjector({ store: h.store, publish: event => {
+      assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))
+      if (event.type.startsWith('request.')) assert.deepEqual(event.data, expected(reader.get('SELECT * FROM requests WHERE id=?', event.entityId)))
+      events.push(event)
+    } })
+    const send = (event, at, extra = {}) => projector.applyHooks([{ ...fixture('SessionStart.startup.json', { hook_event_name: event, cwd: path.dirname(h.file), ...extra }), hookTs: at }])
+    send('SessionStart', 1000)
+    send('Notification', 2000, { notification_type: 'permission_prompt', message: 'Allow Bash?' })
+    let row = h.store.get('SELECT * FROM requests')
+    assert.deepEqual(projector.snapshot().requests[0], expected(row))
+    h.store.run('UPDATE requests SET why=?,options=?,notified_at=?,renotified_at=?,task_id=? WHERE id=?', 'Synthetic explanation', JSON.stringify([{ key: '1', label: 'Yes' }]), 2001, 2002, 'T4', row.id)
+    send('PermissionRequest', 2100, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    row = h.store.get('SELECT * FROM requests')
+    assert.equal(row.source, 'permission_request')
+    assert.deepEqual(projector.snapshot().requests[0], expected(row))
+    assert.equal(projector.snapshot().requests[0].toolName, 'Bash')
+    assert.deepEqual(projector.snapshot().requests[0].detail, { command: 'pwd' })
+    send('PostToolUse', 3000, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    row = h.store.get('SELECT * FROM requests')
+    assert.equal(row.state, 'answered')
+    assert.deepEqual(projector.snapshot().requests[0], expected(row))
+    assert.ok(events.some(event => event.type === 'request.updated'))
+    assert.ok(events.some(event => event.type === 'request.closed' && event.data.answer.via === 'terminal'))
+    assert.equal(projector.snapshot().sessions[0].lastInputFrom, 'terminal')
+    assert.equal(projector.snapshot().sessions[0].lastInputName, null)
+    assert.equal(Object.hasOwn(projector.snapshot().sessions[0], 'reviewBaseline'), false)
+  } finally { reader.close(); h.close() }
+})
+
+test('observed linked worktrees share main repo identity but branch review and changes use their own tree', () => {
+  const h = harness()
+  const root = path.dirname(h.file)
+  const main = path.join(root, 'project')
+  const linked = path.join(root, 'linked')
+  const alias = path.join(root, 'alias')
+  try {
+    const git = (cwd, args) => execFileSync('git', ['-C', cwd, ...args], { timeout: 2000 })
+    mkdirSync(main)
+    git(main, ['init', '-q', '--initial-branch=main-fixture'])
+    writeFileSync(path.join(main, 'file.txt'), 'baseline\n')
+    git(main, ['add', '.'])
+    git(main, ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture'])
+    git(main, ['worktree', 'add', '-q', '-b', 'linked-fixture', linked])
+    symlinkSync(linked, alias)
+    const send = (event, at, extra = {}) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { hook_event_name: event, cwd: alias, ...extra }), hookTs: at }])
+    send('SessionStart', 1000)
+    const session = h.projector.snapshot().sessions[0]
+    assert.equal(session.repoId, main)
+    assert.equal(session.branch, 'linked-fixture')
+    const repository = h.store.get('SELECT * FROM repos WHERE id=?', main)
+    assert.equal(repository.name, 'project')
+    assert.equal(repository.crew_seed, 'project')
+    assert.equal(repository.crew_slot, 0)
+    assert.equal(repository.crew_slot_shared, 0)
+    send('PermissionRequest', 1500, { tool_name: 'Write', tool_input: { file_path: path.join(linked, 'CLAUDE.md'), content: 'synthetic local guidance' } })
+    assert.equal(h.projector.snapshot().requests[0].tier, 'caution')
+    writeFileSync(path.join(main, 'main-only.txt'), 'main edit\n')
+    writeFileSync(path.join(linked, 'file.txt'), 'linked edit\nsecond\n')
+    send('UserPromptSubmit', 2000, { prompt: 'linked work' })
+    send('Stop', 3000, { stop_hook_active: false })
+    let files = h.projector.snapshot().sessions[0].changedFiles
+    assert.deepEqual(files.map(file => file.path), [path.join(linked, 'file.txt')])
+    assert.deepEqual([files[0].adds, files[0].dels], [2, 1])
+    h.projector.signal(session.id, { type: 'review' }, 4000)
+    send('UserPromptSubmit', 5000, { prompt: 'unchanged reviewed work' })
+    send('Stop', 6000, { stop_hook_active: false })
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
+    send('CwdChanged', 7000, { cwd: main })
+    assert.equal(h.projector.snapshot().sessions[0].repoId, main)
+    assert.equal(h.projector.snapshot().sessions[0].branch, 'main-fixture')
+    send('UserPromptSubmit', 7500, { prompt: 'main tree work' })
+    send('Stop', 8000, { stop_hook_active: false })
+    files = h.projector.snapshot().sessions[0].changedFiles
+    assert.ok(files.some(file => file.path === path.join(main, 'main-only.txt')))
+    assert.equal(h.store.get('SELECT COUNT(*) AS n FROM repos').n, 1)
+  } finally { h.close() }
+})
+
+test('observed repo display names and persistent crew slots distinguish collisions and overflow', () => {
+  const h = harness()
+  const root = path.dirname(h.file)
+  try {
+    const directories = [path.join(root, 'work', 'api'), path.join(root, 'oss', 'api'), ...Array.from({ length: 8 }, (_, i) => path.join(root, `repo-${i}`))]
+    for (const [i, cwd] of directories.entries()) {
+      mkdirSync(cwd, { recursive: true })
+      h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { session_id: `crew-${i}`, cwd }), hookTs: 1000 + i, claudePid: 100 + i, pidChain: [100 + i] }])
+    }
+    const rows = h.store.all('SELECT * FROM repos ORDER BY first_seen_at')
+    assert.deepEqual(rows.slice(0, 2).map(row => row.name), ['work/api', 'oss/api'])
+    assert.deepEqual(rows.slice(0, 9).map(row => row.crew_slot), [0, 1, 2, 3, 4, 5, 6, 7, 8])
+    assert.ok(rows.slice(0, 9).every(row => row.crew_slot_shared === 0))
+    assert.equal(rows[9].crew_slot_shared, 1)
+    const seed = 'repo-7'
+    let hash = 2166136261
+    for (let i = 0; i < seed.length; i++) hash = Math.imul(hash ^ seed.charCodeAt(i), 16777619) >>> 0
+    assert.equal(rows[9].crew_slot, hash % 9)
+    assert.ok(rows.every(row => row.crew_seed === row.name))
+    const before = rows.map(row => ({ ...row }))
+    h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', { session_id: 'crew-0', cwd: directories[0] }), hookTs: 2000, claudePid: 100, pidChain: [100] }])
+    assert.deepEqual(h.store.all('SELECT * FROM repos ORDER BY first_seen_at').map(row => ({ ...row })), before)
+  } finally { h.close() }
 })
