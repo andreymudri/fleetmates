@@ -2664,3 +2664,87 @@ test('Git mode comparison and review fingerprints honor core.filemode true and f
     } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
   }
 })
+
+test('wrapper chdir options use command-local directories for protected reads and nested execution', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-wrapper-read-'))
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    const state = path.join(root, 'state')
+    const deck = path.join(state, 'fleetmates', 'deck')
+    const project = path.join(root, 'project')
+    const ordinary = path.join(root, 'ordinary')
+    process.env.XDG_STATE_HOME = state
+    mkdirSync(deck, { recursive: true })
+    mkdirSync(project)
+    mkdirSync(ordinary)
+    writeFileSync(path.join(deck, 'token'), 'SYNTHETIC_TOKEN\n')
+    writeFileSync(path.join(project, 'token'), 'ordinary\n')
+    writeFileSync(path.join(ordinary, 'token'), 'ordinary\n')
+    symlinkSync(deck, path.join(project, 'cache'))
+    symlinkSync(ordinary, path.join(project, 'ordinary'))
+    const tier = (command, cwd = project) => permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }, { repoRoot: project })
+    for (const prefix of [
+      'env -C cache', 'env --chdir cache', 'env --chdir=cache', 'env -Ccache', 'env -iC cache', 'env -iCcache',
+      '/usr/bin/env -C cache', 'sudo -D cache', 'sudo --chdir cache', 'sudo --chdir=cache', 'sudo -Dcache', 'sudo -nDcache',
+      'env -C cache env -C ../../../project/cache',
+      'env -C ordinary sudo -D ../project/cache', 'sudo -D ordinary env --chdir=../project/cache',
+      'nice -n 1 env -C cache timeout 2', 'env -C "$XDG_STATE_HOME/fleetmates/deck"'
+    ]) {
+      for (const suffix of ['cat token', "sh -c 'cat token'", "bash -lc 'echo \"$(cat token)\"'", "sh -c 'echo `cat token`'"]) {
+        assert.equal(tier(`${prefix} ${suffix}`), 'destructive', `${prefix} ${suffix}`)
+      }
+    }
+    for (const command of [
+      'env -C ordinary cat token', 'sudo -D ordinary cat token',
+      "env -C ordinary sh -c 'cat token'", 'env -C "$UNKNOWN_CWD" cat cache/token',
+      'env -C ordinary true; cat token', 'sudo -D ordinary true && cat token',
+      'env -C cache echo "$(cat token)"',
+      "env -C cache sh -c 'echo ordinary'",
+      'env -C cache cat <token',
+      'env -C cache printf x >token'
+    ]) assert.equal(tier(command), 'caution', command)
+    for (const command of [
+      'env -C ordinary true; cat cache/token', 'sudo -D ordinary true && cat cache/token',
+      'env -C ordinary echo "$(cat cache/token)"',
+      "sh -c 'env -C cache cat token'"
+    ]) assert.equal(tier(command), 'destructive', command)
+    for (const wrapper of ['env -C', 'sudo -D']) {
+      assert.equal(tier(`${wrapper} ${ordinary} cat token`, deck), 'caution')
+      assert.equal(tier(`${wrapper} ${ordinary} cat <token`, deck), 'destructive')
+      assert.equal(tier(`${wrapper} ${ordinary} printf x >token`, deck), 'destructive')
+      assert.equal(tier(`${wrapper} ${ordinary} true; cat token`, deck), 'destructive')
+    }
+    assert.equal(existsSync(path.join(project, 'executed')), false)
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('wrapper directories apply to file-writing executables and nested shells but not parent redirections', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-wrapper-write-'))
+  try {
+    const project = path.join(root, 'project')
+    const claude = path.join(root, 'controls', '.claude')
+    const ordinary = path.join(root, 'ordinary')
+    mkdirSync(project)
+    mkdirSync(claude, { recursive: true })
+    mkdirSync(ordinary)
+    symlinkSync(claude, path.join(project, 'controls'))
+    symlinkSync(ordinary, path.join(project, 'ordinary'))
+    const tier = (command, cwd = project) => permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }, { repoRoot: project })
+    for (const wrapper of ['env -C', 'env --chdir=', 'sudo -D', 'sudo --chdir=']) {
+      const prefix = wrapper.endsWith('=') ? `${wrapper}controls` : `${wrapper} controls`
+      for (const suffix of ['tee settings.local.json', "sh -c 'printf x > settings.local.json'", "bash -lc 'tee settings.local.json'"]) assert.equal(tier(`${prefix} ${suffix}`), 'destructive', `${prefix} ${suffix}`)
+    }
+    assert.equal(tier("env -C ordinary sudo -D ../project/controls sh -c 'printf x > settings.local.json'"), 'destructive')
+    assert.equal(tier('env -C ordinary tee settings.local.json'), 'caution')
+    assert.equal(tier('env -C controls printf x > settings.local.json'), 'caution')
+    assert.equal(tier(`env -C ${ordinary} tee settings.local.json`, claude), 'caution')
+    assert.equal(tier(`env -C ${ordinary} printf x > settings.local.json`, claude), 'destructive')
+    assert.equal(tier('env -C ordinary true; tee controls/settings.local.json'), 'destructive')
+    assert.equal(tier('env -C "$UNKNOWN_CWD" tee settings.local.json'), 'caution')
+    assert.equal(existsSync(path.join(project, 'settings.local.json')), false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

@@ -78,7 +78,7 @@ function embeddedCommands(command) {
 
 const executionWrappers = ['env', 'sudo', 'doas', 'nice', 'timeout', 'stdbuf', 'time', 'nohup']
 
-function skipWrapperOptions(words, index, wrapper) {
+function skipWrapperOptions(words, index, wrapper, onDirectory = () => {}) {
   let offset = index + 1
   const takesValue = {
     env: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-a', '--argv0'],
@@ -90,15 +90,25 @@ function skipWrapperOptions(words, index, wrapper) {
     time: ['-f', '--format', '-o', '--output'],
     nohup: []
   }[wrapper]
+  const directoryOption = wrapper === 'env' ? '-C' : wrapper === 'sudo' ? '-D' : null
+  const directoryValue = (option, value) => {
+    if (directoryOption && [directoryOption, '--chdir'].includes(option)) onDirectory(value)
+  }
   while (offset < words.length) {
     const word = words[offset].value
     if (word === '--') { offset++; break }
     if (wrapper === 'env' && /^[A-Za-z_]\w*=/.test(word)) { offset++; continue }
-    if (takesValue.includes(word)) { offset += 2; continue }
-    if (word.startsWith('--')) { offset++; continue }
+    if (takesValue.includes(word)) { directoryValue(word, words[offset + 1]?.value); offset += 2; continue }
+    if (word.startsWith('--')) {
+      const equal = word.indexOf('=')
+      if (equal >= 0) directoryValue(word.slice(0, equal), word.slice(equal + 1))
+      offset++
+      continue
+    }
     if (word.startsWith('-') && word !== '-') {
       const flags = word.slice(1)
       const valueAt = [...flags].findIndex(flag => takesValue.includes(`-${flag}`))
+      if (valueAt >= 0) directoryValue(`-${flags[valueAt]}`, valueAt === flags.length - 1 ? words[offset + 1]?.value : flags.slice(valueAt + 1))
       offset += valueAt >= 0 && valueAt === flags.length - 1 ? 2 : 1
       continue
     }
@@ -221,15 +231,27 @@ function canonicalExistingPath(location) {
   }
 }
 
+function knownShellPath(value) {
+  return value.replace(/^\$(?:([A-Z_]+)|\{([A-Z_]+)\})(?=\/|$)/, (match, plain, braced) => {
+    const variable = plain ?? braced
+    const configured = ['XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'].includes(variable) ? process.env[variable] : null
+    return configured && path.isAbsolute(configured) ? configured : match
+  })
+}
+
+function wrapperDirectory(value, cwd) {
+  if (typeof value !== 'string' || !value) return null
+  const expanded = knownShellPath(value)
+  if (/[$*?`]/.test(expanded)) return null
+  if (path.isAbsolute(expanded)) return canonicalExistingPath(expanded)
+  return path.isAbsolute(cwd ?? '') ? canonicalExistingPath(path.resolve(cwd, expanded)) : null
+}
+
 function namesRelativeDeckControl(hook, depth = 0) {
   if (depth > 4) return true
   const namesControl = (value, shell = false, directory = hook.cwd) => {
     if (typeof value !== 'string' || !value) return false
-    const expanded = shell ? value.replace(/^\$(?:([A-Z_]+)|\{([A-Z_]+)\})(?=\/)/, (match, plain, braced) => {
-      const variable = plain ?? braced
-      const configured = ['XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'].includes(variable) ? process.env[variable] : null
-      return configured && path.isAbsolute(configured) ? configured : match
-    }) : value
+    const expanded = shell ? knownShellPath(value) : value
     if (shell && /[$*?`]/.test(expanded)) return false
     if (path.isAbsolute(expanded)) return namesDeckControl({ path: canonicalExistingPath(expanded) })
     return path.isAbsolute(directory ?? '') && namesDeckControl({ path: canonicalExistingPath(path.resolve(directory, expanded)) })
@@ -254,10 +276,30 @@ function namesRelativeDeckControl(hook, depth = 0) {
     for (const cwd of directories) {
       if (embeddedCommands(raw).some(command => namesRelativeDeckControl({ ...hook, cwd, tool_input: { command } }, depth + 1))) return true
     }
+    const redirected = new Set()
+    for (let i = 0; i < words.length; i++) {
+      if (!['<', '>'].includes(words[i].value) || words[i].quoted) continue
+      const operator = words[i].value
+      let repeated = false
+      while (words[i + 1]?.value === operator && !words[i + 1].quoted) { repeated = true; i++ }
+      const target = words[i + 1]
+      if (!target) continue
+      redirected.add(target)
+      if (operator === '<' && repeated) continue
+      for (const cwd of directories) if (namesControl(target.value, true, cwd)) return true
+    }
+    let commandDirectories = directories
+    let wrapped = false
     let index = 0
     while (words[index]) {
       const wrapper = path.posix.basename(words[index].value)
-      if (!/^[A-Za-z_]\w*=/.test(words[index].value) && executionWrappers.includes(wrapper)) { index = skipWrapperOptions(words, index, wrapper); continue }
+      if (!/^[A-Za-z_]\w*=/.test(words[index].value) && executionWrappers.includes(wrapper)) {
+        wrapped = true
+        index = skipWrapperOptions(words, index, wrapper, target => {
+          commandDirectories = new Set([...commandDirectories].map(cwd => wrapperDirectory(target, cwd)))
+        })
+        continue
+      }
       if (/^[A-Za-z_]\w*=/.test(words[index].value) || ['command', 'builtin'].includes(wrapper)) {
         index++
         if (wrapper === 'command') {
@@ -272,17 +314,19 @@ function namesRelativeDeckControl(hook, depth = 0) {
     }
     const executable = path.posix.basename(words[index]?.value ?? '')
     const args = words.slice(index + 1)
+    let scriptArgument = null
     if (['sh', 'bash', 'zsh'].includes(executable) || executable === 'eval') {
       const at = executable === 'eval' ? -1 : args.findIndex(word => /^-[A-Za-z]*c[A-Za-z]*$/.test(word.value))
       const inner = args[at + 1]
       if ((executable === 'eval' || at >= 0) && inner?.quoted) {
-        for (const cwd of directories) if (namesRelativeDeckControl({ ...hook, cwd, tool_input: { command: inner.value } }, depth + 1)) return true
+        scriptArgument = inner
+        for (const cwd of commandDirectories) if (namesRelativeDeckControl({ ...hook, cwd, tool_input: { command: inner.value } }, depth + 1)) return true
       }
     }
-    if (!['echo', 'printf'].includes(executable) || words.some(word => ['>', '>>', '<', '<<'].includes(word.value))) {
-      for (const cwd of directories) if (args.some(word => !word.value.startsWith('-') && namesControl(word.value, true, cwd))) return true
+    if (!['echo', 'printf'].includes(executable)) {
+      for (const cwd of commandDirectories) if (args.some(word => word !== scriptArgument && !redirected.has(word) && (word.quoted || !['<', '>'].includes(word.value)) && !word.value.startsWith('-') && namesControl(word.value, true, cwd))) return true
     }
-    if (executable === 'cd') {
+    if (executable === 'cd' && !wrapped) {
       const target = args.find(word => word.value !== '--' && !word.value.startsWith('-'))?.value
       if (target && !/[$*?`]/.test(target)) {
         const next = new Set()
@@ -321,7 +365,7 @@ function namesRelativeDeckControl(hook, depth = 0) {
 function shellWriteTargets(command, cwd) {
   let directory = cwd
   const targets = []
-  const add = target => targets.push({ file_path: target, cwd: directory })
+  const add = (target, cwd = directory) => targets.push({ file_path: target, cwd })
   const tokens = shellTokens(command)
   const inspect = words => {
     for (let i = 0; i < words.length; i++) {
@@ -330,10 +374,16 @@ function shellWriteTargets(command, cwd) {
       const target = words[i + 1]
       if (target && !target.separator && target.value !== '&') add(target.value)
     }
+    let commandDirectory = directory
+    let wrapped = false
     let index = 0
     while (words[index]) {
       const wrapper = path.posix.basename(words[index].value)
-      if (!/^[A-Za-z_]\w*=/.test(words[index].value) && executionWrappers.includes(wrapper)) { index = skipWrapperOptions(words, index, wrapper); continue }
+      if (!/^[A-Za-z_]\w*=/.test(words[index].value) && executionWrappers.includes(wrapper)) {
+        wrapped = true
+        index = skipWrapperOptions(words, index, wrapper, target => { commandDirectory = wrapperDirectory(target, commandDirectory) })
+        continue
+      }
       if (/^[A-Za-z_]\w*=/.test(words[index].value) || ['command', 'builtin'].includes(wrapper)) {
         index++
         if (wrapper === 'command') {
@@ -350,21 +400,21 @@ function shellWriteTargets(command, cwd) {
     const args = words.slice(index + 1).map(word => word.value)
     if (['sh', 'bash', 'zsh'].includes(executable)) {
       const at = args.findIndex(arg => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))
-      if (at >= 0 && words[index + at + 2]?.quoted) targets.push({ command: args[at + 1], cwd: directory })
+      if (at >= 0 && words[index + at + 2]?.quoted) targets.push({ command: args[at + 1], cwd: commandDirectory })
     }
-    if (executable === 'eval' && words[index + 1]?.quoted) targets.push({ command: args[0], cwd: directory })
-    if (executable === 'cd') {
+    if (executable === 'eval' && words[index + 1]?.quoted) targets.push({ command: args[0], cwd: commandDirectory })
+    if (executable === 'cd' && !wrapped) {
       const target = args.find(arg => arg !== '--' && !arg.startsWith('-'))
       if (target && !/[$*?`]/.test(target)) directory = path.resolve(directory ?? '', target)
     }
     if (executable === 'dd') {
-      for (const arg of args) if (arg.startsWith('of=')) add(arg.slice(3))
+      for (const arg of args) if (arg.startsWith('of=')) add(arg.slice(3), commandDirectory)
     }
     const editsInPlace = ['sed', 'perl'].includes(executable) && args.some(arg => arg === '--in-place' || arg.startsWith('--in-place=') || /^-i/.test(arg))
     if (['tee', 'cp', 'mv', 'install', 'touch', 'truncate'].includes(executable) || editsInPlace) {
       for (const arg of args) {
-        if (arg.startsWith('--target-directory=')) add(arg.slice('--target-directory='.length))
-        else if (!arg.startsWith('-') && !['<', '>'].includes(arg)) add(arg)
+        if (arg.startsWith('--target-directory=')) add(arg.slice('--target-directory='.length), commandDirectory)
+        else if (!arg.startsWith('-') && !['<', '>'].includes(arg)) add(arg, commandDirectory)
       }
     }
   }
