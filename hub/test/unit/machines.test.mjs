@@ -4584,3 +4584,94 @@ test('promisor missing trees and blobs cannot launch remote helpers despite ambi
     else process.env.GIT_NO_LAZY_FETCH = previous
   }
 })
+
+
+test('stale timer accepts buffered completion without replacing the causal hook watermark', () => {
+  const h = harness()
+  const reader = openDeckDb(h.file)
+  try {
+    const events = []
+    const projector = createProjector({ store: h.store, publish: event => {
+      assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))
+      if (event.type === 'session.upserted') {
+        const row = reader.get('SELECT * FROM sessions WHERE id=?', event.entityId)
+        assert.equal(event.data.state, row.state)
+        assert.equal(event.data.stateSince, row.state_since)
+        assert.equal(event.data.lastActivityAt, row.last_activity_at)
+      }
+      events.push(event)
+    } })
+    const send = (name, at, extra = {}) => {
+      const checked = validateEnvelope(JSON.stringify({ ...fixture('SessionStart.startup.json', {
+        hook_event_name: name, cwd: path.dirname(h.file), transcript_path: path.join(path.dirname(h.file), 'absent.jsonl'), ...extra
+      }), hookTs: at }))
+      assert.equal(checked.ok, true)
+      projector.applyHooks([checked.value])
+    }
+    send('SessionStart', 1000)
+    send('UserPromptSubmit', 2000, { prompt: 'work' })
+    projector.tick(1202000)
+    assert.equal(projector.snapshot().sessions[0].state, 'stale')
+    send('PostToolUse', 1201900, { tool_name: 'Read', tool_input: { file_path: 'example.txt' } })
+    let session = projector.snapshot().sessions[0]
+    assert.equal(session.state, 'running')
+    assert.equal(session.lastActivityAt, 1201900)
+    assert.equal(session.stateSince, 1201900)
+    assert.equal(h.store.get('SELECT since_ts FROM sessions WHERE id=?', session.id).since_ts, 1201900)
+    assert.equal(events.at(-1).data.running, 1)
+    send('Stop', 1201950, { stop_hook_active: false })
+    session = projector.snapshot().sessions[0]
+    assert.equal(session.state, 'idle')
+    assert.equal(session.stateSince, 1201950)
+    assert.equal(session.lastActivityAt, 1201950)
+    const completed = { ...h.store.get('SELECT * FROM sessions WHERE id=?', session.id) }
+    send('PostToolUse', 1201925, { tool_name: 'Read', tool_input: { file_path: 'older.txt' } })
+    projector.tick(1302000)
+    assert.deepEqual({ ...h.store.get('SELECT * FROM sessions WHERE id=?', session.id) }, completed)
+    assert.equal(projector.snapshot().counts.running, 0)
+    assert.deepEqual(h.store.all('SELECT applied FROM hook_events ORDER BY id').map(row => row.applied), [1, 1, 1, 1, 0])
+    assert.ok(events.some(event => event.type === 'session.upserted' && event.at === 1201950 && event.data.state === 'idle'))
+  } finally { reader.close(); h.close() }
+})
+
+test('stale recovery uses real activity time and retains old-hook and terminal fences', () => {
+  for (const terminal of ['none', 'announced-timeout', 'pid-loss']) {
+    const h = harness()
+    try {
+      const send = (name, at, extra = {}) => h.projector.applyHooks([{ ...fixture('SessionStart.startup.json', {
+        hook_event_name: name, cwd: path.dirname(h.file), ...extra
+      }), hookTs: at }])
+      send('SessionStart', 1000)
+      send('UserPromptSubmit', 2000, { prompt: 'work' })
+      const id = h.projector.snapshot().sessions[0].id
+      h.projector.tick(1202000)
+      const stale = { ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }
+      send('Stop', 1500, { stop_hook_active: false })
+      assert.deepEqual({ ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }, stale)
+      if (terminal === 'none') {
+        send('PostToolUse', 1201900, { tool_name: 'Read', tool_input: { file_path: 'real.txt' } })
+        assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+        h.projector.tick(2401899)
+        assert.equal(h.projector.snapshot().sessions[0].state, 'running')
+        h.projector.tick(2401900)
+        assert.equal(h.projector.snapshot().sessions[0].state, 'stale')
+        assert.equal(h.projector.snapshot().sessions[0].stateSince, 1201900)
+        assert.equal(h.store.get('SELECT since_ts FROM sessions WHERE id=?', id).since_ts, 1201900)
+      } else {
+        if (terminal === 'announced-timeout') {
+          send('SessionEnd', 1202100, { reason: 'clear' })
+          h.projector.tick(1207100)
+        } else h.projector.signal(id, { type: 'pid_gone' }, 1207100)
+        const ended = { ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }
+        const summary = { ...h.store.get('SELECT * FROM session_summaries WHERE session_id=?', id) }
+        assert.equal(ended.alive, 0)
+        send('PostToolUse', 1207050, { tool_name: 'Read', tool_input: { file_path: 'late.txt' } })
+        send('PermissionRequest', 1207060, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+        assert.deepEqual({ ...h.store.get('SELECT * FROM sessions WHERE id=?', id) }, ended)
+        assert.deepEqual({ ...h.store.get('SELECT * FROM session_summaries WHERE session_id=?', id) }, summary)
+        assert.equal(h.projector.snapshot().sessions.length, 1)
+        assert.equal(h.projector.snapshot().counts.openRequests, 0)
+      }
+    } finally { h.close() }
+  }
+})
