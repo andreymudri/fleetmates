@@ -220,8 +220,13 @@ function destructiveSegment(words, depth) {
   if (command === 'git') {
     let offset = 0
     while (offset < args.length) {
-      if (['-C', '-c', '--git-dir', '--work-tree', '--config-env', '--namespace'].includes(args[offset])) { offset += 2; continue }
-      if (/^(?:--git-dir|--work-tree|--config-env|--namespace)=/.test(args[offset])) { offset++; continue }
+      if (['--no-pager', '-P', '--paginate', '-p', '--no-optional-locks', '--no-replace-objects', '--no-lazy-fetch', '--literal-pathspecs', '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs', '--bare'].includes(args[offset])) { offset++; continue }
+      if (['-C', '-c', '--git-dir', '--work-tree', '--config-env', '--namespace'].includes(args[offset])) {
+        if (offset + 1 >= args.length) return false
+        offset += 2
+        continue
+      }
+      if (/^(?:--git-dir|--work-tree|--config-env|--namespace)=/.test(args[offset]) || /^-[Cc].+/.test(args[offset])) { offset++; continue }
       break
     }
     gitArgs = args.slice(offset)

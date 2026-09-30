@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { tmpdir } from 'node:os'
 import { expireRequests } from './request.mjs'
 
 const maxGitOutput = 1024 * 1024
@@ -9,7 +10,7 @@ const maxChangedPaths = 512
 const maxScannedPaths = 4096
 const maxScannedBytes = 32 * 1024 * 1024
 
-function git(root, args, budget = null) {
+function git(root, args, budget = null, differences = false) {
   if (budget && Date.now() >= budget.deadline) return null
   try {
     return execFileSync('git', ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', ...args], {
@@ -19,7 +20,10 @@ function git(root, args, budget = null) {
       maxBuffer: maxGitOutput,
       stdio: ['ignore', 'pipe', 'ignore']
     })
-  } catch { return null }
+  } catch (error) {
+    if (differences && error.status === 1 && Buffer.isBuffer(error.stdout)) return error.stdout
+    return null
+  }
 }
 
 function gitHead(root, budget = null) {
@@ -138,7 +142,7 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
     }
     if (!unchanged) paths.set(name, { adds: null, dels: null })
   }
-  return paths.size <= maxChangedPaths ? { paths, normalization, budget, fileMode, gitlinks, depth } : null
+  return paths.size <= maxChangedPaths ? { paths, normalization, budget, fileMode, gitlinks, depth, entries } : null
 }
 
 function fileFingerprint(root, name, scan) {
@@ -192,6 +196,80 @@ function gitlinkState(directory, budget, depth) {
   }
 }
 
+function statisticsBudget(scan) {
+  return { remaining: 4 * 1024 * 1024, deadline: scan.budget.deadline }
+}
+
+function lineBytes(root, name, scan, budget) {
+  let fd
+  try {
+    const file = path.resolve(root, name)
+    if (!file.startsWith(`${root}${path.sep}`) || Date.now() >= budget.deadline) return null
+    const stat = lstatSync(file)
+    if (stat.isSymbolicLink()) {
+      const bytes = Buffer.from(readlinkSync(file))
+      if (bytes.length > budget.remaining) return null
+      budget.remaining -= bytes.length
+      return bytes
+    }
+    if (!stat.isFile() || stat.size > maxGitOutput || stat.size > budget.remaining) return null
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const before = fstatSync(fd)
+    if (!before.isFile() || before.size !== stat.size) return null
+    const bytes = Buffer.alloc(before.size)
+    let at = 0
+    while (at < bytes.length) {
+      if (Date.now() >= budget.deadline) return null
+      const read = readSync(fd, bytes, at, bytes.length - at, at)
+      if (!read) return null
+      at += read
+    }
+    budget.remaining -= bytes.length
+    const after = fstatSync(fd)
+    if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) return null
+    if (!scan.normalization.get(name)) return bytes
+    const normalized = Buffer.alloc(bytes.length)
+    let used = 0
+    for (let index = 0; index < bytes.length; index++) {
+      if (bytes[index] === 13 && bytes[index + 1] === 10) continue
+      normalized[used++] = bytes[index]
+    }
+    return normalized.subarray(0, used)
+  } catch (error) {
+    return ['ENOENT', 'ENOTDIR'].includes(error.code) ? Buffer.alloc(0) : null
+  } finally { if (fd !== undefined) closeSync(fd) }
+}
+
+function lineStatistics(root, name, saved, scan, budget, binary) {
+  const unknown = { adds: null, dels: null }
+  if (scan.gitlinks.has(name) || binary === undefined || binary === 'unset' || Date.now() >= budget.deadline) return unknown
+  let before
+  if (Object.hasOwn(saved.files, name)) {
+    const content = saved.contents?.[name]
+    if (typeof content !== 'string' || content.length > Math.ceil(maxGitOutput / 3) * 4) return unknown
+    before = Buffer.from(content, 'base64')
+  } else {
+    const entry = scan.entries.get(name)
+    if (entry?.type === 'commit') return unknown
+    before = entry ? git(root, ['cat-file', 'blob', entry.oid], budget) : Buffer.alloc(0)
+  }
+  if (!before || before.length > budget.remaining) return unknown
+  budget.remaining -= before.length
+  const after = lineBytes(root, name, scan, budget)
+  if (!after || before.includes(0) || after.includes(0)) return unknown
+  if (before.equals(after)) return { adds: 0, dels: 0 }
+  let directory
+  try {
+    directory = mkdtempSync(path.join(tmpdir(), 'deck-numstat-'))
+    writeFileSync(path.join(directory, 'before'), before, { mode: 0o600 })
+    writeFileSync(path.join(directory, 'after'), after, { mode: 0o600 })
+    const output = git(directory, ['-c', 'diff.algorithm=myers', 'diff', '--no-index', '--numstat', '--no-ext-diff', '--no-textconv', '--no-renames', '--', 'before', 'after'], budget, true)?.toString('utf8')
+    const match = /^(\d+)\t(\d+)\t/.exec(output ?? '')
+    return match ? { adds: Number(match[1]), dels: Number(match[2]) } : unknown
+  } catch { return unknown }
+  finally { if (directory) rmSync(directory, { recursive: true, force: true }) }
+}
+
 /** Capture the current Git changes as a review boundary. */
 export function captureReviewBaseline(root, previous = null, includeExisting = true) {
   const head = baseline(previous)?.head ?? gitHead(root)
@@ -199,7 +277,15 @@ export function captureReviewBaseline(root, previous = null, includeExisting = t
   const scan = includeExisting ? gitPaths(root, head) : { paths: new Map(), normalization: new Map(), budget: scanBudget() }
   if (!scan) return null
   try {
-    return JSON.stringify({ head, files: Object.fromEntries([...scan.paths.keys()].map(name => [name, fileFingerprint(root, name, scan)])) })
+    const files = Object.fromEntries([...scan.paths.keys()].map(name => [name, fileFingerprint(root, name, scan)]))
+    const budget = statisticsBudget(scan)
+    const contents = Object.fromEntries(Object.keys(files).map(name => {
+      const bytes = lineBytes(root, name, scan, budget)
+      const digest = bytes && createHash('sha256').update(bytes).digest('hex')
+      const consistent = files[name] === null && bytes?.length === 0 || files[name]?.endsWith(digest ?? '-')
+      return [name, bytes && consistent ? bytes.toString('base64') : null]
+    }))
+    return JSON.stringify({ head, files, contents })
   } catch { return null }
 }
 
@@ -212,7 +298,13 @@ function gitChangedFiles(root, value) {
   for (const name of Object.keys(saved.files)) if (!paths.has(name)) paths.set(name, { adds: null, dels: null })
   if (paths.size > maxChangedPaths) return null
   try {
-    return [...paths].filter(([name]) => !Object.hasOwn(saved.files, name) || saved.files[name] !== fileFingerprint(root, name, scan)).map(([name, diff]) => ({ path: path.resolve(root, name), ...diff }))
+    const changed = [...paths.keys()].filter(name => !Object.hasOwn(saved.files, name) || saved.files[name] !== fileFingerprint(root, name, scan))
+    if (!changed.length) return []
+    const attributes = git(root, ['check-attr', '-z', 'diff', '--', ...changed], scan.budget)?.toString('utf8').split('\0')
+    const binary = new Map()
+    if (attributes) for (let index = 0; index + 2 < attributes.length; index += 3) binary.set(attributes[index], attributes[index + 2])
+    const budget = statisticsBudget(scan)
+    return changed.map(name => ({ path: path.resolve(root, name), ...lineStatistics(root, name, saved, scan, budget, binary.get(name)) }))
   } catch { return null }
 }
 
