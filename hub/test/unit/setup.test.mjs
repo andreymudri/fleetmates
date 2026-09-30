@@ -444,11 +444,17 @@ test('init updates an old deck hook in place', () => {
   assert.equal(groups[0].hooks[1].command, 'node /home/you/other.mjs')
 })
 
-test('renamed Node init is idempotent and uninstall preserves unrelated groups', () => {
+test('renamed Node init is idempotent and uninstall preserves unrelated groups', t => {
   const s = sandbox('existing-hooks.json')
-  const executable = path.join(s.root, 'deck-node-runtime')
-  fs.copyFileSync(process.execPath, executable)
-  chmodSync(executable, 0o700)
+  const executableDir = mkdtempSync(path.join('/var/tmp', 'deck-node-test-'))
+  const executable = path.join(executableDir, 'deck-node-runtime')
+  t.after(() => fs.rmSync(executableDir, { recursive: true, force: true }))
+  try {
+    fs.linkSync(process.execPath, executable)
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error
+    fs.copyFileSync(process.execPath, executable, fs.constants.COPYFILE_FICLONE)
+  }
   const original = JSON.parse(readFileSync(s.settings, 'utf8'))
   const target = setupPaths(s.env).hook
   const unrelated = [
