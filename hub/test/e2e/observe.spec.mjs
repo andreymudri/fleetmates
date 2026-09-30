@@ -519,6 +519,9 @@ if (import.meta.main) {
     await page.waitForSelector('.session-card--approval')
     const running = await page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running').map(animation => animation.animationName ?? String(animation)))
     assert.deepEqual(running, [])
+    const ring = await page.$eval('.session-card--approval', el => getComputedStyle(el).boxShadow)
+    t.diagnostic(`needs-you card ring under reduced motion: ${ring}`)
+    assert.notEqual(ring, 'none', 'needs-you cards keep a static ring')
     const loading = await openDeck(browser, h, '/', { reducedMotion: 'reduce', wait: false, init: () => { window.WebSocket = class { constructor() {} close() {} send() {} addEventListener() {} } } })
     await loading.waitForSelector('.skeleton-card')
     assert.deepEqual(await loading.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running').length), 0)
@@ -555,9 +558,9 @@ if (import.meta.main) {
     const order = fixture('busy').expect.grid.concat(fixture('busy').expect.quiet)
     assert.deepEqual(sessions, [['rustot · combat-tick', `Alt ${order.indexOf('rustot') + 1}`], ['rustot-client · ui/inventory', `Alt ${order.indexOf('rustot-client') + 1}`]])
     await page.keyboard.press('ArrowDown')
-    const second = await page.getAttribute('.palette-input', 'aria-activedescendant')
+    assert.equal(await page.getAttribute('.palette-input', 'aria-activedescendant'), 'palette-opt-1')
     await page.keyboard.press('Alt+KeyK')
-    assert.notEqual(await page.getAttribute('.palette-input', 'aria-activedescendant'), second, 'Alt K moves the highlight up')
+    assert.equal(await page.getAttribute('.palette-input', 'aria-activedescendant'), 'palette-opt-0', 'Alt K moves the highlight up one row')
     assert.equal(await page.locator('.palette').count(), 1, 'and the palette stays open')
     await page.keyboard.press('Escape')
     await page.waitForSelector('.palette', { state: 'detached' })
@@ -661,6 +664,16 @@ if (import.meta.main) {
     const moving = await page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running' &&
       animation.effect?.getKeyframes?.().some(frame => frame.transform && frame.transform !== 'none')).length)
     assert.equal(moving, 0)
+  })
+
+  spec('Drawer AC11: with reduced motion the drawer fades in', { todo: 'gap: no stylesheet applies deck-drawer-in (tokens.css defines it), so the drawer neither slides nor fades' }, async t => {
+    const h = await busyDeck(t)
+    const page = await openDeck(browser, h, '/', { reducedMotion: 'reduce' })
+    await page.keyboard.press('Alt+KeyU')
+    await page.waitForSelector('.drawer')
+    const fading = await page.evaluate(() => document.querySelector('.drawer').getAnimations({ subtree: true }).some(animation =>
+      animation.effect?.getKeyframes?.().some(frame => frame.opacity !== undefined)))
+    assert.ok(fading, 'the drawer runs an opacity animation')
   })
 
   spec('Counts property (qa 1.8, drawer AC2): over 200 random opens and closes the chip, badge and drawer subtitle always agree with the server', async t => {
@@ -782,11 +795,14 @@ if (import.meta.main) {
     await page.keyboard.press('Alt+KeyU')
     await page.waitForSelector('.drawer')
     const toasts = await page.locator('.toast--needs').count()
-    const now = Date.now()
-    await h.send(['portfolio-site', 'vault-mcp', 'turbidassist'].map((key, i) => envelopeFor({ key, fixture: 'busy' }, { e: 'PermissionRequest', at: now + i, tool_name: 'Bash', tool_input: { command: `make step-${i}` } }, now)))
+    // Three separate hook deliveries, each stored before the next is sent, all inside one 2 s window.
+    const first = Date.now()
+    for (const [i, key] of ['portfolio-site', 'vault-mcp', 'turbidassist'].entries()) await h.hook(key, { e: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: `make step-${i}` } })
+    assert.ok(Date.now() - first < 2000, `the three requests arrived within 2 s (${Date.now() - first} ms)`)
     await until(async () => (await page.evaluate(() => window.__said)).filter(Boolean).length >= 2, { timeout: 5000, message: 'the burst announcement' })
+    await page.waitForTimeout(2300)
     const burst = (await page.evaluate(() => window.__said)).filter(Boolean)
-    assert.equal(burst.at(-1), '3 new requests')
+    assert.deepEqual(burst.slice(1), ['3 new requests'], 'one burst announcement for the three')
     assert.equal(await page.locator('.toast--needs').count(), toasts, 'no needs toast while the drawer is open')
   })
 
