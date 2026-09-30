@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 
 function canonical(value) {
@@ -74,28 +74,44 @@ function embeddedCommands(command) {
   return found
 }
 
+const executionWrappers = ['env', 'sudo', 'doas', 'nice', 'timeout', 'stdbuf', 'time', 'nohup']
+
 function skipWrapperOptions(words, index, wrapper) {
   let offset = index + 1
-  const takesValue = wrapper === 'env'
-    ? ['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-a', '--argv0']
-    : ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-r', '--role', '-t', '--type']
+  const takesValue = {
+    env: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-a', '--argv0'],
+    sudo: ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-r', '--role', '-t', '--type'],
+    doas: ['-u'],
+    nice: ['-n', '--adjustment'],
+    timeout: ['-s', '--signal', '-k', '--kill-after'],
+    stdbuf: ['-i', '--input', '-o', '--output', '-e', '--error'],
+    time: ['-f', '--format', '-o', '--output'],
+    nohup: []
+  }[wrapper]
   while (offset < words.length) {
     const word = words[offset].value
-    if (word === '--') return offset + 1
+    if (word === '--') { offset++; break }
     if (wrapper === 'env' && /^[A-Za-z_]\w*=/.test(word)) { offset++; continue }
     if (takesValue.includes(word)) { offset += 2; continue }
-    if (/^--[a-z][a-z-]*=/.test(word) || wrapper === 'env' && /^-[uCSa].+/.test(word) || wrapper !== 'env' && /^-[ughCpDrt].+/.test(word)) { offset++; continue }
-    if (word.startsWith('-') && word !== '-') { offset++; continue }
+    if (word.startsWith('--')) { offset++; continue }
+    if (word.startsWith('-') && word !== '-') {
+      const flags = word.slice(1)
+      const valueAt = [...flags].findIndex(flag => takesValue.includes(`-${flag}`))
+      offset += valueAt >= 0 && valueAt === flags.length - 1 ? 2 : 1
+      continue
+    }
     break
   }
-  return offset
+  return wrapper === 'timeout' && words[offset] ? offset + 1 : offset
 }
 
 function destructiveSegment(words, depth) {
   if (depth > 4 || !words.length) return false
   let index = 0
   while (index < words.length) {
-    const word = words[index].value
+    const raw = words[index].value
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(raw)) { index++; continue }
+    const word = path.posix.basename(raw)
     if (word === 'command') {
       index++
       while (words[index]?.value === '--' || /^-[pVv]+$/.test(words[index]?.value ?? '')) {
@@ -104,10 +120,8 @@ function destructiveSegment(words, depth) {
       }
       continue
     }
-    if (['env', 'sudo', 'doas'].includes(word)) { index = skipWrapperOptions(words, index, word); continue }
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word) || ['builtin', 'time', 'nice', 'nohup'].includes(word)) { index++; continue }
-    if (word === 'timeout') { index += 2; continue }
-    if (word === 'stdbuf') { index++; while (words[index]?.value.startsWith('-')) index++; continue }
+    if (executionWrappers.includes(word)) { index = skipWrapperOptions(words, index, word); continue }
+    if (word === 'builtin') { index++; continue }
     if (['uv', 'poetry'].includes(word) && words[index + 1]?.value === 'run' || word === 'pnpm' && words[index + 1]?.value === 'exec' || word === 'npx' && words[index + 1]?.value === '--no-install') { index += 2; continue }
     break
   }
@@ -230,7 +244,7 @@ function namesRelativeDeckControl(hook, depth = 0) {
     let index = 0
     while (words[index]) {
       const wrapper = path.posix.basename(words[index].value)
-      if (['env', 'sudo', 'doas'].includes(wrapper)) { index = skipWrapperOptions(words, index, wrapper); continue }
+      if (!/^[A-Za-z_]\w*=/.test(words[index].value) && executionWrappers.includes(wrapper)) { index = skipWrapperOptions(words, index, wrapper); continue }
       if (/^[A-Za-z_]\w*=/.test(words[index].value) || ['command', 'builtin'].includes(wrapper)) { index++; continue }
       break
     }
@@ -262,7 +276,7 @@ function shellWriteTargets(command, cwd) {
     let index = 0
     while (words[index]) {
       const wrapper = path.posix.basename(words[index].value)
-      if (['env', 'sudo', 'doas'].includes(wrapper)) { index = skipWrapperOptions(words, index, wrapper); continue }
+      if (!/^[A-Za-z_]\w*=/.test(words[index].value) && executionWrappers.includes(wrapper)) { index = skipWrapperOptions(words, index, wrapper); continue }
       if (/^[A-Za-z_]\w*=/.test(words[index].value) || ['command', 'builtin'].includes(wrapper)) {
         index++
         if (wrapper === 'command') {
@@ -396,25 +410,57 @@ function notificationMatchesTool(message, toolName, input) {
   return target === (input?.file_path ?? input?.notebook_path ?? input?.path)
 }
 
+/** Hook events that provide evidence of resumed work. */
+export const resumedActivityEvents = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PreCompact', 'PostCompact', 'SubagentStart', 'SubagentStop']
+
+function transcriptQuestion(location) {
+  if (typeof location !== 'string' || !path.isAbsolute(location)) return null
+  let fd
+  try {
+    fd = openSync(location, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const info = fstatSync(fd)
+    if (!info.isFile() || typeof process.getuid === 'function' && info.uid !== process.getuid()) return null
+    const offset = Math.max(0, info.size - 65536)
+    const buffer = Buffer.alloc(Math.min(info.size, 65536))
+    const bytes = readSync(fd, buffer, 0, buffer.length, offset)
+    let tail = buffer.subarray(0, bytes).toString('utf8')
+    if (offset) tail = tail.slice(tail.indexOf('\n') + 1)
+    for (const line of tail.split('\n').reverse()) {
+      let entry
+      try { entry = JSON.parse(line) } catch { continue }
+      if (entry?.type !== 'assistant' || entry.message?.role !== 'assistant' || !Array.isArray(entry.message.content)) continue
+      const text = entry.message.content.findLast(block => block?.type === 'text' && typeof block.text === 'string')?.text.trim()
+      if (text !== undefined) return text.endsWith('?') ? text.slice(-2000) : null
+    }
+  } catch { return null }
+  finally { if (fd !== undefined) closeSync(fd) }
+  return null
+}
+
 /** Open, answer and expire observe-only requests inside the caller's transaction. */
-export function applyRequestHook(store, session, envelope) {
+export function applyRequestHook(store, session, envelope, { late = false } = {}) {
   const hook = envelope.hook
   const event = hook.hook_event_name
   const at = envelope.hookTs
   const key = matchKey(hook)
+  const resumed = resumedActivityEvents.includes(event) && store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'observed' }), at, session.id, 'question', 'open', 'stop_question', 'elicitation', at).changes > 0
+  if (late && !['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) return resumed
+  let question = null
+  if (event === 'Stop' && ['running', 'stale'].includes(session.state) && !session.subagents_active && !store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? LIMIT 1', session.id, 'open')) question = transcriptQuestion(hook.transcript_path ?? session.transcript_path)
   let kind = null
   let source = null
+  if (question) { kind = 'question'; source = 'stop_question' }
   if (event === 'PermissionRequest') { kind = 'permission'; source = 'permission_request' }
   if (event === 'PreToolUse' && hook.tool_name === 'AskUserQuestion') { kind = 'question'; source = 'ask_user_question' }
   if (event === 'Notification' && hook.notification_type === 'permission_prompt') { kind = 'permission'; source = 'notification' }
   if (event === 'Notification' && hook.notification_type === 'elicitation_dialog') { kind = 'question'; source = 'elicitation' }
   if (kind) {
-    const toolName = source === 'notification' ? notificationToolName(hook.message) : hook.tool_name ?? null
+    const toolName = source === 'stop_question' ? null : source === 'notification' ? notificationToolName(hook.message) : hook.tool_name ?? null
     if (source === 'notification') {
       const recent = store.all('SELECT source, summary, tool_name, detail FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND created_at BETWEEN ? AND ?', session.id, 'permission', 'open', at - 2000, at + 2000).some(row => row.source === 'notification' ? row.summary === (hook.message ?? 'Needs your answer') : row.source === 'permission_request' && notificationMatchesTool(hook.message, row.tool_name, JSON.parse(row.detail)))
       if (recent) return false
     }
-    const summary = source === 'notification' ? hook.message ?? 'Needs your answer' : toolName ? `${toolName}: ${JSON.stringify(hook.tool_input ?? {}).slice(0, 160)}` : hook.message ?? 'Needs your answer'
+    const summary = source === 'stop_question' ? question.slice(0, 160) : source === 'notification' ? hook.message ?? 'Needs your answer' : toolName ? `${toolName}: ${JSON.stringify(hook.tool_input ?? {}).slice(0, 160)}` : hook.message ?? 'Needs your answer'
     if (source === 'permission_request') {
       const fallback = store.all('SELECT id, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC', session.id, 'permission', 'open', 'notification', at - 2000, at + 2000).find(row => notificationMatchesTool(row.summary, toolName, hook.tool_input))
       if (fallback) {
@@ -422,7 +468,7 @@ export function applyRequestHook(store, session, envelope) {
         return true
       }
     }
-    store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? permissionTier(hook, { repoRoot: session.repo_id }) : null, toolName, summary, JSON.stringify(hook.tool_input ?? {}), JSON.stringify(hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, at)
+    store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? permissionTier(hook, { repoRoot: session.repo_id }) : null, toolName, summary, JSON.stringify(source === 'stop_question' ? { question } : hook.tool_input ?? {}), JSON.stringify(source === 'stop_question' ? [] : hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, at)
     return true
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
@@ -430,7 +476,7 @@ export function applyRequestHook(store, session, envelope) {
     const row = store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind, at)
       ?? (outcomeKind === 'question' ? store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission', at) : null)
       ?? store.all('SELECT id, kind, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
-    if (!row) return false
+    if (!row) return resumed
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: event === 'PermissionDenied' ? 'deny' : 'allow' }), at, row.id)
     if (hook.tool_name === 'AskUserQuestion') {
       const relatedKind = row.kind === 'permission' ? 'question' : 'permission'
@@ -446,8 +492,8 @@ export function applyRequestHook(store, session, envelope) {
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND state = ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'deny' }), at, session.id, 'open')
     return true
   }
-  if (event === 'Notification' && hook.notification_type === 'idle_prompt') return expireRequests(store, session.id, 'interrupted')
-  return false
+  if (event === 'Notification' && hook.notification_type === 'idle_prompt') return store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE session_id = ? AND state = ? AND source <> ?', 'expired', 'interrupted', session.id, 'open', 'stop_question').changes > 0
+  return resumed
 }
 
 /** Expire every open request for a session. */

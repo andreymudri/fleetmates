@@ -1944,3 +1944,123 @@ for (const tool_name of ['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']) 
     rmSync(root, { recursive: true, force: true })
   }
 })
+
+
+test('Stop uses the bounded private assistant transcript tail for free-text questions', () => {
+  const h = harness()
+  const reader = openDeckDb(h.file)
+  try {
+    const transcript = path.join(path.dirname(h.file), 'transcript.jsonl')
+    const marker = path.join(path.dirname(h.file), 'must-not-execute')
+    const assistant = { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: `Never execute $(touch ${marker}).` }, { type: 'text', text: 'Should I continue?  ' }, { type: 'tool_use', name: 'Bash', input: { command: `touch ${marker}` } }] } }
+    writeFileSync(transcript, JSON.stringify(assistant) + '\n' + JSON.stringify({ type: 'user', message: { role: 'user', content: 'A user question is not the assistant tail?' } }) + '\n', { mode: 0o600 })
+    const published = []
+    const projector = createProjector({ store: h.store, publish: event => {
+      published.push(event)
+      if (event.type === 'request.opened') assert.equal(reader.get('SELECT state FROM requests WHERE id = ?', event.entityId).state, 'open')
+      if (event.type === 'request.closed') assert.equal(reader.get('SELECT state FROM requests WHERE id = ?', event.entityId).state, 'answered')
+    } })
+    const hook = (event, hookTs, fields = {}) => ({ ...fixture('UserPromptSubmit.json', { hook_event_name: event, transcript_path: transcript, cwd: path.dirname(h.file), ...fields }), hookTs })
+    projector.applyHooks([hook('SessionStart', 1000, { source: 'startup' }), hook('UserPromptSubmit', 2000)])
+    projector.applyHooks([hook('Stop', 3000, { stop_hook_active: false, last_assistant_message: 'An untrusted hook field has no question.' })])
+    const question = h.store.get('SELECT * FROM requests')
+    assert.ok(question)
+    assert.equal(question.source, 'stop_question')
+    assert.equal(question.kind, 'question')
+    assert.equal(question.summary, 'Should I continue?')
+    assert.equal(projector.snapshot().sessions[0].state, 'asked_you')
+    assert.equal(projector.snapshot().counts.openRequests, 1)
+    assert.equal(projector.snapshot().counts.needYouSessions, 1)
+    assert.equal(published.filter(event => event.type === 'request.opened').length, 1)
+    projector.applyHooks([hook('Notification', 3100, { notification_type: 'idle_prompt' }), hook('Stop', 3200, { stop_hook_active: false })])
+    assert.equal(projector.snapshot().requests.length, 1)
+    assert.equal(projector.snapshot().requests[0].state, 'open')
+    assert.equal(projector.snapshot().sessions[0].state, 'asked_you')
+    projector.applyHooks([hook('PreToolUse', 4000, { tool_name: 'Read', tool_input: { file_path: '/tmp/example.txt' } })])
+    assert.equal(projector.snapshot().requests[0].state, 'answered')
+    assert.equal(projector.snapshot().sessions[0].state, 'running')
+    assert.equal(published.filter(event => event.type === 'request.closed').length, 1)
+    assert.equal(projector.snapshot().counts.needYouSessions, 0)
+    projector.applyHooks([hook('Stop', 3500, { stop_hook_active: false })])
+    assert.equal(projector.snapshot().requests.length, 1)
+    assert.equal(projector.snapshot().requests[0].state, 'answered')
+    assert.equal(projector.snapshot().sessions[0].state, 'running')
+    assert.equal(existsSync(marker), false)
+  } finally { reader.close(); h.close() }
+})
+
+test('Stop accepts readable assistant tails without trusting hook claims or unsafe inputs', () => {
+  for (const scenario of ['hook_only', 'missing', 'public', 'symlink', 'oversized', 'recent_tail', 'malformed', 'user_only', 'subagent']) {
+    const h = harness()
+    try {
+      const transcript = path.join(path.dirname(h.file), 'transcript.jsonl')
+      const assistant = text => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } }) + '\n'
+      const data = ['oversized', 'recent_tail'].includes(scenario) ? assistant('Old question?') + JSON.stringify({ type: 'user', message: { content: 'x'.repeat(100000) } }) + '\n' + (scenario === 'recent_tail' ? assistant('Recent question?') : '') : scenario === 'malformed' ? '{not-json' : scenario === 'user_only' ? JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'User question?' }] } }) + '\n' : assistant(scenario === 'hook_only' ? 'Finished.' : 'Real question?')
+      if (scenario !== 'missing') writeFileSync(transcript, data, { mode: scenario === 'public' ? 0o644 : 0o600 })
+      if (scenario === 'symlink') {
+        const target = path.join(path.dirname(h.file), 'target.jsonl')
+        writeFileSync(target, data, { mode: 0o600 })
+        rmSync(transcript)
+        symlinkSync(target, transcript)
+      }
+      const hook = (event, hookTs, fields = {}) => ({ ...fixture('UserPromptSubmit.json', { hook_event_name: event, transcript_path: transcript, cwd: path.dirname(h.file), ...fields }), hookTs })
+      h.projector.applyHooks([hook('SessionStart', 1000, { source: 'startup' }), hook('UserPromptSubmit', 2000)])
+      if (scenario === 'subagent') h.projector.applyHooks([hook('SubagentStart', 2500)])
+      h.projector.applyHooks([hook('Stop', 3000, { stop_hook_active: false, last_assistant_message: 'Untrusted question?', endsWithQuestion: true })])
+      assert.equal(h.projector.snapshot().requests.length, ['public', 'recent_tail'].includes(scenario) ? 1 : 0, scenario)
+      assert.equal(h.projector.snapshot().sessions[0].state, ['public', 'recent_tail'].includes(scenario) ? 'asked_you' : scenario === 'subagent' ? 'running' : 'idle', scenario)
+    } finally { h.close() }
+  }
+})
+
+test('elicitation questions close on resumed activity with committed publication and late ordering', async t => {
+  for (const event of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'SubagentStart', 'SubagentStop']) await t.test(event, () => {
+    const h = harness()
+    const reader = openDeckDb(h.file)
+    try {
+      const projector = createProjector({ store: h.store, publish: published => {
+        if (published.type === 'request.closed') assert.equal(reader.get('SELECT state FROM requests WHERE id = ?', published.entityId).state, 'answered')
+      } })
+      const hook = (name, hookTs, fields = {}) => ({ ...fixture('UserPromptSubmit.json', { hook_event_name: name, cwd: path.dirname(h.file), ...fields }), hookTs })
+      projector.applyHooks([hook('SessionStart', 1000, { source: 'startup' }), hook('Notification', 2000, { notification_type: 'elicitation_dialog', message: 'Continue?' })])
+      const events = projector.applyHooks([hook(event, 3000, { tool_name: 'Bash', tool_input: { command: 'pwd' }, stop_hook_active: false })])
+      assert.equal(projector.snapshot().requests[0].state, 'answered')
+      assert.equal(projector.snapshot().sessions[0].state, 'running')
+      assert.equal(projector.snapshot().counts.openRequests, 0)
+      assert.equal(events.filter(row => row.type === 'request.closed').length, 1)
+    } finally { reader.close(); h.close() }
+  })
+})
+
+test('late resumed activity closes older free questions but leaves newer requests and state timing intact', () => {
+  const h = harness()
+  try {
+    const hook = (event, hookTs, fields = {}) => ({ ...fixture('UserPromptSubmit.json', { hook_event_name: event, cwd: path.dirname(h.file), ...fields }), hookTs })
+    h.projector.applyHooks([hook('SessionStart', 1000, { source: 'startup' }), hook('Notification', 2000, { notification_type: 'elicitation_dialog', message: 'Older question?' }), hook('Notification', 4000, { notification_type: 'elicitation_dialog', message: 'Newer question?' }), hook('PermissionRequest', 5000, { tool_name: 'Bash', tool_input: { command: 'pwd' } })])
+    const before = h.store.get('SELECT * FROM sessions')
+    const events = h.projector.applyHooks([hook('PreToolUse', 3000, { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Late tool question?' }] } })])
+    assert.deepEqual(h.projector.snapshot().requests.map(row => row.state), ['answered', 'open', 'open'])
+    assert.equal(events.filter(row => row.type === 'request.closed').length, 1)
+    assert.equal(h.store.get('SELECT state_since FROM sessions').state_since, before.state_since)
+    assert.equal(h.store.get('SELECT since_ts FROM sessions').since_ts, before.since_ts)
+    assert.equal(h.store.get('SELECT last_activity_at FROM sessions').last_activity_at, before.last_activity_at)
+    assert.equal(h.projector.snapshot().sessions[0].state, 'needs_approval')
+  } finally { h.close() }
+})
+
+test('destructive wrapper classification normalizes basenames and consumes nice and timeout options', () => {
+  const prefixes = [
+    'WRAPPER=/usr/bin/timeout', 'env', '/usr/bin/env', '/usr/bin/env -i', '/usr/bin/sudo -u root',
+    'nice', '/usr/bin/nice', 'nice -n 1', 'nice -n1', 'nice --adjustment 1', 'nice --adjustment=1', 'nice -5',
+    'timeout 2', '/usr/bin/timeout 2', 'timeout --signal=TERM 2', 'timeout --signal TERM 2', 'timeout -sTERM 2', 'timeout -s TERM 2', 'timeout -vs TERM 2', 'timeout -vk1s 2',
+    'timeout --kill-after=1 --foreground 2', 'timeout -k 1s -s TERM 2s', 'timeout -k1s -- 2s',
+    '/usr/bin/env nice -n 1 /usr/bin/timeout --signal=TERM 2', '/usr/bin/stdbuf -o L', '/usr/bin/nohup'
+  ]
+  for (const prefix of prefixes) {
+    assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command: `${prefix} rm -rf /tmp/demo` } }), 'destructive', prefix)
+    assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command: `${prefix} pwd` } }), 'caution', prefix)
+  }
+  for (const command of ['command -v rm', 'command -V rm', '/usr/bin/env command -v rm', 'nice -n 1 command -v rm', 'timeout --signal=TERM 2 command -V rm']) {
+    assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command } }), 'caution', command)
+  }
+})

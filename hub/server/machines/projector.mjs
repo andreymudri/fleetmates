@@ -1,6 +1,6 @@
 import { dedupeKey } from '../ingest/validate.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
-import { applyRequestHook, expireRequests } from './request.mjs'
+import { applyRequestHook, expireRequests, resumedActivityEvents } from './request.mjs'
 import { applySessionHook, captureReviewBaseline, persistSessionSummary, resolveSession } from './session.mjs'
 
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
@@ -50,8 +50,8 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           const late = !!session && (envelope.hookTs < session.since_ts || !session.alive && !(hook.hook_event_name === 'SessionStart' && hook.source === 'resume'))
           const beforeRequests = session ? new Map(store.all('SELECT * FROM requests WHERE session_id = ?', session.id).map(row => [row.id, requestView(row)])) : new Map()
           let requestChanged = false
-          if (late && session.alive && ['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(hook.hook_event_name)) {
-            requestChanged = applyRequestHook(store, session, envelope)
+          if (late && session.alive && [...resumedActivityEvents, 'PermissionDenied'].includes(hook.hook_event_name)) {
+            requestChanged = applyRequestHook(store, session, envelope, { late: true })
             if (requestChanged && ['needs_approval', 'asked_you'].includes(session.state)) {
               const open = store.all('SELECT kind FROM requests WHERE session_id = ? AND state = ?', session.id, 'open')
               const state = open.some(row => row.kind === 'permission') ? 'needs_approval' : open.length ? 'asked_you' : 'running'
