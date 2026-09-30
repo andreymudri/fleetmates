@@ -4,10 +4,14 @@
 // each envelope's latency into:
 //   spawn  harness spawn() to the hook's own hookTs (process start)
 //   socket hookTs to the server receiving the line on hooks.sock (hook_events.received_at)
-//   server receipt to the WebSocket publish of the session change (includes the 250 ms reorder window)
+//   server receipt to the WebSocket publish of the session change (the reorder buffer's hold)
 //   dom    publish to the card's pill text changing in the page (MutationObserver, wall clock)
 //   total  spawn() to the pill change
-// Prints one JSON line and exits 1 when total p95 is not under 300 ms.
+// The split is reported pooled (`splitMs`, information only) and per hook event (`byEventMs`). Per
+// TEST-O2 (docs/deck/09-testing.md) the buffer flushes early for Stop, PermissionRequest and
+// Notification and keeps its 250 ms window for other events, so the 300 ms budget is judged on the total
+// p95 of the early-flushed events only (`budget`). Prints one JSON line and exits 1 when that p95 is not
+// under 300 ms, when no early-flushed event was measured, or when an envelope went unmatched.
 //
 // Not part of `npm test`. The hook walks its process ancestry for a `claude` process, and every session
 // that shares one is the same session to the deck, so run it outside a Claude Code session, or detached:
@@ -22,6 +26,20 @@ import { buildWeb, envelopeFor, hookPayload, hub, launchBrowser, openDeck, start
 const ENVELOPES = Number(process.env.ENVELOPES ?? 500)
 const SESSIONS = Number(process.env.SESSIONS ?? 20)
 const BUDGET_P95_MS = 300
+/** Events the reorder buffer flushes early (TEST-O2); only these are held to the budget. */
+export const EARLY_FLUSH_EVENTS = Object.freeze(['Stop', 'PermissionRequest', 'Notification'])
+
+/**
+ * The TEST-O2 verdict: total p95 over the early-flushed events only, against the budget.
+ * @param {{ event: string, total: number }[]} samples one per matched envelope
+ * @param {number} [budget]
+ * @returns {{ events: string[], total: ReturnType<typeof stats> | null, budgetP95Ms: number, withinBudget: boolean }}
+ */
+export function budgetVerdict(samples, budget = BUDGET_P95_MS) {
+  const judged = samples.filter(sample => EARLY_FLUSH_EVENTS.includes(sample.event)).map(sample => sample.total)
+  const total = judged.length ? stats(judged) : null
+  return { events: [...EARLY_FLUSH_EVENTS], total, budgetP95Ms: budget, withinBudget: !!total && total.p95 < budget }
+}
 
 /**
  * The first `claude` ancestor of this process, or null (the same walk deck-hook does).
@@ -139,6 +157,8 @@ async function main() {
     const rows = h.deck.store.all("SELECT hook_ts, received_at, payload FROM hook_events WHERE claude_session_id LIKE 'fx-lat-%' AND event IN ('PermissionRequest','PostToolUse')")
     const byCommand = new Map(rows.map(row => [`${JSON.parse(row.payload).hook_event_name}:${JSON.parse(row.payload).tool_input?.command}`, row]))
     const split = { spawn: [], socket: [], server: [], dom: [], total: [] }
+    const byEvent = {}
+    const samples = []
     let missing = 0
     for (const row of sent) {
       const stored = byCommand.get(`${row.event}:${row.event === 'PermissionRequest' ? row.command : sent.findLast(prior => prior.key === row.key && prior.i < row.i).command}`)
@@ -148,17 +168,21 @@ async function main() {
       const dom = pills.find(change => change.id === idOf[row.key] && change.text.startsWith(row.want) && within(change.at))
       if (!stored || !publish || !dom) { missing++
         continue }
-      split.spawn.push(stored.hook_ts - row.spawnedAt)
-      split.socket.push(stored.received_at - stored.hook_ts)
-      split.server.push(publish.at - stored.received_at)
-      split.dom.push(dom.at - publish.at)
-      split.total.push(dom.at - row.spawnedAt)
+      const parts = { spawn: stored.hook_ts - row.spawnedAt, socket: stored.received_at - stored.hook_ts, server: publish.at - stored.received_at, dom: dom.at - publish.at, total: dom.at - row.spawnedAt }
+      byEvent[row.event] ??= { spawn: [], socket: [], server: [], dom: [], total: [] }
+      for (const [name, value] of Object.entries(parts)) {
+        split[name].push(value)
+        byEvent[row.event][name].push(value)
+      }
+      samples.push({ event: row.event, total: parts.total })
     }
-    const total = stats(split.total)
+    const summarize = parts => Object.fromEntries(Object.entries(parts).map(([name, values]) => [name, stats(values)]))
+    const budget = budgetVerdict(samples)
     const result = {
       envelopes: ENVELOPES, sessions: SESSIONS, matched: split.total.length, unmatched: missing,
-      splitMs: Object.fromEntries(Object.entries(split).map(([name, values]) => [name, stats(values)])),
-      budgetP95Ms: BUDGET_P95_MS, withinBudget: total.p95 < BUDGET_P95_MS,
+      splitMs: summarize(split),
+      byEventMs: Object.fromEntries(Object.entries(byEvent).map(([event, parts]) => [event, summarize(parts)])),
+      budget, budgetP95Ms: BUDGET_P95_MS, withinBudget: budget.withinBudget,
       environment: { ...environment(browser), loadavgBefore: before.loadavg }
     }
     process.stdout.write(JSON.stringify(result) + '\n')
