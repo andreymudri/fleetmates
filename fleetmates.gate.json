@@ -16,6 +16,22 @@
           "blockOn": ["high"]
         }
       ]
+    },
+    "9": {
+      "fixRounds": 3,
+      "checks": [
+        { "name": "test", "kind": "command", "run": "npm test" },
+        { "name": "hub-test", "kind": "command", "run": "npm ci --prefix hub --no-audit --no-fund && npm --prefix hub test" },
+        { "name": "fileset", "kind": "fileset" },
+        { "name": "ownership", "kind": "ownership" },
+        {
+          "name": "review",
+          "kind": "agent",
+          "agent": "tm-reviewer",
+          "lens": ["correctness", "security", "tests"],
+          "blockOn": ["high"]
+        }
+      ]
     }
   }
 }
