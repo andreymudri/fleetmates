@@ -34,7 +34,7 @@ function writeIfMissing(file, content, mode = 0o600) {
 async function verifyListener(port, token) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid deck port')
   const nonce = randomBytes(24).toString('base64url')
-  const expected = createHmac('sha256', token).update(`fleetmates-deck-open:${nonce}`).digest()
+  const expected = createHmac('sha256', token).update(`fleetmates-deck-open:${port}:${nonce}`).digest()
   const deadline = Date.now() + 3000
   let body
   for (;;) {

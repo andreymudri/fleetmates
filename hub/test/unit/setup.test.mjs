@@ -53,11 +53,12 @@ function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false
   return { root, home, config, state, runtime, calls, settings, env, hubPath, run, runWith }
 }
 
-async function listener(s, token, valid, delayMs = 0) {
-  const script = path.join(s.root, 'listener.mjs')
-  writeFileSync(script, `import http from 'node:http'\nimport fs from 'node:fs'\nimport { createHmac } from 'node:crypto'\nconst server = http.createServer((req, res) => {\n  fs.writeFileSync(process.env.REQUEST_FILE, req.url)\n  if (req.url === '/') {\n    res.setHeader('content-type', 'text/html')\n    res.end('<main id="deck-ready">Fleetmates Deck</main>')\n    return\n  }\n  const nonce = new URL(req.url, 'http://127.0.0.1').searchParams.get('nonce')\n  if (!/^[A-Za-z0-9_-]{32}$/.test(nonce || '') || req.url !== '/.well-known/fleetmates-deck/identity?nonce=' + nonce) {\n    res.writeHead(404).end()\n    return\n  }\n  const mac = createHmac('sha256', process.env.TEST_TOKEN).update('fleetmates-deck-open:' + nonce).digest('hex')\n  res.setHeader('content-type', 'application/json')\n  res.end(JSON.stringify({ nonce, mac: process.env.VALID === 'yes' ? mac : '0'.repeat(64) }))\n})\nserver.listen(0, '127.0.0.1', () => {\n  const port = server.address().port\n  if (Number(process.env.DELAY_MS)) server.close(() => {\n    process.stdout.write(String(port) + '\\n')\n    setTimeout(() => server.listen(port, '127.0.0.1'), Number(process.env.DELAY_MS))\n  })\n  else process.stdout.write(String(port) + '\\n')\n})\n`)
-  const requestFile = path.join(s.root, 'request-url')
-  const child = spawn(process.execPath, [script], { env: { ...process.env, TEST_TOKEN: token, VALID: valid ? 'yes' : 'no', DELAY_MS: String(delayMs), REQUEST_FILE: requestFile }, stdio: ['ignore', 'pipe', 'pipe'] })
+async function listener(s, token, valid, delayMs = 0, { relayPort = 0, legacyProof = false } = {}) {
+  const listenerRoot = mkdtempSync(path.join(s.root, 'listener-'))
+  const script = path.join(listenerRoot, 'listener.mjs')
+  writeFileSync(script, `import http from 'node:http'\nimport fs from 'node:fs'\nimport { createHmac } from 'node:crypto'\nconst server = http.createServer((req, res) => {\n  fs.writeFileSync(process.env.REQUEST_FILE, req.url)\n  if (Number(process.env.RELAY_PORT)) {\n    const forwarded = http.get({ hostname: '127.0.0.1', port: Number(process.env.RELAY_PORT), path: req.url, headers: { host: req.headers.host } }, upstream => {\n      res.writeHead(upstream.statusCode, upstream.headers)\n      upstream.pipe(res)\n    })\n    forwarded.on('error', () => res.writeHead(502).end())\n    return\n  }\n  if (req.url === '/') {\n    res.setHeader('content-type', 'text/html')\n    res.end('<main id="deck-ready">Fleetmates Deck</main>')\n    return\n  }\n  const nonce = new URL(req.url, 'http://127.0.0.1').searchParams.get('nonce')\n  if (!/^[A-Za-z0-9_-]{32}$/.test(nonce || '') || req.url !== '/.well-known/fleetmates-deck/identity?nonce=' + nonce) {\n    res.writeHead(404).end()\n    return\n  }\n  const mac = createHmac('sha256', process.env.TEST_TOKEN).update('fleetmates-deck-open:' + (process.env.LEGACY_PROOF === 'yes' ? '' : server.address().port + ':') + nonce).digest('hex')\n  res.setHeader('content-type', 'application/json')\n  res.end(JSON.stringify({ nonce, mac: process.env.VALID === 'yes' ? mac : '0'.repeat(64) }))\n})\nserver.listen(0, '127.0.0.1', () => {\n  const port = server.address().port\n  if (Number(process.env.DELAY_MS)) server.close(() => {\n    process.stdout.write(String(port) + '\\n')\n    setTimeout(() => server.listen(port, '127.0.0.1'), Number(process.env.DELAY_MS))\n  })\n  else process.stdout.write(String(port) + '\\n')\n})\n`)
+  const requestFile = path.join(listenerRoot, 'request-url')
+  const child = spawn(process.execPath, [script], { env: { ...process.env, TEST_TOKEN: token, VALID: valid ? 'yes' : 'no', RELAY_PORT: String(relayPort), LEGACY_PROOF: legacyProof ? 'yes' : 'no', DELAY_MS: String(delayMs), REQUEST_FILE: requestFile }, stdio: ['ignore', 'pipe', 'pipe'] })
   const port = await new Promise((resolve, reject) => {
     child.stdout.once('data', chunk => resolve(Number(String(chunk).trim())))
     child.once('error', reject)
@@ -339,6 +340,54 @@ test('open refuses a loopback listener without the token proof', async () => {
     assert.equal(result.status, 1)
     assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /xdg-open:/)
     assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
+  } finally { server.child.kill() }
+})
+
+test('open rejects an identity relay to another port before exposing the token', async () => {
+  const s = sandbox('empty.json', { webEntry: true })
+  assert.equal(s.run('init').status, 0)
+  const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
+  const trusted = await listener(s, token, true)
+  let relay
+  try {
+    relay = await listener(s, '', true, 0, { relayPort: trusted.port })
+    assert.notEqual(relay.port, trusted.port)
+    writeFileSync(s.calls, '')
+    const rejected = s.run('open')
+    assert.equal(rejected.status, 1, rejected.stderr)
+    assert.match(rejected.stderr, /deck identity proof failed/)
+    const request = readFileSync(relay.requestFile, 'utf8')
+    assert.match(request, /^\/\.well-known\/fleetmates-deck\/identity\?nonce=[A-Za-z0-9_-]{32}$/)
+    assert.equal(readFileSync(trusted.requestFile, 'utf8'), request)
+    assert.equal(request.includes(token), false)
+    assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /xdg-open:/)
+    assert.equal(existsSync(path.join(s.state, 'fleetmates/deck/open.html')), false)
+    assert.equal(readdirSync(path.join(s.state, 'fleetmates/deck')).some(name => name.startsWith('.open-')), false)
+    assert.doesNotMatch(rejected.stdout + rejected.stderr, new RegExp(token))
+    writeFileSync(path.join(s.config, 'fleetmates/deck/config.json'), JSON.stringify({ port: trusted.port }))
+    const accepted = s.run('open')
+    assert.equal(accepted.status, 0, accepted.stderr)
+    assert.match(readFileSync(s.calls, 'utf8'), /xdg-open:/)
+    assert.ok(readFileSync(path.join(s.state, 'fleetmates/deck/open.html'), 'utf8').includes(`http://127.0.0.1:${trusted.port}/#token=${token}`))
+    assert.doesNotMatch(accepted.stdout + accepted.stderr, new RegExp(token))
+  } finally {
+    relay?.child.kill()
+    trusted.child.kill()
+  }
+})
+
+test('open refuses the old nonce-only identity proof', async () => {
+  const s = sandbox('empty.json', { webEntry: true })
+  assert.equal(s.run('init').status, 0)
+  const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
+  const server = await listener(s, token, true, 0, { legacyProof: true })
+  try {
+    const result = s.run('open')
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /deck identity proof failed/)
+    assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /xdg-open:/)
+    assert.equal(existsSync(path.join(s.state, 'fleetmates/deck/open.html')), false)
+    assert.doesNotMatch(result.stdout + result.stderr, new RegExp(token))
   } finally { server.child.kill() }
 })
 
