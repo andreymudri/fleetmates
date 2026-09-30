@@ -81,7 +81,7 @@ export function createApiClient({ token, fetch, onFatal = () => {} }) {
       else if (error.details?.reason === 'client_outdated') onFatal('client_outdated')
       throw Object.assign(new Error(error.message ?? error.code), { status: response.status, code: error.code, retryable: !!error.retryable, details: error.details ?? {} })
     }
-    return payload?.data
+    return payload
   }
   return {
     get: path => request('GET', path),

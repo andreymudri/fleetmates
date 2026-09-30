@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
+import { createApiClient } from '../../web/src/state/api.js'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const token = 'a'.repeat(43)
@@ -34,7 +35,9 @@ async function deckWithTwoSessions(t) {
   await writeFile(path.join(state, 'token'), token, { mode: 0o600 })
   const out = path.join(dir, 'web')
   execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
-  const deck = await startDeckServer({ env, port: 0, staticDir: out, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
+  // deckd answers, so no deckd banner is up: its once-a-second countdown would re-render the shell and hide stale state.
+  const deckd = { request: async op => op === 'list' ? { ptys: [] } : op === 'exits' ? { exits: [] } : {}, on: () => () => {}, close() {} }
+  const deck = await startDeckServer({ env, port: 0, staticDir: out, notifications: false, connectDeckd: async () => deckd,
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }) })
   const browser = await chromium.launch({ executablePath, headless: true })
   t.after(async () => { await browser.close()
@@ -91,6 +94,16 @@ test('moving between Focus sessions and following ?tab= gives each route fresh r
   await page.waitForFunction(() => document.querySelector('.focus-tab[aria-selected="true"]')?.id === 'focus-tab-changes', null, { timeout: 2000 })
     .catch(() => {})
   assert.equal(await selectedTab(page), 'focus-tab-changes', 'following ?tab=changes from Facts shows Changes')
+
+  // Back or an overlay (popstate) lands on ?tab=facts; then the session's own list link navigates in-app to the bare
+  // /s/a, which names the default Changes tab. The pathname never changes, so only the shell's search state re-renders.
+  await pushRoute(page, `/s/${a}?tab=facts`)
+  await page.waitForFunction(() => document.querySelector('.focus-tab[aria-selected="true"]')?.id === 'focus-tab-facts', null, { timeout: 2000 })
+  await page.click('.focus-list-row[aria-current="page"]')
+  await page.waitForFunction(() => location.search === '', null, { timeout: 2000 })
+  await page.waitForFunction(() => document.querySelector('.focus-tab[aria-selected="true"]')?.id === 'focus-tab-changes', null, { timeout: 2000 })
+    .catch(() => {})
+  assert.equal(await selectedTab(page), 'focus-tab-changes', 'an in-app link to the bare session URL shows Changes')
   assert.deepEqual(errors, [])
 })
 
@@ -107,4 +120,37 @@ test('Alt K opens the palette, and inside the open palette it moves the highligh
   assert.equal(await page.getAttribute('.palette-input', 'aria-activedescendant'), first, 'Alt K moves the highlight up')
   assert.equal(await page.evaluate(() => history.length), entries, 'Alt K inside the palette pushes no history entry')
   assert.deepEqual(errors, [])
+})
+
+test('the REST client hands screens the bare body the real deck server sends', async t => {
+  const { startDeckServer } = await import('../../server/main.mjs')
+  const dir = await mkdtemp(path.join(tmpdir(), 'm1r-'))
+  const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
+  await mkdir(env.XDG_RUNTIME_DIR, { mode: 0o700 })
+  const state = path.join(dir, '.local/state/fleetmates/deck')
+  await mkdir(state, { recursive: true, mode: 0o700 })
+  await writeFile(path.join(state, 'token'), token, { mode: 0o600 })
+  await mkdir(path.join(dir, 'dev'))
+  const deck = await startDeckServer({ env, port: 0, staticDir: dir, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
+    runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }) })
+  t.after(async () => { await deck.close()
+    await rm(dir, { recursive: true, force: true }) })
+  const base = `http://127.0.0.1:${deck.address().port}`
+  const client = createApiClient({ token, fetch: (route, init) => fetch(base + route, { ...init, headers: { ...init.headers, Origin: base } }) })
+  assert.deepEqual(await client.get('/api/version'), { apiVersion: 1, deckVersion: '0.1.0', build: 'm1' })
+  const checks = await client.get('/api/setup/checks')
+  assert.ok(Array.isArray(checks.checks) && checks.checks.some(check => check.id === 'hooks'), 'First run reads data.checks')
+  const installed = await client.post('/api/setup/hooks')
+  assert.equal(installed.check.id, 'hooks', 'the hooks fix reads data.check')
+  assert.ok('backupPath' in installed)
+  const prefs = await client.get('/api/prefs')
+  assert.equal(typeof prefs.prefs, 'object', 'Settings reads data.prefs and data.sources')
+  assert.equal(typeof prefs.sources, 'object')
+  assert.deepEqual(await client.post('/api/repos/rescan'), { found: 0 })
+  deck.ingest.receive(JSON.stringify({ v: 1, hookTs: 1000, ptyId: null, claudePid: null, pidChain: [], truncated: false,
+    hook: { ...fixture, cwd: dir, hook_event_name: 'SessionStart' } }))
+  deck.ingest.flush()
+  const id = deck.projector.snapshot().sessions[0].id
+  const steps = await client.get(`/api/sessions/${encodeURIComponent(id)}/steps`)
+  assert.ok(Array.isArray(steps.steps), 'Focus reads data.steps')
 })
