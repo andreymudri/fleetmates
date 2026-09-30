@@ -110,6 +110,13 @@ test('count chips read "3 need you", "2 running", "1 to review", hide zero and n
   assert.equal(requestSummary(counts), '4 requests from 3 ships')
   assert.equal(requestSummary({ ...counts, openRequests: 1, requestSessions: 1 }), '1 request from 1 ship')
   assert.equal(requestSummary({ ...counts, openRequests: 0, requestSessions: 0 }), null)
+
+  // Counts has no hooks, so calling it returns the element tree; each chip's onClick is its own handler.
+  const tree = Counts({ counts, onNeeds: () => clicks.push('needs'), onRunning: () => clicks.push('running'), onReview: () => clicks.push('review') })
+  const buttons = tree.props.children.filter(Boolean)
+  assert.deepEqual(buttons.map(button => button.props.className), ['count-chip count-chip--needs', 'count-chip count-chip--running', 'count-chip count-chip--review'])
+  for (const button of buttons) button.props.onClick()
+  assert.deepEqual(clicks, ['needs', 'running', 'review'], 'each chip calls the handler for its own filter')
 })
 
 test('untrusted card text renders as literal text, never as markup', async () => {
@@ -148,6 +155,99 @@ test('bidi and control characters in titles and commands are shown as visible to
   assert.ok(html.includes('git push &lt;U+202E&gt;--force'), 'command shows the token')
   assert.ok(html.includes('fix/&lt;U+2066&gt;x'), 'branch shows the token')
   assert.match(html, /<bdi>harmless &lt;U\+202E&gt;exe.ssalc<\/bdi>/, 'the title is bidi-isolated from the pill beside it')
+})
+
+test('isolates and non-format default-ignorables are tokenized by titleText and shown', async () => {
+  const { shown, titleText } = await load('StatusPill.jsx')
+  for (const cp of [0x2066, 0x2067, 0x2068, 0x2069]) {
+    const hex = cp.toString(16).toUpperCase()
+    assert.equal(titleText(`a${String.fromCodePoint(cp)}b`), `a<U+${hex}>b`, `titleText U+${hex}`)
+  }
+  assert.equal(shown('xㅤyᅟz'), 'x<U+3164>y<U+115F>z', 'Hangul fillers are default-ignorable but not Cf')
+})
+
+test('every agent-supplied card string passes through its sanitizer', async () => {
+  const { SessionCard } = await load('SessionCard.jsx')
+  const RLO = '‮'
+  const raw = /‮/u
+  const base = { id: 'b1', repoId: '/home/you/dev/api', task: 'plain', branch: 'main', origin: 'observed', changedFiles: [], startedAt: NOW - MIN, stateSince: NOW - MIN }
+  const repo = { id: base.repoId, name: 'api', crewSlot: 2 }
+  const card = props => render(SessionCard, { repo, now: NOW, ...props })
+
+  const files = card({ session: { ...base, state: 'running', changedFiles: [{ path: `src/${RLO}sr.exe`, adds: 1, dels: 0 }] } })
+  assert.doesNotMatch(files, raw, 'file chip')
+  assert.ok(files.includes('<span class="file-name">&lt;U+202E&gt;sr.exe</span>'), files)
+
+  const steps = card({ session: { ...base, state: 'running' }, steps: [{ text: `Edit ${RLO}sr.exe` }] })
+  assert.doesNotMatch(steps, raw, 'step text')
+  assert.ok(steps.includes('<span class="card-step-text">Edit &lt;U+202E&gt;sr.exe</span>'), steps)
+
+  const tool = card({ session: { ...base, state: 'running', activity: `tool:Ba${RLO}sh` } })
+  assert.doesNotMatch(tool, raw, 'activity tool name')
+  assert.ok(tool.includes('<p class="card-now">Using Ba&lt;U+202E&gt;sh</p>'), tool)
+
+  const question = card({ session: { ...base, state: 'asked_you' }, requests: [{ id: 'q1', sessionId: 'b1', kind: 'question', summary: `Keep ${RLO}it?`, state: 'open', createdAt: NOW }] })
+  assert.doesNotMatch(question, raw, 'question summary')
+  assert.ok(question.includes('<p class="request-question"><bdi>Keep &lt;U+202E&gt;it?</bdi></p>'), question)
+
+  const named = card({ session: { ...base, state: 'running' }, repo: { ...repo, name: `ap${RLO}i` } })
+  assert.doesNotMatch(named, raw, 'repo name')
+  assert.ok(named.includes('<span class="meta-item">ap&lt;U+202E&gt;i</span>'), named)
+
+  const crashed = card({ session: { ...base, state: 'crashed', crashKind: 'exit', exitCode: `1${RLO}` } })
+  const hint = /<p class="card-hint">([^<]*)<\/p>/.exec(crashed)?.[1]
+  assert.equal(hint, 'The session exited with code 1&lt;U+202E&gt;.', 'crash code')
+  const signalled = card({ session: { ...base, state: 'crashed', crashKind: 'signal', exitSignal: `SIG${RLO}X` } })
+  assert.equal(/<p class="card-hint">([^<]*)<\/p>/.exec(signalled)?.[1], 'The session was stopped by signal SIG&lt;U+202E&gt;X.', 'crash signal')
+})
+
+test('only open requests of this session reach the card', async () => {
+  const { SessionCard } = await load('SessionCard.jsx')
+  const session = { id: 'o1', repoId: '/home/you/dev/api', task: 'ship it', branch: null, state: 'needs_approval', origin: 'observed', changedFiles: [], startedAt: NOW, stateSince: NOW }
+  const mine = { id: 'mine', sessionId: 'o1', kind: 'permission', tier: 'safe', summary: 'cargo check', state: 'open', createdAt: NOW - MIN }
+  const requests = [
+    { ...mine, id: 'other', sessionId: 'o2', tier: 'destructive', summary: 'rm -rf ~', createdAt: NOW - 9 * MIN },
+    { ...mine, id: 'done', tier: 'destructive', summary: 'rm -rf ~', state: 'resolved', createdAt: NOW - 8 * MIN },
+    mine
+  ]
+  const html = render(SessionCard, { session, repo: { id: session.repoId, name: 'api', crewSlot: 2 }, requests, now: NOW })
+  assert.match(html, /data-request="mine"/)
+  assert.doesNotMatch(html, /rm -rf ~/, 'another session and a resolved request never render')
+  assert.doesNotMatch(html, /more request/)
+})
+
+test('card caps, crash lines, quiet labels and hrefs', async () => {
+  const { SessionCard, QuietCard } = await load('SessionCard.jsx')
+  const { stateLabel } = await load('StatusPill.jsx')
+  const base = { id: 'c1', repoId: '/home/you/dev/api', task: 'caps', branch: null, origin: 'observed', changedFiles: [], startedAt: NOW - MIN, stateSince: NOW - MIN }
+  const repo = { id: base.repoId, name: 'api', crewSlot: 2 }
+
+  const changedFiles = Array.from({ length: 8 }, (_, i) => ({ path: `src/f${i}.rs`, adds: 1, dels: 0 }))
+  const files = render(SessionCard, { session: { ...base, state: 'running', changedFiles }, repo, now: NOW })
+  assert.equal((files.match(/class="file-name"/g) ?? []).length, 6, 'at most six file chips')
+  assert.ok(files.includes('f5.rs') && !files.includes('f6.rs'))
+  assert.match(files, /<a class="file-chip file-chip--more" href="\/s\/c1\?tab=changes">\+2 more<\/a>/)
+
+  const steps = Array.from({ length: 5 }, (_, i) => ({ text: `step ${i}` }))
+  const stepped = render(SessionCard, { session: { ...base, state: 'running' }, repo, steps, now: NOW })
+  assert.deepEqual([...stepped.matchAll(/class="card-step-text">([^<]*)</g)].map(m => m[1]), ['step 2', 'step 3', 'step 4'], 'the last three steps')
+
+  const hint = session => /<p class="card-hint">([^<]*)<\/p>/.exec(render(SessionCard, { session: { ...base, state: 'crashed', ...session }, repo, now: NOW }))?.[1]
+  assert.equal(hint({ crashKind: 'signal', exitSignal: 'SIGKILL' }), 'The process ran out of memory or was killed by the system.')
+  assert.equal(hint({ crashKind: 'lost' }), 'The deck lost track of this process. It may have been closed outside the deck.')
+  assert.equal(hint({ crashKind: 'signal', exitSignal: 'SIGSEGV' }), 'The session was stopped by signal SIGSEGV.')
+  assert.equal(stateLabel('crashed', {}), 'Crashed · lost')
+
+  const at = NOW - 30 * MIN
+  const stale = { ...base, state: 'stale', lastActivityAt: at, stateSince: at }
+  assert.match(render(QuietCard, { session: { ...stale, origin: 'launched' }, repo, now: NOW }), /href="\/s\/c1">Open terminal<\/a>/)
+  assert.match(render(QuietCard, { session: stale, repo, now: NOW }), /href="\/s\/c1">Open<\/a>/)
+
+  const odd = { ...base, id: 'a/b?c#d', state: 'done', changedFiles: [{ path: 'x.rs', adds: 1, dels: 0 }] }
+  const done = render(SessionCard, { session: odd, repo, now: NOW })
+  assert.match(done, /class="card-link" href="\/s\/a%2Fb%3Fc%23d"/)
+  assert.match(done, /href="\/s\/a%2Fb%3Fc%23d\?tab=changes">Review changes/)
+  assert.match(render(QuietCard, { session: { ...odd, state: 'idle' }, repo, now: NOW }), /class="button button--ghost button--xs" href="\/s\/a%2Fb%3Fc%23d">Open</)
 })
 
 test('long titles keep the full text in the node and the title attribute and truncate in CSS', async () => {

@@ -12,6 +12,7 @@ export const CARD_COPY = Object.freeze({
   'home.card.crashed.title': '{repo} ran aground',
   'home.card.crashed.exit': 'The session exited with code {code}.',
   'home.card.crashed.killed': 'The process ran out of memory or was killed by the system.',
+  'home.card.crashed.signal': 'The session was stopped by signal {signal}.',
   'home.card.crashed.lost': 'The deck lost track of this process. It may have been closed outside the deck.',
   'home.card.activity.compacting': 'Compacting context…',
   'home.card.activity.subagents': '{n, plural, one {# subagent working} other {# subagents working}}',
@@ -181,7 +182,8 @@ function crashLine(session, t) {
   const params = pillParams(session, 0)
   if (params.kind === 'lost') return translate(t, CARD_COPY, 'home.card.crashed.lost')
   if (params.kind === 'signal' && params.signal === 'SIGKILL') return translate(t, CARD_COPY, 'home.card.crashed.killed')
-  return translate(t, CARD_COPY, 'home.card.crashed.exit', { code: shown(params.code ?? params.signal ?? '') })
+  if (params.kind === 'signal') return translate(t, CARD_COPY, 'home.card.crashed.signal', { signal: shown(params.signal) })
+  return translate(t, CARD_COPY, 'home.card.crashed.exit', { code: shown(params.code) })
 }
 
 /**
