@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { test } from 'node:test'
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -335,6 +337,163 @@ test('reopened lifecycle replaces permanent history metadata while retaining ses
       assert.ok(publications.some(summary => summary.ended_at === 5000))
       assert.ok(publications.some(summary => summary.ended_at === 8000))
     } finally { reader.close(); h.close() }
+  }
+})
+
+test('public session projections include committed compaction activity and persisted M1 metadata', () => {
+  const h = harness()
+  const reader = openDeckDb(h.file)
+  try {
+    const updates = []
+    const projector = createProjector({ store: h.store, publish: event => {
+      if (event.type !== 'session.upserted') return
+      assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))
+      assert.equal(event.data.activity, reader.get('SELECT activity FROM sessions WHERE id=?', event.entityId).activity)
+      updates.push(event.data)
+    } })
+    const send = (event, at, extra = {}) => {
+      const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: path.dirname(h.file), ...extra })
+      envelope.hookTs = at
+      assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true)
+      projector.applyHooks([envelope])
+      assert.deepEqual(updates.at(-1), projector.snapshot().sessions[0])
+    }
+    send('SessionStart', 1000)
+    assert.equal(updates.at(-1).activity, null)
+    send('PreCompact', 2000)
+    assert.equal(updates.at(-1).activity, 'compacting')
+    assert.equal(updates.at(-1).state, 'running')
+    send('PostCompact', 3000)
+    assert.equal(updates.at(-1).activity, null)
+    send('PreCompact', 4000)
+    send('SessionStart', 5000, { source: 'compact', session_id: 'compacted-conversation' })
+    assert.equal(updates.at(-1).activity, null)
+    const id = updates.at(-1).id
+    assert.equal(updates.at(-1).toolCalls, 0)
+    for (const seq of [1, 2]) h.store.run('INSERT INTO session_steps(session_id,seq,at,tool_name,line,status) VALUES(?,?,?,?,?,?)', id, seq, 5500, 'Read', 'Synthetic step', 'ok')
+    h.store.run('UPDATE sessions SET branch=?,role=?,run_repo_id=repo_id,run_id=?,run_task_id=?,last_input_from=?,last_input_name=?,activity=?,reviewed_at=? WHERE id=?', 'fixture-branch', 'lead', 'fixture-run', 'T4', 'terminal', 'fixture-terminal', 'tool:Read', 4500, id)
+    send('SubagentStart', 6000, { session_id: 'compacted-conversation', agent_id: 'projection-agent' })
+    const view = updates.at(-1)
+    assert.deepEqual(view.sessionAliases, [fixture('SessionStart.startup.json').hook.session_id])
+    assert.equal(view.ptyId, null)
+    assert.equal(view.processKey, '42')
+    assert.equal(view.branch, 'fixture-branch')
+    assert.equal(view.role, 'lead')
+    assert.deepEqual(view.runRef, { repoId: path.dirname(h.file), runId: 'fixture-run', taskId: 'T4' })
+    assert.equal(view.lastInputFrom, 'terminal')
+    assert.equal(view.lastInputName, 'fixture-terminal')
+    assert.equal(view.activity, 'tool:Read')
+    assert.equal(view.subagentsActive, 1)
+    assert.equal(view.toolCalls, 2)
+    assert.equal(view.reviewedAt, 4500)
+    assert.equal(view.startedAt, 1000)
+    assert.equal(view.endedAt, null)
+    assert.equal(view.transcriptPath, fixture('SessionStart.startup.json').hook.transcript_path)
+    for (const privateField of ['reviewBaseline', 'review_baseline', 'contents', 'since_ts', 'end_announced', 'end_reason']) assert.equal(Object.hasOwn(view, privateField), false)
+    send('SubagentStop', 7000, { session_id: 'compacted-conversation', agent_id: 'projection-agent', stop_hook_active: false })
+    assert.equal(updates.at(-1).subagentsActive, 0)
+    send('SessionEnd', 8000, { session_id: 'compacted-conversation', reason: 'prompt_input_exit' })
+    assert.equal(updates.at(-1).endedAt, 8000)
+    assert.equal(updates.at(-1).alive, false)
+  } finally { reader.close(); h.close() }
+})
+
+test('Git scans refuse symlinked ancestors without reading or retaining synthetic outside files', () => {
+  const h = harness()
+  const originalRead = fs.readSync
+  try {
+    const root = path.dirname(h.file)
+    const repo = path.join(root, 'repo')
+    const outside = path.join(root, 'private')
+    mkdirSync(path.join(repo, 'tracked'), { recursive: true })
+    mkdirSync(outside)
+    writeFileSync(path.join(repo, 'tracked', 'credentials.json'), 'placeholder\n')
+    const secret = 'SYNTHETIC_OUTSIDE_SECRET_NOT_FOR_SQLITE\n'
+    const secretFile = path.join(outside, 'credentials.json')
+    writeFileSync(secretFile, secret)
+    execFileSync('git', ['init', '-q', repo], { timeout: 2000 })
+    execFileSync('git', ['-C', repo, 'add', 'tracked/credentials.json'], { timeout: 2000 })
+    rmSync(path.join(repo, 'tracked'), { recursive: true })
+    symlinkSync(outside, path.join(repo, 'tracked'))
+    const gitPath = process.env.PATH.split(path.delimiter).map(directory => path.join(directory, 'git')).find(existsSync)
+    assert.ok(gitPath)
+    const bin = path.join(root, 'bin')
+    const trace = path.join(root, 'git-trace.jsonl')
+    mkdirSync(bin)
+    writeFileSync(path.join(bin, 'git'), `#!${process.execPath}\nconst fs = require('node:fs')\nconst { spawnSync } = require('node:child_process')\nfs.appendFileSync(${JSON.stringify(trace)}, JSON.stringify(process.argv.slice(2)) + '\\n')\nconst child = spawnSync(${JSON.stringify(gitPath)}, process.argv.slice(2), { stdio: 'inherit' })\nprocess.exit(child.status ?? 1)\n`, { mode: 0o700 })
+    const previousPath = process.env.PATH
+    try {
+      process.env.PATH = `${bin}${path.delimiter}${previousPath}`
+      assert.equal(captureReviewBaseline(repo), null)
+      const commands = readFileSync(trace, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      assert.equal(commands.some(args => args.includes('--eol')), false)
+    } finally { process.env.PATH = previousPath }
+    let outsideReads = 0
+    const outsideStat = fs.statSync(secretFile)
+    fs.readSync = (fd, ...args) => {
+      const stat = fs.fstatSync(fd)
+      if (stat.dev === outsideStat.dev && stat.ino === outsideStat.ino) outsideReads++
+      return originalRead(fd, ...args)
+    }
+    syncBuiltinESMExports()
+    const send = (event, at, extra = {}) => {
+      const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: repo, ...extra })
+      envelope.hookTs = at
+      h.projector.applyHooks([envelope])
+    }
+    send('UserPromptSubmit', 1000, { prompt: 'Joined late' })
+    assert.equal(h.store.get('SELECT review_baseline FROM sessions').review_baseline, null)
+    assert.equal(outsideReads, 0)
+    rmSync(path.join(repo, 'tracked'))
+    mkdirSync(path.join(repo, 'tracked'))
+    writeFileSync(path.join(repo, 'tracked', 'credentials.json'), 'placeholder\n')
+    execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture'], { timeout: 2000 })
+    writeFileSync(path.join(repo, 'tracked', 'credentials.json'), 'inside\nsecond\n')
+    send('PostToolUse', 2000, { tool_name: 'Edit', tool_input: { file_path: path.join(repo, 'tracked', 'credentials.json') }, tool_response: { success: true } })
+    send('Stop', 3000)
+    const before = { ...h.store.get('SELECT * FROM sessions') }
+    assert.equal(JSON.parse(before.changed_files).length, 1)
+    assert.ok(before.review_baseline)
+    rmSync(path.join(repo, 'tracked'), { recursive: true })
+    symlinkSync(outside, path.join(repo, 'tracked'))
+    assert.equal(captureReviewBaseline(repo, before.review_baseline), null)
+    send('UserPromptSubmit', 4000, { prompt: 'Continue' })
+    send('Stop', 5000)
+    h.projector.signal(before.id, { type: 'review' }, 6000)
+    const after = h.store.get('SELECT * FROM sessions')
+    assert.equal(after.state, 'done')
+    assert.equal(after.changed_files, before.changed_files)
+    assert.equal(after.review_baseline, before.review_baseline)
+    assert.equal(after.reviewed_at, null)
+    assert.equal(outsideReads, 0)
+    const saved = JSON.stringify(h.store.all('SELECT payload FROM hook_events')) + JSON.stringify(h.store.all('SELECT data FROM events')) + JSON.stringify(h.store.all('SELECT review_baseline FROM sessions'))
+    assert.equal(saved.includes(secret.trim()), false)
+    assert.equal(saved.includes(Buffer.from(secret).toString('base64')), false)
+    const externalModule = path.join(outside, 'external-module')
+    mkdirSync(externalModule)
+    execFileSync('git', ['init', '-q', externalModule], { timeout: 2000 })
+    execFileSync('git', ['-C', externalModule, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture', '--allow-empty'], { timeout: 2000 })
+    const moduleHead = execFileSync('git', ['-C', externalModule, 'rev-parse', 'HEAD'], { timeout: 2000, encoding: 'utf8' }).trim()
+    execFileSync('git', ['-C', repo, 'rm', '--cached', '-q', 'tracked/credentials.json'], { timeout: 2000 })
+    execFileSync('git', ['-C', repo, 'update-index', '--add', '--cacheinfo', `160000,${moduleHead},tracked/external-module`], { timeout: 2000 })
+    execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'gitlink fixture'], { timeout: 2000 })
+    assert.equal(captureReviewBaseline(repo), null)
+    execFileSync('git', ['-C', repo, 'update-index', '--force-remove', 'tracked/external-module'], { timeout: 2000 })
+    execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'remove gitlink fixture'], { timeout: 2000 })
+    rmSync(path.join(repo, 'tracked'))
+    mkdirSync(path.join(repo, 'tracked'))
+    symlinkSync(secretFile, path.join(repo, 'tracked', 'credentials.json'))
+    const finalLink = captureReviewBaseline(repo)
+    assert.ok(finalLink)
+    assert.equal(JSON.parse(finalLink).files['tracked/credentials.json'].startsWith('link:'), true)
+    assert.equal(Buffer.from(JSON.parse(finalLink).contents['tracked/credentials.json'], 'base64').toString(), secretFile)
+    assert.equal(outsideReads, 0)
+    rmSync(path.join(repo, 'tracked', 'credentials.json'))
+    assert.ok(captureReviewBaseline(repo))
+  } finally {
+    fs.readSync = originalRead
+    syncBuiltinESMExports()
+    h.close()
   }
 })
 

@@ -44,6 +44,25 @@ function scanBudget() {
   return { remaining: maxScannedBytes, remainingPaths: maxScannedPaths, deadline: Date.now() + 1500 }
 }
 
+function workingPath(root, name, budget) {
+  if (Date.now() >= budget.deadline) throw new Error('scan timeout')
+  const boundary = realpathSync(root)
+  const file = path.resolve(boundary, name)
+  if (!file.startsWith(`${boundary}${path.sep}`)) throw new Error('path outside repository')
+  let directory = boundary
+  for (const component of path.relative(boundary, path.dirname(file)).split(path.sep).filter(Boolean)) {
+    if (Date.now() >= budget.deadline) throw new Error('scan timeout')
+    directory = path.join(directory, component)
+    try {
+      if (lstatSync(directory).isSymbolicLink()) throw new Error('symlinked repository ancestor')
+    } catch (error) {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') break
+      throw error
+    }
+  }
+  return file
+}
+
 function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false) {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
@@ -86,8 +105,8 @@ function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false) {
 function gitPaths(root, head, budget = scanBudget(), depth = 0) {
   if (depth > 4 || Date.now() >= budget.deadline) return null
   const tree = head === 'unborn' ? Buffer.alloc(0) : git(root, ['ls-tree', '-r', '-z', head], budget)
-  const listed = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '--eol', '-z'], budget)
-  if (!tree || !listed) return null
+  const namesOnly = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], budget)
+  if (!tree || !namesOnly) return null
   const autoCRLF = /^(true|input)$/.test(git(root, ['config', '--get', 'core.autocrlf'], budget)?.toString('utf8').trim() ?? '')
   const fileMode = git(root, ['config', '--bool', '--get', 'core.filemode'], budget)?.toString('utf8').trim() !== 'false'
   const entries = new Map()
@@ -97,6 +116,12 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
     entries.set(match[4], { mode: match[1], type: match[2], oid: match[3] })
   }
   if (entries.size > budget.remainingPaths) return null
+  const workingNames = new Set([...entries.keys(), ...namesOnly.toString('utf8').split('\0').filter(Boolean)])
+  if (workingNames.size > budget.remainingPaths) return null
+  try { for (const name of workingNames) workingPath(root, name, budget) }
+  catch { return null }
+  const listed = git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '--eol', '-z'], budget)
+  if (!listed) return null
   const blobs = [...new Set([...entries.values()].filter(entry => entry.type === 'blob').map(entry => entry.oid))]
   if (blobs.length) {
     const checked = git(root, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], budget, false, `${blobs.join('\n')}\n`)?.toString('utf8').trim().split('\n')
@@ -119,8 +144,8 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
   for (const name of names) {
     const entry = entries.get(name)
     if (entry?.type === 'commit') {
-      const location = path.resolve(root, name)
-      if (!location.startsWith(`${root}${path.sep}`)) return null
+      let location
+      try { location = workingPath(root, name, budget) } catch { return null }
       const link = gitlinkState(location, budget, depth + 1)
       if (!link) return null
       gitlinks.set(name, link)
@@ -130,8 +155,7 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
     let unchanged = false
     if (entry) {
       try {
-        const location = path.resolve(root, name)
-        if (!location.startsWith(`${root}${path.sep}`)) return null
+        const location = workingPath(root, name, budget)
         const stat = lstatSync(location)
         let oid = null
         let mode = null
@@ -153,8 +177,7 @@ function gitPaths(root, head, budget = scanBudget(), depth = 0) {
 }
 
 function fileFingerprint(root, name, scan) {
-  const file = path.resolve(root, name)
-  if (!file.startsWith(`${root}${path.sep}`)) throw new Error('path outside repository')
+  const file = workingPath(root, name, scan.budget)
   if (scan.gitlinks?.has(name)) return scan.gitlinks.get(name).fingerprint
   try {
     const stat = lstatSync(file)
@@ -210,8 +233,8 @@ function statisticsBudget(scan) {
 function lineBytes(root, name, scan, budget) {
   let fd
   try {
-    const file = path.resolve(root, name)
-    if (!file.startsWith(`${root}${path.sep}`) || Date.now() >= budget.deadline) return null
+    const file = workingPath(root, name, budget)
+    if (Date.now() >= budget.deadline) return null
     const stat = lstatSync(file)
     if (stat.isSymbolicLink()) {
       const bytes = Buffer.from(readlinkSync(file))

@@ -9,8 +9,39 @@ const rank = event => {
   return index < 0 ? 1 : index === 0 ? 0 : index + 1
 }
 
-function sessionView(row) {
-  return { id: row.id, claudeSessionId: row.claude_session_id, origin: row.origin, repoId: row.repo_id, cwd: row.cwd, task: row.task, state: row.state, stateSince: row.state_since, lastActivityAt: row.last_activity_at, alive: !!row.alive, joinedMidLife: !!row.joined_mid_life, changedFiles: JSON.parse(row.changed_files), crashKind: row.crash_kind, exitCode: row.exit_code, exitSignal: row.exit_signal }
+function sessionView(row, store) {
+  return {
+    id: row.id,
+    claudeSessionId: row.claude_session_id,
+    sessionAliases: store.all('SELECT claude_session_id FROM session_aliases WHERE session_id=? ORDER BY replaced_at,claude_session_id', row.id).map(alias => alias.claude_session_id),
+    origin: row.origin,
+    ptyId: row.pty_id,
+    repoId: row.repo_id,
+    cwd: row.cwd,
+    branch: row.branch,
+    task: row.task,
+    runRef: row.run_id ? { repoId: row.run_repo_id, runId: row.run_id, taskId: row.run_task_id } : null,
+    role: row.role,
+    state: row.state,
+    stateSince: row.state_since,
+    lastActivityAt: row.last_activity_at,
+    alive: !!row.alive,
+    processKey: row.process_key,
+    activity: row.activity,
+    subagentsActive: row.subagents_active,
+    joinedMidLife: !!row.joined_mid_life,
+    changedFiles: JSON.parse(row.changed_files),
+    crashKind: row.crash_kind,
+    exitCode: row.exit_code,
+    exitSignal: row.exit_signal,
+    lastInputFrom: row.last_input_from,
+    lastInputName: row.last_input_name,
+    transcriptPath: row.transcript_path,
+    reviewedAt: row.reviewed_at,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    toolCalls: store.get('SELECT COUNT(*) AS n FROM session_steps WHERE session_id=?', row.id).n
+  }
 }
 function requestView(row) {
   return { id: row.id, sessionId: row.session_id, kind: row.kind, tier: row.tier, state: row.state, answer: row.answer ? JSON.parse(row.answer) : null, expiredReason: row.expired_reason, createdAt: row.created_at, summary: row.summary }
@@ -19,7 +50,7 @@ function requestView(row) {
 /** Persist ordered hook batches and publish only sequences from committed transactions. */
 export function createProjector({ store, now = Date.now, publish = () => {} }) {
   function snapshot() {
-    const sessions = store.all('SELECT * FROM sessions ORDER BY started_at, id').map(sessionView)
+    const sessions = store.all('SELECT * FROM sessions ORDER BY started_at, id').map(row => sessionView(row, store))
     const requests = store.all('SELECT * FROM requests ORDER BY created_at, id').map(requestView)
     return { seq: Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq), sessions, requests, counts: projectCounts(store), home: projectHome(sessions, requests) }
   }
@@ -104,7 +135,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
             }
           }
           if (session) persistSessionSummary(store, session)
-          if (session && (!late || requestChanged || identityChanged || replacementChanged || lifecycleChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session) })
+          if (session && (!late || requestChanged || identityChanged || replacementChanged || lifecycleChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session, store) })
         }
         store.appendEvent({ at: now(), type: 'counts', data: projectCounts(store) })
       })
@@ -116,17 +147,17 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           const state = JSON.parse(row.changed_files).length ? 'done' : 'ended'
           store.run('UPDATE sessions SET state = ?, state_since = ?, alive = 0, ended_at = ?, since_ts = ? WHERE id = ?', state, state === row.state ? row.state_since : at, at, at, row.id)
           persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
-          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
         }
         for (const row of store.all('SELECT * FROM sessions WHERE state = ? AND (activity IS NULL OR activity <> ?) AND ? - last_activity_at >= ?', 'running', 'compacting', at, 1_200_000)) {
           store.run('UPDATE sessions SET state = ?, state_since = last_activity_at, since_ts = ? WHERE id = ?', 'stale', at, row.id)
-          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
         }
         for (const row of store.all('SELECT * FROM sessions WHERE origin = ? AND alive = 1 AND process_key IS NULL AND ? - last_activity_at >= ?', 'observed', at, 86_400_000)) {
           closeRequests(row.id, 'process_ended', at)
           store.run('UPDATE sessions SET state = ?, state_since = ?, alive = 0, ended_at = ?, since_ts = ? WHERE id = ?', 'ended', row.state === 'ended' ? row.state_since : at, at, at, row.id)
           persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
-          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
         }
         store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
       })
@@ -153,7 +184,7 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           store.run('UPDATE sessions SET state=?,reviewed_at=?,state_since=?,since_ts=?,changed_files=?,review_baseline=? WHERE id=?', row.alive ? 'reviewed' : 'ended', at, at, at, '[]', baseline ?? row.review_baseline, row.id)
         }
         persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
-        store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id)) })
+        store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
         store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
       })
     }
