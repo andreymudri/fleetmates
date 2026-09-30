@@ -3008,3 +3008,102 @@ test('late SessionStart repairs process identity and publishes without rewinding
     } finally { h.close() }
   }
 })
+
+test('literal env split strings classify executables without treating argv as shell syntax', () => {
+  const tier = command => permissionTier({ cwd: '/tmp', tool_name: 'Bash', tool_input: { command } })
+  for (const command of [
+    "env -S 'rm /tmp/synthetic-only'",
+    "env -S'rm /tmp/synthetic-only'",
+    "env --split-string 'rm /tmp/synthetic-only'",
+    "/usr/bin/env --split-string='rm /tmp/synthetic-only'",
+    "env -iS'rm /tmp/synthetic-only'",
+    "env -S 'rm' /tmp/synthetic-only",
+    "env -S 'nice -n 1 rm /tmp/synthetic-only'",
+    "env -S 'env -S \"rm /tmp/synthetic-only\"'",
+    "env -S 'bash -lc \"rm /tmp/synthetic-only\"'",
+    "nice -n 1 env -S 'rm /tmp/synthetic-only'",
+    "env -S 'rm\\_/tmp/synthetic-only'",
+    "env -S '\"/bin/rm\" \"/tmp/synthetic only\"'",
+    "env -S 'systemctl stop --user \"fleetmates-deck.service\"'"
+  ]) assert.equal(tier(command), 'destructive', command)
+  for (const command of [
+    "env -S 'printf \"rm /tmp/synthetic-only\"'",
+    "env -S 'printf x > .git/config'",
+    "env -S 'printf x && rm /tmp/synthetic-only'",
+    "env -S 'printf x | rm /tmp/synthetic-only'",
+    "env -S 'printf \"\" rm /tmp/synthetic-only'",
+    "env -S '\"\" rm /tmp/synthetic-only'",
+    "env -S 'printf x # rm /tmp/synthetic-only'",
+    "env -S '${UNKNOWN_EXECUTABLE} /tmp/synthetic-only'",
+    "env -S 'rm ${UNKNOWN_ARG}'",
+    "env -S 'rm $(unknown)'",
+    "env -S '$(rm /tmp/synthetic-only)'",
+    "env -S 'rm\\q /tmp/synthetic-only'",
+    "env -S '\"rm /tmp/synthetic-only'",
+    "env -S 'printf \"$UNKNOWN\"'"
+  ]) assert.equal(tier(command), 'caution', command)
+  assert.equal(tier(`env -S 'rm ${'x'.repeat(65536)}'`), 'caution')
+  assert.equal(tier(`env -S 'rm ${Array(1025).fill('x').join(' ')}'`), 'caution')
+  let recursive = 'rm /tmp/synthetic-only'
+  for (let i = 0; i < 10; i++) recursive = `-S ${JSON.stringify(recursive)}`
+  assert.equal(tier(`env -S '${recursive}'`), 'caution')
+
+})
+
+test('env split string controls honor command-local cwd and nested read write scopes', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-env-split-'))
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    process.env.XDG_STATE_HOME = root
+    const project = path.join(root, 'project')
+    const deck = path.join(root, 'fleetmates', 'deck')
+    mkdirSync(project)
+    mkdirSync(deck, { recursive: true })
+    writeFileSync(path.join(deck, 'token'), 'SYNTHETIC_TOKEN', { mode: 0o600 })
+    symlinkSync(deck, path.join(project, 'cache'))
+    symlinkSync(deck, path.join(project, 'cache with space'))
+    mkdirSync(path.join(project, '.claude'))
+    mkdirSync(path.join(project, 'ordinary'))
+    const tier = command => permissionTier({ cwd: project, tool_name: 'Bash', tool_input: { command } }, { repoRoot: project })
+    for (const command of [
+      "env -S 'cat cache/token'",
+      "env -S 'cat \"cache with space/token\"'",
+      "env -S '-C \"cache with space\" cat token'",
+      "env -C cache -S 'cat token'",
+      "env -S '-C cache cat token'",
+      "env --split-string='--chdir=cache cat token'",
+      "env -S '-Ccache cat token'",
+      "env -S 'env -C cache cat token'",
+      "env -S 'env -C cache -S \"cat token\"'",
+      "env -S '-C cache sh -c \"cat token\"'",
+      "env -C cache -S 'sh -c \"cat token\"'",
+      "env -S 'sh -c \"cd cache && cat token\"'",
+      "env -S '-C cache tee token'",
+      "env -S '-C .claude tee settings.local.json'",
+      "env -S 'env -C .claude touch settings.local.json'",
+      "env -S '-C .claude sh -c \"printf x > settings.local.json\"'",
+      "env -C .claude -S 'sh -c \"printf x > settings.local.json\"'",
+      "printf '%s' \"$(env -S '-C cache cat token')\"",
+      "sh -c 'env -S \"-C cache cat token\"'"
+    ]) assert.equal(tier(command), 'destructive', command)
+    for (const command of [
+      "env -S 'cat ordinary/file.txt'",
+      "env -S '-C ordinary cat file.txt'",
+      "env -S '-C ordinary tee file.txt'",
+      "env -S '-C cache printf x'; cat token",
+      "env -C cache -S 'printf x'; cat token",
+      "env -S '-C .claude printf x'; tee settings.local.json",
+      "env -S '-C .claude printf x' > settings.local.json",
+      "env -S '-C cache printf x > token'",
+      "env -S 'printf x && cat cache/token'",
+      "env -S '-C $UNKNOWN cat token'",
+      "env -S '-C ${UNKNOWN} tee token'"
+    ]) assert.equal(tier(command), 'caution', command)
+    assert.equal(readFileSync(path.join(deck, 'token'), 'utf8'), 'SYNTHETIC_TOKEN')
+    assert.equal(existsSync(path.join(project, '.claude', 'settings.local.json')), false)
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})

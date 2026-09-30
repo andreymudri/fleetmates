@@ -78,8 +78,63 @@ function embeddedCommands(command) {
 
 const executionWrappers = ['env', 'sudo', 'doas', 'nice', 'timeout', 'stdbuf', 'time', 'nohup']
 
+function envSplitTokens(text, location) {
+  if (typeof text !== 'string' || text.length > 65536) return null
+  const words = []
+  let value = ''
+  let active = false
+  let quote = null
+  const finish = () => {
+    if (active) words.push({ value, quoted: true, start: location.start, end: location.end })
+    value = ''
+    active = false
+  }
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]
+    if (words.length > 1024) return null
+    if (!quote && /\s/.test(char)) { finish(); continue }
+    if (!quote && char === '#' && !active) break
+    if (char === "'" || char === '"') {
+      if (!quote) { quote = char; active = true; continue }
+      if (quote === char) { quote = null; continue }
+    }
+    if (char === '$' && quote !== "'") return null
+    if (char === '\\') {
+      const next = text[i + 1]
+      if (next === undefined) return null
+      if (quote === "'" && !['\\', "'"].includes(next)) { value += char; active = true; continue }
+      if (next === '_' && !quote) { finish(); i++; continue }
+      if (next === 'c') {
+        if (quote) return null
+        finish()
+        return words
+      }
+      const escapes = { '\\': '\\', "'": "'", '"': '"', '#': '#', '$': '$', _: ' ', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v' }
+      if (!Object.hasOwn(escapes, next)) return null
+      value += escapes[next]
+      active = true
+      i++
+      continue
+    }
+    value += char
+    active = true
+  }
+  if (quote) return null
+  finish()
+  return words.length <= 1024 ? words : null
+}
+
 function skipWrapperOptions(words, index, wrapper, onDirectory = () => {}) {
   let offset = index + 1
+  let splits = 0
+  const expandSplit = (text, count, prefix = '') => {
+    if (++splits > 8) return false
+    const parsed = envSplitTokens(text, words[offset])
+    if (!parsed || words.length - count + parsed.length > 1024) return false
+    const options = prefix ? [{ ...words[offset], value: `-${prefix}` }] : []
+    words.splice(offset, count, ...options, ...parsed)
+    return true
+  }
   const takesValue = {
     env: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string', '-a', '--argv0'],
     sudo: ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-r', '--role', '-t', '--type'],
@@ -98,6 +153,14 @@ function skipWrapperOptions(words, index, wrapper, onDirectory = () => {}) {
     const word = words[offset].value
     if (word === '--') { offset++; break }
     if (wrapper === 'env' && /^[A-Za-z_]\w*=/.test(word)) { offset++; continue }
+    if (wrapper === 'env' && ['-S', '--split-string'].includes(word)) {
+      if (!expandSplit(words[offset + 1]?.value, 2)) return words.length
+      continue
+    }
+    if (wrapper === 'env' && word.startsWith('--split-string=')) {
+      if (!expandSplit(word.slice('--split-string='.length), 1)) return words.length
+      continue
+    }
     if (takesValue.includes(word)) { directoryValue(word, words[offset + 1]?.value); offset += 2; continue }
     if (word.startsWith('--')) {
       const equal = word.indexOf('=')
@@ -108,6 +171,11 @@ function skipWrapperOptions(words, index, wrapper, onDirectory = () => {}) {
     if (word.startsWith('-') && word !== '-') {
       const flags = word.slice(1)
       const valueAt = [...flags].findIndex(flag => takesValue.includes(`-${flag}`))
+      if (wrapper === 'env' && valueAt >= 0 && flags[valueAt] === 'S') {
+        const separate = valueAt === flags.length - 1
+        if (!expandSplit(separate ? words[offset + 1]?.value : flags.slice(valueAt + 1), separate ? 2 : 1, flags.slice(0, valueAt))) return words.length
+        continue
+      }
       if (valueAt >= 0) directoryValue(`-${flags[valueAt]}`, valueAt === flags.length - 1 ? words[offset + 1]?.value : flags.slice(valueAt + 1))
       offset += valueAt >= 0 && valueAt === flags.length - 1 ? 2 : 1
       continue
@@ -434,13 +502,13 @@ function sensitiveWrite(hook, repoRoot, depth = 0) {
   if (!fileTool && tool !== 'Bash') return false
   const raw = fileTool ? hook.tool_input?.file_path ?? hook.tool_input?.notebook_path ?? '' : hook.tool_input?.command ?? ''
   if (typeof raw !== 'string') return false
+  if (!fileTool) return shellWriteTargets(raw, hook.cwd ?? repoRoot).some(target => sensitiveWrite({ ...hook, cwd: target.cwd, tool_name: target.command === undefined ? 'Write' : 'Bash', tool_input: target.command === undefined ? { file_path: target.file_path } : { command: target.command } }, repoRoot, depth + 1))
   const location = fileTool ? canonicalExistingPath(path.resolve(hook.cwd ?? repoRoot ?? '', raw)) : null
   const normalized = (location ?? raw).replaceAll('\\', '/')
   if (fileTool && /(?:^|\/)(?:\.git|\.claude)(?:\/hooks)?$/.test(normalized)) return true
   if (/(?:^|[^A-Za-z0-9_.-])\.git\//.test(normalized)) return true
   if (/(?:^|\/)\.claude\/(?:settings[^/]*\.json|hooks\/)/.test(normalized)) return true
   if (/(?:^|\/)\.mcp\.json(?:\b|$)/.test(normalized)) return true
-  if (!fileTool) return shellWriteTargets(raw, hook.cwd ?? repoRoot).some(target => sensitiveWrite({ ...hook, cwd: target.cwd, tool_name: target.command === undefined ? 'Write' : 'Bash', tool_input: target.command === undefined ? { file_path: target.file_path } : { command: target.command } }, repoRoot, depth + 1))
   if (!fileTool || path.posix.basename(normalized) !== 'CLAUDE.md') return false
   if (!repoRoot) return true
   const root = canonicalExistingPath(path.resolve(repoRoot))
