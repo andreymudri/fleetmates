@@ -1908,3 +1908,39 @@ test('stale timing remains anchored to last activity across repeated ticks', () 
     assert.equal(h.projector.snapshot().sessions[0].stateSince, 2000)
   } finally { h.close() }
 })
+
+
+for (const tool_name of ['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']) test(`${tool_name} resolves literal metacharacter paths to protected deck controls`, () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-literal-controls-'))
+  const previous = process.env.XDG_STATE_HOME
+  try {
+    const state = path.join(root, 'state')
+    const deck = path.join(state, 'fleetmates', 'deck')
+    const project = path.join(root, 'project')
+    mkdirSync(deck, { recursive: true, mode: 0o700 })
+    mkdirSync(project)
+    writeFileSync(path.join(deck, 'token'), 'synthetic-token', { mode: 0o600 })
+    process.env.XDG_STATE_HOME = state
+    const input = file_path => tool_name === 'NotebookEdit' ? { notebook_path: file_path } : { file_path }
+    const tier = file_path => permissionTier({ cwd: project, tool_name, tool_input: input(file_path) }, { repoRoot: project })
+    for (const name of ['token-link', 'token?link', 'token$link', 'token`link', 'token*link']) {
+      symlinkSync(path.join(deck, 'token'), path.join(project, name))
+      assert.equal(readFileSync(path.join(project, name), 'utf8'), 'synthetic-token')
+      for (const file_path of [name, path.join(project, name)]) assert.equal(tier(file_path), 'destructive', file_path)
+    }
+    for (const name of ['ordinary?file', 'ordinary$file', 'ordinary`file', 'ordinary*file']) {
+      writeFileSync(path.join(project, name), 'ordinary')
+      for (const file_path of [name, path.join(project, name)]) assert.equal(tier(file_path), 'caution', file_path)
+    }
+    symlinkSync(deck, path.join(project, 'controls?link'))
+    assert.equal(tier('controls?link/new.json'), 'destructive')
+    assert.equal(tier(path.join(project, 'controls?link', 'new.json')), 'destructive')
+    for (const command of ['cat token?link', 'cat token$link', 'cat token*link', 'cat token`link']) {
+      assert.equal(permissionTier({ cwd: project, tool_name: 'Bash', tool_input: { command } }), 'caution', command)
+    }
+  } finally {
+    if (previous === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = previous
+    rmSync(root, { recursive: true, force: true })
+  }
+})

@@ -214,7 +214,7 @@ function namesRelativeDeckControl(hook, depth = 0) {
       const configured = ['XDG_STATE_HOME', 'XDG_CONFIG_HOME', 'XDG_RUNTIME_DIR'].includes(variable) ? process.env[variable] : null
       return configured && path.isAbsolute(configured) ? configured : match
     }) : value
-    if (/[$*?`]/.test(expanded)) return false
+    if (shell && /[$*?`]/.test(expanded)) return false
     if (path.isAbsolute(expanded)) return namesDeckControl({ path: canonicalExistingPath(expanded) })
     return path.isAbsolute(hook.cwd ?? '') && namesDeckControl({ path: canonicalExistingPath(path.resolve(hook.cwd, expanded)) })
   }
