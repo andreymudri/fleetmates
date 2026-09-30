@@ -12,7 +12,7 @@ import { chromium } from 'playwright-core'
 import { captureToken, createApiClient, createConnection, wsProtocols, backoffMs, TOKEN_KEY } from '../../web/src/state/api.js'
 import {
   createDeckStore, reduce, initialState, matchRoute, resolveRoute, keyAction, documentTitle, badgeText,
-  selectLanguage, createAnnouncer, bannerFor
+  selectLanguage, createAnnouncer, bannerFor, isRoute
 } from '../../web/src/state/deck-store.js'
 import { messages as en, format } from '../../web/src/i18n/en.js'
 import * as pt from '../../web/src/i18n/pt.js'
@@ -106,6 +106,12 @@ test('the URL fragment token moves into sessionStorage and the fragment is dropp
 
   const rejected = captureToken({ location: fakeLocation('http://127.0.0.1:47800/#token=def&to=//evil.example/'), history, storage })
   assert.deepEqual(rejected, { token: 'def', to: null })
+  for (const to of ['//s/x', '//memory/note/x', '//runs/evil.example/x']) {
+    assert.notEqual(matchRoute(to).name, 'notFound', `${to} matches a route, so only the // guard rejects it`)
+    assert.equal(isRoute(to), false, `${to} is protocol-relative and resolves to another origin`)
+    const hostile = captureToken({ location: fakeLocation(`http://127.0.0.1:47800/#token=ghi&to=${to}`), history, storage })
+    assert.deepEqual(hostile, { token: 'ghi', to: null })
+  }
   assert.deepEqual(captureToken({ location: fakeLocation('http://127.0.0.1:47800/#to=/memory'), history, storage: memoryStorage() }), { token: null, to: null })
 })
 
@@ -139,6 +145,19 @@ test('REST calls carry the bearer token and API version, and 401 reports an inva
   assert.equal(seen[1].init.body, '{"bell":false}')
   assert.equal(seen[0].init.headers['Content-Type'], undefined)
   assert.deepEqual(wsProtocols('abc'), ['deck.v1', 'deck.auth.abc'])
+})
+
+test('the REST client refuses any path outside /api/ and never sends the token there', async () => {
+  const seen = []
+  const client = createApiClient({ token: 'abc', fetch: async (url, init) => { seen.push([url, init.headers.Authorization])
+    return { status: 200, ok: true, json: async () => ({ data: {} }) } } })
+  for (const bad of ['https://evil.example/x', '//evil.example/api/x', '/not-api/thing', '/apix/y', 'api/version']) {
+    await assert.rejects(client.get(bad), error => error.code === 'bad_path', bad)
+    await assert.rejects(client.post(bad, {}), error => error.code === 'bad_path', bad)
+  }
+  assert.deepEqual(seen, [], 'fetch never ran for a non-API path')
+  await client.get('/api/version')
+  assert.deepEqual(seen, [['/api/version', 'Bearer abc']])
 })
 
 test('reconnect sends lastSeq and epoch, backs off with jitter, and Retry now keeps the attempt count', async () => {
@@ -216,6 +235,19 @@ test('heartbeat silence reconnects; token, origin and outdated closes stop retry
   assert.equal(live.socket.readyState, 3)
   live.connection.close()
 
+  const beating = make()
+  beating.socket.open()
+  beating.socket.receive(snapshotMessage(1))
+  clock.advance(20_000)
+  beating.socket.receive({ t: 'hb', serverTime: 20_000 })
+  clock.advance(10_000)
+  assert.equal(beating.store.getState().connection.state, 'live', 'every message re-arms the 30 s watchdog')
+  assert.equal(beating.socket.readyState, 1)
+  clock.advance(20_000)
+  await Promise.resolve()
+  assert.equal(beating.store.getState().connection.state, 'reconnecting', '30 s after the last hb the socket is dropped')
+  beating.connection.close()
+
   for (const [code, state] of [[4401, 'token_invalid'], [4403, 'origin_rejected']]) {
     const { store } = make()
     const count = created.length
@@ -234,6 +266,25 @@ test('heartbeat silence reconnects; token, origin and outdated closes stop retry
   assert.equal(refused.store.getState().connection.state, 'token_invalid', 'an upgrade refused with 401 is a stale token')
   probeResult = null
 
+  const probes = []
+  const api = createApiClient({ token: 'abc', fetch: async (url, init) => { probes.push([url, init.headers.Authorization])
+    return { status: 403, ok: false, json: async () => ({ error: { code: 'forbidden_origin', message: 'forbidden', retryable: false } }) } } })
+  const originStore = createDeckStore()
+  const origin = createConnection({
+    token: 'abc', url: 'ws://x/api/ws', WebSocket: FakeWebSocket, store: originStore, storage, setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout, now: clock.now, random: () => 0.5, probe: api.probe, reload: () => assert.fail('no reload')
+  })
+  const pendingBefore = clock.pending()
+  origin.start()
+  const originCount = created.length
+  created.at(-1).drop(1006)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(probes, [['/api/version', 'Bearer abc']])
+  assert.equal(originStore.getState().connection.state, 'origin_rejected', 'an upgrade refused with 403 is a rejected origin')
+  assert.equal(clock.pending(), pendingBefore, 'no retry timer is armed')
+  clock.advance(120_000)
+  assert.equal(created.length, originCount, 'origin_rejected never retries')
+
   const outdated = make()
   outdated.socket.open()
   outdated.socket.drop(4410)
@@ -249,6 +300,12 @@ test('heartbeat silence reconnects; token, origin and outdated closes stop retry
 })
 
 test('store buffers events during resync, swaps the snapshot atomically and drops stale sequence numbers', () => {
+  let stale = reduce(initialState(), { type: 'resync' })
+  stale = reduce(stale, { type: 'message', message: { t: 'counts', seq: 4, at: 40, data: counts(4) } })
+  stale = reduce(stale, { type: 'message', message: snapshotMessage(5, { counts: counts(5) }) })
+  assert.equal(stale.data.counts.needYouSessions, 5, 'a buffered event older than the snapshot is dropped')
+  assert.equal(stale.seq, 5, 'the sequence never moves backward')
+
   let state = reduce(initialState(), { type: 'resync' })
   state = reduce(state, { type: 'message', message: { t: 'welcome', epoch: 'e1', headSeq: 4 } })
   state = reduce(state, { type: 'message', message: { t: 'counts', seq: 6, at: 60, data: counts(6) } })
@@ -267,13 +324,16 @@ test('store buffers events during resync, swaps the snapshot atomically and drop
   assert.deepEqual(state.data.sessions.map(row => row.id), ['a'], 'old UI stays until replay or snapshot')
   state = reduce(state, { type: 'message', message: { t: 'replay.begin', from: 6, to: 8 } })
   state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 7, at: 70, data: session('b', 'needs_approval') } })
-  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 8, at: 80, data: session('a', 'done') } })
-  state = reduce(state, { type: 'message', message: { t: 'replay.end', seq: 8 } })
+  state = reduce(state, { type: 'message', message: { t: 'request.opened', seq: 8, at: 80, data: { id: 'rb', sessionId: 'b', kind: 'permission', summary: 'ls' } } })
+  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 9, at: 90, data: session('a', 'done') } })
+  state = reduce(state, { type: 'message', message: { t: 'replay.end', seq: 9 } })
   assert.equal(state.syncing, false)
-  assert.equal(state.seq, 8)
-  assert.equal(state.lastEventAt, 80)
+  assert.equal(state.seq, 9)
+  assert.equal(state.lastEventAt, 90)
   assert.deepEqual(state.data.sessions.map(row => [row.id, row.state]), [['a', 'done'], ['b', 'needs_approval']])
+  assert.deepEqual(state.data.requests.map(row => row.id), ['rb'], 'the replayed request is applied')
   assert.deepEqual(state.toasts, [], 'replayed requests do not raise toasts')
+  assert.deepEqual(state.announcements, [], 'replayed requests are not announced')
 
   state = reduce(state, { type: 'resync' })
   state = reduce(state, { type: 'message', message: snapshotMessage(2, { sessions: [session('z')] }) })
@@ -284,7 +344,7 @@ test('store buffers events during resync, swaps the snapshot atomically and drop
 test('needs toasts appear once per episode and never with the drawer open or the session in Focus', () => {
   const opened = (seq, id, sessionId, kind = 'permission') => ({ type: 'message', message: { t: 'request.opened', seq, at: seq, data: { id, sessionId, kind, summary: 'cargo test --release combat::' } } })
   let state = reduce(reduce(initialState(), { type: 'resync' }), { type: 'message', message: snapshotMessage(1, {
-    repos: [{ id: '/home/you/dev/rustot', name: 'rustot' }], sessions: [{ id: 's1', repoId: '/home/you/dev/rustot', state: 'running' }, { id: 's2', repoId: '/home/you/dev/rustot', state: 'running' }]
+    repos: [{ id: '/home/you/dev/rustot', name: 'rustot' }], sessions: [{ id: 's1', repoId: '/home/you/dev/rustot', state: 'running' }, { id: 's2', repoId: '/home/you/dev/rustot', state: 'running' }, { id: 's3', repoId: '/home/you/dev/rustot', state: 'running' }]
   }) })
   state = reduce(state, opened(2, 'r1', 's1'))
   state = reduce(state, opened(3, 'r2', 's1'))
@@ -302,6 +362,34 @@ test('needs toasts appear once per episode and never with the drawer open or the
   assert.equal(state.toasts.length, 1)
   state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 8, at: 8, data: { id: 's2', repoId: '/home/you/dev/rustot', state: 'crashed', exitCode: 1 } } })
   assert.deepEqual(state.toasts.map(toast => [toast.tone, toast.title]), [['needs', 'rustot asked you'], ['error', 'rustot crashed, exit 1']])
+  state = reduce(state, { type: 'view', path: '/s/s3', overlay: null })
+  state = reduce(state, opened(9, 'r6', 's3'))
+  assert.equal(state.episodes.s3, true, 'the episode starts even while hidden')
+  assert.deepEqual(state.toasts.map(toast => toast.tone), ['needs', 'error'], 'a new request for the session in Focus raises no toast')
+})
+
+test('a snapshot rebuilds needs episodes and drops toasts for requests that closed while away', () => {
+  const S = { id: 'S', repoId: '/home/you/dev/rustot', state: 'running' }
+  const repos = [{ id: '/home/you/dev/rustot', name: 'rustot' }]
+  let state = reduce(reduce(initialState(), { type: 'resync' }), { type: 'message', message: snapshotMessage(1, { repos, sessions: [S] }) })
+  state = reduce(state, { type: 'message', message: { t: 'request.opened', seq: 2, at: 2, data: { id: 'R1', sessionId: 'S', kind: 'permission', summary: 'x' } } })
+  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 3, at: 3, data: { ...S, state: 'needs_approval' } } })
+  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 4, at: 4, data: { id: 'C', repoId: '/home/you/dev/rustot', state: 'crashed', exitCode: 2 } } })
+  assert.deepEqual(state.toasts.map(toast => toast.requestId ?? toast.tone), ['R1', 'error'])
+  assert.deepEqual(state.episodes, { S: true })
+
+  state = reduce(state, { type: 'resync' })
+  state = reduce(state, { type: 'message', message: { t: 'welcome', epoch: 'e2', headSeq: 10 } })
+  const snapshot = snapshotMessage(10, { repos, sessions: [S, { id: 'Q', repoId: '/home/you/dev/rustot', state: 'asked_you' }], requests: [{ id: 'RQ', sessionId: 'Q', kind: 'question' }] })
+  state = reduce(state, { type: 'message', message: { ...snapshot, epoch: 'e2' } })
+  assert.deepEqual(state.episodes, { Q: true }, 'episodes come from snapshot sessions in a needs state')
+  assert.deepEqual(state.toasts.map(toast => toast.requestId ?? toast.tone), ['error'], 'the closed R1 toast is gone; toasts without a request stay')
+
+  state = reduce(state, { type: 'message', message: { t: 'request.opened', seq: 11, at: 11, data: { id: 'R2', sessionId: 'S', kind: 'permission', summary: 'y' } } })
+  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 12, at: 12, data: { ...S, state: 'needs_approval' } } })
+  assert.deepEqual(state.toasts.map(toast => toast.requestId ?? toast.tone), ['error', 'R2'], 'the new episode toasts')
+  state = reduce(state, { type: 'message', message: { t: 'request.opened', seq: 13, at: 13, data: { id: 'RQ2', sessionId: 'Q', kind: 'question', summary: 'z' } } })
+  assert.deepEqual(state.toasts.map(toast => toast.requestId ?? toast.tone), ['error', 'R2'], 'Q was already waiting in the snapshot, so its episode does not toast again')
 })
 
 test('the live region announces at most once per 2s and merges bursts', () => {
@@ -424,6 +512,13 @@ test('the shell renders zero, loading, populated, fallback-language and fatal st
   assert.match(lost, /Retry now/)
   assert.match(lost, /shell--stale/)
   assert.doesNotMatch(lost, /skeleton-card/, 'a cached snapshot beats a skeleton')
+
+  const many = Array.from({ length: 5 }, (_, i) => ({ id: i + 1, tone: 'error', title: `toast ${i + 1}` }))
+  const stackHtml = render({ ...busy, toasts: many })
+  assert.equal((stackHtml.match(/<li class="toast /g) ?? []).length, 3, 'at most three toasts show')
+  assert.match(stackHtml, /<p class="toast-more">\+2 more<\/p>/)
+  assert.doesNotMatch(stackHtml, /toast 2</, 'the oldest toasts are the ones folded away')
+  assert.match(stackHtml, /toast 3<[\s\S]*toast 4<[\s\S]*toast 5</, 'newest last')
 
   const fatal = render({ ...initialState(), connection: { state: 'token_invalid', attempt: 0, nextAt: null } })
   assert.match(fatal, /This tab&#x27;s key no longer matches the deck\./)

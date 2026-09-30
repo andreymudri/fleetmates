@@ -170,7 +170,10 @@ function receive(state, message) {
     case 'snapshot': {
       const data = { ...emptyData(), ...message.data }
       data.sources = message.data.sources ?? state.data.sources
-      return flush({ ...state, loaded: true, syncing: false, replaying: false, epoch: message.epoch, seq: message.seq, data })
+      const episodes = Object.fromEntries(data.sessions.filter(row => NEEDS_STATES.has(row.state)).map(row => [row.id, true]))
+      const open = new Set(data.requests.map(row => row.id))
+      const toasts = state.toasts.filter(toast => toast.requestId === undefined || open.has(toast.requestId))
+      return flush({ ...state, loaded: true, syncing: false, replaying: false, epoch: message.epoch, seq: message.seq, data, episodes, toasts })
     }
     case 'replay.begin':
       return { ...state, replaying: true }

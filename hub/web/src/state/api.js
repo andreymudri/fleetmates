@@ -54,7 +54,8 @@ export function backoffMs(attempt, random = Math.random) {
 }
 
 /**
- * REST client that attaches the token only to `/api/*` calls.
+ * REST client for same-origin `/api/*` paths. Any other path, including an absolute URL,
+ * is refused before `fetch` runs, so the bearer token is never sent anywhere else.
  * @param {{ token: string, fetch: typeof fetch, onFatal?: (state: string) => void }} options
  * @returns {{ get: (path: string) => Promise<any>, patch: (path: string, body: object) => Promise<any>, post: (path: string, body?: object) => Promise<any>, probe: () => Promise<string | null> }}
  */
@@ -69,6 +70,7 @@ export function createApiClient({ token, fetch, onFatal = () => {} }) {
     return options
   }
   async function request(method, path, body) {
+    if (typeof path !== 'string' || !path.startsWith('/api/')) throw Object.assign(new Error('Not a deck API path'), { status: 0, code: 'bad_path', retryable: false, details: {} })
     const response = await fetch(path, init(method, body))
     let payload = null
     try { payload = await response.json() } catch {}
