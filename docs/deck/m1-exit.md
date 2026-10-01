@@ -24,8 +24,8 @@ first and a short `TMPDIR`, because Unix socket paths are limited to about 108 b
 
 | Suite | Command | Result |
 |---|---|---|
-| Root (fleetmates) | `npm test` | 2791 tests, 2774 pass, 0 fail, 17 skipped |
-| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 606 tests, 606 pass, 0 fail, 0 skipped |
+| Root (fleetmates) | `npm test` | 2796 tests, 2779 pass, 0 fail, 17 skipped |
+| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 610 tests, 610 pass, 0 fail, 0 skipped |
 | Observe e2e | `TMPDIR=/tmp/hx node --test hub/test/e2e/observe.spec.mjs` | 39 tests, 39 pass, 0 fail, 0 skipped |
 | Security e2e | `TMPDIR=/tmp/hx node --test hub/test/e2e/security.spec.mjs` | 10 tests, 10 pass, 0 fail, 0 skipped |
 | Accessibility e2e | `TMPDIR=/tmp/hx node --test hub/test/e2e/accessibility.spec.mjs` | 7 tests, 7 pass, 0 fail, 0 skipped |
@@ -78,14 +78,26 @@ outside a Claude Code session or detached with `setsid -f`):
 Prepared:
 
 - `hub/package.json`: version 0.1.0, `bin` (`fleetmates-deck`, `fm`), `files` (`bin/`, `deckd/`,
-  `server/`, `hook/`, `web/dist/`, `systemd/`, `README.md`, `CHANGELOG.md`), `prepack` runs the
-  Vite build, license and repository fields. It keeps `"private": true` (see section 6).
+  `server/`, `hook/`, `web/dist/`, `systemd/`, `vendor/`, `README.md`, `CHANGELOG.md`), license and
+  repository fields. `prepack` runs `bin/vendor-fleetmates.mjs` and then the Vite build; `postpack`
+  removes the vendored copy again. It keeps `"private": true` (see section 6).
+- The server's fleetmates adapter imports root modules (`scripts/names.mjs`, `liveness.mjs`,
+  `git.mjs`, and `reviews.mjs` through them), which the package cannot ship from outside `hub/`.
+  `bin/vendor-fleetmates.mjs` copies their import closure into `hub/vendor/fleetmates/` (ignored by
+  git), following every relative import and refusing one that leaves `scripts/` or names a package.
+  Inside a fleetmates checkout the adapter still loads the root modules, so the root contract test
+  keeps covering what the deck runs; elsewhere it loads `vendor/fleetmates/`. Covered by
+  `hub/test/unit/package-contents.test.mjs`, which also packs a staged copy of the hub, extracts it
+  and imports `server/main.mjs` and `deckd/main.mjs` from the result. An earlier version of this
+  report called the rehearsal passed while the installed server could not start: its import failed
+  with `ERR_MODULE_NOT_FOUND`, and the rehearsal never imported the server.
 - `hub/CHANGELOG.md` with the 0.1.0 entry, `hub/README.md`, a deck section in the root
   `README.md`, and two screenshots in `hub/docs/screenshots/`.
 - `.github/workflows/deck-release.yml`, triggered by `deck-v*` tags only. Jobs: the hub suite,
   the three e2e specs, `hub-perf` (informational, results uploaded), a package job (tag must equal
   `deck-v` plus the package version, package must not be private, `npm pack --dry-run` listing with
-  required files and no tests or spike code), a clean-install job, and `publish` (npm 11.5.1 or
+  required files, the vendored modules, and no tests or spike code), a clean-install job that also
+  imports `server/main.mjs` and `deckd/main.mjs` from the installed package, and `publish` (npm 11.5.1 or
   later, `id-token: write`, `npm publish --provenance --access public` from `hub/`, skipped when
   the version is already on npm). The root `release.yml` fires on `v*`; as a glob, `v*` does not
   match `deck-v0.1.0` and `deck-v*` does not match `v2.3.1` (checked with Node's
@@ -96,16 +108,19 @@ Prepared:
   subcommands, flags and positionals before starting anything, and refuse with the install command
   when `hub/` or `hub/node_modules` is missing (`tests/deck-forwarding.test.mjs`).
 
-Clean-install rehearsal, run locally on 2026-10-01 (not a fresh user account):
+Clean-install rehearsal, run locally on 2026-10-01 on the fixed tree (not a fresh user account):
 
 | Step | Result |
 |---|---|
-| `npm pack` in `hub/` | `andreymudri-fleetmates-deck-0.1.0.tgz`, 212291 bytes, 46 entries including `CHANGELOG.md`, `README.md` and the built `web/dist/`; no test, spike or fixture files |
+| `npm pack` in `hub/` | `andreymudri-fleetmates-deck-0.1.0.tgz`, 243411 bytes, 51 entries including `CHANGELOG.md`, `README.md`, the built `web/dist/` and `vendor/fleetmates/` (`git.mjs`, `liveness.mjs`, `names.mjs`, `reviews.mjs`); `hub/vendor/` was gone again after the pack |
 | `npm install -g --prefix <empty dir> <tarball>` with an empty `HOME` | Installed; npm 11.19.0 skipped `node-pty`'s install scripts (allowScripts) |
 | `fleetmates-deck init --dry-run` | Printed the planned directories, hook script, settings, token and units; the empty `HOME` stayed empty |
 | `fm` with no arguments | Printed its usage and failed, as expected |
 | `web/dist/index.html` in the installed package | Present |
+| `import('./server/main.mjs')` and `import('./deckd/main.mjs')` in the installed package | Both imported, and the adapter loaded the fleetmates modules from the package's `vendor/fleetmates/`. Importing either module starts nothing: each starts only when it is the script node runs |
 | `node-pty` from the installed package | Loaded and spawned `/bin/echo` through a PTY (exit 0), so the prebuilt binary works without the skipped scripts on this machine |
+
+Not rehearsed: starting the installed server and deckd as systemd units.
 
 Still PENDING (owner): `fleetmates-deck init` and `doctor` on a fresh user account with systemd,
 checking every non-optional check is green ([13-operations.md](13-operations.md) section 13.5).
@@ -136,7 +151,7 @@ as reported by the run's reviewers.
 | Low | Line counts on Focus edit steps are always empty: `deck-hook` drops `tool_response` (`hookFields` in `hub/hook/deck-hook.mjs`), which `patchCounts` in `session.mjs` reads. Owner decision: should the hook compute the counts itself, since the response can carry file contents | Code read: `tool_response` is absent from `hookFields` |
 | Low | First run shows a missing Claude Code as "Claude Code 2.1.282 is newer than this deck was tested with": `versionOf` in `FirstRun.jsx` takes the tested version out of the doctor detail "Claude Code unavailable; tested 2.1.282" | A copy of `versionOf` run on that detail returns `2.1.282` |
 | Low | Settings splits `vaultCommand` arguments on whitespace, so an argument containing a space cannot be entered; and a field showing a hidden character as a visible token saves the token text back | `parsePref` and `prefText` in `Settings.jsx` read |
-| Low | Popup ordering between "other tiers" and untiered requests is unpinned (unreachable today: `permissionTier` returns only `destructive` or `caution`) | Swapping the two ranks in `notification.mjs` left all 606 hub tests green; restored |
+| Low | Popup ordering between "other tiers" and untiered requests is unpinned (unreachable today: `permissionTier` returns only `destructive` or `caution`) | Swapping the two ranks in `notification.mjs` left all 606 hub tests green (before this fix round added 4); restored |
 | Low | A deckd drop during the handshake can count two reconnect attempts (`hub/server/main.mjs`); some recovery paths in `main.mjs` (no-XDG Retry, probe on a later macrotask, deckd Start) have no pinning test | Not re-checked |
 | Low | `api.mjs` rescan error handling; a NUL in a path returns 500 | Not re-checked |
 | Low | `setup.test.mjs` once left an orphaned `listener.mjs` child after removing its temp dir (2026-09-30) | Not seen in this task's hub runs |
