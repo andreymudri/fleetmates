@@ -372,6 +372,10 @@ test('Settings nav lists the sections with live subtitles and marks the current 
   const later = render(SettingsView, { section: 'rules', prefs, navigate: () => {}, children: 'BODY' })
   assert.doesNotMatch(later, /BODY/)
   assert.match(later, /This section arrives in a later milestone\./)
+  // M2 renders Appearance; Approval rules stays a later section.
+  const appearance = render(SettingsView, { section: 'appearance', prefs, navigate: () => {}, children: 'BODY' })
+  assert.match(appearance, /BODY/)
+  assert.doesNotMatch(appearance, /later milestone/)
   const loading = render(SettingsView, { section: 'notifications', prefs, loading: true, navigate: () => {}, children: 'BODY' })
   assert.match(loading, /aria-busy="true"/)
   assert.equal((loading.match(/class="skeleton-panel/g) ?? []).length, 3)
