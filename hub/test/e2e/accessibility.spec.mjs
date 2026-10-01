@@ -1,12 +1,12 @@
 // M1 accessibility (docs/deck/09-testing.md section 11.2, qa-checklist 1.3, 1.5 and 1.9): axe on every
 // M1 screen and overlay with zero serious or critical violations, plus the focus traps and the skip link.
 //
-// axe-core is not a hub dependency yet (09-testing section 2 proposes `@axe-core/playwright`, which
-// needs hub/package.json). This suite injects axe-core's own `axe.min.js` into the page, resolved from
-// hub/node_modules or from AXE_CORE_PATH; without either, the axe tests are skipped with that reason.
+// axe-core is a hub development dependency (hub/package.json), so `npm ci --prefix hub` installs it. This
+// suite injects axe-core's own `axe.min.js` into the page, from AXE_CORE_PATH when set and otherwise from
+// hub/node_modules; when neither file exists, the axe tests are skipped with that reason.
 //
 // Not part of `npm --prefix hub test`. Run with:
-//   mkdir -p /tmp/hx/e2e && TMPDIR=/tmp/hx/e2e AXE_CORE_PATH=/path/to/axe.min.js node --test hub/test/e2e/accessibility.spec.mjs
+//   mkdir -p /tmp/hx/e2e && TMPDIR=/tmp/hx/e2e node --test hub/test/e2e/accessibility.spec.mjs
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { access, readFile } from 'node:fs/promises'
@@ -164,6 +164,7 @@ test('axe: loading, deckd down banner, lost server, fatal token and not-found pa
   const loading = await openDeck(browser, h, '/', { wait: false, init: () => { window.WebSocket = class { constructor() {} close() {} send() {} addEventListener() {} } } })
   await loading.waitForSelector('.skeleton-card')
   await audit.run(loading, 'home-loading')
+  assert.deepEqual(screens['home-loading'].filter(row => row.id === 'page-has-heading-one'), [], 'the loading page has a level-one heading')
   const page = await openDeck(browser, h)
   await page.waitForSelector('.banner--deckd')
   await audit.run(page, 'home-deckd-down')

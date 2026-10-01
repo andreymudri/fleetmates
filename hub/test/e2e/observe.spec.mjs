@@ -511,17 +511,24 @@ if (import.meta.main) {
   spec('Home AC15 and Failures AC4: with deckd down the banner counts down per attempt and pills keep updating', async t => {
     const h = await startDeck(t, { web: web.dir, deckd: fakeDeckd({ up: false }) })
     await h.load('busy')
-    const page = await openDeck(browser, h)
+    // The page runs on Playwright's clock, so its one-second tick is driven by the test instead of by a loaded machine.
+    let clock
+    const page = await openDeck(browser, h, '/', { before: p => { clock = p.clock.install() } })
+    await clock
     const text = () => page.textContent('.banner--deckd .banner-text').catch(() => null)
     await until(async () => /\(attempt 3, next in 4s\)/.test(await text() ?? ''), { timeout: 15_000, interval: 50, message: 'attempt 3, next in 4s' })
-    const seen = new Set()
-    const deadline = Date.now() + 2600
-    while (Date.now() < deadline) {
-      const match = /\(attempt 3, next in (\d)s\)/.exec(await text() ?? '')
-      if (match) seen.add(Number(match[1]))
-      await page.waitForTimeout(100)
+    // Freeze the page's time, then advance it one second at a time: each tick must lower the countdown by exactly one.
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1))
+    const shownSeconds = async () => Number(/\(attempt 3, next in (\d)s\)/.exec(await text() ?? '')?.[1] ?? NaN)
+    const seen = [await shownSeconds()]
+    for (let tick = 0; tick < 2; tick++) {
+      await page.clock.runFor(1000)
+      const expected = seen.at(-1) - 1
+      await until(async () => await shownSeconds() === expected, { timeout: 2000, interval: 20, message: `next in ${expected}s` }).catch(() => {})
+      seen.push(await shownSeconds())
     }
-    assert.ok(seen.has(3) && seen.has(2), `the countdown advances each second: saw ${[...seen].join(', ')}`)
+    assert.ok(seen[0] >= 2 && seen[0] <= 4, `the countdown starts at 4s or just below: saw ${seen.join(', ')}`)
+    assert.deepEqual(seen, [seen[0], seen[0] - 1, seen[0] - 2], `the countdown advances each second: saw ${seen.join(', ')}`)
     await h.hook('research', { e: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'curl https://example.test' } })
     await card(page, h.ids.get('research')).locator('.pill, .status-pill, [class*="pill"]').filter({ hasText: 'Needs approval' }).first().waitFor({ timeout: 5000 })
   })
@@ -555,7 +562,8 @@ if (import.meta.main) {
     await page.waitForSelector('.skeleton-card')
     assert.equal(await page.locator('.skeleton-card').count(), 6)
     assert.equal(await page.getAttribute('main#main', 'aria-busy'), 'true')
-    assert.equal(await page.textContent('.skeleton-grid .sr-only'), 'Loading sessions')
+    assert.equal(await page.textContent('.skeleton-grid span.sr-only'), 'Loading sessions')
+    assert.equal(await page.textContent('.skeleton-grid h1'), 'Sessions')
   })
 
   spec('Palette AC1, AC2, AC4, AC9: Alt K opens a focused combobox fast, groups follow the spec, Alt K moves up, Esc returns focus', async t => {

@@ -51,6 +51,7 @@ function Loading({ route, t }) {
   const cards = route === 'home' ? 6 : 1
   return (
     <div className="skeleton-grid">
+      <h1 className="sr-only">{t(PAGE_KEYS[route] ?? 'shell.page.home')}</h1>
       <span className="sr-only">{t('fail.loading', { thing: t('fail.loading.sessions') })}</span>
       {Array.from({ length: cards }, (_, index) => <div key={index} className="skeleton-card motion-shimmer" aria-hidden="true" />)}
     </div>
