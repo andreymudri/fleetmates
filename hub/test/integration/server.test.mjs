@@ -188,15 +188,17 @@ test('WebSocket snapshot, durable replay, window expiry, epoch mismatch and hear
 })
 test('spool, live hook socket and SQLite survive restart while deckd is offline', async t => {
   const h = await harness(t)
+  // Recent hook times: the restart runs the 30-day retention job, which rightly drops a session that ended in 1970.
+  const at = Date.now() - 10_000
   const sock = net.connect(path.join(h.env.XDG_RUNTIME_DIR, 'fleetmates-deck/hooks.sock'))
   await once(sock, 'connect')
-  sock.end(JSON.stringify({ v: 1, hookTs: 1000, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: { ...fixture, cwd: h.dir } }) + '\n')
+  sock.end(JSON.stringify({ v: 1, hookTs: at, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: { ...fixture, cwd: h.dir } }) + '\n')
   await once(sock, 'close')
   await waitFor(() => h.deck.projector.snapshot().sessions.length === 1)
-  h.send('SessionEnd', 2000, { reason: 'prompt_input_exit' })
+  h.send('SessionEnd', at + 1000, { reason: 'prompt_input_exit' })
   const oldEpoch = h.deck.epoch
   fs.mkdirSync(path.join(h.state, 'spool'), { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(h.state, 'spool/hooks-20260930-1790000000000-abcdefabcdef.jsonl'), JSON.stringify({ v: 1, hookTs: 3000, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: { ...fixture, cwd: h.dir, session_id: 'other-session' } }) + '\n', { mode: 0o600 })
+  fs.writeFileSync(path.join(h.state, 'spool/hooks-20260930-1790000000000-abcdefabcdef.jsonl'), JSON.stringify({ v: 1, hookTs: at + 2000, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: { ...fixture, cwd: h.dir, session_id: 'other-session' } }) + '\n', { mode: 0o600 })
   await h.restart()
   assert.equal(h.deck.epoch, oldEpoch)
   assert.equal((await h.request('/api/history')).data.summaries.length, 1)

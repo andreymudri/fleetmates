@@ -26,8 +26,9 @@ const leadLength = words => words ? length(words) + 3 : 0
 /**
  * Title and body of a needs-you popup. Only the agent-written parts (the task and each summary) are cut, so
  * "needs you", every tier and the terminal hint always fit notify.mjs's final caps (08-security 4.9, T13).
- * Every line leads with the deck's words: the title is "needs you · <task>" (with "(N requests)" after
- * "needs you"), the body opens with the terminal hint, and each request line reads "<tier> · <summary>".
+ * Every line leads with the deck's words: the title is "needs you · <most severe tier> · <task>" (with
+ * "(N requests)" after "needs you", and no tier when no request has one), the body opens with the terminal
+ * hint, and each request line reads "<tier> · <summary>".
  * Lines go most severe first (stable within a tier), so the agent's arrival order cannot push a destructive
  * request out of the popup. Each summary is folded to one line, then the summaries share the room: the
  * shortest keep their whole text and the longest are cut to one common length. Requests left out are
@@ -38,12 +39,15 @@ const leadLength = words => words ? length(words) + 3 : 0
  * @returns {{ title: string, body: string }}
  */
 export function requestPopupText(task, requests, observed) {
-  const words = `needs you${requests.length > 1 ? ` (${requests.length} requests)` : ''}`
-  const title = lead(words, clipText(task, TITLE_MAX - length(words) - 3))
   const head = observed ? HINT : ''
   const sorted = requests.map((request, index) => ({ request, index }))
     .sort((a, b) => rank(a.request) - rank(b.request) || a.index - b.index)
     .map(({ request }) => ({ text: clipText(oneLine(request.summary), Infinity), tier: request.tier || '' }))
+  // The most severe tier sits in the title before any agent text, so a task that wraps or reads as a tier
+  // cannot hide it (T13 review, title half).
+  const phrase = `needs you${requests.length > 1 ? ` (${requests.length} requests)` : ''}`
+  const words = sorted[0]?.tier ? lead(phrase, sorted[0].tier) : phrase
+  const title = lead(words, clipText(task, TITLE_MAX - length(words) - 3))
   const more = shown => shown < sorted.length ? `+${sorted.length - shown} more${sorted[shown].tier ? ` · ${sorted[shown].tier}` : ''}` : ''
   // Room the first `shown` summaries share: everything but the deck's own words and the line breaks.
   const room = shown => BODY_MAX - length(head) - sorted.slice(0, shown).reduce((sum, row) => sum + leadLength(row.tier), 0)

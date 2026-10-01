@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { workingRoot } from './machines/session.mjs'
 import { openDeckDb } from './db/index.mjs'
+import { runRetention } from './db/retention.mjs'
 import { createProjector } from './machines/projector.mjs'
 import { createIngestor, startHookSocket } from './ingest/socket.mjs'
 import { startSpoolDrain } from './ingest/spool.mjs'
@@ -42,10 +43,28 @@ export function reconnectDelay(attempt, baseMs, random = Math.random) {
   const jitter = 0.8 + 0.4 * random()
   return Math.max(0, Math.min(Math.round(baseMs * steps * jitter), 2 ** 31 - 1))
 }
+/**
+ * Milliseconds from `at` to the next 04:10 local time, when the daily retention job runs (06-storage 6).
+ * @param {number} at epoch milliseconds
+ * @returns {number} milliseconds, never 0: at exactly 04:10 the next run is the following day's
+ */
+export function nextRetentionDelay(at) {
+  const date = new Date(at)
+  let next = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 4, 10).getTime()
+  if (next <= at) next = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1, 4, 10).getTime()
+  return next - at
+}
+const defaultRetentionTimer = {
+  set(fn, ms) { const timer = setTimeout(fn, ms)
+    timer.unref()
+    return timer },
+  clear(timer) { clearTimeout(timer) }
+}
 /** Create a deck server with injectable processes, readers and dependency services. */
 export async function createDeckServer(options = {}) {
   const { env = process.env, host = '127.0.0.1', now = Date.now, connectDeckd = defaultConnectDeckd,
-    reconnectMs = 1000, random = Math.random, tokenPollMs = 250, runCommand: command = runCommand } = options
+    reconnectMs = 1000, random = Math.random, tokenPollMs = 250, runCommand: command = runCommand,
+    retentionTimer = defaultRetentionTimer } = options
   if (host !== '127.0.0.1') throw Error('deck server requires IPv4 loopback 127.0.0.1')
   const paths = options.paths ?? setupPaths(env)
   privateDir(paths.state)
@@ -69,6 +88,7 @@ export async function createDeckServer(options = {}) {
   let notificationWork = Promise.resolve()
   let generation = 0
   let reconnect
+  let retentionTimeout = null
   const offs = []
   const timers = []
   const healthState = { dep: 'deckd', state: 'down', reason: 'deckd_unavailable', since: now(), nextProbeAt: null, attempt: 0 }
@@ -145,9 +165,20 @@ export async function createDeckServer(options = {}) {
     },
     async rescan() {
       let found = 0
-      function visit(dir, depth) {
-        if (!fs.lstatSync(dir).isDirectory()) return
-        if (fs.existsSync(path.join(dir, '.git'))) {
+      // Only a scan root that cannot be read fails the rescan (settings_io_failed); a directory below it that
+      // cannot be read is skipped, so one locked folder does not hide the repos beside it.
+      function visit(dir, depth, top = false) {
+        let entries = []
+        let repo = false
+        try {
+          if (!fs.lstatSync(dir).isDirectory()) return
+          repo = fs.existsSync(path.join(dir, '.git'))
+          if (!repo && depth > 0) entries = fs.readdirSync(dir, { withFileTypes: true })
+        } catch {
+          if (top) throw apiError(500, 'settings_io_failed')
+          return
+        }
+        if (repo) {
           const id = fs.realpathSync(dir)
           if (!store.get('SELECT id FROM repos WHERE id=?', id)) {
             let name = path.basename(dir)
@@ -162,9 +193,11 @@ export async function createDeckServer(options = {}) {
           }
           return
         }
-        if (depth > 0) for (const entry of fs.readdirSync(dir, { withFileTypes: true })) if (entry.isDirectory() && !entry.name.startsWith('.')) visit(path.join(dir, entry.name), depth - 1)
+        for (const entry of entries) if (entry.isDirectory() && !entry.name.startsWith('.')) visit(path.join(dir, entry.name), depth - 1)
       }
-      try { visit(scanRoot(), 2) } catch { throw apiError(500, 'settings_io_failed') }
+      let root
+      try { root = scanRoot() } catch { throw apiError(500, 'settings_io_failed') }
+      visit(root, 2, true)
       return { found }
     },
     ...options.services
@@ -224,6 +257,25 @@ export async function createDeckServer(options = {}) {
       clearTimeout(reconnect)
       reconnect = setTimeout(() => { void connect() }, delay)
       reconnect.unref() }
+  }
+  // The 30-day retention job (06-storage 6): once at start, then daily at 04:10 local. Each removed session's
+  // session.removed event goes to open tabs as { id }. A run that throws is rolled back by runRetention and
+  // skipped here; the next daily run is still scheduled.
+  function retention() {
+    const before = Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq)
+    try { runRetention(store, { now: now() }) } catch { return }
+    for (const row of store.all('SELECT seq,at,entity_id FROM events WHERE seq>? AND type=? ORDER BY seq', before, 'session.removed')) {
+      publish({ seq: Number(row.seq), at: row.at, type: 'session.removed', data: { id: row.entity_id } })
+    }
+  }
+  function scheduleRetention() {
+    if (stopped) return
+    retentionTimeout = retentionTimer.set(() => {
+      retentionTimeout = null
+      if (stopped) return
+      retention()
+      scheduleRetention()
+    }, nextRetentionDelay(now()))
   }
   function publishSession(id) {
     const at = now()
@@ -285,7 +337,9 @@ export async function createDeckServer(options = {}) {
       healthState.nextProbeAt = null
       stateEvent()
     } catch {
-      if (!stopped) disconnect()
+      // A drop during the handshake already ran disconnect() from the close listener (it bumps the
+      // generation); counting this failure again would report two attempts for one drop.
+      if (!stopped && turn === generation) disconnect()
       client?.close()
     } finally { connecting = false }
   }
@@ -294,6 +348,8 @@ export async function createDeckServer(options = {}) {
     stopped = true
     generation++
     clearTimeout(reconnect)
+    if (retentionTimeout !== null) retentionTimer.clear(retentionTimeout)
+    retentionTimeout = null
     for (const timer of timers) clearInterval(timer)
     recording?.stop()
     await notificationWork.catch(() => {})
@@ -311,6 +367,8 @@ export async function createDeckServer(options = {}) {
   }
   try {
     privateDir(paths.spool)
+    retention()
+    scheduleRetention()
     if (options.notifications !== false) {
       const [{ createNotifier }, { createNotificationMachine }, { createScribedStatus }] = await Promise.all([
         import('./adapters/notify.mjs'), import('./machines/notification.mjs'), import('./adapters/scribed-status.mjs')

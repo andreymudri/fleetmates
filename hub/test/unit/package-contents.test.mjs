@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { cp, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -47,6 +47,42 @@ test('the vendor script refuses an import that leaves scripts/ and a bare packag
       assert.match(result.stderr, reason)
       assert.equal(existsSync(path.join(base, name, 'out')), false, `${name} must write nothing`)
     }
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+/** Write a scripts/ dir whose git.mjs has `source`, run the vendor script on it, and return the result. */
+async function vendorFrom(base, name, source, extra = {}) {
+  const from = path.join(base, name, 'scripts')
+  await mkdir(from, { recursive: true })
+  for (const file of ['names.mjs', 'liveness.mjs']) await writeFile(path.join(from, file), 'export default 1\n')
+  await writeFile(path.join(from, 'git.mjs'), source)
+  for (const [file, text] of Object.entries(extra)) await writeFile(path.join(from, file), text)
+  const out = path.join(base, name, 'out')
+  const result = spawnSync(process.execPath, [vendorScript, '--from', from, '--out', out], { encoding: 'utf8' })
+  return { result, out }
+}
+
+test('the vendor script refuses a dynamic import it cannot follow and writes nothing', async () => {
+  const base = await mkdtemp(path.join(tmpdir(), 'deck-vendor-'))
+  try {
+    const { result, out } = await vendorFrom(base, 'dynamic', "const n = './extra.mjs'\nexport const load = () => import(n)\n", { 'extra.mjs': 'export default 1\n' })
+    assert.notEqual(result.status, 0, 'a non-literal import() must be refused')
+    assert.match(result.stderr, /git\.mjs has a dynamic import that cannot be followed: import\(n\)/)
+    assert.equal(existsSync(out), false, 'nothing is written')
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('the vendor script follows export ... from and a literal dynamic import', async () => {
+  const base = await mkdtemp(path.join(tmpdir(), 'deck-vendor-'))
+  try {
+    const { result, out } = await vendorFrom(base, 'follow', "export { a } from './a.mjs'\nexport const load = () => import('./b.mjs')\n",
+      { 'a.mjs': 'export const a = 1\n', 'b.mjs': 'export default 1\n' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual((await readdir(out)).sort(), ['a.mjs', 'b.mjs', 'git.mjs', 'liveness.mjs', 'names.mjs'])
   } finally {
     await rm(base, { recursive: true, force: true })
   }
@@ -98,6 +134,7 @@ test('a packed and extracted package imports server/main.mjs and deckd/main.mjs'
     execFileSync('tar', ['-xzf', path.join(packed, tarball), '-C', extracted])
     const pkg = path.join(extracted, 'package')
     assert.deepEqual((await readdir(path.join(pkg, 'vendor', 'fleetmates'))).sort(), CLOSURE)
+    assert.equal(await readFile(path.join(pkg, 'LICENSE'), 'utf8'), await readFile(path.join(repo, 'LICENSE'), 'utf8'), 'the tarball ships the repository license')
     await symlink(path.join(hub, 'node_modules'), path.join(pkg, 'node_modules'))
     const result = spawnSync(process.execPath, ['--input-type=module', '-e',
       "await import('./server/main.mjs'); await import('./deckd/main.mjs'); const { fleetmatesScriptsDir } = await import('./server/adapters/fleetmates.mjs'); console.log(fleetmatesScriptsDir())"],

