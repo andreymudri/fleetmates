@@ -14,7 +14,7 @@ import { doctor } from './setup/doctor.mjs'
 import { checkHooks, deckHookCommand, readSettings, transformHooks, writeSettings } from './setup/hooks.mjs'
 import { scanRepos } from './adapters/repos.mjs'
 import { createDeckdLink } from './pty/link.mjs'
-import { createFleetmatesReader } from './adapters/fleetmates.mjs'
+import { createFleetmatesReader, taskForCwd } from './adapters/fleetmates.mjs'
 import { createApi } from './http/api.mjs'
 import { createRouter, apiError } from './http/router.mjs'
 import { readToken } from './http/auth.mjs'
@@ -84,7 +84,7 @@ export async function createDeckServer(options = {}) {
       try { callback(event) } catch {}
     }
   }
-  const projector = createProjector({ store, now, publish })
+  const projector = createProjector({ store, now, publish, locateTask: taskForCwd })
   link = createDeckdLink({ env, connectDeckd, reconnectMs, random, now, store, projector, publish, timeoutMs: options.deckdTimeoutMs ?? 2000 })
   const ingest = createIngestor({ now, onEvent: envelope => projector.applyHooks([envelope]), onRejected: row => store.run('INSERT INTO rejected_events(received_at,via,reason,raw) VALUES(?,?,?,?)', row.receivedAt, row.via, row.reason, '') })
   const scanRoot = () => {
@@ -277,7 +277,7 @@ export async function createDeckServer(options = {}) {
     const runPoll = setInterval(() => {
       if (runBusy || stopped) return
       runBusy = true
-      Promise.resolve().then(() => reader.list()).then(list => {
+      Promise.resolve().then(() => reader.list()).then(api.withLeads).then(list => {
         if (stopped) return
         for (const row of list) {
           const key = JSON.stringify([row.repoId, row.runId])

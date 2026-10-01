@@ -742,6 +742,21 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
 }
 
+// `scripts/cli.mjs`, then (in the same command segment) `--run <id>` or `--run=<id>`, the id bare or quoted.
+const LEAD_COMMAND = /scripts\/cli\.mjs\b["']?[^;&|\n]*?\s--run(?:=|\s+)(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;&|"'()<>`$]+))/
+
+/**
+ * The run id a fleetmates lead names in a Bash command (`node scripts/cli.mjs <verb> --run <id>`), or null.
+ * The id is returned as written; the caller applies the fleetmates name rules.
+ * @param {unknown} command the Bash `tool_input.command`
+ * @returns {string | null}
+ */
+export function leadRunId(command) {
+  if (typeof command !== 'string') return null
+  const match = LEAD_COMMAND.exec(command)
+  return match ? match[1] ?? match[2] ?? match[3] : null
+}
+
 /** Steps kept per session; older ones are trimmed after each insert (06-storage `session_steps`). */
 export const STEP_LIMIT = 200
 const STEP_LABELS = { Edit: 'Update', MultiEdit: 'Update' }
@@ -768,9 +783,11 @@ function patchCounts(response) {
  * @param {object} store
  * @param {object | null} session the sessions row
  * @param {{ hook: object, hookTs: number }} envelope
+ * @param {{ taskId?: string | null }} [options] the teammate task the step is attributed to; defaults to the
+ *   session's own `run_task_id`
  * @returns {boolean} whether a step was written
  */
-export function recordToolStep(store, session, envelope) {
+export function recordToolStep(store, session, envelope, { taskId = session?.run_task_id ?? null } = {}) {
   const hook = envelope.hook
   const event = hook.hook_event_name
   if (!session || !hook.tool_name || (event !== 'PreToolUse' && !STEP_OUTCOMES[event])) return false
@@ -789,7 +806,7 @@ export function recordToolStep(store, session, envelope) {
   const seq = store.get('SELECT COALESCE(MAX(seq),0)+1 AS seq FROM session_steps WHERE session_id=?', session.id).seq
   store.run('INSERT INTO session_steps(session_id,seq,at,tool_name,line,adds,dels,status,match_key,task_id) VALUES(?,?,?,?,?,?,?,?,?,?)',
     session.id, seq, envelope.hookTs, String(hook.tool_name), toolLine(hook.tool_name, hook.tool_input, hook.cwd ?? session.cwd, STEP_LABELS),
-    counts.adds, counts.dels, event === 'PreToolUse' ? 'running' : STEP_OUTCOMES[event], key, session.run_task_id ?? null)
+    counts.adds, counts.dels, event === 'PreToolUse' ? 'running' : STEP_OUTCOMES[event], key, taskId)
   store.run('DELETE FROM session_steps WHERE session_id=? AND seq<=?', session.id, seq - STEP_LIMIT)
   return true
 }

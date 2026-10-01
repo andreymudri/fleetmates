@@ -771,7 +771,7 @@ export function isRequestOpening(hook) {
 }
 
 /** Reconcile delayed openings against accepted process and conversation history. */
-export function reconcileRequestOpenings(store, session, history) {
+export function reconcileRequestOpenings(store, session, history, { taskFor } = {}) {
   const queue = []
   for (const item of history) {
     const hook = item.hook
@@ -818,7 +818,7 @@ export function reconcileRequestOpenings(store, session, history) {
   for (const pending of queue) {
     const hook = pending.hook
     const existing = store.get('SELECT id FROM requests WHERE session_id=? AND kind=? AND match_key=? AND created_at=?', session.id, pending.kind, matchKey(hook), pending.createdAt)
-    if (!existing) changed = applyRequestHook(store, session, pending) || changed
+    if (!existing) changed = applyRequestHook(store, session, pending, { taskId: taskFor?.(pending) }) || changed
   }
   return changed
 }
@@ -847,8 +847,11 @@ function transcriptQuestion(location) {
   return null
 }
 
-/** Open, answer and expire observe-only requests inside the caller's transaction. */
-export function applyRequestHook(store, session, envelope, { late = false } = {}) {
+/**
+ * Open, answer and expire observe-only requests inside the caller's transaction. A request it opens carries
+ * `taskId` (the teammate task the hook is attributed to), which defaults to the session's `run_task_id`.
+ */
+export function applyRequestHook(store, session, envelope, { late = false, taskId = session.run_task_id ?? null } = {}) {
   const hook = envelope.hook
   const event = hook.hook_event_name
   const at = envelope.hookTs
@@ -874,11 +877,11 @@ export function applyRequestHook(store, session, envelope, { late = false } = {}
     if (source === 'permission_request') {
       const fallback = store.all('SELECT id, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC', session.id, 'permission', 'open', 'notification', at - 2000, at + 2000).find(row => notificationMatchesTool(row.summary, toolName, hook.tool_input))
       if (fallback) {
-        store.run('UPDATE requests SET source = ?, tool_name = ?, summary = ?, detail = ?, match_key = ?, tier = ? WHERE id = ?', source, hook.tool_name, summary, JSON.stringify(hook.tool_input ?? {}), key, permissionTier(hook, { repoRoot: session.repo_id }), fallback.id)
+        store.run('UPDATE requests SET source = ?, tool_name = ?, summary = ?, detail = ?, match_key = ?, tier = ?, task_id = COALESCE(?, task_id) WHERE id = ?', source, hook.tool_name, summary, JSON.stringify(hook.tool_input ?? {}), key, permissionTier(hook, { repoRoot: session.repo_id }), taskId, fallback.id)
         return true
       }
     }
-    store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? permissionTier(hook, { repoRoot: session.repo_id }) : null, toolName, summary, JSON.stringify(source === 'stop_question' ? { question } : hook.tool_input ?? {}), JSON.stringify(source === 'stop_question' ? [] : hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, at)
+    store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, task_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? permissionTier(hook, { repoRoot: session.repo_id }) : null, toolName, summary, JSON.stringify(source === 'stop_question' ? { question } : hook.tool_input ?? {}), JSON.stringify(source === 'stop_question' ? [] : hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, taskId, at)
     return true
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
