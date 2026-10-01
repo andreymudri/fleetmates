@@ -154,6 +154,7 @@
 .setting-field { display: flex; gap: var(--space-8); }
 .setting-hint { margin: 0; color: var(--text-muted); font: var(--type-meta); overflow-wrap: anywhere; }
 .setting-error { margin: 0; color: var(--text-on-red-tint); font: var(--type-meta); overflow-wrap: anywhere; }
+.setting-saved { color: var(--text-on-green-tint); }
 .setting-status { display: flex; align-items: center; gap: var(--space-12); }
 .setting-status-text { flex: 1; margin: 0; }
 .setting-status--ok .setting-status-text { color: var(--text-on-green-tint); }
