@@ -231,7 +231,8 @@ test('spawn refuses a non-string env value, an env that is not an object, and a 
       { cwd: rt.dir, env: { A: 1 } },
       { cwd: rt.dir, env: ['A=1'] },
       { cwd: rt.dir, env: 'A=1' },
-      { cwd: 'relative/dir', env: {} },
+      // relative, though it names a directory that exists from here
+      { cwd: path.relative(process.cwd(), rt.dir) || '.', env: {} },
       { cwd: path.join(rt.dir, 'missing'), env: {} },
       { cwd: stub, env: {} }
     ]) {
@@ -265,14 +266,27 @@ test('a 1.5 MiB line without a newline yields one line_too_long, then ping is an
   }
 })
 
+/**
+ * Start deckd on `runtimeDir` and return the error it refused with, or
+ * null after closing a deckd that did start.
+ * @param {string} runtimeDir
+ * @returns {Promise<Error | null>}
+ */
+async function startError (runtimeDir) {
+  return startDeckd({ runtimeDir, loginEnv: {} }).then((d) => d.close().then(() => null), (err) => err)
+}
+
 test('startDeckd refuses a runtime dir with group or world permission bits', async () => {
   const loose = await mkdtemp(path.join(rt.dir, 'loose-'))
-  await chmod(loose, 0o755)
-  await assert.rejects(startDeckd({ runtimeDir: loose, loginEnv: {} }), /0755/)
-  await mkdir(path.join(loose, 'g'), { mode: 0o700 })
-  await chmod(path.join(loose, 'g'), 0o710)
-  await assert.rejects(startDeckd({ runtimeDir: path.join(loose, 'g'), loginEnv: {} }), /0710/)
-  await rm(loose, { recursive: true, force: true })
+  try {
+    await chmod(loose, 0o755)
+    assert.match(String((await startError(loose))?.message), /mode 0755/)
+    await mkdir(path.join(loose, 'g'), { mode: 0o700 })
+    await chmod(path.join(loose, 'g'), 0o710)
+    assert.match(String((await startError(path.join(loose, 'g')))?.message), /mode 0710/)
+  } finally {
+    await rm(loose, { recursive: true, force: true })
+  }
 })
 
 test('pin: at most 5 screen events in one second while the stub writes 40 frames', async () => {
