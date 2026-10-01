@@ -619,13 +619,21 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
     needsOpened.current = true
     openNeedsFilter(search, onOverlay)
   }, [])
-  // The collision chip stays 3 s after the input machine reports a collision.
+  // The collision chip shows for 3 s from the moment the input machine reports a collision, even when the
+  // machine settles first: leaving 'collision' does not cancel the timer that hides it.
+  const chipTimer = useRef(null)
   useEffect(() => {
-    if (sourceState !== 'collision') return undefined
+    if (sourceState !== 'collision') return
     setCollision(true)
-    const timer = setTimeout(() => setCollision(false), COLLISION_CHIP_MS)
-    return () => clearTimeout(timer)
-  }, [sourceState])
+    clearTimeout(chipTimer.current)
+    chipTimer.current = setTimeout(() => setCollision(false), COLLISION_CHIP_MS)
+  }, [sourceState, id])
+  // Switching sessions (or leaving Focus) drops the chip and its timer; this cleanup runs before the effect above.
+  useEffect(() => () => {
+    clearTimeout(chipTimer.current)
+    chipTimer.current = null
+    setCollision(false)
+  }, [id])
   // The "No signal from hooks yet" hint appears 30 s into `starting`, not at the next minute tick.
   const startAt = session?.state === 'starting' ? session.stateSince : null
   useEffect(() => {

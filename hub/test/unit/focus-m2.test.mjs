@@ -2,12 +2,15 @@
 // fake terminal client, and the action, panel and deep-link helpers the Focus route wires around it.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { runnerImport } from 'vite'
+import { build, runnerImport } from 'vite'
+import { chromium } from 'playwright-core'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 
@@ -341,4 +344,120 @@ test('focus.css styles the M2 Focus with tokens only and collapses at 1280 px', 
   const source = (await readFile(path.join(hub, 'web/src/screens/focus/Focus.jsx'), 'utf8')).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')
   assert.doesNotMatch(source, /dangerouslySetInnerHTML|innerHTML/)
   assert.doesNotMatch(source, /import\s+['"][^'"]+\.css['"]/)
+})
+
+async function findChromium() {
+  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
+    if (!candidate) continue
+    try { await access(candidate)
+      return candidate } catch {}
+  }
+  return null
+}
+
+// A page that mounts the real Focus route with a stub terminal client. `window.h.source(state)` sets s1's
+// input-machine state and `window.h.show(id)` switches the route without remounting Focus.
+const COLLISION_HARNESS = `import React, { useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import { Focus } from '@hub/web/src/screens/focus/Focus.jsx'
+
+const h = window.h = {}
+const client = { attach: () => ({ write: () => true, resize: () => true, detach() {} }) }
+const api = { get: async () => ({}), post: async () => ({}) }
+const row = id => ({ id, repoId: '/home/you/dev/rustot', origin: 'wrapped', ptyId: 'pty-' + id, alive: true, task: 'Port', branch: 'b',
+  state: 'running', stateSince: Date.now(), lastActivityAt: Date.now(), startedAt: Date.now(), changedFiles: [], cwd: '/home/you/dev/rustot',
+  toolCalls: 0, sessionAliases: [], lastInputFrom: null, lastInputName: null })
+function App() {
+  const [id, setId] = useState('s1')
+  const [source, setSource] = useState('quiet')
+  h.show = setId
+  h.source = setSource
+  const state = {
+    loaded: true, deckdOutage: false, connection: { state: 'live', attempt: 0, nextAt: null }, view: { path: '/', overlay: null },
+    data: { sessions: [row('s1'), row('s2')], requests: [], runs: [], order: ['s1', 's2'], health: [], prefs: {}, tails: {},
+      inputSources: { s1: { sessionId: 's1', state: source, from: 'browser', name: null, detached: false } },
+      repos: [{ id: '/home/you/dev/rustot', name: 'rustot', crew: { slot: 0, seed: 'rustot', hat: 'none' } }], counts: null, recap: null,
+      setup: { firstRunCompletedAt: 1 } }
+  }
+  return <><span id="mark">{id + ':' + source}</span><Focus route={{ params: { sessionId: id } }} state={state} navigate={() => {}} api={api}
+    search="" client={client} dispatch={() => {}} onOverlay={() => {}} /></>
+}
+createRoot(document.getElementById('root')).render(<App />)
+`
+
+test('the collision chip shows for 3 s from the collision even when the machine settles first, and a session switch clears it', async t => {
+  const executablePath = await findChromium()
+  assert.ok(executablePath, 'Chromium or Chrome is required for the Focus browser test')
+  const dir = await mkdtemp(path.join(tmpdir(), 'focus-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(path.join(dir, 'index.html'), '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>t</title></head><body><div id="root" style="width:1600px;height:900px"></div><script type="module" src="./entry.jsx"></script></body></html>')
+  await writeFile(path.join(dir, 'entry.jsx'), COLLISION_HARNESS)
+  const out = path.join(dir, 'dist')
+  await build({
+    root: dir, base: './', configFile: false, logLevel: 'silent',
+    resolve: { alias: { '@hub': hub, react: path.join(hub, 'node_modules/react'), 'react-dom': path.join(hub, 'node_modules/react-dom') } },
+    build: { outDir: out, emptyOutDir: true }
+  })
+  const server = createServer(async (req, res) => {
+    const name = new URL(req.url, 'http://x').pathname
+    try {
+      const body = await readFile(path.join(out, name === '/' ? 'index.html' : path.normalize(name)))
+      res.writeHead(200, { 'content-type': name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' }).end(body)
+    } catch { res.writeHead(404).end() }
+  }).listen(0, '127.0.0.1')
+  await new Promise(resolve => server.once('listening', resolve))
+  t.after(() => server.close())
+  const browser = await chromium.launch({ executablePath, headless: true })
+  t.after(() => browser.close())
+  const page = await browser.newPage()
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  // A fake clock: timers fire only when the test advances it, so each 3 s boundary below is exact.
+  await page.clock.install({ time: NOW })
+  await page.goto(`http://127.0.0.1:${server.address().port}/`)
+  await page.waitForFunction(() => document.getElementById('mark')?.textContent === 's1:quiet', null, { timeout: 10_000 })
+  // Set the route and the source state, then wait until React committed both.
+  const set = async (id, source) => {
+    await page.evaluate(([i, s]) => { window.h.show(i)
+      window.h.source(s) }, [id, source])
+    await page.waitForFunction(want => document.getElementById('mark')?.textContent === want, `${id}:${source}`, { timeout: 5000 })
+  }
+  // React commits a timer's state update in a later MessageChannel task (the fake clock does not own those).
+  const advance = async ms => {
+    await page.clock.runFor(ms)
+    await page.evaluate(async () => {
+      for (let i = 0; i < 3; i++) {
+        await new Promise(resolve => { const channel = new MessageChannel()
+          channel.port1.onmessage = resolve
+          channel.port2.postMessage(0) })
+      }
+    })
+  }
+  const chip = () => page.evaluate(() => ({
+    chip: document.querySelectorAll('.focus-collision').length,
+    status: [...document.querySelectorAll('[role="status"][aria-live="polite"]')].map(node => node.textContent).filter(Boolean)
+  }))
+  const CHIP = 'Both typing: last keystroke wins'
+
+  assert.deepEqual(await chip(), { chip: 0, status: [] })
+  await set('s1', 'collision')
+  assert.deepEqual(await chip(), { chip: 1, status: [CHIP] }, 'the collision shows the chip and announces it once')
+  await advance(300)
+  await set('s1', 'browser_active')
+  assert.deepEqual(await chip(), { chip: 1, status: [CHIP] }, 'the chip outlives the settle until its 3 s are up')
+  await advance(2700)
+  assert.deepEqual(await chip(), { chip: 0, status: [] }, 'the chip is gone 3 s after the collision began')
+  await advance(5000)
+  assert.deepEqual(await chip(), { chip: 0, status: [] })
+
+  await set('s1', 'collision')
+  assert.equal((await chip()).chip, 1)
+  await advance(500)
+  await set('s2', 'collision')
+  assert.deepEqual(await chip(), { chip: 0, status: [] }, 'switching to another session mid-collision clears the chip')
+  await advance(5000)
+  await set('s1', 'quiet')
+  assert.deepEqual(await chip(), { chip: 0, status: [] })
+  assert.deepEqual(errors, [])
 })
