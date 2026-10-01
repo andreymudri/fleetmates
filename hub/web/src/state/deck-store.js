@@ -7,7 +7,8 @@ const NEEDS_STATES = new Set(['needs_approval', 'asked_you'])
 function emptyData() {
   return {
     sessions: [], requests: [], runs: [], repos: [], counts: null, order: [], recap: null, ruleOffers: [], research: [],
-    recorder: { state: 'idle' }, health: [], prefs: {}, sources: {}, setup: { firstRunCompletedAt: null }
+    recorder: { state: 'idle' }, health: [], prefs: {}, sources: {}, setup: { firstRunCompletedAt: null },
+    inputSources: {}, tails: {}
   }
 }
 
@@ -175,6 +176,18 @@ function flush(state) {
   return next
 }
 
+// Ephemeral events (05-api 3.4, 3.5) carry no seq: they apply at once, are never buffered and never move `seq`.
+function applyEphemeral(state, message) {
+  const data = message.data
+  const id = data?.sessionId
+  if (typeof id !== 'string' || !id) return state
+  if (message.t === 'input.source') {
+    return { ...state, data: { ...state.data, inputSources: { ...state.data.inputSources, [id]: data } } }
+  }
+  if (!Array.isArray(data.lines)) return state
+  return { ...state, data: { ...state.data, tails: { ...state.data.tails, [id]: data.lines } } }
+}
+
 function receive(state, message) {
   switch (message.t) {
     case 'welcome':
@@ -183,6 +196,9 @@ function receive(state, message) {
     case 'snapshot': {
       const data = { ...emptyData(), ...message.data }
       data.sources = message.data.sources ?? state.data.sources
+      // Ephemeral terminal state is not part of the snapshot; keep what the socket already delivered.
+      data.inputSources = state.data.inputSources ?? {}
+      data.tails = state.data.tails ?? {}
       const episodes = Object.fromEntries(data.sessions.filter(row => NEEDS_STATES.has(row.state)).map(row => [row.id, true]))
       const open = new Set(data.requests.map(row => row.id))
       const toasts = state.toasts.filter(toast => toast.requestId === undefined || open.has(toast.requestId))
@@ -195,6 +211,9 @@ function receive(state, message) {
       return flush({ ...state, replaying: false, syncing: false, seq: Math.max(state.seq, message.seq ?? 0) })
     case 'ui.navigate':
       return matchRoute(String(message.data?.path ?? '')).name === 'notFound' ? state : { ...state, navigateTo: message.data.path }
+    case 'input.source':
+    case 'screen.tail':
+      return applyEphemeral(state, message)
     default:
       if (message.seq === undefined) return state
       if (!state.loaded || state.syncing && !state.replaying) return { ...state, buffer: [...state.buffer, message] }
@@ -219,6 +238,8 @@ export function reduce(state, action) {
       return { ...state, connection: { state: action.state, attempt: action.attempt ?? 0, nextAt: action.nextAt ?? null } }
     case 'view':
       return { ...state, view: { path: action.path, overlay: action.overlay ?? null } }
+    case 'toast.push':
+      return addToast(state, { tone: action.tone, title: action.title, body: action.body ?? null })
     case 'toast.dismiss':
       return { ...state, toasts: state.toasts.filter(toast => toast.id !== action.id) }
     case 'announce.taken':
@@ -307,6 +328,20 @@ export function resolveRoute(pathname, state) {
 }
 
 const SECTIONS = { Digit1: '/', Digit2: '/memory', Digit3: '/meetings', Digit4: '/settings/rules' }
+const GLOBAL_CODES = new Set(['KeyK', 'KeyN', 'KeyU', 'KeyI', 'Escape'])
+
+/**
+ * Whether a keydown is in the keyboard.md section 2 global set (Alt K, Alt N, Alt U, Alt I, Alt Esc,
+ * Alt 1 to 9, Alt Shift 1 to 4), matched on `event.code`. A focused terminal hands these to the shell and
+ * sends every other key, including Alt P, Alt B and Tab, to the PTY.
+ * @param {{ code: string, altKey: boolean, shiftKey: boolean, ctrlKey: boolean, metaKey: boolean }} event
+ * @returns {boolean}
+ */
+export function isGlobalChord(event) {
+  if (!event?.altKey || event.ctrlKey || event.metaKey) return false
+  if (event.shiftKey) return Object.hasOwn(SECTIONS, event.code)
+  return GLOBAL_CODES.has(event.code) || /^Digit[1-9]$/.test(event.code)
+}
 
 /**
  * Map a keydown to a global shell action (keyboard.md, rail-and-shell.md section 6). Matches `event.code`.
@@ -399,4 +434,69 @@ export function createAnnouncer({ setTimeout, clearTimeout, emit, t, windowMs = 
       queue = []
     }
   }
+}
+
+const NEEDS_KINDS = new Set(['request', 'run', 'task'])
+
+/**
+ * Read the Needs-you drawer filter from a location search (`?needs=request:<id>`, `?needs=run:<runId>`,
+ * `?needs=task:<runId>:<taskId>`; the task id is after the last colon, so a run id may hold colons).
+ * @param {string | null | undefined} search
+ * @returns {{ kind: 'request', id: string } | { kind: 'run', runId: string } | { kind: 'task', runId: string, taskId: string } | null}
+ */
+export function parseNeedsFilter(search) {
+  let value
+  try { value = new URLSearchParams(String(search ?? '')).get('needs') } catch { return null }
+  if (!value) return null
+  const colon = value.indexOf(':')
+  if (colon === -1) return null
+  const kind = value.slice(0, colon)
+  const rest = value.slice(colon + 1)
+  if (!NEEDS_KINDS.has(kind) || !rest) return null
+  if (kind === 'request') return { kind, id: rest }
+  if (kind === 'run') return { kind, runId: rest }
+  const last = rest.lastIndexOf(':')
+  const runId = rest.slice(0, last)
+  const taskId = rest.slice(last + 1)
+  if (last === -1 || !runId || !taskId) return null
+  return { kind, runId, taskId }
+}
+
+/**
+ * Build the `needs=` query parameter for a filter from {@link parseNeedsFilter}; empty for none.
+ * @param {{ kind: string, id?: string, runId?: string, taskId?: string } | null} filter
+ * @returns {string}
+ */
+export function needsFilterParam(filter) {
+  if (!filter) return ''
+  const value = filter.kind === 'request' ? `request:${filter.id}` : filter.kind === 'run' ? `run:${filter.runId}` : `task:${filter.runId}:${filter.taskId}`
+  return new URLSearchParams({ needs: value }).toString()
+}
+
+const DENSITY_KEY = 'deck.density'
+const DENSITIES = new Set(['comfortable', 'compact'])
+
+/**
+ * Home card density from `localStorage` `deck.density`: `comfortable` (default) or `compact`.
+ * A storage that throws (private mode, quota) reads as the default.
+ * @param {Storage | undefined} storage
+ * @returns {'comfortable' | 'compact'}
+ */
+export function readDensity(storage) {
+  try {
+    const value = storage?.getItem(DENSITY_KEY)
+    return DENSITIES.has(value) ? value : 'comfortable'
+  } catch {
+    return 'comfortable'
+  }
+}
+
+/**
+ * Remember the Home card density; unknown values and storage errors are ignored.
+ * @param {Storage | undefined} storage
+ * @param {'comfortable' | 'compact'} value
+ */
+export function writeDensity(storage, value) {
+  if (!DENSITIES.has(value)) return
+  try { storage?.setItem(DENSITY_KEY, value) } catch {}
 }

@@ -12,7 +12,7 @@ import { chromium } from 'playwright-core'
 import { captureToken, createApiClient, createConnection, wsProtocols, backoffMs, TOKEN_KEY } from '../../web/src/state/api.js'
 import {
   createDeckStore, reduce, initialState, matchRoute, resolveRoute, keyAction, documentTitle, badgeText,
-  selectLanguage, createAnnouncer, bannerFor, isRoute
+  selectLanguage, createAnnouncer, bannerFor, isRoute, parseNeedsFilter, needsFilterParam, readDensity, writeDensity
 } from '../../web/src/state/deck-store.js'
 import { messages as en, format } from '../../web/src/i18n/en.js'
 import * as pt from '../../web/src/i18n/pt.js'
@@ -69,13 +69,14 @@ function fakeSockets() {
       this.readyState = 0
       created.push(this)
     }
-    send(data) { this.sent.push(JSON.parse(data)) }
+    send(data) { this.sent.push(typeof data === 'string' ? JSON.parse(data) : data) }
     close(code = 1000) { if (this.readyState === 3) return
       this.readyState = 3
       this.onclose?.({ code }) }
     open() { this.readyState = 1
       this.onopen?.({}) }
     receive(message) { this.onmessage?.({ data: JSON.stringify(message) }) }
+    receiveBinary(data) { this.onmessage?.({ data }) }
     drop(code = 1006) { this.readyState = 3
       this.onclose?.({ code }) }
   }
@@ -297,6 +298,139 @@ test('heartbeat silence reconnects; token, origin and outdated closes stop retry
   await Promise.resolve()
   assert.equal(reloads, 1)
   assert.equal(second.store.getState().connection.state, 'client_outdated')
+})
+
+test('the connection routes term.* messages and binary frames to terminal listeners, never to the store', async () => {
+  const clock = fakeClock()
+  const { FakeWebSocket, created } = fakeSockets()
+  const store = createDeckStore()
+  const dispatched = []
+  const dispatch = store.dispatch
+  store.dispatch = action => { dispatched.push(action)
+    dispatch(action) }
+  const connection = createConnection({
+    token: 'abc', url: 'ws://x/api/ws', WebSocket: FakeWebSocket, store, storage: memoryStorage(),
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, now: clock.now, random: () => 0.5,
+    probe: async () => null, reload: () => assert.fail('no reload')
+  })
+  const terms = []
+  const frames = []
+  let lives = 0
+  connection.onTerm(message => terms.push(message))
+  const offBinary = connection.onBinary(data => frames.push(data))
+  connection.onLive(() => { lives++ })
+  connection.start()
+  assert.equal(created[0].binaryType, 'arraybuffer')
+  assert.equal(connection.send({ t: 'term.attach', sessionId: 's1', cols: 80, rows: 24 }), false, 'nothing is sent before the socket is live')
+  assert.equal(connection.sendBinary(new Uint8Array([2, 1, 97, 120])), false)
+  created[0].open()
+  assert.equal(connection.send({ t: 'sub.tails', sessionIds: [] }), false, 'resyncing is not live')
+  created[0].receive(snapshotMessage(1))
+  assert.equal(lives, 1)
+  assert.equal(connection.send({ t: 'term.attach', sessionId: 's1', cols: 80, rows: 24 }), true)
+  const input = new Uint8Array([2, 2, 115, 49, 120])
+  assert.equal(connection.sendBinary(input), true)
+  assert.deepEqual(created[0].sent.slice(1), [{ t: 'term.attach', sessionId: 's1', cols: 80, rows: 24 }, input])
+
+  dispatched.length = 0
+  created[0].receive({ t: 'term.attached', sessionId: 's1', ptyId: 'p1', cols: 80, rows: 24 })
+  created[0].receive({ t: 'term.error', sessionId: 's1', error: { code: 'no_pty' } })
+  const output = new Uint8Array([1, 2, 115, 49, 104, 105]).buffer
+  created[0].receiveBinary(output)
+  assert.deepEqual(terms.map(message => message.t), ['term.attached', 'term.error'])
+  assert.deepEqual(frames, [output])
+  assert.deepEqual(dispatched, [], 'term.* messages and binary frames never reach the store')
+  created[0].receive({ t: 'counts', seq: 2, at: 2, data: counts(1) })
+  assert.equal(store.getState().data.counts.needYouSessions, 1, 'other messages still reach the store')
+  clock.advance(29_000)
+  created[0].receiveBinary(output)
+  clock.advance(29_000)
+  assert.equal(store.getState().connection.state, 'live', 'a binary frame re-arms the heartbeat watchdog')
+  offBinary()
+  created[0].receiveBinary(output)
+  assert.equal(frames.length, 2, 'an unsubscribed listener hears nothing')
+
+  created[0].drop(1006)
+  await Promise.resolve()
+  assert.equal(connection.send({ t: 'term.detach', sessionId: 's1' }), false, 'nothing is sent while reconnecting')
+  clock.advance(1000)
+  created[1].open()
+  assert.equal(lives, 1)
+  created[1].receive({ t: 'replay.begin', from: 2, to: 2 })
+  created[1].receive({ t: 'replay.end', seq: 2 })
+  assert.equal(lives, 2, 'onLive fires on every return to live')
+  created[1].receive({ t: 'replay.end', seq: 2 })
+  assert.equal(lives, 2, 'a second live signal while already live does not fire again')
+  connection.close()
+})
+
+test('input.source and screen.tail are ephemeral store state and never move the durable sequence', () => {
+  let state = reduce(initialState(), { type: 'message', message: snapshotMessage(5) })
+  state = reduce(state, { type: 'message', message: { t: 'input.source', data: { sessionId: 's1', state: 'terminal_active', from: 'terminal', name: 'kitty', detached: false } } })
+  state = reduce(state, { type: 'message', message: { t: 'screen.tail', data: { sessionId: 's1', lines: ['$ cargo test', 'ok'] } } })
+  assert.deepEqual(state.data.inputSources.s1, { sessionId: 's1', state: 'terminal_active', from: 'terminal', name: 'kitty', detached: false })
+  assert.deepEqual(state.data.tails.s1, ['$ cargo test', 'ok'])
+  assert.equal(state.seq, 5)
+  state = reduce(state, { type: 'message', message: { t: 'input.source', data: { sessionId: 's1', state: 'collision', from: 'browser', name: null, detached: false } } })
+  assert.equal(state.data.inputSources.s1.state, 'collision')
+  state = reduce(state, { type: 'message', message: { t: 'screen.tail', data: { sessionId: 's1', lines: 'not a list' } } })
+  assert.deepEqual(state.data.tails.s1, ['$ cargo test', 'ok'], 'a malformed tail is ignored')
+  state = reduce(state, { type: 'message', message: { t: 'input.source', data: { state: 'quiet' } } })
+  assert.deepEqual(Object.keys(state.data.inputSources), ['s1'], 'an input.source without a session id is ignored')
+  state = reduce(state, { type: 'resync' })
+  state = reduce(state, { type: 'message', message: { t: 'screen.tail', data: { sessionId: 's2', lines: ['busy'] } } })
+  assert.deepEqual(state.data.tails.s2, ['busy'], 'ephemeral events apply even while resyncing')
+  assert.deepEqual(state.buffer, [], 'ephemeral events are never buffered as durable events')
+  state = reduce(state, { type: 'message', message: snapshotMessage(7) })
+  assert.equal(state.seq, 7)
+  assert.equal(state.data.inputSources.s1.state, 'collision', 'a snapshot keeps the ephemeral state')
+  assert.deepEqual(state.data.tails.s2, ['busy'])
+  assert.deepEqual(initialState().data.inputSources, {})
+  assert.deepEqual(initialState().data.tails, {})
+})
+
+test('toast.push adds a toast with the next id', () => {
+  let state = initialState()
+  state = reduce(state, { type: 'toast.push', tone: 'error', title: 'Could not stop rustot', body: 'deckd is reconnecting' })
+  state = reduce(state, { type: 'toast.push', tone: 'info', title: 'Marked reviewed' })
+  assert.deepEqual(state.toasts, [
+    { id: 1, tone: 'error', title: 'Could not stop rustot', body: 'deckd is reconnecting' },
+    { id: 2, tone: 'info', title: 'Marked reviewed', body: null }
+  ])
+  assert.equal(state.nextId, 3)
+})
+
+test('the needs filter parses from and builds back to the ?needs= parameter', () => {
+  assert.deepEqual(parseNeedsFilter('?needs=request:r1'), { kind: 'request', id: 'r1' })
+  assert.deepEqual(parseNeedsFilter('?needs=run:2026%2Fsubstop'), { kind: 'run', runId: '2026/substop' })
+  assert.deepEqual(parseNeedsFilter('?needs=task:r1:T2'), { kind: 'task', runId: 'r1', taskId: 'T2' })
+  assert.deepEqual(parseNeedsFilter('?x=1&needs=task:2026:sub:T12'), { kind: 'task', runId: '2026:sub', taskId: 'T12' }, 'the task id is after the last colon')
+  for (const bad of ['', '?needs=', '?needs=task:r1', '?needs=task::T2', '?needs=task:r1:', '?needs=request:', '?needs=other:x', '?other=1', null, undefined]) {
+    assert.equal(parseNeedsFilter(bad), null, String(bad))
+  }
+  for (const filter of [{ kind: 'request', id: 'r1' }, { kind: 'run', runId: '2026/substop' }, { kind: 'task', runId: '2026:sub', taskId: 'T12' }]) {
+    const param = needsFilterParam(filter)
+    assert.match(param, /^needs=/)
+    assert.deepEqual(parseNeedsFilter(`?${param}`), filter)
+  }
+  assert.equal(needsFilterParam({ kind: 'task', runId: 'r1', taskId: 'T2' }), 'needs=task%3Ar1%3AT2')
+  assert.equal(needsFilterParam(null), '')
+})
+
+test('density reads and writes deck.density with comfortable as the default and survives a throwing storage', () => {
+  const storage = memoryStorage()
+  assert.equal(readDensity(storage), 'comfortable')
+  writeDensity(storage, 'compact')
+  assert.equal(storage.getItem('deck.density'), 'compact')
+  assert.equal(readDensity(storage), 'compact')
+  storage.setItem('deck.density', 'dense')
+  assert.equal(readDensity(storage), 'comfortable', 'an unknown value reads as the default')
+  writeDensity(storage, 'sideways')
+  assert.equal(storage.getItem('deck.density'), 'dense', 'an unknown value is not written')
+  const throwing = { getItem() { throw new Error('denied') }, setItem() { throw new Error('denied') } }
+  assert.equal(readDensity(throwing), 'comfortable')
+  assert.doesNotThrow(() => writeDensity(throwing, 'compact'))
+  assert.equal(readDensity(undefined), 'comfortable')
 })
 
 test('store buffers events during resync, swaps the snapshot atomically and drops stale sequence numbers', () => {
