@@ -1226,7 +1226,7 @@ test('different permission notifications stay open while a matching repeat is de
     }
     afterRequest.projector.applyHooks([notification('Allow Write?', 1001), notification('Allow Bash?', 1002)])
     assert.equal(afterRequest.projector.snapshot().counts.openRequests, 2)
-    assert.deepEqual(afterRequest.projector.snapshot().requests.map(row => row.summary), ['Bash: {"command":"pwd"}', 'Allow Write?'])
+    assert.deepEqual(afterRequest.projector.snapshot().requests.map(row => row.summary), ['pwd', 'Allow Write?'])
   } finally { afterRequest.close() }
 })
 
@@ -1962,7 +1962,7 @@ test('published sequences are committed and a failed batch rolls back', () => {
       published.push(event.seq)
     } })
     projector.applyHooks([fixture('UserPromptSubmit.json')])
-    assert.deepEqual(published, [1, 2])
+    assert.deepEqual(published, [1, 2, 3])
     const before = projector.snapshot()
     const bad = fixture('UserPromptSubmit.json', { session_id: 'bad', hook_event_name: null })
     bad.claudePid = 90
@@ -1970,7 +1970,7 @@ test('published sequences are committed and a failed batch rolls back', () => {
     assert.throws(() => projector.applyHooks([bad]))
     assert.equal(projector.snapshot().seq, before.seq)
     assert.equal(projector.snapshot().sessions.length, before.sessions.length)
-    assert.deepEqual(published, [1, 2])
+    assert.deepEqual(published, [1, 2, 3])
   } finally { reader.close(); h.close() }
 })
 
@@ -2105,7 +2105,7 @@ test('notification upgrades publish the updated request after commit', () => {
     assert.equal(updates[0].entityId, id)
     assert.deepEqual(updates[0].data, projector.snapshot().requests[0])
     assert.equal(updates[0].data.tier, 'destructive')
-    assert.equal(updates[0].data.summary, 'Bash: {"command":"rm old.log"}')
+    assert.equal(updates[0].data.summary, 'rm old.log')
     assert.equal(events.filter(event => event.type === 'request.opened' || event.type === 'request.closed').length, 0)
   } finally { reader.close(); h.close() }
 })

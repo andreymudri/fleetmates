@@ -300,3 +300,8 @@ a.button { display: inline-flex; align-items: center; text-decoration: none; }
 h1.empty-title { font: var(--type-display); letter-spacing: var(--type-display-tracking); color: var(--text-strong); }
 h2.empty-title { font: var(--type-section-title); color: var(--text-strong); }
 .empty-body { margin: 0; font: var(--type-body-sm); color: var(--text-muted); }
+
+/* The static needs-you ring, drawn inset inside the card's border box (home.md AC18). While the pulse runs
+   its keyframes override this value; when reduced motion stops the pulse (tokens.css), this inset line is
+   what shows, since it outranks the outset ring tokens.css gives `.motion-pulse` there. */
+.session-card.motion-pulse { box-shadow: inset 0 0 0 1px var(--color-amber-700); }

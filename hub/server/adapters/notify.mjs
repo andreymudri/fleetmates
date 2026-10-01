@@ -43,6 +43,44 @@ function bellAudio() {
   return bytes
 }
 
+/** Title and body caps in characters, counted after stripping (08-security.md section 4.9). */
+export const TITLE_MAX = 80
+export const BODY_MAX = 200
+// C0 controls and DEL (VT and FF included), C1 controls (NEL included), LINE and PARAGRAPH SEPARATOR, and the
+// bidi controls (ALM, LRM, RLM, LRE..RLO, LRI..PDI). The body keeps line feeds and no other line break.
+const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069]/gu
+const CONTROLS_BUT_LF = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2028\u2029\u2066-\u2069]/gu
+const ENTITIES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
+
+/**
+ * Make agent-supplied text safe for a notification daemon that renders markup (08-security.md 4.9,
+ * threat T13): strip C0 and C1 controls and bidi characters (the body keeps line feeds between its lines),
+ * cap the stripped text at `max` characters with an ellipsis, then escape `& < > " '`. Escaping comes after
+ * the cap, so an entity is never cut in half; the escaped argument can be longer than `max`.
+ * @param {unknown} text
+ * @param {number} max
+ * @param {{ keepLineFeeds?: boolean }} [options]
+ * @returns {string}
+ */
+export function notificationText(text, max, { keepLineFeeds = false } = {}) {
+  return clipText(text, max, { keepLineFeeds }).replace(/[&<>"']/g, char => ENTITIES[char])
+}
+
+/**
+ * The strip and cap steps of {@link notificationText}, without escaping: controls and bidi characters removed
+ * (line feeds kept only with `keepLineFeeds`), then at most `max` characters ending in `…`. Callers compose
+ * popup text from clipped parts so that the fixed parts they add always fit the final caps.
+ * @param {unknown} text
+ * @param {number} max
+ * @param {{ keepLineFeeds?: boolean }} [options]
+ * @returns {string}
+ */
+export function clipText(text, max, { keepLineFeeds = false } = {}) {
+  const chars = Array.from(String(text ?? '').replace(keepLineFeeds ? CONTROLS_BUT_LF : CONTROLS, ''))
+  if (max <= 0) return ''
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : chars.join('')
+}
+
 /** Create popup, dismissal, test-ping and bell commands with injectable executables and runner. */
 export function createNotifier({ notifyCommand = 'notify-send', soundCommand = 'pw-play', dismissCommand = 'makoctl', env = process.env, run = execute, timeoutMs = 2000 } = {}) {
   async function call(command, args, code, input) {
@@ -54,7 +92,7 @@ export function createNotifier({ notifyCommand = 'notify-send', soundCommand = '
   async function popup({ title, body, urgency = 'normal', replaceId = null }) {
     const args = ['--app-name=fleetmates deck', '--print-id', `--urgency=${urgency}`]
     if (Number.isInteger(replaceId) && replaceId > 0) args.push(`--replace-id=${replaceId}`)
-    args.push('--', String(title), String(body))
+    args.push('--', notificationText(title, TITLE_MAX), notificationText(body, BODY_MAX, { keepLineFeeds: true }))
     const result = await call(notifyCommand, args, 'notify_failed')
     if (!result.ok) return result
     const id = Number(result.stdout?.trim())

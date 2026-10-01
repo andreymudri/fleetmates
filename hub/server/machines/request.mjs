@@ -9,6 +9,77 @@ function canonical(value) {
   return value
 }
 
+const LINE_MAX = 4000
+
+// LF, CRLF, VT, FF, NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR; a lone CR is left for the control strip.
+const LINE_BREAK = /\s*(?:\r\n|[\n\u000b\u000c\u0085\u2028\u2029])\s*/u
+
+/**
+ * Fold text to one display line: each line break becomes a visible ` ↵ ` and the result is capped.
+ * @param {unknown} text
+ * @returns {string}
+ */
+export function oneLine(text) {
+  const line = String(text ?? '').trim().split(LINE_BREAK).filter(Boolean).join(' ↵ ')
+  return line.length > LINE_MAX ? `${line.slice(0, LINE_MAX - 1)}…` : line
+}
+
+function questionText(input) {
+  const questions = Array.isArray(input?.questions) ? input.questions : []
+  const first = questions.find(row => typeof row?.question === 'string' && row.question.trim())
+  return first ? oneLine(first.question) : null
+}
+
+function relativeTo(cwd, file) {
+  if (typeof file !== 'string' || !file) return null
+  if (typeof cwd === 'string' && cwd && path.isAbsolute(file)) {
+    const inside = path.relative(cwd, file)
+    if (inside && !inside.startsWith('..') && !path.isAbsolute(inside)) return inside
+  }
+  return file
+}
+
+/**
+ * One readable line for a tool call: the tool name (or `label`) and its main argument, such as
+ * `Read src/main.rs` or `Bash npm test`. Paths inside `cwd` are shown relative to it.
+ * @param {string} toolName
+ * @param {object} [input] the hook's `tool_input`
+ * @param {string} [cwd]
+ * @param {Record<string, string>} [labels] display names that replace a tool name
+ * @returns {string}
+ */
+export function toolLine(toolName, input = {}, cwd = '', labels = {}) {
+  const name = String(toolName ?? '')
+  const args = input && typeof input === 'object' ? input : {}
+  const text = value => typeof value === 'string' && value.trim() ? value : null
+  let detail
+  if (name === 'Bash') detail = text(args.command)
+  else if (['Read', 'Write', 'Edit', 'MultiEdit'].includes(name)) detail = relativeTo(cwd, args.file_path)
+  else if (name === 'NotebookEdit') detail = relativeTo(cwd, args.notebook_path)
+  else if (['Glob', 'Grep'].includes(name)) detail = text(args.pattern)
+  else if (name === 'WebFetch') detail = text(args.url)
+  else if (name === 'WebSearch') detail = text(args.query)
+  else if (['Task', 'Agent'].includes(name)) detail = text(args.description)
+  else if (name === 'AskUserQuestion') detail = questionText(args)
+  else detail = Object.values(args).find(text) ?? null
+  const label = labels[name] ?? name
+  return oneLine(detail ? `${label} ${detail}` : label)
+}
+
+/**
+ * The request summary cards and the drawer show: the question for AskUserQuestion, the command for Bash,
+ * else {@link toolLine}. Never raw JSON.
+ * @param {string} toolName
+ * @param {object} [input]
+ * @param {string} [cwd]
+ * @returns {string}
+ */
+export function requestSummary(toolName, input = {}, cwd = '') {
+  if (toolName === 'AskUserQuestion') return questionText(input) ?? toolLine(toolName, input, cwd)
+  if (toolName === 'Bash' && typeof input?.command === 'string' && input.command.trim()) return oneLine(input.command)
+  return toolLine(toolName, input, cwd)
+}
+
 /** Match a tool outcome with the request that opened it. */
 export function matchKey(hook) {
   let input = hook.tool_input ?? {}
@@ -799,7 +870,7 @@ export function applyRequestHook(store, session, envelope, { late = false } = {}
       const recent = store.all('SELECT source, summary, tool_name, detail FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND created_at BETWEEN ? AND ?', session.id, 'permission', 'open', at - 2000, at + 2000).some(row => row.source === 'notification' ? row.summary === (hook.message ?? 'Needs your answer') : row.source === 'permission_request' && notificationMatchesTool(hook.message, row.tool_name, JSON.parse(row.detail)))
       if (recent) return false
     }
-    const summary = source === 'stop_question' ? question.slice(0, 160) : source === 'notification' ? hook.message ?? 'Needs your answer' : toolName ? `${toolName}: ${JSON.stringify(hook.tool_input ?? {}).slice(0, 160)}` : hook.message ?? 'Needs your answer'
+    const summary = source === 'stop_question' ? question.slice(0, 160) : source === 'notification' ? hook.message ?? 'Needs your answer' : toolName ? requestSummary(toolName, hook.tool_input ?? {}, hook.cwd) : hook.message ?? 'Needs your answer'
     if (source === 'permission_request') {
       const fallback = store.all('SELECT id, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC', session.id, 'permission', 'open', 'notification', at - 2000, at + 2000).find(row => notificationMatchesTool(row.summary, toolName, hook.tool_input))
       if (fallback) {

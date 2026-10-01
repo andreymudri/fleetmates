@@ -30,13 +30,28 @@ const here = env => env.location.pathname + env.location.search
 
 /**
  * Open an overlay the way the shell's `Alt K` and `Alt U` do: push a history entry that carries it, then
- * tell the shell through a `popstate` event so Back closes it.
+ * tell the shell through a `popstate` event so Back closes it. `detail.request` names the drawer row to focus
+ * (a team card's "Review N", home.md 5 and Drawer AC9).
  * @param {'palette'|'drawer'} overlay
  * @param {Window} [env]
+ * @param {{ request?: string }} [detail]
  */
-export function openOverlay(overlay, env = win()) {
-  env.history.pushState({ overlay }, '', here(env))
-  env.dispatchEvent(new env.PopStateEvent('popstate', { state: { overlay } }))
+export function openOverlay(overlay, env = win(), detail = {}) {
+  const state = detail.request ? { overlay, request: detail.request } : { overlay }
+  env.history.pushState(state, '', here(env))
+  env.dispatchEvent(new env.PopStateEvent('popstate', { state }))
+}
+
+/**
+ * The element the drawer focuses when it opens: the named request's Open, else the first row's Open, else Close.
+ * @param {ParentNode | null} panel
+ * @param {string | null | undefined} requestId
+ * @returns {Element | null}
+ */
+export function drawerFocusTarget(panel, requestId) {
+  if (!panel) return null
+  const named = requestId ? [...panel.querySelectorAll('.drawer-row')].find(row => row.getAttribute('data-request') === requestId)?.querySelector('a') : null
+  return named ?? panel.querySelector('.drawer-row a') ?? panel.querySelector('.drawer-close')
 }
 
 /**
@@ -113,7 +128,7 @@ function Row({ request, state, now, t, go }) {
   const href = `/s/${encodeURIComponent(request.sessionId)}`
   const question = tierOf(request) === 'question'
   return (
-    <li className={`drawer-row drawer-row--${tierOf(request)}`} role="group" aria-label={question ? titleText(request.summary) : shown(request.summary)}>
+    <li className={`drawer-row drawer-row--${tierOf(request)}`} aria-label={question ? titleText(request.summary) : shown(request.summary)} data-request={request.id}>
       {question
         ? <p className="drawer-question"><bdi>{titleText(request.summary)}</bdi></p>
         : <code className="drawer-command">{shown(request.summary)}</code>}
@@ -206,7 +221,8 @@ export function trapTab(event, container) {
 
 /**
  * The Needs-you drawer overlay: {@link DrawerView} wired to Esc, the {@link trapTab} focus trap, initial
- * focus on the first request's Open (or Close when empty) and focus returned to the opener on close.
+ * focus from {@link drawerFocusTarget} (the request the history entry names, else the first request's Open,
+ * else Close) and focus returned to the opener on close.
  * This browser wiring is not exercised by the unit tests; only {@link DrawerView} and {@link trapTab} are.
  * @param {{ state: object, t?: Function, navigate: (to: string) => void, onClose?: () => void, onLeave?: () => void }} props
  */
@@ -214,7 +230,8 @@ export function NeedsYouDrawer(props) {
   const panel = useRef(null)
   useEffect(() => {
     const opener = globalThis.document?.activeElement
-    const target = panel.current?.querySelector('.drawer-row a') ?? panel.current?.querySelector('.drawer-close')
+    const target = drawerFocusTarget(panel.current, globalThis.history?.state?.request)
+    target?.scrollIntoView?.({ block: 'nearest' })
     target?.focus()
     return () => opener?.focus?.()
   }, [])

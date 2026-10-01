@@ -9,7 +9,22 @@
   gap: var(--space-20);
   min-height: 100%;
 }
+/* The grid presentation fills the content area: the header stays and only the fleet scrolls (Home AC14). */
+.home:not(.home--calm) {
+  height: 100%;
+  min-height: 0;
+}
+.home-fleet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-20);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-top: var(--space-6);
+}
 .home-header {
+  flex: none;
   display: flex;
   align-items: center;
   gap: var(--space-16);
@@ -26,13 +41,21 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   grid-auto-rows: minmax(360px, auto);
   gap: var(--space-20);
+  flex: 1 0 auto;
   padding: 0 var(--space-28);
 }
 @media (max-width: 1439px) {
   .home-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+/* 1440 wide and 1000 tall or more (home.md 3.4): rows drop the 360px minimum, taking their content height
+   plus a share (1fr) of the fleet's spare height, so the busy fixture fits 1920 x 1080 with nothing
+   scrolling (Home AC1, checked in hub/test/e2e/observe.spec.mjs). */
+@media (min-width: 1440px) and (min-height: 1000px) {
+  .home-grid { grid-auto-rows: minmax(min-content, 1fr); flex: 1 1 0; }
+}
 
 .quiet-row {
+  flex: none;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-20);
@@ -69,6 +92,24 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Team card (home.md 4.2 `team`) */
+.session-card--team { border-style: double; border-width: 3px; }
+.team-tiles { display: flex; flex-wrap: wrap; gap: var(--space-6); margin: 0; padding: 0; list-style: none; }
+.team-tile {
+  padding: var(--space-2) var(--space-8);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  font: var(--type-meta);
+  color: var(--text-secondary);
+  unicode-bidi: isolate;
+}
+.team-tile--needs { border-color: var(--state-needs-approval-border); color: var(--state-needs-approval-fg); }
+.team-tile--done { border-color: var(--state-done-border); }
+.team-phase { margin: 0; font: var(--type-meta); color: var(--text-secondary); }
+.team-asks { display: flex; flex-direction: column; gap: var(--space-6); margin: 0; padding: 0; list-style: none; }
+.team-ask { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.request-box--team .button { align-self: flex-start; }
 
 /* Calm (home.md 3.3, 4.5) */
 .home--calm {

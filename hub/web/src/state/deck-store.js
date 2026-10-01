@@ -24,6 +24,7 @@ export function initialState() {
     buffer: [],
     epoch: null,
     seq: 0,
+    deckdOutage: false,
     lastEventAt: null,
     data: emptyData(),
     view: { path: '/', overlay: null },
@@ -86,6 +87,8 @@ function applyEvent(state, message, live) {
     case 'session.upserted': {
       const previous = d.sessions.find(row => row.id === data.id)
       next.data = { ...d, sessions: upsert(d.sessions, data) }
+      // The server publishes no order.changed when a session only leaves the order, so drop it here.
+      if (data.state === 'ended' && d.order.includes(data.id)) next.data.order = d.order.filter(id => id !== data.id)
       if (!NEEDS_STATES.has(data.state) && next.episodes[data.id]) {
         const episodes = { ...next.episodes }
         delete episodes[data.id]
@@ -142,6 +145,7 @@ function applyEvent(state, message, live) {
     }
     case 'health.changed':
       next.data = { ...d, health: upsert(d.health, data, row => row.dep === data.dep) }
+      if (data.dep === 'deckd') next.deckdOutage = outageAfter(next.deckdOutage, data)
       return next
     case 'recap':
       next.data = { ...d, recap: data }
@@ -152,6 +156,15 @@ function applyEvent(state, message, live) {
     default:
       return next
   }
+}
+
+const OUTAGE = new Set(['down', 'reconnecting'])
+
+// Whether deckd is in an outage after this health row: a `checking` probe (Retry now, Start) keeps the
+// outage it started from, any other state settles it.
+function outageAfter(outage, row) {
+  if (!row) return outage
+  return row.state === 'checking' ? outage : OUTAGE.has(row.state)
 }
 
 function flush(state) {
@@ -173,7 +186,8 @@ function receive(state, message) {
       const episodes = Object.fromEntries(data.sessions.filter(row => NEEDS_STATES.has(row.state)).map(row => [row.id, true]))
       const open = new Set(data.requests.map(row => row.id))
       const toasts = state.toasts.filter(toast => toast.requestId === undefined || open.has(toast.requestId))
-      return flush({ ...state, loaded: true, syncing: false, replaying: false, epoch: message.epoch, seq: message.seq, data, episodes, toasts })
+      const deckdOutage = outageAfter(state.deckdOutage, data.health?.find(row => row.dep === 'deckd'))
+      return flush({ ...state, loaded: true, syncing: false, replaying: false, epoch: message.epoch, seq: message.seq, data, episodes, toasts, deckdOutage })
     }
     case 'replay.begin':
       return { ...state, replaying: true }
@@ -340,7 +354,8 @@ export function badgeText(n, t) {
 }
 
 /**
- * The one connection banner to show; server link lost wins over deckd lost.
+ * The one connection banner to show; server link lost wins over deckd lost. A deckd probe in flight
+ * (`checking`, after Retry now) keeps the deckd banner while the outage it started from lasts.
  * @param {Record<string, any>} state
  * @param {number} now
  * @returns {{ kind: 'server' | 'deckd', attempt: number, seconds: number } | null}
@@ -350,7 +365,7 @@ export function bannerFor(state, now) {
   const { connection } = state
   if (connection.state === 'reconnecting') return { kind: 'server', attempt: connection.attempt, seconds: seconds(connection.nextAt) }
   const deckd = state.data.health.find(row => row.dep === 'deckd')
-  if (state.loaded && deckd && ['down', 'reconnecting'].includes(deckd.state)) return { kind: 'deckd', attempt: deckd.attempt ?? 0, seconds: seconds(deckd.nextProbeAt) }
+  if (state.loaded && deckd && (OUTAGE.has(deckd.state) || deckd.state === 'checking' && state.deckdOutage)) return { kind: 'deckd', attempt: deckd.attempt ?? 0, seconds: seconds(deckd.nextProbeAt) }
   return null
 }
 
