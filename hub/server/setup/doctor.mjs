@@ -65,6 +65,20 @@ function probeDeckd(paths, list = false) {
   })
 }
 
+/** A variable name; any other `loginEnvNames` entry is left out, so no value can be printed. */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * Detail of a running deckd's check from its hello answer (OPS-O2): the login-environment
+ * variable names deckd adds to launched sessions, sorted, never their values. A proto 1 deckd
+ * does not send them.
+ */
+function deckdDetail(hello) {
+  if (hello?.proto === 1) return 'deckd running; login env names need deckd 0.2.0'
+  const names = Array.isArray(hello?.loginEnvNames) ? hello.loginEnvNames.filter(name => typeof name === 'string' && ENV_NAME.test(name)).sort() : []
+  return names.length ? `login env adds ${names.length} names: ${names.join(', ')}` : 'deckd running'
+}
+
 /** Run the six terminal setup checks without changing local state. */
 export async function doctor(paths, command, { run = probe } = {}) {
   const claude = run('claude', ['--version'])
@@ -82,13 +96,14 @@ export async function doctor(paths, command, { run = probe } = {}) {
   checks.push({ id: 'hooks', state: configured && usable ? 'ok' : 'failed', blocking: true, detail: !configured ? 'Observation hooks missing' : usable ? 'Observation hooks installed' : 'Observation hook script missing or unreadable' })
   const unit = run('systemctl', ['--user', 'is-active', 'fleetmates-deckd.service'])
   let socket = false
+  let hello = null
   if (unit.status === 0 && paths.runtime) {
     try {
-      await probeDeckd(paths)
+      hello = await probeDeckd(paths)
       socket = true
     } catch {}
   }
-  checks.push({ id: 'deckd', state: unit.status === 0 && socket ? 'ok' : 'failed', blocking: false, detail: unit.status === 0 && socket ? 'deckd running' : 'deckd unavailable' })
+  checks.push({ id: 'deckd', state: unit.status === 0 && socket ? 'ok' : 'failed', blocking: false, detail: unit.status === 0 && socket ? deckdDetail(hello) : 'deckd unavailable' })
   checks.push({ id: 'vault', state: 'optional_skipped', blocking: false, detail: 'vault-mcp not checked by terminal setup' })
   checks.push({ id: 'scribed', state: paths.runtime && fs.existsSync(path.join(path.dirname(paths.runtime), SOCKET_NAME)) ? 'ok' : 'optional_skipped', blocking: false, detail: 'scribed socket optional' })
   checks.push({ id: 'notify', state: 'pending', blocking: false, detail: 'Send a test ping from Settings' })

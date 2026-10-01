@@ -93,6 +93,19 @@ test('captureLoginEnv keeps every variable when the profile prints a banner firs
   assert.equal(env.FROM_BASE, undefined)
 })
 
+test('captureLoginEnv parses only what follows the marker, so an assignment-shaped banner is not a variable', async () => {
+  // A profile that prints `NAME=value` text before the probe command runs.
+  // The fake shell never reads a profile: it prints the banner itself.
+  const shell = await fakeShell('sh-assign-banner', [
+    "printf 'GREETING=hello from motd'",
+    'exec env -i REAL_VAR=1 OTHER_VAR=2 /bin/sh -c "$4"'
+  ].join('\n'))
+  const env = await captureLoginEnv({ shell, baseEnv: { FROM_BASE: '1' } })
+  assert.equal(env.GREETING, undefined)
+  assert.equal(env.REAL_VAR, '1')
+  assert.equal(env.OTHER_VAR, '2')
+})
+
 test('captureLoginEnv answers when the shell exits, though a background job still holds stdout', async () => {
   const pidFile = path.join(dir, 'sleeper.pid')
   const shell = await fakeShell('sh-bg', [

@@ -810,6 +810,60 @@ for (const stall of ['hello', 'list', null]) {
   })
 }
 
+/**
+ * Run doctor against a fake deckd whose hello answers `hello`, and return the deckd check.
+ * @param {object} hello fields of the hello answer
+ */
+async function deckdCheckWith(hello) {
+  const s = sandbox()
+  const paths = setupPaths(s.env)
+  mkdirSync(paths.runtime, { recursive: true })
+  const sockets = new Set()
+  const server = createServer(socket => {
+    sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+    socket.on('error', () => {})
+    let buffer = ''
+    socket.on('data', chunk => {
+      buffer += chunk
+      let newline
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        const message = JSON.parse(buffer.slice(0, newline))
+        buffer = buffer.slice(newline + 1)
+        socket.write(`${JSON.stringify({ id: message.id, ok: true, ...(message.op === 'hello' ? hello : {}) })}\n`)
+      }
+    })
+  })
+  await new Promise((resolve, reject) => server.listen(path.join(paths.runtime, 'deckd.sock'), resolve).once('error', reject))
+  try {
+    const checks = await doctor(paths, 'unused', { run: file => ({ status: 0, stdout: file === 'claude' ? '2.1.282' : 'active' }) })
+    return checks.find(check => check.id === 'deckd')
+  } finally {
+    for (const socket of sockets) socket.destroy()
+    await new Promise(resolve => server.close(resolve))
+  }
+}
+
+test('doctor names the login environment variables deckd adds, never their values', async () => {
+  const check = await deckdCheckWith({ proto: 2, deckdVersion: '0.2.0', bootId: 'b', loginEnvNames: ['PATH', 'MISE_SHELL'] })
+  assert.equal(check.state, 'ok')
+  assert.equal(check.detail, 'login env adds 2 names: MISE_SHELL, PATH')
+  assert.doesNotMatch(check.detail, /=/)
+})
+
+test('doctor prints only loginEnvNames entries shaped like a variable name', async () => {
+  const check = await deckdCheckWith({ proto: 2, deckdVersion: '0.2.0', bootId: 'b', loginEnvNames: ['MISE_SHELL', 'PATH=/home/you/bin', 'PATH', 7] })
+  assert.equal(check.detail, 'login env adds 2 names: MISE_SHELL, PATH')
+  assert.doesNotMatch(check.detail, /home\/you|=/)
+})
+
+test('doctor keeps the deckd detail for an empty login env list and names the upgrade for a proto 1 deckd', async () => {
+  assert.equal((await deckdCheckWith({ proto: 2, deckdVersion: '0.2.0', bootId: 'b', loginEnvNames: [] })).detail, 'deckd running')
+  const old = await deckdCheckWith({ proto: 1, deckdVersion: '0.1.0', bootId: 'b' })
+  assert.equal(old.state, 'ok')
+  assert.equal(old.detail, 'deckd running; login env names need deckd 0.2.0')
+})
+
 test('doctor fails when the configured hook script is missing or not a file', () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
