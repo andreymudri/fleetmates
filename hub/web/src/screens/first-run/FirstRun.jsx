@@ -166,7 +166,8 @@ export function summaryText(checks, t) {
   return translate(t, FIRST_RUN_COPY, 'firstRun.summary', { ok: checks.filter(row => row.state === 'ok').length, n: checks.length })
 }
 
-// The doctor detail is "Claude Code {found}; tested {pinned}" or "Claude Code unavailable; tested {pinned}":
+// The doctor detail is "Claude Code {found}; tested {pinned}", "Claude Code {found} is newer than this deck was tested
+// with ({pinned})" or "Claude Code unavailable; tested {pinned}":
 // only a version right after "Claude Code" was found; the tested version is not one.
 function versionOf(check) {
   return check.version ?? /^Claude Code (\d+\.\d+\.\d+)/.exec(String(check.detail ?? ''))?.[1] ?? null
@@ -193,6 +194,8 @@ export function rowView(check, t) {
     const drift = Number(check.drift) > 0 ? tr('firstRun.cc.drift', { n: Number(check.drift) }) : null
     if (state === 'ok') return { ...view, tone: drift ? 'warn' : 'ok', title: tr('firstRun.cc.ok', { version: shown(version) }), sub: drift ?? tr('firstRun.cc.ok.sub') }
     if (!version) return { ...view, tone: 'warn', title: tr('firstRun.cc.missing'), sub: error ?? (check.detail ? shown(check.detail) : null), mono: !!error }
+    // `warn` is the doctor's state for a newer Claude Code; a `failed` one with a version is older than tested.
+    if (state === 'failed') return { ...view, tone: 'warn', sub: error ?? (check.detail ? shown(check.detail) : null), mono: !!error }
     return { ...view, tone: 'warn', title: tr('firstRun.cc.warn', { version: shown(version) }), sub: error ?? drift ?? tr('firstRun.cc.warn.sub'), mono: !!error }
   }
   if (id === 'hooks') {

@@ -13,7 +13,7 @@ import { startSpoolDrain } from './ingest/spool.mjs'
 import { connectDeckd as defaultConnectDeckd } from '../deckd/client.mjs'
 import { setupPaths } from './setup/paths.mjs'
 import { doctor } from './setup/doctor.mjs'
-import { readSettings, transformHooks, writeSettings } from './setup/hooks.mjs'
+import { deckHookCommand, readSettings, transformHooks, writeSettings } from './setup/hooks.mjs'
 import { createFleetmatesReader } from './adapters/fleetmates.mjs'
 import { createApi } from './http/api.mjs'
 import { createRouter, apiError } from './http/router.mjs'
@@ -125,7 +125,7 @@ export async function createDeckServer(options = {}) {
   const processEnv = { ...env }
   for (const key of Object.keys(processEnv)) if (/TOKEN|SECRET|PASSWORD|AUTHORIZATION/i.test(key)) delete processEnv[key]
   const run = (file, args) => command(file, args, processEnv)
-  const hookCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(paths.hook)}`
+  const hookCommand = deckHookCommand(process.execPath, paths.hook)
   async function checks() { return doctor(paths, hookCommand, { run }) }
   const services = {
     checks,

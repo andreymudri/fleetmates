@@ -705,7 +705,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
 /** @typedef {{kind: 'vaultNote', ref: string}|{kind: 'meetingNote', ref: string}|{kind: 'runPlan', ref: {repoId: string, runId: string}}|{kind: 'postmeetLog', ref: string}} OpenRequest   (vaultNote: vault-relative path; meetingNote and postmeetLog: meeting id) */
 /** @typedef {{needYouSessions: number, running: number, toReview: number, openRequests: number, requestSessions: number, oldestRequestAt: number|null, perRun: {repoId: string, runId: string, needYou: number, total: number}[]}} Counts */
 /** @typedef {{dep: 'deckd'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number}} Health */
-/** @typedef {{id: 'claude'|'hooks'|'deckd'|'vault'|'scribed'|'notify', state: 'pending'|'checking'|'ok'|'failed'|'optional_skipped', blocking: boolean, detail: string|null, error: string|null}} SetupCheck */
+/** @typedef {{id: 'claude'|'hooks'|'deckd'|'vault'|'scribed'|'notify', state: 'pending'|'checking'|'ok'|'warn'|'failed'|'optional_skipped', blocking: boolean, detail: string|null, error: string|null}} SetupCheck */   (warn: Claude Code newer than the tested version, state-machines 10.2)
 
 /**
  * @typedef {object} Prefs

@@ -923,7 +923,7 @@ Get a new install to a working deck, blocking only on what makes the deck useles
 
 ### 10.2 Check states
 
-`pending`, `checking`, `ok`, `failed`, `optional_skipped`. The canvas "warn" visual is `failed` on an optional check; "todo" is `pending` on a check that needs a user action (notifications).
+`pending`, `checking`, `ok`, `warn`, `failed`, `optional_skipped`. `warn` is only set by the Claude Code check, for a version newer than the tested one (SM-O18 default: warn only); it never blocks, and `fleetmates-deck doctor` prints it as `warn` so the terminal does not call version drift a failure. A missing or older Claude Code is `failed`. The canvas "warn" visual is `warn`, or `failed` on an optional check; "todo" is `pending` on a check that needs a user action (notifications).
 
 | Check | Probe | Blocking | Fix action | ok copy (canvas) | failed copy |
 |---|---|---|---|---|---|

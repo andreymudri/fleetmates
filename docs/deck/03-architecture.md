@@ -199,7 +199,7 @@ deckd keeps running the PTYs. On start, the web server: opens SQLite, drains the
 | Command | Does |
 |---|---|
 | `fleetmates-deck init` (alias `node scripts/cli.mjs deck init`) | Installs hooks into `~/.claude/settings.json` (merging, idempotent, backup first), installs and enables the two systemd user units, creates dirs and the token, runs the first-run checks in the terminal. |
-| `fleetmates-deck open` (alias `node scripts/cli.mjs ui`) | Starts the web server unit if needed and opens `http://127.0.0.1:47800/#token=<token>` in the default browser with `xdg-open`. The SPA moves the token to `sessionStorage` and sends it as `Authorization: Bearer` on HTTP and as a WebSocket subprotocol ([08-security.md](08-security.md)). |
+| `fleetmates-deck open` (alias `node scripts/cli.mjs ui`) | Starts the web server unit if needed and opens `http://127.0.0.1:47800/#token=<token>` in the default web browser through a private bootstrap page (`$BROWSER`, then the `xdg-settings` default web browser, then `xdg-open`; the token stays out of argv). The SPA moves the token to `sessionStorage` and sends it as `Authorization: Bearer` on HTTP and as a WebSocket subprotocol ([08-security.md](08-security.md)). |
 | `fleetmates-deck status` | Services, sockets, hook install state, versions. |
 | `fleetmates-deck doctor` | Runs the same six checks as the First run screen and prints them. |
 | `fleetmates-deck uninstall-hooks` | Removes only the deck's hook entries. |

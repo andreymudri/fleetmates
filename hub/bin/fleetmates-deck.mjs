@@ -6,14 +6,15 @@ import { spawnSync } from 'node:child_process'
 import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { setupPaths } from '../server/setup/paths.mjs'
-import { readSettings, transformHooks, writeSettings } from '../server/setup/hooks.mjs'
+import { deckHookCommand, readSettings, transformHooks, writeSettings } from '../server/setup/hooks.mjs'
 import { UNIT_NAMES, renderUnit, writeUnit } from '../server/setup/units.mjs'
 import { doctor, status } from '../server/setup/doctor.mjs'
+import { initChecks } from '../server/setup/wait.mjs'
+import { openInBrowser } from '../server/setup/browser.mjs'
 
 const hub = fileURLToPath(new URL('..', import.meta.url))
 const paths = setupPaths()
-const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
-const command = `${shellQuote(process.execPath)} ${shellQuote(paths.hook)}`
+const command = deckHookCommand(process.execPath, paths.hook)
 const args = process.argv.slice(2)
 
 function run(file, argv) {
@@ -110,7 +111,7 @@ async function init(dryRun, rotateToken) {
   if (webUnitChanged) run('systemctl', ['--user', 'try-restart', 'fleetmates-deck.service'])
   run('systemctl', ['--user', 'enable', '--now', ...UNIT_NAMES])
   process.stdout.write('deckd remains running if it was already active\n')
-  const checks = await doctor(paths, command)
+  const checks = await initChecks(paths, command)
   for (const check of checks) process.stdout.write(`${check.id}: ${check.state} (${check.detail})\n`)
   if (checks.find(check => check.id === 'hooks')?.state !== 'ok') process.exitCode = 1
 }
@@ -153,8 +154,7 @@ async function main() {
       fs.writeFileSync(temp, `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${JSON.stringify(url)})</script>\n`, { flag: 'wx', mode: 0o600 })
       fs.renameSync(temp, bootstrap)
     } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp) }
-    const result = spawnSync('xdg-open', [bootstrap], { stdio: 'ignore', timeout: 10000 })
-    if (result.error || result.status !== 0) throw new Error('could not open browser')
+    if (!await openInBrowser(bootstrap)) throw new Error(`could not open a browser; open this file in your web browser: ${bootstrap}`)
     return
   }
   throw new Error('usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | uninstall-hooks')
