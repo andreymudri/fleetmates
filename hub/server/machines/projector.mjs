@@ -1,7 +1,9 @@
+import { realpathSync } from 'node:fs'
 import { dedupeKey } from '../ingest/validate.mjs'
+import { isRunName } from '../adapters/fleetmates.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
 import { applyRequestHook, expireRequests, isRequestOpening, reconcileRequestOpenings, resumedActivityEvents } from './request.mjs'
-import { applySessionHook, applySubagentLifecycle, captureReviewBaseline, ignoresSessionHook, isObsoleteSessionStart, persistSessionSummary, recordSessionIdentity, recordToolStep, refreshSessionChanges, workingRoot, resolveSession, sameKnownProcess } from './session.mjs'
+import { applySessionHook, applySubagentLifecycle, captureReviewBaseline, ignoresSessionHook, isObsoleteSessionStart, leadRunId, persistSessionSummary, recordSessionIdentity, recordToolStep, refreshSessionChanges, workingRoot, resolveSession, sameKnownProcess } from './session.mjs'
 
 const ranks = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest', 'Notification', 'PermissionDenied', 'PostToolUseFailure', 'PostToolUse', 'SubagentStop', 'Stop', 'SessionEnd']
 const rank = event => {
@@ -80,8 +82,48 @@ export const SCROLLBACK_CAP = 2 * 1024 * 1024
 export const PROMPT_GONE_REASON = 'interrupted'
 const PTY_ORIGINS = ['wrapped', 'launched']
 
-/** Persist ordered hook batches and publish only sequences from committed transactions. */
-export function createProjector({ store, now = Date.now, publish = () => {} }) {
+const realPath = location => {
+  try { return realpathSync(location) } catch { return null }
+}
+
+/**
+ * Persist ordered hook batches and publish only sequences from committed transactions.
+ * `locateTask(repoRoot, cwd)` resolves a directory to the fleetmates task whose worktree it is
+ * (`{ runId, taskId }` or null); it joins sessions to runs (04-integrations 1.3, state-machines 11).
+ */
+export function createProjector({ store, now = Date.now, publish = () => {}, locateTask = () => null }) {
+  function locate(repoRoot, cwd) {
+    try { return locateTask(repoRoot, cwd) ?? null } catch { return null }
+  }
+  // The teammate task a hook belongs to: a hook whose cwd differs from the session's and resolves to a task of
+  // a run in the session's repo, else the session's own runRef task. The session's repo never moves for it.
+  function taskIdFor(session, hook) {
+    if (typeof hook.cwd === 'string' && hook.cwd !== session.cwd) {
+      const found = locate(session.repo_id, hook.cwd)
+      if (found) return found.taskId
+    }
+    return session.run_task_id ?? null
+  }
+  // A SessionStart inside a teammate worktree makes the session that task's teammate; so does a later hook from a
+  // solo session there, for a teammate that started before its `locate` wrote the index record.
+  function joinTeammate(session, roles = ['solo', 'teammate']) {
+    if (!roles.includes(session.role)) return session
+    const found = locate(session.repo_id, session.cwd)
+    if (!found) return session
+    store.run('UPDATE sessions SET role=?,run_repo_id=?,run_id=?,run_task_id=? WHERE id=?', 'teammate', session.repo_id, found.runId, found.taskId, session.id)
+    return store.get('SELECT * FROM sessions WHERE id=?', session.id)
+  }
+  // A lead names its run in `scripts/cli.mjs ... --run <id>` from the repo root; the run row records it.
+  function joinLead(session, hook, at) {
+    if (!['solo', 'lead'].includes(session.role)) return session
+    const runId = leadRunId(hook.tool_input?.command)
+    if (runId === null || !isRunName(session.repo_id, runId)) return session
+    if (realPath(session.cwd) !== session.repo_id || realPath(hook.cwd ?? session.cwd) !== session.repo_id) return session
+    store.run('UPDATE sessions SET role=?,run_repo_id=?,run_id=?,run_task_id=NULL WHERE id=?', 'lead', session.repo_id, runId, session.id)
+    store.run('INSERT INTO runs(repo_id,run_id,lead_session_id,first_seen_at,last_seen_at) VALUES(?,?,?,?,?) ON CONFLICT(repo_id,run_id) DO UPDATE SET lead_session_id=excluded.lead_session_id,last_seen_at=MAX(last_seen_at,excluded.last_seen_at)',
+      session.repo_id, runId, session.id, at, at)
+    return store.get('SELECT * FROM sessions WHERE id=?', session.id)
+  }
   function snapshot() {
     const sessions = store.all('SELECT * FROM sessions ORDER BY started_at, id').map(row => sessionView(row, store))
     const requests = store.all('SELECT * FROM requests ORDER BY created_at, id').map(requestView)
@@ -216,7 +258,8 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
               const history = store.all('SELECT hook_ts,payload,pty_id,claude_pid FROM hook_events WHERE session_id=? AND hook_ts>=? ORDER BY hook_ts,id', session.id, boundary)
                 .map(row => ({ hookTs: row.hook_ts, hook: JSON.parse(row.payload), ptyId: row.pty_id, claudePid: row.claude_pid }))
                 .filter(item => sameKnownProcess(store, session, item) && currentConversation(item.hook))
-              requestChanged = reconcileRequestOpenings(store, { ...session, repo_id: workingRoot(session.cwd) }, [...history, envelope].sort((a, b) => a.hookTs - b.hookTs || rank(a.hook.hook_event_name) - rank(b.hook.hook_event_name))) || requestChanged
+              const owner = session
+              requestChanged = reconcileRequestOpenings(store, { ...session, repo_id: workingRoot(session.cwd) }, [...history, envelope].sort((a, b) => a.hookTs - b.hookTs || rank(a.hook.hook_event_name) - rank(b.hook.hook_event_name)), { taskFor: item => taskIdFor(owner, item.hook) }) || requestChanged
               openingApplied = requestChanged
               if (requestChanged) {
                 const open = store.all('SELECT kind FROM requests WHERE session_id=? AND state=?', session.id, 'open')
@@ -256,12 +299,15 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
               lifecycleAccepted = result.accepted
               lifecycleChanged = result.changed
             }
+            if (known && session.alive && hook.hook_event_name !== 'SessionStart') session = joinTeammate(session, ['solo'])
             if (session && (!lifecycleEvent || lifecycleAccepted) && !ignoresSessionHook(store, session, hook)) {
-              requestChanged = applyRequestHook(store, { ...session, repo_id: workingRoot(session.cwd) }, envelope)
+              requestChanged = applyRequestHook(store, { ...session, repo_id: workingRoot(session.cwd) }, envelope, { taskId: taskIdFor(session, hook) })
               if (known) session = applySessionHook(store, envelope, session, requestChanged)
             }
+            if (session && hook.hook_event_name === 'SessionStart') session = joinTeammate(session)
+            if (session?.alive && hook.hook_event_name === 'PreToolUse' && hook.tool_name === 'Bash') session = joinLead(session, hook, envelope.hookTs)
           }
-          if (session && (!late || session.alive && sameKnownProcess(store, session, envelope))) recordToolStep(store, session, envelope)
+          if (session && (!late || session.alive && sameKnownProcess(store, session, envelope))) recordToolStep(store, session, envelope, { taskId: taskIdFor(session, hook) })
           store.run('INSERT INTO hook_events(dedupe_key,session_id,claude_session_id,event,hook_ts,received_at,via,pty_id,claude_pid,applied,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)', key, session?.id ?? null, hook.session_id, hook.hook_event_name, envelope.hookTs, envelope.receivedAt ?? now(), envelope.via ?? 'socket', envelope.ptyId ?? null, envelope.claudePid ?? null, lifecycleEvent ? lifecycleAccepted ? 1 : 0 : openingApplied || !late ? 1 : 0, JSON.stringify(hook))
           if (session && (!late || requestChanged)) {
             for (const row of store.all('SELECT * FROM requests WHERE session_id = ?', session.id)) {

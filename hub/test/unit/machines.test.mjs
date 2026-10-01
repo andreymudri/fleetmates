@@ -10,7 +10,7 @@ import { validateEnvelope } from '../../server/ingest/validate.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { runRetention } from '../../server/db/retention.mjs'
 import { createProjector, PROMPT_GONE_REASON, SCROLLBACK_CAP } from '../../server/machines/projector.mjs'
-import { applySessionHook, captureReviewBaseline } from '../../server/machines/session.mjs'
+import { applySessionHook, captureReviewBaseline, leadRunId } from '../../server/machines/session.mjs'
 import { projectHome } from '../../server/machines/counts.mjs'
 import { expireRequests, permissionTier } from '../../server/machines/request.mjs'
 
@@ -5361,4 +5361,14 @@ test('row 42: an exit after stop_requested ends the session whatever the signal;
       ['starting', true, 'pty_new', 'pty_new', 'launched', null, null, null, null, 4000])
     assert.equal(r.projector.snapshot().sessions.filter(row => row.id === c.id).length, 1, 'the deck session id is kept')
   } finally { r.close() }
+})
+
+test('leadRunId reads --run only from the scripts/cli.mjs command segment', () => {
+  assert.equal(leadRunId('node scripts/cli.mjs dispatch --run r1 --phase 1'), 'r1')
+  assert.equal(leadRunId('node scripts/cli.mjs gate --run="r 2" --phase 1'), 'r 2')
+  assert.equal(leadRunId("node scripts/cli.mjs gate --run 'r3'"), 'r3')
+  for (const command of ['node scripts/cli.mjs status; git log --run foo', 'node scripts/cli.mjs status && git log --run foo',
+    'node scripts/cli.mjs status | grep x --run foo', 'node scripts/cli.mjs status\ngit log --run foo', 'git log --run foo', 42]) {
+    assert.equal(leadRunId(command), null, String(command))
+  }
 })

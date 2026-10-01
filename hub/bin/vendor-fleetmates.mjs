@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 
 const hub = fileURLToPath(new URL('..', import.meta.url))
 /** The modules server/adapters/fleetmates.mjs loads. */
-export const ENTRIES = Object.freeze(['names.mjs', 'liveness.mjs', 'git.mjs'])
+export const ENTRIES = Object.freeze(['names.mjs', 'liveness.mjs', 'git.mjs', 'state.mjs'])
 
 const SPECIFIER = /(?:^|[\s;}])(?:import|export)\s[^'"`]*?\sfrom\s*['"]([^'"]+)['"]|(?:^|[\s;}])import\s*['"]([^'"]+)['"]|\bimport\s*\(\s*([^)]*)\)/g
 

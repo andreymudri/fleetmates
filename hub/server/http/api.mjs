@@ -101,9 +101,14 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
   function activeRun(run) {
     return !!run.leadSessionId && projector.snapshot().sessions.some(row => row.id === run.leadSessionId && row.alive) || run.tasks?.some(task => !['done', 'skipped', 'cancelled'].includes(task.state))
   }
+  /** Fill each run's `leadSessionId` from the `runs` table, where the run join records the lead. */
+  function withLeads(list) {
+    const leads = new Map(store.all('SELECT repo_id,run_id,lead_session_id FROM runs WHERE lead_session_id IS NOT NULL').map(row => [JSON.stringify([row.repo_id, row.run_id]), row.lead_session_id]))
+    return list.map(run => ({ ...run, leadSessionId: leads.get(JSON.stringify([run.repoId, run.runId])) ?? run.leadSessionId ?? null }))
+  }
   async function runs(query) {
     const id = resolveRepo(query)
-    return (await runReader.list()).filter(run => (!id || run.repoId === id) && (query.get('active') !== '1' || activeRun(run)))
+    return withLeads(await runReader.list()).filter(run => (!id || run.repoId === id) && (query.get('active') !== '1' || activeRun(run)))
   }
   async function snapshot() {
     const projection = projector.snapshot()
@@ -111,7 +116,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     return {
       seq: projection.seq,
       data: { sessions: projection.sessions.filter(row => row.state !== 'ended' || row.endedAt >= now() - 86_400_000), requests: projection.requests.filter(row => row.state === 'open'),
-        runs: (await runReader.list()).filter(activeRun), repos: repos(), counts: projection.counts, order: projection.home.order,
+        runs: withLeads(await runReader.list()).filter(activeRun), repos: repos(), counts: projection.counts, order: projection.home.order,
         recap: { reviewed: store.get('SELECT COUNT(*) AS n FROM sessions WHERE reviewed_at IS NOT NULL').n },
         ruleOffers: [], research: [], recorder: recorder(), health: health(), prefs, setup: { firstRunCompletedAt: prefs.firstRunCompletedAt } }
     }
@@ -168,7 +173,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       if (route === 'runs') return ok({ runs: await runs(q) })
       if (s[1] === 'runs' && s.length === 4) {
         const id = resolveRepo(q, s[2])
-        const run = (await runReader.list()).find(run => run.repoId === id && run.runId === s[3])
+        const run = withLeads(await runReader.list()).find(run => run.repoId === id && run.runId === s[3])
         if (!run) throw apiError(404, 'not_found')
         if (run.readError) throw apiError(502, 'run_unreadable', { file: run.readError.file })
         return ok({ run })
@@ -292,5 +297,5 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       return { status: 503, data: { error: { code: 'deckd_unavailable', message: 'deckd_unavailable', retryable: true } } }
     }
   }
-  return { route: handle, snapshot, preferences, repos, close: () => launcher.close() }
+  return { route: handle, snapshot, preferences, repos, withLeads, close: () => launcher.close() }
 }

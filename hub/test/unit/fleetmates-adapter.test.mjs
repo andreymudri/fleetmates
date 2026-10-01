@@ -1,10 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
+import fs from 'node:fs'
 import path from 'node:path'
-import { createFleetmatesReader } from '../../server/adapters/fleetmates.mjs'
+import { pathToFileURL } from 'node:url'
+import { createFleetmatesReader, createTaskLocator, fleetmatesScriptsDir, isRunName, taskForCwd } from '../../server/adapters/fleetmates.mjs'
+
+const rootState = await import(pathToFileURL(path.join(fleetmatesScriptsDir(), 'state.mjs')).href)
 
 async function withRepo(run) {
   const repo = await mkdtemp(path.join(tmpdir(), 'deck-runs-'))
@@ -387,5 +391,131 @@ test('recorded gate keyed by a manifest phase name remains visible', async () =>
       assert.equal(gate.verdict, 'PASS')
       assert.equal(gate.phaseName, 'default')
     } finally { reader.close() }
+  })
+})
+
+// taskForCwd (M2 Task 7): the one index record for a worktree, read synchronously with the root guards.
+async function withTeammate(run) {
+  await withRepo(async (base) => {
+    const repo = fs.realpathSync(base)
+    const worktree = path.join(repo, 'wt-T2')
+    await mkdir(worktree)
+    await rootState.writeLocation(repo, 'r1', 'T2', { worktree, branch: 'fleetmates/r1/T2' })
+    await run(repo, worktree)
+  })
+}
+
+/** Every file under `.fleetmates/` with its size and mtime, to prove a lookup writes nothing. */
+function stateTree(repo) {
+  const rows = []
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name)
+      const info = fs.lstatSync(full)
+      rows.push(`${path.relative(repo, full)} ${info.size} ${info.mtimeMs}`)
+      if (entry.isDirectory()) walk(full)
+    }
+  }
+  walk(path.join(repo, '.fleetmates'))
+  return rows.sort()
+}
+
+/** A locator over the real file system that counts the record opens. */
+function countingLocator(clock) {
+  let opens = 0
+  const locator = createTaskLocator({
+    clock: () => clock.now,
+    io: { ...fs, openSync: (...args) => { opens++
+      return fs.openSync(...args) } },
+  })
+  return { locator, get opens() { return opens } }
+}
+
+test('taskForCwd resolves a worktree to its run and task, and null for any other directory', async () => {
+  await withTeammate(async (repo, worktree) => {
+    const before = stateTree(repo)
+    assert.deepEqual(taskForCwd(repo, worktree), { runId: 'r1', taskId: 'T2' })
+    assert.deepEqual(taskForCwd(repo, `${worktree}/`), { runId: 'r1', taskId: 'T2' }, 'the key is the normalised path')
+    assert.equal(taskForCwd(repo, repo), null)
+    assert.equal(taskForCwd(repo, path.join(repo, 'elsewhere')), null)
+    assert.equal(taskForCwd(repo, ''), null)
+    assert.equal(taskForCwd('relative/repo', worktree), null)
+    assert.deepEqual(stateTree(repo), before, 'the lookup writes nothing under .fleetmates/')
+  })
+})
+
+test('taskForCwd caches a hit for 60 s and never caches a miss', async () => {
+  await withTeammate(async (repo, worktree) => {
+    const clock = { now: 1_000 }
+    const h = countingLocator(clock)
+    assert.deepEqual(h.locator.taskForCwd(repo, worktree), { runId: 'r1', taskId: 'T2' })
+    assert.equal(h.opens, 1)
+    clock.now += 59_999
+    assert.deepEqual(h.locator.taskForCwd(repo, worktree), { runId: 'r1', taskId: 'T2' })
+    assert.equal(h.opens, 1, 'a second lookup inside 60 s reads nothing')
+    clock.now += 1
+    assert.deepEqual(h.locator.taskForCwd(repo, worktree), { runId: 'r1', taskId: 'T2' })
+    assert.equal(h.opens, 2, 'the entry expires at 60 s')
+    // A teammate's `locate` writes its record after its own hook already looked the worktree up.
+    const later = path.join(repo, 'wt-T3')
+    await mkdir(later)
+    assert.equal(h.locator.taskForCwd(repo, later), null)
+    assert.equal(h.opens, 3)
+    await rootState.writeLocation(repo, 'r1', 'T3', { worktree: later, branch: 'fleetmates/r1/T3' })
+    assert.deepEqual(h.locator.taskForCwd(repo, later), { runId: 'r1', taskId: 'T3' }, 'the earlier miss was not cached')
+    assert.equal(h.opens, 4)
+  })
+})
+
+test('taskForCwd refuses an oversized record, a FIFO and a record naming another worktree', async () => {
+  await withTeammate(async (repo, worktree) => {
+    const record = path.join(rootState.indexDir(repo), `${rootState.worktreeKey(worktree)}.json`)
+    const fresh = () => createTaskLocator().taskForCwd(repo, worktree)
+    const valid = fs.readFileSync(record, 'utf8')
+    fs.writeFileSync(record, valid.trimEnd() + ' '.repeat(64 * 1024))
+    assert.equal(fresh(), null, 'over 64 KiB')
+    fs.writeFileSync(record, valid.trimEnd() + ' '.repeat(64 * 1024 - Buffer.byteLength(valid.trimEnd())))
+    assert.deepEqual(fresh(), { runId: 'r1', taskId: 'T2' }, 'exactly 64 KiB is still read')
+    fs.writeFileSync(record, JSON.stringify({ runId: 'r1', taskId: 'T2', worktree: path.join(repo, 'other') }))
+    assert.equal(fresh(), null, 'a record filed under one key naming another directory')
+    fs.writeFileSync(record, JSON.stringify({ runId: 'r1', taskId: 'T2', worktree: 'wt-T2' }))
+    assert.equal(fresh(), null, 'a relative worktree')
+    fs.rmSync(record)
+    execFileSync('mkfifo', [record])
+    // In a child process: a blocking open on a FIFO with no writer never returns, so in-process it would hang the runner.
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e',
+      `const { createTaskLocator } = await import(${JSON.stringify(new URL('../../server/adapters/fleetmates.mjs', import.meta.url).href)})
+       process.stdout.write(JSON.stringify(createTaskLocator().taskForCwd(${JSON.stringify(repo)}, ${JSON.stringify(worktree)})))`],
+    { encoding: 'utf8', timeout: 10_000 })
+    assert.equal(child.signal, null, 'the FIFO lookup returned instead of blocking')
+    assert.equal(child.status, 0, child.stderr)
+    assert.equal(child.stdout, 'null')
+  })
+})
+
+test('taskForCwd applies the root name rules exactly as findTaskByWorktree does', async () => {
+  await withTeammate(async (repo, worktree) => {
+    const record = path.join(rootState.indexDir(repo), `${rootState.worktreeKey(worktree)}.json`)
+    const runIds = ['r1', '2026/substop', '../x', 'a..b', '-x', 'x;y', '', 'r\u200b1', 'e\u0301', '/abs', 'a//b', 'r'.repeat(255), 'r'.repeat(256), 'é', 7]
+    const taskIds = ['T2', 'T2/x', '..', '.', '-T', 'T\u2800', 'x'.repeat(128), 'x'.repeat(129), null]
+    let compared = 0
+    for (const runId of runIds) {
+      for (const taskId of taskIds) {
+        fs.writeFileSync(record, JSON.stringify({ runId, taskId, worktree }))
+        const expected = await rootState.findTaskByWorktree(repo, worktree)
+        const actual = createTaskLocator().taskForCwd(repo, worktree)
+        assert.deepEqual(actual, expected && { runId: expected.runId, taskId: expected.taskId }, JSON.stringify({ runId, taskId }))
+        compared++
+      }
+    }
+    assert.ok(compared > 100)
+    for (const runId of runIds) {
+      fs.writeFileSync(record, JSON.stringify({ runId, taskId: 'T2', worktree }))
+      assert.equal(isRunName(repo, runId), (await rootState.findTaskByWorktree(repo, worktree)) !== null, JSON.stringify(runId))
+    }
+    assert.equal(isRunName(repo, 'r1'), true)
+    assert.equal(isRunName(repo, '2026/substop'), true)
+    assert.equal(isRunName(repo, '../escape'), false)
+    assert.equal(isRunName(repo, '-rf'), false)
   })
 })

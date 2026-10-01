@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readState } from '../scripts/state.mjs'
+import { readState, worktreeKey, indexDir, isLocalAbsolute } from '../scripts/state.mjs'
 import { livenessRows, DEFAULT_STALE_MINUTES } from '../scripts/liveness.mjs'
 import { NAMES } from '../scripts/names.mjs'
 import { createGit } from '../scripts/git.mjs'
@@ -11,4 +11,9 @@ test('deck reader root imports retain their public names', () => {
   assert.equal(typeof DEFAULT_STALE_MINUTES, 'number')
   assert.equal(typeof NAMES.stateDir, 'string')
   assert.equal(typeof createGit, 'function')
+  // The deck's teammate lookup (hub/server/adapters/fleetmates.mjs taskForCwd) names the index record with the
+  // first two and checks the record's worktree path with the third.
+  assert.equal(typeof worktreeKey, 'function')
+  assert.equal(typeof indexDir, 'function')
+  assert.equal(typeof isLocalAbsolute, 'function')
 })
