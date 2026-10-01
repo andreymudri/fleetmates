@@ -43,5 +43,4 @@ package name decision (see `docs/deck/m1-exit.md`).
 ### Known limits
 
 - Observe only. Answering requests and launching sessions from the browser come in M2 and M3.
-- The 30-day detail retention job exists but nothing schedules it yet, so detail is kept.
 - Changed-line counts on edit steps are always empty: the hook does not forward tool responses.

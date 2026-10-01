@@ -16,12 +16,16 @@ Two separate things share this repo:
 
 ## Current state of the deck
 
-M0 (the spike) is done. Start from these files:
+All deck work lives on the `feat/deck` branch. Base new deck branches and fleet runs on it
+(`--base feat/deck`), not on `master`, and commit deck plans there.
+
+M0 (the spike) is done. M1 (Observe) is integrated on `feat/deck`; its remaining exit steps need
+the owner and are listed in `docs/deck/m1-exit.md`. Start from these files:
 
 - `docs/deck/spikes/m0.md`: what M0 built, its measurements, and the open questions it
   answered. Section 6 lists known defects and follow-ups with file:line. Section 7 lists what
   M1 inherits. Section 9 lists the checks only the owner can do.
-- `docs/deck/12-milestones.md`: the milestones. M1 is next.
+- `docs/deck/12-milestones.md`: the milestones. M2 follows M1's exit.
 - `docs/deck/README.md`: how the design docs are organized.
 - `docs/plans/2026-09-26-deck-m0.md`: the M0 plan, including its deviations from the handoff.
 

@@ -25,7 +25,7 @@ first and a short `TMPDIR`, because Unix socket paths are limited to about 108 b
 | Suite | Command | Result |
 |---|---|---|
 | Root (fleetmates) | `npm test` | 2796 tests, 2779 pass, 0 fail, 17 skipped |
-| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 610 tests, 610 pass, 0 fail, 0 skipped |
+| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 630 tests, 630 pass, 0 fail, 0 skipped |
 | Observe e2e | `TMPDIR=/tmp/hx node --test hub/test/e2e/observe.spec.mjs` | 39 tests, 39 pass, 0 fail, 0 skipped |
 | Security e2e | `TMPDIR=/tmp/hx node --test hub/test/e2e/security.spec.mjs` | 10 tests, 10 pass, 0 fail, 0 skipped |
 | Accessibility e2e | `TMPDIR=/tmp/hx node --test hub/test/e2e/accessibility.spec.mjs` | 7 tests, 7 pass, 0 fail, 0 skipped |
@@ -34,9 +34,8 @@ Notes:
 
 - The accessibility suite now finds `axe-core` in `hub/node_modules` (a pinned hub development
   dependency, 4.13.0), so its axe tests run without `AXE_CORE_PATH`. It reports zero serious or
-  critical violations. One moderate finding remains: the loading page has no level-one heading
-  (`page-has-heading-one`). The comment at the top of that spec still says axe-core is not a hub
-  dependency; that file was outside this task's file set.
+  critical violations. The moderate `page-has-heading-one` finding on the loading page was fixed in
+  the cleanup round (section 5), and the spec now asserts it.
 - The e2e specs and the performance scripts are not part of `npm --prefix hub test` and are not in
   `deck.yml`. The release workflow runs them (section 3).
 - Never run a bare `node --test` in this repository: its default glob includes
@@ -146,22 +145,13 @@ as reported by the run's reviewers.
 
 | Severity | Finding | Checked how |
 |---|---|---|
-| Medium | A popup title made of wide glyphs can wrap over several lines in mako and push the body (terminal hint and tier) below the popup's max height. Since the last fix the title leads with "needs you", but the tier is still only in the body: for a task `deploy docs · caution ` plus 55 U+FDFD, the title is 80 characters, reads "needs you · deploy docs · caution ...", and "destructive" sits on the body's second line. Proposed fix: put the most severe tier in the title, or cap the task by rendered width | `requestPopupText` called with that input. The mako rendering itself is not verified |
-| Medium | The 30-day retention job (`hub/server/db/retention.mjs`) is tested but no production code calls it, so detail is never pruned in 0.1.0. The README and changelog say so | `grep` for callers outside tests found none |
 | Low | Line counts on Focus edit steps are always empty: `deck-hook` drops `tool_response` (`hookFields` in `hub/hook/deck-hook.mjs`), which `patchCounts` in `session.mjs` reads. Owner decision: should the hook compute the counts itself, since the response can carry file contents | Code read: `tool_response` is absent from `hookFields` |
-| Low | First run shows a missing Claude Code as "Claude Code 2.1.282 is newer than this deck was tested with": `versionOf` in `FirstRun.jsx` takes the tested version out of the doctor detail "Claude Code unavailable; tested 2.1.282" | A copy of `versionOf` run on that detail returns `2.1.282` |
-| Low | Settings splits `vaultCommand` arguments on whitespace, so an argument containing a space cannot be entered; and a field showing a hidden character as a visible token saves the token text back | `parsePref` and `prefText` in `Settings.jsx` read |
-| Low | Popup ordering between "other tiers" and untiered requests is unpinned (unreachable today: `permissionTier` returns only `destructive` or `caution`) | Swapping the two ranks in `notification.mjs` left all 606 hub tests green (before this fix round added 4); restored |
-| Low | A deckd drop during the handshake can count two reconnect attempts (`hub/server/main.mjs`); some recovery paths in `main.mjs` (no-XDG Retry, probe on a later macrotask, deckd Start) have no pinning test | Not re-checked |
-| Low | `api.mjs` rescan error handling; a NUL in a path returns 500 | Not re-checked |
-| Low | `setup.test.mjs` once left an orphaned `listener.mjs` child after removing its temp dir (2026-09-30) | Not seen in this task's hub runs |
+| Low | A NUL in the path of a static request (for example `GET /a%00b`) returns 500: `realpath` in `hub/server/http/router.mjs` throws `ERR_INVALID_ARG_VALUE`, which the static route does not map to a 4xx. The API routes return 400 since the cleanup round | `realpath` called on a path containing NUL throws `ERR_INVALID_ARG_VALUE`; the router's catch maps that to 500 |
+| Low | `runRetention` (`hub/server/db/retention.mjs`) stores each `session.removed` event with data `{}`. The live publish sends `{ id }`, but a client that replays stored events cannot tell which session to drop | Code read |
 | Low | Earlier test gaps listed in the run's review files for T7, T10, T11 and T12 | Not re-checked |
 
 New in this task:
 
-- `hub/LICENSE` does not exist, so the tarball ships no license file even though
-  [13-operations.md](13-operations.md) section 13.2 lists `LICENSE`. The `license` field says MIT.
-  Adding the file was outside this task's file set.
 - `hub/test/unit/m1-scaffold.test.mjs` asserts `"private": true`, so the package stays private and
   the release workflow's package job fails until the owner removes the flag and that assertion.
 - The dogfood pane-check logger (TEST-O4, `DECK_DOGFOOD=1`) and `fleetmates-deck report` are not
@@ -169,6 +159,27 @@ New in this task:
   grep is not in CI.
 - npm 11 may skip `node-pty`'s install scripts. The prebuilt binary worked here; a platform without
   a matching prebuild would need `npm install -g --allow-scripts=node-pty`.
+
+Fixed in the cleanup round (tasks 17 and 18, phase 13, gate PASS with no review findings):
+
+- Popup titles name the most severe open tier before the task, as in
+  `needs you · destructive · <task>`, so the tier comes before any task text. The mako rendering is
+  not re-verified. Other tiers sort before untiered requests, and a test pins it.
+- The 30-day retention job runs when the server starts and then daily at 04:10 local time. Removed
+  sessions are published to open tabs.
+- A deckd drop during the handshake counts one reconnect attempt, not two. The no-XDG Retry path,
+  the probe on a later macrotask and the deckd Start path have tests.
+- Rescan skips a subdirectory it cannot read; a NUL in the scan root or a session cwd returns 400.
+- First run shows a missing Claude Code as not found.
+- Settings keeps a stored value with hidden characters unless the field is changed, shows a hint
+  for it, and accepts quoted `vaultCommand` arguments.
+- The loading page has a level-one heading.
+- `hub/LICENSE` ships in the package.
+- The vendor script's refusal of a non-literal dynamic import, and its following of `export ... from`
+  and literal dynamic imports, are tested.
+- `setup.test.mjs` stops every listener it starts, and a listener exits when its stdin closes.
+- The reorder early-flush tests and the AC15 countdown e2e use fake clocks instead of wall-clock
+  waits.
 
 ## 6. Owner decisions still open
 
@@ -191,7 +202,6 @@ confirms or changes it before the milestone closes.
 | FR-O4, HOME-O9, design-system 15.1 to 15.5; FAIL-O2; SHELL-O2; CREW-O1 to CREW-O3 | As in the design and screen specs |
 | SET-O1, SET-O2 | Language row read-only; UI prefs in the database |
 | Hook line counts (section 5) | None computed |
-| Hub `LICENSE` file (section 5) | Missing |
 
 ## 7. Dogfood log template
 

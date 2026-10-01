@@ -101,8 +101,8 @@ and opens `http://127.0.0.1:47800/` in your browser with the token in the URL fr
 | Units | `~/.config/systemd/user/fleetmates-deck.service`, `fleetmates-deckd.service` |
 
 The policy is a summary row per session kept forever, and the event stream and stored scrollback
-dropped after 30 days. In 0.1.0 the 30-day cleanup is implemented and tested but not yet scheduled,
-so nothing is dropped yet. Claude Code transcripts are linked by path, never copied.
+dropped after 30 days. The server runs this cleanup when it starts and then daily at 04:10 local
+time. Claude Code transcripts are linked by path, never copied.
 
 Meeting content: M1 only reads whether TurbidAssist is recording, to keep the bell quiet. It does
 not read or store transcripts.
