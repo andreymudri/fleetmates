@@ -11,13 +11,16 @@ function canonical(value) {
 
 const LINE_MAX = 4000
 
+// LF, CRLF, VT, FF, NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR; a lone CR is left for the control strip.
+const LINE_BREAK = /\s*(?:\r\n|[\n\u000b\u000c\u0085\u2028\u2029])\s*/u
+
 /**
  * Fold text to one display line: each line break becomes a visible ` ↵ ` and the result is capped.
  * @param {unknown} text
  * @returns {string}
  */
 export function oneLine(text) {
-  const line = String(text ?? '').trim().split(/\s*\r?\n\s*/).filter(Boolean).join(' ↵ ')
+  const line = String(text ?? '').trim().split(LINE_BREAK).filter(Boolean).join(' ↵ ')
   return line.length > LINE_MAX ? `${line.slice(0, LINE_MAX - 1)}…` : line
 }
 

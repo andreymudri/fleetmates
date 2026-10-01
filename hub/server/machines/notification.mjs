@@ -1,14 +1,25 @@
 import { BODY_MAX, TITLE_MAX, clipText, createNotifier } from '../adapters/notify.mjs'
+import { oneLine } from './request.mjs'
 
-/** The shortest summary worth showing; a request that cannot get this much room moves into "+N more". */
+/**
+ * The summary length every shown request is promised (or its whole summary, when shorter). Requests are shown
+ * in severity order only while all of them can keep that much; the rest move into "+N more".
+ */
 const SUMMARY_MIN = 24
 const HINT = '\nAnswer in your terminal'
+/** Popup line order: the drawer's tier words from most to least severe; other tiers, then untiered, come last. */
+const SEVERITY = ['destructive', 'caution', 'safe']
 const length = text => Array.from(text).length
+const rank = request => request.tier ? (SEVERITY.includes(request.tier) ? SEVERITY.indexOf(request.tier) : SEVERITY.length) : SEVERITY.length + 1
+const tierText = tier => tier ? ` · ${tier}` : ''
 
 /**
  * Title and body of a needs-you popup. Only the agent-written parts (the task and each summary) are cut, so
  * " needs you", every tier and the terminal hint always fit notify.mjs's final caps (08-security 4.9, T13).
- * Requests that cannot keep a readable summary are left out whole and counted as "+N more".
+ * Lines go most severe first (stable within a tier), so the agent's arrival order cannot push a destructive
+ * request out of the popup. Each summary is folded to one line, then the summaries share the room: the
+ * shortest keep their whole text and the longest are cut to one common length. Requests left out are
+ * counted on a last line that names the most severe tier among them, as "+N more · destructive".
  * @param {string} task
  * @param {{ summary: string, tier?: string | null }[]} requests
  * @param {boolean} observed whether to end with the terminal hint
@@ -18,23 +29,22 @@ export function requestPopupText(task, requests, observed) {
   const suffix = ` needs you${requests.length > 1 ? ` (${requests.length} requests)` : ''}`
   const title = clipText(task, TITLE_MAX - length(suffix)) + suffix
   const tail = observed ? HINT : ''
-  const lines = []
-  let used = length(tail)
-  for (let i = 0; i < requests.length; i++) {
-    const tier = requests[i].tier ? ` · ${requests[i].tier}` : ''
-    const separator = lines.length ? 1 : 0
-    const rest = requests.length - i - 1
-    // Keep room for the "+N more" line a later stop would add.
-    const reserve = rest ? length(`\n+${rest} more`) : 0
-    const room = BODY_MAX - used - separator - length(tier) - reserve
-    if (lines.length && room < SUMMARY_MIN) {
-      lines.push(`+${requests.length - i} more`)
-      break
-    }
-    const line = clipText(requests[i].summary, room) + tier
-    lines.push(line)
-    used += separator + length(line)
-  }
+  const sorted = requests.map((request, index) => ({ request, index }))
+    .sort((a, b) => rank(a.request) - rank(b.request) || a.index - b.index)
+    .map(({ request }) => ({ text: clipText(oneLine(request.summary), Infinity), tier: tierText(request.tier) }))
+  const more = shown => shown < sorted.length ? `+${sorted.length - shown} more${sorted[shown].tier}` : ''
+  // Room the first `shown` summaries share: everything but the deck's own words and the line breaks.
+  const room = shown => BODY_MAX - length(tail) - sorted.slice(0, shown).reduce((sum, row) => sum + length(row.tier), 0)
+    - (shown - 1) - (more(shown) ? 1 + length(more(shown)) : 0)
+  let shown = sorted.length
+  while (shown > 1 && sorted.slice(0, shown).reduce((sum, row) => sum + Math.min(length(row.text), SUMMARY_MIN), 0) > room(shown)) shown--
+  const budget = room(shown)
+  const lengths = sorted.slice(0, shown).map(row => length(row.text))
+  // The largest common cut whose total fits the budget.
+  let cut = Math.max(0, ...lengths)
+  while (cut > 0 && lengths.reduce((sum, size) => sum + Math.min(size, cut), 0) > budget) cut--
+  const lines = sorted.slice(0, shown).map(row => clipText(row.text, cut) + row.tier)
+  if (more(shown)) lines.push(more(shown))
   return { title, body: lines.join('\n') + tail }
 }
 

