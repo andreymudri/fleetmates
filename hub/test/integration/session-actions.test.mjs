@@ -87,7 +87,7 @@ function hook(deck, ptyId, cwd, event, fields = {}) {
 async function until(fn, what) {
   const end = Date.now() + 10_000
   for (;;) {
-    const value = fn()
+    const value = await fn()
     if (value) return value
     assert.ok(Date.now() < end, `timed out waiting for ${what}`)
     await new Promise(resolve => setTimeout(resolve, 10))
@@ -210,6 +210,11 @@ test('scrollback reads deckd for a live session and the stored tail after it exi
   assert.equal(live.data.truncated, false)
   for (const bad of ['0', '5001', 'x']) assert.equal((await request(`/api/sessions/${session.id}/scrollback?lines=${bad}`)).status, 422, bad)
   await term.request('write', { ptyId, data: Buffer.from('last words\r').toString('base64'), source: { kind: 'terminal' } })
+  // Kill only once deckd's ring holds the echo, so the stored tail is checked against bytes deckd surely kept.
+  await until(async () => {
+    const read = await request(`/api/sessions/${session.id}/scrollback?lines=50`)
+    return read.status === 200 && read.data.source === 'deckd' && read.data.text.includes('last words')
+  }, 'the echo in the live scrollback')
   await term.request('kill', { ptyId, signal: 'SIGKILL', graceMs: 0 })
   await until(() => !byId(deck, session.id).alive, 'the exit')
   const stored = await request(`/api/sessions/${session.id}/scrollback`)

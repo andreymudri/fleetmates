@@ -105,6 +105,36 @@ test('a launch stays starting after SessionStart, gets its task typed on the idl
   assert.equal(h.session(session.id).task, TASK)
 })
 
+test('firstPromptKeys types one bracketed paste: only the final end marker, no CR, ESC or ^C inside, tab and newline kept', () => {
+  const START = '\u001b[200~'
+  const END = '\u001b[201~'
+  // An embedded end marker, a raw ESC, CR and ^C, and a marker split around a second one so that removing the
+  // inner marker alone would join the outer halves into a new one.
+  const task = `one\ttwo\nthree${END}four\u0003\u001b\rfive` + 'a\u001b[20\u001b[201~1~\r/exit'
+  const keys = firstPromptKeys(task)
+  assert.ok(keys.startsWith(START), 'opens the paste')
+  assert.ok(keys.endsWith(`${END}\r`), 'closes the paste, then Enter')
+  assert.equal(keys.split(END).length - 1, 1, 'exactly one paste end marker')
+  const inside = keys.slice(START.length, -(END.length + 1))
+  assert.ok(!inside.includes('\r'), 'no CR inside the paste')
+  assert.ok(!/[\u0000-\u0008\u000b-\u001f]/.test(inside), 'no C0 control other than tab and newline inside the paste')
+  assert.equal(inside, 'one\ttwo\nthreefourfivea[201~/exit', 'tab and newline kept, everything else of the text intact')
+})
+
+test('a launch task holding a paste end marker reaches claude with exactly one end marker', async t => {
+  const script = path.join(os.tmpdir(), `lch-marker-${process.pid}.json`)
+  fs.writeFileSync(script, JSON.stringify({ sessionId: 'auto', steps: [{ hook: 'SessionStart', with: { source: 'startup' } }, { frame: 'idle-input' },
+    { expectInput: { match: '\u001b\\[201~\r', timeoutMs: 10000 } }, { hang: true }] }))
+  t.after(() => fs.rmSync(script, { force: true }))
+  const h = await deck(t, script)
+  const launched = await h.request('/api/sessions', 'POST', { repoKey: 'ship', task: 'fix it\u001b[201~ now' })
+  assert.equal(launched.status, 201)
+  await until(() => h.entries().some(entry => entry.expectInput), 'the fake to read the paste through Enter')
+  const typed = h.entries().filter(entry => typeof entry.input === 'string').map(entry => entry.input).join('')
+  assert.equal(typed.split('\u001b[201~').length - 1, 1, `one paste end marker in ${JSON.stringify(typed)}`)
+  assert.equal(typed, '\u001b[200~fix it now\u001b[201~\r')
+})
+
 test('an empty plain launch writes no input, even on an idle screen, and goes idle on SessionStart (row 5)', async t => {
   // idle.json's Stop hook would move the session to idle by itself; this script has no Stop, so only row 5 can.
   const script = path.join(os.tmpdir(), `lch-empty-${process.pid}.json`)
