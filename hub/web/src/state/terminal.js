@@ -1,0 +1,186 @@
+/**
+ * Client side of the WebSocket terminal channel (docs/deck/05-api.md section 3.5): the binary frame
+ * layout, a per-tab terminal client over `createConnection`, and the paste guards of state-machines 3.5.
+ */
+
+/** Binary frame kinds: byte 0 of every terminal frame. */
+export const FRAME_KIND = Object.freeze({ output: 1, input: 2, snapshot: 3 })
+
+/** Most tail subscriptions one socket may hold (05-api 3.5, `sub.tails`). */
+export const MAX_TAILS = 50
+
+/** Paste size above which the SPA asks first (state-machines 3.5), in UTF-8 bytes. */
+export const PASTE_CONFIRM_BYTES = 4096
+
+const ID = /^[A-Za-z0-9_-]{1,64}$/
+const encoder = new TextEncoder()
+
+function toBytes(data) {
+  if (typeof data === 'string') return encoder.encode(data)
+  if (data instanceof Uint8Array) return data
+  if (data instanceof ArrayBuffer) return new Uint8Array(data)
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+  throw new TypeError('terminal data must be a string or bytes')
+}
+
+/**
+ * Encode one terminal frame: byte 0 the kind, byte 1 the session id length, the ASCII id, then the payload.
+ * @param {number} kind one of {@link FRAME_KIND}
+ * @param {string} sessionId 1 to 64 characters from `[A-Za-z0-9_-]`
+ * @param {string | Uint8Array | ArrayBuffer} payload a string is sent as UTF-8
+ * @returns {Uint8Array}
+ */
+export function encodeFrame(kind, sessionId, payload) {
+  if (typeof sessionId !== 'string' || !ID.test(sessionId)) throw new TypeError('invalid session id')
+  const body = toBytes(payload)
+  const frame = new Uint8Array(2 + sessionId.length + body.length)
+  frame[0] = kind
+  frame[1] = sessionId.length
+  for (let i = 0; i < sessionId.length; i++) frame[2 + i] = sessionId.charCodeAt(i)
+  frame.set(body, 2 + sessionId.length)
+  return frame
+}
+
+/**
+ * Encode browser keystrokes or a paste for one session as an input frame (kind 2).
+ * @param {string} sessionId
+ * @param {string | Uint8Array} bytes
+ * @returns {Uint8Array}
+ */
+export function encodeInput(sessionId, bytes) {
+  return encodeFrame(FRAME_KIND.input, sessionId, bytes)
+}
+
+/**
+ * Decode a binary frame. Returns null for a frame shorter than 2 bytes, an id length of 0 or over 64,
+ * a truncated id, or an id outside `[A-Za-z0-9_-]`. The payload is a view into the frame.
+ * @param {ArrayBuffer | Uint8Array} buffer
+ * @returns {{ kind: number, sessionId: string, payload: Uint8Array } | null}
+ */
+export function decodeServerFrame(buffer) {
+  let frame
+  try { frame = toBytes(buffer) } catch { return null }
+  if (frame.length < 2) return null
+  const length = frame[1]
+  if (length === 0 || length > 64 || frame.length < 2 + length) return null
+  const sessionId = String.fromCharCode(...frame.subarray(2, 2 + length))
+  if (!ID.test(sessionId)) return null
+  return { kind: frame[0], sessionId, payload: frame.subarray(2 + length) }
+}
+
+/**
+ * @typedef {object} TerminalHandlers
+ * @property {(message: { sessionId: string, ptyId: string, cols: number, rows: number }) => void} [onAttached]
+ * @property {(bytes: Uint8Array) => void} [onSnapshot] the screen plus scrollback; reset the terminal first
+ * @property {(bytes: Uint8Array) => void} [onOutput]
+ * @property {(message: { sessionId: string, code: number | null, signal: string | null }) => void} [onExit]
+ * @property {(error: { code: string, message?: string }) => void} [onError]
+ */
+
+/**
+ * The terminal client for one tab. Every `attach` sends `term.attach`; the client sends it again for every
+ * attached session when the connection returns to `live` and after a `term.error output_dropped`, so the
+ * server resends the screen. `subscribeTails` is sent again on `live` too.
+ * @param {{ onTerm: Function, onBinary: Function, onLive: Function, send: (message: object) => boolean, sendBinary: (bytes: Uint8Array) => boolean }} connection
+ * @returns {{
+ *   attach: (sessionId: string, size: { cols: number, rows: number }, handlers?: TerminalHandlers) => { write: (data: string | Uint8Array) => boolean, resize: (cols: number, rows: number) => boolean, detach: () => void },
+ *   subscribeTails: (ids: string[]) => boolean,
+ *   close: () => void
+ * }}
+ */
+export function createTerminalClient(connection) {
+  const attached = new Map()
+  let tails = null
+  const sendAttach = (sessionId, entry) => connection.send({ t: 'term.attach', sessionId, cols: entry.cols, rows: entry.rows })
+  const off = [
+    connection.onTerm(message => {
+      const entry = attached.get(message?.sessionId)
+      if (!entry) return
+      if (message.t === 'term.attached') entry.handlers.onAttached?.(message)
+      else if (message.t === 'term.exit') entry.handlers.onExit?.(message)
+      else if (message.t === 'term.error') {
+        if (message.error?.code === 'output_dropped') sendAttach(message.sessionId, entry)
+        else entry.handlers.onError?.(message.error ?? { code: 'internal' })
+      }
+    }),
+    connection.onBinary(data => {
+      const frame = decodeServerFrame(data)
+      const entry = frame && attached.get(frame.sessionId)
+      if (!entry) return
+      if (frame.kind === FRAME_KIND.snapshot) entry.handlers.onSnapshot?.(frame.payload)
+      else if (frame.kind === FRAME_KIND.output) entry.handlers.onOutput?.(frame.payload)
+    }),
+    connection.onLive(() => {
+      for (const [sessionId, entry] of attached) sendAttach(sessionId, entry)
+      if (tails) connection.send({ t: 'sub.tails', sessionIds: tails })
+    })
+  ]
+  return {
+    attach(sessionId, { cols, rows }, handlers = {}) {
+      const entry = { cols, rows, handlers }
+      attached.set(sessionId, entry)
+      sendAttach(sessionId, entry)
+      const current = () => attached.get(sessionId) === entry
+      return {
+        write(data) {
+          if (!current()) return false
+          return connection.sendBinary(encodeInput(sessionId, data))
+        },
+        resize(nextCols, nextRows) {
+          if (!current()) return false
+          entry.cols = nextCols
+          entry.rows = nextRows
+          return connection.send({ t: 'term.resize', sessionId, cols: nextCols, rows: nextRows })
+        },
+        detach() {
+          if (!current()) return
+          attached.delete(sessionId)
+          connection.send({ t: 'term.detach', sessionId })
+        }
+      }
+    },
+    subscribeTails(ids) {
+      tails = [...ids].filter(id => typeof id === 'string').slice(0, MAX_TAILS)
+      return connection.send({ t: 'sub.tails', sessionIds: tails })
+    },
+    close() {
+      for (const unsubscribe of off) unsubscribe()
+      attached.clear()
+      tails = null
+    }
+  }
+}
+
+const PASTE_END = '\u001b[201~'
+// Every C0 control except tab (0x09) and newline (0x0a).
+const C0 = /[\u0000-\u0008\u000b-\u001f]/g
+
+/**
+ * Clean pasted text before xterm wraps it in bracketed paste: remove every `ESC[201~` (until none is
+ * left, so a marker rebuilt by a removal goes too) and every C0 control except tab and newline.
+ * @param {string} text
+ * @returns {string}
+ */
+export function sanitizePaste(text) {
+  let clean = String(text ?? '')
+  while (clean.includes(PASTE_END)) clean = clean.split(PASTE_END).join('')
+  return clean.replace(C0, '')
+}
+
+/**
+ * Whether a paste is above 4 KB counted in UTF-8 bytes.
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function pasteNeedsConfirm(text) {
+  return encoder.encode(String(text ?? '')).length > PASTE_CONFIRM_BYTES
+}
+
+/**
+ * Paste size for the confirm copy ("Paste {size} into {repo}?"), rounded to whole KB.
+ * @param {string} text
+ * @returns {string}
+ */
+export function pasteSizeText(text) {
+  return `${Math.round(encoder.encode(String(text ?? '')).length / 1024)} KB`
+}

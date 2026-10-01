@@ -110,7 +110,15 @@ export function createApiClient({ token, fetch, onFatal = () => {} }) {
  * @param {Storage} options.storage
  * @param {() => Promise<string | null>} options.probe
  * @param {() => void} options.reload
- * @returns {{ start: () => void, retryNow: () => void, visible: () => void, close: () => void }}
+ * @returns {{
+ *   start: () => void, retryNow: () => void, visible: () => void, close: () => void,
+ *   send: (message: object) => boolean, sendBinary: (bytes: Uint8Array) => boolean,
+ *   onTerm: (fn: (message: object) => void) => () => void, onBinary: (fn: (data: ArrayBuffer) => void) => () => void,
+ *   onLive: (fn: () => void) => () => void
+ * }}
+ * `term.*` JSON messages go to `onTerm` listeners and binary frames to `onBinary` listeners, never to the
+ * store. `send` and `sendBinary` send only while the connection is `live` and return false otherwise.
+ * `onLive` fires on every return to `live`.
  */
 export function createConnection({
   token, url, WebSocket, store, storage, probe, reload, setTimeout = globalThis.setTimeout, clearTimeout = globalThis.clearTimeout,
@@ -121,7 +129,21 @@ export function createConnection({
   let timer = null
   let watchdog = null
   let stopped = false
-  const set = (state, nextAt = null) => store.dispatch({ type: 'connection', state, attempt, nextAt })
+  let live = false
+  const termListeners = new Set()
+  const binaryListeners = new Set()
+  const liveListeners = new Set()
+  const listen = listeners => fn => {
+    listeners.add(fn)
+    return () => listeners.delete(fn)
+  }
+  const notify = (listeners, value) => { for (const fn of [...listeners]) fn(value) }
+  const set = (state, nextAt = null) => {
+    const wasLive = live
+    live = state === 'live'
+    store.dispatch({ type: 'connection', state, attempt, nextAt })
+    if (live && !wasLive) notify(liveListeners)
+  }
   const disarm = () => {
     if (watchdog !== null) clearTimeout(watchdog)
     watchdog = null
@@ -170,6 +192,7 @@ export function createConnection({
     set('connecting')
     let opened = false
     const ws = new WebSocket(url, wsProtocols(token))
+    ws.binaryType = 'arraybuffer'
     socket = ws
     ws.onopen = () => {
       if (socket !== ws) return
@@ -183,8 +206,16 @@ export function createConnection({
     ws.onmessage = event => {
       if (socket !== ws) return
       arm()
+      if (typeof event.data !== 'string') {
+        notify(binaryListeners, event.data)
+        return
+      }
       let message
       try { message = JSON.parse(event.data) } catch { return }
+      if (typeof message?.t === 'string' && message.t.startsWith('term.')) {
+        notify(termListeners, message)
+        return
+      }
       store.dispatch({ type: 'message', message })
       if (message.t === 'snapshot' || message.t === 'replay.end') {
         attempt = 0
@@ -199,7 +230,17 @@ export function createConnection({
       closed(event.code, opened)
     }
   }
+  function sendRaw(data) {
+    if (!live || !socket) return false
+    socket.send(data)
+    return true
+  }
   return {
+    send: message => sendRaw(JSON.stringify(message)),
+    sendBinary: bytes => sendRaw(bytes),
+    onTerm: listen(termListeners),
+    onBinary: listen(binaryListeners),
+    onLive: listen(liveListeners),
     start() {
       if (!token) { set('token_invalid')
         return }

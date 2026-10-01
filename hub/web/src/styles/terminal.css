@@ -1,0 +1,90 @@
+/* TerminalView (docs/deck/design/components.md section 14, design-system 11.6) and ConfirmDialog.
+   Imported once from main.jsx; components never import CSS. */
+@import '@xterm/xterm/css/xterm.css';
+
+.terminal-view {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  padding: 18px 22px;
+  background: var(--bg-sunken);
+  border-radius: var(--radius-md);
+}
+
+/* xterm focuses its hidden textarea, so the ring is drawn on the section (design-system 11.1). */
+.terminal-view:focus-within {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.terminal-host {
+  flex: 1;
+  min-height: 0;
+}
+
+.terminal-skeleton {
+  position: absolute;
+  inset: 18px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-10);
+  pointer-events: none;
+}
+
+.terminal-skeleton-line {
+  display: block;
+  height: 12px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-skeleton);
+}
+
+.terminal-skeleton-line:nth-child(2n) { width: 62%; }
+.terminal-skeleton-line:nth-child(3n) { width: 78%; }
+.terminal-skeleton-line:nth-child(5n) { width: 40%; }
+
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog);
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.confirm-dialog {
+  width: min(480px, calc(100vw - var(--space-48)));
+  padding: var(--space-24);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-dialog);
+  color: var(--text-default);
+}
+
+.confirm-title {
+  margin: 0 0 var(--space-12);
+  font: var(--type-dialog-title);
+  letter-spacing: var(--type-dialog-title-tracking);
+  color: var(--text-strong);
+}
+
+.confirm-body {
+  margin: 0 0 var(--space-24);
+  white-space: pre-wrap;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-8);
+}
+
+.button--danger {
+  background: var(--component-button-danger-bg);
+  color: var(--text-on-danger);
+  border-color: transparent;
+}
+
+.button--danger:hover { background: var(--component-button-danger-bg-hover); }
