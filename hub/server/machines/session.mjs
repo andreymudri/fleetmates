@@ -707,6 +707,9 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
       if (hook.source !== 'compact') expireRequests(store, existing.id, 'session_replaced')
     }
     if (hook.source === 'clear' || hook.source === 'resume' || hook.source === 'fork') { state = changedFiles.length ? 'done' : 'idle'; subagents = 0; endReason = null }
+    // Rows 4 and 5: a PTY session that just started waits in `starting` while the launch flow still has its
+    // first prompt to type (it types on the idle screen, 03-architecture 4.1), and is otherwise idle.
+    else if (hook.source !== 'compact' && existing.state === 'starting') state = existing.launch_task ? 'starting' : 'idle'
     if (hook.source === 'compact') activity = null
   } else if (event === 'UserPromptSubmit') {
     state = 'running'

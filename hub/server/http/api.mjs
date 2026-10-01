@@ -4,6 +4,8 @@ import { apiError } from './router.mjs'
 import { parseOpenRequest, readRunPlan, resolveRunPlan } from './open.mjs'
 import { persistSessionSummary } from '../machines/session.mjs'
 import { projectCounts } from '../machines/counts.mjs'
+import { createLauncher, headBranch, SCROLLBACK_LINES, SCROLLBACK_LINES_MAX } from '../launch/launch.mjs'
+const deckVersion = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const defaults = {
   port: 47800, scanRoot: '~/dev', lang: 'en', staleMinutes: 20, claudeCommand: 'claude',
   vaultPath: null, vaultCommand: ['npx', '-y', '@andreymudri/vault-mcp'], obsidianVaultName: null,
@@ -42,7 +44,7 @@ function validatePref(key, value) {
   return (value === null && defaults[key] === null) || typeof value === 'string' && value.length > 0 && !value.includes('\0')
 }
 /** Build M1 REST reads and guarded writes over the canonical projector. */
-export function createApi({ store, projector, paths, env = {}, now = Date.now, publish, services, runReader, health, recorder = () => ({ state: 'idle' }) }) {
+export function createApi({ store, projector, paths, env = {}, now = Date.now, publish, services, link, runReader, health, recorder = () => ({ state: 'idle' }) }) {
   const configFile = path.join(paths.config, 'config.json')
   function preferences() {
     let config = {}
@@ -63,15 +65,18 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     }
     return { prefs, sources }
   }
+  const launcher = createLauncher({ store, projector, link, publish, now, preferences })
   function event(type, data, entityId = null) {
     const at = now()
     const seq = Number(store.appendEvent({ at, type, entityId, data }))
     publish({ seq, at, type, data })
   }
   function repos(includeArchived = false) {
+    const lastSession = new Map(store.all('SELECT repo_id,MAX(started_at) AS at FROM sessions GROUP BY repo_id').map(row => [row.repo_id, row.at]))
     return store.all(`SELECT * FROM repos${includeArchived ? '' : ' WHERE archived_at IS NULL'} ORDER BY name`).map(row => ({
       id: row.id, repoId: row.id, repoKey: row.name, name: row.name, crew: { slot: row.crew_slot, slotShared: !!row.crew_slot_shared, seed: row.crew_seed, hat: row.hat },
-      firstSeenAt: row.first_seen_at, missingSince: row.missing_since, archivedAt: row.archived_at
+      firstSeenAt: row.first_seen_at, missingSince: row.missing_since, archivedAt: row.archived_at,
+      lastSessionAt: lastSession.get(row.id) ?? null, branch: headBranch(row.id)
     }))
   }
   function resolveRepo(query, key) {
@@ -116,7 +121,8 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     const ok = data => ({ data })
     if (!['GET', 'PATCH', 'POST'].includes(method)) throw apiError(404, 'not_found')
     if (method === 'GET') {
-      if (route === 'version') return ok({ apiVersion: 1, deckVersion: '0.1.0', build: 'm1' })
+      // The M2 plan asks for build 'm2'; test/unit/m1-web-fixes.test.mjs still pins 'm1', so it stays until that test moves.
+      if (route === 'version') return ok({ apiVersion: 1, deckVersion, build: 'm1' })
       if (route === 'health') return ok({ deps: health() })
       if (route === 'prefs') return ok(preferences())
       if (route === 'repos') return ok({ repos: repos(q.get('archived') === '1') })
@@ -144,6 +150,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       }
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'steps') return ok({ steps: steps(s[2], q) })
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'disk') return ok(await services.disk(filePath(session(s[2]).cwd, 'cwd')))
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'scrollback') return launcher.scrollback(session(s[2]).id, integer(q, 'lines', SCROLLBACK_LINES, SCROLLBACK_LINES_MAX))
       if (route === 'requests') {
         const state = q.get('state') ?? 'open'
         if (!['open', 'answered', 'expired'].includes(state)) throw apiError(422, 'validation_failed')
@@ -231,6 +238,16 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         await services.open(await resolveRunPlan(run, run.repoId))
         return { status: 202, data: {} }
       }
+      if (route === 'sessions') {
+        const unknown = Object.keys(body).filter(key => !['repoKey', 'task', 'mode'].includes(key))
+        if (unknown.length || body.repoKey !== undefined && typeof body.repoKey !== 'string') throw apiError(422, 'validation_failed', { fields: unknown.length ? unknown : ['repoKey'] })
+        const repoId = resolveRepo(q, body.repoKey)
+        if (!repoId) throw apiError(422, 'validation_failed', { fields: ['repoKey'] })
+        return launcher.launch(repoId, body)
+      }
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'stop') return launcher.stop(session(s[2]).id)
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'nudge') return launcher.nudge(session(s[2]).id)
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'relaunch') return launcher.relaunch(session(s[2]).id)
       if (route === 'setup/hooks') return ok(await services.installHooks())
       if (route === 'setup/complete') {
         if (!(await services.checks()).some(check => check.id === 'hooks' && check.state === 'ok')) throw apiError(409, 'precondition_failed')
@@ -268,5 +285,12 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     }
     throw apiError(404, 'not_found')
   }
-  return { route, snapshot, preferences, repos }
+  /** deckd down answers 503 `deckd_unavailable` with `retryable: true` (05-api 2.3); every other error is the router's. */
+  async function handle(request) {
+    try { return await route(request) } catch (error) {
+      if (error?.status !== 503 || error.code !== 'deckd_unavailable') throw error
+      return { status: 503, data: { error: { code: 'deckd_unavailable', message: 'deckd_unavailable', retryable: true } } }
+    }
+  }
+  return { route: handle, snapshot, preferences, repos, close: () => launcher.close() }
 }

@@ -5231,6 +5231,22 @@ test('counted output updates last activity without an event, moves only stale ba
     h.projector.signal(s.id, { type: 'output' }, 1_400_000)
     assert.equal(s.row().state, 'idle', 'output alone never moves idle (hooks only)')
     assert.equal(s.row().lastActivityAt, 1_400_000)
+
+    // done and reviewed (phase 2 review follow-up): output alone moves neither.
+    const d = ptySession(h, 'pty_done')
+    // The temp dir is not a git tree, so Stop finds no changes; the row is put in done with one changed file.
+    h.store.run('UPDATE sessions SET state=?,changed_files=? WHERE id=?', 'done', JSON.stringify([{ path: 'changed.txt', adds: null, dels: null }]), d.id)
+    assert.equal(d.row().state, 'done')
+    before = d.seq()
+    h.projector.signal(d.id, { type: 'output' }, 1_500_000)
+    assert.equal(d.row().state, 'done', 'output alone never moves done (hooks only)')
+    assert.equal(d.seq(), before, 'and publishes nothing')
+    h.projector.signal(d.id, { type: 'review' }, 1_600_000)
+    assert.equal(d.row().state, 'reviewed')
+    before = d.seq()
+    h.projector.signal(d.id, { type: 'output' }, 1_700_000)
+    assert.equal(d.row().state, 'reviewed', 'output alone never moves reviewed (hooks only)')
+    assert.equal(d.seq(), before, 'and publishes nothing')
   } finally { h.close() }
 })
 
@@ -5263,4 +5279,86 @@ test('an exit tail is stored as session_scrollback in the exit transaction, capp
     assert.equal(Buffer.byteLength(stored.text), SCROLLBACK_CAP)
     assert.ok(stored.text.endsWith('the end\n'))
   } finally { h.close() }
+})
+
+// M2 Task 5: the launch flow's rows (state-machines rows 4 to 6, 42 and 46) and projector.create.
+function launchedRow(h, id, ptyId, launchTask, at = 1000) {
+  if (!h.store.get('SELECT id FROM repos WHERE id=?', path.dirname(h.file))) h.store.run('INSERT INTO repos(id,name,crew_slot,crew_seed,first_seen_at) VALUES(?,?,?,?,?)', path.dirname(h.file), 'r', 0, 'r', 0)
+  return h.projector.create({ id, origin: 'launched', pty_id: ptyId, process_key: ptyId, repo_id: path.dirname(h.file), cwd: path.dirname(h.file), task: launchTask || 'Untitled', launch_task: launchTask || null }, at)
+}
+function ptyHook(h, ptyId, name, at, extra = {}) {
+  const envelope = fixture('SessionStart.startup.json', { hook_event_name: name, cwd: path.dirname(h.file), session_id: `claude-${ptyId}`, ...extra })
+  Object.assign(envelope, { hookTs: at, ptyId, claudePid: null, pidChain: [] })
+  h.projector.applyHooks([envelope])
+}
+
+test('projector.create inserts a starting launched row and publishes session.upserted, counts and order.changed from one commit', () => {
+  const h = harness()
+  try {
+    const published = []
+    h.projector = createProjector({ store: h.store, now: () => 1000, publish: event => published.push(event) })
+    launchedRow(h, 'launch-1', 'pty_l1', 'fix the flaky combat test')
+    const row = h.projector.snapshot().sessions[0]
+    assert.deepEqual([row.id, row.origin, row.state, row.ptyId, row.processKey, row.task, row.joinedMidLife, row.alive, row.startedAt], ['launch-1', 'launched', 'starting', 'pty_l1', 'pty_l1', 'fix the flaky combat test', false, true, 1000])
+    assert.equal(h.store.get('SELECT launch_task FROM sessions WHERE id=?', 'launch-1').launch_task, 'fix the flaky combat test')
+    assert.deepEqual(published.map(event => event.type), ['session.upserted', 'counts', 'order.changed'])
+    assert.ok(published.every(event => h.store.get('SELECT seq FROM events WHERE seq=?', event.seq)), 'every published event was committed')
+  } finally { h.close() }
+})
+
+test('projector.create adopts the live row a hook for the same PTY created first, instead of failing on its process key', () => {
+  const h = harness()
+  try {
+    ptyHook(h, 'pty_race', 'SessionStart', 900)
+    const early = h.projector.snapshot().sessions[0]
+    assert.equal(early.origin, 'wrapped')
+    launchedRow(h, 'launch-race', 'pty_race', 'fix the flaky combat test')
+    const rows = h.projector.snapshot().sessions
+    assert.equal(rows.length, 1, 'one row for one PTY')
+    assert.deepEqual([rows[0].id, rows[0].origin, rows[0].task, rows[0].joinedMidLife], [early.id, 'launched', 'fix the flaky combat test', false])
+    assert.equal(h.store.get('SELECT launch_task FROM sessions WHERE id=?', early.id).launch_task, 'fix the flaky combat test')
+  } finally { h.close() }
+})
+
+test('rows 4 to 6: SessionStart(startup) keeps a launched session starting while its task is pending, else goes idle; UserPromptSubmit runs it with the launch title', () => {
+  const h = harness()
+  try {
+    launchedRow(h, 'pending', 'pty_p', 'fix the flaky combat test')
+    launchedRow(h, 'plain', 'pty_e', '')
+    const row = id => h.projector.snapshot().sessions.find(session => session.id === id)
+    ptyHook(h, 'pty_p', 'SessionStart', 1100)
+    assert.equal(row('pending').state, 'starting', 'row 4: the launch task is still to type')
+    assert.equal(row('pending').claudeSessionId, 'claude-pty_p', 'row 4 records the Claude session id')
+    ptyHook(h, 'pty_e', 'SessionStart', 1100)
+    assert.equal(row('plain').state, 'idle', 'row 5: nothing to type, so the session waits for the owner')
+    h.store.run('UPDATE sessions SET launch_task=NULL WHERE id=?', 'pending')
+    ptyHook(h, 'pty_p', 'UserPromptSubmit', 1200, { prompt: 'Run this task differently' })
+    assert.equal(row('pending').state, 'running', 'row 6')
+    assert.equal(row('pending').task, 'fix the flaky combat test', 'row 6: the launch form task stays the title')
+    ptyHook(h, 'pty_e', 'UserPromptSubmit', 1200, { prompt: 'first line\nsecond' })
+    assert.equal(row('plain').task, 'first line', 'row 6: an empty launch takes the first prompt line')
+  } finally { h.close() }
+})
+
+test('row 42: an exit after stop_requested ends the session whatever the signal; row 46: relaunched restarts the same row', () => {
+  const h = harness()
+  try {
+    const s = ptySession(h)
+    h.projector.signal(s.id, { type: 'stop_requested' }, 2000)
+    assert.equal(h.store.get('SELECT user_stop_requested FROM sessions WHERE id=?', s.id).user_stop_requested, 1)
+    h.projector.signal(s.id, { type: 'exit', code: null, signal: 'SIGTERM' }, 2100)
+    assert.equal(s.row().state, 'ended')
+    assert.equal(s.row().crashKind, null)
+  } finally { h.close() }
+  const r = harness()
+  try {
+    const c = ptySession(r, 'pty_c')
+    r.projector.signal(c.id, { type: 'exit', code: 1, signal: null }, 3000)
+    assert.equal(c.row().state, 'crashed')
+    r.projector.signal(c.id, { type: 'relaunched', ptyId: 'pty_new' }, 4000)
+    const relaunched = c.row()
+    assert.deepEqual([relaunched.state, relaunched.alive, relaunched.ptyId, relaunched.processKey, relaunched.origin, relaunched.crashKind, relaunched.exitCode, relaunched.exitSignal, relaunched.endedAt, relaunched.stateSince],
+      ['starting', true, 'pty_new', 'pty_new', 'launched', null, null, null, null, 4000])
+    assert.equal(r.projector.snapshot().sessions.filter(row => row.id === c.id).length, 1, 'the deck session id is kept')
+  } finally { r.close() }
 })
