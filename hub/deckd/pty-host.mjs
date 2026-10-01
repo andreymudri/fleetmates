@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { Ring } from './ring.mjs'
 import { ScreenModel } from './screen-model.mjs'
+import { dropSessionVars } from './login-env.mjs'
 
 const require = createRequire(import.meta.url)
 /** @type {typeof import('node-pty')} */
@@ -61,8 +62,11 @@ export function newPtyId () {
 export class PtyHost {
   /**
    * Spawn `claude` in a new PTY. Refuses any argv[0] whose basename is not
-   * `claude` with code `spawn_refused`.
-   * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
+   * `claude` with code `spawn_refused`. The child's environment is
+   * `{ ...baseEnv, ...env }` (baseEnv defaults to this process's environment
+   * without TERM and Claude Code's session variables), then
+   * `FLEETMATES_DECK_PTY=<ptyId>` and `TERM=xterm-256color`.
+   * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, baseEnv?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
    * @returns {PtyHost}
    */
@@ -78,7 +82,7 @@ export class PtyHost {
   }
 
   /**
-   * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
+   * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, baseEnv?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
    */
   constructor (req, hooks) {
@@ -120,7 +124,7 @@ export class PtyHost {
     /** @type {(() => void) | null} */
     this.unwatchScreen = null
 
-    const env = { ...process.env, ...(req.env ?? {}), FLEETMATES_DECK_PTY: this.ptyId }
+    const env = { ...(req.baseEnv ?? dropSessionVars(process.env)), ...(req.env ?? {}), FLEETMATES_DECK_PTY: this.ptyId, TERM: 'xterm-256color' }
     try {
       this.proc = nodePty.spawn(req.argv[0], req.argv.slice(1), {
         name: 'xterm-256color',

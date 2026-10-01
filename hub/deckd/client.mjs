@@ -29,9 +29,13 @@ export class DeckdRequestError extends Error {
  * listeners. Event listeners run synchronously as each line is decoded,
  * while a request's promise settles a microtask later, so a caller that must
  * order an event against a response compares sequence numbers.
- * @param {{ runtimeDir: string, kind: 'server' | 'terminal', name?: string }} opts
+ *
+ * `proto` is the version asked for in `hello` (default PROTO); the version
+ * deckd agreed to, its version and its bootId are then `client.proto`,
+ * `client.deckdVersion` and `client.bootId`.
+ * @param {{ runtimeDir: string, kind: 'server' | 'terminal', name?: string, proto?: number }} opts
  */
-export async function connectDeckd ({ runtimeDir, kind, name }) {
+export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO }) {
   // Same path as main.mjs socketPaths(); not imported from there, because
   // main.mjs loads node-pty, which a client has no use for.
   const socketPath = path.join(runtimeDir, 'fleetmates-deck', 'deckd.sock')
@@ -81,6 +85,12 @@ export async function connectDeckd ({ runtimeDir, kind, name }) {
   })
 
   const client = {
+    /** Protocol version agreed in `hello`. @type {number} */
+    proto: 0,
+    /** deckd's version from `hello`. @type {string} */
+    deckdVersion: '',
+    /** deckd's boot id from `hello`. @type {string} */
+    bootId: '',
     /**
      * Send one request; resolves with the `ok: true` response, rejects with a
      * DeckdRequestError carrying deckd's error `code`.
@@ -123,7 +133,10 @@ export async function connectDeckd ({ runtimeDir, kind, name }) {
   }
 
   try {
-    await client.request('hello', { proto: PROTO, client: name === undefined ? { kind, pid: process.pid } : { kind, name, pid: process.pid } })
+    const hello = await client.request('hello', { proto, client: name === undefined ? { kind, pid: process.pid } : { kind, name, pid: process.pid } })
+    client.proto = hello.proto
+    client.deckdVersion = hello.deckdVersion
+    client.bootId = hello.bootId
   } catch (err) {
     socket.destroy()
     throw err

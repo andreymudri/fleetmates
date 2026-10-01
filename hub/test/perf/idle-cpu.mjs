@@ -104,7 +104,7 @@ async function measure(mode, web, browser) {
     const launcher = path.join(root, 'server.mjs')
     await writeFile(launcher, `import { startDeckServer } from ${JSON.stringify(pathToFileURL(path.join(hub, 'server/main.mjs')).href)}\nconst deck = await startDeckServer({ staticDir: process.env.DECK_WEB })\nprocess.stderr.write('listening ' + deck.address().port + '\\n')\nprocess.once('SIGTERM', () => deck.close().then(() => process.exit(0)))\n`)
     const port = await freePort()
-    const started = child([path.join(hub, 'deckd/main.mjs')], env, err => /deckd listening on/.test(err))
+    const started = child([path.join(hub, 'deckd/main.mjs')], { ...env, DECKD_LOGIN_ENV: 'inherit' }, err => /deckd listening on/.test(err))
     deckd = started.proc
     await started.ready
     const web2 = child([launcher], { ...env, DECK_PORT: String(port), DECK_WEB: web }, err => /listening \d+/.test(err))

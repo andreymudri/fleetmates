@@ -97,7 +97,7 @@ async function main () {
   /** @type {import('playwright-core').Browser | undefined} */
   let browser
   try {
-    deckd = (await startChild(deckdMain, { ...fake.env, XDG_RUNTIME_DIR: rt.dir, HOME: rt.dir }, /deckd listening on/)).proc
+    deckd = (await startChild(deckdMain, { ...fake.env, XDG_RUNTIME_DIR: rt.dir, HOME: rt.dir, DECKD_LOGIN_ENV: 'inherit' }, /deckd listening on/)).proc
     const started = await startChild(spikeMain, { ...rt.env, SPIKE_PORT: '0' }, /^(http:\/\/127\.0\.0\.1:\d+\/)#token=([A-Za-z0-9_-]{43})\n/m)
     spike = started.proc
     const [, base, token] = started.match

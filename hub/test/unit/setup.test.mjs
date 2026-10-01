@@ -11,6 +11,7 @@ import { once } from 'node:events'
 import test, { afterEach } from 'node:test'
 import { chromium } from 'playwright-core'
 import { doctor, status } from '../../server/setup/doctor.mjs'
+import { PROTO } from '../../deckd/protocol.mjs'
 import { hooksInstalled, isDeckHook, readSettings, transformHooks, writeSettings } from '../../server/setup/hooks.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
 import { renderUnit } from '../../server/setup/units.mjs'
@@ -776,7 +777,7 @@ for (const stall of ['hello', 'list', null]) {
           if (message.op === stall) continue
           assert.equal(message.op === 'hello' || message.op === 'list', true)
           if (message.op === 'hello') {
-            assert.equal(message.proto, 1)
+            assert.equal(message.proto, PROTO)
             assert.equal(message.client.kind, 'terminal')
           }
           socket.write(`${JSON.stringify({ id: message.id, ok: true, ptys: [{ id: 'one' }, { id: 'two' }] })}\n`)
