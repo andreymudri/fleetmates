@@ -11,9 +11,12 @@ export function json(req, res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' })
   res.end(req.method === 'HEAD' ? undefined : JSON.stringify(data))
 }
-/** Read an optional JSON object body with the Task 5 one MiB byte cap. */
+/**
+ * Read an optional JSON object body with a 256 KiB byte cap (08-security 4.1); a declared or streamed body
+ * over it is 413 payload_too_large. Terminal input and pastes travel over the WebSocket, not this path.
+ */
 export async function readBody(req) {
-  const max = 1024 * 1024
+  const max = 256 * 1024
   const hasBody = req.headers['transfer-encoding'] !== undefined || Number(req.headers['content-length'] ?? 0) > 0
   if (!hasBody) return {}
   if (!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'] ?? '')) throw apiError(415, 'unsupported_media_type')
@@ -77,6 +80,9 @@ export function createRouter({ api, staticDir, getToken, getPort }) {
       res.writeHead(200, { 'Content-Type': types[path.extname(file)] ?? 'application/octet-stream' })
       res.end(req.method === 'HEAD' ? undefined : content)
     } catch (error) {
+      // A body refused for its declared length is never read; without closing, the client's unsent body and
+      // the kept-alive socket end in ECONNRESET instead of the 413 (seen with a 300,000-byte Content-Length).
+      if (error.status === 413 && !res.headersSent) res.setHeader('Connection', 'close')
       if (!res.headersSent) json(req, res, error.status ?? (error instanceof URIError ? 422 : error.code === 'ENOENT' ? 404 : 500), { error: { code: error.code && error.status ? error.code : error instanceof URIError ? 'validation_failed' : error.code === 'ENOENT' ? 'not_found' : 'internal', message: error.status ? error.code : 'Request failed', retryable: false, ...(error.details && Object.keys(error.details).length ? { details: error.details } : {}) } })
       else res.end()
       req.resume()

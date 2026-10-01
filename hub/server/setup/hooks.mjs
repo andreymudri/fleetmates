@@ -143,3 +143,22 @@ export function hooksInstalled(settings, command) {
   if (lifecycleEvents.some(event => Array.isArray(settings.hooks?.[event]) && settings.hooks[event].some(group => Array.isArray(group?.hooks) && group.hooks.some(hook => hook?.type === 'command' && isDeckHook(hook.command, command))))) return false
   return HOOK_EVENTS.every(event => Array.isArray(settings.hooks?.[event]) && settings.hooks[event].some(group => group.matcher === '*' && group.hooks?.some(hook => sameCommand(hook?.command, command) && hook.async === true)))
 }
+
+/**
+ * The `hooks` health row's state, with the rules of the doctor hooks check: the settings file lists `command`
+ * for every observation event, and the hook script is a readable regular file. An unreadable or invalid
+ * settings file counts as hooks missing.
+ * @param {{ settings: string, hook: string }} paths
+ * @param {string} command the installed hook command (`deckHookCommand`)
+ * @returns {{ state: 'ok' | 'down', reason: null | 'hooks_missing' | 'hook_script_missing' }}
+ */
+export function checkHooks(paths, command) {
+  let configured = false
+  try { configured = hooksInstalled(readSettings(paths.settings).value, command) } catch {}
+  if (!configured) return { state: 'down', reason: 'hooks_missing' }
+  try {
+    if (!fs.statSync(paths.hook).isFile()) return { state: 'down', reason: 'hook_script_missing' }
+    fs.accessSync(paths.hook, fs.constants.R_OK)
+  } catch { return { state: 'down', reason: 'hook_script_missing' } }
+  return { state: 'ok', reason: null }
+}

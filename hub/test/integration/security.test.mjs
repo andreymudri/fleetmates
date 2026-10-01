@@ -64,7 +64,7 @@ test('writes reject missing Origin and preflights; GET and HEAD require no Origi
   assert.equal(head.status, 200)
   assert.equal(head.data, null)
 })
-test('JSON body type, schema and one MiB streamed limit are enforced before writes', async t => {
+test('JSON body type, schema and 256 KiB streamed limit are enforced before writes', async t => {
   const h = await harness(t)
   assert.equal((await h.request('/api/prefs', { 'Content-Type': 'text/plain' }, 'PATCH', '{}')).status, 415)
   for (const body of ['{', '[]', 'null', '{"textSize":99}', '{"unknown":true}', '{"constructor":"x"}', '{"__proto__":"x"}']) {
@@ -72,7 +72,9 @@ test('JSON body type, schema and one MiB streamed limit are enforced before writ
   }
   assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked' }, 'PATCH', '{"scanRoot":"' + 'x'.repeat(1024 * 1024) + '"}')).status, 413)
   const body = JSON.stringify({ scanRoot: 'x'.repeat(300_000) })
-  assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json' }, 'PATCH', body)).status, 200)
+  assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json' }, 'PATCH', body)).status, 413)
+  const fits = JSON.stringify({ scanRoot: 'x'.repeat(200_000) })
+  assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json' }, 'PATCH', fits)).status, 200)
 })
 for (const [name, headers, protocols, status] of [
   ['token', {}, ['deck.v1', 'deck.auth.wrong'], 401],

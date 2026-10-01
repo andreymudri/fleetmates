@@ -55,6 +55,7 @@ const healthRows = deck => deck.store.all('SELECT at,data FROM events WHERE type
 function fakeDeckd(reply = {}) {
   const listeners = new Map()
   const client = {
+    proto: 2,
     request: async op => op === 'list' ? { ptys: reply.ptys ?? [] } : op === 'exits' ? { exits: reply.exits ?? [] } : {},
     on(event, fn) { listeners.set(event, fn)
       return () => listeners.delete(event) },

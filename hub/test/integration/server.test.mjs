@@ -208,7 +208,7 @@ test('deckd reconnect reconciles exits without losing persisted history', async 
   const listeners = new Map()
   let available = false
   let closed = false
-  const client = { request: async op => op === 'list' ? { ptys: [] } : op === 'exits' ? { exits: [{ ptyId: 'pty_fake', code: 0, signal: null, at: 3000 }] } : {},
+  const client = { proto: 2, request: async op => op === 'list' ? { ptys: [] } : op === 'exits' ? { exits: [{ ptyId: 'pty_fake', code: 0, signal: null, at: 3000 }] } : {},
     on(ev, fn) { listeners.set(ev, fn)
       return () => listeners.delete(ev) }, close() { closed = true } }
   const h = await harness(t, { reconnectMs: 20, connectDeckd: async () => { if (!available) throw Error('offline')
@@ -227,7 +227,7 @@ test('deckd reconnect reconciles exits without losing persisted history', async 
 test('live deckd PTYs are restored and spawned events retain one canonical session', async t => {
   const listeners = new Map()
   const pty = { ptyId: 'pty_live', cwd: '/tmp', origin: 'wrapped', startedAt: 1000, pid: 123, argv: ['claude'] }
-  const client = { request: async op => op === 'list' ? { ptys: [pty] } : op === 'exits' ? { exits: [] } : {},
+  const client = { proto: 2, request: async op => op === 'list' ? { ptys: [pty] } : op === 'exits' ? { exits: [] } : {},
     on(ev, fn) { listeners.set(ev, fn)
       return () => listeners.delete(ev) }, close() {} }
   const h = await harness(t, { connectDeckd: async () => client })
