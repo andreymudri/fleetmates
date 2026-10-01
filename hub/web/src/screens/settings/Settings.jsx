@@ -47,6 +47,11 @@ export const SETTINGS_COPY = Object.freeze({
   'settings.conn.current': 'Current: {value}',
   'settings.conn.save': 'Save',
   'settings.conn.env': 'Set by the environment',
+  'settings.conn.saved': 'Saved.',
+  'settings.conn.unchanged': 'No change to save.',
+  'settings.conn.empty': 'Not saved: this field cannot be empty.',
+  'settings.conn.nul': 'Not saved: the text contains a NUL character.',
+  'settings.conn.quote': 'Not saved: a quote is not closed.',
   'settings.conn.hidden': 'The stored value contains hidden characters, shown here as <U+XXXX> tokens. It is kept unless you change this field.',
   'settings.conn.services': 'Services',
   'settings.conn.dep.deckd': 'deckd',
@@ -186,7 +191,22 @@ export function parsePref(pref, text) {
 }
 
 /**
- * Persist one preference through the authenticated api (`PATCH /api/prefs`, applied immediately, no Save button).
+ * Why a field's text is not sent, as a copy key, or null when {@link parsePref} accepts it. Save always answers
+ * with a visible line: this one, the saved line, or the server's error.
+ * @param {{ key: string, argv?: boolean, nullable?: boolean }} pref
+ * @param {string} text
+ * @returns {string | null}
+ */
+export function refusalKey(pref, text) {
+  if (parsePref(pref, text) !== undefined) return null
+  const value = String(text ?? '').trim()
+  if (value.includes('\0')) return 'settings.conn.nul'
+  if (!value) return 'settings.conn.empty'
+  return 'settings.conn.quote'
+}
+
+/**
+ * Persist one preference through the authenticated api (`PATCH /api/prefs`): toggles and selects on change, text fields on Save or Enter.
  * @param {{ patch: Function }} api
  * @param {string} key
  * @param {unknown} value
@@ -271,7 +291,7 @@ export function NotificationsSection({ prefs, sources = {}, t, status, pinging =
   )
 }
 
-function TextPref({ pref, value, locked, t, error, onSave }) {
+function TextPref({ pref, value, locked, t, error, note = null, onSave, onNote = () => {} }) {
   const tr = (key, params) => translate(t, SETTINGS_COPY, key, params)
   const id = pref.id ?? `pref-${pref.key}`
   const current = prefText(value)
@@ -279,22 +299,24 @@ function TextPref({ pref, value, locked, t, error, onSave }) {
     event.preventDefault()
     const input = event.currentTarget.elements.namedItem(pref.key)
     // The field shows hidden characters as tokens: unchanged text keeps the stored value instead of saving the tokens.
-    if (input?.value === current) return
+    if (input?.value === current) return onNote(pref.key, 'settings.conn.unchanged')
     const next = parsePref(pref, input?.value)
-    if (next === undefined || prefText(next) === current) return
+    if (next === undefined) return onNote(pref.key, refusalKey(pref, input?.value))
+    if (prefText(next) === current) return onNote(pref.key, 'settings.conn.unchanged')
     onSave(pref.key, next)
   }
   return (
     <form className="setting-row setting-text" onSubmit={submit}>
       <label className="setting-label" htmlFor={id}>{tr(pref.label)}</label>
       <div className="setting-field">
-        <input id={id} name={pref.key} className="text-input" type="text" defaultValue={current} key={current} readOnly={locked} spellCheck={false} autoComplete="off" />
+        <input id={id} name={pref.key} className="text-input" type="text" defaultValue={current} key={current} readOnly={locked} spellCheck={false} autoComplete="off" onInput={() => { if (note) onNote(pref.key, null) }} />
         {locked ? null : <button type="submit" className="button button--secondary button--xs">{tr('settings.conn.save')}</button>}
       </div>
       {pref.argv || COMMAND_PREFS.some(item => item.key === pref.key) ? <p className="setting-hint">{tr('settings.conn.current', { value: current })}</p> : null}
       {hasHiddenText(value) ? <p className="setting-hint">{tr('settings.conn.hidden')}</p> : null}
       {locked ? <p className="setting-hint">{tr('settings.conn.env')}</p> : null}
       {error ? <p className="setting-error" role="status"><bdi>{error}</bdi></p> : null}
+      {!error && note ? <p className={note === 'settings.conn.saved' ? 'setting-hint setting-saved' : note === 'settings.conn.unchanged' ? 'setting-hint' : 'setting-error'} role="status">{tr(note)}</p> : null}
     </form>
   )
 }
@@ -302,11 +324,12 @@ function TextPref({ pref, value, locked, t, error, onSave }) {
 /**
  * Connections section, pure (settings.md 4.5): folders, vault, TurbidAssist, the commands the deck runs,
  * dependency statuses with their start actions, the inline checklist and the stale threshold.
- * @param {{ prefs: object, sources?: object, health?: object[], t?: Function, errors?: Record<string, string>, found?: number | null, busy?: Record<string, boolean>, startErrors?: Record<string, string>, checklist?: React.ReactNode, onSave: (key: string, value: unknown) => void, onRescan: () => void, onStart: (dep: string) => void, onChecklist: () => void }} props
+ * `notes` holds each field's last Save outcome as a copy key (saved, unchanged or a refusal); `onNote` sets or clears it.
+ * @param {{ prefs: object, sources?: object, health?: object[], t?: Function, errors?: Record<string, string>, notes?: Record<string, string>, found?: number | null, busy?: Record<string, boolean>, startErrors?: Record<string, string>, checklist?: React.ReactNode, onSave: (key: string, value: unknown) => void, onNote?: (key: string, note: string | null) => void, onRescan: () => void, onStart: (dep: string) => void, onChecklist: () => void }} props
  */
-export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors = {}, found = null, busy = {}, startErrors = {}, checklist = null, onSave, onRescan, onStart, onChecklist }) {
+export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors = {}, notes = {}, found = null, busy = {}, startErrors = {}, checklist = null, onSave, onNote, onRescan, onStart, onChecklist }) {
   const tr = (key, params) => translate(t, SETTINGS_COPY, key, params)
-  const text = pref => <TextPref key={pref.key} pref={pref} value={prefs[pref.key]} locked={sources[pref.key] === 'env'} t={t} error={errors[pref.key]} onSave={onSave} />
+  const text = pref => <TextPref key={pref.key} pref={pref} value={prefs[pref.key]} locked={sources[pref.key] === 'env'} t={t} error={errors[pref.key]} note={notes[pref.key] ?? null} onSave={onSave} onNote={onNote} />
   return (
     <section className="settings-section" aria-labelledby="settings-connections-title">
       <h2 className="settings-heading" id="settings-connections-title">{tr('settings.nav.connections')}</h2>
@@ -387,6 +410,7 @@ export function Settings({ route, state, t, navigate, api, feed }) {
   const [sources, setSources] = useState(null)
   const [pending, setPending] = useState({})
   const [errors, setErrors] = useState({})
+  const [notes, setNotes] = useState({})
   const [ping, setPing] = useState(null)
   const [pinging, setPinging] = useState(false)
   const [found, setFound] = useState(null)
@@ -404,10 +428,12 @@ export function Settings({ route, state, t, navigate, api, feed }) {
   }, [section, sources])
   const prefs = { ...state.data.prefs, ...pending }
   const known = { ...(sources ?? {}), ...state.data.sources }
+  const onNote = (key, note) => setNotes(map => (map[key] ?? null) === note ? map : { ...map, [key]: note })
   const onSave = (key, value) => {
     setPending(map => ({ ...map, [key]: value }))
     setErrors(map => ({ ...map, [key]: undefined }))
-    savePref(client, key, value).then(() => {}, error => setErrors(map => ({ ...map, [key]: tr('settings.saveError', { setting: key, error: shown(failure(error)) }) })))
+    onNote(key, null)
+    savePref(client, key, value).then(() => onNote(key, 'settings.conn.saved'), error => setErrors(map => ({ ...map, [key]: tr('settings.saveError', { setting: key, error: shown(failure(error)) }) })))
       .finally(() => setPending(map => { const next = { ...map }
         delete next[key]
         return next }))
@@ -431,9 +457,9 @@ export function Settings({ route, state, t, navigate, api, feed }) {
   if (section === 'notifications') {
     body = <NotificationsSection prefs={prefs} sources={known} t={t} status={notifyStatus(notifyRow, t)} pinging={pinging} errors={errors} onChange={onSave} onTestPing={onTestPing} />
   } else if (section === 'connections') {
-    body = <ConnectionsSection prefs={prefs} sources={known} health={state.data.health} t={t} errors={errors} found={found} busy={busy} startErrors={startErrors}
+    body = <ConnectionsSection prefs={prefs} sources={known} health={state.data.health} t={t} errors={errors} notes={notes} found={found} busy={busy} startErrors={startErrors}
       checklist={checklist ? <Checklist state={state} t={t} navigate={navigate} api={client} feed={feed} mode="rerun" onDone={() => setChecklist(false)} /> : null}
-      onSave={onSave} onRescan={onRescan} onStart={onStart} onChecklist={() => setChecklist(true)} />
+      onSave={onSave} onNote={onNote} onRescan={onRescan} onStart={onStart} onChecklist={() => setChecklist(true)} />
   }
   return <SettingsView section={section} prefs={prefs} loading={sources === null} t={t} navigate={navigate}>{body}</SettingsView>
 }

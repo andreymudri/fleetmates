@@ -473,6 +473,38 @@ test('Connections edits folders and the commands the server runs only through it
   assert.match(html, /A running session counts as adrift after 20 min without activity\./)
 })
 
+test('Save on a Connections field always answers: saved, no change, or why the text was not sent', () => {
+  const { ConnectionsSection, refusalKey } = settings
+  const saved = []
+  const noted = []
+  const section = (notes = {}, errors = {}) => ConnectionsSection({ prefs, notes, errors, onSave: (key, value) => saved.push([key, value]), onNote: (key, note) => noted.push([key, note]), onRescan() {}, onStart() {}, onChecklist() {} })
+  const formOf = (tree, name) => elements(tree, ['form']).find(node => elements(node, ['input'])[0].props.name === name)
+  const submit = (name, value) => formOf(section(), name).props.onSubmit({ preventDefault() {}, currentTarget: { elements: { namedItem: () => ({ value }) } } })
+
+  submit('scanRoot', '~/dev')
+  submit('scanRoot', ' ~/dev ')
+  submit('scanRoot', '  ')
+  submit('claudeCommand', 'cl\0aude')
+  submit('vaultCommand', 'node "/home/you/x.mjs')
+  submit('scanRoot', '/home/you/Work')
+  assert.deepEqual(noted, [['scanRoot', 'settings.conn.unchanged'], ['scanRoot', 'settings.conn.unchanged'], ['scanRoot', 'settings.conn.empty'],
+    ['claudeCommand', 'settings.conn.nul'], ['vaultCommand', 'settings.conn.quote']], 'every Save that sends nothing says why')
+  assert.deepEqual(saved, [['scanRoot', '/home/you/Work']], 'a real edit goes to onSave and is not noted here')
+  assert.equal(refusalKey({ key: 'scanRoot' }, '/home/you/Work'), null)
+
+  const lines = (notes, errors) => elements(formOf(section(notes, errors), 'scanRoot'), ['p']).filter(node => node.props.role === 'status').map(node => [node.props.className, textOf(node)])
+  assert.deepEqual(lines({ scanRoot: 'settings.conn.saved' }), [['setting-hint setting-saved', 'Saved.']])
+  assert.deepEqual(lines({ scanRoot: 'settings.conn.unchanged' }), [['setting-hint', 'No change to save.']])
+  assert.deepEqual(lines({ scanRoot: 'settings.conn.empty' }), [['setting-error', 'Not saved: this field cannot be empty.']])
+  assert.deepEqual(lines({ scanRoot: 'settings.conn.saved' }, { scanRoot: 'Could not save scanRoot: settings_io_failed' }), [['setting-error', 'Could not save scanRoot: settings_io_failed']], 'a server error replaces the note')
+  assert.deepEqual(lines({}), [])
+
+  noted.length = 0
+  elements(formOf(section({ scanRoot: 'settings.conn.saved' }), 'scanRoot'), ['input'])[0].props.onInput()
+  elements(formOf(section(), 'scanRoot'), ['input'])[0].props.onInput()
+  assert.deepEqual(noted, [['scanRoot', null]], 'typing again clears the note, and only when there is one')
+})
+
 test('every server string in Settings is shown with visible tokens, one field at a time', () => {
   const { ConnectionsSection, NotificationsSection, SettingsView, notifyStatus } = settings
   const noop = () => {}
