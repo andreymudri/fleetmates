@@ -254,6 +254,27 @@ test('handleLink opens http and https only, and asks before any host other than 
   }
 })
 
+test('handleLink confirms and opens the parsed href, so the dialog shows the host the browser will open', async () => {
+  const { handleLink } = await load('components/TerminalView.jsx')
+  const run = uri => {
+    const asked = []
+    const opened = []
+    handleLink(uri, { confirmLink: url => { asked.push(url)
+      return true }, open: url => opened.push(url) })
+    return { asked, opened }
+  }
+  const homograph = run('https://аpple.com/login')
+  assert.equal(homograph.asked.length, 1)
+  assert.equal(new URL(homograph.asked[0]).host, 'xn--pple-43d.com', 'the confirm shows the punycode host')
+  assert.match(homograph.asked[0], /^https:\/\/xn--/)
+  assert.deepEqual(homograph.opened, homograph.asked, 'the opened URL is the one confirmed')
+  const backslash = run('https://evil.com\\@localhost/')
+  assert.equal(backslash.asked.length, 1, 'a backslash does not make it a localhost link')
+  assert.equal(new URL(backslash.asked[0]).host, 'evil.com')
+  assert.doesNotMatch(backslash.asked[0], /\\/, 'the backslash is normalized in what the dialog shows')
+  assert.deepEqual(backslash.opened, backslash.asked)
+})
+
 async function findChromium() {
   for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
@@ -287,9 +308,11 @@ const client = {
 }
 function App() {
   const [id, setId] = useState('sessA')
+  const [deckdUp, setDeckdUp] = useState(true)
   h.show = setId
-  return <TerminalView sessionId={id} label={id} client={client} confirmLink={url => { h.confirms.push(url)
-    return h.answer }} />
+  h.deckd = setDeckdUp
+  return <><button id="outside" type="button">outside</button><span id="deckd">{String(deckdUp)}</span><TerminalView sessionId={id} label={id} client={client} deckdUp={deckdUp} confirmLink={url => { h.confirms.push(url)
+    return h.answer }} /></>
 }
 createRoot(document.getElementById('root')).render(<App />)
 `
@@ -315,14 +338,20 @@ test('a mounted TerminalView stays writable after a session switch and gates ter
     } catch { res.writeHead(404).end() }
   }).listen(0, '127.0.0.1')
   await new Promise(resolve => server.once('listening', resolve))
+  // Closed on its own, before Chromium launches, so a launch error fails the test instead of hanging the file.
+  t.after(() => server.close())
   const browser = await chromium.launch({ executablePath, headless: true })
-  t.after(async () => { await browser.close()
-    server.close() })
+  t.after(() => browser.close())
   const page = await browser.newPage()
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
   await page.goto(`http://127.0.0.1:${server.address().port}/`)
   const h = fn => page.evaluate(fn)
+  // Toggle the deckd health prop and wait until React committed it.
+  const deckd = async up => {
+    await page.evaluate(value => window.h.deckd(value), up)
+    await page.waitForFunction(value => document.getElementById('deckd')?.textContent === String(value), up, { timeout: 5000 })
+  }
   const typeInto = async (keys) => {
     await page.locator('.xterm-helper-textarea').focus()
     await page.keyboard.type(keys)
@@ -376,5 +405,44 @@ test('a mounted TerminalView stays writable after a session switch and gates ter
   assert.deepEqual(await h(() => [window.h.confirms.splice(0), window.h.links.splice(0)]), [[], ['http://localhost:9/y']], 'localhost opens without asking')
   await click('JS')
   assert.deepEqual(await h(() => [window.h.confirms.splice(0), window.h.links.splice(0)]), [[], []], 'javascript: never opens')
+
+  // Data xterm emits on its own (here its reply to a device attributes query) while the terminal is not
+  // focused never reaches the client.
+  await page.locator('#outside').focus()
+  await h(() => window.h.handlers.sessB.onOutput(new TextEncoder().encode('\x1b[cQUERY-DONE\r\n')))
+  await page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('QUERY-DONE'), null, { timeout: 5000 })
+  assert.deepEqual(await h(() => window.h.writes.splice(0)), [], 'nothing is written while the terminal is unfocused')
+
+  // deckd went down before the attach completed: the server dropped the tab, so the view attaches again
+  // once the deckd health row is up, and only then.
+  await h(() => window.h.show('sessC'))
+  await page.waitForFunction(() => window.h.handlers.sessC, null, { timeout: 10_000 })
+  await deckd(false)
+  await h(() => window.h.handlers.sessC.onError({ code: 'deckd_unavailable' }))
+  await page.waitForFunction(() => document.querySelector('.terminal-view')?.getAttribute('data-waiting') === 'deckd', null, { timeout: 5000 })
+  assert.equal(await h(() => window.h.attaches.filter(id => id === 'sessC').length), 1, 'no re-attach while deckd is down')
+  await deckd(true)
+  await page.waitForFunction(() => window.h.attaches.filter(id => id === 'sessC').length === 2, null, { timeout: 5000 })
+  await h(() => { window.h.handlers.sessC.onAttached({ sessionId: 'sessC', ptyId: 'p3', cols: 80, rows: 24 }) })
+  await page.waitForFunction(() => !document.querySelector('.xterm-helper-textarea')?.readOnly, null, { timeout: 5000 })
+  await typeInto('z')
+  assert.deepEqual(await h(() => window.h.writes.splice(0)), [['sessC', 'z']], 'the re-attached view is writable')
+  // An outage after the attach: the server keeps the tab and re-attaches it, so the view does not.
+  await h(() => window.h.handlers.sessC.onError({ code: 'deckd_unavailable' }))
+  await deckd(false)
+  await deckd(true)
+  // A barrier: React runs the effects of the deckd changes before it commits the session switch.
+  await h(() => window.h.show('sessD'))
+  await page.waitForFunction(() => window.h.handlers.sessD, null, { timeout: 10_000 })
+  assert.equal(await h(() => window.h.attaches.filter(id => id === 'sessC').length), 2, 'an attached view leaves re-attaching to the server')
+
+  // The health row can still read up when the error arrives: the view waits for a return to up, no attach loop.
+  await h(() => window.h.handlers.sessD.onError({ code: 'deckd_unavailable' }))
+  await page.waitForFunction(() => document.querySelector('.terminal-view')?.getAttribute('data-waiting') === 'deckd', null, { timeout: 5000 })
+  // A barrier: the effects of the error's commit ran before React committed deckd going down.
+  await deckd(false)
+  assert.equal(await h(() => window.h.attaches.filter(id => id === 'sessD').length), 1, 'no re-attach while the row still read up')
+  await deckd(true)
+  await page.waitForFunction(() => window.h.attaches.filter(id => id === 'sessD').length === 2, null, { timeout: 5000 })
   assert.deepEqual(errors, [])
 })
