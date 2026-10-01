@@ -465,15 +465,18 @@ async function main () {
   }
   const cap = Number(process.env.DECKD_OUTPUT_QUEUE_CAP)
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
-  // DECKD_LOGIN_ENV=inherit skips the login-shell probe. A deckd started by
-  // a node:test file (NODE_TEST_CONTEXT is set in every test file's
-  // environment) skips it too, so no test runs the owner's shell profile.
-  const skipProbe = process.env.DECKD_LOGIN_ENV === 'inherit' || process.env.NODE_TEST_CONTEXT !== undefined
-  const loginEnv = skipProbe ? dropSessionVars(process.env) : await captureLoginEnv()
+  // DECKD_LOGIN_ENV=inherit skips the login-shell probe; nothing else does.
+  // Every test and perf harness that starts this file sets it.
+  const skipProbe = process.env.DECKD_LOGIN_ENV === 'inherit'
+  /** @type {string | null} */
+  let failed = null
+  const loginEnv = skipProbe
+    ? dropSessionVars(process.env)
+    : await captureLoginEnv({ onFallback: (reason) => { failed = reason } })
   const added = changedNames(loginEnv, process.env)
-  console.error(skipProbe
-    ? 'deckd: login environment probe skipped, using the service environment'
-    : `deckd: login environment adds ${added.length} names${added.length ? ': ' + added.join(', ') : ''}`)
+  if (skipProbe) console.error('deckd: login environment probe skipped (DECKD_LOGIN_ENV=inherit), using the service environment')
+  else if (failed) console.error(`deckd: login environment probe failed (${failed}), using the service environment`)
+  else console.error(`deckd: login environment adds ${added.length} names${added.length ? ': ' + added.join(', ') : ''}`)
   const deckd = await startDeckd({
     runtimeDir,
     outputQueueCap: Number.isInteger(cap) && cap > 0 ? cap : OUTPUT_QUEUE_CAP,

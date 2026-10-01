@@ -3,6 +3,7 @@
 // thin environment, so deckd asks the owner's login shell for the one a
 // terminal would have, once, and hands it to the sessions it launches.
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 
 /**
  * Claude Code's own per-session variables. A deckd started from inside a
@@ -52,10 +53,9 @@ export function dropSessionVars (env) {
 }
 
 /**
- * Parse `env -0` output. Entries are NUL-separated `NAME=value`; a value may
- * hold `=` and newlines. An entry whose name is not a variable name is
- * skipped, which also skips the first entry when a profile printed text
- * before `env` ran.
+ * Parse `env -0` output: NUL-separated `NAME=value` entries, where a value
+ * may hold `=` and newlines. An entry whose name is not a variable name is
+ * skipped.
  * @param {Buffer} out
  * @returns {Record<string, string>}
  */
@@ -71,55 +71,88 @@ function parseEnv0 (out) {
   return env
 }
 
+/** How long to keep reading after the shell exited while something it started still holds stdout. */
+const EXIT_DRAIN_MS = 100
+
 /**
- * Run `[shell, '-l', '-i', '-c', 'env -0']` with stdin from /dev/null,
- * stderr ignored and a timeout, and return its environment minus
- * dropSessionVars. Falls back to `baseEnv` (same drops) on a missing shell,
- * a non-zero exit, the timeout or empty output. On the timeout the shell's
- * whole process group is killed with SIGKILL, because an interactive shell
- * may ignore SIGTERM.
- * @param {{ shell?: string, timeoutMs?: number, baseEnv?: Record<string, string | undefined> }} [opts]
+ * @typedef {'no_shell' | 'spawn_error' | 'exit' | 'timeout' | 'no_output'} FallbackReason
+ */
+
+/**
+ * Run `[shell, '-l', '-i', '-c', "printf '%s\0' <marker>; env -0"]` with
+ * stdin from /dev/null, stderr ignored and a timeout, and return the
+ * environment printed after the random marker, minus dropSessionVars. The
+ * marker keeps anything a profile prints before `env` (a banner, a motd) out
+ * of the first variable. The answer comes when the shell exits, not when its
+ * stdout closes, so a background job a profile starts cannot hold the probe
+ * open. Falls back to `baseEnv` (same drops) on a missing shell, a non-zero
+ * exit, the timeout, or output without the marker or any variable, and
+ * reports which through `onFallback`. On the timeout the shell's whole
+ * process group is killed with SIGKILL, because an interactive shell may
+ * ignore SIGTERM.
+ * @param {{ shell?: string, timeoutMs?: number, baseEnv?: Record<string, string | undefined>, onFallback?: (reason: FallbackReason) => void }} [opts]
  * @returns {Promise<Record<string, string>>}
  */
-export function captureLoginEnv ({ shell = process.env.SHELL, timeoutMs = 5000, baseEnv = process.env } = {}) {
-  const fallback = () => dropSessionVars(baseEnv)
-  if (typeof shell !== 'string' || shell === '') return Promise.resolve(fallback())
+export function captureLoginEnv ({ shell = process.env.SHELL, timeoutMs = 5000, baseEnv = process.env, onFallback = () => {} } = {}) {
+  /** @param {FallbackReason} reason */
+  const fallback = (reason) => {
+    onFallback(reason)
+    return dropSessionVars(baseEnv)
+  }
+  if (typeof shell !== 'string' || shell === '') return Promise.resolve(fallback('no_shell'))
+  const marker = `__FLEETMATES_DECK_ENV_${randomBytes(8).toString('hex')}__`
   return new Promise((resolve) => {
     let done = false
-    /** @param {Record<string, string>} env */
-    const finish = (env) => {
+    /** @type {NodeJS.Timeout | null} */
+    let drainTimer = null
+    /** @param {() => Record<string, string>} make */
+    const finish = (make) => {
       if (done) return
       done = true
       clearTimeout(timer)
-      resolve(env)
+      if (drainTimer) clearTimeout(drainTimer)
+      child.stdout?.destroy()
+      resolve(make())
     }
     /** @type {import('node:child_process').ChildProcess} */
     let child
     try {
-      child = spawn(shell, ['-l', '-i', '-c', 'env -0'], {
+      child = spawn(shell, ['-l', '-i', '-c', `printf '%s\\0' ${marker}; env -0`], {
         stdio: ['ignore', 'pipe', 'ignore'],
         env: dropSessionVars(baseEnv),
         detached: true
       })
     } catch {
-      resolve(fallback())
+      resolve(fallback('spawn_error'))
       return
     }
     const timer = setTimeout(() => {
       try {
         if (child.pid) process.kill(-child.pid, 'SIGKILL')
       } catch {}
-      child.stdout?.destroy()
-      finish(fallback())
+      finish(() => fallback('timeout'))
     }, timeoutMs)
     /** @type {Buffer[]} */
     const chunks = []
+    let exited = false
+    let ended = false
+    const parse = () => finish(() => {
+      const out = Buffer.concat(chunks)
+      const at = out.indexOf(marker + '\0')
+      const env = at === -1 ? {} : parseEnv0(out.subarray(at + marker.length + 1))
+      return Object.keys(env).length === 0 ? fallback('no_output') : dropSessionVars(env)
+    })
     child.stdout?.on('data', (d) => chunks.push(d))
-    child.on('error', () => finish(fallback()))
-    child.on('close', (code) => {
-      if (code !== 0) return finish(fallback())
-      const env = parseEnv0(Buffer.concat(chunks))
-      finish(Object.keys(env).length === 0 ? fallback() : dropSessionVars(env))
+    child.stdout?.on('end', () => {
+      ended = true
+      if (exited) parse()
+    })
+    child.on('error', () => finish(() => fallback('spawn_error')))
+    child.on('exit', (code) => {
+      if (code !== 0) return finish(() => fallback('exit'))
+      exited = true
+      if (ended) parse()
+      else drainTimer = setTimeout(parse, EXIT_DRAIN_MS)
     })
   })
 }

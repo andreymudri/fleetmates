@@ -56,9 +56,11 @@ test('CLAUDE_SESSION_VARS is exactly the per-session list the owner chose', () =
 
 test('captureLoginEnv keeps profile CLAUDE_CODE_* names and drops the session ones and TERM', async () => {
   const argvLog = path.join(dir, 'argv.log')
+  // Records its argv, then runs the probe's command with an environment of
+  // its own, as a login shell would after reading a profile.
   const shell = await fakeShell('sh-ok', [
     `printf '%s\\n' "$@" > '${argvLog}'`,
-    "printf 'CLAUDE_CODE_FOO=1\\0CLAUDE_CODE_EXECPATH=/home/you/bin/x\\0CLAUDE_CODE_SESSION_ID=abc\\0CLAUDECODE=1\\0TERM=dumb\\0PATH=/home/you/bin:/usr/bin\\0MULTI=a=b\\nc\\0'"
+    `exec env -i CLAUDE_CODE_FOO=1 CLAUDE_CODE_EXECPATH=/home/you/bin/x CLAUDE_CODE_SESSION_ID=abc CLAUDECODE=1 TERM=dumb PATH=/home/you/bin:/usr/bin "MULTI=$(printf 'a=b\\nc')" /bin/sh -c "$4"`
   ].join('\n'))
   const env = await captureLoginEnv({ shell, baseEnv: { FROM_BASE: '1' } })
   assert.equal(env.CLAUDE_CODE_FOO, '1')
@@ -71,11 +73,65 @@ test('captureLoginEnv keeps profile CLAUDE_CODE_* names and drops the session on
   assert.equal(env.MULTI, 'a=b\nc')
   // the probe's output replaces the base environment, it is not merged into it
   assert.equal(env.FROM_BASE, undefined)
-  assert.deepEqual((await readFile(argvLog, 'utf8')).split('\n').slice(0, 4), ['-l', '-i', '-c', 'env -0'])
+  const argv = (await readFile(argvLog, 'utf8')).split('\n')
+  assert.deepEqual(argv.slice(0, 3), ['-l', '-i', '-c'])
+  // a NUL-terminated marker first, then the environment
+  assert.match(argv[3], /^printf '%s\\0' __FLEETMATES_DECK_ENV_[0-9a-f]{16}__; env -0$/)
+})
+
+test('captureLoginEnv keeps every variable when the profile prints a banner first', async () => {
+  // Prints a banner with no newline, runs whatever the probe asked for
+  // before `env -0`, then an `env -0` whose first variable follows the banner.
+  const shell = await fakeShell('sh-banner', [
+    "printf 'Welcome back'",
+    'eval "${4%env -0}"',
+    'exec env -i FIRST_VAR=1 SECOND_VAR=2 env -0'
+  ].join('\n'))
+  const env = await captureLoginEnv({ shell, baseEnv: { FROM_BASE: '1' } })
+  assert.equal(env.FIRST_VAR, '1')
+  assert.equal(env.SECOND_VAR, '2')
+  assert.equal(env.FROM_BASE, undefined)
+})
+
+test('captureLoginEnv answers when the shell exits, though a background job still holds stdout', async () => {
+  const pidFile = path.join(dir, 'sleeper.pid')
+  const shell = await fakeShell('sh-bg', [
+    `sleep 30 & echo $! > '${pidFile}'`,
+    'env -i A_VAR=1 /bin/sh -c "$4"',
+    'exit 0'
+  ].join('\n'))
+  /** @type {string[]} */
+  const fallbacks = []
+  const t0 = Date.now()
+  try {
+    const env = await captureLoginEnv({ shell, timeoutMs: 5000, baseEnv: { FROM_BASE: '1' }, onFallback: (r) => fallbacks.push(r) })
+    assert.equal(env.A_VAR, '1')
+    assert.deepEqual(fallbacks, [])
+    assert.ok(Date.now() - t0 < 2500, `took ${Date.now() - t0} ms`)
+  } finally {
+    const pid = Number(await readFile(pidFile, 'utf8').catch(() => ''))
+    if (pid) try { process.kill(pid, 'SIGKILL') } catch {}
+  }
+})
+
+test('captureLoginEnv reports why it fell back', async () => {
+  const base = { FROM_BASE: '1' }
+  /** @param {string} shell */
+  const reason = async (shell, timeoutMs = 5000) => {
+    /** @type {string[]} */
+    const got = []
+    await captureLoginEnv({ shell, timeoutMs, baseEnv: base, onFallback: (r) => got.push(r) })
+    return got
+  }
+  assert.deepEqual(await reason(await fakeShell('sh-r-exit', 'exit 3')), ['exit'])
+  assert.deepEqual(await reason(await fakeShell('sh-r-slow', 'sleep 5'), 200), ['timeout'])
+  assert.deepEqual(await reason(await fakeShell('sh-r-nomark', "printf 'A=1\\0'")), ['no_output'])
+  assert.deepEqual(await reason(path.join(dir, 'no-such-shell')), ['spawn_error'])
+  assert.deepEqual(await reason(''), ['no_shell'])
 })
 
 test('captureLoginEnv falls back to the base environment, with the same drops, on exit 1', async () => {
-  const shell = await fakeShell('sh-fail', "printf 'FROM_SHELL=1\\0'; exit 1")
+  const shell = await fakeShell('sh-fail', 'env -i FROM_SHELL=1 /bin/sh -c "$4"; exit 1')
   const env = await captureLoginEnv({ shell, baseEnv: { FROM_BASE: '1', TERM: 'xterm', CLAUDECODE: '1', CLAUDE_CODE_USE_BEDROCK: '1' } })
   assert.deepEqual(env, { FROM_BASE: '1', CLAUDE_CODE_USE_BEDROCK: '1' })
 })

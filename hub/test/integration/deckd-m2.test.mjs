@@ -6,7 +6,8 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import path from 'node:path'
-import { mkdtemp, mkdir, chmod, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, chmod, writeFile, readFile, rm } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { startDeckd } from '../../deckd/main.mjs'
@@ -17,6 +18,7 @@ import { Ring } from '../../deckd/ring.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const stub = path.join(here, 'stubs', 'claude')
+const mainPath = path.resolve(here, '..', '..', 'deckd', 'main.mjs')
 
 /** @type {Awaited<ReturnType<typeof makeRuntimeDir>>} */
 let rt
@@ -354,5 +356,125 @@ test('pin: a second resize 100 ms after the first lands no sooner than 1 s after
     host.kill('SIGKILL', 0)
     await exited
     host.dispose()
+  }
+})
+
+/**
+ * A `claude` that prints Claude Code's session variables and a profile-style
+ * one, then waits.
+ * @param {string} dir
+ * @returns {Promise<string>} its path
+ */
+async function sessionVarsClaude (dir) {
+  const file = path.join(dir, 'claude')
+  await writeFile(file, [
+    '#!/bin/sh',
+    `printf 'SESS cc=[%s] sid=[%s] foo=[%s]\\r\\n' "$CLAUDECODE" "$CLAUDE_CODE_SESSION_ID" "$CLAUDE_CODE_FOO"`,
+    'exec cat'
+  ].join('\n') + '\n', { mode: 0o700 })
+  return file
+}
+
+/**
+ * Run `node main.mjs` with exactly `env` (plus a private runtime dir) until
+ * it listens, call `fn`, then stop it with SIGTERM.
+ * @param {Record<string, string>} env
+ * @param {(runtimeDir: string, stderr: () => string) => Promise<void>} [fn]
+ */
+async function withMain (env, fn = async () => {}) {
+  const runtime = await makeRuntimeDir()
+  const proc = spawn(process.execPath, [mainPath], { env: { ...env, XDG_RUNTIME_DIR: runtime.dir }, stdio: ['ignore', 'ignore', 'pipe'] })
+  let stderr = ''
+  proc.stderr?.on('data', (d) => { stderr += d })
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`deckd did not start: ${stderr}`)), 15000)
+      proc.stderr?.on('data', () => {
+        if (stderr.includes('deckd listening on')) { clearTimeout(timer); resolve(undefined) }
+      })
+      proc.once('exit', (code) => { clearTimeout(timer); reject(new Error(`deckd exited ${code}: ${stderr}`)) })
+    })
+    await fn(runtime.dir, () => stderr)
+  } finally {
+    if (proc.exitCode === null) {
+      const exited = new Promise((resolve) => proc.once('exit', resolve))
+      proc.kill('SIGTERM')
+      await exited
+    }
+    await runtime.cleanup()
+  }
+}
+
+test('main runs the login probe unless DECKD_LOGIN_ENV=inherit; NODE_TEST_CONTEXT does not skip it', async () => {
+  const dir = await mkdtemp(path.join(rt.dir, 'probe-'))
+  const marker = path.join(dir, 'probe.argv')
+  // A fake login shell: records its argv, then runs the probe's command
+  // without reading any profile.
+  const shell = path.join(dir, 'fake-shell')
+  await writeFile(shell, `#!/bin/sh\nprintf '%s\\n' "$@" >> '${marker}'\nexec /bin/sh -c "$4"\n`, { mode: 0o700 })
+  const base = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: dir, SHELL: shell }
+  try {
+    await withMain({ ...base, NODE_TEST_CONTEXT: 'child-v8' })
+    const ran = await readFile(marker, 'utf8')
+    assert.deepEqual(ran.split('\n').slice(0, 3), ['-l', '-i', '-c'])
+    await rm(marker)
+    await withMain({ ...base, NODE_TEST_CONTEXT: 'child-v8', DECKD_LOGIN_ENV: 'inherit' })
+    assert.equal(await readFile(marker, 'utf8').catch(() => ''), '')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('main with DECKD_LOGIN_ENV=inherit still drops the session variables from launched sessions', async () => {
+  const dir = await mkdtemp(path.join(rt.dir, 'inherit-'))
+  const claude = await sessionVarsClaude(dir)
+  try {
+    await withMain({
+      PATH: process.env.PATH ?? '/usr/bin:/bin',
+      HOME: dir,
+      SHELL: path.join(dir, 'no-such-shell'),
+      DECKD_LOGIN_ENV: 'inherit',
+      CLAUDECODE: '1',
+      CLAUDE_CODE_SESSION_ID: 'abc',
+      CLAUDE_CODE_FOO: 'kept'
+    }, async (runtimeDir) => {
+      const c = await connectDeckd({ runtimeDir, kind: 'server', name: 'm2' })
+      try {
+        const res = await c.request('spawn', { cwd: dir, argv: [claude], env: {}, origin: 'launched' })
+        assert.equal(await waitRow(c, res.ptyId, (l) => l.startsWith('SESS ')), 'SESS cc=[] sid=[] foo=[kept]')
+        await killAndWait(c, res.ptyId)
+      } finally {
+        c.close()
+      }
+    })
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('startDeckd without loginEnv drops the session variables of its own environment', async () => {
+  const runtime = await makeRuntimeDir()
+  const claude = await sessionVarsClaude(runtime.dir)
+  const saved = { CLAUDECODE: process.env.CLAUDECODE, CLAUDE_CODE_SESSION_ID: process.env.CLAUDE_CODE_SESSION_ID, CLAUDE_CODE_FOO: process.env.CLAUDE_CODE_FOO }
+  Object.assign(process.env, { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: 'abc', CLAUDE_CODE_FOO: 'kept' })
+  /** @type {Awaited<ReturnType<typeof startDeckd>> | undefined} */
+  let d
+  try {
+    d = await startDeckd({ runtimeDir: runtime.dir })
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+  const c = await connectDeckd({ runtimeDir: runtime.dir, kind: 'server', name: 'm2' })
+  try {
+    const res = await c.request('spawn', { cwd: runtime.dir, argv: [claude], env: {}, origin: 'launched' })
+    assert.equal(await waitRow(c, res.ptyId, (l) => l.startsWith('SESS ')), 'SESS cc=[] sid=[] foo=[kept]')
+    await killAndWait(c, res.ptyId)
+  } finally {
+    c.close()
+    await d?.close()
+    await runtime.cleanup()
   }
 })

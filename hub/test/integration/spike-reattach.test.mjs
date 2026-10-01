@@ -244,7 +244,7 @@ function exited (proc) {
 before(async () => {
   rt = await makeRuntimeDir()
   fake = await fakeBin({ script: echoScript })
-  const { proc } = await startChild(deckdMain, { ...fake.env, XDG_RUNTIME_DIR: rt.dir, HOME: rt.dir }, /deckd listening on/)
+  const { proc } = await startChild(deckdMain, { ...fake.env, XDG_RUNTIME_DIR: rt.dir, HOME: rt.dir, DECKD_LOGIN_ENV: 'inherit' }, /deckd listening on/)
   deckd = proc
 })
 

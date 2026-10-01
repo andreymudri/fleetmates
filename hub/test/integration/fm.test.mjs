@@ -148,7 +148,7 @@ before(async () => {
   logPath = path.join(tmp, 'fake.log')
   fb = await fakeBin({ script, log: logPath })
   env = { ...fb.env, XDG_RUNTIME_DIR: rt.dir, TERM_PROGRAM: TERM_NAME }
-  deckd = spawn(process.execPath, [mainPath], { env, stdio: ['ignore', 'ignore', 'pipe'] })
+  deckd = spawn(process.execPath, [mainPath], { env: { ...env, DECKD_LOGIN_ENV: 'inherit' }, stdio: ['ignore', 'ignore', 'pipe'] })
   let stderr = ''
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`deckd did not start: ${stderr}`)), 10000)
