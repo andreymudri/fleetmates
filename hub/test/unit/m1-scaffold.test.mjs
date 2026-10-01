@@ -24,7 +24,7 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
   assert.equal(pkg.type, 'module')
   assert.equal(pkg.engines.node, '>=24.2.0')
   assert.equal(typeof pkg.scripts.build, 'string')
-  for (const name of ['react', 'react-dom', 'vite']) {
+  for (const name of ['react', 'react-dom', 'vite', 'markdown-it']) {
     const version = pkg.dependencies?.[name] ?? pkg.devDependencies?.[name]
     assert.match(version, /^\d+\.\d+\.\d+$/)
     assert.equal(lock.packages[''].dependencies?.[name] ?? lock.packages[''].devDependencies?.[name], version)
