@@ -35,6 +35,28 @@ function shellWords(command) {
   return words
 }
 
+const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
+
+/**
+ * The hook command `init` and the web server both install: each word single-quoted, which survives
+ * spaces, quotes and `$` in either path (a double-quoted `$` would expand).
+ */
+export function deckHookCommand(execPath, hookPath) {
+  return `${shellQuote(execPath)} ${shellQuote(hookPath)}`
+}
+
+/**
+ * Whether two hook commands run the same argv, whatever their quoting: an install written by an
+ * older build (`"<node>" "<hook>"` from the web server) matches the canonical single-quoted form.
+ */
+function sameCommand(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false
+  if (a === b) return true
+  const x = shellWords(a)
+  const y = shellWords(b)
+  return !!x && !!y && x.length === y.length && x.every((word, i) => word === y[i])
+}
+
 /** Check whether a command names a deck hook script. */
 export function isDeckHook(command, installedCommand) {
   if (typeof command !== 'string' || /[\r\n]/.test(command)) return false
@@ -42,7 +64,7 @@ export function isDeckHook(command, installedCommand) {
   if (words?.length !== 2) return false
   const [node, script] = words
   const knownNode = node === process.execPath || ['node', 'nodejs'].includes(node) || (path.isAbsolute(node) && ['node', 'nodejs'].includes(path.basename(node)))
-  return (knownNode || command === installedCommand) && path.isAbsolute(script) && /\/(?:hub|fleetmates-deck)\/hook\/deck-hook\.mjs$/.test(script)
+  return (knownNode || sameCommand(command, installedCommand)) && path.isAbsolute(script) && /\/(?:hub|fleetmates-deck)\/hook\/deck-hook\.mjs$/.test(script)
 }
 
 /** Merge or remove deck hooks without moving unrelated groups. */
@@ -119,5 +141,5 @@ export function writeSettings(file, current, next) {
 /** Check that every subscribed event has the installed command. */
 export function hooksInstalled(settings, command) {
   if (lifecycleEvents.some(event => Array.isArray(settings.hooks?.[event]) && settings.hooks[event].some(group => Array.isArray(group?.hooks) && group.hooks.some(hook => hook?.type === 'command' && isDeckHook(hook.command, command))))) return false
-  return HOOK_EVENTS.every(event => Array.isArray(settings.hooks?.[event]) && settings.hooks[event].some(group => group.matcher === '*' && group.hooks?.some(hook => hook.command === command && hook.async === true)))
+  return HOOK_EVENTS.every(event => Array.isArray(settings.hooks?.[event]) && settings.hooks[event].some(group => group.matcher === '*' && group.hooks?.some(hook => sameCommand(hook?.command, command) && hook.async === true)))
 }

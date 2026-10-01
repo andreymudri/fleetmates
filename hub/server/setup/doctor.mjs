@@ -6,6 +6,28 @@ import { createLineDecoder, encode, PROTO } from '../../deckd/protocol.mjs'
 import { SOCKET_NAME } from '../adapters/scribed.mjs'
 import { hooksInstalled, readSettings } from './hooks.mjs'
 
+/** The Claude Code version the newest hook fixture set covers (docs/deck/09-testing.md section 4). */
+export const TESTED_CLAUDE_CODE = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).fleetmatesDeck.testedClaudeCode
+
+/** Compare two x.y.z versions numerically: negative, zero or positive. */
+function compareVersions(a, b) {
+  const [x, y] = [a, b].map(v => v.split('.').map(Number))
+  return x[0] - y[0] || x[1] - y[1] || x[2] - y[2]
+}
+
+/**
+ * Check 1. Equal to the tested version is ok; newer is a non-blocking warning (SM-O18 default:
+ * warn only); older or not found is failed. None of them block (only the hooks check does, D-63).
+ */
+function claudeCheck(version) {
+  const tested = TESTED_CLAUDE_CODE
+  if (!version) return { id: 'claude', state: 'failed', blocking: false, detail: `Claude Code unavailable; tested ${tested}` }
+  const order = compareVersions(version, tested)
+  if (order === 0) return { id: 'claude', state: 'ok', blocking: false, detail: `Claude Code ${version}; tested ${tested}` }
+  if (order > 0) return { id: 'claude', state: 'warn', blocking: false, detail: `Claude Code ${version} is newer than this deck was tested with (${tested})` }
+  return { id: 'claude', state: 'failed', blocking: false, detail: `Claude Code ${version}; tested ${tested}` }
+}
+
 function probe(file, args, timeout = 2000) {
   return spawnSync(file, args, { encoding: 'utf8', timeout, env: process.env })
 }
@@ -47,7 +69,7 @@ function probeDeckd(paths, list = false) {
 export async function doctor(paths, command, { run = probe } = {}) {
   const claude = run('claude', ['--version'])
   const version = claude.status === 0 ? claude.stdout.match(/\d+\.\d+\.\d+/)?.[0] : null
-  const checks = [{ id: 'claude', state: version === '2.1.282' ? 'ok' : 'failed', blocking: false, detail: version ? `Claude Code ${version}; tested 2.1.282` : 'Claude Code unavailable; tested 2.1.282' }]
+  const checks = [claudeCheck(version)]
   let configured = false
   try { configured = hooksInstalled(readSettings(paths.settings).value, command) } catch {}
   let usable = false
@@ -87,5 +109,5 @@ export async function status(paths, command, { run = probe } = {}) {
       livePtys = (await probeDeckd(paths, true)).ptys.length
     } catch {}
   }
-  return { units, hooks, socket, livePtys, claudeVersion, testedClaudeVersion: '2.1.282' }
+  return { units, hooks, socket, livePtys, claudeVersion, testedClaudeVersion: TESTED_CLAUDE_CODE }
 }

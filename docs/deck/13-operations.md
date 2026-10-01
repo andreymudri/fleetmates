@@ -54,7 +54,7 @@ fleetmates-deck open
 | 4. Token (Decided: random token in a 0600 file) | Creates `~/.local/state/fleetmates/deck/token` only if missing: 32 random bytes, base64url, mode 0600. An existing token is kept so open tabs stay valid. `--rotate-token` replaces it. |
 | 5. Config | Writes `~/.config/fleetmates/deck/config.json` with defaults (section 7) only if missing, and, only if missing, a stub `tiers.json` that `extends` the shipped defaults and holds no entries of its own ([07-approvals.md](07-approvals.md) section 4.1, APR-O5 default). `tiers.schema.json` is copied next to it on every run, so the stub's `$schema` resolves (07-approvals 4.2). Existing files are never overwritten. |
 | 6. systemd units | Renders the two unit templates from `hub/systemd/` into `~/.config/systemd/user/` with the absolute Node path (`process.execPath`) and hub path, then `systemctl --user daemon-reload` and `systemctl --user enable --now fleetmates-deckd.service fleetmates-deck.service`. If a unit file exists and differs, it is replaced and the change is reported. `init` never restarts a running `fleetmates-deckd` (that would end every session); it prints a notice when the running deckd is older than the installed one (section 9.2). |
-| 7. Checks | Runs the six First run checks in the terminal (same probes as [screens/first-run.md](screens/first-run.md)) and prints them. Exit code 0 when the hooks check passes (the only blocking check, Decided), 1 otherwise. |
+| 7. Checks | When deckd is active, first waits up to 3 s for its socket to accept a connection (deckd is `Type=simple`, so systemd reports it active a moment before it listens). Runs the six First run checks in the terminal (same probes as [screens/first-run.md](screens/first-run.md)) and prints them. Exit code 0 when the hooks check passes (the only blocking check, Decided), 1 otherwise. |
 | 8. Research workspace (M6) | Creates the research workspace at `researchWorkspace` (default `~/.local/share/fleetmates-deck/research/`, section 7.1; D-54) only if missing: `git init`, one initial commit with `fleetmates.gate.json`, `README.md` and `.gitignore`, and `.claude/settings.local.json` with the vault write denies ([10-memory-and-research.md](10-memory-and-research.md) section 8.2). Then asks in the terminal whether to allow `WebSearch` and `WebFetch` in that workspace (KB-O3); nothing is written without a yes, and a non-interactive terminal skips the question. An existing workspace is left untouched. Not part of the exit code. |
 
 The First run screen's "Install hooks" button runs step 3 through the web server (`POST /api/setup/hooks`); "Start deckd" runs `systemctl --user start fleetmates-deckd.service`.
@@ -138,7 +138,7 @@ The environment of the systemd user manager is not the login shell's (no `PATH` 
 
 | Task | Command |
 |---|---|
-| Open the UI | `fleetmates-deck open` (starts the web unit if needed, opens the tokenised URL with `xdg-open`) |
+| Open the UI | `fleetmates-deck open` (starts the web unit if needed, writes a 0600 bootstrap page holding the tokenised URL and opens it in the web browser: `$BROWSER`, then the `xdg-settings get default-web-browser` entry through `gtk-launch` or `gio launch`, then `xdg-open`; if none works it prints the bootstrap file path) |
 | Status of everything | `fleetmates-deck status` (units, sockets, hook install state, live PTYs, versions) |
 | Six checks in the terminal | `fleetmates-deck doctor` |
 | Restart the web server | `systemctl --user restart fleetmates-deck` |

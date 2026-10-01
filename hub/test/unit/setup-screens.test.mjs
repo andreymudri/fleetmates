@@ -126,7 +126,7 @@ test('the observation hooks check is the only one that blocks Set sail', () => {
   blockedButton.props.onClick()
   assert.equal(sailed, 0)
 
-  const open = ChecklistView({ ...props, checks: checks({ scribed: { state: 'optional_skipped' }, notify: { state: 'pending' }, deckd: { state: 'failed' }, claude: { state: 'failed', detail: 'Claude Code 2.2.0; tested 2.1.282' } }) })
+  const open = ChecklistView({ ...props, checks: checks({ scribed: { state: 'optional_skipped' }, notify: { state: 'pending' }, deckd: { state: 'failed' }, claude: { state: 'warn', detail: 'Claude Code 2.2.0 is newer than this deck was tested with (2.1.282)' } }) })
   const openButton = sailButton(open)
   assert.equal(textOf(openButton), 'Set sail')
   assert.equal(openButton.props['aria-disabled'], undefined)
@@ -142,7 +142,9 @@ test('each check shows its ok, failed, warning and not-checked copy and its fix 
   const { rowView } = first
   const view = (id, state, extra) => rowView(check(id, state, extra))
   assert.deepEqual(pick(view('claude', 'ok', { detail: 'Claude Code 2.1.282; tested 2.1.282' })), ['ok', 'Claude Code 2.1.282 compatible', 'Matches the pinned hook payload fixtures for this deck release', null])
-  assert.deepEqual(pick(view('claude', 'failed', { detail: 'Claude Code 2.2.0; tested 2.1.282' })), ['warn', 'Claude Code 2.2.0 is newer than this deck was tested with', 'Hooks may differ; sessions can show wrong states.', null])
+  assert.deepEqual(pick(view('claude', 'warn', { detail: 'Claude Code 2.2.0 is newer than this deck was tested with (2.1.282)' })), ['warn', 'Claude Code 2.2.0 is newer than this deck was tested with', 'Hooks may differ; sessions can show wrong states.', null])
+  assert.deepEqual(pick(view('claude', 'failed', { detail: 'Claude Code 2.1.200; tested 2.1.282' })), ['warn', 'Claude Code', 'Claude Code 2.1.200; tested 2.1.282', null],
+    'an older Claude Code is not called newer')
   assert.deepEqual(pick(view('claude', 'failed', { detail: 'Claude Code unavailable; tested 2.1.282' })), ['warn', 'Claude Code was not found', 'Claude Code unavailable; tested 2.1.282', null],
     'the tested version in the detail is not a found version')
   assert.deepEqual(pick(view('claude', 'ok', { detail: 'Claude Code 2.1.282', drift: 3 })), ['warn', 'Claude Code 2.1.282 compatible', '3 hook payloads did not match the pinned fixtures', null])
@@ -293,7 +295,7 @@ test('every server string in the checklist is shown with visible tokens, one fie
   const noop = () => {}
   const row = c => render(ChecklistRow, { view: rowView(c), navigate: noop, onAction: noop })
   const cases = ch => ({
-    version: check('claude', 'failed', { detail: `Claude Code 2.2.0${ch}; tested`, version: `2.2.0${ch}` }),
+    version: check('claude', 'warn', { detail: `Claude Code 2.2.0${ch} is newer`, version: `2.2.0${ch}` }),
     missingDetail: check('claude', 'failed', { detail: `unavailable ${ch}` }),
     okVersion: check('claude', 'ok', { version: `2.1.282${ch}` }),
     claudeError: check('claude', 'failed', { detail: 'Claude Code 2.2.0', error: `boom ${ch}` }),
