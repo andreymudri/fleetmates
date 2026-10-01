@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { apiError } from './router.mjs'
+import { parseOpenRequest, readRunPlan, resolveRunPlan } from './open.mjs'
 import { persistSessionSummary } from '../machines/session.mjs'
 import { projectCounts } from '../machines/counts.mjs'
 const defaults = {
@@ -13,6 +14,9 @@ const defaults = {
 const configKeys = new Set(['port', 'scanRoot', 'lang', 'staleMinutes', 'claudeCommand', 'vaultPath', 'vaultCommand', 'obsidianVaultName', 'turbidassistConfig', 'scribedCommand', 'researchWorkspace'])
 const envKeys = { port: 'DECK_PORT', lang: 'DECK_LANG', vaultPath: 'VAULT_PATH' }
 const camel = row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]))
+// POST routes that take a JSON body; every other POST with a body is refused before routing.
+const postBodyRoutes = new Set(['open', 'sessions'])
+const hats = ['none', 'cap', 'bandana']
 const validStates = ['starting', 'running', 'needs_approval', 'asked_you', 'done', 'stale', 'idle', 'reviewed', 'crashed', 'ended']
 function integer(query, name, fallback, max = Number.MAX_SAFE_INTEGER) {
   if (!query.has(name)) return fallback
@@ -162,6 +166,12 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         if (run.readError) throw apiError(502, 'run_unreadable', { file: run.readError.file })
         return ok({ run })
       }
+      if (s[1] === 'runs' && s.length === 5 && s[4] === 'plan') {
+        const id = resolveRepo(q, s[2])
+        const run = (await runReader.list()).find(run => run.repoId === id && run.runId === s[3])
+        if (!run) throw apiError(404, 'not_found')
+        return ok({ path: run.planPath, ...(await readRunPlan(await resolveRunPlan(run, run.repoId))) })
+      }
     }
     if (method === 'PATCH' && route === 'prefs') {
       const current = preferences()
@@ -188,8 +198,39 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       event('prefs.changed', updated)
       return ok(updated)
     }
+    if (method === 'PATCH' && s[1] === 'repos' && s.length === 4 && s[3] === 'crew') {
+      const id = resolveRepo(q, s[2])
+      const keys = Object.keys(body)
+      const unknown = keys.filter(key => !['seed', 'slot', 'hat'].includes(key))
+      if (!keys.length || unknown.length) throw apiError(422, 'validation_failed', { fields: unknown.length ? unknown : ['seed', 'slot', 'hat'] })
+      const row = store.get('SELECT name FROM repos WHERE id=?', id)
+      const { seed, slot, hat } = body
+      const reroll = typeof seed === 'string' && seed.startsWith(`${row.name}#`) ? seed.slice(row.name.length + 1) : null
+      if (seed !== undefined && seed !== row.name && !(/^[1-9]\d{0,2}$/.test(reroll ?? '') && Number(reroll) >= 2)) throw apiError(422, 'validation_failed', { fields: ['seed'] })
+      if (slot !== undefined && !(Number.isInteger(slot) && slot >= 0 && slot <= 8)) throw apiError(422, 'validation_failed', { fields: ['slot'] })
+      if (hat !== undefined && !hats.includes(hat)) throw apiError(422, 'validation_failed', { fields: ['hat'] })
+      // One transaction (design/crew.md 4.2): a taken slot rolls back the seed and hat written before it.
+      store.tx(() => {
+        if (seed !== undefined) store.run('UPDATE repos SET crew_seed=? WHERE id=?', seed, id)
+        if (hat !== undefined) store.run('UPDATE repos SET hat=? WHERE id=?', hat, id)
+        if (slot !== undefined) {
+          if (store.get('SELECT id FROM repos WHERE crew_slot=? AND crew_slot_shared=0 AND archived_at IS NULL AND id<>?', slot, id)) throw apiError(409, 'slot_taken', { fields: ['slot'] })
+          store.run('UPDATE repos SET crew_slot=?,crew_slot_shared=0 WHERE id=?', slot, id)
+        }
+      })
+      const repo = repos(true).find(candidate => candidate.id === id)
+      event('repo.upserted', repo, id)
+      return ok({ repo })
+    }
     if (method === 'POST') {
-      if (Object.keys(body).length) throw apiError(422, 'validation_failed')
+      if (Object.keys(body).length && !postBodyRoutes.has(route)) throw apiError(422, 'validation_failed')
+      if (route === 'open') {
+        const { ref } = parseOpenRequest(body)
+        const run = (await runReader.list()).find(run => run.repoId === ref.repoId && run.runId === ref.runId)
+        if (!run) throw apiError(404, 'not_found')
+        await services.open(await resolveRunPlan(run, run.repoId))
+        return { status: 202, data: {} }
+      }
       if (route === 'setup/hooks') return ok(await services.installHooks())
       if (route === 'setup/complete') {
         if (!(await services.checks()).some(check => check.id === 'hooks' && check.state === 'ok')) throw apiError(409, 'precondition_failed')

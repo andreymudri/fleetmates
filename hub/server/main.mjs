@@ -2,7 +2,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { workingRoot } from './machines/session.mjs'
 import { openDeckDb } from './db/index.mjs'
@@ -162,6 +162,19 @@ export async function createDeckServer(options = {}) {
         return { mount: location, sizeBytes: info.blocks * info.bsize, usedBytes: (info.blocks - info.bfree) * info.bsize, availBytes: info.bavail * info.bsize }
       })
       return { cwd, mounts }
+    },
+    // Opens one resolved, checked absolute path (open.mjs): argv only, no shell, the token-free environment.
+    // The opener is detached and never awaited, since xdg-open may run the editor in the foreground; only a
+    // failure to spawn it (ENOENT, EACCES) is reported.
+    open(file) {
+      return new Promise((resolve, reject) => {
+        let child
+        try { child = spawn('xdg-open', [file], { env: processEnv, stdio: 'ignore', detached: true }) }
+        catch { return reject(apiError(502, 'open_failed')) }
+        child.once('error', () => reject(apiError(502, 'open_failed')))
+        child.once('spawn', () => { child.unref()
+          resolve() })
+      })
     },
     async rescan() {
       let found = 0
@@ -396,10 +409,29 @@ export async function createDeckServer(options = {}) {
       timer.unref()
       timers.push(timer)
     }
+    // run.updated (05-api 3.4): re-read the runs every runPollMs and publish each run whose JSON changed
+    // since the previous read. The first read has nothing to compare with, so it publishes every run once.
+    const runJson = new Map()
+    let runBusy = false
+    const runPoll = setInterval(() => {
+      if (runBusy || stopped) return
+      runBusy = true
+      Promise.resolve().then(() => reader.list()).then(list => {
+        if (stopped) return
+        for (const row of list) {
+          const key = JSON.stringify([row.repoId, row.runId])
+          const text = JSON.stringify(row)
+          if (runJson.get(key) === text) continue
+          runJson.set(key, text)
+          const at = now()
+          publish({ seq: Number(store.appendEvent({ at, type: 'run.updated', entityId: row.runId, data: row })), at, type: 'run.updated', data: row })
+        }
+      }).catch(() => {}).finally(() => { runBusy = false })
+    }, options.runPollMs ?? 60_000)
     const rotation = setInterval(() => { try { refreshToken() } catch {} }, tokenPollMs)
     const tick = setInterval(() => { projector.tick(now()) }, 5000)
     const ping = setInterval(() => { if (link) request(link, 'ping').catch(() => disconnect()) }, 5000)
-    for (const timer of [rotation, tick, ping]) { timer.unref()
+    for (const timer of [runPoll, rotation, tick, ping]) { timer.unref()
       timers.push(timer) }
   } catch (error) { await close()
     throw error }

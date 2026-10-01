@@ -23,7 +23,7 @@ async function harness(t, options = {}) {
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
   fs.writeFileSync(path.join(staticDir, 'app.js'), 'export const deck = true')
-  const opts = { env, port: 0, staticDir, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
+  const opts = { env, port: 0, staticDir, notifications: false, connectDeckd: async () => { throw Error('fake offline') }, runPollMs: 3_600_000,
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }), ...options }
   let deck = await startDeckServer(opts)
   const request = async (route, init = {}) => {
