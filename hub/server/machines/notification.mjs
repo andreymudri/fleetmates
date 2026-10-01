@@ -6,35 +6,47 @@ import { oneLine } from './request.mjs'
  * in severity order only while all of them can keep that much; the rest move into "+N more".
  */
 const SUMMARY_MIN = 24
-const HINT = '\nAnswer in your terminal'
+const HINT = 'Answer in your terminal\n'
 /** Popup line order: the drawer's tier words from most to least severe; other tiers, then untiered, come last. */
 const SEVERITY = ['destructive', 'caution', 'safe']
 const length = text => Array.from(text).length
 const rank = request => request.tier ? (SEVERITY.includes(request.tier) ? SEVERITY.indexOf(request.tier) : SEVERITY.length) : SEVERITY.length + 1
-const tierText = tier => tier ? ` · ${tier}` : ''
+
+/**
+ * The deck's own words first, then the agent's text. Agent text that renders very wide (wide glyphs, U+3000)
+ * wraps after the deck's words on its own line instead of before them; the hint and the most severe tier sit on
+ * the first two body lines, ahead of any agent text.
+ * @param {string} words the deck's phrase, such as "needs you" or a tier
+ * @param {string} text agent text, already stripped
+ * @returns {string}
+ */
+const lead = (words, text) => text ? `${words} · ${text}` : words
+const leadLength = words => words ? length(words) + 3 : 0
 
 /**
  * Title and body of a needs-you popup. Only the agent-written parts (the task and each summary) are cut, so
- * " needs you", every tier and the terminal hint always fit notify.mjs's final caps (08-security 4.9, T13).
+ * "needs you", every tier and the terminal hint always fit notify.mjs's final caps (08-security 4.9, T13).
+ * Every line leads with the deck's words: the title is "needs you · <task>" (with "(N requests)" after
+ * "needs you"), the body opens with the terminal hint, and each request line reads "<tier> · <summary>".
  * Lines go most severe first (stable within a tier), so the agent's arrival order cannot push a destructive
  * request out of the popup. Each summary is folded to one line, then the summaries share the room: the
  * shortest keep their whole text and the longest are cut to one common length. Requests left out are
  * counted on a last line that names the most severe tier among them, as "+N more · destructive".
  * @param {string} task
  * @param {{ summary: string, tier?: string | null }[]} requests
- * @param {boolean} observed whether to end with the terminal hint
+ * @param {boolean} observed whether to open with the terminal hint
  * @returns {{ title: string, body: string }}
  */
 export function requestPopupText(task, requests, observed) {
-  const suffix = ` needs you${requests.length > 1 ? ` (${requests.length} requests)` : ''}`
-  const title = clipText(task, TITLE_MAX - length(suffix)) + suffix
-  const tail = observed ? HINT : ''
+  const words = `needs you${requests.length > 1 ? ` (${requests.length} requests)` : ''}`
+  const title = lead(words, clipText(task, TITLE_MAX - length(words) - 3))
+  const head = observed ? HINT : ''
   const sorted = requests.map((request, index) => ({ request, index }))
     .sort((a, b) => rank(a.request) - rank(b.request) || a.index - b.index)
-    .map(({ request }) => ({ text: clipText(oneLine(request.summary), Infinity), tier: tierText(request.tier) }))
-  const more = shown => shown < sorted.length ? `+${sorted.length - shown} more${sorted[shown].tier}` : ''
+    .map(({ request }) => ({ text: clipText(oneLine(request.summary), Infinity), tier: request.tier || '' }))
+  const more = shown => shown < sorted.length ? `+${sorted.length - shown} more${sorted[shown].tier ? ` · ${sorted[shown].tier}` : ''}` : ''
   // Room the first `shown` summaries share: everything but the deck's own words and the line breaks.
-  const room = shown => BODY_MAX - length(tail) - sorted.slice(0, shown).reduce((sum, row) => sum + length(row.tier), 0)
+  const room = shown => BODY_MAX - length(head) - sorted.slice(0, shown).reduce((sum, row) => sum + leadLength(row.tier), 0)
     - (shown - 1) - (more(shown) ? 1 + length(more(shown)) : 0)
   let shown = sorted.length
   while (shown > 1 && sorted.slice(0, shown).reduce((sum, row) => sum + Math.min(length(row.text), SUMMARY_MIN), 0) > room(shown)) shown--
@@ -43,20 +55,21 @@ export function requestPopupText(task, requests, observed) {
   // The largest common cut whose total fits the budget.
   let cut = Math.max(0, ...lengths)
   while (cut > 0 && lengths.reduce((sum, size) => sum + Math.min(size, cut), 0) > budget) cut--
-  const lines = sorted.slice(0, shown).map(row => clipText(row.text, cut) + row.tier)
+  const lines = sorted.slice(0, shown).map(row => row.tier ? lead(row.tier, clipText(row.text, cut)) : clipText(row.text, cut))
   if (more(shown)) lines.push(more(shown))
-  return { title, body: lines.join('\n') + tail }
+  return { title, body: head + lines.join('\n') }
 }
 
 /**
- * Title of a done or crash popup, with the task cut so the deck's own words always fit.
+ * Title of a done or crash popup, "made port · <task>" or "crashed · <task>", with the task cut so the deck's
+ * own words always fit and always come first.
  * @param {string} task
  * @param {'done'|'crash'} kind
  * @returns {string}
  */
 export function terminalPopupTitle(task, kind) {
-  const suffix = kind === 'done' ? ' made port' : ' crashed'
-  return clipText(task, TITLE_MAX - length(suffix)) + suffix
+  const words = kind === 'done' ? 'made port' : 'crashed'
+  return lead(words, clipText(task, TITLE_MAX - length(words) - 3))
 }
 
 const graceMs = 3000
