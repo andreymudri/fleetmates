@@ -69,6 +69,17 @@ function requestView(row) {
   }
 }
 
+/** Longest stored exit scrollback in bytes (06-storage `session_scrollback`); a longer tail keeps its end. */
+export const SCROLLBACK_CAP = 2 * 1024 * 1024
+/**
+ * Expired reason for requests closed by `screen_idle` (state-machines row 21: the prompt left the screen with
+ * no outcome). The plan names it `prompt_gone`, but the `requests.expired_reason` CHECK in 0001-init.sql and
+ * the 05-api `expiredReason` type allow only process_ended, session_replaced, interrupted and superseded, so
+ * this uses `interrupted`, the reason `Notification(idle_prompt)` already gives the same row.
+ */
+export const PROMPT_GONE_REASON = 'interrupted'
+const PTY_ORIGINS = ['wrapped', 'launched']
+
 /** Persist ordered hook batches and publish only sequences from committed transactions. */
 export function createProjector({ store, now = Date.now, publish = () => {} }) {
   function snapshot() {
@@ -104,6 +115,42 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
     const events = store.all('SELECT seq, at, type, entity_id, data FROM events WHERE seq > ? ORDER BY seq', before).map(row => ({ seq: Number(row.seq), at: row.at, type: row.type, entityId: row.entity_id, data: JSON.parse(row.data) }))
     for (const event of events) publish(event)
     return events
+  }
+  // screen_idle and counted output for a live PTY session. Returns whether the session changed in a way that is
+  // published; a silent last_activity_at update returns false.
+  function applyScreenSignal(row, signal, at) {
+    if (!row.alive || !PTY_ORIGINS.includes(row.origin)) return false
+    if (signal.type === 'output') {
+      if (row.state !== 'stale') {
+        store.run('UPDATE sessions SET last_activity_at=MAX(last_activity_at,?) WHERE id=?', at, row.id)
+        return false
+      }
+      // Row 29: activity resets stale.
+      store.run('UPDATE sessions SET state=?,state_since=?,since_ts=?,last_activity_at=MAX(last_activity_at,?) WHERE id=?', 'running', at, at, at, row.id)
+      return true
+    }
+    if (row.state === 'running') {
+      // Row 30: no open tool step and no subagent working, else the idle screen is the lead waiting on them.
+      if (row.subagents_active !== 0 || store.get('SELECT 1 AS open FROM session_steps WHERE session_id=? AND status=? LIMIT 1', row.id, 'running')) return false
+      const refreshed = refreshSessionChanges(store, row)
+      const state = JSON.parse(refreshed.changed_files).length ? 'done' : 'idle'
+      store.run('UPDATE sessions SET state=?,state_since=?,since_ts=? WHERE id=?', state, at, at, row.id)
+      return true
+    }
+    if (!['needs_approval', 'asked_you'].includes(row.state)) return false
+    // Row 21: the prompt left the screen with no outcome (Esc in the terminal). A question the deck opened from
+    // the last assistant text (source stop_question) is answered at the idle input box, so it stays open.
+    const open = store.all('SELECT id FROM requests WHERE session_id=? AND state=? AND source<>?', row.id, 'open', 'stop_question')
+    if (open.length === 0) return false
+    store.run('UPDATE requests SET state=?,expired_reason=? WHERE session_id=? AND state=? AND source<>?', 'expired', PROMPT_GONE_REASON, row.id, 'open', 'stop_question')
+    for (const request of open) {
+      const closed = store.get('SELECT * FROM requests WHERE id=?', request.id)
+      store.appendEvent({ at, type: 'request.closed', entityId: closed.id, data: requestView(closed) })
+    }
+    const left = store.all('SELECT kind FROM requests WHERE session_id=? AND state=?', row.id, 'open')
+    const state = left.some(request => request.kind === 'permission') ? 'needs_approval' : left.length ? 'asked_you' : 'idle'
+    store.run('UPDATE sessions SET state=?,state_since=?,since_ts=? WHERE id=?', state, state === row.state ? row.state_since : at, at, row.id)
+    return true
   }
   function closeRequests(sessionId, reason, at) {
     const open = store.all('SELECT id FROM requests WHERE session_id = ? AND state = ?', sessionId, 'open')
@@ -225,11 +272,19 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
         store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
       })
     },
+    /**
+     * Apply one non-hook signal to a session in one transaction: `pid_gone`, `lost`, `review`, and from deckd
+     * `exit` (`{ code, signal, tail }`, tail base64 from `exits`, stored in `session_scrollback`),
+     * `screen_idle` (rows 21 and 30) and `output` (counted output, state-machines 1.10). `screen_idle` and
+     * `output` append no event when they change nothing a client sees.
+     */
     signal(sessionId, signal, at = now()) {
       return commit(() => {
         let row = store.get('SELECT * FROM sessions WHERE id = ?', sessionId)
         if (!row) return
-        if (signal.type === 'pid_gone' && row.origin === 'observed' && row.alive) {
+        if (signal.type === 'screen_idle' || signal.type === 'output') {
+          if (!applyScreenSignal(row, signal, at)) return
+        } else if (signal.type === 'pid_gone' && row.origin === 'observed' && row.alive) {
           closeRequests(row.id, 'process_ended', at)
           const announced = ['clear', 'resume'].includes(row.end_reason)
           const state = announced ? JSON.parse(row.changed_files).length ? 'done' : 'ended' : 'crashed'
@@ -238,9 +293,18 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           row = refreshSessionChanges(store, row)
           closeRequests(row.id, 'process_ended', at)
           const exitSignal = signal.signal && signal.signal !== '0' ? String(signal.signal) : null
-          const crashed = (signal.code !== 0 || exitSignal !== null) && !row.user_stop_requested && !row.end_announced
+          // Row 8: a session still starting with no Claude session id never came up, so any exit is a crash.
+          // A requested stop (row 42) still wins, so Stop on a session that never started ends it.
+          const neverStarted = row.state === 'starting' && !row.claude_session_id
+          const crashed = !row.user_stop_requested && (neverStarted || (signal.code !== 0 || exitSignal !== null) && !row.end_announced)
           const state = crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended'
           store.run('UPDATE sessions SET state=?,state_since=?,alive=0,activity=NULL,ended_at=?,exit_code=?,exit_signal=?,crash_kind=?,since_ts=? WHERE id=?', state, state === row.state ? row.state_since : at, at, signal.code ?? null, exitSignal, crashed ? exitSignal ? 'signal' : 'exit' : null, at, row.id)
+          if (typeof signal.tail === 'string') {
+            let bytes = Buffer.from(signal.tail, 'base64')
+            const truncated = bytes.length > SCROLLBACK_CAP
+            if (truncated) bytes = bytes.subarray(bytes.length - SCROLLBACK_CAP)
+            store.run('INSERT INTO session_scrollback(session_id,captured_at,text,truncated) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,text=excluded.text,truncated=excluded.truncated', row.id, at, bytes.toString('utf8'), truncated ? 1 : 0)
+          }
         } else if (signal.type === 'lost' && row.origin !== 'observed' && row.alive) {
           // Reconciliation rule 5(c): deckd no longer knows the PTY and kept no exit record for it.
           row = refreshSessionChanges(store, row)

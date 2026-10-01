@@ -9,7 +9,7 @@ import path from 'node:path'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { runRetention } from '../../server/db/retention.mjs'
-import { createProjector } from '../../server/machines/projector.mjs'
+import { createProjector, PROMPT_GONE_REASON, SCROLLBACK_CAP } from '../../server/machines/projector.mjs'
 import { applySessionHook, captureReviewBaseline } from '../../server/machines/session.mjs'
 import { projectHome } from '../../server/machines/counts.mjs'
 import { expireRequests, permissionTier } from '../../server/machines/request.mjs'
@@ -5137,5 +5137,130 @@ test('sparse staged blobs retain accurate totals review boundaries and known edi
     h.projector.signal(session.id, { type: 'review' }, 11000)
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
     assert.equal(h.store.get('SELECT review_baseline FROM sessions WHERE id=?', session.id).review_baseline, boundary)
+  } finally { h.close() }
+})
+
+// M2 Task 4: the deckd signals of a PTY session (state-machines rows 8, 21, 29, 30 and 1.10, 06-storage 11).
+function ptySession(h, ptyId = 'pty_m2') {
+  const send = (name, at, extra = {}) => {
+    const envelope = fixture('SessionStart.startup.json', { hook_event_name: name, cwd: path.dirname(h.file), ...extra })
+    Object.assign(envelope, { hookTs: at, ptyId, claudePid: null, pidChain: [] })
+    h.projector.applyHooks([envelope])
+  }
+  send('SessionStart', 1000)
+  send('UserPromptSubmit', 1100, { prompt: 'work' })
+  const id = h.projector.snapshot().sessions[0].id
+  const row = () => h.projector.snapshot().sessions.find(session => session.id === id)
+  const seq = () => Number(h.store.get('SELECT COALESCE(MAX(seq),0) AS seq FROM events').seq)
+  return { id, send, row, seq }
+}
+
+test('screen_idle moves a running PTY session to idle only with no open tool step and no subagent working', () => {
+  const h = harness()
+  try {
+    const s = ptySession(h)
+    assert.equal(s.row().origin, 'wrapped')
+    assert.equal(s.row().state, 'running')
+    s.send('PreToolUse', 1200, { tool_name: 'Bash', tool_input: { command: 'sleep 60' }, tool_use_id: 'tool-1' })
+    let before = s.seq()
+    h.projector.signal(s.id, { type: 'screen_idle' }, 1300)
+    assert.equal(s.row().state, 'running', 'an open tool step keeps it running')
+    assert.equal(h.store.get('SELECT COUNT(*) AS n FROM events WHERE seq>? AND type=?', before, 'session.upserted').n, 0, 'and publishes nothing')
+    s.send('PostToolUse', 1400, { tool_name: 'Bash', tool_input: { command: 'sleep 60' }, tool_use_id: 'tool-1', tool_response: {} })
+    h.store.run('UPDATE sessions SET subagents_active=1 WHERE id=?', s.id)
+    h.projector.signal(s.id, { type: 'screen_idle' }, 1500)
+    assert.equal(s.row().state, 'running', 'a subagent working keeps it running')
+    h.store.run('UPDATE sessions SET subagents_active=0 WHERE id=?', s.id)
+    before = s.seq()
+    h.projector.signal(s.id, { type: 'screen_idle' }, 1600)
+    assert.equal(s.row().state, 'idle')
+    assert.equal(s.row().stateSince, 1600)
+    assert.equal(h.store.get('SELECT COUNT(*) AS n FROM events WHERE seq>? AND type=?', before, 'session.upserted').n, 1)
+    before = s.seq()
+    h.projector.signal(s.id, { type: 'screen_idle' }, 1700)
+    assert.equal(s.seq(), before, 'an idle session is untouched and nothing is appended')
+    h.store.run('UPDATE sessions SET origin=?,state=? WHERE id=?', 'observed', 'running', s.id)
+    h.projector.signal(s.id, { type: 'screen_idle' }, 1800)
+    assert.equal(s.row().state, 'running', 'an observed session has no screen model')
+  } finally { h.close() }
+})
+
+test('screen_idle from needs_approval expires the open request with the prompt-gone reason and goes idle; a stop question stays', () => {
+  const h = harness()
+  try {
+    const s = ptySession(h)
+    s.send('PermissionRequest', 1200, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+    assert.equal(s.row().state, 'needs_approval')
+    const [open] = h.projector.snapshot().requests
+    const before = s.seq()
+    h.projector.signal(s.id, { type: 'screen_idle' }, 1300)
+    assert.equal(s.row().state, 'idle')
+    const closed = h.projector.snapshot().requests.find(request => request.id === open.id)
+    assert.equal(closed.state, 'expired')
+    assert.equal(closed.expiredReason, PROMPT_GONE_REASON)
+    assert.deepEqual(h.store.all('SELECT entity_id FROM events WHERE seq>? AND type=?', before, 'request.closed').map(row => row.entity_id), [open.id])
+
+    s.send('UserPromptSubmit', 1400, { prompt: 'more' })
+    s.send('PermissionRequest', 1500, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+    const question = h.projector.snapshot().requests.find(request => request.state === 'open')
+    h.store.run('UPDATE requests SET kind=?,tier=NULL,source=? WHERE id=?', 'question', 'stop_question', question.id)
+    h.store.run('UPDATE sessions SET state=? WHERE id=?', 'asked_you', s.id)
+    h.projector.signal(s.id, { type: 'screen_idle' }, 1600)
+    assert.equal(s.row().state, 'asked_you', 'a question asked in the last assistant text is answered at the idle input box')
+    assert.equal(h.projector.snapshot().requests.find(request => request.id === question.id).state, 'open')
+  } finally { h.close() }
+})
+
+test('counted output updates last activity without an event, moves only stale back to running, and never wakes idle', () => {
+  const h = harness()
+  try {
+    const s = ptySession(h)
+    let before = s.seq()
+    h.projector.signal(s.id, { type: 'output' }, 5000)
+    assert.equal(s.row().lastActivityAt, 5000)
+    assert.equal(s.seq(), before, 'a running session publishes nothing for output')
+    h.projector.tick(5000 + 1_200_000)
+    assert.equal(s.row().state, 'stale')
+    before = s.seq()
+    h.projector.signal(s.id, { type: 'output' }, 1_300_000)
+    assert.equal(s.row().state, 'running', 'row 29: activity resets stale')
+    assert.equal(s.row().stateSince, 1_300_000)
+    assert.equal(h.store.get('SELECT COUNT(*) AS n FROM events WHERE seq>? AND type=?', before, 'session.upserted').n, 1)
+    s.send('Stop', 1_300_100, { stop_hook_active: false })
+    assert.equal(s.row().state, 'idle')
+    h.projector.signal(s.id, { type: 'output' }, 1_400_000)
+    assert.equal(s.row().state, 'idle', 'output alone never moves idle (hooks only)')
+    assert.equal(s.row().lastActivityAt, 1_400_000)
+  } finally { h.close() }
+})
+
+test('row 8: a starting session with no Claude session id crashes on exit code 0 unless a stop was requested', () => {
+  for (const stop of [false, true]) {
+    const h = harness()
+    try {
+      h.store.run("INSERT INTO repos(id,name,crew_slot,crew_seed,first_seen_at) VALUES('/r','r',0,'r',0)")
+      h.store.run('INSERT INTO sessions(id,origin,pty_id,process_key,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at,user_stop_requested) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        'starter', 'wrapped', 'pty_s', 'pty_s', '/r', '/r', 'starting', 1000, 1000, 1000, 1, 1000, stop ? 1 : 0)
+      h.projector.signal('starter', { type: 'exit', code: 0, signal: null }, 2000)
+      const row = h.projector.snapshot().sessions[0]
+      assert.equal(row.state, stop ? 'ended' : 'crashed')
+      assert.equal(row.crashKind, stop ? null : 'exit')
+      assert.equal(row.exitCode, 0)
+    } finally { h.close() }
+  }
+})
+
+test('an exit tail is stored as session_scrollback in the exit transaction, capped at 2 MiB keeping its end', () => {
+  const h = harness()
+  try {
+    const s = ptySession(h)
+    const tail = Buffer.concat([Buffer.alloc(SCROLLBACK_CAP, 0x61), Buffer.from('the end\n')])
+    h.projector.signal(s.id, { type: 'exit', code: 1, signal: null, tail: tail.toString('base64') }, 3000)
+    assert.equal(s.row().state, 'crashed')
+    const stored = h.store.get('SELECT captured_at,text,truncated FROM session_scrollback WHERE session_id=?', s.id)
+    assert.equal(stored.captured_at, 3000)
+    assert.equal(stored.truncated, 1)
+    assert.equal(Buffer.byteLength(stored.text), SCROLLBACK_CAP)
+    assert.ok(stored.text.endsWith('the end\n'))
   } finally { h.close() }
 })

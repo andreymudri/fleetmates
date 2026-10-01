@@ -63,6 +63,7 @@ const deckdRows = deck => deck.store.all('SELECT data FROM events WHERE type=? O
 function fakeDeckd({ onList } = {}) {
   const listeners = new Map()
   const client = {
+    proto: 2,
     async request(op) {
       if (op === 'list') { await onList?.(listeners)
         return { ptys: [] } }
