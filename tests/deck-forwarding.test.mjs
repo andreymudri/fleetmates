@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { runCli } from '../scripts/cli.mjs'
@@ -130,4 +131,89 @@ test('the usage line lists ui and deck', async () => {
   assert.ok(usage)
   const names = usage[1].split('|')
   assert.ok(names.includes('ui') && names.includes('deck'))
+})
+
+test('a refusal never echoes the caller\'s subcommand or positional text', async () => {
+  const { base, root, argvFile } = await fakeCheckout()
+  try {
+    const hostile = '\u001b[2Jforged-text'
+    for (const argv of [['deck', hostile], ['deck', 'status', hostile], ['ui', hostile]]) {
+      const { io, text } = capture()
+      assert.equal(await runCli([...argv, '--root', root], io), 2)
+      assert.equal(text().includes('forged-text'), false, `${JSON.stringify(argv)} echoed the caller's text`)
+      assert.equal(text().includes('\u001b'), false, `${JSON.stringify(argv)} printed a control character`)
+      assert.equal(existsSync(argvFile), false)
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('each deck subcommand takes only its own flags', async () => {
+  const { base, root, argvFile } = await fakeCheckout()
+  try {
+    const refused = [
+      ['doctor', '--rotate-token'],
+      ['status', '--dry-run'],
+      ['status', '--rotate-token'],
+      ['uninstall-hooks', '--dry-run'],
+      ['uninstall-hooks', '--rotate-token'],
+      ['open', '--dry-run'],
+    ]
+    for (const [sub, flag] of refused) {
+      const { io, text } = capture()
+      assert.equal(await runCli(['deck', sub, flag, '--root', root], io), 2, `deck ${sub} ${flag}`)
+      assert.match(text(), new RegExp(`deck ${sub} does not take ${flag}`))
+      assert.equal(existsSync(argvFile), false, `deck ${sub} ${flag} must not start the hub CLI`)
+    }
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('a child that ends on a signal exits 1', { skip: process.platform === 'win32' && 'SIGKILL of oneself is POSIX only' }, async () => {
+  const { base, root } = await fakeCheckout()
+  try {
+    await writeFile(path.join(root, 'hub', 'bin', 'fleetmates-deck.mjs'), "process.kill(process.pid, 'SIGKILL')\n")
+    const { io } = capture()
+    assert.equal(await runCli(['deck', 'doctor', '--root', root], io), 1)
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('a child that cannot start exits 1 and names the error code', async () => {
+  const { base, root, argvFile } = await fakeCheckout()
+  const execPath = process.execPath
+  try {
+    process.execPath = path.join(base, 'no-such-node')
+    const { io, text } = capture()
+    assert.equal(await runCli(['deck', 'status', '--root', root], io), 1)
+    assert.match(text(), /could not start the deck CLI \(ENOENT\)/)
+    assert.equal(existsSync(argvFile), false)
+  } finally {
+    process.execPath = execPath
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('deck commands run before the claude-teammates migration and leave legacy state untouched', async () => {
+  const { base, root } = await fakeCheckout()
+  try {
+    const git = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' })
+    git(['init', '--quiet', '--initial-branch=main'])
+    git(['config', 'user.email', 'test@example.com'])
+    git(['config', 'user.name', 'Test'])
+    await writeFile(path.join(root, 'teammates.gate.json'), '{"phases":{}}', 'utf8')
+    await writeFile(path.join(root, '.gitignore'), '.teammates/\nhub/\n', 'utf8')
+    git(['add', 'teammates.gate.json', '.gitignore'])
+    git(['commit', '--quiet', '-m', 'adopt claude-teammates'])
+    const { io, text } = capture()
+    assert.equal(await runCli(['deck', 'status', '--root', root], io), 7, text())
+    assert.equal(existsSync(path.join(root, 'teammates.gate.json')), true, 'the legacy manifest must not be renamed')
+    assert.equal(existsSync(path.join(root, 'fleetmates.gate.json')), false)
+    assert.equal(await readFile(path.join(root, '.gitignore'), 'utf8'), '.teammates/\nhub/\n')
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
 })
