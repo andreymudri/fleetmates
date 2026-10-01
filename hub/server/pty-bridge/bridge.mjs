@@ -37,7 +37,7 @@ export function tailLines(lines, statusRows) {
 /**
  * @typedef {{ readyState: number, bufferedAmount: number, send: (data: string | Buffer) => void }} TabSocket
  * @typedef {{ ws: TabSocket, sessionId: string, ptyId: string, cols: number, rows: number, buffer: { seq: number, msg: any }[] | null,
- *   syncs: number, dropping: boolean }} Tab
+ *   syncs: number, dropping: boolean, attached: boolean }} Tab
  */
 
 /**
@@ -110,8 +110,10 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
     sendFrame(ws, FRAME_KIND.output, tab.sessionId, bytes)
   }
   // Snapshot then stream: only output events whose arrival number (`link.seqOf`) is after the screen
-  // response's are streamed; the ones before it are expected in the response's scrollback.
-  async function sync(tab, first) {
+  // response's are streamed; the ones before it are expected in the response's scrollback. The sync that
+  // completes first after a term.attach or a deckd outage sends term.attached before its snapshot and the
+  // browser resize after it; a sync superseded by a later one (a `dropped` event) sends nothing.
+  async function sync(tab) {
     const turn = ++tab.syncs
     tab.buffer = []
     let screen
@@ -122,6 +124,8 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
     }
     if (!current(tab) || tab.syncs !== turn) return
     const seam = link.seqOf(screen) ?? 0
+    const first = !tab.attached
+    tab.attached = true
     if (first) send(tab.ws, { t: 'term.attached', sessionId: tab.sessionId, ptyId: tab.ptyId, cols: screen.cols, rows: screen.rows })
     sendFrame(tab.ws, FRAME_KIND.snapshot, tab.sessionId, Buffer.from(typeof screen.scrollback === 'string' ? screen.scrollback : '', 'base64'))
     const later = tab.buffer.filter(entry => entry.seq > seam)
@@ -140,7 +144,7 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
     const socket = socketOf(ws)
     const previous = socket.tabs.get(sessionId)
     /** @type {Tab} */
-    const tab = { ws, sessionId, ptyId: row.pty_id, cols, rows, buffer: [], syncs: 0, dropping: false }
+    const tab = { ws, sessionId, ptyId: row.pty_id, cols, rows, buffer: [], syncs: 0, dropping: false, attached: false }
     socket.tabs.set(sessionId, tab)
     const pty = ptyOf(tab.ptyId)
     pty.tabs.add(tab)
@@ -151,7 +155,7 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
       if (ptys.get(tab.ptyId) === pty) ptys.delete(tab.ptyId)
       return termError(ws, sessionId, failureCode(error))
     }
-    if (current(tab)) await sync(tab, true)
+    if (current(tab)) await sync(tab)
   }
   function resize(ws, msg) {
     const { sessionId, cols, rows } = msg
@@ -223,7 +227,7 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
       }
     }),
     link.on('dropped', msg => {
-      for (const tab of ptys.get(msg?.ptyId)?.tabs ?? []) void sync(tab, false)
+      for (const tab of ptys.get(msg?.ptyId)?.tabs ?? []) void sync(tab)
     }),
     link.on('exit', msg => {
       const pty = ptys.get(msg?.ptyId)
@@ -237,7 +241,8 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
       }
     }),
     // A deckd outage ends every deckd attach. Tabs stay attached on this side, so their input is refused as
-    // deckd_unavailable, and are attached again with a fresh snapshot when the link is back.
+    // deckd_unavailable, and are attached again with term.attached, a fresh snapshot and the browser resize
+    // when the link is back.
     link.on('down', () => {
       ptys.clear()
       chains.clear()
@@ -245,6 +250,7 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
         for (const tab of socket.tabs.values()) {
           tab.syncs++
           tab.buffer = null
+          tab.attached = false
           termError(ws, tab.sessionId, 'deckd_unavailable')
         }
       }
@@ -261,14 +267,15 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
           const pty = ptyOf(tab.ptyId)
           pty.tabs.add(tab)
           tab.buffer = []
-          pty.ready.then(() => { if (current(tab)) return sync(tab, false) }, error => {
+          pty.ready.then(() => { if (current(tab)) return sync(tab) }, error => {
             if (!current(tab)) return
             removeTab(tab)
             termError(tab.ws, tab.sessionId, failureCode(error))
           })
         }
       }
-      // Seed each PTY's count of terminal clients, so a detach after a server restart reports `detached`.
+      // Seed each PTY's count of terminal clients attached before this link came up. Without it, the first of
+      // two such terminals to detach would report `detached` while the other is still attached.
       link.request('list').then(list => {
         for (const pty of list.ptys ?? []) machineOf(pty.ptyId).terminals((pty.clients ?? []).filter(client => client?.kind === 'terminal').length)
       }).catch(() => {})

@@ -355,6 +355,94 @@ test('exit, dropped and a deckd outage reach the attached tabs', async t => {
   assert.equal(Buffer.from(write.fields.data, 'base64').toString(), 'back')
 })
 
+/** Record the order of every JSON type and frame for `sessionId` on a client, as `t` or `frame:<kind>`. */
+function order(c, sessionId) {
+  const seen = []
+  c.ws.on('message', (data, binary) => {
+    if (binary) { const frame = decodeFrame(data)
+      if (frame?.sessionId === sessionId) seen.push(`frame:${frame.kind}`)
+      return }
+    const msg = JSON.parse(data.toString())
+    if (msg.sessionId === sessionId) seen.push(msg.t === 'term.error' ? `term.error:${msg.error.code}` : msg.t)
+  })
+  return seen
+}
+
+test('after a deckd outage an attached tab gets term.attached again before its fresh snapshot, and the browser resize', async t => {
+  const fake = scripted()
+  const deck = await server(t, fake.connect)
+  const row = await spawned(fake, deck)
+  const c = await client(t, deck)
+  const seen = order(c, row.id)
+  await c.attach(row.id, 90, 25)
+  await fake.until(() => fake.requests.some(r => r.op === 'resize'), 'the attach resize')
+  fake.drop()
+  await c.termError(row.id, 'deckd_unavailable')
+  fake.scrollback.set(row.ptyId, 'after the outage')
+  deck.link.retry()
+  await c.until(() => snapshots(c, row.id).length === 2, 'the snapshot after the outage')
+  const resizes = await fake.until(() => { const found = fake.requests.filter(r => r.op === 'resize')
+    return found.length === 2 && found }, 'the resize after the outage')
+  assert.deepEqual(resizes[1].fields, { ptyId: row.ptyId, cols: 90, rows: 25, source: { kind: 'browser' } })
+  const snapshot = `frame:${FRAME_KIND.snapshot}`
+  assert.deepEqual(seen, ['term.attached', snapshot, 'term.error:deckd_unavailable', 'term.attached', snapshot])
+  const attached = c.json.filter(m => m.t === 'term.attached' && m.sessionId === row.id).at(-1)
+  assert.deepEqual({ ptyId: attached.ptyId, cols: attached.cols, rows: attached.rows }, { ptyId: row.ptyId, cols: 100, rows: 30 })
+})
+
+test('a dropped event during the first sync still gives the tab one term.attached, one resize and an exact seam', async t => {
+  const fake = scripted({ manual: ['screen'] })
+  const deck = await server(t, fake.connect)
+  const row = await spawned(fake, deck)
+  const c = await client(t, deck)
+  const seen = order(c, row.id)
+  c.send({ t: 'term.attach', sessionId: row.id, cols: 90, rows: 25 })
+  const first = await fake.until(() => fake.requests.find(r => r.op === 'screen' && !r.answered), 'the first screen request')
+  fake.emit('output', { ptyId: row.ptyId, data: Buffer.from('one|').toString('base64') })
+  fake.emit('dropped', { ptyId: row.ptyId, bytes: 10 })
+  const second = await fake.until(() => fake.requests.find(r => r.op === 'screen' && !r.answered && r !== first), 'the second screen request')
+  fake.emit('output', { ptyId: row.ptyId, data: Buffer.from('two|').toString('base64') })
+  fake.scrollback.set(row.ptyId, 'history|one|')
+  first.reply()
+  fake.scrollback.set(row.ptyId, 'history|one|two|')
+  second.reply()
+  fake.emit('output', { ptyId: row.ptyId, data: Buffer.from('three|').toString('base64') })
+  await c.until(() => outputs(c, row.id).includes('three|'), 'the streamed output')
+  await fake.until(() => fake.requests.some(r => r.op === 'resize'), 'the browser resize')
+  // A barrier: the error answers a message sent after everything above, so no late term.attached is missed.
+  c.send({ t: 'barrier' })
+  await c.until(() => c.json.some(m => m.t === 'error'), 'the barrier')
+  assert.deepEqual(seen, ['term.attached', `frame:${FRAME_KIND.snapshot}`, `frame:${FRAME_KIND.output}`])
+  assert.deepEqual(snapshots(c, row.id), ['history|one|two|'])
+  assert.equal(outputs(c, row.id), 'three|', 'nothing lost or doubled at the seam')
+  const resizes = fake.requests.filter(r => r.op === 'resize')
+  assert.equal(resizes.length, 1)
+  assert.deepEqual(resizes[0].fields, { ptyId: row.ptyId, cols: 90, rows: 25, source: { kind: 'browser' } })
+})
+
+test('terminal clients attached before the server starts are counted: one leaving is not detached, the last one is', async t => {
+  const fake = scripted()
+  const ptyId = `pty-${++ptys}`
+  const cwd = fs.mkdtempSync(path.join(dir, 'repo-'))
+  fake.live.set(ptyId, { ptyId, pid: 1000 + ptys, origin: 'wrapped', cwd, argv: ['claude'], startedAt: Date.now(), cols: 100, rows: 30,
+    clients: [{ kind: 'terminal', name: 'kitty' }, { kind: 'terminal', name: 'foot' }, { kind: 'server' }], lastInputFrom: null, lastInputAt: null })
+  const deck = await server(t, fake.connect)
+  await fake.until(() => fake.requests.filter(r => r.op === 'list').length >= 2, 'the list the bridge seeds from')
+  // The client's hello round trip is the barrier that lets the seed's list response be handled first.
+  const c = await client(t, deck)
+  const row = deck.projector.snapshot().sessions.find(session => session.ptyId === ptyId)
+  assert.ok(row, 'the link adopted the live PTY')
+  const sources = () => c.json.filter(m => m.t === 'input.source' && m.data.sessionId === row.id).map(m => m.data)
+  fake.emit('client', { ptyId, change: 'detached', client: { kind: 'terminal', name: 'kitty' } })
+  c.send({ t: 'barrier' })
+  await c.until(() => c.json.some(m => m.t === 'error'), 'the barrier')
+  assert.deepEqual(sources(), [], 'foot is still attached, so nothing changed')
+  fake.emit('client', { ptyId, change: 'detached', client: { kind: 'terminal', name: 'foot' } })
+  const detached = await c.until(() => sources().find(view => view.detached), 'detached')
+  assert.equal(detached.detached, true)
+  assert.equal(sources().length, 1)
+})
+
 test('the bridge detaches from deckd when the last tab detaches and keeps the link watching the screen', async t => {
   const fake = scripted()
   const deck = await server(t, fake.connect)
