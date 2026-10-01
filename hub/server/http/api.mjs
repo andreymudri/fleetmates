@@ -20,6 +20,11 @@ function integer(query, name, fallback, max = Number.MAX_SAFE_INTEGER) {
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1 || Number(value) > max) throw apiError(422, 'validation_failed', { fields: [name] })
   return Number(value)
 }
+/** No file system call accepts a path with NUL in it; refuse it as bad input (400) before one throws a 500. */
+function filePath(value, field) {
+  if (typeof value === 'string' && value.includes('\0')) throw apiError(400, 'validation_failed', { fields: [field] })
+  return value
+}
 function validatePref(key, value) {
   if (!Object.hasOwn(defaults, key) || ['staleMinutes', 'firstRunCompletedAt'].includes(key)) return false
   if (typeof defaults[key] === 'boolean') return typeof value === 'boolean'
@@ -134,7 +139,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return ok({ session: row, requests: projector.snapshot().requests.filter(request => request.sessionId === row.id), steps: steps(row.id, q) })
       }
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'steps') return ok({ steps: steps(s[2], q) })
-      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'disk') return ok(await services.disk(session(s[2]).cwd))
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'disk') return ok(await services.disk(filePath(session(s[2]).cwd, 'cwd')))
       if (route === 'requests') {
         const state = q.get('state') ?? 'open'
         if (!['open', 'answered', 'expired'].includes(state)) throw apiError(422, 'validation_failed')
@@ -194,7 +199,10 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return ok({ firstRunCompletedAt })
       }
       if (route === 'notify/test') return ok(await services.notify())
-      if (route === 'repos/rescan') return { status: 202, data: await services.rescan() }
+      if (route === 'repos/rescan') {
+        filePath(preferences().prefs.scanRoot, 'scanRoot')
+        return { status: 202, data: await services.rescan() }
+      }
       if (s[1] === 'deps' && s.length === 4 && ['start', 'retry'].includes(s[3])) {
         const allowed = s[3] === 'start' ? ['deckd', 'scribed'] : ['deckd', 'vault-mcp', 'scribed', 'notify']
         if (!allowed.includes(s[2])) throw apiError(404, 'not_found')

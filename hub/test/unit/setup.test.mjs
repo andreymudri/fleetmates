@@ -7,6 +7,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createContext, runInContext } from 'node:vm'
 import { createServer } from 'node:net'
+import { once } from 'node:events'
 import test, { afterEach } from 'node:test'
 import { chromium } from 'playwright-core'
 import { doctor, status } from '../../server/setup/doctor.mjs'
@@ -26,7 +27,11 @@ const requiredHookEvents = [
 // Every sandbox root, and the ones the current test has not yet had removed.
 const sandboxRoots = []
 const pendingRoots = []
-afterEach(() => {
+// Every listener child, and the ones the current test has not yet had stopped.
+const startedListeners = []
+const runningListeners = []
+afterEach(async () => {
+  for (const child of runningListeners.splice(0)) await stopListener(child)
   for (const root of pendingRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
 })
 
@@ -62,12 +67,22 @@ function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false
   return { root, home, config, state, runtime, calls, settings, env, hubPath, run, runWith }
 }
 
+/** Stop a listener child and wait until it has exited. */
+async function stopListener(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = once(child, 'exit')
+  child.kill('SIGKILL')
+  await exited
+}
+
 async function listener(s, token, valid, delayMs = 0, { relayPort = 0, legacyProof = false } = {}) {
   const listenerRoot = mkdtempSync(path.join(s.root, 'listener-'))
   const script = path.join(listenerRoot, 'listener.mjs')
-  writeFileSync(script, `import http from 'node:http'\nimport fs from 'node:fs'\nimport { createHmac } from 'node:crypto'\nconst server = http.createServer((req, res) => {\n  fs.writeFileSync(process.env.REQUEST_FILE, req.url)\n  if (Number(process.env.RELAY_PORT)) {\n    const forwarded = http.get({ hostname: '127.0.0.1', port: Number(process.env.RELAY_PORT), path: req.url, headers: { host: req.headers.host } }, upstream => {\n      res.writeHead(upstream.statusCode, upstream.headers)\n      upstream.pipe(res)\n    })\n    forwarded.on('error', () => res.writeHead(502).end())\n    return\n  }\n  if (req.url === '/') {\n    res.setHeader('content-type', 'text/html')\n    res.end('<main id="deck-ready">Fleetmates Deck</main>')\n    return\n  }\n  const nonce = new URL(req.url, 'http://127.0.0.1').searchParams.get('nonce')\n  if (!/^[A-Za-z0-9_-]{32}$/.test(nonce || '') || req.url !== '/.well-known/fleetmates-deck/identity?nonce=' + nonce) {\n    res.writeHead(404).end()\n    return\n  }\n  const mac = createHmac('sha256', process.env.TEST_TOKEN).update('fleetmates-deck-open:' + (process.env.LEGACY_PROOF === 'yes' ? '' : server.address().port + ':') + nonce).digest('hex')\n  res.setHeader('content-type', 'application/json')\n  res.end(JSON.stringify({ nonce, mac: process.env.VALID === 'yes' ? mac : '0'.repeat(64) }))\n})\nserver.listen(0, '127.0.0.1', () => {\n  const port = server.address().port\n  if (Number(process.env.DELAY_MS)) server.close(() => {\n    process.stdout.write(String(port) + '\\n')\n    setTimeout(() => server.listen(port, '127.0.0.1'), Number(process.env.DELAY_MS))\n  })\n  else process.stdout.write(String(port) + '\\n')\n})\n`)
+  writeFileSync(script, `import http from 'node:http'\nimport fs from 'node:fs'\nimport { createHmac } from 'node:crypto'\nprocess.stdin.on('end', () => process.exit(0)).resume()\nconst server = http.createServer((req, res) => {\n  fs.writeFileSync(process.env.REQUEST_FILE, req.url)\n  if (Number(process.env.RELAY_PORT)) {\n    const forwarded = http.get({ hostname: '127.0.0.1', port: Number(process.env.RELAY_PORT), path: req.url, headers: { host: req.headers.host } }, upstream => {\n      res.writeHead(upstream.statusCode, upstream.headers)\n      upstream.pipe(res)\n    })\n    forwarded.on('error', () => res.writeHead(502).end())\n    return\n  }\n  if (req.url === '/') {\n    res.setHeader('content-type', 'text/html')\n    res.end('<main id="deck-ready">Fleetmates Deck</main>')\n    return\n  }\n  const nonce = new URL(req.url, 'http://127.0.0.1').searchParams.get('nonce')\n  if (!/^[A-Za-z0-9_-]{32}$/.test(nonce || '') || req.url !== '/.well-known/fleetmates-deck/identity?nonce=' + nonce) {\n    res.writeHead(404).end()\n    return\n  }\n  const mac = createHmac('sha256', process.env.TEST_TOKEN).update('fleetmates-deck-open:' + (process.env.LEGACY_PROOF === 'yes' ? '' : server.address().port + ':') + nonce).digest('hex')\n  res.setHeader('content-type', 'application/json')\n  res.end(JSON.stringify({ nonce, mac: process.env.VALID === 'yes' ? mac : '0'.repeat(64) }))\n})\nserver.listen(0, '127.0.0.1', () => {\n  const port = server.address().port\n  if (Number(process.env.DELAY_MS)) server.close(() => {\n    process.stdout.write(String(port) + '\\n')\n    setTimeout(() => server.listen(port, '127.0.0.1'), Number(process.env.DELAY_MS))\n  })\n  else process.stdout.write(String(port) + '\\n')\n})\n`)
   const requestFile = path.join(listenerRoot, 'request-url')
-  const child = spawn(process.execPath, [script], { env: { ...process.env, TEST_TOKEN: token, VALID: valid ? 'yes' : 'no', RELAY_PORT: String(relayPort), LEGACY_PROOF: legacyProof ? 'yes' : 'no', DELAY_MS: String(delayMs), REQUEST_FILE: requestFile }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, [script], { env: { ...process.env, TEST_TOKEN: token, VALID: valid ? 'yes' : 'no', RELAY_PORT: String(relayPort), LEGACY_PROOF: legacyProof ? 'yes' : 'no', DELAY_MS: String(delayMs), REQUEST_FILE: requestFile }, stdio: ['pipe', 'pipe', 'pipe'] })
+  startedListeners.push(child)
+  runningListeners.push(child)
   const port = await new Promise((resolve, reject) => {
     child.stdout.once('data', chunk => resolve(Number(String(chunk).trim())))
     child.once('error', reject)
@@ -395,7 +410,7 @@ test('open uses a private bootstrap file after identity proof and reaches the de
       } finally { await browser.close() }
     }
     assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
-  } finally { server.child.kill() }
+  } finally { await stopListener(server.child) }
 })
 
 test('open uses validated DECK_PORT ahead of config port', async () => {
@@ -413,7 +428,7 @@ test('open uses validated DECK_PORT ahead of config port', async () => {
     assert.equal(argument.includes(token), false)
     assert.equal(s.runWith({ DECK_PORT: 'invalid' }, 'open').status, 1)
     assert.equal(s.runWith({ DECK_PORT: '65536' }, 'open').status, 1)
-  } finally { server.child.kill() }
+  } finally { await stopListener(server.child) }
 })
 
 test('open refuses a loopback listener without the token proof', async () => {
@@ -426,7 +441,7 @@ test('open refuses a loopback listener without the token proof', async () => {
     assert.equal(result.status, 1)
     assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /xdg-open:/)
     assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
-  } finally { server.child.kill() }
+  } finally { await stopListener(server.child) }
 })
 
 test('open rejects an identity relay to another port before exposing the token', async () => {
@@ -457,8 +472,8 @@ test('open rejects an identity relay to another port before exposing the token',
     assert.ok(readFileSync(path.join(s.state, 'fleetmates/deck/open.html'), 'utf8').includes(`http://127.0.0.1:${trusted.port}/#token=${token}`))
     assert.doesNotMatch(accepted.stdout + accepted.stderr, new RegExp(token))
   } finally {
-    relay?.child.kill()
-    trusted.child.kill()
+    if (relay) await stopListener(relay.child)
+    await stopListener(trusted.child)
   }
 })
 
@@ -474,7 +489,7 @@ test('open refuses the old nonce-only identity proof', async () => {
     assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /xdg-open:/)
     assert.equal(existsSync(path.join(s.state, 'fleetmates/deck/open.html')), false)
     assert.doesNotMatch(result.stdout + result.stderr, new RegExp(token))
-  } finally { server.child.kill() }
+  } finally { await stopListener(server.child) }
 })
 
 test('open waits for a valid listener after systemctl start returns', async () => {
@@ -488,7 +503,7 @@ test('open waits for a valid listener after systemctl start returns', async () =
     assert.ok(argument?.startsWith(path.join(s.state, 'fleetmates/deck/')))
     assert.equal(argument.includes(token), false)
     assert.equal(readFileSync(server.requestFile, 'utf8').includes(token), false)
-  } finally { server.child.kill() }
+  } finally { await stopListener(server.child) }
 })
 
 test('open stops retrying when no listener appears', async () => {
@@ -502,7 +517,7 @@ test('open stops retrying when no listener appears', async () => {
     assert.equal(result.status, 1)
     assert.ok(Date.now() - started < 5000)
     assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /xdg-open:/)
-  } finally { server.child.kill() }
+  } finally { await stopListener(server.child) }
 })
 
 test('invalid settings stops init before it writes directories or services', () => {
@@ -784,6 +799,35 @@ test('both unit templates quote executable and entry paths with spaces', () => {
     if (name === 'fleetmates-deck.service') assert.ok(rendered.split('\n').includes(`ConditionPathExists=${hubPath}/${entry}`))
     assert.equal(rendered.includes('@NODE@') || rendered.includes('@ENTRY@'), false)
   }
+})
+
+// The next two tests run in this order: the first leaves its listener running, as a failing test would.
+let abandoned
+test('a test may stop early and leave its listener running', async () => {
+  const s = sandbox()
+  mkdirSync(path.join(s.config, 'fleetmates/deck'), { recursive: true })
+  abandoned = await listener(s, 'token', true)
+  assert.equal(abandoned.child.exitCode, null, 'the listener is up when its test ends')
+})
+
+test('every listener a test started has exited before the next test runs, including an abandoned one', () => {
+  assert.ok(abandoned, 'the previous test started a listener')
+  assert.ok(startedListeners.length >= 9, `the earlier tests started listeners: ${startedListeners.length}`)
+  const alive = startedListeners.filter(child => child.exitCode === null && child.signalCode === null)
+  assert.deepEqual(alive.map(child => child.pid), [], 'no listener outlives its test')
+})
+
+test('a listener exits on its own when the process that started it goes away', async () => {
+  const s = sandbox()
+  mkdirSync(path.join(s.config, 'fleetmates/deck'), { recursive: true })
+  const { child } = await listener(s, 'token', true)
+  const exited = once(child, 'exit')
+  // Closing its stdin is what the listener sees when the test process dies without running any cleanup.
+  child.stdin.end()
+  let timer
+  const outcome = await Promise.race([exited.then(() => 'exited'), new Promise(resolve => { timer = setTimeout(() => resolve('still running'), 3000) })])
+  clearTimeout(timer)
+  assert.equal(outcome, 'exited')
 })
 
 test('each deck-setup sandbox is removed once the test that made it finishes', () => {

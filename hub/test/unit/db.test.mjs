@@ -168,6 +168,20 @@ test('retention keeps summaries, open requests and recent replay while pruning o
   } finally { store.close() }
 }))
 
+test('retention never deletes a live session or unreviewed work, however old, only sessions that ended', async () => withDatabase(async file => {
+  const store = openDeckDb(file)
+  const day = 86_400_000
+  try {
+    store.run("INSERT INTO repos(id,name,crew_slot,crew_seed,first_seen_at) VALUES('/repo','repo',0,'repo',0)")
+    const rows = [['running', 1], ['needs_approval', 1], ['asked_you', 1], ['idle', 1], ['stale', 1], ['starting', 1], ['done', 0], ['crashed', 0], ['reviewed', 0], ['ended', 0]]
+    for (const [state, alive] of rows) {
+      store.run('INSERT INTO sessions(id,origin,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at,ended_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', state, 'wrapped', '/repo', '/repo', state, 1, 1, 1, alive, 1, state === 'ended' ? 1 : null)
+    }
+    assert.equal(runRetention(store, { now: 400 * day }).removed, 1)
+    assert.deepEqual(store.all('SELECT id FROM sessions ORDER BY id').map(row => row.id), rows.map(([state]) => state).filter(state => state !== 'ended').sort())
+  } finally { store.close() }
+}))
+
 test('retention rolls back earlier deletions when a later deletion fails', async () => withDatabase(async file => {
   const store = openDeckDb(file)
   try {
