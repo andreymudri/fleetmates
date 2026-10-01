@@ -110,7 +110,8 @@ jobs:
             const files = JSON.parse(text.slice(text.indexOf("\n[") + 1))[0].files.map(f => f.path)
             for (const f of files) console.log(f)
             const need = ["package.json", "README.md", "CHANGELOG.md", "bin/fleetmates-deck.mjs", "bin/fm.mjs",
-              "deckd/main.mjs", "server/main.mjs", "hook/deck-hook.mjs", "web/dist/index.html"]
+              "deckd/main.mjs", "server/main.mjs", "hook/deck-hook.mjs", "web/dist/index.html",
+              "vendor/fleetmates/names.mjs", "vendor/fleetmates/liveness.mjs", "vendor/fleetmates/git.mjs", "vendor/fleetmates/reviews.mjs"]
             const missing = need.filter(f => !files.includes(f))
             const leaked = files.filter(f => /^(test|spike|node_modules)\/|\.test\.mjs$|\.env/.test(f))
             if (missing.length) { console.error("missing from the package: " + missing.join(", ")); process.exit(1) }
@@ -157,6 +158,9 @@ jobs:
           grep -q '^usage: fm' /tmp/fm.err
           cd "$prefix/lib/node_modules/$name"
           test -f web/dist/index.html
+          # Importing the two entry modules has no side effects (each starts only when it is argv[1]),
+          # and fails with ERR_MODULE_NOT_FOUND if the package misses a module they need.
+          node --input-type=module -e "await import('./server/main.mjs'); await import('./deckd/main.mjs'); console.log('server and deckd import')"
           # npm 11 may skip node-pty's install scripts (allowScripts); the prebuilt binary must still spawn.
           node --input-type=module -e "const pty = (await import('node-pty')).default; const p = pty.spawn('/bin/echo', ['pty-ok'], {}); let out = ''; p.onData(d => { out += d }); p.onExit(e => { console.log(out.trim(), e.exitCode); process.exitCode = out.includes('pty-ok') && e.exitCode === 0 ? 0 : 1 })"
 

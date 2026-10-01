@@ -28,6 +28,7 @@
     "hook/",
     "web/dist/",
     "systemd/",
+    "vendor/",
     "README.md",
     "CHANGELOG.md"
   ],
@@ -36,7 +37,8 @@
   },
   "scripts": {
     "build": "vite build --config web/vite.config.mjs",
-    "prepack": "npm run build",
+    "prepack": "node bin/vendor-fleetmates.mjs && npm run build",
+    "postpack": "node bin/vendor-fleetmates.mjs --clean",
     "test": "node --test \"test/**/*.test.mjs\"",
     "perf": "node test/perf/keystroke-echo.spec.mjs"
   },
