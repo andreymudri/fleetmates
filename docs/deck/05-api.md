@@ -84,7 +84,7 @@ Columns: request body or query, success response, error codes (section 4), miles
 | GET | `/api/sessions` | query `state` (comma list), `repoKey`, `active=1` (not `ended`), `limit` (default 100), `before` (ms, on `startedAt`) | `{ sessions: Session[], nextBefore }` | `not_found` (unknown repoKey) | M1 | new-session conflict check, palette, history lists (Home reads the snapshot) |
 | GET | `/api/sessions/:id` | | `{ session: Session, requests: Request[], steps: Step[] }` | `not_found` | M1 | Focus deep link, palette |
 | GET | `/api/sessions/:id/steps` | query `limit` (default 50, max 200), `taskId` | `{ steps: Step[] }` | `not_found` | M1 | Home tails after a gap, Team crew panels |
-| POST | `/api/sessions` | `{ repoKey, task, mode?: 'plain' \| 'fleetmates' }` | 201 `{ session: Session, warning?: { kind: 'repo_busy', sessionIds: string[] } }` | `not_found` (repo), `validation_failed` (empty task), `deckd_unavailable`, `spawn_failed` | M2 | New session "Launch a ship" (`U.Launch`), "Run as a fleetmates job" (`mode: 'fleetmates'`, NEW-O1); flow in 03-architecture 4.1 |
+| POST | `/api/sessions` | `{ repoKey, task, mode?: 'plain' \| 'fleetmates' }` | 201 `{ session: Session, warning?: { kind: 'repo_busy', sessionIds: string[] } }` | `not_found` (repo), `validation_failed` (empty task), `deckd_unavailable`, `spawn_failed` | M2 | New session "Launch a ship" (`U.Launch`), "Run as a fleetmates job" (`mode: 'fleetmates'`, D-68); flow in 03-architecture 4.1 |
 | POST | `/api/sessions/:id/stop` | | 202 `{ session }` | `not_found`, `read_only_session` (observed), `invalid_state` (`ended`, `crashed`), `deckd_unavailable` | M2 | Home, Focus, Failures "Stop…", Team "Stop run…" on the lead, research "Stop run…" (`U.Stop`, state-machines 1.7 row 50) |
 | POST | `/api/sessions/:id/nudge` | | 202 `{ session }` | `read_only_session`, `invalid_state` (not `stale` or `idle`), `deckd_unavailable` | M2 | Home quiet row, Failures adrift card (`U.Nudge`) |
 | POST | `/api/sessions/:id/mark-reviewed` | | `{ session }` | `invalid_state` (not `done`; state-machines 1.9 says 409) | M1 | Focus "Mark reviewed" (in the read-only Focus of M1, MS-O1), palette (`U.MarkReviewed`) |
@@ -763,7 +763,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
 
 ## Open items
 
-Existing items referenced, not repeated: SHELL-O1, SM-O1, SM-O9, SM-O12, SM-O13, SM-O15, SM-O16, NEW-O1, TEAM-O5, FOC-O1, MEM-O1, MEET-O4, MEET-O7, RES-O3, RES-O6, SET-O1, SET-O2, FAIL-O1.
+Existing items referenced, not repeated: SHELL-O1, SM-O1, SM-O9, SM-O12, SM-O13, SM-O15, SM-O16, TEAM-O5, MEM-O1, MEET-O4, MEET-O7, RES-O3, RES-O6, SET-O1, SET-O2, FAIL-O1.
 
 Closed: the former open item on which targets `POST /api/open` may open. Decided by D-57 (Proposed); see section 2.8.
 

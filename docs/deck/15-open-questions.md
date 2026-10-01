@@ -17,7 +17,6 @@ Ranked by how early they bite.
 |---|---|---|---|---|
 | Q1 | **Command and package names.** You asked for `fleetmates ui` and `fleetmates deck init` (D-65), but the fleetmates root package has no `bin` and zero dependencies by rule (its rename spec rejected a `fleetmates` binary). Keep the root rule and ship the hub's own bins (`fleetmates-deck open`, `fleetmates-deck init`, `fm claude`), or add a `fleetmates` bin to the root? Also the npm name of `hub/` (`@andreymudri/fleetmates-deck` proposed). | Hub bins `fleetmates-deck` and `fm`; `node scripts/cli.mjs ui` and `deck` forward to them; package `@andreymudri/fleetmates-deck` | [03-architecture.md](03-architecture.md) sections 3 and 6, OPS-O3 | M1 before exit |
 | Q2 | **Server and UI language details.** React + Vite is decided; the UI in JS + JSDoc or TSX (the option text said "UI can still be TSX")? HTTP framework (Hono or Fastify was named under the old TypeScript plan)? | JS + JSDoc everywhere with `checkJs`; plain `node:http` with a small router | [03-architecture.md](03-architecture.md) section 3 | M0 |
-| Q3 | **Second plain session in a repo that already has one.** Your answer to this question was never recorded. | Warn, never block, offer "Run as a fleetmates job" | SM-O5, NEW-O1 | M2 before start |
 | Q4 | **Approval tier defaults.** The ai-design-skills design-oversight review of the tiers has not run. Also: in-repo file edits, `git add`/`git commit`, `curl … \| sh`, Caution from a popup. | Review runs before M3; defaults in 07-approvals section 4.3; Caution never from a popup | APR-O1 to APR-O4, SM-O9, DRW-O4 | M3 before start |
 | Q5 | **Memory UI.** You said "we will talk more on the ui subject later". The Memory screens are a reviewed draft, not final. | Build from the canvas as specified | MEM-O8, MEM-O1 | M5 before start |
 | Q6 | **Tasks from meetings.** "Tasks from meetings" was not picked in the scope question, but the canvas has "Launch as session", "Research first" and "Dismiss" on action items. In v1 or later? | In M4 as designed, deck-only state | MEET-O6, HOME-O8, MTG-O4 | M4 before exit |
@@ -32,7 +31,6 @@ Ranked by how early they bite.
 | Q15 | **Keyboard.** Alt 1 to 7 does two jobs (rail sections and sessions), and Alt P / Alt T clash with Claude Code inside the terminal. | The proposed map in keyboard.md | [interaction/keyboard.md](interaction/keyboard.md) section 5 | M2 before exit |
 | Q16 | **Rate limits.** "Show rate-limit state instead of dollars" has no screen and no milestone. | Later | MS-O3 | none |
 | Q17 | **Jump to session in M1.** M1 promises "jump to session", but Focus is M2. | A read-only Focus layout for observed sessions ships in M1 | MS-O1 | M1 before start |
-| Q18 | **Unwrapped sessions are read-only.** Plain `claude` sessions started outside `fm claude` are observed, read-only. You picked "Full control everywhere" through the wrapper; is read-only for unwrapped sessions acceptable, and should `fm claude` fall back to observe-only when deckd is down? | Yes to both | [01-product.md](01-product.md) section 6 (principles), [03-architecture.md](03-architecture.md) section 2.4 | M2 before start |
 | Q19 | **PT-BR UI catalog.** M1 ships English only, or both? No PT-BR copy exists for the nautical voice yet. | English only at M1; the `pt` catalog lands when you supply or approve the voice. Until then `DECK_LANG=pt` falls back to `en` with a notice | SET-O1, [03-architecture.md](03-architecture.md) section 5 | M1 before exit |
 
 ## 2. Gates per milestone
@@ -45,7 +43,7 @@ Ranked by how early they bite.
 |---|---|
 | M0 | Q2; API-O4 and API-O5 are answered by the spike |
 | M1 | Q17 (MS-O1); the M0 spike answers (SM-O1, SM-O6, SM-O12, TEST-O2, OPS-O2) |
-| M2 | Q3 (SM-O5, NEW-O1); Q18; FOC-O1 |
+| M2 | None open: Q3 (SM-O5, NEW-O1), Q18 and FOC-O1 were decided on 2026-10-01 (D-67 to D-69) |
 | M3 | Q4 (APR-O1 review, SM-O9, DRW-O4); DRW-O1; SM-O10; SM-O11 |
 | M4 | M1 dogfood week passed; MS-O2; Q7 (MEET-O4, MTG-O3, SM-O13); MEET-O11; TEST-O3 |
 | M5 | Q5 (MEM-O8, MEM-O1); MEM-O2; SM-O16 / MEM-O7; KB-O1 |
@@ -61,7 +59,6 @@ Every open item in the handoff, grouped by the doc that owns it. Question and de
 | SM-O2 | What does `Notification[agent_needs_input]` mean for the deck (a background agent waiting on the user)? Should it open a question request? | Log only | M1 before exit | [state-machines.md](interaction/state-machines.md) |
 | SM-O3 | Should a `Stop` whose last assistant text ends with `?` count as `asked_you`? It catches "Should I paginate or truncate?" but may misfire on rhetorical endings | On, with the rule in 1.5; measure false positives in M1 | M1 before exit | [state-machines.md](interaction/state-machines.md) |
 | SM-O4 | Should `stale` and `crashed` send desktop popups? The owner picked "sound when blocked" and "notify on done" only | Crash: popup, no bell. Stale: no popup | M1 before exit | [state-machines.md](interaction/state-machines.md) |
-| SM-O5 | The owner's answer on a second plain session in a repo with an active one was never recorded (Q3) | Warn, never block, offer "Run as a fleetmates job" | M2 before start | [state-machines.md](interaction/state-machines.md) |
 | SM-O6 | Screen-idle detection (row 30) depends on reading Claude Code's TUI layout; confirm with the fake `claude` binary and the pinned version | On for PTY sessions | M0 answered by spike | [state-machines.md](interaction/state-machines.md) |
 | SM-O7 | When `CwdChanged` moves a session into another repo, does its review baseline reset, and which crew member does the card show? | Reset baseline; card follows the new repo | M1 before exit | [state-machines.md](interaction/state-machines.md) |
 | SM-O8 | Should `claude --resume <id>` of an ended conversation reopen the old deck session (row 49) or create a new one? | Reopen | M1 before exit | [state-machines.md](interaction/state-machines.md) |
@@ -91,7 +88,6 @@ Every open item in the handoff, grouped by the doc that owns it. Question and de
 | DRW-O2 | Caution row third line "adds a dependency" is a per-pattern description that tiers.json does not define yet. | Proposed: optional `description` per tiers.json pattern; else "waiting {duration}". | M3 before exit | [needs-you-drawer.md](screens/needs-you-drawer.md) |
 | DRW-O3 | Notification-only requests (state-machines 2.7 row 2) have no `tool_input`; their summary is the notification message, tier Caution. | Proposed: shown with the message text and a muted "(details not available)". | M1 before exit | [needs-you-drawer.md](screens/needs-you-drawer.md) |
 | DRW-O4 | Popup "Open" for Caution (SM-O9). | Open (tracked as SM-O9). | M3 before start | [needs-you-drawer.md](screens/needs-you-drawer.md) |
-| FOC-O1 | Opening Focus "for a teammate" (Team task rows, crew terminals): fleetmates teammates are subagents of the lead with no PTY of their own (fleetmates contract 5). | **Open**. Default: teammate links open the lead's Focus with the drawer filtered to that task's requests; no per-teammate terminal. | M2 before start | [focus.md](screens/focus.md) |
 | FOC-O2 | PTY size when the terminal client and the browser differ (SM-O12). | Open (tracked as SM-O12). | M0 answered by spike | [focus.md](screens/focus.md) |
 | FOC-O3 | Facts tab content was never designed. | Proposed (4.5). | M2 before exit | [focus.md](screens/focus.md) |
 | FOC-O4 | "Notes read by this session" in the Memory tab: hooks give `tool_input` paths for `vault_get_note` but not the hits of `vault_search` (tool responses are not relied on, state-machines 0.2). | Proposed: list `vault_get_note` paths only. | M5 before exit | [focus.md](screens/focus.md) |
@@ -143,7 +139,6 @@ Every open item in the handoff, grouped by the doc that owns it. Question and de
 | FR-O2 | "Start scribed" mechanism (SM-O13, FAIL-O1). | Open. | M1 before exit | [first-run.md](screens/first-run.md) |
 | FR-O3 | Hook installer must keep fleetmates' own hooks (SessionStart, SubagentStop) intact; merge rules and backup file name are not specified. | Proposed: back up to `~/.claude/settings.json.deck-backup-<timestamp>`, append deck hooks per event, never reorder existing entries. | M1 before exit | [first-run.md](screens/first-run.md) |
 | FR-O4 | Themed "Set sail" button (design-system 15.1). | Open. | M1 before exit | [first-run.md](screens/first-run.md) |
-| NEW-O1 | Same-repo second plain session: the owner's answer was never recorded (Q3, SM-O5). "Run as a fleetmates job" has no defined behaviour: a fleetmates run needs a plan. | **Open**. Default: warn, never block; the button launches a `launched` session whose initial prompt asks Claude to handle the task as a fleetmates run (fleetmates makes per-task worktrees, so changes do not mix). Flag for the owner. | M2 before start | [new-session.md](screens/new-session.md) |
 | NEW-O2 | Scan depth and what counts as a repo under `~/dev` (direct children only, nested repos, submodules). | **Open**. Default: direct children of the scan root that are git roots, plus repos already known from hooks anywhere. | M2 before exit | [new-session.md](screens/new-session.md) |
 | NEW-O3 | Themed "Launch a ship" (design-system 15.1). | Open. | M2 before exit | [new-session.md](screens/new-session.md) |
 | NEW-O5 | After launch: go to Focus or stay on the current screen. | Proposed: Focus with the terminal focused. | M2 before exit | [new-session.md](screens/new-session.md) |

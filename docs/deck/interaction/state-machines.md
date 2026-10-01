@@ -204,7 +204,7 @@ Rows are evaluated top to bottom; the first match wins. "any live" = `starting`,
 
 | # | From | Event | Guard | To | Actions |
 |---|---|---|---|---|---|
-| 1 | (none) | `U.Launch(repo, task)` | repo resolved | `starting` | create row `origin=launched`; ask deckd to spawn `claude "<task>"` in the repo with `FLEETMATES_DECK_PTY`; same-repo warning if another plain session is active there (warn, never block; SM-O5) |
+| 1 | (none) | `U.Launch(repo, task)` | repo resolved | `starting` | create row `origin=launched`; ask deckd to spawn `claude "<task>"` in the repo with `FLEETMATES_DECK_PTY`; same-repo warning if another plain session is active there (warn, never block; D-68) |
 | 2 | (none) | `P.Spawned(ptyId, wrapped)` | | `starting` | create row `origin=wrapped` |
 | 3 | (none) | any `H.*` | unknown session and no alias match | per [1.4](#14-ingestion-rules-apply-before-the-transition-table) rule 4 | create row; card note "Joined mid-voyage" |
 | 4 | `starting` | `H.SessionStart(startup)` | `launchTaskPending` | `starting` | record `claudeSessionId`, `transcriptPath`, `branch`, start commit |
@@ -332,7 +332,7 @@ The diagram shows the main paths; the table is authoritative (for example every 
 9. **PTY exit codes.** 0: ended. Non-zero or signal after `U.Stop` or an announced `SessionEnd`: ended. Otherwise crashed. Known error mapping for the crash card (ENOSPC, EACCES, ENOMEM, "command not found") comes from the scrollback tail. Proposed.
 10. **Observed sessions.** No PTY, no exit code, no screen model: end comes from `SessionEnd.reason`, crash from `X.PidGone`, idle from `idle_prompt`. Everything is read-only: no Stop, no Nudge, no answers ("Answer in your terminal").
 11. **deckd down.** Hooks still arrive (they go to the web server), so pills stay correct; PTY-only signals (`P.*`, `S.*`) pause. Rows 30 and 43 cannot fire; on reconnect deckd's exit records are applied (rule 5).
-12. **Same repo, two plain sessions.** Both are tracked; `repoId` is shared, `changedFiles` overlap (both see the same working tree). The card notes "Shares the working tree with rustot · combat-tick". Proposed; SM-O5.
+12. **Same repo, two plain sessions.** Both are tracked; `repoId` is shared, `changedFiles` overlap (both see the same working tree). The card notes "Shares the working tree with rustot · combat-tick". Proposed; the same-repo policy is D-68.
 13. **Hook payload shape drift after a Claude Code update.** An envelope that fails validation is kept in a `rejected_events` table, counted on the FirstRun Claude Code check ("3 hook payloads did not match the pinned fixtures") and never applied. Proposed.
 
 ---
@@ -1023,7 +1023,7 @@ Add `processKey` (ptyId or claude pid), `sinceTs`, `subagentsActive`, `activity`
 | SM-O2 | What does `Notification[agent_needs_input]` mean for the deck (a background agent waiting on the user)? Should it open a question request? | Log only |
 | SM-O3 | Should a `Stop` whose last assistant text ends with `?` count as `asked_you`? It catches "Should I paginate or truncate?" but may misfire on rhetorical endings | On, with the rule in 1.5; measure false positives in M1 |
 | SM-O4 | Should `stale` and `crashed` send desktop popups? The owner picked "sound when blocked" and "notify on done" only | Crash: popup, no bell. Stale: no popup |
-| SM-O5 | The owner's answer on a second plain session in a repo with an active one was never recorded (Q3) | Warn, never block, offer "Run as a fleetmates job" |
+| SM-O5 | Second plain session in a repo with an active one (Q3) | **Decided** (D-68): warn, never block, offer "Run as a fleetmates job" |
 | SM-O6 | Screen-idle detection (row 30) depends on reading Claude Code's TUI layout; confirm with the fake `claude` binary and the pinned version | On for PTY sessions |
 | SM-O7 | When `CwdChanged` moves a session into another repo, does its review baseline reset, and which crew member does the card show? | Reset baseline; card follows the new repo |
 | SM-O8 | Should `claude --resume <id>` of an ended conversation reopen the old deck session (row 49) or create a new one? | Reopen |

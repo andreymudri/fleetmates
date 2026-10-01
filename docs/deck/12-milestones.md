@@ -256,7 +256,7 @@ Collected from every doc (IDs with `-O` numbers, plus design-system section 15 a
 
 | When | Items |
 |---|---|
-| Before start | Q18 in [15-open-questions.md](15-open-questions.md) (unwrapped sessions read-only; `fm claude` fallback when deckd is down); SM-O5 / NEW-O1 (second plain session in the same repo, "Run as a fleetmates job"); FOC-O1 (Focus for a teammate); OPS-O2 if M0 left it open |
+| Before start | Decided on 2026-10-01: Q18 (D-67, unwrapped sessions read-only and the `fm claude` fallback when deckd is down); SM-O5 / NEW-O1 (D-68, second plain session in the same repo, "Run as a fleetmates job"); FOC-O1 (D-69, Focus for a teammate). OPS-O2 was answered by the M0 spike |
 | Before exit | NEW-O2 (scan depth); NEW-O3 (themed "Launch a ship"); TEAM-O2 to TEAM-O6 (gate sentence, elapsed time, gate checking, Open plan, teammate terminals); design-system 15.6 (xterm screen reader mode default); keyboard.md section 5 (Alt chords vs Claude Code and Hyprland) |
 
 ### M3

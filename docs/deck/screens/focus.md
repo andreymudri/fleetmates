@@ -287,7 +287,7 @@ The canvas placed "Related memory" under the Changes tab; it moves to the Memory
 
 | Id | Gap | Status |
 |---|---|---|
-| FOC-O1 | Opening Focus "for a teammate" (Team task rows, crew terminals): fleetmates teammates are subagents of the lead with no PTY of their own (fleetmates contract 5). | **Open**. Default: teammate links open the lead's Focus with the drawer filtered to that task's requests; no per-teammate terminal. |
+| FOC-O1 | Opening Focus "for a teammate" (Team task rows, crew terminals): fleetmates teammates are subagents of the lead with no PTY of their own (fleetmates contract 5). | **Decided** (D-69): teammate links open the lead's Focus with the drawer filtered to that task's requests; no per-teammate terminal. |
 | FOC-O2 | PTY size when the terminal client and the browser differ (SM-O12). | Open (tracked as SM-O12). |
 | FOC-O3 | Facts tab content was never designed. | Proposed (4.5). |
 | FOC-O4 | "Notes read by this session" in the Memory tab: hooks give `tool_input` paths for `vault_get_note` but not the hits of `vault_search` (tool responses are not relied on, state-machines 0.2). | Proposed: list `vault_get_note` paths only. |

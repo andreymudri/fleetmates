@@ -136,8 +136,8 @@ Teammate panels show tool steps only; assistant prose lines ("Ported 14 tests") 
 | "All ships" / `Alt Esc` | Home | route |
 | "Review 2 requests" | drawer filtered to the run, focus on its first request | UI (`?needs=run:<runId>`) |
 | Task row with a request | same, focused on that task's request | UI |
-| Task row otherwise | scrolls to and highlights its crew panel (Proposed; FOC-O1) | client |
-| Crew panel header | Focus on the lead session (teammates have no Focus, FOC-O1) | route |
+| Task row otherwise | scrolls to and highlights its crew panel (Proposed; D-69 sets where teammate links go) | client |
+| Crew panel header | Focus on the lead session (teammates have no Focus, D-69) | route |
 | "Open plan" | opens `plan.planPath` (TEAM-O5) | `POST /api/open { kind: 'runPlan', ref: { repoId, runId } }` (Proposed; D-57, kinds in [08-security.md](../08-security.md) 4.9) |
 | "Stop run…" | confirm Dialog "Stop the fleetmates run gate-cli?" body "Stops the lead session. Teammates stop with it. Worktrees and branches stay; fleetmates never deletes runs." | `U.Stop` on the lead |
 | Gate diamond focus or hover | Tooltip with recorded time and failed checks | client |

@@ -81,7 +81,7 @@ Purpose: sessions survive a crash or restart of the web server, and of the brows
 - `fm claude [claude args...]`: asks deckd to spawn `claude` with those args in the current directory and environment, then attaches the current terminal to the PTY (raw mode, resize forwarding). Exit behaviour (Proposed): closing the terminal detaches; the session keeps running in deckd and remains controllable from the browser. `Ctrl ]` then `d` detaches explicitly (like telnet escape), `fm attach <id>` reattaches.
 - `fm ls`: list PTY sessions (id, repo, state, attached clients).
 - `fm attach <id|repo>`: attach to an existing PTY.
-- If deckd is not running, `fm claude` prints one line ("deckd is not running, starting plain claude; this session will be observed only") and execs plain `claude` so the user is never blocked. Whether unwrapped sessions may stay read-only and this fallback is acceptable is Q18 in [15-open-questions.md](15-open-questions.md) (default: yes to both).
+- If deckd is not running, `fm claude` prints one line ("deckd is not running, starting plain claude; this session will be observed only") and execs plain `claude` so the user is never blocked. Unwrapped sessions stay read-only and this fallback is **Decided** ([14-decisions.md](14-decisions.md) D-67).
 
 ### 2.5 Browser
 

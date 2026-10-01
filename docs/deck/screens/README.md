@@ -92,7 +92,6 @@ Existing ids from other docs (SM-O*, design-system 15.*, crew.md 12) are referen
 | HOME-O9, NEW-O3, RES-O7, FR-O4 | Themed launch buttons (design-system 15.1) | Keep canvas labels | several |
 | PAL-O1 | Note link counts need `vault_graph` | Folder only | palette |
 | DRW-O1 | Destructive confirm label with a computed consequence | Generic "I checked what this command will change" | needs-you-drawer |
-| FOC-O1 | Focus for a teammate (no PTY per teammate) | Lead Focus + drawer filtered to the task | focus, team-run |
 | TEAM-O2 | Gate check sentence not stored in `status.gates` | Verdict and time only | team-run |
 | TEAM-O3 | Run elapsed time source | Lead `startedAt`, else earliest task | team-run |
 | TEAM-O4 | Gate "checking" not observable | Never shown | team-run |
@@ -121,7 +120,6 @@ Existing ids from other docs (SM-O*, design-system 15.*, crew.md 12) are referen
 | MEET-O11 | Location of TurbidAssist `config.yaml` and `session_dir` | Settings, Connections path | meetings, settings |
 | SET-O1 | Language is an environment variable, not a setting | Read-only row | settings |
 | SET-O2 | Storage of deck preferences | Deck SQLite; env wins | settings |
-| NEW-O1 | Same-repo second plain session and "Run as a fleetmates job" behaviour (SM-O5) | Warn, never block; button launches the task as a fleetmates run | new-session |
 | NEW-O2 | Repo scan depth under `~/dev` | Direct children + repos known from hooks | new-session |
 | SHELL-O2 | Below 1280px and zoom (design-system 15.3) | Horizontal scroll | rail-and-shell |
 | CREW-O1..O3 | Slot 8, more than nine repos, teammate shades (crew.md 12) | crew.md defaults | crew-sheet |
