@@ -1,4 +1,4 @@
-import { constants, existsSync, readFileSync, watch as fsWatch } from 'node:fs'
+import fs, { constants, existsSync, readFileSync, watch as fsWatch } from 'node:fs'
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -25,8 +25,8 @@ export function fleetmatesScriptsDir(adapterDir = path.dirname(fileURLToPath(imp
 
 const scriptsDir = fleetmatesScriptsDir()
 const load = (name) => import(pathToFileURL(path.join(scriptsDir, name)).href)
-const [{ NAMES }, { livenessRows, DEFAULT_STALE_MINUTES }, { createGit, defaultGitExec }] = await Promise.all([
-  load('names.mjs'), load('liveness.mjs'), load('git.mjs'),
+const [{ NAMES }, { livenessRows, DEFAULT_STALE_MINUTES }, { createGit, defaultGitExec }, { worktreeKey, indexDir, isLocalAbsolute }] = await Promise.all([
+  load('names.mjs'), load('liveness.mjs'), load('git.mjs'), load('state.mjs'),
 ])
 
 const MAX_FILE_BYTES = 1024 * 1024
@@ -249,6 +249,99 @@ async function projectRun(entry, planResult, statusResult, polled) {
     readError: planResult.error ? { file: 'plan.json', message: planResult.error }
       : statusResult.error ? { file: 'status.json', message: statusResult.error } : null,
   }
+}
+
+// Teammate lookup (04-integrations 1.3, state-machines 11). The record bound and the id rules below restate
+// scripts/state.mjs, which keeps them private; the parity test in test/unit/fleetmates-adapter.test.mjs
+// compares this lookup with `findTaskByWorktree` over a set of hostile ids.
+const MAX_RECORD_BYTES = 64 * 1024
+const MAX_RUN_ID_BYTES = 255
+const MAX_TASK_ID_BYTES = 128
+const ID_COMPONENT = /^[\p{L}\p{M}\p{N}._-]+$/u
+const INVISIBLE = /\p{Default_Ignorable_Code_Point}/u
+const RECORD_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)
+const TASK_CACHE_LIMIT = 1024
+
+function idInside(repoRoot, value, single) {
+  if (typeof value !== 'string' || value === '') return false
+  const base = path.resolve(repoRoot, NAMES.stateDir)
+  const rel = path.relative(base, path.resolve(base, value))
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return false
+  return !single || !rel.includes(path.sep)
+}
+function idPath(value, maxBytes) {
+  if (typeof value !== 'string' || value === '' || Buffer.byteLength(value, 'utf8') > maxBytes) return false
+  if (value.normalize('NFC') !== value || value.includes('..')) return false
+  return value.split('/').every((part) => part !== '.' && part !== '..' && !part.startsWith('-') && ID_COMPONENT.test(part) && !INVISIBLE.test(part))
+}
+
+/**
+ * Whether `runId` passes the fleetmates run id rules (scripts/state.mjs): contained in the state directory,
+ * nesting allowed, an allowlisted NFC id of at most 255 bytes with no `..` and no component starting with `-`.
+ * @param {string} repoRoot absolute repository root
+ * @param {unknown} runId
+ * @returns {boolean}
+ */
+export function isRunName(repoRoot, runId) {
+  return idInside(repoRoot, runId, false) && idPath(runId, MAX_RUN_ID_BYTES)
+}
+const isTaskName = (repoRoot, taskId) => idInside(repoRoot, taskId, true) && idPath(taskId, MAX_TASK_ID_BYTES)
+
+function readTaskRecord(io, repoRoot, cwd) {
+  if (typeof repoRoot !== 'string' || !path.isAbsolute(repoRoot)) return null
+  const key = worktreeKey(cwd)
+  if (key === '') return null
+  let fd
+  try {
+    fd = io.openSync(path.join(indexDir(repoRoot), `${key}.json`), RECORD_FLAGS)
+    const info = io.fstatSync(fd)
+    if (!info.isFile() || info.size > MAX_RECORD_BYTES) return null
+    const buffer = Buffer.alloc(info.size)
+    const bytes = io.readSync(fd, buffer, 0, buffer.length, 0)
+    const record = JSON.parse(buffer.toString('utf8', 0, bytes))
+    if (!isRunName(repoRoot, record?.runId) || !isTaskName(repoRoot, record.taskId)) return null
+    if (!isLocalAbsolute(record.worktree) || worktreeKey(record.worktree) !== key) return null
+    return { runId: record.runId, taskId: record.taskId }
+  } catch {
+    return null
+  } finally {
+    if (fd !== undefined) try { io.closeSync(fd) } catch {}
+  }
+}
+
+/**
+ * Create a synchronous teammate lookup that reads one fleetmates index record per `cwd` and caches the
+ * answer, a miss included, for `ttlMs`. It never writes under `.fleetmates/`.
+ * @param {{ clock?: () => number, ttlMs?: number, io?: Pick<typeof fs, 'openSync' | 'fstatSync' | 'readSync' | 'closeSync'> }} [options]
+ * @returns {{ taskForCwd: (repoRoot: string, cwd: string) => { runId: string, taskId: string } | null }}
+ */
+export function createTaskLocator({ clock = Date.now, ttlMs = 60_000, io = fs } = {}) {
+  const cache = new Map()
+  return {
+    taskForCwd(repoRoot, cwd) {
+      const key = `${repoRoot}\0${cwd}`
+      const now = clock()
+      const hit = cache.get(key)
+      if (hit && now - hit.at < ttlMs) return hit.task && { ...hit.task }
+      cache.delete(key)
+      const task = readTaskRecord(io, repoRoot, cwd)
+      if (cache.size >= TASK_CACHE_LIMIT) cache.delete(cache.keys().next().value)
+      cache.set(key, { at: now, task })
+      return task && { ...task }
+    },
+  }
+}
+
+const defaultLocator = createTaskLocator()
+/**
+ * The fleetmates task whose worktree is `cwd`, from `<repoRoot>/.fleetmates/index/<worktreeKey(cwd)>.json`,
+ * or null. Synchronous, cached per `cwd` for 60 s.
+ * @param {string} repoRoot absolute main repository root
+ * @param {string} cwd the directory a hook reported
+ * @returns {{ runId: string, taskId: string } | null}
+ */
+export function taskForCwd(repoRoot, cwd) {
+  return defaultLocator.taskForCwd(repoRoot, cwd)
 }
 
 /** Create a read-only fleetmates run reader with a bounded git poll interval. */

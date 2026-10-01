@@ -15,7 +15,7 @@ import { fleetmatesScriptsDir } from '../../server/adapters/fleetmates.mjs'
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const repo = path.dirname(hub)
 const vendorScript = path.join(hub, 'bin', 'vendor-fleetmates.mjs')
-const CLOSURE = ['git.mjs', 'liveness.mjs', 'names.mjs', 'reviews.mjs']
+const CLOSURE = ['enforce.mjs', 'git.mjs', 'liveness.mjs', 'names.mjs', 'reviews.mjs', 'state.mjs']
 
 test('the vendor script copies the whole import closure of the adapter modules, and each copy imports', async () => {
   const out = await mkdtemp(path.join(tmpdir(), 'deck-vendor-'))
@@ -40,7 +40,7 @@ test('the vendor script refuses an import that leaves scripts/ and a bare packag
       const from = path.join(base, name, 'scripts')
       await mkdir(from, { recursive: true })
       await writeFile(path.join(base, name, 'outside.mjs'), 'export default 1\n')
-      for (const file of ['names.mjs', 'liveness.mjs', 'git.mjs']) await writeFile(path.join(from, file), 'export default 1\n')
+      for (const file of ['names.mjs', 'liveness.mjs', 'git.mjs', 'state.mjs']) await writeFile(path.join(from, file), 'export default 1\n')
       await writeFile(path.join(from, 'git.mjs'), source)
       const result = spawnSync(process.execPath, [vendorScript, '--from', from, '--out', path.join(base, name, 'out')], { encoding: 'utf8' })
       assert.notEqual(result.status, 0, `${name} must be refused`)
@@ -56,7 +56,7 @@ test('the vendor script refuses an import that leaves scripts/ and a bare packag
 async function vendorFrom(base, name, source, extra = {}) {
   const from = path.join(base, name, 'scripts')
   await mkdir(from, { recursive: true })
-  for (const file of ['names.mjs', 'liveness.mjs']) await writeFile(path.join(from, file), 'export default 1\n')
+  for (const file of ['names.mjs', 'liveness.mjs', 'state.mjs']) await writeFile(path.join(from, file), 'export default 1\n')
   await writeFile(path.join(from, 'git.mjs'), source)
   for (const [file, text] of Object.entries(extra)) await writeFile(path.join(from, file), text)
   const out = path.join(base, name, 'out')
@@ -82,7 +82,7 @@ test('the vendor script follows export ... from and a literal dynamic import', a
     const { result, out } = await vendorFrom(base, 'follow', "export { a } from './a.mjs'\nexport const load = () => import('./b.mjs')\n",
       { 'a.mjs': 'export const a = 1\n', 'b.mjs': 'export default 1\n' })
     assert.equal(result.status, 0, result.stderr)
-    assert.deepEqual((await readdir(out)).sort(), ['a.mjs', 'b.mjs', 'git.mjs', 'liveness.mjs', 'names.mjs'])
+    assert.deepEqual((await readdir(out)).sort(), ['a.mjs', 'b.mjs', 'git.mjs', 'liveness.mjs', 'names.mjs', 'state.mjs'])
   } finally {
     await rm(base, { recursive: true, force: true })
   }
