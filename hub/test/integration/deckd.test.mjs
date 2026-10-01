@@ -168,7 +168,9 @@ before(async () => {
     env: {
       ...rt.env,
       PATH: [stubDir, rt.env.PATH].join(path.delimiter),
-      DECKD_OUTPUT_QUEUE_CAP: String(QUEUE_CAP)
+      DECKD_OUTPUT_QUEUE_CAP: String(QUEUE_CAP),
+      // no login-shell probe: the test never runs the owner's profile
+      DECKD_LOGIN_ENV: 'inherit'
     },
     stdio: ['ignore', 'ignore', 'pipe']
   })

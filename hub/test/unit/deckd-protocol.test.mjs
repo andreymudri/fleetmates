@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP } from '../../deckd/protocol.mjs'
+import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP, MAX_LINE } from '../../deckd/protocol.mjs'
 import { Ring } from '../../deckd/ring.mjs'
 
 /**
@@ -17,8 +17,9 @@ function recorder () {
 }
 
 test('constants match 05-api.md section 5', () => {
-  assert.equal(PROTO, 1)
+  assert.equal(PROTO, 2)
   assert.equal(OUTPUT_QUEUE_CAP, 8 * 1024 * 1024)
+  assert.equal(MAX_LINE, 1024 * 1024)
 })
 
 test('encode writes one JSON line', () => {
@@ -61,6 +62,31 @@ test('decoder reports bad JSON and keeps decoding', () => {
   r.feed('[]]\n' + encode({ again: 1 }))
   assert.equal(r.errors.length, 2)
   assert.deepEqual(r.messages, [{ ok: true }, { again: 1 }])
+})
+
+test('decoder with maxLine discards an over-long line once and keeps decoding', () => {
+  /** @type {unknown[]} */
+  const messages = []
+  /** @type {unknown[]} */
+  const errors = []
+  const feed = createLineDecoder((m) => messages.push(m), (e) => errors.push(e), { maxLine: 16 })
+  // split across chunks, no newline yet: reported once, as soon as it is too long
+  feed('x'.repeat(10))
+  feed('x'.repeat(10))
+  assert.deepEqual(errors, [{ code: 'line_too_long' }])
+  feed('y'.repeat(100))
+  feed('zz\n' + encode({ a: 1 }))
+  assert.deepEqual(errors, [{ code: 'line_too_long' }])
+  assert.deepEqual(messages, [{ a: 1 }])
+  // a whole over-long line inside one chunk
+  feed(JSON.stringify({ long: 'w'.repeat(20) }) + '\n' + encode({ b: 2 }))
+  assert.deepEqual(errors, [{ code: 'line_too_long' }, { code: 'line_too_long' }])
+  assert.deepEqual(messages, [{ a: 1 }, { b: 2 }])
+  // exactly maxLine bytes is still read
+  const exact = JSON.stringify({ c: 'v'.repeat(8) })
+  assert.equal(exact.length, 16)
+  feed(exact + '\n')
+  assert.deepEqual(messages, [{ a: 1 }, { b: 2 }, { c: 'v'.repeat(8) }])
 })
 
 // `screen { scrollback: N }` returns Ring.tail(N).
