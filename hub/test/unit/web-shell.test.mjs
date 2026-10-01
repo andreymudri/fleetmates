@@ -486,6 +486,7 @@ test('the shell renders zero, loading, populated, fallback-language and fatal st
   assert.doesNotMatch(loading, /rail-badge/, 'no badge before the snapshot')
   assert.match(loading, /<main[^>]*id="main"[^>]*aria-busy="true"/)
   assert.match(loading, /Loading sessions/)
+  assert.match(loading, /<h1 class="sr-only">Sessions<\/h1>/, 'the loading page has a level-one heading')
   assert.equal((loading.match(/class="skeleton-card/g) ?? []).length, 6)
   assert.match(loading, /role="status"/)
 

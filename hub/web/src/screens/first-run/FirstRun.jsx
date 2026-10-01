@@ -166,8 +166,10 @@ export function summaryText(checks, t) {
   return translate(t, FIRST_RUN_COPY, 'firstRun.summary', { ok: checks.filter(row => row.state === 'ok').length, n: checks.length })
 }
 
+// The doctor detail is "Claude Code {found}; tested {pinned}" or "Claude Code unavailable; tested {pinned}":
+// only a version right after "Claude Code" was found; the tested version is not one.
 function versionOf(check) {
-  return check.version ?? /(\d+\.\d+\.\d+)/.exec(String(check.detail ?? ''))?.[1] ?? null
+  return check.version ?? /^Claude Code (\d+\.\d+\.\d+)/.exec(String(check.detail ?? ''))?.[1] ?? null
 }
 
 /**

@@ -143,6 +143,8 @@ test('each check shows its ok, failed, warning and not-checked copy and its fix 
   const view = (id, state, extra) => rowView(check(id, state, extra))
   assert.deepEqual(pick(view('claude', 'ok', { detail: 'Claude Code 2.1.282; tested 2.1.282' })), ['ok', 'Claude Code 2.1.282 compatible', 'Matches the pinned hook payload fixtures for this deck release', null])
   assert.deepEqual(pick(view('claude', 'failed', { detail: 'Claude Code 2.2.0; tested 2.1.282' })), ['warn', 'Claude Code 2.2.0 is newer than this deck was tested with', 'Hooks may differ; sessions can show wrong states.', null])
+  assert.deepEqual(pick(view('claude', 'failed', { detail: 'Claude Code unavailable; tested 2.1.282' })), ['warn', 'Claude Code was not found', 'Claude Code unavailable; tested 2.1.282', null],
+    'the tested version in the detail is not a found version')
   assert.deepEqual(pick(view('claude', 'ok', { detail: 'Claude Code 2.1.282', drift: 3 })), ['warn', 'Claude Code 2.1.282 compatible', '3 hook payloads did not match the pinned fixtures', null])
   assert.equal(view('claude', 'ok', { drift: 1, detail: '2.1.282' }).sub, '1 hook payload did not match the pinned fixtures')
   assert.deepEqual(pick(view('hooks', 'ok')), ['ok', 'Observation hooks installed', 'Every Claude Code session on this machine reports to the deck.', null])
@@ -456,6 +458,8 @@ test('Connections edits folders and the commands the server runs only through it
   assert.match(textOf(vault), /Set by the environment/)
 
   assert.deepEqual(parsePref({ key: 'vaultCommand', argv: true }, ' a  b\tc '), ['a', 'b', 'c'])
+  assert.deepEqual(parsePref({ key: 'vaultCommand', argv: true }, 'node \'/home/you/my vault/x.mjs\''), ['node', '/home/you/my vault/x.mjs'])
+  assert.equal(parsePref({ key: 'vaultCommand', argv: true }, 'node "/home/you/x.mjs'), undefined)
   assert.equal(parsePref({ key: 'scanRoot' }, '   '), undefined)
   assert.equal(parsePref({ key: 'vaultPath', nullable: true }, ''), null)
   assert.equal(parsePref({ key: 'claudeCommand' }, 'cl\0aude'), undefined)

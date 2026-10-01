@@ -47,6 +47,7 @@ export const SETTINGS_COPY = Object.freeze({
   'settings.conn.current': 'Current: {value}',
   'settings.conn.save': 'Save',
   'settings.conn.env': 'Set by the environment',
+  'settings.conn.hidden': 'The stored value contains hidden characters, shown here as <U+XXXX> tokens. It is kept unless you change this field.',
   'settings.conn.services': 'Services',
   'settings.conn.dep.deckd': 'deckd',
   'settings.conn.dep.scribed': 'scribed',
@@ -110,19 +111,68 @@ export function settingsNav(prefs = {}, t) {
   return SECTIONS.map(id => ({ id, title: tr(`settings.nav.${id}`), sub: subs[id], href: `/settings/${id}` }))
 }
 
+// One argv element as field text: bare when it needs no quoting, otherwise single-quoted, with each
+// single quote written as '"'"' (close, a double-quoted quote, reopen), which `splitArgv` joins back.
+function quoteArg(arg) {
+  const text = String(arg)
+  if (text && !/[\s'"]/u.test(text)) return text
+  return `'${text.replaceAll('\'', '\'"\'"\'')}'`
+}
+
+function plainText(value) {
+  if (value === null || value === undefined) return ''
+  return Array.isArray(value) ? value.map(quoteArg).join(' ') : String(value)
+}
+
 /**
- * Text a preference shows in its field: argv arrays join with spaces; controls and hidden characters become visible tokens.
+ * Text a preference shows in its field: argv arrays join with spaces, quoting arguments that hold spaces or quotes;
+ * controls and hidden characters become visible tokens.
  * @param {unknown} value
  * @returns {string}
  */
 export function prefText(value) {
-  if (value === null || value === undefined) return ''
-  return shown(Array.isArray(value) ? value.join(' ') : value)
+  return shown(plainText(value))
+}
+
+/**
+ * Whether a stored preference holds characters its field can only show as `<U+XXXX>` tokens.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+export function hasHiddenText(value) {
+  return prefText(value) !== plainText(value)
+}
+
+// Split a command line into argv the way a POSIX shell splits words, and nothing more: whitespace separates
+// arguments, '...' and "..." group literally (no escapes, no expansion), adjacent parts join. Unbalanced quotes
+// return undefined.
+function splitArgv(text) {
+  const args = []
+  let current = null
+  let quote = null
+  for (const ch of text) {
+    if (quote) {
+      if (ch === quote) quote = null
+      else current += ch
+    } else if (ch === '\'' || ch === '"') {
+      quote = ch
+      current ??= ''
+    } else if (/\s/u.test(ch)) {
+      if (current !== null) args.push(current)
+      current = null
+    } else {
+      current = (current ?? '') + ch
+    }
+  }
+  if (quote) return undefined
+  if (current !== null) args.push(current)
+  return args
 }
 
 /**
  * Parse a field back into a preference value, or `undefined` when it cannot be sent
- * (empty for a non-nullable key, or a NUL character, which the server refuses).
+ * (empty for a non-nullable key, a NUL character, which the server refuses, or an unbalanced quote in an argv
+ * preference). Argv preferences accept shell-style '...' and "..." arguments; nothing else is interpreted.
  * @param {{ key: string, argv?: boolean, nullable?: boolean }} pref
  * @param {string} text
  * @returns {unknown}
@@ -131,7 +181,7 @@ export function parsePref(pref, text) {
   const value = String(text ?? '').trim()
   if (value.includes('\0')) return undefined
   if (!value) return pref.nullable ? null : undefined
-  if (pref.argv) return value.split(/\s+/)
+  if (pref.argv) return splitArgv(value)
   return value
 }
 
@@ -228,6 +278,8 @@ function TextPref({ pref, value, locked, t, error, onSave }) {
   const submit = event => {
     event.preventDefault()
     const input = event.currentTarget.elements.namedItem(pref.key)
+    // The field shows hidden characters as tokens: unchanged text keeps the stored value instead of saving the tokens.
+    if (input?.value === current) return
     const next = parsePref(pref, input?.value)
     if (next === undefined || prefText(next) === current) return
     onSave(pref.key, next)
@@ -240,6 +292,7 @@ function TextPref({ pref, value, locked, t, error, onSave }) {
         {locked ? null : <button type="submit" className="button button--secondary button--xs">{tr('settings.conn.save')}</button>}
       </div>
       {pref.argv || COMMAND_PREFS.some(item => item.key === pref.key) ? <p className="setting-hint">{tr('settings.conn.current', { value: current })}</p> : null}
+      {hasHiddenText(value) ? <p className="setting-hint">{tr('settings.conn.hidden')}</p> : null}
       {locked ? <p className="setting-hint">{tr('settings.conn.env')}</p> : null}
       {error ? <p className="setting-error" role="status"><bdi>{error}</bdi></p> : null}
     </form>
