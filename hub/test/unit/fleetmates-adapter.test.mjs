@@ -444,7 +444,7 @@ test('taskForCwd resolves a worktree to its run and task, and null for any other
   })
 })
 
-test('taskForCwd caches each cwd for 60 s, including a miss', async () => {
+test('taskForCwd caches a hit for 60 s and never caches a miss', async () => {
   await withTeammate(async (repo, worktree) => {
     const clock = { now: 1_000 }
     const h = countingLocator(clock)
@@ -453,12 +453,17 @@ test('taskForCwd caches each cwd for 60 s, including a miss', async () => {
     clock.now += 59_999
     assert.deepEqual(h.locator.taskForCwd(repo, worktree), { runId: 'r1', taskId: 'T2' })
     assert.equal(h.opens, 1, 'a second lookup inside 60 s reads nothing')
-    assert.equal(h.locator.taskForCwd(repo, path.join(repo, 'nope')), null)
-    assert.equal(h.locator.taskForCwd(repo, path.join(repo, 'nope')), null)
-    assert.equal(h.opens, 2, 'a miss is cached as well')
     clock.now += 1
     assert.deepEqual(h.locator.taskForCwd(repo, worktree), { runId: 'r1', taskId: 'T2' })
-    assert.equal(h.opens, 3, 'the entry expires at 60 s')
+    assert.equal(h.opens, 2, 'the entry expires at 60 s')
+    // A teammate's `locate` writes its record after its own hook already looked the worktree up.
+    const later = path.join(repo, 'wt-T3')
+    await mkdir(later)
+    assert.equal(h.locator.taskForCwd(repo, later), null)
+    assert.equal(h.opens, 3)
+    await rootState.writeLocation(repo, 'r1', 'T3', { worktree: later, branch: 'fleetmates/r1/T3' })
+    assert.deepEqual(h.locator.taskForCwd(repo, later), { runId: 'r1', taskId: 'T3' }, 'the earlier miss was not cached')
+    assert.equal(h.opens, 4)
   })
 })
 

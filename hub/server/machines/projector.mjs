@@ -104,9 +104,10 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
     }
     return session.run_task_id ?? null
   }
-  // A SessionStart inside a teammate worktree makes the session that task's teammate.
-  function joinTeammate(session) {
-    if (!['solo', 'teammate'].includes(session.role)) return session
+  // A SessionStart inside a teammate worktree makes the session that task's teammate; so does a later hook from a
+  // solo session there, for a teammate that started before its `locate` wrote the index record.
+  function joinTeammate(session, roles = ['solo', 'teammate']) {
+    if (!roles.includes(session.role)) return session
     const found = locate(session.repo_id, session.cwd)
     if (!found) return session
     store.run('UPDATE sessions SET role=?,run_repo_id=?,run_id=?,run_task_id=? WHERE id=?', 'teammate', session.repo_id, found.runId, found.taskId, session.id)
@@ -275,7 +276,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
             lifecycleChanged = result.changed
           }
           if (late && session.alive && (!lifecycleEvent || lifecycleAccepted) && [...resumedActivityEvents, 'PermissionDenied'].includes(hook.hook_event_name) && (hook.hook_event_name !== 'UserPromptSubmit' || sameKnownProcess(store, session, envelope))) {
-            requestChanged = applyRequestHook(store, { ...session, repo_id: workingRoot(session.cwd) }, envelope, { late: true, taskId: taskIdFor(session, hook) }) || requestChanged
+            requestChanged = applyRequestHook(store, { ...session, repo_id: workingRoot(session.cwd) }, envelope, { late: true }) || requestChanged
             if (requestChanged && ['needs_approval', 'asked_you'].includes(session.state)) {
               const open = store.all('SELECT kind FROM requests WHERE session_id = ? AND state = ?', session.id, 'open')
               const state = open.some(row => row.kind === 'permission') ? 'needs_approval' : open.length ? 'asked_you' : 'running'
@@ -298,6 +299,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
               lifecycleAccepted = result.accepted
               lifecycleChanged = result.changed
             }
+            if (known && session.alive && hook.hook_event_name !== 'SessionStart') session = joinTeammate(session, ['solo'])
             if (session && (!lifecycleEvent || lifecycleAccepted) && !ignoresSessionHook(store, session, hook)) {
               requestChanged = applyRequestHook(store, { ...session, repo_id: workingRoot(session.cwd) }, envelope, { taskId: taskIdFor(session, hook) })
               if (known) session = applySessionHook(store, envelope, session, requestChanged)

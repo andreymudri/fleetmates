@@ -311,7 +311,7 @@ function readTaskRecord(io, repoRoot, cwd) {
 
 /**
  * Create a synchronous teammate lookup that reads one fleetmates index record per `cwd` and caches the
- * answer, a miss included, for `ttlMs`. It never writes under `.fleetmates/`.
+ * answer for `ttlMs` when it finds a task; a miss is read again on the next call. It never writes under `.fleetmates/`.
  * @param {{ clock?: () => number, ttlMs?: number, io?: Pick<typeof fs, 'openSync' | 'fstatSync' | 'readSync' | 'closeSync'> }} [options]
  * @returns {{ taskForCwd: (repoRoot: string, cwd: string) => { runId: string, taskId: string } | null }}
  */
@@ -322,12 +322,14 @@ export function createTaskLocator({ clock = Date.now, ttlMs = 60_000, io = fs } 
       const key = `${repoRoot}\0${cwd}`
       const now = clock()
       const hit = cache.get(key)
-      if (hit && now - hit.at < ttlMs) return hit.task && { ...hit.task }
+      if (hit && now - hit.at < ttlMs) return { ...hit.task }
       cache.delete(key)
       const task = readTaskRecord(io, repoRoot, cwd)
+      // A miss is not kept: a teammate's own `locate` hook looks its worktree up before the record exists.
+      if (!task) return null
       if (cache.size >= TASK_CACHE_LIMIT) cache.delete(cache.keys().next().value)
       cache.set(key, { at: now, task })
-      return task && { ...task }
+      return { ...task }
     },
   }
 }
@@ -335,7 +337,7 @@ export function createTaskLocator({ clock = Date.now, ttlMs = 60_000, io = fs } 
 const defaultLocator = createTaskLocator()
 /**
  * The fleetmates task whose worktree is `cwd`, from `<repoRoot>/.fleetmates/index/<worktreeKey(cwd)>.json`,
- * or null. Synchronous, cached per `cwd` for 60 s.
+ * or null. Synchronous, a hit is cached per `cwd` for 60 s, a miss is not.
  * @param {string} repoRoot absolute main repository root
  * @param {string} cwd the directory a hook reported
  * @returns {{ runId: string, taskId: string } | null}
