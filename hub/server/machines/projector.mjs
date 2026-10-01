@@ -162,6 +162,32 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
   }
   return {
     snapshot,
+    /**
+     * Insert a session row the deck itself started (the launch flow, state-machines row 1) in one transaction
+     * and append `session.upserted`, `counts` and, when the urgency order moved, `order.changed`. A live row
+     * that already holds `pty_id` (a hook from the new PTY was ingested before this insert) is adopted
+     * instead: it takes `origin`, `task` (unless `Untitled`), `launch_task` and `joined_mid_life = 0`.
+     * @param {{ id: string, origin: string, pty_id: string, process_key: string, repo_id: string, cwd: string,
+     *   task?: string, launch_task?: string | null, branch?: string | null }} row columns of the new row
+     * @param {number} [at] start time
+     * @returns {object} the session view
+     */
+    create(row, at = now()) {
+      let id = row.id
+      commit(() => {
+        const live = store.get('SELECT id FROM sessions WHERE pty_id=? AND alive=1', row.pty_id)
+        if (live) {
+          id = live.id
+          store.run("UPDATE sessions SET origin=?,task=CASE WHEN ?='Untitled' THEN task ELSE ? END,launch_task=?,joined_mid_life=0 WHERE id=?", row.origin, row.task ?? 'Untitled', row.task ?? 'Untitled', row.launch_task ?? null, id)
+        } else {
+          store.run('INSERT INTO sessions(id,origin,pty_id,process_key,repo_id,cwd,branch,task,launch_task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            id, row.origin, row.pty_id, row.process_key, row.repo_id, row.cwd, row.branch ?? null, row.task ?? 'Untitled', row.launch_task ?? null, 'starting', at, at, at, 1, 0, at)
+        }
+        store.appendEvent({ at, type: 'session.upserted', entityId: id, data: sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store) })
+        store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
+      })
+      return sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store)
+    },
     applyHooks(batch) {
       return commit(() => {
         for (const envelope of [...batch].sort((a, b) => a.hookTs - b.hookTs || rank(a.hook.hook_event_name) - rank(b.hook.hook_event_name))) {
@@ -273,7 +299,8 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
       })
     },
     /**
-     * Apply one non-hook signal to a session in one transaction: `pid_gone`, `lost`, `review`, and from deckd
+     * Apply one non-hook signal to a session in one transaction: `pid_gone`, `lost`, `review`, from the session
+     * actions `stop_requested` (row 50) and `relaunched` (`{ ptyId }`, row 46, only from `crashed`), and from deckd
      * `exit` (`{ code, signal, tail }`, tail base64 from `exits`, stored in `session_scrollback`),
      * `screen_idle` (rows 21 and 30) and `output` (counted output, state-machines 1.10). `screen_idle` and
      * `output` append no event when they change nothing a client sees.
@@ -310,6 +337,13 @@ export function createProjector({ store, now = Date.now, publish = () => {} }) {
           row = refreshSessionChanges(store, row)
           closeRequests(row.id, 'process_ended', at)
           store.run('UPDATE sessions SET state=?,state_since=?,alive=0,activity=NULL,ended_at=?,exit_code=NULL,exit_signal=NULL,crash_kind=?,since_ts=? WHERE id=?', 'crashed', row.state === 'crashed' ? row.state_since : at, at, 'lost', at, row.id)
+        } else if (signal.type === 'stop_requested' && row.alive) {
+          // Row 50: the owner asked to stop it; the exit that follows ends it, never crashes it (row 42).
+          store.run('UPDATE sessions SET user_stop_requested=1 WHERE id=?', row.id)
+        } else if (signal.type === 'relaunched' && row.state === 'crashed' && typeof signal.ptyId === 'string') {
+          // Row 46: deckd spawned a replacement process; the same deck session starts again on the new PTY.
+          store.run("UPDATE sessions SET state='starting',state_since=?,since_ts=?,last_activity_at=MAX(last_activity_at,?),alive=1,pty_id=?,process_key=?,origin='launched',crash_kind=NULL,exit_code=NULL,exit_signal=NULL,ended_at=NULL,end_announced=0,end_reason=NULL,user_stop_requested=0,activity=NULL,subagents_active=0 WHERE id=?",
+            at, at, at, signal.ptyId, signal.ptyId, row.id)
         } else if (signal.type === 'review' && row.state === 'done') {
           const baseline = captureReviewBaseline(workingRoot(row.cwd), row.review_baseline)
           if (!baseline && row.review_baseline) return

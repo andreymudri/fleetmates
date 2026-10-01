@@ -5,6 +5,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { DatabaseSync } from 'node:sqlite'
 import { openDeckDb } from '../../server/db/index.mjs'
+import { fileURLToPath } from 'node:url'
 import { runRetention } from '../../server/db/retention.mjs'
 
 async function withDatabase(fn) {
@@ -16,7 +17,7 @@ async function withDatabase(fn) {
 test('opens strict M1 schema with private files, WAL, foreign keys and a stable epoch', async () => withDatabase(async file => {
   const store = openDeckDb(file)
   try {
-    assert.equal(store.get('PRAGMA user_version').user_version, 1)
+    assert.equal(store.get('PRAGMA user_version').user_version, 2)
     assert.equal(store.get('PRAGMA journal_mode').journal_mode, 'wal')
     assert.equal(store.get('PRAGMA foreign_keys').foreign_keys, 1)
     assert.equal(store.get('PRAGMA auto_vacuum').auto_vacuum, 2)
@@ -87,6 +88,23 @@ test('migration makes a backup and rejects a newer schema', async () => withData
   future.exec('PRAGMA user_version = 99')
   future.close()
   assert.throws(() => openDeckDb(file), /newer deck.*schema 99/i)
+}))
+
+test('a version 1 database migrates to 2 with a pre-0002 backup and gains sessions.launch_task', async () => withDatabase(async file => {
+  await mkdir(path.dirname(file), { recursive: true })
+  const db = new DatabaseSync(file)
+  db.exec(await readFile(fileURLToPath(new URL('../../server/db/migrations/0001-init.sql', import.meta.url)), 'utf8'))
+  db.exec('PRAGMA user_version = 1')
+  db.close()
+  const store = openDeckDb(file)
+  try {
+    assert.equal(store.get('PRAGMA user_version').user_version, 2)
+    assert.ok(store.all('PRAGMA table_info(sessions)').some(column => column.name === 'launch_task'), 'sessions.launch_task exists')
+  } finally { store.close() }
+  const backups = (await readdir(path.dirname(file))).filter(name => name.includes('.pre-0002.bak'))
+  assert.equal(backups.length, 1)
+  const backup = new DatabaseSync(path.join(path.dirname(file), backups[0]), { readOnly: true })
+  try { assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 1) } finally { backup.close() }
 }))
 
 test('failed migration rolls back schema changes and preserves the backup', async () => withDatabase(async file => {
