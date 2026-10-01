@@ -1,10 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { runnerImport } from 'vite'
+import { build, runnerImport } from 'vite'
+import { chromium } from 'playwright-core'
 import {
   encodeFrame, encodeInput, decodeServerFrame, createTerminalClient, sanitizePaste, pasteNeedsConfirm, pasteSizeText, FRAME_KIND
 } from '../../web/src/state/terminal.js'
@@ -231,4 +235,146 @@ test('ConfirmDialog is a labelled modal dialog with Cancel first and marked for 
   const plain = renderToStaticMarkup(createElement(ConfirmDialog, { title: 't', body: 'b', confirmLabel: 'Paste', onConfirm: () => {}, onCancel: () => {} }))
   assert.match(plain, />Cancel</, 'Cancel is the default cancel label')
   assert.doesNotMatch(plain, /button--danger/)
+})
+
+test('handleLink opens http and https only, and asks before any host other than localhost', async () => {
+  const { handleLink } = await load('components/TerminalView.jsx')
+  const run = (uri, answer) => {
+    const asked = []
+    const opened = []
+    const result = handleLink(uri, { confirmLink: url => { asked.push(url)
+      return answer }, open: (...args) => opened.push(args) })
+    return { result, asked, opened }
+  }
+  assert.deepEqual(run('https://example.com/a', false), { result: false, asked: ['https://example.com/a'], opened: [] }, 'a refused confirm opens nothing')
+  assert.deepEqual(run('https://example.com/a', true), { result: true, asked: ['https://example.com/a'], opened: [['https://example.com/a', '_blank', 'noopener,noreferrer']] })
+  assert.deepEqual(run('http://localhost:3000/x', false), { result: true, asked: [], opened: [['http://localhost:3000/x', '_blank', 'noopener,noreferrer']] }, 'localhost opens without asking')
+  for (const bad of ['javascript:alert(1)', 'file:///etc/passwd', 'data:text/html,x']) {
+    assert.deepEqual(run(bad, true), { result: false, asked: [], opened: [] }, bad)
+  }
+})
+
+async function findChromium() {
+  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
+    if (!candidate) continue
+    try { await access(candidate)
+      return candidate } catch {}
+  }
+  return null
+}
+
+// A page that mounts the real TerminalView with a recording client; `window.h.show(id)` switches sessions.
+const HARNESS = `import React, { useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import { TerminalView } from '@hub/web/src/components/TerminalView.jsx'
+import '@hub/web/src/styles/terminal.css'
+
+const decoder = new TextDecoder()
+const h = window.h = { attaches: [], writes: [], detaches: [], handlers: {}, links: [], confirms: [], answer: false }
+window.open = url => { h.links.push(url) }
+const client = {
+  attach(sessionId, size, handlers) {
+    h.attaches.push(sessionId)
+    h.handlers[sessionId] = handlers
+    return {
+      write: data => { h.writes.push([sessionId, typeof data === 'string' ? data : decoder.decode(data)])
+        return true },
+      resize: () => true,
+      detach: () => { h.detaches.push(sessionId) }
+    }
+  }
+}
+function App() {
+  const [id, setId] = useState('sessA')
+  h.show = setId
+  return <TerminalView sessionId={id} label={id} client={client} confirmLink={url => { h.confirms.push(url)
+    return h.answer }} />
+}
+createRoot(document.getElementById('root')).render(<App />)
+`
+
+test('a mounted TerminalView stays writable after a session switch and gates terminal links in Chromium', async t => {
+  const executablePath = await findChromium()
+  assert.ok(executablePath, 'Chromium or Chrome is required for the terminal browser test')
+  const dir = await mkdtemp(path.join(tmpdir(), 'term-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(path.join(dir, 'index.html'), '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>t</title></head><body><div id="root" style="width:800px;height:400px"></div><script type="module" src="./entry.jsx"></script></body></html>')
+  await writeFile(path.join(dir, 'entry.jsx'), HARNESS)
+  const out = path.join(dir, 'dist')
+  await build({
+    root: dir, base: './', configFile: false, logLevel: 'silent',
+    resolve: { alias: { '@hub': hub, react: path.join(hub, 'node_modules/react'), 'react-dom': path.join(hub, 'node_modules/react-dom') } },
+    build: { outDir: out, emptyOutDir: true }
+  })
+  const server = createServer(async (req, res) => {
+    const name = new URL(req.url, 'http://x').pathname
+    try {
+      const body = await readFile(path.join(out, name === '/' ? 'index.html' : path.normalize(name)))
+      res.writeHead(200, { 'content-type': name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' }).end(body)
+    } catch { res.writeHead(404).end() }
+  }).listen(0, '127.0.0.1')
+  await new Promise(resolve => server.once('listening', resolve))
+  const browser = await chromium.launch({ executablePath, headless: true })
+  t.after(async () => { await browser.close()
+    server.close() })
+  const page = await browser.newPage()
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  await page.goto(`http://127.0.0.1:${server.address().port}/`)
+  const h = fn => page.evaluate(fn)
+  const typeInto = async (keys) => {
+    await page.locator('.xterm-helper-textarea').focus()
+    await page.keyboard.type(keys)
+  }
+
+  await page.waitForFunction(() => window.h.handlers.sessA, null, { timeout: 10_000 })
+  await h(() => { window.h.handlers.sessA.onAttached({ sessionId: 'sessA', ptyId: 'p1', cols: 80, rows: 24 }) })
+  await typeInto('ab')
+  assert.deepEqual(await h(() => window.h.writes.splice(0)), [['sessA', 'a'], ['sessA', 'b']])
+
+  await h(() => window.h.show('sessB'))
+  await page.waitForFunction(() => window.h.handlers.sessB, null, { timeout: 10_000 })
+  assert.deepEqual(await h(() => window.h.detaches), ['sessA'])
+  await typeInto('x')
+  assert.deepEqual(await h(() => window.h.writes.splice(0)), [], 'no input before the new session is attached')
+  await h(() => { window.h.handlers.sessB.onAttached({ sessionId: 'sessB', ptyId: 'p2', cols: 80, rows: 24 }) })
+  await page.waitForFunction(() => !document.querySelector('.xterm-helper-textarea')?.readOnly, null, { timeout: 5000 })
+  await typeInto('cd')
+  assert.deepEqual(await h(() => window.h.writes.splice(0)), [['sessB', 'c'], ['sessB', 'd']], 'the terminal is writable for the new session')
+
+  // OSC 8 links: click each word and record what the handler did.
+  await h(() => window.h.handlers.sessB.onOutput(new TextEncoder().encode(
+    '\x1b]8;;https://example.com/x\x07EXT\x1b]8;;\x07 \x1b]8;;http://localhost:9/y\x07LOC\x1b]8;;\x07 \x1b]8;;javascript:alert(1)\x07JS\x1b]8;;\x07\r\n')))
+  const click = async word => {
+    const box = await page.evaluate(w => {
+      const walker = document.createTreeWalker(document.querySelector('.xterm-rows'), NodeFilter.SHOW_TEXT)
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const i = node.textContent.indexOf(w)
+        if (i === -1) continue
+        const range = document.createRange()
+        range.setStart(node, i)
+        range.setEnd(node, i + 1)
+        const r = range.getBoundingClientRect()
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 }
+      }
+      return null
+    }, word)
+    assert.ok(box, `${word} is on screen`)
+    await page.mouse.move(box.x, box.y)
+    await page.waitForTimeout(50)
+    await page.mouse.click(box.x, box.y)
+    await page.waitForTimeout(50)
+  }
+  await page.waitForFunction(() => document.querySelector('.xterm-rows')?.textContent.includes('EXT'), null, { timeout: 5000 })
+  await click('EXT')
+  assert.deepEqual(await h(() => [window.h.confirms.splice(0), window.h.links.splice(0)]), [['https://example.com/x'], []], 'a remote link asks and a refusal opens nothing')
+  await h(() => { window.h.answer = true })
+  await click('EXT')
+  assert.deepEqual(await h(() => [window.h.confirms.splice(0), window.h.links.splice(0)]), [['https://example.com/x'], ['https://example.com/x']])
+  await click('LOC')
+  assert.deepEqual(await h(() => [window.h.confirms.splice(0), window.h.links.splice(0)]), [[], ['http://localhost:9/y']], 'localhost opens without asking')
+  await click('JS')
+  assert.deepEqual(await h(() => [window.h.confirms.splice(0), window.h.links.splice(0)]), [[], []], 'javascript: never opens')
+  assert.deepEqual(errors, [])
 })

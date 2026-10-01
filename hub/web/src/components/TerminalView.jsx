@@ -66,11 +66,20 @@ function themeFor(element) {
   }
 }
 
-function openLink(uri, confirmLink) {
+/**
+ * Activate a terminal link through {@link linkDecision}: refused schemes do nothing, a non-localhost
+ * link opens only when `confirmLink(uri)` returns true, and localhost opens at once. Opening uses
+ * `open(uri, '_blank', 'noopener,noreferrer')`.
+ * @param {string} uri
+ * @param {{ confirmLink: (uri: string) => boolean, open: (url: string, target: string, features: string) => unknown }} options
+ * @returns {boolean} whether the link was opened
+ */
+export function handleLink(uri, { confirmLink, open }) {
   const decision = linkDecision(uri)
-  if (decision === 'refuse') return
-  if (decision === 'confirm' && !confirmLink(uri)) return
-  globalThis.open?.(uri, '_blank', 'noopener,noreferrer')
+  if (decision === 'refuse') return false
+  if (decision === 'confirm' && !confirmLink(uri)) return false
+  open(uri, '_blank', 'noopener,noreferrer')
+  return true
 }
 
 /**
@@ -113,6 +122,9 @@ export function TerminalView({
     let pasting = false
     const cleanups = []
     const reducedMotion = !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    // A new session (or client) starts detached and unpainted, so the stdin effect re-runs on its attach.
+    setConnected(false)
+    setPainted(!!initialText)
 
     ;(async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')])
@@ -121,9 +133,12 @@ export function TerminalView({
         ...terminalOptions({ readOnly: latest.current.readOnly, connected: false, screenReaderMode, reducedMotion, theme: themeFor(section.current) }),
         linkHandler: {
           allowNonHttpProtocols: false,
-          activate: (_event, uri) => openLink(uri, url => latest.current.confirmLink
-            ? latest.current.confirmLink(url)
-            : globalThis.confirm?.(translate(latest.current.t, TERMINAL_COPY, 'terminal.link.confirm', { url })) === true)
+          activate: (_event, uri) => handleLink(uri, {
+            confirmLink: url => latest.current.confirmLink
+              ? latest.current.confirmLink(url)
+              : globalThis.confirm?.(translate(latest.current.t, TERMINAL_COPY, 'terminal.link.confirm', { url })) === true,
+            open: (...args) => globalThis.open?.(...args)
+          })
         }
       })
       termRef.current = term
