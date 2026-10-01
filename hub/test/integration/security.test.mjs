@@ -137,3 +137,52 @@ test('server refuses a token path that is a symlink to a private token file', as
     await candidate.close()
   }, /private 0600 file/)
 })
+test('a binary frame sent before hello closes the socket with 4400', async t => {
+  const h = await harness(t, { helloTimeoutMs: 5000 })
+  const ws = h.ws()
+  await once(ws, 'open')
+  const closing = once(ws, 'close')
+  ws.send(Buffer.from([2, 3, 0x61, 0x62, 0x63, 0x78]))
+  const [code, reason] = await closing
+  assert.equal(code, 4400)
+  // 'Bad hello' is the frame's refusal; the hello timeout would close with 'Missing hello'.
+  assert.equal(reason.toString(), 'Bad hello')
+})
+test('a term.attach from a socket opened with a wrong token is never processed: the upgrade is 401', async t => {
+  // A connected deckd link that records every request, so a processed attach would show up as one.
+  const requests = []
+  const deckdClient = { proto: 2, deckdVersion: '9.9.9', bootId: 'boot', on: () => () => {}, seqOf: () => undefined, close() {},
+    request: async op => { requests.push(op)
+      return op === 'list' ? { ptys: [] } : op === 'exits' ? { exits: [] } : {} } }
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sec-home-'))
+  const runtimeDir = path.join(home, 'run')
+  fs.mkdirSync(runtimeDir, { mode: 0o700 })
+  const state = path.join(home, '.local/state/fleetmates/deck')
+  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const h = await harness(t, { env: { HOME: home, XDG_RUNTIME_DIR: runtimeDir }, connectDeckd: async () => deckdClient, helloTimeoutMs: 5000 })
+  assert.equal(h.deck.link.connected, true)
+  const client = h.ws({}, ['deck.v1', 'deck.auth.wrong'])
+  const opened = once(client, 'open').then(() => {
+    client.send(JSON.stringify({ t: 'hello', apiVersion: 1, epoch: null, lastSeq: 0 }))
+    client.send(JSON.stringify({ t: 'term.attach', sessionId: 'abc', cols: 80, rows: 24 }))
+    return { statusCode: 101, resume() {} }
+  })
+  const response = await Promise.race([once(client, 'unexpected-response').then(([, res]) => res), opened])
+  response.resume()
+  assert.equal(response.statusCode, 401)
+  // The same message on a socket with the right token does reach the bridge, which answers it.
+  const good = h.ws()
+  await once(good, 'open')
+  const replies = []
+  good.on('message', data => replies.push(JSON.parse(data.toString())))
+  const closed = once(good, 'close').then(([code]) => { throw Error(`socket closed ${code}`) })
+  const next = () => Promise.race([once(good, 'message'), closed])
+  good.send(JSON.stringify({ t: 'hello', apiVersion: 1, epoch: null, lastSeq: 0 }))
+  while (!replies.some(m => m.t === 'snapshot')) await next()
+  good.send(JSON.stringify({ t: 'term.attach', sessionId: 'abc', cols: 80, rows: 24 }))
+  while (!replies.some(m => m.t === 'term.error')) await next()
+  assert.equal(replies.find(m => m.t === 'term.error').error.code, 'not_found')
+  assert.deepEqual(requests.filter(op => op !== 'list' && op !== 'exits'), [])
+})

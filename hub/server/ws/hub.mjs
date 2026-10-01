@@ -1,7 +1,15 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import { authorize, securityHeaders } from '../http/auth.mjs'
-/** Attach authenticated M1 snapshot/replay sockets to an HTTP server. */
-export function createWsHub({ server, store, epoch, snapshot, getToken, getPort, now = Date.now,
+import { createPtyBridge } from '../pty-bridge/bridge.mjs'
+/** Client message types the PTY bridge handles after hello (05-api 3.5). */
+const TERMINAL_TYPES = new Set(['term.attach', 'term.detach', 'term.resize', 'sub.tails'])
+/** Client message types accepted and ignored for now (05-api 3.6). */
+const IGNORED_TYPES = new Set(['ui.focus', 'bell.played'])
+/**
+ * Attach authenticated snapshot/replay sockets to an HTTP server. With a deckd `link`, ready sockets also
+ * carry the terminal channel through the PTY bridge.
+ */
+export function createWsHub({ server, store, epoch, snapshot, getToken, getPort, link = null, now = Date.now,
   heartbeatMs = 15_000, helloTimeoutMs = 5000 }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, handleProtocols: () => 'deck.v1' })
   const states = new Map()
@@ -32,14 +40,32 @@ export function createWsHub({ server, store, epoch, snapshot, getToken, getPort,
   wss.on('headers', headers => {
     for (const [key, value] of Object.entries(securityHeaders(getPort(), true))) headers.push(`${key}: ${value}`)
   })
+  let hub
+  const bridge = link ? createPtyBridge({ link, store, now, publish: event => hub.publish(event) }) : null
+  const invalid = ws => send(ws, { t: 'error', at: now(), data: { code: 'validation_failed', message: 'validation_failed', retryable: false } })
+  // After hello: JSON control messages and binary terminal frames. A bad message is answered, never fatal.
+  function dispatch(ws, raw, binary) {
+    if (binary) return bridge ? bridge.binary(ws, raw) : invalid(ws)
+    let message
+    try { message = JSON.parse(raw.toString()) } catch { return invalid(ws) }
+    if (!message || typeof message !== 'object' || typeof message.t !== 'string') return invalid(ws)
+    if (IGNORED_TYPES.has(message.t)) return
+    if (bridge && TERMINAL_TYPES.has(message.t)) return void Promise.resolve(bridge.message(ws, message)).catch(() => {})
+    invalid(ws)
+  }
   wss.on('connection', ws => {
     const state = { ready: false, syncing: false, pending: [], seq: 0 }
     states.set(ws, state)
     const timeout = setTimeout(() => ws.close(4400, 'Missing hello'), helloTimeoutMs)
     ws.on('error', () => {})
     ws.once('close', () => { clearTimeout(timeout)
-      states.delete(ws) })
+      states.delete(ws)
+      bridge?.close(ws) })
     ws.on('message', async (raw, binary) => {
+      if (state.ready) {
+        try { dispatch(ws, raw, binary) } catch { invalid(ws) }
+        return
+      }
       try {
         const hello = JSON.parse(raw.toString())
         if (binary || state.syncing || state.ready || hello.t !== 'hello' || !Number.isSafeInteger(hello.lastSeq) || hello.lastSeq < 0 || !(hello.epoch === null || typeof hello.epoch === 'string')) { ws.close(4400, 'Bad hello')
@@ -81,7 +107,7 @@ export function createWsHub({ server, store, epoch, snapshot, getToken, getPort,
     for (const [ws, state] of states) if (state.ready) send(ws, { t: 'hb', seq: headSeq(), at: now() })
   }, heartbeatMs)
   heartbeat.unref()
-  return {
+  hub = {
     /** Fan out committed durable events and unsequenced progress. */
     publish(event) {
       const message = { t: event.type ?? event.t, at: event.at ?? now(), data: event.data, ...(event.seq === undefined ? {} : { seq: Number(event.seq) }) }
@@ -98,6 +124,7 @@ export function createWsHub({ server, store, epoch, snapshot, getToken, getPort,
     /** Stop heartbeats and close all sockets before the HTTP listener. */
     async close() {
       clearInterval(heartbeat)
+      bridge?.dispose()
       server.off('upgrade', onUpgrade)
       for (const ws of states.keys()) ws.close(1001, 'Server shutting down')
       const timeout = setTimeout(() => { for (const ws of states.keys()) ws.terminate() }, 100)
@@ -105,4 +132,5 @@ export function createWsHub({ server, store, epoch, snapshot, getToken, getPort,
       clearTimeout(timeout)
     }
   }
+  return hub
 }
