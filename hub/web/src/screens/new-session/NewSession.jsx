@@ -148,9 +148,10 @@ export function clearDraft(storage) {
 
 /**
  * The form's first state: `?repo=` preselects a known repo and `?task=` prefills Task; without either, a draft
- * from {@link readDraft} is restored. Focus starts on Task when a repo is selected, else on Repo.
+ * from {@link readDraft} is restored. Focus starts on Task when a repo is selected, else on Repo. A wanted repo
+ * that is not among the known repos yet is kept as `pending` for {@link resolvePending}.
  * @param {{ search?: string, state: object, draft?: { repo: string | null, task: string } | null }} options
- * @returns {{ query: string, repoKey: string | null, task: string, focus: 'repo' | 'task', open: boolean, active: number, submitting: boolean, error: null, fieldError: null, rootMissing: boolean }}
+ * @returns {{ query: string, repoKey: string | null, pending: string | null, task: string, focus: 'repo' | 'task', open: boolean, active: number, submitting: boolean, error: null, fieldError: null, rootMissing: boolean }}
  */
 export function initialForm({ search = '', state, draft = null }) {
   let params
@@ -160,9 +161,24 @@ export function initialForm({ search = '', state, draft = null }) {
   const task = fromQuery ? params.get('task') ?? '' : draft?.task ?? ''
   const repo = findRepo(state, wanted)
   return {
-    query: repo ? repo.name : wanted ?? '', repoKey: repo ? keyOf(repo) : null, task, focus: repo ? 'task' : 'repo', open: !repo,
+    query: repo ? repo.name : wanted ?? '', repoKey: repo ? keyOf(repo) : null, pending: repo ? null : wanted || null, task, focus: repo ? 'task' : 'repo', open: !repo,
     active: -1, submitting: false, error: null, fieldError: null, rootMissing: false
   }
+}
+
+/**
+ * Resolve the form's `pending` repo (a `?repo=` or draft repo the form opened with before the snapshot had it)
+ * once the store has loaded: the repo is selected as {@link initialForm} would have, unless the user already
+ * picked a repo or edited the Repo field. Either way `pending` is dropped, so this happens at most once.
+ * @param {{ pending?: string | null, repoKey: string | null, query: string }} form
+ * @param {object} state deck store state
+ * @returns {object | null} the patch to apply, or null when there is nothing to do yet
+ */
+export function resolvePending(form, state) {
+  if (!form.pending || !state.loaded) return null
+  if (form.repoKey || form.query !== form.pending) return { pending: null }
+  const repo = findRepo(state, form.pending)
+  return repo ? { pending: null, repoKey: keyOf(repo), query: repo.name, open: false, active: -1, focus: 'task' } : { pending: null }
 }
 
 /**
@@ -415,6 +431,12 @@ export function NewSession({ search = globalThis.location?.search ?? '', state, 
   }, [])
   useEffect(() => { if (form.error) errorRef.current?.focus() }, [form.error])
   useEffect(() => {
+    const patch = resolvePending(form, state)
+    if (!patch) return
+    update(current => resolvePending(current, state) ?? {})
+    if (patch.repoKey && globalThis.document?.activeElement === repoRef.current) taskRef.current?.focus()
+  }, [state.loaded, state.data?.repos, form.pending])
+  useEffect(() => {
     if (!state.loaded || known) return undefined
     let live = true
     probeScanRoot(client).then(missing => { if (live) update({ rootMissing: missing }) })
@@ -430,7 +452,7 @@ export function NewSession({ search = globalThis.location?.search ?? '', state, 
     close()
   }
   const pick = row => {
-    update({ repoKey: keyOf(row.repo), query: row.repo.name, open: false, active: -1, fieldError: null })
+    update({ repoKey: keyOf(row.repo), query: row.repo.name, pending: null, open: false, active: -1, fieldError: null })
     taskRef.current?.focus()
   }
   const submit = (mode = 'plain') => {

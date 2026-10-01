@@ -1,11 +1,15 @@
 // Task 10: the New session form (docs/deck/screens/new-session.md, acceptance criteria 1 to 9, D-68).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { runnerImport } from 'vite'
+import { build, runnerImport } from 'vite'
+import { chromium } from 'playwright-core'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const src = path.join(hub, 'web/src')
@@ -159,6 +163,21 @@ test('?repo= preselects the repo and puts the initial focus on Task; ?task= pref
   assert.match(render(ns.NewSessionView, { state, form: form(blank) }), /role="combobox"[^>]*data-initial-focus="true"/)
 })
 
+test('a wanted repo the store does not have yet stays pending and resolves once on load, unless the user chose', () => {
+  const loading = { ...deckState(), loaded: false }
+  const initial = ns.initialForm({ search: '?repo=alpha&task=fix', state: loading })
+  assert.equal(initial.repoKey, null)
+  assert.equal(initial.pending, 'alpha')
+  assert.equal(ns.resolvePending(initial, loading), null, 'nothing happens before the store loads')
+  const loaded = deckState({ repos: [repo('alpha')] })
+  assert.deepEqual(ns.resolvePending(initial, loaded), { pending: null, repoKey: 'alpha', query: 'alpha', open: false, active: -1, focus: 'task' })
+  assert.deepEqual(ns.resolvePending({ ...initial, query: 'bet' }, loaded), { pending: null }, 'a typed query is kept')
+  assert.deepEqual(ns.resolvePending({ ...initial, repoKey: 'beta', query: 'beta' }, loaded), { pending: null }, 'a picked repo is kept')
+  assert.deepEqual(ns.resolvePending(initial, deckState({ repos: [repo('beta')] })), { pending: null }, 'an unknown repo is dropped')
+  assert.equal(ns.resolvePending({ ...initial, pending: null }, loaded), null)
+  assert.equal(ns.initialForm({ search: '?repo=alpha', state: loaded }).pending, null)
+})
+
 test('a repo with an active plain session shows the conflict banner naming it, and Launch stays enabled (AC3)', () => {
   const state = deckState({ repos: [repo('rustot')], sessions: [session('s1', 'rustot', { state: 'needs_approval' }), session('s2', 'other')] })
   const tree = ns.NewSessionView({ state, form: form({ repoKey: 'rustot', query: 'rustot', open: false }) })
@@ -223,6 +242,17 @@ test('an empty task is allowed and posts an empty string (AC5); no repo shows "P
   const html = render(ns.NewSessionView, { state: deckState({ repos: [repo('rustot')] }), form: form({ fieldError: 'repo' }) })
   assert.match(html, /Pick a repo\./)
   assert.match(html, /role="combobox"[^>]*aria-invalid="true"/)
+})
+
+test('"Run as a fleetmates job" with an empty or blank task posts nothing and marks Task', async () => {
+  for (const task of ['', '   \n', null]) {
+    const api = fakeApi({ 'POST /api/sessions': { session: { id: 'j1' } } })
+    const routes = []
+    const result = await ns.submitLaunch({ api, repoKey: 'rustot', task, mode: 'fleetmates', navigate: to => routes.push(to), storage: memoryStorage() })
+    assert.deepEqual(result, { fieldError: 'task' }, JSON.stringify(task))
+    assert.equal(api.calls.length, 0)
+    assert.deepEqual(routes, [])
+  }
 })
 
 test('Alt Enter submits, Enter alone does not, Esc cancels', () => {
@@ -317,4 +347,95 @@ test('the scan root reads as missing only when the rescan fails with settings_io
   assert.equal(await ns.probeScanRoot(fakeApi({ 'POST /api/repos/rescan': { found: 0 } })), false)
   const other = Object.assign(new Error('internal'), { status: 500, code: 'internal', details: {} })
   assert.equal(await ns.probeScanRoot(fakeApi({ 'POST /api/repos/rescan': other })), false)
+})
+
+async function findChromium() {
+  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
+    if (!candidate) continue
+    try { await access(candidate)
+      return candidate } catch {}
+  }
+  return null
+}
+
+// A page that mounts the stateful NewSession with a recording api; `window.h.load(repos)` delivers the snapshot.
+const HARNESS = `import React, { useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import { NewSession } from '@hub/web/src/screens/new-session/NewSession.jsx'
+
+const h = window.h = { posts: [], routes: [] }
+const map = new Map()
+const storage = { getItem: key => map.has(key) ? map.get(key) : null, setItem: (key, value) => map.set(key, String(value)), removeItem: key => map.delete(key) }
+const api = {
+  get: () => Promise.resolve({}),
+  post: (url, body) => {
+    h.posts.push({ url, body })
+    return url === '/api/sessions' ? Promise.resolve({ session: { id: 'new1' } }) : Promise.resolve({ found: 0 })
+  }
+}
+const empty = { loaded: false, deckdOutage: false, data: { repos: [], sessions: [], requests: [], runs: [], order: [], health: [], prefs: { scanRoot: '~/dev' } } }
+function App() {
+  const [state, setState] = useState(empty)
+  h.load = repos => setState({ ...empty, loaded: true, data: { ...empty.data, repos } })
+  return <NewSession search={new URLSearchParams(location.hash.slice(1)).toString() ? '?' + location.hash.slice(1) : ''} state={state} api={api}
+    navigate={(to, options) => h.routes.push([to, options ?? null])} storage={storage} history={{ state: null, back() {} }} />
+}
+createRoot(document.getElementById('root')).render(<App />)
+`
+
+test('a ?repo= that arrives before the repos resolves once they load, and never overrides a repo the user typed', async t => {
+  const executablePath = await findChromium()
+  assert.ok(executablePath, 'Chromium or Chrome is required for the New session browser test')
+  const dir = await mkdtemp(path.join(tmpdir(), 'newsess-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(path.join(dir, 'index.html'), '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>t</title></head><body><div id="root"></div><script type="module" src="./entry.jsx"></script></body></html>')
+  await writeFile(path.join(dir, 'entry.jsx'), HARNESS)
+  const out = path.join(dir, 'dist')
+  await build({
+    root: dir, base: './', configFile: false, logLevel: 'silent',
+    resolve: { alias: { '@hub': hub, react: path.join(hub, 'node_modules/react'), 'react-dom': path.join(hub, 'node_modules/react-dom') } },
+    build: { outDir: out, emptyOutDir: true }
+  })
+  const server = createServer(async (req, res) => {
+    const name = new URL(req.url, 'http://x').pathname
+    try {
+      const body = await readFile(path.join(out, name === '/' ? 'index.html' : path.normalize(name)))
+      res.writeHead(200, { 'content-type': name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' }).end(body)
+    } catch { res.writeHead(404).end() }
+  }).listen(0, '127.0.0.1')
+  await new Promise(resolve => server.once('listening', resolve))
+  const browser = await chromium.launch({ executablePath, headless: true })
+  t.after(async () => { await browser.close()
+    server.close() })
+  const repos = [repo('alpha'), repo('beta')]
+  const errors = []
+  const open = async hash => {
+    const page = await browser.newPage()
+    page.on('pageerror', error => errors.push(error.message))
+    await page.goto(`http://127.0.0.1:${server.address().port}/#${hash}`)
+    await page.waitForFunction(() => window.h?.load && document.querySelector('.launch-submit'), null, { timeout: 10_000 })
+    return page
+  }
+
+  const page = await open('repo=alpha&task=fix')
+  await page.evaluate(list => window.h.load(list), repos)
+  await page.waitForFunction(() => !document.querySelector('[aria-busy="true"]'), null, { timeout: 5000 })
+  assert.equal(await page.inputValue('#new-session-repo'), 'alpha')
+  assert.equal(await page.locator('.launch-list').count(), 0, 'the resolved repo closes the list')
+  assert.equal(await page.inputValue('#new-session-task'), 'fix')
+  await page.click('.launch-submit')
+  await page.waitForFunction(() => window.h.routes.length > 0 || document.querySelector('.launch-field-error'), null, { timeout: 5000 })
+  assert.deepEqual(await page.evaluate(() => window.h.posts), [{ url: '/api/sessions', body: { repoKey: 'alpha', task: 'fix' } }])
+  assert.deepEqual(await page.evaluate(() => window.h.routes), [['/s/new1', { replace: true }]])
+
+  const typed = await open('repo=alpha')
+  await typed.fill('#new-session-repo', 'bet')
+  await typed.evaluate(list => window.h.load(list), repos)
+  await typed.waitForSelector('.launch-option', { timeout: 5000 })
+  assert.equal(await typed.inputValue('#new-session-repo'), 'bet', 'the typed query stays')
+  await typed.click('.launch-submit')
+  await typed.waitForSelector('.launch-field-error', { timeout: 5000 })
+  assert.deepEqual(await typed.evaluate(() => window.h.posts.filter(post => post.url === '/api/sessions')), [], 'no repo was chosen for the user')
+  assert.deepEqual(errors, [])
 })
