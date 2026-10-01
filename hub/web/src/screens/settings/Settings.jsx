@@ -3,6 +3,7 @@ import { shown, titleText, translate } from '../../components/StatusPill.jsx'
 import { linkHandler } from '../../shell/Rail.jsx'
 import { deckApi } from '../drawer/NeedsYouDrawer.jsx'
 import { Checklist } from '../first-run/FirstRun.jsx'
+import { readDensity, writeDensity } from '../../state/deck-store.js'
 
 /** English copy for the M1 Settings sections (docs/deck/screens/settings.md section 9) plus the M1-only rows. */
 export const SETTINGS_COPY = Object.freeze({
@@ -69,6 +70,24 @@ export const SETTINGS_COPY = Object.freeze({
   'settings.conn.startError': 'Could not start {dep}: {error}',
   'settings.conn.checklist': 'Run the setup checklist again',
   'settings.conn.stale': 'A running session counts as adrift after {n} min without activity.',
+  'settings.conn.deckdOutdated': 'deckd is older than the deck; restart it when no session is running',
+  'settings.appearance.density': 'Density',
+  'settings.appearance.density.comfortable': 'Comfortable',
+  'settings.appearance.density.compact': 'Compact',
+  'settings.appearance.textSize': 'Text size',
+  'settings.appearance.textSize.default': '{n}px (default)',
+  'settings.appearance.textSize.option': '{n}px',
+  'settings.appearance.motion': 'Motion',
+  'settings.appearance.motion.system': 'Follow the system setting',
+  'settings.appearance.motion.reduce': 'Always reduce motion',
+  'settings.appearance.language': 'Language',
+  'settings.appearance.language.value': '{language} (set by DECK_LANG)',
+  'settings.appearance.language.en': 'English',
+  'settings.appearance.language.pt': 'Portuguese (Brazil)',
+  'settings.appearance.srTerminal': 'Screen reader mode for terminals',
+  'settings.appearance.srTerminal.hint': 'Slower. Lets screen readers read terminal output.',
+  'settings.appearance.sharedColors': '{n} repos share 9 colors',
+  'settings.appearance.customizeCrew': 'Customize crew',
   'settings.saveError': 'Could not save {setting}: {error}'
 })
 
@@ -76,6 +95,18 @@ export const SETTINGS_COPY = Object.freeze({
 export const SECTIONS = Object.freeze(['appearance', 'rules', 'notifications', 'connections', 'crew'])
 /** Sections with content in M1. */
 export const M1_SECTIONS = Object.freeze(['notifications', 'connections'])
+/** Sections rendered now: M1's plus Appearance and the Crew sheet from M2; Approval rules stays a later section. */
+export const RENDERED_SECTIONS = Object.freeze(['appearance', 'notifications', 'connections', 'crew'])
+/** Text sizes offered in Appearance, in px (settings.md 4.3); 14 is the default. */
+export const TEXT_SIZES = Object.freeze([13, 14, 15, 16])
+/** Motion preference values (settings.md 4.3). */
+export const MOTIONS = Object.freeze(['system', 'reduce'])
+const DENSITY_OPTIONS = ['comfortable', 'compact']
+
+// The page's localStorage, read through `window` so a server render (no window) never touches Node's own storage global.
+function browserStorage() {
+  try { return globalThis.window?.localStorage } catch { return undefined }
+}
 /** Notification preferences edited in M1, with their control type (settings.md 4.4). */
 export const NOTIFY_PREFS = Object.freeze([
   { key: 'bell', control: 'checkbox', label: 'settings.notify.bell', hint: 'settings.notify.bell.hint' },
@@ -247,6 +278,98 @@ export function depStatus(row, dep, t) {
   return { tone: state === 'ok' ? 'ok' : state === 'down' || state === 'degraded' ? 'bad' : 'todo', text }
 }
 
+/**
+ * How many repos share crew colors (design/crew.md 4.3): every known, not archived repo once any of them holds a
+ * shared slot, else 0.
+ * @param {object[]} repos snapshot `repos` rows
+ * @returns {number}
+ */
+export function sharedRepos(repos = []) {
+  const known = repos.filter(repo => !repo.archivedAt)
+  return known.some(repo => repo.crew?.slotShared) ? known.length : 0
+}
+
+/**
+ * Keyboard handler for a radio group of buttons: arrow keys move the choice and select it (ARIA radio pattern).
+ * @param {unknown[]} values the options in order
+ * @param {number} index the option this handler belongs to
+ * @param {(value: unknown) => void} pick
+ * @returns {(event: { key: string, preventDefault: () => void }) => void}
+ */
+export function radioKeys(values, index, pick) {
+  return event => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key]
+    if (!step || values.length < 2) return
+    event.preventDefault()
+    const next = (index + step + values.length) % values.length
+    pick(values[next])
+    globalThis.document?.activeElement?.parentElement?.children?.[next]?.focus?.()
+  }
+}
+
+function RadioButtons({ label, values, current, text, onPick, className = 'segmented' }) {
+  return (
+    <div className={className} role="radiogroup" aria-label={label}>
+      {values.map((value, index) => (
+        <button key={String(value)} type="button" role="radio" className="segmented-option" aria-checked={value === current ? 'true' : 'false'}
+          tabIndex={value === current ? 0 : -1} onClick={() => { if (value !== current) onPick(value) }} onKeyDown={radioKeys(values, index, onPick)}>{text(value)}</button>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Appearance and language section, pure (settings.md 4.3): Density (per browser, `deck.density`), Text size and
+ * Motion (`PATCH /api/prefs`), the language as a read-only row (SET-O1), the terminal screen reader mode
+ * (off by default) and the shared colors line with its link to the Crew sheet.
+ * @param {{ prefs: object, sources?: object, repos?: object[], t?: Function, errors?: Record<string, string>, storage?: Storage, density?: string, navigate: (to: string) => void, onChange: (key: string, value: unknown) => void, onDensity?: (value: string) => void }} props
+ */
+export function AppearanceSection({ prefs, sources = {}, repos = [], t, errors = {}, storage = browserStorage(), density, navigate, onChange, onDensity = () => {} }) {
+  const tr = (key, params) => translate(t, SETTINGS_COPY, key, params)
+  const size = TEXT_SIZES.includes(prefs.textSize) ? prefs.textSize : 14
+  const motion = MOTIONS.includes(prefs.motion) ? prefs.motion : 'system'
+  const currentDensity = density ?? readDensity(storage)
+  const lang = prefs.lang === 'pt' ? 'pt' : 'en'
+  const language = tr(`settings.appearance.language.${lang}`)
+  const shared = sharedRepos(repos)
+  return (
+    <section className="settings-section" aria-labelledby="settings-appearance-title">
+      <h2 className="settings-heading" id="settings-appearance-title">{tr('settings.nav.appearance')}</h2>
+      <Field>
+        <span className="setting-label">{tr('settings.appearance.density')}</span>
+        <RadioButtons label={tr('settings.appearance.density')} values={DENSITY_OPTIONS} current={currentDensity} text={value => tr(`settings.appearance.density.${value}`)}
+          onPick={value => { writeDensity(storage, value)
+            onDensity(value) }} />
+      </Field>
+      <Field error={errors.textSize}>
+        <label className="setting-select" htmlFor="pref-textSize">{tr('settings.appearance.textSize')}
+          <select id="pref-textSize" value={String(size)} disabled={sources.textSize === 'env'} onChange={event => onChange('textSize', Number(event.target.value))}>
+            {TEXT_SIZES.map(n => <option key={n} value={String(n)}>{tr(n === 14 ? 'settings.appearance.textSize.default' : 'settings.appearance.textSize.option', { n })}</option>)}
+          </select>
+        </label>
+      </Field>
+      <Field error={errors.motion}>
+        <span className="setting-label">{tr('settings.appearance.motion')}</span>
+        <RadioButtons label={tr('settings.appearance.motion')} values={MOTIONS} current={motion} text={value => tr(`settings.appearance.motion.${value}`)} onPick={value => onChange('motion', value)} />
+      </Field>
+      <div className="setting-row setting-language">
+        <span className="setting-label">{tr('settings.appearance.language')}</span>
+        <p className="setting-value">{sources.lang === 'env' ? tr('settings.appearance.language.value', { language }) : language}</p>
+      </div>
+      <Field hint={tr('settings.appearance.srTerminal.hint')} error={errors.terminalScreenReader}>
+        <label className="setting-check" htmlFor="pref-terminalScreenReader"><input id="pref-terminalScreenReader" type="checkbox" checked={prefs.terminalScreenReader === true}
+          disabled={sources.terminalScreenReader === 'env'} onChange={event => onChange('terminalScreenReader', event.target.checked)} /> {tr('settings.appearance.srTerminal')}</label>
+      </Field>
+      {shared ? (
+        <p className="setting-row setting-inline setting-shared">
+          <span>{tr('settings.appearance.sharedColors', { n: shared })}</span>
+          <a href="/settings/crew" onClick={linkHandler(navigate, '/settings/crew')}>{tr('settings.appearance.customizeCrew')}</a>
+        </p>
+      ) : null}
+    </section>
+  )
+}
+
 function Field({ hint, children, error }) {
   return (
     <div className="setting-row">
@@ -351,6 +474,7 @@ export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors
               <span className="dep-text"><bdi>{status.text}</bdi></span>
               {startable ? <button type="button" className="button button--secondary button--xs" aria-busy={busy[dep] ? 'true' : undefined}
                 onClick={() => { if (!busy[dep]) onStart(dep) }}>{tr(`settings.conn.start.${dep}`)}</button> : null}
+              {dep === 'deckd' && health.find(row => row.dep === dep)?.reason === 'deckd_outdated' ? <p className="setting-hint dep-outdated">{tr('settings.conn.deckdOutdated')}</p> : null}
               {startErrors[dep] ? <p className="setting-error" role="status"><bdi>{tr('settings.conn.startError', { dep: tr(`settings.conn.dep.${dep}`), error: shown(startErrors[dep]) })}</bdi></p> : null}
             </li>
           )
@@ -387,7 +511,7 @@ export function SettingsView({ section, prefs, loading = false, t, navigate, chi
       <div className="settings-content" aria-busy={loading ? 'true' : undefined}>
         {loading
           ? <>{[0, 1, 2].map(index => <div key={index} className="skeleton-panel motion-shimmer" aria-hidden="true" />)}</>
-          : M1_SECTIONS.includes(section) ? children : <section className="settings-section"><h2 className="settings-heading">{tr(`settings.nav.${SECTIONS.includes(section) ? section : 'rules'}`)}</h2><p className="setting-hint">{tr('settings.later')}</p></section>}
+          : RENDERED_SECTIONS.includes(section) ? children : <section className="settings-section"><h2 className="settings-heading">{tr(`settings.nav.${SECTIONS.includes(section) ? section : 'rules'}`)}</h2><p className="setting-hint">{tr('settings.later')}</p></section>}
       </div>
     </div>
   )
@@ -417,6 +541,7 @@ export function Settings({ route, state, t, navigate, api, feed }) {
   const [busy, setBusy] = useState({})
   const [startErrors, setStartErrors] = useState({})
   const [checklist, setChecklist] = useState(false)
+  const [density, setDensity] = useState(() => readDensity(browserStorage()))
   useEffect(() => {
     let current = true
     client.get('/api/prefs').then(data => { if (current) setSources(data?.sources ?? {}) }).catch(() => { if (current) setSources({}) })
@@ -454,7 +579,9 @@ export function Settings({ route, state, t, navigate, api, feed }) {
   }
   const notifyRow = ping ?? state.data.health.find(row => row.dep === 'notify') ?? null
   let body = null
-  if (section === 'notifications') {
+  if (section === 'appearance') {
+    body = <AppearanceSection prefs={prefs} sources={known} repos={state.data.repos} t={t} errors={errors} density={density} navigate={navigate} onChange={onSave} onDensity={setDensity} />
+  } else if (section === 'notifications') {
     body = <NotificationsSection prefs={prefs} sources={known} t={t} status={notifyStatus(notifyRow, t)} pinging={pinging} errors={errors} onChange={onSave} onTestPing={onTestPing} />
   } else if (section === 'connections') {
     body = <ConnectionsSection prefs={prefs} sources={known} health={state.data.health} t={t} errors={errors} notes={notes} found={found} busy={busy} startErrors={startErrors}
