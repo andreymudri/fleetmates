@@ -14,8 +14,11 @@ const CAP = 256 * 1024
 /** A private HOME with a token, a static page and a repo directory holding a plan. */
 function home() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rco-'))
-  // A token-shaped variable, so a test can check child processes do not inherit it.
-  const env = { HOME: dir, DECK_TEST_TOKEN: 'not-a-real-token' }
+  // A token-shaped variable, so a test can check child processes do not inherit it. PATH holds only the fake
+  // opener's directory, so no test can reach the desktop's real xdg-open.
+  const bin = path.join(dir, 'bin')
+  fs.mkdirSync(bin)
+  const env = { HOME: dir, PATH: bin, DECK_TEST_TOKEN: 'not-a-real-token' }
   const state = path.join(dir, '.local/state/fleetmates/deck')
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
@@ -25,7 +28,7 @@ function home() {
   const repo = path.join(dir, 'dev', 'alpha')
   fs.mkdirSync(path.join(repo, 'docs'), { recursive: true })
   fs.writeFileSync(path.join(repo, 'docs', 'plan.md'), '# Plan\n\n- T1 build it\n')
-  return { dir, env, staticDir, repo: fs.realpathSync(repo) }
+  return { dir, env, bin, staticDir, repo: fs.realpathSync(repo) }
 }
 
 async function harness(t, options = {}) {
@@ -232,16 +235,55 @@ test('run.updated is published once per changed run and never on an unchanged re
   assert.equal(h.deck.store.get('SELECT COUNT(*) AS n FROM events WHERE type=?', 'run.updated').n, first + 1)
 })
 
-test('the production opener runs xdg-open with the one path as argv and without the deck token in its environment', async t => {
-  const calls = []
-  const h = await harness(t, { services: {}, runCommand: (file, args, env) => { calls.push({ file, args, env })
-    return { status: 0, stdout: '', stderr: '' } } })
+/**
+ * A fake xdg-open that records its argv, environment and pid under HOME, then stays in the foreground for
+ * 10 s, as an opener that runs the editor in the foreground does.
+ */
+function fakeOpener(place) {
+  const file = path.join(place.bin, 'xdg-open')
+  let pid = null
+  fs.writeFileSync(file, '#!/bin/sh\n/usr/bin/env > "$HOME/opener.env"\nprintf \'%s\\n\' "$@" > "$HOME/opener.args"\necho $$ > "$HOME/opener.pid"\nexec /bin/sleep 10\n', { mode: 0o755 })
+  return {
+    read: name => fs.readFileSync(path.join(place.dir, `opener.${name}`), 'utf8'),
+    ready() {
+      const text = fs.existsSync(path.join(place.dir, 'opener.pid')) ? fs.readFileSync(path.join(place.dir, 'opener.pid'), 'utf8') : ''
+      if (text.endsWith('\n')) pid = Number(text)
+      return pid !== null
+    },
+    // The pid is read while HOME still exists: the harness removes HOME in its own after hook.
+    kill() { if (pid) try { process.kill(pid) } catch {} }
+  }
+}
+
+test('the production opener answers 202 without waiting for a foreground xdg-open, with argv only and no token in its environment', async t => {
+  // runCommand: undefined restores the real synchronous runner, so a regression to it blocks here for 5 s.
+  const h = await harness(t, { services: {}, runCommand: undefined })
   h.addRepo(h.place.repo, 'alpha', 0)
   h.runs.push({ repoId: h.place.repo, runId: 'r1', planPath: 'docs/plan.md', tasks: [] })
-  assert.equal((await h.json('/api/open', 'POST', { kind: 'runPlan', ref: { repoId: h.place.repo, runId: 'r1' } })).status, 202)
-  const opens = calls.filter(call => call.file === 'xdg-open')
-  assert.equal(opens.length, 1)
-  assert.deepEqual(opens[0].args, [path.join(h.place.repo, 'docs', 'plan.md')])
-  assert.equal(opens[0].env.HOME, h.place.dir)
-  assert.equal(Object.keys(opens[0].env).some(key => /TOKEN/i.test(key)), false)
+  const opener = fakeOpener(h.place)
+  t.after(async () => { await waitFor(opener.ready)
+    opener.kill() })
+  const started = Date.now()
+  const [opened, version] = await Promise.all([
+    h.json('/api/open', 'POST', { kind: 'runPlan', ref: { repoId: h.place.repo, runId: 'r1' } }),
+    h.request('/api/version')
+  ])
+  const elapsed = Date.now() - started
+  assert.equal(opened.status, 202)
+  assert.equal(version.status, 200)
+  assert.ok(elapsed < 2000, `POST /api/open answered after ${elapsed} ms`)
+  await waitFor(opener.ready)
+  assert.equal(opener.read('args'), path.join(h.place.repo, 'docs', 'plan.md') + '\n')
+  const env = Object.fromEntries(opener.read('env').trim().split('\n').map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]))
+  assert.equal(env.HOME, h.place.dir)
+  assert.equal(Object.keys(env).some(key => /TOKEN/i.test(key)), false)
+})
+
+test('a missing opener is 502 open_failed', async t => {
+  const h = await harness(t, { services: {}, runCommand: undefined })
+  h.addRepo(h.place.repo, 'alpha', 0)
+  h.runs.push({ repoId: h.place.repo, runId: 'r1', planPath: 'docs/plan.md', tasks: [] })
+  const response = await h.json('/api/open', 'POST', { kind: 'runPlan', ref: { repoId: h.place.repo, runId: 'r1' } })
+  assert.equal(response.status, 502)
+  assert.equal(response.data.error.code, 'open_failed')
 })

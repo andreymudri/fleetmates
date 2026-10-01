@@ -2,7 +2,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { workingRoot } from './machines/session.mjs'
 import { openDeckDb } from './db/index.mjs'
@@ -163,9 +163,18 @@ export async function createDeckServer(options = {}) {
       })
       return { cwd, mounts }
     },
-    // Opens one resolved, checked absolute path (open.mjs); argv only, token-free environment, 5 s timeout.
-    async open(file) {
-      if (run('xdg-open', [file]).status !== 0) throw apiError(502, 'open_failed')
+    // Opens one resolved, checked absolute path (open.mjs): argv only, no shell, the token-free environment.
+    // The opener is detached and never awaited, since xdg-open may run the editor in the foreground; only a
+    // failure to spawn it (ENOENT, EACCES) is reported.
+    open(file) {
+      return new Promise((resolve, reject) => {
+        let child
+        try { child = spawn('xdg-open', [file], { env: processEnv, stdio: 'ignore', detached: true }) }
+        catch { return reject(apiError(502, 'open_failed')) }
+        child.once('error', () => reject(apiError(502, 'open_failed')))
+        child.once('spawn', () => { child.unref()
+          resolve() })
+      })
     },
     async rescan() {
       let found = 0
