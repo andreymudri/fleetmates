@@ -1,9 +1,33 @@
-import { constants, watch as fsWatch } from 'node:fs'
+import { constants, existsSync, readFileSync, watch as fsWatch } from 'node:fs'
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { NAMES } from '../../../scripts/names.mjs'
-import { livenessRows, DEFAULT_STALE_MINUTES } from '../../../scripts/liveness.mjs'
-import { createGit, defaultGitExec } from '../../../scripts/git.mjs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+/**
+ * Where this adapter loads the fleetmates modules (names, liveness, git) from. Inside a fleetmates
+ * checkout (the hub's parent holds a package.json named `fleetmates` and scripts/names.mjs) it is
+ * that checkout's scripts/, so the root contract test and the deck read the same code and a stale
+ * vendored copy is never used. Otherwise, as in an installed package, it is vendor/fleetmates/,
+ * which `prepack` fills with bin/vendor-fleetmates.mjs.
+ * @param {string} [adapterDir] the directory holding this adapter
+ * @returns {string}
+ */
+export function fleetmatesScriptsDir(adapterDir = path.dirname(fileURLToPath(import.meta.url))) {
+  const repo = path.resolve(adapterDir, '../../..')
+  try {
+    if (JSON.parse(readFileSync(path.join(repo, 'package.json'), 'utf8')).name === 'fleetmates'
+      && existsSync(path.join(repo, 'scripts', 'names.mjs'))) return path.join(repo, 'scripts')
+  } catch {}
+  const vendored = path.resolve(adapterDir, '../../vendor/fleetmates')
+  if (existsSync(path.join(vendored, 'names.mjs'))) return vendored
+  throw new Error('fleetmates modules not found: run from a fleetmates checkout, or install a package packed with bin/vendor-fleetmates.mjs')
+}
+
+const scriptsDir = fleetmatesScriptsDir()
+const load = (name) => import(pathToFileURL(path.join(scriptsDir, name)).href)
+const [{ NAMES }, { livenessRows, DEFAULT_STALE_MINUTES }, { createGit, defaultGitExec }] = await Promise.all([
+  load('names.mjs'), load('liveness.mjs'), load('git.mjs'),
+])
 
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_DISCOVERY_DEPTH = 16

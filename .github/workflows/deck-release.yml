@@ -1,0 +1,198 @@
+name: deck-release
+
+# Publishes the deck package (hub/) on a `deck-vX.Y.Z` tag. The plugin's own release.yml fires on
+# `v*` tags only, so a deck tag never publishes the plugin and a plugin tag never publishes the deck
+# (docs/deck/13-operations.md section 13, OPS-O3). Pushing the tag is the owner's action.
+
+on:
+  push:
+    tags: ['deck-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  hub:
+    runs-on: ubuntu-latest
+    env:
+      TMPDIR: /tmp/hx
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: hub/.node-version
+          cache: npm
+          cache-dependency-path: hub/package-lock.json
+      - run: mkdir -p /tmp/hx
+      - run: npm ci --prefix hub
+      - run: npm --prefix hub run build
+      - run: npm --prefix hub test
+
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      TMPDIR: /tmp/hx
+      # The ubuntu runner image ships Google Chrome here; the specs also look for /usr/bin/chromium.
+      CHROMIUM_PATH: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: hub/.node-version
+          cache: npm
+          cache-dependency-path: hub/package-lock.json
+      - run: mkdir -p /tmp/hx
+      - run: npm ci --prefix hub
+      - run: node --test hub/test/e2e/observe.spec.mjs hub/test/e2e/security.spec.mjs hub/test/e2e/accessibility.spec.mjs
+
+  hub-perf:
+    # Informational, as 09-testing section 10 rates hub-perf: shared runners are slower and noisier
+    # than the reference machine, so the numbers are uploaded for the release notes and do not block.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      TMPDIR: /tmp/hx
+      CHROMIUM_PATH: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: hub/.node-version
+          cache: npm
+          cache-dependency-path: hub/package-lock.json
+      - run: mkdir -p /tmp/hx/perf
+      - run: npm ci --prefix hub
+      - run: node hub/test/perf/hook-latency.mjs | tee /tmp/hx/perf/hook-latency.json
+      - run: node hub/test/perf/home-paint.mjs | tee /tmp/hx/perf/home-paint.json
+      - run: node hub/test/perf/idle-cpu.mjs | tee /tmp/hx/perf/idle-cpu.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hub-perf
+          path: /tmp/hx/perf/*.json
+
+  package:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: hub/.node-version
+          cache: npm
+          cache-dependency-path: hub/package-lock.json
+      - name: Tag must be deck-v + hub/package.json version
+        id: version
+        run: |
+          version=$(node -p "require('./hub/package.json').version")
+          if [ "${GITHUB_REF_NAME}" != "deck-v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match hub/package.json version ${version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Package must not be private
+        # hub/package.json carries "private": true until the owner settles the package name (Q1 in
+        # docs/deck/15-open-questions.md) and removes it; npm refuses to publish a private package.
+        run: |
+          if [ "$(node -p "require('./hub/package.json').private === true")" = "true" ]; then
+            echo "hub/package.json is still private: remove \"private\" before tagging a deck release"
+            exit 1
+          fi
+      - run: npm ci --prefix hub
+      - name: Package contents
+        # npm pack runs prepack (the Vite build), then lists what the tarball would hold.
+        working-directory: hub
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            const text = require("fs").readFileSync("/tmp/pack.json", "utf8")
+            const files = JSON.parse(text.slice(text.indexOf("\n[") + 1))[0].files.map(f => f.path)
+            for (const f of files) console.log(f)
+            const need = ["package.json", "README.md", "CHANGELOG.md", "bin/fleetmates-deck.mjs", "bin/fm.mjs",
+              "deckd/main.mjs", "server/main.mjs", "hook/deck-hook.mjs", "web/dist/index.html",
+              "vendor/fleetmates/names.mjs", "vendor/fleetmates/liveness.mjs", "vendor/fleetmates/git.mjs", "vendor/fleetmates/reviews.mjs"]
+            const missing = need.filter(f => !files.includes(f))
+            const leaked = files.filter(f => /^(test|spike|node_modules)\/|\.test\.mjs$|\.env/.test(f))
+            if (missing.length) { console.error("missing from the package: " + missing.join(", ")); process.exit(1) }
+            if (leaked.length) { console.error("must not ship: " + leaked.join(", ")); process.exit(1) }
+          '
+      - name: Pack the tarball for the clean-install job
+        working-directory: hub
+        run: npm pack --pack-destination /tmp/deck-pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deck-tarball
+          path: /tmp/deck-pack/*.tgz
+
+  clean-install:
+    # 13-operations section 13.5 "Clean install", rehearsed on a runner: install the packed tarball
+    # into an empty prefix under an empty HOME and run the commands that write nothing. The full
+    # check (init and doctor on a fresh user account with systemd) stays a manual owner step.
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      # Only hub/.node-version is checked out, for setup-node: the install must not see the source tree.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: hub/.node-version
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: hub/.node-version
+      - uses: actions/download-artifact@v4
+        with:
+          name: deck-tarball
+          path: /tmp/deck-pack
+      - name: Install into an empty prefix and HOME
+        run: |
+          tarball=$(ls /tmp/deck-pack/*.tgz)
+          name=$(tar -xOzf "$tarball" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')
+          export HOME=$(mktemp -d)
+          unset XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME CLAUDE_CONFIG_DIR
+          prefix=$(mktemp -d)
+          npm install -g --prefix "$prefix" "$tarball"
+          export PATH="$prefix/bin:$PATH"
+          fleetmates-deck init --dry-run
+          if fm 2> /tmp/fm.err; then echo "fm without arguments must print usage and fail"; exit 1; fi
+          grep -q '^usage: fm' /tmp/fm.err
+          cd "$prefix/lib/node_modules/$name"
+          test -f web/dist/index.html
+          # Importing the two entry modules has no side effects (each starts only when it is argv[1]),
+          # and fails with ERR_MODULE_NOT_FOUND if the package misses a module they need.
+          node --input-type=module -e "await import('./server/main.mjs'); await import('./deckd/main.mjs'); console.log('server and deckd import')"
+          # npm 11 may skip node-pty's install scripts (allowScripts); the prebuilt binary must still spawn.
+          node --input-type=module -e "const pty = (await import('node-pty')).default; const p = pty.spawn('/bin/echo', ['pty-ok'], {}); let out = ''; p.onData(d => { out += d }); p.onExit(e => { console.log(out.trim(), e.exitCode); process.exitCode = out.includes('pty-ok') && e.exitCode === 0 ? 0 : 1 })"
+
+  publish:
+    needs: [hub, e2e, package, clean-install]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # npm trusted publishing: the registry exchanges this job's OIDC token for a short-lived
+      # publish credential, and --provenance links the package to this workflow run.
+      id-token: write
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: hub/.node-version
+          registry-url: 'https://registry.npmjs.org'
+      - name: npm must support trusted publishing (11.5.1 or later)
+        run: |
+          npm install -g npm@11
+          npm_version=$(npm --version)
+          echo "npm ${npm_version}"
+          node -e 'const [a, b, c] = process.argv[1].split(".").map(Number); process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1)' "${npm_version}"
+      - run: npm ci --prefix hub
+      - name: Publish unless this version is already on npm
+        working-directory: hub
+        run: |
+          name=$(node -p "require('./package.json').name")
+          if [ "$(npm view "${name}@${VERSION}" version 2>/dev/null)" = "${VERSION}" ]; then
+            echo "${name}@${VERSION} is already on npm, nothing to publish"
+            exit 0
+          fi
+          npm publish --provenance --access public

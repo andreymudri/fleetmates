@@ -29,7 +29,8 @@ import { collectReviewResults, isUnsafePathComponent, printable, printableBlock,
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
-import { realpathSync } from 'node:fs'
+import { realpathSync, existsSync, statSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { stat } from 'node:fs/promises'
 import { validateLinkPaths } from './preview-links.mjs'
 import { planDrift, renderDrift } from './plan-drift.mjs'
@@ -139,7 +140,7 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|config> [options]
+const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|ui|deck|config> [options]
 
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
@@ -172,7 +173,9 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   config   list [--root <path>]
   config   get <key> [--root <path>]
   config   set <key> <value> [--root <path>] [--local]
-  config   unset <key> [--root <path>] [--local]`
+  config   unset <key> [--root <path>] [--local]
+  ui       [--root <path>]
+  deck     init [--dry-run] [--rotate-token] | doctor | status | open | uninstall-hooks [--root <path>]`
 
 // A flag followed by nothing, or by another flag, is a boolean switch (e.g. --no-fleet)
 // and takes no value. Without this, a boolean flag anywhere but the very last argv
@@ -182,7 +185,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round', 'dry-run', 'rotate-token'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -318,6 +321,9 @@ export const REQUIRED = {
   // fallthrough: a command absent from this map also skips the whole missing-argument
   // branch, so the omission would read as "not a command" to anyone auditing the table.
   config: [],
+  // Forwarded to the deck's own CLI, which belongs to no run; forwardDeck checks the subcommand.
+  ui: [],
+  deck: [],
 }
 
 // Every flag each command actually reads. An unknown flag is refused rather than ignored: a
@@ -362,6 +368,9 @@ export const KNOWN_FLAGS = {
   usage: ['session', 'json', 'run'],
   'map-notes': ['run', 'write'],
   config: ['local'],
+  // Forwarded to hub/bin/fleetmates-deck.mjs; forwardDeck narrows these per deck subcommand.
+  ui: [],
+  deck: ['dry-run', 'rotate-token'],
 }
 
 function unknownFlags(command, flags) {
@@ -2760,6 +2769,73 @@ export function promptSafeDirectories(dirs = []) {
   })
 }
 
+// The flags each forwarded deck subcommand accepts, mirroring the hub CLI's own parser in
+// hub/bin/fleetmates-deck.mjs. `ui` and `deck` go through this CLI's own grammar first (parseFlags,
+// the rejected `--flag=value` spelling, KNOWN_FLAGS), then this table narrows the flags to the
+// subcommand, so a typo never reaches a command that writes settings.json or starts units.
+const DECK_COMMANDS = {
+  init: ['dry-run', 'rotate-token'],
+  doctor: [],
+  status: [],
+  open: [],
+  'uninstall-hooks': [],
+}
+
+const DECK_USAGE = 'usage: cli.mjs deck init [--dry-run] [--rotate-token] | doctor | status | open | uninstall-hooks\n'
+  + '       cli.mjs ui    (same as: cli.mjs deck open)\n'
+  + '       --root <path> names the fleetmates checkout whose hub/ to run; the default is this one'
+
+/**
+ * Forward `cli.mjs ui` and `cli.mjs deck <cmd>` to the hub's own CLI, `hub/bin/fleetmates-deck.mjs`.
+ *
+ * The child is started with `spawnSync(process.execPath, [bin, ...argv])`: an argv array and no
+ * shell, so no argument and no part of the hub path is ever parsed by a shell. An unknown
+ * subcommand, an extra positional and a flag the subcommand does not take are refused with exit 2
+ * before a process starts, and the refusal does not echo the caller's text. A missing hub, or a
+ * hub without `node_modules`, is refused with exit 1 and the install command. Otherwise the
+ * child's exit status is returned (1 when it ended on a signal or failed to start).
+ *
+ * @param {'ui' | 'deck'} command
+ * @param {string[]} positional positional arguments after the command
+ * @param {Record<string, string | true>} flags parsed flags, already checked against KNOWN_FLAGS
+ * @param {{ out: (s: string) => void }} io
+ * @returns {number} exit code
+ */
+export function forwardDeck(command, positional, flags, io) {
+  const [sub, ...extra] = command === 'ui' ? ['open', ...positional] : positional
+  if (!Object.hasOwn(DECK_COMMANDS, sub ?? '')) {
+    io.out(`deck needs one of: ${Object.keys(DECK_COMMANDS).join(', ')}\n${DECK_USAGE}`)
+    return 2
+  }
+  const name = command === 'ui' ? 'ui' : `deck ${sub}`
+  if (extra.length > 0) {
+    io.out(`${name} takes no positional arguments\n${DECK_USAGE}`)
+    return 2
+  }
+  const forwarded = Object.keys(flags).filter((flag) => flag !== 'root')
+  const refused = forwarded.filter((flag) => !DECK_COMMANDS[sub].includes(flag))
+  if (refused.length > 0) {
+    io.out(`${name} does not take ${refused.map((flag) => `--${flag}`).join(', ')}\n${DECK_USAGE}`)
+    return 2
+  }
+  const hub = path.join(typeof flags.root === 'string' ? path.resolve(flags.root) : FLEET_ROOT, 'hub')
+  const bin = path.join(hub, 'bin', 'fleetmates-deck.mjs')
+  const isDir = (p) => { try { return statSync(p).isDirectory() } catch { return false } }
+  if (!existsSync(bin) || !isDir(path.join(hub, 'node_modules'))) {
+    // JSON quoting escapes control characters, so a --root carrying a terminal escape prints inert.
+    io.out(`fleetmates deck is not installed: ${existsSync(bin) ? 'hub/node_modules' : 'hub/bin/fleetmates-deck.mjs'} is missing.\n`
+      + 'The deck ships in hub/ of a fleetmates source checkout. Install its dependencies with:\n'
+      + `  npm ci --prefix ${JSON.stringify(hub)}`)
+    return 1
+  }
+  const result = spawnSync(process.execPath, [bin, sub, ...forwarded.map((flag) => `--${flag}`)], { stdio: 'inherit', shell: false })
+  if (result.error) {
+    io.out(`could not start the deck CLI (${result.error.code ?? 'error'})`)
+    return 1
+  }
+  return Number.isInteger(result.status) ? result.status : 1
+}
+
 export async function runCli(argv, io = { out: console.log }) {
   // Two channels, not one. `io.out` carries the ANSWER a command was asked for — and for
   // `workflow` that answer is a JavaScript module a caller redirects into a file. Anything
@@ -2835,6 +2911,10 @@ export async function runCli(argv, io = { out: console.log }) {
   // Before any command reads a name: a repository claude-teammates left behind is moved to the
   // fleetmates spellings once, or the command refuses and says why. `newestMtime` is the same walk
   // `liveness` uses, so "a teammate is live" means the same thing in both places.
+  // Before the migration: the deck commands read no run state and must not migrate the cwd. Their
+  // flags and rejected spellings were already checked above, like every other command's.
+  if (command === 'ui' || command === 'deck') return forwardDeck(command, positional, flags, io)
+
   const migration = await migrate(root, { io, measureTouch: (dir) => newestMtime(dir) })
   if (migration.code !== 0) return migration.code
 
