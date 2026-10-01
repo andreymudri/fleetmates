@@ -163,6 +163,10 @@ export async function createDeckServer(options = {}) {
       })
       return { cwd, mounts }
     },
+    // Opens one resolved, checked absolute path (open.mjs); argv only, token-free environment, 5 s timeout.
+    async open(file) {
+      if (run('xdg-open', [file]).status !== 0) throw apiError(502, 'open_failed')
+    },
     async rescan() {
       let found = 0
       // Only a scan root that cannot be read fails the rescan (settings_io_failed); a directory below it that
@@ -396,10 +400,29 @@ export async function createDeckServer(options = {}) {
       timer.unref()
       timers.push(timer)
     }
+    // run.updated (05-api 3.4): re-read the runs every runPollMs and publish each run whose JSON changed
+    // since the previous read. The first read has nothing to compare with, so it publishes every run once.
+    const runJson = new Map()
+    let runBusy = false
+    const runPoll = setInterval(() => {
+      if (runBusy || stopped) return
+      runBusy = true
+      Promise.resolve().then(() => reader.list()).then(list => {
+        if (stopped) return
+        for (const row of list) {
+          const key = JSON.stringify([row.repoId, row.runId])
+          const text = JSON.stringify(row)
+          if (runJson.get(key) === text) continue
+          runJson.set(key, text)
+          const at = now()
+          publish({ seq: Number(store.appendEvent({ at, type: 'run.updated', entityId: row.runId, data: row })), at, type: 'run.updated', data: row })
+        }
+      }).catch(() => {}).finally(() => { runBusy = false })
+    }, options.runPollMs ?? 60_000)
     const rotation = setInterval(() => { try { refreshToken() } catch {} }, tokenPollMs)
     const tick = setInterval(() => { projector.tick(now()) }, 5000)
     const ping = setInterval(() => { if (link) request(link, 'ping').catch(() => disconnect()) }, 5000)
-    for (const timer of [rotation, tick, ping]) { timer.unref()
+    for (const timer of [runPoll, rotation, tick, ping]) { timer.unref()
       timers.push(timer) }
   } catch (error) { await close()
     throw error }
