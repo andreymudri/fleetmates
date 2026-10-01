@@ -68,8 +68,9 @@ function themeFor(element) {
 
 /**
  * Activate a terminal link through {@link linkDecision}: refused schemes do nothing, a non-localhost
- * link opens only when `confirmLink(uri)` returns true, and localhost opens at once. Opening uses
- * `open(uri, '_blank', 'noopener,noreferrer')`.
+ * link opens only when `confirmLink(href)` returns true, and localhost opens at once. `href` is the parsed
+ * `new URL(uri).href` (punycode host, backslashes normalized), so the confirm shows the URL the browser
+ * will open (docs/deck/08-security.md 4.6). Opening uses `open(href, '_blank', 'noopener,noreferrer')`.
  * @param {string} uri
  * @param {{ confirmLink: (uri: string) => boolean, open: (url: string, target: string, features: string) => unknown }} options
  * @returns {boolean} whether the link was opened
@@ -77,8 +78,9 @@ function themeFor(element) {
 export function handleLink(uri, { confirmLink, open }) {
   const decision = linkDecision(uri)
   if (decision === 'refuse') return false
-  if (decision === 'confirm' && !confirmLink(uri)) return false
-  open(uri, '_blank', 'noopener,noreferrer')
+  const href = new URL(uri).href
+  if (decision === 'confirm' && !confirmLink(href)) return false
+  open(href, '_blank', 'noopener,noreferrer')
   return true
 }
 
@@ -88,18 +90,20 @@ export function handleLink(uri, { confirmLink, open }) {
  * `renderToStaticMarkup` in Node without loading them. A snapshot frame resets the terminal; output frames
  * are written as they come; keystrokes reach `client` only while the terminal has focus. Global chords
  * (keyboard.md section 2) are left to the shell. Pastes are sanitized and confirmed above 4 KB, then
- * handed to xterm's bracketed paste. Links open only for `http:` and `https:`.
+ * handed to xterm's bracketed paste. Links open only for `http:` and `https:`. A `deckd_unavailable` error that
+ * arrives before the first `onAttached` (the server dropped the pending attach) leaves the view waiting, and it
+ * attaches again once `deckdUp` turns true after being false; after an attach the server re-attaches the tab itself.
  * @param {{
  *   sessionId: string, label: string, readOnly?: boolean, screenReaderMode?: boolean,
  *   client?: ReturnType<import('../state/terminal.js').createTerminalClient> | null, initialText?: string,
  *   autoFocus?: boolean, onFocusChange?: (focused: boolean) => void,
  *   confirmPaste?: (sizeText: string) => boolean | Promise<boolean>, confirmLink?: (url: string) => boolean,
- *   t?: Function
+ *   deckdUp?: boolean, t?: Function
  * }} props
  */
 export function TerminalView({
   sessionId, label, readOnly = false, screenReaderMode = false, client = null, initialText = '', autoFocus = false,
-  onFocusChange, confirmPaste, confirmLink, t
+  onFocusChange, confirmPaste, confirmLink, deckdUp = true, t
 }) {
   const section = useRef(null)
   const host = useRef(null)
@@ -107,7 +111,10 @@ export function TerminalView({
   const latest = useRef({})
   const [painted, setPainted] = useState(!!initialText)
   const [connected, setConnected] = useState(false)
-  latest.current = { readOnly, connected, onFocusChange, confirmPaste, confirmLink, t }
+  const [waiting, setWaiting] = useState(false)
+  const reattach = useRef(null)
+  const sawDown = useRef(false)
+  latest.current = { readOnly, connected, onFocusChange, confirmPaste, confirmLink, deckdUp, t }
 
   useEffect(() => {
     const element = host.current
@@ -124,6 +131,8 @@ export function TerminalView({
     const reducedMotion = !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches
     // A new session (or client) starts detached and unpainted, so the stdin effect re-runs on its attach.
     setConnected(false)
+    setWaiting(false)
+    sawDown.current = !latest.current.deckdUp
     setPainted(!!initialText)
 
     ;(async () => {
@@ -203,21 +212,35 @@ export function TerminalView({
         observer.observe(element)
       }
 
+      let attachedOnce = false
+      const attach = () => {
+        handle = client.attach(sessionId, { cols: term.cols, rows: term.rows }, handlers)
+      }
+      const handlers = {
+        onAttached: () => {
+          attachedOnce = true
+          sawDown.current = false
+          setWaiting(false)
+          setConnected(true)
+        },
+        onSnapshot: bytes => {
+          term.reset()
+          term.write(bytes)
+          setPainted(true)
+        },
+        onOutput: bytes => {
+          term.write(bytes)
+          setPainted(true)
+        },
+        onExit: () => setConnected(false),
+        onError: error => {
+          setConnected(false)
+          if (error?.code === 'deckd_unavailable' && !attachedOnce) setWaiting(true)
+        }
+      }
       if (client) {
-        handle = client.attach(sessionId, { cols: term.cols, rows: term.rows }, {
-          onAttached: () => setConnected(true),
-          onSnapshot: bytes => {
-            term.reset()
-            term.write(bytes)
-            setPainted(true)
-          },
-          onOutput: bytes => {
-            term.write(bytes)
-            setPainted(true)
-          },
-          onExit: () => setConnected(false),
-          onError: () => setConnected(false)
-        })
+        reattach.current = () => { if (!disposed) attach() }
+        attach()
       }
       if (autoFocus) term.focus()
     })()
@@ -226,6 +249,7 @@ export function TerminalView({
       disposed = true
       if (timer !== null) clearTimeout(timer)
       observer?.disconnect()
+      reattach.current = null
       handle?.detach()
       for (const cleanup of cleanups) cleanup()
       term?.dispose()
@@ -241,9 +265,23 @@ export function TerminalView({
     term.options.screenReaderMode = !!screenReaderMode
   }, [readOnly, connected, screenReaderMode])
 
+  // The server forgot an attach deckd never completed; ask again once deckd is back. "Back" is a return to up
+  // after down, so a health row that still reads up when the error arrives does not start an attach loop.
+  useEffect(() => {
+    if (!deckdUp) {
+      sawDown.current = true
+      return
+    }
+    if (!waiting || !sawDown.current) return
+    sawDown.current = false
+    setWaiting(false)
+    reattach.current?.()
+  }, [waiting, deckdUp])
+
   const ariaLabel = translate(t, TERMINAL_COPY, 'terminal.label', { label: titleText(label) })
   return (
-    <section ref={section} className="terminal-view" aria-label={ariaLabel} data-readonly={readOnly ? 'true' : undefined}>
+    <section ref={section} className="terminal-view" aria-label={ariaLabel} data-readonly={readOnly ? 'true' : undefined}
+      data-waiting={waiting ? 'deckd' : undefined}>
       {!painted && (
         <div className="terminal-skeleton" aria-hidden="true">
           {Array.from({ length: SKELETON_LINES }, (_, index) => <span key={index} className="terminal-skeleton-line motion-shimmer" />)}

@@ -420,6 +420,27 @@ test('a dropped event during the first sync still gives the tab one term.attache
   assert.deepEqual(resizes[0].fields, { ptyId: row.ptyId, cols: 90, rows: 25, source: { kind: 'browser' } })
 })
 
+test('a dropped event after the first sync sends a fresh snapshot but no second term.attached and no second resize', async t => {
+  const fake = scripted()
+  const deck = await server(t, fake.connect)
+  const row = await spawned(fake, deck)
+  const c = await client(t, deck)
+  const seen = order(c, row.id)
+  await c.attach(row.id, 90, 25)
+  await fake.until(() => fake.requests.some(r => r.op === 'resize'), 'the attach resize')
+  fake.scrollback.set(row.ptyId, 'after the drop')
+  fake.emit('dropped', { ptyId: row.ptyId, bytes: 10 })
+  await c.until(() => snapshots(c, row.id).length === 2, 'the second snapshot')
+  // A barrier: the error answers a message sent after the second sync, so a late term.attached or resize is in.
+  c.send({ t: 'barrier' })
+  await c.until(() => c.json.some(m => m.t === 'error'), 'the barrier')
+  assert.equal(snapshots(c, row.id)[1], 'after the drop')
+  assert.equal(c.json.filter(m => m.t === 'term.attached' && m.sessionId === row.id).length, 1, 'exactly one term.attached')
+  assert.equal(fake.requests.filter(r => r.op === 'resize').length, 1, 'exactly one browser resize')
+  const snapshot = `frame:${FRAME_KIND.snapshot}`
+  assert.deepEqual(seen, ['term.attached', snapshot, snapshot])
+})
+
 test('terminal clients attached before the server starts are counted: one leaving is not detached, the last one is', async t => {
   const fake = scripted()
   const ptyId = `pty-${++ptys}`
