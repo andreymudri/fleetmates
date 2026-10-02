@@ -7,7 +7,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pty from 'node-pty'
 import { fakeBin } from '../helpers/fake-bin.mjs'
-import { acceptTrust, childEnv, createRedactor, readAccount, redactTokens, REDACTIONS } from '../capture/capture-cc.mjs'
+import {
+  acceptTrust, captureSettings, CAPTURE_TEST, childEnv, CMD, createRedactor, LONG_CMD, option2Rule, PROMPTS,
+  readAccount, redactTokens, REDACTIONS, STEP_ORDER
+} from '../capture/capture-cc.mjs'
 
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const scriptsDir = path.join(hubDir, 'test', 'fixtures', 'scripts')
@@ -541,6 +544,174 @@ test('fake claude exits 2 on a bad script', async () => {
   }
 })
 
+/** Events from docs/deck/04-integrations.md section 2.1, listed here independently of the script. */
+const HOOK_EVENTS = [
+  'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
+  'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied', 'Notification', 'Stop',
+  'SubagentStart', 'SubagentStop', 'CwdChanged', 'PreCompact', 'PostCompact',
+  'WorktreeCreate', 'WorktreeRemove'
+]
+
+test('captureSettings asks for Bash, Edit, Write and WebFetch and registers the hook for every event', () => {
+  const text = captureSettings('run-hook')
+  assert.ok(text.endsWith('\n'))
+  const settings = JSON.parse(text)
+  assert.deepEqual(settings.permissions, { ask: ['Bash', 'Edit', 'Write', 'WebFetch'] })
+  assert.deepEqual(Object.keys(settings.hooks).sort(), [...HOOK_EVENTS].sort())
+  for (const e of HOOK_EVENTS) {
+    assert.deepEqual(settings.hooks[e], [{ hooks: [{ type: 'command', command: 'run-hook', timeout: 10 }] }], e)
+  }
+  assert.equal(captureSettings('run-hook'), text, 'the same text every call, so bash-2 restores it exactly')
+})
+
+test('capture steps: Bash runs node --test, write, webfetch and bash-long follow edit', () => {
+  assert.deepEqual(STEP_ORDER, [
+    'startup', 'bash-1', 'bash-2', 'bash-3', 'edit', 'write', 'webfetch', 'bash-long',
+    'ask', 'question', 'compact', 'clear', 'exit'
+  ])
+  assert.equal(CMD, 'node --test capture.test.mjs')
+  assert.match(LONG_CMD, /^node --test --test-name-pattern="[a-z]{200}" capture\.test\.mjs$/)
+  assert.ok(PROMPTS.bash.endsWith(`: ${CMD}`))
+  assert.ok(PROMPTS['bash-long'].endsWith(`: ${LONG_CMD}`))
+  assert.equal(PROMPTS.write, 'Use the Write tool to create capture-write.txt containing capture. Do nothing else.')
+  assert.equal(PROMPTS.webfetch, 'Use the WebFetch tool to fetch https://example.com and reply with its title only.')
+})
+
+test('option2Rule keeps only the permissions object, redacted', () => {
+  const { redactValue } = redactorFor()
+  const settings = JSON.stringify({
+    permissions: { allow: ['Bash(node --test:*)', 'Read(/var/lib/u1000/notes)'], ask: ['Bash', 'Edit', 'Write', 'WebFetch'] },
+    hooks: { Stop: [{ hooks: [{ type: 'command', command: 'CAPTURE_OUT=/tmp/deck-capture-raw-x hook' }] }] }
+  })
+  assert.deepEqual(option2Rule(settings, redactValue), {
+    allow: ['Bash(node --test:*)', 'Read(/home/you/notes)'],
+    ask: ['Bash', 'Edit', 'Write', 'WebFetch']
+  })
+})
+
+test('capture-cc starts claude in a repo with the capture settings and a passing, committed capture.test.mjs', async () => {
+  const t = await tempDir('deck-capture-repo-state-')
+  try {
+    const bin = path.join(t.dir, 'bin')
+    await mkdir(bin)
+    const dump = path.join(t.dir, 'repo-state.json')
+    const js = path.join(bin, 'stub.mjs')
+    // The stub records the repo it was started in, runs the Bash steps' command there, and exits.
+    await writeFile(js, [
+      "import { execFileSync, spawnSync } from 'node:child_process'",
+      "import { readFileSync, writeFileSync } from 'node:fs'",
+      "if (process.argv.includes('--version')) { process.stdout.write('2.1.282 (Claude Code)\\n'); process.exit(0) }",
+      `const run = spawnSync(process.execPath, ${JSON.stringify(CMD.split(' ').slice(1))}, { encoding: 'utf8' })`,
+      `writeFileSync(${JSON.stringify(dump)}, JSON.stringify({`,
+      "  settings: readFileSync('.claude/settings.local.json', 'utf8'),",
+      "  testFile: readFileSync('capture.test.mjs', 'utf8'),",
+      "  tracked: execFileSync('git', ['ls-files'], { encoding: 'utf8' }).split('\\n').filter(Boolean),",
+      '  status: run.status',
+      '}))'
+    ].join('\n'))
+    await writeFile(path.join(bin, 'claude'), `#!/bin/sh\nexec '${process.execPath}' '${js}' "$@"\n`, { mode: 0o755 })
+    const run = await runCapture(t.dir, bin)
+    assert.equal(run.code, 0, run.stderr)
+    const state = JSON.parse(await readFile(dump, 'utf8'))
+    const settings = JSON.parse(state.settings)
+    assert.deepEqual(settings.permissions, { ask: ['Bash', 'Edit', 'Write', 'WebFetch'] })
+    const hookCommand = settings.hooks.Stop[0].hooks[0].command
+    assert.equal(state.settings, captureSettings(hookCommand), 'the repo settings are captureSettings output')
+    assert.equal(state.testFile, CAPTURE_TEST)
+    assert.ok(state.tracked.includes('capture.test.mjs'), JSON.stringify(state.tracked))
+    assert.equal(state.status, 0, `${CMD} passes in the throwaway repo`)
+    assert.deepEqual(await readdir(run.tmp), [], 'no deck-capture-* dirs left behind')
+  } finally {
+    await t.cleanup()
+  }
+})
+
+/**
+ * One Bash permission prompt as a fake claude script: wait for the typed prompt, fire
+ * PreToolUse and PermissionRequest, show three options, and branch on the key.
+ * Test stimulus, not a captured frame.
+ * @param {Record<string, string>} keys key -> branch label
+ */
+const bashPrompt = keys => [
+  { expectInput: { match: '\r', timeoutMs: 20000 } },
+  { hook: 'PreToolUse', with: { tool_name: 'Bash' } },
+  { hook: 'PermissionRequest', with: { tool_name: 'Bash' } },
+  { print: '❯ 1. Yes\r\n  2. Yes, and don\'t ask again\r\n  3. No\r\n' },
+  { expectKey: { ...keys, timeoutMs: 20000 } }
+]
+
+test('capture-cc bash-2 saves the rule option 2 wrote as option2-rule.json, redacted, and lists it in MANIFEST; bash-3 needs PermissionDenied', async () => {
+  const t = await tempDir('deck-capture-opt2-')
+  /** @type {Awaited<ReturnType<typeof fakeBin>> | undefined} */
+  let bin
+  try {
+    const home = path.join(t.dir, 'home')
+    const tmp = path.join(t.dir, 'tmp')
+    const out = path.join(t.dir, 'out')
+    for (const d of [path.join(home, '.claude'), tmp, out]) await mkdir(d, { recursive: true })
+    // Stands in for claude writing its "don't ask again" rule: a user-level CwdChanged hook,
+    // fired by the script below only after key 2, adds an allow rule to the repo settings.
+    const restored = path.join(t.dir, 'settings-after-bash-2.json')
+    const writeRule = path.join(t.dir, 'write-rule.mjs')
+    await writeFile(writeRule, [
+      "import { readFileSync, writeFileSync } from 'node:fs'",
+      "const file = '.claude/settings.local.json'",
+      "const s = JSON.parse(readFileSync(file, 'utf8'))",
+      "s.permissions.allow = ['Bash(node --test:*)', `Read(${process.env.HOME}/notes)`]",
+      'writeFileSync(file, JSON.stringify(s))'
+    ].join('\n'))
+    await writeFile(path.join(home, '.claude', 'settings.json'), JSON.stringify({
+      hooks: {
+        CwdChanged: [{ hooks: [{ type: 'command', command: `'${process.execPath}' '${writeRule}'`, timeout: 10 }] }],
+        // Fired after bash-2 has finished: copies the repo settings out for the restore check.
+        WorktreeRemove: [{ hooks: [{ type: 'command', command: `cp .claude/settings.local.json '${restored}'`, timeout: 10 }] }]
+      }
+    }))
+    const script = path.join(t.dir, 'opt2.json')
+    const answered = [{ hook: 'PostToolUse', with: { tool_name: 'Bash' } }, { print: 'ok\r\n' }, { hook: 'Stop' }]
+    await writeFile(script, JSON.stringify({
+      steps: [
+        { hook: 'SessionStart', with: { source: 'startup' } },
+        { print: '> \r\n' },
+        ...bashPrompt({ 1: 'one' }),
+        { branch: { one: answered } },
+        ...bashPrompt({ 2: 'two' }),
+        { branch: { two: [{ hook: 'CwdChanged' }, ...answered] } },
+        // bash-3 answers No; this fake fires no PermissionDenied, which bash-3 must report.
+        ...bashPrompt({ 3: 'no' }),
+        { branch: { no: [{ print: 'denied\r\n' }] } },
+        { sleep: 7000 },
+        { hook: 'WorktreeRemove' },
+        { exit: { code: 0 } }
+      ]
+    }))
+    bin = await fakeBin({ script, log: path.join(t.dir, 'fake.jsonl') })
+    const env = { ...bin.env, HOME: home, TMPDIR: tmp, FAKE_CLAUDE_FIXTURES: path.join(t.dir, 'fixtures'), CAPTURE_STEP_TIMEOUT_MS: '5000' }
+    const run = await new Promise(resolve => {
+      execFile(process.execPath, [captureCc, '--unattended', '--out', out], { env, timeout: 90000 },
+        (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }))
+    })
+    assert.equal(run.code, 0, run.stderr)
+    const dir = path.join(out, 'hooks', '2.1.282')
+    const manifest = JSON.parse(await readFile(path.join(dir, 'MANIFEST.json'), 'utf8'))
+    for (const s of ['startup', 'bash-1', 'bash-2']) assert.ok(!manifest.skipped.some(k => k.step === s), JSON.stringify(manifest.skipped))
+    assert.deepEqual(JSON.parse(await readFile(path.join(dir, 'option2-rule.json'), 'utf8')), {
+      ask: ['Bash', 'Edit', 'Write', 'WebFetch'],
+      allow: ['Bash(node --test:*)', 'Read(/home/you/notes)']
+    })
+    assert.ok(manifest.hooks.includes('option2-rule.json'), JSON.stringify(manifest.hooks))
+    assert.deepEqual(manifest.steps, STEP_ORDER)
+    assert.match(run.stderr, /step bash-3 failed: no PermissionDenied\(Bash\)/, 'bash-3 waits for PermissionDenied after answering 3')
+    const settingsAfter = await readFile(restored, 'utf8')
+    const hookCommand = JSON.parse(settingsAfter).hooks.Stop[0].hooks[0].command
+    assert.equal(settingsAfter, captureSettings(hookCommand), 'bash-2 restored the exact capture settings')
+    assert.deepEqual(await readdir(tmp), [], 'no deck-capture-* dirs left behind')
+  } finally {
+    await bin?.cleanup()
+    await t.cleanup()
+  }
+})
+
 // Fixture consistency: every captured set under test/fixtures/hooks/<version> keeps its
 // MANIFEST true and its hand redactions in place.
 const fixturesDir = path.join(hubDir, 'test', 'fixtures')
@@ -559,37 +730,80 @@ async function capturedVersions () {
   return out
 }
 
+/** Files in hooks/<version> that are not hook payloads. */
+const NOT_PAYLOADS = new Set(['MANIFEST.json', 'option2-rule.json'])
+
+/**
+ * Assert one captured set under `root` (hooks/<v> and screens/<v>) matches its MANIFEST and keeps
+ * its redactions. A recapture merged into an existing set lists its new files in
+ * `MANIFEST.recapture.added`, as paths relative to `root`; those count as listed hook files.
+ * @param {string} root
+ * @param {string} v
+ */
+async function assertFixtureSet (root, v) {
+  const hooksDir = path.join(root, 'hooks', v)
+  const screensDir = path.join(root, 'screens', v)
+  const manifest = JSON.parse(await readFile(path.join(hooksDir, 'MANIFEST.json'), 'utf8'))
+  for (const [name, frame] of Object.entries(manifest.frames ?? {})) {
+    const bytes = (await readFile(path.join(screensDir, `${name}.ansi`))).length
+    assert.equal(frame.bytes, bytes, `${v} MANIFEST frames.${name}.bytes vs ${name}.ansi`)
+  }
+  /** @type {string[]} */
+  const added = manifest.recapture?.added ?? []
+  for (const rel of added) {
+    assert.ok(await readFile(path.join(root, rel)).then(() => true, () => false), `${v} MANIFEST recapture.added ${rel} exists`)
+  }
+  const addedHooks = added.filter(rel => path.dirname(rel) === path.join('hooks', v)).map(rel => path.basename(rel))
+  const listed = [...new Set([...manifest.hooks, ...addedHooks])].filter(f => f.endsWith('.json') && !NOT_PAYLOADS.has(f)).sort()
+  const hookFiles = (await readdir(hooksDir)).filter(f => f.endsWith('.json') && f !== 'MANIFEST.json').sort()
+  const payloadFiles = hookFiles.filter(f => !NOT_PAYLOADS.has(f))
+  assert.deepEqual(listed, payloadFiles, `${v} MANIFEST hooks vs files`)
+  for (const f of hookFiles) {
+    const text = await readFile(path.join(hooksDir, f), 'utf8')
+    const payload = JSON.parse(text)
+    if (!NOT_PAYLOADS.has(f)) assert.equal(payload.hook_event_name, f.split('.')[0], `${v}/${f} hook_event_name`)
+    assert.doesNotMatch(text, UUID_RE, `${v}/${f} holds a UUID`)
+    assert.doesNotMatch(text, /\/home\/(?!you\b)/, `${v}/${f} holds a /home/ path other than /home/you`)
+  }
+  const screenFiles = await readdir(screensDir).catch(() => [])
+  for (const [dir, files] of [[hooksDir, await readdir(hooksDir)], [screensDir, screenFiles]]) {
+    for (const f of files) {
+      const text = (await readFile(path.join(dir, f))).toString('latin1')
+      assert.doesNotMatch(text, /deck-capture-repo/, `${v}/${f} holds the throwaway repo name`)
+      if (dir !== screensDir) continue
+      for (const m of text.matchAll(/claude\.ai\/code\/session_/g)) {
+        const at = /** @type {number} */ (m.index) + m[0].length
+        assert.equal(text.slice(at, at + 8), 'REDACTED', `${v}/${f} session URL`)
+      }
+    }
+  }
+}
+
 test('fixture sets: MANIFEST matches the files and the redactions hold', async () => {
   const versions = await capturedVersions()
   assert.ok(versions.length > 0, 'at least one captured fixture set')
-  for (const v of versions) {
-    const hooksDir = path.join(fixturesDir, 'hooks', v)
-    const screensDir = path.join(fixturesDir, 'screens', v)
-    const manifest = JSON.parse(await readFile(path.join(hooksDir, 'MANIFEST.json'), 'utf8'))
-    for (const [name, frame] of Object.entries(manifest.frames ?? {})) {
-      const bytes = (await readFile(path.join(screensDir, `${name}.ansi`))).length
-      assert.equal(frame.bytes, bytes, `${v} MANIFEST frames.${name}.bytes vs ${name}.ansi`)
+  for (const v of versions) await assertFixtureSet(fixturesDir, v)
+})
+
+test('fixture sets: recapture.added lists merged files, and option2-rule.json is not a hook payload', async () => {
+  const t = await tempDir('deck-fixture-set-')
+  try {
+    const hooksDir = path.join(t.dir, 'hooks', '9.9.9')
+    await mkdir(hooksDir, { recursive: true })
+    await mkdir(path.join(t.dir, 'screens', '9.9.9'), { recursive: true })
+    await writeFile(path.join(hooksDir, 'Stop.json'), JSON.stringify({ hook_event_name: 'Stop' }))
+    await writeFile(path.join(hooksDir, 'PermissionRequest.Bash.json'), JSON.stringify({ hook_event_name: 'PermissionRequest' }))
+    await writeFile(path.join(hooksDir, 'option2-rule.json'), JSON.stringify({ allow: ['Bash(node --test:*)'] }))
+    const manifest = {
+      hooks: ['Stop.json'],
+      frames: {},
+      recapture: { added: ['hooks/9.9.9/PermissionRequest.Bash.json', 'hooks/9.9.9/option2-rule.json'] }
     }
-    const hookFiles = (await readdir(hooksDir)).filter(f => f.endsWith('.json') && f !== 'MANIFEST.json').sort()
-    assert.deepEqual([...manifest.hooks].filter(f => f.endsWith('.json')).sort(), hookFiles, `${v} MANIFEST hooks vs files`)
-    for (const f of hookFiles) {
-      const text = await readFile(path.join(hooksDir, f), 'utf8')
-      const payload = JSON.parse(text)
-      assert.equal(payload.hook_event_name, f.split('.')[0], `${v}/${f} hook_event_name`)
-      assert.doesNotMatch(text, UUID_RE, `${v}/${f} holds a UUID`)
-      assert.doesNotMatch(text, /\/home\/(?!you\b)/, `${v}/${f} holds a /home/ path other than /home/you`)
-    }
-    const screenFiles = await readdir(screensDir).catch(() => [])
-    for (const [dir, files] of [[hooksDir, await readdir(hooksDir)], [screensDir, screenFiles]]) {
-      for (const f of files) {
-        const text = (await readFile(path.join(dir, f))).toString('latin1')
-        assert.doesNotMatch(text, /deck-capture-repo/, `${v}/${f} holds the throwaway repo name`)
-        if (dir !== screensDir) continue
-        for (const m of text.matchAll(/claude\.ai\/code\/session_/g)) {
-          const at = /** @type {number} */ (m.index) + m[0].length
-          assert.equal(text.slice(at, at + 8), 'REDACTED', `${v}/${f} session URL`)
-        }
-      }
-    }
+    await writeFile(path.join(hooksDir, 'MANIFEST.json'), JSON.stringify(manifest))
+    await assertFixtureSet(t.dir, '9.9.9')
+    await writeFile(path.join(hooksDir, 'PermissionDenied.Bash.json'), JSON.stringify({ hook_event_name: 'PermissionDenied' }))
+    await assert.rejects(assertFixtureSet(t.dir, '9.9.9'), /MANIFEST hooks vs files/, 'a payload listed nowhere fails')
+  } finally {
+    await t.cleanup()
   }
 })
