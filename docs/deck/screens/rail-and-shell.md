@@ -178,6 +178,22 @@ Motion: toasts enter 200ms, exit 160ms; the rec dot pulses; reduced motion fades
 | `shell.notFound.home` | All ships |
 | `shell.fatal.token` | This tab's key no longer matches the deck. Open the deck again with fleetmates-deck open. |
 | `shell.fatal.origin` | The deck only answers pages it served itself. Open it from fleetmates-deck open. |
+| `shell.fatal.heading` | Fleetmates Deck |
+| `shell.fatal.outdated` | The deck was updated. Reload |
+| `shell.fatal.reload` | Reload |
+| `shell.lang.fallback` | DECK_LANG is set to Portuguese, but the Portuguese catalog is not approved yet. The deck is shown in English. |
+| `shell.page.home` | Sessions |
+| `shell.page.new` | New session |
+| `shell.page.focus` | Session |
+| `shell.page.team` | Team run |
+| `shell.page.memory` | Memory |
+| `shell.page.research` | Research |
+| `shell.page.meetings` | Meetings |
+| `shell.page.settings` | Settings |
+| `shell.page.crew` | Crew |
+| `shell.page.welcome` | First run |
+| `shell.page.notFound` | Not found |
+| `shell.page.pending` | This screen arrives in a later milestone. |
 | `shell.toast.needs.title` | {repo} needs approval |
 | `shell.toast.question.title` | {repo} asked you |
 | `shell.toast.crash.title` | {repo} crashed, exit {code} |

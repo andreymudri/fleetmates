@@ -745,6 +745,14 @@ Keyboard and ARIA: native `<dialog>` with `showModal()` (gives focus trap and in
 
 Content: title states the action ("Stop rustot · combat-tick?"); body says the consequence literally ("The process gets SIGINT. Uncommitted changes stay in the worktree."). Themed copy only in form dialog titles ("Send out scouts").
 
+Copy (`CONFIRM_COPY` in `hub/web/src/components/ConfirmDialog.jsx`):
+
+| Key | EN |
+|---|---|
+| `confirm.cancel` | Cancel |
+
+`confirm.cancel` is the Cancel label when the caller passes no `cancelLabel`. The Focus and Home dialogs pass their own; the Team run Stop dialog passes none and shows this one.
+
 ---
 
 ## 27. Drawer
@@ -1107,6 +1115,12 @@ Keyboard and ARIA: `role="group"` `aria-label="Permission prompt: Bash command c
 Anatomy: padding 24, gap 16, `radius.3xl`, `bg.surface`, `border.default`; title `type.panel-title` as `h2`. Children: open-loop link rows (padding 12, `radius.lg`, `color.purple.900` for review or `bg.raised` for PR; CrewAvatar sm done; trailing action text in `state.done.fg` or `text.link`), capture links (padding 12, `radius.lg`, `bg.canvas`, domain dot + title 600, meta), ActionItemCard `row`.
 
 States: empty per section (Proposed): "No open loops.", "Nothing new in your vault today.", "No meetings today." in `text.muted`. The page-level rule: HomeCalm only when nothing is running and nothing is adrift (Decided).
+
+Copy shipped for the open loops section (`EMPTY_COPY` in `hub/web/src/components/EmptyState.jsx`, rendered by `EmptyState kind="openLoops"` on Home):
+
+| Key | EN |
+|---|---|
+| `empty.openLoops.title` | No open loops. |
 
 ---
 

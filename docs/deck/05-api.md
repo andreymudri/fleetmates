@@ -291,7 +291,7 @@ Durable (carry `seq`):
 | `request.closed` | `{ id, sessionId, state: 'answered' \| 'expired', answer, expiredReason }` | request final | all |
 | `counts` | `Counts` | after any transaction that changes a count | header chips, Rail badge, drawer subtitle, document title, Team pill |
 | `order.changed` | `{ order: string[] }` | urgency order changed | Home grid, Focus list, palette, `Alt 1..9` |
-| `run.updated` | `Run` | `status.json` / `plan.json` re-read, teammate join changed. The server watches every run directory a run list has found and re-reads after a change (debounced, about 250 ms), with a 60 s poll as the fallback; it publishes only runs whose data changed, and the first read publishes every run once | team card, Team |
+| `run.updated` | `Run` | `status.json` / `plan.json` re-read, teammate join changed. The server watches every run directory a run list has found and re-reads after a change (debounced, about 250 ms), with a 60 s poll as the fallback; it publishes only runs whose data changed. When it starts listening the server primes: it lists the runs, which arms the watchers, and records each run's data as the baseline without publishing; later reads publish only changed runs. If the priming list fails, the next successful read publishes every run once | team card, Team |
 | `run.derived` | `{ repoId, runId, derivedPhase, phases }` | slow git derive finished | Team phases |
 | `repo.upserted` | `RepoView` | new repo, crew change, archive | every avatar |
 | `rule.upserted` | `RuleView` | rule written or found in a settings file | Settings |

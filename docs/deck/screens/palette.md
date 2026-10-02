@@ -154,6 +154,18 @@ Width behaviour: identical at 1920, 1440 and 1280 (700px fixed, design-system 8.
 | `palette.footer.run` | Enter run |
 | `palette.footer.focus` | Alt Enter open in Focus |
 | `palette.footer.close` | Esc close |
+| `palette.needs.title` | {repo} · {summary} |
+| `palette.needs.waiting` | waiting {duration} |
+| `palette.needs.answerInTerminal` | Answer in your terminal |
+| `palette.session.title` | {repo} · {detail} |
+| `palette.group.showAll.needs` | requests |
+| `palette.group.showAll.sessions` | sessions |
+| `palette.group.showAll.actions` | actions |
+| `empty.palette.title` | No matches. |
+
+The three `palette.group.showAll.*` words fill the `{group}` of `palette.group.showAll`.
+`empty.palette.title` lives in `EMPTY_COPY` (`hub/web/src/components/EmptyState.jsx`), shown when
+the palette has no row and no message.
 
 ## 10. Acceptance criteria
 
