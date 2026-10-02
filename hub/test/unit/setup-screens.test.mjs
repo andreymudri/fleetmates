@@ -174,6 +174,17 @@ test('each check shows its ok, failed, warning and not-checked copy and its fix 
   assert.match(render(first.ChecklistRow, { view: rowView(check('hooks', 'failed', { error: longError })), navigate: () => {}, onAction: () => {} }), /<summary>Show full error<\/summary>/)
   assert.doesNotMatch(render(first.ChecklistRow, { view: rowView(check('hooks', 'failed', { error: 'short' })), navigate: () => {}, onAction: () => {} }), /Show full error/)
 })
+
+test('a skipped or unchecked vault row offers no fix, and a failed one keeps Fix in Settings (dogfood bug 6)', () => {
+  const { rowView } = first
+  for (const state of ['optional_skipped', 'pending', 'todo']) {
+    const row = rowView(check('vault', state, { detail: 'vault-mcp not checked by terminal setup' }))
+    assert.equal(row.tone, 'todo', `${state} vault row`)
+    assert.equal(row.action, null, `a ${state} vault row offers no action: no setting can change it before M5`)
+  }
+  assert.equal(rowView(check('vault', 'failed', { error: 'spawn exited 1' })).action, 'firstRun.vault.fix')
+  assert.equal(rowView(check('vault', 'failed', { detail: 'not a directory' })).action, 'firstRun.vault.fix')
+})
 function pick(view) {
   return [view.tone, view.title, view.sub, view.action]
 }

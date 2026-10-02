@@ -209,7 +209,8 @@ export function rowView(check, t) {
   if (id === 'vault') {
     if (state === 'ok') return { ...view, tone: 'ok', title: tr('firstRun.vault.ok'), sub: check.path ? tr('firstRun.vault.ok.sub', { path: shown(check.path), n: Number(check.notes ?? 0) }) : null }
     if (state === 'failed') return { ...view, tone: 'bad', title: tr('firstRun.vault.bad'), sub: error ?? (check.detail ? shown(check.detail) : null), mono: true, action: FIX.vault }
-    return { ...view, tone: 'todo', sub: check.detail ? shown(check.detail) : null, action: FIX.vault }
+    // Skipped or not run: no setting can change the vault check before M5, so only a failed check offers a fix.
+    return { ...view, tone: 'todo', sub: check.detail ? shown(check.detail) : null }
   }
   if (id === 'scribed') {
     if (state === 'ok') return { ...view, tone: 'ok', title: tr('firstRun.scribed.ok'), optional: false }
