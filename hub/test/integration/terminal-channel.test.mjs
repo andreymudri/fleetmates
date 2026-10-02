@@ -515,6 +515,29 @@ test('output for a tab over 4 MiB of backlog is dropped with one output_dropped 
   assert.deepEqual(errors().map(m => m.error.code), ['output_dropped', 'output_dropped'], 'a new episode reports again')
 })
 
+test('a deckd refusal of the attach maps to no_pty, a retryable deckd_unavailable, or a non-retryable internal', async t => {
+  const fake = scripted()
+  let refusal = null
+  // The scripted deckd answers every request; this one refuses `attach` with `refusal` while it is set.
+  const connect = async () => {
+    const link = await fake.connect()
+    const answer = link.request
+    link.request = (op, fields) => op === 'attach' && refusal ? Promise.reject(Object.assign(Error(refusal), { code: refusal })) : answer.call(link, op, fields)
+    return link
+  }
+  const deck = await server(t, connect)
+  const c = await client(t, deck)
+  for (const [code, expected, retryable] of [['not_found', 'no_pty', false], ['deckd_unavailable', 'deckd_unavailable', true],
+    ['timeout', 'deckd_unavailable', true], ['closed', 'deckd_unavailable', true], ['bad_request', 'internal', false]]) {
+    const row = await spawned(fake, deck)
+    refusal = code
+    c.send({ t: 'term.attach', sessionId: row.id, cols: 80, rows: 24 })
+    const error = await c.until(() => c.json.find(m => m.t === 'term.error' && m.sessionId === row.id), `the term.error for ${code}`)
+    assert.deepEqual(error.error, { code: expected, message: expected, retryable }, `deckd ${code}`)
+  }
+  assert.equal(c.closed, null)
+})
+
 // Real deckd with the fake claude: input that never reaches the PTY, and the browser source set by the server.
 let rt
 let deckd
