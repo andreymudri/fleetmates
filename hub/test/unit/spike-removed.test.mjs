@@ -76,6 +76,10 @@ test('the perf script runs test/perf/focus-echo.mjs, and that file exists', () =
   assert.equal(existsSync(path.join(hub, 'test/perf/focus-echo.mjs')), true)
 })
 
+test('the M0 keystroke echo spec is gone: test/perf/keystroke-echo.spec.mjs does not exist', () => {
+  assert.equal(existsSync(path.join(hub, 'test/perf/keystroke-echo.spec.mjs')), false)
+})
+
 test('jsconfig.json does not include spike', () => {
   const config = JSON.parse(readFileSync(path.join(hub, 'jsconfig.json'), 'utf8'))
   assert.equal(config.include.includes('spike'), false)

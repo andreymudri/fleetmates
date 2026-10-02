@@ -327,6 +327,15 @@ test('a hooks_outdated row shows the outdated hint, not the noHooks hint, with L
   assert.notEqual(buttonNamed(tree, 'Launch a ship').props.disabled, true)
 })
 
+test('a hooks row that is not ok with an unknown reason shows neither hint, with Launch enabled', () => {
+  const odd = deckState({ repos: [repo('rustot')], health: [{ dep: 'deckd', state: 'up' }, { dep: 'hooks', state: 'warn', reason: 'something_else' }] })
+  const tree = ns.NewSessionView({ state: odd, form: form({ repoKey: 'rustot', open: false }) })
+  const html = renderToStaticMarkup(tree)
+  assert.ok(!html.includes(NO_HOOKS_TEXT), 'an unknown reason is not called missing')
+  assert.ok(!html.includes(HOOKS_OUTDATED_TEXT), 'an unknown reason is not called outdated')
+  assert.notEqual(buttonNamed(tree, 'Launch a ship').props.disabled, true)
+})
+
 test('the draft restores within 10 minutes and not after (AC8)', () => {
   const storage = memoryStorage()
   ns.writeDraft(storage, { repo: 'rustot', task: 'fix the tick' }, NOW)
