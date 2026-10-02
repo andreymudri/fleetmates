@@ -338,3 +338,30 @@ test('initial focus is the first row\'s primary action, or its checkbox when the
   const down = fakeRow('x', { 'a': element('open-x') })
   assert.equal(drawerFocusTarget(panelOf([down]), 'x').name, 'open-x', 'a row with every answer disabled falls back to Open')
 })
+
+test('Alt A and Alt D send nothing while deckd is down, the prompt is queued, an answer is in flight, or one did not land', async () => {
+  const blocked = [
+    ['deckd outage flag', {}, state => ({ ...state, deckdOutage: true })],
+    ['deckd health down', {}, state => ({ ...state, data: { ...state.data, health: [{ dep: 'deckd', state: 'down' }] } })],
+    ['deckd health reconnecting', {}, state => ({ ...state, data: { ...state.data, health: [{ dep: 'deckd', state: 'reconnecting' }] } })],
+    ['prompt queued', { screenMatch: 'queued' }],
+    ['answer sending', { delivery: 'sending' }],
+    ['answer verifying', { delivery: 'verifying' }],
+    ['answer did not land', { delivery: 'did_not_land' }]
+  ]
+  for (const tier of ['safe', 'caution']) {
+    for (const [why, extra, shape = state => state] of blocked) {
+      const api = fakeApi()
+      const h = await harness(shape(stateWith({ requests: [request('r', 's1', tier, extra)] })), { api })
+      h.key({ key: 'a', code: 'KeyA', altKey: true })
+      h.key({ key: 'd', code: 'KeyD', altKey: true })
+      await h.settle()
+      assert.deepEqual(answers(api), [], `${tier}, ${why}: Alt A and Alt D send nothing`)
+    }
+    const api = fakeApi()
+    const h = await harness(stateWith({ requests: [request('r', 's1', tier)], health: [{ dep: 'deckd', state: 'up' }] }), { api })
+    h.key({ key: 'd', code: 'KeyD', altKey: true })
+    await h.settle()
+    assert.deepEqual(answers(api), [['POST', '/api/requests/r/answer', { choice: 'deny' }]], `${tier}: the same row answers once nothing blocks it`)
+  }
+})
