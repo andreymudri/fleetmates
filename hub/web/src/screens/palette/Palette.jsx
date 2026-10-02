@@ -5,7 +5,7 @@ import { EmptyState } from '../../components/EmptyState.jsx'
 import { StatusPill, compactDuration, pillParams, shown, titleText, translate } from '../../components/StatusPill.jsx'
 import { closeOverlay, deckApi, leaveOverlay, repoFor, tierOf, trapTab } from '../drawer/NeedsYouDrawer.jsx'
 
-/** English copy for the M1 palette (docs/deck/screens/palette.md section 9). */
+/** English copy for the palette (docs/deck/screens/palette.md section 9): M1 plus the M2 launch actions. */
 export const PALETTE_COPY = Object.freeze({
   'palette.input.label': 'Search, ask or run',
   'palette.group.needs': 'Needs you',
@@ -16,6 +16,10 @@ export const PALETTE_COPY = Object.freeze({
   'palette.needs.answerInTerminal': 'Answer in your terminal',
   'palette.session.title': '{repo} · {detail}',
   'palette.action.markReviewed': 'Mark {repo} · {task} reviewed',
+  'palette.action.launchIn': 'Launch a ship in {repo}',
+  'palette.action.launchIn.sub': 'Recent harbor',
+  'palette.action.launch': 'Launch a ship',
+  'palette.command.unknown': 'No command named "{name}". Try research or launch.',
   'palette.group.showAll': 'Show all {n} {group}',
   'palette.group.showAll.needs': 'requests',
   'palette.group.showAll.sessions': 'sessions',
@@ -27,6 +31,10 @@ export const PALETTE_COPY = Object.freeze({
 
 /** Rows a group shows before "Show all" (palette.md section 5). */
 export const GROUP_MAX = 5
+/** Recent harbors the empty query offers as launch rows (palette.md 4.1). */
+export const RECENT_HARBORS = 3
+/** Command names `>` knows (palette.md 4.2); `research` arrives in M6 and lists nothing before then. */
+export const COMMANDS = Object.freeze(['launch', 'research'])
 
 const URGENCY = { needs_approval: 0, asked_you: 1, crashed: 2, starting: 3, running: 3, done: 4, stale: 5, idle: 6, reviewed: 7, ended: 8 }
 const NEEDS = new Set(['needs_approval', 'asked_you'])
@@ -82,14 +90,90 @@ export function matchesQuery(query, fields) {
 }
 
 /**
- * The palette result model for a query: the Needs you, Sessions and Actions groups (M1), each capped at
- * {@link GROUP_MAX} unless expanded, and the flat list of selectable rows.
+ * Known repos, newest first by `lastSessionAt`, else by their newest session's start in the snapshot; archived
+ * repos and repos with neither are left out.
+ * @param {object[]} repos
+ * @param {object[]} sessions
+ * @returns {object[]}
+ */
+export function recentRepos(repos = [], sessions = []) {
+  const started = new Map()
+  for (const row of sessions ?? []) {
+    if (Number.isFinite(row.startedAt)) started.set(row.repoId, Math.max(started.get(row.repoId) ?? -Infinity, row.startedAt))
+  }
+  const at = repo => Number.isFinite(repo.lastSessionAt) ? repo.lastSessionAt : started.get(repo.id) ?? null
+  return (repos ?? []).filter(repo => !repo.archivedAt && at(repo) !== null)
+    .sort((a, b) => at(b) - at(a) || String(a.name).localeCompare(String(b.name)))
+}
+
+const repoKeyOf = repo => repo.repoKey ?? repo.name
+const byName = (a, b) => String(a.name).localeCompare(String(b.name))
+
+function launchRow(repo, t, sub = false) {
+  if (!repo) return { kind: 'launch', group: 'actions', key: 'launch', repoKey: null, title: translate(t, PALETTE_COPY, 'palette.action.launch') }
+  const repoKey = repoKeyOf(repo)
+  const row = { kind: 'launch', group: 'actions', key: `launch-${repoKey}`, repoKey, repo: repoFor([repo], repo.id),
+    title: translate(t, PALETTE_COPY, 'palette.action.launchIn', { repo: shown(repo.name) }) }
+  if (sub) row.subtitle = translate(t, PALETTE_COPY, 'palette.action.launchIn.sub')
+  return row
+}
+
+/**
+ * Command mode (`>`, palette.md 4.2): `launch <repo>` lists a launch row per matching repo, the exact name
+ * first; a prefix of a command name counts as that command; `research` lists nothing until M6; any other name
+ * gives the "No command named" message.
+ * @param {string} text the query after `>`
+ * @param {object[]} repos
+ * @param {Function} [t]
+ * @returns {{ rows: object[], message: string | null }}
+ */
+export function commandRows(text, repos, t) {
+  const [name = '', ...rest] = String(text).trim().split(/\s+/)
+  const lower = normalizeText(name)
+  if (!lower) return { rows: [], message: null }
+  const command = COMMANDS.find(word => word.startsWith(lower))
+  if (!command) return { rows: [], message: translate(t, PALETTE_COPY, 'palette.command.unknown', { name: shown(name) }) }
+  if (command !== 'launch') return { rows: [], message: null }
+  const arg = rest.join(' ')
+  const exact = repo => normalizeText(repo.name) === normalizeText(arg) ? 0 : 1
+  const found = (repos ?? []).filter(repo => !repo.archivedAt && matchesQuery(arg, [repo.name]))
+  return { rows: found.sort((a, b) => exact(a) - exact(b) || byName(a, b)).map(repo => launchRow(repo, t)), message: null }
+}
+
+function finish(entries, expanded, t, message = null) {
+  const groups = []
+  const rows = []
+  for (const [id, all] of entries) {
+    if (!all.length) continue
+    const open = expanded.includes(id)
+    const visible = open ? all : all.slice(0, GROUP_MAX)
+    const more = visible.length < all.length
+      ? { kind: 'showAll', group: id, key: `more-${id}`, title: translate(t, PALETTE_COPY, 'palette.group.showAll', { n: all.length, group: translate(t, PALETTE_COPY, `palette.group.showAll.${id}`) }) }
+      : null
+    groups.push({ id, label: translate(t, PALETTE_COPY, `palette.group.${id}`), rows: visible, total: all.length, more })
+    rows.push(...visible, ...(more ? [more] : []))
+  }
+  rows.forEach((row, index) => { row.index = index })
+  return { groups, rows, active: rows.length ? 0 : -1, message }
+}
+
+/**
+ * The palette result model for a query: the Needs you, Sessions and Actions groups in that order, each capped
+ * at {@link GROUP_MAX} unless expanded, and the flat list of selectable rows. Actions (palette.md 4.1): on an
+ * empty query "Launch a ship" and "Launch a ship in {repo}" for the {@link RECENT_HARBORS} most recent repos;
+ * with a query, a launch row per matching repo; then "Mark reviewed" for matching done sessions. A query
+ * starting with `>` is command mode ({@link commandRows}); `message` carries its unknown-command line.
  * @param {object} state deck store state
  * @param {{ query?: string, now?: number, expanded?: string[], t?: (key: string, params?: object) => string }} [options]
- * @returns {{ groups: { id: string, label: string, rows: object[], total: number, more: object | null }[], rows: object[], active: number }}
+ * @returns {{ groups: { id: string, label: string, rows: object[], total: number, more: object | null }[], rows: object[], active: number, message: string | null }}
  */
 export function paletteModel(state, { query = '', now = Date.now(), expanded = [], t } = {}) {
   const { sessions = [], requests = [], repos = [], order = [] } = state.data
+  const typed = String(query ?? '').trimStart()
+  if (typed.startsWith('>')) {
+    const command = commandRows(typed.slice(1), repos, t)
+    return finish([['actions', command.rows]], expanded, t, command.message)
+  }
   const live = orderSessions(sessions.filter(row => row.state !== 'ended'), order, requests)
   const position = new Map(live.map((row, index) => [row.id, index + 1]))
   const byId = new Map(sessions.map(row => [row.id, row]))
@@ -119,27 +203,17 @@ export function paletteModel(state, { query = '', now = Date.now(), expanded = [
       title: translate(t, PALETTE_COPY, 'palette.session.title', { repo: shown(repo.name), detail }), kbd: index <= 9 ? `Alt ${index}` : undefined }]
   })
 
-  const actions = live.filter(session => session.state === 'done').flatMap(session => {
+  const launches = typed.trim()
+    ? (repos ?? []).filter(repo => !repo.archivedAt && matchesQuery(query, [repo.name])).sort(byName).map(repo => launchRow(repo, t))
+    : [launchRow(null, t), ...recentRepos(repos, sessions).slice(0, RECENT_HARBORS).map(repo => launchRow(repo, t, true))]
+  const reviews = live.filter(session => session.state === 'done').flatMap(session => {
     const repo = repoFor(repos, session.repoId)
     if (!matchesQuery(query, [repo.name, session.task, session.branch])) return []
     return [{ kind: 'review', group: 'actions', key: `review-${session.id}`, sessionId: session.id, session, repo,
       title: translate(t, PALETTE_COPY, 'palette.action.markReviewed', { repo: shown(repo.name), task: titleText(session.task || untitled) }) }]
   })
 
-  const groups = []
-  const rows = []
-  for (const [id, all] of [['needs', needs], ['sessions', sessionRows], ['actions', actions]]) {
-    if (!all.length) continue
-    const open = expanded.includes(id)
-    const visible = open ? all : all.slice(0, GROUP_MAX)
-    const more = visible.length < all.length
-      ? { kind: 'showAll', group: id, key: `more-${id}`, title: translate(t, PALETTE_COPY, 'palette.group.showAll', { n: all.length, group: translate(t, PALETTE_COPY, `palette.group.showAll.${id}`) }) }
-      : null
-    groups.push({ id, label: translate(t, PALETTE_COPY, `palette.group.${id}`), rows: visible, total: all.length, more })
-    rows.push(...visible, ...(more ? [more] : []))
-  }
-  rows.forEach((row, index) => { row.index = index })
-  return { groups, rows, active: rows.length ? 0 : -1 }
+  return finish([['needs', needs], ['sessions', sessionRows], ['actions', [...launches, ...reviews]]], expanded, t)
 }
 
 /**
@@ -172,15 +246,32 @@ export function moveActive(active, delta, count) {
 }
 
 /**
- * Run a palette row. Session and Needs rows jump to Focus (M1 answers nothing from the palette); a review
- * action marks the session reviewed; "Show all" expands its group.
- * @param {object} row
- * @param {{ navigate: (to: string) => void, leave: () => void, onClose: () => void, expand: (group: string) => void, api: { post: Function } }} env
+ * Go to the new-session form and record where it was opened from as `history.state.from`, which the form
+ * returns to on close (new-session.md). `env` is the window; without one only `navigate` runs.
+ * @param {(to: string) => void} navigate
+ * @param {string} [to] `/new`, or `/new?repo=<repoKey>`
+ * @param {{ location: { pathname: string, search: string }, history: { replaceState: Function } } | undefined} [env]
  */
-export async function runRow(row, { navigate, leave, onClose, expand, api }) {
+export function openLaunch(navigate, to = '/new', env = globalThis.window) {
+  const from = env?.location ? env.location.pathname + env.location.search : null
+  navigate(to)
+  if (from && env.history) env.history.replaceState({ from }, '', env.location.pathname + env.location.search)
+}
+
+/**
+ * Run a palette row. Session and Needs rows jump to Focus (answers arrive in M3); a launch row opens the
+ * new-session form through {@link openLaunch}, with `?repo=<repoKey>` when it names a repo; a review action
+ * marks the session reviewed; "Show all" expands its group.
+ * @param {object} row
+ * @param {{ navigate: (to: string) => void, leave: () => void, onClose: () => void, expand: (group: string) => void, api: { post: Function }, win?: object }} env
+ */
+export async function runRow(row, { navigate, leave, onClose, expand, api, win }) {
   if (row.kind === 'session' || row.kind === 'needs') {
     leave()
     navigate(`/s/${encodeURIComponent(row.sessionId)}`)
+  } else if (row.kind === 'launch') {
+    leave()
+    openLaunch(navigate, row.repoKey ? `/new?repo=${encodeURIComponent(row.repoKey)}` : '/new', win)
   } else if (row.kind === 'review') {
     await api.post(`/api/sessions/${encodeURIComponent(row.sessionId)}/mark-reviewed`)
     onClose()
@@ -196,10 +287,12 @@ function Option({ row, active, now, t, onRow, onHover }) {
   const pose = row.kind === 'needs' ? 'needs' : poseFor(row.session?.state ?? 'none')
   return (
     <li className={`palette-row palette-row--${row.kind}`} {...common}>
-      <CrewAvatar seed={row.repo.crewSeed} slot={row.repo.crewSlot} pose={pose} hat={row.repo.hat} size="sm" />
+      {row.repo
+        ? <CrewAvatar seed={row.repo.crewSeed} slot={row.repo.crewSlot} pose={row.kind === 'launch' ? 'idle' : pose} hat={row.repo.hat} size="sm" />
+        : <span className="palette-glyph" aria-hidden="true">+</span>}
       <span className="palette-row-text">
         <span className="palette-row-title">{row.title}</span>
-        {row.kind === 'needs' ? <span className="palette-row-sub">{row.subtitle}</span> : null}
+        {row.subtitle && (row.kind === 'needs' || row.kind === 'launch') ? <span className="palette-row-sub">{row.subtitle}</span> : null}
         {row.kind === 'session' ? <span className="palette-row-sub"><StatusPill state={row.session.state} params={pillParams(row.session, now)} role={row.session.role} variant="text" t={t} /></span> : null}
       </span>
       {row.kbd ? <kbd className="kbd" aria-hidden="true">{row.kbd}</kbd> : null}
@@ -230,7 +323,7 @@ export function PaletteView({ model, query, active, now = Date.now(), t, onQuery
             </li>
           ))}
         </ul>
-        {model.rows.length ? null : <EmptyState kind="palette" t={t} />}
+        {model.rows.length ? null : model.message ? <p className="palette-message" role="status">{model.message}</p> : <EmptyState kind="palette" t={t} />}
         <p className="palette-footer">{['palette.footer.move', 'palette.footer.run', 'palette.footer.close'].map(key => translate(t, PALETTE_COPY, key)).join(' · ')}</p>
       </div>
     </div>

@@ -1,17 +1,30 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { CARD_COPY, QuietCard, SessionCard } from '../../components/SessionCard.jsx'
+import { CARD_COPY, QuietCard, SessionCard, controllable } from '../../components/SessionCard.jsx'
+import { COMPACT_STEPS, CompactCard } from '../../components/CompactCard.jsx'
+import { ConfirmDialog } from '../../components/ConfirmDialog.jsx'
 import { Counts } from '../../components/Counts.jsx'
 import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
 import { MetaLine, StatusPill, pillParams, shown, stateLabel, titleText, translate } from '../../components/StatusPill.jsx'
 import { linkHandler } from '../../shell/Rail.jsx'
-import { NeedsYouDrawer, openOverlay, repoFor } from '../drawer/NeedsYouDrawer.jsx'
-import { Palette, orderSessions } from '../palette/Palette.jsx'
+import { nudgeSession, stopSession } from '../../state/actions.js'
+import { readDensity, writeDensity } from '../../state/deck-store.js'
+import { NeedsYouDrawer, deckApi, needsLinkDetail, openOverlay, repoFor } from '../drawer/NeedsYouDrawer.jsx'
+import { Palette, openLaunch, orderSessions } from '../palette/Palette.jsx'
 
-/** English copy for the M1 Home (docs/deck/screens/home.md section 9). */
+/** English copy for Home (docs/deck/screens/home.md section 9): M1 plus the M2 header, compact and Stop keys. */
 export const HOME_COPY = Object.freeze({
   'home.header.title': 'Sessions',
   'home.header.search': 'Search, ask or run',
+  'home.header.density.label': 'Density',
+  'home.header.density.comfortable': 'Comfortable',
+  'home.header.density.compact': 'Compact',
+  'home.header.launch': 'Launch a ship',
+  'home.stop.title': 'Stop {repo} · {task}?',
+  'home.stop.body': 'The process gets SIGTERM, then SIGKILL after 5 s. Uncommitted changes stay in the working tree.',
+  'home.stop.confirm': 'Stop session',
+  'home.stop.cancel': 'Cancel',
+  'home.stop.failed': 'Could not stop {repo}: {message}',
   'home.grid.label': 'Active sessions',
   'home.quiet.strip.label': 'Quiet sessions',
   'home.quiet.strip.more': '+{n} more',
@@ -236,6 +249,103 @@ export function dayPart(hour) {
   return 'night'
 }
 
+/** Home card densities, in the order the header's radiogroup lists them (home.md 4.1). */
+export const DENSITIES = Object.freeze(['comfortable', 'compact'])
+// deckd health states that are an outage (the rule `bannerFor` and Focus use).
+const OUTAGE = new Set(['down', 'reconnecting'])
+
+/**
+ * Pick a density: remember it through the storage helper (`deck.density`) and show it.
+ * @param {Storage | undefined} storage
+ * @param {'comfortable' | 'compact'} value
+ * @param {(value: string) => void} set
+ */
+export function pickDensity(storage, value, set) {
+  writeDensity(storage, value)
+  set(value)
+}
+
+/**
+ * Whether deckd is in an outage, from its health row: a down state, or a probe in flight while an outage lasts.
+ * @param {object} state
+ * @returns {boolean}
+ */
+export function deckdDownOf(state) {
+  const row = (state.data.health ?? []).find(item => item.dep === 'deckd')
+  return !!row && (OUTAGE.has(row.state) || row.state === 'checking' && !!state.deckdOutage)
+}
+
+/**
+ * The compact grid's cards in urgency order: every Home session (the grid, then the quiet row or strip) with each
+ * run's team card in place of its lead.
+ * @param {ReturnType<typeof homeLayout>} shape
+ * @param {object[]} teams from {@link teamCards}
+ * @returns {({ session: object } | { team: object })[]}
+ */
+export function compactEntries(shape, teams) {
+  const leads = new Set(teams.map(team => team.lead?.id).filter(Boolean))
+  const rest = shape.crowded ? shape.strip : shape.quiet
+  return withTeams([...shape.grid, ...rest.filter(row => !shape.grid.includes(row))].filter(row => !leads.has(row.id)), teams)
+}
+
+/**
+ * The session ids Home subscribes to with `subscribeTails`: the controllable PTY sessions (and team leads) of the
+ * compact grid; none outside compact, which clears the set.
+ * @param {'comfortable' | 'compact'} density
+ * @param {ReturnType<typeof homeLayout>} shape
+ * @param {object[]} teams
+ * @returns {string[]}
+ */
+export function tailSubscription(density, shape, teams) {
+  if (density !== 'compact') return []
+  return compactEntries(shape, teams).map(item => item.session ?? item.team.lead).filter(row => row && controllable(row)).map(row => row.id)
+}
+
+/**
+ * The quiet-row actions, kept out of the component so their order is testable: "Stop…" only opens the dialog,
+ * confirming closes it and posts the stop (a failure toasts "Could not stop {repo}: {message}"), and Nudge posts
+ * at once.
+ * @param {{ api: { post: Function }, setStopping: (session: object | null) => void, toast: (toast: { tone: string, title: string }) => void,
+ *   repoName: (session: object) => string, t?: Function }} options
+ * @returns {{ openStop: (session: object) => void, cancelStop: () => void, confirmStop: (session: object) => Promise<void>, nudge: (session: object) => Promise<void> }}
+ */
+export function homeActions({ api, setStopping, toast, repoName, t }) {
+  return {
+    openStop: session => setStopping(session),
+    cancelStop: () => setStopping(null),
+    async confirmStop(session) {
+      setStopping(null)
+      try {
+        await stopSession(api, session.id)
+      } catch (error) {
+        toast({ tone: 'error', title: translate(t, HOME_COPY, 'home.stop.failed', { repo: shown(repoName(session)), message: error?.message ?? error?.code ?? 'failed' }) })
+      }
+    },
+    nudge: session => nudgeSession(api, session.id).then(() => {}, () => {})
+  }
+}
+
+function DensityControl({ density, onDensity, t }) {
+  const label = translate(t, HOME_COPY, 'home.header.density.label')
+  const pick = value => { if (value !== density) onDensity(value) }
+  return (
+    <div className="segmented home-density" role="radiogroup" aria-label={label}>
+      {DENSITIES.map((value, index) => (
+        <button key={value} type="button" role="radio" className="segmented-option" aria-checked={value === density ? 'true' : 'false'} tabIndex={value === density ? 0 : -1}
+          onClick={() => pick(value)}
+          onKeyDown={event => {
+            const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key]
+            if (!step) return
+            event.preventDefault()
+            const next = (index + step + DENSITIES.length) % DENSITIES.length
+            pick(DENSITIES[next])
+            globalThis.document?.activeElement?.parentElement?.children?.[next]?.focus?.()
+          }}>{translate(t, HOME_COPY, `home.header.density.${value}`)}</button>
+      ))}
+    </div>
+  )
+}
+
 const sessionHref = id => `/s/${encodeURIComponent(id)}`
 const cardDomId = id => `card-title-${String(id).replace(/[^\w-]/g, '_')}`
 
@@ -308,13 +418,17 @@ function Calm({ state, layout, now, t, navigate, lang }) {
 }
 
 /**
- * Home, M1 (home.md): header with count chips and the search trigger, the comfortable grid, the quiet row
- * or quiet strip, team cards from the snapshot's runs, and the calm presentation. The fleet (grid and quiet
- * row) scrolls under a fixed header. `onHold` reports the pointer over the grid and focus inside a card, which
- * hold reorders. Pure: no hooks, so tests can walk it.
- * @param {{ state: object, t?: (key: string, params?: object) => string, now?: number, navigate: (to: string) => void, layout?: ReturnType<typeof homeLayout>, onOverlay?: (overlay: 'palette'|'drawer', detail?: object) => void, onFocusCard?: (id: string) => void, onHold?: (kind: 'pointer'|'focus', held: boolean) => void, lang?: string }} props
+ * Home (home.md): header with count chips, the Density radiogroup, the search trigger and "Launch a ship"
+ * (`Alt N`), then the comfortable grid with the quiet row or quiet strip, or in compact density a grid of
+ * {@link CompactCard}s with PTY tails (`state.data.tails`) or observed hook `steps`; team cards from the
+ * snapshot's runs, and the calm presentation. The quiet row offers Nudge and Stop… for controllable PTY
+ * sessions through `onNudge` and `onStop`. The fleet scrolls under a fixed header. `onHold` reports the pointer
+ * over the grid and focus inside a card, which hold reorders. Pure: no hooks, so tests can walk it.
+ * @param {{ state: object, t?: (key: string, params?: object) => string, now?: number, navigate: (to: string) => void, layout?: ReturnType<typeof homeLayout>, onOverlay?: (overlay: 'palette'|'drawer', detail?: object) => void, onFocusCard?: (id: string) => void, onHold?: (kind: 'pointer'|'focus', held: boolean) => void, lang?: string,
+ *   density?: 'comfortable' | 'compact', onDensity?: (value: string) => void, onLaunch?: () => void, steps?: Record<string, object[]>, onNudge?: (session: object) => void, onStop?: (session: object) => void }} props
  */
-export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverlay = (overlay, detail) => openOverlay(overlay, undefined, detail), onFocusCard = focusCard, onHold = () => {}, lang = 'en' }) {
+export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverlay = (overlay, detail) => openOverlay(overlay, undefined, detail), onFocusCard = focusCard, onHold = () => {}, lang = 'en',
+  density = 'comfortable', onDensity = () => {}, onLaunch = () => openLaunch(navigate), steps = {}, onNudge, onStop }) {
   const { sessions, requests, repos, order, counts, runs } = state.data
   const shape = layout ?? homeLayout(sessions, { order, requests, now })
   const teams = teamCards(runs, sessions, requests)
@@ -326,6 +440,9 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
   const oldestDone = shape.grid.concat(shape.strip).filter(row => row.state === 'done').sort((a, b) => (a.stateSince ?? 0) - (b.stateSince ?? 0))[0]
   const firstRunning = shape.grid.find(row => row.state === 'running' || row.state === 'starting')
   const hidden = shape.strip.length - STRIP_MAX
+  const compact = density === 'compact'
+  const deckdDown = deckdDownOf(state)
+  const tails = state.data.tails ?? {}
   return (
     <section className="home" onFocus={event => onHold('focus', inCard(event.target))} onBlur={event => onHold('focus', inCard(event.relatedTarget))}>
       <header className="home-header">
@@ -333,10 +450,27 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
         <Counts counts={counts} t={t} onNeeds={() => onOverlay('drawer')}
           onRunning={() => { if (firstRunning) onFocusCard(firstRunning.id) }}
           onReview={() => { if (oldestDone) navigate(`${sessionHref(oldestDone.id)}?tab=changes`) }} />
+        <DensityControl density={compact ? 'compact' : 'comfortable'} onDensity={onDensity} t={t} />
         <button type="button" className="button button--secondary home-search" onClick={() => onOverlay('palette')}>
           {translate(t, HOME_COPY, 'home.header.search')} <kbd className="kbd" aria-hidden="true">Alt K</kbd>
         </button>
+        <button type="button" className="button button--primary home-launch" onClick={() => onLaunch()}>
+          <span aria-hidden="true">+</span> {translate(t, HOME_COPY, 'home.header.launch')} <kbd className="kbd" aria-hidden="true">Alt N</kbd>
+        </button>
       </header>
+      {compact ? (
+        <div className="home-fleet">
+          <section className="home-grid home-grid--compact" aria-labelledby="home-grid-title" onPointerEnter={() => onHold('pointer', true)} onPointerLeave={() => onHold('pointer', false)}>
+            <h2 className="sr-only" id="home-grid-title">{translate(t, HOME_COPY, 'home.grid.label')}</h2>
+            {compactEntries(shape, teams).map(item => item.team
+              ? <CompactCard key={item.team.key} team={item.team} repo={repoFor(repos, item.team.run.repoId)} t={t} now={now} navigate={navigate} deckdDown={deckdDown}
+                label={item.team.needs ? translate(t, HOME_COPY, 'home.card.team.pill', { needs: item.team.needs, total: item.team.total }) : undefined}
+                tail={item.team.lead ? tails[item.team.lead.id] : undefined} steps={item.team.lead ? steps[item.team.lead.id] : undefined} />
+              : <CompactCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} t={t} now={now} navigate={navigate} deckdDown={deckdDown}
+                tail={tails[item.session.id]} steps={steps[item.session.id]} />)}
+          </section>
+        </div>
+      ) : (
       <div className="home-fleet">
         <section className="home-grid" aria-labelledby="home-grid-title" onPointerEnter={() => onHold('pointer', true)} onPointerLeave={() => onHold('pointer', false)}>
           <h2 className="sr-only" id="home-grid-title">{translate(t, HOME_COPY, 'home.grid.label')}</h2>
@@ -352,10 +486,12 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
                 {shape.strip.slice(0, STRIP_MAX).map(session => <StripChip key={session.id} session={session} repo={repo(session)} now={now} t={t} navigate={navigate} />)}
                 {hidden > 0 ? <li><button type="button" className="button button--ghost button--xs strip-more" onClick={() => onOverlay('palette')}>{translate(t, HOME_COPY, 'home.quiet.strip.more', { n: hidden })}</button></li> : null}
               </ul>
-            ) : shape.quiet.map(session => <QuietCard key={session.id} session={session} repo={repo(session)} now={now} lang={lang} t={t} navigate={navigate} />)}
+            ) : shape.quiet.map(session => <QuietCard key={session.id} session={session} repo={repo(session)} now={now} lang={lang} t={t} navigate={navigate}
+              onNudge={onNudge} onStop={onStop} deckdDown={deckdDown} />)}
           </section>
         ) : null}
       </div>
+      )}
     </section>
   )
 }
@@ -387,13 +523,23 @@ export function ObserveOverlays({ state, t, navigate, api }) {
 /**
  * The Home route screen for the shell's `screens` map: {@link HomeView} with crowding hysteresis carried
  * between renders, reorders held by {@link heldOrder} while the pointer is over the grid or focus is in a
- * card, a minute tick and the observe overlays. This browser wiring is exercised by the e2e suite
- * (`hub/test/e2e/observe.spec.mjs`, Home AC3 and AC4), not by the unit tests; {@link homeLayout},
- * {@link heldOrder} and {@link HomeView} are unit tested.
- * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: object }} props
+ * card, a minute tick and the observe overlays. It keeps the density from `storage` through `readDensity`
+ * ({@link pickDensity} writes it), subscribes `terminals.subscribeTails` to {@link tailSubscription} (cleared on
+ * leaving compact and on unmount), loads the last hook steps of observed compact sessions, holds the Stop
+ * dialog of {@link homeActions}, and opens the Needs-you drawer once for a `?needs=` link ({@link needsLinkDetail}).
+ * The effects are browser wiring the unit tests do not run; the static render, {@link homeLayout},
+ * {@link heldOrder}, {@link tailSubscription}, {@link homeActions} and {@link HomeView} are unit tested.
+ * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: object, terminals?: { subscribeTails: (ids: string[]) => boolean } | null,
+ *   storage?: Storage, search?: string, dispatch?: (action: object) => void, onOverlay?: (overlay: 'palette'|'drawer', detail?: object) => void }} props
  */
-export function Home({ state, t, navigate, api }) {
+export function Home({ state, t, navigate, api, terminals = null, storage = globalThis.localStorage, search = globalThis.location?.search ?? '', dispatch,
+  onOverlay = (overlay, detail) => openOverlay(overlay, globalThis.window, detail) }) {
   const now = useMinuteNow()
+  const [density, setDensity] = useState(() => readDensity(storage))
+  const [stopping, setStopping] = useState(null)
+  const [steps, setSteps] = useState({})
+  const needsOpened = useRef(false)
+  const http = api ?? deckApi()
   const crowded = useRef(false)
   const hold = useRef({ pointer: false, focus: false })
   const memo = useRef({ shown: null, since: null })
@@ -412,9 +558,44 @@ export function Home({ state, t, navigate, api }) {
     hold.current = { ...hold.current, [kind]: value }
     if (!value) wake(n => n + 1)
   }
+  const teams = teamCards(state.data.runs, state.data.sessions, state.data.requests)
+  const tailIds = tailSubscription(density, layout, teams)
+  const tailKey = tailIds.join('\u0000')
+  useEffect(() => {
+    terminals?.subscribeTails(tailIds)
+  }, [terminals, tailKey])
+  useEffect(() => () => { terminals?.subscribeTails([]) }, [terminals])
+  // Observed compact cards list their last hook steps; they reload when the session's activity moves.
+  const observed = density === 'compact'
+    ? compactEntries(layout, teams).map(item => item.session ?? item.team.lead).filter(row => row && row.origin === 'observed')
+    : []
+  const observedKey = observed.map(row => `${row.id}@${row.lastActivityAt ?? ''}`).join('\u0000')
+  useEffect(() => {
+    let current = true
+    for (const row of observed) {
+      http.get(`/api/sessions/${encodeURIComponent(row.id)}/steps?limit=${COMPACT_STEPS}`)
+        .then(data => { if (current) setSteps(map => ({ ...map, [row.id]: data?.steps ?? [] })) }, () => {})
+    }
+    return () => { current = false }
+  }, [http, observedKey])
+  useEffect(() => {
+    if (needsOpened.current) return
+    needsOpened.current = true
+    const detail = needsLinkDetail(search)
+    if (detail) onOverlay('drawer', detail)
+  }, [])
+  const toast = item => { if (dispatch) dispatch({ type: 'toast.push', ...item }) }
+  const actions = homeActions({ api: http, setStopping, toast, repoName: session => repoFor(state.data.repos, session.repoId).name, t })
+  const stopRepo = stopping ? repoFor(state.data.repos, stopping.repoId).name : ''
   return (
     <>
-      <HomeView state={{ ...state, data: { ...state.data, order: held.order } }} t={t} now={now} navigate={navigate} layout={layout} onHold={onHold} />
+      <HomeView state={{ ...state, data: { ...state.data, order: held.order } }} t={t} now={now} navigate={navigate} layout={layout} onHold={onHold}
+        density={density} onDensity={value => pickDensity(storage, value, setDensity)} steps={steps} onNudge={actions.nudge} onStop={actions.openStop} />
+      {stopping ? (
+        <ConfirmDialog title={translate(t, HOME_COPY, 'home.stop.title', { repo: shown(stopRepo), task: stopping.task || translate(t, CARD_COPY, 'home.card.untitled') })}
+          body={translate(t, HOME_COPY, 'home.stop.body')} confirmLabel={translate(t, HOME_COPY, 'home.stop.confirm')} cancelLabel={translate(t, HOME_COPY, 'home.stop.cancel')}
+          tone="danger" onConfirm={() => { actions.confirmStop(stopping) }} onCancel={actions.cancelStop} t={t} />
+      ) : null}
       <ObserveOverlays state={state} t={t} navigate={navigate} api={api} />
     </>
   )

@@ -429,6 +429,10 @@ test('quiet cards carry the corrected lines and observed-safe actions', async ()
   assert.match(stale, /Adrift since 17:40: no activity since then\./)
   assert.match(stale, /<a class="button button--ghost button--xs" href="\/s\/q">Open<\/a>/)
   assert.doesNotMatch(stale, /Nudge|Stop/, 'observed sessions get Open only')
+  // M2: the same stale session in a live deckd PTY gets Nudge (home.md 4.3); observed ones above never do.
+  const live = { ...base, origin: 'launched', ptyId: 'p-q', alive: true }
+  assert.match(render(QuietCard, { session: { ...live, state: 'stale', lastActivityAt: at, stateSince: at }, repo, now: at + 22 * MIN }), />Nudge \(send Enter\)<\/button>/)
+  assert.match(render(QuietCard, { session: { ...live, state: 'idle', stateSince: at }, repo, now: at + 60 * MIN }), />Stop…<\/button>/)
   const idle = render(QuietCard, { session: { ...base, state: 'idle', stateSince: at }, repo, now: at + 60 * MIN })
   assert.match(idle, /quiet-card--idle/)
   assert.match(idle, />Idle 1h</)

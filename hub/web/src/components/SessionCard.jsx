@@ -32,6 +32,9 @@ export const CARD_COPY = Object.freeze({
   'home.quiet.reviewed.line': 'Reviewed at {time}. Leaves the grid at midnight.',
   'home.quiet.openTerminal': 'Open terminal',
   'home.quiet.open': 'Open',
+  'home.quiet.nudge': 'Nudge (send Enter)',
+  'home.quiet.stop': 'Stop…',
+  'home.quiet.deckdDown': 'deckd is reconnecting',
   'tier.safe': 'Safe',
   'tier.caution': 'Caution',
   'tier.destructive': 'Destructive',
@@ -241,21 +244,42 @@ const QUIET_LINES = {
 }
 
 /**
- * QuietCard for the quiet row (components.md section 11, home.md 4.3): stale, idle or reviewed, one line, Open.
- * Observed sessions never get Nudge or Stop.
- * @param {{ session: object, repo?: object, now?: number, lang?: string, t?: (key: string, params?: object) => string, navigate?: (to: string) => void }} props
+ * Whether a session runs in a live deckd PTY the deck can control: not observed, alive, with a PTY id.
+ * @param {{ origin?: string, alive?: boolean, ptyId?: string | null }} session
+ * @returns {boolean}
  */
-export function QuietCard({ session, repo, now = Date.now(), lang = 'en', t, navigate }) {
+export function controllable(session) {
+  return session.origin !== 'observed' && !!session.alive && !!session.ptyId
+}
+
+/**
+ * QuietCard for the quiet row (components.md section 11, home.md 4.3): stale, idle or reviewed, one line, Open.
+ * A {@link controllable} session adds "Nudge (send Enter)" when stale and "Stop…" when idle, calling `onNudge`
+ * or `onStop` with the session; both are disabled with the visible reason "deckd is reconnecting" while
+ * `deckdDown`. Observed sessions never get Nudge or Stop.
+ * @param {{ session: object, repo?: object, now?: number, lang?: string, t?: (key: string, params?: object) => string, navigate?: (to: string) => void,
+ *   onNudge?: (session: object) => void, onStop?: (session: object) => void, deckdDown?: boolean }} props
+ */
+export function QuietCard({ session, repo, now = Date.now(), lang = 'en', t, navigate, onNudge = () => {}, onStop = () => {}, deckdDown = false }) {
   const line = QUIET_LINES[session.state]?.(session)
   const href = sessionHref(session.id)
   const openLabel = session.state === 'stale' && session.origin !== 'observed' ? 'home.quiet.openTerminal' : 'home.quiet.open'
+  const live = controllable(session)
+  const control = live && session.state === 'stale' ? ['home.quiet.nudge', onNudge, 'button--amber-outline']
+    : live && session.state === 'idle' ? ['home.quiet.stop', onStop, 'button--ghost'] : null
+  const reasonId = `quiet-reason-${String(session.id).replace(/[^\w-]/g, '_')}`
   return (
     <article className={`quiet-card quiet-card--${session.state}`} aria-labelledby={domId(session.id)}>
       <CardHeader session={session} repo={repo} title={session.task || translate(t, CARD_COPY, 'home.card.untitled')} t={t} now={now} navigate={navigate} size="sm" pillVariant="text" />
       {line ? <p className="quiet-line">{translate(t, CARD_COPY, line[0], { time: clock(line[1], lang) })}</p> : null}
       <div className="quiet-actions">
         <a className="button button--ghost button--xs" href={href} onClick={navigate ? linkHandler(navigate, href) : undefined}>{translate(t, CARD_COPY, openLabel)}</a>
+        {control ? (
+          <button type="button" className={`button ${control[2]} button--xs`} disabled={deckdDown} aria-describedby={deckdDown ? reasonId : undefined}
+            onClick={() => control[1](session)}>{translate(t, CARD_COPY, control[0])}</button>
+        ) : null}
       </div>
+      {control && deckdDown ? <p className="quiet-reason" id={reasonId}>{translate(t, CARD_COPY, 'home.quiet.deckdDown')}</p> : null}
     </article>
   )
 }

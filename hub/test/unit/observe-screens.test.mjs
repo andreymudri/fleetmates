@@ -294,7 +294,10 @@ test('palette groups: Needs you then Sessions in urgency order, Alt N for the fi
   assert.equal(sessions.rows[0].title, 'rustot · combat-tick')
   assert.deepEqual(sessions.rows.map(row => row.kbd), ['Alt 1', 'Alt 2', 'Alt 3', 'Alt 4', 'Alt 5'])
   assert.equal(model.rows.find(row => row.kind === 'showAll' && row.group === 'sessions').title, 'Show all 8 sessions')
-  assert.deepEqual(model.groups[2].rows.map(row => row.title), ['Mark vault · task s4 reviewed'])
+  // M2 (palette.md 4.1): Actions open with Launch a ship and three recent harbors (equal session starts sort
+  // by name), then the review action.
+  assert.deepEqual(model.groups[2].rows.map(row => row.title),
+    ['Launch a ship', 'Launch a ship in axios', 'Launch a ship in client', 'Launch a ship in discord', 'Mark vault · task s4 reviewed'])
 
   const fifteen = withSessions(busy(), many(15, () => 'running'))
   const expanded = paletteModel(fifteen, { query: '', now: NOW, expanded: ['sessions'] })
@@ -303,7 +306,8 @@ test('palette groups: Needs you then Sessions in urgency order, Alt N for the fi
   assert.deepEqual(rows.map(row => row.kbd ?? null), [...Array.from({ length: 9 }, (_, i) => `Alt ${i + 1}`), null, null, null, null, null, null])
 
   const filtered = paletteModel(state, { query: 'RUST', now: NOW })
-  assert.deepEqual(filtered.groups.map(group => group.id), ['needs', 'sessions'])
+  assert.deepEqual(filtered.groups.map(group => group.id), ['needs', 'sessions', 'actions'])
+  assert.deepEqual(filtered.groups[2].rows.map(row => row.title), ['Launch a ship in rustot'], 'a query offers launch rows for matching repos')
   assert.deepEqual(filtered.groups[1].rows.map(row => [row.sessionId, row.kbd]), [['s1', 'Alt 1']], 'the Kbd keeps the urgency position')
   assert.equal(filtered.active, 0)
   assert.deepEqual(paletteModel(state, { query: 'zzz', now: NOW }).rows, [])

@@ -1,0 +1,155 @@
+/* Home compact density, the M2 Home header controls, quiet-row controls, palette launch rows and the drawer
+   filter line (home.md 3.2, 3.4, 4.1, 4.3, 4.4; palette.md 4.1; needs-you-drawer.md). Imported once from
+   main.jsx by Task 14. */
+
+.home-density { flex: none; }
+.home-launch { flex: none; white-space: nowrap; }
+
+/* Compact: 3 x 3 at 1440 wide and up, 2 columns below; gap --space-10 (home.md 3.2). */
+.home-grid--compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-rows: minmax(260px, 1fr);
+  gap: var(--space-10);
+}
+@media (max-width: 1439px) {
+  .home-grid--compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 1440px) and (min-height: 1000px) {
+  .home-grid--compact { grid-template-rows: repeat(3, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); }
+}
+
+.compact-card {
+  --card-border: var(--border-default);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-12);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface);
+  color: var(--text-default);
+}
+.compact-card--needs-approval { --card-border: var(--state-needs-approval-border); }
+.compact-card--asked-you { --card-border: var(--state-asked-you-border); }
+.compact-card--done { --card-border: var(--state-done-border); }
+.compact-card--crashed { --card-border: var(--state-crashed-border); }
+.compact-card:has(.card-link:focus-visible) { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: var(--focus-ring-offset); }
+
+.compact-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+}
+.compact-title {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compact-branch {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compact-header .status-pill { margin-left: auto; flex: none; }
+
+.compact-tail {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: var(--space-8) var(--space-10);
+  list-style: none;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--component-terminal-background);
+  color: var(--component-terminal-foreground);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--font-line-height-code);
+}
+.compact-tail-line {
+  white-space: pre;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compact-tail-line--muted { color: var(--text-muted); }
+.compact-tail--loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+.compact-tail-skeleton {
+  display: block;
+  height: 10px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-skeleton);
+}
+.compact-tail-skeleton:nth-child(2) { width: 72%; }
+.compact-tail-skeleton:nth-child(3) { width: 48%; }
+
+.compact-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  min-width: 0;
+  padding: var(--space-6) var(--space-8);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+}
+.compact-ask {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compact-open { flex: none; }
+
+/* Quiet-row controls: the disabled reason stays visible (home.md 8). */
+.quiet-reason {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+/* Palette launch rows without a repo get a glyph tile in place of the crew avatar. */
+.palette-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--crew-size-sm);
+  height: var(--crew-size-sm);
+  border-radius: var(--radius-sm);
+  background: var(--bg-control);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.palette-message {
+  margin: 0;
+  padding: var(--space-16);
+  color: var(--text-secondary);
+}
+
+/* The drawer's run or task filter line with Show all (D-69). */
+.drawer-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  margin: var(--space-4) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
