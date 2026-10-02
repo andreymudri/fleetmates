@@ -24,6 +24,14 @@ writeFileSync(path.join(home, 'repo', 'notes.txt'), 'synthetic\n')
 // for a path that exists.
 writeFileSync(path.join(home, '.ssh', 'id_ed25519'), 'synthetic-key\n')
 writeFileSync(path.join(home, '.aws', 'credentials'), 'synthetic-credentials\n')
+// Sensitive-list files inside directories a whole-directory read reaches (diff -N, grep -r, rg).
+for (const dir of ['.claude', '.docker', '.kube', 'empty']) mkdirSync(path.join(home, dir), { recursive: true })
+writeFileSync(path.join(home, '.git-credentials'), 'synthetic-credentials\n')
+writeFileSync(path.join(home, '.claude', '.credentials.json'), '{"accessToken":"synthetic"}\n')
+writeFileSync(path.join(home, '.docker', 'config.json'), '{}\n')
+writeFileSync(path.join(home, '.kube', 'config'), 'synthetic\n')
+writeFileSync(path.join(home, 'project', 'notes.txt'), 'synthetic\n')
+writeFileSync(path.join(home, 'project', 'package.json'), '{}\n')
 Object.assign(process.env, {
   HOME: home,
   XDG_CONFIG_HOME: path.join(home, '.config'),

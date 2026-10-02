@@ -8,7 +8,7 @@ import { DEFAULT_TIERS, tiersSha256 } from './tiers.mjs'
 
 const TOP_KEYS = Object.freeze(['$schema', 'version', 'extends', 'disable', 'entries'])
 /** The entry fields tiers.schema.json allows. */
-export const ENTRY_KEYS = Object.freeze(['id', 'tier', 'tool', 'cmd', 'anyArg', 'noneArg', 'allowOpts', 'outputOpts', 'longOpts', 'script', 'sql', 'path', 'domain', 'rule', 'ruleNote', 'description', 'confirm', 'count', 'floor'])
+export const ENTRY_KEYS = Object.freeze(['id', 'tier', 'tool', 'cmd', 'anyArg', 'noneArg', 'allowOpts', 'outputOpts', 'longOpts', 'pathOperands', 'operandOpts', 'forwardOpts', 'script', 'sql', 'path', 'domain', 'rule', 'ruleNote', 'description', 'confirm', 'count', 'floor'])
 const TIER_NAMES = ['safe', 'caution', 'destructive']
 const COUNTS = ['push_overwritten', 'reset_files', 'clean_files', 'rm_paths']
 const ID = /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_:-]+)+$/
@@ -33,8 +33,9 @@ function checkEntry(entry, { user }) {
   if (!TIER_NAMES.includes(entry.tier)) throw new TiersError(`${id} needs a tier of safe, caution or destructive`, id)
   if (typeof entry.tool !== 'string' || !entry.tool) throw new TiersError(`${id} needs a tool`, id)
   if (entry.cmd !== undefined && (typeof entry.cmd !== 'string' || !entry.cmd.trim() || entry.tool !== 'Bash')) throw new TiersError(`cmd of ${id} must be a non-empty string on a Bash entry`, id)
-  for (const key of ['anyArg', 'noneArg', 'allowOpts', 'outputOpts', 'script']) if (entry[key] !== undefined) stringList(entry[key], key, id)
+  for (const key of ['anyArg', 'noneArg', 'allowOpts', 'outputOpts', 'operandOpts', 'forwardOpts', 'script']) if (entry[key] !== undefined) stringList(entry[key], key, id)
   if (entry.longOpts !== undefined && (!Array.isArray(entry.longOpts) || entry.longOpts.some(option => typeof option !== 'string' || !/^--[^=*]+$/.test(option)))) throw new TiersError(`longOpts of ${id} must be long options such as --force`, id)
+  if (entry.pathOperands !== undefined && !['all', 'none', 'afterFirst'].includes(entry.pathOperands)) throw new TiersError(`pathOperands of ${id} must be all, none or afterFirst`, id)
   if (entry.sql !== undefined && !['read', 'write'].includes(entry.sql)) throw new TiersError(`sql of ${id} must be read or write`, id)
   if ((entry.script !== undefined || entry.sql !== undefined) && entry.cmd === undefined) throw new TiersError(`${id} needs cmd for script or sql`, id)
   if (entry.path !== undefined && !['inRepo', 'outsideRepo'].includes(entry.path)) stringList(entry.path, 'path', id)

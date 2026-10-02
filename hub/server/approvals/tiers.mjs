@@ -3,7 +3,7 @@
 // set (tiers.default.json plus the user's tiers.json, see tiers-store.mjs), takes the highest
 // matching tier, and then applies the floors, which are code and cannot be lowered or disabled.
 import { createHash } from 'node:crypto'
-import { existsSync, globSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, globSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -191,6 +191,57 @@ function deckControls(deckPaths, home) {
   for (const dir of dirs) all.add(realExisting(dir))
   const port = String(given.port ?? process.env.DECK_PORT ?? 47800)
   return { dirs: [...all], port }
+}
+
+// Read scope (07-approvals 3.5): a path is inside the repo when its realpath (or its nearest
+// existing ancestor's) lies under the repo root or a worktree. Reads inside `.git` count as inside.
+const inScope = (location, ctx) => {
+  const real = realExisting(location)
+  return ctx.scope.some(root => within(real, root))
+}
+// A word that reads as a path: absolute, home-relative, dot-relative, or holding a slash.
+const syntaxPath = word => word.startsWith('/') || word.startsWith('~') || word === '.' || word === '..' || word.startsWith('./') || word.startsWith('../') || word.includes('/')
+const expandHome = (word, ctx) => (word === '~' || word.startsWith('~/')) && ctx.home ? path.join(ctx.home, word.slice(1)) : word
+const existsAt = location => { try { return Boolean(location) && existsSync(location) } catch { return false } }
+// The sensitive-list locations under the home directory (07-approvals 3.5), for the ancestor check
+// of commands that read a whole directory.
+const HOME_SENSITIVE = Object.freeze(['.ssh', '.gnupg', '.aws', '.config/gh', '.netrc', '.claude/.credentials.json', '.git-credentials', '.npmrc', '.pypirc', '.docker/config.json', '.kube/config', '.config/gcloud', '.password-store', '.local/share/keyrings'])
+const holdsSecret = (location, ctx) => candidates(location).some(candidate => isSensitive(candidate, ctx.home) || (ctx.home && HOME_SENSITIVE.some(rel => within(path.join(ctx.home, rel), candidate))))
+const WALK_LIMIT = 20000
+const WALK_MS = 200
+
+// Walk directory trees with lstat semantics (a symlink is resolved, never descended), bounded by
+// WALK_LIMIT entries and WALK_MS. Reports a symlink into the deck's files, a symlink out of the repo,
+// a sensitive-list file, and a walk that ran out of budget.
+function walkTrees(roots, ctx) {
+  const found = { deck: false, outside: false, secret: false, over: false }
+  const started = Date.now()
+  const stack = []
+  for (const root of roots) {
+    try { if (statSync(root).isDirectory()) stack.push(realpathSync(root)) } catch {}
+  }
+  const seen = new Set()
+  let count = 0
+  while (stack.length && !found.deck) {
+    const dir = stack.pop()
+    if (seen.has(dir)) continue
+    seen.add(dir)
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      if (++count > WALK_LIMIT || Date.now() - started > WALK_MS) { found.over = true; return found }
+      const full = path.join(dir, entry.name)
+      if (isSensitive(full, ctx.home)) found.secret = true
+      if (entry.isSymbolicLink()) {
+        let target
+        try { target = realpathSync(full) } catch { continue }
+        if (ancestorOfControl(target, ctx)) found.deck = true
+        if (!inScope(target, ctx)) found.outside = true
+        if (holdsSecret(target, ctx)) found.secret = true
+      } else if (entry.isDirectory()) stack.push(full)
+    }
+  }
+  return found
 }
 
 const namesControl = (location, ctx) => candidates(location).some(candidate => ctx.deck.dirs.some(dir => within(candidate, dir)))
@@ -622,10 +673,23 @@ function classifySegment(segment, ctx, ready, out) {
     || (name === 'diff' && (shortFlag('r') || words.some(word => word.startsWith('--rec'))))
     || (name === 'ls' && (shortFlag('R') || words.some(word => word.startsWith('--recur'))))
     || (name === 'tar' && (/^[^-]*c/.test(words[1] ?? '') || words.some(word => /^-[^-]*c/.test(word) || word === '--create')))
-  if (recursive) {
+  // git diff runs as `git diff --no-index` when a path is outside the working tree, and then
+  // recurses into directory operands like diff -r (git-diff(1)).
+  const gitDiff = name === 'git' && list[1] === 'diff'
+  if (recursive || gitDiff || name === 'diff') {
     const roots = operands.map(operand => operand.location)
-    if (roots.length <= (['grep', 'rg', 'fd'].includes(name) ? 1 : 0) && segment.cwd) roots.push(segment.cwd)
-    if (roots.some(root => ancestorOfControl(root, ctx))) push(reason('floor.deck', 'destructive', text, 'reads a directory that holds the deck\'s own files'))
+    const implicit = recursive && roots.length <= (['grep', 'rg', 'fd'].includes(name) ? 1 : 0) && segment.cwd
+    if (implicit) roots.push(segment.cwd)
+    if ((recursive || gitDiff) && roots.some(root => ancestorOfControl(root, ctx))) push(reason('floor.deck', 'destructive', text, 'reads a directory that holds the deck\'s own files'))
+    // diff without -r still prints every top-level file of a directory operand.
+    if (roots.some(root => holdsSecret(root, ctx))) push(reason('read.secret', 'caution', text, 'reads a secret file'))
+    if (implicit && !inScope(segment.cwd, ctx)) push(reason('scope.read-outside', 'caution', text, 'reads outside the repo'))
+    // Symlinks under the roots inside the repo (roots outside it are rated by the read scope).
+    const walk = (!gitDiff || list.includes('--no-index')) ? walkTrees(roots.filter(root => inScope(root, ctx)), ctx) : null
+    if (walk?.deck) push(reason('floor.deck', 'destructive', text, 'reads a directory that holds the deck\'s own files'))
+    if (walk?.outside) push(reason('scope.read-outside', 'caution', text, 'reads outside the repo'))
+    if (walk?.secret) push(reason('read.secret', 'caution', text, 'reads a secret file'))
+    if (walk?.over) push(reason('scope.walk-limit', 'caution', text, 'reads a directory too large to check'))
   }
   const sensitive = ({ location }) => candidates(location).some(candidate => isSensitive(candidate, ctx.home))
   const exists = ({ location }) => { try { return existsSync(location) } catch { return false } }
@@ -687,6 +751,76 @@ function classifySegment(segment, ctx, ready, out) {
   matchEntries(segment, ctx, ready, out, { name, list, text, words })
 }
 
+// Read scope of a Safe candidate (07-approvals 3.5, the Bash side of the Read tool's "reads outside
+// the repo"): every path operand and every path value of an option, resolved with symlinks
+// followed, must lie inside the repo. A word is a path when it looks like one (syntaxPath) or names
+// something that exists. `pathOperands: "none"` entries take text only; `"afterFirst"` entries take
+// a pattern, script or filter first, which counts only when it names an existing path.
+function readsOutside(entry, tail, segment, ctx) {
+  if (entry.pathOperands === 'none') return false
+  const outside = location => location === null || (!DEV_NULLS.has(location) && !inScope(location, ctx))
+  let first = entry.pathOperands === 'afterFirst'
+  let operandsOnly = false
+  for (let k = 0; k < tail.words.length; k++) {
+    const word = tail.words[k]
+    const info = tail.info[k]
+    if (info?.glob) {
+      const matches = expandGlob(word, segment.cwd)
+      if (matches?.some(outside)) return true
+      first = false
+      continue
+    }
+    if (info && !info.literal) return true
+    if (!operandsOnly && word === '--') { operandsOnly = true; continue }
+    if (!operandsOnly && word.startsWith('-') && word !== '-') {
+      const equal = word.indexOf('=')
+      const value = equal > 0 ? word.slice(equal + 1) : (!word.startsWith('--') && word.length > 2 ? word.slice(2) : '')
+      if (value && syntaxPath(value) && outside(resolveIn(expandHome(value, ctx), segment.cwd))) return true
+      continue
+    }
+    if (word === '-') continue
+    const location = resolveIn(expandHome(word, ctx), segment.cwd)
+    if (first) {
+      first = false
+      if (existsAt(location) && outside(location)) return true
+      continue
+    }
+    if (!path.isAbsolute(word) && /\s/.test(word)) continue
+    if (!syntaxPath(word) && !existsAt(location)) continue
+    if (outside(location)) return true
+  }
+  return false
+}
+
+// Words after `--` that an entry forwards to another program (the test binary, a package script):
+// an option not on `forwardOpts` is Caution, and a path among them that a floor protects keeps that
+// floor, because the program may write it (`cargo test -- --logfile PATH` replaces PATH).
+function forwardedVerdicts(entry, tail, segment, ctx, text) {
+  const at = tail.words.findIndex((word, k) => word === '--' && (!tail.info[k] || tail.info[k].literal))
+  if (at < 0) return []
+  const verdicts = []
+  let flagged = false
+  for (const word of tail.words.slice(at + 1)) {
+    if (!flagged && word.startsWith('-') && word !== '-' && !matchesAny(entry.forwardOpts, word)) {
+      flagged = true
+      verdicts.push(reason('forward.option', 'caution', text, 'passes options to the test program'))
+    }
+    const equal = word.startsWith('-') ? word.indexOf('=') : -1
+    const value = equal > 0 ? word.slice(equal + 1) : word
+    if (!value || value.startsWith('-') || !syntaxPath(value)) continue
+    const verdict = writeVerdict(resolveIn(expandHome(value, ctx), segment.cwd), ctx, text)
+    if (verdict?.tier === 'destructive') verdicts.push(verdict)
+  }
+  return verdicts
+}
+
+// `operandOpts` entries (git branch) take operands only alongside one of those options: without
+// one, `git branch NAME` creates a branch instead of listing.
+function operandsAllowed(entry, words) {
+  if (words.some(word => argVariants(word).some(variant => matchesAny(entry.operandOpts, variant)))) return true
+  return !words.some(word => word !== '--' && !word.startsWith('-'))
+}
+
 function matchEntries(segment, ctx, ready, out, { name, list, text, words }) {
   const items = [...(ready.bash.get(name) ?? []), ...ready.bashGlobs.filter(item => argGlob(item.words[0]).test(name))]
   let matched = false
@@ -724,6 +858,13 @@ function matchEntries(segment, ctx, ready, out, { name, list, text, words }) {
           if (!location || scopeRelative(location, ctx.scope) === null) { out.reasons.push(reason('cargo.target-dir', 'caution', text, 'builds into a directory outside the repo')); continue }
         }
       }
+      const tail = { words: words.slice(words.length - found.rest.length), info: (segment.wordInfo ?? []).slice(words.length - found.rest.length) }
+      if (Array.isArray(entry.operandOpts) && !operandsAllowed(entry, tail.words)) { out.reasons.push(reason('unknown.operand', 'caution', text, 'takes an operand outside the Safe pattern')); continue }
+      if (Array.isArray(entry.forwardOpts)) {
+        const forwarded = forwardedVerdicts(entry, tail, segment, ctx, text)
+        if (forwarded.length) { out.reasons.push(...forwarded); continue }
+      }
+      if (readsOutside(entry, tail, segment, ctx)) { out.reasons.push(reason('scope.read-outside', 'caution', text, 'reads outside the repo')); continue }
       if (!safeEntry) safeEntry = { entry, script: Array.isArray(entry.script) ? found.rest.find(arg => !arg.startsWith('-')) : null }
     }
     matched = true

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -203,6 +203,68 @@ test('the shipped defaults validate, every Safe Bash entry lists its options, an
   assert.deepEqual(Object.keys(schema.$defs.entry.properties).sort(), [...ENTRY_KEYS].sort())
   for (const key of ['allowOpts', 'outputOpts', 'script', 'ruleNote', 'count', 'longOpts', 'floor']) assert.ok(schema.$defs.entry.properties[key], key)
   assert.equal(new Set(DEFAULT_TIERS.entries.map(entry => entry.id)).size, DEFAULT_TIERS.entries.length)
+})
+
+test('a recursive read inside the repo rates the symlinks under it: into the deck state, out of the repo, or a loop', () => {
+  const s = sandbox()
+  try {
+    // A committed symlink to ~/.local/state reaches the deck token at fleetmates/deck/token.
+    symlinkSync(path.join(s.home, '.local', 'state'), path.join(s.repo, 'notes'))
+    for (const command of ['grep -R DECK .', 'grep -rR DECK', 'diff -rN . ../empty', 'ls -R', 'tree', 'rg DECK']) {
+      const result = s.bash(command)
+      assert.equal(result.tier, 'destructive', command)
+      assert.ok(result.reasons.some(item => item.entryId === 'floor.deck'), command)
+    }
+    rmSync(path.join(s.repo, 'notes'))
+    // `.git` is walked too: grep -R follows a symlink there like anywhere else.
+    mkdirSync(path.join(s.repo, '.git'))
+    symlinkSync(path.join(s.home, '.local', 'state'), path.join(s.repo, '.git', 'cache'))
+    assert.equal(s.bash('grep -R DECK .').tier, 'destructive')
+    rmSync(path.join(s.repo, '.git'), { recursive: true })
+    // A symlink to a directory outside the repo: a read outside it.
+    mkdirSync(path.join(s.home, 'elsewhere'))
+    symlinkSync(path.join(s.home, 'elsewhere'), path.join(s.repo, 'vendor'))
+    const outside = s.bash('grep -r x .')
+    assert.equal(outside.tier, 'caution')
+    assert.ok(outside.reasons.some(item => item.description === 'reads outside the repo'))
+    rmSync(path.join(s.repo, 'vendor'))
+    // A loop inside the repo is resolved, not followed, and stays Safe.
+    mkdirSync(path.join(s.repo, 'src'))
+    symlinkSync('..', path.join(s.repo, 'src', 'up'))
+    assert.equal(s.bash('grep -r x .').tier, 'safe')
+  } finally { s.close() }
+})
+
+test('a recursive read over a repo tree holding a sensitive-list file is "reads a secret file"', () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.repo, 'config'))
+    assert.equal(s.bash('grep -r x .').tier, 'safe')
+    writeFileSync(path.join(s.repo, 'config', '.env'), 'SYNTHETIC=1\n')
+    const result = s.bash('grep -r x .')
+    assert.equal(result.tier, 'caution')
+    assert.ok(result.reasons.some(item => item.entryId === 'read.secret'))
+  } finally { s.close() }
+})
+
+test('a recursive read over more entries than the walk checks is Caution', () => {
+  const s = sandbox()
+  try {
+    const big = path.join(s.repo, 'big')
+    mkdirSync(big)
+    for (let k = 0; k < 20001; k++) writeFileSync(path.join(big, String(k)), '')
+    const result = s.bash('grep -r x big')
+    assert.equal(result.tier, 'caution')
+    assert.ok(result.reasons.some(item => item.description === 'reads a directory too large to check'))
+    assert.equal(s.bash('grep -r x src', {}).tier, 'safe')
+  } finally { s.close() }
+})
+
+test('pathOperands, operandOpts and forwardOpts are validated like the other entry fields', () => {
+  assert.equal(validateTiers({ version: 1, entries: [{ id: 'safe.user.a', tier: 'safe', tool: 'Bash', cmd: 'a', pathOperands: 'some' }] }).ok, false)
+  assert.equal(validateTiers({ version: 1, entries: [{ id: 'safe.user.a', tier: 'safe', tool: 'Bash', cmd: 'a', forwardOpts: [1] }] }).ok, false)
+  assert.equal(validateTiers({ version: 1, entries: [{ id: 'safe.user.a', tier: 'safe', tool: 'Bash', cmd: 'a', operandOpts: '-l' }] }).ok, false)
+  assert.deepEqual(validateTiers({ version: 1, entries: [{ id: 'safe.user.a', tier: 'safe', tool: 'Bash', cmd: 'a', pathOperands: 'none', operandOpts: ['-l'], forwardOpts: [] }] }), { ok: true })
 })
 
 function storeSandbox() {

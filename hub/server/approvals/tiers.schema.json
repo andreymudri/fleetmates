@@ -29,6 +29,9 @@
         "allowOpts": { "$ref": "#/$defs/globs" },
         "outputOpts": { "$ref": "#/$defs/globs" },
         "longOpts": { "type": "array", "items": { "type": "string", "pattern": "^--[^=*]+$" } },
+        "pathOperands": { "enum": ["all", "none", "afterFirst"] },
+        "operandOpts": { "$ref": "#/$defs/globs" },
+        "forwardOpts": { "$ref": "#/$defs/globs" },
         "script": { "type": "array", "items": { "type": "string", "minLength": 1 } },
         "sql": { "enum": ["read", "write"] },
         "path": {
