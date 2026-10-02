@@ -1,5 +1,5 @@
 {
-  "about": "UI fixtures for the M1 Observe end-to-end suites (docs/deck/screens/README.md section 4). Each session is a list of hook events that the e2e harness turns into deck-hook envelopes: the payload starts from the pinned Claude Code 2.1.282 hook fixture for the event, then takes the fields given here. `ago` is seconds before load time. Every path uses the /home/you placeholder, and the repo names are neutral canvas names. `busy` differs from the canvas in one way: the server has no Safe tier and no team card in M1, so the fleetmates lead is a plain session with two Caution requests and the rustot request is the oldest.",
+  "about": "UI fixtures for the M1 Observe end-to-end suites (docs/deck/screens/README.md section 4). Each session is a list of hook events that the e2e harness turns into deck-hook envelopes: the payload starts from the pinned Claude Code 2.1.282 hook fixture for the event, then takes the fields given here. `ago` is seconds before load time. Every path uses the /home/you placeholder, and the repo names are neutral canvas names. `busy` differs from the canvas in one way: the server has no team card in M1, so the fleetmates lead is a plain session with two requests (npm test, which the M3 classifier rates Safe, and git fetch, Caution) and the rustot request is the oldest.",
   "claudeCodeVersion": "2.1.282",
   "home": "/home/you/dev",
   "fixtures": {
@@ -63,7 +63,7 @@
         "chips": ["3 need you", "2 running", "1 to review"],
         "badge": "3",
         "drawerSubtitle": "4 requests from 3 ships · oldest waiting 9m",
-        "drawerSections": [["caution", 3], ["question", 1]],
+        "drawerSections": [["safe", 2], ["caution", 1], ["question", 1]],
         "states": { "rustot": "needs_approval", "fleetmates": "needs_approval", "discord-audit": "asked_you", "research": "running", "portfolio-site": "running", "vault-mcp": "done", "rustot-client": "stale", "turbidassist": "idle", "axios-like": "reviewed" }
       }
     },
