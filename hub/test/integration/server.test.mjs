@@ -260,12 +260,14 @@ test('default repo rescan updates run discovery without mutating fixture runs', 
 })
 test('snapshot queues events committed during an asynchronous run read', async t => {
   let release
-  let waiting = false
-  const h = await harness(t, { runReader: { list: () => new Promise(resolve => { waiting = true
+  let calls = 0
+  // The first list() is the server's priming pass at listen(); the second is the snapshot's read.
+  const h = await harness(t, { runReader: { list: () => new Promise(resolve => { calls++
     release = () => resolve([]) }), close() {} } })
+  await waitFor(() => calls === 1)
   const client = socket(h)
   t.after(() => client.ws.terminate())
-  await waitFor(() => waiting)
+  await waitFor(() => calls === 2)
   h.send('SessionStart', 1000)
   release()
   await waitFor(() => client.messages.some(message => message.t === 'session.upserted'))

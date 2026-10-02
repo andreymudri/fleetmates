@@ -240,6 +240,7 @@ export async function createDeckServer(options = {}) {
   hub = createWsHub({ server, store, epoch, link, snapshot: api.snapshot, getToken: refreshToken, getPort: () => boundPort, now, heartbeatMs: options.heartbeatMs, helloTimeoutMs: options.helloTimeoutMs })
   let hooks
   let spool
+  let runPass = () => {}
   // The 30-day retention job (06-storage 6): once at start, then daily at 04:10 local. Each removed session's
   // session.removed event goes to open tabs as { id }. A run that throws is rolled back by runRetention and
   // skipped here; the next daily run is still scheduled.
@@ -310,17 +311,19 @@ export async function createDeckServer(options = {}) {
       timers.push(timer)
     }
     // run.updated (05-api 3.4): re-read the runs and publish each run whose JSON changed since the previous
-    // read. The first read has nothing to compare with, so it publishes every run once. The pass runs whenever
-    // the reader reports a changed run directory (debounced by the reader) and every runPollMs as the fallback.
-    // The reader watches each run directory any list() has found, so the Team page's first GET /api/runs or a
-    // WebSocket snapshot starts the watching. Passes never overlap: a request during a pass reruns it once that
-    // pass ends, and the shared comparison means a watch event and the poll never publish the same change twice.
+    // read. The pass runs whenever the reader reports a changed run directory (debounced by the reader) and
+    // every runPollMs as the fallback. The reader watches each run directory any list() has found, so listen()
+    // starts one priming pass: it lists the runs, which arms the watchers, and records each run's JSON as the
+    // baseline without publishing. listen() does not wait for it, and a failing list only leaves the baseline
+    // empty, so the next pass publishes every run once. Passes never overlap: a request during a pass (the
+    // priming one included) reruns it once that pass ends, and the shared comparison means a watch event and
+    // the poll never publish the same change twice.
     const runJson = new Map()
     let runBusy = false
     let runAgain = false
-    const runPass = () => {
+    runPass = (prime = false) => {
       if (stopped) return
-      if (runBusy) { runAgain = true
+      if (runBusy) { if (!prime) runAgain = true
         return }
       runBusy = true
       runAgain = false
@@ -331,6 +334,7 @@ export async function createDeckServer(options = {}) {
           const text = JSON.stringify(row)
           if (runJson.get(key) === text) continue
           runJson.set(key, text)
+          if (prime) continue
           const at = now()
           publish({ seq: Number(store.appendEvent({ at, type: 'run.updated', entityId: row.runId, data: row })), at, type: 'run.updated', data: row })
         }
@@ -338,7 +342,7 @@ export async function createDeckServer(options = {}) {
         if (runAgain) runPass() })
     }
     reader.watch?.(() => runPass())
-    const runPoll = setInterval(runPass, options.runPollMs ?? 60_000)
+    const runPoll = setInterval(() => runPass(), options.runPollMs ?? 60_000)
     const rotation = setInterval(() => { try { refreshToken() } catch {} }, tokenPollMs)
     const tick = setInterval(() => { projector.tick(now()) }, 5000)
     for (const timer of [runPoll, rotation, tick]) { timer.unref()
@@ -357,6 +361,7 @@ export async function createDeckServer(options = {}) {
         server.listen(port, host, () => { server.off('error', reject)
         boundPort = server.address().port
         resolve() }) })
+      runPass(true)
       return server.address()
     }
   }
