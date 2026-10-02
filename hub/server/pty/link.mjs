@@ -136,24 +136,29 @@ export function createDeckdLink({ env, connectDeckd, reconnectMs = 1000, random 
     store.run('UPDATE sessions SET last_input_from=?,last_input_name=? WHERE id=?', from, name, row.id)
     publishSession(row.id)
   }
-  function applyExit(exit, tail) {
+  // `record` is the proto 2 exit record (05-api 5.2 `exits`): its raw `tail` and serialized `history` go to the
+  // projector, which stores the history when there is one (06-storage `session_scrollback`).
+  function applyExit(exit, record) {
     const row = liveSession(exit.ptyId)
     if (!row) return
     outputAt.delete(row.id)
-    projector.signal(row.id, { type: 'exit', code: exit.code, signal: exit.signal, ...(typeof tail === 'string' ? { tail } : {}) }, exit.at ?? now())
+    const tail = record?.tail
+    const history = record?.history
+    projector.signal(row.id, { type: 'exit', code: exit.code, signal: exit.signal, ...(typeof tail === 'string' ? { tail } : {}),
+      ...(typeof history?.data === 'string' ? { history } : {}) }, exit.at ?? now())
   }
-  // A live exit: with proto 2, read the exit record's tail (05-api 5.2 `exits`) before ending the session.
+  // A live exit: with proto 2, read the exit record's tail and history (05-api 5.2 `exits`) before ending the session.
   async function liveExit(exit) {
     tracker.forget(exit.ptyId)
     const current = client
-    let tail
+    let record
     if (current && protoOf(current) >= 2) {
       try {
         const found = await bounded(current.request('exits', { since: exit.at ?? 0 }))
-        tail = (found.exits ?? []).find(record => record.ptyId === exit.ptyId && record.at === exit.at)?.tail
+        record = (found.exits ?? []).find(item => item.ptyId === exit.ptyId && item.at === exit.at)
       } catch {}
     }
-    if (!stopped) applyExit(exit, tail)
+    if (!stopped) applyExit(exit, record)
   }
   function watch(current, ptyId) {
     Promise.resolve().then(() => bounded(current.request('watchScreen', { ptyId, on: true }))).catch(() => {})
@@ -246,11 +251,11 @@ export function createDeckdLink({ env, connectDeckd, reconnectMs = 1000, random 
       const proto = protoOf(candidate)
       const [live, ended] = await Promise.all([bounded(candidate.request('list')), bounded(candidate.request('exits', { since: 0 }))])
       if (stopped || client !== candidate) return
-      // Reconciliation rule 5: restore live PTYs, apply exit records (with their tails), then end as lost
+      // Reconciliation rule 5: restore live PTYs, apply exit records (with their tails and histories), then end as lost
       // every PTY session deckd neither runs nor remembers.
       for (const pty of live.ptys ?? []) createPtySession(pty, 1)
       for (const exit of ended.exits ?? []) { tracker.forget(exit.ptyId)
-        applyExit(exit, proto >= 2 ? exit.tail : undefined) }
+        applyExit(exit, proto >= 2 ? exit : undefined) }
       const ids = new Set((live.ptys ?? []).map(pty => pty.ptyId))
       for (const row of store.all('SELECT id,pty_id FROM sessions WHERE alive=1 AND origin<>?', 'observed')) if (!ids.has(row.pty_id)) projector.signal(row.id, { type: 'lost' }, now())
       for (const pty of live.ptys ?? []) watch(candidate, pty.ptyId)

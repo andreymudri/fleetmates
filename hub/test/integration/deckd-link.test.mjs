@@ -171,6 +171,27 @@ test('a process exiting 1 stores its last output as the session scrollback and e
   assert.equal(stored.truncated, 0)
 })
 
+test('an exit from a proto 2 deckd reaches the projector with the history of its exit record, which is stored', async t => {
+  const { deck } = await server(t)
+  const exits = []
+  const signal = deck.projector.signal
+  deck.projector.signal = (id, sig, at) => {
+    if (sig.type === 'exit') exits.push(sig)
+    return signal.call(deck.projector, id, sig, at)
+  }
+  t.after(() => { deck.projector.signal = signal })
+  const { ptyId } = await spawnFake([{ expectInput: { match: 'go', timeoutMs: 10_000 } }, { print: 'history before the crash\r\n' }, { exit: { code: 1 } }])
+  const row = await until(() => sessionOf(deck, ptyId), 'the spawned row')
+  await write(deck, ptyId, 'go')
+  await until(() => sessionOf(deck, ptyId).state === 'crashed', 'the crash')
+  assert.equal(exits.length, 1)
+  assert.equal(typeof exits[0].history?.data, 'string', 'the exit signal carries history.data')
+  assert.match(exits[0].history.data, /history before the crash/)
+  assert.equal(typeof exits[0].tail, 'string', 'the raw tail still goes along')
+  const stored = deck.store.get('SELECT text FROM session_scrollback WHERE session_id=?', row.id)
+  assert.equal(stored.text, exits[0].history.data)
+})
+
 test('a deckd that answers proto 1 is ok with reason deckd_outdated and its version, and stores no exit tail', async t => {
   const runtime = fs.mkdtempSync(path.join(dir, 'rt-'))
   fs.chmodSync(runtime, 0o700)
