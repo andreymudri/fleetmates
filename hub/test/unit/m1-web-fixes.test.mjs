@@ -37,8 +37,11 @@ async function deckWithTwoSessions(t) {
   execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
   // deckd answers, so no deckd banner is up: its once-a-second countdown would re-render the shell and hide stale state.
   const deckd = { request: async op => op === 'list' ? { ptys: [] } : op === 'exits' ? { exits: [] } : {}, on: () => () => {}, close() {} }
+  // The sessions below are observed, with hooks stamped at 1000. On the wall clock they are decades old, so the
+  // projector's 5 s tick would end them (an observed session silent for a day) part way through a slow test. A
+  // server clock held one minute after the hooks keeps them done for the whole test.
   const deck = await startDeckServer({ env, port: 0, staticDir: out, notifications: false, connectDeckd: async () => deckd,
-    runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }) })
+    runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }), now: () => 61_000 })
   const browser = await chromium.launch({ executablePath, headless: true })
   t.after(async () => { await browser.close()
     await deck.close()

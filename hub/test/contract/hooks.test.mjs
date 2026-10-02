@@ -114,21 +114,36 @@ test('hook sends one complete line to the runtime socket without creating spool'
     await new Promise(resolve => server.listen(socketPath, resolve))
     await chmod(socketPath, 0o600)
     const hook = JSON.parse(await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
-    const started = Date.now()
-    const child = spawn(process.execPath, [executable], { env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: runtime }, stdio: ['pipe', 'pipe', 'pipe'] })
+    // The 200 ms budget is the hook script's own run, which its in-script timer bounds. Node's
+    // interpreter boot comes before the script and grows with machine load, so the clock is read
+    // inside the child: a preload writes performance.now() to fd 3 once before the hook module
+    // loads and once at process exit.
+    const clock = path.join(home, 'clock.mjs')
+    await writeFile(clock, "import { writeSync } from 'node:fs'\nwriteSync(3, `${performance.now()}\\n`)\nprocess.on('exit', () => { writeSync(3, `${performance.now()}\\n`) })\n")
+    const child = spawn(process.execPath, ['--import', clock, executable], { env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: runtime }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] })
     child.stdin.end(JSON.stringify(hook))
     const output = []
     child.stdout.on('data', chunk => output.push(chunk))
     child.stderr.on('data', chunk => output.push(chunk))
+    let clockText = ''
     let childTimer
     let exit
     try {
       exit = await Promise.race([
         new Promise(resolve => child.on('close', resolve)),
-        new Promise((_, reject) => { childTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook did not exit')) }, 500) }),
+        new Promise((_, reject) => {
+          child.stdio[3].setEncoding('utf8')
+          child.stdio[3].on('data', chunk => {
+            const first = !clockText.includes('\n')
+            clockText += chunk
+            if (first && clockText.includes('\n')) childTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook did not exit')) }, 500)
+          })
+        }),
       ])
     } finally { clearTimeout(childTimer) }
-    assert.ok(Date.now() - started < 200, 'socket hook exceeded its 200 ms budget')
+    const [scriptStart, scriptExit] = clockText.trim().split('\n').map(Number)
+    assert.ok(Number.isFinite(scriptStart) && Number.isFinite(scriptExit), 'socket hook clock did not report')
+    assert.ok(scriptExit - scriptStart < 200, 'socket hook exceeded its 200 ms budget')
     assert.equal(exit, 0)
     assert.equal(Buffer.concat(output).length, 0)
     let wireTimer

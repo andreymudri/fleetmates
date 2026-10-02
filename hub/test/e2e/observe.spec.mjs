@@ -70,14 +70,16 @@ export async function buildWeb() {
 
 /**
  * A fake deckd for `connectDeckd`: answers `list` and `exits`, and can go down (dropping every
- * open link) and come back. Counts connection attempts.
- * @param {{ up?: boolean, ptys?: object[] }} [options]
+ * open link) and come back. Counts connection attempts. From attempt `holdFrom` on, a connection
+ * attempt neither succeeds nor fails until `release()`, so the link reports no further attempt.
+ * @param {{ up?: boolean, ptys?: object[], holdFrom?: number }} [options]
  */
-export function fakeDeckd({ up = true, ptys = [] } = {}) {
+export function fakeDeckd({ up = true, ptys = [], holdFrom = Infinity } = {}) {
   let isUp = up
   let attempts = 0
   const links = new Set()
   const exits = []
+  const held = []
   return {
     ptys,
     exits,
@@ -86,6 +88,7 @@ export function fakeDeckd({ up = true, ptys = [] } = {}) {
     /** The `connectDeckd` option. */
     connect: async () => {
       attempts++
+      if (attempts >= holdFrom) await new Promise((_, reject) => { held.push(reject) })
       if (!isUp) throw Object.assign(Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
       const listeners = new Map()
       const link = {
@@ -109,6 +112,8 @@ export function fakeDeckd({ up = true, ptys = [] } = {}) {
     },
     /** Answer the next connection attempt. */
     up() { isUp = true },
+    /** Fail every held connection attempt. */
+    release() { for (const reject of held.splice(0)) reject(Object.assign(Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })) },
     /** Send a deckd event to every live link. */
     emit(event, message) { for (const link of links) link.emit(event, message) }
   }
@@ -191,7 +196,7 @@ export async function until(check, { timeout = 10_000, interval = 20, message = 
 /**
  * Start the real deck server on the built app with a temporary HOME, a fake deckd and fake setup commands.
  * @param {{ after?: Function }} t test context (its `after` removes everything); omit for manual `close()`
- * @param {{ web: string, port?: number, deckd?: ReturnType<typeof fakeDeckd>, firstRun?: boolean, env?: object, runCommand?: Function, services?: object, reconnectMs?: number, hookScript?: boolean }} options
+ * @param {{ web: string, port?: number, deckd?: ReturnType<typeof fakeDeckd>, firstRun?: boolean, env?: object, runCommand?: Function, services?: object, reconnectMs?: number, deckdTimeoutMs?: number, hookScript?: boolean }} options
  */
 export async function startDeck(t, options) {
   const { startDeckServer } = await import('../../server/main.mjs')
@@ -215,7 +220,7 @@ export async function startDeck(t, options) {
     return { status: 0, stdout: '', stderr: '' }
   })
   const start = port => startDeckServer({ env, port, staticDir: options.web, notifications: false, connectDeckd: deckd.connect, runCommand,
-    random: () => 0.5, reconnectMs: options.reconnectMs ?? 1000, services: options.services })
+    random: () => 0.5, reconnectMs: options.reconnectMs ?? 1000, deckdTimeoutMs: options.deckdTimeoutMs, services: options.services })
   const h = {
     dir, env, paths, deckd, commands, ids: new Map(),
     deck: await start(options.port ?? 0),
@@ -269,6 +274,7 @@ export async function startDeck(t, options) {
     async close() {
       for (const context of h.contexts) await context.close().catch(() => {})
       await h.deck.close()
+      deckd.release?.()
       await rm(dir, { recursive: true, force: true })
     }
   }
@@ -283,7 +289,7 @@ export async function startDeck(t, options) {
  * @param {import('playwright-core').Browser} browser
  * @param {{ base: string }} h
  * @param {string} [route]
- * @param {{ viewport?: { width: number, height: number }, reducedMotion?: 'reduce' | 'no-preference', wait?: boolean, init?: Function, before?: (page: import('playwright-core').Page) => void, rewrite?: (message: object) => object }} [options]
+ * @param {{ viewport?: { width: number, height: number }, reducedMotion?: 'reduce' | 'no-preference', wait?: boolean, init?: Function, before?: (page: import('playwright-core').Page) => void | Promise<void>, rewrite?: (message: object) => object }} [options]
  */
 export async function openDeck(browser, h, route = '/', { viewport = { width: 1920, height: 1080 }, reducedMotion = 'no-preference', wait = true, init, before, rewrite } = {}) {
   const context = await browser.newContext({ viewport, reducedMotion })
@@ -302,7 +308,7 @@ export async function openDeck(browser, h, route = '/', { viewport = { width: 19
   page.on('dialog', dialog => { page.dialogs.push(dialog.message())
     dialog.dismiss().catch(() => {}) })
   if (init) await page.addInitScript(init)
-  before?.(page)
+  await before?.(page)
   await page.goto(`${h.base}${route}#token=${TOKEN}`)
   if (wait) await page.waitForFunction(() => document.querySelector('main#main') && document.querySelector('main#main').getAttribute('aria-busy') !== 'true', null, { timeout: 10_000 })
   return page
@@ -509,26 +515,33 @@ if (import.meta.main) {
   })
 
   spec('Home AC15 and Failures AC4: with deckd down the banner counts down per attempt and pills keep updating', async t => {
-    const h = await startDeck(t, { web: web.dir, deckd: fakeDeckd({ up: false }) })
+    // The server's attempts run on the wall clock (1 s, 2 s, then 4 s before attempt 4), and the page compares
+    // their nextProbeAt with its own clock. Neither may race the test on a loaded machine: deckd's fourth
+    // connection attempt is held until teardown, so attempt 3 stays the server's last word, and the page
+    // runs on Playwright's clock, paused before the deck loads, so its one-second tick fires only when the
+    // test advances it.
+    const deckd = fakeDeckd({ up: false, holdFrom: 4 })
+    const h = await startDeck(t, { web: web.dir, deckd, deckdTimeoutMs: 3_600_000 })
     await h.load('busy')
-    // The page runs on Playwright's clock, so its one-second tick is driven by the test instead of by a loaded machine.
-    let clock
-    const page = await openDeck(browser, h, '/', { before: p => { clock = p.clock.install() } })
-    await clock
+    const page = await openDeck(browser, h, '/', { before: async p => {
+      const start = Date.now()
+      await p.clock.install({ time: start })
+      await p.clock.pauseAt(start + 60_000)
+    } })
     const text = () => page.textContent('.banner--deckd .banner-text').catch(() => null)
-    await until(async () => /\(attempt 3, next in 4s\)/.test(await text() ?? ''), { timeout: 15_000, interval: 50, message: 'attempt 3, next in 4s' })
-    // Freeze the page's time, then advance it one second at a time: each tick must lower the countdown by exactly one.
-    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1))
+    await until(() => h.deck.link.health().attempt === 3 && deckd.attempts() === 4, { timeout: 15_000, interval: 50, message: 'attempt 3 to fail and attempt 4 to be held' })
+    const { nextProbeAt } = h.deck.link.health()
+    await until(async () => /\(attempt 3, next in \d+s\)/.test(await text() ?? ''), { timeout: 15_000, interval: 50, message: 'the attempt 3 banner' })
+    // Five seconds before the next probe, then one second at a time: each tick must lower the countdown by exactly one.
+    await page.clock.setSystemTime(nextProbeAt - 5000)
     const shownSeconds = async () => Number(/\(attempt 3, next in (\d)s\)/.exec(await text() ?? '')?.[1] ?? NaN)
-    const seen = [await shownSeconds()]
-    for (let tick = 0; tick < 2; tick++) {
+    const seen = []
+    for (const expected of [4, 3, 2]) {
       await page.clock.runFor(1000)
-      const expected = seen.at(-1) - 1
       await until(async () => await shownSeconds() === expected, { timeout: 2000, interval: 20, message: `next in ${expected}s` }).catch(() => {})
       seen.push(await shownSeconds())
     }
-    assert.ok(seen[0] >= 2 && seen[0] <= 4, `the countdown starts at 4s or just below: saw ${seen.join(', ')}`)
-    assert.deepEqual(seen, [seen[0], seen[0] - 1, seen[0] - 2], `the countdown advances each second: saw ${seen.join(', ')}`)
+    assert.deepEqual(seen, [4, 3, 2], `the countdown advances each second: saw ${seen.join(', ')}`)
     await h.hook('research', { e: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'curl https://example.test' } })
     await card(page, h.ids.get('research')).locator('.pill, .status-pill, [class*="pill"]').filter({ hasText: 'Needs approval' }).first().waitFor({ timeout: 5000 })
   })

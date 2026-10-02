@@ -737,17 +737,22 @@ test('SIGHUP to fm attach detaches without printing and leaves the PTY running',
   try {
     const attach = runInPty(process.execPath, [fmPath, 'attach', p.ptyId])
     await until(async () => (await listed(p.ptyId))?.clients.some((/** @type {any} */ c) => c.kind === 'terminal'), 'fm attach to attach')
+    // deckd lists the client as soon as it handles `attach`, before fm has read the reply and
+    // set its SIGHUP handler. fm writes PTY output only after that handler is set, so the echo
+    // of this write reaching fm's terminal is the point where a hangup means a detach.
+    await browser.request('write', { ptyId: p.ptyId, data: b64('hup1'), source: { kind: 'deck' } })
+    await until(() => attach.out().includes('hup1'), () => `the echo in fm attach: ${JSON.stringify(attach.out())}`)
     let detached = false
     const off = browser.on('client', (ev) => {
       if (ev.ptyId === p.ptyId && ev.change === 'detached' && ev.client.kind === 'terminal') detached = true
     })
     attach.pty.kill('SIGHUP')
     const exited = await attach.exited()
-    off()
     assert.equal(exited.exitCode, 0)
     assert.ok(!exited.signal, `fm died of signal ${exited.signal}`)
     assert.doesNotMatch(attach.out(), /detached from/)
-    assert.ok(detached, 'deckd reported the terminal detached')
+    // The event and fm's exit reach this process on different channels, so wait for the event.
+    await until(() => detached, 'deckd to report the terminal detached').finally(off)
     assert.ok(await listed(p.ptyId), 'the PTY is still running')
   } finally {
     await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
