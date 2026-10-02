@@ -64,7 +64,7 @@ Width: 600px at 1920, 1440 and 1280 (design-system 8.3). At 1280 the drawer cove
 | Reply | Field TextInput `md` (sr-only label "Reply") + Button `amber` | | placeholder "Reply to discord-audit", "Reply" | |
 | Destructive header | TierBadge `md` destructive | | "Destructive", "Never batched, never a rule, never from a popup" | |
 | Destructive row | RequestRow `destructive` | `request.summary`, consequence | "git push --force origin ui/inventory" / "rustot-client · rewrites 3 commits on the remote" | |
-| Confirm | Checkbox `tone="danger"` | label from the tiers.json destructive entry (Proposed), with counts when the deck can compute them | "I checked the 3 commits that will be overwritten" | see DRW-O1 |
+| Confirm | Checkbox `tone="danger"` | label from the tiers.json destructive entry's `confirm` template, with `{n}` filled from its `count` when the deck can compute it (D-72) | "I checked the 3 commits that will be overwritten" | when the entry has no template or the count is unknown, the label is the fallback "I checked what this command will change" (D-72, [07-approvals.md](../07-approvals.md) section 8) |
 | Destructive actions | Button `danger sm` Deny, `danger-confirm sm` Allow once (disabled until checked) | | "Deny", "Allow once" | never default button |
 | Observed row actions | text + Button `ghost xs` | `session.origin = observed` | "Answer in your terminal", "Open" | replaces every answer button |
 | Footer | text | none | "Alt A allow focused · Alt D deny · Alt Shift A allow all Safe · rules live in each repo's .claude/settings.local.json" | M1 footer: "Answer in your terminal for now. Answering here arrives with approvals." (Proposed) |
@@ -174,6 +174,7 @@ Toasts of tone `needs` are suppressed while the drawer is open (components Toast
 | `drawer.safe.batch.toast` | Allowed {ok} of {n} |
 | `drawer.safe.batch.toastPartial` | Allowed {ok} of {n}: {failed} did not land |
 | `drawer.rule.suggest` | You allowed {command} in {repo} {n} times. Make it a rule? |
+| `drawer.rule.suggest.anyFlags` | It will allow {command} with any flags. |
 | `drawer.rule.added` | Rule added to {repo}: {pattern} |
 | `drawer.destructive.confirm` | {consequence} |
 | `drawer.empty.title` | Nothing needs you. |
@@ -194,6 +195,11 @@ The empty drawer renders `EmptyState kind="drawer"`, which reads `empty.drawer.t
 `drawer.empty.title` and `drawer.empty.body` rows above have the same English, and no code under
 `hub/web/src` reads those two keys.
 
+`drawer.rule.suggest.anyFlags` is shown on its own line after `drawer.rule.suggest` when the
+matched tiers.json entry has `ruleNote: 'anyFlags'`, the runner entries whose Safe match excludes
+code-loading flags that the suggested prefix rule cannot exclude (D-78,
+[07-approvals.md](../07-approvals.md) section 6).
+
 ## 10. Acceptance criteria
 
 1. **Given** fixture `busy`, **when** pressing `Alt U`, **then** the drawer opens with title "Needs you", subtitle "4 requests from 3 ships · oldest waiting 9 min", sections Safe (2), Caution (1), Question (1) and no Destructive section, and focus is on the first Safe row's "Allow once".
@@ -212,10 +218,10 @@ The empty drawer renders `EmptyState kind="drawer"`, which reads `empty.drawer.t
 
 | Id | Gap | Status |
 |---|---|---|
-| DRW-O1 | The Destructive confirm label "I checked the 3 commits that will be overwritten" needs a per-command consequence (commit count for `git push --force`). No source computes it. | **Open**. Default: tiers.json destructive entries carry a label template; when the deck cannot fill the count, the label reads "I checked what this command will change". |
+| DRW-O1 | The Destructive confirm label "I checked the 3 commits that will be overwritten" needs a per-command consequence (commit count for `git push --force`). No source computes it. | **Decided** 2026-10-02 (D-72). tiers.json destructive entries carry a label template; when the deck cannot fill the count, the label reads "I checked what this command will change". |
 | DRW-O2 | Caution row third line "adds a dependency" is a per-pattern description that tiers.json does not define yet. | Proposed: optional `description` per tiers.json pattern; else "waiting {duration}". |
 | DRW-O3 | Notification-only requests (state-machines 2.7 row 2) have no `tool_input`; their summary is the notification message, tier Caution. | Proposed: shown with the message text and a muted "(details not available)". |
-| DRW-O4 | Popup "Open" for Caution (SM-O9). | Open (tracked as SM-O9). |
+| DRW-O4 | Popup "Open" for Caution (SM-O9). | **Decided** 2026-10-02 with SM-O9 (D-71): the popup offers "Open" for Caution, never "Allow once". |
 
 ## 12. Changes from the canvas
 

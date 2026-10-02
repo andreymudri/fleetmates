@@ -1,8 +1,9 @@
 # Tier design-oversight review (APR-O1, Q4)
 
-Date: 2026-10-02. Run deck-m2c, Task 35. Status: **findings for the owner**. Nothing in
-[07-approvals.md](../07-approvals.md) or any other doc was changed; the owner resolves these findings
-before M3 ships answering from the deck (07-approvals section 12).
+Date: 2026-10-02. Run deck-m2c, Task 35. Status: **resolved by the owner on 2026-10-02 (D-75 to D-83)**,
+see [14-decisions.md](../14-decisions.md). The review run itself changed nothing in
+[07-approvals.md](../07-approvals.md) or any other doc; run deck-m3a Task 1 applied the resolution
+there (07-approvals section 12).
 
 ## 1. Scope and method
 

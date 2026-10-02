@@ -378,6 +378,7 @@ API paths are Proposed; the state-machine event is the contract.
 | `home.card.request.guardTyping` | You are typing in the terminal. Answer there, or try again in a second. | |
 | `home.card.request.deckdDown` | deckd is reconnecting. Answer in your terminal for now. | |
 | `home.card.rule.short` | Allowed {n} times. Always allow in {repo}? | |
+| `home.card.rule.anyFlags` | Any flags. | after `home.card.rule.short` when the matched tiers.json entry has `ruleNote: 'anyFlags'` (D-78) |
 | `home.card.rule.added` | Rule added to {repo}: {pattern} | toast |
 | `home.card.rule.undo` | Undo | |
 | `home.card.question.reply.label` | Reply to {repo} | sr-only label and placeholder |

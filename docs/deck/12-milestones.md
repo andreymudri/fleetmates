@@ -144,7 +144,7 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 3. Rules: suggestion after the configured count; write and revoke preserve every other key and the order in `settings.local.json` fixtures; external edits show as "added by hand".
 4. Manual: real Claude Code smoke answering all three options from the browser on the pinned version ([09-testing.md](09-testing.md) section 5.4).
 5. Manual: one working week answering permission prompts from the deck with zero answers delivered to a prompt other than the one shown.
-6. The design-oversight review of the tiers (Q4, APR-O1) is done and its findings are resolved before this milestone starts (section 9).
+6. The design-oversight review of the tiers (Q4, APR-O1) is done and its findings are resolved before this milestone starts (section 9). The review ran on 2026-10-02 ([reviews/2026-10-02-tier-oversight.md](reviews/2026-10-02-tier-oversight.md)) and the owner resolved it the same day (D-75 to D-83).
 
 **Dependencies**: M2 (PTY bridge, PromptBar host, screen model in production).
 
@@ -263,8 +263,8 @@ Collected from every doc (IDs with `-O` numbers, plus design-system section 15 a
 
 | When | Items |
 |---|---|
-| Before start | Design-oversight review of the tiers (Q4, APR-O1, not yet run); SM-O9 / DRW-O4 (Caution from a popup); DRW-O1 (Destructive confirm label); SM-O10 (terminal approvals count toward rules); SM-O11 (Safe request with no tiers.json pattern) |
-| Before exit | SET-O4 (threshold options 5 / 3 / Never, re-offer after dismissal) |
+| Before start | All decided. Design-oversight review of the tiers (Q4, APR-O1): done 2026-10-02 and resolved by the owner (D-75 to D-83), which also decides APR-O2, APR-O3 and APR-O4; SM-O9 / DRW-O4 (Caution from a popup): D-71; DRW-O1 (Destructive confirm label): D-72; SM-O10 (terminal approvals count toward rules): D-73; SM-O11 (Safe request with no tiers.json pattern): D-74; fixture recapture for the corpus (Q8, F17): D-83; typing guard on both input sides: D-84; npm and pnpm script rules: D-86 |
+| Before exit | SET-O4 (threshold options 5 / 3 / Never, re-offer after dismissal); PAL-O3 (palette Enter) decided by D-85 |
 
 ### M4
 
