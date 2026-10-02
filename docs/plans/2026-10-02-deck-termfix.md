@@ -120,12 +120,15 @@ Clicking or focusing the Focus terminal never changes its layout or background, 
 - Modify: `hub/server/machines/projector.mjs`
 - Modify: `hub/server/launch/launch.mjs`
 - Create: `hub/server/screen/history.mjs`
+- Modify: `hub/server/pty/link.mjs`
 - Modify: `docs/deck/06-storage.md`
 - Create: `hub/test/unit/scrollback-history.test.mjs`
 - Test: `hub/test/integration/session-actions.test.mjs`
+- Test: `hub/test/integration/deckd-link.test.mjs`
 
 **Depends:** T2
 
+- [ ] `link.mjs`: pass deckd's `history` from the exit event and from the `exits` records (proto 2) through `applyExit` into the projector's `exit` signal next to `tail`. `deckd-link.test.mjs`: an exit from a proto 2 deckd reaches the projector with `history.data` (mutation: drop `history` in `applyExit`).
 - [ ] `projector.mjs`: when an `exit` event carries `history`, `session_scrollback.text` stores `history.data`; otherwise it stores the raw `tail` as today. No schema change.
 - [ ] `history.mjs`: export `renderHistory(text, { cols = 120, rows = 40 } = {})`, which writes `text` into an `@xterm/headless` Terminal of that size (scrollback 1000) with the serialize addon loaded and returns the serialized output. Writing already serialized history through it reproduces the same screen; writing legacy raw bytes through it turns them into absolute-positioned rows (best effort, since their original size is unknown).
 - [ ] `launch.mjs` `scrollback()`: for a live PTY, request `screen` with `history: true` and serve `history.data` (falling back to the raw `scrollback` when deckd does not send `history`); for a stored row, serve `renderHistory(stored.text)`. `lastLines` then cuts the served text on `\r\n` line boundaries. The response shape `{ text, source, truncated }` is unchanged.
