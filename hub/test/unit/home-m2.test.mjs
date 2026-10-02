@@ -479,4 +479,7 @@ test('every agent-supplied compact line renders U+202E as a visible token: PTY t
   check(render(CompactCard, { session: branched, repo, now: NOW, tail: [], requests: [{ ...ask, sessionId: 'b1', summary: 'plain' }] }), 'branch')
   const taskTeam = { ...team, requests: [{ ...team.requests[0], summary: 'plain', taskId: `T${RLO}4` }] }
   check(render(CompactCard, { team: taskTeam, repo, now: NOW, tail: [] }), 'team ask task id')
+  const { taskId: _taskId, ...untasked } = team.requests[0]
+  const leadAsk = { ...team, requests: [untasked] }
+  check(render(CompactCard, { team: leadAsk, repo, now: NOW, tail: [] }), 'team ask without a task id')
 })

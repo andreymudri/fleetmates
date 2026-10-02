@@ -728,17 +728,45 @@ test('in Chromium the deck drops the fragment, authenticates the socket and show
   assert.equal(await page.title(), 'Memory · fleetmates deck')
   await page.keyboard.press('Alt+Shift+Digit4')
   await page.waitForFunction(() => location.pathname === '/settings/rules', null, { timeout: 5000 })
-  const appearance = () => page.evaluate(() => ({
-    size: document.documentElement.style.getPropertyValue('--text-base'), motion: document.documentElement.getAttribute('data-motion')
-  }))
-  assert.deepEqual(await appearance(), { size: '14px', motion: null }, 'the default appearance')
+  // Computed styles too, so the stylesheet is pinned to read --text-base and data-motion, not only the root to carry them.
+  const appearance = () => page.evaluate(() => {
+    const root = document.documentElement
+    const probe = document.createElement('div')
+    probe.className = 'motion-breathe'
+    probe.style.transition = 'opacity var(--motion-duration-fast) linear'
+    const drawer = document.createElement('div')
+    drawer.className = 'drawer'
+    document.body.append(probe, drawer)
+    const result = {
+      size: root.style.getPropertyValue('--text-base'), motion: root.getAttribute('data-motion'), body: getComputedStyle(document.body).fontSize,
+      loop: getComputedStyle(probe).animationName, fade: getComputedStyle(probe).transitionDuration, drawer: getComputedStyle(drawer).animationName
+    }
+    probe.remove()
+    drawer.remove()
+    return result
+  })
+  const full = { loop: 'deck-breathe', fade: '0.1s', drawer: 'deck-drawer-in' }
+  const reduced = { loop: 'none', fade: '0s', drawer: 'deck-fade-in' }
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  assert.deepEqual(await appearance(), { size: '14px', motion: null, body: '14px', ...full }, 'the default appearance')
   // A preference change arrives as prefs.changed over the socket; the shell re-applies it to the document root.
-  const status = await page.evaluate(async key => (await fetch('/api/prefs', { method: 'PATCH', headers: {
+  // Motion and text size change in separate requests, so each one alone must reach the root.
+  const patch = body => page.evaluate(async ([key, json]) => (await fetch('/api/prefs', { method: 'PATCH', headers: {
     Authorization: `Bearer ${sessionStorage.getItem(key)}`, 'X-Deck-Api': '1', 'Content-Type': 'application/json'
-  }, body: JSON.stringify({ textSize: 16, motion: 'reduce' }) })).status, TOKEN_KEY)
-  assert.equal(status, 200)
+  }, body: json })).status, [TOKEN_KEY, JSON.stringify(body)])
+  assert.equal(await patch({ motion: 'reduce' }), 200)
   await page.waitForFunction(() => document.documentElement.getAttribute('data-motion') === 'reduce', null, { timeout: 5000 })
-  assert.deepEqual(await appearance(), { size: '16px', motion: 'reduce' })
+  assert.deepEqual(await appearance(), { size: '14px', motion: 'reduce', body: '14px', ...reduced }, 'Always reduce motion alone')
+  assert.equal(await patch({ textSize: 16 }), 200)
+  await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--text-base') === '16px', null, { timeout: 5000 })
+  assert.deepEqual(await appearance(), { size: '16px', motion: 'reduce', body: '16px', ...reduced }, 'text size alone')
+  // Motion back to system: without data-motion the OS preference governs.
+  assert.equal(await patch({ motion: 'system' }), 200)
+  await page.waitForFunction(() => !document.documentElement.hasAttribute('data-motion'), null, { timeout: 5000 })
+  assert.deepEqual(await appearance(), { size: '16px', motion: null, body: '16px', ...full }, 'system motion, no OS preference')
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  // The media query redefines deck-drawer-in as a fade, so the drawer keeps its animation name there.
+  assert.deepEqual(await appearance(), { size: '16px', motion: null, body: '16px', ...reduced, drawer: 'deck-drawer-in' }, 'system motion follows the OS preference')
   assert.deepEqual(errors, [])
 
   const stale = await browser.newPage()

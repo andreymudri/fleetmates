@@ -5,6 +5,8 @@ import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { runnerImport } from 'vite'
 import { initialState } from '../../web/src/state/deck-store.js'
 
@@ -64,9 +66,35 @@ test('deckScreens registers new, team and crew and hands the same terminals and 
   assert.deepEqual(team.map(node => node.type.name), ['TeamRun'], 'TeamRun renders its own observe overlays')
   assert.equal(team[0].props.api, api)
   assert.equal(team[0].props.route, live.route)
-  const crew = components(screens.crew(live), ['CrewSheet'])
-  assert.equal(crew.length, 1)
+  const crew = components(screens.crew(live), ['CrewSheet', 'ObserveOverlays'])
+  assert.deepEqual(crew.map(node => node.type.name), ['CrewSheet', 'ObserveOverlays'], 'the crew route renders the observe overlays, as settings does')
   assert.equal(crew[0].props.api, api)
+  assert.equal(crew[1].props.state, live.state, 'so Alt K and Alt U on /settings/crew show the palette and the drawer')
+})
+
+// The end index of the element whose open tag starts at `start`, counting nested <div> tags (React emits no self-closing divs).
+function divEnd(html, start) {
+  let depth = 0
+  for (const match of html.slice(start).matchAll(/<div[\s>]|<\/div>/g)) {
+    depth += match[0] === '</div>' ? -1 : 1
+    if (depth === 0) return start + match.index + match[0].length
+  }
+  return -1
+}
+
+test('on /new the palette opened by Alt K renders once, outside the inert background', async () => {
+  const { deckScreens } = await load('screens/failures/Failures.jsx')
+  const screens = deckScreens({ api: fakeApi(), terminals: null, dispatch: () => {} })
+  const base = loaded()
+  const state = { ...base, view: { ...base.view, path: '/new', overlay: 'palette' } }
+  const html = renderToStaticMarkup(createElement(screens.new, { ...props(state), route: { name: 'new', params: {} } }))
+  const start = html.indexOf('<div class="launch-background"')
+  assert.ok(start >= 0, 'the screen it was opened from renders beneath the dialog')
+  const end = divEnd(html, start)
+  assert.ok(end > start)
+  const palettes = [...html.matchAll(/role="dialog"[^>]*aria-label="Search, ask or run"/g)]
+  assert.equal(palettes.length, 1, 'one palette')
+  assert.ok(palettes[0].index > end, 'the palette sits outside the inert, aria-hidden background')
 })
 
 test('the M2 screens keep the M1 failure notices where M1 shows them', async () => {

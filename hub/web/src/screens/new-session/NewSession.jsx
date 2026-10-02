@@ -406,7 +406,7 @@ export function NewSessionView({
 
 /**
  * The `/new` route screen: {@link NewSessionView} over the route it was opened from (`history.state.from`, else
- * Home), rendered inert beneath it when `screens` has that route. Holds the form state, the combobox keys,
+ * Home), rendered inert beneath it, without its overlays, when `screens` has that route. Holds the form state, the combobox keys,
  * `Alt Enter` and Esc, and the initial focus; Esc and Cancel keep a draft for {@link DRAFT_TTL_MS}. Browser
  * wiring; the pure view and the exported functions carry the tested behaviour.
  * @param {{ search?: string, state: object, t?: Function, navigate: (to: string, options?: { replace?: boolean }) => void, api?: object,
@@ -484,9 +484,11 @@ export function NewSession({ search = globalThis.location?.search ?? '', state, 
     else cancel()
   }
   const Background = screens?.[matchRoute(from).name]
+  // The background renders with no overlay: the palette or drawer belongs outside the inert, aria-hidden subtree.
+  const backgroundState = useMemo(() => (state.view?.overlay ? { ...state, view: { ...state.view, overlay: null } } : state), [state])
   return (
     <>
-      {Background ? <div className="launch-background" inert aria-hidden="true"><Background route={matchRoute(from)} search="" state={state} t={t} navigate={navigate} /></div> : null}
+      {Background ? <div className="launch-background" inert aria-hidden="true"><Background route={matchRoute(from)} search="" state={backgroundState} t={t} navigate={navigate} /></div> : null}
       <NewSessionView state={state} form={form} t={t} panelRef={panel} errorRef={errorRef} repoRef={repoRef} taskRef={taskRef}
         onQuery={value => update(current => {
           const selected = findRepo(state, current.repoKey)

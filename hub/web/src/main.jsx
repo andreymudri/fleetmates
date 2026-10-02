@@ -20,7 +20,8 @@ import { deckScreens } from './screens/failures/Failures.jsx'
 import { createTerminalClient } from './state/terminal.js'
 
 // Components and screens never import CSS themselves (the vite runnerImport test loader cannot load it);
-// every stylesheet is imported here, once.
+// each deck stylesheet is imported here, once. xterm's stylesheet is the exception: it is imported here and also
+// `@import`ed by terminal.css, and the production build carries its rules once.
 
 const { token, to } = captureToken({ location: window.location, history: window.history, storage: window.sessionStorage })
 if (to) window.history.replaceState(null, '', to)
