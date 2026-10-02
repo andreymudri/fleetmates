@@ -1,0 +1,44 @@
+/* AnswerControls (components/AnswerControls.jsx): the answer buttons, confirm checkbox, reply field and
+   delivery lines every M3 surface shares. Values are tokens from tokens.css. Imported once from main.jsx. */
+
+.answer-controls { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
+.answer-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
+.answer-options .button { max-width: 100%; overflow-wrap: anywhere; text-align: start; }
+.answer-line { margin: 0; font-size: var(--font-size-sm); }
+.answer-line--muted { color: var(--text-muted); }
+.answer-line--error { padding: var(--space-8) var(--space-12); border-radius: var(--radius-md); background: var(--state-crashed-bg); color: var(--state-crashed-fg); }
+
+.answer-confirm { display: flex; align-items: flex-start; gap: var(--space-8); font-size: var(--font-size-sm); color: var(--text-default); cursor: pointer; }
+.answer-confirm input { margin-top: var(--space-2); flex: 0 0 auto; }
+.answer-confirm-text { overflow-wrap: anywhere; }
+
+.answer-reply { display: flex; align-items: center; gap: var(--space-8); }
+.answer-reply-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--space-4) var(--space-8);
+  border: 1px solid var(--border-field);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-default);
+  font: inherit;
+}
+.answer-reply-input:focus-visible { border-color: var(--border-field-focus); }
+
+/* The spinner sits inside the chosen button next to its kept label (the button also carries aria-busy). */
+.answer-spinner {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  margin-inline-end: var(--space-6);
+  vertical-align: -0.1em;
+  border: 2px solid currentColor;
+  border-inline-end-color: transparent;
+  border-radius: var(--radius-round);
+  animation: answer-spin 800ms linear infinite;
+}
+@keyframes answer-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .answer-spinner { animation: none; border-inline-end-color: currentColor; opacity: 0.6; }
+}
+:where(:root[data-motion="reduce"]) .answer-spinner { animation: none; border-inline-end-color: currentColor; opacity: 0.6; }

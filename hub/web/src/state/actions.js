@@ -1,5 +1,6 @@
 /**
- * REST helpers for the M2 session, crew and run actions (docs/deck/05-api.md sections 2.3, 2.6 and 2.8).
+ * REST helpers for the M2 session, crew and run actions and the M3 answer, rule and diff calls
+ * (docs/deck/05-api.md sections 2.3, 2.4, 2.5, 2.6 and 2.8).
  * Each takes the client from `createApiClient`, encodes every path segment with `encodeURIComponent`,
  * and returns the API's body or throws its `ApiError` unchanged.
  */
@@ -90,4 +91,89 @@ export function fetchRunPlan(api, repoKey, runId) {
  */
 export function openRunPlan(api, repoId, runId) {
   return api.post('/api/open', { kind: 'runPlan', ref: { repoId, runId } })
+}
+
+/**
+ * Answer one request (`POST /api/requests/:id/answer`). The server enforces the tier rules.
+ * @param {{ post: Function }} api
+ * @param {string} id
+ * @param {{ choice: 'allow' | 'allow_always' | 'deny' | 'option' | 'reply', optionKey?: string, text?: string, confirm?: boolean }} body
+ * @returns {Promise<{ request: object }>}
+ */
+export function answerRequest(api, id, body) {
+  return api.post(`/api/requests/${seg(id)}/answer`, body)
+}
+
+/**
+ * Allow several Safe permission requests once (`POST /api/requests/answer-batch`).
+ * @param {{ post: Function }} api
+ * @param {string[]} ids
+ * @returns {Promise<{ results: { id: string, ok: boolean, error?: object }[] }>}
+ */
+export function answerBatch(api, ids) {
+  return api.post('/api/requests/answer-batch', { ids, choice: 'allow' })
+}
+
+/**
+ * Tell Claude what to do instead after a deck Deny (`POST /api/requests/:id/followup`).
+ * @param {{ post: Function }} api
+ * @param {string} id
+ * @param {string} text
+ * @returns {Promise<unknown>}
+ */
+export function sendFollowup(api, id, text) {
+  return api.post(`/api/requests/${seg(id)}/followup`, { text })
+}
+
+/**
+ * Read the approval rules, for every repo or for one.
+ * @param {{ get: Function }} api
+ * @param {string} [repoKey]
+ * @returns {Promise<{ threshold: number | null, tiersError?: object | null, repos: object[] }>}
+ */
+export function fetchRules(api, repoKey) {
+  const query = repoKey === undefined ? '' : `?repoKey=${seg(repoKey)}`
+  return api.get(`/api/rules${query}`)
+}
+
+/**
+ * Add an allow rule to a repo's settings file (`POST /api/rules`).
+ * @param {{ post: Function }} api
+ * @param {{ repoKey: string, pattern: string, source: 'suggested' | 'manual' }} rule
+ * @returns {Promise<{ rule: object }>}
+ */
+export function addRule(api, { repoKey, pattern, source }) {
+  return api.post('/api/rules', { repoKey, pattern, source })
+}
+
+/**
+ * Revoke a rule (`DELETE /api/rules/:repoKey/:pattern`); the pattern is one encoded segment.
+ * @param {{ del: Function }} api
+ * @param {string} repoKey
+ * @param {string} pattern
+ * @returns {Promise<{ removed: boolean, reason?: 'already_removed' }>}
+ */
+export function revokeRule(api, repoKey, pattern) {
+  return api.del(`/api/rules/${seg(repoKey)}/${seg(pattern)}`)
+}
+
+/**
+ * Dismiss a rule suggestion (`POST /api/rules/suggestions/dismiss`).
+ * @param {{ post: Function }} api
+ * @param {{ repoKey: string, pattern: string }} offer
+ * @returns {Promise<unknown>}
+ */
+export function dismissRuleOffer(api, { repoKey, pattern }) {
+  return api.post('/api/rules/suggestions/dismiss', { repoKey, pattern })
+}
+
+/**
+ * Read one changed file's diff against the review baseline (`GET /api/sessions/:id/diff?path=`).
+ * @param {{ get: Function }} api
+ * @param {string} sessionId
+ * @param {string} path repo-relative
+ * @returns {Promise<{ path: string, baseline: string, diff: string, binary: boolean, truncated: boolean }>}
+ */
+export function fetchDiff(api, sessionId, path) {
+  return api.get(`${session(sessionId, 'diff')}?path=${seg(path)}`)
 }

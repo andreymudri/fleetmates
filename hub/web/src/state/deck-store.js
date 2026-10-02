@@ -6,7 +6,7 @@ const NEEDS_STATES = new Set(['needs_approval', 'asked_you'])
 /** @returns {Record<string, any>} the empty data a snapshot replaces */
 function emptyData() {
   return {
-    sessions: [], requests: [], runs: [], repos: [], counts: null, order: [], recap: null, ruleOffers: [], research: [],
+    sessions: [], requests: [], runs: [], repos: [], counts: null, order: [], recap: null, ruleOffers: [], rules: [], rulesRev: 0, research: [],
     recorder: { state: 'idle' }, health: [], prefs: {}, sources: {}, setup: { firstRunCompletedAt: null },
     inputSources: {}, tails: {}
   }
@@ -70,6 +70,9 @@ function upsert(list, row, same = item => item.id === row.id) {
   next[index] = row
   return next
 }
+
+// Rules and rule offers are keyed by repo and pattern: the same pattern in two repos is two rows.
+const sameRule = data => row => row.repoId === data.repoId && row.pattern === data.pattern
 
 function addToast(state, toast) {
   return { ...state, toasts: [...state.toasts, { id: state.nextId, ...toast }], nextId: state.nextId + 1 }
@@ -151,6 +154,18 @@ function applyEvent(state, message, live) {
     case 'recap':
       next.data = { ...d, recap: data }
       return next
+    case 'rule.offered':
+      next.data = { ...d, ruleOffers: upsert(d.ruleOffers, data, sameRule(data)) }
+      return next
+    case 'rule.withdrawn':
+      next.data = { ...d, ruleOffers: d.ruleOffers.filter(row => !sameRule(data)(row)) }
+      return next
+    case 'rule.upserted':
+      next.data = { ...d, rules: upsert(d.rules, data, sameRule(data)), rulesRev: d.rulesRev + 1 }
+      return next
+    case 'rule.removed':
+      next.data = { ...d, rules: d.rules.filter(row => !sameRule(data)(row)), rulesRev: d.rulesRev + 1 }
+      return next
     case 'prefs.changed':
       next.data = { ...d, prefs: data.prefs, sources: data.sources ?? d.sources, setup: { ...d.setup, firstRunCompletedAt: data.prefs?.firstRunCompletedAt ?? d.setup.firstRunCompletedAt } }
       return next
@@ -199,6 +214,8 @@ function receive(state, message) {
       // Ephemeral terminal state is not part of the snapshot; keep what the socket already delivered.
       data.inputSources = state.data.inputSources ?? {}
       data.tails = state.data.tails ?? {}
+      // The snapshot carries no rules revision; keep counting from the last one so it never repeats.
+      data.rulesRev = state.data.rulesRev ?? 0
       const episodes = Object.fromEntries(data.sessions.filter(row => NEEDS_STATES.has(row.state)).map(row => [row.id, true]))
       const open = new Set(data.requests.map(row => row.id))
       const toasts = state.toasts.filter(toast => toast.requestId === undefined || open.has(toast.requestId))

@@ -57,7 +57,8 @@ export function backoffMs(attempt, random = Math.random) {
  * REST client for same-origin `/api/*` paths. Any other path, including an absolute URL,
  * is refused before `fetch` runs, so the bearer token is never sent anywhere else.
  * @param {{ token: string, fetch: typeof fetch, onFatal?: (state: string) => void }} options
- * @returns {{ get: (path: string) => Promise<any>, patch: (path: string, body: object) => Promise<any>, post: (path: string, body?: object) => Promise<any>, probe: () => Promise<string | null> }}
+ * `del` sends DELETE with no body.
+ * @returns {{ get: (path: string) => Promise<any>, patch: (path: string, body: object) => Promise<any>, post: (path: string, body?: object) => Promise<any>, del: (path: string) => Promise<any>, probe: () => Promise<string | null> }}
  */
 export function createApiClient({ token, fetch, onFatal = () => {} }) {
   function init(method, body) {
@@ -87,6 +88,7 @@ export function createApiClient({ token, fetch, onFatal = () => {} }) {
     get: path => request('GET', path),
     patch: (path, body) => request('PATCH', path, body),
     post: (path, body) => request('POST', path, body),
+    del: path => request('DELETE', path),
     /** Tell a refused WebSocket upgrade (401 or 403) apart from a server that is down. */
     async probe() {
       try {
