@@ -583,7 +583,8 @@ if (import.meta.main) {
     const first = await page.textContent('#palette-opt-0 .palette-row-title')
     assert.equal(first, 'rustot · cargo test --release combat::', 'the first option is the oldest request, rustot, read as its command')
     await page.fill('.palette-input', 'rus')
-    assert.deepEqual(await page.$$eval('.palette-group-title', rows => rows.map(row => row.textContent)), ['Needs you', 'Sessions'])
+    // M2 adds the Actions group (palette.md 4.1) after Needs you and Sessions.
+    assert.deepEqual(await page.$$eval('.palette-group-title', rows => rows.map(row => row.textContent)), ['Needs you', 'Sessions', 'Actions'])
     const sessions = await page.$$eval('.palette-group--sessions .palette-row--session', rows => rows.map(row => [row.querySelector('.palette-row-title').textContent, row.querySelector('kbd')?.textContent ?? null]))
     const order = fixture('busy').expect.grid.concat(fixture('busy').expect.quiet)
     assert.deepEqual(sessions, [['rustot · combat-tick', `Alt ${order.indexOf('rustot') + 1}`], ['rustot-client · ui/inventory', `Alt ${order.indexOf('rustot-client') + 1}`]])

@@ -2,7 +2,8 @@
 // under 2% of one core, 03-architecture 7). Starts real deckd and the real deck server as separate
 // processes on a temporary HOME and XDG_RUNTIME_DIR, spawns 10 fake `claude` sessions through deckd that
 // fire their hooks through the real deck-hook and then sit on the idle-input frame, connects the built app
-// in headless Chromium, lets it settle, and samples utime + stime from /proc/<pid>/stat of both processes
+// in headless Chromium with Home and one Focus page per session (each with its live terminal attached, M2),
+// lets it settle, and samples utime + stime from /proc/<pid>/stat of both processes
 // for DURATION seconds (default 60). Then it repeats with 10 sessions redrawing the spinner frame every
 // 100 ms and reports that too (reported, not gated). Prints one JSON line; exits 1 when idle is over 2%.
 //
@@ -133,6 +134,15 @@ async function measure(mode, web, browser) {
     const page = await context.newPage()
     await page.goto(`${base}/#token=${TOKEN}`)
     await page.waitForSelector('section.home', { timeout: 10_000 })
+    // M2: each session is attached in its own Focus page (a live xterm on the terminal channel), on top of the
+    // screen watch the server keeps on every live PTY.
+    const ids = (await api('/api/sessions')).sessions.map(row => row.id)
+    for (const id of ids) {
+      const focus = await context.newPage()
+      await focus.goto(`${base}/s/${encodeURIComponent(id)}#token=${TOKEN}`)
+      await focus.waitForSelector('.terminal-view .xterm-rows', { timeout: 10_000 })
+      await focus.waitForSelector('.terminal-view .terminal-skeleton', { state: 'detached', timeout: 10_000 })
+    }
     await new Promise(resolve => setTimeout(resolve, 5000))
     const pids = { deckd: deckd.pid, server: server.pid }
     const first = { deckd: await cpuTicks(pids.deckd), server: await cpuTicks(pids.server) }
@@ -144,7 +154,7 @@ async function measure(mode, web, browser) {
     const percent = name => Math.round((last[name] - first[name]) / TICKS / seconds * 100 * 100) / 100
     const sessions = (await api('/api/sessions')).sessions.map(row => row.state)
     await context.close()
-    return { mode, sessions: sessions.length, states: [...new Set(sessions)], seconds: Math.round(seconds * 10) / 10,
+    return { mode, sessions: sessions.length, focusPages: ids.length, states: [...new Set(sessions)], seconds: Math.round(seconds * 10) / 10,
       percentOfOneCore: { deckd: percent('deckd'), server: percent('server'), total: Math.round((percent('deckd') + percent('server')) * 100) / 100 },
       loadavgStart: loadStart, loadavgEnd: environment().loadavg }
   } finally {
