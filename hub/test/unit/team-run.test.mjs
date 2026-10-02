@@ -259,6 +259,21 @@ test('team: Stop run is hidden without a lead and disabled with the reason while
   assert.doesNotMatch(noLead, /Review \d/)
 })
 
+test('team: the Stop run dialog passes no cancelLabel, so its Cancel button reads confirm.cancel', async () => {
+  const { TeamRunView } = await load('team-run/TeamRun.jsx')
+  const { CONFIRM_COPY } = await runnerImport(path.join(hub, 'web/src/components/ConfirmDialog.jsx'), { configFile: false, logLevel: 'silent', root: hub }).then(r => r.module)
+  const { messages: en, format } = await runnerImport(path.join(hub, 'web/src/i18n/en.js'), { configFile: false, logLevel: 'silent', root: hub }).then(r => r.module)
+  // The shell's English translator (App.jsx): en.js first, then the screen's own copy through translate.
+  const t = (key, params) => format(en[key] ?? key, params, 'en')
+  const expected = en['confirm.cancel'] ?? CONFIRM_COPY['confirm.cancel']
+  assert.equal(expected, 'Cancel')
+  const html = render(TeamRunView, viewProps({ confirming: true, t }))
+  assert.match(html, /role="dialog"/)
+  const cancel = html.match(/<button[^>]*data-initial-focus="true"[^>]*>([^<]*)<\/button>/)
+  assert.ok(cancel, 'the dialog renders its Cancel button')
+  assert.equal(cancel[1], expected)
+})
+
 test('team: an unreadable status keeps the last good data dimmed with the error banner', async () => {
   const { TeamRunView } = await load('team-run/TeamRun.jsx')
   const run = teamRun({ readError: { file: 'status.json', message: 'Malformed JSON' } })
