@@ -20,6 +20,10 @@ writeFileSync(path.join(deckPaths.config, 'token'), 'synthetic-token\n')
 writeFileSync(path.join(deckPaths.config, 'tiers.json'), '{}\n')
 writeFileSync(path.join(deckPaths.state, 'token'), 'synthetic-token\n')
 writeFileSync(path.join(home, 'repo', 'notes.txt'), 'synthetic\n')
+// Synthetic secrets: a command other than the read commands is rated "reads a secret file" only
+// for a path that exists.
+writeFileSync(path.join(home, '.ssh', 'id_ed25519'), 'synthetic-key\n')
+writeFileSync(path.join(home, '.aws', 'credentials'), 'synthetic-credentials\n')
 Object.assign(process.env, {
   HOME: home,
   XDG_CONFIG_HOME: path.join(home, '.config'),

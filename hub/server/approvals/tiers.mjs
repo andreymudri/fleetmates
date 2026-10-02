@@ -71,8 +71,16 @@ const gitConfigWriteRunsCode = key => /^(?:remote\..+\.(?:push|mirror)|alias\..*
 const DEV_NULLS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr'])
 const PERSISTENCE_FILES = Object.freeze(['.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.profile', '.zshrc', '.zprofile', '.zshenv', '.zlogin', '.zlogout', '.config/fish/config.fish'])
 const PERSISTENCE_DIRS = Object.freeze(['.config/fish/conf.d', '.config/hypr', '.config/systemd/user', '.config/autostart'])
-// Bash read commands whose path operands go through the sensitive list (F9).
+// Bash read commands whose path operands go through the sensitive list (F9) whether or not the
+// file exists yet. Every other command's operands and option values go through it too, once the
+// path exists (a path that does not exist holds nothing to read).
 const READ_COMMANDS = Object.freeze(['cat', 'head', 'tail', 'less', 'grep', 'rg', 'cp', 'base64', 'xxd', 'od', 'strings'])
+// Commands that only print their own arguments, so a path among them is text, not a read.
+const TEXT_COMMANDS = Object.freeze(['echo', 'printf'])
+// Safe subcommands documented to rewrite the files or directories they are given (the working
+// directory when they are given none; the tools are not run in this suite), so every path operand
+// is a write target.
+const OPERAND_WRITERS = Object.freeze(['terraform fmt', 'ruff check', 'ruff format', 'go fmt'])
 const FILE_WRITE_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const GLOB_LIMIT = 1000
 const GLOB_VISIT_LIMIT = 20000
@@ -265,12 +273,16 @@ function disallowedOption(entry, rest) {
     if (arg === '--') return null
     if (!arg.startsWith('-') || arg === '-') continue
     if (matchesAny(allow, arg)) continue
-    if (outputs.some(option => arg === option || arg.startsWith(`${option}=`) || (option.length === 2 && arg.startsWith(option)))) continue
+    // An output option is allowed in the spellings the parser resolves to a write target: the
+    // option alone (its value is the next word), `--long=value`, and a two-letter `-oVALUE`. A
+    // single-dash `-o=VALUE` is not one of them (the parser reads `=VALUE` as the path, while Go's
+    // documented flag syntax reads VALUE), so it stays off the Safe list.
+    if (outputs.some(option => arg === option || (option.startsWith('--') && arg.startsWith(`${option}=`)) || (option.length === 2 && arg.startsWith(option) && arg[2] !== '='))) continue
     if (bundles && !arg.startsWith('--') && arg.length > 2) {
       let ok = true
       for (let c = 1; c < arg.length; c++) {
         const flag = `-${arg[c]}`
-        if (outputs.includes(flag)) break
+        if (outputs.includes(flag)) { if (arg[c + 1] === '=') ok = false; break }
         if (!matchesAny(allow, flag)) { ok = false; break }
         if (/^\d+$/.test(arg.slice(c + 1))) break
       }
@@ -570,6 +582,9 @@ function classifySegment(segment, ctx, ready, out) {
   if (PRIVILEGE_WORDS.includes(name)) push(reason('floor.privilege', 'caution', text, 'runs as another user'))
   const info = segment.wordInfo ?? []
   const operands = []
+  // The file an option names in its own word: `--file=PATH`, `--pathspec-from-file=PATH` or a
+  // stuck short value such as `-FPATH`. An option's value in the next word is an operand already.
+  const optionValues = []
   for (let k = 1; k < words.length; k++) {
     const word = words[k]
     if (info[k]?.glob) {
@@ -580,23 +595,71 @@ function classifySegment(segment, ctx, ready, out) {
     }
     if (info[k] && !info[k].literal) continue
     if (namesDeckPort(word, ctx)) push(reason('floor.deck', 'destructive', text, 'talks to the deck\'s own server'))
+    if (word.startsWith('-') && word !== '--') {
+      const equal = word.indexOf('=')
+      const value = equal > 0 ? word.slice(equal + 1) : (!word.startsWith('--') && word.length > 2 ? word.slice(2) : '')
+      const location = value && !/\s/.test(value) ? resolveIn(value, segment.cwd) : null
+      if (location) optionValues.push({ location, word })
+      continue
+    }
     // A relative word with white space is a script or text argument (`sh -c 'echo x'`), not a path.
-    if (word.startsWith('-') || (!path.isAbsolute(word) && /\s/.test(word))) continue
+    if (!path.isAbsolute(word) && /\s/.test(word)) continue
     const location = resolveIn(word, segment.cwd)
     if (location) operands.push({ location, word })
   }
-  if (!['echo', 'printf'].includes(name) && operands.some(({ location }) => namesControl(location, ctx))) push(reason('floor.deck', 'destructive', text, 'names the deck\'s own files'))
+  // The deck floor reads operands only: an option value may be a pattern (`--regexp=cache/token`),
+  // and the M1 floor already rates the options that read a file (machines.test.mjs pins both).
+  const named = [...operands, ...optionValues]
+  if (!TEXT_COMMANDS.includes(name) && operands.some(({ location }) => namesControl(location, ctx))) push(reason('floor.deck', 'destructive', text, 'names the deck\'s own files'))
   if (name === 'systemctl' && words.some(word => /^fleetmates-deck/.test(commandBase(word)))) push(reason('floor.deck', 'destructive', text, 'controls the deck\'s own services'))
-  const recursive = name === 'rg' || name === 'find' || name === 'rsync'
-    || (name === 'grep' && words.some(word => /^-[^-]*[rR]/.test(word) || word === '--recursive' || word.startsWith('--recursive') || word === '--dereference-recursive'))
-    || (name === 'cp' && words.some(word => /^-[^-]*[rRa]/.test(word) || ['--recursive', '--archive'].includes(word)))
+  // Commands that read a whole directory tree: their roots may not hold the deck's files (F9). diff
+  // -r prints every file under its operands in full (with -N, against an empty directory).
+  const shortFlag = (flags) => words.some(word => new RegExp(`^-[^-]*[${flags}]`).test(word))
+  const recursive = name === 'rg' || name === 'find' || name === 'rsync' || name === 'fd' || name === 'tree'
+    || (name === 'du' && (shortFlag('a') || words.includes('--all')))
+    || (name === 'grep' && (shortFlag('rR') || words.some(word => word === '--recursive' || word.startsWith('--recursive') || word === '--dereference-recursive')))
+    || (name === 'cp' && (shortFlag('rRa') || words.some(word => ['--recursive', '--archive'].includes(word))))
+    || (name === 'diff' && (shortFlag('r') || words.some(word => word.startsWith('--rec'))))
+    || (name === 'ls' && (shortFlag('R') || words.some(word => word.startsWith('--recur'))))
     || (name === 'tar' && (/^[^-]*c/.test(words[1] ?? '') || words.some(word => /^-[^-]*c/.test(word) || word === '--create')))
   if (recursive) {
     const roots = operands.map(operand => operand.location)
-    if (roots.length <= (['grep', 'rg'].includes(name) ? 1 : 0) && segment.cwd) roots.push(segment.cwd)
+    if (roots.length <= (['grep', 'rg', 'fd'].includes(name) ? 1 : 0) && segment.cwd) roots.push(segment.cwd)
     if (roots.some(root => ancestorOfControl(root, ctx))) push(reason('floor.deck', 'destructive', text, 'reads a directory that holds the deck\'s own files'))
   }
-  if (READ_COMMANDS.includes(name) && operands.some(({ location }) => candidates(location).some(candidate => isSensitive(candidate, ctx.home)))) push(reason('read.secret', 'caution', text, 'reads a secret file'))
+  const sensitive = ({ location }) => candidates(location).some(candidate => isSensitive(candidate, ctx.home))
+  const exists = ({ location }) => { try { return existsSync(location) } catch { return false } }
+  if ((READ_COMMANDS.includes(name) && operands.some(sensitive)) || (!TEXT_COMMANDS.includes(name) && named.some(item => exists(item) && sensitive(item)))) push(reason('read.secret', 'caution', text, 'reads a secret file'))
+  if (name === 'go') {
+    // Go's flag package documents `-o=PATH`, `--o=PATH` and `--o PATH` as spellings of `-o PATH`
+    // (not run here: no Go toolchain on the test host). The parser does not record them as writes,
+    // so their value is checked as the output file here.
+    for (let k = 1; k < words.length; k++) {
+      if (info[k] && !info[k].literal) continue
+      const match = /^--?o=(.*)$/.exec(words[k])
+      const value = match ? match[1] : (words[k] === '--o' ? words[k + 1] : null)
+      if (value === null || value === undefined) continue
+      const verdict = writeVerdict(info[k + 1] && !match && !info[k + 1].literal ? null : resolveIn(value, segment.cwd), ctx, text)
+      if (verdict) push(verdict)
+    }
+  }
+  if (OPERAND_WRITERS.includes(`${name} ${words[1] ?? ''}`)) {
+    // A non-literal operand, or a glob too large to expand, is an unknown target (null).
+    const targets = []
+    for (let k = 2, parsing = true; k < words.length; k++) {
+      const word = words[k]
+      if (parsing && word === '--' && (!info[k] || info[k].literal)) { parsing = false; continue }
+      if (info[k]?.glob) { targets.push(...(expandGlob(word, segment.cwd) ?? [null])); continue }
+      if (info[k] && !info[k].literal) { targets.push(null); continue }
+      if (parsing && word.startsWith('-') && word !== '-') continue
+      if (word !== '-') targets.push(resolveIn(word, segment.cwd))
+    }
+    if (!targets.length) targets.push(segment.cwd)
+    for (const target of targets) {
+      const verdict = writeVerdict(target, ctx, text)
+      if (verdict) push(verdict)
+    }
+  }
   if (name === 'git') {
     const { floors, safe } = gitGlobals(globals, segment, ctx)
     for (const key of floors) push(reason('floor.git-c', 'destructive', text, `${key} runs a program`))

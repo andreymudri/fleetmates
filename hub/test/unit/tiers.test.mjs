@@ -43,6 +43,19 @@ test('a user Safe entry cannot lower a Destructive match', () => {
   } finally { s.close() }
 })
 
+test('a user file with extends: null drops the default entries but keeps every floor entry', () => {
+  const s = sandbox()
+  try {
+    const tiers = effectiveTiers(DEFAULT_TIERS, { version: 1, extends: null })
+    const floors = DEFAULT_TIERS.entries.filter(entry => entry.floor === true)
+    assert.ok(floors.length > 100, `${floors.length} floor entries`)
+    assert.deepEqual(tiers.entries.map(entry => entry.id), floors.map(entry => entry.id))
+    for (const command of ['kubectl delete pod web', 'terraform destroy', 'npm publish']) assert.equal(s.bash(command, { tiers }).tier, 'destructive', command)
+    // The non-floor defaults are gone: a Safe default no longer matches.
+    assert.equal(s.bash('ls', { tiers }).tier, 'caution')
+  } finally { s.close() }
+})
+
 test('description text never changes a tier (F17)', () => {
   const s = sandbox()
   try {

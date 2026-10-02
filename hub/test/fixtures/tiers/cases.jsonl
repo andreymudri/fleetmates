@@ -385,3 +385,85 @@
 {"toolName":"Bash","toolInput":{"command":"env -S 'rm\\_/tmp/synthetic-only'"},"cwd":"/tmp","expected":"destructive","note":"regression: machines.test.mjs asserts destructive","repoRoot":null}
 {"toolName":"Bash","toolInput":{"command":"env -S '\"/bin/rm\" \"/tmp/synthetic only\"'"},"cwd":"/tmp","expected":"destructive","note":"regression: machines.test.mjs asserts destructive","repoRoot":null}
 {"toolName":"Bash","toolInput":{"command":"env -S 'systemctl stop --user \"fleetmates-deck.service\"'"},"cwd":"/tmp","expected":"destructive","note":"regression: machines.test.mjs asserts destructive","repoRoot":null}
+{"toolName":"Bash","toolInput":{"command":"diff -rN /home/you /home/you/empty"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"diff -r /home/you/.config /home/you/empty"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"diff -Nr /home/you/.local/state /home/you/empty"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"diff -r src /home/you/project"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"diff -u a b"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"ls -R /home/you"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"ls -laR /home/you/.config"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"ls -R"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"tree /home/you"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"tree src"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"du -a /home/you"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"du -sh /home/you"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"pytest --basetemp=/home/you"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"pytest --basetemp=/home/you/victim"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"pytest --basetemp=."},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"go build -o .git/hooks/pre-commit ./cmd/x"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"go build -o.git/hooks/pre-commit ./cmd/x"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"go build -o=.git/hooks/pre-commit ./cmd/x"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"go build --o=.git/hooks/pre-commit ./cmd/x"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"go build --o .git/hooks/pre-commit ./cmd/x"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"go build -o /home/you/.bashrc ."},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"go build -o/home/you/.bashrc ."},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"go build -o=/home/you/.bashrc ."},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"go build --o=/home/you/.bashrc ."},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"go build --o /home/you/.bashrc ."},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"go build -o /home/you/other/out ."},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"go build -o/home/you/other/out ."},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"go build -o=/home/you/other/out ."},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"go build --o=/home/you/other/out ."},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"go build --o /home/you/other/out ."},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"go build -o=/home/you/.local/bin/ls ."},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"go build -o bin/x ."},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"go build -o=bin/x ."},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"sort -o .git/hooks/pre-commit f"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"sort -o.git/hooks/pre-commit f"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"sort --output=.git/hooks/pre-commit f"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"sort --output .git/hooks/pre-commit f"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"sort -o=.git/hooks/pre-commit f"},"cwd":"/home/you/repo","expected":"destructive","note":"the M1 floor reads -o=.git/hooks as a .git write"}
+{"toolName":"Bash","toolInput":{"command":"sort -o /home/you/.bashrc f"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"sort -o/home/you/.bashrc f"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"sort --output=/home/you/.bashrc f"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"sort --output /home/you/.bashrc f"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"sort -o=/home/you/.bashrc f"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"sort -o /home/you/other/out f"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"sort -o/home/you/other/out f"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"sort --output=/home/you/other/out f"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"sort --output /home/you/other/out f"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"sort -o=/home/you/other/out f"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"sort -o sorted.txt f"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"sort --output=sorted.txt f"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"sort /home/you/.ssh/id_ed25519"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"sed -n p /home/you/.ssh/id_ed25519"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"uniq /home/you/.ssh/id_ed25519"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"diff /home/you/.ssh/id_ed25519 /dev/null"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"wc -l /home/you/.ssh/id_ed25519"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git commit -F /home/you/.ssh/id_ed25519"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git commit --file=/home/you/.ssh/id_ed25519"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git commit -F/home/you/.ssh/id_ed25519"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git add --pathspec-from-file=/home/you/.ssh/id_ed25519"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git commit --template=/home/you/.aws/credentials"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git commit -F msg.txt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"golangci-lint run --out-format=json:/home/you/.bashrc"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"golangci-lint run --output.text.path=/home/you/.bashrc"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"golangci-lint run --out-format=json"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"pytest --cov-report=xml:/home/you/.bashrc"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"pytest --cov-report xml:/home/you/.bashrc"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"pytest --cov=src --cov-report=term-missing"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"terraform providers mirror /home/you/.local/bin"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"terraform providers lock"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"terraform providers schema -json"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"terraform providers"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"terraform fmt /home/you/other"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"terraform fmt /home/you/.config/autostart"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"ruff check --fix /home/you/other"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"ruff format /home/you/other"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"ruff format src"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"terraform fmt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"go build -pkgdir=/home/you/.config/systemd/user"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"go build -ldflags=-extld=/tmp/evil"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"go test -cpuprofile=/home/you/.bashrc"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"go build -p 4 ./..."},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"go test -cpu=1,2 ./..."},"cwd":"/home/you/repo","expected":"safe"}
