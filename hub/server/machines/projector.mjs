@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs'
+import { capHistory } from '../../deckd/screen-model.mjs'
 import { dedupeKey } from '../ingest/validate.mjs'
 import { isRunName } from '../adapters/fleetmates.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
@@ -86,7 +87,10 @@ function requestView(row) {
   }
 }
 
-/** Longest stored exit scrollback in bytes (06-storage `session_scrollback`); a longer tail keeps its end. */
+/**
+ * Longest stored exit scrollback in bytes (06-storage `session_scrollback`); a longer tail keeps its end, a
+ * longer history keeps its newest whole lines.
+ */
 export const SCROLLBACK_CAP = 2 * 1024 * 1024
 /**
  * Expired reason for requests closed by `screen_idle` (state-machines row 21: the prompt left the screen with
@@ -362,7 +366,8 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
     /**
      * Apply one non-hook signal to a session in one transaction: `pid_gone`, `lost`, `review`, from the session
      * actions `stop_requested` (row 50) and `relaunched` (`{ ptyId }`, row 46, only from `crashed`), and from deckd
-     * `exit` (`{ code, signal, tail }`, tail base64 from `exits`, stored in `session_scrollback`),
+     * `exit` (`{ code, signal, tail, history }`, tail base64 from `exits`; `session_scrollback` stores
+     * `history.data` when deckd sent one, else the raw tail),
      * `screen_idle` (rows 21 and 30) and `output` (counted output, state-machines 1.10). `screen_idle` and
      * `output` append no event when they change nothing a client sees.
      */
@@ -387,12 +392,18 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
           const crashed = !row.user_stop_requested && (neverStarted || (signal.code !== 0 || exitSignal !== null) && !row.end_announced)
           const state = crashed ? 'crashed' : JSON.parse(row.changed_files).length ? 'done' : 'ended'
           store.run('UPDATE sessions SET state=?,state_since=?,alive=0,activity=NULL,ended_at=?,exit_code=?,exit_signal=?,crash_kind=?,since_ts=? WHERE id=?', state, state === row.state ? row.state_since : at, at, signal.code ?? null, exitSignal, crashed ? exitSignal ? 'signal' : 'exit' : null, at, row.id)
-          if (typeof signal.tail === 'string') {
+          let scrollback = null
+          if (typeof signal.history?.data === 'string') {
+            // deckd's serialized history (05-api 5.2), cut by whole leading lines like deckd's own cap.
+            const text = capHistory(signal.history.data, SCROLLBACK_CAP)
+            scrollback = { text, truncated: text !== signal.history.data }
+          } else if (typeof signal.tail === 'string') {
             let bytes = Buffer.from(signal.tail, 'base64')
             const truncated = bytes.length > SCROLLBACK_CAP
             if (truncated) bytes = bytes.subarray(bytes.length - SCROLLBACK_CAP)
-            store.run('INSERT INTO session_scrollback(session_id,captured_at,text,truncated) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,text=excluded.text,truncated=excluded.truncated', row.id, at, bytes.toString('utf8'), truncated ? 1 : 0)
+            scrollback = { text: bytes.toString('utf8'), truncated }
           }
+          if (scrollback) store.run('INSERT INTO session_scrollback(session_id,captured_at,text,truncated) VALUES(?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET captured_at=excluded.captured_at,text=excluded.text,truncated=excluded.truncated', row.id, at, scrollback.text, scrollback.truncated ? 1 : 0)
         } else if (signal.type === 'lost' && row.origin !== 'observed' && row.alive) {
           // Reconciliation rule 5(c): deckd no longer knows the PTY and kept no exit record for it.
           row = refreshSessionChanges(store, row)

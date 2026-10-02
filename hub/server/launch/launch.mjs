@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { apiError } from '../http/router.mjs'
+import { renderHistory } from '../screen/history.mjs'
 
 /** Longest launch task, in characters. */
 export const TASK_MAX = 10_000
@@ -58,19 +59,19 @@ export function headBranch(root) {
   } catch { return null }
 }
 
-function countLines(buf) {
-  let n = 0
-  for (let i = buf.indexOf(0x0a); i !== -1; i = buf.indexOf(0x0a, i + 1)) n++
-  return n + (buf.length && buf[buf.length - 1] !== 0x0a ? 1 : 0)
-}
-/** Keep the newest `lines` lines of `buf`; report whether older ones were dropped. */
-function lastLines(buf, lines) {
-  let truncated = false
-  while (countLines(buf) > lines) {
-    buf = buf.subarray(buf.indexOf(0x0a) + 1)
-    truncated = true
+/**
+ * Keep the newest `lines` lines of `text`, cut on `\r\n` boundaries; report whether older ones were dropped.
+ * @param {string} text
+ * @param {number} lines
+ */
+function lastLines(text, lines) {
+  let at = text.endsWith('\r\n') ? text.length - 2 : text.length
+  for (let i = 0; i < lines; i++) {
+    if (at <= 0) return { text, truncated: false }
+    at = text.lastIndexOf('\r\n', at - 1)
+    if (at === -1) return { text, truncated: false }
   }
-  return { buf, truncated }
+  return { text: text.slice(at + 2), truncated: true }
 }
 
 /**
@@ -173,21 +174,23 @@ export function createLauncher({ store, projector, link, now = Date.now, prefere
       return { status: 202, data: { session: view(id) } }
     },
     /**
-     * `GET /api/sessions/:id/scrollback`: deckd's ring for a live PTY, else the tail stored at exit.
+     * `GET /api/sessions/:id/scrollback`: deckd's serialized history for a live PTY (its raw ring when deckd
+     * sends no `history`), else the text stored at exit rendered by `renderHistory`.
      * @param {string} id
      * @param {number} lines
      */
     async scrollback(id, lines) {
       const current = row(id)
       if (current.alive && current.pty_id && link?.connected) {
-        const reply = await link.request('screen', { ptyId: current.pty_id, scrollback: lines + 1 })
-        const { buf, truncated } = lastLines(Buffer.from(reply.scrollback ?? '', 'base64'), lines)
-        return { data: { text: buf.toString('utf8'), source: 'deckd', truncated } }
+        const reply = await link.request('screen', { ptyId: current.pty_id, scrollback: lines + 1, history: true })
+        const served = typeof reply.history?.data === 'string' ? reply.history.data : Buffer.from(reply.scrollback ?? '', 'base64').toString('utf8')
+        const { text, truncated } = lastLines(served, lines)
+        return { data: { text, source: 'deckd', truncated } }
       }
       const stored = store.get('SELECT text,truncated FROM session_scrollback WHERE session_id=?', id)
       if (!stored) throw apiError(404, 'not_found')
-      const { buf, truncated } = lastLines(Buffer.from(stored.text, 'utf8'), lines)
-      return { data: { text: buf.toString('utf8'), source: 'stored', truncated: !!stored.truncated || truncated } }
+      const { text, truncated } = lastLines(await renderHistory(stored.text), lines)
+      return { data: { text, source: 'stored', truncated: !!stored.truncated || truncated } }
     },
     close() { offIdle() }
   }
