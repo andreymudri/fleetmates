@@ -47,7 +47,7 @@ async function harness(t) {
   const events = []
   deck.subscribe(event => events.push(event))
   const updates = () => events.filter(event => event.type === 'run.updated' && event.data.runId === 'r1')
-  /** GET /api/runs as the Team page does on load; that first read finds the run and attaches its watcher. */
+  /** GET /api/runs as the Team page does on load. The server's priming pass at listen() already watches r1. */
   const runs = async () => {
     const origin = `http://127.0.0.1:${deck.address().port}`
     const response = await fetch(origin + '/api/runs', { headers: { Authorization: `Bearer ${token}`, Origin: origin } })
@@ -119,6 +119,11 @@ test('a watch event during a pass reruns the pass once it ends, publishing both 
   deck.subscribe(event => events.push(event))
   const updates = () => events.filter(event => event.type === 'run.updated' && event.data.runId === 'r1')
   assert.equal(typeof fire, 'function', 'the server registers a watch callback')
+  // listen() starts the priming pass, which records 'pending' as the baseline. Release it so the watch-driven
+  // passes below are the only ones left; the baseline means 'pending' is never published.
+  await waitFor(() => releases.length === 1, 2000, 'the priming pass to call list()')
+  releases[0]()
+  state = 'blocked'
   const startCalls = releases.length
   fire()
   await waitFor(() => releases.length === startCalls + 1, 2000, 'the first pass to call list()')
@@ -130,7 +135,7 @@ test('a watch event during a pass reruns the pass once it ends, publishing both 
   await waitFor(() => releases.length === startCalls + 2, 2000, 'the rerun pass to call list()')
   releases[startCalls + 1]()
   await waitFor(() => updates().length === 2, 2000, 'run.updated for both states')
-  assert.deepEqual(updates().map(event => event.data.tasks[0].state), ['pending', 'in_progress'])
+  assert.deepEqual(updates().map(event => event.data.tasks[0].state), ['blocked', 'in_progress'])
   assert.equal(releases.length - startCalls, 2, 'list() ran exactly twice')
 })
 
@@ -153,4 +158,15 @@ test('a repo registered after the first read rebuilds the reader with the watch,
   const updated = runId => h.events.some(event => event.type === 'run.updated' && event.data.runId === runId &&
     event.data.tasks[0].state === 'in_progress')
   await waitFor(() => updated('r1') && updated('r2'), 2000, 'run.updated for r1 and r2 after the edits')
+})
+
+test('a run present at start is watched without any client listing runs, and startup publishes nothing', async t => {
+  const h = await harness(t)
+  // No GET /api/runs and no WebSocket snapshot: only the server's own priming pass can attach the watcher.
+  await waitFor(() => watchers() > h.before, 2000, 'the priming pass to watch the run directory')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  assert.equal(h.updates().length, 0, 'no run.updated at startup for an unchanged run')
+  fs.writeFileSync(path.join(h.runDir, 'status.json'), JSON.stringify({ runId: 'r1', tasks: [{ id: 'T1', state: 'in_progress' }] }))
+  await waitFor(() => h.updates().length === 1, 2000, 'run.updated after the edit')
+  assert.equal(h.updates()[0].data.tasks[0].state, 'in_progress')
 })
