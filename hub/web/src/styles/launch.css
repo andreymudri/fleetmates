@@ -15,6 +15,10 @@
   background: var(--overlay-scrim);
 }
 
+/* Alt U on /new opens the Needs-you drawer over the form: while the launch scrim is in the page, the drawer scrim
+   (and the drawer inside it) sits one layer above it, so a click on the drawer never reaches the launch scrim. */
+:root:has(.launch-scrim) .drawer-scrim { z-index: calc(var(--z-dialog) + 1); }
+
 .launch-dialog {
   --launch-row: 48px;
   display: flex;

@@ -656,21 +656,26 @@ if (import.meta.main) {
     assert.equal(await page.inputValue('#new-session-task'), 'reindex the notes')
   })
 
-  // Known gap logged by the phase 6 review: on /new the Needs-you drawer (z-index 30, hub/web/src/styles/observe.css:221)
-  // opens under the launch scrim (z-index 40, hub/web/src/styles/launch.css:10), so a click meant for the drawer lands
-  // on the scrim and cancels the form.
-  spec('New session: Alt U opens the Needs-you drawer above the form', { todo: 'the drawer (observe.css:221, z 30) stacks under the launch scrim (launch.css:10, z 40)' }, async t => {
+  // On /new the Needs-you drawer opens over the launch scrim, so a click meant for the drawer never lands on the
+  // scrim and cancels the form.
+  spec('New session: Alt U opens the Needs-you drawer above the form', async t => {
     const h = await deck(t, { team: false })
     await h.observed()
     const page = await openDeck(browser, h, '/new')
     await page.waitForSelector('#new-session-repo')
     await page.keyboard.press('Alt+KeyU')
     await page.waitForSelector('.drawer')
+    // The drawer slides in from off screen; read the topmost element once it has arrived.
+    await page.$eval('.drawer', drawer => Promise.all(drawer.getAnimations().map(animation => animation.finished)))
     const onTop = await page.$eval('.drawer', drawer => {
       const box = drawer.getBoundingClientRect()
       return drawer.contains(document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2))
     })
     assert.equal(onTop, true, 'the drawer is the topmost element at its centre')
+    await page.click('.drawer .drawer-close')
+    await page.waitForSelector('.drawer', { state: 'detached' })
+    assert.equal(new URL(page.url()).pathname, '/new', 'closing the drawer keeps the form')
+    assert.equal(await page.locator('.launch-dialog').count(), 1, 'the New session dialog is still open')
   })
 
   spec('New session AC9: a repo name with markup renders as text', async t => {

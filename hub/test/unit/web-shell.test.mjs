@@ -745,10 +745,41 @@ test('in Chromium the deck drops the fragment, authenticates the socket and show
     drawer.remove()
     return result
   })
+  // The reduced-motion stills: each loop's animation, the static rings and the scroll behaviour of a probe and of
+  // the root, both set to smooth inline while they are read.
+  const stills = () => page.evaluate(() => {
+    const make = className => {
+      const node = document.createElement('div')
+      node.className = className
+      node.style.scrollBehavior = 'smooth'
+      document.body.append(node)
+      return node
+    }
+    const nodes = {
+      pulse: make('motion-pulse'), recPulse: make('motion-rec-pulse'), caret: make('motion-caret'), shimmer: make('motion-shimmer'),
+      arrive: make('motion-arrive'), card: make('session-card motion-pulse')
+    }
+    const root = document.documentElement
+    const rootScroll = root.style.scrollBehavior
+    root.style.scrollBehavior = 'smooth'
+    const style = name => getComputedStyle(nodes[name])
+    const result = {
+      pulse: style('pulse').animationName, recPulse: style('recPulse').animationName, caret: style('caret').animationName,
+      shimmer: style('shimmer').animationName, arrive: style('arrive').animationName,
+      pulseShadow: style('pulse').boxShadow, arriveShadow: style('arrive').boxShadow, cardShadow: style('card').boxShadow,
+      scroll: style('pulse').scrollBehavior, rootScroll: getComputedStyle(root).scrollBehavior
+    }
+    for (const node of Object.values(nodes)) node.remove()
+    root.style.scrollBehavior = rootScroll
+    return result
+  })
   const full = { loop: 'deck-breathe', fade: '0.1s', drawer: 'deck-drawer-in' }
   const reduced = { loop: 'none', fade: '0s', drawer: 'deck-fade-in' }
   await page.emulateMedia({ reducedMotion: 'no-preference' })
   assert.deepEqual(await appearance(), { size: '14px', motion: null, body: '14px', ...full }, 'the default appearance')
+  const moving = await stills()
+  assert.deepEqual([moving.pulse, moving.recPulse, moving.caret, moving.shimmer, moving.arrive, moving.scroll, moving.rootScroll],
+    ['deck-pulse', 'deck-rec-pulse', 'deck-caret', 'deck-shimmer', 'deck-arrive', 'smooth', 'smooth'], 'with motion allowed the loops run')
   // A preference change arrives as prefs.changed over the socket; the shell re-applies it to the document root.
   // Motion and text size change in separate requests, so each one alone must reach the root.
   const patch = body => page.evaluate(async ([key, json]) => (await fetch('/api/prefs', { method: 'PATCH', headers: {
@@ -757,6 +788,13 @@ test('in Chromium the deck drops the fragment, authenticates the socket and show
   assert.equal(await patch({ motion: 'reduce' }), 200)
   await page.waitForFunction(() => document.documentElement.getAttribute('data-motion') === 'reduce', null, { timeout: 5000 })
   assert.deepEqual(await appearance(), { size: '14px', motion: 'reduce', body: '14px', ...reduced }, 'Always reduce motion alone')
+  // Every loop of the reduced-motion list stops, the static replacements show, smooth scrolling turns off, and a
+  // later sheet's `.session-card.motion-pulse` inset ring still wins (the `:where()` specificity in tokens.css).
+  assert.deepEqual(await stills(), {
+    pulse: 'none', recPulse: 'none', caret: 'none', shimmer: 'none', arrive: 'none',
+    pulseShadow: 'rgb(122, 96, 54) 0px 0px 0px 1px', arriveShadow: 'rgba(230, 233, 247, 0.35) 0px 0px 0px 3px',
+    cardShadow: 'rgb(122, 96, 54) 0px 0px 0px 1px inset', scroll: 'auto', rootScroll: 'auto'
+  }, 'Always reduce motion stills every loop')
   assert.equal(await patch({ textSize: 16 }), 200)
   await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--text-base') === '16px', null, { timeout: 5000 })
   assert.deepEqual(await appearance(), { size: '16px', motion: 'reduce', body: '16px', ...reduced }, 'text size alone')
