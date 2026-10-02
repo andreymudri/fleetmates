@@ -33,8 +33,10 @@ function home() {
   return { dir, repo, runDir, staticDir, env: { HOME: dir, PATH: process.env.PATH } }
 }
 
-async function harness(t) {
+/** Start the deck over home(); `setup(place)` runs first, so whatever it writes is on disk at startup. */
+async function harness(t, setup = () => {}) {
   const place = home()
+  setup(place)
   // A closed watcher's handle is released on a later turn of the event loop, so the previous test's deck may
   // still count here. Nothing else in this file watches files, so every earlier watcher must reach zero.
   await waitFor(() => watchers() === 0, 2000, 'earlier watchers to close')
@@ -95,21 +97,8 @@ test('closing the deck server closes its run-directory watchers', async t => {
   await waitFor(() => watchers() === h.before, 2000, 'the watcher to close')
 })
 
-test('a watch event during a pass reruns the pass once it ends, publishing both states in order', async t => {
-  const place = home()
-  let fire = null
-  const releases = []
-  let state = 'pending'
-  // list() resolves only when the test releases it, so the second watch event is certain to land mid-pass.
-  // Each call snapshots the run state at the moment the pass starts, as a real read would.
-  const runReader = {
-    list() {
-      const seen = [{ repoId: place.repo, runId: 'r1', tasks: [{ id: 'T1', state }], readError: null }]
-      return new Promise(resolve => { releases.push(() => resolve(seen)) })
-    },
-    watch(callback) { fire = callback },
-    close() {}
-  }
+/** A deck server over an injected run reader; returns the server and the run.updated events for r1. */
+async function injected(t, place, runReader) {
   const deck = await startDeckServer({ env: place.env, port: 0, staticDir: place.staticDir, notifications: false,
     connectDeckd: async () => { throw Error('fake offline') }, reconnectMs: 600_000, runPollMs: 600_000, runReader,
     runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
@@ -118,25 +107,97 @@ test('a watch event during a pass reruns the pass once it ends, publishing both 
   const events = []
   deck.subscribe(event => events.push(event))
   const updates = () => events.filter(event => event.type === 'run.updated' && event.data.runId === 'r1')
-  assert.equal(typeof fire, 'function', 'the server registers a watch callback')
-  // listen() starts the priming pass, which records 'pending' as the baseline. Release it so the watch-driven
-  // passes below are the only ones left; the baseline means 'pending' is never published.
+  return { deck, updates }
+}
+
+/** A run reader whose list() resolves only when the test calls the matching entry of `releases`. */
+function gatedReader(place, current) {
+  const control = { fire: null, releases: [] }
+  // Each call snapshots the run state at the moment the pass starts, as a real read would.
+  control.reader = {
+    list() {
+      const seen = [{ repoId: place.repo, runId: 'r1', tasks: [{ id: 'T1', state: current() }], readError: null }]
+      return new Promise(resolve => { control.releases.push(() => resolve(seen)) })
+    },
+    watch(callback) { control.fire = callback },
+    close() {}
+  }
+  return control
+}
+
+/** Let every queued promise reaction run, so a released pass has finished before the next step. */
+const settle = () => new Promise(resolve => setTimeout(resolve, 20))
+
+test('a watch event during a pass reruns the pass once it ends, publishing both states in order', async t => {
+  const place = home()
+  let state = 'pending'
+  const gate = gatedReader(place, () => state)
+  const { updates } = await injected(t, place, gate.reader)
+  const { releases } = gate
+  assert.equal(typeof gate.fire, 'function', 'the server registers a watch callback')
+  // listen() starts the priming pass, which records 'pending' as the baseline. Release it and let it end, so
+  // the watch-driven passes below are the only ones left; the baseline means 'pending' is never published.
   await waitFor(() => releases.length === 1, 2000, 'the priming pass to call list()')
   releases[0]()
+  await settle()
   state = 'blocked'
-  const startCalls = releases.length
-  fire()
-  await waitFor(() => releases.length === startCalls + 1, 2000, 'the first pass to call list()')
+  gate.fire()
+  await waitFor(() => releases.length === 2, 2000, 'the first watch-driven pass to call list()')
   state = 'in_progress'
-  fire()
-  await new Promise(resolve => setTimeout(resolve, 20))
-  assert.equal(releases.length, startCalls + 1, 'passes never overlap')
-  releases[startCalls]()
-  await waitFor(() => releases.length === startCalls + 2, 2000, 'the rerun pass to call list()')
-  releases[startCalls + 1]()
+  gate.fire()
+  await settle()
+  assert.equal(releases.length, 2, 'passes never overlap')
+  releases[1]()
+  await waitFor(() => releases.length === 3, 2000, 'the rerun pass to call list()')
+  releases[2]()
   await waitFor(() => updates().length === 2, 2000, 'run.updated for both states')
   assert.deepEqual(updates().map(event => event.data.tasks[0].state), ['blocked', 'in_progress'])
-  assert.equal(releases.length - startCalls, 2, 'list() ran exactly twice')
+  assert.equal(releases.length, 3, 'list() ran exactly three times: priming, the first pass and its rerun')
+})
+
+test('a watch event during the priming pass reruns the pass once priming ends, publishing the change', async t => {
+  const place = home()
+  let state = 'pending'
+  const gate = gatedReader(place, () => state)
+  const { updates } = await injected(t, place, gate.reader)
+  const { releases } = gate
+  // The priming pass snapshots 'pending' and stays busy until released; the watch event lands meanwhile.
+  await waitFor(() => releases.length === 1, 2000, 'the priming pass to call list()')
+  state = 'in_progress'
+  gate.fire()
+  await settle()
+  assert.equal(releases.length, 1, 'the watch event does not overlap the priming pass')
+  releases[0]()
+  await waitFor(() => releases.length === 2, 2000, 'the rerun after the priming pass to call list()')
+  releases[1]()
+  await waitFor(() => updates().length === 1, 2000, 'run.updated from the rerun')
+  assert.equal(updates()[0].data.tasks[0].state, 'in_progress')
+})
+
+test('a failing priming list leaves the baseline empty, so the next pass publishes the unchanged run once', async t => {
+  const place = home()
+  let fire = null
+  let calls = 0
+  const runReader = {
+    list() {
+      calls += 1
+      if (calls === 1) return Promise.reject(Error('first read fails'))
+      return Promise.resolve([{ repoId: place.repo, runId: 'r1', tasks: [{ id: 'T1', state: 'pending' }], readError: null }])
+    },
+    watch(callback) { fire = callback },
+    close() {}
+  }
+  const { updates } = await injected(t, place, runReader)
+  await waitFor(() => calls === 1, 2000, 'the priming pass to call list()')
+  await settle()
+  assert.equal(updates().length, 0, 'the failed priming pass publishes nothing')
+  fire()
+  await waitFor(() => updates().length === 1, 2000, 'run.updated from the first successful pass')
+  assert.equal(updates()[0].data.tasks[0].state, 'pending')
+  fire()
+  await waitFor(() => calls === 3, 2000, 'the third pass to call list()')
+  await settle()
+  assert.equal(updates().length, 1, 'the run is published once, then the recorded baseline holds')
 })
 
 test('a repo registered after the first read rebuilds the reader with the watch, so both repos publish within 2 s', async t => {
@@ -169,4 +230,22 @@ test('a run present at start is watched without any client listing runs, and sta
   fs.writeFileSync(path.join(h.runDir, 'status.json'), JSON.stringify({ runId: 'r1', tasks: [{ id: 'T1', state: 'in_progress' }] }))
   await waitFor(() => h.updates().length === 1, 2000, 'run.updated after the edit')
   assert.equal(h.updates()[0].data.tasks[0].state, 'in_progress')
+})
+
+test('the priming pass records every run present at start, so editing one run publishes only that run', async t => {
+  // Run r2 sits in the same repo as r1 before the server starts; only r1 is edited afterwards.
+  const h = await harness(t, place => {
+    const r2 = path.join(place.repo, '.fleetmates', 'r2')
+    fs.mkdirSync(r2, { recursive: true })
+    fs.writeFileSync(path.join(r2, 'plan.json'), JSON.stringify({ runId: 'r2', totalPhases: 1, tasks: [{ id: 'T1', title: 'First', phase: 1, files: [], deps: [] }] }))
+    fs.writeFileSync(path.join(r2, 'status.json'), JSON.stringify({ runId: 'r2', tasks: [{ id: 'T1', state: 'pending' }] }))
+  })
+  // One watcher per listed run directory: both are watched once the priming pass has read them.
+  await waitFor(() => watchers() === 2, 2000, 'the priming pass to watch both run directories')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  fs.writeFileSync(path.join(h.runDir, 'status.json'), JSON.stringify({ runId: 'r1', tasks: [{ id: 'T1', state: 'in_progress' }] }))
+  await waitFor(() => h.updates().length === 1, 2000, 'run.updated for r1 after the edit')
+  await new Promise(resolve => setTimeout(resolve, 100))
+  const published = h.events.filter(event => event.type === 'run.updated').map(event => event.data.runId)
+  assert.deepEqual(published, ['r1'], 'the unchanged r2 matches its priming baseline and is not published')
 })
