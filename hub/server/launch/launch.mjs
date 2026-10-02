@@ -5,13 +5,15 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { apiError } from '../http/router.mjs'
-import { renderHistory } from '../screen/history.mjs'
+import { DEFAULT_RENDER_SIZE, readStoredHistory, renderHistory } from '../screen/history.mjs'
 
 /** Longest launch task, in characters. */
 export const TASK_MAX = 10_000
 /** Default and largest `lines` of `GET /api/sessions/:id/scrollback`. */
 export const SCROLLBACK_LINES = 1000
 export const SCROLLBACK_LINES_MAX = 5000
+/** Rendered stored rows the launcher remembers, newest used kept. */
+export const RENDER_CACHE_SIZE = 64
 /**
  * The first prompt of a "Run as a fleetmates job" launch (D-68); a blank line and the owner's task follow it.
  */
@@ -76,12 +78,30 @@ function lastLines(text, lines) {
 
 /**
  * Create the launcher over the deckd link Task 4 built (`hub/server/pty/link.mjs`). It subscribes to
- * `link.onIdle` at once to type pending launch tasks; `close()` unsubscribes.
+ * `link.onIdle` at once to type pending launch tasks; `close()` unsubscribes. `render` turns a stored
+ * scrollback row into served text (`renderHistory`); each row is rendered once and kept in a cache of
+ * `RENDER_CACHE_SIZE` rows.
  * @param {{ store: object, projector: object, link?: import('../pty/link.mjs').DeckdLink, publish?: Function,
- *   now?: () => number, preferences: () => { prefs: { claudeCommand: string } } }} options
+ *   now?: () => number, preferences: () => { prefs: { claudeCommand: string } }, render?: typeof renderHistory }} options
  */
-export function createLauncher({ store, projector, link, now = Date.now, preferences }) {
+export function createLauncher({ store, projector, link, now = Date.now, preferences, render = renderHistory }) {
   const typing = new Set()
+  /** @type {Map<string, Promise<{ data: string, truncated: boolean }>>} */
+  const rendered = new Map()
+  // A stored row is keyed by its session, capture time and length; a new exit of the same session replaces it.
+  function renderStored(id, stored) {
+    const key = `${id}\n${stored.captured_at}\n${stored.text.length}`
+    let entry = rendered.get(key)
+    if (entry) rendered.delete(key)
+    else {
+      const { text, size } = readStoredHistory(stored.text)
+      entry = Promise.resolve().then(() => render(text, size ?? DEFAULT_RENDER_SIZE))
+      entry.catch(() => { if (rendered.get(key) === entry) rendered.delete(key) })
+    }
+    rendered.set(key, entry)
+    while (rendered.size > RENDER_CACHE_SIZE) rendered.delete(rendered.keys().next().value)
+    return entry
+  }
   const live = () => {
     if (!link?.connected) throw apiError(503, 'deckd_unavailable')
   }
@@ -175,7 +195,8 @@ export function createLauncher({ store, projector, link, now = Date.now, prefere
     },
     /**
      * `GET /api/sessions/:id/scrollback`: deckd's serialized history for a live PTY (its raw ring when deckd
-     * sends no `history`), else the text stored at exit rendered by `renderHistory`.
+     * sends no `history`), else the text stored at exit rendered by `render` at its stored size (120x40 when
+     * the row names none), once per stored row.
      * @param {string} id
      * @param {number} lines
      */
@@ -187,10 +208,11 @@ export function createLauncher({ store, projector, link, now = Date.now, prefere
         const { text, truncated } = lastLines(served, lines)
         return { data: { text, source: 'deckd', truncated } }
       }
-      const stored = store.get('SELECT text,truncated FROM session_scrollback WHERE session_id=?', id)
+      const stored = store.get('SELECT captured_at,text,truncated FROM session_scrollback WHERE session_id=?', id)
       if (!stored) throw apiError(404, 'not_found')
-      const { text, truncated } = lastLines(await renderHistory(stored.text), lines)
-      return { data: { text, source: 'stored', truncated: !!stored.truncated || truncated } }
+      const out = await renderStored(id, stored)
+      const { text, truncated } = lastLines(out.data, lines)
+      return { data: { text, source: 'stored', truncated: !!stored.truncated || out.truncated || truncated } }
     },
     close() { offIdle() }
   }

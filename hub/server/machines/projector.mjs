@@ -1,6 +1,7 @@
 import { realpathSync } from 'node:fs'
 import { capHistory } from '../../deckd/screen-model.mjs'
 import { dedupeKey } from '../ingest/validate.mjs'
+import { historySize, sizeHeader } from '../screen/history.mjs'
 import { isRunName } from '../adapters/fleetmates.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
 import { applyRequestHook, expireRequests, isRequestOpening, reconcileRequestOpenings, resumedActivityEvents } from './request.mjs'
@@ -367,7 +368,8 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
      * Apply one non-hook signal to a session in one transaction: `pid_gone`, `lost`, `review`, from the session
      * actions `stop_requested` (row 50) and `relaunched` (`{ ptyId }`, row 46, only from `crashed`), and from deckd
      * `exit` (`{ code, signal, tail, history }`, tail base64 from `exits`; `session_scrollback` stores
-     * `history.data` when deckd sent one, else the raw tail),
+     * `history.data` behind a header naming `history.cols` and `history.rows` when deckd sent one, else the
+     * raw tail),
      * `screen_idle` (rows 21 and 30) and `output` (counted output, state-machines 1.10). `screen_idle` and
      * `output` append no event when they change nothing a client sees.
      */
@@ -394,9 +396,12 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
           store.run('UPDATE sessions SET state=?,state_since=?,alive=0,activity=NULL,ended_at=?,exit_code=?,exit_signal=?,crash_kind=?,since_ts=? WHERE id=?', state, state === row.state ? row.state_since : at, at, signal.code ?? null, exitSignal, crashed ? exitSignal ? 'signal' : 'exit' : null, at, row.id)
           let scrollback = null
           if (typeof signal.history?.data === 'string') {
-            // deckd's serialized history (05-api 5.2), cut by whole leading lines like deckd's own cap.
-            const text = capHistory(signal.history.data, SCROLLBACK_CAP)
-            scrollback = { text, truncated: text !== signal.history.data }
+            // deckd's serialized history (05-api 5.2), cut by whole leading lines like deckd's own cap, after
+            // the header naming the size deckd serialized it at (06-storage `session_scrollback`).
+            const size = historySize(signal.history)
+            const header = size ? sizeHeader(size) : ''
+            const text = capHistory(signal.history.data, SCROLLBACK_CAP - header.length)
+            scrollback = { text: header + text, truncated: text !== signal.history.data }
           } else if (typeof signal.tail === 'string') {
             let bytes = Buffer.from(signal.tail, 'base64')
             const truncated = bytes.length > SCROLLBACK_CAP

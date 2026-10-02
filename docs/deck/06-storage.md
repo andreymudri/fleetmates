@@ -190,9 +190,18 @@ CREATE TABLE session_scrollback (
 ) STRICT;
 -- `text` holds deckd's serialized history (`history.data` of the exit record, 05-api.md 5.2) when the exit
 -- the projector applies carries one, cut by whole leading lines; otherwise the raw `tail` bytes, cut keeping
--- their end. `GET /api/sessions/:id/scrollback` serves every stored row rendered through a 120x40 headless
--- terminal: serialized history comes out as the same screen, and a legacy raw row comes out as rows drawn at
--- 120x40 (best effort, since its original size is unknown).
+-- their end. A history row starts with a size header, `ESC [ 8 ; rows ; cols t` (the XTWINOPS resize
+-- sequence), naming `history.rows` and `history.cols` clamped to 5..200 rows and 20..500 columns; the 2 MiB
+-- cap counts the header. A row without the header is a raw tail or was written before sizes were stored.
+-- `GET /api/sessions/:id/scrollback` serves every stored row rendered through a headless terminal of the
+-- size its header names, or 120x40 when it names none. Serialized history comes out as the same screen; a
+-- raw row comes out as rows drawn at 120x40 (best effort, since its original size is unknown). One render
+-- writes only the newest 256 KiB of the row, cut at a line start, with line, scroll and repeat counts
+-- bounded to a screenful, in 2048-character steps that yield to the event loop, starting no step after
+-- 500 ms, into a scrollback sized from the input (at most 5000 rows). The response says truncated when the stored row was
+-- cut, when the render left input out (the 256 KiB cut, the 500 ms budget, or a full scrollback), or when
+-- `lines` cut it. The server keeps the 64 most recently read renders in memory, keyed by session, capture
+-- time and text length, so a repeat read does not render again.
 
 -- the forever row (Decided D-19: repo, branch, task, outcome, duration, gate result)
 CREATE TABLE session_summaries (
