@@ -15,6 +15,7 @@ import { PROTO } from '../../deckd/protocol.mjs'
 import { hooksInstalled, isDeckHook, readSettings, transformHooks, writeSettings } from '../../server/setup/hooks.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
 import { renderUnit } from '../../server/setup/units.mjs'
+import { newerVersion, testedVersion } from '../helpers/tested-version.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const fixtures = path.join(hub, 'test/fixtures/settings')
@@ -53,7 +54,7 @@ function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false
   // xdg-open succeeds; DECK_TEST_DEFAULT_BROWSER, DECK_TEST_GTK_LAUNCH, DECK_TEST_XDG_OPEN_STATUS steer them.
   for (const name of ['systemctl', 'xdg-open', 'claude', 'notify-send', 'xdg-settings', 'gtk-launch', 'gio', 'deck-test-browser']) {
     const file = path.join(bin, name)
-    writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$DECK_TEST_CALLS"\nif [ '${name}' = claude ]; then echo "\${DECK_TEST_CLAUDE_VERSION:-2.1.282} (Claude Code)"; fi\nif [ '${name}' = xdg-settings ]; then [ -n "$DECK_TEST_DEFAULT_BROWSER" ] || exit 1; echo "$DECK_TEST_DEFAULT_BROWSER"; exit 0; fi\nif [ '${name}' = gtk-launch ]; then exit \${DECK_TEST_GTK_LAUNCH:-1}; fi\nif [ '${name}' = gio ] || [ '${name}' = deck-test-browser ]; then exit 1; fi\nif [ '${name}' = xdg-open ]; then exit \${DECK_TEST_XDG_OPEN_STATUS:-0}; fi\nif [ '${name}' = systemctl ] && [ "$2" = is-active ]; then if [ "$3" = fleetmates-deck.service ] && [ "$DECK_TEST_WEB_ACTIVE" = 1 ]; then exit 0; fi; if [ "$3" = fleetmates-deckd.service ] && [ "$DECK_TEST_DECKD_ACTIVE" = 1 ]; then exit 0; fi; exit 3; fi\nif [ '${name}' = systemctl ] && [ "$DECK_TEST_MODEL_WEB" = 1 ] && [ "$2" = enable ]; then\n  if [ -e "$DECK_TEST_WEB_ENTRY" ]; then\n    printf active > "$DECK_TEST_WEB_STATE"\n  elif grep -Fqx "ConditionPathExists=$DECK_TEST_WEB_ENTRY" "$XDG_CONFIG_HOME/systemd/user/fleetmates-deck.service"; then\n    printf skipped > "$DECK_TEST_WEB_STATE"\n  else\n    printf failed > "$DECK_TEST_WEB_STATE"\n    exit 1\n  fi\nfi\n`)
+    writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$DECK_TEST_CALLS"\nif [ '${name}' = claude ]; then echo "\${DECK_TEST_CLAUDE_VERSION:-${testedVersion()}} (Claude Code)"; fi\nif [ '${name}' = xdg-settings ]; then [ -n "$DECK_TEST_DEFAULT_BROWSER" ] || exit 1; echo "$DECK_TEST_DEFAULT_BROWSER"; exit 0; fi\nif [ '${name}' = gtk-launch ]; then exit \${DECK_TEST_GTK_LAUNCH:-1}; fi\nif [ '${name}' = gio ] || [ '${name}' = deck-test-browser ]; then exit 1; fi\nif [ '${name}' = xdg-open ]; then exit \${DECK_TEST_XDG_OPEN_STATUS:-0}; fi\nif [ '${name}' = systemctl ] && [ "$2" = is-active ]; then if [ "$3" = fleetmates-deck.service ] && [ "$DECK_TEST_WEB_ACTIVE" = 1 ]; then exit 0; fi; if [ "$3" = fleetmates-deckd.service ] && [ "$DECK_TEST_DECKD_ACTIVE" = 1 ]; then exit 0; fi; exit 3; fi\nif [ '${name}' = systemctl ] && [ "$DECK_TEST_MODEL_WEB" = 1 ] && [ "$2" = enable ]; then\n  if [ -e "$DECK_TEST_WEB_ENTRY" ]; then\n    printf active > "$DECK_TEST_WEB_STATE"\n  elif grep -Fqx "ConditionPathExists=$DECK_TEST_WEB_ENTRY" "$XDG_CONFIG_HOME/systemd/user/fleetmates-deck.service"; then\n    printf skipped > "$DECK_TEST_WEB_STATE"\n  else\n    printf failed > "$DECK_TEST_WEB_STATE"\n    exit 1\n  fi\nfi\n`)
     execFileSync('chmod', ['700', file])
   }
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: config, XDG_STATE_HOME: state, XDG_DATA_HOME: path.join(root, 'data'), XDG_RUNTIME_DIR: runtime, PATH: `${bin}:${process.env.PATH}`, DECK_TEST_CALLS: calls, CLAUDE_CONFIG_DIR: path.join(home, '.claude') }
@@ -628,10 +629,10 @@ test('init probes the active deckd socket for readiness before its deckd check',
 
 test('doctor and init show a newer Claude Code as a warning that does not fail the exit code', () => {
   const s = sandbox()
-  const newer = { DECK_TEST_CLAUDE_VERSION: '2.1.285' }
+  const newer = { DECK_TEST_CLAUDE_VERSION: newerVersion() }
   const init = s.runWith(newer, 'init')
   assert.equal(init.status, 0, init.stderr)
-  assert.match(init.stdout, /^claude: warn \(Claude Code 2\.1\.285 is newer than this deck was tested with \(2\.1\.282\)\)$/m)
+  assert.ok(init.stdout.split('\n').includes(`claude: warn (Claude Code ${newerVersion()} is newer than this deck was tested with (${testedVersion()}))`), init.stdout)
   const doctor = s.runWith(newer, 'doctor')
   assert.equal(doctor.status, 0)
   assert.match(doctor.stdout, /^claude: warn /m)
@@ -774,8 +775,8 @@ test('doctor and status read setup state without service mutations', () => {
   assert.equal(status.status, 0)
   const summary = JSON.parse(status.stdout)
   assert.equal(summary.hooks, true)
-  assert.equal(summary.claudeVersion, '2.1.282')
-  assert.equal(summary.testedClaudeVersion, '2.1.282')
+  assert.equal(summary.claudeVersion, testedVersion())
+  assert.equal(summary.testedClaudeVersion, testedVersion())
   assert.equal(summary.livePtys, 0)
   const serviceCalls = readFileSync(s.calls, 'utf8').trim().split('\n').filter(call => call.startsWith('systemctl:'))
   assert.deepEqual(serviceCalls, [

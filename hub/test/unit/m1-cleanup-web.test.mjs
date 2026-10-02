@@ -12,6 +12,7 @@ import { runnerImport } from 'vite'
 import { createDeckStore, initialState } from '../../web/src/state/deck-store.js'
 import { doctor } from '../../server/setup/doctor.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
+import { testedVersion } from '../helpers/tested-version.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 
@@ -52,7 +53,7 @@ test('first run shows a missing Claude Code as missing, even though the doctor d
   try {
     const paths = setupPaths({ HOME: path.join(dir, 'home'), XDG_RUNTIME_DIR: path.join(dir, 'r') })
     const missing = (await doctor(paths, 'deck-hook', { run: () => ({ status: 127, stdout: '', stderr: 'not found' }) })).find(row => row.id === 'claude')
-    assert.match(missing.detail, /2\.1\.282/, 'the doctor detail for a missing claude names the tested version')
+    assert.ok(missing.detail.includes(testedVersion()), 'the doctor detail for a missing claude names the tested version')
     const view = rowView(missing)
     assert.equal(view.title, 'Claude Code was not found')
     assert.equal(view.tone, 'warn')

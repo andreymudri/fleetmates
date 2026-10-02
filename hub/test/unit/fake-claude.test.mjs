@@ -7,6 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pty from 'node-pty'
 import { fakeBin } from '../helpers/fake-bin.mjs'
+import { testedVersion } from '../helpers/tested-version.mjs'
 import {
   acceptTrust, captureSettings, CAPTURE_TEST, childEnv, CMD, createRedactor, LONG_CMD, option2Rule, PROMPTS,
   readAccount, redactTokens, REDACTIONS, STEP_ORDER
@@ -184,7 +185,7 @@ test('capture-cc refuses a claude version other than testedClaudeCode, starting 
     })
     assert.notEqual(result.code, 0)
     assert.match(result.stderr, /0\.0\.0/)
-    assert.match(result.stderr, /2\.1\.282/)
+    assert.ok(result.stderr.includes(testedVersion()), result.stderr)
     assert.deepEqual(await readdir(out), [])
     assert.deepEqual(await readdir(tmp), [], 'no throwaway repo or raw dir was created')
     assert.deepEqual(await readLog(log), [], 'the fake never started a session')
@@ -307,7 +308,7 @@ test('redaction: MANIFEST.redactions names every rule pinned above', () => {
 })
 
 /**
- * Put a stub `claude` first on PATH: `--version` prints 2.1.282, anything else appends
+ * Put a stub `claude` first on PATH: `--version` prints the tested version, anything else appends
  * `hookLine` to $CAPTURE_OUT/hooks.jsonl and exits 0.
  * @param {string} dir
  * @param {string} hookLine
@@ -318,7 +319,7 @@ async function captureStub (dir, hookLine) {
   const js = path.join(bin, 'stub.mjs')
   await writeFile(js, [
     "import { appendFileSync } from 'node:fs'",
-    "if (process.argv.includes('--version')) { process.stdout.write('2.1.282 (Claude Code)\\n'); process.exit(0) }",
+    `if (process.argv.includes('--version')) { process.stdout.write(${JSON.stringify(`${testedVersion()} (Claude Code)\n`)}); process.exit(0) }`,
     `appendFileSync(process.env.CAPTURE_OUT + '/hooks.jsonl', ${JSON.stringify(hookLine)}.replaceAll('@CWD@', process.cwd()) + '\\n')`
   ].join('\n'))
   await writeFile(path.join(bin, 'claude'), `#!/bin/sh\nexec '${process.execPath}' '${js}' "$@"\n`, { mode: 0o755 })
@@ -362,7 +363,7 @@ test('capture-cc past the version gate writes redacted hooks and MANIFEST, leavi
     const bin = await captureStub(t.dir, JSON.stringify({ receivedAt: 1, payload }))
     const run = await runCapture(t.dir, bin)
     assert.equal(run.code, 0, run.stderr)
-    const dir = path.join(run.out, 'hooks', '2.1.282')
+    const dir = path.join(run.out, 'hooks', testedVersion())
     assert.deepEqual(JSON.parse(await readFile(path.join(dir, 'SessionStart.startup.json'), 'utf8')), {
       hook_event_name: 'SessionStart',
       source: 'startup',
@@ -372,7 +373,7 @@ test('capture-cc past the version gate writes redacted hooks and MANIFEST, leavi
       banner: 'you@example.com | You | Example Org'
     })
     const manifest = JSON.parse(await readFile(path.join(dir, 'MANIFEST.json'), 'utf8'))
-    assert.equal(manifest.version, '2.1.282')
+    assert.equal(manifest.version, testedVersion())
     assert.deepEqual(manifest.hooks, ['SessionStart.startup.json'])
     assert.deepEqual(await readdir(run.tmp), [], 'no deck-capture-* dirs left behind')
   } finally {
@@ -437,7 +438,7 @@ test('capture-cc startup moves ❯ to "Yes, I trust" when the dialog preselects 
         }
       ]
     }))
-    bin = await fakeBin({ script, log })
+    bin = await fakeBin({ script, log, version: testedVersion() })
     const home = path.join(t.dir, 'home')
     const tmp = path.join(t.dir, 'tmp')
     const out = path.join(t.dir, 'out')
@@ -454,7 +455,7 @@ test('capture-cc startup moves ❯ to "Yes, I trust" when the dialog preselects 
     const inputs = entries.filter(e => 'input' in e).map(e => e.input)
     assert.equal(inputs[0], '\x1b[B', 'the first key moves the marker down, not Enter on "No, exit"')
     assert.ok(inputs.includes('\r'), 'Enter confirms once ❯ is on "Yes, I trust"')
-    const dir = path.join(out, 'hooks', '2.1.282')
+    const dir = path.join(out, 'hooks', testedVersion())
     assert.equal(JSON.parse(await readFile(path.join(dir, 'SessionStart.startup.json'), 'utf8')).source, 'startup')
     const manifest = JSON.parse(await readFile(path.join(dir, 'MANIFEST.json'), 'utf8'))
     assert.ok(!manifest.skipped.some(s => s.step === 'startup'), JSON.stringify(manifest.skipped))
@@ -600,7 +601,7 @@ test('capture-cc starts claude in a repo with the capture settings and a passing
     await writeFile(js, [
       "import { execFileSync, spawnSync } from 'node:child_process'",
       "import { readFileSync, writeFileSync } from 'node:fs'",
-      "if (process.argv.includes('--version')) { process.stdout.write('2.1.282 (Claude Code)\\n'); process.exit(0) }",
+      `if (process.argv.includes('--version')) { process.stdout.write(${JSON.stringify(`${testedVersion()} (Claude Code)\n`)}); process.exit(0) }`,
       `const run = spawnSync(process.execPath, ${JSON.stringify(CMD.split(' ').slice(1))}, { encoding: 'utf8' })`,
       `writeFileSync(${JSON.stringify(dump)}, JSON.stringify({`,
       "  settings: readFileSync('.claude/settings.local.json', 'utf8'),",
@@ -685,14 +686,14 @@ test('capture-cc bash-2 saves the rule option 2 wrote as option2-rule.json, reda
         { exit: { code: 0 } }
       ]
     }))
-    bin = await fakeBin({ script, log: path.join(t.dir, 'fake.jsonl') })
+    bin = await fakeBin({ script, log: path.join(t.dir, 'fake.jsonl'), version: testedVersion() })
     const env = { ...bin.env, HOME: home, TMPDIR: tmp, FAKE_CLAUDE_FIXTURES: path.join(t.dir, 'fixtures'), CAPTURE_STEP_TIMEOUT_MS: '5000' }
     const run = await new Promise(resolve => {
       execFile(process.execPath, [captureCc, '--unattended', '--out', out], { env, timeout: 90000 },
         (err, stdout, stderr) => resolve({ code: err ? err.code : 0, stdout, stderr }))
     })
     assert.equal(run.code, 0, run.stderr)
-    const dir = path.join(out, 'hooks', '2.1.282')
+    const dir = path.join(out, 'hooks', testedVersion())
     const manifest = JSON.parse(await readFile(path.join(dir, 'MANIFEST.json'), 'utf8'))
     for (const s of ['startup', 'bash-1', 'bash-2']) assert.ok(!manifest.skipped.some(k => k.step === s), JSON.stringify(manifest.skipped))
     assert.deepEqual(JSON.parse(await readFile(path.join(dir, 'option2-rule.json'), 'utf8')), {
