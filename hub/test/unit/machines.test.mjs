@@ -437,6 +437,26 @@ test('the session view carries reviewBaseline: the stored baseline commit in a g
   } finally { h.close() }
 })
 
+test('the session view reads reviewBaseline as null when the stored head is not a commit sha', () => {
+  const h = harness()
+  try {
+    const envelope = fixture('SessionStart.startup.json', { session_id: 'baseline-odd', cwd: path.dirname(h.file) })
+    envelope.claudePid = 44
+    envelope.pidChain = [44]
+    h.projector.applyHooks([envelope])
+    const store = head => h.store.run('UPDATE sessions SET review_baseline=? WHERE claude_session_id=?', JSON.stringify({ head, files: {} }), 'baseline-odd')
+    const view = () => h.projector.snapshot().sessions.find(row => row.claudeSessionId === 'baseline-odd').reviewBaseline
+    const sha = 'a'.repeat(40)
+    // A well-formed sha written the same way reaches the view, so the null results below come from the check.
+    store(sha)
+    assert.equal(view(), sha)
+    for (const head of ['HEAD~1', 'a'.repeat(39), sha + '\n', '\u0007' + sha, 'A'.repeat(40), 42]) {
+      store(head)
+      assert.equal(view(), null, `head ${JSON.stringify(head)}`)
+    }
+  } finally { h.close() }
+})
+
 test('Git scans refuse symlinked ancestors without reading or retaining synthetic outside files', () => {
   const h = harness()
   const originalRead = fs.readSync

@@ -94,3 +94,42 @@ test('closing the deck server closes its run-directory watchers', async t => {
   await h.deck.close()
   await waitFor(() => watchers() === h.before, 2000, 'the watcher to close')
 })
+
+test('a watch event during a pass reruns the pass once it ends, publishing both states in order', async t => {
+  const place = home()
+  let fire = null
+  const releases = []
+  let state = 'pending'
+  // list() resolves only when the test releases it, so the second watch event is certain to land mid-pass.
+  // Each call snapshots the run state at the moment the pass starts, as a real read would.
+  const runReader = {
+    list() {
+      const seen = [{ repoId: place.repo, runId: 'r1', tasks: [{ id: 'T1', state }], readError: null }]
+      return new Promise(resolve => { releases.push(() => resolve(seen)) })
+    },
+    watch(callback) { fire = callback },
+    close() {}
+  }
+  const deck = await startDeckServer({ env: place.env, port: 0, staticDir: place.staticDir, notifications: false,
+    connectDeckd: async () => { throw Error('fake offline') }, reconnectMs: 600_000, runPollMs: 600_000, runReader,
+    runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
+  t.after(async () => { await deck.close()
+    fs.rmSync(place.dir, { recursive: true, force: true }) })
+  const events = []
+  deck.subscribe(event => events.push(event))
+  const updates = () => events.filter(event => event.type === 'run.updated' && event.data.runId === 'r1')
+  assert.equal(typeof fire, 'function', 'the server registers a watch callback')
+  const startCalls = releases.length
+  fire()
+  await waitFor(() => releases.length === startCalls + 1, 2000, 'the first pass to call list()')
+  state = 'in_progress'
+  fire()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(releases.length, startCalls + 1, 'passes never overlap')
+  releases[startCalls]()
+  await waitFor(() => releases.length === startCalls + 2, 2000, 'the rerun pass to call list()')
+  releases[startCalls + 1]()
+  await waitFor(() => updates().length === 2, 2000, 'run.updated for both states')
+  assert.deepEqual(updates().map(event => event.data.tasks[0].state), ['pending', 'in_progress'])
+  assert.equal(releases.length - startCalls, 2, 'list() ran exactly twice')
+})
