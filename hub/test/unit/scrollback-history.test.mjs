@@ -122,3 +122,20 @@ test('the served stored text keeps the newest lines, cut on CRLF boundaries', as
     assert.deepEqual(shown, lines.slice(-5))
   } finally { h.close() }
 })
+
+test('a live PTY serves the history deckd sends with screen history: true, else its raw ring', async () => {
+  const h = harness()
+  try {
+    const asked = []
+    let reply = { scrollback: Buffer.from('raw ring\r\n').toString('base64'), history: { data: 'serialized\r\nhistory', cols: 120, rows: 40 } }
+    const link = { connected: true, request: async (op, fields) => { asked.push({ op, fields }); return reply } }
+    const launcher = createLauncher({ store: h.store, projector: h.projector, link, preferences: () => ({ prefs: { claudeCommand: 'claude' } }) })
+    try {
+      assert.deepEqual((await launcher.scrollback(h.id, 1)).data, { text: 'history', source: 'deckd', truncated: true })
+      assert.equal(asked[0].op, 'screen')
+      assert.equal(asked[0].fields.history, true)
+      reply = { scrollback: reply.scrollback }
+      assert.deepEqual((await launcher.scrollback(h.id, 50)).data, { text: 'raw ring\r\n', source: 'deckd', truncated: false })
+    } finally { launcher.close() }
+  } finally { h.close() }
+})

@@ -185,9 +185,14 @@ CREATE TABLE session_steps (
 CREATE TABLE session_scrollback (
   session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
   captured_at INTEGER NOT NULL,
-  text        TEXT NOT NULL,                          -- raw bytes as UTF-8, ANSI kept, capped at 2 MiB
+  text        TEXT NOT NULL,                          -- serialized history or raw tail as UTF-8, ANSI kept, capped at 2 MiB
   truncated   INTEGER NOT NULL CHECK (truncated IN (0,1))
 ) STRICT;
+-- `text` holds deckd's serialized history (`history.data` of the exit record, 05-api.md 5.2) when the exit
+-- the projector applies carries one, cut by whole leading lines; otherwise the raw `tail` bytes, cut keeping
+-- their end. `GET /api/sessions/:id/scrollback` serves every stored row rendered through a 120x40 headless
+-- terminal: serialized history comes out as the same screen, and a legacy raw row comes out as rows drawn at
+-- 120x40 (best effort, since its original size is unknown).
 
 -- the forever row (Decided D-19: repo, branch, task, outcome, duration, gate result)
 CREATE TABLE session_summaries (
