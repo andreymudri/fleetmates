@@ -475,6 +475,52 @@ test('store buffers events during resync, swaps the snapshot atomically and drop
   assert.deepEqual(state.data.sessions.map(row => row.id), ['z'])
 })
 
+test('rule events fill and empty ruleOffers and rules keyed by repo and pattern, and bump rulesRev', () => {
+  const offer = (repoId, pattern, count = 5) => ({ repoId, pattern, count, threshold: 5 })
+  const rule = (repoId, pattern, extra = {}) => ({ repoId, pattern, source: 'suggested', approvalsBefore: 5, createdAt: 1, tier: 'safe', ...extra })
+  const event = (t, seq, data) => ({ type: 'message', message: { t, seq, at: seq, data } })
+  let state = reduce(initialState(), { type: 'resync' })
+  state = reduce(state, { type: 'message', message: snapshotMessage(1, { ruleOffers: [offer('/home/you/dev/a', 'Bash(cargo test)')] }) })
+  assert.deepEqual(state.data.ruleOffers, [offer('/home/you/dev/a', 'Bash(cargo test)')], 'offers come from the snapshot')
+  assert.deepEqual(state.data.rules, [])
+  const rev = state.data.rulesRev
+
+  state = reduce(state, event('rule.offered', 2, offer('/home/you/dev/b', 'Bash(cargo test)')))
+  state = reduce(state, event('rule.offered', 3, offer('/home/you/dev/a', 'Bash(cargo test)', 6)))
+  assert.deepEqual(state.data.ruleOffers, [offer('/home/you/dev/a', 'Bash(cargo test)', 6), offer('/home/you/dev/b', 'Bash(cargo test)')], 'the same pattern in another repo is its own offer')
+  state = reduce(state, event('rule.withdrawn', 4, { repoId: '/home/you/dev/a', pattern: 'Bash(cargo test)' }))
+  assert.deepEqual(state.data.ruleOffers, [offer('/home/you/dev/b', 'Bash(cargo test)')], 'withdrawing one repo keeps the other')
+  state = reduce(state, event('rule.withdrawn', 5, { repoId: '/home/you/dev/b', pattern: 'Bash(cargo test)' }))
+  assert.deepEqual(state.data.ruleOffers, [])
+  assert.equal(state.data.rulesRev, rev, 'offers do not bump the rules revision')
+
+  state = reduce(state, event('rule.upserted', 6, rule('/home/you/dev/a', 'Bash(ls)')))
+  state = reduce(state, event('rule.upserted', 7, rule('/home/you/dev/b', 'Bash(ls)')))
+  state = reduce(state, event('rule.upserted', 8, rule('/home/you/dev/a', 'Bash(ls)', { source: 'manual', createdAt: null })))
+  assert.deepEqual(state.data.rules, [rule('/home/you/dev/a', 'Bash(ls)', { source: 'manual', createdAt: null }), rule('/home/you/dev/b', 'Bash(ls)')])
+  assert.equal(state.data.rulesRev, rev + 3, 'every rule change bumps rulesRev so Settings refetches')
+  state = reduce(state, event('rule.removed', 9, { repoId: '/home/you/dev/a', pattern: 'Bash(ls)' }))
+  assert.deepEqual(state.data.rules, [rule('/home/you/dev/b', 'Bash(ls)')], 'removing one repo keeps the other')
+  state = reduce(state, event('rule.removed', 10, { repoId: '/home/you/dev/b', pattern: 'Bash(ls)' }))
+  assert.deepEqual(state.data.rules, [])
+  assert.equal(state.data.rulesRev, rev + 5)
+})
+
+test('request.updated replaces the request with its delivery, screen match, options, allowAlways and confirm label', () => {
+  let state = reduce(initialState(), { type: 'resync' })
+  const request = { id: 'r1', sessionId: 's1', kind: 'permission', tier: 'destructive', summary: 'rm -rf build', delivery: 'idle', screenMatch: 'unknown', options: [], allowAlways: false, confirmLabel: null }
+  state = reduce(state, { type: 'message', message: snapshotMessage(1, { requests: [request] }) })
+  const updated = { ...request, delivery: 'verifying', screenMatch: 'on_screen', options: [{ key: '1', label: 'Yes' }, { key: '3', label: 'No' }], allowAlways: true, confirmLabel: 'Delete build and 3 files' }
+  state = reduce(state, { type: 'message', message: { t: 'request.updated', seq: 2, at: 2, data: updated } })
+  assert.equal(state.data.requests.length, 1)
+  const [row] = state.data.requests
+  assert.equal(row.delivery, 'verifying')
+  assert.equal(row.screenMatch, 'on_screen')
+  assert.deepEqual(row.options, [{ key: '1', label: 'Yes' }, { key: '3', label: 'No' }])
+  assert.equal(row.allowAlways, true)
+  assert.equal(row.confirmLabel, 'Delete build and 3 files')
+})
+
 test('needs toasts appear once per episode and never with the drawer open or the session in Focus', () => {
   const opened = (seq, id, sessionId, kind = 'permission') => ({ type: 'message', message: { t: 'request.opened', seq, at: seq, data: { id, sessionId, kind, summary: 'cargo test --release combat::' } } })
   let state = reduce(reduce(initialState(), { type: 'resync' }), { type: 'message', message: snapshotMessage(1, {
