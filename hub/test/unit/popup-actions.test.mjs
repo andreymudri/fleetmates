@@ -140,6 +140,7 @@ test('the default runner streams a real child\'s stdout by line and kills it on 
   writeFileSync(action, `#!${process.execPath}\nprocess.stdout.write('42\\n')\nsetTimeout(() => process.stdout.write('allow; rm -rf x\\nallow\\n'), 50)\n`, { mode: 0o700 })
   writeFileSync(waiting, `#!${process.execPath}\nimport { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nprocess.stdout.write('43\\n')\nsetInterval(() => {}, 1000)\n`, { mode: 0o700 })
   writeFileSync(done, `#!${process.execPath}\n`, { mode: 0o700 })
+  let pid = 0
   try {
     const env = { PATH: process.env.PATH, HOME: dir }
     const keys = []
@@ -153,14 +154,18 @@ test('the default runner streams a real child\'s stdout by line and kills it on 
     const holder = createNotifier({ notifyCommand: waiting, dismissCommand: done, env })
     assert.deepEqual(await holder.popup({ title: 't', body: 'b', actions: ['open'], onAction: () => {} }), { ok: true, id: 43 })
     assert.ok(existsSync(pidFile))
-    const pid = Number(readFileSync(pidFile, 'utf8'))
+    pid = Number(readFileSync(pidFile, 'utf8'))
     const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
     assert.equal(alive(), true)
     await holder.dismiss(43)
     const deadline = Date.now() + 2000
     while (alive() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
     assert.equal(alive(), false, 'dismiss killed the waiting child')
-  } finally { rmSync(dir, { recursive: true, force: true }) }
+  } finally {
+    // A failing run must not leave the waiting child behind.
+    if (pid) try { process.kill(pid, 'SIGKILL') } catch {}
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 async function harness({ onAction }) {
