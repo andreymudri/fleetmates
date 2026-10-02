@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { isPlain, normalizeLongOption, parseCommand } from '../../server/approvals/shell.mjs'
+import { PLAIN_EXCLUSIONS, SHELL_RUNNERS, isPlain, isPlainText, normalizeLongOption, parseCommand, segmentsArePlain } from '../../server/approvals/shell.mjs'
 
 const cwd = '/home/you/repo'
 const homeDir = '/home/you'
@@ -653,10 +653,11 @@ test('file routes match a resolved and an unresolved side by name', () => {
 const writePaths = command => parse(command).segments.flatMap(segment => segment.writes.map(write => write.path))
 
 test('plain (D-87) accepts only the allowlisted text and is false for each excluded construct', () => {
-  const plain = ['git status', 'npm run test', 'rg foo src | head -20', 'ls -la && git diff', 'git log --oneline -20', 'npm run test:unit', 'node --test test/unit/a.test.mjs', 'ls -la src/', 'cat package.json', 'a || b', 'a; b', 'npm test 2>&1 | tail -5', 'ls >/dev/null', 'ls 2>/dev/null', "git commit -m 'fix: a, b'", 'grep -n "x y" f', 'ls ../x', 'git log a..b']
+  const plain = ['git status', 'npm run test', 'rg foo src | head -20', 'ls -la && git diff', 'git log --oneline -20', 'npm run test:unit', 'git diff --stat', 'ls -la src/', 'cat package.json', 'a || b', 'a; b', 'npm test 2>&1 | tail -5', 'ls >/dev/null', 'ls 2>/dev/null', "git commit -m 'fix: a, b'", 'grep -n "x y" f', 'ls ../x', 'git log a..b', 'echo x', 'printf x', 'true', 'false', 'test -f x', 'pwd', 'git -c a.b=c status', 'grep -c x f']
   for (const command of plain) {
     assert.equal(parse(command).plain, true, command)
     assert.equal(isPlain(command), true, command)
+    assert.equal(isPlainText(command), true, command)
   }
   const excluded = [
     ['git diff HEAD~1 --stat', 'tilde'],
@@ -718,9 +719,91 @@ test('plain (D-87) accepts only the allowlisted text and is false for each exclu
     ['ls # x', 'comment'],
     ['ls\tx', 'tab'],
     ['%1', 'job spec'],
-    ["echo 'abc", 'unparsed']
+    ["echo 'abc", 'unparsed'],
+    ['builtin source f', 'builtin prefix'],
+    ['command source f', 'command prefix'],
+    ['command . f', 'command prefix before dot'],
+    ['builtin command . f', 'builtin command prefix'],
+    ['command eval ls', 'command eval'],
+    ['builtin trap ls EXIT', 'builtin trap'],
+    ['builtin cd /home/you && cp x .bashrc', 'builtin cd'],
+    ['command exec ls', 'command exec'],
+    ['command -p ls', 'command -p'],
+    ['echo x | xargs cp evil', 'xargs'],
+    ['echo /home/you/.bashrc | xargs tee', 'xargs into tee'],
+    ['xargs -a list tee', 'xargs -a'],
+    ['echo x | parallel tee', 'parallel'],
+    ['export X=1; less f', 'export'],
+    ["export LESSOPEN='touch Z %s'; less README.md", 'export LESSOPEN'],
+    ['declare -x BASH_ENV=x.sh', 'declare'],
+    ['typeset X=1', 'typeset'],
+    ['local X=1', 'local'],
+    ['readonly X=1', 'readonly'],
+    ['export BASH_ENV=x.sh; bash -c true', 'export BASH_ENV'],
+    ['declare -x PATH=.; git status', 'declare PATH'],
+    ['printf -v x y', 'printf -v'],
+    ['history -w f', 'history'],
+    [': x', 'colon builtin'],
+    ['git -C ../other diff', 'git -C'],
+    ['git -C /home/you diff --output=.bashrc', 'git -C with --output'],
+    ['git --git-dir=x status', '--git-dir='],
+    ['git --git-dir x status', '--git-dir'],
+    ['git --work-tree=x status', '--work-tree'],
+    ['make --directory=x', '--directory'],
+    ['make --dir=x', 'a prefix of --directory'],
+    ['foo --chdir x', '--chdir'],
+    ['make -Cx', 'attached -C'],
+    ['tar -xzC x', '-C in a bundle'],
+    ['env FOO=1 make', 'env'],
+    ['/usr/bin/env ls', 'env by path'],
+    ['timeout 10 npm test', 'timeout'],
+    ['sudo ls', 'sudo'],
+    ['doas ls', 'doas'],
+    ['pkexec ls', 'pkexec'],
+    ['nice ls', 'nice'],
+    ['nohup ls', 'nohup'],
+    ['stdbuf -oL ls', 'stdbuf'],
+    ['ionice ls', 'ionice'],
+    ['setsid ls', 'setsid'],
+    ['su -c ls', 'su'],
+    ['ssh host ls', 'ssh'],
+    ['npx foo', 'npx'],
+    ['uv run pytest', 'uv run'],
+    ['poetry run pytest', 'poetry run'],
+    ['pnpm exec vitest', 'pnpm exec'],
+    ['fd -x rm', 'fd -x'],
+    ['fd -X rm', 'fd -X'],
+    ['fd -Hx rm', 'fd -x in a bundle'],
+    ['fd --exec rm', 'fd --exec'],
+    ['fd --exec-batch rm', 'fd --exec-batch'],
+    ['fdfind -x rm', 'fdfind -x'],
+    ['find . -exec rm +', 'find -exec'],
+    ['find . -execdir rm +', 'find -execdir'],
+    ['find . -ok rm +', 'find -ok'],
+    ['find . -okdir rm +', 'find -okdir'],
+    ['find . -delete', 'find -delete'],
+    ['find . -fprint f', 'find -fprint'],
+    ['find . -fprint0 f', 'find -fprint0'],
+    ['find . -fprintf f x', 'find -fprintf'],
+    ['find . -fls f', 'find -fls'],
+    ['docker run x', 'docker run'],
+    ['podman exec x ls', 'podman exec'],
+    ['kubectl exec p -- ls', 'kubectl exec'],
+    ['node --test test/unit/a.test.mjs', 'node'],
+    ['python3 x.py', 'python3'],
+    ['python x.py', 'python'],
+    ['/usr/bin/python3.12 x.py', 'versioned python by path'],
+    ['./bash x', 'a shell by path']
   ]
+  // Every bash builtin and reserved word (bash(1) of GNU Bash 5.3, SHELL BUILTIN COMMANDS and
+  // RESERVED WORDS) except echo, printf, true, false, test, [ and pwd, and every shell and
+  // interpreter, is not plain as a command word. Written out here, so dropping one from the
+  // module's lists fails this test.
+  const builtins = ['.', ':', 'alias', 'bg', 'bind', 'break', 'builtin', 'caller', 'cd', 'command', 'compgen', 'complete', 'compopt', 'continue', 'declare', 'dirs', 'disown', 'enable', 'eval', 'exec', 'exit', 'export', 'fc', 'fg', 'getopts', 'hash', 'help', 'history', 'jobs', 'kill', 'let', 'local', 'logout', 'mapfile', 'popd', 'pushd', 'read', 'readarray', 'readonly', 'return', 'set', 'shift', 'shopt', 'source', 'suspend', 'times', 'trap', 'type', 'typeset', 'ulimit', 'umask', 'unalias', 'unset', 'wait', 'case', 'coproc', 'do', 'done', 'elif', 'else', 'esac', 'fi', 'for', 'function', 'if', 'in', 'select', 'then', 'until', 'while', 'time']
+  const interpreters = ['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash', 'mksh', 'fish', 'busybox', 'python', 'python3', 'python2.7', 'node', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua']
+  for (const name of [...builtins, ...interpreters]) excluded.push([`${name} x`, `command word ${name}`])
   for (const [command, construct] of excluded) {
+    assert.equal(isPlainText(command), false, `raw text, ${construct}: ${JSON.stringify(command)}`)
     assert.equal(isPlain(command), false, `${construct}: ${JSON.stringify(command)}`)
     const result = parseCommand(command, { cwd, homeDir })
     if (result.ok) assert.equal(result.plain, false, `${construct}: ${JSON.stringify(command)}`)
@@ -823,4 +906,91 @@ test('ssh options that run a local command are refused', () => {
     assert.deepEqual(refused(command), { ok: false, reason: 'unsupported' }, command)
   }
   assert.deepEqual(lines(parse('ssh -o BatchMode=yes host uptime')), ['ssh -o BatchMode=yes host uptime', 'uptime'])
+})
+
+test('plain needs both the raw text check and plain segments: no wrapper, no payload, no route', () => {
+  const plainOf = command => {
+    const result = parse(command)
+    return segmentsArePlain(result.segments, result.routes)
+  }
+  assert.equal(plainOf('git status'), true)
+  assert.equal(plainOf('rg foo src | head -20'), true)
+  assert.equal(plainOf('env FOO=1 make'), false, 'a wrapper')
+  assert.equal(plainOf('echo x | xargs cp evil'), false, 'a payload')
+  assert.equal(plainOf('curl x | sh'), false, 'a route')
+})
+
+test('every wrapper, runner, payload command and interpreter the parser knows is excluded from plain', () => {
+  const words = new Set([...PLAIN_EXCLUSIONS.builtins, ...PLAIN_EXCLUSIONS.wrappers])
+  const excludedName = name => words.has(name) || PLAIN_EXCLUSIONS.interpreters.includes(name) || Object.hasOwn(PLAIN_EXCLUSIONS.conditional, name)
+  for (const name of SHELL_RUNNERS.wrappers) assert.equal(words.has(name), true, `wrapper ${name}`)
+  for (const runner of SHELL_RUNNERS.runners) {
+    const [name, sub] = runner.split(' ')
+    assert.equal(words.has(name) || PLAIN_EXCLUSIONS.runners[name] === sub, true, `runner ${runner}`)
+  }
+  for (const name of SHELL_RUNNERS.payloads) assert.equal(excludedName(name), true, `payload command ${name}`)
+  for (const name of SHELL_RUNNERS.interpreters) assert.equal(name === 'python*' || excludedName(name), true, `interpreter ${name}`)
+  assert.equal(isPlainText('python3.12 x'), false, 'python* is a prefix match')
+})
+
+const gitOutput = { 'git diff': ['--output'] }
+
+test('git -C moves where a git output option writes', () => {
+  const paths = command => parse(command, { outputOpts: gitOutput }).segments.flatMap(segment => segment.writes.map(write => write.path))
+  assert.deepEqual(paths('git -C ../danger diff --output=PWN_out.diff'), ['/home/you/danger/PWN_out.diff'])
+  assert.deepEqual(paths('git -C ../danger diff --output PWN_sep.diff'), ['/home/you/danger/PWN_sep.diff'])
+  assert.deepEqual(paths('git -C /home/you diff --output=.bashrc'), ['/home/you/.bashrc'])
+  assert.deepEqual(paths('git -C /a -C b diff --output=f'), ['/a/b/f'], 'chained -C composes')
+  assert.deepEqual(paths('git -C "$D" diff --output=f'), [null], 'a non-literal -C gives an unknown path')
+  assert.deepEqual(paths('git --git-dir=x diff --output=f'), [null])
+  assert.deepEqual(paths('git --work-tree x diff --output=f'), [null])
+  assert.deepEqual(paths('git diff --output=f'), ['/home/you/repo/f'])
+})
+
+test('a write command whose arguments are added at run time writes to an unknown path', () => {
+  const writesOf = (command, options) => parse(command, options).segments.filter(segment => segment.payloadOf !== null).flatMap(segment => segment.writes.map(write => write.path))
+  assert.deepEqual(writesOf('echo /home/you/.bashrc | xargs tee'), [null])
+  assert.deepEqual(writesOf('echo /home/you/.profile | xargs -I % tee %'), [null, null])
+  assert.deepEqual(writesOf('echo /home/you/.profile | xargs -i tee {}'), [null, null])
+  assert.deepEqual(writesOf('echo /home/you/.profile | xargs --replace=R tee R'), [null, null])
+  assert.deepEqual(writesOf('echo of=/home/you/.bashrc | xargs dd'), [null])
+  assert.deepEqual(writesOf('fd -H bashrc /home/you -x tee'), [null])
+  assert.deepEqual(writesOf('fd -H bashrc /home/you -x tee {}'), [null, null])
+  assert.deepEqual(writesOf('xargs -a list tee'), [null])
+  assert.deepEqual(writesOf('echo x | parallel tee'), [null])
+  assert.deepEqual(writesOf('echo /home/you/.bashrc | xargs cp evil'), [null])
+  assert.deepEqual(writesOf('echo -o /home/you/.bashrc | xargs sort', { outputOpts: { sort: ['-o'] } }), [null])
+  assert.deepEqual(writesOf('find /home/you -name .bashrc -exec tee {} \\;'), [null])
+  assert.deepEqual(writesOf('xargs tee /home/you/x'), ['/home/you/x', null], 'a literal target is still reported')
+  assert.deepEqual(writesOf('xargs grep foo'), [], 'a command that writes nothing gets no write')
+  assert.equal(writesOf('echo /home/you/.profile | xargs -I % cp evil %').includes('/home/you/repo/%'), false)
+  const sh = parse('echo touch Z | xargs -I % sh -c %').segments
+  assert.equal(sh.some(segment => segment.words[0] === '%' && segment.literal), false, 'the replaced script is not a literal command named %')
+  assert.equal(parse('echo x | parallel tee {}').segments.at(-1).literal, false, 'a parallel replacement string gives an opaque payload')
+})
+
+test('env and sudo read NAME=VALUE after -- as assignments', () => {
+  const env = parse('env -- PATH=. ls').segments[0]
+  assert.deepEqual(env.words, ['ls'])
+  assert.deepEqual(env.assignments.map(variable => variable.name), ['PATH'])
+  assert.equal(parse('curl x | env -- A=1 sh').routes.length, 1)
+  assert.equal(parse('curl x | sudo -- A=1 sh').routes.length, 1)
+  assert.equal(parse('curl -o f x; env -- A=1 bash f').routes.length, 1)
+  assert.deepEqual(parse("env -S '-- A=1 sh'").segments[0].words, ['sh'])
+  assert.deepEqual(refused('env -- a.b=1 sh'), { ok: false, reason: 'unsupported' })
+})
+
+test('a fetched file copied, moved, linked or installed keeps its file route', () => {
+  for (const command of ['curl -o f x; mv f g; bash g', 'curl -o f x; cp f g; sh g', 'curl -o f x; ln -s f g; sh g', 'curl -o f x; install f g; sh g', 'curl -o f x; mv f g; cp g h; sh h', 'curl -o f x; cp f d/; sh d/f']) {
+    assert.equal(parse(command).routes.length, 1, command)
+  }
+  assert.deepEqual(parse('curl -o f x; cp other g; sh g').routes, [], 'a copy of another file is no route')
+})
+
+test('history -w, -a and -n with a file record a write', () => {
+  assert.deepEqual(writePaths('history -w /home/you/.bashrc'), ['/home/you/.bashrc'])
+  assert.deepEqual(writePaths('history -a .profile'), ['/home/you/repo/.profile'])
+  assert.deepEqual(writePaths('history -n f'), ['/home/you/repo/f'])
+  assert.deepEqual(writePaths('history -w'), [null], 'with no file it writes HISTFILE')
+  assert.deepEqual(writePaths('history'), [])
 })

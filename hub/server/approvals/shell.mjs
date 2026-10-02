@@ -21,9 +21,13 @@ const metaChars = new Set([' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>'])
 // Reserved words that only end a compound command; one at command start anywhere else is a syntax
 // error, as in Bash.
 const listEnds = ['then', 'elif', 'else', 'fi', 'do', 'done', 'esac', '}']
-// Two levels of guarantee (D-87). `plain: true` means the allowlist in `plainText` accepted the
-// whole source text (simple commands joined by `|`, `&&`, `||`, `;`, every character from a
-// small literal set) and the parser returned ok; only a plain command may be Safe. Outside plain
+// Two levels of guarantee (D-87, tightened 2026-10-02). `plain: true` means the allowlist in
+// `plainText` accepted the whole source text (simple commands joined by `|`, `&&`, `||`, `;`,
+// every character from a small literal set, and no command word that is a builtin other than
+// echo, printf without -v, true, false, test, `[` and pwd, a wrapper or payload runner, a shell
+// or interpreter, and no option that changes the directory or repository), the parser returned
+// ok, and the walker found no wrapper, no payload segment and no route; only a plain command may
+// be Safe. Outside plain
 // the parser is best effort, for raising tiers: it refuses the constructs listed in the
 // parseCommand JSDoc with `unsupported` or `unknown-expansion`, and otherwise reports the segments,
 // writes and routes it finds. It does not promise to see everything bash runs in a command that
@@ -125,11 +129,73 @@ function dotDotAfterComponent(text) {
 
 // D-87 plain text. Every character outside a quote pair is from PLAIN_CHAR or a space; a quote
 // pair holds only those characters and spaces. The only operators are `|`, `&&`, `||` and `;`,
-// and the only redirects PLAIN_REDIRECTS, each a whole token.
+// and the only redirects PLAIN_REDIRECTS, each a whole token. The word lists below are written
+// out rather than derived from the walker's tables, so the text check does not depend on the
+// walker; a test checks that every name in those tables is also excluded here.
 const PLAIN_CHAR = /^[A-Za-z0-9_\-./:=@%+,]$/
 const PLAIN_QUOTED = /^[A-Za-z0-9_\-./:=@%+, ]*$/
 const PLAIN_REDIRECTS = ['2>&1', '2>/dev/null', '>/dev/null']
-const PLAIN_EXCLUDED_WORDS = new Set(['cd', 'pushd', 'popd', 'eval', 'source', '.', 'exec', 'trap', 'if', 'then', 'elif', 'else', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'in', 'select', 'function', 'coproc', 'time'])
+// Every builtin and reserved word of bash(1) (GNU Bash 5.3, SHELL BUILTIN COMMANDS and RESERVED
+// WORDS) except echo, printf (without -v), true, false, test, `[` and pwd.
+const PLAIN_EXCLUDED_BUILTINS = Object.freeze(['.', ':', 'alias', 'bg', 'bind', 'break', 'builtin', 'caller', 'cd', 'command', 'compgen', 'complete', 'compopt', 'continue', 'declare', 'dirs', 'disown', 'enable', 'eval', 'exec', 'exit', 'export', 'fc', 'fg', 'getopts', 'hash', 'help', 'history', 'jobs', 'kill', 'let', 'local', 'logout', 'mapfile', 'popd', 'pushd', 'read', 'readarray', 'readonly', 'return', 'set', 'shift', 'shopt', 'source', 'suspend', 'times', 'trap', 'type', 'typeset', 'ulimit', 'umask', 'unalias', 'unset', 'wait', '!', 'case', 'coproc', 'do', 'done', 'elif', 'else', 'esac', 'fi', 'for', 'function', 'if', 'in', 'select', 'then', 'until', 'while', '{', '}', 'time', '[[', ']]'])
+// Wrappers and payload runners, excluded whatever their arguments: the wrapper table of the walker
+// (`wrapperSpecs`), npx (the walker's `npx --no-install` runner; npx runs a package in any form)
+// and the commands whose payload the walker parses from their own words.
+const PLAIN_EXCLUDED_WRAPPERS = Object.freeze(['builtin', 'command', 'doas', 'env', 'eval', 'exec', 'ionice', 'nice', 'nohup', 'npx', 'parallel', 'pkexec', 'setsid', 'ssh', 'stdbuf', 'su', 'sudo', 'time', 'timeout', 'trap', 'xargs'])
+// Runners excluded when the subcommand that runs a payload is one of their words.
+const PLAIN_EXCLUDED_RUNNERS = Object.freeze({ uv: 'run', poetry: 'run', pnpm: 'exec' })
+// Commands excluded only with an option or subcommand that runs a payload or writes a file.
+const PLAIN_CONDITIONAL = Object.freeze({
+  find: word => ['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fls'].includes(word) || word.startsWith('-fprint'),
+  fd: word => /^-[A-Za-z]*[xX]/.test(word) || word.startsWith('--exec'),
+  fdfind: word => /^-[A-Za-z]*[xX]/.test(word) || word.startsWith('--exec'),
+  docker: word => word === 'run' || word === 'exec',
+  podman: word => word === 'run' || word === 'exec',
+  kubectl: word => word === 'exec'
+})
+// The shells and interpreters of F7 (`shellSet` and INTERPRETERS); a name starting `python` is
+// matched as a prefix.
+const PLAIN_EXCLUDED_INTERPRETERS = Object.freeze(['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash', 'mksh', 'fish', 'busybox', 'node', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'source', '.'])
+// Options that change the directory or repository a command acts on, matched exactly, as
+// `--opt=value`, or as a getopt_long prefix (`--dir`); `-C` also attached (`-Cdir`) or in a
+// bundle (`-xzC`).
+const PLAIN_DIRECTORY_OPTIONS = Object.freeze(['--git-dir', '--work-tree', '--directory', '--chdir'])
+
+function plainDirectoryOption(word) {
+  if (/^-[A-Za-z]*C/.test(word)) return true
+  if (!word.startsWith('--') || word.length < 3) return false
+  const name = word.split('=')[0]
+  return PLAIN_DIRECTORY_OPTIONS.some(option => option.startsWith(name))
+}
+
+function plainCommandWords(words) {
+  const [first, ...args] = words
+  if (first.includes('=') || first.startsWith('%')) return false
+  const name = commandBase(first)
+  if (PLAIN_EXCLUDED_BUILTINS.includes(name) || PLAIN_EXCLUDED_WRAPPERS.includes(name)) return false
+  if (PLAIN_EXCLUDED_INTERPRETERS.includes(name) || name.startsWith('python')) return false
+  if (name === 'printf' && /^-[A-Za-z]*v/.test(args[0] ?? '')) return false
+  if (Object.hasOwn(PLAIN_EXCLUDED_RUNNERS, name) && args.includes(PLAIN_EXCLUDED_RUNNERS[name])) return false
+  if (Object.hasOwn(PLAIN_CONDITIONAL, name) && args.some(PLAIN_CONDITIONAL[name])) return false
+  return !args.some(plainDirectoryOption)
+}
+
+/**
+ * The lists behind the D-87 raw text check, for tests: `builtins`, `wrappers`, `interpreters`
+ * (a name starting `python` is also excluded), `runners` (name to the subcommand that runs a
+ * payload), `conditional` (name to a predicate over its words) and `directoryOptions`.
+ */
+export const PLAIN_EXCLUSIONS = Object.freeze({ builtins: PLAIN_EXCLUDED_BUILTINS, wrappers: PLAIN_EXCLUDED_WRAPPERS, interpreters: PLAIN_EXCLUDED_INTERPRETERS, runners: PLAIN_EXCLUDED_RUNNERS, conditional: PLAIN_CONDITIONAL, directoryOptions: PLAIN_DIRECTORY_OPTIONS })
+
+/**
+ * The D-87 check on the source text alone, apart from the walker (see `isPlain` for the rule).
+ * `isPlain` also needs the parse to succeed and `segmentsArePlain` to hold.
+ * @param {string} source
+ * @returns {boolean}
+ */
+export function isPlainText(source) {
+  return typeof source === 'string' && plainText(source)
+}
 
 function plainText(source) {
   const commands = [[]]
@@ -174,8 +240,7 @@ function plainText(source) {
   endWord()
   for (const command of commands) {
     if (!command.length) return false
-    const name = command[0]
-    if (PLAIN_EXCLUDED_WORDS.has(name) || name.includes('=') || name.startsWith('%')) return false
+    if (!plainCommandWords(command)) return false
     if (command.some(dotDotAfterComponent)) return false
   }
   return true
@@ -848,13 +913,21 @@ function scanOptions(words, start, spec, onValue = () => {}, onFlag = () => {}) 
     const word = words[i]
     const text = word.text
     if (!word.literal) break
-    if (text === '--') { i++; break }
-    // GNU env (and sudo) take any operand holding `=` before the command as an assignment, so
-    // one whose name is not a NAME (`a.b=1`, `BASH_FUNC_f%%=...`, which defines a function) is
-    // refused rather than read as the command word.
+    // GNU env (and sudo) take any operand holding `=` before the command as an assignment, also
+    // after `--` (the review ran `env -- PATH=. ls` in bash and it ran ./ls), so one whose name is
+    // not a NAME (`a.b=1`, `BASH_FUNC_f%%=...`, which defines a function) is refused rather than
+    // read as the command word.
+    const assign = operand => {
+      if (!/^[A-Za-z_]\w*=/.test(operand.text)) fail('unsupported')
+      onValue('=', operand)
+    }
+    if (text === '--') {
+      i++
+      for (; spec.assigns && i < words.length && words[i].literal && words[i].text.includes('='); i++) assign(words[i])
+      break
+    }
     if (spec.assigns && !text.startsWith('-') && text.includes('=')) {
-      if (!/^[A-Za-z_]\w*=/.test(text)) fail('unsupported')
-      onValue('=', word)
+      assign(word)
       i++
       continue
     }
@@ -1187,6 +1260,7 @@ class Walker {
     this.assignmentsOf(name, rest, segment)
     this.payloads(name, rest, segment, ctx, command.redirects)
     this.writeTargets(name, rest, segment)
+    if (ctx.runtimeArgs) this.runtimeWrite(name, segment, ctx.via)
     // These run code in the current shell. A trap action or a sourced file may change the
     // directory in ways the parser cannot see; an eval payload is checked for a directory change.
     if (name === 'trap' || name === '.' || name === 'source') ctx.dir = null
@@ -1302,7 +1376,7 @@ class Walker {
     const depth = ctx.depth + 1
     const list = parseString(text, depth, this.options)
     const remote = Boolean(ctx.remote || extra.remote)
-    this.walkList(list, { dir: remote || extra.unknownDir ? null : segment.cwd, depth, payloadOf: segment.index, via, remote, wrappers: extra.wrappers })
+    this.walkList(list, { dir: remote || extra.unknownDir ? null : segment.cwd, depth, payloadOf: segment.index, via, remote, wrappers: extra.wrappers, runtimeArgs: extra.runtimeArgs })
   }
 
   opaquePayload(words, segment, ctx, via, remote = false) {
@@ -1318,25 +1392,53 @@ class Walker {
     else this.opaquePayload(words, segment, ctx, via, extra.remote)
   }
 
-  argvPayload(words, segment, ctx, via, remote = false) {
+  // `runtimeArgs` marks a payload that gets more arguments when it runs (xargs, fd -x, parallel):
+  // a write command in it also writes to an unknown path.
+  argvPayload(words, segment, ctx, via, remote = false, runtimeArgs = false) {
     if (!words.length) return
     if (ctx.depth + 1 > MAX_DEPTH) fail('too-deep')
     const isRemote = Boolean(ctx.remote || remote)
-    this.walkSimple({ type: 'simple', assigns: [], words, redirects: [] }, { dir: isRemote ? null : segment.cwd, depth: ctx.depth + 1, payloadOf: segment.index, via, remote: isRemote }, null, false)
+    this.walkSimple({ type: 'simple', assigns: [], words, redirects: [] }, { dir: isRemote ? null : segment.cwd, depth: ctx.depth + 1, payloadOf: segment.index, via, remote: isRemote, runtimeArgs }, null, false)
+  }
+
+  // A write command whose arguments are added at run time may write anywhere, so it gets a write
+  // to an unknown path: the commands writeTargets knows, and any command the outputOpts table
+  // names (its output option may come at run time too).
+  runtimeWrite(name, segment, via) {
+    const table = this.options.outputOpts
+    const outputs = table ? Object.keys(table).some(key => key.split(' ')[0] === name) : false
+    if (RUNTIME_WRITE_COMMANDS.includes(name) || outputs) segment.writes.push({ path: null, raw: '', via, literal: false, runtime: true })
   }
 
   payloads(name, words, segment, ctx, redirects = []) {
     if (shellSet.has(name)) return this.shellPayload(name, words, segment, ctx, redirects)
-    if (name === 'eval') return this.stringPayload(words.slice(1), segment, ctx, 'eval')
-    if (name === 'trap') return this.trapPayload(words, segment, ctx)
-    if (name === 'su') return this.suPayload(words, segment, ctx)
-    if (name === 'xargs') return this.argvPayload(words.slice(xargsCommandIndex(words)), segment, ctx, 'xargs')
-    if (name === 'find') return this.findPayloads(words, segment, ctx)
-    if (name === 'fd' || name === 'fdfind') return this.fdPayloads(words, segment, ctx)
-    if (name === 'parallel') return this.parallelPayload(words, segment, ctx)
-    if (name === 'ssh') return this.sshPayload(words, segment, ctx)
-    if (name === 'docker' || name === 'podman') return this.containerPayload(name, words, segment, ctx)
-    if (name === 'kubectl') return this.kubectlPayload(words, segment, ctx)
+    if (Object.hasOwn(payloadHandlers, name)) payloadHandlers[name](this, name, words, segment, ctx)
+  }
+
+  // xargs adds the arguments it reads from stdin or an -a file, or puts them where its -I, -i or
+  // --replace string stands, so every word holding that string is not literal.
+  xargsPayload(words, segment, ctx) {
+    const start = xargsCommandIndex(words)
+    let replace = null
+    const longs = [...xargsSpec.extra, ...xargsSpec.other, ...xargsSpec.optional, ...xargsSpec.refuse].filter(option => option.startsWith('--'))
+    for (let k = 1; k < start; k++) {
+      const word = words[k]
+      const text = word.text
+      if (text === '--') break
+      if (text.startsWith('--')) {
+        const equal = text.indexOf('=')
+        if (matchLong(equal < 0 ? text : text.slice(0, equal), longs) === '--replace') replace = equal < 0 ? literalWord('{}') : { ...word, text: text.slice(equal + 1) }
+        continue
+      }
+      for (let c = 1; c < text.length; c++) {
+        if (text[c] === 'i') { replace = text.length > c + 1 ? { ...word, text: text.slice(c + 1) } : literalWord('{}'); break }
+        if (text[c] === 'I') { replace = text.length > c + 1 ? { ...word, text: text.slice(c + 1) } : words[++k]; break }
+        if (xargsSpec.other.includes(`-${text[c]}`) || xargsSpec.attached.includes(`-${text[c]}`)) { if (c === text.length - 1 && xargsSpec.other.includes(`-${text[c]}`)) k++; break }
+      }
+    }
+    const payload = words.slice(start)
+    const runtime = !replace ? payload : !replace.literal ? payload.map(word => ({ ...word, literal: false })) : runtimeWords(payload, word => word.text.includes(replace.text))
+    this.argvPayload(runtime, segment, ctx, 'xargs', false, true)
   }
 
   // Shell options are limited to SHELL_LETTERS, `-o` with SET_OPTION_NAMES and SHELL_LONG_OPTIONS;
@@ -1435,18 +1537,22 @@ class Walker {
       let end = k + 1
       while (end < words.length && !(words[end].text === ';' || (words[end].text === '+' && words[end - 1].text === '{}'))) end++
       if (end >= words.length || end === k + 1) fail('syntax')
-      this.argvPayload(words.slice(k + 1, end), segment, ctx, `find ${words[k].text}`)
+      // find puts each path it finds where `{}` stands (find(1)), so a word holding it is not
+      // literal.
+      this.argvPayload(runtimeWords(words.slice(k + 1, end), word => word.text.includes('{}')), segment, ctx, `find ${words[k].text}`)
       k = end
     }
   }
 
+  // fd adds each path it finds, or puts it where a `{}`, `{/}`, `{//}`, `{.}` or `{/.}`
+  // placeholder stands (fd(1)), so a word holding `{` is not literal.
   fdPayloads(words, segment, ctx) {
     const actions = new Set(['-x', '-X', '--exec', '--exec-batch'])
     for (let k = 1; k < words.length; k++) {
       if (!words[k].literal || !actions.has(words[k].text)) continue
       let end = k + 1
       while (end < words.length && words[end].text !== ';') end++
-      this.argvPayload(words.slice(k + 1, end), segment, ctx, `fd ${words[k].text}`)
+      this.argvPayload(runtimeWords(words.slice(k + 1, end), word => word.text.includes('{')), segment, ctx, `fd ${words[k].text}`, false, true)
       k = end
     }
   }
@@ -1472,7 +1578,11 @@ class Walker {
     let end = i
     while (end < words.length && !separator.test(words[end].text)) end++
     if (end > i) {
-      this.stringPayload(words.slice(i, end), segment, ctx, 'parallel')
+      // parallel adds each input, or puts it where a replacement string (`{}`, `{.}`, `{1}`, a
+      // `{= =}` expression) stands; with one, the command is opaque.
+      const command = words.slice(i, end)
+      if (command.some(word => word.text.includes('{'))) this.opaquePayload(command, segment, ctx, 'parallel')
+      else this.stringPayload(command, segment, ctx, 'parallel', { runtimeArgs: true })
       return
     }
     const sources = words.slice(end)
@@ -1593,6 +1703,7 @@ class Walker {
     if (name === 'dd') {
       for (const word of words.slice(1)) if (word.text.startsWith('of=')) this.addWrite(segment, { ...word, text: word.text.slice(3) }, 'dd')
     }
+    if (name === 'history') this.historyTargets(words, segment)
     if (name === 'cp' || name === 'mv' || name === 'install' || name === 'ln') this.copyTargets(name, words, segment)
     if (name === 'curl') this.curlTargets(words, segment)
     if (name === 'wget') this.wgetTargets(words, segment)
@@ -1666,6 +1777,21 @@ class Walker {
     const url = operands.find(word => !/^[A-Z]+$/.test(word.text))
     const file = url ? urlBasename(url.text) : null
     if (file) this.addWrite(segment, { text: file, literal: url.literal || url.glob }, name)
+  }
+
+  // `history -w`, `-a` and `-n` take a FILE operand, or use HISTFILE without one (bash(1));
+  // -w and -a write it, and -n is recorded as a write too, which over-reports.
+  historyTargets(words, segment) {
+    let file = false
+    let operand = null
+    for (const word of words.slice(1)) {
+      if (word.literal && /^-[a-z]+$/.test(word.text)) {
+        if (/[awn]/.test(word.text)) file = true
+      } else if (operand === null) operand = word
+    }
+    if (!file) return
+    if (operand) this.addWrite(segment, operand, 'history')
+    else segment.writes.push({ path: null, raw: 'HISTFILE', via: 'history', literal: false })
   }
 
   copyTargets(name, words, segment) {
@@ -1819,10 +1945,23 @@ class Walker {
     if (!table) return
     let key = name
     let args = words.slice(1)
+    let dir = segment.cwd
     if (name === 'git') {
       const rest = gitSubcommandArgs(args.map(word => word.text))
       if (!rest.length) return
       key = `git ${rest[0]}`
+      // git changes to each `-C` directory, in order, before it reads the subcommand's options
+      // (the review ran `git -C ../danger diff --output=f` and f landed in ../danger). With
+      // --git-dir or --work-tree the base of a relative output path is not modelled here, so it is
+      // unknown.
+      const globals = args.slice(0, args.length - rest.length)
+      for (let k = 0; k < globals.length; k++) {
+        const text = globals[k].text
+        if (text === '-C') {
+          const value = globals[++k]
+          dir = value.literal ? this.chdir(value.text, dir) : null
+        } else if (/^--(?:git-dir|work-tree)(?:=|$)/.test(text)) dir = null
+      }
       args = args.slice(args.length - rest.length + 1)
     }
     let spec = Object.hasOwn(table, key) ? table[key] : null
@@ -1846,7 +1985,7 @@ class Walker {
       const text = word.text
       if (parsing && text === '--') { parsing = false; continue }
       if (!parsing || !word.literal || !text.startsWith('-') || text === '-') {
-        if (operandIndexes.has(operand)) this.addWrite(segment, word, key)
+        if (operandIndexes.has(operand)) this.addWrite(segment, word, key, dir)
         operand++
         continue
       }
@@ -1855,12 +1994,12 @@ class Walker {
         const normalized = normalizeLongOption(equal < 0 ? text : text.slice(0, equal), longs)
         if (typeof normalized === 'string' && options.includes(normalized)) {
           const value = equal >= 0 ? { ...word, text: text.slice(equal + 1) } : args[++k]
-          this.addWrite(segment, value, `${key} ${normalized}`)
+          this.addWrite(segment, value, `${key} ${normalized}`, dir)
         } else if (valueOptions.has(equal < 0 ? text : text.slice(0, equal)) && equal < 0) k++
         continue
       }
       if (options.includes(text) && text.length > 2) {
-        this.addWrite(segment, args[++k], `${key} ${text}`)
+        this.addWrite(segment, args[++k], `${key} ${text}`, dir)
         continue
       }
       if (valueOptions.has(text)) { k++; continue }
@@ -1869,7 +2008,7 @@ class Walker {
         if (options.includes(option) || valueOptions.has(option)) {
           const rest = text.slice(c + 1)
           const value = rest ? { ...word, text: rest } : args[++k]
-          if (options.includes(option)) this.addWrite(segment, value, `${key} ${option}`)
+          if (options.includes(option)) this.addWrite(segment, value, `${key} ${option}`, dir)
           break
         }
       }
@@ -1954,6 +2093,21 @@ class Walker {
       }
     }
     if (!fetched.length) return routes
+    // A fetched file that a later cp, mv, ln or install names as an operand marks what that
+    // command writes as fetched too, in order, so a chain of copies keeps the mark. Every word
+    // that is not an option counts as a source, which over-reports.
+    for (const segment of segments) {
+      if (!['cp', 'mv', 'ln', 'install'].includes(names[segment.index])) continue
+      const sources = segment.words.slice(1).map((word, k) => ({ word, literal: segment.wordInfo[k + 1].literal })).filter(({ word, literal }) => !literal || !word.startsWith('-'))
+      for (const file of [...fetched]) {
+        if (file.after >= segment.index) continue
+        const copied = sources.some(({ word, literal }) => {
+          const resolved = literal ? this.resolve(word, segment.cwd) : null
+          return file.path && resolved ? resolved === file.path : path.posix.basename(word) === file.name
+        })
+        if (copied) for (const write of segment.writes) fetchedFile(write, file.fetch, segment.index)
+      }
+    }
     // A segment piped (at any distance) into a later interpreter stage of its pipeline feeds it
     // whatever file it reads, so its operands and `<` files count as run by that interpreter.
     const pipedInto = segment => {
@@ -2007,6 +2161,55 @@ class Walker {
     }
     return routes
   }
+}
+
+// Commands whose payload the walker parses from their own words; the shells of `shellSet` are
+// handled apart, since they also read a here-string or heredoc.
+const payloadHandlers = {
+  eval: (walker, name, words, segment, ctx) => walker.stringPayload(words.slice(1), segment, ctx, 'eval'),
+  trap: (walker, name, words, segment, ctx) => walker.trapPayload(words, segment, ctx),
+  su: (walker, name, words, segment, ctx) => walker.suPayload(words, segment, ctx),
+  xargs: (walker, name, words, segment, ctx) => walker.xargsPayload(words, segment, ctx),
+  find: (walker, name, words, segment, ctx) => walker.findPayloads(words, segment, ctx),
+  fd: (walker, name, words, segment, ctx) => walker.fdPayloads(words, segment, ctx),
+  fdfind: (walker, name, words, segment, ctx) => walker.fdPayloads(words, segment, ctx),
+  parallel: (walker, name, words, segment, ctx) => walker.parallelPayload(words, segment, ctx),
+  ssh: (walker, name, words, segment, ctx) => walker.sshPayload(words, segment, ctx),
+  docker: (walker, name, words, segment, ctx) => walker.containerPayload(name, words, segment, ctx),
+  podman: (walker, name, words, segment, ctx) => walker.containerPayload(name, words, segment, ctx),
+  kubectl: (walker, name, words, segment, ctx) => walker.kubectlPayload(words, segment, ctx)
+}
+
+/**
+ * The names the walker treats as wrappers (`wrappers`), runner wrappers (`runners`, two words),
+ * payload commands (`payloads`) and F7 interpreters (`interpreters`), for the test that checks
+ * the D-87 plain lists cover them.
+ */
+export const SHELL_RUNNERS = Object.freeze({
+  wrappers: Object.freeze(Object.keys(wrapperSpecs)),
+  runners: Object.freeze(Object.keys(runnerValues)),
+  payloads: Object.freeze([...shellSet, ...Object.keys(payloadHandlers)]),
+  interpreters: Object.freeze([...INTERPRETERS, ...shellSet])
+})
+
+// The commands writeTargets records a write for.
+const RUNTIME_WRITE_COMMANDS = Object.freeze(['tee', 'dd', 'cp', 'mv', 'install', 'ln', 'curl', 'wget', 'aria2c', 'http', 'httpie', 'history'])
+
+// Copies of `words` where each word `replaced` matches is not literal, since its text is
+// replaced at run time.
+function runtimeWords(words, replaced) {
+  return words.map(word => (word.literal && replaced(word) ? { ...word, literal: false } : word))
+}
+
+/**
+ * The walker half of D-87 plain: no segment has a wrapper or is a payload, and there is no route.
+ * `isPlain` needs this and `isPlainText` both.
+ * @param {object[]} segments
+ * @param {object[]} routes
+ * @returns {boolean}
+ */
+export function segmentsArePlain(segments, routes) {
+  return !routes.length && segments.every(segment => !segment.wrappers.length && segment.payloadOf === null)
 }
 
 function assignment(word) {
@@ -2126,8 +2329,9 @@ function mayAssignHome(command) {
 
 /**
  * Parse a Bash command into segments for the classifier (docs/deck/07-approvals.md 3.3). A
- * successful parse carries `plain` (D-87): true only when the allowlist in `plainText` accepted
- * the whole source text, which is checked on the text alone, apart from the walker. Outside plain the
+ * successful parse carries `plain` (D-87, see `isPlain`): true only when `isPlainText` accepts
+ * the source text, which is checked on the text alone, apart from the walker, and
+ * `segmentsArePlain` holds for the walked segments and routes. Outside plain the
  * parser is best effort, for raising tiers; it does not promise to report everything bash runs.
  * It refuses the following with `{ ok: false, reason }` (a refusal has no `plain`):
  * `unclosed-quote`, `heredoc-delimiter`, `syntax`, `too-deep`, `too-large`, `nul` and
@@ -2150,7 +2354,11 @@ function mayAssignHome(command) {
  * carries that resolved `path`. A path is null (unknown) when the directory is unknown, when a
  * `..` follows another component, or when a leading `..` starts from a directory a cd reached
  * through a possible symlink. `stdinShell` marks `sudo -s`, `sudo -i`, `doas -s` and `su` with
- * no command, which run a shell on their stdin. `routes` lists the network-to-interpreter routes of
+ * no command, which run a shell on their stdin. A write command in a payload that gets more
+ * arguments at run time (`xargs`, `fd -x`/`-X`, `parallel`) also has a write `{ path: null,
+ * runtime: true }`, and a payload word holding the replacement string of xargs, find or fd is not
+ * literal. A git output option resolves against `git -C` (unknown after `--git-dir` or
+ * `--work-tree`). `routes` lists the network-to-interpreter routes of
  * the tier review F7 as `{ kind: 'pipe' | 'substitution' | 'file', fetch, interpreter, path?, raw?,
  * variable? }` (segment indexes); a file route whose path is unknown has `path: null` and the
  * written `raw` text, and `variable: true` marks a fetch assigned to a variable before a later
@@ -2168,7 +2376,8 @@ export function parseCommand(command, { cwd = null, homeDir = null, outputOpts =
     const list = parseString(command, 0, options)
     const walker = new Walker(options)
     walker.walkList(list, { dir: cwd, depth: 0, payloadOf: null, via: null, remote: false })
-    return { ok: true, plain: plainText(command), segments: walker.segments, routes: walker.routes() }
+    const routes = walker.routes()
+    return { ok: true, plain: plainText(command) && segmentsArePlain(walker.segments, routes), segments: walker.segments, routes }
   } catch (error) {
     if (error instanceof ShellError) return { ok: false, reason: error.reason }
     if (error instanceof RangeError) return { ok: false, reason: 'too-large' }
@@ -2177,12 +2386,20 @@ export function parseCommand(command, { cwd = null, homeDir = null, outputOpts =
 }
 
 /**
- * Whether a Bash command is plain (D-87): the parser accepts it and the source text is simple
- * commands joined only by `|`, `&&`, `||` or `;`, each word plain literal text (letters, digits,
- * `_ - . / : = @ % +` and `,`, or a quote pair of those and spaces), no `..` after another path
- * component, no command word that is an assignment, a job spec, `cd`, `pushd`, `popd`, `eval`,
- * `source`, `.`, `exec`, `trap` or a reserved word, and no redirect but `2>&1`, `>/dev/null` and
- * `2>/dev/null`. Only a plain command may be Safe.
+ * Whether a Bash command is plain (D-87 as tightened on 2026-10-02): the parser accepts it, and
+ * the source text is simple commands joined only by `|`, `&&`, `||` or `;`, each word plain
+ * literal text (letters, digits, `_ - . / : = @ % +` and `,`, or a quote pair of those and
+ * spaces), no `..` after another path component, and no redirect but `2>&1`, `>/dev/null` and
+ * `2>/dev/null`. No command word (judged by its basename) is an assignment, a job spec, a bash
+ * builtin or reserved word other than echo, printf without -v, true, false, test, `[` and pwd,
+ * a wrapper or payload runner (`builtin`, `command`, `env`, `sudo`, `xargs`, `parallel`, the
+ * rest of PLAIN_EXCLUSIONS.wrappers, `uv run`, `poetry run`, `pnpm exec`), `find` with
+ * `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*` or `-fls`, `fd` with `-x`, `-X`,
+ * `--exec` or `--exec-batch`, `docker` or `podman` with `run` or `exec`, `kubectl exec`, or a
+ * shell or interpreter (a `python` prefix included). No word is `-C` (attached or in a bundle)
+ * or `--git-dir`, `--work-tree`, `--directory` or `--chdir` (or a prefix of one). And the walker
+ * found no segment with a wrapper, no payload segment and no route. Only a plain command may be
+ * Safe.
  * @param {string} command
  * @returns {boolean}
  */
