@@ -1,7 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP, MAX_LINE } from '../../deckd/protocol.mjs'
 import { Ring } from '../../deckd/ring.mjs'
+import { startDeckd } from '../../deckd/main.mjs'
+import { connectDeckd } from '../../deckd/client.mjs'
+import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
+
+const stub = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'integration', 'stubs', 'claude')
 
 /**
  * Build a decoder that records what it produced.
@@ -115,4 +124,127 @@ test('screen scrollback: Ring.tail drops a first line cut short by the byte cap'
   clean.push(Buffer.from('xy'))
   assert.equal(clean.snapshot().toString(), 'cond\nxy')
   assert.equal(clean.tail(99).toString(), 'xy')
+})
+
+test('history: proto 2 gets it on the exit record and on screen with history: true; proto 1 gets neither', async () => {
+  const rt = await makeRuntimeDir()
+  const deckd = await startDeckd({ runtimeDir: rt.dir, loginEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: rt.dir } })
+  const c2 = await connectDeckd({ runtimeDir: rt.dir, kind: 'server', name: 'history2', proto: 2 })
+  const c1 = await connectDeckd({ runtimeDir: rt.dir, kind: 'server', name: 'history1', proto: 1 })
+  try {
+    const since = Date.now() - 1
+    const { ptyId } = await c2.request('spawn', { cwd: rt.dir, argv: [stub], env: {}, cols: 90, rows: 20, origin: 'launched' })
+    const end = Date.now() + 15000
+    while (!(await c2.request('screen', { ptyId, scrollback: 0 })).lines.includes('READY')) {
+      if (Date.now() > end) throw new Error('stub never printed READY')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    await c2.request('write', { ptyId, data: Buffer.from('\x1b[31mredline\x1b[0m\r\n').toString('base64'), source: { kind: 'deck' } })
+    const end2 = Date.now() + 15000
+    for (;;) {
+      const res = await c2.request('screen', { ptyId, scrollback: 0, history: true })
+      assert.equal(Object.hasOwn(res, 'history'), true)
+      if (res.history.data.includes('redline')) {
+        assert.equal(res.history.cols, 90)
+        assert.equal(res.history.rows, 20)
+        assert.match(res.history.data, /\x1b\[(?:[0-9;]*;)?31(?:;[0-9;]*)?mredline/)
+        break
+      }
+      if (Date.now() > end2) throw new Error(`no redline in history: ${JSON.stringify(res.history)}`)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    // without history: true, proto 2 gets no history field
+    assert.equal(Object.hasOwn(await c2.request('screen', { ptyId, scrollback: 0 }), 'history'), false)
+    // proto 1 never gets it
+    assert.equal(Object.hasOwn(await c1.request('screen', { ptyId, scrollback: 0, history: true }), 'history'), false)
+
+    const exited = new Promise((resolve) => {
+      const off = c2.on('exit', (/** @type {any} */ m) => { if (m.ptyId === ptyId) { off(); resolve(m) } })
+    })
+    await c2.request('kill', { ptyId, signal: 'SIGKILL', graceMs: 0 })
+    await exited
+    const rec2 = (await c2.request('exits', { since })).exits.find((/** @type {any} */ e) => e.ptyId === ptyId)
+    assert.equal(rec2.history.cols, 90)
+    assert.equal(rec2.history.rows, 20)
+    assert.match(rec2.history.data, /redline/)
+    assert.equal(typeof rec2.tail, 'string')
+    const rec1 = (await c1.request('exits', { since })).exits.find((/** @type {any} */ e) => e.ptyId === ptyId)
+    assert.equal(Object.hasOwn(rec1, 'history'), false)
+    assert.equal(Object.hasOwn(rec1, 'tail'), false)
+  } finally {
+    c1.close()
+    c2.close()
+    await deckd.close()
+    await rt.cleanup()
+  }
+})
+
+/**
+ * Run `script` as a one-shot `claude` under a fresh in-process deckd and
+ * return the proto 2 exit record of its PTY. `FLAG` in `script` becomes the
+ * path of a file the child can create. With `stall`, this process blocks its
+ * event loop, which it shares with deckd, from the spawn until that file
+ * exists and 50 ms more: the child's last output and its exit then reach
+ * deckd together.
+ * @param {string} script body of a node program
+ * @param {{ historyCap?: number, stall?: boolean }} [opts]
+ * @returns {Promise<any>}
+ */
+async function exitRecordOf (script, { stall = false, ...deckdOpts } = {}) {
+  const rt = await makeRuntimeDir()
+  const bin = path.join(rt.dir, 'bin')
+  await mkdir(bin, { mode: 0o700 })
+  const claude = path.join(bin, 'claude')
+  const flag = path.join(rt.dir, 'flag')
+  await writeFile(claude, `#!/usr/bin/env node\n${script.replace('FLAG', JSON.stringify(flag))}\n`, { mode: 0o700 })
+  const deckd = await startDeckd({ runtimeDir: rt.dir, loginEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: rt.dir }, ...deckdOpts })
+  const c = await connectDeckd({ runtimeDir: rt.dir, kind: 'server', name: 'history-exit', proto: 2 })
+  try {
+    const since = Date.now() - 1
+    /** @type {any[]} */
+    const seen = []
+    /** @type {(m: any) => void} */
+    let onExit = (m) => { seen.push(m) }
+    const off = c.on('exit', (/** @type {any} */ m) => onExit(m))
+    const { ptyId } = await c.request('spawn', { cwd: rt.dir, argv: [claude], env: {}, cols: 80, rows: 10, origin: 'launched' })
+    if (stall) {
+      const end = Date.now() + 15000
+      while (!existsSync(flag) && Date.now() < end) { /* block */ }
+      const settle = Date.now() + 50
+      while (Date.now() < settle) { /* block */ }
+    }
+    await new Promise((resolve) => {
+      if (seen.some((m) => m.ptyId === ptyId)) return resolve(undefined)
+      onExit = (m) => { if (m.ptyId === ptyId) resolve(undefined) }
+    })
+    off()
+    return (await c.request('exits', { since })).exits.find((/** @type {any} */ e) => e.ptyId === ptyId)
+  } finally {
+    c.close()
+    await deckd.close()
+    await rt.cleanup()
+  }
+}
+
+test('history: the exit record carries output written just before the child exits', async () => {
+  // The child prints the marker and exits at once; nothing waits for the
+  // marker before the exit. The stall makes deckd receive both together.
+  const script = "process.stdout.write('\\x1b[33mLAST-WORDS-7f3a\\x1b[0m\\r\\n'); require('node:fs').writeFileSync(FLAG, ''); process.exit(0)"
+  const rec = await exitRecordOf(script, { stall: true })
+  assert.equal(rec.code, 0)
+  assert.match(rec.history.data, /LAST-WORDS-7f3a/, JSON.stringify(rec.history.data.slice(-200)))
+})
+
+test('history: the exit record caps history.data at the byte cap, starting right after a CRLF', async () => {
+  const cap = 3000
+  const script = "let s = ''; for (let i = 0; i < 300; i++) s += `\\x1b[3${i % 8}mrow ${i} çé\\x1b[0m\\r\\n`; process.stdout.write(s, () => process.exit(0))"
+  const rec = await exitRecordOf(script, { historyCap: cap })
+  const data = rec.history.data
+  assert.ok(data.length > 0)
+  assert.ok(Buffer.byteLength(data) <= cap, `history.data is ${Buffer.byteLength(data)} bytes`)
+  // the newest rows stay, the oldest are dropped
+  assert.match(data, /row 299 çé/)
+  assert.doesNotMatch(data, /row 0 /)
+  // a whole serialized line: its colour, then the row text up to the CRLF
+  assert.match(data, /^\x1b\[3\dmrow \d+ çé\r\n/, JSON.stringify(data.slice(0, 40)))
 })
