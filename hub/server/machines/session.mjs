@@ -48,6 +48,31 @@ function baseline(value) {
   } catch { return null }
 }
 
+/**
+ * The commit a stored review baseline was taken at: a 40 to 64 hex sha, 'unborn' for a repository
+ * without commits, or null when the value is not a valid baseline.
+ * @param {string|null} value the `sessions.review_baseline` column
+ * @returns {string|null}
+ */
+export function baselineHead(value) {
+  return value ? baseline(value)?.head ?? null : null
+}
+
+/**
+ * The file content a review baseline stored for a repository-relative path (a path that was dirty or
+ * absent when the baseline was taken), or null when the baseline holds no content for it. A path the
+ * baseline recorded as absent gives an empty buffer.
+ * @param {string|null} value the `sessions.review_baseline` column
+ * @param {string} name repository-relative path with `/` separators
+ * @returns {Buffer|null}
+ */
+export function baselineContent(value, name) {
+  const saved = value ? baseline(value) : null
+  if (!saved || !Object.hasOwn(saved.files, name)) return null
+  const content = saved.contents && Object.hasOwn(saved.contents, name) ? saved.contents[name] : null
+  return typeof content === 'string' ? Buffer.from(content, 'base64') : null
+}
+
 function scanBudget() {
   return { remaining: maxScannedBytes, remainingPaths: maxScannedPaths, deadline: Date.now() + 1500 }
 }
