@@ -81,7 +81,7 @@ async function headContent(root, head, name) {
   if (!/^[0-9a-f]{40,64}$/.test(oid)) return Buffer.alloc(0)
   const type = await gitRead(root, ['cat-file', '-t', oid])
   if (type?.code !== 0 || type.stdout.toString('utf8').trim() !== 'blob') return Buffer.alloc(0)
-  const shown = await gitRead(root, ['show', '--no-textconv', oid], { maxBuffer: MAX_SIDE_BYTES })
+  const shown = await gitRead(root, ['cat-file', 'blob', oid], { maxBuffer: MAX_SIDE_BYTES })
   return shown?.code === 0 ? shown.stdout : null
 }
 

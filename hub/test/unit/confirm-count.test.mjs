@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -38,11 +38,59 @@ test('countFor push_overwritten counts the remote-tracking commits a force push 
   assert.equal(git(repo, 'rev-parse', 'refs/heads/main'), local)
 })
 
-test('countFor reset_files counts git status --porcelain lines', async t => {
+test('countFor reset_files counts tracked changes a reset discards and never untracked files', async t => {
   const repo = tempRepo(t)
+  writeFileSync(path.join(repo, 'u1'), 'u\n')
+  writeFileSync(path.join(repo, 'u2'), 'u\n')
+  // Only untracked files: git reset --hard discards nothing.
+  assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], repo), 0)
+  for (const name of ['b.txt', 'c.txt', 'd.txt', 'e.txt']) writeFileSync(path.join(repo, name), `${name}\n`)
+  git(repo, 'add', 'b.txt', 'c.txt', 'd.txt', 'e.txt')
+  git(repo, 'commit', '-qm', 'two')
   writeFileSync(path.join(repo, 'a.txt'), 'changed\n')
-  writeFileSync(path.join(repo, 'new.txt'), 'new\n')
-  assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], repo), 2)
+  writeFileSync(path.join(repo, 'b.txt'), 'staged\n')
+  git(repo, 'add', 'b.txt')
+  rmSync(path.join(repo, 'c.txt'))
+  git(repo, 'rm', '-q', '--cached', 'd.txt')
+  writeFileSync(path.join(repo, 'added.txt'), 'added\n')
+  git(repo, 'add', 'added.txt')
+  // Same content, new mtime: not a change.
+  utimesSync(path.join(repo, 'e.txt'), new Date('2001-01-01'), new Date('2001-01-01'))
+  // a.txt modified, b.txt staged, c.txt deleted, d.txt removed from the index, added.txt staged; d.txt
+  // is now untracked in the work tree and u1, u2 always were.
+  assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], repo), 5)
+  // From a subdirectory the count still covers the whole repository, as a reset does.
+  mkdirSync(path.join(repo, 'sub'))
+  assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], path.join(repo, 'sub')), 5)
+})
+
+test('countFor reset_files in a repo with a marker clean filter never runs the filter', async t => {
+  const repo = tempRepo(t)
+  writeFileSync(path.join(repo, 'b.txt'), 'b\n')
+  git(repo, 'add', 'b.txt')
+  git(repo, 'commit', '-qm', 'two')
+  const marker = path.join(repo, '..', `${path.basename(repo)}-marker`)
+  t.after(() => rmSync(marker, { force: true }))
+  const script = path.join(repo, '..', `${path.basename(repo)}-filter.sh`)
+  t.after(() => rmSync(script, { force: true }))
+  writeFileSync(script, `#!/bin/sh\necho ran >> '${marker}'\ncat\n`)
+  chmodSync(script, 0o755)
+  writeFileSync(path.join(repo, '.gitattributes'), '* filter=evil\n')
+  writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil\n')
+  git(repo, 'config', 'filter.evil.clean', script)
+  const stale = () => utimesSync(path.join(repo, 'a.txt'), new Date('2001-01-01'), new Date('2001-01-01'))
+  // The fixture is live: a plain git status re-hashes the stat-dirty a.txt through the filter.
+  stale()
+  execFileSync('git', ['-C', repo, 'status', '--porcelain'], { timeout: 5000 })
+  assert.equal(existsSync(marker), true)
+  rmSync(marker)
+  stale()
+  const unchanged = await countFor('reset_files', ['git', 'reset', '--hard'], repo)
+  assert.equal(existsSync(marker), false)
+  assert.equal(unchanged, 0)
+  writeFileSync(path.join(repo, 'b.txt'), 'B\n')
+  assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], repo), 1)
+  assert.equal(existsSync(marker), false)
 })
 
 test('countFor clean_files runs git clean -n with the literal flags minus -f and deletes nothing', async t => {

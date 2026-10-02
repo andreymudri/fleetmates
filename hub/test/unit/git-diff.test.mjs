@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { SAFE_GIT_FLAGS, gitRead } from '../../server/adapters/git-read.mjs'
+import { SAFE_GIT_FLAGS, allowedCommand, gitEnv, gitRead } from '../../server/adapters/git-read.mjs'
 import { MAX_DIFF_BYTES, sessionDiff } from '../../server/adapters/git-diff.mjs'
 import { captureReviewBaseline } from '../../server/machines/session.mjs'
 
@@ -133,18 +133,72 @@ test('a repo config diff.external and core.fsmonitor pointing at a marker script
   git(repo, 'config', 'core.fsmonitor', script)
   const value = captureReviewBaseline(repo)
   writeFileSync(path.join(repo, 'a.txt'), 'two\n')
-  // Without --no-ext-diff on the command itself, only the helper's -c flags keep the script away. The empty
-  // diff.external makes git 2.55 refuse ("cannot run"), so callers still pass --no-ext-diff to get a diff.
-  const bare = await gitRead(repo, ['diff'])
-  assert.notEqual(bare, null)
-  assert.notEqual(bare.code, 0)
-  const diff = await gitRead(repo, ['diff', '--no-ext-diff'])
-  assert.equal(diff.code, 0)
+  // gitRead refuses a work-tree diff and status outright, so the safe flags are run here by hand: without
+  // --no-ext-diff on the command itself, only the -c flags keep the script away. The empty diff.external
+  // makes git refuse ("cannot run"), and the status still succeeds without starting the fsmonitor script.
+  assert.equal(await gitRead(repo, ['diff']), null)
+  assert.equal(await gitRead(repo, ['status', '--porcelain']), null)
+  const run = args => spawnSync('git', [...SAFE_GIT_FLAGS, ...args], { cwd: repo, env: gitEnv(), timeout: 5000 })
+  assert.notEqual(run(['diff']).status, 0)
+  const diff = run(['diff', '--no-ext-diff'])
+  assert.equal(diff.status, 0)
   assert.match(diff.stdout.toString('utf8'), /^\+two$/m)
-  const status = await gitRead(repo, ['status', '--porcelain'])
-  assert.equal(status.code, 0)
+  assert.equal(run(['status', '--porcelain']).status, 0)
   await sessionDiff(session(repo, value, ['a.txt']), 'a.txt')
   assert.equal(existsSync(marker), false)
+})
+
+/** A repository whose in-tree and info attributes select clean, smudge, textconv and diff drivers that touch `marker`. */
+function filterRepo(t) {
+  const repo = tempRepo(t, { 'a.txt': 'one\n', 'b.txt': 'two\n' })
+  const marker = path.join(repo, '..', `${path.basename(repo)}-filter-marker`)
+  t.after(() => rmSync(marker, { force: true }))
+  const script = path.join(repo, '..', `${path.basename(repo)}-filter.sh`)
+  t.after(() => rmSync(script, { force: true }))
+  writeFileSync(script, `#!/bin/sh\necho ran >> '${marker}'\nif [ -n "$1" ]; then cat "$1"; else cat; fi\n`)
+  chmodSync(script, 0o755)
+  writeFileSync(path.join(repo, '.gitattributes'), '* filter=evil diff=evil\n')
+  writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil diff=evil\n')
+  for (const key of ['filter.evil.clean', 'filter.evil.smudge', 'filter.evil.process', 'diff.evil.textconv', 'diff.evil.command']) git(repo, 'config', key, script)
+  // Stat-dirty with unchanged content: git status would re-hash a.txt through the clean filter.
+  utimesSync(path.join(repo, 'a.txt'), new Date('2001-01-01'), new Date('2001-01-01'))
+  writeFileSync(path.join(repo, 'before'), 'x\n')
+  writeFileSync(path.join(repo, 'after'), 'y\n')
+  return { repo, marker }
+}
+
+test('a status-like gitRead in a repo with a marker clean filter is refused and never runs the filter', async t => {
+  const { repo, marker } = filterRepo(t)
+  // The fixture itself is live: plain git status runs the filter.
+  spawnSync('git', ['status', '--porcelain'], { cwd: repo, env: gitEnv(), timeout: 5000 })
+  assert.equal(existsSync(marker), true)
+  rmSync(marker)
+  utimesSync(path.join(repo, 'a.txt'), new Date('2001-01-01'), new Date('2001-01-01'))
+  for (const args of [['status', '--porcelain'], ['diff-files', '--name-only'], ['diff-index', '--name-only', 'HEAD'], ['ls-files', '-m'], ['ls-files', '--modified'], ['ls-files', '-dm'], ['show', 'HEAD'], ['log', '-p'], ['diff', '--no-ext-diff', '--no-textconv'], ['cat-file', '--filters', 'HEAD:a.txt'], ['clean', '-f'], ['clean', '-nf'], ['symbolic-ref', 'HEAD', 'refs/heads/x'], ['-c', 'x=y', 'rev-parse', 'HEAD'], ['add', 'a.txt']]) {
+    const output = await gitRead(repo, args)
+    assert.equal(existsSync(marker), false, args.join(' '))
+    assert.equal(output, null, args.join(' '))
+    assert.equal(allowedCommand(args), false, args.join(' '))
+  }
+})
+
+test('every command gitRead allows runs in a repo with marker filter and diff drivers without starting them', async t => {
+  const { repo, marker } = filterRepo(t)
+  const allowed = [
+    ['rev-parse', '--show-toplevel'], ['rev-list', '--count', 'HEAD'], ['ls-tree', '-r', '-z', 'HEAD'],
+    ['symbolic-ref', '--quiet', '--short', 'HEAD'], ['cat-file', 'blob', 'HEAD:a.txt'], ['ls-files', '--stage', '--debug', '-z'],
+    ['ls-files', '--eol', '-t', '--cached', '--others'], ['ls-files', '--error-unmatch', 'a.txt'], ['clean', '-n', '-d'],
+    ['worktree', 'list', '--porcelain'], ['config', '--bool', '--get', 'core.filemode'],
+    ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', 'before', 'after']
+  ]
+  for (const args of allowed) {
+    const output = await gitRead(repo, args)
+    assert.equal(existsSync(marker), false, args.join(' '))
+    assert.ok(output && output.code <= 1, args.join(' '))
+    assert.equal(allowedCommand(args), true, args.join(' '))
+  }
+  const diff = await gitRead(repo, allowed.at(-1))
+  assert.match(diff.stdout.toString('utf8'), /^-x\n\+y$/m)
 })
 
 test('gitRead starts git with the 4.8 flags and environment, without credential or GIT_ variables', async t => {
@@ -158,9 +212,9 @@ test('gitRead starts git with the 4.8 flags and environment, without credential 
   process.env.PATH = `${bin}:${process.env.PATH}`
   process.env.FLEETMATES_DECK_TOKEN = 'placeholder'
   process.env.GIT_EXTERNAL_DIFF = '/bin/false'
-  const output = await gitRead(bin, ['status'])
+  const output = await gitRead(bin, ['rev-parse', 'HEAD'])
   assert.equal(output.stdout.toString('utf8'), '001 /bin/false')
-  assert.deepEqual(readFileSync(`${record}.argv`, 'utf8').trim().split('\n'), [...SAFE_GIT_FLAGS, 'status'])
+  assert.deepEqual(readFileSync(`${record}.argv`, 'utf8').trim().split('\n'), [...SAFE_GIT_FLAGS, 'rev-parse', 'HEAD'])
   const names = readFileSync(`${record}.env`, 'utf8').split('\n')
   assert.equal(names.includes('FLEETMATES_DECK_TOKEN'), false)
   assert.equal(names.includes('GIT_EXTERNAL_DIFF'), false)
@@ -175,6 +229,6 @@ test('gitRead resolves null when git outlives its timeout', async t => {
   t.after(() => { process.env.PATH = saved })
   process.env.PATH = `${bin}:${saved}`
   const started = Date.now()
-  assert.equal(await gitRead(bin, ['status'], { timeoutMs: 200 }), null)
+  assert.equal(await gitRead(bin, ['rev-parse', 'HEAD'], { timeoutMs: 200 }), null)
   assert.ok(Date.now() - started < 2000)
 })
