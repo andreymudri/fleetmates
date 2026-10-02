@@ -242,6 +242,21 @@ test('AC7: an observed session\'s row has no Allow, Deny or Reply, only "Answer 
   assert.deepEqual(answers(api), [], 'Alt A and Alt D never answer an observed row')
 })
 
+test('Alt A and Alt D never answer a focused question of a PTY session, though they answer its permission row', async () => {
+  const state = stateWith({ requests: [request('q', 's1', null, { kind: 'question' }), request('p', 's1', 'safe')] })
+  const api = fakeApi()
+  const h = await harness(state, { api })
+  h.dispatch({ type: 'focus', id: 'q' })
+  h.key({ key: 'a', code: 'KeyA', altKey: true })
+  h.key({ key: 'd', code: 'KeyD', altKey: true })
+  await h.settle()
+  assert.deepEqual(answers(api), [], 'Alt A and Alt D send nothing for a focused PTY question')
+  h.dispatch({ type: 'focus', id: 'p' })
+  h.key({ key: 'a', code: 'KeyA', altKey: true })
+  await h.settle()
+  assert.deepEqual(answers(api).map(call => call[1]), ['/api/requests/p/answer'], 'the same keys still answer a PTY permission row')
+})
+
 test('the rule suggestion line, its any-flags line, accepting with a toast and Undo', async () => {
   const offers = [
     { repoId: '/home/you/dev/rustot', pattern: 'Bash(cargo test:*)', count: 5, threshold: 5, ruleNote: 'anyFlags' },
