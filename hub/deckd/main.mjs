@@ -141,17 +141,18 @@ function exitTail (host) {
 }
 
 /**
- * The PTY's serialized history at exit, `data` cut to EXIT_TAIL_BYTES by
+ * The PTY's serialized history at exit, `data` cut to `maxBytes` by
  * dropping whole leading lines. Undefined when serializing fails, so the exit
  * is still recorded.
  * @param {PtyHost} host
+ * @param {number} maxBytes
  * @returns {Promise<import('./screen-model.mjs').History | undefined>}
  */
-async function exitHistory (host) {
+async function exitHistory (host, maxBytes) {
   try {
     await host.screen.flush()
     const history = host.screen.history()
-    return { ...history, data: capHistory(history.data, EXIT_TAIL_BYTES) }
+    return { ...history, data: capHistory(history.data, maxBytes) }
   } catch (err) {
     console.error('deckd: could not serialize the history of', host.ptyId, /** @type {Error} */ (err).message)
     return undefined
@@ -163,10 +164,12 @@ async function exitHistory (host) {
  * `loginEnv` is the environment `launched` sessions start from; when absent
  * it is this process's environment without Claude Code's session variables,
  * so a caller that passes none never runs a shell.
- * @param {{ runtimeDir: string, outputQueueCap?: number, version?: string, loginEnv?: Record<string, string> }} opts
+ * `historyCap` is the byte cap of an exit record's `history.data`
+ * (EXIT_TAIL_BYTES unless a test sets it).
+ * @param {{ runtimeDir: string, outputQueueCap?: number, version?: string, loginEnv?: Record<string, string>, historyCap?: number }} opts
  * @returns {Promise<{ socketPath: string, bootId: string, close: () => Promise<void> }>}
  */
-export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CAP, version = '0.0.0', loginEnv = dropSessionVars(process.env) }) {
+export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CAP, version = '0.0.0', loginEnv = dropSessionVars(process.env), historyCap = EXIT_TAIL_BYTES }) {
   await checkRuntimeDir(runtimeDir)
   const loginEnvNames = changedNames(loginEnv, process.env).slice(0, LOGIN_ENV_NAMES_MAX)
   const { dir, socketPath } = socketPaths(runtimeDir)
@@ -321,7 +324,7 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
           // The record (with `history`, read once the screen model has parsed
           // every byte) is stored before the `exit` event goes out, so a
           // client that asks `exits` on that event finds it.
-          const history = await exitHistory(h)
+          const history = await exitHistory(h, historyCap)
           const rec = { ...event, tail: exitTail(h), ...(history ? { history } : {}) }
           const cutoff = Date.now() - EXIT_RETENTION_MS
           exits = exits.filter((e) => e.at >= cutoff)
