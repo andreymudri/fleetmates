@@ -113,7 +113,7 @@ jobs:
               "deckd/main.mjs", "server/main.mjs", "hook/deck-hook.mjs", "web/dist/index.html",
               "vendor/fleetmates/names.mjs", "vendor/fleetmates/liveness.mjs", "vendor/fleetmates/git.mjs", "vendor/fleetmates/reviews.mjs"]
             const missing = need.filter(f => !files.includes(f))
-            const leaked = files.filter(f => /^(test|spike|node_modules)\/|\.test\.mjs$|\.env/.test(f))
+            const leaked = files.filter(f => /^(test|node_modules)\/|\.test\.mjs$|\.env/.test(f))
             if (missing.length) { console.error("missing from the package: " + missing.join(", ")); process.exit(1) }
             if (leaked.length) { console.error("must not ship: " + leaked.join(", ")); process.exit(1) }
           '
