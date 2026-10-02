@@ -41,7 +41,7 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 | Repo | Deliverables |
 |---|---|
-| fleetmates `hub/` | `deckd/` skeleton; `bin/fm.mjs` (claude, attach); `test/capture/`; `test/fake-claude/`; `test/fixtures/hooks/<v>/`, `screens/<v>/`; `test/fixtures/scribed/` hand-copied from the expectations in TurbidAssist's `tests/realtime/test_protocol.py` and reviewed; `server/adapters/scribed.mjs` (minimal); spike page (deleted at M1) |
+| fleetmates `hub/` | `deckd/` skeleton; `bin/fm.mjs` (claude, attach); `test/capture/`; `test/fake-claude/`; `test/fixtures/hooks/<v>/`, `screens/<v>/`; `test/fixtures/scribed/` hand-copied from the expectations in TurbidAssist's `tests/realtime/test_protocol.py` and reviewed; `server/adapters/scribed.mjs` (minimal); spike page (deleted at M2) |
 | fleetmates root | none |
 | vault-mcp | none |
 | TurbidAssist | none required. The protocol fixture exporter (T0; TEST-O3, MTG-O3) is optional until M4 |
@@ -303,7 +303,7 @@ Sized for fleetmates team runs: each task owns a disjoint file set so teammates 
 | T2 Capture script and fake `claude` v0 | `hub/test/capture/*`, `hub/test/fake-claude/*`, `hub/test/fixtures/hooks/<v>/*`, `hub/test/fixtures/screens/<v>/*`, `hub/test/fixtures/scripts/*` | none |
 | T3 Screen model and prompt parser | `hub/deckd/screen/*`, `hub/test/contract/screens.test.mjs` | T2 |
 | T4 `fm claude` and `fm attach` minimal | `hub/bin/fm.mjs`, `hub/deckd/client.mjs`, `hub/test/integration/fm.test.mjs` | T1 |
-| T5 Spike web page: xterm.js bridged to deckd over WebSocket | `hub/spike/*` (deleted at M1) | T1 |
+| T5 Spike web page: xterm.js bridged to deckd over WebSocket | `hub/spike/*` (deleted at M2) | T1 |
 | T6 scribed client minimal and fixtures | `hub/server/adapters/scribed.mjs`, `hub/test/contract/scribed.test.mjs`, `hub/test/fixtures/scribed/*`; TurbidAssist `scripts/export_protocol_fixtures.py` | none |
 | T7 Measurements and spike report | `hub/test/perf/keystroke-echo.spec.mjs`, `docs/deck/spikes/m0.md` | T3, T4, T5 |
 
