@@ -735,11 +735,12 @@ test('the detach escape: Ctrl ] twice sends one Ctrl ], Ctrl ] then another byte
 /**
  * A Unix socket proxy on a fresh runtime dir in front of the test deckd. It
  * logs every request fm sends and the close of fm's socket, in order, keeps
- * deckd's answers by request id, and with `holdAttach` holds deckd's answer
- * to fm's first `attach` request, and every line after it, until release().
- * @param {{ holdAttach?: boolean }} [opts]
+ * deckd's answers by request id, and with `hold` set to an op holds deckd's
+ * answer to fm's first request of that op, and every line after it, until
+ * release().
+ * @param {{ hold?: 'spawn' | 'attach' }} [opts]
  */
-async function deckdProxy ({ holdAttach = false } = {}) {
+async function deckdProxy ({ hold } = {}) {
   const proxyRt = await makeRuntimeDir()
   const dir = path.join(proxyRt.dir, 'fleetmates-deck')
   await mkdir(dir, { mode: 0o700 })
@@ -761,15 +762,15 @@ async function deckdProxy ({ holdAttach = false } = {}) {
     sock.on('error', () => {})
     up.on('error', () => {})
     /** @type {number | null} */
-    let attachId = null
+    let holdId = null
     sock.on('data', createLineDecoder((req) => {
       log.push(req)
-      if (holdAttach && req.op === 'attach' && attachId === null) attachId = req.id
+      if (hold && req.op === hold && holdId === null) holdId = req.id
       up.write(encode(req))
     }, () => {}))
     up.on('data', createLineDecoder((msg) => {
       if (msg.id !== undefined) answers.set(msg.id, msg)
-      if (attachId !== null && msg.id === attachId) holding = true
+      if (holdId !== null && msg.id === holdId) holding = true
       if (holding) held.push(encode(msg))
       else sock.write(encode(msg))
     }, () => {}))
@@ -784,7 +785,7 @@ async function deckdProxy ({ holdAttach = false } = {}) {
     log,
     answers,
     env: { ...env, XDG_RUNTIME_DIR: proxyRt.dir },
-    /** Whether deckd's answer to `attach` is being held. */
+    /** Whether deckd's answer to the `hold` op is being held. */
     holding: () => holding,
     /** Pass on what was held, and everything after it. */
     release () {
@@ -798,6 +799,15 @@ async function deckdProxy ({ holdAttach = false } = {}) {
       await proxyRt.cleanup()
     }
   }
+}
+
+/**
+ * The proxy log as op and PTY id only, for failure messages: a `spawn`
+ * request carries fm's whole environment, which must not reach test output.
+ * @param {Awaited<ReturnType<typeof deckdProxy>>} proxy
+ */
+function opsOf (proxy) {
+  return proxy.log.map((r) => r.closed ? 'closed' : [r.op, r.ptyId].filter(Boolean).join(' ')).join(', ')
 }
 
 /**
@@ -836,7 +846,7 @@ test('SIGHUP to fm attach detaches without printing and leaves the PTY running',
     await until(() => detached, 'deckd to report the terminal detached').finally(off)
     // deckd also reports a detach when the socket closes, so check the request itself.
     const sent = detachSent(proxy, p.ptyId)
-    assert.notEqual(sent.at, -1, `fm sent no detach: ${JSON.stringify(proxy.log)}`)
+    assert.notEqual(sent.at, -1, `fm sent no detach: ${opsOf(proxy)}`)
     assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
     assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
     assert.ok(await listed(p.ptyId), 'the PTY is still running')
@@ -848,7 +858,7 @@ test('SIGHUP to fm attach detaches without printing and leaves the PTY running',
 
 test('SIGHUP to fm attach before deckd answers attach detaches once it answers, without printing', async () => {
   const p = await spawnAt(tmp)
-  const proxy = await deckdProxy({ holdAttach: true })
+  const proxy = await deckdProxy({ hold: 'attach' })
   try {
     const attach = runInPty(process.execPath, [fmPath, 'attach', p.ptyId], { env: proxy.env })
     /** @type {{ exitCode: number, signal?: number } | null} */
@@ -866,6 +876,66 @@ test('SIGHUP to fm attach before deckd answers attach detaches once it answers, 
     assert.ok(!exited.signal, `fm died of signal ${exited.signal}`)
     assert.equal(attach.out(), '')
     const sent = detachSent(proxy, p.ptyId)
+    assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
+    assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
+    assert.ok(await listed(p.ptyId), 'the PTY is still running')
+  } finally {
+    await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+    await proxy.close()
+  }
+})
+
+test('SIGHUP to fm claude before deckd answers spawn detaches from the spawned PTY once it answers, without printing', async () => {
+  const proxy = await deckdProxy({ hold: 'spawn' })
+  /** @type {string | undefined} */
+  let id
+  try {
+    const wrapped = runInPty(process.execPath, [fmPath, 'claude'], { env: proxy.env })
+    await until(() => proxy.holding(), 'deckd to answer spawn, held by the proxy')
+    id = proxy.answers.get(proxy.log.find((r) => r.op === 'spawn').id).ptyId
+    assert.ok(id, 'deckd spawned a PTY')
+    wrapped.pty.kill('SIGHUP')
+    // fm sends nothing for a hangup before it knows a PTY id, so no request shows it was
+    // handled; give it time to be, so the release below comes after it.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.deepEqual(proxy.log.map((r) => r.op), ['hello', 'spawn'], 'fm sent nothing before the spawn answer')
+    proxy.release()
+    const exited = await wrapped.exited()
+    assert.equal(exited.exitCode, 0)
+    assert.ok(!exited.signal, `fm died of signal ${exited.signal}`)
+    assert.equal(wrapped.out(), '')
+    const sent = detachSent(proxy, /** @type {string} */ (id))
+    assert.notEqual(sent.at, -1, `fm sent no detach: ${opsOf(proxy)}`)
+    assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
+    assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
+    assert.ok(await listed(/** @type {string} */ (id)), 'the PTY is still running')
+  } finally {
+    if (id) await browser.request('kill', { ptyId: id, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+    await proxy.close()
+  }
+})
+
+test('SIGHUP to fm attach <repo> before deckd answers the first attach detaches from the repo\'s PTY, without printing', async () => {
+  const repo = path.join(tmp, 'hup-repo')
+  await mkdir(path.join(repo, '.git'), { recursive: true })
+  const p = await spawnAt(repo)
+  const proxy = await deckdProxy({ hold: 'attach' })
+  try {
+    const attach = runInPty(process.execPath, [fmPath, 'attach', 'hup-repo'], { env: proxy.env })
+    await until(() => proxy.holding(), 'deckd to answer the first attach, held by the proxy')
+    const first = proxy.log.find((r) => r.op === 'attach')
+    assert.equal(first.ptyId, 'hup-repo')
+    assert.equal(proxy.answers.get(first.id).ok, false, 'the repo name is not a live PTY id')
+    attach.pty.kill('SIGHUP')
+    // fm says `detach` for the id it sent `attach` for, which shows it handled the hangup.
+    await until(() => detachSent(proxy, 'hup-repo').at !== -1, 'fm to send detach for the repo name')
+    proxy.release()
+    const exited = await attach.exited()
+    assert.equal(exited.exitCode, 0)
+    assert.ok(!exited.signal, `fm died of signal ${exited.signal}`)
+    assert.equal(attach.out(), '')
+    const sent = detachSent(proxy, p.ptyId)
+    assert.notEqual(sent.at, -1, `fm sent no detach for ${p.ptyId}: ${opsOf(proxy)}`)
     assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
     assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
     assert.ok(await listed(p.ptyId), 'the PTY is still running')
