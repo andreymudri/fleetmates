@@ -6,6 +6,9 @@ import { Focus } from '../focus/Focus.jsx'
 import { Home, ObserveOverlays } from '../home/Home.jsx'
 import { FirstRun } from '../first-run/FirstRun.jsx'
 import { Settings } from '../settings/Settings.jsx'
+import { NewSession } from '../new-session/NewSession.jsx'
+import { TeamRun } from '../team-run/TeamRun.jsx'
+import { CrewSheet } from '../crew/CrewSheet.jsx'
 
 /** English copy for the M1 failure patterns the screens place (docs/deck/screens/failures-and-loading.md section 9). */
 export const FAIL_COPY = Object.freeze({
@@ -111,23 +114,40 @@ export function FailureNotices({ model, repos = [], t, navigate, history = false
 }
 
 /**
- * The shell's `screens` map for M1: Home, Focus, First run and Settings, each given the real authenticated `api`
- * (so a 401 from any of them reaches the shell's fatal state through the api's `onFatal`) and, except First run,
- * the failure notices. The route components are plain functions without hooks, so tests can call them.
- * @param {{ api: object, feed?: object, now?: () => number }} options
+ * The shell's `screens` map: Home, Focus, First run and Settings from M1, and New session, Team run and the Crew sheet
+ * from M2, each given the real authenticated `api` (so a 401 from any of them reaches the shell's fatal state through
+ * the api's `onFatal`). Home, Focus, Settings, Team run and the Crew sheet place the failure notices; First run is
+ * full-bleed, and New session shows deckd down in its own form over the screen it renders beneath it. Home and Focus
+ * get the terminal client (`terminals`) and the store's `dispatch` for their toasts; New session gets this map itself.
+ * The route components are plain functions without hooks, so tests can call them.
+ * @param {{ api: object, feed?: object, terminals?: object | null, dispatch?: (action: object) => void, now?: () => number }} options
  * @returns {Record<string, Function>}
  */
-export function deckScreens({ api, feed, now = Date.now }) {
+export function deckScreens({ api, feed, terminals = null, dispatch, now = Date.now }) {
   const notices = (props, history) => (
     <FailureNotices model={failureModel(props.state, now())} repos={props.state.data.repos} t={props.t} navigate={props.navigate} history={history}
       onStartDeckd={() => { api.post('/api/deps/deckd/start').catch(() => {}) }} />
   )
-  return {
+  const screens = {
     home: function HomeScreen(props) {
-      return <>{notices(props, true)}<Home state={props.state} t={props.t} navigate={props.navigate} api={api} /></>
+      return <>{notices(props, true)}<Home state={props.state} t={props.t} navigate={props.navigate} api={api} terminals={terminals} dispatch={dispatch} /></>
     },
     focus: function FocusScreen(props) {
-      return <>{notices(props, false)}<Focus route={props.route} state={props.state} t={props.t} navigate={props.navigate} api={api} /></>
+      return (
+        <>
+          {notices(props, false)}
+          <Focus route={props.route} state={props.state} t={props.t} navigate={props.navigate} api={api} client={terminals} dispatch={dispatch} />
+        </>
+      )
+    },
+    new: function NewSessionScreen(props) {
+      return <NewSession search={props.search} state={props.state} t={props.t} navigate={props.navigate} api={api} screens={screens} />
+    },
+    team: function TeamRunScreen(props) {
+      return <>{notices(props, false)}<TeamRun route={props.route} search={props.search} state={props.state} t={props.t} navigate={props.navigate} api={api} /></>
+    },
+    crew: function CrewScreen(props) {
+      return <>{notices(props, false)}<CrewSheet route={props.route} search={props.search} state={props.state} t={props.t} navigate={props.navigate} api={api} /></>
     },
     welcome: function WelcomeScreen(props) {
       return <FirstRun state={props.state} t={props.t} navigate={props.navigate} api={api} feed={feed} />
@@ -142,4 +162,5 @@ export function deckScreens({ api, feed, now = Date.now }) {
       )
     }
   }
+  return screens
 }

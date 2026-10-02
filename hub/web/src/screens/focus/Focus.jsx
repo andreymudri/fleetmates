@@ -594,6 +594,7 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
   const history = known && isPty(session) && !isLive(session)
   const activity = session?.lastActivityAt
   const sourceState = state.data.inputSources?.[id]?.state
+  const sourceFrom = state.data.inputSources?.[id]?.from
   const repoName = session ? repoFor(state.data.repos, session.repoId).name : ''
   const now = Math.max(minute, tick)
 
@@ -620,14 +621,15 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
     openNeedsFilter(search, onOverlay)
   }, [])
   // The collision chip shows for 3 s from the moment the input machine reports a collision, even when the
-  // machine settles first: leaving 'collision' does not cancel the timer that hides it.
+  // machine settles first: leaving 'collision' does not cancel the timer that hides it. During a sustained collision
+  // the machine re-emits 'collision' with a flipped `from` on each crossing, and each one re-arms the 3 s.
   const chipTimer = useRef(null)
   useEffect(() => {
     if (sourceState !== 'collision') return
     setCollision(true)
     clearTimeout(chipTimer.current)
     chipTimer.current = setTimeout(() => setCollision(false), COLLISION_CHIP_MS)
-  }, [sourceState, id])
+  }, [sourceState, sourceFrom, id])
   // Switching sessions (or leaving Focus) drops the chip and its timer; this cleanup runs before the effect above.
   useEffect(() => () => {
     clearTimeout(chipTimer.current)

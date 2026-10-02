@@ -663,6 +663,27 @@ test('the shell renders zero, loading, populated, fallback-language and fatal st
   assert.match(outdated, /<button[^>]*>Reload<\/button>/)
 })
 
+test('applyAppearance sets the text size as --text-base and reduced motion as data-motion on the root, and clears them', async () => {
+  const { applyAppearance } = await loadShell()
+  const props = new Map()
+  const attrs = new Map()
+  const root = {
+    style: { setProperty: (key, value) => props.set(key, value), removeProperty: key => props.delete(key) },
+    setAttribute: (key, value) => attrs.set(key, value),
+    removeAttribute: key => attrs.delete(key)
+  }
+  applyAppearance(root, { textSize: 16, motion: 'reduce' })
+  assert.equal(props.get('--text-base'), '16px')
+  assert.equal(attrs.get('data-motion'), 'reduce')
+  applyAppearance(root, { textSize: 13, motion: 'system' })
+  assert.equal(props.get('--text-base'), '13px')
+  assert.equal(attrs.has('data-motion'), false, 'system motion leaves the attribute off')
+  applyAppearance(root, { textSize: 'huge' })
+  assert.equal(props.has('--text-base'), false, 'an unknown size falls back to the stylesheet')
+  applyAppearance(root, undefined)
+  assert.equal(props.size + attrs.size, 0)
+})
+
 async function findChromium() {
   for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
@@ -707,6 +728,17 @@ test('in Chromium the deck drops the fragment, authenticates the socket and show
   assert.equal(await page.title(), 'Memory · fleetmates deck')
   await page.keyboard.press('Alt+Shift+Digit4')
   await page.waitForFunction(() => location.pathname === '/settings/rules', null, { timeout: 5000 })
+  const appearance = () => page.evaluate(() => ({
+    size: document.documentElement.style.getPropertyValue('--text-base'), motion: document.documentElement.getAttribute('data-motion')
+  }))
+  assert.deepEqual(await appearance(), { size: '14px', motion: null }, 'the default appearance')
+  // A preference change arrives as prefs.changed over the socket; the shell re-applies it to the document root.
+  const status = await page.evaluate(async key => (await fetch('/api/prefs', { method: 'PATCH', headers: {
+    Authorization: `Bearer ${sessionStorage.getItem(key)}`, 'X-Deck-Api': '1', 'Content-Type': 'application/json'
+  }, body: JSON.stringify({ textSize: 16, motion: 'reduce' }) })).status, TOKEN_KEY)
+  assert.equal(status, 200)
+  await page.waitForFunction(() => document.documentElement.getAttribute('data-motion') === 'reduce', null, { timeout: 5000 })
+  assert.deepEqual(await appearance(), { size: '16px', motion: 'reduce' })
   assert.deepEqual(errors, [])
 
   const stale = await browser.newPage()

@@ -136,6 +136,16 @@ test('team: the timeline shows 4 phases and 3 gates from derivedPhase, never sta
   assert.match(strip(html), /Gate 2 runs when tasks 3 to 7 are merged\./)
 })
 
+test('team: a solo gate record (phase null, key solo:<name>) never numbers the banner NaN', async () => {
+  const { TeamRunView } = await load('team-run/TeamRun.jsx')
+  const run = teamRun()
+  const pass = run.gates[1]
+  run.gates = { 1: { ...pass, recordedAt: GATE_AT }, 'solo:1': { verdict: 'PASS', phase: null, phaseName: '1', recordedAt: GATE_AT + 1000 } }
+  const text = strip(render(TeamRunView, viewProps({ run })))
+  assert.match(text, /Gate 1 passed at 13:02\./)
+  assert.doesNotMatch(text, /NaN/)
+})
+
 test('team: task rows carry the literal state labels and the header pill counts who needs you (AC2)', async () => {
   const { TeamRunView } = await load('team-run/TeamRun.jsx')
   const tree = TeamRunView(viewProps())

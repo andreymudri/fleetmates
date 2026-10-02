@@ -317,7 +317,8 @@ function Tasks({ run, views, phase, repo, t, lang, onReview, onScrollTo }) {
     )
   }
   const latest = Object.entries(run.gates ?? {}).map(([key, gate]) => ({ n: Number.isFinite(gate.phase) ? gate.phase : Number(key), ...gate }))
-    .filter(gate => Number.isFinite(gate.recordedAt)).sort((a, b) => b.recordedAt - a.recordedAt)[0] ?? null
+    // A solo gate record (`fleetmates gate --no-fleet`, key `solo:<phaseName>`, phase null) has no gate number.
+    .filter(gate => Number.isFinite(gate.n) && Number.isFinite(gate.recordedAt)).sort((a, b) => b.recordedAt - a.recordedAt)[0] ?? null
   const current = phase.derived === null ? [] : tasks.filter(task => task.phase === phase.derived)
   const banner = [
     latest ? translate(t, TEAM_COPY, latest.verdict === 'PASS' ? 'team.gateBanner.passed' : 'team.gateBanner.failed', { n: latest.n, time: clock(latest.recordedAt, lang), checks: (latest.failed ?? []).map(shown).join(', ') }) : null,

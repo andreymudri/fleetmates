@@ -424,6 +424,7 @@ test('a ?repo= that arrives before the repos resolves once they load, and never 
   assert.equal(await page.inputValue('#new-session-repo'), 'alpha')
   assert.equal(await page.locator('.launch-list').count(), 0, 'the resolved repo closes the list')
   assert.equal(await page.inputValue('#new-session-task'), 'fix')
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'new-session-task', 'the resolved repo moves focus to Task')
   await page.click('.launch-submit')
   await page.waitForFunction(() => window.h.routes.length > 0 || document.querySelector('.launch-field-error'), null, { timeout: 5000 })
   assert.deepEqual(await page.evaluate(() => window.h.posts), [{ url: '/api/sessions', body: { repoKey: 'alpha', task: 'fix' } }])
