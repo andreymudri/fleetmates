@@ -232,6 +232,35 @@ test('dry run reports pending changes without exposing settings secrets', () => 
   assert.doesNotMatch(result.stdout + result.stderr, new RegExp(secret))
 })
 
+test('init writes the hub version beside the installed hook so the installed copy stamps it', async () => {
+  // Task 23: init copies only deck-hook.mjs, whose version comes from ../package.json, so init also
+  // writes <share>/package.json holding just the hub version.
+  const s = sandbox('empty.json', { isolatedHub: true })
+  const hubPackage = path.join(s.hubPath, 'package.json')
+  const version = JSON.parse(readFileSync(hubPackage, 'utf8')).version
+  const paths = setupPaths(s.env)
+  const versionFile = path.join(paths.share, 'package.json')
+  const dryRun = s.run('init', '--dry-run')
+  assert.equal(dryRun.status, 0, dryRun.stderr)
+  assert.ok(dryRun.stdout.includes(`hook version: ${versionFile} (would write)`), dryRun.stdout)
+  assert.equal(existsSync(versionFile), false, 'dry run writes nothing')
+  const stamp = async tag => (await import(`${pathToFileURL(paths.hook).href}?${tag}`))
+    .makeEnvelope({ session_id: 's', cwd: '/home/you/dev/x', hook_event_name: 'Stop', stop_hook_active: false }, { hookTs: 1, ptyId: null }).deckHookVersion
+  const first = s.run('init')
+  assert.equal(first.status, 0, first.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(versionFile, 'utf8')), { version })
+  assert.equal(statSync(versionFile).mode & 0o777, 0o600)
+  assert.equal(await stamp('first'), version)
+  const unchanged = s.run('init', '--dry-run')
+  assert.ok(unchanged.stdout.includes(`hook version: ${versionFile} (unchanged)`), unchanged.stdout)
+  writeFileSync(hubPackage, JSON.stringify({ ...JSON.parse(readFileSync(hubPackage, 'utf8')), version: '9.8.7' }))
+  const second = s.run('init')
+  assert.equal(second.status, 0, second.stderr)
+  assert.deepEqual(JSON.parse(readFileSync(versionFile, 'utf8')), { version: '9.8.7' })
+  assert.equal(statSync(versionFile).mode & 0o777, 0o600)
+  assert.equal(await stamp('second'), '9.8.7')
+})
+
 test('init merges hooks, preserves existing order and is byte identical twice', () => {
   const s = sandbox('existing-hooks.json')
   assert.equal(s.run('init').status, 0)

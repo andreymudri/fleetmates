@@ -75,6 +75,11 @@ async function init(dryRun, rotateToken) {
   const changes = JSON.stringify(current.value) !== JSON.stringify(merged)
   const hookSource = path.join(hub, 'hook/deck-hook.mjs')
   const source = fs.readFileSync(hookSource)
+  // The installed hook reads its version from ../package.json, so the share directory carries only the hub version.
+  const versionFile = path.join(paths.share, 'package.json')
+  const versionContent = `${JSON.stringify({ version: JSON.parse(fs.readFileSync(path.join(hub, 'package.json'), 'utf8')).version })}\n`
+  let versionChanged = true
+  try { versionChanged = fs.readFileSync(versionFile, 'utf8') !== versionContent } catch (error) { if (error.code !== 'ENOENT') throw error }
   const unitChanges = UNIT_NAMES.map(name => {
     const content = renderUnit(name, process.execPath, hub)
     let changed = true
@@ -84,6 +89,7 @@ async function init(dryRun, rotateToken) {
   if (dryRun) {
     process.stdout.write(`directories: ${paths.config}, ${paths.state}, ${paths.share}\n`)
     process.stdout.write(`hook script: ${paths.hook}\n`)
+    process.stdout.write(`hook version: ${versionFile} (${versionChanged ? 'would write' : 'unchanged'})\n`)
     process.stdout.write(`settings: ${changes ? 'would update' : 'unchanged'}\n`)
     process.stdout.write(`token: ${rotateToken ? 'would rotate' : 'would create if missing'}\n`)
     for (const unit of unitChanges) process.stdout.write(`${unit.name}: ${unit.changed ? 'would write' : 'unchanged'}\n`)
@@ -92,6 +98,8 @@ async function init(dryRun, rotateToken) {
   for (const dir of [paths.config, paths.state, paths.spool, paths.logs, paths.share, path.dirname(paths.hook)]) privateDir(dir)
   if (!fs.existsSync(paths.hook) || !fs.readFileSync(paths.hook).equals(source)) fs.writeFileSync(paths.hook, source, { mode: 0o600 })
   fs.chmodSync(paths.hook, 0o600)
+  if (versionChanged) fs.writeFileSync(versionFile, versionContent, { mode: 0o600 })
+  fs.chmodSync(versionFile, 0o600)
   const backup = writeSettings(paths.settings, current, merged)
   if (backup) process.stdout.write(`settings backup: ${backup}\n`)
   if (rotateToken) {
