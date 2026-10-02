@@ -1080,11 +1080,11 @@ test('history -w, -a and -n with a file record a write', () => {
 // listed but stay excluded by the earlier rules (`type` is a bash builtin outside the kept ones,
 // and `[` is outside the plain character set).
 const allowlistRows = {
-  ls: 'ls -la', pwd: 'pwd', cat: 'cat f', head: 'head -5 f', tail: 'tail -5 f', wc: 'wc -l f', grep: 'grep -n x f', rg: 'rg foo src', fd: 'fd foo', tree: 'tree src', stat: 'stat f', file: 'file f', which: 'which git', type: null, echo: 'echo x', printf: 'printf x', date: 'date', du: 'du -sh src', df: 'df -h', diff: 'diff a b', cmp: 'cmp a b', sort: 'sort f', uniq: 'uniq f', cut: 'cut -d, -f1 f', tr: 'tr a b', jq: 'jq .a f', yq: 'yq .a f', sed: 'sed -n 1p f', find: 'find . -name x', true: 'true', false: 'false', test: 'test -f x', '[': null,
-  git: ['git status', 'git diff', 'git log', 'git show HEAD', 'git blame f', 'git rev-parse HEAD', 'git ls-files', 'git branch', 'git remote -v', 'git stash list', 'git worktree list', 'git describe', 'git shortlog', 'git grep x', 'git config --get user.name', 'git add f', 'git commit -m x', 'git --no-pager log', 'git -P diff', 'git config --get-all a.b', 'git config --global --get-regexp alias'],
+  ls: 'ls -la', pwd: 'pwd', cat: 'cat f', head: 'head -5 f', tail: 'tail -5 f', wc: 'wc -l f', grep: 'grep -n x f', rg: 'rg foo src', tree: 'tree src', stat: 'stat f', file: 'file f', which: 'which git', type: null, echo: 'echo x', printf: 'printf x', date: 'date', du: 'du -sh src', df: 'df -h', diff: 'diff a b', cmp: 'cmp a b', sort: 'sort f', uniq: 'uniq f', cut: 'cut -d, -f1 f', tr: 'tr a b', jq: 'jq .a f', yq: 'yq .a f', sed: 'sed -n 1p f', find: 'find . -name x', true: 'true', false: 'false', test: 'test -f x', '[': null,
+  git: ['git status', 'git diff', 'git log', 'git show HEAD', 'git blame f', 'git rev-parse HEAD', 'git ls-files', 'git branch', 'git remote -v', 'git stash list', 'git worktree list', 'git describe', 'git shortlog', 'git grep x', 'git add f', 'git commit -m x', 'git --no-pager log', 'git -P diff'],
   cargo: ['cargo build', 'cargo check', 'cargo test', 'cargo nextest run', 'cargo clippy', 'cargo fmt', 'cargo doc', 'cargo bench', 'cargo tree', 'cargo metadata', 'cargo --version'],
-  npm: ['npm test', 'npm run test', 'npm ls', 'npm outdated', 'npm -w hub test', 'npm --filter hub run build', 'npm -r test'],
-  pnpm: ['pnpm test', 'pnpm run build', 'pnpm ls', 'pnpm outdated', 'pnpm lint', 'pnpm -r test', 'pnpm --filter web lint', 'pnpm -w web test'],
+  npm: ['npm test', 'npm run test', 'npm ls', 'npm outdated'],
+  pnpm: ['pnpm test', 'pnpm run build', 'pnpm ls', 'pnpm outdated', 'pnpm lint'],
   go: ['go build ./...', 'go test ./...', 'go vet ./...', 'go fmt ./...', 'go list ./...', 'go version', 'go env'],
   gofmt: 'gofmt -l .',
   'golangci-lint': 'golangci-lint run',
@@ -1103,10 +1103,10 @@ const allowlistRows = {
 // For each entry with subcommands: a subcommand it does not list, an abbreviation of one it
 // lists, or a form the entry does not allow.
 const allowlistMisses = {
-  git: ['git push', 'git stat', 'git stash', 'git stash pop', 'git worktree add x', 'git config user.name x', 'git config --unset a.b', 'git config --get a.b --add c d', 'git --git-dir=x status', 'git --namespace x status', 'git -p log', 'git', 'git --no-pager'],
+  git: ['git push', 'git stat', 'git stash', 'git stash pop', 'git worktree add x', 'git config user.name x', 'git config --unset a.b', 'git config --get a.b --add c d', 'git config --get user.name', 'git config core.fsmonitor x --get', 'git --git-dir=x status', 'git --namespace x status', 'git -p log', 'git', 'git --no-pager'],
   cargo: ['cargo run', 'cargo b', 'cargo nextest', 'cargo install x', 'cargo --version x', 'cargo -Zunstable build'],
-  npm: ['npm install', 'npm t', 'npm exe x', 'npm run-script test', 'npm --workspace hub test', 'npm -w', 'npm lint'],
-  pnpm: ['pnpm install', 'pnpm add x', 'pnpm t', 'pnpm --workspace web test'],
+  npm: ['npm install', 'npm t', 'npm exe x', 'npm run-script test', 'npm --workspace hub test', 'npm -w', 'npm lint', 'npm -w web test', 'npm --filter rebuild test', 'npm -r test'],
+  pnpm: ['pnpm install', 'pnpm add x', 'pnpm t', 'pnpm --workspace web test', 'pnpm -w add test', 'pnpm --filter web test', 'pnpm -r test'],
   go: ['go run x.go', 'go generate', 'go get x', 'go tes'],
   'golangci-lint': ['golangci-lint cache clean', 'golangci-lint ru'],
   ruff: ['ruff clean', 'ruff chec'],
@@ -1190,4 +1190,48 @@ test('rbash and versioned interpreters are shells and interpreters to the walker
   }
   assert.deepEqual(lines(parse("rbash -c 'touch Z'")), ['rbash -c touch Z', 'touch Z'], 'rbash -c is a payload')
   assert.deepEqual(parse('curl http://x | luacheck').routes, [], 'a name that only starts with lua is not an interpreter')
+})
+
+// D-87 narrowed (owner, 2026-10-02): no option between a PLAIN_COMMANDS command word and its
+// subcommand (git keeps `--no-pager` and `-P`), and `git config` and `fd` are not on the
+// allowlist. Options after the subcommand are Task 7's allowOpts.
+test('D-87 narrowed: no option before the subcommand, and git config and fd are not plain', () => {
+  for (const command of ['git config core.fsmonitor x --get', 'git config --get user.name', 'fd -0x touch P', 'fd foo src', 'npm --filter rebuild test', 'npm -w web test', 'pnpm -w add test', 'pnpm --filter web test']) {
+    assert.equal(plainCommandAllowed(command.split(' ')), false, `allowlist: ${command}`)
+    assert.equal(isPlainText(command), false, `raw text: ${command}`)
+    assert.equal(isPlain(command), false, command)
+    const result = parse(command)
+    assert.equal(result.plain, false, command)
+    assert.equal(segmentsArePlain(result.segments, result.routes), false, `walker half: ${command}`)
+  }
+  for (const command of ['git status', 'git --no-pager log', 'npm test', 'npm run build', 'pnpm test']) {
+    assert.equal(isPlain(command), true, command)
+    assert.equal(plainCommandAllowed(command.split(' ')), true, `allowlist: ${command}`)
+  }
+  assert.equal(Object.hasOwn(PLAIN_COMMANDS, 'fd'), false)
+  assert.equal(PLAIN_COMMANDS.git.some(sequence => sequence[0] === 'config'), false)
+})
+
+test('fd sees -x and -X inside a short bundle', () => {
+  assert.deepEqual(lines(parse('fd -0x touch P')), ['fd -0x touch P', 'touch P'])
+  assert.notEqual(parse('fd -0x touch P').segments[1].payloadOf, null)
+  assert.deepEqual(lines(parse('fd -0X touch P')), ['fd -0X touch P', 'touch P'])
+  assert.deepEqual(lines(parse('fdfind -H0x touch P')), ['fdfind -H0x touch P', 'touch P'])
+  assert.deepEqual(lines(parse('fd -e x foo')), ['fd -e x foo'], 'an -e value is not a bundle')
+})
+
+test('curl and wget options that let the server or a wgetrc choose the file write to an unknown path', () => {
+  assert.deepEqual(writePaths('curl -OJ http://e/x'), [null])
+  assert.deepEqual(writePaths('curl -J -O http://e/x'), [null])
+  assert.deepEqual(writePaths('curl --remote-header-name -O http://e/x'), [null])
+  assert.deepEqual(writePaths('curl --remote-header-name --remote-name http://e/x'), [null])
+  assert.deepEqual(writePaths('curl -O http://e/x'), ['/home/you/repo/x'], 'without -J the URL names the file')
+  assert.deepEqual(writePaths('wget --content-disposition http://e/x'), [null])
+  assert.deepEqual(writePaths('wget --content-disposition -P /home/you http://e/x'), [null])
+  assert.deepEqual(writePaths('wget --trust-server-names http://e/x'), [null])
+  assert.deepEqual(writePaths('wget http://e/x'), ['/home/you/repo/x'], 'without them the URL names the file')
+  assert.deepEqual(writePaths('wget --config=rc http://h/y'), [null, '/home/you/repo/y'])
+  assert.deepEqual(writePaths('wget --config rc http://h/y'), [null, '/home/you/repo/y'])
+  assert.deepEqual(writePaths('wget --conf rc http://h/y'), [null, '/home/you/repo/y'], 'a prefix of --config')
+  assert.deepEqual(writePaths('wget --conf=rc http://h/y'), [null, '/home/you/repo/y'])
 })
