@@ -214,6 +214,84 @@ test('run file changes are debounced and refresh rows without another git poll',
   })
 })
 
+test('a run directory deleted and recreated with the same id gets a fresh watcher', async () => {
+  await withRepo(async (repo) => {
+    const plan = { runId: 'r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }
+    const status = (state) => ({ runId: 'r1', tasks: [{ id: 'T1', state }] })
+    const opened = []
+    let notifications = 0
+    const reader = createFleetmatesReader({
+      repoRoots: [repo], debounceMs: 10, pollRun: async () => ({ derivedPhase: 1 }),
+      watchFactory: (dir, callback) => {
+        const watcher = fs.watch(dir, callback)
+        const record = { dir, closed: false }
+        const close = watcher.close.bind(watcher)
+        watcher.close = () => { record.closed = true; close() }
+        opened.push(record)
+        return watcher
+      },
+    })
+    const until = async (predicate, ms = 2000) => {
+      const end = Date.now() + ms
+      while (!predicate() && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 20))
+      return predicate()
+    }
+    try {
+      reader.watch(() => { notifications++ })
+      const dir = await writeRun(repo, 'r1', plan, status('pending'))
+      assert.equal((await reader.list()).length, 1)
+      await writeFile(path.join(dir, 'status.json'), JSON.stringify(status('running')))
+      assert.ok(await until(() => notifications >= 1), 'first edit notifies')
+      await rm(dir, { recursive: true, force: true })
+      assert.equal((await reader.list()).length, 0)
+      assert.deepEqual(opened.filter((record) => !record.closed), [], 'no watcher left open for a vanished run')
+      await writeRun(repo, 'r1', plan, status('pending'))
+      assert.equal((await reader.list()).length, 1)
+      const before = notifications
+      await writeFile(path.join(dir, 'status.json'), JSON.stringify(status('done')))
+      assert.ok(await until(() => notifications > before), 'edit after recreation notifies within 2 s')
+      assert.equal((await reader.list())[0].tasks[0].state, 'done')
+    } finally {
+      reader.close()
+    }
+  })
+})
+
+test('a watcher that reports its own run directory removed is closed before the next list', async () => {
+  await withRepo(async (repo) => {
+    const dir = await writeRun(repo, 'r1', {
+      runId: 'r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }],
+    }, { runId: 'r1', tasks: [{ id: 'T1', state: 'pending' }] })
+    const watchers = []
+    const notified = []
+    const reader = createFleetmatesReader({
+      repoRoots: [repo], debounceMs: 10, pollRun: async () => ({ derivedPhase: 1 }),
+      watchFactory: (_dir, callback) => {
+        const watcher = { callback, closed: false, close() { this.closed = true } }
+        watchers.push(watcher)
+        return watcher
+      },
+    })
+    try {
+      reader.watch((repoRoot, runId) => { notified.push(runId) })
+      await reader.list()
+      assert.equal(watchers.length, 1)
+      watchers[0].callback('rename', 'status.json')
+      assert.equal(watchers[0].closed, false, 'a file rename inside the run keeps the watcher')
+      await rm(dir, { recursive: true, force: true })
+      watchers[0].callback('rename', 'r1')
+      assert.equal(watchers[0].closed, true)
+      assert.deepEqual(notified, ['r1'])
+      await writeRun(repo, 'r1', { runId: 'r1', totalPhases: 1, tasks: [] }, { runId: 'r1', tasks: [] })
+      await reader.list()
+      assert.equal(watchers.length, 2, 'the recreated run gets a fresh watcher')
+      assert.equal(watchers[1].closed, false)
+    } finally {
+      reader.close()
+    }
+  })
+})
+
 test('missing task branch with done status keeps the phase open as unknown', async () => {
   await withRepo(async (repo) => {
     execFileSync('git', ['init', '-q', '-b', 'run/r1'], { cwd: repo })
