@@ -191,7 +191,7 @@ test('a saved change toasts with Undo, and Undo PATCHes the previous seed, slot 
   assert.equal(toasts.length, 1)
   assert.equal(toasts[0].tone, 'success')
   assert.equal(toasts[0].text, 'rustot\'s crew member updated')
-  assert.deepEqual(toasts[0].undo, { seed: 'rustot#2', slot: 1, hat: 'cap' })
+  assert.deepEqual(toasts[0].undo, { seed: 'rustot#2', slot: 1, slotShared: false, hat: 'cap' })
   // A change that leaves the slot alone does not send it back, so a shared slot is never claimed by Undo.
   await changeCrew({ api, repo: target, patch: { hat: 'none' }, setPreview() {}, toast: item => toasts.push(item) })
   assert.deepEqual(toasts[1].undo, { seed: 'rustot#2', hat: 'cap' })
@@ -199,7 +199,19 @@ test('a saved change toasts with Undo, and Undo PATCHes the previous seed, slot 
   const undone = []
   const tree = CrewSheetView({ repos: REPOS, selected: 'rustot', toast: toasts[0], onSelect() {}, onChange() {}, onUndo: undo => undone.push(undo), onDismiss() {} })
   button(tree, 'Undo').props.onClick()
-  assert.deepEqual(undone, [{ seed: 'rustot#2', slot: 1, hat: 'cap' }])
+  assert.deepEqual(undone, [{ seed: 'rustot#2', slot: 1, slotShared: false, hat: 'cap' }])
+})
+
+test('Undo of a move away from a shared slot PATCHes the previous slot with slotShared true', async () => {
+  const { changeCrew } = crewSheet
+  const target = repo('rustot', 3, { slotShared: true })
+  const api = fakeApi({ 'PATCH /api/repos/rustot/crew': body => ({ repo: { ...target, crew: { ...target.crew, ...body } } }) })
+  const toasts = []
+  await changeCrew({ api, repo: target, patch: { slot: 5 }, setPreview() {}, toast: item => toasts.push(item) })
+  assert.deepEqual(toasts[0].undo, { seed: 'rustot', slot: 3, slotShared: true, hat: 'none' })
+  const moved = { ...target, crew: { ...target.crew, slot: 5, slotShared: false } }
+  await changeCrew({ api, repo: moved, patch: toasts[0].undo, setPreview() {}, toast: item => toasts.push(item) })
+  assert.deepEqual(api.calls.map(call => call.body), [{ slot: 5 }, { seed: 'rustot', slot: 3, slotShared: true, hat: 'none' }])
 })
 
 test('the shared colors notice shows when any repo shares a slot', () => {

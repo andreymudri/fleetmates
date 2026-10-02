@@ -119,6 +119,30 @@ test('crew PATCH: setting a slot clears crew_slot_shared; a shared holder does n
   assert.equal((await h.json('/api/repos/alpha/crew', 'PATCH', { slot: 2 })).status, 200)
 })
 
+test('crew PATCH: Undo with slotShared true restores a shared slot; a non-boolean slotShared is refused', async t => {
+  const h = await harness(t)
+  h.addRepo('/r/alpha', 'alpha', 3, 1)
+  h.addRepo('/r/beta', 'beta', 3, 1)
+  const moved = await h.json('/api/repos/alpha/crew', 'PATCH', { slot: 5 })
+  assert.equal(moved.status, 200)
+  assert.deepEqual({ ...h.crewRow('/r/alpha') }, { seed: 'alpha', slot: 5, shared: 0, hat: 'none' })
+  const undo = await h.json('/api/repos/alpha/crew', 'PATCH', { slot: 3, slotShared: true })
+  assert.equal(undo.status, 200)
+  assert.deepEqual({ ...h.crewRow('/r/alpha') }, { seed: 'alpha', slot: 3, shared: 1, hat: 'none' })
+  assert.equal(undo.data.repo.crew.slotShared, true)
+  for (const slotShared of ['true', 1, null, {}]) {
+    const response = await h.json('/api/repos/alpha/crew', 'PATCH', { slot: 3, slotShared })
+    assert.equal(response.status, 422, JSON.stringify(slotShared))
+    assert.equal(response.data.error.code, 'validation_failed')
+    assert.deepEqual(response.data.error.details.fields, ['slotShared'])
+  }
+  assert.deepEqual({ ...h.crewRow('/r/alpha') }, { seed: 'alpha', slot: 3, shared: 1, hat: 'none' })
+  h.addRepo('/r/gamma', 'gamma', 6)
+  const exclusive = await h.json('/api/repos/alpha/crew', 'PATCH', { slot: 6, slotShared: false })
+  assert.equal(exclusive.status, 409)
+  assert.equal(exclusive.data.error.code, 'slot_taken')
+})
+
 test('crew PATCH: validation of seed, slot, hat and unknown fields; an unknown repo is 404', async t => {
   const h = await harness(t)
   h.addRepo('/r/alpha', 'alpha', 0)
