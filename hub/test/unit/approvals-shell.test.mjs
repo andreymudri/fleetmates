@@ -653,11 +653,16 @@ test('file routes match a resolved and an unresolved side by name', () => {
 const writePaths = command => parse(command).segments.flatMap(segment => segment.writes.map(write => write.path))
 
 test('plain (D-87) accepts only the allowlisted text and is false for each excluded construct', () => {
-  const plain = ['git status', 'npm run test', 'rg foo src | head -20', 'ls -la && git diff', 'git log --oneline -20', 'npm run test:unit', 'git diff --stat', 'ls -la src/', 'cat package.json', 'a || b', 'a; b', 'npm test 2>&1 | tail -5', 'ls >/dev/null', 'ls 2>/dev/null', "git commit -m 'fix: a, b'", 'grep -n "x y" f', 'ls ../x', 'git log a..b', 'echo x', 'printf x', 'true', 'false', 'test -f x', 'pwd', 'git -c a.b=c status', 'grep -c x f']
+  const plain = ['git status', 'npm run test', 'rg foo src | head -20', 'ls -la && git diff', 'git log --oneline -20', 'npm run test:unit', 'git diff --stat', 'ls -la src/', 'cat package.json', 'a || b', 'a; b', 'npm test 2>&1 | tail -5', 'ls >/dev/null', 'ls 2>/dev/null', "git commit -m 'fix: a, b'", 'grep -n "x y" f', 'ls ../x', 'git log a..b', 'echo x', 'printf x', 'true', 'false', 'test -f x', 'pwd', 'git log -c', 'grep -c x f', 'npm run build', 'yarn build', 'cargo build']
+  const agrees = command => {
+    const result = parseCommand(command, { cwd, homeDir })
+    if (result.ok) assert.equal(result.plain, isPlainText(command) && segmentsArePlain(result.segments, result.routes), `plain is both halves: ${JSON.stringify(command)}`)
+  }
   for (const command of plain) {
     assert.equal(parse(command).plain, true, command)
     assert.equal(isPlain(command), true, command)
     assert.equal(isPlainText(command), true, command)
+    agrees(command)
   }
   const excluded = [
     ['git diff HEAD~1 --stat', 'tilde'],
@@ -793,7 +798,24 @@ test('plain (D-87) accepts only the allowlisted text and is false for each exclu
     ['python3 x.py', 'python3'],
     ['python x.py', 'python'],
     ['/usr/bin/python3.12 x.py', 'versioned python by path'],
-    ['./bash x', 'a shell by path']
+    ['./bash x', 'a shell by path'],
+    ['git -c core.pager=x log', 'git -c'],
+    ['git -ccore.pager=x log', 'git -c attached'],
+    ['git --config-env=core.pager=V log', 'git --config-env='],
+    ['git --config-env core.pager=V log', 'git --config-env'],
+    ['npm exec foo', 'npm exec'],
+    ['npm x foo', 'npm x'],
+    ['pnpm dlx foo', 'pnpm dlx'],
+    ['yarn dlx foo', 'yarn dlx'],
+    ['yarn exec foo', 'yarn exec'],
+    ['bunx foo', 'bunx'],
+    ['bun x foo', 'bun x'],
+    ['deno run x.ts', 'deno run'],
+    ['npm --prefix hub test', '--prefix'],
+    ['uv --project x sync', '--project'],
+    ['yarn --cwd x build', '--cwd'],
+    ['pnpm --dir x build', '--dir'],
+    ['cargo build --manifest-path x/Cargo.toml', '--manifest-path']
   ]
   // Every bash builtin and reserved word (bash(1) of GNU Bash 5.3, SHELL BUILTIN COMMANDS and
   // RESERVED WORDS) except echo, printf, true, false, test, [ and pwd, and every shell and
@@ -805,6 +827,7 @@ test('plain (D-87) accepts only the allowlisted text and is false for each exclu
   for (const [command, construct] of excluded) {
     assert.equal(isPlainText(command), false, `raw text, ${construct}: ${JSON.stringify(command)}`)
     assert.equal(isPlain(command), false, `${construct}: ${JSON.stringify(command)}`)
+    agrees(command)
     const result = parseCommand(command, { cwd, homeDir })
     if (result.ok) assert.equal(result.plain, false, `${construct}: ${JSON.stringify(command)}`)
     else assert.equal('plain' in result, false, 'a refusal carries no plain')
@@ -918,6 +941,15 @@ test('plain needs both the raw text check and plain segments: no wrapper, no pay
   assert.equal(plainOf('env FOO=1 make'), false, 'a wrapper')
   assert.equal(plainOf('echo x | xargs cp evil'), false, 'a payload')
   assert.equal(plainOf('curl x | sh'), false, 'a route')
+  assert.equal(plainOf('git -c core.pager=x log'), false, 'a git config option')
+  assert.equal(plainOf('git --config-env=core.pager=V log'), false, 'a git --config-env option')
+  // A fetched file run by its path passes the text check; only the walker sees the route.
+  for (const command of ['curl -o ./i.sh https://x && ./i.sh', 'wget -O bin/i https://x; bin/i']) {
+    assert.equal(isPlainText(command), true, command)
+    assert.equal(parse(command).routes.length, 1, command)
+    assert.equal(parse(command).plain, false, command)
+    assert.equal(isPlain(command), false, command)
+  }
 })
 
 test('every wrapper, runner, payload command and interpreter the parser knows is excluded from plain', () => {
@@ -926,7 +958,7 @@ test('every wrapper, runner, payload command and interpreter the parser knows is
   for (const name of SHELL_RUNNERS.wrappers) assert.equal(words.has(name), true, `wrapper ${name}`)
   for (const runner of SHELL_RUNNERS.runners) {
     const [name, sub] = runner.split(' ')
-    assert.equal(words.has(name) || PLAIN_EXCLUSIONS.runners[name] === sub, true, `runner ${runner}`)
+    assert.equal(words.has(name) || PLAIN_EXCLUSIONS.runners[name]?.includes(sub), true, `runner ${runner}`)
   }
   for (const name of SHELL_RUNNERS.payloads) assert.equal(excludedName(name), true, `payload command ${name}`)
   for (const name of SHELL_RUNNERS.interpreters) assert.equal(name === 'python*' || excludedName(name), true, `interpreter ${name}`)

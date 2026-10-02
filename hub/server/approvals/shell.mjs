@@ -25,8 +25,9 @@ const listEnds = ['then', 'elif', 'else', 'fi', 'do', 'done', 'esac', '}']
 // `plainText` accepted the whole source text (simple commands joined by `|`, `&&`, `||`, `;`,
 // every character from a small literal set, and no command word that is a builtin other than
 // echo, printf without -v, true, false, test, `[` and pwd, a wrapper or payload runner, a shell
-// or interpreter, and no option that changes the directory or repository), the parser returned
-// ok, and the walker found no wrapper, no payload segment and no route; only a plain command may
+// or interpreter, no git config option, and no option that changes the directory or repository),
+// the parser returned ok, and the walker found no wrapper, no payload segment, no git config
+// option and no route; only a plain command may
 // be Safe. Outside plain
 // the parser is best effort, for raising tiers: it refuses the constructs listed in the
 // parseCommand JSDoc with `unsupported` or `unknown-expansion`, and otherwise reports the segments,
@@ -141,9 +142,11 @@ const PLAIN_EXCLUDED_BUILTINS = Object.freeze(['.', ':', 'alias', 'bg', 'bind', 
 // Wrappers and payload runners, excluded whatever their arguments: the wrapper table of the walker
 // (`wrapperSpecs`), npx (the walker's `npx --no-install` runner; npx runs a package in any form)
 // and the commands whose payload the walker parses from their own words.
-const PLAIN_EXCLUDED_WRAPPERS = Object.freeze(['builtin', 'command', 'doas', 'env', 'eval', 'exec', 'ionice', 'nice', 'nohup', 'npx', 'parallel', 'pkexec', 'setsid', 'ssh', 'stdbuf', 'su', 'sudo', 'time', 'timeout', 'trap', 'xargs'])
-// Runners excluded when the subcommand that runs a payload is one of their words.
-const PLAIN_EXCLUDED_RUNNERS = Object.freeze({ uv: 'run', poetry: 'run', pnpm: 'exec' })
+const PLAIN_EXCLUDED_WRAPPERS = Object.freeze(['builtin', 'bunx', 'command', 'doas', 'env', 'eval', 'exec', 'ionice', 'nice', 'nohup', 'npx', 'parallel', 'pkexec', 'setsid', 'ssh', 'stdbuf', 'su', 'sudo', 'time', 'timeout', 'trap', 'xargs'])
+// Runners excluded when a subcommand that runs a package or payload is one of their words: the
+// walker's runner table (`uv run`, `poetry run`, `pnpm exec`) and the package runners `npm exec`,
+// `npm x`, `pnpm dlx`, `yarn dlx`, `yarn exec`, `bun x` and `deno run`.
+const PLAIN_EXCLUDED_RUNNERS = Object.freeze({ uv: Object.freeze(['run']), poetry: Object.freeze(['run']), pnpm: Object.freeze(['exec', 'dlx']), npm: Object.freeze(['exec', 'x']), yarn: Object.freeze(['dlx', 'exec']), bun: Object.freeze(['x']), deno: Object.freeze(['run']) })
 // Commands excluded only with an option or subcommand that runs a payload or writes a file.
 const PLAIN_CONDITIONAL = Object.freeze({
   find: word => ['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fls'].includes(word) || word.startsWith('-fprint'),
@@ -159,7 +162,19 @@ const PLAIN_EXCLUDED_INTERPRETERS = Object.freeze(['sh', 'bash', 'dash', 'zsh', 
 // Options that change the directory or repository a command acts on, matched exactly, as
 // `--opt=value`, or as a getopt_long prefix (`--dir`); `-C` also attached (`-Cdir`) or in a
 // bundle (`-xzC`).
-const PLAIN_DIRECTORY_OPTIONS = Object.freeze(['--git-dir', '--work-tree', '--directory', '--chdir'])
+const PLAIN_DIRECTORY_OPTIONS = Object.freeze(['--git-dir', '--work-tree', '--directory', '--chdir', '--prefix', '--project', '--cwd', '--dir', '--manifest-path'])
+
+// True when a git command line sets configuration before its subcommand (`-c`, `-cname=value`,
+// `--config-env`): any config key may run code (core.pager, core.fsmonitor, alias.*). Used by
+// both halves of plain.
+function gitConfigOption(words) {
+  if (!words.length || commandBase(words[0]) !== 'git') return false
+  for (const word of words.slice(1)) {
+    if (!word.startsWith('-')) return false
+    if (word.startsWith('-c') || /^--config-env(?:=|$)/.test(word)) return true
+  }
+  return false
+}
 
 function plainDirectoryOption(word) {
   if (/^-[A-Za-z]*C/.test(word)) return true
@@ -175,15 +190,16 @@ function plainCommandWords(words) {
   if (PLAIN_EXCLUDED_BUILTINS.includes(name) || PLAIN_EXCLUDED_WRAPPERS.includes(name)) return false
   if (PLAIN_EXCLUDED_INTERPRETERS.includes(name) || name.startsWith('python')) return false
   if (name === 'printf' && /^-[A-Za-z]*v/.test(args[0] ?? '')) return false
-  if (Object.hasOwn(PLAIN_EXCLUDED_RUNNERS, name) && args.includes(PLAIN_EXCLUDED_RUNNERS[name])) return false
+  if (Object.hasOwn(PLAIN_EXCLUDED_RUNNERS, name) && args.some(arg => PLAIN_EXCLUDED_RUNNERS[name].includes(arg))) return false
+  if (gitConfigOption(words)) return false
   if (Object.hasOwn(PLAIN_CONDITIONAL, name) && args.some(PLAIN_CONDITIONAL[name])) return false
   return !args.some(plainDirectoryOption)
 }
 
 /**
  * The lists behind the D-87 raw text check, for tests: `builtins`, `wrappers`, `interpreters`
- * (a name starting `python` is also excluded), `runners` (name to the subcommand that runs a
- * payload), `conditional` (name to a predicate over its words) and `directoryOptions`.
+ * (a name starting `python` is also excluded), `runners` (name to the subcommands that run a
+ * package or payload), `conditional` (name to a predicate over its words) and `directoryOptions`.
  */
 export const PLAIN_EXCLUSIONS = Object.freeze({ builtins: PLAIN_EXCLUDED_BUILTINS, wrappers: PLAIN_EXCLUDED_WRAPPERS, interpreters: PLAIN_EXCLUDED_INTERPRETERS, runners: PLAIN_EXCLUDED_RUNNERS, conditional: PLAIN_CONDITIONAL, directoryOptions: PLAIN_DIRECTORY_OPTIONS })
 
@@ -2202,14 +2218,15 @@ function runtimeWords(words, replaced) {
 }
 
 /**
- * The walker half of D-87 plain: no segment has a wrapper or is a payload, and there is no route.
- * `isPlain` needs this and `isPlainText` both.
+ * The walker half of D-87 plain: no segment has a wrapper, is a payload or is a git command with
+ * a config option before its subcommand, and there is no route. `isPlain` needs this and
+ * `isPlainText` both.
  * @param {object[]} segments
  * @param {object[]} routes
  * @returns {boolean}
  */
 export function segmentsArePlain(segments, routes) {
-  return !routes.length && segments.every(segment => !segment.wrappers.length && segment.payloadOf === null)
+  return !routes.length && segments.every(segment => !segment.wrappers.length && segment.payloadOf === null && !gitConfigOption(segment.words))
 }
 
 function assignment(word) {
@@ -2393,13 +2410,17 @@ export function parseCommand(command, { cwd = null, homeDir = null, outputOpts =
  * `2>/dev/null`. No command word (judged by its basename) is an assignment, a job spec, a bash
  * builtin or reserved word other than echo, printf without -v, true, false, test, `[` and pwd,
  * a wrapper or payload runner (`builtin`, `command`, `env`, `sudo`, `xargs`, `parallel`, the
- * rest of PLAIN_EXCLUSIONS.wrappers, `uv run`, `poetry run`, `pnpm exec`), `find` with
+ * rest of PLAIN_EXCLUSIONS.wrappers, `uv run`, `poetry run`, `pnpm exec` and `dlx`, `npm exec`
+ * and `x`, `yarn dlx` and `exec`, `bun x`, `deno run`), git with `-c` or `--config-env` before
+ * its subcommand, `find` with
  * `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*` or `-fls`, `fd` with `-x`, `-X`,
  * `--exec` or `--exec-batch`, `docker` or `podman` with `run` or `exec`, `kubectl exec`, or a
  * shell or interpreter (a `python` prefix included). No word is `-C` (attached or in a bundle)
- * or `--git-dir`, `--work-tree`, `--directory` or `--chdir` (or a prefix of one). And the walker
- * found no segment with a wrapper, no payload segment and no route. Only a plain command may be
- * Safe.
+ * or `--git-dir`, `--work-tree`, `--directory`, `--chdir`, `--prefix`, `--project`, `--cwd`,
+ * `--dir` or `--manifest-path` (or a prefix of one). And the walker found no segment with a
+ * wrapper, no payload segment, no git config option and no route (a fetched file run by its path,
+ * `curl -o ./i.sh URL && ./i.sh`, passes the text check and is caught only here). Only a plain
+ * command may be Safe.
  * @param {string} command
  * @returns {boolean}
  */
