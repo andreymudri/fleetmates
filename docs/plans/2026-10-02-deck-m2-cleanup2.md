@@ -113,9 +113,11 @@ Second cleanup round (owner: "keep working", 2026-10-02). `m2-exit.md` 9.2: the 
 - Modify: `docs/deck/design/design-system.md`
 - Modify: `docs/deck/design/components.md`
 - Modify: `docs/deck/m2-exit.md`
+- Modify: `docs/deck/05-api.md`
 
 **Depends:** T27, T28, T29
 
 - [ ] Add the copy-deck rows `m2-exit.md` 9.2 lists as missing (31 copy-map keys and 17 `hub/web/src/i18n/en.js` keys), each with the exact English text the code ships, in the doc the table names; the state pill labels go in design-system.md's i18n section; `confirm.cancel` and `empty.openLoops.title` in components.md. Recount with a script over every `*_COPY` map and `en.js` and report the number still missing (target 0).
 - [ ] `m2-exit.md`: a section for this second round listing each item from Tasks 27 to 30 with its test and evidence, moving the matching 9.2 rows out; flakes that remain, with their measured rates.
+- [ ] `05-api.md`, the `run.updated` row of the events table: replace "the first read publishes every run once" with what Task 27 ships (the server primes at start: it lists runs, arms the watchers and records each run's data as the baseline without publishing; later reads publish only changed runs; if the priming list fails, the next successful read publishes every run once).
 - [ ] Docs rules: English, plain prose, no em dash, `/home/you` placeholders.
