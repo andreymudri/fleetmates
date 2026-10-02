@@ -472,4 +472,14 @@ test('every agent-supplied compact line renders U+202E as a visible token: PTY t
     requests: [{ id: 'q4', sessionId: 'lead', kind: 'permission', tier: 'caution', summary: `ask ${RLO}evil`, state: 'open', createdAt: NOW - MIN, taskId: 'T4' }]
   }
   check(render(CompactCard, { team, repo, now: NOW, tail: [] }), 'team ask')
+  const asking = session('a1', 'rustot', 'needs_approval', { task: 'plain', branch: 'main' })
+  const ask = { id: 'q1', sessionId: 'a1', kind: 'permission', tier: 'caution', summary: `rm ${RLO}evil`, state: 'open', createdAt: NOW - MIN }
+  check(render(CompactCard, { session: asking, repo, now: NOW, tail: [], requests: [ask] }), 'single-session ask summary')
+  const branched = session('b1', 'rustot', 'needs_approval', { task: 'plain', branch: `feat/${RLO}evil` })
+  check(render(CompactCard, { session: branched, repo, now: NOW, tail: [], requests: [{ ...ask, sessionId: 'b1', summary: 'plain' }] }), 'branch')
+  const taskTeam = { ...team, requests: [{ ...team.requests[0], summary: 'plain', taskId: `T${RLO}4` }] }
+  check(render(CompactCard, { team: taskTeam, repo, now: NOW, tail: [] }), 'team ask task id')
+  const { taskId: _taskId, ...untasked } = team.requests[0]
+  const leadAsk = { ...team, requests: [untasked] }
+  check(render(CompactCard, { team: leadAsk, repo, now: NOW, tail: [] }), 'team ask without a task id')
 })

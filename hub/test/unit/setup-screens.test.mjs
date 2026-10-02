@@ -626,7 +626,7 @@ test('deckScreens hands every screen the authenticated api it was given, and the
   const api = fakeApi({ 'POST /api/deps/deckd/start': { dep: { dep: 'deckd', state: 'checking' } } })
   const feed = { subscribe: () => () => {} }
   const screens = failures.deckScreens({ api, feed, now: () => NOW })
-  assert.deepEqual(Object.keys(screens).sort(), ['focus', 'home', 'settings', 'welcome'])
+  assert.deepEqual(Object.keys(screens).sort(), ['crew', 'focus', 'home', 'new', 'settings', 'team', 'welcome'])
   const down = loaded({ ...fixture(), health: [{ dep: 'deckd', state: 'down', reason: null }] })
   const props = { route: { name: 'x', params: { sessionId: 's2', section: 'connections' } }, state: down, t: undefined, navigate: () => {} }
   const expected = { home: ['Home'], focus: ['Focus'], welcome: ['FirstRun'], settings: ['Settings', 'ObserveOverlays'] }

@@ -22,6 +22,22 @@ export function makeTranslator(language) {
   return (key, params) => format(language.messages[key] ?? en[key] ?? key, params, language.lang)
 }
 
+const TEXT_SIZES = [13, 14, 15, 16]
+
+/**
+ * Apply the Appearance preferences to the document root: `textSize` as the `--text-base` custom property and
+ * `motion: 'reduce'` as `data-motion="reduce"`. A size outside the Settings choices, or motion `system`, removes
+ * the value so the stylesheet default and the OS preference apply.
+ * @param {{ style: { setProperty: Function, removeProperty: Function }, setAttribute: Function, removeAttribute: Function }} root
+ * @param {{ textSize?: unknown, motion?: unknown } | undefined} prefs
+ */
+export function applyAppearance(root, prefs) {
+  if (TEXT_SIZES.includes(prefs?.textSize)) root.style.setProperty('--text-base', `${prefs.textSize}px`)
+  else root.style.removeProperty('--text-base')
+  if (prefs?.motion === 'reduce') root.setAttribute('data-motion', 'reduce')
+  else root.removeAttribute('data-motion')
+}
+
 function clock(at, lang) {
   return at ? new Intl.DateTimeFormat(lang, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at) : ''
 }
@@ -218,6 +234,11 @@ export function Shell({ store, connection, api, screens }) {
     for (const item of state.announcements) announcer.push(item)
     store.dispatch({ type: 'announce.taken', ids: state.announcements.map(item => item.id) })
   }, [state.announcements, announcer, store])
+
+  // Appearance follows the store's prefs, so a prefs.changed event re-applies it.
+  const textSize = state.data.prefs?.textSize
+  const motion = state.data.prefs?.motion
+  useEffect(() => { applyAppearance(document.documentElement, { textSize, motion }) }, [textSize, motion])
 
   const route = matchRoute(path)
   useEffect(() => {

@@ -371,16 +371,18 @@ const row = id => ({ id, repoId: '/home/you/dev/rustot', origin: 'wrapped', ptyI
 function App() {
   const [id, setId] = useState('s1')
   const [source, setSource] = useState('quiet')
+  const [from, setFrom] = useState('browser')
   h.show = setId
   h.source = setSource
+  h.from = setFrom
   const state = {
     loaded: true, deckdOutage: false, connection: { state: 'live', attempt: 0, nextAt: null }, view: { path: '/', overlay: null },
     data: { sessions: [row('s1'), row('s2')], requests: [], runs: [], order: ['s1', 's2'], health: [], prefs: {}, tails: {},
-      inputSources: { s1: { sessionId: 's1', state: source, from: 'browser', name: null, detached: false } },
+      inputSources: { s1: { sessionId: 's1', state: source, from, name: null, detached: false } },
       repos: [{ id: '/home/you/dev/rustot', name: 'rustot', crew: { slot: 0, seed: 'rustot', hat: 'none' } }], counts: null, recap: null,
       setup: { firstRunCompletedAt: 1 } }
   }
-  return <><span id="mark">{id + ':' + source}</span><Focus route={{ params: { sessionId: id } }} state={state} navigate={() => {}} api={api}
+  return <><span id="mark">{id + ':' + source + ':' + from}</span><Focus route={{ params: { sessionId: id } }} state={state} navigate={() => {}} api={api}
     search="" client={client} dispatch={() => {}} onOverlay={() => {}} /></>
 }
 createRoot(document.getElementById('root')).render(<App />)
@@ -416,12 +418,13 @@ test('the collision chip shows for 3 s from the collision even when the machine 
   // A fake clock: timers fire only when the test advances it, so each 3 s boundary below is exact.
   await page.clock.install({ time: NOW })
   await page.goto(`http://127.0.0.1:${server.address().port}/`)
-  await page.waitForFunction(() => document.getElementById('mark')?.textContent === 's1:quiet', null, { timeout: 10_000 })
+  await page.waitForFunction(() => document.getElementById('mark')?.textContent === 's1:quiet:browser', null, { timeout: 10_000 })
   // Set the route and the source state, then wait until React committed both.
-  const set = async (id, source) => {
-    await page.evaluate(([i, s]) => { window.h.show(i)
-      window.h.source(s) }, [id, source])
-    await page.waitForFunction(want => document.getElementById('mark')?.textContent === want, `${id}:${source}`, { timeout: 5000 })
+  const set = async (id, source, from = 'browser') => {
+    await page.evaluate(([i, s, f]) => { window.h.show(i)
+      window.h.source(s)
+      window.h.from(f) }, [id, source, from])
+    await page.waitForFunction(want => document.getElementById('mark')?.textContent === want, `${id}:${source}:${from}`, { timeout: 5000 })
   }
   // React commits a timer's state update in a later MessageChannel task (the fake clock does not own those).
   const advance = async ms => {
@@ -459,5 +462,31 @@ test('the collision chip shows for 3 s from the collision even when the machine 
   await advance(5000)
   await set('s1', 'quiet')
   assert.deepEqual(await chip(), { chip: 0, status: [] })
+
+  // A second collision restarts the timer: the first one's timeout is cleared, so it cannot hide the chip early.
+  await set('s1', 'collision')
+  await advance(1000)
+  await set('s1', 'browser_active')
+  await advance(1000)
+  await set('s1', 'collision')
+  await advance(1500)
+  assert.equal((await chip()).chip, 1, 'the chip is still shown 1.5 s after the second collision')
+  await advance(1500)
+  assert.equal((await chip()).chip, 0, 'and goes 3 s after it')
+  await set('s1', 'quiet')
+  await advance(5000)
+
+  // A sustained collision: the input machine re-emits 'collision' with a flipped `from` on every crossing,
+  // and each crossing re-arms the 3 s chip.
+  await set('s1', 'collision', 'browser')
+  await advance(1000)
+  await set('s1', 'collision', 'terminal')
+  await advance(1000)
+  await set('s1', 'collision', 'browser')
+  await advance(1000)
+  assert.equal((await chip()).chip, 1, 'the chip is still shown 3 s into a sustained collision')
+  await set('s1', 'collision', 'terminal')
+  await advance(1000)
+  assert.equal((await chip()).chip, 1, 'the chip is still shown 4 s into a sustained collision')
   assert.deepEqual(errors, [])
 })

@@ -277,7 +277,8 @@
   --font-size-2xs: 11px;
   --font-size-xs: 12px;
   --font-size-sm: 13px;
-  --font-size-base: 14px;
+  /* Settings Text size: the shell sets --text-base on the root (App.jsx applyAppearance). */
+  --font-size-base: var(--text-base, 14px);
   --font-size-md: 15px;
   --font-size-lg: 16px;
   --font-size-xl: 18px;
@@ -539,3 +540,24 @@ a:hover { color: var(--text-link-hover); }
   @keyframes deck-drawer-in { from { opacity: 0; } to { opacity: 1; } }
   *, *::before, *::after { scroll-behavior: auto !important; }
 }
+
+/* Settings "Always reduce motion": the shell sets data-motion="reduce" on the root (App.jsx applyAppearance). The same
+   rules as the media query above. `:where()` keeps each class rule at the media block's specificity, so overrides in
+   later sheets (such as `.session-card.motion-pulse`) still win as they do there. Keyframes cannot be scoped to a
+   selector, so the drawer switches to the deck-fade-in fade instead of redefining deck-drawer-in; that rule needs the
+   higher specificity to beat `.drawer` in shell.css, which loads after this sheet. */
+:root[data-motion="reduce"] {
+  --motion-duration-fast: 0ms;
+  --motion-duration-normal: 100ms;
+  --motion-duration-moderate: 100ms;
+  --motion-duration-slow: 100ms;
+  --motion-distance-dialog: 0px;
+  --motion-distance-toast: 0px;
+  --motion-distance-press: 0px;
+}
+:where(:root[data-motion="reduce"]) :is(.motion-breathe, .motion-pulse, .motion-rec-pulse, .motion-caret, .motion-shimmer) { animation: none; }
+:where(:root[data-motion="reduce"]) .motion-pulse { box-shadow: 0 0 0 1px var(--color-amber-700); }
+:where(:root[data-motion="reduce"]) .motion-arrive { animation: none; box-shadow: 0 0 0 3px rgba(230, 233, 247, 0.35); }
+:where(:root[data-motion="reduce"]) .motion-shimmer { background: var(--bg-skeleton); }
+:root[data-motion="reduce"] .drawer { animation-name: deck-fade-in; }
+:root[data-motion="reduce"], :where(:root[data-motion="reduce"]) *, :where(:root[data-motion="reduce"]) *::before, :where(:root[data-motion="reduce"]) *::after { scroll-behavior: auto !important; }
