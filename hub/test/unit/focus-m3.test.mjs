@@ -315,5 +315,20 @@ test('the Focus route: digits answer a Safe request only outside the terminal an
   await page.click('.prompt-option--danger-confirm')
   await page.waitForFunction(() => window.calls.filter(call => call[0] === 'POST').length === 2, null, { timeout: 5000 })
   assert.deepEqual((await posts())[1], ['POST', '/api/requests/r3/answer', { choice: 'allow', confirm: true }])
+
+  // The tick belongs to one request: a new Destructive request arrives unticked with its Allow disabled,
+  // and a changed summary on the same request clears a tick too (state-machines 2.5).
+  const guard = () => page.evaluate(() => ({
+    checked: document.querySelector('.prompt-bar input[type="checkbox"]').checked,
+    disabled: document.querySelector('.prompt-option--danger-confirm').disabled
+  }))
+  await setRequest({ ...safe, id: 'r4', tier: 'destructive', summary: 'git push --force', confirmLabel: 'I checked the 3 commits' })
+  assert.deepEqual(await guard(), { checked: false, disabled: true }, 'a new request does not inherit the previous tick')
+  await page.click('.prompt-bar input[type="checkbox"]')
+  assert.deepEqual(await guard(), { checked: true, disabled: false })
+  await page.evaluate(row => window.h.request(row), { ...safe, id: 'r4', tier: 'destructive', summary: 'git push --force origin main', confirmLabel: 'I checked the 3 commits' })
+  await page.waitForFunction(() => document.querySelector('.prompt-bar')?.textContent.includes('origin main'), null, { timeout: 5000 })
+  assert.deepEqual(await guard(), { checked: false, disabled: true }, 'a changed summary clears the tick')
+  assert.equal((await posts()).length, 2, 'nothing was sent for r4')
   assert.deepEqual(errors, [])
 })
