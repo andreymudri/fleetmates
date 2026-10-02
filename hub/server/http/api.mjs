@@ -212,21 +212,23 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     if (method === 'PATCH' && s[1] === 'repos' && s.length === 4 && s[3] === 'crew') {
       const id = resolveRepo(q, s[2])
       const keys = Object.keys(body)
-      const unknown = keys.filter(key => !['seed', 'slot', 'hat'].includes(key))
+      const unknown = keys.filter(key => !['seed', 'slot', 'hat', 'slotShared'].includes(key))
       if (!keys.length || unknown.length) throw apiError(422, 'validation_failed', { fields: unknown.length ? unknown : ['seed', 'slot', 'hat'] })
       const row = store.get('SELECT name FROM repos WHERE id=?', id)
-      const { seed, slot, hat } = body
+      const { seed, slot, hat, slotShared } = body
       const reroll = typeof seed === 'string' && seed.startsWith(`${row.name}#`) ? seed.slice(row.name.length + 1) : null
       if (seed !== undefined && seed !== row.name && !(/^[1-9]\d{0,2}$/.test(reroll ?? '') && Number(reroll) >= 2)) throw apiError(422, 'validation_failed', { fields: ['seed'] })
       if (slot !== undefined && !(Number.isInteger(slot) && slot >= 0 && slot <= 8)) throw apiError(422, 'validation_failed', { fields: ['slot'] })
       if (hat !== undefined && !hats.includes(hat)) throw apiError(422, 'validation_failed', { fields: ['hat'] })
+      if (slotShared !== undefined && typeof slotShared !== 'boolean') throw apiError(422, 'validation_failed', { fields: ['slotShared'] })
       // One transaction (design/crew.md 4.2): a taken slot rolls back the seed and hat written before it.
       store.tx(() => {
         if (seed !== undefined) store.run('UPDATE repos SET crew_seed=? WHERE id=?', seed, id)
         if (hat !== undefined) store.run('UPDATE repos SET hat=? WHERE id=?', hat, id)
         if (slot !== undefined) {
-          if (store.get('SELECT id FROM repos WHERE crew_slot=? AND crew_slot_shared=0 AND archived_at IS NULL AND id<>?', slot, id)) throw apiError(409, 'slot_taken', { fields: ['slot'] })
-          store.run('UPDATE repos SET crew_slot=?,crew_slot_shared=0 WHERE id=?', slot, id)
+          // A shared slot (Undo of a move away from one) skips the taken check; others still hold it.
+          if (slotShared !== true && store.get('SELECT id FROM repos WHERE crew_slot=? AND crew_slot_shared=0 AND archived_at IS NULL AND id<>?', slot, id)) throw apiError(409, 'slot_taken', { fields: ['slot'] })
+          store.run('UPDATE repos SET crew_slot=?,crew_slot_shared=? WHERE id=?', slot, slotShared === true ? 1 : 0, id)
         }
       })
       const repo = repos(true).find(candidate => candidate.id === id)

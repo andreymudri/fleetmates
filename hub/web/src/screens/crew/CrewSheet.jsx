@@ -92,15 +92,16 @@ function failure(error) {
 /**
  * Apply one crew change: the preview updates at once, `PATCH /api/repos/:repoKey/crew` saves it, a failure
  * reverts the preview and toasts "Could not save the crew change: {error}", a success toasts with an Undo
- * patch holding the previous seed and hat, and the previous slot when the change moved it.
- * @param {{ api: { patch: Function }, repo: object, patch: { seed?: string, slot?: number, hat?: string }, setPreview: (crew: object) => void, toast: (toast: { tone: 'success'|'error', text: string, undo?: object }) => void, t?: Function }} options
+ * patch holding the previous seed and hat, and the previous slot and its `slotShared` when the change moved it.
+ * @param {{ api: { patch: Function }, repo: object, patch: { seed?: string, slot?: number, slotShared?: boolean, hat?: string }, setPreview: (crew: object) => void, toast: (toast: { tone: 'success'|'error', text: string, undo?: object }) => void, t?: Function }} options
  * @returns {Promise<void>}
  */
 export function changeCrew({ api, repo, patch, setPreview, toast, t }) {
   const tr = (key, params) => translate(t, CREW_COPY, key, params)
   const before = crewOf(repo)
   setPreview({ ...before, ...patch })
-  const undo = { seed: before.seed, ...(patch.slot !== undefined && before.slot !== null ? { slot: before.slot } : {}), hat: before.hat }
+  // Undo sends the previous slot with whether it was shared, so a shared slot comes back shared, not as a 409.
+  const undo = { seed: before.seed, ...(patch.slot !== undefined && before.slot !== null ? { slot: before.slot, slotShared: !!repo.crew?.slotShared } : {}), hat: before.hat }
   return patchCrew(api, repo.repoKey ?? repo.name, patch).then(
     () => toast({ tone: 'success', text: tr('crew.saved', { repo: shown(repo.name) }), undo }),
     error => {
