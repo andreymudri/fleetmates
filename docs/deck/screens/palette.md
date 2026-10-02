@@ -41,7 +41,7 @@ Width behaviour: identical at 1920, 1440 and 1280 (700px fixed, design-system 8.
 | Input | Field palette variant, `role="combobox"` | `query` | sr-only label "Search, ask or run" | autofocus on open |
 | Prefix hint | text `type.meta` | none | "? ask · > run" | changes to "Asking your vault" in `?` mode and "Running a command" in `>` mode (Proposed) |
 | Group header "Needs you" | Eyebrow tone `state.needs-approval.fg` | open requests (`request.state = open`) matching query | "Needs you" | first group |
-| Needs row | ListRow: CrewAvatar sm (needs), title, subtitle, trailing Kbd | `repo.name`, `request.summary`, `request.tier`, waiting time from `createdAt` | title "rustot · Allow cargo test --release combat::", subtitle "Safe · test · waiting 3m", trailing "Enter" on the highlighted row | question rows: title "discord-audit · Reply: Should logs…", destructive rows: "git push --force… · Review in Needs you" |
+| Needs row | ListRow: CrewAvatar sm (needs), title, subtitle, trailing Kbd | `repo.name`, `request.summary`, `request.tier`, waiting time from `createdAt` | title "rustot · Allow cargo test --release combat::", subtitle "Safe · test · waiting 3m", trailing "Enter" on the highlighted row | only Safe rows on a PTY session start with "Allow" (`palette.needs.allow.title`); Caution rows use `palette.needs.title` ("rustot · npm install commander@14"), because Enter opens them (D-85); question rows: title "discord-audit · Reply: Should logs…", destructive rows: "git push --force… · Review in Needs you" |
 | Group header "Sessions" | Eyebrow tone `state.running.fg` | sessions not `ended`, urgency order (home.md 7.3) | "Sessions" | |
 | Session row | ListRow: CrewAvatar sm, title, StatePill `text` as subtitle, trailing Kbd | `repo.name · session.branch` or `repo.name · session.task`; `session.state`; index in urgency order | "rustot · combat-tick", "Needs approval", "Alt 2" | Kbd only for positions 1 to 9 |
 | Group header "Actions" | Eyebrow tone `text.link` | static list + query-derived | "Actions" | |
@@ -89,7 +89,8 @@ Width behaviour: identical at 1920, 1440 and 1280 (700px fixed, design-system 8.
 |---|---|---|
 | Type | filters; first row of the first non-empty group is highlighted | client |
 | Up / Down, Alt J / Alt K (while open) | move highlight across groups, wrapping | client (keyboard.md 3) |
-| Enter on a Safe or Caution Needs row (M3) | allows once; the row shows a spinner, then the palette closes and a toast confirms "Allowed cargo test in rustot" | `U.Allow` (state-machines 2.7) |
+| Enter on a Safe Needs row (M3) | Enter on a Safe Needs row allows once; the row shows a spinner, then the palette closes and a toast confirms "Allowed cargo test in rustot" (D-85) | `U.Allow` (state-machines 2.7) |
+| Enter on a Caution Needs row (M3) | opens the request: the drawer focused on it, or Focus for an observed session; nothing is answered (D-85) | UI |
 | Enter on a Needs row before M3, or observed session | opens Focus on that session | route |
 | Enter on a Destructive Needs row | opens the drawer on that request (never approves from the palette, state-machines 2.5) | UI |
 | Enter on a Question row | opens the drawer with the reply field focused | UI |
@@ -173,7 +174,7 @@ the palette has no row and no message.
 2. **Given** the palette open with query "rus", **then** groups appear in the order Needs you, Sessions, Actions, Memory and the Sessions rows read "rustot · combat-tick" with "Alt 2" and "rustot-client · ui/inventory" with its urgency position.
 3. **Given** focus inside a Focus terminal, **when** pressing `Alt K`, **then** the palette opens and the terminal receives no bytes.
 4. **Given** the palette open, **when** pressing `Alt K` again, **then** the highlight moves up one row and the palette stays open.
-5. **Given** a Safe Needs row highlighted (M3), **when** pressing Enter, **then** `U.Allow` is sent for that request id and the palette closes after `request.closed`.
+5. **Given** a Safe Needs row highlighted (M3), **when** pressing Enter, **then** Enter on a Safe Needs row allows once: `U.Allow` is sent for that request id and the palette closes after `request.closed`. **Given** a Caution Needs row highlighted, **when** pressing Enter, **then** no answer is sent and the request opens (the drawer focused on it, or Focus for an observed session) (D-85).
 6. **Given** a Destructive Needs row highlighted, **when** pressing Enter, **then** no answer is sent and the drawer opens focused on that request.
 7. **Given** the query "?how do retries work", **then** only the Ask row and Memory notes are shown and Enter navigates to `/memory` with a thread whose first user message is "how do retries work".
 8. **Given** fixture `vaultDown`, **when** typing, **then** the Memory group shows "Memory is unavailable: vault-mcp is not answering." and no Ask row.
@@ -186,7 +187,7 @@ the palette has no row and no message.
 |---|---|---|
 | PAL-O1 | Note rows' "6 links" needs `vault_graph` degree, which is a proposal not yet in vault-mcp v0.3.0. | **Open**. Default: show the folder only until `vault_graph` exists. |
 | PAL-O2 | Fuzzy matching algorithm not specified by the canvas. | Proposed: substring plus word-prefix, case and accent insensitive. |
-| PAL-O3 | Whether Enter on a Safe Needs row should approve (fast) or open (safe). Tier rules allow the palette as a surface for Safe and Caution. | Proposed: approve for Safe and Caution, with the row title starting with the verb "Allow" so the effect is literal. Flag in review. |
+| PAL-O3 | Whether Enter on a Safe Needs row should approve (fast) or open (safe). Tier rules allow the palette as a surface for Safe and Caution. | **Decided** 2026-10-02 (D-85). Enter approves Safe only, and only Safe row titles start with the verb "Allow"; on a Caution row Enter opens the request (the drawer, or Focus for an observed session); Destructive is never answered from the palette. |
 
 ## 12. Changes from the canvas
 

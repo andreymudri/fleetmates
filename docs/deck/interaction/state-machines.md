@@ -394,12 +394,12 @@ Decided rules (canvas Settings tier aside and Approvals drawer), with Proposed m
 
 | Tier | Where it can be answered | Batch | Popup | Rule | Mechanics |
 |---|---|---|---|---|---|
-| Safe | card, drawer, Focus bar, palette, popup | yes: "Allow both Safe once" / `Alt Shift A` (only Safe rows; never includes Caution or Destructive) | yes: popup action "Allow once" | suggested after 5 approvals | Allow once = option "1 Yes"; Focus bar also shows option 2 ("Yes, don't ask again for …") |
-| Caution | card, drawer, Focus bar, palette | no: one at a time | no (Proposed; SM-O9): popup offers "Open" only | only by hand in Settings | Allow once = "1 Yes"; option 2 is hidden in the Focus bar (Proposed), because it would create a rule the owner did not add by hand |
+| Safe | card, drawer, Focus bar, palette, popup | yes: "Allow both Safe once" / `Alt Shift A` (only Safe rows; never includes Caution or Destructive) | yes: popup action "Allow once", only for a single request whose whole summary the popup shows (9.3, F11) | suggested after 5 approvals | Allow once = option "1 Yes"; Focus bar shows option 2 only under D-77: its parsed label is "Yes, don't ask again for `<pattern>`", the pattern equals the deck's rule candidate, and the tool is not a file tool (the 2.1.282 Edit prompt's option 2 switches the session to accept edits); otherwise options 1 and 3 |
+| Caution | card, drawer, Focus bar, palette | no: one at a time | no (D-71): popup offers "Open" only | only by hand in Settings | Allow once = "1 Yes"; option 2 is hidden in the Focus bar (Proposed), because it would create a rule the owner did not add by hand |
 | Destructive | drawer and Focus bar only | never | never | never | Confirm checkbox ("I checked the 3 commits that will be overwritten") must be ticked by click or Space; no shortcut approves; Allow once is not the default button; option 2 hidden; checkbox resets when the drawer closes or the request's summary changes (Proposed) |
 | Question | card, drawer, Focus, palette | no | no (popup "Open") | no | AskUserQuestion: option buttons from `tool_input`, sent as the option number, plus "Other" free text; free-text questions: text then Enter |
 
-Deny = option "3 No, tell Claude what to do". After a deny from the deck, the row offers an optional "Tell Claude what to do instead" input for 30 s; text is typed into the PTY followed by Enter. Proposed.
+Deny = the option whose parsed label starts with "No" (the captured 2.1.282 Edit prompt shows "3. No"; [07-approvals.md](../07-approvals.md) section 5.1, F17). After a deny from the deck, the row offers an optional "Tell Claude what to do instead" input for 30 s; text is typed into the PTY followed by Enter. Proposed.
 
 Batch semantics (Safe): requests are answered in parallel across sessions and sequentially within one session (a session shows one prompt at a time). Each request runs its own sending and verifying; the drawer shows per-row results and one summary toast ("Allowed 2 of 2" or "Allowed 1 of 2: 1 did not land"). Proposed.
 
@@ -409,7 +409,7 @@ Batch semantics (Safe): requests are answered in parallel across sessions and se
 - **Observed sessions cannot be answered from the deck** (no PTY). Every surface shows "Answer in your terminal"; popups offer "Open" only. Decided (observed sessions are read-only).
 - **Guards before sending** (all must pass, else stay `waiting` with a message):
   1. `screenMatch = on_screen` for this request. If not: "The terminal is showing a different prompt. Open terminal." This is what prevents a queued "1" from approving the next (possibly Destructive) prompt.
-  2. No `I.TerminalBytes` for this PTY within `terminalTypingGuard` (1 s): "You are typing in the terminal. Answer there, or try again in a second."
+  2. No input for this PTY from either side within `terminalTypingGuard` (1 s): neither `I.TerminalBytes` from the `fm claude` terminal nor `I.BrowserBytes` from the browser Focus terminal (D-84). If either typed: "You are typing in the terminal. Answer there, or try again in a second."
   3. deckd connected ([4.2](#42-web-server-to-deckd)).
   4. Tier rules above (for example Destructive requires `confirming`).
 - **Keys**: the option's digit as printed on screen (the screen model parses "1 Yes", "2 Yes, don't ask again for …", "3 No, …"); free text is written as a bracketed paste followed by `\r`.
@@ -438,7 +438,7 @@ Batch semantics (Safe): requests are answered in parallel across sessions and se
 | 13 | `open.verifying` | `T.Verify` | | `open.did_not_land` | |
 | 14 | `open.did_not_land` | `U.TryAgain` | send guards pass | `open.sending` | |
 | 15 | `open.did_not_land` | late proof | | `answered(browser)` | the late proof still wins |
-| 16 | `open.*` | matching tool outcome (`PostToolUse`, `PostToolUseFailure`) | deck did not send keys | `answered(terminal, allow)` | rule counter +1 when Safe (Proposed; SM-O10) |
+| 16 | `open.*` | matching tool outcome (`PostToolUse`, `PostToolUseFailure`) | deck did not send keys | `answered(terminal, allow)` | rule counter +1 when Safe (D-73), and only when this request's `PermissionRequest` and the `PostToolUse` came from the same Claude process (F16) |
 | 17 | `open.*` | matching `PermissionDenied`, or `H.UserPromptSubmit` | deck did not send keys | `answered(terminal, deny)` | |
 | 18 | `open.*` (question) | `H.PostToolUse(AskUserQuestion)`, `H.UserPromptSubmit`, any activity (for `stop_question`) | deck did not send keys | `answered(terminal)` | |
 | 19 | `open.*` | `S.PromptGone` then `S.ScreenIdle`, or `H.Notification[idle_prompt]` | no outcome seen | `expired(interrupted)` | the user pressed Esc; not for `stop_question` |
@@ -470,7 +470,9 @@ stateDiagram-v2
 
 Decided: offered after 5 Safe approvals of the same command in the same repo; Settings offers 5 times, 3 times, Never suggest. Rules are written to `<repo>/.claude/settings.local.json` `permissions.allow` in Claude Code permission syntax; Destructive never becomes a rule; Caution only by hand.
 
-One machine per `(repoId, pattern)`. `pattern` is the Claude Code permission pattern derived from the matched tiers.json entry (for example `Bash(cargo test:*)`). Proposed; SM-O11 for requests that match no entry.
+One machine per `(repoId, pattern)`. `pattern` is the Claude Code permission pattern derived from the matched tiers.json entry (for example `Bash(cargo test:*)`). Proposed. A Safe request that matches no tiers.json entry has no pattern and gets no suggestion (D-74). npm and pnpm script entries give the exact script rule (`Bash(npm run test)`), never a prefix rule (D-86).
+
+What counts (D-73, F16): a request allowed from the browser or in the terminal counts. A terminal allow counts only when the request's `PermissionRequest` and its closing `PostToolUse` came from the same Claude process, so forged envelopes on `hooks.sock` cannot raise the counter on their own ([08-security.md](../08-security.md) T22).
 
 | From | Event | Guard | To | Actions |
 |---|---|---|---|---|
@@ -486,7 +488,7 @@ One machine per `(repoId, pattern)`. `pattern` is the Claude Code permission pat
 
 1. Two sessions ask the same Safe command: two requests, batch answers both, counter +2.
 2. The user answers in the terminal while the deck is `sending`: guard 2 usually stops it; if both land, the prompt closes once and the deck's extra digit reaches the input line as text. The verification sees `S.PromptGone` and records `answered(browser)`; the Focus view shows the stray character in the input line. Accepted risk, reduced by guard 2. Proposed.
-3. The screen prompt text differs from `tool_input` (Claude Code shortens long commands): `screenMatch` compares the parsed command prefix up to the screen's truncation point. Proposed.
+3. The screen prompt text differs from `tool_input` (Claude Code shortens long commands): `screenMatch` compares the parsed command prefix up to the screen's truncation point. When the visible prompt matches more than one open request of the session (two commands that share the visible prefix, one Safe and one Destructive), no request is `on_screen` and every answer is refused until only one matches, because a "1" could answer the wrong prompt (F12, D-76).
 4. deckd down: every PTY request becomes `screenMatch=unknown`, send guard 3 fails, surfaces show "deckd is reconnecting. Answer in your terminal for now."
 5. Notification-only request (row 2) has no `tool_input`: it cannot be matched by tool outcome; it closes on `S.PromptGone` + proof or on any later `PostToolUse` of the session. Proposed.
 6. A request stays open in an observed session for hours: shown with its waiting time; no auto-expiry (the process may genuinely be waiting). `X.PidGone` or `SessionEnd` expires it.
@@ -877,7 +879,7 @@ Make sure a blocked session is noticed without nagging (Decided: desktop notific
 | `renotified` | popup again (replace id), no bell | final until closed (one renotify, Proposed; SM-O17) |
 | `cleared` | request answered or expired: dismiss the popup, drop from badge | final |
 
-Popup content: title "rustot needs you", body the request summary ("Wants to run cargo test --release combat::") with the tier word; actions: Safe "Allow once" and "Open"; Caution, Destructive and questions "Open" only (Destructive never from a popup, Decided; Caution SM-O9). Observed sessions: "Open" only, body ends with "Answer in your terminal". Coalescing: requests of one session opened within the grace window share one popup "rustot needs you (2 requests)". Proposed.
+Popup content: title "rustot needs you", body the request summary ("Wants to run cargo test --release combat::") with the tier word; actions: Safe "Allow once" and "Open"; Caution, Destructive and questions "Open" only (Destructive never from a popup, Decided; Caution D-71). A Safe popup offers "Allow once" only when it holds a single request and shows that request's whole summary; a clipped body or a coalesced popup offers "Open" only, because a clipped popup is a review the owner did not get (F11, D-76). Observed sessions: "Open" only, body ends with "Answer in your terminal". Coalescing: requests of one session opened within the grace window share one popup "rustot needs you (2 requests)". Proposed.
 
 If the deck tab is visible, focused and showing that session (Focus), the desktop popup is skipped; in-browser feedback still happens. Proposed.
 
@@ -1027,9 +1029,9 @@ Add `processKey` (ptyId or claude pid), `sinceTs`, `subagentsActive`, `activity`
 | SM-O6 | Screen-idle detection (row 30) depends on reading Claude Code's TUI layout; confirm with the fake `claude` binary and the pinned version | On for PTY sessions |
 | SM-O7 | When `CwdChanged` moves a session into another repo, does its review baseline reset, and which crew member does the card show? | Reset baseline; card follows the new repo |
 | SM-O8 | Should `claude --resume <id>` of an ended conversation reopen the old deck session (row 49) or create a new one? | Reopen |
-| SM-O9 | Can Caution requests be approved from a popup? Tier copy only says Safe can and Destructive never | No: popup offers "Open" |
-| SM-O10 | Do terminal approvals (observed through `PostToolUse`) count toward "Make it a rule?" | Yes |
-| SM-O11 | Pattern for a Safe request that matches no tiers.json entry | No suggestion for it |
+| SM-O9 | Can Caution requests be approved from a popup? Tier copy only says Safe can and Destructive never | **Decided** 2026-10-02 (D-71): no, the popup offers "Open" |
+| SM-O10 | Do terminal approvals (observed through `PostToolUse`) count toward "Make it a rule?" | **Decided** 2026-10-02 (D-73): yes, with the same-process rule of 2.8 (F16) |
+| SM-O11 | Pattern for a Safe request that matches no tiers.json entry | **Decided** 2026-10-02 (D-74): no suggestion for it |
 | SM-O12 | PTY size when the terminal and the browser differ | Follow the most recent input source |
 | SM-O13 | "Start scribed" copy says `systemctl --user start scribed`, but TurbidAssist has no scribed unit (scribed is spawned on demand by `ScribeClient.ensure_daemon()`). Ship a unit, or spawn `scribed` detached like the reference client? | Proposed: the deck starts it with `systemd-run --user` running a login shell (`$SHELL -l -c 'exec scribed'`), so scribed is not in the deck's cgroup and gets `HF_TOKEN`; TurbidAssist change T4 (a `scribed.service` unit, [04-integrations.md](../04-integrations.md) section 4.3) is the later clean fix |
 | SM-O14 | In-deck speaker naming for `awaiting_names`, or only the `postmeet name` hint? | Hint only in v1 |
