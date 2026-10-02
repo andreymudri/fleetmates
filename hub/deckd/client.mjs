@@ -1,5 +1,5 @@
 // deckd client: one connection to deckd.sock speaking the JSON-lines
-// protocol of docs/deck/05-api.md section 5. Used by `fm` and the spike server.
+// protocol of docs/deck/05-api.md section 5. Used by `fm` and the web server.
 import net from 'node:net'
 import path from 'node:path'
 import { encode, createLineDecoder, PROTO } from './protocol.mjs'

@@ -40,7 +40,7 @@
     "prepack": "node bin/vendor-fleetmates.mjs && npm run build",
     "postpack": "node bin/vendor-fleetmates.mjs --clean",
     "test": "node --test \"test/**/*.test.mjs\"",
-    "perf": "node test/perf/keystroke-echo.spec.mjs"
+    "perf": "node test/perf/focus-echo.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
