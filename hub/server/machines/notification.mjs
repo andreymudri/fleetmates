@@ -65,6 +65,23 @@ export function requestPopupText(task, requests, observed) {
 }
 
 /**
+ * The actions a needs-you popup offers (D-71, F11): `['allow', 'open']` only for exactly one `permission`
+ * request with tier `safe` in a session that is not observed, when the rendered body shows that request's whole
+ * one-line summary (no clip by {@link requestPopupText}); `['open']` in every other case.
+ * @param {{ kind?: string, tier?: string | null, summary: string }[]} requests
+ * @param {boolean} observed
+ * @param {{ body: string }} rendered the popup text built from the same requests
+ * @returns {string[]}
+ */
+export function popupActions(requests, observed, rendered) {
+  if (requests.length !== 1 || observed) return ['open']
+  const [request] = requests
+  if (request.kind !== 'permission' || request.tier !== 'safe') return ['open']
+  const whole = lead(request.tier, clipText(oneLine(request.summary), Infinity))
+  return String(rendered?.body ?? '').split('\n').includes(whole) ? ['allow', 'open'] : ['open']
+}
+
+/**
  * Title of a done or crash popup, "made port · <task>" or "crashed · <task>", with the task cut so the deck's
  * own words always fit and always come first.
  * @param {string} task
@@ -80,9 +97,33 @@ const graceMs = 3000
 const prefix = 'notify:popup:'
 const defaults = Object.freeze({ bell: true, renotifyAfter: 10, notifyDone: true, quietInMeetings: true, notifyCrash: true })
 
-/** Create a serialized notification tick over committed session and request rows. */
-export function createNotificationMachine({ store, notifier = createNotifier(), now = Date.now, recording = () => false, publish = () => {} }) {
+/**
+ * Create a serialized notification tick over committed session and request rows. A popup action reaches
+ * `onAction({ key, requestIds, sessionId })`: `allow` only while the popup's single request is still open, a
+ * `permission` request with tier `safe`, and its session has a PTY (re-read from the store at click time);
+ * every other click arrives as `open`. Popup to request ids lives in memory only, never in notification text.
+ */
+export function createNotificationMachine({ store, notifier = createNotifier(), now = Date.now, recording = () => false, publish = () => {}, onAction = () => {} }) {
   let pending = Promise.resolve()
+  /** Popup token to `{ requestIds, sessionId }`, in memory only. */
+  const targets = new Map()
+  let tokens = 0
+  /** Popup meta key to its token, so a dismissed or replaced popup's target is dropped. */
+  const popups = new Map()
+  const forget = key => {
+    targets.delete(popups.get(key))
+    popups.delete(key)
+  }
+  function act(token, key) {
+    const target = targets.get(token)
+    if (!target) return
+    let allowed = false
+    if (key === 'allow' && target.requestIds.length === 1) {
+      const row = store.get("SELECT r.state,r.kind,r.tier,s.pty_id,s.origin FROM requests r JOIN sessions s ON s.id=r.session_id WHERE r.id=? AND s.id=?", target.requestIds[0], target.sessionId)
+      allowed = !!row && row.state === 'open' && row.kind === 'permission' && row.tier === 'safe' && !!row.pty_id && row.origin !== 'observed'
+    }
+    try { onAction({ key: allowed ? 'allow' : 'open', requestIds: [...target.requestIds], sessionId: target.sessionId }) } catch {}
+  }
   const read = key => {
     const row = store.get('SELECT value FROM meta WHERE key=?', key)
     return row ? JSON.parse(row.value) : null
@@ -144,17 +185,25 @@ export function createNotificationMachine({ store, notifier = createNotifier(), 
       return true
     })
     if (!claim) return false
-    const { title, body } = requestPopupText(session.task, requests, session.origin === 'observed')
+    const observed = session.origin === 'observed'
+    const rendered = requestPopupText(session.task, requests, observed)
+    const { title, body } = rendered
+    const token = ++tokens
+    targets.set(token, { requestIds: requests.map(row => row.id), sessionId: session.id })
     let result
-    try { result = await notifier.popup({ title, body, replaceId: replacing?.id ?? null }) } catch { result = { ok: false } }
+    try {
+      result = await notifier.popup({ title, body, replaceId: replacing?.id ?? null, actions: popupActions(requests, observed, rendered), onAction: key => act(token, key) })
+    } catch { result = { ok: false } }
     if (!result.ok) {
+      targets.delete(token)
       store.tx(() => { for (const key of keys) store.run('DELETE FROM notification_history WHERE dedupe_key=?', key) })
       publish({ type: 'notify.failed', data: { code: 'notify_failed' } })
       return false
     }
     store.tx(() => {
-      if (replacing) remove(prefix + replacing.key)
+      if (replacing) { remove(prefix + replacing.key); forget(prefix + replacing.key) }
       write(prefix + keys[0], { key: keys[0], id: result.id, sessionId: session.id, requestIds: requests.map(row => row.id) })
+      popups.set(prefix + keys[0], token)
       for (const row of requests) store.run(`UPDATE requests SET ${kind === 'request' ? 'notified_at' : 'renotified_at'}=? WHERE id=?`, at, row.id)
     })
     publish({ type: 'notification.sent', data: { kind, sessionId: session.id, requestIds: requests.map(row => row.id) } })
@@ -173,6 +222,7 @@ export function createNotificationMachine({ store, notifier = createNotifier(), 
       if (obsolete) {
         await notifier.dismiss(value.id)
         remove(row.key)
+        forget(row.key)
       }
     }
     for (const session of store.all('SELECT * FROM sessions')) {
@@ -223,6 +273,12 @@ export function createNotificationMachine({ store, notifier = createNotifier(), 
     getPreferences,
     setPreferences,
     testPing() { return notifier.testPing() },
+    /** Kill every waiting popup process and drop the in-memory popup targets. */
+    close() {
+      targets.clear()
+      popups.clear()
+      notifier.close?.()
+    },
     tick(at = now()) {
       const result = pending.then(() => tick(at))
       pending = result.catch(() => {})
