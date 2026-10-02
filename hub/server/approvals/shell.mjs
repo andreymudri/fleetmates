@@ -18,8 +18,12 @@ const interpreterSet = new Set(INTERPRETERS.filter(name => name !== 'python*'))
 const shellSet = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash', 'mksh'])
 const devNulls = new Set(['/dev/null', '/dev/stdout', '/dev/stderr'])
 const metaChars = new Set([' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>'])
-const reservedPrefix = ['if', 'then', 'elif', 'else', 'do', 'while', 'until']
-const reservedEnd = ['fi', 'done', 'esac']
+// Reserved words that only end a compound command; one at command start anywhere else is a syntax
+// error, as in Bash.
+const listEnds = ['then', 'elif', 'else', 'fi', 'do', 'done', 'esac', '}']
+// Constructs this parser does not model (a function body, a coprocess, a select menu, an arithmetic
+// command): reading them as plain words would hide the commands they run, so they fail closed.
+const unsupportedWords = ['function', 'coproc', 'select']
 const redirectOps = ['&>>', '&>', '<<<', '<<-', '<<', '<>', '<&', '>>', '>|', '>&', '<', '>']
 const writeOps = new Set(['>', '>>', '>|', '&>', '&>>', '<>', '>&'])
 const substitutionKinds = new Set(['$(', '`', '<('])
@@ -152,6 +156,11 @@ class Parser {
     return !(char === undefined || char === ')' || char === ';' || char === '&' || char === '|' || char === '\n')
   }
 
+  // `end` is null (the whole input), ')' or a list of reserved words that close the list.
+  atEnd(end) {
+    return Array.isArray(end) && end.some(word => this.atWord(word))
+  }
+
   parseList(end) {
     const items = []
     for (;;) {
@@ -165,7 +174,7 @@ class Parser {
         if (end === ')') return items
         fail('syntax')
       }
-      if (end === '}' && this.atWord('}')) return items
+      if (this.atEnd(end)) return items
       const pipeline = this.parsePipeline()
       this.skipBlanks()
       const first = this.s[this.i]
@@ -180,7 +189,7 @@ class Parser {
       items.push({ pipeline, op })
       if (op === '&&' || op === '||') {
         this.skipNewlines()
-        if (!this.commandStartsAt() || (end === '}' && this.atWord('}'))) fail('syntax')
+        if (!this.commandStartsAt() || this.atEnd(end)) fail('syntax')
         continue
       }
       if (op === null) {
@@ -190,7 +199,7 @@ class Parser {
           return items
         }
         if (next === ')' && end === ')') return items
-        if (end === '}' && this.atWord('}')) return items
+        if (this.atEnd(end)) return items
         fail('syntax')
       }
     }
@@ -222,20 +231,13 @@ class Parser {
   }
 
   parseCommand() {
-    let skipped = false
-    for (;;) {
-      this.skipBlanks()
-      const keyword = reservedPrefix.find(word => this.atWord(word))
-      if (!keyword) break
-      this.i += keyword.length
-      skipped = true
-    }
     this.skipBlanks()
-    const ending = reservedEnd.find(word => this.atWord(word))
-    if (ending) {
-      this.i += ending.length
-      return { type: 'simple', assigns: [], words: [], redirects: this.parseTrailingRedirects(), skipped: true }
-    }
+    if (unsupportedWords.some(word => this.atWord(word)) || this.s.startsWith('((', this.i)) fail('unsupported')
+    if (this.atWord('case')) fail('syntax')
+    if (listEnds.some(word => this.atWord(word))) fail('syntax')
+    if (this.atWord('if')) return this.parseIf()
+    if (this.atWord('while') || this.atWord('until')) return this.parseLoop()
+    if (this.atWord('for')) return this.parseFor()
     if (this.s[this.i] === '(') {
       this.i++
       this.enter()
@@ -248,13 +250,86 @@ class Parser {
     if (this.atWord('{')) {
       this.i++
       this.enter()
-      const body = this.parseList('}')
+      const body = this.parseList(['}'])
       if (!this.atWord('}') || !body.length) fail('syntax')
       this.i++
       this.leave()
       return { type: 'group', kind: 'brace', body, redirects: this.parseTrailingRedirects() }
     }
-    return this.parseSimple(skipped)
+    return this.parseSimple()
+  }
+
+  // A non-empty list closed by one of `ends`; the caller consumes the closing word.
+  clause(ends) {
+    const list = this.parseList(ends)
+    if (!list.length) fail('syntax')
+    return list
+  }
+
+  parseIf() {
+    this.enter()
+    this.i += 2
+    const body = []
+    for (;;) {
+      body.push(...this.clause(['then']))
+      this.i += 4
+      body.push(...this.clause(['elif', 'else', 'fi']))
+      if (this.atWord('elif')) { this.i += 4; continue }
+      if (this.atWord('else')) {
+        this.i += 4
+        body.push(...this.clause(['fi']))
+      }
+      break
+    }
+    this.i += 2
+    this.leave()
+    return { type: 'group', kind: 'if', body, redirects: this.parseTrailingRedirects() }
+  }
+
+  parseLoop() {
+    const kind = this.atWord('while') ? 'while' : 'until'
+    this.enter()
+    this.i += kind.length
+    const body = this.clause(['do'])
+    this.i += 2
+    body.push(...this.clause(['done']))
+    this.i += 4
+    this.leave()
+    return { type: 'group', kind, body, redirects: this.parseTrailingRedirects() }
+  }
+
+  parseFor() {
+    this.enter()
+    this.i += 3
+    this.skipBlanks()
+    if (this.s.startsWith('((', this.i)) fail('unsupported')
+    let j = this.i
+    while (isNameChar(this.s[j])) j++
+    const after = this.s[j]
+    if (!isNameStart(this.s[this.i]) || !(after === undefined || metaChars.has(after))) fail('syntax')
+    this.i = j
+    const items = []
+    this.skipNewlines()
+    if (this.atWord('in')) {
+      this.i += 2
+      for (;;) {
+        this.skipBlanks()
+        const char = this.s[this.i]
+        if (char === undefined || char === ';' || char === '\n') break
+        if (metaChars.has(char)) fail('syntax')
+        items.push(this.readWord())
+      }
+      if (this.s[this.i] === ';') this.i++
+      else if (this.s[this.i] === '\n') this.newline()
+      else fail('syntax')
+    } else if (this.s[this.i] === ';') this.i++
+    this.skipNewlines()
+    if (!this.atWord('do')) fail('syntax')
+    this.i += 2
+    const body = this.clause(['done'])
+    this.i += 4
+    this.leave()
+    return { type: 'group', kind: 'for', body, items, redirects: this.parseTrailingRedirects() }
   }
 
   parseTrailingRedirects() {
@@ -266,7 +341,16 @@ class Parser {
     }
   }
 
+  // `{name}>file` (a named file descriptor) is a redirect wherever it stands in a simple command.
+  namedFdEnd() {
+    if (this.s[this.i] !== '{' || !isNameStart(this.s[this.i + 1])) return -1
+    let j = this.i + 2
+    while (isNameChar(this.s[j])) j++
+    return this.s[j] === '}' && (this.s[j + 1] === '<' || this.s[j + 1] === '>') ? j + 1 : -1
+  }
+
   redirectAhead() {
+    if (this.namedFdEnd() >= 0) return true
     let j = this.i
     while (isDigit(this.s[j])) j++
     const char = this.s[j]
@@ -274,8 +358,8 @@ class Parser {
     return j === this.i && char === '&' && this.s[j + 1] === '>'
   }
 
-  parseSimple(skipped) {
-    const command = { type: 'simple', assigns: [], words: [], redirects: [], skipped }
+  parseSimple() {
+    const command = { type: 'simple', assigns: [], words: [], redirects: [] }
     for (;;) {
       this.skipBlanks()
       const char = this.s[this.i]
@@ -288,12 +372,18 @@ class Parser {
       if (!command.words.length && /^[A-Za-z_]\w*=/.test(word.raw)) { command.assigns.push(word); continue }
       command.words.push(word)
     }
-    if (!command.words.length && !command.assigns.length && !command.redirects.length && !skipped) fail('syntax')
+    if (!command.words.length && !command.assigns.length && !command.redirects.length) fail('syntax')
     return command
   }
 
   parseRedirect() {
     let fd = ''
+    let varFd = null
+    const named = this.namedFdEnd()
+    if (named >= 0) {
+      varFd = this.s.slice(this.i + 1, named - 1)
+      this.i = named
+    }
     while (isDigit(this.s[this.i])) fd += this.s[this.i++]
     const op = redirectOps.find(candidate => this.s.startsWith(candidate, this.i))
     this.i += op.length
@@ -306,6 +396,7 @@ class Parser {
       target = this.readWord()
     }
     const redirect = { fd: fd ? Number(fd) : null, op, target, subs: [] }
+    if (varFd) redirect.varFd = varFd
     if (op === '<<' || op === '<<-') {
       if (target.expansion || target.procSub) fail('heredoc-delimiter')
       redirect.heredoc = true
@@ -334,17 +425,13 @@ class Parser {
     const word = { text: '', expansion: false, glob: false, quoted: false, subs: [] }
     let brace = -1
     let bracket = false
-    if (s[this.i] === '~') {
-      const next = s[this.i + 1]
-      if (next === undefined || next === '/' || metaChars.has(next)) {
-        if (this.options.homeDir) word.text = this.options.homeDir
-        else { word.text = '~'; word.expansion = true }
-        this.i++
-      }
-    }
+    if (s[this.i] === '~') this.readTilde(word, false)
     while (this.i < s.length) {
       const char = s[this.i]
       if (metaChars.has(char)) break
+      // Bash expands `~` after the `=` of any NAME= word (so `dd of=~/x` writes the home file), and
+      // after a `:` in its value.
+      if (char === '~' && /^[A-Za-z_]\w*=(?:[^'"\\]*:)?$/.test(s.slice(start, this.i))) { this.readTilde(word, true); continue }
       if (char === "'") {
         const end = s.indexOf("'", this.i + 1)
         if (end < 0) fail('unclosed-quote')
@@ -408,6 +495,19 @@ class Parser {
 
   homeExpands() {
     return Boolean(this.options.homeDir) && !this.options.homeAssigned
+  }
+
+  // A bare `~` is the home directory unless HOME may have been reassigned; `~user`, `~+` and `~-`
+  // name a directory this parser does not know, so the word stops being literal.
+  readTilde(word, assignment) {
+    const next = this.s[this.i + 1]
+    const bare = next === undefined || next === '/' || metaChars.has(next) || (assignment && next === ':')
+    if (bare && this.homeExpands()) word.text += this.options.homeDir
+    else {
+      word.text += '~'
+      word.expansion = true
+    }
+    this.i++
   }
 
   readDollar(word, inDouble) {
@@ -596,7 +696,8 @@ const wrapperSpecs = {
   env: { flags: ['-i', '--ignore-environment', '-0', '--null'], values: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'], other: ['-a', '--argv0'], assigns: true },
   command: { flags: ['-p'] },
   builtin: {},
-  time: { flags: ['-p'], other: ['-f', '--format', '-o', '--output'] },
+  exec: { flags: ['-c', '-l'], other: ['-a'] },
+  time:{ flags: ['-p'], other: ['-f', '--format', '-o', '--output'] },
   nice: { values: ['-n', '--adjustment'] },
   nohup: {},
   timeout: { flags: ['--preserve-status', '--foreground', '-v', '--verbose'], values: ['-s', '--signal', '-k', '--kill-after'] },
@@ -723,8 +824,30 @@ class Walker {
     return segment
   }
 
+  // A list is a run of and-or lists (items joined by `&&` and `||`). One that ends in `&` runs in a
+  // background subshell, so its directory changes stay inside it. A directory change reaches the
+  // next item only through `&&` with no `||` before it in the same and-or list: on any other path
+  // the `cd` may have failed or been skipped, so the directory becomes unknown (null).
   walkList(list, ctx) {
-    for (const item of list) this.walkPipeline(item.pipeline, ctx, item.op)
+    for (let first = 0; first < list.length;) {
+      let last = first
+      while (last < list.length - 1 && (list[last].op === '&&' || list[last].op === '||')) last++
+      const chainCtx = list[last].op === '&' ? { ...ctx } : ctx
+      const start = chainCtx.dir
+      let sawOr = false
+      for (let k = first; k <= last; k++) {
+        const before = chainCtx.dir
+        const op = list[k].op
+        this.walkPipeline(list[k].pipeline, chainCtx, op)
+        if (chainCtx.dir !== before && (op !== '&&' || sawOr)) chainCtx.dir = null
+        if (op === '||') {
+          sawOr = true
+          if (chainCtx.dir !== start) chainCtx.dir = null
+        }
+      }
+      if (chainCtx.dir !== start) chainCtx.dir = null
+      first = last + 1
+    }
   }
 
   walkPipeline(pipeline, ctx, op) {
@@ -742,34 +865,44 @@ class Walker {
 
   walkCommand(command, ctx, position) {
     if (command.type === 'simple') return this.walkSimple(command, ctx, position, true)
+    const dir = ctx.dir
     const inner = { ...ctx, depth: ctx.depth + 1 }
     const start = this.segments.length
+    if (command.items?.some(word => word.subs.length)) this.walkSubs(command.items, this.newSegment(ctx, position), ctx)
     this.walkList(command.body, inner)
-    if (command.kind === 'brace' && position.single) ctx.dir = inner.dir
+    // A brace group runs in this shell. The body of if, while, until and for may run zero times or
+    // only in part, so a directory it changes is unknown afterwards. A subshell never leaks.
+    if (position.single && command.kind === 'brace') ctx.dir = inner.dir
+    else if (position.single && command.kind !== 'subshell' && inner.dir !== dir) ctx.dir = null
     if (!command.redirects.length) return
     let holders = this.segments.slice(start).filter(segment => segment.payloadOf === (ctx.payloadOf ?? null))
     if (!holders.length) holders = [this.newSegment(inner, position)]
-    for (const holder of holders) this.addRedirects(holder, command.redirects)
+    // The shell opens a compound's redirects before its body runs, so they resolve in `dir`.
+    for (const holder of holders) this.addRedirects(holder, command.redirects, dir)
     for (const redirect of command.redirects) this.walkSubs([redirect.target, { subs: redirect.subs }], holders[0], ctx)
   }
 
-  addRedirects(segment, redirects) {
+  // Redirects are opened by the shell, so they resolve against the shell directory `dir`, never the
+  // directory a wrapper such as `env -C` gives the command.
+  addRedirects(segment, redirects, dir) {
     for (const redirect of redirects) {
       const record = { fd: redirect.fd, op: redirect.op, target: redirect.target.text, literal: redirect.target.literal }
+      if (redirect.varFd) record.varFd = redirect.varFd
       if (redirect.heredoc) { record.heredoc = true; record.quoted = redirect.quoted }
       if ((redirect.op === '>&' || redirect.op === '<&') && /^(?:\d+|-)$/.test(redirect.target.text)) record.dup = true
+      if (!redirect.heredoc && redirect.op !== '<<<' && !record.dup && !redirect.target.procSub) record.path = redirect.target.literal ? resolvePath(redirect.target.text, dir) : null
       segment.redirects.push(record)
-      if (writeOps.has(redirect.op) && !record.dup && !redirect.target.procSub) this.addWrite(segment, redirect.target, redirect.op === '>&' ? '&>' : redirect.op)
+      if (writeOps.has(redirect.op) && !record.dup && !redirect.target.procSub) this.addWrite(segment, redirect.target, redirect.op === '>&' ? '&>' : redirect.op, dir)
     }
   }
 
-  addWrite(segment, word, via) {
+  addWrite(segment, word, via, dir = segment.cwd) {
     if (!word) return
     if (!word.literal) {
       segment.writes.push({ path: null, raw: word.text, via, literal: false })
       return
     }
-    const resolved = resolvePath(word.text, segment.cwd)
+    const resolved = resolvePath(word.text, dir)
     const record = { path: resolved, via }
     if (resolved === null) record.raw = word.text
     else if (devNulls.has(resolved)) record.devNull = true
@@ -786,7 +919,6 @@ class Walker {
   }
 
   walkSimple(command, ctx, position, walkSubstitutions) {
-    if (command.skipped && !command.words.length && !command.assigns.length && !command.redirects.length) return
     const segment = this.newSegment(ctx, position)
     for (const word of command.assigns) segment.assignments.push(assignment(word))
     const words = command.words.slice()
@@ -795,7 +927,7 @@ class Walker {
     segment.words = rest.map(word => word.text)
     segment.wordInfo = rest.map(word => ({ literal: word.literal, quoted: word.quoted, glob: word.glob }))
     segment.literal = rest.length ? rest[0].literal : true
-    this.addRedirects(segment, command.redirects)
+    this.addRedirects(segment, command.redirects, ctx.dir)
     if (walkSubstitutions) {
       this.walkSubs([...command.assigns, ...command.words, ...command.redirects.map(redirect => redirect.target)], segment, ctx)
       for (const redirect of command.redirects) this.walkSubs([{ subs: redirect.subs }], segment, ctx)
@@ -805,7 +937,13 @@ class Walker {
     this.assignmentsOf(name, rest, segment)
     this.payloads(name, rest, segment, ctx)
     this.writeTargets(name, rest, segment)
-    if ((name === 'cd' || name === 'pushd' || name === 'popd') && position?.single) ctx.dir = this.changeDirectory(name, rest, ctx.dir)
+    if ((name === 'cd' || name === 'pushd' || name === 'popd') && position?.single) {
+      // Behind an external wrapper (`env cd`, `sudo cd`) cd is a separate process and the shell
+      // stays put; `time` is a Bash keyword that runs the builtin, but /usr/bin/time does not.
+      const own = segment.wrappers.slice(ctx.wrappers?.length ?? 0).filter(wrapper => wrapper !== 'command' && wrapper !== 'builtin')
+      if (!own.length) ctx.dir = this.changeDirectory(name, rest, ctx.dir)
+      else if (own.includes('time')) ctx.dir = null
+    }
   }
 
   changeDirectory(name, words, dir) {
@@ -814,7 +952,7 @@ class Walker {
     while (i < words.length && /^-[LPe@]+$/.test(words[i].text)) i++
     if (words[i]?.text === '--') i++
     const target = words[i]
-    if (!target) return this.options.homeDir ?? null
+    if (!target) return this.options.homeDir && !this.options.homeAssigned ? this.options.homeDir : null
     if (!target.literal || target.text === '-' || target.text.startsWith('+')) return null
     return resolvePath(target.text, dir)
   }
@@ -1321,7 +1459,13 @@ class Walker {
       }
       return found
     }
+    // A file a fetch wrote. When its directory is unknown (or its name is not literal) the file is
+    // compared by its last path component, so an unresolved path still finds its route.
     const fetched = []
+    const fetchedFile = (write, fetch, after) => {
+      if (write.devNull) return
+      fetched.push({ path: write.path, raw: write.path ? null : write.raw, name: path.posix.basename(write.path ?? write.raw), fetch, after })
+    }
     for (const ranges of this.pipelines) {
       for (let a = 0; a < ranges.length; a++) {
         const [start, end] = ranges[a]
@@ -1330,7 +1474,7 @@ class Walker {
           for (let b = a + 1; b < ranges.length; b++) {
             for (let target = ranges[b][0]; target < ranges[b][1]; target++) {
               if (isInterpreter(target)) add('pipe', fetch, target)
-              for (const write of segments[target].writes) if (write.path && !write.devNull) fetched.push({ path: write.path, fetch, after: target })
+              for (const write of segments[target].writes) fetchedFile(write, fetch, target)
             }
           }
         }
@@ -1345,7 +1489,7 @@ class Walker {
         }
       }
       if (isFetch(index)) {
-        for (const write of segment.writes) if (write.path && !write.devNull) fetched.push({ path: write.path, fetch: index, after: index })
+        for (const write of segment.writes) fetchedFile(write, index, index)
         for (const child of children[index]) {
           if (segments[child].via !== '>(') continue
           for (const inner of subtree(child)) if (isInterpreter(inner)) add('substitution', index, inner)
@@ -1354,18 +1498,31 @@ class Walker {
     }
     if (!fetched.length) return routes
     for (const segment of segments) {
-      const executed = new Set()
-      if (segment.words.length && segment.literal && segment.words[0].includes('/')) executed.add(resolvePath(segment.words[0], segment.cwd))
+      const paths = new Set()
+      const resolvedNames = new Set()
+      const unresolvedNames = new Set()
+      const execute = (text, resolved) => {
+        if (resolved) {
+          paths.add(resolved)
+          resolvedNames.add(path.posix.basename(resolved))
+        } else unresolvedNames.add(path.posix.basename(text))
+      }
+      const word0 = segment.words[0]
+      if (word0 !== undefined && (!segment.literal || word0.includes('/'))) execute(word0, segment.literal ? resolvePath(word0, segment.cwd) : null)
       if (isInterpreter(segment.index)) {
         segment.words.slice(1).forEach((word, k) => {
-          if (segment.wordInfo[k + 1].literal && !word.startsWith('-')) executed.add(resolvePath(word, segment.cwd))
+          const literal = segment.wordInfo[k + 1].literal
+          if (!literal || !word.startsWith('-')) execute(word, literal ? resolvePath(word, segment.cwd) : null)
         })
-        for (const redirect of segment.redirects) if (redirect.op === '<' && redirect.literal) executed.add(resolvePath(redirect.target, segment.cwd))
+        for (const redirect of segment.redirects) if (redirect.op === '<') execute(redirect.target, redirect.path)
       }
-      executed.delete(null)
-      if (!executed.size) continue
+      if (!paths.size && !unresolvedNames.size) continue
       for (const file of fetched) {
-        if (segment.index > file.after && executed.has(file.path)) add('file', file.fetch, segment.index, { path: file.path })
+        if (segment.index <= file.after) continue
+        const match = file.path
+          ? paths.has(file.path) || unresolvedNames.has(file.name)
+          : resolvedNames.has(file.name) || unresolvedNames.has(file.name)
+        if (match) add('file', file.fetch, segment.index, file.path ? { path: file.path } : { path: null, raw: file.raw })
       }
     }
     return routes
@@ -1404,14 +1561,26 @@ function xargsCommandIndex(words) {
   return Math.min(i, words.length)
 }
 
+// HOME can be reassigned by `HOME=`, `for HOME in`, `read HOME`, `{HOME}>f` and more, so any bare
+// HOME name other than a `$HOME` or `${HOME...}` expansion stops `~` and `$HOME` expanding.
+function mayAssignHome(command) {
+  const text = command.replace(/[\\'"]/g, '').replace(/\$\{?[#!]?HOME(?!\w)/g, '')
+  return /(?<!\w)HOME(?!\w)/.test(text)
+}
+
 /**
  * Parse a Bash command into segments for the classifier (docs/deck/07-approvals.md 3.3). Fails
- * closed: anything the tokenizer does not understand returns `{ ok: false, reason }`.
+ * closed: anything the tokenizer does not understand returns `{ ok: false, reason }`, and a
+ * construct it does not model (a `function` body, `coproc`, `select`, `((...))`, `for ((...))`)
+ * returns `{ ok: false, reason: 'unsupported' }`.
  *
  * Each segment is `{ index, words, wordInfo, literal, assignments, redirects, wrappers,
  * wrapperOptions, payloadOf, via, depth, cwd, remote, writes, mounts, privileged, pipeline, stage,
- * op }`. `routes` lists the network-to-interpreter routes of the tier review F7 as
- * `{ kind: 'pipe' | 'substitution' | 'file', fetch, interpreter, path? }` (segment indexes).
+ * op }`. `cwd` is the directory the command runs in (`env -C` and `sudo -D` change it); redirects
+ * resolve against the shell directory instead, and each file redirect record carries that
+ * resolved `path` (null when unknown). `routes` lists the network-to-interpreter routes of the tier
+ * review F7 as `{ kind: 'pipe' | 'substitution' | 'file', fetch, interpreter, path?, raw? }`
+ * (segment indexes); a file route whose path is unknown has `path: null` and the written `raw` text.
  * @param {string} command
  * @param {{ cwd?: string, homeDir?: string, outputOpts?: Record<string, string[] | { options?: string[], operands?: number[], values?: string[] }> }} [options]
  * @returns {{ ok: true, segments: object[], routes: object[] } | { ok: false, reason: string }}
@@ -1420,7 +1589,7 @@ export function parseCommand(command, { cwd = null, homeDir = null, outputOpts =
   if (typeof command !== 'string') return { ok: false, reason: 'not-a-string' }
   if (command.includes('\u0000')) return { ok: false, reason: 'nul' }
   if (command.length > MAX_LENGTH) return { ok: false, reason: 'too-large' }
-  const options = { homeDir, homeAssigned: /(?:^|[^\w$])HOME=/.test(command), outputOpts }
+  const options = { homeDir, homeAssigned: mayAssignHome(command), outputOpts }
   try {
     const list = parseString(command, 0, options)
     const walker = new Walker(options)

