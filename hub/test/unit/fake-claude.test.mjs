@@ -640,7 +640,7 @@ const bashPrompt = keys => [
   { expectKey: { ...keys, timeoutMs: 20000 } }
 ]
 
-test('capture-cc bash-2 saves the rule option 2 wrote as option2-rule.json, redacted, and lists it in MANIFEST', async () => {
+test('capture-cc bash-2 saves the rule option 2 wrote as option2-rule.json, redacted, and lists it in MANIFEST; bash-3 needs PermissionDenied', async () => {
   const t = await tempDir('deck-capture-opt2-')
   /** @type {Awaited<ReturnType<typeof fakeBin>> | undefined} */
   let bin
@@ -677,7 +677,10 @@ test('capture-cc bash-2 saves the rule option 2 wrote as option2-rule.json, reda
         { branch: { one: answered } },
         ...bashPrompt({ 2: 'two' }),
         { branch: { two: [{ hook: 'CwdChanged' }, ...answered] } },
-        { sleep: 4000 },
+        // bash-3 answers No; this fake fires no PermissionDenied, which bash-3 must report.
+        ...bashPrompt({ 3: 'no' }),
+        { branch: { no: [{ print: 'denied\r\n' }] } },
+        { sleep: 7000 },
         { hook: 'WorktreeRemove' },
         { exit: { code: 0 } }
       ]
@@ -698,6 +701,7 @@ test('capture-cc bash-2 saves the rule option 2 wrote as option2-rule.json, reda
     })
     assert.ok(manifest.hooks.includes('option2-rule.json'), JSON.stringify(manifest.hooks))
     assert.deepEqual(manifest.steps, STEP_ORDER)
+    assert.match(run.stderr, /step bash-3 failed: no PermissionDenied\(Bash\)/, 'bash-3 waits for PermissionDenied after answering 3')
     const settingsAfter = await readFile(restored, 'utf8')
     const hookCommand = JSON.parse(settingsAfter).hooks.Stop[0].hooks[0].command
     assert.equal(settingsAfter, captureSettings(hookCommand), 'bash-2 restored the exact capture settings')
