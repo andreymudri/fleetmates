@@ -515,7 +515,7 @@ Source: [03-architecture.md](03-architecture.md) 2.3 and 4.2, [04-integrations.m
 
 1. Connect to `$XDG_RUNTIME_DIR/fleetmates-deck/hooks.sock` with a 100 ms timeout, write the line, half-close, exit 0. No response is read.
 2. On any error (no socket, refused, timeout, `XDG_RUNTIME_DIR` unset) append the line to `~/.local/state/fleetmates/deck/spool/hooks-<yyyymmdd>.jsonl` (file 0600, dir 0700) with a single `write` on an `O_APPEND` descriptor, exit 0.
-3. Total budget 200 ms (03-architecture 2.3). Never print to stdout or stderr; always exit 0.
+3. Total budget 200 ms (03-architecture 2.3). The budget covers the hook's own run, from the moment its module starts loading to process exit, not Node's interpreter boot before it (owner decision 2026-10-02, D-70). `hub/test/contract/hooks.test.mjs` measures that span with an `--import` preload that writes a clock line before the hook module loads and another at exit. Never print to stdout or stderr; always exit 0.
 
 No token: the socket and the spool are 0600 in 0700 directories, owned by the user; the browser never reaches them (03-architecture 2.2).
 

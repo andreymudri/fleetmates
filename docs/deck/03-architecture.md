@@ -73,7 +73,7 @@ Purpose: sessions survive a crash or restart of the web server, and of the brows
 ### 2.3 deck-hook (hook command)
 
 - A tiny Node script installed by `fleetmates-deck init` (name pending Q1) as an **async** command hook for every event the deck uses (list in [04-integrations.md](04-integrations.md) section 2). Async hooks never block Claude Code (Decided intent: observation must never slow or alter a session).
-- Reads the JSON payload from stdin, adds an envelope (receive time, `FLEETMATES_DECK_PTY` if set, parent pid chain for observed sessions, hook script version), writes one JSON line to `hooks.sock`, exits 0. Hard budget: 200 ms. On any failure it appends the line to a spool file `~/.local/state/fleetmates/deck/spool/hooks-<yyyymmdd>.jsonl` and exits 0. The web server drains the spool on start.
+- Reads the JSON payload from stdin, adds an envelope (receive time, `FLEETMATES_DECK_PTY` if set, parent pid chain for observed sessions, hook script version), writes one JSON line to `hooks.sock`, exits 0. Hard budget: 200 ms for the hook's own run, from module load to exit; Node's interpreter boot before it is not counted (owner decision 2026-10-02, D-70), and `hub/test/contract/hooks.test.mjs` measures that span. On any failure it appends the line to a spool file `~/.local/state/fleetmates/deck/spool/hooks-<yyyymmdd>.jsonl` and exits 0. The web server drains the spool on start.
 - Must never print to stdout (for `SessionStart` and `UserPromptSubmit`, stdout is added to Claude's context).
 
 ### 2.4 fm CLI
