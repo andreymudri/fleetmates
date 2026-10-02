@@ -1,5 +1,6 @@
-// M1 accessibility (docs/deck/09-testing.md section 11.2, qa-checklist 1.3, 1.5 and 1.9): axe on every
-// M1 screen and overlay with zero serious or critical violations, plus the focus traps and the skip link.
+// M1 and M2 accessibility (docs/deck/09-testing.md section 11.2, qa-checklist 1.3, 1.4, 1.5 and 1.9): axe on
+// every M1 and M2 screen and overlay with zero serious or critical violations, the focus traps, the skip link,
+// the way out of the live terminal (WCAG 2.1.2) and reduced motion.
 //
 // axe-core is a hub development dependency (hub/package.json), so `npm ci --prefix hub` installs it. This
 // suite injects axe-core's own `axe.min.js` into the page, from AXE_CORE_PATH when set and otherwise from
@@ -13,6 +14,7 @@ import { access, readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { buildWeb, fakeDeckd, hub, launchBrowser, openDeck, startDeck } from './observe.spec.mjs'
+import { control, startControl, typedInto } from './control.spec.mjs'
 
 async function findAxe() {
   const candidates = [process.env.AXE_CORE_PATH]
@@ -220,4 +222,149 @@ test('keyboard (qa 1.3): every focusable control on Home shows a visible focus i
     if (seen && !seen.visible) missing.push(seen.what)
   }
   assert.deepEqual([...new Set(missing)], [], 'controls without a focus-visible indicator')
+})
+
+// M2 (09-testing.md section 11.2, "end of M2"): the audit on the React build with a live terminal, against the
+// control harness of control.spec.mjs (real deckd, fake claude). Every axe finding is printed with its impact;
+// serious and critical ones fail. Findings of the keyboard and motion checks that the product does not meet yet
+// are todo tests naming the defect and its severity (qa-checklist 0.4).
+
+test('axe (M2): Focus with a live terminal and its Stop dialog, New session, Team run and plan drawer, Settings Appearance and compact Home', { skip: skipAxe }, async t => {
+  const audit = auditor()
+  const h = await startControl(t, { web: web.dir })
+  const vault = await h.wrapped('vault-mcp')
+  await h.observed()
+  await h.teamLead()
+  const page = await openDeck(browser, h, `/s/${vault.id}`)
+  await page.waitForSelector('.terminal-view .xterm-rows')
+  await page.waitForSelector('.terminal-view .terminal-skeleton', { state: 'detached', timeout: 10_000 }).catch(() => {})
+  await audit.run(page, 'focus-live-terminal')
+  await page.click('.focus-actions .button--danger')
+  await page.waitForSelector('.confirm-dialog')
+  await audit.run(page, 'focus-stop-dialog')
+  await page.keyboard.press('Escape')
+  await page.goto(`${h.base}/new`)
+  await page.waitForSelector('#new-session-repo')
+  await audit.run(page, 'new-session')
+  await page.fill('#new-session-repo', 'rustot')
+  await page.keyboard.press('Enter')
+  await page.waitForSelector('.launch-banner--hint')
+  await audit.run(page, 'new-session-conflict')
+  await page.goto(`${h.base}/runs/${control.team.repo}/${control.team.runId}`)
+  await page.waitForSelector('#team-crew-T5 .team-crew-steps')
+  await audit.run(page, 'team-run')
+  await page.click('.team-actions button:text-is("Open plan")')
+  await page.waitForSelector('[role="dialog"]')
+  await audit.run(page, 'team-plan-drawer')
+  await page.goto(`${h.base}/settings/appearance`)
+  await page.waitForSelector('#pref-textSize')
+  await audit.run(page, 'settings-appearance')
+  const compact = await openDeck(browser, h, '/', { init: () => localStorage.setItem('deck.density', 'compact') })
+  await compact.waitForSelector('.home-grid--compact')
+  await audit.run(compact, 'home-compact')
+  audit.done()
+})
+
+// S2 found by this audit (broken keyboard path, qa-checklist 0.4): the Crew sheet's grid scroller
+// (hub/web/src/screens/crew/CrewSheet.jsx:209, `.crew-grid-scroll`) scrolls but cannot take focus, so a keyboard
+// user cannot scroll it (axe scrollable-region-focusable, serious).
+test('axe (M2): the Crew sheet', { skip: skipAxe, todo: 'CrewSheet.jsx:209 .crew-grid-scroll is a scrollable region with no keyboard access (axe scrollable-region-focusable, serious, S2)' }, async t => {
+  const audit = auditor()
+  const h = await startControl(t, { web: web.dir, team: false })
+  const page = await openDeck(browser, h, '/settings/crew')
+  await page.waitForSelector('.crew-grid tbody th.crew-repo')
+  await audit.run(page, 'crew-sheet')
+  audit.done()
+})
+
+test('keyboard (qa 1.3, WCAG 2.1.2): Tab reaches the terminal, the leave hint shows, Alt K opens the palette from it and Alt Esc leaves it', async t => {
+  const h = await startControl(t, { web: web.dir, team: false })
+  const vault = await h.wrapped('vault-mcp')
+  const page = await openDeck(browser, h, `/s/${vault.id}`)
+  await page.waitForSelector('.terminal-view .xterm-rows')
+  const inTerminal = () => page.evaluate(() => !!document.activeElement?.classList.contains('xterm-helper-textarea'))
+  await page.focus('.focus-back')
+  let tabs = 0
+  while (!(await inTerminal()) && tabs < 60) { await page.keyboard.press('Tab')
+    tabs++ }
+  assert.equal(await inTerminal(), true, `Tab reaches the terminal (${tabs} presses)`)
+  assert.equal(await page.textContent('.focus-leave-hint'), 'Alt Esc to leave the terminal', 'the way out is shown while the terminal has focus')
+  const typedBefore = typedInto(vault.log)
+  await page.keyboard.press('Alt+KeyK')
+  await page.waitForSelector('.palette-input')
+  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('palette-input')), true, 'Alt K moves focus to the palette')
+  await page.keyboard.press('Escape')
+  await page.waitForSelector('.palette', { state: 'detached' })
+  await page.click('.terminal-view .xterm-screen')
+  await page.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'))
+  await page.keyboard.press('Alt+Escape')
+  await page.waitForFunction(() => location.pathname === '/', null, { timeout: 5000 })
+  assert.equal(await inTerminal(), false, 'Alt Esc leaves the terminal')
+  await page.waitForTimeout(200)
+  assert.equal(typedInto(vault.log), typedBefore, 'neither chord reached the PTY')
+})
+
+test('keyboard (qa 1.3): the Stop dialog takes focus on Cancel, keeps Tab inside, and Esc returns focus to Stop', async t => {
+  const h = await startControl(t, { web: web.dir, team: false })
+  const vault = await h.wrapped('vault-mcp')
+  const page = await openDeck(browser, h, `/s/${vault.id}`)
+  await page.waitForSelector('.terminal-view .xterm-rows')
+  await page.click('.focus-actions .button--danger')
+  await page.waitForSelector('.confirm-dialog')
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Cancel', 'Cancel has the initial focus')
+  assert.deepEqual(await page.$$eval('.confirm-actions button', rows => rows.map(row => row.textContent)), ['Cancel', 'Stop session'], 'Cancel comes first')
+  const outside = []
+  for (let i = 0; i < 20; i++) {
+    await page.keyboard.press(i % 5 === 4 ? 'Shift+Tab' : 'Tab')
+    if (!(await page.evaluate(() => document.querySelector('.confirm-dialog')?.contains(document.activeElement)))) outside.push(await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 60)))
+  }
+  assert.deepEqual(outside, [], 'Tab never leaves the dialog')
+  await page.keyboard.press('Escape')
+  await page.waitForSelector('.confirm-dialog', { state: 'detached' })
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Stop…', 'focus returns to Stop')
+  assert.equal(h.session(vault.id).alive, true, 'Esc stopped nothing')
+})
+
+const running = page => page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running')
+  .map(animation => `${animation.animationName ?? animation.transitionProperty ?? animation.constructor.name} on ${animation.effect?.target?.getAttribute?.('class') ?? '?'}`))
+
+test('motion (qa 1.4): with reduced motion nothing animates on the Crew page, Home or Focus', async t => {
+  const h = await startControl(t, { web: web.dir, team: false })
+  const vault = await h.wrapped('vault-mcp')
+  await h.observed()
+  for (const route of ['/settings/crew', '/', `/s/${vault.id}`]) {
+    const page = await openDeck(browser, h, route, { reducedMotion: 'reduce' })
+    await page.waitForTimeout(1000)
+    assert.deepEqual(await running(page), [], `${route}: no running animation 1 s after load`)
+  }
+})
+
+test('motion (qa 1.4): Settings "Always reduce motion" stops every CSS animation with the OS preference off', async t => {
+  const h = await startControl(t, { web: web.dir, team: false })
+  await h.wrapped('vault-mcp')
+  await h.observed()
+  assert.equal((await h.api('/api/prefs', 'PATCH', { motion: 'reduce' })).status, 200)
+  for (const route of ['/settings/crew', '/']) {
+    const page = await openDeck(browser, h, route, { reducedMotion: 'no-preference' })
+    await page.waitForFunction(() => document.documentElement.getAttribute('data-motion') === 'reduce')
+    await page.waitForTimeout(1000)
+    assert.deepEqual(await running(page), [], `${route}: no running animation 1 s after load`)
+  }
+})
+
+// Known gap (S3, qa 1.4 "caret (xterm only when motion is allowed)"): TerminalView reads only the OS media
+// query for `cursorBlink` (hub/web/src/components/TerminalView.jsx:131), never the Settings preference.
+test('motion (qa 1.4): the terminal caret does not blink with Settings "Always reduce motion"', { todo: 'TerminalView.jsx:131 ignores data-motion="reduce": the xterm cursor blinks with the Settings preference on and the OS preference off' }, async t => {
+  const h = await startControl(t, { web: web.dir, team: false })
+  const vault = await h.wrapped('vault-mcp')
+  const blinking = page => page.evaluate(() => document.querySelectorAll('.terminal-view .xterm-cursor-blink').length > 0)
+  const os = await openDeck(browser, h, `/s/${vault.id}`, { reducedMotion: 'reduce' })
+  await os.waitForSelector('.terminal-view .xterm-rows')
+  await os.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'))
+  assert.equal(await blinking(os), false, 'the OS preference stops the blink')
+  assert.equal((await h.api('/api/prefs', 'PATCH', { motion: 'reduce' })).status, 200)
+  const page = await openDeck(browser, h, `/s/${vault.id}`, { reducedMotion: 'no-preference' })
+  await page.waitForSelector('.terminal-view .xterm-rows')
+  await page.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'))
+  assert.equal(await blinking(page), false, 'the Settings preference stops the blink')
 })

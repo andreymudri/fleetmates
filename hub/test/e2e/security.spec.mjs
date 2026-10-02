@@ -1,6 +1,8 @@
-// M1 security suite against the running deck (docs/deck/09-testing.md section 11.1, 08-security.md
+// M1 and M2 security suite against the running deck (docs/deck/09-testing.md section 11.1, 08-security.md
 // section 4): DNS rebinding, drive-by pages, tokens on every route, binding, file modes, hook socket
-// abuse, deckd exposure, untrusted text in the built app, approval bypass and static path traversal.
+// abuse, deckd exposure, untrusted text in the built app, approval bypass and static path traversal; for M2
+// the terminal channel's refusals, the plan opener's path rules and untrusted text on the M2 screens, against
+// the control harness of control.spec.mjs (real deckd, fake claude).
 // hub/test/integration/security.test.mjs covers the per-header HTTP and WebSocket rejections in
 // isolation; this suite drives the whole deck, a foreign page in Chromium, `init`, real deckd and the
 // real hooks socket.
@@ -18,6 +20,8 @@ import path from 'node:path'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
 import { TOKEN, buildWeb, envelopeFor, hub, launchBrowser, openDeck, startDeck, ui, until } from './observe.spec.mjs'
+import { control, logEntries, startControl, typedInto } from './control.spec.mjs'
+import { FRAME_KIND, encodeFrame } from '../../server/pty-bridge/frames.mjs'
 
 let web
 let browser
@@ -78,10 +82,12 @@ async function routerTable() {
   const methodAt = index => blocks.filter(([, start]) => start >= 0 && start <= index).at(-1)?.[0]
   const routes = []
   for (const match of body.matchAll(/route === '([^']+)'/g)) routes.push({ method: methodAt(match.index), path: `/api/${match[1]}` })
-  for (const match of body.matchAll(/s\[1\] === '(\w+)' && s\.length === (\d)(?: && (?:s\[3\] === '([\w-]+)'|\['([^\]]+)'\]\.includes\(s\[3\]\)))?/g)) {
-    const [, resource, length, one, many] = match
-    const tails = Number(length) === 3 ? [''] : one ? [one] : many ? many.split(/'\s*,\s*'/).map(item => item.replace(/'/g, '')) : ['x']
-    for (const tail of tails) routes.push({ method: methodAt(match.index), path: `/api/${resource}/x${Number(length) === 4 ? `/${tail}` : ''}` })
+  for (const match of body.matchAll(/s\[1\] === '(\w+)' && s\.length === (\d)(?: && (?:s\[(3|4)\] === '([\w-]+)'|\['([^\]]+)'\]\.includes\(s\[3\]\)))?/g)) {
+    const [, resource, length, , one, many] = match
+    const n = Number(length)
+    const tails = n === 3 ? [''] : one ? [one] : many ? many.split(/'\s*,\s*'/).map(item => item.replace(/'/g, '')) : ['x']
+    // Every segment between the resource and the last one is a parameter: /api/<resource>/x, /x/<tail>, /x/x/<tail>.
+    for (const tail of tails) routes.push({ method: methodAt(match.index), path: n === 3 ? `/api/${resource}/x` : ['/api', resource, ...Array(n - 3).fill('x'), tail].join('/') })
   }
   return routes
 }
@@ -149,6 +155,11 @@ test('tokens: every route in the router table answers 401 without the token and 
   const routes = await routerTable()
   assert.ok(routes.length >= 20, `the router table was read from api.mjs: ${routes.length} routes`)
   t.diagnostic(`routes: ${routes.map(route => `${route.method} ${route.path}`).join(', ')}`)
+  // The M2 routes (05-api.md section 2): each is in the table, so the loop below proves it refuses both tokens.
+  const listed = new Set(routes.map(route => `${route.method} ${route.path}`))
+  const m2 = ['POST /api/sessions', 'POST /api/sessions/x/stop', 'POST /api/sessions/x/nudge', 'POST /api/sessions/x/relaunch',
+    'GET /api/sessions/x/scrollback', 'POST /api/open', 'PATCH /api/repos/x/crew', 'GET /api/runs/x/x/plan']
+  assert.deepEqual(m2.filter(route => !listed.has(route)), [], 'the router table lists every M2 route')
   const origin = `http://127.0.0.1:${h.port}`
   for (const route of routes) {
     for (const [name, authorization] of [['no token', undefined], ['wrong token', `Bearer ${'b'.repeat(43)}`], ['token in the query', undefined]]) {
@@ -378,4 +389,166 @@ test('static files: traversal and encoded variants never serve a file outside th
   assert.match(page.headers['content-security-policy'], /script-src 'self'/)
   assert.match(page.headers['content-security-policy'], /frame-ancestors 'none'/)
   assert.equal(page.headers['x-frame-options'], 'DENY')
+})
+
+/**
+ * A WebSocket client of the deck that has said hello and received its snapshot; collects JSON messages.
+ * @param {{ after: Function }} t
+ * @param {{ base: string }} h
+ */
+async function wsClient(t, h) {
+  const ws = new WebSocket(`${h.base.replace('http', 'ws')}/api/ws`, ['deck.v1', `deck.auth.${TOKEN}`], { headers: { Origin: h.base } })
+  ws.on('error', () => {})
+  t.after(() => ws.terminate())
+  const json = []
+  ws.on('message', (data, binary) => { if (!binary) json.push(JSON.parse(data.toString())) })
+  await once(ws, 'open')
+  ws.send(JSON.stringify({ t: 'hello', apiVersion: 1, epoch: null, lastSeq: 0 }))
+  await until(() => json.some(message => message.t === 'snapshot'), { message: 'the snapshot' })
+  return {
+    ws, json,
+    termError: (sessionId, code) => until(() => json.find(message => message.t === 'term.error' && message.sessionId === sessionId && message.error?.code === code), { message: `term.error ${code}` })
+  }
+}
+
+test('terminal channel (M2): an observed session gets no_pty, input for an unattached session never reaches the PTY, and a 65 KiB frame is refused', async t => {
+  const h = await startControl(t, { web: web.dir, team: false })
+  const observed = await h.observe(control.sessions.observed[0])
+  const vault = await h.wrapped('vault-mcp')
+  const c = await wsClient(t, h)
+  c.ws.send(JSON.stringify({ t: 'term.attach', sessionId: observed, cols: 80, rows: 24 }))
+  await c.termError(observed, 'no_pty')
+  c.ws.send(encodeFrame(FRAME_KIND.input, vault.id, Buffer.from('unattached-secret')))
+  await c.termError(vault.id, 'not_attached')
+  c.ws.send(JSON.stringify({ t: 'term.attach', sessionId: vault.id, cols: 80, rows: 24 }))
+  await until(() => c.json.some(message => message.t === 'term.attached' && message.sessionId === vault.id), { message: 'term.attached' })
+  c.ws.send(encodeFrame(FRAME_KIND.input, vault.id, Buffer.alloc(65 * 1024, 0x78)))
+  await c.termError(vault.id, 'payload_too_large')
+  c.ws.send(encodeFrame(FRAME_KIND.input, vault.id, Buffer.from('ok')))
+  await until(() => typedInto(vault.log) === 'ok', { message: 'a valid frame after the refusals' })
+  assert.equal(typedInto(vault.log), 'ok', 'neither the unattached input nor the 65 KiB frame reached the fake')
+  assert.equal(c.ws.readyState, WebSocket.OPEN, 'the socket stays open')
+  assert.ok(logEntries(vault.log).every(entry => !String(entry.input ?? '').includes('unattached-secret')))
+})
+
+test('POST /api/open (M2): a .desktop plan, an executable .md and a symlink out of the repo are refused and nothing is opened', async t => {
+  const runs = { 'plan-desktop': 'plan.desktop', 'plan-exec': 'exec.md', 'plan-link': 'link.md' }
+  const h = await startControl(t, { web: web.dir, prepare: async ({ home, team }) => {
+    const outside = path.join(home, 'outside.md')
+    await writeFile(outside, '# outside the repo\n')
+    await symlink(outside, path.join(team.repo, 'link.md'))
+    await writeFile(path.join(team.repo, 'plan.desktop'), '[Desktop Entry]\nExec=true\n')
+    await writeFile(path.join(team.repo, 'exec.md'), '# run me\n', { mode: 0o755 })
+    for (const [runId, planPath] of Object.entries(runs)) {
+      await mkdir(path.join(team.repo, '.fleetmates', runId), { recursive: true })
+      await writeFile(path.join(team.repo, '.fleetmates', runId, 'plan.json'), JSON.stringify({ runId, totalPhases: 1, planPath, tasks: [] }))
+      await writeFile(path.join(team.repo, '.fleetmates', runId, 'status.json'), JSON.stringify({ runId, tasks: [] }))
+    }
+  } })
+  for (const [runId, planPath] of Object.entries(runs)) {
+    const open = await h.api('/api/open', 'POST', { kind: 'runPlan', ref: { repoId: h.team.repo, runId } })
+    assert.equal(open.status, 403, `POST /api/open for ${planPath}`)
+    assert.equal(open.data.error.code, 'path_not_allowed')
+    const read = await h.api(`/api/runs/${control.team.repo}/${runId}/plan`)
+    assert.equal(read.status, 403, `GET plan for ${planPath}`)
+    assert.doesNotMatch(JSON.stringify(read.data), /outside the repo|run me|Desktop Entry/)
+  }
+  const good = await h.api('/api/open', 'POST', { kind: 'runPlan', ref: { repoId: h.team.repo, runId: control.team.runId } })
+  assert.equal(good.status, 202, 'the fixture plan itself opens')
+  assert.deepEqual(h.opened, [path.join(h.team.repo, control.team.planPath)], 'only the good plan reached the opener')
+})
+
+/**
+ * A control deck carrying the qa 1.7 payloads in repo names, the run title (the lead's task), task titles, the
+ * plan markdown and observed sessions' prompts; returns the deck, the observed session ids and the repo names.
+ */
+async function xssDeck(t) {
+  // A path segment cannot hold "/", so repo names carry the payloads without it, as the M1 test does.
+  const repoNames = ui.xss.map((payload, index) => `x${index}-${payload.replace(/\//g, '')}`)
+  const h = await startControl(t, { web: web.dir, repos: [...control.repos, ...repoNames], prepare: async ({ team }) => {
+    const plan = JSON.parse(await readFile(path.join(team.runDir, 'plan.json'), 'utf8'))
+    ui.xss.forEach((payload, index) => { plan.tasks[index + 2].title = payload })
+    await writeFile(path.join(team.runDir, 'plan.json'), JSON.stringify(plan))
+    await writeFile(path.join(team.repo, team.planPath), `# ${ui.xss[0]}\n\n${ui.xss.map(payload => `- ${payload}`).join('\n')}\n\n<script>alert(9)</script>\n\n[x](javascript:alert(8))\n`)
+  } })
+  await h.teamLead({ prompt: ui.xss[1] })
+  const ids = []
+  for (const [index, repo] of repoNames.entries()) {
+    ids.push(await h.observe({ key: `xss${index}`, sessionId: `fx-xss-${index}-${ui.xss[index]}`, repo }, [
+      { e: 'SessionStart', ago: 60 }, { e: 'UserPromptSubmit', ago: 50, prompt: ui.xss[index] }]))
+  }
+  return { h, ids, repoNames }
+}
+
+/**
+ * The qa 1.7 checks for the page as it stands: no img, script, javascript: link or inline handler appeared, and
+ * no escape, bell or bidi override reached the DOM text raw (`controls: false` skips that last one). Returns the
+ * page text.
+ */
+function checker(page, scripts) {
+  return async (where, { controls = true } = {}) => {
+    const found = await page.evaluate(() => ({
+      img: document.querySelectorAll('img').length,
+      scripts: [...document.querySelectorAll('script')].map(row => row.outerHTML),
+      javascript: document.querySelectorAll('[href^="javascript:" i]').length,
+      handlers: [...document.querySelectorAll('*')].filter(el => [...el.attributes].some(attr => /^on/i.test(attr.name))).length,
+      text: document.body.innerText,
+      hidden: [...new Set(document.body.textContent.match(/[\u001b\u0007‮]/g) ?? [])].map(char => `U+${char.codePointAt(0).toString(16).padStart(4, '0').toUpperCase()}`)
+    }))
+    assert.equal(found.img, 0, `${where}: no img element`)
+    assert.deepEqual(found.scripts, scripts, `${where}: no new script element`)
+    assert.equal(found.javascript, 0, `${where}: no javascript: link`)
+    assert.equal(found.handlers, 0, `${where}: no inline event handler attribute`)
+    if (controls) assert.deepEqual(found.hidden, [], `${where}: escape, bell and bidi controls never reach the DOM text raw`)
+    return found.text
+  }
+}
+
+const teamRoute = `/runs/${control.team.repo}/${control.team.runId}`
+
+test('untrusted text (M2): qa 1.7 payloads in run titles, task titles, repo names, plan markdown and Facts render literally', async t => {
+  const { h, ids, repoNames } = await xssDeck(t)
+  const page = await openDeck(browser, h, teamRoute)
+  await page.waitForSelector('.team-task')
+  const check = checker(page, await page.$$eval('script', rows => rows.map(row => row.outerHTML)))
+  const team = await check('Team run')
+  assert.ok(team.includes(ui.xss[1]), 'the run title (the lead\'s task) is literal')
+  for (const payload of ui.xss.slice(0, 3)) assert.ok(team.includes(payload), `the task title ${payload} is literal`)
+  await page.click('.team-actions button:text-is("Open plan")')
+  await page.waitForFunction(() => document.querySelector('[role="dialog"]')?.textContent.includes('alert(9)'), null, { timeout: 5000 })
+  // The raw control characters of the plan markdown are pinned by the todo test below.
+  const plan = await check('plan drawer', { controls: false })
+  assert.ok(plan.includes('<script>alert(9)</script>'), 'raw HTML in the plan markdown is text')
+  assert.ok(plan.includes(ui.xss[0]), 'the plan heading payload is text')
+  await page.keyboard.press('Escape')
+  await page.goto(`${h.base}/`)
+  await page.waitForSelector('.home-grid > article')
+  const home = await check('Home')
+  for (const name of repoNames.slice(0, 3)) assert.ok(home.includes(name), `the repo name ${name} is literal on Home`)
+  await page.goto(`${h.base}/settings/crew`)
+  await page.waitForSelector('.crew-grid')
+  await check('Crew sheet')
+  await page.goto(`${h.base}/new`)
+  await page.waitForSelector('.launch-option')
+  await check('New session')
+  for (const id of ids) {
+    await page.goto(`${h.base}/s/${id}?tab=facts`)
+    await page.waitForSelector('.focus-facts')
+    await check(`Focus Facts ${id}`)
+  }
+  assert.deepEqual(page.dialogs, [], 'no dialog opened')
+  assert.deepEqual(page.errors, [])
+})
+
+// Product gap found by this suite: the plan drawer returns markdown text tokens as they are
+// (hub/web/src/screens/team-run/PlanDrawer.jsx:54 `case 'text': return token.content`, also code_inline at :55 and
+// fence at :59), so a plan's ESC, BEL and U+202E reach the DOM raw; every other screen passes text through `shown`.
+test('untrusted text (M2): escape, bell and bidi controls in plan markdown never reach the DOM raw', { todo: 'PlanDrawer.jsx:54 renders markdown text tokens without shown(): U+202E, U+001B and U+0007 reach the DOM' }, async t => {
+  const { h } = await xssDeck(t)
+  const page = await openDeck(browser, h, teamRoute)
+  await page.waitForSelector('.team-task')
+  const check = checker(page, await page.$$eval('script', rows => rows.map(row => row.outerHTML)))
+  await page.click('.team-actions button:text-is("Open plan")')
+  await page.waitForFunction(() => document.querySelector('[role="dialog"]')?.textContent.includes('alert(9)'), null, { timeout: 5000 })
+  await check('plan drawer')
 })
