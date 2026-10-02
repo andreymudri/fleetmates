@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { homedir } from 'node:os'
+import { activeTiers, classify, worktrees } from '../approvals/tiers.mjs'
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
@@ -346,11 +347,8 @@ function destructiveSegment(words, depth) {
   if (command === 'git' && gitArgs[0] === 'push' && gitArgs.slice(1).some(arg => ['--force', '--force-with-lease', '--force-if-includes', '--mirror', '--delete'].includes(arg) || /^--(?:force-with-lease|force-if-includes|force|mirror|delete)=/.test(arg) || /^-[A-Za-z]*[fd]/.test(arg) || arg.startsWith('+') || arg.startsWith(':'))) return true
   if (command === 'git' && gitArgs[0] === 'clean' && gitArgs.slice(1).some(arg => arg === '--force' || /^-[A-Za-z]*f/.test(arg))) return true
   if (command === 'git' && gitArgs[0] === 'reset' && gitArgs.some(arg => ['--hard', '--keep', '--merge'].includes(arg))) return true
-  if (command === 'git' && gitArgs[0] === 'config') {
-    const options = gitArgs.slice(1)
-    if (options.some(arg => ['--unset', '--unset-all', '--remove-section', '--rename-section', '--add', '--replace-all', '--edit'].includes(arg))) return true
-    if (!options.some(arg => ['--get', '--get-all', '--get-regexp', '--list', '-l', '--get-urlmatch'].includes(arg)) && options.filter(arg => !arg.startsWith('-')).length >= 2) return true
-  }
+  // `git config` writes are rated by key in the M3 classifier (approvals/tiers.mjs), so other keys
+  // stay Caution (07-approvals 4.3).
   if (['sh', 'bash', 'zsh'].includes(command)) {
     const at = args.findIndex(arg => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))
     if (at >= 0 && words[index + at + 2]?.quoted && destructiveShell(args[at + 1], depth + 1)) return true
@@ -732,20 +730,51 @@ function sqlCode(sql) {
   return code
 }
 
-function destructiveSql(sql) {
+/**
+ * Whether SQL text writes a database (07-approvals 4.3 psql and sqlite3 rows): a write keyword outside
+ * comments and string literals, `COPY ... FROM`, `EXPLAIN ANALYZE`, or text that cannot be read.
+ * @param {string} sql
+ * @returns {boolean}
+ */
+export function destructiveSql(sql) {
   const code = sqlCode(sql)
   return code === null || /\b(?:INSERT|UPDATE|DELETE|MERGE|UPSERT|DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|VACUUM|REINDEX|CALL|DO)\b/i.test(code)
     || /\bCOPY\b[\s\S]*\bFROM\b/i.test(code) || /\bEXPLAIN\s+ANALYZE\b/i.test(code)
 }
 
-/** Classify a permission conservatively; unknown commands remain Caution. */
-export function permissionTier(hook, { repoRoot } = {}) {
-  if (namesDeckControl(hook.tool_input) || namesRelativeDeckControl(hook) || sensitiveWrite(hook, repoRoot)) return 'destructive'
+/**
+ * The M1 Destructive checks (deck controls, Claude Code settings and `.git` writes, destructive MCP
+ * names and SQL, and the M1 shell patterns), kept as one floor of the M3 classifier.
+ * @param {{ tool_name?: string, tool_input?: object, cwd?: string }} hook
+ * @param {{ repoRoot?: string }} [options]
+ * @returns {boolean}
+ */
+export function legacyDestructive(hook, { repoRoot } = {}) {
+  if (namesDeckControl(hook.tool_input) || namesRelativeDeckControl(hook) || sensitiveWrite(hook, repoRoot)) return true
   const mcpTool = /^mcp__.+?__(.+)$/.exec(hook.tool_name ?? '')?.[1]
-  if (mcpTool && /delete|remove|drop|destroy|purge|truncate|wipe|reset/i.test(mcpTool)) return 'destructive'
-  if (mcpTool && typeof hook.tool_input?.sql === 'string' && destructiveSql(hook.tool_input.sql)) return 'destructive'
-  if (hook.tool_name === 'Bash' && destructiveShell(hook.tool_input?.command)) return 'destructive'
-  return 'caution'
+  if (mcpTool && /delete|remove|drop|destroy|purge|truncate|wipe|reset/i.test(mcpTool)) return true
+  if (mcpTool && typeof hook.tool_input?.sql === 'string' && destructiveSql(hook.tool_input.sql)) return true
+  return hook.tool_name === 'Bash' && destructiveShell(hook.tool_input?.command)
+}
+
+/**
+ * The M3 classification of a hook (approvals/tiers.mjs `classify`) with the active tiers and the
+ * repo's cached worktrees.
+ * @param {{ tool_name?: string, tool_input?: object, cwd?: string }} hook
+ * @param {{ repoRoot?: string }} [options]
+ */
+export function classifyHook(hook, { repoRoot } = {}) {
+  return classify({ toolName: hook.tool_name, toolInput: hook.tool_input, cwd: hook.cwd ?? null, repoRoot: repoRoot ?? null, worktrees: worktrees.get(repoRoot), tiers: activeTiers() })
+}
+
+/**
+ * The tier of a permission request: `classifyHook(...).tier`, kept for the M1 callers.
+ * @param {{ tool_name?: string, tool_input?: object, cwd?: string }} hook
+ * @param {{ repoRoot?: string }} [options]
+ * @returns {'safe'|'caution'|'destructive'}
+ */
+export function permissionTier(hook, { repoRoot } = {}) {
+  return classifyHook(hook, { repoRoot }).tier
 }
 
 function notificationToolName(message) {
@@ -854,6 +883,7 @@ function transcriptQuestion(location) {
 export function applyRequestHook(store, session, envelope, { late = false, taskId = session.run_task_id ?? null } = {}) {
   const hook = envelope.hook
   const event = hook.hook_event_name
+  if (event === 'WorktreeCreate' || event === 'WorktreeRemove') worktrees.drop(session.repo_id)
   const at = envelope.hookTs
   const key = matchKey(hook)
   const resumed = resumedActivityEvents.includes(event) && store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'observed' }), at, session.id, 'question', 'open', 'stop_question', 'elicitation', at).changes > 0
@@ -877,11 +907,14 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
     if (source === 'permission_request') {
       const fallback = store.all('SELECT id, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC', session.id, 'permission', 'open', 'notification', at - 2000, at + 2000).find(row => notificationMatchesTool(row.summary, toolName, hook.tool_input))
       if (fallback) {
-        store.run('UPDATE requests SET source = ?, tool_name = ?, summary = ?, detail = ?, match_key = ?, tier = ?, task_id = COALESCE(?, task_id) WHERE id = ?', source, hook.tool_name, summary, JSON.stringify(hook.tool_input ?? {}), key, permissionTier(hook, { repoRoot: session.repo_id }), taskId, fallback.id)
+        const classified = classifyHook(hook, { repoRoot: session.repo_id })
+        store.run('UPDATE requests SET source = ?, tool_name = ?, summary = ?, detail = ?, match_key = ?, tier = ?, reasons = ?, rule_pattern = ?, task_id = COALESCE(?, task_id) WHERE id = ?', source, hook.tool_name, summary, JSON.stringify(hook.tool_input ?? {}), key, classified.tier, JSON.stringify(classified.reasons), classified.ruleCandidate, taskId, fallback.id)
         return true
       }
     }
-    store.run('INSERT INTO requests(id, session_id, kind, tier, tool_name, summary, detail, options, state, source, match_key, task_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, kind === 'permission' ? permissionTier(hook, { repoRoot: session.repo_id }) : null, toolName, summary, JSON.stringify(source === 'stop_question' ? { question } : hook.tool_input ?? {}), JSON.stringify(source === 'stop_question' ? [] : hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, taskId, at)
+    // A notification-only request has no tool input: Caution, no rule candidate (07-approvals 3.1).
+    const classified = kind !== 'permission' ? null : source === 'notification' ? { tier: 'caution', reasons: [{ entryId: 'unknown.notification', tier: 'caution', segment: '', description: 'the prompt came without its tool input' }], ruleCandidate: null } : classifyHook(hook, { repoRoot: session.repo_id })
+    store.run('INSERT INTO requests(id, session_id, kind, tier, reasons, rule_pattern, tool_name, summary, detail, options, state, source, match_key, task_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', randomUUID(), session.id, kind, classified?.tier ?? null, JSON.stringify(classified?.reasons ?? []), classified?.ruleCandidate ?? null, toolName, summary, JSON.stringify(source === 'stop_question' ? { question } : hook.tool_input ?? {}), JSON.stringify(source === 'stop_question' ? [] : hook.tool_input?.questions?.[0]?.options ?? []), 'open', source, key, taskId, at)
     return true
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {

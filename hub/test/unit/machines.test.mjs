@@ -12,7 +12,8 @@ import { runRetention } from '../../server/db/retention.mjs'
 import { createProjector, PROMPT_GONE_REASON, SCROLLBACK_CAP } from '../../server/machines/projector.mjs'
 import { applySessionHook, captureReviewBaseline, leadRunId } from '../../server/machines/session.mjs'
 import { projectHome } from '../../server/machines/counts.mjs'
-import { expireRequests, permissionTier } from '../../server/machines/request.mjs'
+import { applyRequestHook, expireRequests, permissionTier } from '../../server/machines/request.mjs'
+import { worktrees } from '../../server/approvals/tiers.mjs'
 
 function execFileSync(file, args, options = {}) {
   if (path.basename(file) !== 'git') return executeFile(file, args, options)
@@ -236,7 +237,7 @@ test('configured Claude settings retain the write floor for literal aliases and 
       assert.equal(tier('tee ordinary/settings.json'), 'caution')
       assert.equal(tier('tee custom-config/notes.json'), 'caution')
       assert.equal(tier('tee "$UNKNOWN/settings.json"'), 'caution')
-      assert.equal(permissionTier({ cwd: root, tool_name: 'Write', tool_input: { file_path: 'ordinary/settings.json' } }, { repoRoot: root }), 'caution')
+      assert.equal(permissionTier({ cwd: root, tool_name: 'Write', tool_input: { file_path: 'ordinary/settings.json' } }, { repoRoot: root }), 'safe')
     }
     assert.equal(readFileSync(path.join(selected, 'settings.json'), 'utf8'), '{}')
   } finally {
@@ -906,7 +907,7 @@ test('deck controls and destructive shell substitutions have a Destructive floor
     ['Bash', { command: 'git clean -fd' }]
   ]
   for (const [tool_name, tool_input] of cases) assert.equal(permissionTier({ tool_name, tool_input }), 'destructive', JSON.stringify(tool_input))
-  assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command: 'echo safe' } }), 'caution')
+  assert.equal(permissionTier({ tool_name: 'Bash', tool_input: { command: 'echo safe' } }), 'safe')
 })
 
 test('new deck has zero counts before any session arrives', () => {
@@ -1419,7 +1420,7 @@ test('destructive MCP operation names have a destructive tier', () => {
   for (const tool_name of ['mcp__vault__vault_delete', 'mcp__db__drop_table', 'mcp__store__remove_item', 'mcp__store__reset_all']) {
     assert.equal(permissionTier({ tool_name, tool_input: {} }), 'destructive', tool_name)
   }
-  assert.equal(permissionTier({ tool_name: 'mcp__vault__vault_search', tool_input: {} }), 'caution')
+  assert.equal(permissionTier({ tool_name: 'mcp__vault__vault_search', tool_input: {} }), 'safe')
 })
 
 test('MCP SQL query bodies distinguish database writes from quoted text', () => {
@@ -1485,7 +1486,7 @@ test('relative deck control paths resolve against hook cwd', () => {
     ['Bash', { command: 'cat token' }],
     ['Bash', { command: 'cat ./token' }]
   ]) assert.equal(permissionTier({ cwd, tool_name, tool_input }), 'destructive', `${tool_name}: ${JSON.stringify(tool_input)}`)
-  assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command: 'echo token' } }), 'caution')
+  assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command: 'echo token' } }), 'safe')
   assert.equal(permissionTier({ cwd: '/home/you/project', tool_name: 'Read', tool_input: { file_path: 'token' } }), 'caution')
   const previous = process.env.XDG_STATE_HOME
   try {
@@ -1509,7 +1510,7 @@ test('relative deck token operands remain protected across file-reading commands
       assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }), 'destructive', command)
     }
     for (const command of ['echo token', 'printf token']) {
-      assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }), 'caution', command)
+      assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }), 'safe', command)
     }
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
@@ -1573,7 +1574,7 @@ test('symlinked parents retain the deck control floor for reads and new writes',
     for (const file_path of ['cache/new.json', 'cache/new/subdir/new.json']) {
       assert.equal(permissionTier({ cwd: project, tool_name: 'Write', tool_input: { file_path, content: 'x' } }, { repoRoot: project }), 'destructive', file_path)
     }
-    assert.equal(permissionTier({ cwd: project, tool_name: 'Read', tool_input: { file_path: 'ordinary.txt' } }, { repoRoot: project }), 'caution')
+    assert.equal(permissionTier({ cwd: project, tool_name: 'Read', tool_input: { file_path: 'ordinary.txt' } }, { repoRoot: project }), 'safe')
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
@@ -1596,7 +1597,7 @@ test('symlinked Git control files and parents retain the destructive write floor
     for (const file_path of ['config-link', 'hooks-link/pre-commit', path.join(repo, 'config-link'), 'settings-link', 'mcp-link']) {
       assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path, content: '[core]' } }, { repoRoot: repo }), 'destructive', file_path)
     }
-    assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path: 'ordinary.txt', content: 'x' } }, { repoRoot: repo }), 'caution')
+    assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path: 'ordinary.txt', content: 'x' } }, { repoRoot: repo }), 'safe')
   } finally { rmSync(repo, { recursive: true, force: true }) }
 })
 
@@ -1621,8 +1622,8 @@ test('Bash writes resolve relative sensitive targets and symlink aliases', () =>
     execFileSync('/bin/sh', ['-c', settingsWrite], { cwd, timeout: 1000 })
     assert.equal(readFileSync(path.join(cwd, 'settings.local.json'), 'utf8'), '{}')
     assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command: settingsWrite } }, { repoRoot: repo }), 'destructive')
-    for (const command of ["printf 'config-link'", 'cat config-link', 'printf x > ordinary.txt']) {
-      assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), 'caution', command)
+    for (const [command, expected] of [["printf 'config-link'", 'safe'], ['cat config-link', 'safe'], ['printf x > ordinary.txt', 'caution']]) {
+      assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), expected, command)
     }
   } finally { rmSync(repo, { recursive: true, force: true }) }
 })
@@ -1722,7 +1723,7 @@ test('writes to Claude settings and Git metadata keep the Destructive floor', ()
     '/home/you/elsewhere/CLAUDE.md'
   ]
   for (const file_path of files) assert.equal(permissionTier({ tool_name: 'Write', tool_input: { file_path, content: 'x' } }, { repoRoot: '/home/you/project' }), 'destructive', file_path)
-  assert.equal(permissionTier({ tool_name: 'Write', tool_input: { file_path: '/home/you/project/CLAUDE.md', content: 'x' } }, { repoRoot: '/home/you/project' }), 'caution')
+  assert.equal(permissionTier({ tool_name: 'Write', tool_input: { file_path: '/home/you/project/CLAUDE.md', content: 'x' } }, { repoRoot: '/home/you/project' }), 'safe')
 })
 
 test('startup in a new process does not reuse an ended conversation', () => {
@@ -2091,7 +2092,7 @@ test('Bash destructive commands keep the destructive tier through wrappers and c
     ['echo ready && rm -rf /home/you/work', 'destructive'],
     ["sh -c 'rm -rf /home/you/work'", 'destructive'],
     ['find . -name old -delete', 'destructive'],
-    ['echo rm', 'caution'],
+    ['echo rm', 'safe'],
     ['unknown-command arg', 'caution']
   ]
   for (const [command, tier] of commands) {
@@ -2610,13 +2611,13 @@ for (const tool_name of ['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']) 
     }
     for (const name of ['ordinary?file', 'ordinary$file', 'ordinary`file', 'ordinary*file']) {
       writeFileSync(path.join(project, name), 'ordinary')
-      for (const file_path of [name, path.join(project, name)]) assert.equal(tier(file_path), 'caution', file_path)
+      for (const file_path of [name, path.join(project, name)]) assert.equal(tier(file_path), 'safe', file_path)
     }
     symlinkSync(deck, path.join(project, 'controls?link'))
     assert.equal(tier('controls?link/new.json'), 'destructive')
     assert.equal(tier(path.join(project, 'controls?link', 'new.json')), 'destructive')
-    for (const command of ['cat token?link', 'cat token$link', 'cat token*link', 'cat token`link']) {
-      assert.equal(permissionTier({ cwd: project, tool_name: 'Bash', tool_input: { command } }), 'caution', command)
+    for (const [command, expected] of [['cat token?link', 'destructive'], ['cat token$link', 'caution'], ['cat token*link', 'destructive'], ['cat token`link', 'caution']]) {
+      assert.equal(permissionTier({ cwd: project, tool_name: 'Bash', tool_input: { command } }), expected, command)
     }
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
@@ -3551,12 +3552,12 @@ test('literal systemctl deck controls retain their floor across quoting options 
   for (const command of [
     'systemctl --user stop ordinary.service',
     'systemctl stop --user ordinary.service',
-    "printf '%s' 'systemctl --user stop fleetmates-deck.service'",
     'command -v systemctl fleetmates-deck.service',
     'command -V systemctl fleetmates-deck.service',
     'systemctl --user stop "$UNKNOWN_UNIT"',
     'systemctl --user status unrelated-fleetmates-deck.service'
   ]) assert.equal(tier(command), 'caution', command)
+  assert.equal(tier("printf '%s' 'systemctl --user stop fleetmates-deck.service'"), 'safe')
 })
 
 test('resuming another repository updates only authorized cwd and Git review boundaries', () => {
@@ -3715,18 +3716,17 @@ test('literal env split strings classify executables without treating argv as sh
     "env -S '\"\" rm /tmp/synthetic-only'",
     "env -S 'printf x # rm /tmp/synthetic-only'",
     "env -S '${UNKNOWN_EXECUTABLE} /tmp/synthetic-only'",
-    "env -S 'rm ${UNKNOWN_ARG}'",
-    "env -S 'rm $(unknown)'",
     "env -S '$(rm /tmp/synthetic-only)'",
     "env -S 'rm\\q /tmp/synthetic-only'",
     "env -S '\"rm /tmp/synthetic-only'",
     "env -S 'printf \"$UNKNOWN\"'"
   ]) assert.equal(tier(command), 'caution', command)
-  assert.equal(tier(`env -S 'rm ${'x'.repeat(65536)}'`), 'caution')
-  assert.equal(tier(`env -S 'rm ${Array(1025).fill('x').join(' ')}'`), 'caution')
+  for (const command of ["env -S 'rm ${UNKNOWN_ARG}'", "env -S 'rm $(unknown)'"]) assert.equal(tier(command), 'destructive', command)
+  assert.equal(tier(`env -S 'rm ${'x'.repeat(65536)}'`), 'destructive')
+  assert.equal(tier(`env -S 'rm ${Array(1025).fill('x').join(' ')}'`), 'destructive')
   let recursive = 'rm /tmp/synthetic-only'
   for (let i = 0; i < 10; i++) recursive = `-S ${JSON.stringify(recursive)}`
-  assert.equal(tier(`env -S '${recursive}'`), 'caution')
+  assert.equal(tier(`env -S '${recursive}'`), 'destructive')
 
 })
 
@@ -3888,7 +3888,7 @@ test('registered deck hook programs have a write floor across configured roots a
       for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
         const input = file => tool === 'NotebookEdit' ? { notebook_path: file, new_source: 'synthetic' } : { file_path: file, content: 'synthetic', edits: [] }
         for (const file of [program, path.relative(project, program), alias, path.basename(alias), path.join(dirAlias, 'deck-hook.mjs'), path.join(path.basename(dirAlias), 'deck-hook.mjs')]) assert.equal(permissionTier({ cwd: project, tool_name: tool, tool_input: input(file) }, { repoRoot: project }), 'destructive', `${tool} ${file}`)
-        for (const file of [path.join(directory, 'ordinary.txt'), path.join(data, 'fleetmates-deck', 'ordinary.txt'), path.join(project, 'deck-hook.mjs')]) assert.equal(permissionTier({ cwd: project, tool_name: tool, tool_input: input(file) }, { repoRoot: project }), 'caution', `${tool} ${file}`)
+        for (const file of [path.join(directory, 'ordinary.txt'), path.join(data, 'fleetmates-deck', 'ordinary.txt'), path.join(project, 'deck-hook.mjs')]) assert.equal(permissionTier({ cwd: project, tool_name: tool, tool_input: input(file) }, { repoRoot: project }), file === path.join(project, 'deck-hook.mjs') ? 'safe' : 'caution', `${tool} ${file}`)
       }
       const tier = command => permissionTier({ cwd: project, tool_name: 'Bash', tool_input: { command } }, { repoRoot: project })
       for (const command of [
@@ -4051,7 +4051,7 @@ test('sensitive requested names and canonical targets both enforce file write fl
     for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
       const tier = file => permissionTier({ cwd: root, tool_name: tool, tool_input: tool === 'NotebookEdit' ? { notebook_path: file, new_source: 'synthetic' } : { file_path: file, content: 'synthetic', edits: [] } }, { repoRoot: root })
       for (const target of targets) for (const file of [target, path.relative(root, target)]) assert.equal(tier(file), 'destructive', `${tool} ${file}`)
-      for (const file of ['ordinary', 'ordinary-alias', path.join(root, 'ordinary-alias')]) assert.equal(tier(file), 'caution', `${tool} ${file}`)
+      for (const file of ['ordinary', 'ordinary-alias', path.join(root, 'ordinary-alias')]) assert.equal(tier(file), 'safe', `${tool} ${file}`)
     }
     for (const target of targets) for (const file of [target, path.relative(root, target)]) {
       for (const command of [`tee '${file}'`, `sh -c 'printf x > "${file}"'`]) assert.equal(permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root }), 'destructive', command)
@@ -4107,8 +4107,8 @@ test('requested and canonical CLAUDE.md paths preserve local and global repo bou
     symlinkSync(repo, path.join(root, 'repo-alias'))
     const tier = (file, repoRoot = repo, cwd = repo) => permissionTier({ cwd, tool_name: 'Write', tool_input: { file_path: file, content: 'synthetic' } }, { repoRoot })
     for (const file of [path.join(outside, 'CLAUDE.md'), '../outside/CLAUDE.md', 'global-alias']) assert.equal(tier(file), 'destructive', file)
-    for (const file of ['CLAUDE.md', path.join(repo, 'CLAUDE.md'), 'plain']) assert.equal(tier(file), 'caution', file)
-    assert.equal(tier('CLAUDE.md', path.join(root, 'repo-alias'), path.join(root, 'repo-alias')), 'caution')
+    for (const file of ['CLAUDE.md', path.join(repo, 'CLAUDE.md'), 'plain']) assert.equal(tier(file), 'safe', file)
+    assert.equal(tier('CLAUDE.md', path.join(root, 'repo-alias'), path.join(root, 'repo-alias')), 'safe')
     for (const file of [path.join(outside, 'CLAUDE.md'), '../outside/CLAUDE.md', 'global-alias', 'CLAUDE.md', 'plain']) {
       const expected = ['CLAUDE.md', 'plain'].includes(file) ? 'caution' : 'destructive'
       for (const command of [`tee '${file}'`, `sh -c 'printf x > "${file}"'`]) assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), expected, command)
@@ -4376,7 +4376,8 @@ test('valid Git global flags preserve destructive subcommands across ordering wr
       }
     }
     for (const options of ['--no-pager --no-optional-locks -C . -P', '-P -c color.ui=false --no-pager -C . --no-optional-locks', '-P -C . --no-optional-locks', '--literal-pathspecs --no-replace-objects --no-lazy-fetch --no-pager']) assert.equal(tier(`git ${options} clean -fd`), 'destructive', options)
-    for (const command of ['git --unknown-global clean -fd', 'git --no-pager --help', 'git -P status', 'git --version clean -fd', 'git -c', 'git -C']) assert.equal(tier(command), 'caution', command)
+    for (const command of ['git --unknown-global clean -fd', 'git --no-pager --help', 'git --version clean -fd', 'git -c', 'git -C']) assert.equal(tier(command), 'caution', command)
+    assert.equal(tier('git -P status'), 'safe')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -4427,7 +4428,7 @@ test('Git no-advice and documented boolean global options retain destructive ope
       for (const prefix of [`git ${flag}`, `git -C '${root}' ${flag} -c color.ui=false`, `env /usr/bin/git -P ${flag}`, `nice -n 1 git ${flag}`]) {
         for (const operation of ['clean -fd', 'push --force', 'reset --hard', 'config --local core.hooksPath /tmp/synthetic-hooks']) assert.equal(tier(`${prefix} ${operation}`), 'destructive', `${prefix} ${operation}`)
         assert.equal(tier(`sh -c '${prefix.replaceAll("'", '"')} clean -fd'`), 'destructive')
-        assert.equal(tier(`${prefix} status --short`), 'caution')
+        assert.equal(tier(`${prefix} status --short`), [`git --no-pager`, `git -P`].includes(prefix) ? 'safe' : 'caution', `${prefix} status --short`)
       }
     }
     assert.equal(tier('git --no-advice --no-optional-locks -P --no-lazy-fetch clean -fd'), 'destructive')
@@ -4942,7 +4943,7 @@ test('observed linked worktrees share main repo identity but branch review and c
     assert.equal(repository.crew_slot, 0)
     assert.equal(repository.crew_slot_shared, 0)
     send('PermissionRequest', 1500, { tool_name: 'Write', tool_input: { file_path: path.join(linked, 'CLAUDE.md'), content: 'synthetic local guidance' } })
-    assert.equal(h.projector.snapshot().requests[0].tier, 'caution')
+    assert.equal(h.projector.snapshot().requests[0].tier, 'safe')
     writeFileSync(path.join(main, 'main-only.txt'), 'main edit\n')
     writeFileSync(path.join(linked, 'file.txt'), 'linked edit\nsecond\n')
     send('UserPromptSubmit', 2000, { prompt: 'linked work' })
@@ -5423,4 +5424,48 @@ test('leadRunId reads --run only from the scripts/cli.mjs command segment', () =
     'node scripts/cli.mjs status | grep x --run foo', 'node scripts/cli.mjs status\ngit log --run foo', 'git log --run foo', 42]) {
     assert.equal(leadRunId(command), null, String(command))
   }
+})
+
+test('request open stores the M3 tier, reasons and rule candidate, and a notification-only request stays Caution', () => {
+  const cases = [
+    ['cargo test --release', 'safe', 'Bash(cargo test:*)', 'safe.cargo.test'],
+    ['npm install', 'caution', null, 'caution.npm.install'],
+    ['git push --force origin main', 'destructive', null, 'destructive.git.push-force']
+  ]
+  for (const [command, tier, rule, entryId] of cases) {
+    const h = harness()
+    try {
+      h.projector.applyHooks([fixture('PermissionRequest.AskUserQuestion.json', { tool_name: 'Bash', tool_input: { command } })])
+      const row = h.store.get('SELECT tier, reasons, rule_pattern, confirm_label FROM requests')
+      assert.equal(row.tier, tier, command)
+      assert.equal(row.rule_pattern, rule, command)
+      assert.equal(row.confirm_label, null)
+      assert.ok(JSON.parse(row.reasons).some(reason => reason.entryId === entryId && reason.tier === tier), `${command}: ${row.reasons}`)
+      assert.equal(h.projector.snapshot().requests[0].tier, tier, command)
+    } finally { h.close() }
+  }
+  const h = harness()
+  try {
+    h.projector.applyHooks([fixture('PermissionRequest.AskUserQuestion.json', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Allow Bash?', tool_name: 'Bash', tool_input: { command: 'cargo test' } })])
+    const row = h.store.get('SELECT tier, reasons, rule_pattern FROM requests')
+    assert.deepEqual({ tier: row.tier, rule: row.rule_pattern, reasons: JSON.parse(row.reasons).map(reason => reason.entryId) }, { tier: 'caution', rule: null, reasons: ['unknown.notification'] })
+  } finally { h.close() }
+})
+
+test('a WorktreeCreate or WorktreeRemove hook drops the cached worktrees of its repo', async () => {
+  const h = harness()
+  const repo = path.join(path.dirname(h.file), 'repo')
+  try {
+    mkdirSync(repo)
+    execFileSync('git', ['init', '-q', repo], { timeout: 2000 })
+    for (const event of ['WorktreeCreate', 'WorktreeRemove']) {
+      const listed = await worktrees.load(repo)
+      assert.equal(listed.length, 1)
+      assert.equal(worktrees.get(repo), listed)
+      applyRequestHook(h.store, { id: 'no-session', repo_id: repo, state: 'running' }, { hook: { hook_event_name: event }, hookTs: 1000 })
+      assert.notEqual(worktrees.get(repo), listed, event)
+      assert.deepEqual(worktrees.get(repo), [])
+      assert.equal((await worktrees.load(repo)).length, 1)
+    }
+  } finally { worktrees.drop(repo); h.close() }
 })
