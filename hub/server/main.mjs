@@ -94,6 +94,9 @@ export async function createDeckServer(options = {}) {
   const repoRoots = () => store.all('SELECT id FROM repos WHERE archived_at IS NULL').map(row => row.id)
   let rootsKey = ''
   let currentReader
+  let runWatcher = null
+  // A reader is rebuilt when the repo roots change; each new one gets the watch callback, so its run
+  // directories keep triggering the compare-and-publish pass below.
   const reader = options.runReader ?? {
     async list() {
       const roots = repoRoots().sort()
@@ -101,11 +104,19 @@ export async function createDeckServer(options = {}) {
       if (!currentReader || key !== rootsKey) {
         currentReader?.close()
         currentReader = createFleetmatesReader({ repoRoots: roots })
+        if (runWatcher) currentReader.watch(runWatcher)
         rootsKey = key
       }
       return currentReader.list()
     },
-    close() { currentReader?.close() }
+    watch(callback) {
+      runWatcher = callback
+      currentReader?.watch(callback)
+    },
+    close() {
+      runWatcher = null
+      currentReader?.close()
+    }
   }
   const processEnv = { ...env }
   for (const key of Object.keys(processEnv)) if (/TOKEN|SECRET|PASSWORD|AUTHORIZATION/i.test(key)) delete processEnv[key]
@@ -270,13 +281,21 @@ export async function createDeckServer(options = {}) {
       timer.unref()
       timers.push(timer)
     }
-    // run.updated (05-api 3.4): re-read the runs every runPollMs and publish each run whose JSON changed
-    // since the previous read. The first read has nothing to compare with, so it publishes every run once.
+    // run.updated (05-api 3.4): re-read the runs and publish each run whose JSON changed since the previous
+    // read. The first read has nothing to compare with, so it publishes every run once. The pass runs whenever
+    // the reader reports a changed run directory (debounced by the reader) and every runPollMs as the fallback.
+    // The reader watches each run directory any list() has found, so the Team page's first GET /api/runs or a
+    // WebSocket snapshot starts the watching. Passes never overlap: a request during a pass reruns it once that
+    // pass ends, and the shared comparison means a watch event and the poll never publish the same change twice.
     const runJson = new Map()
     let runBusy = false
-    const runPoll = setInterval(() => {
-      if (runBusy || stopped) return
+    let runAgain = false
+    const runPass = () => {
+      if (stopped) return
+      if (runBusy) { runAgain = true
+        return }
       runBusy = true
+      runAgain = false
       Promise.resolve().then(() => reader.list()).then(api.withLeads).then(list => {
         if (stopped) return
         for (const row of list) {
@@ -287,8 +306,11 @@ export async function createDeckServer(options = {}) {
           const at = now()
           publish({ seq: Number(store.appendEvent({ at, type: 'run.updated', entityId: row.runId, data: row })), at, type: 'run.updated', data: row })
         }
-      }).catch(() => {}).finally(() => { runBusy = false })
-    }, options.runPollMs ?? 60_000)
+      }).catch(() => {}).finally(() => { runBusy = false
+        if (runAgain) runPass() })
+    }
+    reader.watch?.(() => runPass())
+    const runPoll = setInterval(runPass, options.runPollMs ?? 60_000)
     const rotation = setInterval(() => { try { refreshToken() } catch {} }, tokenPollMs)
     const tick = setInterval(() => { projector.tick(now()) }, 5000)
     for (const timer of [runPoll, rotation, tick]) { timer.unref()

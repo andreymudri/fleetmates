@@ -396,13 +396,65 @@ test('public session projections include committed compaction activity and persi
     assert.equal(view.startedAt, 1000)
     assert.equal(view.endedAt, null)
     assert.equal(view.transcriptPath, fixture('SessionStart.startup.json').hook.transcript_path)
-    for (const privateField of ['reviewBaseline', 'review_baseline', 'contents', 'since_ts', 'end_announced', 'end_reason']) assert.equal(Object.hasOwn(view, privateField), false)
+    for (const privateField of ['review_baseline', 'contents', 'since_ts', 'end_announced', 'end_reason']) assert.equal(Object.hasOwn(view, privateField), false)
     send('SubagentStop', 7000, { session_id: 'compacted-conversation', agent_id: 'projection-agent', stop_hook_active: false })
     assert.equal(updates.at(-1).subagentsActive, 0)
     send('SessionEnd', 8000, { session_id: 'compacted-conversation', reason: 'prompt_input_exit' })
     assert.equal(updates.at(-1).endedAt, 8000)
     assert.equal(updates.at(-1).alive, false)
   } finally { reader.close(); h.close() }
+})
+
+test('the session view carries reviewBaseline: the stored baseline commit in a git repo, null outside git', () => {
+  const h = harness()
+  try {
+    const root = path.dirname(h.file)
+    const repo = path.join(root, 'repo')
+    const plain = path.join(root, 'plain')
+    mkdirSync(repo)
+    mkdirSync(plain)
+    execFileSync('git', ['init', '-q', repo], { timeout: 2000 })
+    writeFileSync(path.join(repo, 'a.txt'), 'a\n')
+    execFileSync('git', ['-C', repo, 'add', 'a.txt'], { timeout: 2000 })
+    execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture'], { timeout: 2000 })
+    // Two separate Claude processes, so the second SessionStart does not replace the first session.
+    const send = (sessionId, cwd, pid) => {
+      const envelope = fixture('SessionStart.startup.json', { session_id: sessionId, cwd })
+      envelope.claudePid = pid
+      envelope.pidChain = [pid]
+      h.projector.applyHooks([envelope])
+    }
+    send('baseline-git', repo, 42)
+    send('baseline-plain', plain, 43)
+    const view = id => h.projector.snapshot().sessions.find(row => row.claudeSessionId === id)
+    const stored = h.store.get('SELECT review_baseline FROM sessions WHERE claude_session_id=?', 'baseline-git').review_baseline
+    // The stored value also holds file fingerprints and contents; the view carries only its commit.
+    const head = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { timeout: 2000, encoding: 'utf8' }).trim()
+    assert.equal(JSON.parse(stored).head, head)
+    assert.equal(view('baseline-git').reviewBaseline, head)
+    assert.equal(Object.hasOwn(view('baseline-plain'), 'reviewBaseline'), true)
+    assert.equal(view('baseline-plain').reviewBaseline, null)
+  } finally { h.close() }
+})
+
+test('the session view reads reviewBaseline as null when the stored head is not a commit sha', () => {
+  const h = harness()
+  try {
+    const envelope = fixture('SessionStart.startup.json', { session_id: 'baseline-odd', cwd: path.dirname(h.file) })
+    envelope.claudePid = 44
+    envelope.pidChain = [44]
+    h.projector.applyHooks([envelope])
+    const store = head => h.store.run('UPDATE sessions SET review_baseline=? WHERE claude_session_id=?', JSON.stringify({ head, files: {} }), 'baseline-odd')
+    const view = () => h.projector.snapshot().sessions.find(row => row.claudeSessionId === 'baseline-odd').reviewBaseline
+    const sha = 'a'.repeat(40)
+    // A well-formed sha written the same way reaches the view, so the null results below come from the check.
+    store(sha)
+    assert.equal(view(), sha)
+    for (const head of ['HEAD~1', 'a'.repeat(39), sha + '\n', '\u0007' + sha, 'A'.repeat(40), 42]) {
+      store(head)
+      assert.equal(view(), null, `head ${JSON.stringify(head)}`)
+    }
+  } finally { h.close() }
 })
 
 test('Git scans refuse symlinked ancestors without reading or retaining synthetic outside files', () => {
@@ -4860,7 +4912,7 @@ test('public requests retain stored drawer matching delivery and notification fi
     assert.ok(events.some(event => event.type === 'request.closed' && event.data.answer.via === 'terminal'))
     assert.equal(projector.snapshot().sessions[0].lastInputFrom, 'terminal')
     assert.equal(projector.snapshot().sessions[0].lastInputName, null)
-    assert.equal(Object.hasOwn(projector.snapshot().sessions[0], 'reviewBaseline'), false)
+    assert.equal(projector.snapshot().sessions[0].reviewBaseline, null)
   } finally { reader.close(); h.close() }
 })
 

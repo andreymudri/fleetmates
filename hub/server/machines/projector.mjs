@@ -11,6 +11,20 @@ const rank = event => {
   return index < 0 ? 1 : index === 0 ? 0 : index + 1
 }
 
+/**
+ * The commit the session's review compares against, read from the stored `review_baseline`. The stored value
+ * is JSON that also holds per-file fingerprints and file contents, which stay private: the view carries only
+ * the commit sha, and null outside git, for an unborn HEAD, or for a value it cannot read.
+ * @param {string|null} value the `sessions.review_baseline` column
+ * @returns {string|null}
+ */
+function reviewBaselineHead(value) {
+  if (typeof value !== 'string') return null
+  try {
+    const head = JSON.parse(value)?.head
+    return typeof head === 'string' && /^[0-9a-f]{40,64}$/.test(head) ? head : null
+  } catch { return null }
+}
 function sessionView(row, store) {
   return {
     id: row.id,
@@ -40,6 +54,7 @@ function sessionView(row, store) {
     lastInputName: row.last_input_name,
     transcriptPath: row.transcript_path,
     reviewedAt: row.reviewed_at,
+    reviewBaseline: reviewBaselineHead(row.review_baseline),
     startedAt: row.started_at,
     endedAt: row.ended_at,
     toolCalls: store.get('SELECT COUNT(*) AS n FROM session_steps WHERE session_id=?', row.id).n
