@@ -31,8 +31,9 @@ export class DeckdRequestError extends Error {
  * order an event against a response compares sequence numbers.
  *
  * `proto` is the version asked for in `hello` (default PROTO); the version
- * deckd agreed to, its version and its bootId are then `client.proto`,
- * `client.deckdVersion` and `client.bootId`.
+ * deckd agreed to, its version, its bootId and the features it announced are
+ * then `client.proto`, `client.deckdVersion`, `client.bootId` and
+ * `client.features`.
  * @param {{ runtimeDir: string, kind: 'server' | 'terminal', name?: string, proto?: number }} opts
  */
 export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO }) {
@@ -92,6 +93,12 @@ export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO }) {
     /** deckd's boot id from `hello`. @type {string} */
     bootId: '',
     /**
+     * Optional features deckd announced in `hello`, such as `guardedWrite`;
+     * an empty array when the answer has none (an M2 deckd, or proto 1).
+     * @type {string[]}
+     */
+    features: /** @type {string[]} */ ([]),
+    /**
      * Send one request; resolves with the `ok: true` response, rejects with a
      * DeckdRequestError carrying deckd's error `code`.
      * @param {string} op
@@ -137,6 +144,7 @@ export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO }) {
     client.proto = hello.proto
     client.deckdVersion = hello.deckdVersion
     client.bootId = hello.bootId
+    client.features = Array.isArray(hello.features) ? hello.features.filter((f) => typeof f === 'string') : []
   } catch (err) {
     socket.destroy()
     throw err
