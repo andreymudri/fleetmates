@@ -142,9 +142,9 @@ Writes follow [04-integrations.md](04-integrations.md) 2.4 (re-read, merge, atom
 |---|---|---|---|---|---|---|
 | GET | `/api/repos` | query `archived=1` to include archived | `{ repos: RepoView[] }` | | M1 (avatars), M2 (form) | New session repo combobox, Crew sheet, Settings |
 | POST | `/api/repos/rescan` | | 202 `{ found }`, then WS `repo.upserted` per new repo | `settings_io_failed` (scan root unreadable) | M1 | Settings "Rescan" |
-| PATCH | `/api/repos/:repoKey/crew` | `{ seed?, slot?, hat? }` | `{ repo: RepoView }` | `slot_taken`, `validation_failed` | M2 | Crew sheet Reroll, color, hat, Undo |
+| PATCH | `/api/repos/:repoKey/crew` | `{ seed?, slot?, slotShared?, hat? }` (at least one, no other keys) | `{ repo: RepoView }` | `slot_taken`, `validation_failed` | M2 | Crew sheet Reroll, color, hat, Undo |
 
-A slot change runs in one DB transaction ([design/crew.md](design/crew.md) 4.2).
+A slot change runs in one DB transaction ([design/crew.md](design/crew.md) 4.2). `slotShared` is an optional boolean; any other value is 422 `validation_failed` with `fields: ['slotShared']`. With `slot` and `slotShared: true` the server skips the `slot_taken` check and writes the slot as shared; without it, or with `false`, the slot is written exclusive and a slot another repo holds exclusively is 409 `slot_taken`. The Crew sheet's Undo sends the previous `slot` with its previous `slotShared`, so a repo moved off a shared slot gets it back shared.
 
 ### 2.7 Preferences
 
@@ -711,7 +711,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
 /** @typedef {{voyages: number, madePort: number, chartsAdded: number|null}} Recap */
 /** @typedef {{kind: 'vaultNote', ref: string}|{kind: 'meetingNote', ref: string}|{kind: 'runPlan', ref: {repoId: string, runId: string}}|{kind: 'postmeetLog', ref: string}} OpenRequest   (vaultNote: vault-relative path; meetingNote and postmeetLog: meeting id) */
 /** @typedef {{needYouSessions: number, running: number, toReview: number, openRequests: number, requestSessions: number, oldestRequestAt: number|null, perRun: {repoId: string, runId: string, needYou: number, total: number}[]}} Counts */
-/** @typedef {{dep: 'deckd'|'hooks'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number, deckdVersion?: string}} Health */
+/** @typedef {{dep: 'deckd'|'hooks'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'warn'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number, deckdVersion?: string}} Health */
 /** @typedef {{id: 'claude'|'hooks'|'deckd'|'vault'|'scribed'|'notify', state: 'pending'|'checking'|'ok'|'warn'|'failed'|'optional_skipped', blocking: boolean, detail: string|null, error: string|null}} SetupCheck */   (warn: Claude Code newer than the tested version, state-machines 10.2)
 
 /**
@@ -759,7 +759,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  */
 ```
 
-`Health` reasons added in M2: for `deckd`, `deckd_outdated` (state `ok`), `deckd_incompatible` and `deckd_unavailable` (state `down`), with `deckdVersion` while connected (section 5.5); for `hooks`, `hooks_missing` (`~/.claude/settings.json` does not list the deck's hook command for every observed event, or cannot be read) and `hook_script_missing` (the hook script is not a readable regular file), both with state `down`. The server computes the `hooks` row at start and again after every repo rescan, and the New session form reads it.
+`Health` reasons added in M2: for `deckd`, `deckd_outdated` (state `ok`), `deckd_incompatible` and `deckd_unavailable` (state `down`), with `deckdVersion` while connected (section 5.5); for `hooks`, `hooks_missing` (`~/.claude/settings.json` does not list the deck's hook command for every observed event, or cannot be read) and `hook_script_missing` (the hook script is not a readable regular file), both with state `down`. The server computes the `hooks` row at start and again after every repo rescan, and the New session form reads it. Also on `hooks`, `hooks_outdated` with state `warn` (M2): an accepted hook envelope whose `deckHookVersion` is older than the server's package version, or missing or not a semver string, sets it, published once as `health.changed`; the event itself is still accepted. It clears after 3 consecutive envelopes at the current version or newer, or after a successful `POST /api/setup/hooks`. `hooks_missing` and `hook_script_missing` take priority over it. `deck-hook.mjs` reads the version it stamps from the `package.json` one directory above it (`null` when that file cannot be read), and `fleetmates-deck init` writes a `package.json` holding only the hub version next to the installed hook's directory for that reason. Settings, Connections shows a hint for `hooks_outdated`.
 
 ## 8. Versioning (Proposed)
 

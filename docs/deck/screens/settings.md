@@ -95,6 +95,7 @@ Answers **"How is the deck set up, and what have I allowed it to do?"** The main
 | scribed | status + "Start scribed" | health | "scribed reachable" / "scribed socket not found" |
 | deckd | status + "Start deckd" | health | "deckd running · pid 48213 · up 2 min" |
 | Hooks | status + "Install hooks" | first-run check | "Observation hooks installed" |
+| Hooks from an older release | hint under the services list, only while the `hooks` health row has reason `hooks_outdated` (M2) | health | "Hooks are from an older deck release. Run fleetmates-deck init." |
 | Checklist | the FirstRun checklist without the gate, "Done" instead of "Set sail" (state-machines 10.3) | | "Run the setup checklist again" |
 | Stale threshold | read-only row | `staleMinutes` 20 | "A running session counts as adrift after 20 min without activity." (not editable in v1, 02-domain 3) |
 
@@ -212,6 +213,46 @@ Answers **"How is the deck set up, and what have I allowed it to do?"** The main
 | `settings.conn.checklist` | Run the setup checklist again |
 | `settings.conn.stale` | A running session counts as adrift after {n} min without activity. |
 | `settings.saveError` | Could not save {setting}: {error} |
+| `empty.rules.title` | No approval rules yet. Rules you accept from suggestions, or add by hand, show up here. |
+| `settings.nav.rules.sub.later` | Arrives with answering from the deck |
+| `settings.nav.notifications.subNever` | Ship's bell, no re-notify, quiet in meetings |
+| `settings.later` | This section arrives in a later milestone. |
+| `settings.notify.brokenText` | Desktop notifications are not working: {error}. |
+| `settings.notify.untested` | Send a test ping to check desktop notifications. |
+| `settings.conn.commands` | Commands the deck runs |
+| `settings.conn.claudeCommand` | Claude Code command |
+| `settings.conn.scribedCommand` | scribed command |
+| `settings.conn.vaultCommand` | vault-mcp command |
+| `settings.conn.current` | Current: {value} |
+| `settings.conn.save` | Save |
+| `settings.conn.env` | Set by the environment |
+| `settings.conn.saved` | Saved. |
+| `settings.conn.unchanged` | No change to save. |
+| `settings.conn.empty` | Not saved: this field cannot be empty. |
+| `settings.conn.nul` | Not saved: the text contains a NUL character. |
+| `settings.conn.quote` | Not saved: a quote is not closed. |
+| `settings.conn.hidden` | The stored value contains hidden characters, shown here as <U+XXXX> tokens. It is kept unless you change this field. |
+| `settings.conn.services` | Services |
+| `settings.conn.dep.deckd` | deckd |
+| `settings.conn.dep.scribed` | scribed |
+| `settings.conn.dep.vault-mcp` | vault-mcp |
+| `settings.conn.state.ok` | running |
+| `settings.conn.state.checking` | checking |
+| `settings.conn.state.degraded` | degraded |
+| `settings.conn.state.down` | down |
+| `settings.conn.state.unknown` | not checked yet |
+| `settings.conn.reason` | {dep} {state}: {reason} |
+| `settings.conn.status` | {dep} {state} |
+| `settings.conn.start.deckd` | Start deckd |
+| `settings.conn.start.scribed` | Start scribed |
+| `settings.conn.startError` | Could not start {dep}: {error} |
+| `settings.conn.deckdOutdated` | deckd is older than the deck; restart it when no session is running |
+| `settings.conn.hooksOutdated` | Hooks are from an older deck release. Run fleetmates-deck init. |
+| `settings.appearance.density.comfortable` | Comfortable |
+| `settings.appearance.density.compact` | Compact |
+| `settings.appearance.textSize.option` | {n}px |
+| `settings.appearance.language.en` | English |
+| `settings.appearance.language.pt` | Portuguese (Brazil) |
 
 ## 10. Acceptance criteria
 

@@ -461,6 +461,25 @@ API paths are Proposed; the state-machine event is the contract.
 | `home.calm.harbors` | Recent harbors | |
 | `home.calm.launch` | Launch a ship | |
 | `home.calm.adrift.headline` | {n, plural, one {One ship adrift} other {# ships adrift}} | only if HOME-O1 picks the adrift variant |
+| `home.header.counts.label` | Session counts |  |
+| `empty.home.title` | Calm seas. No ships out. |  |
+| `empty.home.body` | No ships yet. Launch one, or start claude in a terminal and it shows up here. |  |
+| `home.card.untitled` | Untitled |  |
+| `home.card.crashed.title` | {repo} ran aground |  |
+| `home.card.crashed.exit` | The session exited with code {code}. |  |
+| `home.card.crashed.killed` | The process ran out of memory or was killed by the system. |  |
+| `home.card.crashed.signal` | The session was stopped by signal {signal}. |  |
+| `home.card.crashed.lost` | The deck lost track of this process. It may have been closed outside the deck. |  |
+| `home.card.activity.tool` | Using {tool} |  |
+| `home.quiet.deckdDown` | deckd is reconnecting |  |
+| `tier.safe` | Safe |  |
+| `tier.caution` | Caution |  |
+| `tier.destructive` | Destructive |  |
+| `tier.question` | Question |  |
+| `home.stop.failed` | Could not stop {repo}: {message} |  |
+| `home.quiet.strip.name` | {repo} · {task}, {state} |  |
+| `home.card.team.ask` | task {taskId} · {summary} |  |
+| `home.card.team.moreRequests` | +{n} more |  |
 
 ## 10. Acceptance criteria
 

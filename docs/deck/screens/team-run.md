@@ -210,6 +210,33 @@ Teammate panels show tool steps only; assistant prose lines ("Ported 14 tests") 
 | `team.error.noStatus` | This run has no status.json yet. fleetmates init-run writes it. |
 | `team.error.derive` | Phase unknown: {error} |
 | `team.notFound` | This run is not on the deck. |
+| `team.plan.label` | Plan |
+| `team.plan.close` | Close |
+| `team.plan.openInEditor` | Open in editor |
+| `team.plan.loading` | Loading the plan |
+| `team.plan.truncated` | The plan is longer than 256 KiB; the rest is not shown. |
+| `team.plan.error` | Could not read the plan: {error} |
+| `team.plan.openFailed` | Could not open the plan: {error} |
+| `team.stop.deckdDown` | deckd is reconnecting |
+| `team.stop.failed` | Could not stop the run: {message} |
+| `team.subtitle.plan` | plan {path} |
+| `team.phases.label` | Phases |
+| `team.phase.short` | P{n} |
+| `team.phase.status.done` | done |
+| `team.phase.status.active` | active |
+| `team.phase.status.pending` | pending |
+| `team.phase.sr` | {name}, {status}: {detail} |
+| `team.gate.sr` | {label}, recorded {time} |
+| `team.tasks.label` | Current phase tasks |
+| `team.task.verified` | Claimed by the teammate; verified by Gate {n} |
+| `team.gateBanner.failed` | Gate {n} failed at {time}: failed: {checks}. |
+| `team.crew.label` | Crew activity |
+| `team.crew.empty` | No activity recorded yet. |
+| `team.crew.loading` | Loading activity |
+| `team.loading` | Loading the run |
+| `team.asOf` | as of {time} |
+| `team.error.plan` | plan.json could not be read: {error}. Retrying. |
+| `team.error.deriveDefault` | the run branch could not be compared with the task branches |
 
 ## 10. Acceptance criteria
 

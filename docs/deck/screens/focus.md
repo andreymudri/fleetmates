@@ -267,6 +267,27 @@ The canvas placed "Related memory" under the Changes tab; it moves to the Memory
 | `focus.notFound.title` | This session is not on the deck. |
 | `focus.paste.title` | Paste {size} into {repo}? |
 | `focus.reviewed.toast` | Marked reviewed |
+| `empty.focusChanges.title` | No changes yet. |
+| `empty.focusMemory.title` | Nothing in your vault matches this task yet. |
+| `terminal.label` | Terminal, {label} |
+| `terminal.link.confirm` | Open this link from the terminal? (line break) {url} |
+| `focus.list.team` | {needs} of {total} need you |
+| `focus.header.reviewFailed` | Could not mark this session reviewed. |
+| `focus.stop.failed` | Could not stop {repo}: {message} |
+| `focus.crash.relaunch` | Relaunch |
+| `focus.crash.dismiss` | Dismiss |
+| `focus.crash.lost` | The deck lost track of this process. It may have been closed outside the deck. |
+| `focus.crash.exit` | The session exited with code {code}. |
+| `focus.starting.hint` | No signal from hooks yet. Is fleetmates deck init done? |
+| `focus.paste.body` | The text goes to the terminal as one paste. |
+| `focus.paste.confirm` | Paste |
+| `focus.link.title` | Open this link from the terminal? |
+| `focus.link.confirm` | Open link |
+| `focus.log.label` | Activity |
+| `focus.log.empty` | No activity recorded yet. |
+| `focus.log.loading` | Loading activity |
+| `focus.changes.caption` | Diffs arrive with approvals. |
+| `focus.facts.lastInput` | Last input from |
 
 ## 10. Acceptance criteria
 
