@@ -354,11 +354,32 @@ export function createFleetmatesReader({ repoRoots = [], clock = Date.now, pollR
   const debounceTimers = new Map()
   let listener = null
   const keyFor = (repoRoot, runId) => `${repoRoot}\0${runId}`
+  const inodeOf = (dir) => {
+    try { return fs.statSync(dir).ino } catch { return null }
+  }
+  // Close and forget a run's watcher so the next list() attaches a fresh one to whatever
+  // directory now holds that run id.
+  const dropWatcher = (key) => {
+    const watcher = watchers.get(key)
+    if (!watcher) return
+    watchers.delete(key)
+    clearTimeout(debounceTimers.get(key))
+    debounceTimers.delete(key)
+    try { watcher.close() } catch {}
+    const item = cache.get(key)
+    if (item) item.dirty = true
+  }
   const attachWatcher = (entry) => {
     const key = keyFor(entry.repoRoot, entry.runId)
     if (!listener || watchers.has(key)) return
+    const inode = inodeOf(entry.dir)
     try {
-      const watcher = watchFactory(entry.dir, () => {
+      const watcher = watchFactory(entry.dir, (eventType) => {
+        if (eventType === 'rename' && watchers.get(key) === watcher && inodeOf(entry.dir) !== inode) {
+          dropWatcher(key)
+          listener?.(entry.repoRoot, entry.runId)
+          return
+        }
         clearTimeout(debounceTimers.get(key))
         debounceTimers.set(key, setTimeout(() => {
           debounceTimers.delete(key)
@@ -414,6 +435,8 @@ export function createFleetmatesReader({ repoRoots = [], clock = Date.now, pollR
         rows.push(run)
         attachWatcher(entry)
       }
+      const present = new Set(entries.map((entry) => keyFor(entry.repoRoot, entry.runId)))
+      for (const key of [...watchers.keys()]) if (!present.has(key)) dropWatcher(key)
       return rows
     },
     /** Mark a run's files for re-reading on the next list call. */
