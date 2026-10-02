@@ -8,7 +8,7 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
-import { buildWeb, launchBrowser, openDeck, startDeck } from './observe.spec.mjs'
+import { buildWeb, launchBrowser, openDeck, startDeck, TOKEN } from './observe.spec.mjs'
 
 let web
 let browser
@@ -79,4 +79,21 @@ test('Settings: Connections fields saved with Save or Enter, and a Notifications
   assert.equal(await page.isChecked('#pref-notifyDone'), false, 'the toggle survives a reload')
   assert.equal(h.deck.store.get('SELECT value FROM prefs WHERE key=?', 'notifyDone')?.value, 'false')
   assert.deepEqual(page.errors, [])
+
+  // Dogfood bug 4 probe: a new browser context shares no page state, cache or storage with the one that
+  // saved, so every value it shows came back from the server.
+  const fresh = await openDeck(browser, h, '/settings/connections')
+  assert.notEqual(fresh.context(), page.context(), 'the read-back runs in a new browser context')
+  await fresh.waitForSelector('#pref-scanRoot')
+  assert.equal(await fresh.inputValue('#pref-scanRoot'), '/home/you/Work', 'Repos folder reads back in a new context')
+  assert.equal(await fresh.inputValue('#vault'), '/home/you/vault', 'Vault reads back in a new context')
+  await fresh.goto(`${h.base}/settings/notifications`)
+  await fresh.waitForSelector('#pref-notifyDone')
+  assert.equal(await fresh.isChecked('#pref-notifyDone'), false, 'the toggle reads back in a new context')
+  const data = await (await fetch(`${h.base}/api/prefs`, { headers: { authorization: `Bearer ${TOKEN}` } })).json()
+  assert.deepEqual([data.prefs.scanRoot, data.sources.scanRoot], ['/home/you/Work', 'config'])
+  assert.deepEqual([data.prefs.vaultPath, data.sources.vaultPath], ['/home/you/vault', 'config'])
+  assert.deepEqual([data.prefs.notifyDone, data.sources.notifyDone], [false, 'db'])
+  assert.deepEqual(await config(h), { scanRoot: '/home/you/Work', vaultPath: '/home/you/vault' }, 'config.json holds the saved Connections fields')
+  assert.deepEqual(fresh.errors, [])
 })
