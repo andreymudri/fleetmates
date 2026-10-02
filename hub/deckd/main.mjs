@@ -12,10 +12,11 @@ import { pathToFileURL } from 'node:url'
 import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP, MAX_LINE } from './protocol.mjs'
 import { PtyHost, DeckdError } from './pty-host.mjs'
 import { captureLoginEnv, dropSessionVars, changedNames } from './login-env.mjs'
+import { capHistory } from './screen-model.mjs'
 
 /** How long `exits` keeps an exit record. */
 const EXIT_RETENTION_MS = 24 * 60 * 60 * 1000
-/** Lines and bytes of output an exit record keeps as its `tail`. */
+/** Lines and bytes of output an exit record keeps as its `tail`; `history.data` shares the byte cap. */
 const EXIT_TAIL_LINES = 1000
 const EXIT_TAIL_BYTES = 256 * 1024
 /** Most names the hello answer lists in `loginEnvNames`. */
@@ -24,7 +25,7 @@ const SOURCE_KINDS = new Set(['browser', 'deck', 'terminal'])
 
 /**
  * @typedef {{ socket: net.Socket, client: { kind: string, name?: string, pid?: number } | null, proto: number, dropped: Map<string, number> }} Conn
- * @typedef {{ ptyId: string, code: number, signal: string | null, at: number, tail: string }} ExitRecord
+ * @typedef {{ ptyId: string, code: number, signal: string | null, at: number, tail: string, history?: import('./screen-model.mjs').History }} ExitRecord
  */
 
 /**
@@ -137,6 +138,24 @@ function exitTail (host) {
     if (nl !== -1 && nl + 1 < tail.length) tail = tail.subarray(nl + 1)
   }
   return tail.toString('base64')
+}
+
+/**
+ * The PTY's serialized history at exit, `data` cut to EXIT_TAIL_BYTES by
+ * dropping whole leading lines. Undefined when serializing fails, so the exit
+ * is still recorded.
+ * @param {PtyHost} host
+ * @returns {Promise<import('./screen-model.mjs').History | undefined>}
+ */
+async function exitHistory (host) {
+  try {
+    await host.screen.flush()
+    const history = host.screen.history()
+    return { ...history, data: capHistory(history.data, EXIT_TAIL_BYTES) }
+  } catch (err) {
+    console.error('deckd: could not serialize the history of', host.ptyId, /** @type {Error} */ (err).message)
+    return undefined
+  }
 }
 
 /**
@@ -297,9 +316,13 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
         onOutput: (h, data) => {
           for (const [conn, { stream }] of h.clients) if (stream) sendOutput(conn, h.ptyId, data)
         },
-        onExit: (h, exit) => {
+        onExit: async (h, exit) => {
           const event = { ptyId: h.ptyId, ...exit }
-          const rec = { ...event, tail: exitTail(h) }
+          // The record (with `history`, read once the screen model has parsed
+          // every byte) is stored before the `exit` event goes out, so a
+          // client that asks `exits` on that event finds it.
+          const history = await exitHistory(h)
+          const rec = { ...event, tail: exitTail(h), ...(history ? { history } : {}) }
           const cutoff = Date.now() - EXIT_RETENTION_MS
           exits = exits.filter((e) => e.at >= cutoff)
           exits.push(rec)
@@ -323,8 +346,8 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       const cutoff = Date.now() - EXIT_RETENTION_MS
       exits = exits.filter((e) => e.at >= cutoff)
       const found = exits.filter((e) => e.at >= since)
-      // `tail` is a proto 2 field.
-      return { exits: conn.proto >= 2 ? found : found.map(({ tail, ...e }) => e) }
+      // `tail` and `history` are proto 2 fields.
+      return { exits: conn.proto >= 2 ? found : found.map(({ tail, history, ...e }) => e) }
     },
     attach: (conn, req) => {
       const host = getHost(req.ptyId)
@@ -338,7 +361,7 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       detach(conn, getHost(req.ptyId))
       return {}
     },
-    screen: async (_conn, req) => {
+    screen: async (conn, req) => {
       const host = getHost(req.ptyId)
       await host.screen.flush()
       // `scrollback` is a line count: the newest N lines of raw output.
@@ -349,7 +372,9 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
         rows: host.rows,
         cursor: host.screen.cursor(),
         lines: host.screen.lines(),
-        scrollback: host.ring.tail(n).toString('base64')
+        scrollback: host.ring.tail(n).toString('base64'),
+        // `history` is a proto 2 field, sent only when asked for.
+        ...(req.history === true && conn.proto >= 2 ? { history: host.screen.history() } : {})
       }
     },
     watchScreen: (conn, req) => {

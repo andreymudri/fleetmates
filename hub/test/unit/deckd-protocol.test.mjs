@@ -1,7 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP, MAX_LINE } from '../../deckd/protocol.mjs'
 import { Ring } from '../../deckd/ring.mjs'
+import { startDeckd } from '../../deckd/main.mjs'
+import { connectDeckd } from '../../deckd/client.mjs'
+import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
+
+const stub = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'integration', 'stubs', 'claude')
 
 /**
  * Build a decoder that records what it produced.
@@ -115,4 +122,57 @@ test('screen scrollback: Ring.tail drops a first line cut short by the byte cap'
   clean.push(Buffer.from('xy'))
   assert.equal(clean.snapshot().toString(), 'cond\nxy')
   assert.equal(clean.tail(99).toString(), 'xy')
+})
+
+test('history: proto 2 gets it on the exit record and on screen with history: true; proto 1 gets neither', async () => {
+  const rt = await makeRuntimeDir()
+  const deckd = await startDeckd({ runtimeDir: rt.dir, loginEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: rt.dir } })
+  const c2 = await connectDeckd({ runtimeDir: rt.dir, kind: 'server', name: 'history2', proto: 2 })
+  const c1 = await connectDeckd({ runtimeDir: rt.dir, kind: 'server', name: 'history1', proto: 1 })
+  try {
+    const since = Date.now() - 1
+    const { ptyId } = await c2.request('spawn', { cwd: rt.dir, argv: [stub], env: {}, cols: 90, rows: 20, origin: 'launched' })
+    const end = Date.now() + 15000
+    while (!(await c2.request('screen', { ptyId, scrollback: 0 })).lines.includes('READY')) {
+      if (Date.now() > end) throw new Error('stub never printed READY')
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    await c2.request('write', { ptyId, data: Buffer.from('\x1b[31mredline\x1b[0m\r\n').toString('base64'), source: { kind: 'deck' } })
+    const end2 = Date.now() + 15000
+    for (;;) {
+      const res = await c2.request('screen', { ptyId, scrollback: 0, history: true })
+      assert.equal(Object.hasOwn(res, 'history'), true)
+      if (res.history.data.includes('redline')) {
+        assert.equal(res.history.cols, 90)
+        assert.equal(res.history.rows, 20)
+        assert.match(res.history.data, /\x1b\[(?:[0-9;]*;)?31(?:;[0-9;]*)?mredline/)
+        break
+      }
+      if (Date.now() > end2) throw new Error(`no redline in history: ${JSON.stringify(res.history)}`)
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    // without history: true, proto 2 gets no history field
+    assert.equal(Object.hasOwn(await c2.request('screen', { ptyId, scrollback: 0 }), 'history'), false)
+    // proto 1 never gets it
+    assert.equal(Object.hasOwn(await c1.request('screen', { ptyId, scrollback: 0, history: true }), 'history'), false)
+
+    const exited = new Promise((resolve) => {
+      const off = c2.on('exit', (/** @type {any} */ m) => { if (m.ptyId === ptyId) { off(); resolve(m) } })
+    })
+    await c2.request('kill', { ptyId, signal: 'SIGKILL', graceMs: 0 })
+    await exited
+    const rec2 = (await c2.request('exits', { since })).exits.find((/** @type {any} */ e) => e.ptyId === ptyId)
+    assert.equal(rec2.history.cols, 90)
+    assert.equal(rec2.history.rows, 20)
+    assert.match(rec2.history.data, /redline/)
+    assert.equal(typeof rec2.tail, 'string')
+    const rec1 = (await c1.request('exits', { since })).exits.find((/** @type {any} */ e) => e.ptyId === ptyId)
+    assert.equal(Object.hasOwn(rec1, 'history'), false)
+    assert.equal(Object.hasOwn(rec1, 'tail'), false)
+  } finally {
+    c1.close()
+    c2.close()
+    await deckd.close()
+    await rt.cleanup()
+  }
 })

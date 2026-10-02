@@ -1,22 +1,48 @@
 // Headless terminal model of one PTY: what is on screen right now, as plain
-// text rows, for the web server's screen parsers (docs/deck/05-api.md 5.4).
+// text rows, for the web server's screen parsers (docs/deck/05-api.md 5.4),
+// and its serialized history for replay at any size (5.2).
 import xtermHeadless from '@xterm/headless'
+import addonSerialize from '@xterm/addon-serialize'
 
 const { Terminal } = xtermHeadless
+const { SerializeAddon } = addonSerialize
+
+/** Scrollback lines the model keeps and `history()` serializes. */
+export const HISTORY_LINES = 1000
 
 /** Minimum gap between two `screen` emissions to one watcher: at most 4 per second. */
 export const SCREEN_THROTTLE_MS = 250
 
 /**
  * @typedef {{ rev: number, lines: string[], cursor: { x: number, y: number }, changedRows: number[] }} ScreenEvent
+ * @typedef {{ data: string, cols: number, rows: number }} History
  */
+
+/**
+ * Cut serialized history to at most `maxBytes` UTF-8 bytes by dropping whole
+ * leading lines: the result starts right after a `\r\n` of `data`, so it never
+ * starts inside an escape sequence or a multi-byte character. Returns '' when
+ * no line boundary leaves a short enough rest.
+ * @param {string} data
+ * @param {number} maxBytes
+ * @returns {string}
+ */
+export function capHistory (data, maxBytes) {
+  const buf = Buffer.from(data, 'utf8')
+  if (buf.length <= maxBytes) return data
+  const crlf = buf.indexOf('\r\n', Math.max(0, buf.length - maxBytes - 2))
+  if (crlf === -1) return ''
+  return buf.subarray(crlf + 2).toString('utf8')
+}
 
 export class ScreenModel {
   /**
    * @param {{ cols: number, rows: number }} size
    */
   constructor ({ cols, rows }) {
-    this.term = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true })
+    this.term = new Terminal({ cols, rows, scrollback: HISTORY_LINES, allowProposedApi: true })
+    this.serializer = new SerializeAddon()
+    this.term.loadAddon(this.serializer)
     this.rev = 0
     /** @type {Set<() => void>} */
     this.listeners = new Set()
@@ -65,6 +91,19 @@ export class ScreenModel {
       out.push(buf.getLine(buf.viewportY + y)?.translateToString(true) ?? '')
     }
     return out
+  }
+
+  /**
+   * The scrollback and the screen, serialized with colours and attributes,
+   * and the model's size now. Call after `flush()` to include every byte.
+   * @returns {History}
+   */
+  history () {
+    return {
+      data: this.serializer.serialize({ scrollback: HISTORY_LINES }),
+      cols: this.term.cols,
+      rows: this.term.rows
+    }
   }
 
   /**
