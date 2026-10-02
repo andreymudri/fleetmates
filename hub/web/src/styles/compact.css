@@ -118,8 +118,9 @@
 }
 .compact-open { flex: none; }
 
-/* Quiet-row controls: the disabled reason stays visible (home.md 8). */
-.quiet-reason {
+/* Quiet-row controls and the header launch: the disabled reason stays visible (home.md 8). */
+.quiet-reason,
+.home-launch-reason {
   margin: 0;
   font-size: var(--font-size-xs);
   color: var(--text-muted);

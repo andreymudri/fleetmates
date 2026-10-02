@@ -325,6 +325,22 @@ export function homeActions({ api, setStopping, toast, repoName, t }) {
   }
 }
 
+/**
+ * The quiet-row Stop dialog Home holds: null while nothing is `stopping`, else a danger {@link ConfirmDialog}
+ * titled "Stop {repo} · {task}?" whose Confirm calls `actions.confirmStop` for that session and whose Cancel
+ * calls `actions.cancelStop`. Pure: it returns the element and runs no hooks itself.
+ * @param {{ stopping: object | null, repos?: object[], actions: ReturnType<typeof homeActions>, t?: Function }} props
+ */
+export function HomeStopDialog({ stopping, repos, actions, t }) {
+  if (!stopping) return null
+  const repo = repoFor(repos, stopping.repoId).name
+  return (
+    <ConfirmDialog title={translate(t, HOME_COPY, 'home.stop.title', { repo: shown(repo), task: stopping.task || translate(t, CARD_COPY, 'home.card.untitled') })}
+      body={translate(t, HOME_COPY, 'home.stop.body')} confirmLabel={translate(t, HOME_COPY, 'home.stop.confirm')} cancelLabel={translate(t, HOME_COPY, 'home.stop.cancel')}
+      tone="danger" onConfirm={() => actions.confirmStop(stopping)} onCancel={actions.cancelStop} t={t} />
+  )
+}
+
 function DensityControl({ density, onDensity, t }) {
   const label = translate(t, HOME_COPY, 'home.header.density.label')
   const pick = value => { if (value !== density) onDensity(value) }
@@ -419,7 +435,7 @@ function Calm({ state, layout, now, t, navigate, lang }) {
 
 /**
  * Home (home.md): header with count chips, the Density radiogroup, the search trigger and "Launch a ship"
- * (`Alt N`), then the comfortable grid with the quiet row or quiet strip, or in compact density a grid of
+ * (`Alt N`, disabled with the visible reason "deckd is reconnecting" while deckd is down), then the comfortable grid with the quiet row or quiet strip, or in compact density a grid of
  * {@link CompactCard}s with PTY tails (`state.data.tails`) or observed hook `steps`; team cards from the
  * snapshot's runs, and the calm presentation. The quiet row offers Nudge and Stop… for controllable PTY
  * sessions through `onNudge` and `onStop`. The fleet scrolls under a fixed header. `onHold` reports the pointer
@@ -454,9 +470,10 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
         <button type="button" className="button button--secondary home-search" onClick={() => onOverlay('palette')}>
           {translate(t, HOME_COPY, 'home.header.search')} <kbd className="kbd" aria-hidden="true">Alt K</kbd>
         </button>
-        <button type="button" className="button button--primary home-launch" onClick={() => onLaunch()}>
+        <button type="button" className="button button--primary home-launch" onClick={() => onLaunch()} disabled={deckdDown} aria-describedby={deckdDown ? 'home-launch-reason' : undefined}>
           <span aria-hidden="true">+</span> {translate(t, HOME_COPY, 'home.header.launch')} <kbd className="kbd" aria-hidden="true">Alt N</kbd>
         </button>
+        {deckdDown ? <p className="home-launch-reason" id="home-launch-reason">{translate(t, CARD_COPY, 'home.quiet.deckdDown')}</p> : null}
       </header>
       {compact ? (
         <div className="home-fleet">
@@ -526,9 +543,10 @@ export function ObserveOverlays({ state, t, navigate, api }) {
  * card, a minute tick and the observe overlays. It keeps the density from `storage` through `readDensity`
  * ({@link pickDensity} writes it), subscribes `terminals.subscribeTails` to {@link tailSubscription} (cleared on
  * leaving compact and on unmount), loads the last hook steps of observed compact sessions, holds the Stop
- * dialog of {@link homeActions}, and opens the Needs-you drawer once for a `?needs=` link ({@link needsLinkDetail}).
- * The effects are browser wiring the unit tests do not run; the static render, {@link homeLayout},
- * {@link heldOrder}, {@link tailSubscription}, {@link homeActions} and {@link HomeView} are unit tested.
+ * dialog of {@link homeActions} in {@link HomeStopDialog}, and opens the Needs-you drawer once for a `?needs=` link
+ * ({@link needsLinkDetail}). The effects are browser wiring the unit tests do not run; the static render,
+ * {@link homeLayout}, {@link heldOrder}, {@link tailSubscription}, {@link homeActions}, {@link HomeStopDialog} and
+ * {@link HomeView} are unit tested.
  * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: object, terminals?: { subscribeTails: (ids: string[]) => boolean } | null,
  *   storage?: Storage, search?: string, dispatch?: (action: object) => void, onOverlay?: (overlay: 'palette'|'drawer', detail?: object) => void }} props
  */
@@ -586,16 +604,11 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
   }, [])
   const toast = item => { if (dispatch) dispatch({ type: 'toast.push', ...item }) }
   const actions = homeActions({ api: http, setStopping, toast, repoName: session => repoFor(state.data.repos, session.repoId).name, t })
-  const stopRepo = stopping ? repoFor(state.data.repos, stopping.repoId).name : ''
   return (
     <>
       <HomeView state={{ ...state, data: { ...state.data, order: held.order } }} t={t} now={now} navigate={navigate} layout={layout} onHold={onHold}
         density={density} onDensity={value => pickDensity(storage, value, setDensity)} steps={steps} onNudge={actions.nudge} onStop={actions.openStop} />
-      {stopping ? (
-        <ConfirmDialog title={translate(t, HOME_COPY, 'home.stop.title', { repo: shown(stopRepo), task: stopping.task || translate(t, CARD_COPY, 'home.card.untitled') })}
-          body={translate(t, HOME_COPY, 'home.stop.body')} confirmLabel={translate(t, HOME_COPY, 'home.stop.confirm')} cancelLabel={translate(t, HOME_COPY, 'home.stop.cancel')}
-          tone="danger" onConfirm={() => { actions.confirmStop(stopping) }} onCancel={actions.cancelStop} t={t} />
-      ) : null}
+      <HomeStopDialog stopping={stopping} repos={state.data.repos} actions={actions} t={t} />
       <ObserveOverlays state={state} t={t} navigate={navigate} api={api} />
     </>
   )

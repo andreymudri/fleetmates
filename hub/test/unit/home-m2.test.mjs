@@ -357,3 +357,119 @@ test('openOverlay carries the filter in the history state and a ?needs= link nam
   assert.equal(needsLinkDetail('?tab=changes'), null)
   assert.equal(needsLinkDetail(''), null)
 })
+
+test('a run filter keeps the open requests of the run\'s lead even when the lead carries no runRef', async () => {
+  const { DrawerView, filterRequests } = await load('screens/drawer/NeedsYouDrawer.jsx')
+  const state = stateWith([
+    session('lead', 'fm', 'running', { role: 'lead', runRef: null }),
+    session('solo', 'web', 'needs_approval')
+  ])
+  state.data.runs = [{ runId: 'r1', leadSessionId: 'lead' }]
+  state.data.requests = [
+    { id: 'ql', sessionId: 'lead', kind: 'permission', tier: 'safe', summary: 'npm test', state: 'open', createdAt: NOW - 2 * MIN },
+    { id: 'qs', sessionId: 'solo', kind: 'permission', tier: 'safe', summary: 'ls -la', state: 'open', createdAt: NOW - MIN }
+  ]
+  const filter = { kind: 'run', runId: 'r1' }
+  assert.deepEqual(filterRequests(state.data.requests, filter, state.data).map(row => row.id), ['ql'])
+  const html = render(DrawerView, { state, now: NOW, navigate: () => {}, onShowAll: () => {}, filter })
+  assert.deepEqual([...html.matchAll(/data-request="(\w+)"/g)].map(match => match[1]), ['ql'])
+})
+
+test('Home\'s quiet-row Stop… opens a dialog with the home.stop copy; Confirm stops that session and Cancel does not', async () => {
+  const { HomeView, HomeStopDialog, homeActions } = await load('screens/home/Home.jsx')
+  const idle = session('q1', 'rustot', 'idle', { task: 'Tune the VAD threshold' })
+  const state = stateWith([session('busy', 'web', 'running'), idle])
+  const posts = []
+  let stopping = null
+  const api = { post: async path => { posts.push(path)
+    return {} } }
+  const actions = homeActions({ api, setStopping: value => { stopping = value }, toast: () => {}, repoName: () => 'rustot' })
+  const tree = HomeView({ state, now: NOW, navigate: () => {}, onNudge: actions.nudge, onStop: actions.openStop })
+  const stop = elements(tree, 'button').find(node => textOf(node) === 'Stop…')
+  assert.ok(stop, 'an idle live PTY session in the quiet row offers Stop…')
+  assert.equal(HomeStopDialog({ stopping, repos: state.data.repos, actions }), null, 'no dialog before Stop…')
+  stop.props.onClick()
+  assert.equal(stopping, idle)
+  assert.deepEqual(posts, [], 'Stop… alone posts nothing')
+
+  const dialog = HomeStopDialog({ stopping, repos: state.data.repos, actions })
+  assert.equal(dialog.props.title, 'Stop rustot · Tune the VAD threshold?')
+  assert.equal(dialog.props.confirmLabel, 'Stop session')
+  const html = renderToStaticMarkup(dialog)
+  assert.match(html, /role="dialog"/)
+  assert.match(html, />Stop rustot · Tune the VAD threshold\?</)
+  assert.match(html, />Stop session<\/button>/)
+
+  dialog.props.onCancel()
+  assert.equal(stopping, null)
+  assert.deepEqual(posts, [], 'Cancel does not stop the session')
+  stopping = idle
+  await dialog.props.onConfirm()
+  assert.deepEqual(posts, ['/api/sessions/q1/stop'], 'Confirm stops that session')
+  assert.equal(stopping, null)
+})
+
+test('Launch a ship is disabled with the visible reason "deckd is reconnecting" while deckd is down', async () => {
+  const { HomeView } = await load('screens/home/Home.jsx')
+  const launchOf = tree => elements(tree, 'button').find(node => node.props.className?.includes('home-launch'))
+  const down = stateWith(nine())
+  down.data.health = [{ dep: 'deckd', state: 'down' }]
+  const tree = HomeView({ state: down, now: NOW, navigate: () => {} })
+  const launch = launchOf(tree)
+  assert.equal(launch.props.disabled, true)
+  const reasonId = launch.props['aria-describedby']
+  assert.ok(reasonId, 'the disabled button names its reason')
+  const reason = elements(tree, 'p').find(node => node.props.id === reasonId)
+  assert.equal(textOf(reason), 'deckd is reconnecting')
+  assert.match(render(HomeView, { state: down, now: NOW, navigate: () => {} }), /deckd is reconnecting/)
+
+  const up = HomeView({ state: stateWith(nine()), now: NOW, navigate: () => {} })
+  assert.notEqual(launchOf(up).props.disabled, true)
+  assert.equal(launchOf(up).props['aria-describedby'], undefined)
+  assert.doesNotMatch(render(HomeView, { state: stateWith(nine()), now: NOW, navigate: () => {} }), /deckd is reconnecting/)
+})
+
+test('subscribeTails includes a team lead that is a live PTY session in compact', async () => {
+  const { homeLayout, tailSubscription, teamCards } = await load('screens/home/Home.jsx')
+  const runRef = taskId => ({ repoId: '/home/you/dev/fm', runId: 'r1', taskId })
+  const sessions = [
+    session('lead', 'fm', 'running', { role: 'lead', runRef: runRef('T6') }),
+    session('solo', 'web', 'running')
+  ]
+  const runs = [{ repoId: '/home/you/dev/fm', runId: 'r1', leadSessionId: 'lead', teammates: [], tasks: [] }]
+  const layout = homeLayout(sessions, { order: sessions.map(row => row.id), now: NOW })
+  const teams = teamCards(runs, sessions, [])
+  assert.equal(teams.length, 1)
+  assert.deepEqual(tailSubscription('compact', layout, teams).sort(), ['lead', 'solo'])
+})
+
+test('quiet-row Stop and Nudge never render for an observed session, even one carrying a live PTY id', async () => {
+  const { QuietCard, controllable } = await load('components/SessionCard.jsx')
+  const repo = { id: '/home/you/dev/vault', name: 'vault', crewSlot: 2 }
+  const observed = { id: 'q', repoId: repo.id, task: 'Observe me', branch: 'main', origin: 'observed', ptyId: 'p-q', alive: true, changedFiles: [], stateSince: NOW - 30 * MIN, lastActivityAt: NOW - 30 * MIN }
+  assert.equal(controllable({ ...observed, state: 'idle' }), false)
+  for (const state of ['idle', 'stale']) {
+    const html = render(QuietCard, { session: { ...observed, state }, repo, now: NOW, onNudge: () => {}, onStop: () => {} })
+    assert.doesNotMatch(html, /Nudge|Stop/, `observed ${state}: no controls`)
+  }
+})
+
+test('every agent-supplied compact line renders U+202E as a visible token: PTY tail, observed step and team ask', async () => {
+  const { CompactCard } = await load('components/CompactCard.jsx')
+  const RLO = '‮'
+  const repo = { name: 'rustot', crewSlot: 1 }
+  const check = (html, what) => {
+    assert.match(html, /&lt;U\+202E&gt;/, `${what}: the token is shown`)
+    assert.ok(!html.includes(RLO), `${what}: no raw U+202E`)
+  }
+  const pty = session('p1', 'rustot', 'running', { task: 'plain', branch: 'main' })
+  check(render(CompactCard, { session: pty, repo, now: NOW, tail: [`tail ${RLO}evil`] }), 'PTY tail')
+  const observed = session('o1', 'rustot', 'running', { origin: 'observed', ptyId: null, task: 'plain', branch: 'main' })
+  check(render(CompactCard, { session: observed, repo, now: NOW, steps: [{ seq: 1, line: `step ${RLO}evil` }] }), 'observed step')
+  const lead = session('lead', 'rustot', 'running', { task: 'plain', branch: 'main' })
+  const team = {
+    key: 'team-r1', lead, state: 'needs_approval', run: { repoId: lead.repoId, runId: 'r1' },
+    requests: [{ id: 'q4', sessionId: 'lead', kind: 'permission', tier: 'caution', summary: `ask ${RLO}evil`, state: 'open', createdAt: NOW - MIN, taskId: 'T4' }]
+  }
+  check(render(CompactCard, { team, repo, now: NOW, tail: [] }), 'team ask')
+})
