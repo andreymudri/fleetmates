@@ -860,6 +860,7 @@ if (import.meta.main) {
     const repos = (await h.api('/api/repos')).data.repos
     assert.equal(new Set(repos.map(repo => repo.crew.slot)).size, control.crew.slotsTaken, '8 repos hold 8 distinct slots')
     const old = (await h.repo(crewTarget)).crew
+    assert.equal(old.slotShared, false, 'the repo starts on an exclusive slot')
     const page = await openDeck(browser, h, '/settings/crew')
     await page.waitForSelector('#crew-repo')
     await pickCrew(page, crewTarget)
@@ -878,7 +879,7 @@ if (import.meta.main) {
     await until(() => patches.length === 2, { message: 'the Undo PATCH' })
     const [route, body, at] = patches[1]
     assert.ok(at - shownAt < 6000, 'Undo was offered and sent within 6 s')
-    assert.deepEqual([route, body], [patches[0][0], { seed: old.seed || crewTarget, slot: old.slot, hat: old.hat ?? 'none' }])
+    assert.deepEqual([route, body], [patches[0][0], { seed: old.seed || crewTarget, slot: old.slot, slotShared: old.slotShared, hat: old.hat ?? 'none' }])
     await until(async () => (await h.repo(crewTarget)).crew.slot === old.slot, { message: 'Undo to restore the old slot' })
   })
 

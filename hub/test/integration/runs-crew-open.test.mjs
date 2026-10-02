@@ -121,8 +121,9 @@ test('crew PATCH: setting a slot clears crew_slot_shared; a shared holder does n
 
 test('crew PATCH: Undo with slotShared true restores a shared slot; a non-boolean slotShared is refused', async t => {
   const h = await harness(t)
+  // beta holds slot 3 exclusively and alpha shares it, so the Undo below must skip the slot_taken check.
   h.addRepo('/r/alpha', 'alpha', 3, 1)
-  h.addRepo('/r/beta', 'beta', 3, 1)
+  h.addRepo('/r/beta', 'beta', 3)
   const moved = await h.json('/api/repos/alpha/crew', 'PATCH', { slot: 5 })
   assert.equal(moved.status, 200)
   assert.deepEqual({ ...h.crewRow('/r/alpha') }, { seed: 'alpha', slot: 5, shared: 0, hat: 'none' })
