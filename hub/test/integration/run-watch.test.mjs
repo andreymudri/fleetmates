@@ -133,3 +133,24 @@ test('a watch event during a pass reruns the pass once it ends, publishing both 
   assert.deepEqual(updates().map(event => event.data.tasks[0].state), ['pending', 'in_progress'])
   assert.equal(releases.length - startCalls, 2, 'list() ran exactly twice')
 })
+
+test('a repo registered after the first read rebuilds the reader with the watch, so both repos publish within 2 s', async t => {
+  const h = await harness(t)
+  assert.ok((await h.runs()).some(run => run.runId === 'r1'))
+  // Register repo beta with run r2 the same way home() registers alpha: a row in the deck database.
+  const beta = path.join(path.dirname(h.repo), 'beta')
+  const betaRun = path.join(beta, '.fleetmates', 'r2')
+  fs.mkdirSync(betaRun, { recursive: true })
+  fs.writeFileSync(path.join(betaRun, 'plan.json'), JSON.stringify({ runId: 'r2', totalPhases: 1, tasks: [{ id: 'T1', title: 'First', phase: 1, files: [], deps: [] }] }))
+  fs.writeFileSync(path.join(betaRun, 'status.json'), JSON.stringify({ runId: 'r2', tasks: [{ id: 'T1', state: 'pending' }] }))
+  const store = openDeckDb(path.join(h.dir, '.local/state/fleetmates/deck/deck.db'))
+  store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', beta, 'beta', 1, 0, 'beta', 1)
+  store.close()
+  const listed = await h.runs()
+  assert.ok(listed.some(run => run.runId === 'r1') && listed.some(run => run.runId === 'r2'), 'the second read lists both runs')
+  fs.writeFileSync(path.join(h.runDir, 'status.json'), JSON.stringify({ runId: 'r1', tasks: [{ id: 'T1', state: 'in_progress' }] }))
+  fs.writeFileSync(path.join(betaRun, 'status.json'), JSON.stringify({ runId: 'r2', tasks: [{ id: 'T1', state: 'in_progress' }] }))
+  const updated = runId => h.events.some(event => event.type === 'run.updated' && event.data.runId === runId &&
+    event.data.tasks[0].state === 'in_progress')
+  await waitFor(() => updated('r1') && updated('r2'), 2000, 'run.updated for r1 and r2 after the edits')
+})
