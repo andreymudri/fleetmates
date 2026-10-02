@@ -21,9 +21,63 @@ const metaChars = new Set([' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>'])
 // Reserved words that only end a compound command; one at command start anywhere else is a syntax
 // error, as in Bash.
 const listEnds = ['then', 'elif', 'else', 'fi', 'do', 'done', 'esac', '}']
-// Constructs this parser does not model (a function body, a coprocess, a select menu, an arithmetic
-// command): reading them as plain words would hide the commands they run, so they fail closed.
+// The parser accepts only the subset of Bash it models completely and refuses the rest with
+// `unsupported` (a construct or command) or `unknown-expansion` (an expansion), so a construct it
+// cannot model never parses into fewer segments, routes or writes than bash runs. The plan rates
+// a command that does not parse as Caution (D-81), so a refusal costs only Safe auto-approval.
+//
+// Reserved words that start a construct this parser does not model (a function body, a
+// coprocess, a select menu); `((` (an arithmetic command) is refused next to them.
 const unsupportedWords = ['function', 'coproc', 'select']
+// Commands refused by name. Arithmetic evaluation runs the `$(...)` inside an array subscript (the
+// review reproduced it in bash 5.3 for let, printf -v, test -v, read and declare), and a variable
+// NAME operand may carry a subscript, so builtins that do arithmetic or assign to a NAME are
+// refused, as are builtins that change how later commands parse or run, and commands that run a
+// string or argv this parser does not model. The reasons come from bash(1) and the tools' man
+// pages; bash could not be run in this worktree to check them.
+const REFUSED_COMMANDS = Object.freeze({
+  let: 'evaluates every argument as arithmetic',
+  read: 'assigns to NAME operands, which may carry an array subscript',
+  mapfile: 'assigns to an array NAME and runs a -C callback',
+  readarray: 'assigns to an array NAME and runs a -C callback',
+  unset: 'takes NAME operands, which may carry an array subscript',
+  getopts: 'assigns to a NAME operand',
+  shopt: 'changes how later commands parse and run (lastpipe, extglob, expand_aliases)',
+  enable: 'loads or disables builtins, so a later command word may run something else',
+  alias: 'changes what a later command word runs',
+  hash: '-p binds a command name to any file',
+  compgen: 'expands a word list and runs -C and -F commands',
+  complete: 'registers -C and -F commands',
+  bind: '-x binds a shell command',
+  fc: 'runs commands again from the history',
+  jobs: '-x runs a command',
+  flock: 'runs a command or a -c string; not modelled',
+  script: 'runs a -c string or a shell and writes a typescript file; not modelled',
+  runuser: 'runs a command or a -c string as another user; not modelled',
+  chroot: 'runs a command under another root, where paths mean something else; not modelled',
+  watch: 'runs its arguments as an sh -c string, repeatedly; not modelled'
+})
+// Variables whose assignment may run code, refused wherever they are assigned: bash(1) expands PS4
+// like PS1 before each command it traces under xtrace, so a `$(...)` in it may run, and the dynamic
+// variables may hold the integer attribute, which makes an assignment an arithmetic evaluation.
+// Neither was run against bash here; the list errs on the side of refusing.
+const REFUSED_ASSIGNMENTS = Object.freeze(['PS4', 'SECONDS', 'RANDOM', 'SRANDOM', 'LINENO', 'HISTCMD', 'OPTIND', 'BASHPID', 'BASH_SUBSHELL', 'EPOCHSECONDS', 'EPOCHREALTIME', 'PPID', 'UID', 'EUID'])
+// `[[` evaluates the operands of these operators as arithmetic.
+const COND_ARITHMETIC = Object.freeze(['-eq', '-ne', '-lt', '-le', '-gt', '-ge'])
+// `-v NAME` evaluates a subscript in NAME; `-R NAME` looks a NAME up too. Refused in `[[`,
+// `test` and `[`.
+const NAME_TESTS = Object.freeze(['-v', '-R'])
+// The only `set -o` (and `bash -o`) option names accepted; any other option is refused.
+const SET_OPTION_NAMES = Object.freeze(['errexit', 'nounset', 'pipefail', 'xtrace'])
+// The only single-letter options accepted after `set` and on a shell's command line (`-c` is the
+// shell's own; `-l`, `-i` and `-s` change where it reads input and startup files, not the parse).
+const SET_LETTERS = 'eux'
+const SHELL_LETTERS = 'euxclis'
+const SHELL_LONG_OPTIONS = Object.freeze(['--norc', '--noprofile', '--login', '--noediting', '--rcfile', '--init-file'])
+const testUnary = new Set(['-a', '-b', '-c', '-d', '-e', '-f', '-g', '-h', '-k', '-p', '-r', '-s', '-t', '-u', '-w', '-x', '-G', '-L', '-N', '-O', '-S', '-z', '-n', '-o'])
+const testBinary = new Set(['=', '==', '!=', '<', '>', '-eq', '-ne', '-lt', '-le', '-gt', '-ge', '-nt', '-ot', '-ef', '-a', '-o'])
+const declareCommands = new Set(['declare', 'typeset', 'local', 'readonly', 'export'])
+const declareLetters = 'gprxfFlut'
 const redirectOps = ['&>>', '&>', '<<<', '<<-', '<<', '<>', '<&', '>>', '>|', '>&', '<', '>']
 const writeOps = new Set(['>', '>>', '>|', '&>', '&>>', '<>', '>&'])
 const substitutionKinds = new Set(['$(', '`', '<('])
@@ -133,6 +187,10 @@ class Parser {
         const lineStart = this.i
         this.i = end < 0 ? this.s.length : end + 1
         if (line === heredoc.delimiter) { bodyEnd = lineStart; break }
+        // In an unquoted body bash joins a backslash-newline before it compares a line with the
+        // delimiter (the review saw `EO\` + `F` end the body in bash 5.3). Not modelled: any body
+        // line ending in a backslash is refused.
+        if (!heredoc.quoted && line.endsWith('\\')) fail('unsupported')
       }
       if (bodyEnd < 0) fail('heredoc-delimiter')
       if (!heredoc.quoted) heredoc.redirect.subs = new Parser(this.s.slice(bodyStart, bodyEnd), this.depth, this.options).heredocSubs()
@@ -205,17 +263,31 @@ class Parser {
     }
   }
 
+  // `!` and the `time` keyword (with `-p` and `--`) may precede a pipeline in any order; what
+  // follows them is checked exactly as at command start. A timed simple command gets a keyword
+  // `time` word back in front, which the walker strips as the `time` wrapper with no options.
   parsePipeline() {
     const stages = []
     this.skipBlanks()
     let negated = false
-    while (this.atWord('!')) {
-      negated = true
-      this.i++
+    let timed = false
+    for (;;) {
+      if (this.atWord('!')) {
+        negated = true
+        this.i++
+      } else if (this.atWord('time')) {
+        timed = true
+        this.i += 4
+        this.skipBlanks()
+        while (this.atWord('-p')) { this.i += 2; this.skipBlanks() }
+        if (this.atWord('--')) this.i += 2
+      } else break
       this.skipBlanks()
     }
+    if (timed && !this.commandStartsAt()) return { negated, stages: [{ command: { type: 'simple', assigns: [], words: [keywordTime()], redirects: [] }, pipe: null }] }
     for (;;) {
       const command = this.parseCommand()
+      if (timed && !stages.length && command.type === 'simple') command.words.unshift(keywordTime())
       this.skipBlanks()
       if (this.s[this.i] === '|' && this.s[this.i + 1] !== '|') {
         const pipe = this.s[this.i + 1] === '&' ? '|&' : '|'
@@ -238,6 +310,7 @@ class Parser {
     if (this.atWord('if')) return this.parseIf()
     if (this.atWord('while') || this.atWord('until')) return this.parseLoop()
     if (this.atWord('for')) return this.parseFor()
+    if (this.atWord('[[')) return this.parseCond()
     if (this.s[this.i] === '(') {
       this.i++
       this.enter()
@@ -307,6 +380,7 @@ class Parser {
     while (isNameChar(this.s[j])) j++
     const after = this.s[j]
     if (!isNameStart(this.s[this.i]) || !(after === undefined || metaChars.has(after))) fail('syntax')
+    if (REFUSED_ASSIGNMENTS.includes(this.s.slice(this.i, j))) fail('unsupported')
     this.i = j
     const items = []
     this.skipNewlines()
@@ -330,6 +404,32 @@ class Parser {
     this.i += 4
     this.leave()
     return { type: 'group', kind: 'for', body, items, redirects: this.parseTrailingRedirects() }
+  }
+
+  // `[[ ... ]]` is one command whose operators (`&&`, `||`, `!`, `(`, `)`, `<`, `>`) are words, not
+  // list or redirect syntax; it becomes a simple command `[[ ... ]]` the walker checks. `=~` (its
+  // right side has its own lexing) and any other operator are refused.
+  parseCond() {
+    const words = [literalWord('[[')]
+    this.i += 2
+    for (;;) {
+      this.skipNewlines()
+      const char = this.s[this.i]
+      if (char === undefined) fail('syntax')
+      if (this.atWord(']]')) {
+        this.i += 2
+        words.push(literalWord(']]'))
+        break
+      }
+      const pair = this.s.slice(this.i, this.i + 2)
+      if (pair === '&&' || pair === '||') { words.push(literalWord(pair)); this.i += 2; continue }
+      if (char === '(' || char === ')' || char === '<' || char === '>') { words.push(literalWord(char)); this.i++; continue }
+      if (metaChars.has(char)) fail('unsupported')
+      const word = this.readWord()
+      if (word.text === '=~' && word.literal) fail('unsupported')
+      words.push(word)
+    }
+    return { type: 'simple', assigns: [], words, redirects: this.parseTrailingRedirects() }
   }
 
   parseTrailingRedirects() {
@@ -369,7 +469,9 @@ class Parser {
       if ((char === '<' || char === '>') && this.s[this.i + 1] === '(') { command.words.push(this.readProcessSubstitution()); continue }
       if (this.redirectAhead()) { command.redirects.push(this.parseRedirect()); continue }
       const word = this.readWord()
-      if (!command.words.length && /^[A-Za-z_]\w*=/.test(word.raw)) { command.assigns.push(word); continue }
+      if (!command.words.length && /^[A-Za-z_]\w*\+?=/.test(word.raw)) { command.assigns.push(word); continue }
+      // `NAME[subscript]=value` evaluates the subscript as arithmetic.
+      if (!command.words.length && /^[A-Za-z_]\w*\[/.test(word.raw)) fail('unsupported')
       command.words.push(word)
     }
     if (!command.words.length && !command.assigns.length && !command.redirects.length) fail('syntax')
@@ -510,12 +612,17 @@ class Parser {
     this.i++
   }
 
+  // `split` marks an expansion outside double quotes, whose result may split into several words.
   readDollar(word, inDouble) {
     const s = this.s
     const start = this.i
     const next = s[this.i + 1]
+    const unquoted = () => { if (!inDouble) word.split = true }
     if (next === '(') {
-      if (s[this.i + 2] === '(') return this.readArithmetic(word)
+      // Arithmetic expansion evaluates array subscripts held in variable values, which run their
+      // `$(...)`, so every `$((` is refused (as is `$[`).
+      if (s[this.i + 2] === '(') fail('unknown-expansion')
+      unquoted()
       this.i += 2
       this.enter()
       const list = this.parseList(')')
@@ -528,23 +635,18 @@ class Parser {
       return
     }
     if (next === '{') {
-      let j = this.i + 2
-      let depth = 1
-      for (; j < s.length; j++) {
-        const char = s[j]
-        if (char === '`' || (char === '$' && s[j + 1] === '(')) fail('unknown-expansion')
-        if (char === '\\') { j++; continue }
-        if (char === '{') depth++
-        else if (char === '}' && --depth === 0) break
-      }
-      if (j >= s.length) fail('unknown-expansion')
-      const inner = s.slice(this.i + 2, j)
-      if (inner === 'HOME' && this.homeExpands()) word.text += this.options.homeDir
+      // Only `${NAME}` and `${N}`. Every operator form is refused: bash scans quotes inside the
+      // braces by rules this parser does not model, `${v:off}` and `${a[i]}` evaluate arithmetic,
+      // `${v@P}` runs the `$(...)` in a value, `${!v}` is indirection and `${ cmd; }` runs cmd.
+      const match = /^\{([A-Za-z_]\w*|\d+)\}/.exec(s.slice(this.i + 1, this.i + 260))
+      if (!match) fail('unknown-expansion')
+      if (match[1] === 'HOME' && this.homeExpands()) word.text += this.options.homeDir
       else {
         word.expansion = true
-        word.text += s.slice(start, j + 1)
+        unquoted()
+        word.text += s.slice(start, this.i + 1 + match[0].length)
       }
-      this.i = j + 1
+      this.i += 1 + match[0].length
       return
     }
     if (next === "'" && !inDouble) return this.readAnsiC(word)
@@ -562,6 +664,7 @@ class Parser {
       if (name === 'HOME' && this.homeExpands()) word.text += this.options.homeDir
       else {
         word.expansion = true
+        unquoted()
         word.text += s.slice(start, j)
       }
       this.i = j
@@ -569,29 +672,13 @@ class Parser {
     }
     if (next !== undefined && '0123456789@*#?$!-'.includes(next)) {
       word.expansion = true
+      unquoted()
       word.text += `$${next}`
       this.i += 2
       return
     }
     word.text += '$'
     this.i++
-  }
-
-  readArithmetic(word) {
-    const s = this.s
-    const start = this.i
-    let depth = 0
-    let j = this.i + 1
-    for (; j < s.length; j++) {
-      const char = s[j]
-      if (char === '`' || (char === '$' && s[j + 1] === '(' && j !== start)) fail('unknown-expansion')
-      if (char === '(') depth++
-      else if (char === ')' && --depth === 0) break
-    }
-    if (j >= s.length || s[j - 1] !== ')') fail('unknown-expansion')
-    word.expansion = true
-    word.text += s.slice(start, j + 1)
-    this.i = j + 1
   }
 
   readAnsiC(word) {
@@ -642,6 +729,7 @@ class Parser {
     this.leave()
     word.subs.push({ kind: '`', list })
     word.expansion = true
+    if (!inDouble) word.split = true
     word.text += s.slice(this.i, j + 1)
     this.i = j + 1
   }
@@ -653,11 +741,34 @@ function parseString(text, depth, options) {
 }
 
 const literalWord = text => ({ text, raw: text, expansion: false, glob: false, quoted: false, literal: true, subs: [] })
+const keywordTime = () => ({ ...literalWord('time'), keyword: true })
 
+// getopt_long matching: an exact long option, or a unique prefix of one (`--targ` is
+// `--target-directory`). With `prefixes: false` (a tool that does not use getopt_long) only an
+// exact match counts. An ambiguous or unknown option is refused.
+function matchLong(name, known, prefixes = true) {
+  if (known.includes(name)) return name
+  const candidates = prefixes ? known.filter(option => option.startsWith(name)) : []
+  if (candidates.length === 1) return candidates[0]
+  fail('unsupported')
+}
+
+// Scan the options of a wrapper or a payload command. `flags` and `values` are the options the
+// plan names; `other` (with a value) and `extra` (without one) are known options that set
+// wrapperOptions; `optional` are long options whose value is only given as `--opt=value`, and
+// `attached` short options whose value is only the rest of their word (`-i{}`); `refuse` are long
+// options that are refused but listed, so a prefix is judged against the tool's whole list. With
+// `strict`, an option the spec does not know is refused, since the word after it may be its value
+// and reading that value as the command would hide the command.
 function scanOptions(words, start, spec, onValue = () => {}, onFlag = () => {}) {
   const flags = new Set(spec.flags ?? [])
   const values = new Set(spec.values ?? [])
   const other = new Set(spec.other ?? [])
+  const extra = new Set(spec.extra ?? [])
+  const optional = new Set(spec.optional ?? [])
+  const attached = new Set(spec.attached ?? [])
+  const refuse = new Set(spec.refuse ?? [])
+  const longs = [...flags, ...values, ...other, ...extra, ...optional, ...refuse].filter(option => option.startsWith('--'))
   let i = start
   while (i < words.length) {
     const word = words[i]
@@ -665,10 +776,17 @@ function scanOptions(words, start, spec, onValue = () => {}, onFlag = () => {}) 
     if (!word.literal) break
     if (text === '--') { i++; break }
     if (spec.assigns && /^[A-Za-z_]\w*=/.test(text)) { onValue('=', word); i++; continue }
+    if (text === '-' && spec.dashIsFlag) { onValue('-', null); i++; continue }
     if (!text.startsWith('-') || text === '-') break
+    if (spec.numeric && /^-\d+$/.test(text)) { i++; continue }
     if (text.startsWith('--')) {
       const equal = text.indexOf('=')
-      const name = equal < 0 ? text : text.slice(0, equal)
+      let name = equal < 0 ? text : text.slice(0, equal)
+      if (spec.strict) {
+        name = matchLong(name, longs, Boolean(spec.long))
+        if (refuse.has(name)) fail('unsupported')
+        if (equal >= 0 && (flags.has(name) || extra.has(name))) fail('unsupported')
+      }
       if (!flags.has(name) && !values.has(name)) onFlag(name)
       if (equal >= 0) { onValue(name, { ...literalWord(text.slice(equal + 1)), literal: word.literal }); i++ }
       else if (values.has(name) || other.has(name)) { onValue(name, words[i + 1]); i += 2 }
@@ -685,6 +803,11 @@ function scanOptions(words, start, spec, onValue = () => {}, onFlag = () => {}) 
         else { onValue(option, words[i + 1]); consumed = 2 }
         break
       }
+      if (attached.has(option)) {
+        onFlag(option)
+        break
+      }
+      if (spec.strict && !flags.has(option) && !extra.has(option)) fail('unsupported')
       if (!flags.has(option)) onFlag(option)
     }
     i += consumed
@@ -692,19 +815,26 @@ function scanOptions(words, start, spec, onValue = () => {}, onFlag = () => {}) 
   return Math.min(i, words.length)
 }
 
+// Option lists come from `--help` (nice, nohup, timeout, stdbuf, setsid, ionice) and the man pages
+// (env, sudo, pkexec) on the development machine; GNU time and doas are not installed there, so
+// their lists come from their documentation unchecked. `long` marks getopt_long (prefix) matching.
+// The `time` entry is GNU time (/usr/bin/time); the Bash keyword `time` takes no options here and
+// is handled by the parser.
 const wrapperSpecs = {
-  env: { flags: ['-i', '--ignore-environment', '-0', '--null'], values: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'], other: ['-a', '--argv0'], assigns: true },
-  command: { flags: ['-p'] },
-  builtin: {},
-  exec: { flags: ['-c', '-l'], other: ['-a'] },
-  time:{ flags: ['-p'], other: ['-f', '--format', '-o', '--output'] },
-  nice: { values: ['-n', '--adjustment'] },
-  nohup: {},
-  timeout: { flags: ['--preserve-status', '--foreground', '-v', '--verbose'], values: ['-s', '--signal', '-k', '--kill-after'] },
-  stdbuf: { values: ['-i', '-o', '-e', '--input', '--output', '--error'] },
-  sudo: { other: ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-r', '--role', '-t', '--type', '-U', '--other-user', '-T', '--command-timeout'], assigns: true },
-  doas: { other: ['-u', '-C'] },
-  pkexec: { other: ['--user'] }
+  env: { strict: true, long: true, assigns: true, dashIsFlag: true, flags: ['-i', '--ignore-environment', '-0', '--null'], values: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'], other: ['-a', '--argv0'], extra: ['-v', '--debug', '--list-signal-handling'], optional: ['--block-signal', '--default-signal', '--ignore-signal'], refuse: ['--help', '--version'] },
+  command: { strict: true, flags: ['-p'] },
+  builtin: { strict: true },
+  exec: { strict: true, flags: ['-c', '-l'], other: ['-a'] },
+  time: { strict: true, long: true, flags: ['-p', '--portability'], other: ['-f', '--format', '-o', '--output'], extra: ['-a', '--append', '-v', '--verbose', '-q', '--quiet'], refuse: ['--help', '--version'] },
+  nice: { strict: true, long: true, numeric: true, values: ['-n', '--adjustment'], refuse: ['--help', '--version'] },
+  nohup: { strict: true, long: true, refuse: ['--help', '--version'] },
+  timeout: { strict: true, long: true, flags: ['--preserve-status', '-p', '--foreground', '-f', '-v', '--verbose'], values: ['-s', '--signal', '-k', '--kill-after'], refuse: ['--help', '--version'] },
+  stdbuf: { strict: true, long: true, values: ['-i', '-o', '-e', '--input', '--output', '--error'], refuse: ['--help', '--version'] },
+  sudo: { strict: true, long: true, assigns: true, other: ['-u', '--user', '-g', '--group', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-r', '--role', '-t', '--type', '-U', '--other-user', '-T', '--command-timeout', '-a', '--auth-type', '-c', '--login-class'], extra: ['-A', '--askpass', '-B', '--bell', '-b', '--background', '-E', '-H', '--set-home', '-i', '--login', '-k', '--reset-timestamp', '-N', '--no-update', '-n', '--non-interactive', '-P', '--preserve-groups', '-S', '--stdin', '-s', '--shell'], optional: ['--preserve-env'], refuse: ['--help', '--version', '--edit', '--list', '--validate', '--remove-timestamp', '--chroot', '--host'] },
+  doas: { strict: true, other: ['-u', '-C', '-a'], extra: ['-L', '-n', '-s'] },
+  pkexec: { strict: true, other: ['--user'], extra: ['--disable-internal-agent', '--keep-cwd'] },
+  setsid: { strict: true, long: true, extra: ['-c', '--ctty', '-f', '--fork', '-w', '--wait'], refuse: ['--help', '--version'] },
+  ionice: { strict: true, long: true, other: ['-c', '--class', '-n', '--classdata'], extra: ['-t', '--ignore'], refuse: ['--pid', '--pgid', '--uid', '--help', '--version'] }
 }
 
 const runnerValues = {
@@ -855,6 +985,9 @@ class Walker {
     const ranges = []
     this.pipelines.push(ranges)
     const single = pipeline.stages.length === 1
+    // Every stage of a multi-stage pipeline gets its own copy of the context, so a `cd` in any
+    // stage leaves the shell directory alone. Bash runs the last stage in the current shell only
+    // under `shopt -s lastpipe`, and `shopt` (and `bash -O`) is refused.
     pipeline.stages.forEach((stage, index) => {
       const stageCtx = single ? ctx : { ...ctx }
       const start = this.segments.length
@@ -934,6 +1067,7 @@ class Walker {
     }
     if (!rest.length || !rest[0].literal) return
     const name = commandBase(rest[0].text)
+    refuseUnmodelled(name, rest)
     this.assignmentsOf(name, rest, segment)
     this.payloads(name, rest, segment, ctx)
     this.writeTargets(name, rest, segment)
@@ -946,27 +1080,39 @@ class Walker {
     }
   }
 
+  // `popd`, `pushd` (stack rotation, and CDPATH as for cd), `cd -` (OLDPWD) and a non-literal
+  // target give an unknown directory. A cd target whose first component is not `/`, `.` or `..` is
+  // looked up in CDPATH first (POSIX cd; the review saw bash 5.3 follow CDPATH for `.ssh`), and
+  // CDPATH may be assigned in the command or inherited, so such a target gives an unknown
+  // directory too.
   changeDirectory(name, words, dir) {
-    if (name === 'popd') return null
+    if (name !== 'cd') return null
     let i = 1
     while (i < words.length && /^-[LPe@]+$/.test(words[i].text)) i++
     if (words[i]?.text === '--') i++
     const target = words[i]
     if (!target) return this.options.homeDir && !this.options.homeAssigned ? this.options.homeDir : null
-    if (!target.literal || target.text === '-' || target.text.startsWith('+')) return null
-    return resolvePath(target.text, dir)
+    if (!target.literal) return null
+    const text = target.text
+    if (!(text.startsWith('/') || text === '.' || text === '..' || text.startsWith('./') || text.startsWith('../'))) return null
+    return resolvePath(text, dir)
   }
 
   assignmentsOf(name, words, segment) {
-    if (!['export', 'declare', 'typeset', 'local', 'readonly'].includes(name)) return
+    if (!declareCommands.has(name)) return
     for (const word of words.slice(1)) {
-      if (/^[A-Za-z_]\w*=/.test(word.text)) segment.assignments.push({ ...assignment(word), exported: true })
+      if (/^[A-Za-z_]\w*\+?=/.test(word.text)) segment.assignments.push({ ...assignment(word), exported: true })
     }
   }
 
   stripWrappers(words, segment, ctx) {
     let i = 0
     while (i < words.length && words[i].literal) {
+      if (words[i].keyword) {
+        segment.wrappers.push('time')
+        i++
+        continue
+      }
       const name = commandBase(words[i].text)
       const next = words[i + 1]
       let runner = null
@@ -1003,6 +1149,9 @@ class Walker {
         if (name === 'env' && (option === '-C' || option === '--chdir') && value) segment.cwd = value.literal ? resolvePath(value.text, segment.cwd) : null
         if (name === 'sudo' && (option === '-D' || option === '--chdir') && value) segment.cwd = value.literal ? resolvePath(value.text, segment.cwd) : null
         if (name === 'env' && (option === '-S' || option === '--split-string')) split = value ?? null
+        // GNU time writes its report to the -o file (its documentation; GNU time is not installed
+        // here, so this was not run).
+        if (name === 'time' && (option === '-o' || option === '--output')) this.addWrite(segment, value, 'time -o')
       }
       const onFlag = () => { segment.wrapperOptions = true }
       let j = i + 1
@@ -1026,7 +1175,7 @@ class Walker {
     const depth = ctx.depth + 1
     const list = parseString(text, depth, this.options)
     const remote = Boolean(ctx.remote || extra.remote)
-    this.walkList(list, { dir: remote ? null : segment.cwd, depth, payloadOf: segment.index, via, remote, wrappers: extra.wrappers })
+    this.walkList(list, { dir: remote || extra.unknownDir ? null : segment.cwd, depth, payloadOf: segment.index, via, remote, wrappers: extra.wrappers })
   }
 
   opaquePayload(words, segment, ctx, via, remote = false) {
@@ -1052,6 +1201,7 @@ class Walker {
   payloads(name, words, segment, ctx) {
     if (shellSet.has(name)) return this.shellPayload(name, words, segment, ctx)
     if (name === 'eval') return this.stringPayload(words.slice(1), segment, ctx, 'eval')
+    if (name === 'trap') return this.trapPayload(words, segment, ctx)
     if (name === 'su') return this.suPayload(words, segment, ctx)
     if (name === 'xargs') return this.argvPayload(words.slice(xargsCommandIndex(words)), segment, ctx, 'xargs')
     if (name === 'find') return this.findPayloads(words, segment, ctx)
@@ -1062,6 +1212,10 @@ class Walker {
     if (name === 'kubectl') return this.kubectlPayload(words, segment, ctx)
   }
 
+  // Shell options are limited to SHELL_LETTERS, `-o` with SET_OPTION_NAMES and SHELL_LONG_OPTIONS;
+  // anything else (`-O lastpipe`, `-k`, `--posix`) changes how the payload runs and is refused. A
+  // non-literal word that stands where an option may and could split, or has words after it (so
+  // it could be `-c` and the next word the script), gives an opaque payload.
   shellPayload(name, words, segment, ctx) {
     let i = 1
     let command = false
@@ -1069,13 +1223,30 @@ class Walker {
       const text = words[i].text
       if (text === '--' || text === '-') { i++; break }
       if (text === '--rcfile' || text === '--init-file') { i += 2; continue }
-      if (text.startsWith('--')) { i++; continue }
+      if (text.startsWith('--')) {
+        if (!SHELL_LONG_OPTIONS.includes(text)) fail('unsupported')
+        i++
+        continue
+      }
       if (/^[-+][A-Za-z]+$/.test(text)) {
+        let consumed = 1
+        for (const letter of text.slice(1)) {
+          if (letter === 'o') {
+            const option = words[i + consumed]
+            if (option && (!option.literal || !SET_OPTION_NAMES.includes(option.text))) fail('unsupported')
+            consumed++
+          } else if (!SHELL_LETTERS.includes(letter)) fail('unsupported')
+        }
         if (text[0] === '-' && text.includes('c')) command = true
-        i += 1 + [...text].filter(char => char === 'o' || char === 'O').length
+        i += consumed
         continue
       }
       break
+    }
+    const open = words[i]
+    if (open && !open.literal && (open.split || open.glob || i + 1 < words.length)) {
+      this.opaquePayload(words.slice(i), segment, ctx, command ? `${name} -c` : name)
+      return
     }
     if (!command || i >= words.length) return
     const script = words[i]
@@ -1083,14 +1254,36 @@ class Walker {
     else this.opaquePayload([script], segment, ctx, `${name} -c`)
   }
 
+  // `su [options] [-] [user [args]]`: `-c`, `--command` and `--session-command` give a string
+  // payload, and the args after the user are handed to the user's shell (`su root -c cmd`).
   suPayload(words, segment, ctx) {
     let script = null
-    scanOptions(words, 1, { flags: ['-', '-l', '--login', '-m', '-p', '--preserve-environment', '-P', '--pty'], values: ['-c', '--command', '-s', '--shell', '-g', '--group', '-G', '--supp-group', '-w', '--whitelist-environment'] }, (option, value) => {
-      if (option === '-c' || option === '--command') script = value
+    const spec = { strict: true, long: true, dashIsFlag: true, flags: ['-f', '--fast', '-l', '--login', '-m', '-p', '--preserve-environment', '-P', '--pty', '-T', '--no-pty'], values: ['-c', '--command', '--session-command', '-s', '--shell', '-g', '--group', '-G', '--supp-group', '-w', '--whitelist-environment'], refuse: ['--help', '--version'] }
+    let i = scanOptions(words, 1, spec, (option, value) => {
+      if (option === '-c' || option === '--command' || option === '--session-command') script = value ?? null
     })
-    if (!script) return
-    if (script.literal) this.payloadString(script.text, segment, ctx, 'su -c', { wrappers: ['su'] })
-    else this.opaquePayload([script], segment, ctx, 'su -c')
+    if (script) {
+      if (script.literal) this.payloadString(script.text, segment, ctx, 'su -c', { wrappers: ['su'] })
+      else this.opaquePayload([script], segment, ctx, 'su -c')
+    }
+    if (words[i]?.literal && words[i].text === '-') i++
+    i++
+    if (i < words.length) this.shellPayload('su', [literalWord('sh'), ...words.slice(i)], segment, ctx)
+  }
+
+  // `trap [-lpP] [--] ACTION SIGNAL...`: ACTION is a string payload. It runs when the signal
+  // arrives, after later commands may have changed the directory, so its directory is unknown.
+  trapPayload(words, segment, ctx) {
+    let i = 1
+    while (i < words.length && words[i].literal && words[i].text.startsWith('-') && words[i].text !== '-') {
+      const text = words[i].text
+      if (text === '--') { i++; break }
+      if (/^-[lpP]+$/.test(text)) return
+      fail('unsupported')
+    }
+    const operands = words.slice(i)
+    if (operands.length < 2 || (operands[0].literal && operands[0].text === '-')) return
+    this.stringPayload([operands[0]], segment, ctx, 'trap', { unknownDir: true })
   }
 
   findPayloads(words, segment, ctx) {
@@ -1116,17 +1309,36 @@ class Walker {
     }
   }
 
+  // GNU parallel: only the options listed here are accepted, each exactly (`--jobs=4` and `-j4`
+  // too); any other option is refused. With no command, every `:::` argument becomes a payload
+  // and input from stdin or a `::::` file gives an opaque payload, since parallel(1) runs its input
+  // as commands then (parallel is not installed here, so this was not run).
   parallelPayload(words, segment, ctx) {
     const values = new Set(['-j', '--jobs', '-S', '--sshlogin', '-a', '--arg-file', '--colsep', '-d', '--delimiter', '-I', '--results', '--joblog', '-n', '--max-args', '-N', '-L', '--delay', '--timeout', '--tag-string', '--workdir', '--wd', '--tmpdir', '-E'])
+    const flags = new Set(['-k', '--keep-order', '--will-cite', '--bar', '--eta', '--progress', '--line-buffer', '-u', '--ungroup', '--group', '-v', '--verbose', '--tag'])
+    const separator = /^::::?\+?$/
     let i = 1
-    while (i < words.length && words[i].literal && words[i].text.startsWith('-') && !words[i].text.startsWith(':::')) {
+    while (i < words.length && words[i].literal && words[i].text.startsWith('-') && !separator.test(words[i].text)) {
       const text = words[i].text
       if (text === '--') { i++; break }
-      i += values.has(text) ? 2 : 1
+      const name = text.startsWith('--') ? text.split('=')[0] : text.slice(0, 2)
+      const attachedValue = text.startsWith('--') ? text.includes('=') : text.length > 2
+      if (values.has(name)) i += attachedValue ? 1 : 2
+      else if (flags.has(text)) i++
+      else fail('unsupported')
     }
     let end = i
-    while (end < words.length && !/^::::?\+?$/.test(words[end].text)) end++
-    this.stringPayload(words.slice(i, end), segment, ctx, 'parallel')
+    while (end < words.length && !separator.test(words[end].text)) end++
+    if (end > i) {
+      this.stringPayload(words.slice(i, end), segment, ctx, 'parallel')
+      return
+    }
+    const sources = words.slice(end)
+    if (!sources.length || sources.some(word => word.text !== ':::' && separator.test(word.text))) {
+      this.opaquePayload(sources, segment, ctx, 'parallel')
+      return
+    }
+    for (const word of sources) if (word.text !== ':::') this.stringPayload([word], segment, ctx, 'parallel')
   }
 
   sshPayload(words, segment, ctx) {
@@ -1246,12 +1458,16 @@ class Walker {
       if (options && text === '--') { options = false; continue }
       if (!options || !word.literal || !text.startsWith('-') || text === '-') { operands.push(word); continue }
       if (text.startsWith('--')) {
-        const [option, ...valueParts] = text.split('=')
+        const [typed, ...valueParts] = text.split('=')
         const value = valueParts.length ? { ...word, text: valueParts.join('=') } : null
-        if (values.has(option) && !value) {
+        const longs = copyLongOptions[name]
+        const option = matchLong(typed, [...longs.required, ...longs.optional, ...longs.none])
+        if (value && longs.none.includes(option)) fail('unsupported')
+        if (longs.required.includes(option) && !value) {
           if (option === '--target-directory') targetDir = words[k + 1]
           k++
         } else if (option === '--target-directory') targetDir = value
+        if (option === '--directory' && name === 'install') directories = true
         continue
       }
       for (let c = 1; c < text.length; c++) {
@@ -1531,34 +1747,110 @@ class Walker {
 
 function assignment(word) {
   const equal = word.text.indexOf('=')
-  return { name: word.text.slice(0, equal), value: word.text.slice(equal + 1), literal: word.literal }
+  const name = word.text.slice(0, equal).replace(/\+$/, '')
+  if (REFUSED_ASSIGNMENTS.includes(name)) fail('unsupported')
+  return { name, value: word.text.slice(equal + 1), literal: word.literal }
 }
 
-function xargsCommandIndex(words) {
-  const values = new Set(['-I', '-L', '-n', '-P', '-s', '-E', '-d', '-a'])
-  const longValues = new Set(['--arg-file', '--delimiter', '--max-args', '--max-procs', '--max-chars', '--process-slot-var'])
-  const attachedOnly = new Set(['-i', '-l', '-e'])
-  let i = 1
-  while (i < words.length && words[i].literal) {
-    const text = words[i].text
-    if (text === '--') return i + 1
-    if (!text.startsWith('-') || text === '-') break
-    if (text.startsWith('--')) {
-      i += longValues.has(text) ? 2 : 1
+// Refuse a command REFUSED_COMMANDS names, and the forms of `[[`, `test`/`[`, the declare family,
+// `printf`, `wait` and `set` that do arithmetic, assign to a NAME or change how bash runs.
+function refuseUnmodelled(name, words) {
+  if (Object.hasOwn(REFUSED_COMMANDS, name)) fail('unsupported')
+  const args = words.slice(1)
+  if (name === '[[') {
+    if (args.some(word => COND_ARITHMETIC.includes(word.text) || NAME_TESTS.includes(word.text) || /^[A-Za-z_]\w*\[/.test(word.text))) fail('unsupported')
+  } else if (name === 'test' || name === '[') {
+    const last = args.at(-1)
+    refuseTest(name === '[' && last?.literal && last.text === ']' ? args.slice(0, -1) : args)
+  } else if (declareCommands.has(name)) refuseDeclare(args)
+  else if (name === 'printf') {
+    if (args[0] && (!args[0].literal || args[0].text.startsWith('-v'))) fail('unsupported')
+  } else if (name === 'wait') {
+    for (const word of args) {
+      if (word.literal ? /^-\w*p/.test(word.text) : !/^"?\$[!$?#]"?$/.test(word.raw)) fail('unsupported')
+    }
+  } else if (name === 'set') refuseSet(args)
+}
+
+// `test` and `[` do no arithmetic (bash(1)), but `-v NAME` evaluates a subscript in NAME (the
+// review reproduced it in bash 5.3) and `-R NAME` looks a NAME up too. A non-literal operand
+// could expand to `-v`, so one is accepted only where the argument count and the literal
+// operators fix it as an operand by the POSIX test rules: one argument, `OP x`, `! x`, `x OP y`,
+// `! OP x`, `( x )` and `! x OP y`, and never when it may split into several words.
+function refuseTest(args) {
+  if (args.some(word => NAME_TESTS.includes(word.text))) fail('unsupported')
+  if (args.every(word => word.literal)) return
+  if (args.some(word => !word.literal && (word.split || word.glob))) fail('unsupported')
+  const is = (k, set) => Boolean(args[k]?.literal && (typeof set === 'string' ? args[k].text === set : set.has(args[k].text)))
+  const n = args.length
+  if (n === 1) return
+  if (n === 2 && (is(0, testUnary) || is(0, '!'))) return
+  if (n === 3 && (is(1, testBinary) || (is(0, '!') && is(1, testUnary)) || (is(0, '(') && is(2, ')')))) return
+  if (n === 4 && is(0, '!') && is(2, testBinary)) return
+  fail('unsupported')
+}
+
+// declare, typeset, local, readonly and export: options only from declareLetters (so no -i, -a,
+// -A or -n), and every other argument a literal NAME or NAME=value with no subscript.
+function refuseDeclare(args) {
+  let options = true
+  for (const word of args) {
+    if (options && word.literal && word.text === '--') { options = false; continue }
+    if (options && word.literal && /^[-+]./.test(word.text)) {
+      if ([...word.text.slice(1)].some(letter => !declareLetters.includes(letter))) fail('unsupported')
       continue
     }
-    let consumed = 1
-    for (let k = 1; k < text.length; k++) {
-      const option = `-${text[k]}`
-      if (values.has(option)) {
-        if (k === text.length - 1) consumed = 2
-        break
-      }
-      if (attachedOnly.has(option)) break
-    }
-    i += consumed
+    if (!/^[A-Za-z_]\w*(?:\+?=|$)/.test(word.raw)) fail('unsupported')
   }
-  return Math.min(i, words.length)
+}
+
+// set: only SET_LETTERS and `-o` with SET_OPTION_NAMES (either sign); the words after `--`, `-`
+// or the first positional parameter are positional parameters.
+function refuseSet(args) {
+  const pattern = new RegExp(`^[-+]([${SET_LETTERS}]*)(o?)$`)
+  for (let k = 0; k < args.length; k++) {
+    const word = args[k]
+    if (!word.literal) fail('unsupported')
+    if (word.text === '--' || word.text === '-' || !/^[-+]/.test(word.text)) return
+    const match = pattern.exec(word.text)
+    if (!match) fail('unsupported')
+    if (!match[2] || k + 1 >= args.length) continue
+    const option = args[++k]
+    if (!option.literal || !SET_OPTION_NAMES.includes(option.text)) fail('unsupported')
+  }
+}
+
+// The long options of GNU cp, mv, ln and install, from `<tool> --help` (GNU coreutils 9.11): those that
+// need a value, those that take one only as `--opt=value`, and those that take none. They are
+// matched as getopt_long does (any unique prefix); an unknown or ambiguous one is refused.
+const copyLongOptions = {
+  cp: {
+    required: ['--no-preserve', '--sparse', '--suffix', '--target-directory'],
+    optional: ['--backup', '--context', '--preserve', '--reflink', '--update'],
+    none: ['--archive', '--attributes-only', '--copy-contents', '--debug', '--dereference', '--force', '--help', '--interactive', '--keep-directory-symlink', '--link', '--no-clobber', '--no-dereference', '--no-target-directory', '--one-file-system', '--parents', '--recursive', '--remove-destination', '--strip-trailing-slashes', '--symbolic-link', '--verbose', '--version']
+  },
+  mv: {
+    required: ['--suffix', '--target-directory'],
+    optional: ['--backup', '--update'],
+    none: ['--context', '--debug', '--exchange', '--force', '--help', '--interactive', '--no-clobber', '--no-copy', '--no-target-directory', '--strip-trailing-slashes', '--verbose', '--version']
+  },
+  ln: {
+    required: ['--suffix', '--target-directory'],
+    optional: ['--backup'],
+    none: ['--directory', '--force', '--help', '--interactive', '--logical', '--no-dereference', '--no-target-directory', '--physical', '--relative', '--symbolic', '--verbose', '--version']
+  },
+  install: {
+    required: ['--group', '--mode', '--owner', '--strip-program', '--suffix', '--target-directory'],
+    optional: ['--backup', '--context'],
+    none: ['--compare', '--debug', '--directory', '--help', '--no-target-directory', '--preserve-context', '--preserve-timestamps', '--strip', '--verbose', '--version']
+  }
+}
+
+// GNU findutils xargs options (xargs(1)); an unknown or ambiguous option is refused.
+const xargsSpec = { strict: true, long: true, extra: ['-0', '--null', '-o', '--open-tty', '-p', '--interactive', '-r', '--no-run-if-empty', '-t', '--verbose', '--show-limits', '-x', '--exit'], other: ['-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-L', '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars', '--process-slot-var'], optional: ['--eof', '--replace', '--max-lines'], attached: ['-e', '-i', '-l'], refuse: ['--help', '--version'] }
+
+function xargsCommandIndex(words) {
+  return scanOptions(words, 1, xargsSpec)
 }
 
 // HOME can be reassigned by `HOME=`, `for HOME in`, `read HOME`, `{HOME}>f` and more, so any bare
@@ -1569,10 +1861,16 @@ function mayAssignHome(command) {
 }
 
 /**
- * Parse a Bash command into segments for the classifier (docs/deck/07-approvals.md 3.3). Fails
- * closed: anything the tokenizer does not understand returns `{ ok: false, reason }`, and a
- * construct it does not model (a `function` body, `coproc`, `select`, `((...))`, `for ((...))`)
- * returns `{ ok: false, reason: 'unsupported' }`.
+ * Parse a Bash command into segments for the classifier (docs/deck/07-approvals.md 3.3). It
+ * accepts only a modelled subset of Bash and refuses the rest with `{ ok: false, reason }`:
+ * `unclosed-quote`, `heredoc-delimiter`, `syntax`, `too-deep`, `too-large`, `nul` and
+ * `not-a-string` for input it cannot tokenize; `unknown-expansion` for `$((`, `$[`, every `${...}`
+ * other than `${NAME}` and `${N}`, and an unknown `$'\x'` escape; and `unsupported` for `function`,
+ * `coproc`, `select`, `((`, `for ((`, an assignment with a subscript or to REFUSED_ASSIGNMENTS, a
+ * command in REFUSED_COMMANDS, the arithmetic and NAME forms of `[[`, `test`, `[`, the declare
+ * family, `printf -v`, `wait -p`, `set` and shell options outside the accepted ones, `[[ =~`, an
+ * unquoted heredoc body line ending in a backslash, and an unknown or ambiguous option of a
+ * wrapper, of `xargs`, `su`, `trap`, `parallel`, or a long option of `cp`, `mv`, `ln`, `install`.
  *
  * Each segment is `{ index, words, wordInfo, literal, assignments, redirects, wrappers,
  * wrapperOptions, payloadOf, via, depth, cwd, remote, writes, mounts, privileged, pipeline, stage,

