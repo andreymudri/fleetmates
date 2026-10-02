@@ -213,6 +213,17 @@ test('TerminalView renders its labelled section and skeleton under renderToStati
   assert.equal(terminalOptions({ readOnly: false, connected: false }).disableStdin, true)
 })
 
+test('motionReduced honours the OS query and Settings "Always reduce motion" (data-motion="reduce" on the root)', async () => {
+  const { motionReduced } = await load('components/TerminalView.jsx')
+  const media = matches => () => ({ matches })
+  const root = motion => ({ getAttribute: name => name === 'data-motion' ? motion : null })
+  assert.equal(motionReduced({ matchMedia: media(false), root: root('reduce') }), true, 'the Settings preference alone reduces motion')
+  assert.equal(motionReduced({ matchMedia: media(true), root: root(null) }), true, 'the OS preference alone reduces motion')
+  assert.equal(motionReduced({ matchMedia: media(false), root: root('system') }), false)
+  assert.equal(motionReduced({ matchMedia: media(false), root: root(null) }), false)
+  assert.equal(motionReduced({}), false, 'no window and no document reads as motion allowed')
+})
+
 test('ConfirmDialog is a labelled modal dialog with Cancel first and marked for initial focus', async () => {
   const { ConfirmDialog } = await load('components/ConfirmDialog.jsx')
   const html = renderToStaticMarkup(createElement(ConfirmDialog, {
@@ -371,6 +382,24 @@ test('a mounted TerminalView stays writable after a session switch and gates ter
   await page.waitForFunction(() => !document.querySelector('.xterm-helper-textarea')?.readOnly, null, { timeout: 5000 })
   await typeInto('cd')
   assert.deepEqual(await h(() => window.h.writes.splice(0)), [['sessB', 'c'], ['sessB', 'd']], 'the terminal is writable for the new session')
+
+  // The caret blinks while motion is allowed and stops, without a remount, when Settings sets data-motion="reduce"
+  // or the OS preference turns to reduce.
+  const caret = async blink => {
+    await page.waitForFunction(on => {
+      const cursor = document.querySelector('.xterm-rows .xterm-cursor:is(.xterm-cursor-block, .xterm-cursor-bar, .xterm-cursor-underline)')
+      return !!cursor && cursor.classList.contains('xterm-cursor-blink') === on
+    }, blink, { timeout: 5000 })
+  }
+  await caret(true)
+  await h(() => document.documentElement.setAttribute('data-motion', 'reduce'))
+  await caret(false)
+  await h(() => document.documentElement.removeAttribute('data-motion'))
+  await caret(true)
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await caret(false)
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+  await caret(true)
 
   // OSC 8 links: click each word and record what the handler did.
   await h(() => window.h.handlers.sessB.onOutput(new TextEncoder().encode(

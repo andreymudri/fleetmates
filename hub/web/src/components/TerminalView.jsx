@@ -48,6 +48,18 @@ export function terminalOptions({ readOnly = false, connected = false, screenRea
   }
 }
 
+const REDUCE_QUERY = '(prefers-reduced-motion: reduce)'
+
+/**
+ * Whether motion is reduced: the OS `prefers-reduced-motion` query, or Settings "Always reduce motion",
+ * which the shell writes as `data-motion="reduce"` on the document root.
+ * @param {{ matchMedia?: (query: string) => { matches: boolean }, root?: { getAttribute: (name: string) => string|null } | null }} [scope]
+ * @returns {boolean}
+ */
+export function motionReduced({ matchMedia, root } = {}) {
+  return !!matchMedia?.(REDUCE_QUERY)?.matches || root?.getAttribute?.('data-motion') === 'reduce'
+}
+
 function cssVar(element, name, fallback) {
   try {
     const value = globalThis.getComputedStyle?.(element).getPropertyValue(name).trim()
@@ -128,7 +140,7 @@ export function TerminalView({
     let focused = false
     let pasting = false
     const cleanups = []
-    const reducedMotion = !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    const scope = { matchMedia: globalThis.matchMedia?.bind(globalThis), root: globalThis.document?.documentElement ?? null }
     // A new session (or client) starts detached and unpainted, so the stdin effect re-runs on its attach.
     setConnected(false)
     setWaiting(false)
@@ -138,8 +150,9 @@ export function TerminalView({
     ;(async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')])
       if (disposed) return
+      // Motion is read here, after the import: the shell can set data-motion while xterm loads.
       term = new Terminal({
-        ...terminalOptions({ readOnly: latest.current.readOnly, connected: false, screenReaderMode, reducedMotion, theme: themeFor(section.current) }),
+        ...terminalOptions({ readOnly: latest.current.readOnly, connected: false, screenReaderMode, reducedMotion: motionReduced(scope), theme: themeFor(section.current) }),
         linkHandler: {
           allowNonHttpProtocols: false,
           activate: (_event, uri) => handleLink(uri, {
@@ -157,6 +170,17 @@ export function TerminalView({
       try { fit.fit() } catch {}
       term.attachCustomKeyEventHandler(event => !isGlobalChord(event))
       if (initialText) term.write(initialText)
+
+      // The caret blink follows both motion preferences as they change, without a remount.
+      const syncMotion = () => { term.options.cursorBlink = !motionReduced(scope) }
+      const query = scope.matchMedia?.(REDUCE_QUERY)
+      query?.addEventListener?.('change', syncMotion)
+      cleanups.push(() => query?.removeEventListener?.('change', syncMotion))
+      if (scope.root && globalThis.MutationObserver) {
+        const motion = new MutationObserver(syncMotion)
+        motion.observe(scope.root, { attributes: true, attributeFilter: ['data-motion'] })
+        cleanups.push(() => motion.disconnect())
+      }
 
       const textarea = term.textarea
       const onFocus = () => { focused = true

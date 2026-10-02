@@ -714,10 +714,8 @@ if (import.meta.main) {
     assert.deepEqual(page.errors, [])
   })
 
-  // Product gap found by this suite: TeamRunView counts a lead that claims no task as one more worker
-  // (hub/web/src/screens/team-run/TeamRun.jsx:459, `total = working + (lead && !claim ? 1 : 0)`), and a lead the
-  // run join detects never claims one (runRef.taskId is null), so the canvas run reads "2 of 5 need you".
-  spec('Team AC2: the header pill of the canvas run reads 2 of 4 need you', { todo: 'TeamRun.jsx:459 counts the unclaimed lead as a fifth worker: the pill reads "2 of 5 need you"' }, async t => {
+  // A lead the run join detects claims no task (runRef.taskId is null), so it is not counted as a worker (TEAM-O7).
+  spec('Team AC2: the header pill of the canvas run reads 2 of 4 need you', async t => {
     const { h } = await teamDeck(t)
     const page = await openDeck(browser, h, teamRoute)
     await page.waitForSelector('.team-task')

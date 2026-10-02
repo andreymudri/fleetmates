@@ -47,16 +47,20 @@ function element(token, children, key) {
   return createElement(token.tag, props, ...children)
 }
 
-// Leaf tokens: text stays text; html_block, html_inline and image tokens (and anything unknown) are dropped.
+// Untrusted plan text through `shown`, except the line feeds and tabs that lay out code blocks.
+const plain = text => String(text ?? '').replace(/[^\n\t]+/g, part => shown(part))
+
+// Leaf tokens: text stays text, with controls, format and default-ignorable characters shown as visible
+// `<U+XXXX>` tokens by `plain`; html_block, html_inline and image tokens (and anything unknown) are dropped.
 function leaf(token, key, build) {
   switch (token.type) {
     case 'inline': return createElement(React.Fragment, { key }, ...build(token.children ?? []))
-    case 'text': return token.content
-    case 'code_inline': return createElement('code', { key }, token.content)
+    case 'text': return plain(token.content)
+    case 'code_inline': return createElement('code', { key }, plain(token.content))
     case 'softbreak': return '\n'
     case 'hardbreak': return createElement('br', { key })
     case 'code_block':
-    case 'fence': return createElement('pre', { key }, createElement('code', null, token.content))
+    case 'fence': return createElement('pre', { key }, createElement('code', null, plain(token.content)))
     case 'hr': return createElement('hr', { key })
     default: return null
   }
@@ -86,8 +90,9 @@ function build(tokens) {
 
 /**
  * Render plan markdown as React elements by mapping markdown-it tokens (`html: false`); no HTML string
- * is ever injected. Raw HTML in the source shows as text, links render only for `http:` and `https:`,
- * and images are not rendered.
+ * is ever injected. Text, inline code and code blocks pass through `shown` (line feeds and tabs kept),
+ * so control, format and bidi characters show as `<U+XXXX>` tokens. Raw HTML in the source shows as
+ * text, links render only for `http:` and `https:`, and images are not rendered.
  * @param {string} markdown
  * @returns {React.ReactNode[]}
  */
@@ -119,7 +124,7 @@ export function PlanDrawerView({ plan, error = null, openError = null, opening =
   const label = translate(t, PLAN_COPY, 'team.plan.label')
   return (
     <div className="plan-backdrop">
-      <aside ref={panelRef} className="plan-drawer" role="dialog" aria-modal="true" aria-labelledby="plan-drawer-title" onKeyDown={onKeyDown}>
+      <section ref={panelRef} className="plan-drawer" role="dialog" aria-modal="true" aria-labelledby="plan-drawer-title" onKeyDown={onKeyDown}>
         <header className="plan-header">
           <h2 className="plan-title" id="plan-drawer-title">{label}</h2>
           {plan?.path ? <code className="plan-path">{shown(plan.path)}</code> : null}
@@ -140,7 +145,7 @@ export function PlanDrawerView({ plan, error = null, openError = null, opening =
             {[0, 1, 2, 3].map(index => <div key={index} className="plan-skeleton motion-shimmer" aria-hidden="true" />)}
           </div>
         )}
-      </aside>
+      </section>
     </div>
   )
 }

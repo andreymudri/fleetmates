@@ -166,6 +166,15 @@ test('team: task rows carry the literal state labels and the header pill counts 
   assert.match(after.match(/<li[^>]*data-task="T3"[\s\S]*?<\/li>/)?.[0] ?? '', /title="Claimed by the teammate; verified by Gate 2"/)
 })
 
+test('team: a lead that claims no task is not a worker, so the canvas pill reads 2 of 4 need you (AC2, TEAM-O7)', async () => {
+  const { TeamRunView } = await load('team-run/TeamRun.jsx')
+  const state = teamState()
+  state.data.sessions[0].runRef = { ...state.data.sessions[0].runRef, taskId: null }
+  const html = render(TeamRunView, viewProps({ state }))
+  assert.match(html, /2 of 4 need you/)
+  assert.doesNotMatch(html, /of 5 need you/)
+})
+
 test('team: a task row with a request opens the drawer filtered to that task', async () => {
   const { TeamRunView } = await load('team-run/TeamRun.jsx')
   const seen = []
@@ -305,6 +314,24 @@ test('plan: markdown renders as React text; HTML stays text, javascript: links a
   assert.match(html, /<pre><code>const x = &quot;&lt;b&gt;&quot;\n<\/code><\/pre>/)
   assert.equal(planHeading(markdown), 'Gate CLI plan')
   assert.equal(planHeading('no heading here'), null)
+})
+
+test('plan: escape, bell and bidi controls in text, inline code and fences render as visible tokens (qa 1.7)', async () => {
+  const { renderMarkdown } = await load('team-run/PlanDrawer.jsx')
+  const markdown = ['# Head \u202Eevil', '', 'text \u001b[31m and \u0007 and `co\u202Ede`', '', '```', 'fen\u001bce\u0007\tcol', 'line 2', '```', '', '    blo\u202Eck'].join('\n')
+  const html = renderToStaticMarkup(createElement('div', null, renderMarkdown(markdown)))
+  assert.doesNotMatch(html, /[\u001b\u0007\u202e]/, 'no raw ESC, BEL or U+202E reaches the markup')
+  assert.match(html, /<h1>Head &lt;U\+202E&gt;evil<\/h1>/)
+  assert.match(html, /text &lt;U\+001B&gt;\[31m and &lt;U\+0007&gt; and <code>co&lt;U\+202E&gt;de<\/code>/)
+  assert.match(html, /<pre><code>fen&lt;U\+001B&gt;ce&lt;U\+0007&gt;\tcol\nline 2\n<\/code><\/pre>/, 'a fence keeps its tabs and line feeds')
+  assert.match(html, /<pre><code>blo&lt;U\+202E&gt;ck\n<\/code><\/pre>/)
+})
+
+test('plan: the drawer dialog is a section, a role axe allows (aria-allowed-role)', async () => {
+  const { PlanDrawerView } = await load('team-run/PlanDrawer.jsx')
+  const html = renderToStaticMarkup(PlanDrawerView({ plan: null, onClose: () => {}, onOpenInEditor: () => {} }))
+  assert.match(html, /<section class="plan-drawer" role="dialog"/)
+  assert.doesNotMatch(html, /<aside/)
 })
 
 test('plan: the drawer view shows the markdown read-only with Open in editor as the secondary action', async () => {

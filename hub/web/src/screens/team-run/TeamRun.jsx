@@ -449,16 +449,18 @@ export function TeamRunView({
   const phase = phaseState(run)
   const tasks = run.tasks ?? []
   const views = new Map(tasks.map(task => [task.id, taskView(task, { run, requests, now, t, merged: phase.integrated || phase.derived !== null && task.phase < phase.derived })]))
-  // Workers: the tasks under way in the current phase (every task when the phase is unknown), plus the lead when it claims no task.
+  // Workers: the tasks under way in the current phase (every task when the phase is unknown).
   const scope = phase.derived !== null ? tasks.filter(task => task.phase === phase.derived) : phase.failed ? tasks : []
   const working = scope.filter(task => views.get(task.id).state !== 'pending')
   const claim = lead?.runRef?.taskId ?? null
   const leadOwn = lead ? requests.filter(row => row.sessionId === lead.id && !row.taskId) : []
   const leadNeeds = !!lead && (leadOwn.length > 0 || NEEDS.has(lead.state) && !requests.some(row => row.sessionId === lead.id))
-  const needs = working.filter(task => NEEDS.has(views.get(task.id).state)).length + (leadNeeds && !claim ? 1 : 0)
-  const total = Math.max(working.length + (lead && !claim ? 1 : 0), 1)
+  // The pill counts task workers only (team-run.md 4.3, TEAM-O7): a lead joins the count through the task it
+  // claims, so a lead with no claim is not a worker; its own requests still make the pill need you.
+  const needs = working.filter(task => NEEDS.has(views.get(task.id).state)).length
+  const total = Math.max(working.length, 1)
   const states = [...working.map(task => views.get(task.id).state), ...(lead ? [lead.state] : [])]
-  const aggregate = needs ? (requests.length && requests.every(row => row.kind === 'question') ? 'asked_you' : 'needs_approval')
+  const aggregate = needs || leadNeeds && !claim ? (requests.length && requests.every(row => row.kind === 'question') ? 'asked_you' : 'needs_approval')
     : states.some(s => s === 'running' || s === 'stale') ? 'running' : tasks.length && tasks.every(task => task.state === 'done') ? 'done' : 'idle'
   const pillLabel = needs ? translate(t, TEAM_COPY, 'team.pill', { needs, total })
     : aggregate === 'idle' ? translate(t, TEAM_COPY, 'team.task.state.pending') : undefined
