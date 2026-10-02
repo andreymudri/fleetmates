@@ -21,10 +21,13 @@ const metaChars = new Set([' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>'])
 // Reserved words that only end a compound command; one at command start anywhere else is a syntax
 // error, as in Bash.
 const listEnds = ['then', 'elif', 'else', 'fi', 'do', 'done', 'esac', '}']
-// The parser accepts only the subset of Bash it models completely and refuses the rest with
-// `unsupported` (a construct or command) or `unknown-expansion` (an expansion), so a construct it
-// cannot model never parses into fewer segments, routes or writes than bash runs. The plan rates
-// a command that does not parse as Caution (D-81), so a refusal costs only Safe auto-approval.
+// Two levels of guarantee (D-87). `plain: true` means the allowlist in `plainText` accepted the
+// whole source text (simple commands joined by `|`, `&&`, `||`, `;`, every character from a
+// small literal set) and the parser returned ok; only a plain command may be Safe. Outside plain
+// the parser is best effort, for raising tiers: it refuses the constructs listed in the
+// parseCommand JSDoc with `unsupported` or `unknown-expansion`, and otherwise reports the segments,
+// writes and routes it finds. It does not promise to see everything bash runs in a command that
+// is not plain. The plan rates a command that does not parse as Caution (D-81).
 //
 // Reserved words that start a construct this parser does not model (a function body, a
 // coprocess, a select menu); `((` (an arithmetic command) is refused next to them.
@@ -107,10 +110,75 @@ export function commandBase(word) {
   return slash >= 0 && slash < word.length - 1 ? word.slice(slash + 1) : word
 }
 
-function resolvePath(text, dir) {
-  if (text.startsWith('/')) return path.posix.resolve(text)
-  if (!dir) return null
-  return path.posix.resolve(dir, text)
+// True when a `..` component follows a component that is not `..` (`.` counts as one). The kernel
+// resolves such a `..` after it follows any symlink before it, so collapsing it lexically may name
+// a file in another directory; such a path is reported as unknown.
+function dotDotAfterComponent(text) {
+  let seen = false
+  for (const part of text.split('/')) {
+    if (part === '..') {
+      if (seen) return true
+    } else if (part !== '') seen = true
+  }
+  return false
+}
+
+// D-87 plain text. Every character outside a quote pair is from PLAIN_CHAR or a space; a quote
+// pair holds only those characters and spaces. The only operators are `|`, `&&`, `||` and `;`,
+// and the only redirects PLAIN_REDIRECTS, each a whole token.
+const PLAIN_CHAR = /^[A-Za-z0-9_\-./:=@%+,]$/
+const PLAIN_QUOTED = /^[A-Za-z0-9_\-./:=@%+, ]*$/
+const PLAIN_REDIRECTS = ['2>&1', '2>/dev/null', '>/dev/null']
+const PLAIN_EXCLUDED_WORDS = new Set(['cd', 'pushd', 'popd', 'eval', 'source', '.', 'exec', 'trap', 'if', 'then', 'elif', 'else', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'in', 'select', 'function', 'coproc', 'time'])
+
+function plainText(source) {
+  const commands = [[]]
+  let word = null
+  const endWord = () => {
+    if (word !== null) commands.at(-1).push(word)
+    word = null
+  }
+  const operator = length => {
+    endWord()
+    if (!commands.at(-1).length && !commands.at(-1).redirected) return false
+    commands.push([])
+    return length
+  }
+  for (let i = 0; i < source.length;) {
+    const char = source[i]
+    if (char === ' ') { endWord(); i++; continue }
+    if (word === null) {
+      const redirect = PLAIN_REDIRECTS.find(token => source.startsWith(token, i) && [undefined, ' ', '|', ';', '&'].includes(source[i + token.length]))
+      if (redirect) { commands.at(-1).redirected = true; i += redirect.length; continue }
+    }
+    if (char === '|' || char === ';' || char === '&') {
+      const pair = source.slice(i, i + 2)
+      const length = pair === '&&' || pair === '||' ? 2 : char === '&' ? 0 : 1
+      if (!length || !operator(length)) return false
+      i += length
+      continue
+    }
+    if (char === "'" || char === '"') {
+      const end = source.indexOf(char, i + 1)
+      if (end < 0) return false
+      const inner = source.slice(i + 1, end)
+      if (!PLAIN_QUOTED.test(inner)) return false
+      word = (word ?? '') + inner
+      i = end + 1
+      continue
+    }
+    if (!PLAIN_CHAR.test(char)) return false
+    word = (word ?? '') + char
+    i++
+  }
+  endWord()
+  for (const command of commands) {
+    if (!command.length) return false
+    const name = command[0]
+    if (PLAIN_EXCLUDED_WORDS.has(name) || name.includes('=') || name.startsWith('%')) return false
+    if (command.some(dotDotAfterComponent)) return false
+  }
+  return true
 }
 
 function joinPath(dir, name) {
@@ -152,7 +220,7 @@ class Parser {
     for (;;) {
       const char = this.s[this.i]
       if (char === ' ' || char === '\t') this.i++
-      else if (char === '\\' && this.s[this.i + 1] === '\n') this.i += 2
+      else if (char === '\\' && this.s[this.i + 1] === '\n') fail('unsupported')
       else if (char === '#') {
         const end = this.s.indexOf('\n', this.i)
         this.i = end < 0 ? this.s.length : end
@@ -193,6 +261,8 @@ class Parser {
         if (!heredoc.quoted && line.endsWith('\\')) fail('unsupported')
       }
       if (bodyEnd < 0) fail('heredoc-delimiter')
+      const body = this.s.slice(bodyStart, bodyEnd)
+      heredoc.redirect.body = heredoc.strip ? body.replace(/^\t+/gm, '') : body
       if (!heredoc.quoted) heredoc.redirect.subs = new Parser(this.s.slice(bodyStart, bodyEnd), this.depth, this.options).heredocSubs()
     }
   }
@@ -525,7 +595,9 @@ class Parser {
     const s = this.s
     const start = this.i
     const word = { text: '', expansion: false, glob: false, quoted: false, subs: [] }
-    let brace = -1
+    // Any unquoted `{` followed later in the word by an unquoted `,` or `..` may be a brace
+    // expansion at some nesting depth, so the word is marked glob (not literal).
+    let brace = false
     let bracket = false
     if (s[this.i] === '~') this.readTilde(word, false)
     while (this.i < s.length) {
@@ -547,7 +619,12 @@ class Parser {
       } else if (char === '\\') {
         const next = s[this.i + 1]
         if (next === undefined) fail('syntax')
-        if (next !== '\n') { word.text += next; word.quoted = true }
+        // Bash joins a backslash-newline before it tokenizes: the round 2 review saw bash 5.3 run
+        // `$\<newline>(cmd)` as a substitution (bash could not be run here). The tokens here are
+        // already read, so every continuation outside single quotes is refused.
+        if (next === '\n') fail('unsupported')
+        word.text += next
+        word.quoted = true
         this.i += 2
       } else if (char === '$') this.readDollar(word, false)
       else if (char === '`') this.readBacktick(word, false)
@@ -555,12 +632,8 @@ class Parser {
         if (char === '*' || char === '?') word.glob = true
         else if (char === '[') bracket = true
         else if (char === ']' && bracket) word.glob = true
-        else if (char === '{') brace = word.text.length
-        else if (char === '}' && brace >= 0) {
-          const inner = word.text.slice(brace)
-          if (inner.includes(',') || inner.includes('..')) word.glob = true
-          brace = -1
-        }
+        else if (char === '{') brace = true
+        else if (brace && (char === ',' || (char === '.' && s[this.i + 1] === '.'))) word.glob = true
         word.text += char
         this.i++
       }
@@ -579,8 +652,9 @@ class Parser {
       if (char === '\\') {
         const next = s[this.i + 1]
         if (next === undefined) fail('unclosed-quote')
-        if (next === '$' || next === '`' || next === '"' || next === '\\' || next === '\n') {
-          if (next !== '\n') word.text += next
+        if (next === '\n') fail('unsupported')
+        if (next === '$' || next === '`' || next === '"' || next === '\\') {
+          word.text += next
           this.i += 2
         } else {
           word.text += char
@@ -775,7 +849,15 @@ function scanOptions(words, start, spec, onValue = () => {}, onFlag = () => {}) 
     const text = word.text
     if (!word.literal) break
     if (text === '--') { i++; break }
-    if (spec.assigns && /^[A-Za-z_]\w*=/.test(text)) { onValue('=', word); i++; continue }
+    // GNU env (and sudo) take any operand holding `=` before the command as an assignment, so
+    // one whose name is not a NAME (`a.b=1`, `BASH_FUNC_f%%=...`, which defines a function) is
+    // refused rather than read as the command word.
+    if (spec.assigns && !text.startsWith('-') && text.includes('=')) {
+      if (!/^[A-Za-z_]\w*=/.test(text)) fail('unsupported')
+      onValue('=', word)
+      i++
+      continue
+    }
     if (text === '-' && spec.dashIsFlag) { onValue('-', null); i++; continue }
     if (!text.startsWith('-') || text === '-') break
     if (spec.numeric && /^-\d+$/.test(text)) { i++; continue }
@@ -925,6 +1007,26 @@ class Walker {
     this.options = options
     this.segments = []
     this.pipelines = []
+    // Directories reached by a cd, `env -C` or `sudo -D` through a component that may be a
+    // symlink. A leading `..` from one of them is resolved by the kernel from the symlink target,
+    // so it is reported as unknown. The starting `cwd` is taken as a physical path.
+    this.logicalDirs = new Set()
+  }
+
+  resolve(text, dir) {
+    if (dotDotAfterComponent(text)) return null
+    if (text.startsWith('/')) return path.posix.resolve(text)
+    if (!dir) return null
+    if ((text === '..' || text.startsWith('../')) && this.logicalDirs.has(dir)) return null
+    return path.posix.resolve(dir, text)
+  }
+
+  // From a logical directory `resolve` already gives null for any `..`, so only a target naming a
+  // component other than `.` and `..` can make the result logical.
+  chdir(text, dir) {
+    const result = this.resolve(text, dir)
+    if (result !== null && text.split('/').some(part => part !== '' && part !== '.' && part !== '..')) this.logicalDirs.add(result)
+    return result
   }
 
   newSegment(ctx, position) {
@@ -946,6 +1048,7 @@ class Walker {
       writes: [],
       mounts: [],
       privileged: false,
+      stdinShell: false,
       pipeline: position?.pipeline ?? null,
       stage: position?.stage ?? null,
       op: position?.op ?? null
@@ -1002,7 +1105,17 @@ class Walker {
     const inner = { ...ctx, depth: ctx.depth + 1 }
     const start = this.segments.length
     if (command.items?.some(word => word.subs.length)) this.walkSubs(command.items, this.newSegment(ctx, position), ctx)
+    const bodyStart = this.segments.length
+    const pipelinesStart = this.pipelines.length
     this.walkList(command.body, inner)
+    // A later iteration of a loop starts where the previous one left the shell, so when the body
+    // or condition moves the directory anywhere, the body is walked again with it unknown.
+    if ((command.kind === 'for' || command.kind === 'while' || command.kind === 'until') && dir !== null && inner.dir !== dir) {
+      this.segments.length = bodyStart
+      this.pipelines.length = pipelinesStart
+      inner.dir = null
+      this.walkList(command.body, inner)
+    }
     // A brace group runs in this shell. The body of if, while, until and for may run zero times or
     // only in part, so a directory it changes is unknown afterwards. A subshell never leaks.
     if (position.single && command.kind === 'brace') ctx.dir = inner.dir
@@ -1023,7 +1136,7 @@ class Walker {
       if (redirect.varFd) record.varFd = redirect.varFd
       if (redirect.heredoc) { record.heredoc = true; record.quoted = redirect.quoted }
       if ((redirect.op === '>&' || redirect.op === '<&') && /^(?:\d+|-)$/.test(redirect.target.text)) record.dup = true
-      if (!redirect.heredoc && redirect.op !== '<<<' && !record.dup && !redirect.target.procSub) record.path = redirect.target.literal ? resolvePath(redirect.target.text, dir) : null
+      if (!redirect.heredoc && redirect.op !== '<<<' && !record.dup && !redirect.target.procSub) record.path = redirect.target.literal ? this.resolve(redirect.target.text, dir) : null
       segment.redirects.push(record)
       if (writeOps.has(redirect.op) && !record.dup && !redirect.target.procSub) this.addWrite(segment, redirect.target, redirect.op === '>&' ? '&>' : redirect.op, dir)
     }
@@ -1035,7 +1148,7 @@ class Walker {
       segment.writes.push({ path: null, raw: word.text, via, literal: false })
       return
     }
-    const resolved = resolvePath(word.text, dir)
+    const resolved = this.resolve(word.text, dir)
     const record = { path: resolved, via }
     if (resolved === null) record.raw = word.text
     else if (devNulls.has(resolved)) record.devNull = true
@@ -1065,12 +1178,19 @@ class Walker {
       this.walkSubs([...command.assigns, ...command.words, ...command.redirects.map(redirect => redirect.target)], segment, ctx)
       for (const redirect of command.redirects) this.walkSubs([{ subs: redirect.subs }], segment, ctx)
     }
+    // `exec` with only redirects keeps them open for every later command, so a process
+    // substitution, here-string or heredoc there feeds commands this parser cannot link to it.
+    if (!rest.length && segment.wrappers.includes('exec') && command.redirects.some(redirect => redirect.target.procSub || redirect.heredoc || redirect.op === '<<<')) fail('unsupported')
     if (!rest.length || !rest[0].literal) return
     const name = commandBase(rest[0].text)
     refuseUnmodelled(name, rest)
     this.assignmentsOf(name, rest, segment)
-    this.payloads(name, rest, segment, ctx)
+    this.payloads(name, rest, segment, ctx, command.redirects)
     this.writeTargets(name, rest, segment)
+    // These run code in the current shell. A trap action or a sourced file may change the
+    // directory in ways the parser cannot see; an eval payload is checked for a directory change.
+    if (name === 'trap' || name === '.' || name === 'source') ctx.dir = null
+    else if (name === 'eval' && this.segments.slice(segment.index + 1).some(payload => !payload.literal || ['cd', 'pushd', 'popd', 'trap', '.', 'source'].includes(commandName(payload)))) ctx.dir = null
     if ((name === 'cd' || name === 'pushd' || name === 'popd') && position?.single) {
       // Behind an external wrapper (`env cd`, `sudo cd`) cd is a separate process and the shell
       // stays put; `time` is a Bash keyword that runs the builtin, but /usr/bin/time does not.
@@ -1095,7 +1215,7 @@ class Walker {
     if (!target.literal) return null
     const text = target.text
     if (!(text.startsWith('/') || text === '.' || text === '..' || text.startsWith('./') || text.startsWith('../'))) return null
-    return resolvePath(text, dir)
+    return this.chdir(text, dir)
   }
 
   assignmentsOf(name, words, segment) {
@@ -1107,6 +1227,7 @@ class Walker {
 
   stripWrappers(words, segment, ctx) {
     let i = 0
+    let shell = false
     while (i < words.length && words[i].literal) {
       if (words[i].keyword) {
         segment.wrappers.push('time')
@@ -1146,14 +1267,17 @@ class Walker {
       let split = null
       const onValue = (option, value) => {
         if (option === '=') { segment.assignments.push(assignment(value)); return }
-        if (name === 'env' && (option === '-C' || option === '--chdir') && value) segment.cwd = value.literal ? resolvePath(value.text, segment.cwd) : null
-        if (name === 'sudo' && (option === '-D' || option === '--chdir') && value) segment.cwd = value.literal ? resolvePath(value.text, segment.cwd) : null
+        if (name === 'env' && (option === '-C' || option === '--chdir') && value) segment.cwd = value.literal ? this.chdir(value.text, segment.cwd) : null
+        if (name === 'sudo' && (option === '-D' || option === '--chdir') && value) segment.cwd = value.literal ? this.chdir(value.text, segment.cwd) : null
         if (name === 'env' && (option === '-S' || option === '--split-string')) split = value ?? null
         // GNU time writes its report to the -o file (its documentation; GNU time is not installed
         // here, so this was not run).
         if (name === 'time' && (option === '-o' || option === '--output')) this.addWrite(segment, value, 'time -o')
       }
-      const onFlag = () => { segment.wrapperOptions = true }
+      const onFlag = option => {
+        segment.wrapperOptions = true
+        if ((name === 'sudo' && ['-s', '--shell', '-i', '--login'].includes(option)) || (name === 'doas' && option === '-s')) shell = true
+      }
       let j = i + 1
       for (;;) {
         split = null
@@ -1168,6 +1292,9 @@ class Walker {
       if (name === 'timeout' && j < words.length) j++
       i = j
     }
+    // `sudo -s`, `sudo -i` and `doas -s` with no command run a shell that reads its stdin
+    // (sudo(8), doas(1); not run here, since they ask for a password).
+    if (shell && i >= words.length) segment.stdinShell = true
     return i
   }
 
@@ -1198,8 +1325,8 @@ class Walker {
     this.walkSimple({ type: 'simple', assigns: [], words, redirects: [] }, { dir: isRemote ? null : segment.cwd, depth: ctx.depth + 1, payloadOf: segment.index, via, remote: isRemote }, null, false)
   }
 
-  payloads(name, words, segment, ctx) {
-    if (shellSet.has(name)) return this.shellPayload(name, words, segment, ctx)
+  payloads(name, words, segment, ctx, redirects = []) {
+    if (shellSet.has(name)) return this.shellPayload(name, words, segment, ctx, redirects)
     if (name === 'eval') return this.stringPayload(words.slice(1), segment, ctx, 'eval')
     if (name === 'trap') return this.trapPayload(words, segment, ctx)
     if (name === 'su') return this.suPayload(words, segment, ctx)
@@ -1216,9 +1343,10 @@ class Walker {
   // anything else (`-O lastpipe`, `-k`, `--posix`) changes how the payload runs and is refused. A
   // non-literal word that stands where an option may and could split, or has words after it (so
   // it could be `-c` and the next word the script), gives an opaque payload.
-  shellPayload(name, words, segment, ctx) {
+  shellPayload(name, words, segment, ctx, redirects = []) {
     let i = 1
     let command = false
+    let stdin = false
     while (i < words.length && words[i].literal) {
       const text = words[i].text
       if (text === '--' || text === '-') { i++; break }
@@ -1238,6 +1366,7 @@ class Walker {
           } else if (!SHELL_LETTERS.includes(letter)) fail('unsupported')
         }
         if (text[0] === '-' && text.includes('c')) command = true
+        if (text[0] === '-' && text.includes('s')) stdin = true
         i += consumed
         continue
       }
@@ -1246,6 +1375,17 @@ class Walker {
     const open = words[i]
     if (open && !open.literal && (open.split || open.glob || i + 1 < words.length)) {
       this.opaquePayload(words.slice(i), segment, ctx, command ? `${name} -c` : name)
+      return
+    }
+    // With no -c and no script operand (or -s) the shell runs its stdin, so a here-string or
+    // heredoc on fd 0 is its script.
+    if (!command && (i >= words.length || stdin)) {
+      const input = redirects.filter(redirect => (redirect.fd === null || redirect.fd === 0) && (redirect.op === '<<<' || redirect.heredoc)).at(-1)
+      if (!input) return
+      const text = input.op === '<<<' ? input.target.text : input.body
+      const literal = input.op === '<<<' ? input.target.literal : input.quoted || !/[$`\\]/.test(input.body)
+      if (literal) this.payloadString(text, segment, ctx, `${name} stdin`)
+      else this.opaquePayload([{ text, literal: false, quoted: false, glob: false }], segment, ctx, `${name} stdin`)
       return
     }
     if (!command || i >= words.length) return
@@ -1269,6 +1409,8 @@ class Walker {
     if (words[i]?.literal && words[i].text === '-') i++
     i++
     if (i < words.length) this.shellPayload('su', [literalWord('sh'), ...words.slice(i)], segment, ctx)
+    // With no command su runs the user's shell, which reads its stdin (su(1); not run here).
+    else if (!script) segment.stdinShell = true
   }
 
   // `trap [-lpP] [--] ACTION SIGNAL...`: ACTION is a string payload. It runs when the signal
@@ -1341,8 +1483,12 @@ class Walker {
     for (const word of sources) if (word.text !== ':::') this.stringPayload([word], segment, ctx, 'parallel')
   }
 
+  // ssh runs a ProxyCommand, LocalCommand or KnownHostsCommand locally through the user's shell,
+  // and a `-F` file may set them, so `-F`, those `-o` keys (any case, `Key=value` or `Key value`)
+  // and a non-literal `-o` value are refused.
   sshPayload(words, segment, ctx) {
     const valued = 'BbcDEeFIiJLlmOoPpQRSWw'
+    const localKeys = ['proxycommand', 'localcommand', 'permitlocalcommand', 'knownhostscommand', 'match', 'include']
     let i = 1
     const skip = () => {
       while (i < words.length && words[i].literal) {
@@ -1351,8 +1497,14 @@ class Walker {
         if (!text.startsWith('-') || text === '-') return
         let consumed = 1
         for (let k = 1; k < text.length; k++) {
+          if (text[k] === 'F') fail('unsupported')
           if (valued.includes(text[k])) {
-            if (k === text.length - 1) consumed = 2
+            const last = k === text.length - 1
+            if (last) consumed = 2
+            if (text[k] === 'o') {
+              const value = last ? words[i + 1] : literalWord(text.slice(k + 1))
+              if (value && (!value.literal || localKeys.includes(value.text.trim().split(/[\s=]/)[0].toLowerCase()))) fail('unsupported')
+            }
             break
           }
         }
@@ -1416,7 +1568,7 @@ class Walker {
       if (source === null) return
     }
     if (source.startsWith('/') || source.startsWith('.')) {
-      const resolved = resolvePath(source, segment.cwd)
+      const resolved = this.resolve(source, segment.cwd)
       segment.mounts.push(resolved === null ? { source: null, raw: source, target } : { source: resolved, target })
     } else segment.mounts.push({ source, target, named: true })
   }
@@ -1444,7 +1596,76 @@ class Walker {
     if (name === 'cp' || name === 'mv' || name === 'install' || name === 'ln') this.copyTargets(name, words, segment)
     if (name === 'curl') this.curlTargets(words, segment)
     if (name === 'wget') this.wgetTargets(words, segment)
+    if (name === 'aria2c') this.aria2cTargets(words, segment)
+    if (name === 'http' || name === 'httpie') this.httpieTargets(name, words, segment)
     this.outputOptionTargets(name, words, segment)
+  }
+
+  // aria2c writes `-o`/`--out` (or the URL basename) under `-d`/`--dir`, from aria2c(1); aria2c
+  // is not installed here, so this was not run. An unknown option's value is read as a URL, which
+  // over-reports a write.
+  aria2cTargets(words, segment) {
+    let out = null
+    let dir = null
+    const urls = []
+    for (let k = 1; k < words.length; k++) {
+      const word = words[k]
+      const text = word.text
+      if (!word.literal || !text.startsWith('-') || text === '-') { urls.push(word); continue }
+      const long = text.startsWith('--')
+      const equal = text.indexOf('=')
+      const option = long ? (equal < 0 ? text : text.slice(0, equal)) : text.slice(0, 2)
+      if (option !== '--out' && option !== '--dir' && option !== '-o' && option !== '-d') continue
+      const attached = long ? (equal < 0 ? null : text.slice(equal + 1)) : (text.length > 2 ? text.slice(2) : null)
+      const value = attached === null ? words[++k] : { ...word, text: attached }
+      if (option === '--out' || option === '-o') out = value ?? null
+      else dir = value ?? null
+    }
+    const under = word => (dir && !word.text.startsWith('/') ? { text: joinPath(dir.text, word.text), literal: dir.literal && word.literal } : word)
+    if (out) {
+      this.addWrite(segment, under(out), 'aria2c')
+      return
+    }
+    for (const url of urls) {
+      const file = urlBasename(url.text)
+      if (file) this.addWrite(segment, under({ text: file, literal: url.literal || url.glob }), 'aria2c')
+    }
+  }
+
+  // HTTPie writes `-o`/`--output`, and with `-d`/`--download` and no output the URL basename,
+  // from its documentation; HTTPie is not installed here, so this was not run.
+  httpieTargets(name, words, segment) {
+    let output = null
+    let download = false
+    const operands = []
+    for (let k = 1; k < words.length; k++) {
+      const word = words[k]
+      const text = word.text
+      if (!word.literal || !text.startsWith('-') || text === '-') { operands.push(word); continue }
+      if (text.startsWith('--')) {
+        const equal = text.indexOf('=')
+        const option = equal < 0 ? text : text.slice(0, equal)
+        if (option === '--download') download = true
+        if (option === '--output') output = equal < 0 ? words[++k] ?? null : { ...word, text: text.slice(equal + 1) }
+        continue
+      }
+      for (let c = 1; c < text.length; c++) {
+        if (text[c] === 'd') download = true
+        if (text[c] === 'o') {
+          const rest = text.slice(c + 1)
+          output = rest ? { ...word, text: rest } : words[++k] ?? null
+          break
+        }
+      }
+    }
+    if (output) {
+      this.addWrite(segment, output, name)
+      return
+    }
+    if (!download) return
+    const url = operands.find(word => !/^[A-Z]+$/.test(word.text))
+    const file = url ? urlBasename(url.text) : null
+    if (file) this.addWrite(segment, { text: file, literal: url.literal || url.glob }, name)
   }
 
   copyTargets(name, words, segment) {
@@ -1452,6 +1673,7 @@ class Walker {
     const operands = []
     let targetDir = null
     let directories = false
+    let noTarget = false
     for (let k = 1, options = true; k < words.length; k++) {
       const word = words[k]
       const text = word.text
@@ -1468,11 +1690,13 @@ class Walker {
           k++
         } else if (option === '--target-directory') targetDir = value
         if (option === '--directory' && name === 'install') directories = true
+        if (option === '--no-target-directory') noTarget = true
         continue
       }
       for (let c = 1; c < text.length; c++) {
         const option = `-${text[c]}`
         if (option === '-d' && name === 'install') directories = true
+        if (option === '-T') noTarget = true
         if (values.has(option)) {
           const rest = text.slice(c + 1)
           const value = rest ? { ...word, text: rest } : words[++k]
@@ -1490,7 +1714,9 @@ class Walker {
     } else if (operands.length >= 2) {
       const dest = operands.at(-1)
       this.addWrite(segment, dest, name)
-      if (operands.length > 2 || dest.text.endsWith('/')) for (const source of operands.slice(0, -1)) this.addWrite(segment, into(dest, source), name)
+      // Without -T an existing directory DEST receives DEST/basename(SOURCE), which the parser
+      // cannot tell apart from a file DEST, so both are recorded.
+      if (!noTarget) for (const source of operands.slice(0, -1)) this.addWrite(segment, into(dest, source), name)
     } else if (name === 'ln' && operands.length === 1) {
       this.addWrite(segment, { text: commandBase(operands[0].text), literal: operands[0].literal }, name)
     }
@@ -1662,7 +1888,7 @@ class Walker {
     }
     const names = segments.map(segment => commandName(segment))
     const isFetch = index => fetchSet.has(names[index])
-    const isInterpreter = index => isInterpreterName(names[index])
+    const isInterpreter = index => isInterpreterName(names[index]) || segments[index].stdinShell
     const children = segments.map(() => [])
     for (const segment of segments) if (segment.payloadOf !== null) children[segment.payloadOf].push(segment.index)
     const subtree = index => {
@@ -1712,7 +1938,32 @@ class Walker {
         }
       }
     }
+    // A variable assigned from a substitution that fetches may be expanded into a later
+    // interpreter or eval; every later one is linked to the fetch (conservative: the expansion
+    // itself is not traced).
+    for (const segment of segments) {
+      if (!segment.assignments.length) continue
+      for (const child of children[segment.index]) {
+        if (!substitutionKinds.has(segments[child].via)) continue
+        for (const fetch of subtree(child)) {
+          if (!isFetch(fetch)) continue
+          for (const later of segments) {
+            if (later.index > segment.index && later.payloadOf !== segment.index && (isInterpreter(later.index) || names[later.index] === 'eval')) add('substitution', fetch, later.index, { variable: true })
+          }
+        }
+      }
+    }
     if (!fetched.length) return routes
+    // A segment piped (at any distance) into a later interpreter stage of its pipeline feeds it
+    // whatever file it reads, so its operands and `<` files count as run by that interpreter.
+    const pipedInto = segment => {
+      if (segment.pipeline === null || segment.stage === null || isInterpreter(segment.index)) return null
+      const ranges = this.pipelines[segment.pipeline]
+      for (let b = segment.stage + 1; b < ranges.length; b++) {
+        for (let target = ranges[b][0]; target < ranges[b][1]; target++) if (isInterpreter(target)) return target
+      }
+      return null
+    }
     for (const segment of segments) {
       const paths = new Set()
       const resolvedNames = new Set()
@@ -1724,11 +1975,24 @@ class Walker {
         } else unresolvedNames.add(path.posix.basename(text))
       }
       const word0 = segment.words[0]
-      if (word0 !== undefined && (!segment.literal || word0.includes('/'))) execute(word0, segment.literal ? resolvePath(word0, segment.cwd) : null)
+      if (word0 !== undefined && (!segment.literal || word0.includes('/'))) execute(word0, segment.literal ? this.resolve(word0, segment.cwd) : null)
       if (isInterpreter(segment.index)) {
         segment.words.slice(1).forEach((word, k) => {
           const literal = segment.wordInfo[k + 1].literal
-          if (!literal || !word.startsWith('-')) execute(word, literal ? resolvePath(word, segment.cwd) : null)
+          if (!literal || !word.startsWith('-')) execute(word, literal ? this.resolve(word, segment.cwd) : null)
+        })
+        for (const redirect of segment.redirects) if (redirect.op === '<') execute(redirect.target, redirect.path)
+      }
+      // BASH_ENV and ENV name a file a non-interactive bash or sh runs first; any command may
+      // start one, so the assignment counts wherever it is.
+      for (const variable of segment.assignments) {
+        if (variable.name === 'BASH_ENV' || variable.name === 'ENV') execute(variable.value, variable.literal ? this.resolve(variable.value, segment.cwd) : null)
+      }
+      const reader = pipedInto(segment)
+      if (reader !== null) {
+        segment.words.slice(1).forEach((word, k) => {
+          const literal = segment.wordInfo[k + 1].literal
+          if (!literal || !word.startsWith('-')) execute(word, literal ? this.resolve(word, segment.cwd) : null)
         })
         for (const redirect of segment.redirects) if (redirect.op === '<') execute(redirect.target, redirect.path)
       }
@@ -1738,7 +2002,7 @@ class Walker {
         const match = file.path
           ? paths.has(file.path) || unresolvedNames.has(file.name)
           : resolvedNames.has(file.name) || unresolvedNames.has(file.name)
-        if (match) add('file', file.fetch, segment.index, file.path ? { path: file.path } : { path: null, raw: file.raw })
+        if (match) add('file', file.fetch, reader ?? segment.index, file.path ? { path: file.path } : { path: null, raw: file.raw })
       }
     }
     return routes
@@ -1861,27 +2125,39 @@ function mayAssignHome(command) {
 }
 
 /**
- * Parse a Bash command into segments for the classifier (docs/deck/07-approvals.md 3.3). It
- * accepts only a modelled subset of Bash and refuses the rest with `{ ok: false, reason }`:
+ * Parse a Bash command into segments for the classifier (docs/deck/07-approvals.md 3.3). A
+ * successful parse carries `plain` (D-87): true only when the allowlist in `plainText` accepted
+ * the whole source text, which is checked on the text alone, apart from the walker. Outside plain the
+ * parser is best effort, for raising tiers; it does not promise to report everything bash runs.
+ * It refuses the following with `{ ok: false, reason }` (a refusal has no `plain`):
  * `unclosed-quote`, `heredoc-delimiter`, `syntax`, `too-deep`, `too-large`, `nul` and
  * `not-a-string` for input it cannot tokenize; `unknown-expansion` for `$((`, `$[`, every `${...}`
  * other than `${NAME}` and `${N}`, and an unknown `$'\x'` escape; and `unsupported` for `function`,
  * `coproc`, `select`, `((`, `for ((`, an assignment with a subscript or to REFUSED_ASSIGNMENTS, a
  * command in REFUSED_COMMANDS, the arithmetic and NAME forms of `[[`, `test`, `[`, the declare
  * family, `printf -v`, `wait -p`, `set` and shell options outside the accepted ones, `[[ =~`, an
- * unquoted heredoc body line ending in a backslash, and an unknown or ambiguous option of a
- * wrapper, of `xargs`, `su`, `trap`, `parallel`, or a long option of `cp`, `mv`, `ln`, `install`.
+ * unquoted heredoc body line ending in a backslash, a backslash-newline outside single quotes and
+ * quoted heredoc bodies, an `env` or `sudo` operand holding `=` whose name is not a NAME, `exec`
+ * with only redirects when one is a process substitution, here-string or heredoc, `ssh -F` and an
+ * `ssh -o` that sets ProxyCommand, LocalCommand, PermitLocalCommand, KnownHostsCommand, Match or
+ * Include (or is not literal), and an unknown or ambiguous option of a wrapper, of `xargs`, `su`,
+ * `trap`, `parallel`, or a long option of `cp`, `mv`, `ln`, `install`.
  *
  * Each segment is `{ index, words, wordInfo, literal, assignments, redirects, wrappers,
- * wrapperOptions, payloadOf, via, depth, cwd, remote, writes, mounts, privileged, pipeline, stage,
- * op }`. `cwd` is the directory the command runs in (`env -C` and `sudo -D` change it); redirects
- * resolve against the shell directory instead, and each file redirect record carries that
- * resolved `path` (null when unknown). `routes` lists the network-to-interpreter routes of the tier
- * review F7 as `{ kind: 'pipe' | 'substitution' | 'file', fetch, interpreter, path?, raw? }`
- * (segment indexes); a file route whose path is unknown has `path: null` and the written `raw` text.
+ * wrapperOptions, payloadOf, via, depth, cwd, remote, writes, mounts, privileged, stdinShell,
+ * pipeline, stage, op }`. `cwd` is the directory the command runs in (`env -C` and `sudo -D` change
+ * it); redirects resolve against the shell directory instead, and each file redirect record
+ * carries that resolved `path`. A path is null (unknown) when the directory is unknown, when a
+ * `..` follows another component, or when a leading `..` starts from a directory a cd reached
+ * through a possible symlink. `stdinShell` marks `sudo -s`, `sudo -i`, `doas -s` and `su` with
+ * no command, which run a shell on their stdin. `routes` lists the network-to-interpreter routes of
+ * the tier review F7 as `{ kind: 'pipe' | 'substitution' | 'file', fetch, interpreter, path?, raw?,
+ * variable? }` (segment indexes); a file route whose path is unknown has `path: null` and the
+ * written `raw` text, and `variable: true` marks a fetch assigned to a variable before a later
+ * interpreter or eval.
  * @param {string} command
  * @param {{ cwd?: string, homeDir?: string, outputOpts?: Record<string, string[] | { options?: string[], operands?: number[], values?: string[] }> }} [options]
- * @returns {{ ok: true, segments: object[], routes: object[] } | { ok: false, reason: string }}
+ * @returns {{ ok: true, plain: boolean, segments: object[], routes: object[] } | { ok: false, reason: string }}
  */
 export function parseCommand(command, { cwd = null, homeDir = null, outputOpts = null } = {}) {
   if (typeof command !== 'string') return { ok: false, reason: 'not-a-string' }
@@ -1892,10 +2168,26 @@ export function parseCommand(command, { cwd = null, homeDir = null, outputOpts =
     const list = parseString(command, 0, options)
     const walker = new Walker(options)
     walker.walkList(list, { dir: cwd, depth: 0, payloadOf: null, via: null, remote: false })
-    return { ok: true, segments: walker.segments, routes: walker.routes() }
+    return { ok: true, plain: plainText(command), segments: walker.segments, routes: walker.routes() }
   } catch (error) {
     if (error instanceof ShellError) return { ok: false, reason: error.reason }
     if (error instanceof RangeError) return { ok: false, reason: 'too-large' }
     throw error
   }
+}
+
+/**
+ * Whether a Bash command is plain (D-87): the parser accepts it and the source text is simple
+ * commands joined only by `|`, `&&`, `||` or `;`, each word plain literal text (letters, digits,
+ * `_ - . / : = @ % +` and `,`, or a quote pair of those and spaces), no `..` after another path
+ * component, no command word that is an assignment, a job spec, `cd`, `pushd`, `popd`, `eval`,
+ * `source`, `.`, `exec`, `trap` or a reserved word, and no redirect but `2>&1`, `>/dev/null` and
+ * `2>/dev/null`. Only a plain command may be Safe.
+ * @param {string} command
+ * @returns {boolean}
+ */
+export function isPlain(command) {
+  if (typeof command !== 'string') return false
+  const result = parseCommand(command)
+  return result.ok && result.plain
 }
