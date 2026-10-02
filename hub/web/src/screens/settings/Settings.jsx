@@ -4,6 +4,7 @@ import { linkHandler } from '../../shell/Rail.jsx'
 import { deckApi } from '../drawer/NeedsYouDrawer.jsx'
 import { Checklist } from '../first-run/FirstRun.jsx'
 import { readDensity, writeDensity } from '../../state/deck-store.js'
+import { ApprovalRules, rulesNavSub, useRules } from './ApprovalRules.jsx'
 
 /** English copy for the M1 Settings sections (docs/deck/screens/settings.md section 9) plus the M1-only rows. */
 export const SETTINGS_COPY = Object.freeze({
@@ -92,12 +93,12 @@ export const SETTINGS_COPY = Object.freeze({
   'settings.saveError': 'Could not save {setting}: {error}'
 })
 
-/** Every Settings section in nav order; M1 fills Notifications and Connections. */
+/** Every Settings section in nav order; M1 fills Notifications and Connections, M2 Appearance and Crew, M3 Approval rules. */
 export const SECTIONS = Object.freeze(['appearance', 'rules', 'notifications', 'connections', 'crew'])
 /** Sections with content in M1. */
 export const M1_SECTIONS = Object.freeze(['notifications', 'connections'])
-/** Sections rendered now: M1's plus Appearance and the Crew sheet from M2; Approval rules stays a later section. */
-export const RENDERED_SECTIONS = Object.freeze(['appearance', 'notifications', 'connections', 'crew'])
+/** Sections rendered now: every section (Approval rules arrives with M3). */
+export const RENDERED_SECTIONS = Object.freeze(['appearance', 'rules', 'notifications', 'connections', 'crew'])
 /** Text sizes offered in Appearance, in px (settings.md 4.3); 14 is the default. */
 export const TEXT_SIZES = Object.freeze([13, 14, 15, 16])
 /** Motion preference values (settings.md 4.3). */
@@ -131,16 +132,18 @@ export const COMMAND_PREFS = Object.freeze([
 ])
 
 /**
- * Nav rows with their live subtitles (settings.md 4.1). Server values pass through `shown`.
+ * Nav rows with their live subtitles (settings.md 4.1). Server values pass through `shown`. The rules row reads
+ * "{n} rules in {m} repos" from the fetched rules, and is empty until they load.
  * @param {object} prefs
  * @param {Function} [t]
+ * @param {object | null} [rules] the `GET /api/rules` body
  * @returns {{ id: string, title: string, sub: string, href: string }[]}
  */
-export function settingsNav(prefs = {}, t) {
+export function settingsNav(prefs = {}, t, rules = null) {
   const tr = (key, params) => translate(t, SETTINGS_COPY, key, params)
   const subs = {
     appearance: tr('settings.nav.appearance.sub', { size: Number(prefs.textSize ?? 14) }),
-    rules: tr('settings.nav.rules.sub.later'),
+    rules: rulesNavSub(rules, t),
     notifications: prefs.renotifyAfter === null ? tr('settings.nav.notifications.subNever') : tr('settings.nav.notifications.sub', { min: Number(prefs.renotifyAfter ?? 10) }),
     connections: tr('settings.nav.connections.sub', { root: shown(prefs.scanRoot ?? '~/dev') }),
     crew: tr('settings.nav.crew.sub')
@@ -490,17 +493,17 @@ export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors
 
 /**
  * Settings frame, pure: nav (links with `aria-current`), and the section, a skeleton while preferences load,
- * or the later-milestone note.
- * @param {{ section: string, prefs: object, loading?: boolean, t?: Function, navigate: (to: string) => void, children?: React.ReactNode }} props
+ * or the later-milestone note for a section name outside {@link SECTIONS}.
+ * @param {{ section: string, prefs: object, rules?: object | null, loading?: boolean, t?: Function, navigate: (to: string) => void, children?: React.ReactNode }} props
  */
-export function SettingsView({ section, prefs, loading = false, t, navigate, children }) {
+export function SettingsView({ section, prefs, rules = null, loading = false, t, navigate, children }) {
   const tr = key => translate(t, SETTINGS_COPY, key)
   return (
     <div className="settings">
       <nav className="settings-nav" aria-label={tr('settings.nav.label')}>
         <h1 className="settings-title">{tr('settings.title')}</h1>
         <ul className="settings-nav-list">
-          {settingsNav(prefs, t).map(row => (
+          {settingsNav(prefs, t, rules).map(row => (
             <li key={row.id}>
               <a className="settings-nav-link" href={row.href} aria-current={row.id === section ? 'page' : undefined} onClick={linkHandler(navigate, row.href)}>
                 <span className="settings-nav-title">{row.title}</span>
@@ -526,10 +529,11 @@ function failure(error) {
 /**
  * The `/settings/:section` route screen: loads preference sources, saves each control immediately through the
  * authenticated api, reverts on failure with "Could not save {setting}: {error}", and embeds the checklist in
- * Connections. Browser wiring; the pure sections and {@link savePref} carry the tested behavior.
- * @param {{ route: { params: { section?: string } }, state: object, t?: Function, navigate: (to: string) => void, api?: object, feed?: object }} props
+ * Connections. The rules are fetched on mount and whenever `data.rulesRev` changes, for the nav subtitle and
+ * the Approval rules section. Browser wiring; the pure sections and {@link savePref} carry the tested behavior.
+ * @param {{ route: { params: { section?: string } }, state: object, t?: Function, navigate: (to: string) => void, api?: object, feed?: object, dispatch?: Function }} props
  */
-export function Settings({ route, state, t, navigate, api, feed }) {
+export function Settings({ route, state, t, navigate, api, feed, dispatch }) {
   const client = api ?? deckApi()
   const section = route.params.section ?? 'rules'
   const tr = (key, params) => translate(t, SETTINGS_COPY, key, params)
@@ -544,6 +548,7 @@ export function Settings({ route, state, t, navigate, api, feed }) {
   const [startErrors, setStartErrors] = useState({})
   const [checklist, setChecklist] = useState(false)
   const [density, setDensity] = useState(() => readDensity(browserStorage()))
+  const rules = useRules(client, state.data.rulesRev ?? 0)
   useEffect(() => {
     let current = true
     client.get('/api/prefs').then(data => { if (current) setSources(data?.sources ?? {}) }).catch(() => { if (current) setSources({}) })
@@ -583,6 +588,9 @@ export function Settings({ route, state, t, navigate, api, feed }) {
   let body = null
   if (section === 'appearance') {
     body = <AppearanceSection prefs={prefs} sources={known} repos={state.data.repos} t={t} errors={errors} density={density} navigate={navigate} onChange={onSave} onDensity={setDensity} />
+  } else if (section === 'rules') {
+    body = <ApprovalRules api={client} rules={rules} threshold={prefs.ruleSuggestAfter} thresholdError={errors.ruleSuggestAfter} t={t} lang={prefs.lang}
+      toast={dispatch ? item => dispatch({ type: 'toast.push', ...item }) : undefined} onThreshold={value => onSave('ruleSuggestAfter', value)} />
   } else if (section === 'notifications') {
     body = <NotificationsSection prefs={prefs} sources={known} t={t} status={notifyStatus(notifyRow, t)} pinging={pinging} errors={errors} onChange={onSave} onTestPing={onTestPing} />
   } else if (section === 'connections') {
@@ -590,5 +598,5 @@ export function Settings({ route, state, t, navigate, api, feed }) {
       checklist={checklist ? <Checklist state={state} t={t} navigate={navigate} api={client} feed={feed} mode="rerun" onDone={() => setChecklist(false)} /> : null}
       onSave={onSave} onNote={onNote} onRescan={onRescan} onStart={onStart} onChecklist={() => setChecklist(true)} />
   }
-  return <SettingsView section={section} prefs={prefs} loading={sources === null} t={t} navigate={navigate}>{body}</SettingsView>
+  return <SettingsView section={section} prefs={prefs} rules={rules.data} loading={sources === null} t={t} navigate={navigate}>{body}</SettingsView>
 }
