@@ -18,6 +18,8 @@ export class ScreenModel {
   constructor ({ cols, rows }) {
     this.term = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true })
     this.rev = 0
+    /** Writes fed to the terminal whose parse callback has not run yet. */
+    this.unparsed = 0
     /** @type {Set<() => void>} */
     this.listeners = new Set()
     /** Unsubscribe functions of active watches. @type {Set<() => void>} */
@@ -32,7 +34,20 @@ export class ScreenModel {
    * @param {Buffer | Uint8Array | string} buf
    */
   write (buf) {
-    this.term.write(typeof buf === 'string' ? buf : new Uint8Array(buf), () => this.#changed())
+    this.unparsed++
+    this.term.write(typeof buf === 'string' ? buf : new Uint8Array(buf), () => {
+      this.unparsed--
+      this.#changed()
+    })
+  }
+
+  /**
+   * True while output written to the model is not parsed yet, so `rev` and
+   * `lines()` do not show it.
+   * @returns {boolean}
+   */
+  pending () {
+    return this.unparsed > 0
   }
 
   /**

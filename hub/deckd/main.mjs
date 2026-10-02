@@ -21,6 +21,10 @@ const EXIT_TAIL_BYTES = 256 * 1024
 /** Most names the hello answer lists in `loginEnvNames`. */
 const LOGIN_ENV_NAMES_MAX = 200
 const SOURCE_KINDS = new Set(['browser', 'deck', 'terminal'])
+/** Optional features a proto 2 hello announces (docs/deck/05-api.md section 5). */
+const FEATURES = ['guardedWrite']
+/** Largest `guard.quietMs` a guarded write accepts. */
+const GUARD_QUIET_MAX_MS = 5000
 
 /**
  * @typedef {{ socket: net.Socket, client: { kind: string, name?: string, pid?: number } | null, proto: number, dropped: Map<string, number> }} Conn
@@ -70,6 +74,24 @@ function checkSource (source) {
     throw new DeckdError('bad_request', 'source.kind must be browser, deck or terminal')
   }
   return source.name === undefined ? { kind: source.kind } : { kind: source.kind, name: source.name }
+}
+
+/**
+ * Validate a write `guard`: absent, or `{ rev, quietMs }` with an integer
+ * `rev` and an integer `quietMs` from 0 to GUARD_QUIET_MAX_MS, on a write
+ * whose source is `deck`.
+ * @param {any} guard
+ * @param {{ kind: string }} source
+ * @returns {{ rev: number, quietMs: number } | undefined}
+ */
+function checkGuard (guard, source) {
+  if (guard === undefined) return undefined
+  if (!guard || typeof guard !== 'object' || Array.isArray(guard) || !Number.isInteger(guard.rev) ||
+      !Number.isInteger(guard.quietMs) || guard.quietMs < 0 || guard.quietMs > GUARD_QUIET_MAX_MS) {
+    throw new DeckdError('bad_request', `guard must be { rev: integer, quietMs: integer from 0 to ${GUARD_QUIET_MAX_MS} }`)
+  }
+  if (source.kind !== 'deck') throw new DeckdError('bad_request', 'only a deck source may send a guarded write')
+  return { rev: guard.rev, quietMs: guard.quietMs }
 }
 
 /**
@@ -276,7 +298,7 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       if (Number.isInteger(c.pid)) conn.client.pid = c.pid
       conn.proto = Math.min(req.proto, PROTO)
       return conn.proto >= 2
-        ? { proto: conn.proto, deckdVersion: version, bootId, loginEnvNames }
+        ? { proto: conn.proto, deckdVersion: version, bootId, loginEnvNames, features: FEATURES }
         : { proto: conn.proto, deckdVersion: version, bootId }
     },
     spawn: async (_conn, req) => {
@@ -370,8 +392,9 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       const host = getHost(req.ptyId)
       const source = checkSource(req.source)
       if (typeof req.data !== 'string') throw new DeckdError('bad_request', 'data must be base64')
+      const guard = checkGuard(req.guard, source)
       const data = Buffer.from(req.data, 'base64')
-      const at = host.write(data, source)
+      const at = host.write(data, source, guard)
       broadcast({ ev: 'input', ptyId: host.ptyId, source, at, bytes: data.length })
       return { at }
     },
