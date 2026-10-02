@@ -5,8 +5,9 @@ preparation below were run on 2026-10-02 on the integrated M2 tree (run branch t
 this task's documentation and version changes). The cleanup tasks 20 to 25 followed on the same day;
 section 9 lists what they fixed and what stays open. A second cleanup round, Tasks 27 to 30, followed
 on the same day; section 10 lists it, and the suite counts in section 1 were rerun on its integrated
-tip `7600e05`. Exit criterion 6 (two manual working days), the
-manual smoke with real Claude Code, the Orca and keyboard checks, the owner decisions in section 7,
+tip `7600e05`. A third cleanup round, Tasks 31 to 35, followed on the same day; section 11 lists it,
+and the root and hub rows of section 1 were rerun on its documentation task's tip. Exit criterion 6
+(two manual working days), the manual smoke with real Claude Code, the Orca and keyboard checks, the owner decisions in section 7,
 and the tag and publication of `deck-v0.2.0` are still PENDING. They need the owner and are not
 claimed here.
 
@@ -29,7 +30,7 @@ Run from the repository root. The hub suites need `npm ci --prefix hub` first an
 | Suite | Command | Result |
 |---|---|---|
 | Root (fleetmates) | `npm test` | 2796 tests, 2779 pass, 0 fail, 17 skipped |
-| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 930 tests, 930 pass, 0 fail, 0 skipped, 0 todo (905 before the cleanup tasks, 923 after the first round) |
+| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 934 tests, 934 pass, 0 fail, 0 skipped, 0 todo (905 before the cleanup tasks, 923 after the first round, 930 after the second) |
 | Observe e2e (M1) | `TMPDIR=/tmp/hx node --test --test-concurrency=1 test/e2e/observe.spec.mjs` from `hub/` | 39 tests, 39 pass, 0 todo |
 | Security e2e | same, `test/e2e/security.spec.mjs` | 14 tests, 14 pass, 0 todo |
 | Accessibility e2e | same, `test/e2e/accessibility.spec.mjs` | 14 tests, 14 pass, 0 todo |
@@ -41,7 +42,8 @@ The five e2e specs were also run together in one `node --test --test-concurrency
 0 todo, in 161 s. On the second cleanup tip `7600e05` it gave 98 tests, 98 pass, 0 fail, 0 todo, in
 162 s. The cleanup tasks changed assertions in `control.spec.mjs`, `settings-save.spec.mjs` and
 `observe.spec.mjs` but added no e2e test, so the per-spec counts above still hold; the root and hub
-rows were rerun on `7600e05`.
+rows were rerun on `7600e05`, and again for the third round (section 11), which changed no e2e spec;
+the e2e specs were not rerun for it.
 
 Notes:
 
@@ -391,14 +393,51 @@ While adding `confirm.cancel`, this task found that the Team run Stop dialog pas
 
 ### 10.2 Still open after the second round
 
+After Task 30 this table also held the `fm attach` SIGHUP product race, the owner question on the
+200 ms hook budget, and two test notes (the `hooks.test.mjs` kill timer that a hook hanging before its
+clock preload never meets, and the `fm.test.mjs` SIGHUP test that passed without a `detach`). Section
+11 closes each of them.
+
 | Severity | Item | Checked how |
 |---|---|---|
-| Low (product race) | `fm attach` (`hub/bin/fm.mjs`) installs its SIGHUP handler only after it has read deckd's attach reply, while deckd lists the client as soon as it handles `attach`. A SIGHUP in that window kills fm with signal 1 instead of detaching; deckd still drops the client when the socket closes. Not fixed: Task 29 was tests only | Reported by Task 29 with the `fm.test.mjs` failure above as its repro; this task read the handler at `hub/bin/fm.mjs:354`, after the awaited attach reply |
-| Owner question | Whether the 200 ms hook budget ([05-api.md](05-api.md) 6.2 item 3, "Total budget 200 ms", and 03-architecture, "Hard budget: 200 ms") includes Node's interpreter boot. `hooks.test.mjs` now reads it as excluding boot | Task 29 |
-| Test note, not rated | `hooks.test.mjs` starts its 500 ms kill timer at the preload's first clock line, so a hook that hangs before the preload runs is never killed by the test | Code read of the test |
-| Test note, not rated | `fm.test.mjs` "SIGHUP to fm attach" still passes for a handler that exits without sending `detach`, because deckd reports the detach when the socket closes | Reported by Task 29; not rerun here |
 | Low | Dogfood bug 4 stays open (section 9.2) | The five-spec e2e run |
 
 Flakes still known: none. None of this task's runs (one root run, one hub run, one five-spec e2e
 run and the 40 loaded reruns above) saw a failure. The Rolldown panic seen once in the
 package-contents test (section 6) was not seen again and was not measured.
+
+## 11. Third cleanup round, Tasks 31 to 35
+
+Tasks 31, 32, 33 and 35 were integrated on 2026-10-02 in run deck-m2c (run branch tip `d308a9e`,
+[plans/2026-10-02-deck-m2-cleanup3.md](../plans/2026-10-02-deck-m2-cleanup3.md)); Task 34 is this
+documentation pass. On this task's tip, which changes only the five docs it names, this task ran the
+root suite (2796 tests, 2779 pass, 0 fail, 17 skipped) and the hub suite (934 tests, 934 pass, 0 fail,
+0 skipped); every test named below passed in that hub run. The round changed no e2e spec, and the
+five e2e specs were not rerun. Each mutation below was rerun by this task from `hub/` with
+`node --test` on the named file, then restored, and the restored file passed again.
+
+### 11.1 Fixed
+
+| Item | Fix | Test and evidence |
+|---|---|---|
+| `fm attach` installed its SIGHUP handler only after deckd's attach reply, while deckd lists the client as soon as it handles `attach`; a SIGHUP in that window killed fm with signal 1 (section 10.2) | Task 31: `hub/bin/fm.mjs` installs the SIGHUP handler before `spawn` and `attach`. A SIGHUP that arrives before the PTY id is known or before the attach reply is remembered; fm sends `detach` for that PTY as soon as it has sent `attach` (behind `attach` on the same connection), waits for the answer, prints nothing and exits 0. The `fm attach <repo>` fallback detaches the PTY the repo name resolved to. After the attach reply, a SIGHUP detaches as before | `fm.test.mjs` "SIGHUP to fm attach before deckd answers attach detaches once it answers, without printing", "SIGHUP to fm claude before deckd answers spawn detaches from the spawned PTY once it answers, without printing" and "SIGHUP to fm attach <repo> before deckd answers the first attach detaches from the repo's PTY, without printing". The old claim reproduced: with `hub/bin/fm.mjs` from `feat/deck` (before Task 31), those 3 fail and 24 pass, the first with fm ending on signal 1. Mutation rerun: making `attachTo` never send the early `detach` and dropping the handler's branch for a pending attach fails the same 3, 24 pass |
+| `fm.test.mjs` "SIGHUP to fm attach" passed for a handler that exits without sending `detach`, because deckd reports the detach when the socket closes (section 10.2) | Task 31: the test now asserts that fm sent a `detach` request, before closing its socket, and that deckd answered it | `fm.test.mjs` "SIGHUP to fm attach detaches without printing and leaves the PTY running". The old claim reproduced: with the `fm.test.mjs` from `feat/deck` and a handler that calls `finish(0)` instead of `detach()` after the attach reply, all 24 tests pass. Mutation rerun: the same handler change with the current test file fails this test, 26 of 27 pass |
+| `hooks.test.mjs` armed its 500 ms kill timer at the clock preload's first line, so a hook that hung before the preload wrote was never killed (section 10.2) | Task 32: a 10 s startup timer, armed when the hook is spawned and cleared at the preload's first clock line, kills the child and fails with "socket hook never started its clock". The 500 ms timer and the 200 ms budget are unchanged | `hooks.test.mjs` "hook sends one complete line to the runtime socket without creating spool". Evidence rerun: with a preload that waits forever before its first line, the test fails after about 11 s with "socket hook never started its clock"; with the startup timer also commented out, which is the test before Task 32, the run was still going after 40 s and was killed |
+| The Team run Stop dialog passes no `cancelLabel`, so its Cancel button shows `confirm.cancel`, and nothing pinned that (section 10.1) | Task 33: tests only. `confirm.cancel` lives in `CONFIRM_COPY` in `hub/web/src/components/ConfirmDialog.jsx`, not in `en.js` | `team-run.test.mjs` "team: the Stop run dialog passes no cancelLabel, so its Cancel button reads confirm.cancel". Mutation rerun: passing `cancelLabel="Keep running"` to the dialog in `hub/web/src/screens/team-run/TeamRun.jsx` fails it, 19 of 20 pass |
+| Owner question: whether the 200 ms hook budget includes Node's interpreter boot (section 10.2) | Owner decision 2026-10-02, D-70: the budget covers the hook's own run, from module load to exit, not the boot. [05-api.md](05-api.md) section 6.2 item 3 and [03-architecture.md](03-architecture.md) section 2.3 say so | Docs only. `hooks.test.mjs` measures that span with an `--import` preload, for a hook that finishes quickly. No test pins the in-script 200 ms exit timer itself (section 11.2) |
+| Owner decisions SM-O9 / DRW-O4, DRW-O1, SM-O10 and SM-O11 | Recorded as D-71 to D-74 in [14-decisions.md](14-decisions.md) and marked decided in [15-open-questions.md](15-open-questions.md) | Docs only |
+| The tier design-oversight review (APR-O1, Q4) had not run | Task 35: [reviews/2026-10-02-tier-oversight.md](reviews/2026-10-02-tier-oversight.md), 17 findings, 6 of them high, each labelled as a design gap or an M1-only miss. It is input for the owner; none of its findings is decided, and no other doc was changed for them | Linked from APR-O1 and Q4 in [15-open-questions.md](15-open-questions.md) |
+
+Incident: during the Task 31 fix round, a mutation run printed a spawn request's environment into an
+agent's tool output, in a local transcript only; the `fm.test.mjs` failure messages were changed to
+print only op names and PTY ids, and two reviewers confirmed with a marker variable that no
+`fm.test.mjs` output carries environment values.
+
+### 11.2 Still open after the third round
+
+| Severity | Item | Checked how |
+|---|---|---|
+| Owner, before M3 | The findings of the tier design-oversight review (APR-O1, Q4) need the owner's resolution before M3 starts ([12-milestones.md](12-milestones.md) section 5, exit criterion 6, and section 9) | [15-open-questions.md](15-open-questions.md) |
+| Docs, not rated | D-71 to D-74 are recorded in 14-decisions and 15-open-questions only. [interaction/state-machines.md](interaction/state-machines.md), [screens/needs-you-drawer.md](screens/needs-you-drawer.md), [07-approvals.md](07-approvals.md) and the M3 gate row of [12-milestones.md](12-milestones.md) section 9 still read them as Proposed or Open; those files were outside this task's file set | `grep` for the IDs in those files |
+| Medium | The hook's in-script 200 ms exit timer (`hub/hook/deck-hook.mjs`, the `setTimeout` before `main()`) is unpinned: a 900 ms timer passes `hooks.test.mjs`, because the only test of the timer, "hook exits silently when stdin never finishes", allows 1000 ms, and the 200 ms span is measured only for a hook that finishes quickly | Reviewer's mutation, rerun by this task from `hub/`: with the timer changed from 200 to 900 ms, `node --test test/contract/hooks.test.mjs` passes 10 of 10; restored, it passes 10 of 10 again. Tests were outside this task's file set |
+| Low | Dogfood bug 4 stays open (section 9.2): not reproduced | The five-spec e2e run of section 1 |
