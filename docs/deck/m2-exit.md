@@ -54,7 +54,7 @@ Notes:
 |---|---|---|
 | 1 | `launch.test.mjs` "a launch stays starting after SessionStart, gets its task typed on the idle screen, then runs" (fake `claude` on `slow-start.json`; the task arrives as one bracketed paste at least 900 ms after `SessionStart`, and `launch_task` is cleared once typed) | "New session AC3, AC4 and exit criterion 1: a busy repo warns but launches; Alt Enter posts repoKey and task, opens Focus with the terminal focused, and the task is typed after the idle box" |
 | 2 | `restart.test.mjs` "a restarted server reconciles the three running PTYs and the reconnected tab types into each again" (the first server is closed, a second one starts on the same deckd) | "Exit criterion 2: a server restart with three live PTYs; the page reconnects without a reload and types into each again" |
-| 3 | `shared-input.test.mjs` "kitty types, the browser types inside the window: terminal_active, collision, quiet, lastInputFrom browser, then detached", plus the four machine tests in the same file (constants, collision hold, settle, no collision outside the window) | "Exit criterion 3: fm claude in a terminal and the browser type into one session; "Last typed from" follows the typist and crossing keystrokes show the collision chip" |
+| 3 | `shared-input.test.mjs` "kitty types, the browser types inside the window: terminal_active, collision, quiet, lastInputFrom browser, then detached", plus the five input machine tests in the same file: "the timing constants are those of state-machines 3", "terminal bytes then browser bytes inside the window collide, the chip holds 3 s, then quiet", "the collision settles on the source of the latest byte while it is still active", "bytes from the other source outside the window switch the indicator without a collision" and "quiet starts from the seeded source and only terminal clients count for detached" | "Exit criterion 3: fm claude in a terminal and the browser type into one session; "Last typed from" follows the typist and crossing keystrokes show the collision chip" |
 
 The criterion names `slow-start.json` and `idle.json`; the launch test uses `slow-start.json` only.
 `idle.json`'s Stop hook would move the session to idle on its own, so the empty-task case
@@ -174,7 +174,11 @@ above) still packs a staged copy, extracts it and imports `server/main.mjs` and 
 ## 5. The M0 spike, deleted in M2
 
 Task 16 deleted `hub/spike/` (page, `main.js`, `server.mjs`), `hub/test/integration/spike-reattach.test.mjs`
-and `hub/test/perf/keystroke-echo.spec.mjs`; `hub/test/unit/spike-removed.test.mjs` keeps them gone.
+and `hub/test/perf/keystroke-echo.spec.mjs`. `hub/test/unit/spike-removed.test.mjs` pins that `hub/spike/` does not
+exist, that the `perf` script runs `test/perf/focus-echo.mjs` and that file exists, that `jsconfig.json`
+does not include `spike`, and that no hub source imports a specifier containing `spike/`. It does not
+pin the two deleted test files: restoring `keystroke-echo.spec.mjs` from before Task 16 leaves it green
+(section 6).
 What carries each dropped case now:
 
 | Dropped case | Carried by |
@@ -203,6 +207,10 @@ Each was checked against the code on 2026-10-02 as noted.
 | Low | Copy keys used by the screens but absent from every copy deck in `docs/deck/`: 144 keys, among them the M2 `team.*`, `focus.*` (list, stop, crash, paste, link, log, changes, facts), `terminal.link.confirm`, the crew language names and many Settings Connections keys. They need a copy-deck pass | A script that reads every `*_COPY` object in `hub/web/src` and looks for each key in backticks in `docs/deck/**/*.md` |
 | Low | `deck-hook` stamps `deckHookVersion: '0.1.0'` as a literal (`hub/hook/deck-hook.mjs:75`), and nothing in `hub/server` or `hub/bin` reads it, so the "Hooks are from an older deck release" note of [13-operations.md](13-operations.md) 9.4 is not built | `grep -rn deckHookVersion hub/server hub/bin` finds nothing |
 | Low | The release workflow's leak filter still names `spike/` (`.github/workflows/deck-release.yml:116`). Harmless now that the directory is gone; the owner's call | Code read |
+| Low | `spike-removed.test.mjs` does not keep `hub/test/perf/keystroke-echo.spec.mjs` gone: with that file restored from the commit before Task 16, the test file still passes 5 of 5 | Restored the file, ran `node --test test/unit/spike-removed.test.mjs` from `hub/`, removed it again |
+| Medium | `POST /api/sessions` refuses a task holding NUL with 422 `validation_failed` (`hub/server/launch/launch.mjs:132`), as [05-api.md](05-api.md) 2.3 says, but no test pins it. The test belongs in `hub/test/integration/launch.test.mjs` | Removed `task.includes('\0')` from that line; the hub suite stayed green (905 of 905); restored |
+| Low | The web client's WebSocket `hello` still sends `build: 'm1'` (`BUILD` in `hub/web/src/state/api.js:8`, also the key of the reload guard at line 170), pinned by `hub/test/unit/web-shell.test.mjs:178` and `:205`, while `GET /api/version` reports `build: 'm2'` (`hub/server/http/api.mjs:129`). No server code reads the `hello` build | `grep` of `hub/web/src`, the test and `hub/server` |
+| Low | The `Location: http://127.0.0.1:<port>/` header of the 421 localhost answer (`hub/server/http/router.mjs:45`) is pinned only by `security.spec.mjs` "DNS rebinding: ...", which is not in the hub suite. `security.test.mjs` "localhost redirect" pins the 421 status and code but not the header | Removed line 45: the hub suite stayed green (905 of 905) and the DNS rebinding e2e test failed on the missing `location`; restored, it passed |
 | Low | Flaky under load: `hooks.test.mjs` "200 ms budget" and "hook sends one complete line ... without creating spool", `fm.test.mjs` "SIGHUP to fm attach" (failed once in this task, then passed), `observe.spec.mjs` "Home AC15 and Failures AC4", and a Rolldown panic seen once in the package-contents test | Only the `fm.test.mjs` failure was seen in this task; the others are carried from the run's notes, not reproduced |
 
 Known to the owner from dogfooding, recorded and not fixed here:

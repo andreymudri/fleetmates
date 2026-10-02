@@ -20,7 +20,7 @@ Type names in payloads (`Session`, `Request`, `Run`, ...) are the JSDoc typedefs
 | HTTP token carrier | `Authorization: Bearer <token>` header. Never in a query string (it would land in logs and history). | Proposed (API-O1) |
 | WebSocket token carrier | Browsers cannot set headers on a WebSocket. The SPA opens `new WebSocket(url, ['deck.v1', 'deck.auth.' + token])` (the raw token: it is already base64url, so it is a valid subprotocol token as it is); the server checks the second subprotocol, answers with `Sec-WebSocket-Protocol: deck.v1` only, and rejects the upgrade with HTTP 401 when the token is missing or wrong. | Proposed (API-O1) |
 | Host check | `Host` must be exactly `127.0.0.1:<port>`. `localhost:<port>` gets 421 `forbidden_host` with `Location: http://127.0.0.1:<port>/`; anything else gets 403 `forbidden_host` (blocks DNS rebinding). Same rule as [08-security.md](08-security.md) 4.1. | Decided (check; allowed values by the owner on 2026-10-01) |
-| Origin check | Every `/api/*` request other than `GET` and `HEAD`, every WebSocket upgrade, and any request that carries `Origin` must have `Origin: http://127.0.0.1:<port>`; else 403 `forbidden_origin` (HTTP) or a refused upgrade (WebSocket). An `/api/*` request whose `Sec-Fetch-Site` is present and neither `same-origin` nor `none`, and every `OPTIONS` request, also gets 403 `forbidden_origin`. | Decided (check; allowed value by the owner on 2026-10-01) |
+| Origin check | Every `/api/*` request other than `GET` and `HEAD`, every WebSocket upgrade, and any request that carries `Origin` must have `Origin: http://127.0.0.1:<port>`; else 403 `forbidden_origin` (HTTP) or a refused upgrade (WebSocket). An `/api/*` request whose `Sec-Fetch-Site` is present and neither `same-origin` nor `none`, and every `OPTIONS` request to `/api/*`, also gets 403 `forbidden_origin`. An `OPTIONS` request to a non-API path gets 404 `not_found` (only `GET` and `HEAD` are served there), unless it carries a foreign `Origin`, which gets 403 `forbidden_origin` by the rule above. | Decided (check; allowed value by the owner on 2026-10-01) |
 | Body type | Requests with a body must send `Content-Type: application/json` (else 415). Together with the Origin check this forces a CORS preflight for any cross-site attempt; the server answers no CORS headers, so preflights fail. | Proposed |
 | Body size | 256 KiB max, declared or streamed (413 `payload_too_large`, sent with `Connection: close` so a client still sending its body gets the 413 instead of a reset), as [08-security.md](08-security.md) 4.1 says. Terminal input and pastes travel over the WebSocket (section 3.5), not this path. | Decided (owner, 2026-10-01) |
 | POST bodies | Only `POST /api/sessions` and `POST /api/open` read a body. A `POST` with a non-empty JSON object to any other route gets 422 `validation_failed` before it is routed. | Proposed (M2) |
@@ -348,7 +348,7 @@ Client to server (JSON):
 | `term.resize` | `{ sessionId, cols, rows }` | forwarded to deckd with `source: browser`; deckd applies the resize rule (SM-O12: follow the most recent input source, at most once per second) |
 | `sub.tails` | `{ sessionIds: string[] }` | subscribe compact tails (replaces the previous set) |
 
-Server to client (JSON): `term.attached { sessionId, ptyId, cols, rows }`, `term.exit { sessionId, code, signal }`, `term.error { sessionId, error }`. `term.error` codes: `validation_failed`, `not_found`, `no_pty`, `deckd_unavailable`, `output_dropped`, and since M2 `not_attached` (an input frame or `term.resize` for a session this socket has not attached) and `payload_too_large` (an input frame over 64 KiB).
+Server to client (JSON): `term.attached { sessionId, ptyId, cols, rows }`, `term.exit { sessionId, code, signal }`, `term.error { sessionId, error }`. `term.error` codes: `validation_failed`, `not_found`, `no_pty`, `deckd_unavailable`, `output_dropped`, and since M2 `not_attached` (an input frame or `term.resize` for a session this socket has not attached) and `payload_too_large` (an input frame over 64 KiB). A deckd rejection of an attach, input or resize maps as follows: deckd `not_found` becomes `no_pty`, a link that is down, closed or timed out becomes `deckd_unavailable`, and any other deckd error code becomes `internal` (`retryable: false`, no `details`).
 
 Binary frame layout (both directions):
 
@@ -435,7 +435,7 @@ One JSON shape for every non-2xx response and for `error`, `ask.error`, `term.er
 | `no_pty` | 409 | terminal attach on an observed session (WebSocket only) |
 | `output_dropped` | n/a | terminal output dropped for backpressure (WebSocket only) |
 | `not_attached` | n/a | terminal input or resize for a session the socket has not attached (WebSocket only, M2) |
-| `internal` | 500 | bug; logged with a request id in `details.requestId` |
+| `internal` | 500 | bug; logged with a request id in `details.requestId`. Also a `term.error` code (section 3.5) for a deckd rejection the bridge does not map to `no_pty` or `deckd_unavailable` |
 
 ## 5. Web server to deckd protocol (Proposed)
 
