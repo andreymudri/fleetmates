@@ -8,6 +8,7 @@ import { runRetention } from './db/retention.mjs'
 import { createProjector } from './machines/projector.mjs'
 import { createIngestor, startHookSocket } from './ingest/socket.mjs'
 import { startSpoolDrain } from './ingest/spool.mjs'
+import { hookVersionOutdated } from './ingest/validate.mjs'
 import { connectDeckd as defaultConnectDeckd } from '../deckd/client.mjs'
 import { setupPaths } from './setup/paths.mjs'
 import { doctor } from './setup/doctor.mjs'
@@ -20,6 +21,9 @@ import { createRouter, apiError } from './http/router.mjs'
 import { readToken } from './http/auth.mjs'
 import { createWsHub } from './ws/hub.mjs'
 const builtSpa = fileURLToPath(new URL('../web/dist/', import.meta.url))
+const deckVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+// Consecutive envelopes at the current deckHookVersion that return an outdated hooks row to ok.
+const currentHookRun = 3
 function runCommand(file, args, env) {
   try { return { status: 0, stdout: execFileSync(file, args, { encoding: 'utf8', timeout: 5000, env, stdio: ['ignore', 'pipe', 'pipe'] }), stderr: '' } }
   catch (error) { return { status: error.status ?? 1, stdout: '', stderr: '' } }
@@ -86,7 +90,8 @@ export async function createDeckServer(options = {}) {
   }
   const projector = createProjector({ store, now, publish, locateTask: taskForCwd })
   link = createDeckdLink({ env, connectDeckd, reconnectMs, random, now, store, projector, publish, timeoutMs: options.deckdTimeoutMs ?? 2000 })
-  const ingest = createIngestor({ now, onEvent: envelope => projector.applyHooks([envelope]), onRejected: row => store.run('INSERT INTO rejected_events(received_at,via,reason,raw) VALUES(?,?,?,?)', row.receivedAt, row.via, row.reason, '') })
+  const ingest = createIngestor({ now, onEvent: envelope => { projector.applyHooks([envelope])
+    noteHookVersion(envelope) }, onRejected: row => store.run('INSERT INTO rejected_events(received_at,via,reason,raw) VALUES(?,?,?,?)', row.receivedAt, row.via, row.reason, '') })
   const scanRoot = () => {
     const root = api?.preferences().prefs.scanRoot ?? config.scanRoot ?? '~/dev'
     return root.startsWith('~/') ? path.join(paths.home, root.slice(2)) : path.resolve(root)
@@ -124,9 +129,30 @@ export async function createDeckServer(options = {}) {
   const hookCommand = deckHookCommand(process.execPath, paths.hook)
   // The hooks health row (owner decision 2026-10-01): computed now, rechecked after every rescan and hook
   // install, and published as health.changed only when its state or reason changes.
-  hooksState = { dep: 'hooks', ...checkHooks(paths, hookCommand), since: now(), nextProbeAt: null, attempt: 0 }
+  // Task 23 (13-operations 9.4): an accepted envelope stamped older than this package (or unstamped) marks the
+  // hooks outdated, shown as warn/hooks_outdated unless checkHooks reports hooks_missing or hook_script_missing.
+  // A run of currentHookRun envelopes at the current version, or a successful POST /api/setup/hooks, clears it.
+  let hooksOutdated = false
+  let currentRun = 0
+  const hooksRow = () => {
+    const base = checkHooks(paths, hookCommand)
+    return base.state === 'ok' && hooksOutdated ? { state: 'warn', reason: 'hooks_outdated' } : base
+  }
+  function noteHookVersion(envelope) {
+    if (hookVersionOutdated(envelope.deckHookVersion, deckVersion)) {
+      currentRun = 0
+      if (hooksOutdated) return
+      hooksOutdated = true
+    } else {
+      if (!hooksOutdated || ++currentRun < currentHookRun) return
+      hooksOutdated = false
+      currentRun = 0
+    }
+    recheckHooks()
+  }
+  hooksState = { dep: 'hooks', ...hooksRow(), since: now(), nextProbeAt: null, attempt: 0 }
   function recheckHooks() {
-    const next = checkHooks(paths, hookCommand)
+    const next = hooksRow()
     if (next.state === hooksState.state && next.reason === hooksState.reason) return
     const at = now()
     hooksState = { ...hooksState, ...next, since: at }
@@ -139,6 +165,8 @@ export async function createDeckServer(options = {}) {
       try {
         const current = readSettings(paths.settings)
         const backupPath = writeSettings(paths.settings, current, transformHooks(current.value, hookCommand))
+        hooksOutdated = false
+        currentRun = 0
         return { check: (await checks()).find(check => check.id === 'hooks'), backupPath }
       } catch (error) { throw apiError(error instanceof SyntaxError ? 422 : 500, error instanceof SyntaxError ? 'validation_failed' : 'settings_io_failed') }
       finally { recheckHooks() }

@@ -52,6 +52,48 @@ export function validateEnvelope(raw) {
   return { ok: true, value }
 }
 
+const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
+
+/**
+ * Compare two semver versions by semver precedence; build metadata is ignored.
+ * @param {unknown} a
+ * @param {unknown} b
+ * @returns {-1 | 0 | 1 | null} null when either value is not a semver string
+ */
+export function compareVersions(a, b) {
+  const left = typeof a === 'string' ? a.match(semver) : null
+  const right = typeof b === 'string' ? b.match(semver) : null
+  if (!left || !right) return null
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(left[i]) - Number(right[i])
+    if (diff) return diff < 0 ? -1 : 1
+  }
+  if (!left[4] || !right[4]) return left[4] ? -1 : right[4] ? 1 : 0
+  const x = left[4].split('.')
+  const y = right[4].split('.')
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue
+    const xn = /^\d+$/.test(x[i])
+    const yn = /^\d+$/.test(y[i])
+    if (xn && yn) return Number(x[i]) < Number(y[i]) ? -1 : 1
+    if (xn !== yn) return xn ? -1 : 1
+    return x[i] < y[i] ? -1 : 1
+  }
+  return x.length === y.length ? 0 : x.length < y.length ? -1 : 1
+}
+
+/**
+ * Whether an envelope's `deckHookVersion` comes from an older deck release than `current` (13-operations 9.4).
+ * A missing or malformed stamp counts as older.
+ * @param {unknown} stamp the envelope's deckHookVersion
+ * @param {string} current the server's package version
+ * @returns {boolean}
+ */
+export function hookVersionOutdated(stamp, current) {
+  const order = compareVersions(stamp, current)
+  return order === null || order < 0
+}
+
 /** Stable identity for deduplication across socket delivery and spool replay. */
 export function dedupeKey(envelope) {
   const hook = envelope.hook
