@@ -196,9 +196,13 @@ CREATE TABLE session_scrollback (
 -- `GET /api/sessions/:id/scrollback` serves every stored row rendered through a headless terminal of the
 -- size its header names, or 120x40 when it names none. Serialized history comes out as the same screen; a
 -- raw row comes out as rows drawn at 120x40 (best effort, since its original size is unknown). One render
--- writes only the newest 256 KiB of the row, cut at a line start, with line, scroll and repeat counts
--- bounded to a screenful, in 2048-character steps that yield to the event loop, starting no step after
--- 500 ms, into a scrollback sized from the input (at most 5000 rows). The response says truncated when the stored row was
+-- writes only the newest 256 KiB of the row, cut at a line start. The first parameter of each sequence
+-- whose cost grows with it is clamped (line insert, delete and scroll counts to the screen height;
+-- character insert, delete and erase, tab and repeat counts to the width), whatever parameters, controls
+-- or C1 introducer the sequence carries, and a repeat of a cluster longer than 4 x width code units is
+-- dropped. The input goes in steps of at most 2048 characters that end sooner after sequences estimated
+-- at 250,000 cell operations, yield to the event loop, and start no later than 500 ms after the first,
+-- into a scrollback sized from the input (at most 5000 rows). The response says truncated when the stored row was
 -- cut, when the render left input out (the 256 KiB cut, the 500 ms budget, or a full scrollback), or when
 -- `lines` cut it. The server keeps the 64 most recently read renders in memory, keyed by session, capture
 -- time and text length, so a repeat read does not render again.

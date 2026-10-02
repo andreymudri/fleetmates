@@ -246,9 +246,79 @@ test('renderHistory stops at its time budget on crafted bytes, and the event loo
 
 test('boundCounts clamps line, scroll and character counts to the screen so they cost what a screenful costs', () => {
   assert.equal(boundCounts('\x1b[999L\x1b[999M\x1b[999S\x1b[999T', 120, 40), '\x1b[40L\x1b[40M\x1b[40S\x1b[40T')
-  assert.equal(boundCounts('\x1b[9999@\x1b[9999P\x1b[9999X', 120, 40), '\x1b[120@\x1b[120P\x1b[120X')
-  assert.equal(boundCounts('a\x1b[65535b', 120, 40), 'a\x1b[4800b')
-  assert.equal(boundCounts('\x1b[3L\x1b[10;150H\x1b[?999S\x1b[1;2T', 120, 40), '\x1b[3L\x1b[10;150H\x1b[?999S\x1b[1;2T', 'other sequences pass through')
+  assert.equal(boundCounts('\x1b[9999@\x1b[9999P\x1b[9999X\x1b[9999I\x1b[9999Z', 120, 40), '\x1b[120@\x1b[120P\x1b[120X\x1b[120I\x1b[120Z')
+  assert.equal(boundCounts('a\x1b[65535b', 120, 40), 'a\x1b[120b')
+  assert.equal(boundCounts('\x1b[3L\x1b[10;150H\x1b[?999S\x1b[1;2T\x1b[999 @', 120, 40), '\x1b[3L\x1b[10;150H\x1b[?999S\x1b[1;2T\x1b[999 @', 'other sequences pass through')
+})
+
+test('boundCounts clamps the first parameter whatever follows it, after a C1 CSI, and with controls inside the sequence', () => {
+  assert.equal(boundCounts('\x1b[99999;1L', 120, 40), '\x1b[40;1L', 'a second parameter')
+  assert.equal(boundCounts('\x1b[999:1L', 120, 40), '\x1b[40:1L', 'a subparameter')
+  assert.equal(boundCounts('\x1b[999;0S', 120, 40), '\x1b[40;0S', 'a zero second parameter')
+  assert.equal(boundCounts('a\x1b[65535;1b', 120, 40), 'a\x1b[120;1b', 'REP with a second parameter')
+  assert.equal(boundCounts('\x9b99999M\x9b9999;2P', 120, 40), '\x1b[40M\x1b[120;2P', 'the C1 introducer')
+  assert.equal(boundCounts('\x1b[9\n99T', 120, 40), '\n\x1b[40T', 'a line feed inside the parameters, executed first')
+  assert.equal(boundCounts('\x1b\x00[\x7f999S', 120, 40), '\x00\x1b[40S', 'controls between ESC and [')
+})
+
+test('the first parameter xterm hands IL is at most the screen height for every crafted form', async () => {
+  const forms = ['\x1b[99999;1L', '\x1b[999:1L', '\x9b99999L', '\x1b[9\n9999L', '\x1b\n[99999L', '\x1b[2147483647;5L', '\x1b[0099999L']
+  for (const form of forms) {
+    const term = new Terminal({ cols: 120, rows: 40, allowProposedApi: true })
+    const seen = []
+    term.parser.registerCsiHandler({ final: 'L' }, params => {
+      seen.push(params[0])
+      return true
+    })
+    try {
+      await new Promise(resolve => term.write(boundCounts(form, 120, 40), () => resolve(undefined)))
+      assert.deepEqual(seen, [40], JSON.stringify(form))
+    } finally { term.dispose() }
+  }
+})
+
+/**
+ * Render `text` while a 5 ms timer runs; return how long it took and the longest gap between two timer ticks.
+ * @param {string} text
+ * @param {{ cols?: number, rows?: number }} [size]
+ */
+async function timedRender (text, size) {
+  let gap = 0
+  let last = Date.now()
+  const timer = setInterval(() => {
+    const at = Date.now()
+    gap = Math.max(gap, at - last)
+    last = at
+  }, 5)
+  const started = Date.now()
+  try {
+    const out = await renderHistory(text, size)
+    gap = Math.max(gap, Date.now() - last)
+    return { out, took: Date.now() - started, gap }
+  } finally { clearInterval(timer) }
+}
+
+test('a second parameter, a subparameter or a zero second parameter does not lift the count bound', async () => {
+  for (const form of ['\x1b[99999;1L', '\x1b[99999:1L', '\x1b[99999;0S', 'a\x1b[65535;1b', '\x9b99999;1M']) {
+    const { took, gap } = await timedRender(form.repeat(10) + 'done')
+    assert.ok(took < RENDER_BUDGET_MS * 2, `${JSON.stringify(form)} returned after ${took} ms`)
+    assert.ok(gap < 250, `${JSON.stringify(form)}: the longest event-loop gap was ${gap} ms`)
+  }
+})
+
+test('at 500x200, insert-lines after a full scrollback end each write step early, so the event loop keeps running', async () => {
+  const { out, took, gap } = await timedRender('\n'.repeat(6000) + '\x1b[200L'.repeat(Math.floor(200 * 1024 / 7)), { cols: 500, rows: 200 })
+  assert.equal(out.truncated, true, 'the budget stopped it')
+  assert.ok(took < RENDER_BUDGET_MS * 2, `returned after ${took} ms`)
+  assert.ok(gap < 250, `the longest event-loop gap was ${gap} ms`)
+})
+
+test('REP of a cluster of 80000 code units is dropped rather than copied a row long', async () => {
+  const { out, gap } = await timedRender('e' + '\u0301'.repeat(80000) + '\x1b[120b')
+  assert.ok(gap < 250, `the longest event-loop gap was ${gap} ms`)
+  assert.ok(out.data.length < 2 * 80001, `the cluster is printed once, not 120 times (${out.data.length} characters)`)
+  const { data } = await renderHistory('ab\x1b[3b')
+  assert.ok((await render(data, 120, 40)).includes('abbbb'), 'REP of one character still repeats it')
 })
 
 test('16 KiB of insert-lines with a count of 999 renders whole within the budget', async () => {
@@ -265,6 +335,8 @@ test('a raw row feeds only its newest 256 KiB, cut at a line start', async () =>
   assert.ok(!labels.includes('R0000'), 'the oldest lines are not rendered')
   assert.equal(labels.at(-1), 'R2999')
   assert.ok(labels.length * 102 <= RENDER_INPUT_CAP + 102)
+  const first = (await render(out.data, 120, 40, 5000)).find(Boolean)
+  assert.match(first, /^R\d{4}-{95}$/, 'the first served row is a whole labelled line')
 })
 
 test('a stored row is rendered once: a second read is served from the cache', async () => {
@@ -310,5 +382,56 @@ test('the render cache keeps the 64 most recently read rows', async () => {
     assert.equal(calls, 65, 'the row read most recently before the 65th stays cached')
     await launcher.scrollback('s2', 10)
     assert.equal(calls, 66, 'the least recently read row was dropped')
+  } finally { launcher.close() }
+})
+
+/**
+ * A launcher over a stub store holding `rows` (session id to stored scrollback row); every session has ended.
+ * @param {Map<string, object>} rows
+ * @param {Function} [renderer]
+ */
+function storedLauncher (rows, renderer) {
+  const store = { get: (sql, id) => sql.includes('FROM sessions') ? { id, alive: 0 } : rows.get(id) }
+  return createLauncher({ store, projector: {}, preferences: () => ({ prefs: { claudeCommand: 'claude' } }), ...(renderer ? { render: renderer } : {}) })
+}
+
+test('a relaunched session that exits again serves its second run, not the cached first one', async () => {
+  const h = harness()
+  try {
+    const link = { connected: true, request: async () => ({ ptyId: 'pty_second' }) }
+    const launcher = createLauncher({ store: h.store, projector: h.projector, link, preferences: () => ({ prefs: { claudeCommand: 'claude' } }) })
+    try {
+      h.projector.signal(h.id, { type: 'exit', code: 1, signal: null, tail: Buffer.from('FIRST RUN!\r\n').toString('base64') }, 2000)
+      const first = (await launcher.scrollback(h.id, 100)).data.text
+      assert.ok((await render(first, 120, 40)).includes('FIRST RUN!'))
+      await launcher.relaunch(h.id)
+      h.projector.signal(h.id, { type: 'exit', code: 1, signal: null, tail: Buffer.from('SECOND RUN\r\n').toString('base64') }, 3000)
+      const second = (await launcher.scrollback(h.id, 100)).data.text
+      const rows = await render(second, 120, 40)
+      assert.ok(rows.includes('SECOND RUN') && !rows.includes('FIRST RUN!'), 'the same id and length, a later capture time')
+    } finally { launcher.close() }
+  } finally { h.close() }
+})
+
+test('a render that leaves input out answers truncated even when the stored row was whole', async () => {
+  const text = Array.from({ length: 3000 }, (_, i) => `R${String(i).padStart(4, '0')}`.padEnd(100, '-')).join('\r\n')
+  const launcher = storedLauncher(new Map([['s1', { captured_at: 1, text, truncated: 0 }]]))
+  try {
+    const { data } = await launcher.scrollback('s1', 5000)
+    assert.ok(data.text.split('\r\n').length < 5000, 'lines did not cut it')
+    assert.equal(data.truncated, true)
+  } finally { launcher.close() }
+})
+
+test('a render that failed is not cached: the next read renders again', async () => {
+  let calls = 0
+  const launcher = storedLauncher(new Map([['s1', { captured_at: 1, text: 'row', truncated: 0 }]]), async text => {
+    if (++calls === 1) throw new Error('render failed')
+    return { data: text, truncated: false }
+  })
+  try {
+    await assert.rejects(launcher.scrollback('s1', 10), /render failed/)
+    assert.deepEqual((await launcher.scrollback('s1', 10)).data, { text: 'row', source: 'stored', truncated: false })
+    assert.equal(calls, 2)
   } finally { launcher.close() }
 })
