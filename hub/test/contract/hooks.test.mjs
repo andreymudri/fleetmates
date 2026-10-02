@@ -127,20 +127,28 @@ test('hook sends one complete line to the runtime socket without creating spool'
     child.stderr.on('data', chunk => output.push(chunk))
     let clockText = ''
     let childTimer
+    let startTimer
     let exit
     try {
       exit = await Promise.race([
         new Promise(resolve => child.on('close', resolve)),
         new Promise((_, reject) => {
+          // The 500 ms timer below is armed by the preload's first clock line, so a child that
+          // hangs before the preload writes would never meet it. This startup bound is generous
+          // because it covers Node's boot under load, which the 200 ms budget deliberately leaves out.
+          startTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook never started its clock')) }, 10_000)
           child.stdio[3].setEncoding('utf8')
           child.stdio[3].on('data', chunk => {
             const first = !clockText.includes('\n')
             clockText += chunk
-            if (first && clockText.includes('\n')) childTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook did not exit')) }, 500)
+            if (first && clockText.includes('\n')) {
+              clearTimeout(startTimer)
+              childTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook did not exit')) }, 500)
+            }
           })
         }),
       ])
-    } finally { clearTimeout(childTimer) }
+    } finally { clearTimeout(startTimer); clearTimeout(childTimer) }
     const [scriptStart, scriptExit] = clockText.trim().split('\n').map(Number)
     assert.ok(Number.isFinite(scriptStart) && Number.isFinite(scriptExit), 'socket hook clock did not report')
     assert.ok(scriptExit - scriptStart < 200, 'socket hook exceeded its 200 ms budget')
