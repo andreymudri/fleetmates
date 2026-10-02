@@ -226,8 +226,7 @@ test('keyboard (qa 1.3): every focusable control on Home shows a visible focus i
 
 // M2 (09-testing.md section 11.2, "end of M2"): the audit on the React build with a live terminal, against the
 // control harness of control.spec.mjs (real deckd, fake claude). Every axe finding is printed with its impact;
-// serious and critical ones fail. Findings of the keyboard and motion checks that the product does not meet yet
-// are todo tests naming the defect and its severity (qa-checklist 0.4).
+// serious and critical ones fail.
 
 test('axe (M2): Focus with a live terminal and its Stop dialog, New session, Team run and plan drawer, Settings Appearance and compact Home', { skip: skipAxe }, async t => {
   const audit = auditor()
@@ -265,10 +264,9 @@ test('axe (M2): Focus with a live terminal and its Stop dialog, New session, Tea
   audit.done()
 })
 
-// S2 found by this audit (broken keyboard path, qa-checklist 0.4): the Crew sheet's grid scroller
-// (hub/web/src/screens/crew/CrewSheet.jsx:209, `.crew-grid-scroll`) scrolls but cannot take focus, so a keyboard
-// user cannot scroll it (axe scrollable-region-focusable, serious).
-test('axe (M2): the Crew sheet', { skip: skipAxe, todo: 'CrewSheet.jsx:209 .crew-grid-scroll is a scrollable region with no keyboard access (axe scrollable-region-focusable, serious, S2)' }, async t => {
+// The Crew sheet's grid scroller (`.crew-grid-scroll`) scrolls, so it must take focus for a keyboard user to
+// scroll it (axe scrollable-region-focusable, serious).
+test('axe (M2): the Crew sheet', { skip: skipAxe }, async t => {
   const audit = auditor()
   const h = await startControl(t, { web: web.dir, team: false })
   const page = await openDeck(browser, h, '/settings/crew')
@@ -352,19 +350,25 @@ test('motion (qa 1.4): Settings "Always reduce motion" stops every CSS animation
   }
 })
 
-// Known gap (S3, qa 1.4 "caret (xterm only when motion is allowed)"): TerminalView reads only the OS media
-// query for `cursorBlink` (hub/web/src/components/TerminalView.jsx:131), never the Settings preference.
-test('motion (qa 1.4): the terminal caret does not blink with Settings "Always reduce motion"', { todo: 'TerminalView.jsx:131 ignores data-motion="reduce": the xterm cursor blinks with the Settings preference on and the OS preference off' }, async t => {
+// qa 1.4 "caret (xterm only when motion is allowed)": xterm adds `.xterm-cursor-blink` to the cursor cell when it
+// draws a focused cursor, so each check first waits for that cursor (a focused shape class) before reading the
+// class; a read before the draw could not tell a still caret from one not drawn yet. The first page, with motion
+// allowed, shows the class does appear when the caret blinks.
+test('motion (qa 1.4): the terminal caret does not blink with Settings "Always reduce motion"', async t => {
   const h = await startControl(t, { web: web.dir, team: false })
   const vault = await h.wrapped('vault-mcp')
-  const blinking = page => page.evaluate(() => document.querySelectorAll('.terminal-view .xterm-cursor-blink').length > 0)
+  const blinking = async page => {
+    await page.waitForSelector('.terminal-view .xterm-rows')
+    await page.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'))
+    await page.waitForSelector('.terminal-view .xterm-rows .xterm-cursor:is(.xterm-cursor-block, .xterm-cursor-bar, .xterm-cursor-underline)', { timeout: 5000 })
+    return page.evaluate(() => document.querySelectorAll('.terminal-view .xterm-cursor-blink').length > 0)
+  }
+  const allowed = await openDeck(browser, h, `/s/${vault.id}`, { reducedMotion: 'no-preference' })
+  assert.equal(await blinking(allowed), true, 'with motion allowed the caret blinks')
   const os = await openDeck(browser, h, `/s/${vault.id}`, { reducedMotion: 'reduce' })
-  await os.waitForSelector('.terminal-view .xterm-rows')
-  await os.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'))
   assert.equal(await blinking(os), false, 'the OS preference stops the blink')
   assert.equal((await h.api('/api/prefs', 'PATCH', { motion: 'reduce' })).status, 200)
   const page = await openDeck(browser, h, `/s/${vault.id}`, { reducedMotion: 'no-preference' })
-  await page.waitForSelector('.terminal-view .xterm-rows')
-  await page.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'))
+  await page.waitForFunction(() => document.documentElement.getAttribute('data-motion') === 'reduce')
   assert.equal(await blinking(page), false, 'the Settings preference stops the blink')
 })

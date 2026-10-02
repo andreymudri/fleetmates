@@ -206,7 +206,8 @@ export function CrewSheetView({ repos, selected, loading = false, busy = false, 
       {toast ? <CrewToast toast={toast} t={t} onUndo={onUndo} onDismiss={onDismiss} /> : null}
       {!loading && !known.length ? <p className="setting-hint crew-empty">{tr('crew.empty')}</p> : (
         <div className="crew-layout">
-          <div className="crew-grid-scroll">
+          {/* The grid scrolls at narrow sizes, so the scroller takes focus for keyboard scrolling (axe scrollable-region-focusable). */}
+          <div className="crew-grid-scroll" role="group" tabIndex={0} aria-labelledby="crew-title">
             <table className="crew-grid">
               <thead>
                 <tr>

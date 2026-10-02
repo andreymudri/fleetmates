@@ -516,7 +516,7 @@ test('untrusted text (M2): qa 1.7 payloads in run titles, task titles, repo name
   for (const payload of ui.xss.slice(0, 3)) assert.ok(team.includes(payload), `the task title ${payload} is literal`)
   await page.click('.team-actions button:text-is("Open plan")')
   await page.waitForFunction(() => document.querySelector('[role="dialog"]')?.textContent.includes('alert(9)'), null, { timeout: 5000 })
-  // The raw control characters of the plan markdown are pinned by the todo test below.
+  // The raw control characters of the plan markdown are pinned by the next test.
   const plan = await check('plan drawer', { controls: false })
   assert.ok(plan.includes('<script>alert(9)</script>'), 'raw HTML in the plan markdown is text')
   assert.ok(plan.includes(ui.xss[0]), 'the plan heading payload is text')
@@ -540,10 +540,9 @@ test('untrusted text (M2): qa 1.7 payloads in run titles, task titles, repo name
   assert.deepEqual(page.errors, [])
 })
 
-// Product gap found by this suite: the plan drawer returns markdown text tokens as they are
-// (hub/web/src/screens/team-run/PlanDrawer.jsx:54 `case 'text': return token.content`, also code_inline at :55 and
-// fence at :59), so a plan's ESC, BEL and U+202E reach the DOM raw; every other screen passes text through `shown`.
-test('untrusted text (M2): escape, bell and bidi controls in plan markdown never reach the DOM raw', { todo: 'PlanDrawer.jsx:54 renders markdown text tokens without shown(): U+202E, U+001B and U+0007 reach the DOM' }, async t => {
+// The plan drawer passes markdown prose text tokens through `titleText`, and inline code and fence tokens through
+// `shown`. This plan carries the controls in prose, so the test pins the `titleText` path only.
+test('untrusted text (M2): escape, bell and bidi controls in plan markdown never reach the DOM raw', async t => {
   const { h } = await xssDeck(t)
   const page = await openDeck(browser, h, teamRoute)
   await page.waitForSelector('.team-task')
