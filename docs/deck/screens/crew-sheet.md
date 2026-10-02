@@ -119,6 +119,8 @@ Grid: first column repo names (mono), then 5 pose columns (running, needs you, i
 | `crew.saved` | {repo}'s crew member updated |
 | `crew.saveError` | Could not save the crew change: {error} |
 | `crew.undo` | Undo |
+| `crew.grid.repo` | Repo |
+| `crew.dismiss` | Dismiss |
 
 ## 10. Acceptance criteria
 

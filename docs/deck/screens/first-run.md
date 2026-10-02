@@ -141,6 +141,14 @@ Each check result arrives as `setup.check` events so rows resolve independently 
 | `firstRun.setSail` | Set sail |
 | `firstRun.setSail.blocked` | Set sail (needs hooks) |
 | `firstRun.done` | Done |
+| `firstRun.cc.missing` | Claude Code was not found |
+| `firstRun.setSail.error` | Could not set sail: {error} |
+| `firstRun.name.claude` | Claude Code |
+| `firstRun.name.hooks` | Observation hooks |
+| `firstRun.name.deckd` | deckd |
+| `firstRun.name.vault` | vault-mcp |
+| `firstRun.name.scribed` | scribed |
+| `firstRun.name.notify` | Notifications |
 
 ## 10. Acceptance criteria
 

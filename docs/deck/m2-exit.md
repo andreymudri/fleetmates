@@ -2,7 +2,9 @@
 
 Status: **code ready, milestone not complete.** The automated suites, budgets and the release
 preparation below were run on 2026-10-02 on the integrated M2 tree (run branch tip `3eea239` plus
-this task's documentation and version changes). Exit criterion 6 (two manual working days), the
+this task's documentation and version changes). The cleanup tasks 20 to 25 followed on the same day;
+section 9 lists what they fixed and what stays open, and the suite counts in section 1 were rerun on
+their integrated tip `1f8535d`. Exit criterion 6 (two manual working days), the
 manual smoke with real Claude Code, the Orca and keyboard checks, the owner decisions in section 7,
 and the tag and publication of `deck-v0.2.0` are still PENDING. They need the owner and are not
 claimed here.
@@ -26,7 +28,7 @@ Run from the repository root. The hub suites need `npm ci --prefix hub` first an
 | Suite | Command | Result |
 |---|---|---|
 | Root (fleetmates) | `npm test` | 2796 tests, 2779 pass, 0 fail, 17 skipped |
-| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 905 tests, 905 pass, 0 fail, 0 skipped, 0 todo |
+| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 923 tests, 923 pass, 0 fail, 0 skipped, 0 todo (905 before the cleanup tasks) |
 | Observe e2e (M1) | `TMPDIR=/tmp/hx node --test --test-concurrency=1 test/e2e/observe.spec.mjs` from `hub/` | 39 tests, 39 pass, 0 todo |
 | Security e2e | same, `test/e2e/security.spec.mjs` | 14 tests, 14 pass, 0 todo |
 | Accessibility e2e | same, `test/e2e/accessibility.spec.mjs` | 14 tests, 14 pass, 0 todo |
@@ -34,7 +36,10 @@ Run from the repository root. The hub suites need `npm ci --prefix hub` first an
 | Control e2e (M2) | same, `test/e2e/control.spec.mjs` | 30 tests, 30 pass, 0 todo |
 
 The five e2e specs were also run together in one `node --test --test-concurrency=1` call: 98 tests,
-98 pass, 0 todo, in 152 s.
+98 pass, 0 todo, in 152 s. On the cleanup tip `1f8535d` the same call gave 98 tests, 98 pass, 0 fail,
+0 todo, in 161 s. The cleanup tasks changed assertions in `control.spec.mjs` and
+`settings-save.spec.mjs` but added no e2e test, so the per-spec counts above still hold; the root
+and hub rows were rerun on that tip.
 
 Notes:
 
@@ -176,9 +181,11 @@ above) still packs a staged copy, extracts it and imports `server/main.mjs` and 
 Task 16 deleted `hub/spike/` (page, `main.js`, `server.mjs`), `hub/test/integration/spike-reattach.test.mjs`
 and `hub/test/perf/keystroke-echo.spec.mjs`. `hub/test/unit/spike-removed.test.mjs` pins that `hub/spike/` does not
 exist, that the `perf` script runs `test/perf/focus-echo.mjs` and that file exists, that `jsconfig.json`
-does not include `spike`, and that no hub source imports a specifier containing `spike/`. It does not
-pin the two deleted test files: restoring `keystroke-echo.spec.mjs` from before Task 16 leaves it green
-(section 6).
+does not include `spike`, and that no hub source imports a specifier containing `spike/`. That last
+check also catches `spike-reattach.test.mjs` coming back, because the file imports
+`../../spike/server.mjs`: restored from before Task 16, the test file fails 1 of 5 ("no hub source
+imports a module whose specifier contains spike/"). Only `keystroke-echo.spec.mjs` is unpinned:
+restored from before Task 16, the test file still passes 5 of 5 (section 6).
 What carries each dropped case now:
 
 | Dropped case | Carried by |
@@ -197,7 +204,8 @@ What carries each dropped case now:
 
 ## 6. Findings carried out of the run
 
-Each was checked against the code on 2026-10-02 as noted.
+Each was checked against the code on 2026-10-02 as noted, before the cleanup tasks. The table is
+kept as it was found; section 9 gives the state of each finding after Tasks 20 to 25.
 
 | Severity | Finding | Checked how |
 |---|---|---|
@@ -213,7 +221,8 @@ Each was checked against the code on 2026-10-02 as noted.
 | Low | The `Location: http://127.0.0.1:<port>/` header of the 421 localhost answer (`hub/server/http/router.mjs:45`) is pinned only by `security.spec.mjs` "DNS rebinding: ...", which is not in the hub suite. `security.test.mjs` "localhost redirect" pins the 421 status and code but not the header | Removed line 45: the hub suite stayed green (905 of 905) and the DNS rebinding e2e test failed on the missing `location`; restored, it passed |
 | Low | Flaky under load: `hooks.test.mjs` "200 ms budget" and "hook sends one complete line ... without creating spool", `fm.test.mjs` "SIGHUP to fm attach" (failed once in this task, then passed), `observe.spec.mjs` "Home AC15 and Failures AC4", and a Rolldown panic seen once in the package-contents test | Only the `fm.test.mjs` failure was seen in this task; the others are carried from the run's notes, not reproduced |
 
-Known to the owner from dogfooding, recorded and not fixed here:
+Known to the owner from dogfooding, recorded and not fixed by Task 17 (section 9 has their state
+after the cleanup):
 
 - The Settings vault row offers "Fix in Settings", which does nothing useful.
 - Settings once failed to persist in the owner's browser; it was not reproducible.
@@ -303,3 +312,55 @@ Focus was the main control surface, and no keystroke was lost or duplicated. Log
     Verdict: <passed / not passed>
 
 Days 1 and 2: PENDING.
+
+## 9. Cleanup tasks 20 to 25
+
+Tasks 20 to 24 were integrated on 2026-10-02 (run branch tip `1f8535d`); Task 25 is this
+documentation pass. Every test named below passed in this task's hub run (923 of 923) or, for the
+e2e specs, in the five-spec run of section 1. Where a row says a mutation was rerun, this task broke
+the code, watched the named test fail, and restored it; the other mutations were run by the task
+that wrote the test and are not repeated here.
+
+`validation_failed` answers 422 throughout. The M2 plan's text for Tasks 20 and 22 says 400; the
+code and [05-api.md](05-api.md) section 4 say 422, and the tests pin 422.
+
+### 9.1 Fixed
+
+| Item | Fix | Test |
+|---|---|---|
+| A foreign `Origin` on a non-API path was refused, but nothing pinned it (Task 20) | Tests only | `security.test.mjs` "a foreign Origin is refused on non-API paths too, while the same page loads without one" |
+| `OPTIONS` on a non-API path answers 404 `not_found`, unpinned (Task 20) | Tests only | `security.test.mjs` "OPTIONS on a non-API path is not_found with a same-origin or no Origin" |
+| The 421 `Location: http://127.0.0.1:<port>/` header was pinned only by an e2e spec (section 6) | Tests only, now in the hub suite | `security.test.mjs` "the localhost 421 points at the canonical origin with a Location header". Mutation rerun: deleting the `Location` line in `hub/server/http/router.mjs` fails it |
+| `POST /api/sessions` with a task holding NUL was refused with 422 `validation_failed`, unpinned (section 6) | Tests only | `launch.test.mjs` "a fleetmates launch types the D-68 prompt with the task; an empty fleetmates task and bad bodies are refused" now sends `"a\u0000b"` and checks 422, `validation_failed` and `fields: ['task']`. Mutation rerun: dropping the `task.includes('\0')` term in `hub/server/launch/launch.mjs` fails it |
+| The bridge's deckd refusal mapping (`failureCode`) was unpinned (Task 20) | Tests only | `terminal-channel.test.mjs` "a deckd refusal of the attach maps to no_pty, a retryable deckd_unavailable, or a non-retryable internal" |
+| The run reader kept a watcher on a deleted and recreated run directory (section 6) | Task 21: `hub/server/adapters/fleetmates.mjs` closes and forgets a run's watcher when the watcher reports a `rename` and the directory's inode changed or the directory is gone, and at the end of every `list()` for run keys discovery no longer returns, so the next `list()` attaches a fresh one | `fleetmates-adapter.test.mjs` "a run directory deleted and recreated with the same id gets a fresh watcher", "list closes the watcher of a run directory that vanished without a watcher event" and "a watcher that reports its own run directory removed is closed before the next list" |
+| Crew Undo could not restore a shared slot (section 6) | Task 22: `PATCH /api/repos/:repoKey/crew` takes an optional boolean `slotShared` (any other value is 422 `validation_failed`, `fields: ['slotShared']`); `slotShared: true` skips the `slot_taken` check and writes the slot shared. The Crew sheet's Undo sends the previous `slotShared` with the previous slot. Documented in [05-api.md](05-api.md) 2.6 | `runs-crew-open.test.mjs` "crew PATCH: Undo with slotShared true restores a shared slot; a non-boolean slotShared is refused" (mutation rerun: removing the `slotShared !== true` term from the check in `hub/server/http/api.mjs` fails it); `crew-settings.test.mjs` "Undo of a move away from a shared slot PATCHes the previous slot with slotShared true"; `control.spec.mjs` "Crew AC4, AC5 and the Undo follow-up" expects `slotShared` in the Undo body |
+| `deck-hook` stamped the literal `'0.1.0'` and nothing read it (section 6, [13-operations.md](13-operations.md) 9.4) | Task 23: the hook stamps the version in the `package.json` one directory above it (`null` when unreadable); `fleetmates-deck init` writes `<share>/package.json` holding only the hub version (mode 0600) so the installed hook finds one. The server sets the `hooks` health row to state `warn`, reason `hooks_outdated` when an accepted envelope's stamp is older, missing or malformed, and clears it after 3 consecutive current envelopes or a successful `POST /api/setup/hooks`; `hooks_missing` and `hook_script_missing` keep priority. Settings, Connections shows "Hooks are from an older deck release. Run fleetmates-deck init." Documented in [05-api.md](05-api.md) 7 and [screens/settings.md](screens/settings.md) | `hook-version.test.mjs` (4 tests); `hooks-health.test.mjs` "an envelope stamped 0.1.0 turns the hooks row to warn/hooks_outdated once and is still accepted", "a run of current envelopes returns the row to ok" and "POST /api/setup/hooks clears hooks_outdated, and hooks_missing keeps priority over it"; `setup.test.mjs` "init writes the hub version beside the installed hook so the installed copy stamps it" |
+| The web client sent `build: 'm1'` in `hello` (section 6) | Task 24: `BUILD` in `hub/web/src/state/api.js` is `'m2'`; the reload guard key follows it | `web-shell.test.mjs` pins `build: 'm2'` in both `hello` assertions and the `fleetmates-deck.reloaded.m2` key |
+| Dogfood bug 6: the First run and doctor vault row offered "Fix in Settings" when the check was skipped or not run | Task 24: a skipped or unchecked vault row offers no action; a failed one keeps "Fix in Settings" | `setup-screens.test.mjs` "a skipped or unchecked vault row offers no fix, and a failed one keeps Fix in Settings (dogfood bug 6)" |
+| `spike-removed.test.mjs` was said to pin neither deleted test file | Task 25: section 5 corrected. It catches `spike-reattach.test.mjs` returning through its `spike/` import; only `keystroke-echo.spec.mjs` is unpinned | Restored each file from before Task 16 and ran `node --test test/unit/spike-removed.test.mjs` from `hub/`: with `spike-reattach.test.mjs`, 4 pass and 1 fail; with `keystroke-echo.spec.mjs`, 5 pass; both removed again |
+| Copy keys missing from the copy decks (section 6) | Task 25: 117 keys added, with the English text the code ships, to [screens/focus.md](screens/focus.md) (21), [screens/team-run.md](screens/team-run.md) (27), [screens/home.md](screens/home.md) (19), [screens/settings.md](screens/settings.md) (40, including `settings.conn.hooksOutdated`), [screens/first-run.md](screens/first-run.md) (8) and [screens/crew-sheet.md](screens/crew-sheet.md) (2). [screens/new-session.md](screens/new-session.md) had every key already | A script that reads every `*_COPY` object in `hub/web/src` and looks for each key in backticks in `docs/deck/screens/*.md`: 148 of 479 keys missing before, 31 after (section 9.2) |
+| [05-api.md](05-api.md) lacked `hooks_outdated` and `slotShared` | Task 25: the crew `PATCH` row and its note in 2.6; the `Health` typedef gains state `warn`; the `hooks_outdated` reason in section 7 | Docs only |
+| The release workflow's leak filter still named `spike/` (`.github/workflows/deck-release.yml:116`) | Task 25: `spike` dropped from the regex, applied with the owner's approval | Config only: `grep -n spike .github/workflows/deck-release.yml` prints nothing |
+
+### 9.2 Still open
+
+| Severity | Item | Checked how |
+|---|---|---|
+| Low | The New session form shows "Observation hooks are not installed, so the deck will only see this session through its terminal." for a `hooks` row in state `warn` with reason `hooks_outdated`: `hooksMissing` in `hub/web/src/screens/new-session/NewSession.jsx` treats any state other than `ok` as missing. The hooks are installed, only older | Changed the `hooks` row in `new-session.test.mjs` "a hooks row that is not ok shows the noHooks hint ..." to `{ state: 'warn', reason: 'hooks_outdated' }`: the test still passed, so the hint renders; restored |
+| Low | The server starts no run pass at startup (`hub/server/main.mjs:340-341` registers the watch and the 60 s poll only), so a run directory is watched only after something lists runs | Code read on `1f8535d` |
+| Low | `spike-removed.test.mjs` does not keep `hub/test/perf/keystroke-echo.spec.mjs` gone | Restored the file, ran the test file: 5 of 5 pass; removed it again |
+| Low | Dogfood bug 4, Settings once not persisting in the owner's browser: not reproduced. `settings-save.spec.mjs` now reloads Settings in a new browser context and checks every saved field, `GET /api/prefs` and `config.json`; it passed in the five-spec run of section 1. The bug stays open until it is seen again or the two working days pass without it | The five-spec e2e run |
+| Low | Flaky under load, carried from section 6: `hooks.test.mjs` budget tests, `fm.test.mjs` "SIGHUP to fm attach", `observe.spec.mjs` "Home AC15 and Failures AC4", a Rolldown panic in the package-contents test | Not seen in this task's runs (one hub run, one five-spec e2e run) |
+| Low | 31 copy-map keys and 17 keys of `hub/web/src/i18n/en.js` have no copy-deck row under `docs/deck/screens/`, and each belongs to a doc outside Task 25's files. They are listed below, except `state.needs_approval.label`, which design-system.md already names | The copy-key script above, plus the same check of `hub/web/src/i18n/en.js` |
+
+Keys still without a copy-deck row, with the English text the code ships and the doc each belongs in:
+
+| Doc | Keys |
+|---|---|
+| [screens/failures-and-loading.md](screens/failures-and-loading.md) | `fail.deckd.title` "deckd is unavailable"; `fail.deckd.works` "Sessions keep running and hooks keep reporting. Launching, answering and terminals wait for deckd."; `fail.deckd.reason` "Last error: {reason}"; `fail.deckd.start` "Start deckd"; `fail.history.title` "Completed sessions"; `fail.history.empty` "No completed sessions yet."; `fail.loading.sessions` "sessions" (in `en.js`) |
+| [screens/palette.md](screens/palette.md) | `empty.palette.title` "No matches."; `palette.needs.title` "{repo} · {summary}"; `palette.needs.waiting` "waiting {duration}"; `palette.needs.answerInTerminal` "Answer in your terminal"; `palette.session.title` "{repo} · {detail}"; `palette.group.showAll.needs` "requests"; `palette.group.showAll.sessions` "sessions"; `palette.group.showAll.actions` "actions" |
+| [screens/needs-you-drawer.md](screens/needs-you-drawer.md) | `empty.drawer.title` "Nothing needs you."; `empty.drawer.body` "New requests show up here and on the Sessions grid." |
+| [screens/rail-and-shell.md](screens/rail-and-shell.md) (keys in `hub/web/src/i18n/en.js`) | `shell.fatal.heading`, `shell.fatal.outdated`, `shell.fatal.reload`, `shell.lang.fallback`, and the page titles `shell.page.home`, `shell.page.new`, `shell.page.focus`, `shell.page.team`, `shell.page.memory`, `shell.page.research`, `shell.page.meetings`, `shell.page.settings`, `shell.page.crew`, `shell.page.welcome`, `shell.page.notFound`, `shell.page.pending` |
+| State pill labels (`STATE_COPY` in `hub/web/src/components/StatusPill.jsx`; [design/design-system.md](design/design-system.md) 3.4 gives the English values, and its i18n section names only `state.needs_approval.label`) | `state.starting.label` "Starting"; `state.running.label` "Running"; `state.asked_you.label` "Asked you"; `state.done.label` "Done"; `state.stale.label` "No activity {n}m"; `state.idle.label` "Idle {duration}"; `state.reviewed.label` "Reviewed"; `state.crashed.exit` "Crashed · exit {code}"; `state.crashed.signal` "Crashed · signal {signal}"; `state.crashed.lost` "Crashed · lost"; `state.ended.label` "Ended"; `state.draft.label` "Draft · not saved" |
+| Shared components with no screen doc | `confirm.cancel` "Cancel" (the `ConfirmDialog` fallback when a caller passes no `cancelLabel`; every Focus and Home dialog passes its own); `empty.openLoops.title` "No open loops." (`EmptyState`) |
