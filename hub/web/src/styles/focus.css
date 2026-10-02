@@ -67,7 +67,47 @@
 }
 .focus-file { cursor: default; padding: var(--space-2) var(--space-6); border-radius: var(--radius-sm); }
 .focus-file[aria-selected="true"] { background: var(--bg-selected); color: var(--text-strong); }
-.focus-diff-caption { margin: var(--space-12) 0 0; font: var(--type-body-sm); color: var(--text-muted); }
+
+/* PromptBar (components.md 41, focus.md 4.3): the Banner `approval` mirror of the on-screen prompt. Buttons,
+   checkbox, reply field and delivery lines reuse the AnswerControls rules in answers.css. */
+.prompt-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-10) var(--space-24);
+  border-top: 1px solid var(--color-amber-750);
+  background: var(--color-amber-900);
+}
+.prompt-bar--destructive { border-top-color: var(--state-crashed-border); }
+.prompt-bar-head { display: flex; align-items: center; gap: var(--space-12); min-width: 0; }
+.prompt-bar-summary { flex: 1; min-width: 0; margin: 0; overflow-x: auto; white-space: pre; font: var(--type-mono); color: var(--text-strong); }
+p.prompt-bar-summary { white-space: normal; font: var(--type-body); }
+.prompt-bar-note { margin: 0; font: var(--type-meta); color: var(--text-muted); }
+.prompt-option { max-width: 100%; overflow-wrap: anywhere; text-align: start; }
+.prompt-digit { margin-inline-end: var(--space-2); }
+
+/* DiffView (components.md 40), unified: the panel is narrower than 720 px. */
+.diff-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  min-height: 0;
+  margin: var(--space-12) 0 0;
+  padding: var(--space-10) 0;
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+}
+.diff-caption { padding: 0 var(--space-12); font: var(--type-body-sm); color: var(--text-muted); overflow-wrap: anywhere; }
+.diff-lines { margin: 0; overflow-x: auto; font: var(--type-mono); }
+.diff-line { display: block; padding: 0 var(--space-12); white-space: pre; color: var(--text-default); }
+.diff-line--meta,
+.diff-line--hunk { color: var(--text-muted); }
+.diff-line--add { color: var(--text-diff-add); background: var(--tier-safe-bg); }
+.diff-line--del { color: var(--text-diff-del); background: var(--tier-destructive-bg); }
+.diff-note { margin: 0; padding: 0 var(--space-12); font: var(--type-body-sm); color: var(--text-muted); }
+.diff-note--error { color: var(--state-crashed-fg); }
+.diff-view--error .button { align-self: flex-start; margin: 0 var(--space-12); }
+.diff-skeleton { height: var(--space-14); margin: 0 var(--space-12); border-radius: var(--radius-sm); }
 
 /* 1280 px (design-system 8.3): the list is 72 px of avatars and Alt digits, names stay in aria-label, and the
    details panel becomes an overlay drawer that Alt I opens. */
