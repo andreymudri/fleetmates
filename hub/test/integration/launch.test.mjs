@@ -174,9 +174,11 @@ test('a fleetmates launch types the D-68 prompt with the task; an empty fleetmat
   t.after(() => fs.rmSync(script, { force: true }))
   const h = await deck(t, script)
   for (const [body, field] of [[{ repoKey: 'ship', task: '  ', mode: 'fleetmates' }, 'task'], [{ repoKey: 'ship', task: 'x', mode: 'team' }, 'mode'],
-    [{ repoKey: 'ship', task: 'x'.repeat(10_001) }, 'task'], [{ repoKey: 'ship', task: 7 }, 'task'], [{ task: 'x' }, 'repoKey'], [{ repoKey: 'ship', extra: 1 }, 'extra']]) {
+    [{ repoKey: 'ship', task: 'x'.repeat(10_001) }, 'task'], [{ repoKey: 'ship', task: 7 }, 'task'], [{ repoKey: 'ship', task: 'a\u0000b' }, 'task'],
+    [{ task: 'x' }, 'repoKey'], [{ repoKey: 'ship', extra: 1 }, 'extra']]) {
     const refused = await h.request('/api/sessions', 'POST', body)
     assert.equal(refused.status, 422, JSON.stringify(body).slice(0, 80))
+    assert.equal(refused.data.error.code, 'validation_failed')
     assert.deepEqual(refused.data.error.details.fields, [field])
   }
   assert.equal((await h.request('/api/sessions', 'POST', { repoKey: 'nowhere', task: 'x' })).status, 404)

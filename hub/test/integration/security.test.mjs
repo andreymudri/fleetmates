@@ -20,10 +20,11 @@ async function harness(t, options = {}) {
   const port = deck.address().port
   const request = (route, headers = {}, method = 'GET', body = '') => new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: route, method,
-      headers: { Authorization: `Bearer ${token}`, Host: `127.0.0.1:${port}`, Origin: `http://127.0.0.1:${port}`, ...headers } }, res => {
+      // A header given as null is not sent at all; an empty string is sent as an empty value.
+      headers: Object.fromEntries(Object.entries({ Authorization: `Bearer ${token}`, Host: `127.0.0.1:${port}`, Origin: `http://127.0.0.1:${port}`, ...headers }).filter(([, value]) => value !== null)) }, res => {
       let data = ''
       res.on('data', chunk => { data += chunk })
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, data: data ? JSON.parse(data) : null }))
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, data: !data ? null : res.headers['content-type']?.startsWith('application/json') ? JSON.parse(data) : data }))
     })
     req.on('error', reject)
     req.end(body)
@@ -53,6 +54,38 @@ for (const [name, headers, status, code] of [
     assert.equal(response.data.error.code, code)
     assert.equal(response.headers['cache-control'], 'no-store')
     assert.equal(response.headers['access-control-allow-origin'], undefined)
+  }
+})
+test('the localhost 421 points at the canonical origin with a Location header', async t => {
+  const h = await harness(t)
+  for (const route of ['/api/health', '/']) {
+    const response = await h.request(route, { Host: `localhost:${h.port}` })
+    assert.equal(response.status, 421)
+    assert.equal(response.headers.location, `http://127.0.0.1:${h.port}/`)
+  }
+})
+/** A harness whose built SPA is a temporary index.html, so a request that passes the checks gets a 200 page. */
+async function withSpa(t) {
+  const staticDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sec-web-'))
+  fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
+  t.after(() => fs.rmSync(staticDir, { recursive: true, force: true }))
+  return harness(t, { staticDir })
+}
+test('a foreign Origin is refused on non-API paths too, while the same page loads without one', async t => {
+  const h = await withSpa(t)
+  assert.equal((await h.request('/', { Origin: null })).status, 200)
+  for (const [route, method] of [['/', 'GET'], ['/settings', 'OPTIONS']]) {
+    const response = await h.request(route, { Origin: 'http://evil.example' }, method)
+    assert.equal(response.status, 403, `${method} ${route}`)
+    assert.equal(response.data.error.code, 'forbidden_origin')
+  }
+})
+test('OPTIONS on a non-API path is not_found with a same-origin or no Origin', async t => {
+  const h = await withSpa(t)
+  for (const origin of [`http://127.0.0.1:${h.port}`, null]) {
+    const response = await h.request('/', { Origin: origin }, 'OPTIONS')
+    assert.equal(response.status, 404, `Origin ${origin ?? 'absent'}`)
+    assert.equal(response.data.error.code, 'not_found')
   }
 })
 test('writes reject missing Origin and preflights; GET and HEAD require no Origin and HEAD has no body', async t => {
