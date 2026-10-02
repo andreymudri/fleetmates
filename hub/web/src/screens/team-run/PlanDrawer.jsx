@@ -47,15 +47,19 @@ function element(token, children, key) {
   return createElement(token.tag, props, ...children)
 }
 
-// Untrusted plan text through `shown`, except the line feeds and tabs that lay out code blocks.
+// Untrusted code (commands and paths, 08-security 4.5) through `shown`, except the line feeds and tabs
+// that lay out code blocks.
 const plain = text => String(text ?? '').replace(/[^\n\t]+/g, part => shown(part))
+// Untrusted prose through `titleText`: C0, C1 and bidi controls become tokens, emoji and RTL scripts stay.
+const prose = text => String(text ?? '').replace(/[^\n\t]+/g, part => titleText(part))
 
-// Leaf tokens: text stays text, with controls, format and default-ignorable characters shown as visible
-// `<U+XXXX>` tokens by `plain`; html_block, html_inline and image tokens (and anything unknown) are dropped.
+// Leaf tokens: text stays text. Prose shows C0, C1 and bidi controls as visible `<U+XXXX>` tokens (`prose`);
+// inline code and code blocks also show format and default-ignorable characters (`plain`). html_block,
+// html_inline and image tokens (and anything unknown) are dropped.
 function leaf(token, key, build) {
   switch (token.type) {
     case 'inline': return createElement(React.Fragment, { key }, ...build(token.children ?? []))
-    case 'text': return plain(token.content)
+    case 'text': return prose(token.content)
     case 'code_inline': return createElement('code', { key }, plain(token.content))
     case 'softbreak': return '\n'
     case 'hardbreak': return createElement('br', { key })
@@ -90,8 +94,9 @@ function build(tokens) {
 
 /**
  * Render plan markdown as React elements by mapping markdown-it tokens (`html: false`); no HTML string
- * is ever injected. Text, inline code and code blocks pass through `shown` (line feeds and tabs kept),
- * so control, format and bidi characters show as `<U+XXXX>` tokens. Raw HTML in the source shows as
+ * is ever injected. Prose passes through `titleText`, so control and bidi characters show as `<U+XXXX>`
+ * tokens while emoji sequences stay whole; inline code and code blocks pass through `shown`, which also
+ * shows format and default-ignorable characters. Line feeds and tabs are kept. Raw HTML in the source shows as
  * text, links render only for `http:` and `https:`, and images are not rendered.
  * @param {string} markdown
  * @returns {React.ReactNode[]}

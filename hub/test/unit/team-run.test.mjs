@@ -175,6 +175,23 @@ test('team: a lead that claims no task is not a worker, so the canvas pill reads
   assert.doesNotMatch(html, /of 5 need you/)
 })
 
+test('team: a lead request with no task claim sets the header pill to needs you, counting task workers only (TEAM-O7)', async () => {
+  const { TeamRunView } = await load('team-run/TeamRun.jsx')
+  const run = teamRun({ derivedPhase: 1, totalPhases: 1, gates: {}, tasks: [task('T1', 1, 'running', { startedAt: NOW - 10 * MIN })] })
+  const state = teamState({ requests: false })
+  state.data.sessions[0].runRef = { ...state.data.sessions[0].runRef, taskId: null }
+  state.data.requests = [{ id: 'R1', sessionId: 'L1', kind: 'permission', tier: 'caution', summary: 'npm publish', state: 'open', taskId: null, createdAt: NOW - MIN }]
+  const html = render(TeamRunView, viewProps({ state, run }))
+  const header = html.match(/<header class="team-header">[\s\S]*?<\/header>/)?.[0] ?? ''
+  const pills = header.match(/<span class="status-pill [^"]*">[\s\S]*?<span class="status-label">[^<]*<\/span><\/span>/g) ?? []
+  assert.equal(pills.length, 1)
+  assert.match(pills[0], /status-pill--needs-approval/)
+  assert.match(pills[0], /<span class="status-label">Needs approval<\/span>/)
+  // The lead is not a worker: its own request never turns into "1 of 1" or "1 of 2 need you".
+  assert.doesNotMatch(html, /\d+ of \d+ need you/)
+  assert.match(html.match(/<li[^>]*data-task="T1"[\s\S]*?<\/li>/)?.[0] ?? '', /Running/)
+})
+
 test('team: a task row with a request opens the drawer filtered to that task', async () => {
   const { TeamRunView } = await load('team-run/TeamRun.jsx')
   const seen = []
@@ -325,6 +342,17 @@ test('plan: escape, bell and bidi controls in text, inline code and fences rende
   assert.match(html, /text &lt;U\+001B&gt;\[31m and &lt;U\+0007&gt; and <code>co&lt;U\+202E&gt;de<\/code>/)
   assert.match(html, /<pre><code>fen&lt;U\+001B&gt;ce&lt;U\+0007&gt;\tcol\nline 2\n<\/code><\/pre>/, 'a fence keeps its tabs and line feeds')
   assert.match(html, /<pre><code>blo&lt;U\+202E&gt;ck\n<\/code><\/pre>/)
+})
+
+test('plan: prose keeps emoji sequences whole and still shows ESC, BEL and U+202E as tokens; code keeps shown', async () => {
+  const { renderMarkdown } = await load('team-run/PlanDrawer.jsx')
+  const emoji = '\u26A0\uFE0F Risk: \u{1F469}\u200D\u{1F4BB} owns the \u2764\uFE0F step'
+  const html = renderToStaticMarkup(createElement('div', null, renderMarkdown(`${emoji}\n\n- ${emoji}\n\n\`a\u200Db\``)))
+  assert.equal(html.split(emoji).length - 1, 2, 'the paragraph and the list item render the emoji unchanged')
+  assert.match(html, /<code>a&lt;U\+200D&gt;b<\/code>/, 'inline code still shows the joiner')
+  const controls = renderToStaticMarkup(createElement('div', null, renderMarkdown('pro\u001bse \u0007 and \u202Eend')))
+  assert.doesNotMatch(controls, /[\u001b\u0007\u202E]/)
+  assert.match(controls, /<p>pro&lt;U\+001B&gt;se &lt;U\+0007&gt; and &lt;U\+202E&gt;end<\/p>/)
 })
 
 test('plan: the drawer dialog is a section, a role axe allows (aria-allowed-role)', async () => {

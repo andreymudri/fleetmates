@@ -305,6 +305,33 @@ import '@hub/web/src/styles/terminal.css'
 const decoder = new TextDecoder()
 const h = window.h = { attaches: [], writes: [], detaches: [], handlers: {}, links: [], confirms: [], answer: false }
 window.open = url => { h.links.push(url) }
+// Count the motion subscriptions TerminalView makes and releases: the reduced-motion query's change listeners
+// and the MutationObservers that watch data-motion on the document root.
+h.motion = { added: 0, removed: 0, observed: 0, disconnected: 0 }
+const realMatchMedia = window.matchMedia.bind(window)
+window.matchMedia = query => {
+  const list = realMatchMedia(query)
+  if (query !== '(prefers-reduced-motion: reduce)') return list
+  const add = list.addEventListener.bind(list)
+  const remove = list.removeEventListener.bind(list)
+  list.addEventListener = (type, listener, options) => { if (type === 'change') h.motion.added++
+    add(type, listener, options) }
+  list.removeEventListener = (type, listener, options) => { if (type === 'change') h.motion.removed++
+    remove(type, listener, options) }
+  return list
+}
+window.MutationObserver = class extends window.MutationObserver {
+  observe(target, options) {
+    if (target === document.documentElement && options?.attributeFilter?.includes('data-motion')) { this.motion = true
+      h.motion.observed++ }
+    super.observe(target, options)
+  }
+  disconnect() {
+    if (this.motion) { this.motion = false
+      h.motion.disconnected++ }
+    super.disconnect()
+  }
+}
 const client = {
   attach(sessionId, size, handlers) {
     h.attaches.push(sessionId)
@@ -320,10 +347,12 @@ const client = {
 function App() {
   const [id, setId] = useState('sessA')
   const [deckdUp, setDeckdUp] = useState(true)
+  const [mounted, setMounted] = useState(true)
   h.show = setId
   h.deckd = setDeckdUp
-  return <><button id="outside" type="button">outside</button><span id="deckd">{String(deckdUp)}</span><TerminalView sessionId={id} label={id} client={client} deckdUp={deckdUp} confirmLink={url => { h.confirms.push(url)
-    return h.answer }} /></>
+  h.unmount = () => setMounted(false)
+  return <><button id="outside" type="button">outside</button><span id="deckd">{String(deckdUp)}</span>{mounted ? <TerminalView sessionId={id} label={id} client={client} deckdUp={deckdUp} confirmLink={url => { h.confirms.push(url)
+    return h.answer }} /> : <span id="unmounted" />}</>
 }
 createRoot(document.getElementById('root')).render(<App />)
 `
@@ -473,5 +502,15 @@ test('a mounted TerminalView stays writable after a session switch and gates ter
   assert.equal(await h(() => window.h.attaches.filter(id => id === 'sessD').length), 1, 'no re-attach while the row still read up')
   await deckd(true)
   await page.waitForFunction(() => window.h.attaches.filter(id => id === 'sessD').length === 2, null, { timeout: 5000 })
+
+  // Each session above mounted a terminal that subscribed to both motion preferences; every earlier one
+  // released both on the switch, and unmounting the last releases its own.
+  const live = await h(() => ({ ...window.h.motion }))
+  assert.equal(live.added, 4, 'one reduced-motion change listener per mounted session')
+  assert.equal(live.observed, 4, 'one data-motion observer per mounted session')
+  assert.deepEqual([live.removed, live.disconnected], [3, 3], 'only the live terminal is still subscribed')
+  await h(() => window.h.unmount())
+  await page.waitForFunction(() => document.getElementById('unmounted'), null, { timeout: 5000 })
+  assert.deepEqual(await h(() => ({ ...window.h.motion })), { added: 4, removed: 4, observed: 4, disconnected: 4 }, 'unmounting releases the listener and the observer')
   assert.deepEqual(errors, [])
 })
