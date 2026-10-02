@@ -19,6 +19,9 @@
   outline-offset: -2px;
 }
 
+/* The area outside xterm's scrollable element keeps the theme background, never xterm.css's black. */
+.terminal-view .xterm .xterm-viewport { background-color: var(--bg-sunken); }
+
 .terminal-host {
   flex: 1;
   min-height: 0;
