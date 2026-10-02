@@ -523,11 +523,29 @@ The connection banner keeps its themed lead but its second sentence is literal. 
 
 - Chrome follows `DECK_LANG`; meeting content stays PT-BR in both; agent and terminal output is never translated (Decided).
 - Every chrome string is keyed (`home.header.needYouCount`). No string concatenation: plurals and placeholders go through ICU MessageFormat, for example `{count, plural, one {# needs you} other {# need you}}` (Proposed library: FormatJS `react-intl`, which also provides the formatters below).
-- State labels are keys too (`state.needs_approval.label`), with the English values of section 3.4.
+- State labels are keys too (`state.needs_approval.label`), with the English values of section 3.4. The table after this list gives every key of `STATE_COPY` in `hub/web/src/components/StatusPill.jsx`.
 - Numbers with `Intl.NumberFormat(locale)` ("1,240" in `en`, "1.240" in `pt-BR`). Dates and times with `Intl.DateTimeFormat(locale, { hourCycle: 'h23' })`. Relative times ("6 min ago") with `Intl.RelativeTimeFormat`. Lists with `Intl.ListFormat`.
 - Compact durations (`12m`, `1h 12m`) use the same unit letters in both languages (Proposed).
 - Layout must survive PT strings about 30% longer than EN: buttons never have fixed widths; pills and titles truncate with the full text available.
 - Keyboard hints are not translated ("Alt K").
+
+State pill labels as the code ships them:
+
+| Key | EN |
+|---|---|
+| `state.starting.label` | Starting |
+| `state.running.label` | Running |
+| `state.needs_approval.label` | Needs approval |
+| `state.asked_you.label` | Asked you |
+| `state.done.label` | Done |
+| `state.stale.label` | No activity {n}m |
+| `state.idle.label` | Idle {duration} |
+| `state.reviewed.label` | Reviewed |
+| `state.crashed.exit` | Crashed · exit {code} |
+| `state.crashed.signal` | Crashed · signal {signal} |
+| `state.crashed.lost` | Crashed · lost |
+| `state.ended.label` | Ended |
+| `state.draft.label` | Draft · not saved |
 
 ## 13. Density
 

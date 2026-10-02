@@ -3,8 +3,9 @@
 Status: **code ready, milestone not complete.** The automated suites, budgets and the release
 preparation below were run on 2026-10-02 on the integrated M2 tree (run branch tip `3eea239` plus
 this task's documentation and version changes). The cleanup tasks 20 to 25 followed on the same day;
-section 9 lists what they fixed and what stays open, and the suite counts in section 1 were rerun on
-their integrated tip `1f8535d`. Exit criterion 6 (two manual working days), the
+section 9 lists what they fixed and what stays open. A second cleanup round, Tasks 27 to 30, followed
+on the same day; section 10 lists it, and the suite counts in section 1 were rerun on its integrated
+tip `7600e05`. Exit criterion 6 (two manual working days), the
 manual smoke with real Claude Code, the Orca and keyboard checks, the owner decisions in section 7,
 and the tag and publication of `deck-v0.2.0` are still PENDING. They need the owner and are not
 claimed here.
@@ -28,7 +29,7 @@ Run from the repository root. The hub suites need `npm ci --prefix hub` first an
 | Suite | Command | Result |
 |---|---|---|
 | Root (fleetmates) | `npm test` | 2796 tests, 2779 pass, 0 fail, 17 skipped |
-| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 923 tests, 923 pass, 0 fail, 0 skipped, 0 todo (905 before the cleanup tasks) |
+| Hub | `mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test` | 930 tests, 930 pass, 0 fail, 0 skipped, 0 todo (905 before the cleanup tasks, 923 after the first round) |
 | Observe e2e (M1) | `TMPDIR=/tmp/hx node --test --test-concurrency=1 test/e2e/observe.spec.mjs` from `hub/` | 39 tests, 39 pass, 0 todo |
 | Security e2e | same, `test/e2e/security.spec.mjs` | 14 tests, 14 pass, 0 todo |
 | Accessibility e2e | same, `test/e2e/accessibility.spec.mjs` | 14 tests, 14 pass, 0 todo |
@@ -37,9 +38,10 @@ Run from the repository root. The hub suites need `npm ci --prefix hub` first an
 
 The five e2e specs were also run together in one `node --test --test-concurrency=1` call: 98 tests,
 98 pass, 0 todo, in 152 s. On the cleanup tip `1f8535d` the same call gave 98 tests, 98 pass, 0 fail,
-0 todo, in 161 s. The cleanup tasks changed assertions in `control.spec.mjs` and
-`settings-save.spec.mjs` but added no e2e test, so the per-spec counts above still hold; the root
-and hub rows were rerun on that tip.
+0 todo, in 161 s. On the second cleanup tip `7600e05` it gave 98 tests, 98 pass, 0 fail, 0 todo, in
+162 s. The cleanup tasks changed assertions in `control.spec.mjs`, `settings-save.spec.mjs` and
+`observe.spec.mjs` but added no e2e test, so the per-spec counts above still hold; the root and hub
+rows were rerun on `7600e05`.
 
 Notes:
 
@@ -48,10 +50,11 @@ Notes:
   not `control.spec.mjs` or `settings-save.spec.mjs`.
 - Never run a bare `node --test` in this repository: its default glob includes
   `hub/test/capture/capture-cc.mjs`, which starts real Claude Code.
-- Timing-sensitive tests can fail under load. In this task's first hub run, `fm.test.mjs` "SIGHUP to
-  fm attach detaches without printing and leaves the PTY running" failed once (`fm died of signal
-  1`); the next full run passed. Section 6 lists the tests seen flaky during the run. Rerun a lone
-  failure on its own before treating it as real.
+- Timing-sensitive tests can fail under load. In the evidence task's first hub run, `fm.test.mjs`
+  "SIGHUP to fm attach detaches without printing and leaves the PTY running" failed once (`fm died
+  of signal 1`); the next full run passed. Section 6 lists the tests seen flaky during the run, and
+  section 10 how Task 29 made them deterministic. Rerun a lone failure on its own before treating it
+  as real.
 
 ### 1.1 Exit criteria 1 to 3
 
@@ -169,7 +172,9 @@ Deviations from the plan's wording that the code made and the docs now describe:
 - `POST /api/open` answers 502 `open_failed` when the opener cannot be started
   (`runs-crew-open.test.mjs` "a missing opener is 502 open_failed"). The opener is detached and not
   awaited, so its exit status is not checked.
-- The first run poll publishes every run once; later passes publish only changed runs.
+- Run passes publish only changed runs. Since Task 27 the server primes at start (section 10), so a
+  run already present then is not published until it changes; only when the priming list fails
+  does the next successful pass publish every run once.
 - A 413 response sets `Connection: close`.
 
 Clean install: not rehearsed again in this task. The M1 rehearsal is in
@@ -184,8 +189,8 @@ exist, that the `perf` script runs `test/perf/focus-echo.mjs` and that file exis
 does not include `spike`, and that no hub source imports a specifier containing `spike/`. That last
 check also catches `spike-reattach.test.mjs` coming back, because the file imports
 `../../spike/server.mjs`: restored from before Task 16, the test file fails 1 of 5 ("no hub source
-imports a module whose specifier contains spike/"). Only `keystroke-echo.spec.mjs` is unpinned:
-restored from before Task 16, the test file still passes 5 of 5 (section 6).
+imports a module whose specifier contains spike/"). `keystroke-echo.spec.mjs` was unpinned until
+Task 28 (section 6); the test file now also checks that it does not exist (section 10).
 What carries each dropped case now:
 
 | Dropped case | Carried by |
@@ -205,7 +210,7 @@ What carries each dropped case now:
 ## 6. Findings carried out of the run
 
 Each was checked against the code on 2026-10-02 as noted, before the cleanup tasks. The table is
-kept as it was found; section 9 gives the state of each finding after Tasks 20 to 25.
+kept as it was found; section 9 gives the state of each finding after Tasks 20 to 25, and section 10 after Tasks 27 to 30.
 
 | Severity | Finding | Checked how |
 |---|---|---|
@@ -346,21 +351,54 @@ code and [05-api.md](05-api.md) section 4 say 422, and the tests pin 422.
 
 ### 9.2 Still open
 
+After Task 25 this table also held the startup run pass, the unpinned `keystroke-echo.spec.mjs`, the
+tests flaky under load and 47 copy keys without a copy-deck row. Section 10 closes each of them and
+lists what the second round left open.
+
 | Severity | Item | Checked how |
 |---|---|---|
-| Low | The server starts no run pass at startup (`hub/server/main.mjs:340-341` registers the watch and the 60 s poll only), so a run directory is watched only after something lists runs | Code read on `1f8535d` |
-| Low | `spike-removed.test.mjs` does not keep `hub/test/perf/keystroke-echo.spec.mjs` gone | Restored the file, ran the test file: 5 of 5 pass; removed it again |
 | Low | Dogfood bug 4, Settings once not persisting in the owner's browser: not reproduced. `settings-save.spec.mjs` now reloads Settings in a new browser context and checks every saved field, `GET /api/prefs` and `config.json`; it passed in the five-spec run of section 1. The bug stays open until it is seen again or the two working days pass without it | The five-spec e2e run |
-| Low | Flaky under load, carried from section 6: `hooks.test.mjs` budget tests, `fm.test.mjs` "SIGHUP to fm attach", `observe.spec.mjs` "Home AC15 and Failures AC4", a Rolldown panic in the package-contents test | Not seen in this task's runs (one hub run, one five-spec e2e run) |
-| Low | 31 copy-map keys and 17 keys of `hub/web/src/i18n/en.js` have no copy-deck row under `docs/deck/screens/`, and each belongs to a doc outside Task 25's files. They are listed below, except `state.needs_approval.label`, which design-system.md already names | The copy-key script above, plus the same check of `hub/web/src/i18n/en.js` |
 
-Keys still without a copy-deck row, with the English text the code ships and the doc each belongs in:
 
-| Doc | Keys |
-|---|---|
-| [screens/failures-and-loading.md](screens/failures-and-loading.md) | `fail.deckd.title` "deckd is unavailable"; `fail.deckd.works` "Sessions keep running and hooks keep reporting. Launching, answering and terminals wait for deckd."; `fail.deckd.reason` "Last error: {reason}"; `fail.deckd.start` "Start deckd"; `fail.history.title` "Completed sessions"; `fail.history.empty` "No completed sessions yet."; `fail.loading.sessions` "sessions" (in `en.js`) |
-| [screens/palette.md](screens/palette.md) | `empty.palette.title` "No matches."; `palette.needs.title` "{repo} · {summary}"; `palette.needs.waiting` "waiting {duration}"; `palette.needs.answerInTerminal` "Answer in your terminal"; `palette.session.title` "{repo} · {detail}"; `palette.group.showAll.needs` "requests"; `palette.group.showAll.sessions` "sessions"; `palette.group.showAll.actions` "actions" |
-| [screens/needs-you-drawer.md](screens/needs-you-drawer.md) | `empty.drawer.title` "Nothing needs you."; `empty.drawer.body` "New requests show up here and on the Sessions grid." |
-| [screens/rail-and-shell.md](screens/rail-and-shell.md) (keys in `hub/web/src/i18n/en.js`) | `shell.fatal.heading`, `shell.fatal.outdated`, `shell.fatal.reload`, `shell.lang.fallback`, and the page titles `shell.page.home`, `shell.page.new`, `shell.page.focus`, `shell.page.team`, `shell.page.memory`, `shell.page.research`, `shell.page.meetings`, `shell.page.settings`, `shell.page.crew`, `shell.page.welcome`, `shell.page.notFound`, `shell.page.pending` |
-| State pill labels (`STATE_COPY` in `hub/web/src/components/StatusPill.jsx`; [design/design-system.md](design/design-system.md) 3.4 gives the English values, and its i18n section names only `state.needs_approval.label`) | `state.starting.label` "Starting"; `state.running.label` "Running"; `state.asked_you.label` "Asked you"; `state.done.label` "Done"; `state.stale.label` "No activity {n}m"; `state.idle.label` "Idle {duration}"; `state.reviewed.label` "Reviewed"; `state.crashed.exit` "Crashed · exit {code}"; `state.crashed.signal` "Crashed · signal {signal}"; `state.crashed.lost` "Crashed · lost"; `state.ended.label` "Ended"; `state.draft.label` "Draft · not saved" |
-| Shared components with no screen doc | `confirm.cancel` "Cancel" (the `ConfirmDialog` fallback when a caller passes no `cancelLabel`; every Focus and Home dialog passes its own); `empty.openLoops.title` "No open loops." (`EmptyState`) |
+## 10. Second cleanup round, Tasks 27 to 30
+
+Tasks 27 to 29 were integrated on 2026-10-02 (run branch tip `7600e05`); Task 30 is this
+documentation pass. They were planned as the last phases of run deck-m2a and moved, unchanged, into
+run deck-m2b ([plans/2026-10-02-deck-m2-cleanup2.md](../plans/2026-10-02-deck-m2-cleanup2.md)) once
+`feat/deck` had been fast-forwarded past that run's anchor. On `7600e05` this task ran the root
+suite (2796 tests, 2779 pass, 0 fail, 17 skipped), the hub suite (930 of 930) and the five e2e specs
+together (98 of 98, 162 s); every test named below passed in those runs.
+
+### 10.1 Fixed
+
+| Item | Fix | Test and evidence |
+|---|---|---|
+| The server started no run pass at startup, so a run directory was watched only after something listed runs (sections 6 and 9.2) | Task 27: when `listen()` has bound, `hub/server/main.mjs` starts one priming pass and does not await it. The pass lists the runs, which arms the reader's watchers, and records each run's JSON as the comparison baseline without publishing. Later watch events and polls publish only runs whose JSON changed. A failing priming list leaves the baseline empty, so the next successful pass publishes every run once. A watch event during any pass, the priming one included, reruns the pass once it ends. Documented in the `run.updated` row of [05-api.md](05-api.md) section 3.4 | `run-watch.test.mjs` "a run present at start is watched without any client listing runs, and startup publishes nothing", "the priming pass records every run present at start, so editing one run publishes only that run", "a failing priming list leaves the baseline empty, so the next pass publishes the unchanged run once", "a watch event during the priming pass reruns the pass once priming ends, publishing the change" and "a watch event during a pass reruns the pass once it ends, publishing both states in order". Mutation rerun: commenting out `runPass(true)` in `listen()` fails those 5 of the file's 9 tests. `server.test.mjs` "snapshot queues events committed during an asynchronous run read" now counts the reader's `list()` calls: the first is the priming pass, the second the snapshot's read; only that wait changed |
+| `spike-removed.test.mjs` did not keep `hub/test/perf/keystroke-echo.spec.mjs` gone (sections 5, 6 and 9.2) | Task 28: tests only | `spike-removed.test.mjs` "the M0 keystroke echo spec is gone: test/perf/keystroke-echo.spec.mjs does not exist". Mutation rerun: with the file restored from `6b39b28^`, 5 pass and 1 fail (this test); removed again, 6 of 6 pass |
+| The `hooksHintKey` fallback in `NewSession.jsx` (a `hooks` row not `ok` with a reason that is neither missing nor outdated) was unpinned | Task 28: tests only | `new-session.test.mjs` "a hooks row that is not ok with an unknown reason shows neither hint, with Launch enabled" (reason `something_else`). Mutation rerun: making the fallback return `newSession.noHooks` fails it, 25 of 26 pass |
+| `hooks.test.mjs` "hook sends one complete line to the runtime socket without creating spool" failed under load on its 200 ms budget | Task 29: the test times the hook's own run, from a line an `--import` preload writes before the hook module loads to a line written at process exit, so Node's interpreter boot is outside the measure. The 200 ms budget is unchanged | Task 29 measured 17 of 20 runs failing before and 0 of 20 after, under 64 busy loops |
+| `fm.test.mjs` "SIGHUP to fm attach detaches without printing and leaves the PTY running" failed under load (`fm died of signal 1`) | Task 29: after deckd lists the client, the test writes to the PTY and waits for the echo in fm's terminal before sending SIGHUP, and then waits for deckd's `detached` event instead of reading it once at fm's exit | Task 29 measured 2 of 20 before and 0 of 20 after, under 64 busy loops. The cause is a product race, recorded in 10.2 |
+| `m1-web-fixes.test.mjs` "moving between Focus sessions and following ?tab= ..." failed under load | Task 29: the server gets an injected clock one minute after the sessions' hooks, so the projector's 5 s tick cannot end the observed sessions part way through a slow test | Task 29 measured 1 of 10 before and 0 of 10 after |
+| `observe.spec.mjs` "Home AC15 and Failures AC4" failed under load | Task 29: the fake deckd holds the fourth connection attempt until teardown, so attempt 3 stays the server's last word, and the page clock is installed and paused before the deck loads; the countdown must read exactly 4, 3, 2 | Task 29 measured 3 of 10 before and 0 of 10 after |
+| 47 copy keys had no copy-deck row (section 9.2) | Task 30: rows added with the English text the code ships, to [screens/failures-and-loading.md](screens/failures-and-loading.md) (7, one of them `fail.loading.sessions` from `en.js`), [screens/palette.md](screens/palette.md) (8), [screens/needs-you-drawer.md](screens/needs-you-drawer.md) (2), [screens/rail-and-shell.md](screens/rail-and-shell.md) (16, from `en.js`), the i18n section of [design/design-system.md](design/design-system.md) (the 12 `STATE_COPY` labels, in one table with `state.needs_approval.label`) and [design/components.md](design/components.md) (`confirm.cancel` under Dialog, `empty.openLoops.title` under CalmSection) | A script that reads the 18 `*_COPY` maps under `hub/web/src` and the `messages` of `hub/web/src/i18n/en.js` (532 keys) and looks for each key in backticks in `docs/deck/screens/*.md` and `docs/deck/design/*.md`: 47 missing before, 0 after |
+
+Task 29's rates come from its own report and were not measured again here. This task reran each of
+the four tests 10 times under 32 busy loops on `7600e05` (for `fm.test.mjs`, the two tests matching
+`SIGHUP`): 0 failures in 10 for each.
+
+While adding `confirm.cancel`, this task found that the Team run Stop dialog passes no
+`cancelLabel`, so it shows `confirm.cancel`; the Focus and Home dialogs pass their own.
+
+### 10.2 Still open after the second round
+
+| Severity | Item | Checked how |
+|---|---|---|
+| Low (product race) | `fm attach` (`hub/bin/fm.mjs`) installs its SIGHUP handler only after it has read deckd's attach reply, while deckd lists the client as soon as it handles `attach`. A SIGHUP in that window kills fm with signal 1 instead of detaching; deckd still drops the client when the socket closes. Not fixed: Task 29 was tests only | Reported by Task 29 with the `fm.test.mjs` failure above as its repro; this task read the handler at `hub/bin/fm.mjs:354`, after the awaited attach reply |
+| Owner question | Whether the 200 ms hook budget ([05-api.md](05-api.md) 6.2 item 3, "Total budget 200 ms", and 03-architecture, "Hard budget: 200 ms") includes Node's interpreter boot. `hooks.test.mjs` now reads it as excluding boot | Task 29 |
+| Test note, not rated | `hooks.test.mjs` starts its 500 ms kill timer at the preload's first clock line, so a hook that hangs before the preload runs is never killed by the test | Code read of the test |
+| Test note, not rated | `fm.test.mjs` "SIGHUP to fm attach" still passes for a handler that exits without sending `detach`, because deckd reports the detach when the socket closes | Reported by Task 29; not rerun here |
+| Low | Dogfood bug 4 stays open (section 9.2) | The five-spec e2e run |
+
+Flakes still known: none. None of this task's runs (one root run, one hub run, one five-spec e2e
+run and the 40 loaded reruns above) saw a failure. The Rolldown panic seen once in the
+package-contents test (section 6) was not seen again and was not measured.

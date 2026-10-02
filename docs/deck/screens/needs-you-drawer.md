@@ -186,6 +186,13 @@ Toasts of tone `needs` are suppressed while the drawer is open (components Toast
 | `drawer.filter.task` | Requests for {taskId} |
 | `drawer.filter.run` | Requests for run {runId} |
 | `drawer.filter.showAll` | Show all |
+| `empty.drawer.title` | Nothing needs you. |
+| `empty.drawer.body` | New requests show up here and on the Sessions grid. |
+
+The empty drawer renders `EmptyState kind="drawer"`, which reads `empty.drawer.title` and
+`empty.drawer.body` from `EMPTY_COPY` (`hub/web/src/components/EmptyState.jsx`). The
+`drawer.empty.title` and `drawer.empty.body` rows above have the same English, and no code under
+`hub/web/src` reads those two keys.
 
 ## 10. Acceptance criteria
 

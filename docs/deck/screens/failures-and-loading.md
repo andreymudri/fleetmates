@@ -194,6 +194,12 @@ Degraded cards replace only the part that depends on the service (Meetings keeps
 | `fail.stale.openTool` | Still inside {tool}: {summary} |
 | `fail.deckd.banner` | Radio silence from deckd. Ships still sailing, re-establishing contact… (attempt {attempt}, next in {seconds}s) |
 | `fail.deckd.disabled` | deckd is reconnecting |
+| `fail.deckd.title` | deckd is unavailable |
+| `fail.deckd.works` | Sessions keep running and hooks keep reporting. Launching, answering and terminals wait for deckd. |
+| `fail.deckd.reason` | Last error: {reason} |
+| `fail.deckd.start` | Start deckd |
+| `fail.history.title` | Completed sessions |
+| `fail.history.empty` | No completed sessions yet. |
 | `fail.server.banner` | Lost the deck server. Your ships are unaffected, reconnecting… (attempt {attempt}, next in {seconds}s) |
 | `fail.server.asOf` | as of {time} |
 | `fail.retryNow` | Retry now |
@@ -215,6 +221,7 @@ Degraded cards replace only the part that depends on the service (Meetings keeps
 | `fail.notify.open` | Open settings |
 | `fail.hooks.drift` | {n, plural, one {# hook payload did not match the pinned fixtures} other {# hook payloads did not match the pinned fixtures}} |
 | `fail.loading` | Loading {thing} |
+| `fail.loading.sessions` | sessions |
 
 ## 10. Acceptance criteria
 
