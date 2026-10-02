@@ -25,6 +25,24 @@ function tempRepo(t, files = {}) {
   return repo
 }
 
+/**
+ * Points HOME and XDG_CONFIG_HOME at a fresh temporary directory and sets GIT_CONFIG_NOSYSTEM=1 for the
+ * rest of the test, so no git call here reads the owner's global or system config. Returns the home.
+ */
+function isolatedHome(t) {
+  const home = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
+  const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value
+    rmSync(home, { recursive: true, force: true })
+  })
+  mkdirSync(path.join(home, '.config', 'git'), { recursive: true })
+  process.env.HOME = home
+  process.env.XDG_CONFIG_HOME = path.join(home, '.config')
+  process.env.GIT_CONFIG_NOSYSTEM = '1'
+  return home
+}
+
 function session(repo, review_baseline, names) {
   return { cwd: repo, review_baseline, changed_files: JSON.stringify(names.map(name => ({ path: path.join(repo, name), adds: null, dels: null }))) }
 }
@@ -168,18 +186,28 @@ function filterRepo(t) {
 }
 
 test('a status-like gitRead in a repo with a marker clean filter is refused and never runs the filter', async t => {
+  isolatedHome(t)
   const { repo, marker } = filterRepo(t)
   // The fixture itself is live: plain git status runs the filter.
   spawnSync('git', ['status', '--porcelain'], { cwd: repo, env: gitEnv(), timeout: 5000 })
   assert.equal(existsSync(marker), true)
   rmSync(marker)
   utimesSync(path.join(repo, 'a.txt'), new Date('2001-01-01'), new Date('2001-01-01'))
-  for (const args of [['status', '--porcelain'], ['diff-files', '--name-only'], ['diff-index', '--name-only', 'HEAD'], ['ls-files', '-m'], ['ls-files', '--modified'], ['ls-files', '-dm'], ['show', 'HEAD'], ['log', '-p'], ['diff', '--no-ext-diff', '--no-textconv'], ['cat-file', '--filters', 'HEAD:a.txt'], ['clean', '-f'], ['clean', '-nf'], ['symbolic-ref', 'HEAD', 'refs/heads/x'], ['-c', 'x=y', 'rev-parse', 'HEAD'], ['add', 'a.txt']]) {
+  const checkout = path.join(repo, '..', `${path.basename(repo)}-checkout`)
+  t.after(() => rmSync(checkout, { recursive: true, force: true }))
+  const hooks = path.join(repo, '..', `${path.basename(repo)}-hooks`)
+  git(repo, 'config', 'user.useConfigOnly', 'false')
+  for (const args of [['status', '--porcelain'], ['diff-files', '--name-only'], ['diff-index', '--name-only', 'HEAD'], ['ls-files', '-m'], ['ls-files', '--modified'], ['ls-files', '-dm'], ['show', 'HEAD'], ['log', '-p'], ['diff', '--no-ext-diff', '--no-textconv'], ['cat-file', '--filters', 'HEAD:a.txt'], ['clean', '-f'], ['clean', '-nf'], ['symbolic-ref', 'HEAD', 'refs/heads/x'], ['-c', 'x=y', 'rev-parse', 'HEAD'], ['add', 'a.txt'], ['cat-file', '--textconv', 'HEAD:a.txt'], ['worktree', 'add', checkout], ['worktree', 'add', '--detach', checkout, 'HEAD'], ['worktree', 'remove', repo], ['config', 'core.hooksPath', hooks], ['config', '--add', 'core.hooksPath', hooks], ['config', '--unset', 'user.useConfigOnly']]) {
     const output = await gitRead(repo, args)
     assert.equal(existsSync(marker), false, args.join(' '))
     assert.equal(output, null, args.join(' '))
     assert.equal(allowedCommand(args), false, args.join(' '))
   }
+  // A refused worktree add creates no checkout (whose smudge would run the filter), and a refused config
+  // set or unset leaves the repository config as it was.
+  assert.equal(existsSync(checkout), false)
+  assert.equal(spawnSync('git', ['config', '--get-all', 'core.hooksPath'], { cwd: repo, timeout: 5000 }).stdout.toString('utf8'), '')
+  assert.equal(git(repo, 'config', '--get', 'user.useConfigOnly').trim(), 'false')
 })
 
 test('every command gitRead allows runs in a repo with marker filter and diff drivers without starting them', async t => {
@@ -199,6 +227,32 @@ test('every command gitRead allows runs in a repo with marker filter and diff dr
   }
   const diff = await gitRead(repo, allowed.at(-1))
   assert.match(diff.stdout.toString('utf8'), /^-x\n\+y$/m)
+})
+
+test('gitRead diff --no-index never runs a clean filter selected by the user-level attributes file', async t => {
+  const home = isolatedHome(t)
+  const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-noindex-')))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const marker = path.join(dir, 'marker')
+  const script = path.join(dir, 'filter.sh')
+  writeFileSync(script, `#!/bin/sh\necho ran >> '${marker}'\ncat\n`)
+  chmodSync(script, 0o755)
+  // Global attributes ($XDG_CONFIG_HOME/git/attributes, git's default core.attributesFile) and a global
+  // filter driver: no repository is involved, so GIT_DIR=/dev/null cannot keep them out.
+  writeFileSync(path.join(home, '.config', 'git', 'attributes'), '* filter=evil\n')
+  writeFileSync(path.join(home, '.gitconfig'), `[filter "evil"]\n\tclean = ${script}\n`)
+  writeFileSync(path.join(dir, 'a'), 'one\n')
+  writeFileSync(path.join(dir, 'b'), 'two\n')
+  const args = ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', 'a', 'b']
+  // The fixture is live: the same diff without core.attributesFile=/dev/null runs the filter.
+  const flags = SAFE_GIT_FLAGS.filter((word, at) => word !== 'core.attributesFile=/dev/null' && SAFE_GIT_FLAGS[at + 1] !== 'core.attributesFile=/dev/null')
+  spawnSync('git', [...flags, ...args], { cwd: dir, env: { ...gitEnv(), GIT_DIR: '/dev/null' }, timeout: 5000 })
+  assert.equal(existsSync(marker), true)
+  rmSync(marker)
+  const output = await gitRead(dir, args)
+  assert.equal(output.code, 1)
+  assert.match(output.stdout.toString('utf8'), /^-one\n\+two$/m)
+  assert.equal(existsSync(marker), false)
 })
 
 test('gitRead starts git with the 4.8 flags and environment, without credential or GIT_ variables', async t => {

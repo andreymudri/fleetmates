@@ -64,6 +64,57 @@ test('countFor reset_files counts tracked changes a reset discards and never unt
   assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], path.join(repo, 'sub')), 5)
 })
 
+/** Points HOME and XDG_CONFIG_HOME at a fresh temporary directory and sets GIT_CONFIG_NOSYSTEM=1 for the rest of the test. */
+function isolatedHome(t) {
+  const home = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
+  const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value
+    rmSync(home, { recursive: true, force: true })
+  })
+  process.env.HOME = home
+  process.env.XDG_CONFIG_HOME = path.join(home, '.config')
+  process.env.GIT_CONFIG_NOSYSTEM = '1'
+}
+
+test('countFor reset_files counts a work-tree executable-bit change that git status lists', async t => {
+  isolatedHome(t)
+  const repo = tempRepo(t)
+  chmodSync(path.join(repo, 'a.txt'), 0o755)
+  assert.equal(git(repo, 'status', '--porcelain'), 'M a.txt')
+  assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], repo), 1)
+  // With core.filemode off git ignores the bit, and so does the count.
+  git(repo, 'config', 'core.filemode', 'false')
+  assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], repo), 0)
+})
+
+test('countFor reset_files counts a staged mode change whose content and work tree match the index', async t => {
+  isolatedHome(t)
+  const repo = tempRepo(t)
+  chmodSync(path.join(repo, 'a.txt'), 0o755)
+  git(repo, 'add', 'a.txt')
+  assert.equal(git(repo, 'status', '--porcelain'), 'M  a.txt')
+  assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], repo), 1)
+})
+
+test('countFor reset_files skips skip-worktree, assume-unchanged and submodule entries', async t => {
+  isolatedHome(t)
+  const repo = tempRepo(t)
+  for (const name of ['skip.txt', 'assumed.txt']) writeFileSync(path.join(repo, name), `${name}\n`)
+  git(repo, 'add', 'skip.txt', 'assumed.txt')
+  // A gitlink entry with an empty directory in the work tree, as an uninitialised submodule has.
+  git(repo, 'update-index', '--add', '--cacheinfo', `160000,${git(repo, 'rev-parse', 'HEAD')},sub`)
+  mkdirSync(path.join(repo, 'sub'))
+  git(repo, 'commit', '-qm', 'two')
+  git(repo, 'update-index', '--skip-worktree', 'skip.txt')
+  git(repo, 'update-index', '--assume-unchanged', 'assumed.txt')
+  writeFileSync(path.join(repo, 'skip.txt'), 'changed\n')
+  writeFileSync(path.join(repo, 'assumed.txt'), 'changed\n')
+  // git status lists none of the three, so a reset count of them would overstate the label.
+  assert.equal(git(repo, 'status', '--porcelain'), '')
+  assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], repo), 0)
+})
+
 test('countFor reset_files in a repo with a marker clean filter never runs the filter', async t => {
   const repo = tempRepo(t)
   writeFileSync(path.join(repo, 'b.txt'), 'b\n')
