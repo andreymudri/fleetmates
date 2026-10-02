@@ -203,6 +203,57 @@ test('team: a task row with a request opens the drawer filtered to that task', a
   assert.deepEqual(seen, [{ kind: 'task', runId: 'gate-cli', taskId: 'T4' }, { kind: 'run', runId: 'gate-cli' }])
 })
 
+test('team: "Review 2 requests" opens the drawer with the run filter, and that drawer answers only the run\'s requests (D-69)', async () => {
+  const { TeamRun } = await load('team-run/TeamRun.jsx')
+  const drawer = await load('drawer/NeedsYouDrawer.jsx')
+  const options = [{ key: '1', label: 'Yes' }, { key: '3', label: 'No' }]
+  const answerable = row => ({ ...row, tier: 'safe', delivery: 'idle', screenMatch: 'on_screen', options })
+  const state = teamState()
+  state.data.runs = [teamRun()]
+  // A Safe request of another run's session: the filtered drawer must neither show nor answer it.
+  state.data.sessions.push({ id: 'X1', repoId: REPO_ID, role: 'lead', origin: 'wrapped', alive: true, state: 'needs_approval', runRef: { repoId: REPO_ID, runId: 'other', taskId: 'T1' } })
+  state.data.requests = [...state.data.requests, { id: 'RX', sessionId: 'X1', kind: 'permission', summary: 'ls', state: 'open', createdAt: NOW - 6 * MIN }].map(answerable)
+
+  // Run the real TeamRun inside a host component, so its hooks run, and keep the TeamRunView element it returns.
+  let rendered = null
+  function Host() {
+    rendered = TeamRun({ route: { params: { repoKey: 'fleetmates', runId: 'gate-cli' } }, state, navigate: () => {}, api: { get: () => new Promise(() => {}) }, search: '' })
+    return null
+  }
+  renderToStaticMarkup(createElement(Host))
+  const view = [rendered.props.children].flat(Infinity).find(child => child?.type?.name === 'TeamRunView')
+  const review = find(view.type(view.props), node => node.type === 'button' && textOf(node) === 'Review 2 requests')[0]
+
+  const calls = []
+  const env = {
+    location: { pathname: '/runs/fleetmates/gate-cli', search: '' },
+    history: { pushState: (pushed, _, url) => calls.push(['push', pushed, url]) },
+    PopStateEvent: class { constructor(type, init) { this.state = init.state } },
+    dispatchEvent: event => calls.push(['pop', event.state])
+  }
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  globalThis.window = env
+  try {
+    review.props.onClick({ preventDefault() {} })
+  } finally {
+    if (saved) Object.defineProperty(globalThis, 'window', saved)
+    else delete globalThis.window
+  }
+  assert.equal(calls[0]?.[0], 'push')
+  const filter = drawer.drawerFilterFrom(calls[0][1])
+  assert.deepEqual(filter, { kind: 'run', runId: 'gate-cli' }, 'the drawer opens filtered to the run')
+
+  const posts = []
+  const api = { post: (url, body) => { posts.push([url, body])
+    return Promise.resolve({ results: [] }) } }
+  let local = drawer.initialDrawerLocal()
+  const actions = drawer.drawerActions({ api, dispatch: action => { local = drawer.drawerLocal(local, action) }, state })
+  const html = renderToStaticMarkup(createElement(drawer.DrawerView, { state, now: NOW, navigate: () => {}, filter, local, actions }))
+  assert.deepEqual([...html.matchAll(/data-request="(\w+)"/g)].map(match => match[1]), ['R4', 'R5'])
+  drawer.drawerKeyDown({ key: 'A', code: 'KeyA', altKey: true, shiftKey: true, ctrlKey: false, metaKey: false, preventDefault() {} }, { state, filter, local, actions })
+  assert.deepEqual(posts, [['/api/requests/answer-batch', { ids: ['R4', 'R5'], choice: 'allow' }]], 'hidden requests are never answered')
+})
+
 test('team: a failed task reads Failed with the crashed tokens and the doctor sub line (AC5)', async () => {
   const { TeamRunView } = await load('team-run/TeamRun.jsx')
   const run = teamRun()

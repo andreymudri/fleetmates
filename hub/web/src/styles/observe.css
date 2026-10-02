@@ -287,6 +287,37 @@
 .drawer-source { margin: 0; font: var(--type-meta); color: var(--text-muted); unicode-bidi: isolate; }
 .drawer-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
 .drawer-skeleton { height: 88px; border-radius: var(--radius-lg); }
+/* M3 answering (needs-you-drawer.md 4 to 6): the focused row, answer controls, notes, batch, rules, toasts */
+.drawer-row[aria-current="true"] { box-shadow: var(--shadow-ring-selected); }
+.drawer-row--leaving { opacity: 0.8; }
+.drawer-answer { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
+/* A question row: options first, then the "Other" label, then the reply field. */
+.drawer-answer--question .answer-controls { display: contents; }
+.drawer-answer--question .answer-options { order: 0; }
+.drawer-answer--question .drawer-other { order: 1; font: var(--type-meta); color: var(--text-muted); }
+.drawer-answer--question .answer-reply { order: 2; }
+.drawer-answer--question .answer-line { order: 3; }
+.drawer-actions--open { justify-content: flex-end; }
+.drawer-note { margin: 0; font: var(--type-meta); color: var(--text-muted); }
+.drawer-followup { display: flex; align-items: flex-end; gap: var(--space-8); }
+.drawer-followup-label { display: flex; flex: 1 1 auto; flex-direction: column; gap: var(--space-4); min-width: 0; font: var(--type-meta); color: var(--text-secondary); }
+.drawer-batch { display: flex; justify-content: flex-end; margin-top: var(--space-10); }
+.drawer-rules { display: flex; flex-direction: column; gap: var(--space-6); margin: var(--space-10) 0 0; padding: 0; list-style: none; }
+.drawer-rule-accept {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-link);
+  font: var(--type-body-sm);
+  text-align: start;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.drawer-rule-note { margin: var(--space-2) 0 0; font: var(--type-meta); color: var(--text-muted); }
+.drawer-toasts { display: flex; flex-direction: column; gap: var(--space-6); padding: var(--space-10) var(--space-24); border-top: 1px solid var(--border-subtle); }
+.drawer-toast { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); margin: 0; font: var(--type-body-sm); color: var(--text-default); }
+.drawer-toast-text { overflow-wrap: anywhere; }
 .drawer-footer {
   padding: var(--space-12) var(--space-24);
   border-top: 1px solid var(--border-subtle);
