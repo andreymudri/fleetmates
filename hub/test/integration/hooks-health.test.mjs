@@ -90,3 +90,61 @@ test('POST /api/setup/hooks refreshes the row', async t => {
   assert.deepEqual(h.hooksEvents().map(event => [event.data.state, event.data.reason]), [['ok', null]])
   assert.equal((await h.request('/api/health')).data.deps.find(entry => entry.dep === 'hooks').state, 'ok')
 })
+
+// Task 23: the server compares each accepted envelope's deckHookVersion with its own package version.
+const deckVersion = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
+let nextHookTs = 1_000
+/** Feed one valid Stop envelope stamped `stamp` (omitted when undefined) through the ingestor and flush it. */
+function feed(deck, stamp) {
+  const envelope = { v: 1, hookTs: nextHookTs++, ptyId: null, claudePid: null, pidChain: [], truncated: false,
+    hook: { session_id: 'hv-session', transcript_path: '/home/you/t.jsonl', cwd: '/home/you/dev/x', hook_event_name: 'Stop', stop_hook_active: false } }
+  if (stamp !== undefined) envelope.deckHookVersion = stamp
+  assert.equal(deck.ingest.receive(JSON.stringify(envelope)), true, 'the envelope validates')
+  deck.ingest.flush()
+}
+const hooksRow = async h => (await h.request('/api/health')).data.deps.find(entry => entry.dep === 'hooks')
+const hookEvents = h => Number(h.deck.store.get('SELECT COUNT(*) AS n FROM hook_events').n)
+
+test('an envelope stamped 0.1.0 turns the hooks row to warn/hooks_outdated once and is still accepted', async t => {
+  const h = await harness(t)
+  feed(h.deck, deckVersion)
+  assert.equal((await hooksRow(h)).state, 'ok', 'a current stamp leaves the row ok')
+  assert.equal(h.hooksEvents().length, 0)
+  feed(h.deck, '0.1.0')
+  assert.deepEqual([(await hooksRow(h)).state, (await hooksRow(h)).reason], ['warn', 'hooks_outdated'])
+  assert.deepEqual(h.hooksEvents().map(event => [event.data.state, event.data.reason]), [['warn', 'hooks_outdated']])
+  feed(h.deck, '0.1.0')
+  feed(h.deck)
+  assert.equal(h.hooksEvents().length, 1, 'published once while it stays outdated, a missing stamp included')
+  assert.equal(hookEvents(h), 4, 'outdated envelopes are still accepted')
+})
+
+test('a run of current envelopes returns the row to ok', async t => {
+  const h = await harness(t)
+  feed(h.deck, '0.1.0')
+  feed(h.deck, deckVersion)
+  feed(h.deck, deckVersion)
+  assert.equal((await hooksRow(h)).reason, 'hooks_outdated', 'two current envelopes are not yet a run')
+  feed(h.deck, '0.1.0')
+  feed(h.deck, deckVersion)
+  feed(h.deck, deckVersion)
+  assert.equal((await hooksRow(h)).reason, 'hooks_outdated', 'an older envelope restarts the run')
+  feed(h.deck, deckVersion)
+  assert.deepEqual([(await hooksRow(h)).state, (await hooksRow(h)).reason], ['ok', null])
+  assert.deepEqual(h.hooksEvents().map(event => [event.data.state, event.data.reason]), [['warn', 'hooks_outdated'], ['ok', null]])
+})
+
+test('POST /api/setup/hooks clears hooks_outdated, and hooks_missing keeps priority over it', async t => {
+  const h = await harness(t)
+  feed(h.deck, '0.1.0')
+  assert.equal((await hooksRow(h)).reason, 'hooks_outdated')
+  assert.equal((await h.request('/api/prefs', 'PATCH', { scanRoot: h.scanRoot })).status, 200)
+  fs.writeFileSync(h.paths.settings, '{}')
+  assert.equal((await h.request('/api/repos/rescan', 'POST')).status, 202)
+  assert.deepEqual([(await hooksRow(h)).state, (await hooksRow(h)).reason], ['down', 'hooks_missing'])
+  feed(h.deck, '0.1.0')
+  assert.equal((await hooksRow(h)).reason, 'hooks_missing', 'an older envelope does not hide missing hooks')
+  assert.equal((await h.request('/api/setup/hooks', 'POST')).status, 200)
+  assert.deepEqual([(await hooksRow(h)).state, (await hooksRow(h)).reason], ['ok', null])
+  assert.deepEqual(h.hooksEvents().map(event => [event.data.state, event.data.reason]), [['warn', 'hooks_outdated'], ['down', 'hooks_missing'], ['ok', null]])
+})

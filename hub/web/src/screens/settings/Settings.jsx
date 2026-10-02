@@ -71,6 +71,7 @@ export const SETTINGS_COPY = Object.freeze({
   'settings.conn.checklist': 'Run the setup checklist again',
   'settings.conn.stale': 'A running session counts as adrift after {n} min without activity.',
   'settings.conn.deckdOutdated': 'deckd is older than the deck; restart it when no session is running',
+  'settings.conn.hooksOutdated': 'Hooks are from an older deck release. Run fleetmates-deck init.',
   'settings.appearance.density': 'Density',
   'settings.appearance.density.comfortable': 'Comfortable',
   'settings.appearance.density.compact': 'Compact',
@@ -480,7 +481,8 @@ export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors
           )
         })}
       </ul>
-      {checklist ?? <button type="button" className="button button--secondary" onClick={onChecklist}>{tr('settings.conn.checklist')}</button>}
+      {health.find(row => row.dep === 'hooks')?.reason === 'hooks_outdated' ? <p className="setting-hint hooks-outdated">{tr('settings.conn.hooksOutdated')}</p> : null}
+      {checklist ??<button type="button" className="button button--secondary" onClick={onChecklist}>{tr('settings.conn.checklist')}</button>}
       <p className="setting-hint settings-stale">{tr('settings.conn.stale', { n: Number(prefs.staleMinutes ?? 20) })}</p>
     </section>
   )

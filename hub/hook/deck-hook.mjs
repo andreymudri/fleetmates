@@ -10,7 +10,14 @@ const maxInput = 2 * 1024 * 1024
 const maxLine = 1024 * 1024
 const maxString = 64 * 1024
 const maxSpool = 32 * 1024 * 1024
-const hookFields = new Set(['session_id', 'transcript_path', 'cwd', 'hook_event_name', 'permission_mode', 'source', 'reason', 'tool_name', 'tool_input', 'notification_type', 'stop_hook_active', 'message', 'prompt'])
+// Read once at start from the package.json one directory above this script; null when it cannot be read.
+const deckHookVersion = (() => {
+  try {
+    const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+    return typeof version === 'string' ? version : null
+  } catch { return null }
+})()
+const hookFields =new Set(['session_id', 'transcript_path', 'cwd', 'hook_event_name', 'permission_mode', 'source', 'reason', 'tool_name', 'tool_input', 'notification_type', 'stop_hook_active', 'message', 'prompt'])
 
 function tooDeep(value) {
   const stack = [[value, 0]]
@@ -72,7 +79,7 @@ export function makeEnvelope(hook, { hookTs = Date.now(), ptyId = process.env.FL
   const state = { truncated: false }
   const copy = Object.fromEntries(Object.entries(hook).filter(([key]) => hookFields.has(key)))
   if (copy.tool_input !== undefined && !tooDeep(copy.tool_input)) copy.tool_input = truncateInput(copy.tool_input, state)
-  const envelope = { v: 1, deckHookVersion: '0.1.0', hookTs, ptyId, ...ancestry(), truncated: state.truncated, hook: copy }
+  const envelope = { v: 1, deckHookVersion, hookTs, ptyId, ...ancestry(), truncated: state.truncated, hook: copy }
   if (Buffer.byteLength(JSON.stringify(envelope)) > maxLine) {
     delete copy.tool_input
     envelope.truncated = true
