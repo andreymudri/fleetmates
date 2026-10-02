@@ -257,6 +257,37 @@ test('a run directory deleted and recreated with the same id gets a fresh watche
   })
 })
 
+test('list closes the watcher of a run directory that vanished without a watcher event', async () => {
+  await withRepo(async (repo) => {
+    const plan = { runId: 'r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'Task', phase: 1 }] }
+    const status = { runId: 'r1', tasks: [{ id: 'T1', state: 'pending' }] }
+    const opened = []
+    const reader = createFleetmatesReader({
+      repoRoots: [repo], pollRun: async () => ({ derivedPhase: 1 }),
+      watchFactory: (dir) => {
+        const record = { dir, closed: false }
+        opened.push(record)
+        return { close() { record.closed = true } }
+      },
+    })
+    try {
+      reader.watch(() => {})
+      const dir = await writeRun(repo, 'r1', plan, status)
+      assert.equal((await reader.list()).length, 1)
+      assert.equal(opened.length, 1)
+      await rm(dir, { recursive: true, force: true })
+      assert.equal((await reader.list()).length, 0)
+      assert.equal(opened[0].closed, true, 'the vanished run watcher is closed by list()')
+      await writeRun(repo, 'r1', plan, status)
+      assert.equal((await reader.list()).length, 1)
+      assert.equal(opened.length, 2, 'the recreated run gets a fresh watcher')
+      assert.equal(opened[1].closed, false)
+    } finally {
+      reader.close()
+    }
+  })
+})
+
 test('a watcher that reports its own run directory removed is closed before the next list', async () => {
   await withRepo(async (repo) => {
     const dir = await writeRun(repo, 'r1', {
