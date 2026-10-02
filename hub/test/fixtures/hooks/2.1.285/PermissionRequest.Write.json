@@ -1,0 +1,17 @@
+{
+  "session_id": "01J00000000000000000000001",
+  "transcript_path": "/home/you/.claude/projects/fixture/01J00000000000000000000001.jsonl",
+  "cwd": "/home/you/fixture-repo",
+  "scratchpad_dir": "/tmp/claude-1000/-tmp-you-fixture-repo-0000000/01J00000000000000000000001/scratchpad",
+  "prompt_id": "01JQ0000000000000000000006",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/home/you/fixture-repo/capture-write.txt",
+    "content": "capture\n"
+  }
+}

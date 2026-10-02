@@ -1,0 +1,16 @@
+{
+  "session_id": "01J00000000000000000000001",
+  "transcript_path": "/home/you/.claude/projects/fixture/01J00000000000000000000001.jsonl",
+  "cwd": "/home/you/fixture-repo",
+  "scratchpad_dir": "/tmp/claude-1000/-tmp-you-fixture-repo-0000000/01J00000000000000000000001/scratchpad",
+  "prompt_id": "01JQ0000000000000000000002",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "I ran `node --test capture.test.mjs` and it passed: there's 1 test (`capture`), it passed with no failures, and the run took about 160 ms.",
+  "background_tasks": [],
+  "session_crons": []
+}

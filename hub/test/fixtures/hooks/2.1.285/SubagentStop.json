@@ -1,0 +1,19 @@
+{
+  "session_id": "01J00000000000000000000001",
+  "transcript_path": "/home/you/.claude/projects/fixture/01J00000000000000000000001.jsonl",
+  "cwd": "/home/you/fixture-repo",
+  "scratchpad_dir": "/tmp/claude-1000/-tmp-you-fixture-repo-0000000/01J00000000000000000000001/scratchpad",
+  "prompt_id": "01JQ0000000000000000000007",
+  "permission_mode": "default",
+  "agent_id": "a0000000000000000",
+  "agent_type": "",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/home/you/.claude/projects/-tmp-you-fixture-repo-0000000/01J00000000000000000000001/subagents/agent-a0000000000000000.jsonl",
+  "last_assistant_message": "Summary of the conversation so far (redacted for the fixture): the user asked for a short file edit, Claude made it, and a command ran. No further context.",
+  "background_tasks": [],
+  "session_crons": []
+}
