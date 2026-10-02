@@ -5,12 +5,13 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { Worker } from 'node:worker_threads'
 import xtermHeadless from '@xterm/headless'
 import { ScreenModel } from '../../deckd/screen-model.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createProjector, SCROLLBACK_CAP } from '../../server/machines/projector.mjs'
 import { createLauncher } from '../../server/launch/launch.mjs'
-import { boundCounts, historySize, readStoredHistory, renderHistory, RENDER_BUDGET_MS, RENDER_INPUT_CAP } from '../../server/screen/history.mjs'
+import { boundCounts, createHistoryRenderer, fallbackHistory, historySize, newestInput, readStoredHistory, renderHistory, RENDER_INPUT_CAP, RENDER_OUTPUT_CAP, spawnHistoryWorker, stripControls } from '../../server/screen/history.mjs'
 
 const { Terminal } = xtermHeadless
 const fixture = readFileSync(new URL('../fixtures/screens/2.1.282/permission-edit.ansi', import.meta.url))
@@ -226,28 +227,11 @@ test('a live text ending in CRLF and longer than lines keeps its newest line', a
   } finally { h.close() }
 })
 
-test('renderHistory stops at its time budget on crafted bytes, and the event loop keeps running meanwhile', async () => {
-  let gap = 0
-  let last = Date.now()
-  const timer = setInterval(() => {
-    const at = Date.now()
-    gap = Math.max(gap, at - last)
-    last = at
-  }, 5)
-  const started = Date.now()
-  try {
-    const out = await renderHistory('\x1b[40L'.repeat(Math.floor(RENDER_INPUT_CAP / 5)))
-    const took = Date.now() - started
-    assert.equal(out.truncated, true, 'the unrendered rest is reported')
-    assert.ok(took < RENDER_BUDGET_MS * 3, `returned after ${took} ms`)
-    assert.ok(gap < 250, `the longest event-loop gap was ${gap} ms`)
-  } finally { clearInterval(timer) }
-})
-
-test('boundCounts clamps line, scroll and character counts to the screen so they cost what a screenful costs', () => {
+test('boundCounts clamps line, scroll and character counts to the screen, and REP to a screenful', () => {
   assert.equal(boundCounts('\x1b[999L\x1b[999M\x1b[999S\x1b[999T', 120, 40), '\x1b[40L\x1b[40M\x1b[40S\x1b[40T')
   assert.equal(boundCounts('\x1b[9999@\x1b[9999P\x1b[9999X\x1b[9999I\x1b[9999Z', 120, 40), '\x1b[120@\x1b[120P\x1b[120X\x1b[120I\x1b[120Z')
-  assert.equal(boundCounts('a\x1b[65535b', 120, 40), 'a\x1b[120b')
+  assert.equal(boundCounts('a\x1b[65535b', 120, 40), 'a\x1b[4800b')
+  assert.equal(boundCounts('a\x1b[239b', 120, 40), 'a\x1b[239b', 'a REP that wraps onto the next row is kept')
   assert.equal(boundCounts('\x1b[3L\x1b[10;150H\x1b[?999S\x1b[1;2T\x1b[999 @', 120, 40), '\x1b[3L\x1b[10;150H\x1b[?999S\x1b[1;2T\x1b[999 @', 'other sequences pass through')
 })
 
@@ -255,10 +239,11 @@ test('boundCounts clamps the first parameter whatever follows it, after a C1 CSI
   assert.equal(boundCounts('\x1b[99999;1L', 120, 40), '\x1b[40;1L', 'a second parameter')
   assert.equal(boundCounts('\x1b[999:1L', 120, 40), '\x1b[40:1L', 'a subparameter')
   assert.equal(boundCounts('\x1b[999;0S', 120, 40), '\x1b[40;0S', 'a zero second parameter')
-  assert.equal(boundCounts('a\x1b[65535;1b', 120, 40), 'a\x1b[120;1b', 'REP with a second parameter')
+  assert.equal(boundCounts('a\x1b[65535;1b', 120, 40), 'a\x1b[4800;1b', 'REP with a second parameter')
   assert.equal(boundCounts('\x9b99999M\x9b9999;2P', 120, 40), '\x1b[40M\x1b[120;2P', 'the C1 introducer')
   assert.equal(boundCounts('\x1b[9\n99T', 120, 40), '\n\x1b[40T', 'a line feed inside the parameters, executed first')
   assert.equal(boundCounts('\x1b\x00[\x7f999S', 120, 40), '\x00\x1b[40S', 'controls between ESC and [')
+  assert.equal(boundCounts('x\x1b[' + '\x00'.repeat(5) + 'é\x1b[999L', 120, 40), 'x\x1b[' + '\x00'.repeat(5) + 'é\x1b[40L', 'a CSI cut short by a non-final')
 })
 
 test('the first parameter xterm hands IL is at most the screen height for every crafted form', async () => {
@@ -277,52 +262,150 @@ test('the first parameter xterm hands IL is at most the screen height for every 
   }
 })
 
+test('a REP longer than a row wraps onto the next row as it does on the PTY', async () => {
+  const { data } = await renderHistory('x\x1b[239b', { timeoutMs: 30_000 })
+  const rows = await render(data, 120, 40)
+  assert.deepEqual(rows.slice(0, 2), ['x'.repeat(120), 'x'.repeat(120)])
+})
+
+/** The `\x1b#8` (DECALN) fill of a 500x200 screen and its scrollback, then the alternate screen filled too. */
+const DECALN_ALT_FILL = ('\x1b#8\x1b[200H' + '\n'.repeat(200)).repeat(26) + '\x1b[?1049h\x1b#8'
+/** The round 1 insert-lines piece, as much of it as one render feeds. */
+const IL_FILL = '\x1b[99999;1L'.repeat(Math.floor((RENDER_INPUT_CAP - 64) / 11))
+
 /**
- * Render `text` while a 5 ms timer runs; return how long it took and the longest gap between two timer ticks.
- * @param {string} text
- * @param {{ cols?: number, rows?: number }} [size]
+ * A renderer whose workers count their `terminate()` calls in `spy.terminated`.
+ * @param {object} options passed to `createHistoryRenderer`
  */
-async function timedRender (text, size) {
+function spiedRenderer (options) {
+  const spy = { spawned: 0, terminated: 0 }
+  const renderer = createHistoryRenderer({
+    ...options,
+    spawn: () => {
+      const worker = spawnHistoryWorker()
+      const terminate = worker.terminate.bind(worker)
+      worker.terminate = () => {
+        spy.terminated++
+        return terminate()
+      }
+      spy.spawned++
+      return worker
+    }
+  })
+  return { renderer, spy }
+}
+
+test('a render past its time limit ends the worker and answers the stripped text, truncated', async () => {
+  const { renderer, spy } = spiedRenderer({ timeoutMs: 50 })
+  try {
+    const cases = [
+      ['DECALN and the alternate screen at 500x200', DECALN_ALT_FILL, { cols: 500, rows: 200 }],
+      ['the round 1 insert-lines piece', 'last words\r\n' + IL_FILL, {}]
+    ]
+    for (const [name, text, size] of cases) {
+      const before = spy.terminated
+      const out = await renderer.render(text, size)
+      assert.equal(out.truncated, true, name)
+      assert.equal(spy.terminated, before + 1, `${name}: the worker was ended`)
+      assert.ok(!/[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(out.data), `${name}: no control or escape is left`)
+    }
+    assert.ok((await renderer.render('last words\r\n' + IL_FILL)).data.startsWith('last words'), 'the fallback keeps the text')
+    assert.equal(spy.spawned, 3, 'every render after a timeout starts a fresh worker')
+    const after = await renderer.render('fine\r\n', { timeoutMs: 30_000 })
+    assert.deepEqual({ truncated: after.truncated, rows: (await render(after.data, 120, 40)).filter(Boolean) }, { truncated: false, rows: ['fine'] }, 'the fresh worker renders')
+  } finally { renderer.close() }
+})
+
+test('a worker that fails to start or crashes answers the fallback, and the next render starts another', async () => {
+  let spawned = 0
+  const renderer = createHistoryRenderer({
+    spawn: () => ++spawned === 1 ? new Worker('throw new Error("boom")', { eval: true }) : spawnHistoryWorker()
+  })
+  try {
+    assert.deepEqual(await renderer.render('a\x1b[31mred\x1b[0m\r\nb'), { data: 'ared\r\nb', truncated: true })
+    const out = await renderer.render('ok', { timeoutMs: 30_000 })
+    assert.equal(out.truncated, false)
+    assert.equal(spawned, 2)
+  } finally { renderer.close() }
+})
+
+test('the main thread keeps running while the worker renders a costly history', async () => {
   let gap = 0
-  let last = Date.now()
+  let last = performance.now()
   const timer = setInterval(() => {
-    const at = Date.now()
+    const at = performance.now()
     gap = Math.max(gap, at - last)
     last = at
   }, 5)
-  const started = Date.now()
   try {
-    const out = await renderHistory(text, size)
-    gap = Math.max(gap, Date.now() - last)
-    return { out, took: Date.now() - started, gap }
+    const out = await renderHistory(DECALN_ALT_FILL, { cols: 500, rows: 200, timeoutMs: 30_000 })
+    gap = Math.max(gap, performance.now() - last)
+    assert.ok(out.data.length > 1_000_000, 'the costly render ran to its end')
   } finally { clearInterval(timer) }
-}
+  assert.ok(gap < 250, `the longest main-thread gap was ${Math.round(gap)} ms`)
+})
 
-test('a second parameter, a subparameter or a zero second parameter does not lift the count bound', async () => {
-  for (const form of ['\x1b[99999;1L', '\x1b[99999:1L', '\x1b[99999;0S', 'a\x1b[65535;1b', '\x9b99999;1M']) {
-    const { took, gap } = await timedRender(form.repeat(10) + 'done')
-    assert.ok(took < RENDER_BUDGET_MS * 2, `${JSON.stringify(form)} returned after ${took} ms`)
-    assert.ok(gap < 250, `${JSON.stringify(form)}: the longest event-loop gap was ${gap} ms`)
+/** 1 MiB of input built to make a backtracking scanner explode: CSI introducers followed by long control runs, nested ESC, strings left open, and a lone ESC at the end. */
+const ADVERSARIAL = (() => {
+  const unit = '\x1b[' + '\x00'.repeat(2000) + 'é' + '\x1b[' + '\r\n'.repeat(1000) + '\x1b\x1b\x1b[' + ';'.repeat(500) + '\x1b]' + '\x01'.repeat(500)
+  return unit.repeat(Math.ceil(1024 * 1024 / unit.length)).slice(0, 1024 * 1024 - 1) + '\x1b'
+})()
+
+test('every main-thread scan of stored text is linear on 1 MiB of adversarial input', () => {
+  for (const [name, scan] of [
+    ['stripControls', () => stripControls(ADVERSARIAL)],
+    ['fallbackHistory', () => fallbackHistory(ADVERSARIAL)],
+    ['boundCounts', () => boundCounts(ADVERSARIAL, 500, 200)],
+    ['newestInput', () => newestInput(ADVERSARIAL)],
+    ['readStoredHistory', () => readStoredHistory('\x1b[8;' + ADVERSARIAL)]
+  ]) {
+    const started = performance.now()
+    scan()
+    const took = performance.now() - started
+    assert.ok(took < 250, `${name} took ${Math.round(took)} ms`)
   }
 })
 
-test('at 500x200, insert-lines after a full scrollback end each write step early, so the event loop keeps running', async () => {
-  const { out, took, gap } = await timedRender('\n'.repeat(6000) + '\x1b[200L'.repeat(Math.floor(200 * 1024 / 7)), { cols: 500, rows: 200 })
-  assert.equal(out.truncated, true, 'the budget stopped it')
-  assert.ok(took < RENDER_BUDGET_MS * 2, `returned after ${took} ms`)
-  assert.ok(gap < 250, `the longest event-loop gap was ${gap} ms`)
+test('stripControls drops escape sequences and controls but keeps text, CR and LF', () => {
+  assert.equal(stripControls('a\x1b[31;1mb\x1b]0;title\x07c\x1b]8;;u\x1b\\d\x1bPq#\x1b\\e\x1b(Bf\x9b2Jg\x07\x08h\r\n'), 'abcdefgh\r\n')
+  assert.equal(stripControls('x\x1b[' + '\x00'.repeat(10) + 'éy'), 'xéy', 'a CSI cut short keeps the character that ended it')
+  assert.equal(stripControls('tail\x1b'), 'tail')
+  assert.deepEqual(fallbackHistory('one\r\nprogress 10%\rprogress 99%\r\ntwo'), { data: 'one\r\nprogress 99%\r\ntwo', truncated: true })
 })
 
-test('REP of a cluster of 80000 code units is dropped rather than copied a row long', async () => {
-  const { out, gap } = await timedRender('e' + '\u0301'.repeat(80000) + '\x1b[120b')
-  assert.ok(gap < 250, `the longest event-loop gap was ${gap} ms`)
-  assert.ok(out.data.length < 2 * 80001, `the cluster is printed once, not 120 times (${out.data.length} characters)`)
+test('a row longer than the input cap with no CRLF in reach is not cut inside an escape sequence', () => {
+  const head = 'zzz\x1b[38;5;196m'
+  const text = head + 'a'.repeat(RENDER_INPUT_CAP + 5 - head.length)
+  const fed = newestInput(text)
+  assert.ok(text.endsWith(fed))
+  assert.match(fed, /^a+$/, 'no parameter of the cut sequence is fed as text')
+  const multibyte = 'xx' + 'é'.repeat(140_000)
+  assert.match(newestInput(multibyte), /^é+$/, 'the cut falls between characters')
+})
+
+test('REP of a long cluster is dropped rather than copied a row long, after a narrow or a wide character', async () => {
+  for (const base of ['e', '一']) {
+    const out = await renderHistory(base + '́'.repeat(80000) + '\x1b[120b', { timeoutMs: 30_000 })
+    assert.equal(out.truncated, false, `${JSON.stringify(base)}: the render was whole`)
+    assert.ok(out.data.length < 2 * 80001, `${JSON.stringify(base)}: the cluster is printed once, not 120 times (${out.data.length} characters)`)
+  }
   const { data } = await renderHistory('ab\x1b[3b')
   assert.ok((await render(data, 120, 40)).includes('abbbb'), 'REP of one character still repeats it')
 })
 
-test('16 KiB of insert-lines with a count of 999 renders whole within the budget', async () => {
-  const out = await renderHistory('\x1b[999L'.repeat(Math.floor(16 * 1024 / 6)) + 'done')
+test('a render whose output passes RENDER_OUTPUT_CAP keeps its newest whole lines and says truncated', async () => {
+  const cluster = 'e' + '́'.repeat(30)
+  const lines = Array.from({ length: 200 }, (_, i) => `L${String(i).padStart(3, '0')}${cluster}\x1b[490b`)
+  const out = await renderHistory(lines.join('\r\n'), { cols: 500, rows: 200, timeoutMs: 30_000 })
+  assert.equal(out.truncated, true)
+  assert.ok(Buffer.byteLength(out.data) <= RENDER_OUTPUT_CAP, `${Buffer.byteLength(out.data)} bytes`)
+  assert.match(out.data, /^L\d{3}e/, 'the output starts at a line start')
+  assert.ok(out.data.includes('L199'), 'the newest line is kept')
+  assert.ok(!out.data.includes('L000'), 'the oldest line is not')
+})
+
+test('16 KiB of insert-lines with a count of 999 renders whole', async () => {
+  const out = await renderHistory('\x1b[999L'.repeat(Math.floor(16 * 1024 / 6)) + 'done', { timeoutMs: 30_000 })
   assert.equal(out.truncated, false)
   assert.ok((await render(out.data, 120, 40)).some(row => row.includes('done')))
 })
