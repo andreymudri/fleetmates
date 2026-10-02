@@ -273,11 +273,21 @@ async function main (argv) {
     finish(0, message)
   }
 
+  /** A SIGHUP arrived: the terminal closed, so fm leaves the PTY running. */
+  let hungUp = false
+  /** The PTY fm sent `attach` for and has no answer for yet. @type {string | null} */
+  let attaching = null
+  /** The `detach` sent for a SIGHUP while `attaching`. @type {Promise<unknown> | null} */
+  let hangupDetach = null
+  let attachedOk = false
+
   /**
    * Attach, then ask for the replay in the same breath; replay() explains
    * the seam. deckd sizes the PTY to a source only from sizes that source
    * reported with `resize`; the size in `spawn` is not one. Report it now,
-   * so typing here moves the PTY to this terminal's size (SM-O12).
+   * so typing here moves the PTY to this terminal's size (SM-O12). After a
+   * SIGHUP, `detach` follows at once, behind `attach` on the same
+   * connection.
    * @param {string} id
    */
   const attachTo = (id) => {
@@ -286,8 +296,20 @@ async function main (argv) {
     screen.catch(() => {})
     const size = termSize()
     if (size) deckd.request('resize', { ptyId: id, ...size, source }).catch(() => {})
+    attaching = id
+    hangupDetach = hungUp ? deckd.request('detach', { ptyId: id }).catch(() => {}) : null
     return { attached, screen }
   }
+
+  // The terminal closed: detach without printing. deckd lists this client
+  // as soon as it handles `attach`, so a SIGHUP from before `spawn` or
+  // `attach` is sent is remembered, and becomes a `detach` once fm has
+  // sent `attach` for a PTY id.
+  process.on('SIGHUP', () => {
+    hungUp = true
+    if (attachedOk) detach()
+    else if (attaching !== null && hangupDetach === null) hangupDetach = deckd.request('detach', { ptyId: attaching }).catch(() => {})
+  })
 
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
 
@@ -316,6 +338,12 @@ async function main (argv) {
       pending = attachTo(ptyId)
       await pending.attached
     }
+    attaching = null
+    if (hungUp) {
+      await hangupDetach
+      return finish(0)
+    }
+    attachedOk = true
     const id = /** @type {string} */ (ptyId)
 
     let escaped = false
@@ -350,9 +378,6 @@ async function main (argv) {
       const size = termSize()
       if (size) deckd.request('resize', { ptyId: id, ...size, source }).catch(() => {})
     })
-    // The terminal closed: detach the same way, without printing.
-    process.on('SIGHUP', () => { detach() })
-
     await replay(pending.screen)
   } catch (err) {
     const early = ptyId ? exits.get(ptyId) : undefined

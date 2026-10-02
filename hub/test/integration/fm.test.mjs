@@ -732,14 +732,95 @@ test('the detach escape: Ctrl ] twice sends one Ctrl ], Ctrl ] then another byte
   }
 })
 
+/**
+ * A Unix socket proxy on a fresh runtime dir in front of the test deckd. It
+ * logs every request fm sends and the close of fm's socket, in order, keeps
+ * deckd's answers by request id, and with `holdAttach` holds deckd's answer
+ * to fm's first `attach` request, and every line after it, until release().
+ * @param {{ holdAttach?: boolean }} [opts]
+ */
+async function deckdProxy ({ holdAttach = false } = {}) {
+  const proxyRt = await makeRuntimeDir()
+  const dir = path.join(proxyRt.dir, 'fleetmates-deck')
+  await mkdir(dir, { mode: 0o700 })
+  /** fm's requests, and `{ closed: true }` when its socket closed. @type {any[]} */
+  const log = []
+  /** deckd's answers, by request id. @type {Map<number, any>} */
+  const answers = new Map()
+  /** @type {string[]} */
+  let held = []
+  let holding = false
+  /** @type {net.Socket[]} */
+  const socks = []
+  /** @type {net.Socket | null} */
+  let down = null
+  const server = net.createServer((sock) => {
+    const up = net.connect(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
+    socks.push(sock, up)
+    down = sock
+    sock.on('error', () => {})
+    up.on('error', () => {})
+    /** @type {number | null} */
+    let attachId = null
+    sock.on('data', createLineDecoder((req) => {
+      log.push(req)
+      if (holdAttach && req.op === 'attach' && attachId === null) attachId = req.id
+      up.write(encode(req))
+    }, () => {}))
+    up.on('data', createLineDecoder((msg) => {
+      if (msg.id !== undefined) answers.set(msg.id, msg)
+      if (attachId !== null && msg.id === attachId) holding = true
+      if (holding) held.push(encode(msg))
+      else sock.write(encode(msg))
+    }, () => {}))
+    sock.on('close', () => {
+      log.push({ closed: true })
+      up.destroy()
+    })
+    up.on('close', () => sock.destroy())
+  })
+  await new Promise((resolve) => server.listen(path.join(dir, 'deckd.sock'), () => resolve(undefined)))
+  return {
+    log,
+    answers,
+    env: { ...env, XDG_RUNTIME_DIR: proxyRt.dir },
+    /** Whether deckd's answer to `attach` is being held. */
+    holding: () => holding,
+    /** Pass on what was held, and everything after it. */
+    release () {
+      holding = false
+      for (const line of held) down?.write(line)
+      held = []
+    },
+    async close () {
+      for (const s of socks) s.destroy()
+      await new Promise((resolve) => server.close(() => resolve(undefined)))
+      await proxyRt.cleanup()
+    }
+  }
+}
+
+/**
+ * Where fm's `detach` request for `ptyId` and the close of its socket sit
+ * in a proxy log, and deckd's answer to that request.
+ * @param {Awaited<ReturnType<typeof deckdProxy>>} proxy
+ * @param {string} ptyId
+ */
+function detachSent (proxy, ptyId) {
+  const at = proxy.log.findIndex((r) => r.op === 'detach' && r.ptyId === ptyId)
+  const closedAt = proxy.log.findIndex((r) => r.closed)
+  return { at, closedAt, answer: at === -1 ? undefined : proxy.answers.get(proxy.log[at].id) }
+}
+
 test('SIGHUP to fm attach detaches without printing and leaves the PTY running', async () => {
   const p = await spawnAt(tmp)
+  const proxy = await deckdProxy()
   try {
-    const attach = runInPty(process.execPath, [fmPath, 'attach', p.ptyId])
+    const attach = runInPty(process.execPath, [fmPath, 'attach', p.ptyId], { env: proxy.env })
     await until(async () => (await listed(p.ptyId))?.clients.some((/** @type {any} */ c) => c.kind === 'terminal'), 'fm attach to attach')
-    // deckd lists the client as soon as it handles `attach`, before fm has read the reply and
-    // set its SIGHUP handler. fm writes PTY output only after that handler is set, so the echo
-    // of this write reaching fm's terminal is the point where a hangup means a detach.
+    // deckd lists the client as soon as it handles `attach`, before fm has read the reply. fm
+    // writes PTY output only after it has read that reply, so the echo of this write reaching
+    // fm's terminal means this hangup arrives after the attach; the test below covers before.
     await browser.request('write', { ptyId: p.ptyId, data: b64('hup1'), source: { kind: 'deck' } })
     await until(() => attach.out().includes('hup1'), () => `the echo in fm attach: ${JSON.stringify(attach.out())}`)
     let detached = false
@@ -753,9 +834,44 @@ test('SIGHUP to fm attach detaches without printing and leaves the PTY running',
     assert.doesNotMatch(attach.out(), /detached from/)
     // The event and fm's exit reach this process on different channels, so wait for the event.
     await until(() => detached, 'deckd to report the terminal detached').finally(off)
+    // deckd also reports a detach when the socket closes, so check the request itself.
+    const sent = detachSent(proxy, p.ptyId)
+    assert.notEqual(sent.at, -1, `fm sent no detach: ${JSON.stringify(proxy.log)}`)
+    assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
+    assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
     assert.ok(await listed(p.ptyId), 'the PTY is still running')
   } finally {
     await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+    await proxy.close()
+  }
+})
+
+test('SIGHUP to fm attach before deckd answers attach detaches once it answers, without printing', async () => {
+  const p = await spawnAt(tmp)
+  const proxy = await deckdProxy({ holdAttach: true })
+  try {
+    const attach = runInPty(process.execPath, [fmPath, 'attach', p.ptyId], { env: proxy.env })
+    /** @type {{ exitCode: number, signal?: number } | null} */
+    let early = null
+    attach.exited().then((e) => { early = e }, () => {})
+    // deckd lists the client once it handles `attach`; the proxy holds the answer from fm.
+    await until(async () => proxy.holding() && (await listed(p.ptyId))?.clients.some((/** @type {any} */ c) => c.kind === 'terminal'), 'deckd to answer attach, held by the proxy')
+    attach.pty.kill('SIGHUP')
+    // fm knows the PTY id, so it says `detach` at once, behind `attach`.
+    await until(() => early || detachSent(proxy, p.ptyId).at !== -1, 'fm to send detach')
+    assert.equal(early, null, `fm ended before deckd answered attach: ${JSON.stringify(early)}`)
+    proxy.release()
+    const exited = await attach.exited()
+    assert.equal(exited.exitCode, 0)
+    assert.ok(!exited.signal, `fm died of signal ${exited.signal}`)
+    assert.equal(attach.out(), '')
+    const sent = detachSent(proxy, p.ptyId)
+    assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
+    assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
+    assert.ok(await listed(p.ptyId), 'the PTY is still running')
+  } finally {
+    await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+    await proxy.close()
   }
 })
 
