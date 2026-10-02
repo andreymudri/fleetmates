@@ -60,7 +60,8 @@ Dialog `variant="form"` (`--layout-dialog`, `--radius-3xl`), top 110px, scrim. S
 | Validation | submit without a repo: Field error "Pick a repo." |
 | Submitting | Launch `loading`; fields read-only |
 | deckd down | Launch disabled with visible reason "deckd is reconnecting. Launching needs deckd." (state-machines 4.2) |
-| Hooks not installed | Banner `hint`: "Observation hooks are not installed, so the deck will only see this session through its terminal." Launch allowed |
+| Hooks not installed (`hooks` row reason `hooks_missing` or `hook_script_missing`) | Banner `hint`: "Observation hooks are not installed, so the deck will only see this session through its terminal." Launch allowed |
+| Hooks outdated (`hooks` row state `warn`, reason `hooks_outdated`) | Banner `hint`: "Hooks are from an older deck release. Run fleetmates-deck init." Launch allowed |
 | Spawn failed | Banner `error` at the top of the form: "Could not start claude in rustot: {message}." inputs kept, focus on the banner |
 | Success | dialog closes; route `/s/:newId` with the terminal focused (Proposed); the new card fades in on Home |
 | Overflow | long repo paths middle-truncate; 200+ repos: the list virtualises (Proposed) |
@@ -119,6 +120,7 @@ Dialog `variant="form"` (`--layout-dialog`, `--radius-3xl`), top 110px, scrim. S
 | `newSession.launch` | Launch a ship |
 | `newSession.deckdDown` | deckd is reconnecting. Launching needs deckd. |
 | `newSession.noHooks` | Observation hooks are not installed, so the deck will only see this session through its terminal. |
+| `newSession.hooksOutdated` | Hooks are from an older deck release. Run fleetmates-deck init. |
 | `newSession.spawnError` | Could not start claude in {repo}: {message}. |
 
 ## 10. Acceptance criteria

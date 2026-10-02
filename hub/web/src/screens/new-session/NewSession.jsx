@@ -36,6 +36,7 @@ export const NEW_SESSION_COPY = Object.freeze({
   'newSession.launch': 'Launch a ship',
   'newSession.deckdDown': 'deckd is reconnecting. Launching needs deckd.',
   'newSession.noHooks': 'Observation hooks are not installed, so the deck will only see this session through its terminal.',
+  'newSession.hooksOutdated': 'Hooks are from an older deck release. Run fleetmates-deck init.',
   'newSession.spawnError': 'Could not start claude in {repo}: {message}.'
 })
 
@@ -244,10 +245,19 @@ export function probeScanRoot(api) {
   return api.post('/api/repos/rescan').then(() => false, error => error?.code === 'settings_io_failed')
 }
 
-/** Whether the snapshot's `hooks` health row says the observation hooks are not usable. */
-function hooksMissing(state) {
+/** Reasons of the `hooks` health row that mean the observation hooks are not installed. */
+const HOOKS_MISSING_REASONS = new Set(['hooks_missing', 'hook_script_missing'])
+
+/**
+ * The copy key of the hooks hint for the snapshot's `hooks` health row: `newSession.noHooks` when the
+ * hooks are not installed, `newSession.hooksOutdated` when they are installed but older, otherwise null.
+ */
+function hooksHintKey(state) {
   const row = (state.data?.health ?? []).find(item => item.dep === 'hooks')
-  return !!row && row.state !== 'ok'
+  if (!row || row.state === 'ok') return null
+  if (HOOKS_MISSING_REASONS.has(row.reason)) return 'newSession.noHooks'
+  if (row.reason === 'hooks_outdated') return 'newSession.hooksOutdated'
+  return null
 }
 
 function Option({ row, active, t, onPick, onHover }) {
@@ -347,6 +357,7 @@ export function NewSessionView({
   const selected = findRepo(state, form.repoKey)
   const others = selected ? conflictSessions(state.data?.sessions, selected.id) : []
   const deckdDown = !!state.deckdOutage
+  const hooksHint = hooksHintKey(state)
   const busy = !!form.submitting
   const expanded = !!form.open && state.loaded && model.rows.length > 0
   const errorRepo = shown(selected?.name ?? repoFor(state.data?.repos, form.repoKey).name ?? form.repoKey ?? '')
@@ -369,7 +380,7 @@ export function NewSessionView({
               <a className="launch-banner-link" href={SETTINGS_CONNECTIONS} onClick={linkHandler(onLink, SETTINGS_CONNECTIONS)}>{tr('newSession.fixInSettings')}</a>
             </div>
           ) : null}
-          {hooksMissing(state) ? <div className="launch-banner launch-banner--hint" role="note"><p className="launch-banner-text">{tr('newSession.noHooks')}</p></div> : null}
+          {hooksHint ? <div className="launch-banner launch-banner--hint" role="note"><p className="launch-banner-text">{tr(hooksHint)}</p></div> : null}
           <div className="launch-field">
             <label className="launch-label" htmlFor={ids.repo}>{tr('newSession.repo')}</label>
             <input className="launch-input" id={ids.repo} type="text" role="combobox" data-initial-focus={form.focus === 'repo' ? 'true' : undefined}
