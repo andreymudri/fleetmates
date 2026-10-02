@@ -120,6 +120,6 @@ Existing ids from other docs (SM-O*, design-system 15.*, crew.md 12) are referen
 | MEET-O11 | Location of TurbidAssist `config.yaml` and `session_dir` | Settings, Connections path | meetings, settings |
 | SET-O1 | Language is an environment variable, not a setting | Read-only row | settings |
 | SET-O2 | Storage of deck preferences | Deck SQLite; env wins | settings |
-| NEW-O2 | Repo scan depth under `~/dev` | Direct children + repos known from hooks | new-session |
+| NEW-O2 | Repo scan depth under `~/dev` | Decided 2026-10-01: git roots up to two levels below the scan root (a `.git` stops the descent) + repos known from hooks | new-session |
 | SHELL-O2 | Below 1280px and zoom (design-system 15.3) | Horizontal scroll | rail-and-shell |
 | CREW-O1..O3 | Slot 8, more than nine repos, teammate shades (crew.md 12) | crew.md defaults | crew-sheet |

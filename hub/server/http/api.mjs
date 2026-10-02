@@ -126,8 +126,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     const ok = data => ({ data })
     if (!['GET', 'PATCH', 'POST'].includes(method)) throw apiError(404, 'not_found')
     if (method === 'GET') {
-      // The M2 plan asks for build 'm2'; test/unit/m1-web-fixes.test.mjs still pins 'm1', so it stays until that test moves.
-      if (route === 'version') return ok({ apiVersion: 1, deckVersion, build: 'm1' })
+      if (route === 'version') return ok({ apiVersion: 1, deckVersion, build: 'm2' })
       if (route === 'health') return ok({ deps: health() })
       if (route === 'prefs') return ok(preferences())
       if (route === 'repos') return ok({ repos: repos(q.get('archived') === '1') })
