@@ -791,13 +791,37 @@ if (import.meta.main) {
     await page.waitForSelector('.focus-steps, .focus-log-empty', { timeout: 5000 })
     assert.deepEqual(steps, [`/api/sessions/${rustot}/steps`], 'Focus fetched the session steps once')
     // Structural read-only check: no form control anywhere in Focus; its only buttons are the tabs (Mark reviewed is for done sessions).
-    assert.equal(await page.locator('.focus :is(input, select, textarea, [contenteditable="true"])').count(), 0)
-    const buttons = await page.$$eval('.focus button', rows => rows.map(row => row.getAttribute('role') ?? row.className))
+    assert.equal(await page.locator('.focus-screen :is(input, select, textarea, [contenteditable="true"])').count(), 0)
+    const buttons = await page.$$eval('.focus-screen button', rows => rows.map(row => row.getAttribute('role') ?? row.className))
     assert.ok(buttons.every(role => role === 'tab'), `only tabs are buttons: ${buttons.join(', ')}`)
     assert.equal(await page.textContent('.focus-request .request-terminal'), 'Answer in your terminal')
     await page.focus('#focus-tab-facts')
     await page.keyboard.press('ArrowRight')
     assert.equal(await page.getAttribute('.focus-tab[aria-selected="true"]', 'id'), 'focus-tab-changes')
+  })
+
+  // xterm.js adds the class `focus` to its `.xterm` element while the terminal has focus; a screen
+  // class of the same name must never style it (bug 1 of docs/plans/2026-10-02-deck-termfix.md).
+  spec('Focus terminal: clicking the history terminal keeps .xterm-scrollable-element as wide as .xterm at 1480 and 1280', async t => {
+    const h = await busyDeck(t)
+    const id = h.ids.get('vault-mcp')
+    h.deck.store.run("UPDATE sessions SET origin='launched',pty_id='pty-history' WHERE id=?", id)
+    h.deck.store.run('INSERT INTO session_scrollback(session_id,captured_at,text,truncated) VALUES(?,?,?,?)', id, Date.now(), 'history line\r\n', 0)
+    const measured = []
+    for (const width of [1480, 1280]) {
+      const page = await openDeck(browser, h, `/s/${id}`, { viewport: { width, height: 900 } })
+      await page.waitForSelector('.terminal-view .xterm-scrollable-element')
+      await page.click('.terminal-view .xterm-screen')
+      await page.waitForFunction(() => document.querySelector('.terminal-view .xterm')?.classList.contains('focus'), null, { timeout: 5000 })
+      const [xterm, scrollable] = await page.$eval('.terminal-view .xterm', root => [root.getBoundingClientRect().width, root.querySelector('.xterm-scrollable-element').getBoundingClientRect().width])
+      measured.push({ width, xterm, scrollable })
+      // The viewport behind the scrollable element carries the theme background, not xterm.css's black.
+      const [viewport, view] = await page.$eval('.terminal-view', root => [getComputedStyle(root.querySelector('.xterm-viewport')).backgroundColor, getComputedStyle(root).backgroundColor])
+      assert.equal(viewport, view, `at ${width} px the xterm viewport background`)
+      await page.context().close()
+    }
+    const wrong = measured.filter(row => Math.abs(row.xterm - row.scrollable) > 1)
+    assert.deepEqual(wrong, [], wrong.map(row => `at ${row.width} px .xterm is ${row.xterm} px and .xterm-scrollable-element ${row.scrollable} px`).join('; '))
   })
 
   spec('Focus activity log: steps recorded from tool hooks are listed', async t => {

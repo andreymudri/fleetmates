@@ -312,7 +312,7 @@ test('Hide panel toggles with aria-pressed, Alt I is the panel key, and the choi
   assert.deepEqual(toggles, ['toggle'])
   const closed = view(Focus, { state: live, sessionId: 's1', client: fakeClient(), panelOpen: false })
   assert.equal(button(closed, 'Show panelAlt I').props['aria-pressed'], 'true')
-  assert.match(renderToStaticMarkup(closed), /class="focus focus--panel-hidden/)
+  assert.match(renderToStaticMarkup(closed), /class="focus-screen focus--panel-hidden/)
 
   assert.equal(Focus.isPanelKey({ code: 'KeyI', altKey: true, shiftKey: false, ctrlKey: false, metaKey: false }), true)
   assert.equal(Focus.isPanelKey({ code: 'KeyI', altKey: false, shiftKey: false, ctrlKey: false, metaKey: false }), false)
