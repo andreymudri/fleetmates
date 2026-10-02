@@ -19,10 +19,11 @@ Type names in payloads (`Session`, `Request`, `Run`, ...) are the JSDoc typedefs
 | Token | Random token in a 0600 file, `~/.local/state/fleetmates/deck/token`. Required on every `/api/*` request and on the WebSocket upgrade. | Decided (random token, 0600 file, required everywhere); path Proposed |
 | HTTP token carrier | `Authorization: Bearer <token>` header. Never in a query string (it would land in logs and history). | Proposed (API-O1) |
 | WebSocket token carrier | Browsers cannot set headers on a WebSocket. The SPA opens `new WebSocket(url, ['deck.v1', 'deck.auth.' + token])` (the raw token: it is already base64url, so it is a valid subprotocol token as it is); the server checks the second subprotocol, answers with `Sec-WebSocket-Protocol: deck.v1` only, and rejects the upgrade with HTTP 401 when the token is missing or wrong. | Proposed (API-O1) |
-| Host check | `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; anything else gets 403 `forbidden_host` (blocks DNS rebinding). | Decided (check), Proposed (allowed values) |
-| Origin check | Requests that carry `Origin` (all browser `fetch` with a body, all WebSocket upgrades) must have `Origin: http://127.0.0.1:<port>` or `http://localhost:<port>`; else 403 `forbidden_origin` (HTTP) or close 4403 (WebSocket). | Decided (check), Proposed (values) |
+| Host check | `Host` must be exactly `127.0.0.1:<port>`. `localhost:<port>` gets 421 `forbidden_host` with `Location: http://127.0.0.1:<port>/`; anything else gets 403 `forbidden_host` (blocks DNS rebinding). Same rule as [08-security.md](08-security.md) 4.1. | Decided (check; allowed values by the owner on 2026-10-01) |
+| Origin check | Every `/api/*` request other than `GET` and `HEAD`, every WebSocket upgrade, and any request that carries `Origin` must have `Origin: http://127.0.0.1:<port>`; else 403 `forbidden_origin` (HTTP) or a refused upgrade (WebSocket). An `/api/*` request whose `Sec-Fetch-Site` is present and neither `same-origin` nor `none`, and every `OPTIONS` request, also gets 403 `forbidden_origin`. | Decided (check; allowed value by the owner on 2026-10-01) |
 | Body type | Requests with a body must send `Content-Type: application/json` (else 415). Together with the Origin check this forces a CORS preflight for any cross-site attempt; the server answers no CORS headers, so preflights fail. | Proposed |
-| Body size | 1 MiB max (413 `payload_too_large`). | Proposed |
+| Body size | 256 KiB max, declared or streamed (413 `payload_too_large`, sent with `Connection: close` so a client still sending its body gets the 413 instead of a reset), as [08-security.md](08-security.md) 4.1 says. Terminal input and pastes travel over the WebSocket (section 3.5), not this path. | Decided (owner, 2026-10-01) |
+| POST bodies | Only `POST /api/sessions` and `POST /api/open` read a body. A `POST` with a non-empty JSON object to any other route gets 422 `validation_failed` before it is routed. | Proposed (M2) |
 | Caching | Every `/api/*` response carries `Cache-Control: no-store`. | Proposed |
 
 The details (token rotation, what a stale tab sees, CSP, why the WebSocket subprotocol and not a cookie) belong to [08-security.md](08-security.md). The WebSocket close codes the SPA reacts to are fixed by [interaction/state-machines.md](interaction/state-machines.md) 4.1: 4401 token invalid, 4403 origin rejected.
@@ -66,7 +67,7 @@ Columns: request body or query, success response, error codes (section 4), miles
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/version` | | `{ apiVersion, deckVersion, build }` | | M1 | shell (version skew, section 8) |
+| GET | `/api/version` | | `{ apiVersion, deckVersion, build }`: `deckVersion` is the `hub/package.json` version, `build` the milestone (`m2`) | | M1 | shell (version skew, section 8) |
 | GET | `/api/setup/checks` | | `{ checks: SetupCheck[] }` with every automatic check in `checking`; each result then arrives as WS `setup.check` | | M1 | First run open and "Check again" (`U.CheckAgain`), Settings Connections |
 | POST | `/api/setup/hooks` | | `{ check: SetupCheck, backupPath }` after install and re-check | `settings_io_failed`, `validation_failed` (the file is not JSON; nothing written) | M1 | First run "Install hooks" (`U.Fix`), Settings |
 | POST | `/api/setup/complete` | | `{ firstRunCompletedAt }` | `precondition_failed` (hooks check not `ok`; Decided gate) | M1 | First run "Set sail" |
@@ -84,7 +85,7 @@ Columns: request body or query, success response, error codes (section 4), miles
 | GET | `/api/sessions` | query `state` (comma list), `repoKey`, `active=1` (not `ended`), `limit` (default 100), `before` (ms, on `startedAt`) | `{ sessions: Session[], nextBefore }` | `not_found` (unknown repoKey) | M1 | new-session conflict check, palette, history lists (Home reads the snapshot) |
 | GET | `/api/sessions/:id` | | `{ session: Session, requests: Request[], steps: Step[] }` | `not_found` | M1 | Focus deep link, palette |
 | GET | `/api/sessions/:id/steps` | query `limit` (default 50, max 200), `taskId` | `{ steps: Step[] }` | `not_found` | M1 | Home tails after a gap, Team crew panels |
-| POST | `/api/sessions` | `{ repoKey, task, mode?: 'plain' \| 'fleetmates' }` | 201 `{ session: Session, warning?: { kind: 'repo_busy', sessionIds: string[] } }` | `not_found` (repo), `validation_failed` (empty task), `deckd_unavailable`, `spawn_failed` | M2 | New session "Launch a ship" (`U.Launch`), "Run as a fleetmates job" (`mode: 'fleetmates'`, D-68); flow in 03-architecture 4.1 |
+| POST | `/api/sessions` | `{ repoKey, task?, mode?: 'plain' \| 'fleetmates' }` (no other keys) | 201 `{ session: Session, warning?: { kind: 'repo_busy', sessionIds: string[] } }` | `not_found` (repo), `validation_failed` (an empty or blank task in `fleetmates` mode only; a task over 10,000 characters or holding NUL; an unknown key or mode), `deckd_unavailable`, `spawn_failed` | M2 | New session "Launch a ship" (`U.Launch`), "Run as a fleetmates job" (`mode: 'fleetmates'`, D-68); flow in 03-architecture 4.1 |
 | POST | `/api/sessions/:id/stop` | | 202 `{ session }` | `not_found`, `read_only_session` (observed), `invalid_state` (`ended`, `crashed`), `deckd_unavailable` | M2 | Home, Focus, Failures "Stop…", Team "Stop run…" on the lead, research "Stop run…" (`U.Stop`, state-machines 1.7 row 50) |
 | POST | `/api/sessions/:id/nudge` | | 202 `{ session }` | `read_only_session`, `invalid_state` (not `stale` or `idle`), `deckd_unavailable` | M2 | Home quiet row, Failures adrift card (`U.Nudge`) |
 | POST | `/api/sessions/:id/mark-reviewed` | | `{ session }` | `invalid_state` (not `done`; state-machines 1.9 says 409) | M1 | Focus "Mark reviewed" (in the read-only Focus of M1, MS-O1), palette (`U.MarkReviewed`) |
@@ -161,7 +162,7 @@ Which keys live in `config.json` and which in SQLite is [06-storage.md](06-stora
 | GET | `/api/runs` | query `repoKey`, `active=1` | `{ runs: Run[] }` | | M1 | Home team cards (also in the snapshot) |
 | GET | `/api/runs/:repoKey/:runId` | | `{ run: Run }` | `not_found`, `run_unreadable` (`details.file`, retrying) | M2 | Team run |
 | GET | `/api/runs/:repoKey/:runId/plan` | | `{ path, markdown, truncated }` (256 KiB cap) | `not_found` | M2 | Team "Open plan" (TEAM-O5 default: read-only drawer) |
-| POST | `/api/open` | `OpenRequest` `{ kind, ref }` | 202 | `validation_failed` (unknown `kind` or malformed `ref`), `path_not_allowed`, `not_found` | M2 | Team "Open plan" in an external app (`runPlan`); later "Open in Obsidian" (`vaultNote`, `meetingNote`) and "Open log" (`postmeetLog`) (Proposed) |
+| POST | `/api/open` | `OpenRequest` `{ kind, ref }` | 202 | `validation_failed` (unknown `kind` or malformed `ref`), `path_not_allowed`, `not_found`, `open_failed` (the opener could not be started) | M2 | Team "Open plan" in an external app (`runPlan`); later "Open in Obsidian" (`vaultNote`, `meetingNote`) and "Open log" (`postmeetLog`) (Proposed) |
 
 `/api/open` accepts only the named kinds in [08-security.md](08-security.md) section 4.9, never a raw path or URL: Decided by D-57 (Proposed). The server resolves `ref` to a target, runs the checks listed there, and opens it with `xdg-open` or an `obsidian://` URL.
 
@@ -290,7 +291,7 @@ Durable (carry `seq`):
 | `request.closed` | `{ id, sessionId, state: 'answered' \| 'expired', answer, expiredReason }` | request final | all |
 | `counts` | `Counts` | after any transaction that changes a count | header chips, Rail badge, drawer subtitle, document title, Team pill |
 | `order.changed` | `{ order: string[] }` | urgency order changed | Home grid, Focus list, palette, `Alt 1..9` |
-| `run.updated` | `Run` | `status.json` / `plan.json` re-read, teammate join changed | team card, Team |
+| `run.updated` | `Run` | `status.json` / `plan.json` re-read, teammate join changed. The server watches every run directory a run list has found and re-reads after a change (debounced, about 250 ms), with a 60 s poll as the fallback; it publishes only runs whose data changed, and the first read publishes every run once | team card, Team |
 | `run.derived` | `{ repoId, runId, derivedPhase, phases }` | slow git derive finished | Team phases |
 | `repo.upserted` | `RepoView` | new repo, crew change, archive | every avatar |
 | `rule.upserted` | `RuleView` | rule written or found in a settings file | Settings |
@@ -320,7 +321,7 @@ Ephemeral (no `seq`):
 | `ask.error` | `{ threadId, messageId, error: ApiError }` | |
 | `meeting.transcript` | `{ meetingId, line: TranscriptLine }` | live lines from scribed `subscribe`; never persisted, for any tag |
 | `screen.tail` | `{ sessionId, lines: string[] }` | compact card tails (M2), ANSI stripped, at most 1 per second per session, only while a Home compact view is subscribed (`sub.tails`, 3.6) |
-| `input.source` | `{ sessionId, state: 'quiet' \| 'terminal_active' \| 'browser_active' \| 'collision', from: 'terminal' \| 'browser', name: string \| null }` | shared input machine (state-machines 3); drives "Last typed from: terminal (kitty)" and the collision chip |
+| `input.source` | `{ sessionId, state: 'quiet' \| 'terminal_active' \| 'browser_active' \| 'collision', from: 'terminal' \| 'browser' \| null, name: string \| null, detached: boolean }` | shared input machine (state-machines 3); drives "Last typed from: terminal (kitty)" and the collision chip. `detached` is true once the last `fm` terminal client of the PTY has detached (M2) |
 | `ui.navigate` | `{ path }` | notification "Open" action (04-integrations 5); only the most recently focused tab obeys |
 | `hb` | `{ seq, at }` | heartbeat |
 | `error` | `ApiError` | a client message was invalid (unknown type, bad attach) |
@@ -347,7 +348,7 @@ Client to server (JSON):
 | `term.resize` | `{ sessionId, cols, rows }` | forwarded to deckd with `source: browser`; deckd applies the resize rule (SM-O12: follow the most recent input source, at most once per second) |
 | `sub.tails` | `{ sessionIds: string[] }` | subscribe compact tails (replaces the previous set) |
 
-Server to client (JSON): `term.attached { sessionId, ptyId, cols, rows }`, `term.exit { sessionId, code, signal }`, `term.error { sessionId, error }`.
+Server to client (JSON): `term.attached { sessionId, ptyId, cols, rows }`, `term.exit { sessionId, code, signal }`, `term.error { sessionId, error }`. `term.error` codes: `validation_failed`, `not_found`, `no_pty`, `deckd_unavailable`, `output_dropped`, and since M2 `not_attached` (an input frame or `term.resize` for a session this socket has not attached) and `payload_too_large` (an input frame over 64 KiB).
 
 Binary frame layout (both directions):
 
@@ -357,6 +358,7 @@ byte 1      n = length of the session id in bytes (ULID: 26)
 bytes 2..   session id (ASCII), then the payload (raw PTY bytes, UTF-8 as the PTY produced it)
 ```
 
+- An input frame's payload is at most 64 KiB; a larger frame gets `term.error` `payload_too_large` and nothing is written. The server checks, in this order: the frame kind is input, the size, that this socket attached the session, that the session still has that PTY, and that deckd is connected.
 - Input frames are sent only while the xterm has focus (state-machines 3.4). The server forwards them to deckd `write` with `source: { kind: 'browser' }`. The resulting `input.source` event and the session's `lastInputFrom` update give the Focus header "Last typed from: browser" and, when the `fm claude` terminal typed last, "Last typed from: terminal (kitty)" (Decided indicator).
 - Paste over 4 KB is confirmed in the SPA before sending (state-machines 3.5); the server does not re-check.
 - The server never interprets input bytes; the approval guards apply only to deck-originated keystrokes (answers, Nudge, follow-ups, the launch task), which travel through REST.
@@ -389,10 +391,10 @@ One JSON shape for every non-2xx response and for `error`, `ask.error`, `term.er
 | Code | HTTP | Meaning |
 |---|---|---|
 | `unauthorized` | 401 | token missing or wrong |
-| `forbidden_host` | 403 | Host header not loopback |
+| `forbidden_host` | 403, 421 | Host header not `127.0.0.1:<port>`; 421 with a `Location` to `127.0.0.1` when it is `localhost:<port>` |
 | `forbidden_origin` | 403 | Origin not the deck's own |
 | `not_found` | 404 | entity or route unknown (`details.entity`) |
-| `payload_too_large` | 413 | body over 1 MiB |
+| `payload_too_large` | 413 | body over 256 KiB; on the WebSocket, an input frame over 64 KiB |
 | `unsupported_media_type` | 415 | body without `application/json` |
 | `validation_failed` | 422 | body or query invalid (`details.fields`) |
 | `invalid_state` | 409 | action not allowed in the entity's current state (`details.state`) |
@@ -426,16 +428,18 @@ One JSON shape for every non-2xx response and for `error`, `ask.error`, `term.er
 | `spawn_failed` | 502 | deckd could not spawn `claude` (`details.stderr`) |
 | `dependency_start_failed` | 502 | starting deckd or scribed failed |
 | `notify_failed` | 502 | `notify-send` missing or non-zero |
+| `open_failed` | 502 | `/api/open` could not start the opener (`xdg-open` missing or not executable) (M2) |
 | `preview_stale` | 409 | save with a preview that no longer matches the draft |
 | `orphan_citations` | 422 | a sentence cites an unchecked source |
 | `ask_in_progress` | 409 | the thread already has an ask running |
 | `no_pty` | 409 | terminal attach on an observed session (WebSocket only) |
 | `output_dropped` | n/a | terminal output dropped for backpressure (WebSocket only) |
+| `not_attached` | n/a | terminal input or resize for a session the socket has not attached (WebSocket only, M2) |
 | `internal` | 500 | bug; logged with a request id in `details.requestId` |
 
 ## 5. Web server to deckd protocol (Proposed)
 
-deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket 0600, [03-architecture.md](03-architecture.md) 2.1 and 5). Clients: the web server (one long-lived connection) and `fm` terminal clients. The file mode is the authentication; deckd also checks `SO_PEERCRED` uid equals its own.
+deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket 0600, [03-architecture.md](03-architecture.md) 2.1 and 5). Clients: the web server (one long-lived connection) and `fm` terminal clients. The file modes are the authentication: the 0700 directory and the 0600 socket are the control, and deckd refuses to start in a runtime directory with group or world permission bits. deckd does not check the peer's uid, because Node cannot read peer credentials (`SO_PEERCRED`) without a native addon (owner decision, 2026-10-01).
 
 ### 5.1 Framing
 
@@ -448,10 +452,10 @@ deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket
 
 | op | Request | Response | Notes |
 |---|---|---|---|
-| `hello` | `{ proto: 1, client: { kind: 'server' \| 'terminal', name?, pid } }` | `{ proto, deckdVersion, bootId }` | first message; deckd answers the highest `proto` both sides speak. `bootId` changes when deckd restarts (all PTYs lost) |
+| `hello` | `{ proto: 2, client: { kind: 'server' \| 'terminal', name?, pid } }` | `{ proto, deckdVersion, bootId }`, plus `loginEnvNames: string[]` at proto 2 | first message; deckd answers the lower of the asked `proto` and its own (2 since M2); a `proto` that is not an integer of at least 1 gets `unsupported_proto`. `bootId` changes when deckd restarts (all PTYs lost). `loginEnvNames` lists, sorted and at most 200, the names (never the values) of variables in the login environment that `launched` sessions start from which are new or differ from deckd's own service environment; `fleetmates-deck doctor` prints them |
 | `spawn` | `{ cwd, argv, env, cols, rows, origin: 'wrapped' \| 'launched' }` | `{ ptyId, pid, startedAt }` | deckd adds `FLEETMATES_DECK_PTY=<ptyId>` to `env`. `argv` is `['claude', ...]`; deckd refuses any other executable name (`spawn_refused`) |
 | `list` | | `{ ptys: [{ ptyId, pid, origin, cwd, argv, cols, rows, startedAt, clients: [{ kind, name }], lastInputFrom, lastInputAt }] }` | reconciliation (state-machines 1.4 rule 5) |
-| `exits` | `{ since }` | `{ exits: [{ ptyId, code, signal, at }] }` | PTYs that exited while the server was away; kept 24 h in memory |
+| `exits` | `{ since }` | `{ exits: [{ ptyId, code, signal, at, tail }] }` | PTYs that exited while the server was away; kept 24 h in memory. `tail` (proto 2 only) is the base64 of the PTY's last 1,000 output lines, cut to at most 256 KiB at a line start; the server stores it in `session_scrollback` ([06-storage.md](06-storage.md)) for the ended session |
 | `attach` | `{ ptyId, stream: boolean }` | `{ cols, rows }` | subscribe to `output` for this PTY. The server attaches once per PTY and fans out to browsers |
 | `detach` | `{ ptyId }` | `{}` | |
 | `screen` | `{ ptyId, scrollback: number }` | `{ rev, cols, rows, cursor: { x, y }, lines: string[], scrollback: string }` | `lines`: visible screen as plain text rows (for parsing); `scrollback`: raw bytes (base64) for xterm replay |
@@ -482,6 +486,8 @@ Reason: the parsers are versioned with the Claude Code fixtures and change with 
 ### 5.5 Compatibility
 
 deckd is restarted rarely (it kills sessions), so a newer web server must speak the protocol of the deckd that is already running: the server supports `proto` N and N-1 and shows "deckd is older than the deck; restart it when no session is running" in Settings, Connections when they differ. `fm` clients use the same `hello` negotiation.
+
+As built in M2 (`proto` 2): the deckd `Health` row is `ok` with reason `deckd_outdated` when the agreed `proto` is lower than the server's (the link works, without exit tails), and `down` with reason `deckd_incompatible` when deckd answers `hello` with an error; a deckd that cannot be reached is `down` with `deckd_unavailable`. While connected the row also carries `deckdVersion`, the version deckd reported in `hello`.
 
 ## 6. deck-hook envelope and spool
 
@@ -530,14 +536,15 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
 /**
  * @typedef {object} RepoView
  * @property {string} id            realpath of the repo root
+ * @property {string} repoId        same as id
  * @property {string} name          display name, disambiguated (`work/api`); used as repoKey
- * @property {number} crewSlot      0..8
- * @property {boolean} crewSlotShared  (Proposed field, design/crew.md 4.3)
- * @property {string} crewSeed
- * @property {'none'|'cap'|'bandana'} hat
+ * @property {string} repoKey       same as name
+ * @property {{slot: number, slotShared: boolean, seed: string, hat: 'none'|'cap'|'bandana'}} crew   slot 0..8; slotShared (Proposed field, design/crew.md 4.3)
  * @property {number} firstSeenAt
+ * @property {number|null} missingSince  (Proposed field)
  * @property {number|null} archivedAt  (Proposed field)
- * @property {number|null} lastSessionAt  derived
+ * @property {number|null} lastSessionAt  derived: newest session start in this repo (M2)
+ * @property {string|null} branch   current branch of the repo root, null when detached or unreadable (M2)
  */
 
 /**
@@ -560,7 +567,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {string|null} processKey
  * @property {string|null} activity        `compacting`, `tool:<name>`, `subagents:<n>`
  * @property {number} subagentsActive      (Proposed field, state-machines 12.6)
- * @property {string} reviewBaseline
+ * @property {string|null} reviewBaseline   the baseline commit sha (40 to 64 lowercase hex) of the review, null outside git or before one is taken; the stored `sessions.review_baseline` also holds file contents, which never leave the server (M2)
  * @property {boolean} joinedMidLife
  * @property {'exit'|'signal'|'lost'|null} crashKind
  * @property {string|null} exitSignal
@@ -704,7 +711,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
 /** @typedef {{voyages: number, madePort: number, chartsAdded: number|null}} Recap */
 /** @typedef {{kind: 'vaultNote', ref: string}|{kind: 'meetingNote', ref: string}|{kind: 'runPlan', ref: {repoId: string, runId: string}}|{kind: 'postmeetLog', ref: string}} OpenRequest   (vaultNote: vault-relative path; meetingNote and postmeetLog: meeting id) */
 /** @typedef {{needYouSessions: number, running: number, toReview: number, openRequests: number, requestSessions: number, oldestRequestAt: number|null, perRun: {repoId: string, runId: string, needYou: number, total: number}[]}} Counts */
-/** @typedef {{dep: 'deckd'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number}} Health */
+/** @typedef {{dep: 'deckd'|'hooks'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number, deckdVersion?: string}} Health */
 /** @typedef {{id: 'claude'|'hooks'|'deckd'|'vault'|'scribed'|'notify', state: 'pending'|'checking'|'ok'|'warn'|'failed'|'optional_skipped', blocking: boolean, detail: string|null, error: string|null}} SetupCheck */   (warn: Claude Code newer than the tested version, state-machines 10.2)
 
 /**
@@ -751,6 +758,8 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {string|null} transcriptPath   link to Claude Code's own transcript (Decided: link, never copy)
  */
 ```
+
+`Health` reasons added in M2: for `deckd`, `deckd_outdated` (state `ok`), `deckd_incompatible` and `deckd_unavailable` (state `down`), with `deckdVersion` while connected (section 5.5); for `hooks`, `hooks_missing` (`~/.claude/settings.json` does not list the deck's hook command for every observed event, or cannot be read) and `hook_script_missing` (the hook script is not a readable regular file), both with state `down`. The server computes the `hooks` row at start and again after every repo rescan, and the New session form reads it.
 
 ## 8. Versioning (Proposed)
 

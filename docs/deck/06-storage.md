@@ -127,7 +127,9 @@ CREATE TABLE sessions (
   user_stop_requested INTEGER NOT NULL DEFAULT 0 CHECK (user_stop_requested IN (0,1)),
   end_announced       INTEGER NOT NULL DEFAULT 0 CHECK (end_announced IN (0,1)),
   end_reason          TEXT,                           -- SessionEnd.reason when known
-  review_baseline     TEXT,                           -- commit or tree sha; null outside git
+  review_baseline     TEXT,                           -- JSON {head, files, contents}: baseline commit sha, per-file fingerprints
+                                                      -- and base64 file contents; null outside git. Only `head` leaves the
+                                                      -- server, as the session view's `reviewBaseline` (05-api section 7)
   joined_mid_life     INTEGER NOT NULL DEFAULT 0 CHECK (joined_mid_life IN (0,1)),
   crash_kind          TEXT CHECK (crash_kind IN ('exit','signal','lost')),
   exit_signal         TEXT,
@@ -139,6 +141,9 @@ CREATE TABLE sessions (
   reviewed_at         INTEGER,
   started_at          INTEGER NOT NULL,
   ended_at            INTEGER,
+  launch_task         TEXT,                           -- migration 0002-launch (M2): the first prompt still to type into a
+                                                      -- launched session once its idle input box shows; NULL once typed,
+                                                      -- and for every row the launch flow did not create
   CHECK (state <> 'starting' OR origin <> 'observed'),            -- state-machines 1.6 impossible states
   CHECK ((run_id IS NULL) = (run_repo_id IS NULL))
 ) STRICT;
@@ -715,6 +720,7 @@ Everything below is used by this schema or by [05-api.md](05-api.md) and is not 
 | Session | `sessionAliases` as a table | 02-domain names `session_aliases` without a shape |
 | Session | `steps` (entity `Step`) | home.md `session.steps` ring buffer |
 | Session | `toolCalls` (derived) | home.md footer "31 tool calls" |
+| Session | `launch_task` (server-only column, migration `0002-launch`, M2) | the launch flow types the task only after the idle input box appears (03-architecture 4.1), so the text waits in the row until then; it is not part of the session view |
 | Request | `screenMatch` | state-machines 12.5; now also in 02-domain 2.3 |
 | Request | `taskId` | teammate attribution (state-machines 11) |
 | Request | `rulePattern` | the Claude Code pattern of the matched tiers.json entry, key of the rule counter |

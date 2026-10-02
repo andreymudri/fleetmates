@@ -1,12 +1,13 @@
 # fleetmates deck
 
-A local web deck for your Claude Code sessions. Start sessions in your terminals as usual; the deck
-shows which one is working, which one needs you, and which one finished, and sends a desktop popup
-when one is waiting on you.
+A local web deck for your Claude Code sessions. It shows which session is working, which one needs
+you, and which one finished, sends a desktop popup when one is waiting on you, and, for sessions
+started with `fm claude` or from the deck, mirrors the live terminal in the browser so you can type
+into it.
 
 ![Home with nine sessions, three of them waiting on you](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
 
-**Status: 0.1.0, not published yet.** This is milestone M1, Observe. The package name
+**Status: 0.2.0, not published yet.** This is milestone M2, Control, on top of M1, Observe. The package name
 (`@andreymudri/fleetmates-deck`) and the command names (`fleetmates-deck`, `fm`) are still an open
 decision and may change before the first release.
 
@@ -22,9 +23,58 @@ decision and may change before the first release.
 - Shows fleetmates team runs as team cards.
 - First run checks your setup; Settings holds notification and connection preferences.
 
-M1 only watches. Requests are answered in the terminal where the session runs, and every request
-row says so. Answering from the browser, launching sessions and live terminals come in later
-milestones (see the roadmap below).
+Plain `claude` sessions stay observed only: the deck watches them through the hooks and cannot type
+into them.
+
+## What M2 adds
+
+- Run `claude` through the deck's PTY daemon, `fleetmates-deckd`, with `fm claude [args]` instead
+  of `claude [args]`. The session behaves as before in your terminal, and the deck can show and
+  drive it.
+- Focus (`/s/<id>`) mirrors the live terminal. Keys typed in the browser reach the session; the
+  header says whether the terminal or the browser typed last and flags a collision when both type at
+  once. Stop, Nudge and Relaunch work from Focus; Home's quiet row has Stop and Nudge, and the
+  palette has launch actions.
+- Launch from the deck: "Launch a ship" on Home or `Alt N` opens New session. Pick a repo found
+  under the scan root (`~/dev` by default), type a task, and the deck starts `claude` in that repo
+  and types the task once Claude Code shows its idle input box. A second plain session in a repo
+  that is already busy gets a warning and the choice "Run as a fleetmates job".
+- Home has a compact density with live terminal tails. Fleetmates runs have a read-only Team run
+  page with phases, gates, tasks, teammate tool steps and the plan. The Crew sheet customizes each
+  repo's crew member, and Settings, Appearance sets text size, motion and density.
+- Restarting the web server leaves every `fm claude` and launched session running; the browser
+  reconnects and keeps typing into them.
+
+### The `fm` command
+
+| Command | Does |
+|---|---|
+| `fm claude [args]` | Starts `claude [args]` inside deckd and attaches this terminal to it |
+| `fm attach <id\|repo>` | Attaches this terminal to a session deckd already runs, by PTY id or by repo name (refused when the repo has several) |
+| `fm ls` | Lists the sessions deckd runs: id, repo, pid, start time and attached clients |
+| `Ctrl ]` then `d` | Detaches this terminal; the session keeps running in deckd. `Ctrl ]` twice sends one `Ctrl ]` |
+
+If deckd is not running, `fm claude` says so and runs plain `claude` with the same arguments, so
+you are never blocked; that session is observed only. `fm attach` and `fm ls` exit 2 when deckd is
+not running.
+
+### Login environment
+
+Sessions launched from the deck start with the environment of your login shell, not the bare
+environment of the systemd service: deckd runs your shell once as a login shell when it starts and
+keeps what it prints, without Claude Code's own per-session variables. `fleetmates-deck doctor`
+names (never shows the values of) the variables that differ from the service environment. deckd
+reads your profile only when it starts, so after you change your shell profile, restart deckd:
+`systemctl --user restart fleetmates-deckd`. That ends every session running inside deckd, so do it
+when none you care about runs (`fm ls`). Sessions started with `fm claude` take the environment of
+the terminal you run it in.
+
+### M2 limits
+
+- No answering from the browser yet: approval prompts and questions are answered by typing in the
+  mirrored terminal (or your own terminal). Answer buttons come in M3.
+- No diff view: Focus, Changes lists the changed files only.
+- Fleetmates teammates have no terminal of their own; the Team run page shows their tool steps.
 
 ## Requirements
 
@@ -74,7 +124,7 @@ and opens `http://127.0.0.1:47800/` in your browser with the token in the URL fr
 | `fleetmates-deck doctor` | The setup checks in the terminal; exits 1 when the hooks are missing |
 | `fleetmates-deck status` | Units, sockets, hook state and Claude Code version as JSON |
 | `fleetmates-deck uninstall-hooks` | Removes only the deck's hook entries, after a backup |
-| `fm claude [args]`, `fm attach <id>` | Run `claude` inside the deck's PTY daemon |
+| `fm claude [args]`, `fm attach <id\|repo>`, `fm ls` | Run, attach to and list sessions in the deck's PTY daemon (see above) |
 
 ## Security model
 
@@ -83,7 +133,9 @@ and opens `http://127.0.0.1:47800/` in your browser with the token in the URL fr
   `~/.local/state/fleetmates/deck/`. `open` hands it to the browser in the URL fragment, which is
   never sent over the network.
 - The server checks the `Host` and `Origin` headers, so another web page, a DNS rebinding trick or a
-  proxy cannot talk to it.
+  proxy cannot talk to it. Only `127.0.0.1:<port>` is accepted; `localhost` is redirected to it.
+- Keys typed in the browser reach a session only over the authenticated WebSocket, for a session
+  that tab has attached, at most 64 KiB per frame.
 - The PTY daemon `fleetmates-deckd` listens on a Unix socket in a 0700 directory and is not
   reachable from the browser.
 - The hook never prints to Claude Code and never blocks it. Private files are 0600 and private
@@ -140,8 +192,8 @@ section 12.
 
 | Milestone | Adds |
 |---|---|
-| M1 Observe (this release) | Watch sessions, popups, First run, Settings |
-| M2 Control | Live terminals in the browser, launch sessions |
+| M1 Observe | Watch sessions, popups, First run, Settings |
+| M2 Control (this release) | Live terminals in the browser, launch sessions, `fm ls` and `fm attach`, Team run page, Crew sheet |
 | M3 Unblock | Answer approvals and questions from the deck, permission rules |
 | M4 Meetings | TurbidAssist meetings |
 | M5 Memory ask | Ask the knowledge vault |

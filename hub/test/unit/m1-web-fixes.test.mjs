@@ -137,7 +137,8 @@ test('the REST client hands screens the bare body the real deck server sends', a
     await rm(dir, { recursive: true, force: true }) })
   const base = `http://127.0.0.1:${deck.address().port}`
   const client = createApiClient({ token, fetch: (route, init) => fetch(base + route, { ...init, headers: { ...init.headers, Origin: base } }) })
-  assert.deepEqual(await client.get('/api/version'), { apiVersion: 1, deckVersion: '0.1.0', build: 'm1' })
+  assert.deepEqual(await client.get('/api/version'), { apiVersion: 1,
+    deckVersion: JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).version, build: 'm2' })
   const checks = await client.get('/api/setup/checks')
   assert.ok(Array.isArray(checks.checks) && checks.checks.some(check => check.id === 'hooks'), 'First run reads data.checks')
   const installed = await client.post('/api/setup/hooks')

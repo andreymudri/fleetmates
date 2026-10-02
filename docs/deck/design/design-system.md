@@ -460,7 +460,7 @@ These are build requirements. The full WCAG 2.2 audit runs later on the React bu
 10. **Language**: `<html lang>` follows `DECK_LANG`. Meeting content is PT-BR: wrap transcript lines, summaries, decisions and action items in `lang="pt-BR"` when the chrome is English, so screen readers switch voice.
 11. **Structure**: one `h1` per screen; landmarks `nav` (Rail, `aria-label="Deck sections"`), `main`, labelled `aside`s and `section`s as on the canvas. Rail items use `aria-current="page"`.
 12. **Sound**: the Ship's bell always accompanies a visible change and never plays alone.
-13. **Untrusted text**: all agent, transcript, task, command and note text renders as text nodes. Never `dangerouslySetInnerHTML` for it (Decided, D-35). Markdown in notes and answers goes through a sanitising renderer that outputs React elements (Proposed: `react-markdown` without `rehype-raw`).
+13. **Untrusted text**: all agent, transcript, task, command and note text renders as text nodes. Never `dangerouslySetInnerHTML` for it (Decided, D-35). Markdown in plans, notes and answers goes through markdown-it with `html: false`, its tokens mapped to React elements; raw HTML in the source stays text, and no HTML string is ever inserted (Decided by the owner on 2026-10-01; built in M2 for the Team run plan drawer).
 
 ## 12. Voice and copy
 

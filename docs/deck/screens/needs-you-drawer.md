@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Canvas board | `Approvals` (Needs you · approval drawer) over Home |
-| Route | none: overlay on any route; deep link `?needs=<requestId>` or `?needs=run:<runId>` (Proposed) |
+| Route | none: overlay on any route; deep link `?needs=<requestId>`, `?needs=request:<requestId>`, `?needs=run:<runId>` or `?needs=task:<runId>:<taskId>` (Proposed; the task filter is M2, D-69) |
 | Milestone | M1 read-only (lists every open request with "Open" and "Answer in your terminal"). M3 adds Allow, Deny, Reply, batch, confirm checkbox and rule suggestion. |
 | Status | Decided (sections, tier rules, copy), Proposed (states, per-milestone behaviour) |
 
@@ -22,7 +22,13 @@ Answers **"What exactly is waiting on me, and can I clear it safely in one place
 | Palette Enter on a Destructive or Question row | focused on that request |
 | Desktop popup "Open" for a Caution, Destructive or question request (state-machines 9.3) | the deck tab focuses and opens the drawer on that request (Proposed: when the session is not observed; observed opens Focus) |
 
-The drawer is an overlay: it does not replace the route. Opening pushes a history entry so Back closes it (Proposed). Deep link query `?needs=<requestId>` opens it on load.
+The drawer is an overlay: it does not replace the route. Opening pushes a history entry so Back closes it (Proposed). Deep link query `?needs=<requestId>` (or `?needs=request:<requestId>`) opens it on load focused on that request.
+
+### 2.1 Run and task filter (M2, D-69)
+
+`?needs=run:<runId>` and `?needs=task:<runId>:<taskId>` open the drawer filtered. The task id is the part after the last colon, so a run id may itself hold colons. A run filter keeps the open requests of sessions whose `runRef.runId` is that run, plus the run's lead session; a task filter also needs `request.taskId` to equal the task. A teammate link on the Team run page opens the lead's Focus with `?needs=task:<runId>:<taskId>`, so the drawer shows only that task's requests.
+
+While a filter is active the drawer header shows, under the subtitle, one line with "Requests for {taskId}" or "Requests for run {runId}" and a `ghost xs` button "Show all" that drops the filter. Section order, counts in section headers and row content are as in section 4, over the filtered rows; the subtitle keeps the unfiltered counts.
 
 ## 3. Layout
 
@@ -176,6 +182,10 @@ Toasts of tone `needs` are suppressed while the drawer is open (components Toast
 | `drawer.footer.m1` | Answer in your terminal for now. Answering here arrives with approvals. |
 | `drawer.newRequest.announce` | New request from {repo} |
 | `drawer.reconnecting` | Reconnecting to the deck server… |
+| `drawer.row.source.plain` | {repo} · waiting {duration} |
+| `drawer.filter.task` | Requests for {taskId} |
+| `drawer.filter.run` | Requests for run {runId} |
+| `drawer.filter.showAll` | Show all |
 
 ## 10. Acceptance criteria
 

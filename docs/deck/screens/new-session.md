@@ -138,7 +138,7 @@ Dialog `variant="form"` (`--layout-dialog`, `--radius-3xl`), top 110px, scrim. S
 | Id | Gap | Status |
 |---|---|---|
 | NEW-O1 | Same-repo second plain session and the "Run as a fleetmates job" behaviour (Q3, SM-O5). | **Decided** (D-68): warn, never block; the button launches a `launched` session whose initial prompt asks Claude to handle the task as a fleetmates run (fleetmates makes per-task worktrees, so changes do not mix). |
-| NEW-O2 | Scan depth and what counts as a repo under `~/dev` (direct children only, nested repos, submodules). | **Open**. Default: direct children of the scan root that are git roots, plus repos already known from hooks anywhere. |
+| NEW-O2 | Scan depth and what counts as a repo under `~/dev` (direct children only, nested repos, submodules). | **Decided** 2026-10-01. The scan registers git roots up to two levels below the scan root, where a directory holding `.git` stops the descent (as shipped in M1), plus repos known from hooks anywhere. |
 | NEW-O3 | Themed "Launch a ship" (design-system 15.1). | Open. |
 | NEW-O5 | After launch: go to Focus or stay on the current screen. | Proposed: Focus with the terminal focused. |
 
