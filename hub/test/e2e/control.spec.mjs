@@ -762,10 +762,11 @@ if (import.meta.main) {
     assert.deepEqual(await page.$$eval('.drawer-row', rows => rows.map(row => row.dataset.request)), [runRequests.find(row => row.task_id === 'T5').id])
   })
 
-  // The server re-reads plan.json and status.json only when the run reader's 60 s poll interval has passed: its
-  // file watcher is never armed (hub/server/main.mjs builds the reader without calling `watch`), so each file
-  // change below can take up to a minute to reach the page. The waits allow for that and report what they took.
-  const RUN_FILE_WAIT_MS = 75_000
+  // hub/server/main.mjs arms the run reader's file watcher, so once the Team page has listed the runs an edit to
+  // plan.json or status.json reaches the page within about 2 s. Without the watcher the reader re-reads a run only
+  // after its 60 s poll interval, so a 10 s bound fails this flow when the watch path is broken. The waits report
+  // what they took.
+  const RUN_FILE_WAIT_MS = 10_000
   spec('Team AC4, AC5, AC9: a failed task reads Failed, an HTML task title renders as text, and an unreadable status.json shows the error with the last good data dimmed', { timeout: 240_000 }, async t => {
     const { h } = await teamDeck(t)
     const page = await openDeck(browser, h, teamRoute)

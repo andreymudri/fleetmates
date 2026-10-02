@@ -540,7 +540,8 @@ test('untrusted text (M2): qa 1.7 payloads in run titles, task titles, repo name
   assert.deepEqual(page.errors, [])
 })
 
-// The plan drawer passes markdown text, inline code and fence tokens through `shown`, as every other screen does.
+// The plan drawer passes markdown prose text tokens through `titleText`, and inline code and fence tokens through
+// `shown`. This plan carries the controls in prose, so the test pins the `titleText` path only.
 test('untrusted text (M2): escape, bell and bidi controls in plan markdown never reach the DOM raw', async t => {
   const { h } = await xssDeck(t)
   const page = await openDeck(browser, h, teamRoute)
