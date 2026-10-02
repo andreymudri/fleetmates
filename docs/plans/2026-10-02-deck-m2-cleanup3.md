@@ -6,6 +6,15 @@ is the owner's two working days and M3 needs owner decisions first (`docs/deck/1
 section 9), so this round closes the code items M2 left open. Run deck-m2c, run branch
 `run/deck-m2c` from `feat/deck` at 16f6442. Task numbers continue from the M2 plans.
 
+## Owner decisions (2026-10-02, asked while the run was in flight)
+
+- Hook budget: the 200 ms budget covers the hook's own run (module load to exit), not Node's interpreter boot. Keep what Task 29 shipped; the docs say so.
+- Run the tier design-oversight review (APR-O1, Q4) now as a findings document; the owner resolves its findings before M3.
+- SM-O9 / DRW-O4: Caution requests are never approved from a popup; the popup offers "Open".
+- DRW-O1: Destructive tiers.json entries carry a confirm label template; when the deck cannot fill the count the label reads "I checked what this command will change".
+- SM-O10: approvals given in the terminal (observed through `PostToolUse`) count toward "Make it a rule?".
+- SM-O11: a Safe request that matches no tiers.json pattern gets no rule suggestion.
+
 ## Global Constraints
 
 - Base branch: `feat/deck`. Run branches start from it and the gate compares against it.
@@ -95,12 +104,27 @@ is never killed by the test.
 
 - [ ] Render the Team run view with the Stop confirmation open (the way the existing Stop tests reach it) and assert the dialog's Cancel button text is the `confirm.cancel` text from `hub/web/src/i18n/en.js`. Mutation: pass `cancelLabel="Keep running"` in `hub/web/src/screens/team-run/TeamRun.jsx`; the test fails.
 
+### Task 35: tier design-oversight review (APR-O1)
+
+**Files:**
+- Create: `docs/deck/reviews/2026-10-02-tier-oversight.md`
+
+- [ ] Review `docs/deck/07-approvals.md` (sections 1 to 12, especially 3 Classification, 3.4 Floors, 3.5 File tools and repo scope, 4.3 Default pattern list, 4.4 Worked examples, 5.4 Batch, 6 Rule suggestion, 8 Destructive confirm) as a design-oversight review: where can a wrong default cost the owner data or let a risky action through with one click? Cover at least: in-repo file edits, `git add` / `git commit`, `git push` and force variants, `curl ... | sh` and other pipe-to-shell or download-and-run forms, `rm` inside and outside the repo, package installs, environment and credential files, compound commands, quoting and shell-escape tricks that could make the classifier read a command as lower tier than it is, and the rule writer turning one approval into a broad rule. Apply the owner decisions in the plan header (SM-O9, DRW-O1, SM-O10, SM-O11) as settled.
+- [ ] For each finding: severity (high: data loss or an unreviewed Destructive action becomes possible; medium; low), the section and pattern it concerns, a concrete command that shows it, and a proposed change to the default. End with a short list of the questions only the owner can answer. Do not edit 07-approvals.md or any other doc: the owner resolves the findings first.
+- [ ] Docs rules: English, plain prose, no em dash, `/home/you` placeholders.
+
 ### Task 34: third cleanup docs
 
 **Files:**
 - Modify: `docs/deck/m2-exit.md`
+- Modify: `docs/deck/05-api.md`
+- Modify: `docs/deck/03-architecture.md`
+- Modify: `docs/deck/14-decisions.md`
+- Modify: `docs/deck/15-open-questions.md`
 
-**Depends:** T31, T32, T33
+**Depends:** T31, T32, T33, T35
 
 - [ ] Add section 11, "Third cleanup round, Tasks 31 to 34": each item with its test and the mutation evidence, moving the matching rows out of 10.2; what is still open after it (the owner question on the hook budget, dogfood bug 4).
+- [ ] Hook budget: `05-api.md` section 6.2 item 3 and `03-architecture.md` section 2.3 say the 200 ms budget covers the hook's own run, from module load to exit, not Node's interpreter boot (owner decision 2026-10-02), and `hooks.test.mjs` measures that span. Remove the owner question row from m2-exit.
+- [ ] `14-decisions.md`: add D-70 to D-74 for the five owner decisions in the plan header other than running the review (hook budget, SM-O9 / DRW-O4, DRW-O1, SM-O10, SM-O11), each with its reason and the docs it touches, in the table's existing shape. `15-open-questions.md`: mark SM-O9, DRW-O4, DRW-O1, SM-O10 and SM-O11 decided with their D numbers; mark APR-O1 / Q4 as "review run 2026-10-02, findings in `reviews/2026-10-02-tier-oversight.md`, owner to resolve before M3" (still open).
 - [ ] Cite suite counts from runs on the task's own tip. Docs rules: English, plain prose, no em dash, `/home/you` placeholders.
