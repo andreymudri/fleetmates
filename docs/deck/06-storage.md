@@ -209,8 +209,8 @@ CREATE TABLE session_scrollback (
 -- fails or exits, ends that worker (a fresh one serves the next render) and answers a fallback: the input
 -- with every escape sequence and every control character but CR and LF removed, the newest 5000 lines. The
 -- worker has a 512 MiB heap limit and an empty environment. The response says truncated when the stored row
--- was cut, when the render left input or output out (the 256 KiB input cut, a full scrollback, the 4 MiB
--- output cap, or the fallback), or when `lines` cut it. The server keeps the 64 most recently read renders in
+-- was cut, when the render left input or output out (the 256 KiB input cut, a repeat count clamped to a
+-- screenful, a full scrollback, the 4 MiB output cap, or the fallback), or when `lines` cut it. The server keeps the 64 most recently read renders in
 -- memory, fallbacks included, keyed by session, capture time and text length, so a repeat read does not
 -- render again.
 

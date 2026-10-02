@@ -3,7 +3,7 @@
 // runs in a worker thread (this same file, loaded with `workerData[WORKER_MARK]`), so a costly render never
 // blocks the server's event loop; a render past its time limit ends the worker and answers a plain-text
 // fallback. Every scan the main thread runs over stored text is a single hand-written pass.
-import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
+import { Worker, isMainThread, parentPort, resourceLimits, workerData } from 'node:worker_threads'
 
 /** The size a stored row without one (a legacy row or a raw tail) is rendered at. */
 export const DEFAULT_RENDER_SIZE = Object.freeze({ cols: 120, rows: 40 })
@@ -102,13 +102,15 @@ function csiBody(text, at) {
  * screenful of repeats (it wraps). Only sequences with no prefix and no intermediate are touched. Further
  * parameters and subparameters, which xterm ignores for these, are kept. Controls inside the sequence are
  * moved in front of it, where xterm executes them anyway. Every other sequence passes through unchanged.
- * One pass: each character is read at most twice.
+ * One pass: each character is read at most twice. When a REP count is reduced, `seen.rep` is set true, since
+ * the repeats left out are lost from the history.
  * @param {string} text
  * @param {number} cols
  * @param {number} rows
+ * @param {{ rep: boolean }} [seen]
  * @returns {string}
  */
-export function boundCounts(text, cols, rows) {
+export function boundCounts(text, cols, rows, seen) {
   let out = ''
   let copied = 0
   for (let at = 0; at < text.length;) {
@@ -137,6 +139,7 @@ export function boundCounts(text, cols, rows) {
     while (digits < params.length && isDigit(params.charCodeAt(digits))) digits++
     const most = 'LMST'.includes(final) ? rows : final === 'b' ? cols * rows : cols
     if (Number(params.slice(0, digits)) > most) {
+      if (final === 'b' && seen) seen.rep = true
       // The controls between ESC and `[` are not kept in `controls`; collect them too.
       let lead = ''
       if (text.charCodeAt(at) === ESC) for (let i = at + 1; i < body - 1; i++) if (text.charCodeAt(i) !== 0x7f) lead += text[i]
@@ -279,7 +282,8 @@ export function capOutput(data) {
 /**
  * Start a render worker: this file in a worker thread, with an empty environment, no inherited exec
  * arguments and a bounded heap. It posts `{ ready: true }` once the terminal is loaded, then answers each
- * `{ id, text, cols, rows }` with `{ id, data, truncated }` or `{ id, error: true }`.
+ * `{ id, text, cols, rows }` with `{ id, data, truncated }` or `{ id, error: true }`, and `{ probe: 'env' }`
+ * with `{ probe: 'env', envNames, execArgv, resourceLimits }` (names only, never values), for tests.
  * @returns {Worker}
  */
 export function spawnHistoryWorker() {
@@ -409,7 +413,8 @@ let shared = null
  * (default `RENDER_TIMEOUT_MS`) the worker is ended and the answer is `fallbackHistory`. Only the newest
  * `RENDER_INPUT_CAP` bytes are written, with crafted counts bounded (`boundCounts`) and long-cluster
  * repeats dropped, into a scrollback sized from the input (at most `RENDER_SCROLLBACK_MAX` rows); the
- * output keeps its newest `RENDER_OUTPUT_CAP` bytes. `truncated` is true when input or output was left out.
+ * output keeps its newest `RENDER_OUTPUT_CAP` bytes. `truncated` is true when input or output was left out,
+ * repeats a clamped REP count left out included.
  * @param {string} text
  * @param {{ cols?: number, rows?: number, timeoutMs?: number }} [options]
  * @returns {Promise<{ data: string, truncated: boolean }>}
@@ -468,7 +473,8 @@ function serialize(term, serializer, scrollback) {
  * @returns {Promise<{ data: string, truncated: boolean }>}
  */
 async function renderHere({ Terminal, SerializeAddon }, text, { cols, rows }) {
-  const input = boundCounts(text, cols, rows)
+  const seen = { rep: false }
+  const input = boundCounts(text, cols, rows, seen)
   let newlines = 0
   for (let at = input.indexOf('\n'); at !== -1; at = input.indexOf('\n', at + 1)) newlines++
   const scrollback = Math.min(RENDER_SCROLLBACK_MAX, newlines + Math.ceil(input.length / cols) + 1)
@@ -480,7 +486,7 @@ async function renderHere({ Terminal, SerializeAddon }, text, { cols, rows }) {
     await new Promise(resolve => term.write(input, () => resolve(undefined)))
     const full = term.buffer.normal.length >= scrollback + rows
     const out = capOutput(serialize(term, serializer, scrollback))
-    return { data: out.data, truncated: out.truncated || full }
+    return { data: out.data, truncated: out.truncated || full || seen.rep }
   } finally {
     term.dispose()
   }
@@ -490,7 +496,11 @@ async function runWorker() {
   const { Terminal } = (await import('@xterm/headless')).default
   const { SerializeAddon } = (await import('@xterm/addon-serialize')).default
   const port = /** @type {import('node:worker_threads').MessagePort} */ (parentPort)
-  port.on('message', async ({ id, text, cols, rows }) => {
+  port.on('message', async ({ id, text, cols, rows, probe }) => {
+    if (probe === 'env') {
+      port.postMessage({ probe, envNames: Object.keys(process.env), execArgv: process.execArgv, resourceLimits })
+      return
+    }
     try {
       port.postMessage({ id, ...(await renderHere({ Terminal, SerializeAddon }, text, { cols, rows })) })
     } catch {

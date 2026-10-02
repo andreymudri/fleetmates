@@ -345,31 +345,149 @@ test('the main thread keeps running while the worker renders a costly history', 
   assert.ok(gap < 250, `the longest main-thread gap was ${Math.round(gap)} ms`)
 })
 
-/** 1 MiB of input built to make a backtracking scanner explode: CSI introducers followed by long control runs, nested ESC, strings left open, and a lone ESC at the end. */
-const ADVERSARIAL = (() => {
-  const unit = '\x1b[' + '\x00'.repeat(2000) + 'é' + '\x1b[' + '\r\n'.repeat(1000) + '\x1b\x1b\x1b[' + ';'.repeat(500) + '\x1b]' + '\x01'.repeat(500)
-  return unit.repeat(Math.ceil(1024 * 1024 / unit.length)).slice(0, 1024 * 1024 - 1) + '\x1b'
-})()
+/** Where history.mjs lives, for workers and child processes that import it. */
+const HISTORY_URL = new URL('../../server/screen/history.mjs', import.meta.url).href
 
-test('every main-thread scan of stored text is linear on 1 MiB of adversarial input', () => {
-  for (const [name, scan] of [
-    ['stripControls', () => stripControls(ADVERSARIAL)],
-    ['fallbackHistory', () => fallbackHistory(ADVERSARIAL)],
-    ['boundCounts', () => boundCounts(ADVERSARIAL, 500, 200)],
-    ['newestInput', () => newestInput(ADVERSARIAL)],
-    ['readStoredHistory', () => readStoredHistory('\x1b[8;' + ADVERSARIAL)]
-  ]) {
-    const started = performance.now()
-    scan()
-    const took = performance.now() - started
-    assert.ok(took < 250, `${name} took ${Math.round(took)} ms`)
+/**
+ * The source of a worker that builds 1 MiB of input made to make a backtracking scanner explode (CSI
+ * introducers followed by long control runs, nested ESC, strings left open, and a lone ESC at the end), runs
+ * the named scan of history.mjs on it once, and posts how long the scan took.
+ */
+const SCAN_WORKER = `
+const { parentPort, workerData } = require('node:worker_threads')
+import(workerData.url).then(h => {
+  const unit = '\\x1b[' + '\\x00'.repeat(2000) + 'é' + '\\x1b[' + '\\r\\n'.repeat(1000) + '\\x1b\\x1b\\x1b[' + ';'.repeat(500) + '\\x1b]' + '\\x01'.repeat(500)
+  const input = unit.repeat(Math.ceil(1024 * 1024 / unit.length)).slice(0, 1024 * 1024 - 1) + '\\x1b'
+  const scans = {
+    stripControls: () => h.stripControls(input),
+    fallbackHistory: () => h.fallbackHistory(input),
+    boundCounts: () => h.boundCounts(input, 500, 200),
+    newestInput: () => h.newestInput(input),
+    readStoredHistory: () => h.readStoredHistory('\\x1b[8;' + input)
   }
+  const started = performance.now()
+  scans[workerData.scan]()
+  parentPort.postMessage(performance.now() - started)
+})
+`
+
+/** Hard limit on one scan worker; a scan that has not answered by then is ended and the test fails. */
+const SCAN_LIMIT_MS = 5000
+
+/**
+ * Run the named scan in a worker; resolve with its time in ms, or reject when the worker has not answered
+ * within `SCAN_LIMIT_MS` (the worker is ended) or fails.
+ * @param {string} scan
+ * @returns {Promise<number>}
+ */
+function timedScan (scan) {
+  const worker = new Worker(SCAN_WORKER, { eval: true, workerData: { url: HISTORY_URL, scan } })
+  let timer
+  return new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${scan} did not finish within ${SCAN_LIMIT_MS} ms`)), SCAN_LIMIT_MS)
+    worker.once('message', resolve)
+    worker.once('error', reject)
+    worker.once('exit', () => reject(new Error(`${scan} worker exited without an answer`)))
+  }).finally(() => {
+    clearTimeout(timer)
+    return worker.terminate()
+  })
+}
+
+test('every main-thread scan of stored text is linear on 1 MiB of adversarial input', async () => {
+  for (const scan of ['stripControls', 'fallbackHistory', 'boundCounts', 'newestInput', 'readStoredHistory']) {
+    const took = await timedScan(scan)
+    assert.ok(took < 250, `${scan} took ${Math.round(took)} ms`)
+  }
+})
+
+/**
+ * `promise`, or a rejection when it has not settled within `ms`, so a hang fails the test.
+ * @template T
+ * @param {Promise<T>} promise
+ * @param {number} ms
+ * @param {string} what
+ * @returns {Promise<T>}
+ */
+function within (promise, ms, what) {
+  let timer
+  const limit = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms} ms`)), ms) })
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer))
+}
+
+test('a worker that never says ready is ended after the startup limit, and the next render starts another', async () => {
+  let spawned = 0
+  const renderer = createHistoryRenderer({
+    startupMs: 100,
+    spawn: () => ++spawned === 1 ? new Worker('setInterval(() => {}, 1000)', { eval: true }) : spawnHistoryWorker()
+  })
+  try {
+    const started = performance.now()
+    const out = await within(renderer.render('a\x1b[31mred\x1b[0m\r\nb', { timeoutMs: 30_000 }), 3000, 'the render on a worker that never starts')
+    assert.ok(performance.now() - started < 1000, `the fallback came after ${Math.round(performance.now() - started)} ms`)
+    assert.deepEqual(out, { data: 'ared\r\nb', truncated: true })
+    const next = await within(renderer.render('ok', { timeoutMs: 30_000 }), 30_000, 'the next render')
+    assert.equal(next.truncated, false)
+    assert.equal(spawned, 2)
+  } finally { renderer.close() }
+})
+
+test('one render at a time: a cheap render issued beside a costly one that times out still renders', async () => {
+  const renderer = createHistoryRenderer({ timeoutMs: 200 })
+  try {
+    const costly = renderer.render(DECALN_ALT_FILL, { cols: 500, rows: 200 })
+    const cheap = renderer.render('a\x1b[31mred\x1b[0m', { timeoutMs: 30_000 })
+    assert.equal((await costly).truncated, true, 'the costly render fell back')
+    const out = await cheap
+    assert.equal(out.truncated, false, 'the cheap render was not the fallback')
+    assert.ok(out.data.includes('\x1b[31m'), 'its colour survives')
+  } finally { renderer.close() }
+})
+
+test('the render worker sees an empty environment, no exec arguments and a bounded heap', async () => {
+  process.env.DECK_HISTORY_ENV_MARKER = '1'
+  const worker = spawnHistoryWorker()
+  try {
+    const answer = await within(new Promise((resolve, reject) => {
+      worker.on('message', message => {
+        if (message?.ready) worker.postMessage({ probe: 'env' })
+        else if (message?.probe === 'env') resolve(message)
+      })
+      worker.once('error', reject)
+    }), 30_000, 'the env probe')
+    assert.deepEqual(answer.envNames, [], 'the worker sees no environment variable')
+    assert.deepEqual(answer.execArgv, [])
+    assert.equal(answer.resourceLimits.maxOldGenerationSizeMb, 512)
+  } finally {
+    delete process.env.DECK_HISTORY_ENV_MARKER
+    await worker.terminate()
+  }
+})
+
+test('a process that renders once exits on its own: the idle worker does not hold it open', async () => {
+  const { execFile } = await import('node:child_process')
+  const script = `import { renderHistory } from ${JSON.stringify(HISTORY_URL)}\nconst out = await renderHistory('hi\\r\\n', { timeoutMs: 30000 })\nprocess.stdout.write(String(out.truncated))\n`
+  const result = await new Promise(resolve => {
+    execFile(process.execPath, ['--input-type=module', '-e', script], { env: {}, timeout: 10_000, killSignal: 'SIGKILL' }, (error, stdout) => resolve({ error, stdout }))
+  })
+  assert.equal(result.error?.killed ?? false, false, 'the process had to be killed: it did not exit on its own')
+  assert.equal(result.error, null)
+  assert.equal(result.stdout, 'false', 'the render ran')
+})
+
+test('a REP count cut to a screenful says truncated; one within a screenful does not', async () => {
+  assert.equal((await renderHistory('y\r\nx\x1b[400b', { cols: 20, rows: 5, timeoutMs: 30_000 })).truncated, true)
+  assert.equal((await renderHistory('y\r\nx\x1b[100b', { cols: 20, rows: 5, timeoutMs: 30_000 })).truncated, false)
+  const seen = { rep: false }
+  boundCounts('\x1b[999L', 120, 40, seen)
+  assert.equal(seen.rep, false, 'clamping another count is not a REP loss')
 })
 
 test('stripControls drops escape sequences and controls but keeps text, CR and LF', () => {
   assert.equal(stripControls('a\x1b[31;1mb\x1b]0;title\x07c\x1b]8;;u\x1b\\d\x1bPq#\x1b\\e\x1b(Bf\x9b2Jg\x07\x08h\r\n'), 'abcdefgh\r\n')
   assert.equal(stripControls('x\x1b[' + '\x00'.repeat(10) + 'éy'), 'xéy', 'a CSI cut short keeps the character that ended it')
   assert.equal(stripControls('tail\x1b'), 'tail')
+  assert.equal(stripControls('a\x7fb'), 'ab', 'DEL is removed')
   assert.deepEqual(fallbackHistory('one\r\nprogress 10%\rprogress 99%\r\ntwo'), { data: 'one\r\nprogress 99%\r\ntwo', truncated: true })
 })
 
