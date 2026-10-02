@@ -15,20 +15,24 @@ export const INTERPRETERS = Object.freeze(['sh', 'bash', 'dash', 'zsh', 'ksh', '
 
 const fetchSet = new Set(FETCH_COMMANDS)
 const interpreterSet = new Set(INTERPRETERS.filter(name => name !== 'python*'))
-const shellSet = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'ash', 'mksh'])
+const shellSet = new Set(['bash', 'rbash', 'sh', 'zsh', 'dash', 'ksh', 'ash', 'mksh'])
+// Versioned interpreter names (`python3.12`, `lua5.4`, `perl5.38`, `ruby3.3`, `php8.3`): an F7
+// name followed by digits and dots.
+const VERSIONED_INTERPRETER = /^(?:python|lua|perl|ruby|php|node)[0-9.]*$/
 const devNulls = new Set(['/dev/null', '/dev/stdout', '/dev/stderr'])
 const metaChars = new Set([' ', '\t', '\n', ';', '&', '|', '(', ')', '<', '>'])
 // Reserved words that only end a compound command; one at command start anywhere else is a syntax
 // error, as in Bash.
 const listEnds = ['then', 'elif', 'else', 'fi', 'do', 'done', 'esac', '}']
-// Two levels of guarantee (D-87, tightened 2026-10-02). `plain: true` means the allowlist in
-// `plainText` accepted the whole source text (simple commands joined by `|`, `&&`, `||`, `;`,
-// every character from a small literal set, and no command word that is a builtin other than
-// echo, printf without -v, true, false, test, `[` and pwd, a wrapper or payload runner, a shell
-// or interpreter, no git config option, and no option that changes the directory or repository),
-// the parser returned ok, and the walker found no wrapper, no payload segment, no git config
-// option and no route; only a plain command may
-// be Safe. Outside plain
+// Two levels of guarantee (D-87, tightened 2026-10-02, with the PLAIN_COMMANDS allowlist of the
+// same day). `plain: true` means the check in `plainText` accepted the whole source text (simple
+// commands joined by `|`, `&&`, `||`, `;`, every character from a small literal set, every
+// simple command matching an entry of PLAIN_COMMANDS, and no command word that is a builtin
+// other than echo, printf without -v, true, false, test, `[` and pwd, a wrapper or payload
+// runner, a shell or interpreter, no git config option, and no option that changes the
+// directory or repository), the parser returned ok, and the walker found no wrapper, no payload
+// segment, no git config option, no segment outside PLAIN_COMMANDS and no route; only a plain
+// command may be Safe. Outside plain
 // the parser is best effort, for raising tiers: it refuses the constructs listed in the
 // parseCommand JSDoc with `unsupported` or `unknown-expansion`, and otherwise reports the segments,
 // writes and routes it finds. It does not promise to see everything bash runs in a command that
@@ -144,9 +148,9 @@ const PLAIN_EXCLUDED_BUILTINS = Object.freeze(['.', ':', 'alias', 'bg', 'bind', 
 // and the commands whose payload the walker parses from their own words.
 const PLAIN_EXCLUDED_WRAPPERS = Object.freeze(['builtin', 'bunx', 'command', 'doas', 'env', 'eval', 'exec', 'ionice', 'nice', 'nohup', 'npx', 'parallel', 'pkexec', 'setsid', 'ssh', 'stdbuf', 'su', 'sudo', 'time', 'timeout', 'trap', 'xargs'])
 // Runners excluded when a subcommand that runs a package or payload is one of their words: the
-// walker's runner table (`uv run`, `poetry run`, `pnpm exec`) and the package runners `npm exec`,
-// `npm x`, `pnpm dlx`, `yarn dlx`, `yarn exec`, `bun x` and `deno run`.
-const PLAIN_EXCLUDED_RUNNERS = Object.freeze({ uv: Object.freeze(['run']), poetry: Object.freeze(['run']), pnpm: Object.freeze(['exec', 'dlx']), npm: Object.freeze(['exec', 'x']), yarn: Object.freeze(['dlx', 'exec']), bun: Object.freeze(['x']), deno: Object.freeze(['run']) })
+// walker's runner table (`uv run`, `poetry run`, `pnpm exec`) and the package runners `npm exec`
+// (and its abbreviation `npm exe`), `npm x`, `pnpm dlx`, `yarn dlx`, `yarn exec`, `bun x` and `deno run`.
+const PLAIN_EXCLUDED_RUNNERS = Object.freeze({ uv: Object.freeze(['run']), poetry: Object.freeze(['run']), pnpm: Object.freeze(['exec', 'dlx']), npm: Object.freeze(['exec', 'exe', 'x']), yarn: Object.freeze(['dlx', 'exec']), bun: Object.freeze(['x']), deno: Object.freeze(['run']) })
 // Commands excluded only with an option or subcommand that runs a payload or writes a file.
 const PLAIN_CONDITIONAL = Object.freeze({
   find: word => ['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fls'].includes(word) || word.startsWith('-fprint'),
@@ -156,24 +160,106 @@ const PLAIN_CONDITIONAL = Object.freeze({
   podman: word => word === 'run' || word === 'exec',
   kubectl: word => word === 'exec'
 })
-// The shells and interpreters of F7 (`shellSet` and INTERPRETERS); a name starting `python` is
-// matched as a prefix.
-const PLAIN_EXCLUDED_INTERPRETERS = Object.freeze(['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash', 'mksh', 'fish', 'busybox', 'node', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'source', '.'])
+// The shells and interpreters of F7 (`shellSet` and INTERPRETERS); a name starting `python`, and
+// lua, perl, ruby, php or node followed by digits and dots (`lua5.4`), are excluded too.
+const PLAIN_EXCLUDED_INTERPRETERS = Object.freeze(['sh', 'bash', 'rbash', 'dash', 'zsh', 'ksh', 'ash', 'mksh', 'fish', 'busybox', 'node', 'deno', 'bun', 'perl', 'ruby', 'php', 'lua', 'source', '.'])
 // Options that change the directory or repository a command acts on, matched exactly, as
 // `--opt=value`, or as a getopt_long prefix (`--dir`); `-C` also attached (`-Cdir`) or in a
 // bundle (`-xzC`).
 const PLAIN_DIRECTORY_OPTIONS = Object.freeze(['--git-dir', '--work-tree', '--directory', '--chdir', '--prefix', '--project', '--cwd', '--dir', '--manifest-path'])
 
-// True when a git command line sets configuration before its subcommand (`-c`, `-cname=value`,
-// `--config-env`): any config key may run code (core.pager, core.fsmonitor, alias.*). Used by
-// both halves of plain.
-function gitConfigOption(words) {
+// Git global options that take their value as the next word. `--exec-path` takes its value only
+// as `--exec-path=PATH`; it is listed so the scan below skips a following word either way, and
+// the scan never skips a word that starts with `-`, so neither reading hides a later `-c`.
+const GIT_VALUE_GLOBALS = Object.freeze(['-C', '--git-dir', '--work-tree', '--namespace', '--attr-source', '--super-prefix', '--exec-path'])
+
+/**
+ * True when a git command line sets configuration before its subcommand (`-c`, `-cname=value`,
+ * `--config-env`): any config key may run code (core.pager, core.fsmonitor, diff.external,
+ * alias.*). The scan skips the value word of each GIT_VALUE_GLOBALS option (`git --namespace x
+ * -c a=b status` is found) and stops at the subcommand. Used by both halves of plain.
+ * @param {string[]} words the command words, `git` first
+ * @returns {boolean}
+ */
+export function gitConfigOption(words) {
   if (!words.length || commandBase(words[0]) !== 'git') return false
-  for (const word of words.slice(1)) {
+  for (let k = 1; k < words.length; k++) {
+    const word = words[k]
     if (!word.startsWith('-')) return false
     if (word.startsWith('-c') || /^--config-env(?:=|$)/.test(word)) return true
+    if (GIT_VALUE_GLOBALS.includes(word) && k + 1 < words.length && !words[k + 1].startsWith('-')) k++
   }
   return false
+}
+
+// The D-87 allowlist (owner decision 2026-10-02): the command words, and where listed the
+// subcommand sequences, that 07-approvals 4.3 can rate Safe. `null` allows any arguments; an
+// array lists the allowed subcommand word sequences, matched exactly (no abbreviations). A
+// sequence that starts with `-` (`--version`) must be the whole argument list. The command word
+// itself must be the bare name, not a path.
+const anyArgs = null
+const subcommands = (...sequences) => Object.freeze(sequences.map(sequence => Object.freeze(sequence.split(' '))))
+const PLAIN_PACKAGE_SCRIPTS = ['test', 'run', 'ls', 'outdated']
+/** The D-87 allowlist: command word to `null` (any arguments) or the allowed subcommand sequences. */
+export const PLAIN_COMMANDS = Object.freeze(Object.assign(Object.create(null), {
+  ls: anyArgs, pwd: anyArgs, cat: anyArgs, head: anyArgs, tail: anyArgs, wc: anyArgs, grep: anyArgs, rg: anyArgs, fd: anyArgs, tree: anyArgs, stat: anyArgs, file: anyArgs, which: anyArgs, type: anyArgs, echo: anyArgs, printf: anyArgs, date: anyArgs, du: anyArgs, df: anyArgs, diff: anyArgs, cmp: anyArgs, sort: anyArgs, uniq: anyArgs, cut: anyArgs, tr: anyArgs, jq: anyArgs, yq: anyArgs, sed: anyArgs, find: anyArgs, true: anyArgs, false: anyArgs, test: anyArgs, '[': anyArgs,
+  git: subcommands('status', 'diff', 'log', 'show', 'blame', 'rev-parse', 'ls-files', 'branch', 'remote', 'stash list', 'worktree list', 'describe', 'shortlog', 'grep', 'config', 'add', 'commit'),
+  cargo: subcommands('build', 'check', 'test', 'nextest run', 'clippy', 'fmt', 'doc', 'bench', 'tree', 'metadata', '--version'),
+  npm: subcommands(...PLAIN_PACKAGE_SCRIPTS),
+  pnpm: subcommands(...PLAIN_PACKAGE_SCRIPTS, 'lint'),
+  go: subcommands('build', 'test', 'vet', 'fmt', 'list', 'version', 'env'),
+  gofmt: anyArgs,
+  'golangci-lint': subcommands('run'),
+  staticcheck: anyArgs,
+  pytest: anyArgs,
+  ruff: subcommands('check', 'format'),
+  black: anyArgs,
+  mypy: anyArgs,
+  pyright: anyArgs,
+  pip: subcommands('list', 'show'),
+  docker: subcommands('ps', 'images', 'logs', 'inspect', 'version', 'info', 'compose ps', 'compose logs', 'compose config'),
+  terraform: subcommands('fmt', 'validate', 'version', 'providers'),
+  psql: subcommands('--version'),
+  sqlite3: subcommands('--version')
+}))
+// `git config` is plain only with one of PLAIN_GIT_CONFIG_READS and no option outside
+// PLAIN_GIT_CONFIG_OPTIONS, so no write action (`--add`, `--unset`, `--edit`) rides along.
+const PLAIN_GIT_CONFIG_READS = Object.freeze(['--get', '--get-all', '--get-regexp'])
+const PLAIN_GIT_CONFIG_OPTIONS = Object.freeze([...PLAIN_GIT_CONFIG_READS, '--global', '--local', '--system', '--worktree', '--show-origin', '--show-scope', '--name-only', '-z', '--null'])
+
+// The index of the first subcommand word: git skips `--no-pager` and `-P`; npm and pnpm skip
+// `-w <pkg>`, `--filter <pkg>` and `-r`. Any other word before the subcommand is not skipped, so
+// it has to match a sequence itself (and no sequence but `--version` starts with `-`).
+function plainSubcommandStart(name, words) {
+  let k = 1
+  for (;;) {
+    const word = words[k]
+    if (name === 'git' && (word === '--no-pager' || word === '-P')) k++
+    else if ((name === 'npm' || name === 'pnpm') && word === '-r') k++
+    else if ((name === 'npm' || name === 'pnpm') && (word === '-w' || word === '--filter') && k + 1 < words.length) k += 2
+    else return k
+  }
+}
+
+/**
+ * Whether a simple command's words match an entry of PLAIN_COMMANDS (the D-87 allowlist). Used
+ * by both halves of plain.
+ * @param {string[]} words the command words, the command word first
+ * @returns {boolean}
+ */
+export function plainCommandAllowed(words) {
+  const name = words[0]
+  if (typeof name !== 'string' || !Object.hasOwn(PLAIN_COMMANDS, name)) return false
+  const sequences = PLAIN_COMMANDS[name]
+  if (sequences === null) return true
+  const start = plainSubcommandStart(name, words)
+  const matched = sequences.find(sequence => sequence.every((word, n) => words[start + n] === word) && (!sequence[0].startsWith('-') || start + sequence.length === words.length))
+  if (!matched) return false
+  if (name === 'git' && matched[0] === 'config') {
+    const args = words.slice(start + 1)
+    return args.some(word => PLAIN_GIT_CONFIG_READS.includes(word)) && args.every(word => !word.startsWith('-') || PLAIN_GIT_CONFIG_OPTIONS.includes(word))
+  }
+  return true
 }
 
 function plainDirectoryOption(word) {
@@ -188,12 +274,13 @@ function plainCommandWords(words) {
   if (first.includes('=') || first.startsWith('%')) return false
   const name = commandBase(first)
   if (PLAIN_EXCLUDED_BUILTINS.includes(name) || PLAIN_EXCLUDED_WRAPPERS.includes(name)) return false
-  if (PLAIN_EXCLUDED_INTERPRETERS.includes(name) || name.startsWith('python')) return false
+  if (PLAIN_EXCLUDED_INTERPRETERS.includes(name) || name.startsWith('python') || VERSIONED_INTERPRETER.test(name)) return false
   if (name === 'printf' && /^-[A-Za-z]*v/.test(args[0] ?? '')) return false
   if (Object.hasOwn(PLAIN_EXCLUDED_RUNNERS, name) && args.some(arg => PLAIN_EXCLUDED_RUNNERS[name].includes(arg))) return false
   if (gitConfigOption(words)) return false
   if (Object.hasOwn(PLAIN_CONDITIONAL, name) && args.some(PLAIN_CONDITIONAL[name])) return false
-  return !args.some(plainDirectoryOption)
+  if (args.some(plainDirectoryOption)) return false
+  return plainCommandAllowed(words)
 }
 
 /**
@@ -1078,7 +1165,7 @@ function urlBasename(text) {
 }
 
 function isInterpreterName(name) {
-  return name !== null && (interpreterSet.has(name) || /^python[0-9.]*$/.test(name))
+  return name !== null && (interpreterSet.has(name) || shellSet.has(name) || VERSIONED_INTERPRETER.test(name))
 }
 
 /**
@@ -1866,14 +1953,21 @@ class Walker {
 
   curlTargets(words, segment) {
     const shortValues = 'AbcCdDeEFHKmoPQrTtuUwxXyYz'
-    const longValues = new Set(['--output', '--header', '--data', '--data-raw', '--data-binary', '--data-urlencode', '--user', '--user-agent', '--referer', '--cookie', '--cookie-jar', '--request', '--url', '--config', '--dump-header', '--max-time', '--connect-timeout', '--retry', '--proxy', '--cacert', '--cert', '--key', '--form', '--write-out', '--output-dir', '--upload-file', '--range', '--continue-at'])
+    // Options that write the file they name (curl(1)): the output, headers, cookie jar, the
+    // --stderr redirect, trace files, the --libcurl source, the ETag, HSTS and Alt-Svc caches.
+    const outputOptions = ['-o', '--output', '-D', '--dump-header', '-c', '--cookie-jar', '--stderr', '--trace', '--trace-ascii', '--libcurl', '--etag-save', '--hsts', '--alt-svc']
+    const longValues = new Set(['--output', '--header', '--data', '--data-raw', '--data-binary', '--data-urlencode', '--user', '--user-agent', '--referer', '--cookie', '--cookie-jar', '--request', '--url', '--config', '--dump-header', '--max-time', '--connect-timeout', '--retry', '--proxy', '--cacert', '--cert', '--key', '--form', '--write-out', '--output-dir', '--upload-file', '--range', '--continue-at', '--stderr', '--trace', '--trace-ascii', '--libcurl', '--etag-save', '--etag-compare', '--hsts', '--alt-svc'])
     const outputs = []
     const urls = []
     let remoteNames = 0
     let outputDir = null
     const take = (option, value) => {
       if (!value) return
-      if (option === '-o' || option === '--output' || option === '-D' || option === '--dump-header' || option === '-c' || option === '--cookie-jar') outputs.push(value)
+      // --output-dir applies to -o and -O only (curl 8.22.0 put `-o out` under it and `-D hdr`,
+      // `--stderr err` in the working directory).
+      if (outputOptions.includes(option)) outputs.push({ ...value, underDir: option === '-o' || option === '--output' })
+      // A config file may set any option, an output among them, so the write target is unknown.
+      else if (option === '-K' || option === '--config') segment.writes.push({ path: null, raw: value.text, via: 'curl', literal: false })
       else if (option === '--url') urls.push(value)
       else if (option === '--output-dir') outputDir = value
     }
@@ -1901,7 +1995,7 @@ class Walker {
       }
     }
     const base = word => (outputDir && outputDir.literal && !word.text.startsWith('/') ? { text: joinPath(outputDir.text, word.text), literal: word.literal } : word)
-    for (const word of outputs) if (word.text !== '-') this.addWrite(segment, base(word), 'curl')
+    for (const word of outputs) if (word.text !== '-') this.addWrite(segment, word.underDir ? base(word) : word, 'curl')
     if (remoteNames) {
       for (const url of urls) {
         const file = urlBasename(url.text)
@@ -1912,8 +2006,9 @@ class Walker {
 
   wgetTargets(words, segment) {
     const shortValues = 'OoaPeiUtTwQADlBR'
-    const longValues = ['--output-document', '--output-file', '--append-output', '--directory-prefix', '--execute', '--input-file', '--user-agent', '--tries', '--timeout', '--wait', '--quota', '--accept', '--reject', '--domains', '--level', '--base', '--header', '--post-data', '--post-file', '--user', '--password', '--quiet', '--verbose', '--continue', '--no-clobber', '--recursive', '--server-response', '--spider', '--no-check-certificate', '--https-only']
-    const valued = new Set(longValues.slice(0, 21))
+    const valuedOptions = ['--output-document', '--output-file', '--append-output', '--directory-prefix', '--execute', '--input-file', '--user-agent', '--tries', '--timeout', '--wait', '--quota', '--accept', '--reject', '--domains', '--level', '--base', '--header', '--post-data', '--post-file', '--user', '--password', '--save-cookies', '--load-cookies']
+    const longValues = [...valuedOptions, '--quiet', '--verbose', '--continue', '--no-clobber', '--recursive', '--server-response', '--spider', '--no-check-certificate', '--https-only']
+    const valued = new Set(valuedOptions)
     let document = null
     const logs = []
     const urls = []
@@ -1921,7 +2016,10 @@ class Walker {
     const take = (option, value) => {
       if (!value) return
       if (option === '-O' || option === '--output-document') document = value
-      else if (option === '-o' || option === '--output-file' || option === '-a' || option === '--append-output') logs.push(value)
+      else if (option === '-o' || option === '--output-file' || option === '-a' || option === '--append-output' || option === '--save-cookies') logs.push(value)
+      // A wgetrc command (`-e output_document=PATH`) or an input file of more URLs (each saved
+      // under its own name) writes where the words do not show.
+      else if (option === '-e' || option === '--execute' || option === '-i' || option === '--input-file') segment.writes.push({ path: null, raw: value.text, via: 'wget', literal: false })
       else if (option === '-P' || option === '--directory-prefix') prefix = value
     }
     for (let k = 1; k < words.length; k++) {
@@ -2218,15 +2316,15 @@ function runtimeWords(words, replaced) {
 }
 
 /**
- * The walker half of D-87 plain: no segment has a wrapper, is a payload or is a git command with
- * a config option before its subcommand, and there is no route. `isPlain` needs this and
+ * The walker half of D-87 plain: no segment has a wrapper, is a payload, is a git command with
+ * a config option before its subcommand or falls outside PLAIN_COMMANDS, and there is no route. `isPlain` needs this and
  * `isPlainText` both.
  * @param {object[]} segments
  * @param {object[]} routes
  * @returns {boolean}
  */
 export function segmentsArePlain(segments, routes) {
-  return !routes.length && segments.every(segment => !segment.wrappers.length && segment.payloadOf === null && !gitConfigOption(segment.words))
+  return !routes.length && segments.every(segment => !segment.wrappers.length && segment.payloadOf === null && !gitConfigOption(segment.words) && plainCommandAllowed(segment.words))
 }
 
 function assignment(word) {
@@ -2375,7 +2473,10 @@ function mayAssignHome(command) {
  * arguments at run time (`xargs`, `fd -x`/`-X`, `parallel`) also has a write `{ path: null,
  * runtime: true }`, and a payload word holding the replacement string of xargs, find or fd is not
  * literal. A git output option resolves against `git -C` (unknown after `--git-dir` or
- * `--work-tree`). `routes` lists the network-to-interpreter routes of
+ * `--work-tree`). curl records the files its -o, -D, -c, --stderr, --trace, --trace-ascii,
+ * --libcurl, --etag-save, --hsts and --alt-svc options name, and `curl -K`/`--config`, `wget
+ * -e`/`--execute` and `wget -i`/`--input-file` add a write `{ path: null }`, since the file they
+ * read may send output anywhere. `routes` lists the network-to-interpreter routes of
  * the tier review F7 as `{ kind: 'pipe' | 'substitution' | 'file', fetch, interpreter, path?, raw?,
  * variable? }` (segment indexes); a file route whose path is unknown has `path: null` and the
  * written `raw` text, and `variable: true` marks a fetch assigned to a variable before a later
@@ -2403,24 +2504,30 @@ export function parseCommand(command, { cwd = null, homeDir = null, outputOpts =
 }
 
 /**
- * Whether a Bash command is plain (D-87 as tightened on 2026-10-02): the parser accepts it, and
- * the source text is simple commands joined only by `|`, `&&`, `||` or `;`, each word plain
- * literal text (letters, digits, `_ - . / : = @ % +` and `,`, or a quote pair of those and
- * spaces), no `..` after another path component, and no redirect but `2>&1`, `>/dev/null` and
- * `2>/dev/null`. No command word (judged by its basename) is an assignment, a job spec, a bash
- * builtin or reserved word other than echo, printf without -v, true, false, test, `[` and pwd,
- * a wrapper or payload runner (`builtin`, `command`, `env`, `sudo`, `xargs`, `parallel`, the
- * rest of PLAIN_EXCLUSIONS.wrappers, `uv run`, `poetry run`, `pnpm exec` and `dlx`, `npm exec`
- * and `x`, `yarn dlx` and `exec`, `bun x`, `deno run`), git with `-c` or `--config-env` before
- * its subcommand, `find` with
- * `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*` or `-fls`, `fd` with `-x`, `-X`,
- * `--exec` or `--exec-batch`, `docker` or `podman` with `run` or `exec`, `kubectl exec`, or a
- * shell or interpreter (a `python` prefix included). No word is `-C` (attached or in a bundle)
- * or `--git-dir`, `--work-tree`, `--directory`, `--chdir`, `--prefix`, `--project`, `--cwd`,
- * `--dir` or `--manifest-path` (or a prefix of one). And the walker found no segment with a
- * wrapper, no payload segment, no git config option and no route (a fetched file run by its path,
- * `curl -o ./i.sh URL && ./i.sh`, passes the text check and is caught only here). Only a plain
- * command may be Safe.
+ * Whether a Bash command is plain (D-87 as tightened on 2026-10-02, with the PLAIN_COMMANDS
+ * allowlist of the same day): the parser accepts it, and the source text is simple commands
+ * joined only by `|`, `&&`, `||` or `;`, each word plain literal text (letters, digits,
+ * `_ - . / : = @ % +` and `,`, or a quote pair of those and spaces), no `..` after another path
+ * component, and no redirect but `2>&1`, `>/dev/null` and `2>/dev/null`. Every simple command
+ * matches an entry of PLAIN_COMMANDS: its command word is a listed bare name (not a path) and,
+ * where the entry lists subcommands, the words after it start with one of them exactly (no
+ * abbreviation). git may have only `--no-pager` and `-P` before its subcommand and `git config`
+ * needs `--get`, `--get-all` or `--get-regexp`; npm and pnpm may have `-w <pkg>`, `--filter
+ * <pkg>` and `-r` before theirs. On top of the allowlist, no command word (judged by its
+ * basename) is an assignment, a job spec, a bash builtin or reserved word other than echo,
+ * printf without -v, true, false, test, `[` and pwd (so `type` and `[`, though listed, are not
+ * plain), a wrapper or payload runner (`builtin`, `command`, `env`, `sudo`, `xargs`, `parallel`,
+ * the rest of PLAIN_EXCLUSIONS.wrappers, `uv run`, `poetry run`, `pnpm exec` and `dlx`, `npm
+ * exec`, `exe` and `x`, `yarn dlx` and `exec`, `bun x`, `deno run`), git with `-c` or
+ * `--config-env` before its subcommand (the values of git's separate-value globals are
+ * skipped), `find` with `-exec`, `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint*` or `-fls`,
+ * `fd` with `-x`, `-X`, `--exec` or `--exec-batch`, `docker` or `podman` with `run` or `exec`,
+ * `kubectl exec`, or a shell or interpreter (`rbash`, a `python` prefix and versioned names
+ * such as `lua5.4` included). No word is `-C` (attached or in a bundle) or `--git-dir`,
+ * `--work-tree`, `--directory`, `--chdir`, `--prefix`, `--project`, `--cwd`, `--dir` or
+ * `--manifest-path` (or a prefix of one). And the walker found no segment with a wrapper, no
+ * payload segment, no git config option, no segment outside PLAIN_COMMANDS and no route. Only a
+ * plain command may be Safe.
  * @param {string} command
  * @returns {boolean}
  */
