@@ -295,16 +295,36 @@ test('a spawn error shows the error banner with the message, keeps the inputs an
   assert.match(html, /<textarea[^>]*>fix the tick<\/textarea>/)
 })
 
-test('a hooks row that is not ok shows the noHooks hint with Launch enabled; ok or no row shows none', () => {
-  const text = 'Observation hooks are not installed, so the deck will only see this session through its terminal.'
-  const down = deckState({ repos: [repo('rustot')], health: [{ dep: 'deckd', state: 'up' }, { dep: 'hooks', state: 'down', reason: 'hooks_missing' }] })
-  const tree = ns.NewSessionView({ state: down, form: form({ repoKey: 'rustot', open: false }) })
-  assert.ok(renderToStaticMarkup(tree).includes(text))
-  assert.notEqual(buttonNamed(tree, 'Launch a ship').props.disabled, true)
+const NO_HOOKS_TEXT = 'Observation hooks are not installed, so the deck will only see this session through its terminal.'
+const HOOKS_OUTDATED_TEXT = 'Hooks are from an older deck release. Run fleetmates-deck init.'
+
+test('hooks_missing and hook_script_missing show the noHooks hint with Launch enabled; ok or no row shows neither hint', () => {
+  for (const reason of ['hooks_missing', 'hook_script_missing']) {
+    const down = deckState({ repos: [repo('rustot')], health: [{ dep: 'deckd', state: 'up' }, { dep: 'hooks', state: 'down', reason }] })
+    const tree = ns.NewSessionView({ state: down, form: form({ repoKey: 'rustot', open: false }) })
+    const html = renderToStaticMarkup(tree)
+    assert.ok(html.includes(NO_HOOKS_TEXT), `${reason} shows the noHooks hint`)
+    assert.ok(!html.includes(HOOKS_OUTDATED_TEXT), `${reason} does not show the outdated hint`)
+    assert.notEqual(buttonNamed(tree, 'Launch a ship').props.disabled, true)
+  }
   const ok = deckState({ repos: [repo('rustot')], health: [{ dep: 'deckd', state: 'down' }, { dep: 'hooks', state: 'ok' }] })
-  assert.ok(!render(ns.NewSessionView, { state: ok, form: form() }).includes(text), 'an ok hooks row shows no hint, whatever deckd says')
+  const okHtml = render(ns.NewSessionView, { state: ok, form: form() })
+  assert.ok(!okHtml.includes(NO_HOOKS_TEXT), 'an ok hooks row shows no hint, whatever deckd says')
+  assert.ok(!okHtml.includes(HOOKS_OUTDATED_TEXT), 'an ok hooks row shows no outdated hint')
   const missing = deckState({ repos: [repo('rustot')], health: [{ dep: 'deckd', state: 'down' }] })
-  assert.ok(!render(ns.NewSessionView, { state: missing, form: form() }).includes(text), 'a snapshot without the hooks row shows no hint')
+  const missingHtml = render(ns.NewSessionView, { state: missing, form: form() })
+  assert.ok(!missingHtml.includes(NO_HOOKS_TEXT), 'a snapshot without the hooks row shows no hint')
+  assert.ok(!missingHtml.includes(HOOKS_OUTDATED_TEXT), 'a snapshot without the hooks row shows no outdated hint')
+})
+
+test('a hooks_outdated row shows the outdated hint, not the noHooks hint, with Launch enabled', () => {
+  assert.equal(ns.NEW_SESSION_COPY['newSession.hooksOutdated'], HOOKS_OUTDATED_TEXT)
+  const outdated = deckState({ repos: [repo('rustot')], health: [{ dep: 'deckd', state: 'up' }, { dep: 'hooks', state: 'warn', reason: 'hooks_outdated' }] })
+  const tree = ns.NewSessionView({ state: outdated, form: form({ repoKey: 'rustot', open: false }) })
+  const html = renderToStaticMarkup(tree)
+  assert.ok(html.includes(HOOKS_OUTDATED_TEXT), 'the outdated hint renders')
+  assert.ok(!html.includes(NO_HOOKS_TEXT), 'installed but older hooks are not called missing')
+  assert.notEqual(buttonNamed(tree, 'Launch a ship').props.disabled, true)
 })
 
 test('the draft restores within 10 minutes and not after (AC8)', () => {
