@@ -2,19 +2,22 @@ import React, { useEffect, useRef, useState } from 'react'
 import { CARD_COPY } from '../../components/SessionCard.jsx'
 import { ConfirmDialog } from '../../components/ConfirmDialog.jsx'
 import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
+import { DiffView } from '../../components/DiffView.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
+import { PromptBar, promptKeyBody } from '../../components/PromptBar.jsx'
 import { MetaLine, StatusPill, compactDuration, pillParams, shown, stateLabel, titleText, translate } from '../../components/StatusPill.jsx'
 import { TerminalView } from '../../components/TerminalView.jsx'
 import { linkHandler } from '../../shell/Rail.jsx'
-import { fetchScrollback, nudgeSession, relaunchSession, stopSession } from '../../state/actions.js'
+import { answerRequest, fetchDiff, fetchScrollback, nudgeSession, relaunchSession, stopSession } from '../../state/actions.js'
 import { parseNeedsFilter } from '../../state/deck-store.js'
 import { ObserveOverlays, teamCards, useMinuteNow } from '../home/Home.jsx'
 import { deckApi, openOverlay, repoFor, tierOf } from '../drawer/NeedsYouDrawer.jsx'
 import { orderSessions } from '../palette/Palette.jsx'
 
 /**
- * English copy for Focus (docs/deck/screens/focus.md section 9): the M1 read-only layout (MS-O1) and the M2
- * terminal, header and actions. Keys the copy deck does not name carry their source in a comment.
+ * English copy for Focus (docs/deck/screens/focus.md section 9): the M1 read-only layout (MS-O1), the M2
+ * terminal, header and actions, and the M3 PromptBar and Changes diff. Keys the copy deck does not name carry
+ * their source in a comment.
  */
 export const FOCUS_COPY = Object.freeze({
   'focus.list.back': 'All ships',
@@ -46,6 +49,17 @@ export const FOCUS_COPY = Object.freeze({
   'focus.observed.banner': 'Observed session: started as plain claude, read-only here.',
   'focus.prompt.answerInTerminal': 'Answer in your terminal',
   'focus.prompt.deckdDown': 'deckd is reconnecting',
+  'focus.prompt.note': 'Same prompt as the terminal, same keys',
+  // The copy deck's `focus.prompt.answerInTerminal` text; that key keeps the M1 observed-bar wording above.
+  'focus.prompt.parseFailed': 'Answer in the terminal',
+  'focus.prompt.guardTyping': 'You are typing in the terminal. Answer there, or try again in a second.',
+  // The drawer's "Sent · checking…" (needs-you-drawer.md section 9); the Focus copy deck has no verifying line.
+  'focus.prompt.sent': 'Sent · checking…',
+  'focus.prompt.didNotLand': 'Your answer did not reach {repo}. The prompt is still open in its terminal.',
+  'focus.prompt.tryAgain': 'Try again',
+  'focus.question.reply': 'Reply',
+  // No copy deck names the Focus reply field's placeholder; the drawer's (needs-you-drawer.md section 9).
+  'focus.question.replyPlaceholder': 'Reply to {repo}',
   'focus.stale.line': 'Adrift since {time}: no activity since then.',
   'focus.stale.nudge': 'Nudge (send Enter)',
   // focus.md 4.3 crash banner actions; the lines are failures-and-loading.md 4.1 (lost, and "anything else").
@@ -69,8 +83,16 @@ export const FOCUS_COPY = Object.freeze({
   'focus.tabs.changes': 'Changes',
   'focus.tabs.facts': 'Facts',
   'focus.changes.label': 'Changed files',
-  // FOC-O3 default: no diff in M2 (Task 9).
-  'focus.changes.caption': 'Diffs arrive with approvals.',
+  'focus.changes.diffCaption': '{path} · unified (panel is narrow)',
+  'focus.changes.diffError': 'Could not read the diff: {message}',
+  // focus.md 5.3 "Retry"; the same text as `focus.terminal.retry`.
+  'focus.changes.retry': 'Retry',
+  // components.md 40 DiffView states.
+  'focus.changes.binary': 'Binary file, {size}. Open in editor.',
+  'focus.changes.fileEmpty': 'No changes in this file.',
+  // M3 plan Task 15 asks for a note when the diff is truncated; no copy deck names it yet.
+  'focus.changes.truncated': 'Diff truncated: too large to show in full.',
+  'focus.changes.loading': 'Loading the diff',
   'focus.facts.origin': 'Started from',
   'focus.facts.origin.wrapped': 'fm claude in a terminal',
   'focus.facts.origin.launched': 'the deck',
@@ -207,6 +229,60 @@ export function readPanel(storage) {
 export function writePanel(storage, open) {
   try { storage?.setItem(PANEL_KEY, open ? 'open' : 'hidden') } catch {}
 }
+
+/**
+ * Read one changed file's diff for the Changes tab (`GET /api/sessions/:id/diff?path=`).
+ * @param {{ get: Function }} api
+ * @param {string} id
+ * @param {string} path repo-relative
+ * @returns {Promise<{ path: string, baseline: string | null, diff: string, binary: boolean, truncated: boolean, size?: number }>}
+ */
+export function loadDiff(api, id, path) {
+  return fetchDiff(api, id, path)
+}
+
+/**
+ * The open request the PromptBar mirrors: the one the server matched to the prompt on the PTY screen
+ * (`screenMatch: 'on_screen'`), or null.
+ * @param {object[]} open the session's open requests
+ * @returns {object | null}
+ */
+export function onScreenRequest(open) {
+  return open.find(request => request.screenMatch === 'on_screen') ?? null
+}
+
+/**
+ * The file the Changes tab shows: the selected path while it is still among the changed files, else the first.
+ * @param {{ path: string }[]} files
+ * @param {string | null} selected
+ * @returns {string | null}
+ */
+export function shownFile(files, selected) {
+  return files.some(file => file.path === selected) ? selected : files[0]?.path ?? null
+}
+
+const promptLabels = t => ({
+  note: translate(t, FOCUS_COPY, 'focus.prompt.note'),
+  answerInTheTerminal: translate(t, FOCUS_COPY, 'focus.prompt.parseFailed'),
+  deckdDown: translate(t, FOCUS_COPY, 'focus.prompt.deckdDown'),
+  guardTyping: translate(t, FOCUS_COPY, 'focus.prompt.guardTyping'),
+  sent: translate(t, FOCUS_COPY, 'focus.prompt.sent'),
+  didNotLand: FOCUS_COPY['focus.prompt.didNotLand'],
+  tryAgain: translate(t, FOCUS_COPY, 'focus.prompt.tryAgain'),
+  replyLabel: translate(t, FOCUS_COPY, 'focus.question.reply'),
+  replyPlaceholder: FOCUS_COPY['focus.question.replyPlaceholder'],
+  reply: translate(t, FOCUS_COPY, 'focus.question.reply')
+})
+
+const diffLabels = t => ({
+  caption: FOCUS_COPY['focus.changes.diffCaption'],
+  error: FOCUS_COPY['focus.changes.diffError'],
+  retry: translate(t, FOCUS_COPY, 'focus.changes.retry'),
+  binary: FOCUS_COPY['focus.changes.binary'],
+  truncated: translate(t, FOCUS_COPY, 'focus.changes.truncated'),
+  empty: translate(t, FOCUS_COPY, 'focus.changes.fileEmpty'),
+  loading: translate(t, FOCUS_COPY, 'focus.changes.loading')
+})
 
 function deckdOf(state) {
   const row = (state.data.health ?? []).find(item => item.dep === 'deckd')
@@ -356,8 +432,8 @@ function Facts({ session, now, t, lang }) {
   )
 }
 
-function FileList({ files, selectedFile, onSelectFile, t }) {
-  const selected = files.some(file => file.path === selectedFile) ? selectedFile : files[0]?.path
+function FileList({ files, selectedFile, onSelectFile, diff, onRetryDiff, t }) {
+  const selected = shownFile(files, selectedFile)
   const index = files.findIndex(file => file.path === selected)
   const onKeyDown = event => {
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
@@ -378,12 +454,12 @@ function FileList({ files, selectedFile, onSelectFile, t }) {
           </li>
         ))}
       </ul>
-      <p className="focus-diff-caption">{translate(t, FOCUS_COPY, 'focus.changes.caption')}</p>
+      {selected ? <DiffView path={selected} state={diff?.path === selected ? diff : { status: 'loading' }} onRetry={onRetryDiff} labels={diffLabels(t)} /> : null}
     </>
   )
 }
 
-function Details({ session, tab, onTab, now, t, lang, selectedFile, onSelectFile }) {
+function Details({ session, tab, onTab, now, t, lang, selectedFile, onSelectFile, diff, onRetryDiff }) {
   const files = session.changedFiles ?? []
   const labels = {
     changes: `${translate(t, FOCUS_COPY, 'focus.tabs.changes')}${files.length ? ` ${files.length}` : ''}`,
@@ -404,7 +480,7 @@ function Details({ session, tab, onTab, now, t, lang, selectedFile, onSelectFile
       </div>
       <div className="focus-panel" role="tabpanel" id="focus-panel" aria-labelledby={`focus-tab-${tab}`}>
         {tab === 'facts' ? <Facts session={session} now={now} t={t} lang={lang} /> : files.length
-          ? <FileList files={files} selectedFile={selectedFile} onSelectFile={onSelectFile} t={t} />
+          ? <FileList files={files} selectedFile={selectedFile} onSelectFile={onSelectFile} diff={diff} onRetryDiff={onRetryDiff} t={t} />
           : <EmptyState kind="focusChanges" t={t} />}
       </div>
     </aside>
@@ -435,8 +511,10 @@ function CrashBanner({ session, t, deckdDown, reasonId, onRelaunch, onDismiss })
  * Nudge). A live PTY session gets TerminalView with the screen's terminal `client`, focused on open; an ended or
  * crashed one gets a read-only TerminalView filled from `scrollback`. A PTY session's header carries the input
  * indicator, the collision chip, the leave hint, Hide panel and Stop… (an observed one keeps the M1 header); while deckd is down the terminal input and Stop are
- * disabled with the reason "deckd is reconnecting". The details panel lists changed files as a listbox and the
- * Facts rows of FOC-O3. Pure: no hooks, so tests can walk it (TerminalView and ConfirmDialog hold the hooks).
+ * disabled with the reason "deckd is reconnecting". A PTY session's on-screen request gets the PromptBar (its
+ * other open requests keep the "Answer in your terminal" bar). The details panel lists changed files as a
+ * listbox with the selected file's DiffView under it, and the Facts rows of FOC-O3. Pure: no hooks, so tests
+ * can walk it (TerminalView, ConfirmDialog and PromptReply hold the hooks).
  * @param {{
  *   state: object, sessionId: string, t?: Function, now?: number, lang?: string, navigate: (to: string) => void,
  *   steps: object[] | null, tab: 'changes'|'facts', onTab: (tab: string) => void, onMarkReviewed?: () => void,
@@ -446,14 +524,17 @@ function CrashBanner({ session, t, deckdDown, reasonId, onRelaunch, onDismiss })
  *   onStop?: () => void, onConfirmStop?: () => void, onCancelStop?: () => void, onNudge?: () => void,
  *   onRelaunch?: () => void, onDismiss?: () => void, stopError?: string | null,
  *   selectedFile?: string | null, onSelectFile?: (path: string) => void,
- *   confirmLink?: (url: string) => boolean, confirmPaste?: (size: string) => boolean | Promise<boolean>
+ *   confirmLink?: (url: string) => boolean, confirmPaste?: (size: string) => boolean | Promise<boolean>,
+ *   diff?: { path: string, status: 'loading' | 'error' | 'ready', data?: object, message?: string } | null, onRetryDiff?: () => void,
+ *   answer?: { requestId: string, busy: object | null, guard: 'typing' | 'refused' | null } | null, confirmed?: boolean,
+ *   onConfirm?: (checked: boolean) => void, onAnswer?: (request: object, body: object) => void
  * }} props
  */
 export function FocusView({
   state, sessionId, t, now = Date.now(), lang = 'en', navigate, steps, tab, onTab, onMarkReviewed, reviewing = false, reviewError = null,
   client = null, scrollback = null, terminalFocused = false, onTerminalFocus, collision, panelOpen = true, drawerOpen = false, onTogglePanel,
   confirming = false, onStop, onConfirmStop, onCancelStop, onNudge, onRelaunch, onDismiss, stopError = null, selectedFile = null, onSelectFile,
-  confirmLink, confirmPaste
+  confirmLink, confirmPaste, diff = null, onRetryDiff, answer = null, confirmed = false, onConfirm, onAnswer = () => {}
 }) {
   const session = state.data.sessions.find(row => row.id === sessionId)
   if (!session) {
@@ -483,6 +564,7 @@ export function FocusView({
   const starting = session.state === 'starting' && Number.isFinite(session.stateSince) && now - session.stateSince > START_HINT_MS
   const classes = ['focus-screen', panelOpen ? null : 'focus--panel-hidden', drawerOpen ? 'focus--drawer-open' : null].filter(Boolean).join(' ')
   const terminalLabel = `${shown(repo.name)} · ${task}`
+  const prompt = onScreenRequest(open)
   return (
     <div className={classes}>
       <SessionList state={state} sessionId={session.id} now={now} t={t} navigate={navigate} />
@@ -540,9 +622,13 @@ export function FocusView({
               screenReaderMode={!!state.data.prefs?.terminalScreenReader} client={null} initialText={scrollback ?? ''} confirmLink={confirmLink ?? (() => false)} t={t} />
           </div>
         )}
-        {open.map(request => <RequestBar key={request.id} request={request} t={t} />)}
+        {open.map(request => pty && request === prompt ? (
+          <PromptBar key={request.id} request={request} session={session} deckd={deckd} labels={promptLabels(t)} confirmed={confirmed} onConfirm={onConfirm}
+            onAnswer={body => onAnswer(request, body)} busy={answer?.requestId === request.id ? answer.busy : null} guard={answer?.requestId === request.id ? answer.guard : null}
+            badge={<span className={`tier-badge tier-badge--${tierOf(request)}`}>{translate(t, CARD_COPY, `tier.${tierOf(request)}`)}</span>} />
+        ) : <RequestBar key={request.id} request={request} t={t} />)}
       </section>
-      <Details session={session} tab={tab} onTab={onTab} now={now} t={t} lang={lang} selectedFile={selectedFile} onSelectFile={onSelectFile} />
+      <Details session={session} tab={tab} onTab={onTab} now={now} t={t} lang={lang} selectedFile={selectedFile} onSelectFile={onSelectFile} diff={diff} onRetryDiff={onRetryDiff} />
       {confirming ? (
         <ConfirmDialog title={translate(t, FOCUS_COPY, 'focus.stop.title', { repo: shown(repo.name), task })} body={translate(t, FOCUS_COPY, 'focus.stop.body')}
           confirmLabel={translate(t, FOCUS_COPY, 'focus.stop.confirm')} cancelLabel={translate(t, FOCUS_COPY, 'focus.stop.cancel')} tone="danger"
@@ -559,7 +645,9 @@ const narrow = () => !!globalThis.matchMedia?.(NARROW).matches
  * of an ended PTY session, keeps the tab, file selection, panel (`deck.focus.panel`, `Alt I` through a window
  * capture-phase listener; at 1280 px and below it opens the details as an overlay drawer), the collision chip
  * for 3 s, the Stop dialog and the link and paste dialogs, and opens the Needs-you drawer once for a D-69
- * `?needs=` link. `client` is the terminal client (Task 14 wires it); `dispatch` takes the store's `toast.push`.
+ * `?needs=` link. It loads the selected changed file's diff (again when the file's counts change, or on
+ * Retry), posts PromptBar answers, keeps the Destructive checkbox per request and summary, and turns `1`, `2`
+ * and `3` typed outside the terminal into answers through {@link promptKeyBody}. `client` is the terminal client (Task 14 wires it); `dispatch` takes the store's `toast.push`.
  * This browser wiring is not exercised by the unit tests; {@link FocusView} and the exported helpers are.
  * @param {{ route: { params: { sessionId: string } }, state: object, t?: Function, navigate: (to: string) => void, api?: object,
  *   search?: string, client?: object | null, dispatch?: (action: object) => void,
@@ -597,6 +685,20 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
   const sourceFrom = state.data.inputSources?.[id]?.from
   const repoName = session ? repoFor(state.data.repos, session.repoId).name : ''
   const now = Math.max(minute, tick)
+  const [diff, setDiff] = useState(null)
+  const [diffRetry, setDiffRetry] = useState(0)
+  const [answer, setAnswer] = useState(null)
+  const [confirm, setConfirm] = useState({ key: null, checked: false })
+  const files = session?.changedFiles ?? []
+  const diffPath = shownFile(files, selectedFile)
+  const diffFile = files.find(file => file.path === diffPath)
+  const diffRev = diffFile ? `${diffFile.adds ?? 0}:${diffFile.dels ?? 0}` : ''
+  const prompt = known && isPty(session)
+    ? onScreenRequest((state.data.requests ?? []).filter(row => row.sessionId === id && (row.state ?? 'open') === 'open').sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)))
+    : null
+  // The Destructive checkbox resets when the request or its summary changes (state-machines 2.5).
+  const confirmKey = prompt ? `${prompt.id}\n${prompt.summary ?? ''}` : null
+  const confirmed = confirm.key === confirmKey && confirm.checked
 
   useEffect(() => { setSteps(null) }, [id])
   // A followed link such as `?tab=changes` selects its tab even when this Focus instance stays mounted.
@@ -643,6 +745,16 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
     const timer = setTimeout(() => setTick(Date.now()), Math.max(0, startAt + START_HINT_MS + 1 - Date.now()))
     return () => clearTimeout(timer)
   }, [startAt])
+  // The selected file's diff; a refresh of the same file keeps the shown diff until the new one arrives.
+  useEffect(() => {
+    if (!diffPath || tab !== 'changes') return undefined
+    let current = true
+    setDiff(prev => prev?.path === diffPath && prev.status === 'ready' ? prev : { path: diffPath, status: 'loading' })
+    loadDiff(http, id, diffPath)
+      .then(data => { if (current) setDiff({ path: diffPath, status: 'ready', data }) })
+      .catch(error => { if (current) setDiff({ path: diffPath, status: 'error', message: error?.message ?? error?.code ?? 'failed' }) })
+    return () => { current = false }
+  }, [http, id, diffPath, diffRev, tab, diffRetry])
   const togglePanel = () => {
     if (narrow()) { setDrawerOpen(value => !value)
       return }
@@ -670,6 +782,26 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
     setReviewError(null)
     markReviewed(http, id).catch(error => setReviewError(error?.code ?? 'failed')).finally(() => setReviewing(false))
   }
+  const onAnswer = (request, body) => {
+    setAnswer({ requestId: request.id, busy: body, guard: null })
+    answerRequest(http, request.id, body).catch(error => setAnswer(prev => prev?.requestId === request.id
+      ? { ...prev, guard: error?.code === 'typing_in_terminal' ? 'typing' : 'refused' }
+      : prev))
+  }
+  const onKeyAnswer = event => {
+    if (state.view?.overlay || confirming || linkAsk || pasteAsk) return
+    const body = promptKeyBody(event, { request: prompt, terminalFocused, deckdDown: deckdOf(state).down })
+    if (!body) return
+    event.preventDefault()
+    onAnswer(prompt, body)
+  }
+  const keyRef = useRef(onKeyAnswer)
+  keyRef.current = onKeyAnswer
+  useEffect(() => {
+    const onKey = event => keyRef.current(event)
+    globalThis.window?.addEventListener('keydown', onKey)
+    return () => globalThis.window?.removeEventListener('keydown', onKey)
+  }, [])
   const confirmLink = url => { setLinkAsk(url)
     return false }
   const confirmPaste = size => new Promise(resolve => setPasteAsk({ size, resolve }))
@@ -683,7 +815,10 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
         onTogglePanel={togglePanel} confirming={confirming} onStop={() => { setStopError(null)
           actions.openStop() }} onConfirmStop={actions.confirmStop} onCancelStop={actions.cancelStop}
         onNudge={actions.nudge} onRelaunch={actions.relaunch} onDismiss={actions.dismiss} stopError={stopError}
-        selectedFile={selectedFile} onSelectFile={setSelectedFile} confirmLink={confirmLink} confirmPaste={confirmPaste} />
+        selectedFile={selectedFile} onSelectFile={setSelectedFile} confirmLink={confirmLink} confirmPaste={confirmPaste}
+        diff={diff} onRetryDiff={() => { setDiff(prev => prev && { path: prev.path, status: 'loading' })
+          setDiffRetry(value => value + 1) }}
+        answer={answer} confirmed={confirmed} onConfirm={checked => setConfirm({ key: confirmKey, checked })} onAnswer={onAnswer} />
       {linkAsk ? (
         <ConfirmDialog title={translate(t, FOCUS_COPY, 'focus.link.title')} body={linkAsk} confirmLabel={translate(t, FOCUS_COPY, 'focus.link.confirm')}
           cancelLabel={translate(t, FOCUS_COPY, 'focus.stop.cancel')} onCancel={() => setLinkAsk(null)}

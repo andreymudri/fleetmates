@@ -249,7 +249,7 @@ test('Down in the file listbox moves aria-selected; the caption replaces the dif
   assert.deepEqual(picked, ['src/b.rs', 'src/a.rs'])
   const next = view(Focus, { state: live, sessionId: 's1', client: fakeClient(), selectedFile: 'src/b.rs', onSelectFile: () => {} })
   assert.deepEqual(find(next, node => node.props?.role === 'option').map(node => node.props['aria-selected']), ['false', 'true'])
-  assert.match(renderToStaticMarkup(tree), /Diffs arrive with approvals\./)
+  assert.match(renderToStaticMarkup(tree), /src\/a\.rs · unified \(panel is narrow\)/, 'M3: the DiffView caption replaces "Diffs arrive with approvals."')
 })
 
 test('Facts lists every FOC-O3 row, including the review baseline and the earlier conversations count', async () => {
