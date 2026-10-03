@@ -197,10 +197,16 @@ function backup(stateDir, root, bytes, at) {
     try { writeSync(fd, bytes); fsyncSync(fd) } finally { closeSync(fd) }
     break
   }
+  return path.join(dir, name)
+}
+
+// Keep the newest BACKUPS_KEPT backups of a repo. Called after a successful rename only, so a
+// restarted attempt never costs an older backup.
+function prune(backupPath) {
+  const dir = path.dirname(backupPath)
   const kept = readdirSync(dir).map(entry => ({ entry, match: BACKUP_NAME.exec(entry) })).filter(item => item.match)
     .sort((a, b) => a.match[1] < b.match[1] ? 1 : a.match[1] > b.match[1] ? -1 : Number(b.match[2] ?? 0) - Number(a.match[2] ?? 0))
   for (const old of kept.slice(BACKUPS_KEPT)) unlinkSync(path.join(dir, old.entry))
-  return path.join(dir, name)
 }
 
 // Steps 3 to 8 of 07-approvals 7.2 with `change` as step 5. `change(data)` returns false when there
@@ -226,16 +232,20 @@ function rewrite(repoRoot, { change, verify, stateDir, at, beforeRename, create 
     }
     closeSync(fd)
     try { chmodSync(temp, read.mode) } catch {}
+    // Step 6 (backup) before step 7 (re-read compare), so only the compare-to-rename gap is left
+    // for a concurrent writer. A restarted attempt drops its backup of the stale bytes.
+    const backupPath = read.bytes === null ? null : backup(stateDir, read.root, read.bytes, at)
     beforeRename?.(attempt)
     if (!sameBytes(currentBytes(read.file), read.bytes)) {
       try { unlinkSync(temp) } catch {}
+      if (backupPath) { try { unlinkSync(backupPath) } catch {} }
       continue
     }
-    const backupPath = read.bytes === null ? null : backup(stateDir, read.root, read.bytes, at)
     try { renameSync(temp, read.file) } catch (error) {
       try { unlinkSync(temp) } catch {}
       throw fail(read.file, error.code ?? 'rename failed')
     }
+    if (backupPath) prune(backupPath)
     const after = readSettings(read.root)
     if (!verify(allowList(after.data))) throw fail(read.file, 'the rule was not found once after the write')
     return { changed: true, read, after, backupPath, beforeSha256: sha256(read.bytes), afterSha256: sha256(after.bytes) }
@@ -250,11 +260,189 @@ function refused(code, message) {
   return { ok: false, code, message }
 }
 
-function namesControl(text) {
+/**
+ * The persistence floor of tiers.mjs (`PERSISTENCE_FILES` and `PERSISTENCE_DIRS`, home-relative),
+ * copied because tiers.mjs does not export them; validate.test.mjs keeps the copies equal.
+ */
+export const PERSISTENCE_FILES = Object.freeze(['.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.profile', '.zshrc', '.zprofile', '.zshenv', '.zlogin', '.zlogout', '.config/fish/config.fish'])
+export const PERSISTENCE_DIRS = Object.freeze(['.config/fish/conf.d', '.config/hypr', '.config/systemd/user', '.config/autostart'])
+
+// Tools whose rule specifier is a path glob (Claude Code permission syntax).
+const PATH_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Glob', 'Grep', 'LS'])
+const GLOB_CHARS = /[*?[\]{}]/
+// npm's names for `run` (npm help run: run-script, rum, urn).
+const NPM_RUN = ['run', 'run-script', 'rum', 'urn']
+// pnpm subcommands that are not scripts. pnpm runs any other first word as a script, so without a
+// word boundary a prefix naming one could reach another script (D-86). `test`, `t` and `start` run
+// scripts and are left out.
+const PNPM_BUILTINS = ['add', 'install', 'i', 'update', 'up', 'upgrade', 'remove', 'rm', 'uninstall', 'un', 'link', 'ln', 'unlink', 'import', 'rebuild', 'rb', 'prune', 'fetch', 'patch', 'patch-commit', 'audit', 'list', 'ls', 'll', 'la', 'outdated', 'why', 'licenses', 'exec', 'dlx', 'create', 'publish', 'pack', 'store', 'root', 'bin', 'env', 'setup', 'init', 'deploy', 'config', 'get', 'set', 'server', 'doctor', 'help']
+
+const absolute = value => typeof value === 'string' && path.isAbsolute(value)
+const fold = value => String(value).normalize('NFKC').toLowerCase()
+
+// The real path of `location`, or of its nearest existing ancestor joined with the rest.
+function realExisting(location) {
+  let current = location
+  const rest = []
+  for (let depth = 0; depth < 64; depth++) {
+    try { return path.join(realpathSync(current), ...rest.reverse()) } catch {}
+    const parent = path.dirname(current)
+    if (parent === current) return location
+    rest.push(path.basename(current))
+    current = parent
+  }
+  return location
+}
+
+// The deck's controls (F9) and Claude Code's settings directory, for `env` with `homeDir` as HOME.
+function deckContext({ env = process.env, homeDir = null } = {}) {
+  const base = { ...env, ...(absolute(homeDir) ? { HOME: homeDir } : {}) }
+  let paths = {}
+  try { paths = setupPaths(base) } catch {}
+  const home = absolute(homeDir) ? homeDir : paths.home
+  const controls = [paths.config, paths.state, paths.share, paths.runtime, paths.token].filter(absolute)
+  return {
+    home,
+    port: String(base.DECK_PORT ?? 47800),
+    token: paths.token,
+    controls,
+    claudeDir: absolute(paths.settings) ? path.dirname(paths.settings) : null,
+    deckPaths: { config: paths.config, state: paths.state, runtime: paths.runtime ?? null, token: paths.token, port: base.DECK_PORT ?? 47800 }
+  }
+}
+
+function namesControl(text, ctx) {
   if (CONTROL_TEXT.some(pattern => pattern.test(text))) return true
-  let paths
-  try { paths = setupPaths(process.env) } catch { return false }
-  return [paths.config, paths.state, paths.runtime, paths.token].some(dir => typeof dir === 'string' && dir && (text.includes(dir) || (paths.home && dir.startsWith(`${paths.home}/`) && text.includes(`~/${dir.slice(paths.home.length + 1)}`))))
+  return ctx.controls.some(dir => text.includes(dir) || (absolute(ctx.home) && dir.startsWith(`${ctx.home}/`) && text.includes(`~/${dir.slice(ctx.home.length + 1)}`)))
+}
+
+// The paths a rule's glob can start from, as Claude Code reads the specifier: `//p` is absolute,
+// `~/p` is under the home directory, `/p` is relative to the settings file (taken here as absolute,
+// the repo root and the repo's `.claude` directory, to fail closed) and anything else is relative to
+// the repo. Each is the glob's literal root: the components before the first one with a glob
+// character. Null for a form the deck does not read (`~user/`, variables).
+function globRoots(spec, { repoRoot, home }) {
+  if (spec.includes('$') || /^~[^/]/.test(spec) || (spec.startsWith('~') && !absolute(home))) return null
+  const literal = text => {
+    const parts = text.split('/')
+    const at = parts.findIndex(part => GLOB_CHARS.test(part))
+    return at < 0 ? text : parts.slice(0, at).join('/')
+  }
+  const base = absolute(repoRoot) ? repoRoot : process.cwd()
+  if (spec.startsWith('//')) return [path.resolve('/', literal(spec.slice(1)) || '/')]
+  if (spec === '~' || spec.startsWith('~/')) return [path.resolve(home, literal(spec.slice(2)) || '.')]
+  if (spec.startsWith('/')) {
+    const rest = literal(spec.slice(1)) || '.'
+    return [path.resolve('/', rest), path.resolve(base, rest), path.resolve(base, '.claude', rest)]
+  }
+  return [path.resolve(base, literal(spec) || '.')]
+}
+
+// Paths no allow rule may cover, hold or sit inside: the deck controls (F9), Claude Code settings
+// (the user's settings directory and the repo's `.claude/settings*.json`, `.claude/hooks` and
+// `.mcp.json`), the repo's `.git` and the persistence floor.
+function protectedTargets(ctx, repoRoot) {
+  const list = [...ctx.controls]
+  if (ctx.claudeDir) list.push(ctx.claudeDir)
+  if (absolute(ctx.home)) {
+    list.push(path.join(ctx.home, '.claude'))
+    for (const name of [...PERSISTENCE_FILES, ...PERSISTENCE_DIRS]) list.push(path.join(ctx.home, name))
+  }
+  if (absolute(repoRoot)) for (const name of ['.git', '.claude/settings.json', '.claude/settings.local.json', '.claude/hooks', '.mcp.json']) list.push(path.join(repoRoot, name))
+  return [...new Set([...list, ...list.map(realExisting)])]
+}
+
+// Whether `a` and `b` are the same path or one holds the other (case folded).
+function related(a, b) {
+  const one = fold(a)
+  const two = fold(b)
+  const down = path.relative(one, two)
+  const up = path.relative(two, one)
+  const inside = rel => rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+  return inside(down) || inside(up)
+}
+
+// A root that names a `.git` directory, Claude Code settings or hooks by its components, in any repo.
+function namesProtectedComponent(root) {
+  const parts = fold(root).split('/')
+  if (parts.includes('.git') || parts.at(-1) === '.mcp.json') return true
+  const at = parts.lastIndexOf('.claude')
+  return at >= 0 && at < parts.length - 1 && (/^settings[^/]*\.json$/.test(parts[at + 1]) || parts[at + 1] === 'hooks')
+}
+
+function pathVerdict(tool, spec, { classify, tiers, repoRoot, ctx }) {
+  if (!spec.trim() || spec !== spec.trim()) return refused('invalid_pattern', RULE_COPY.invalid)
+  const roots = globRoots(spec, { repoRoot, home: ctx.home })
+  if (!roots) return refused('invalid_pattern', RULE_COPY.invalid)
+  const targets = protectedTargets(ctx, repoRoot)
+  const candidates = [...new Set([...roots, ...roots.map(realExisting)])]
+  if (namesControl(spec, ctx) || candidates.some(root => namesProtectedComponent(root) || targets.some(target => related(root, target)))) return refused('destructive_rule', RULE_COPY.destructive)
+  if (tool !== 'Read') return refused('invalid_pattern', RULE_COPY.invalid)
+  const result = classify({ toolName: 'Read', toolInput: { file_path: roots[0] }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, homeDir: ctx.home, deckPaths: ctx.deckPaths, tiers })
+  if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
+  return { ok: true, pattern: `${tool}(${spec})`, tool, tier: result.tier, warning: null }
+}
+
+/**
+ * Arguments that, appended to a Bash prefix, make the command reach a Destructive floor of
+ * tiers.mjs. Each probe names its floor and a carrier command that reaches the floor with it, which
+ * validate.test.mjs runs; the same test fails when tiers.mjs gains a Destructive floor that has
+ * neither a probe nor an entry in {@link FLOOR_PROBE_EXEMPT}.
+ * @param {{ env?: object, homeDir?: string|null }} [options]
+ * @returns {{ floor: string, carrier: string, args: string }[]}
+ */
+export function floorProbes({ env = process.env, homeDir = null } = {}) {
+  const ctx = deckContext({ env, homeDir })
+  const home = ctx.home
+  const probes = [
+    { floor: 'floor.git-config-write', carrier: 'git config', args: 'core.hooksPath /tmp/x' },
+    { floor: 'floor.git-config-write', carrier: 'git config', args: 'core.fsmonitor x' },
+    { floor: 'floor.git-config-write', carrier: 'git config', args: 'alias.x x' },
+    { floor: 'floor.git-config-write', carrier: 'git config', args: '--edit' },
+    { floor: 'floor.git-c', carrier: 'git', args: '-c core.pager=x status' },
+    { floor: 'floor.git-dir', carrier: 'cp', args: 'x .git/hooks/pre-commit' },
+    { floor: 'floor.git-dir', carrier: 'tee', args: '.git/hooks/pre-commit' },
+    { floor: 'floor.claude-settings', carrier: 'cp', args: 'x .claude/settings.json' },
+    { floor: 'floor.claude-settings', carrier: 'tee', args: '.claude/settings.local.json' },
+    { floor: 'floor.mount', carrier: 'docker run', args: '-v /:/host x' },
+    { floor: 'floor.privileged', carrier: 'docker run', args: '--privileged x' }
+  ]
+  if (absolute(home)) {
+    probes.push({ floor: 'floor.claude-settings', carrier: 'cp', args: `x ${home}/.claude/settings.json` })
+    probes.push({ floor: 'floor.persistence', carrier: 'cp', args: `x ${home}/.bashrc` })
+    probes.push({ floor: 'floor.persistence', carrier: 'tee', args: `${home}/.bashrc` })
+  }
+  // floor.deck is probed by its write form only: the classifier also rates any command that merely
+  // names a deck control Destructive, which `probeReaches` subtracts, so a read of the token
+  // (`cat <token>`) is not something a probe can tell from a mention (`cargo test <token>`).
+  if (absolute(ctx.token)) probes.push({ floor: 'floor.deck', carrier: 'cp', args: `x ${ctx.token}` })
+  return probes
+}
+
+/**
+ * Destructive floors with no probe, and why none is needed.
+ */
+export const FLOOR_PROBE_EXEMPT = Object.freeze({
+  'floor.network-interpreter': 'needs a fetch command piped into an interpreter: every fetch command and interpreter is refused as a prefix by the word list, and a pipe is a second command, which a prefix rule does not approve (07-approvals 7.1)',
+  'floor.m1': 'the M1 checks (deck controls, sensitive writes, destructive MCP tools and SQL, rm-style commands) are covered by the deck, write and persistence probes above and by the Destructive entries the prefix is compared with'
+})
+
+// Whether a Bash prefix is an npm or pnpm script rule in any form (D-86): `run` (or an npm alias of
+// it) anywhere after the command word, options included, or a pnpm first word that is not a known
+// non-script subcommand.
+function scriptPrefix(words) {
+  const name = commandBase(words[0])
+  if (!['npm', 'pnpm'].includes(name)) return false
+  const rest = words.slice(1)
+  if (rest.some(word => NPM_RUN.includes(word))) return true
+  if (name !== 'pnpm') return false
+  const first = rest.find(word => !word.startsWith('-'))
+  return first === undefined || !PNPM_BUILTINS.includes(first)
+}
+
+// The rule of a Safe tiers entry that this pattern equals, if any (`{script}` templates excluded).
+function safeEntryRule(pattern, tiers) {
+  return (tiers?.entries ?? []).some(entry => entry?.tier === 'safe' && typeof entry.rule === 'string' && !entry.rule.includes('{') && samePattern(entry.rule, pattern))
 }
 
 function isInterpreter(name) {
@@ -301,7 +489,24 @@ function toolGlob(pattern) {
   return new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`)
 }
 
-function bashVerdict(pattern, inner, { classify, tiers, repoRoot }) {
+const destructiveReasons = result => new Set(result.reasons.filter(item => item.tier === 'destructive').map(item => `${item.entryId}\u0000${item.description}`))
+
+/**
+ * Whether `<prefix> <args>` reaches a Destructive reason that `true <args>` does not. The baseline
+ * removes the floors the classifier raises on the argument text alone (any command naming a deck
+ * control is Destructive, whatever it does), which every prefix would otherwise share, so what is
+ * left is what the prefix's command does with its arguments: a write, a git config key.
+ * @param {(command: string) => { reasons: object[] }} run
+ * @param {string} prefix
+ * @param {string} args
+ * @returns {boolean}
+ */
+export function probeReaches(run, prefix, args) {
+  const baseline = destructiveReasons(run(`true ${args}`))
+  return [...destructiveReasons(run(`${prefix} ${args}`))].some(key => !baseline.has(key))
+}
+
+function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
   const body = inner.trim()
   if (body === '*' || body === '') return refused(body === '*' ? 'destructive_rule' : 'invalid_pattern', body === '*' ? RULE_COPY.destructive : RULE_COPY.invalid)
   let prefix = null
@@ -312,12 +517,16 @@ function bashVerdict(pattern, inner, { classify, tiers, repoRoot }) {
   const command = prefix ?? exact
   if (!command || command.includes('*') || /[\u0000-\u001f\u007f]/.test(command)) return refused('invalid_pattern', RULE_COPY.invalid)
   const words = command.split(/\s+/)
-  if (prefix !== null && ['npm', 'pnpm'].includes(commandBase(words[0])) && ['run', 'run-script'].includes(words[1])) return refused('invalid_pattern', RULE_COPY.script)
-  if (namesControl(command)) return refused('destructive_rule', RULE_COPY.destructive)
-  if (prefix !== null && (runsPayload(words) || reachesDestructive(words, tiers))) return refused('destructive_rule', RULE_COPY.destructive)
-  const result = classify({ toolName: 'Bash', toolInput: { command }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, tiers })
+  if (prefix !== null && scriptPrefix(words)) return refused('invalid_pattern', RULE_COPY.script)
+  if (namesControl(command, ctx)) return refused('destructive_rule', RULE_COPY.destructive)
+  // A Safe entry's own rule (`Bash(node --test:*)`) skips the word list but not the checks below.
+  const own = prefix !== null && safeEntryRule(pattern, tiers)
+  if (prefix !== null && ((!own && runsPayload(words)) || reachesDestructive(words, tiers))) return refused('destructive_rule', RULE_COPY.destructive)
+  const run = text => classify({ toolName: 'Bash', toolInput: { command: text }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, homeDir: ctx.home, deckPaths: ctx.deckPaths, tiers })
+  const result = run(command)
   if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
-  return { ok: true, pattern, tool: 'Bash', tier: result.tier, warning: null }
+  if (prefix !== null && floorProbes({ env: ctx.env, homeDir: ctx.home }).some(probe => probeReaches(run, prefix, probe.args))) return refused('destructive_rule', RULE_COPY.destructive)
+  return { ok: true, pattern, tool: 'Bash', tier: own ? 'safe' : result.tier, warning: null }
 }
 
 /**
@@ -325,19 +534,27 @@ function bashVerdict(pattern, inner, { classify, tiers, repoRoot }) {
  * Accepts `Bash(<prefix>:*)`, `Bash(<prefix> *)`, `Bash(<exact>)`, `WebFetch(domain:<host>)`,
  * `mcp__<server>__<tool>`, `Read(<glob>)` and tool-wide rules other than Bash and the file tools
  * (those carry `warning: 'toolWide'`). Refuses with `destructive_rule` and "Destructive commands
- * can never become rules." a bare `Bash` or `Bash(*)`, a Bash prefix that reaches a Destructive
- * entry or starts with a wrapper, shell, interpreter or runner, any pattern a Destructive entry or
- * floor matches, a pattern naming the deck's controls or Claude Code settings, and the tool-wide
- * file tool rules. An npm or pnpm script prefix is `invalid_pattern` with "Script rules name one
- * script exactly."; anything else outside the syntax is `invalid_pattern`.
+ * can never become rules.":
+ * - a bare `Bash` or `Bash(*)`, and the tool-wide file tool rules;
+ * - a Bash prefix that reaches a Destructive entry, starts with a wrapper, shell, interpreter or
+ *   runner (except the rule of a Safe tiers entry), or reaches a Destructive floor with any of the
+ *   {@link floorProbes} arguments;
+ * - a Bash pattern the classifier rates Destructive, and a pattern naming the deck's controls or
+ *   Claude Code settings;
+ * - a path rule (`Read`, the file tools, `Glob`, `Grep`, `LS`) whose glob root, with `~` and `//`
+ *   expanded, is, holds or lies inside a deck control, Claude Code settings, a `.git` directory or
+ *   a persistence floor path.
+ * An npm or pnpm script prefix, in any option layout, is `invalid_pattern` with "Script rules name
+ * one script exactly."; anything else outside the syntax is `invalid_pattern`.
  * @param {string} pattern
- * @param {{ classify?: Function, tiers?: { entries: object[] }, repoRoot?: string|null }} [options]
+ * @param {{ classify?: Function, tiers?: { entries: object[] }, repoRoot?: string|null, homeDir?: string|null, env?: object }} [options]
  * @returns {PatternVerdict}
  */
-export function validatePattern(pattern, { classify = defaultClassify, tiers = activeTiers(), repoRoot = null } = {}) {
+export function validatePattern(pattern, { classify = defaultClassify, tiers = activeTiers(), repoRoot = null, homeDir = null, env = process.env } = {}) {
   if (typeof pattern !== 'string') return refused('invalid_pattern', RULE_COPY.invalid)
   const text = pattern.trim()
   if (!text || text !== pattern || text.length > 1000 || /[\u0000-\u001f\u007f]/.test(text)) return refused('invalid_pattern', RULE_COPY.invalid)
+  const ctx = { ...deckContext({ env, homeDir }), env }
   const call = /^([A-Za-z][A-Za-z0-9_]*)\((.*)\)$/s.exec(text)
   if (!call) {
     if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(text)) return refused('invalid_pattern', RULE_COPY.invalid)
@@ -348,30 +565,23 @@ export function validatePattern(pattern, { classify = defaultClassify, tiers = a
       if (!tool) {
         // A server-wide rule reaches any tool of the server, so any Destructive MCP entry that can match a tool of it refuses it.
         const reach = (tiers?.entries ?? []).some(entry => entry?.tier === 'destructive' && typeof entry.tool === 'string' && entry.tool.startsWith('mcp__') && toolGlob(entry.tool).test(`${text}__x_delete_x`))
-        if (reach || namesControl(text)) return refused('destructive_rule', RULE_COPY.destructive)
+        if (reach || namesControl(text, ctx)) return refused('destructive_rule', RULE_COPY.destructive)
         return { ok: true, pattern: text, tool: text, tier: 'caution', warning: 'toolWide' }
       }
       const result = classify({ toolName: text, toolInput: {}, tiers })
-      if (result.tier === 'destructive' || namesControl(text)) return refused('destructive_rule', RULE_COPY.destructive)
+      if (result.tier === 'destructive' || namesControl(text, ctx)) return refused('destructive_rule', RULE_COPY.destructive)
       return { ok: true, pattern: text, tool: text, tier: result.tier, warning: null }
     }
     return { ok: true, pattern: text, tool: text, tier: 'caution', warning: 'toolWide' }
   }
   const [, tool, inner] = call
-  if (tool === 'Bash') return bashVerdict(text, inner, { classify, tiers, repoRoot })
-  if (FILE_TOOLS.has(tool)) return refused('invalid_pattern', RULE_COPY.invalid)
+  if (tool === 'Bash') return bashVerdict(text, inner, { classify, tiers, repoRoot, ctx })
+  if (PATH_TOOLS.has(tool)) return pathVerdict(tool, inner, { classify, tiers, repoRoot, ctx })
   if (tool === 'WebFetch') {
     const host = /^domain:([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)$/.exec(inner)?.[1]?.toLowerCase()
     if (!host || host.includes('..')) return refused('invalid_pattern', RULE_COPY.invalid)
     if (LOOPBACK_HOSTS.has(host) || /^127\./.test(host)) return refused('destructive_rule', RULE_COPY.destructive)
     const result = classify({ toolName: 'WebFetch', toolInput: { url: `https://${host}/` }, tiers })
-    if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
-    return { ok: true, pattern: text, tool, tier: result.tier, warning: null }
-  }
-  if (tool === 'Read') {
-    if (!inner.trim() || inner !== inner.trim()) return refused('invalid_pattern', RULE_COPY.invalid)
-    if (namesControl(inner)) return refused('destructive_rule', RULE_COPY.destructive)
-    const result = classify({ toolName: 'Read', toolInput: { file_path: inner.replace(/\/?\*.*$/, '') || '.' }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, tiers })
     if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
     return { ok: true, pattern: text, tool, tier: result.tier, warning: null }
   }

@@ -165,6 +165,45 @@ test('a change between read and rename restarts the write; a change on every att
   } finally { g.close() }
 })
 
+// Mutation run for this test: the backup moved back after the re-read compare in rewrite(); this test
+// failed.
+test('the backup is taken before the re-read compare, and a change landing after it restarts the write', async () => {
+  const h = harness('local-full.json')
+  try {
+    const dir = backupDir(h.state, h.repoId)
+    const seen = []
+    let calls = 0
+    const result = await h.write('Bash(cargo test:*)', {
+      beforeRename: () => {
+        seen.push(existsSync(dir) ? readdirSync(dir).length : 0)
+        if (++calls > 1) return
+        const data = read(h.file)
+        data.permissions.allow.push('Bash(go test:*)')
+        writeFileSync(h.file, `${JSON.stringify(data, null, 2)}\n`)
+      }
+    })
+    // Each attempt had its backup on disk when the concurrent writer ran; the stale one is dropped.
+    assert.deepEqual(seen, [1, 1])
+    assert.deepEqual(read(h.file).permissions.allow, ['Bash(cargo check:*)', 'WebFetch(domain:docs.rs)', 'Bash(go test:*)', 'Bash(cargo test:*)'])
+    assert.equal(readdirSync(dir).length, 1)
+    assert.ok(readFileSync(result.backupPath, 'utf8').includes('Bash(go test:*)'))
+  } finally { h.close() }
+})
+
+// Mutation run for this test: the uid comparison removed from readSettings; this test failed.
+test('a settings file owned by another user is refused and left unchanged', async () => {
+  const h = harness('local-full.json')
+  const getuid = process.getuid
+  try {
+    process.getuid = () => getuid.call(process) + 1
+    await rejects(h.write('Bash(cargo test:*)'), 'settings_io_failed', /^not a regular file$/)
+    await rejects(Promise.resolve().then(() => h.revoke('Bash(cargo check:*)')), 'settings_io_failed', /^not a regular file$/)
+    process.getuid = getuid
+    assert.deepEqual(readFileSync(h.file), fixture('local-full.json'))
+    assert.equal(existsSync(path.join(h.state, 'backups')), false)
+  } finally { process.getuid = getuid; h.close() }
+})
+
 // Mutation run for this test: the BACKUPS_KEPT pruning removed from backup(); this test failed.
 test('a backup of the previous bytes appears (0600) and the 21st write keeps 20', async () => {
   const h = harness('local-full.json')

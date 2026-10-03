@@ -5,8 +5,9 @@ import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { openDeckDb } from '../../../server/db/index.mjs'
-import { classify, hooksPathCache } from '../../../server/approvals/tiers.mjs'
-import { canonicalPattern, RULE_COPY, samePattern, validatePattern, writeRule } from '../../../server/approvals/rules.mjs'
+import { classify, DEFAULT_TIERS, hooksPathCache } from '../../../server/approvals/tiers.mjs'
+import { setupPaths } from '../../../server/setup/paths.mjs'
+import { canonicalPattern, FLOOR_PROBE_EXEMPT, floorProbes, listRules, probeReaches, PERSISTENCE_DIRS, PERSISTENCE_FILES, RULE_COPY, samePattern, validatePattern, writeRule } from '../../../server/approvals/rules.mjs'
 
 // Pattern validation for rules (07-approvals 7.3, F13, D-76, D-86).
 
@@ -101,4 +102,120 @@ test('a suggestion written for npm run test:unit writes exactly Bash(npm run tes
     await writeRule(store, { repoId, pattern: classified.ruleCandidate, source: 'suggested', stateDir: path.join(root, 'state'), at: 1, gitRead: async () => null })
     assert.deepEqual(JSON.parse(readFileSync(path.join(repoId, '.claude', 'settings.local.json'), 'utf8')), { permissions: { allow: ['Bash(npm run test:unit)'] } })
   } finally { store.close(); rmSync(root, { recursive: true, force: true }) }
+})
+
+// Fix round 1 (phase 5 reviews). A home and a repo of their own, so the deck controls are known paths.
+function sandbox() {
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-rules-floors-'))
+  const home = path.join(root, 'home')
+  const repo = path.join(home, 'dev', 'rustot')
+  mkdirSync(repo, { recursive: true })
+  git(repo, ['init', '-q'])
+  const repoRoot = realpathSync(repo)
+  const homeDir = realpathSync(home)
+  const options = { repoRoot, homeDir, env: { HOME: homeDir } }
+  return { root, homeDir, repoRoot, options, settle: () => hooksPathCache.load(repoRoot, homeDir), close: () => rmSync(root, { recursive: true, force: true }) }
+}
+
+// Mutation run for this test: the protected-root check removed from pathVerdict (only the text match
+// kept, as before this fix); this test failed.
+test('a Read or file-tool glob whose root is, holds or lies inside a deck control or protected path is refused', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    const home = s.homeDir
+    for (const pattern of ['Read(~/**)', 'Read(~/.local/state/**)', `Read(/${home}/.local/**)`, 'Read(/**)', 'Edit(~/.config/**)',
+      'Read(~/.local/state/fleetmates/deck/token)', 'Read(.git/**)', 'Read(**)', 'Read(.claude/settings.json)', 'Read(~/.claude/**)',
+      'Read(~/.bashrc)', 'Write(~/.config/hypr/**)', 'Read(../**)', 'Read(~)', `Read(/${s.repoRoot}/.git/config)`, 'Read(sub/.git/**)', 'Read(/.claude/settings.local.json)']) {
+      assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
+    }
+    const src = validatePattern('Read(src/**)', s.options)
+    assert.equal(src.ok, true)
+    assert.equal(validatePattern('Read(~/notes/**)', s.options).ok, true)
+    // A file-tool rule that reaches nothing protected stays outside the accepted syntax.
+    assert.equal(validatePattern('Edit(src/**)', s.options).code, 'invalid_pattern')
+  } finally { s.close() }
+})
+
+// Mutation run for this test: the floor probes removed from bashVerdict; this test failed.
+test('a Bash prefix whose arguments can reach a Destructive floor is refused; npm test stays accepted', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    for (const pattern of ['Bash(git config:*)', 'Bash(cp:*)', 'Bash(mv:*)', 'Bash(tee:*)', 'Bash(git config --global:*)', 'Bash(cp -r:*)']) {
+      assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
+    }
+    for (const pattern of ['Bash(npm test:*)', 'Bash(cargo test:*)', 'Bash(git status:*)', 'Bash(git fetch:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
+  } finally { s.close() }
+})
+
+// Every Destructive floor tiers.mjs can emit has a probe, or a stated reason why none is needed, so a
+// new floor fails here until it is covered. Comments are stripped before the ids are read.
+test('the floor probes cover every Destructive floor of tiers.mjs and each probe reaches its floor', async () => {
+  const source = readFileSync(new URL('../../../server/approvals/tiers.mjs', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  const floors = [...new Set([...source.matchAll(/reason\('(floor\.[a-z0-9-]+)', 'destructive'/g)].map(match => match[1]))].sort()
+  assert.ok(floors.length >= 9, floors.join(','))
+  const s = sandbox()
+  try {
+    await s.settle()
+    const probes = floorProbes(s.options)
+    for (const floor of floors) assert.ok(probes.some(probe => probe.floor === floor) || Object.hasOwn(FLOOR_PROBE_EXEMPT, floor), `no probe for ${floor}`)
+    const paths = setupPaths(s.options.env)
+    const deckPaths = { config: paths.config, state: paths.state, runtime: paths.runtime, token: paths.token, port: 47800 }
+    const run = command => classify({ toolName: 'Bash', toolInput: { command }, cwd: s.repoRoot, repoRoot: s.repoRoot, homeDir: s.homeDir, deckPaths })
+    for (const probe of probes) {
+      // The carrier reaches the probe's floor, and the argument text alone (`true <args>`) does not.
+      const result = run(`${probe.carrier} ${probe.args}`)
+      const baseline = run(`true ${probe.args}`)
+      assert.ok(result.reasons.some(item => item.entryId === probe.floor && item.tier === 'destructive'), `${probe.carrier} ${probe.args} -> ${result.reasons.map(item => item.entryId)}`)
+      assert.equal(probeReaches(run, probe.carrier, probe.args), true, `${probe.carrier} ${probe.args} vs ${baseline.reasons.map(item => item.entryId)}`)
+    }
+  } finally { s.close() }
+})
+
+test('the persistence lists match the floor lists in tiers.mjs', () => {
+  const source = readFileSync(new URL('../../../server/approvals/tiers.mjs', import.meta.url), 'utf8')
+  const list = name => JSON.parse(new RegExp(`const ${name} = Object\\.freeze\\((\\[[^\\]]*\\])\\)`).exec(source)[1].replace(/'/g, '"'))
+  assert.deepEqual([...PERSISTENCE_FILES], list('PERSISTENCE_FILES'))
+  assert.deepEqual([...PERSISTENCE_DIRS], list('PERSISTENCE_DIRS'))
+})
+
+// Mutation runs for this test: `own` forced to false in bashVerdict, and separately the word list
+// applied to Safe entry rules again; this test failed for each.
+test('every Safe tiers rule validates ok with tier safe and lists with destructive false', async () => {
+  const s = sandbox()
+  const store = openDeckDb(path.join(s.root, 'state', 'deck.db'))
+  try {
+    await s.settle()
+    // ruff check and terraform fmt rewrite the paths they are given (tiers.mjs OPERAND_WRITERS), so
+    // `ruff check <path>` and `terraform fmt <path>` reach the git-dir, Claude settings and
+    // persistence floors: their prefix rules fail the floor probes and stay refused.
+    const probeRefused = ['Bash(ruff check:*)', 'Bash(terraform fmt:*)']
+    for (const rule of probeRefused) assert.equal(validatePattern(rule, s.options).code, 'destructive_rule', rule)
+    const rules = DEFAULT_TIERS.entries.filter(entry => entry.tier === 'safe' && typeof entry.rule === 'string' && !entry.rule.includes('{') && !probeRefused.includes(entry.rule))
+    assert.ok(rules.some(entry => entry.rule === 'Bash(node --test:*)'))
+    assert.ok(rules.some(entry => entry.rule === 'Bash(python -m pytest:*)'))
+    for (const { rule } of rules) {
+      const verdict = validatePattern(rule, s.options)
+      assert.deepEqual({ ok: verdict.ok, tier: verdict.tier }, { ok: true, tier: 'safe' }, rule)
+    }
+    store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', s.repoRoot, 'rustot', 0, 0, 'rustot', 1)
+    mkdirSync(path.join(s.repoRoot, '.claude'))
+    writeFileSync(path.join(s.repoRoot, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: rules.map(entry => entry.rule) } }))
+    const listed = listRules(store, s.repoRoot, { at: 1 })
+    assert.equal(listed.rules.length, rules.length)
+    for (const rule of listed.rules) assert.equal(rule.destructive, false, rule.pattern)
+  } finally { store.close(); s.close() }
+})
+
+// Mutation run for this test: the npm and pnpm option scan reverted to looking at words[1] only; this
+// test failed.
+test('an npm or pnpm prefix with options before run, or a pnpm prefix naming a script, is refused', () => {
+  for (const pattern of ['Bash(npm -s run test:*)', 'Bash(pnpm --silent run test:*)', 'Bash(npm --prefix . run build:*)', 'Bash(pnpm -C . run build:*)', 'Bash(pnpm build:*)', 'Bash(pnpm test:*)', 'Bash(npm rum test:*)', 'Bash(pnpm -s:*)']) {
+    assert.deepEqual(validatePattern(pattern), { ok: false, code: 'invalid_pattern', message: 'Script rules name one script exactly.' }, pattern)
+  }
+  assert.equal(validatePattern('Bash(npm run test)').ok, true)
+  assert.equal(validatePattern('Bash(npm -s run test)').ok, true)
+  assert.equal(validatePattern('Bash(npm test:*)').ok, true)
+  assert.equal(validatePattern('Bash(pnpm ls:*)').ok, true)
 })
