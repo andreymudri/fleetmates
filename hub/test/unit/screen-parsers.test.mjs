@@ -222,6 +222,7 @@ test('long near-miss rows for every screen pattern parse fast', async () => {
       ' '.repeat(W) + tail, // RIGHT_ALIGNED
       '✻ ' + a + tail, // SPINNER
       'Esc to cance'.repeat(W / 12) + tail, // FOOTER
+      '❯ 1. ' + '(esc)'.repeat(W / 5) + tail, // ESC_OPTION
       'Yes, I trus'.repeat(W / 11) + tail // trust label
     )
   }
@@ -344,3 +345,53 @@ test('a box printed above a live input box is transcript, not a prompt', () => {
 test('known limit: a box whose top edge is off screen is not a prompt', () => {
   assert.equal(parseScreen([' Do you want?', ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel'], { x: 1, y: 1 }).prompt, null)
 })
+
+test('a permission box that ends on its "(esc)" deny option parses without a footer', () => {
+  const box = [
+    '● Fetch(https://example.com)',
+    '',
+    RULE,
+    ' Fetch',
+    '',
+    ' Do you want to allow Claude to fetch this content?',
+    ' ❯ 1. Yes',
+    "   2. Yes, and don't ask again for example.com",
+    '   3. No, and tell Claude what to do differently (esc)'
+  ]
+  assert.deepEqual(parseScreen(box, { x: 1, y: 6 }).prompt?.options.map((o) => o.key), ['1', '2', '3'])
+  // Drawn only up to option 2: the "(esc)" option that closes the box is not visible yet.
+  assert.equal(parseScreen(box.slice(0, 8), { x: 1, y: 6 }).prompt, null)
+  // The same box above a live input box is transcript, not a prompt.
+  const above = [...box, '', RULE, '❯ ', RULE]
+  assert.equal(parseScreen(above, { x: 2, y: above.length - 2 }).prompt, null)
+})
+
+/** The 2.1.285 frames that part (a) of Task 19 captured, each with its .expect.json. */
+const FRAMES_2_1_285 = [
+  'compacting', 'idle-input', 'permission-2', 'permission-bash-long', 'permission-edit', 'permission-webfetch',
+  'permission-write', 'question-options', 'question-text', 'spinner', 'tool-output', 'trust-folder'
+]
+
+for (const name of FRAMES_2_1_285) {
+  test(`2.1.285 ${name}: prompt kind, option keys and labels, and the deny option match the expectation`, async () => {
+    const dir = path.join(fixturesDir, 'screens', '2.1.285')
+    const manifest = JSON.parse(readFileSync(path.join(fixturesDir, 'hooks', '2.1.285', 'MANIFEST.json'), 'utf8'))
+    const expected = JSON.parse(readFileSync(path.join(dir, `${name}.expect.json`), 'utf8')).prompt
+    const model = new ScreenModel(manifest.size)
+    let parsed
+    try {
+      model.write(readFileSync(path.join(dir, `${name}.ansi`)))
+      await model.flush()
+      parsed = parseScreen(model.lines(), model.cursor()).prompt
+    } finally {
+      model.dispose()
+    }
+    assert.equal(parsed?.kind ?? null, expected?.kind ?? null, 'prompt kind')
+    const pairs = (/** @type {any} */ p) => p?.options.map((/** @type {any} */ o) => [o.key, o.label]) ?? null
+    assert.deepEqual(pairs(parsed), pairs(expected), 'option keys and labels')
+    if (expected?.kind === 'permission') {
+      const deny = parsed?.options.filter((o) => /^No\b/.test(o.label)) ?? []
+      assert.deepEqual(deny.map((o) => o.key), [expected.options[expected.options.length - 1].key], 'one deny option, the last one, starting with "No"')
+    }
+  })
+}

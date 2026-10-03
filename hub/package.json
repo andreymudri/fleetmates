@@ -33,7 +33,7 @@
     "CHANGELOG.md"
   ],
   "fleetmatesDeck": {
-    "testedClaudeCode": "2.1.282"
+    "testedClaudeCode": "2.1.285"
   },
   "scripts": {
     "build": "vite build --config web/vite.config.mjs",

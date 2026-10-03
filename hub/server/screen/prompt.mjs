@@ -1,6 +1,7 @@
 // Permission, question and trust prompt boxes on a rendered Claude Code
 // screen (docs/deck/04-integrations.md 2.3). Written against the 2.1.282
-// frames in hub/test/fixtures/screens/2.1.282/.
+// frames in hub/test/fixtures/screens/2.1.282/ and checked against the
+// 2.1.285 frames in hub/test/fixtures/screens/2.1.285/.
 //
 // Known limit: a box whose top edge has scrolled off the screen parses as
 // no prompt (`null`). Whether real Claude Code ever draws such a box is
@@ -28,6 +29,15 @@ const NUMBERED = /^(❯ *)?(\d+)\. +(\S.*)$/
 const SELECTED = /^❯ +(\S.*)$/
 /** Every complete 2.1.282 prompt box ends with a hint row naming Esc. */
 const FOOTER = /Esc to cancel/
+/**
+ * A deny option labelled with its Esc shortcut, "No, and tell Claude what to
+ * do differently (esc)". The 2.1.285 WebFetch frame ends on this option, the
+ * last of its box, with no footer row below it; it is the only captured frame
+ * whose box carries no footer. That the `(esc)` option is always the last
+ * one is an assumption read from the captured and hand-written boxes, not
+ * something Claude Code documents.
+ */
+const ESC_OPTION = /\(esc\)$/
 /** A row that separates paragraphs inside a box. */
 const SEPARATOR = /^[─╌]+$/
 /** The tab header of an AskUserQuestion box. */
@@ -35,10 +45,13 @@ const QUESTION_TAB = /[☐☒]/
 
 /**
  * Find the prompt box on screen. Returns `null` when there is none, or when
- * its footer is not visible (a box cut off at the bottom is never returned
- * as a partial option list), or when the cursor sits in an input box below
- * the footer (a real prompt box replaces the input box, so a box above a
- * live input box is transcript text).
+ * its end is not visible (a box cut off at the bottom is never returned as
+ * a partial option list), or when the cursor sits in an input box below
+ * that end (a real prompt box replaces the input box, so a box above a live
+ * input box is transcript text). The end is the footer row below the
+ * options, or else the last option itself when its label ends in `(esc)`
+ * (ESC_OPTION): a box drawn only part way down, before that option, still
+ * parses as `null`.
  * @param {string[]} lines rendered rows
  * @param {{ x: number, y: number }} [cursor]
  * @returns {Prompt | null}
@@ -50,10 +63,13 @@ export function parsePrompt (lines, cursor) {
   const { rows, options } = found
   const first = rows[0]
   const last = rows[rows.length - 1]
-  let footer = last + 1
-  while (footer < trimmed.length && !FOOTER.test(trimmed[footer])) footer++
-  if (footer === trimmed.length) return null
-  if (cursor && inputRow(lines, cursor) > footer) return null
+  let end = last + 1
+  while (end < trimmed.length && !FOOTER.test(trimmed[end])) end++
+  if (end === trimmed.length) {
+    if (!ESC_OPTION.test(options[options.length - 1].label)) return null
+    end = last
+  }
+  if (cursor && inputRow(lines, cursor) > end) return null
   // The box top is the nearest `─` rule above the FIRST option, so a rule
   // inside the box (AskUserQuestion draws one above "Chat about this") is
   // never mistaken for it.

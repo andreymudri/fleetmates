@@ -1,0 +1,18 @@
+{
+  "prompt": {
+    "kind": "permission",
+    "question": "Do you want to proceed?",
+    "options": [
+      {
+        "key": "1",
+        "label": "Yes"
+      },
+      {
+        "key": "2",
+        "label": "No"
+      }
+    ]
+  },
+  "idle": false,
+  "statusRows": []
+}
