@@ -820,15 +820,21 @@ test('a write into the real target of a linked execution-config entry or the cor
 // D-92: a real git for the core.hooksPath tests, run with the sandbox home, no system config and the
 // XDG_CONFIG_HOME the classifier's own git call sees.
 const gitIn = (dir, home, ...args) => execFileSync('git', args, { cwd: dir, env: { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', ...(process.env.XDG_CONFIG_HOME ? { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME } : {}) }, stdio: 'pipe', timeout: 10000 })
-async function withXdg(value, fn) {
-  const saved = process.env.XDG_CONFIG_HOME
-  if (value === undefined) delete process.env.XDG_CONFIG_HOME
-  else process.env.XDG_CONFIG_HOME = value
-  try { return await fn() } finally {
-    if (saved === undefined) delete process.env.XDG_CONFIG_HOME
-    else process.env.XDG_CONFIG_HOME = saved
+// Run `fn` with environment variables set (undefined deletes one), and the config-location variables
+// the hooksPath reads pass through pinned: no global override and an empty system config.
+async function withEnv(vars, fn) {
+  const all = { GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_GLOBAL: undefined, GIT_CONFIG_NOSYSTEM: undefined, ...vars }
+  const saved = Object.fromEntries(Object.keys(all).map(name => [name, process.env[name]]))
+  const apply = values => {
+    for (const [name, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
   }
+  apply(all)
+  try { return await fn() } finally { apply(saved) }
 }
+const withXdg = (value, fn) => withEnv({ XDG_CONFIG_HOME: value }, fn)
 const hooksSandbox = () => {
   const s = sandbox()
   gitIn(s.repo, s.home, 'init', '-q')
@@ -836,10 +842,11 @@ const hooksSandbox = () => {
   return { ...s, at, write: (file, extra) => s.run('Write', { file_path: file, content: 'x' }, extra), settle: (root = s.repo) => hooksPathCache.load(root, s.home) }
 }
 
-// D-92 (a): the read-only git helper allows exactly the classifier's hooksPath read and no other
-// multi-value or listing config read.
-test('the git helper allows exactly `config --type=path --get-all core.hooksPath` beyond the single-value reads (D-92 (a))', () => {
+// D-92 (a): the read-only git helper allows exactly the classifier's two hooksPath reads and no
+// other multi-value or listing config read.
+test('the git helper allows exactly the two hooksPath config reads beyond the single-value reads (D-92 (a))', () => {
   assert.equal(allowedCommand(['config', '--type=path', '--get-all', 'core.hooksPath']), true)
+  assert.equal(allowedCommand(['config', '--null', '--show-origin', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$']), true)
   for (const args of [
     ['config', '--get-all', 'core.hooksPath'],
     ['config', '--get-all', '--type=path', 'core.hooksPath'],
@@ -849,7 +856,11 @@ test('the git helper allows exactly `config --type=path --get-all core.hooksPath
     ['config', '--type=path', '--get-all', '--show-origin', 'core.hooksPath'],
     ['config', '--type=path', '--get-regexp', 'core.hooksPath'],
     ['config', '--type=path', '--list'],
-    ['config', '--get-all', 'core.hooksPath', '--type=path']
+    ['config', '--get-all', 'core.hooksPath', '--type=path'],
+    ['config', '--null', '--show-origin', '--get-regexp', '.'],
+    ['config', '--null', '--show-origin', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$', 'x'],
+    ['config', '--show-origin', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$'],
+    ['config', '--null', '--show-origin', '--list']
   ]) assert.equal(allowedCommand(args), false, args.join(' '))
   // The single-value reads allowed before stay allowed.
   assert.equal(allowedCommand(['config', '--get', 'user.name']), true)
@@ -875,12 +886,13 @@ test('core.hooksPath is read through git, so every form git honours protects its
       assert.deepEqual(await s.settle(), [s.at('h1')])
       expectTier(s.write('h1/pre-commit'), 'caution', 'file.execution-config', 'hooksPath in .git/config')
       expectTier(s.write('h1x/pre-commit'), 'safe', null, 'a sibling of the hooks directory')
-      // :(optional): git drops the prefix, and drops the value when the path does not exist.
+      // :(optional): git drops the prefix, and drops the value when the path does not exist; the raw
+      // read keeps that value too, since creating the directory makes git use it.
       gitIn(s.repo, s.home, 'config', '--unset-all', 'core.hooksPath')
       mkdirSync(s.at('h2'))
       gitIn(s.repo, s.home, 'config', '--add', 'core.hooksPath', ':(optional)h2')
       gitIn(s.repo, s.home, 'config', '--add', 'core.hooksPath', ':(optional)~/missing')
-      assert.deepEqual(await s.settle(), [s.at('h2')])
+      assert.deepEqual(await s.settle(), [s.at('h2'), path.join(s.home, 'missing')])
       expectTier(s.write('h2/pre-commit'), 'caution', 'file.execution-config', ':(optional) prefix')
       // include.path relative to the including file, and a `~/` include.
       gitIn(s.repo, s.home, 'config', '--unset-all', 'core.hooksPath')
@@ -960,6 +972,142 @@ test('a changed git config is read again: the old directory and every hooks name
       assert.deepEqual(await s.settle(), [s.at('r3'), s.at('r2')])
     } finally { s.close() }
   })
+})
+
+// D-92 round 1: a config file git reads through include or includeIf is a protected target and
+// part of the cache key, so the sequence the security review ran (include.path -> an in-repo
+// config/git.conf, a write that sets hooksPath there, then a hook write) is Caution at each step.
+test('an include target is protected and keyed, so setting hooksPath through it never leaves a hook write Safe (D-92 (a))', async () => {
+  await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+    const s = hooksSandbox()
+    try {
+      mkdirSync(s.at('config'))
+      writeFileSync(s.at('config', 'git.conf'), '')
+      writeFileSync(s.at('config', 'nested.conf'), '')
+      gitIn(s.repo, s.home, 'config', 'include.path', '../config/git.conf')
+      assert.deepEqual(await s.settle(), [])
+      expectTier(s.write('config/git.conf'), 'caution', 'file.execution-config', 'the include target')
+      expectTier(s.write('config/other.conf'), 'safe', null, 'a sibling of the include target')
+      writeFileSync(s.at('config', 'git.conf'), '[core]\n\thooksPath = tools/newhooks\n')
+      expectTier(s.write('tools/newhooks/pre-commit'), 'caution', 'file.execution-config', 'the hook right after the include edit')
+      expectTier(s.write('src/a.txt'), 'caution', 'file.execution-config', 'any write while the changed config is unread')
+      await new Promise(resolve => setTimeout(resolve, 2500))
+      expectTier(s.write('tools/newhooks/pre-commit'), 'caution', 'file.execution-config', 'the hook after 2.5 s idle')
+      assert.deepEqual(await s.settle(), [s.at('tools', 'newhooks')])
+      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write once the read is current')
+      // A nested include, named only inside the included file, is protected and keyed too.
+      writeFileSync(s.at('config', 'git.conf'), '[include]\n\tpath = nested.conf\n')
+      assert.deepEqual(await s.settle(), [])
+      expectTier(s.write('config/nested.conf'), 'caution', 'file.execution-config', 'the nested include target')
+      writeFileSync(s.at('config', 'nested.conf'), '[core]\n\thooksPath = tools/deep\n')
+      expectTier(s.write('tools/deep/pre-commit'), 'caution', 'file.execution-config', 'the hook right after the nested include edit')
+      assert.deepEqual(await s.settle(), [s.at('tools', 'deep')])
+      // An includeIf target is protected whether or not its condition matches.
+      writeFileSync(path.join(s.home, '.gitconfig'), `[includeIf "gitdir:${path.join(s.root, 'elsewhere')}/"]\n\tpath = ${s.at('config', 'cond.conf')}\n`)
+      await s.settle()
+      expectTier(s.write('config/cond.conf'), 'caution', 'file.execution-config', 'an includeIf target')
+    } finally { s.close() }
+  })
+})
+
+// D-92 round 1: a read older than HOOKS_PATH_TTL_MS is not current. Until the re-read lands, the
+// old values and every hooks name stay protected (an includeIf condition such as onbranch can
+// change what git reads without any keyed file changing).
+test('a read older than the TTL is not current: hooks names are Caution again until the re-read lands (D-92 (a))', async () => {
+  await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+    const s = hooksSandbox()
+    try {
+      gitIn(s.repo, s.home, 'config', 'core.hooksPath', 'r1')
+      assert.deepEqual(await s.settle(), [s.at('r1')])
+      expectTier(s.write('lib/hooks/x.js'), 'safe', null, 'a hooks name while the read is current')
+      await new Promise(resolve => setTimeout(resolve, 2100))
+      expectTier(s.write('lib/hooks/x.js'), 'caution', 'file.execution-config', 'a hooks name once the TTL passed')
+      expectTier(s.write('r1/pre-commit'), 'caution', 'file.execution-config', 'the old value once the TTL passed')
+      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write once the TTL passed')
+      assert.deepEqual(await s.settle(), [s.at('r1')])
+      expectTier(s.write('lib/hooks/x.js'), 'safe', null, 'a hooks name after the re-read')
+    } finally { s.close() }
+  })
+})
+
+// D-92 round 1: a read that fails (here git cannot parse an included file) never completes. Before
+// any completed read only the hooks names are protected; after one, every write in the repo is.
+test('a failed hooksPath read never counts as complete (D-92 (a))', async () => {
+  await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+    const first = hooksSandbox()
+    const later = hooksSandbox()
+    try {
+      for (const s of [first, later]) {
+        mkdirSync(s.at('conf'))
+        gitIn(s.repo, s.home, 'config', 'include.path', '../conf/inc')
+      }
+      writeFileSync(first.at('conf', 'inc'), '[core\n')
+      assert.deepEqual(await first.settle(), [])
+      expectTier(first.write('tools/hooks/pre-commit'), 'caution', 'file.execution-config', 'a hooks name after a failed first read')
+      expectTier(first.write('src/a.txt'), 'safe', null, 'an ordinary write after a failed first read')
+      writeFileSync(later.at('conf', 'inc'), '[core]\n\thooksPath = r1\n')
+      assert.deepEqual(await later.settle(), [later.at('r1')])
+      writeFileSync(later.at('conf', 'inc'), '[core\n')
+      assert.deepEqual(await later.settle(), [later.at('r1')])
+      expectTier(later.write('r1/pre-commit'), 'caution', 'file.execution-config', 'the old value after a failed re-read')
+      expectTier(later.write('tools/hooks/pre-commit'), 'caution', 'file.execution-config', 'a hooks name after a failed re-read')
+      expectTier(later.write('src/a.txt'), 'caution', 'file.execution-config', 'any write after a failed re-read')
+    } finally {
+      first.close()
+      later.close()
+    }
+  })
+})
+
+// D-92 round 1: git drops an `:(optional)` value whose directory does not exist, but creating the
+// directory makes git use it, so the raw value is protected too.
+test('an :(optional) hooksPath whose directory does not exist yet is protected (D-92 (a))', async () => {
+  await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+    const s = hooksSandbox()
+    try {
+      gitIn(s.repo, s.home, 'config', 'core.hooksPath', ':(optional)tools/ci')
+      assert.deepEqual(await s.settle(), [s.at('tools', 'ci')])
+      expectTier(s.write('tools/ci/pre-commit'), 'caution', 'file.execution-config', 'the missing optional directory')
+      expectTier(s.write('tools/other/x'), 'safe', null, 'a sibling')
+    } finally { s.close() }
+  })
+})
+
+// D-92 round 1: the hooksPath reads honour the system config the user's git reads, here through
+// GIT_CONFIG_SYSTEM, which the reads (and no other helper command) take from the server's
+// environment.
+test('a core.hooksPath from the system config is protected (D-92 (a))', async () => {
+  const s = hooksSandbox()
+  const system = path.join(s.root, 'system.cfg')
+  writeFileSync(system, '[core]\n\thooksPath = tools/h\n')
+  try {
+    await withEnv({ XDG_CONFIG_HOME: undefined, GIT_CONFIG_SYSTEM: system }, async () => {
+      assert.deepEqual(await s.settle(), [s.at('tools', 'h')])
+      expectTier(s.write('tools/h/pre-commit'), 'caution', 'file.execution-config', 'the system hooksPath')
+    })
+  } finally { s.close() }
+})
+
+// D-92 (b) round 1: the common-dir half. Here the main repo's git dir was moved into its linked
+// worktree (`git init --separate-git-dir`), so the worktree's common dir lies inside the worktree
+// while its git dir is only the worktrees/<name> entry below it; the main repo is not classified.
+test('a common dir inside the classified worktree is protected like .git (D-92 (b))', async () => {
+  const s = sandbox()
+  try {
+    const main = path.join(s.root, 'main')
+    const wt = path.join(s.root, 'wt')
+    mkdirSync(main)
+    gitIn(main, s.home, 'init', '-q')
+    gitIn(main, s.home, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'x')
+    gitIn(main, s.home, 'worktree', 'add', '-q', wt)
+    gitIn(main, s.home, 'init', '-q', `--separate-git-dir=${path.join(wt, 'gd')}`)
+    assert.equal(readFileSync(path.join(wt, '.git'), 'utf8').trim(), `gitdir: ${path.join(wt, 'gd', 'worktrees', 'wt')}`)
+    const inTree = (file, tool = 'Write') => classify({ toolName: tool, toolInput: { file_path: file, content: 'x' }, cwd: wt, repoRoot: wt, homeDir: s.home, deckPaths: s.deckPaths })
+    expectTier(inTree('gd/config'), 'destructive', 'floor.git-dir', 'the common dir config')
+    expectTier(inTree('gd/hooks/pre-commit'), 'destructive', 'floor.git-dir', 'a hook in the common dir')
+    expectTier(inTree('gd/worktrees/wt/HEAD'), 'destructive', 'floor.git-dir', 'the worktree git dir')
+    expectTier(inTree('notes.txt'), 'safe', null, 'an ordinary worktree file')
+  } finally { s.close() }
 })
 
 // D-92 (b): a `.git` file names a git dir (and through its commondir, a common dir); when either

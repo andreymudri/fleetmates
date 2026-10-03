@@ -39,6 +39,23 @@ export function gitEnv(source = process.env) {
   return { ...env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_ASKPASS: '/bin/false', GIT_ATTR_NOSYSTEM: '1' }
 }
 
+/**
+ * The two config reads of the classifier's core.hooksPath cache (D-92 (a)), the only multi-value
+ * config reads `allowedCommand` accepts, each exactly as written: the values git applies, and every
+ * raw hooksPath, include.path and includeIf.*.path value with the file it came from.
+ */
+export const HOOKS_PATH_READS = Object.freeze([
+  Object.freeze(['config', '--type=path', '--get-all', 'core.hooksPath']),
+  Object.freeze(['config', '--null', '--show-origin', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$'])
+])
+/**
+ * The config-location variables the user's own git honours. The HOOKS_PATH_READS, and no other
+ * command, get them from the server's environment and read the system config, so they see the
+ * hooksPath the user's git applies.
+ */
+export const HOOKS_PATH_ENV = Object.freeze(['GIT_CONFIG_SYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM'])
+const isHooksPathRead = args => HOOKS_PATH_READS.some(form => form.length === args.length && form.every((word, k) => args[k] === word))
+
 /** Words before `--` (the options and revisions; pathspecs come after `--`). */
 function options(args) {
   const end = args.indexOf('--')
@@ -83,8 +100,8 @@ export function allowedCommand(args) {
     case 'worktree':
       return rest[0] === 'list'
     case 'config':
-      // D-92 (a): the one multi-value read, the classifier's core.hooksPath lookup, exactly as written.
-      if (rest.length === 3 && rest[0] === '--type=path' && rest[1] === '--get-all' && rest[2] === 'core.hooksPath') return true
+      // D-92 (a): the classifier's two core.hooksPath reads, exactly as written.
+      if (isHooksPathRead(args)) return true
       return words.includes('--get') && words.every(word => ['--get', '--bool', '--type=bool', '--null', '-z'].includes(word) || !word.startsWith('-'))
     case 'diff':
       return ['--no-index', '--no-ext-diff', '--no-textconv'].every(word => words.includes(word))
@@ -101,6 +118,7 @@ export function allowedCommand(args) {
  * caller can read `git diff --no-index` exit 1 as "differences"; resolves null when git could not start,
  * timed out, was killed or wrote more than `maxBuffer` bytes. It never rejects. `home`, an absolute
  * path, replaces `HOME` in the child's environment, so the global config git reads is that home's.
+ * The HOOKS_PATH_READS run without `GIT_CONFIG_NOSYSTEM` and with the HOOKS_PATH_ENV variables.
  * @param {string} root working directory of the git call
  * @param {string[]} args git arguments after the safe flags
  * @param {{ timeoutMs?: number, maxBuffer?: number, input?: string|Buffer, home?: string }} [options]
@@ -108,7 +126,11 @@ export function allowedCommand(args) {
  */
 export function gitRead(root, args, { timeoutMs = 1500, maxBuffer = 1024 * 1024, input, home } = {}) {
   if (!allowedCommand(args)) return Promise.resolve(null)
-  const base = typeof home === 'string' && path.isAbsolute(home) ? { ...gitEnv(), HOME: home } : gitEnv()
+  const base = { ...gitEnv(), ...(typeof home === 'string' && path.isAbsolute(home) ? { HOME: home } : {}) }
+  if (isHooksPathRead(args)) {
+    delete base.GIT_CONFIG_NOSYSTEM
+    for (const name of HOOKS_PATH_ENV) if (typeof process.env[name] === 'string') base[name] = process.env[name]
+  }
   const env = args[0] === 'diff' ? { ...base, GIT_DIR: '/dev/null' } : base
   return new Promise(resolve => {
     let child
