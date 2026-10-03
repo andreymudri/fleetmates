@@ -339,7 +339,7 @@ test('initial focus is the first row\'s primary action, or its checkbox when the
   assert.equal(drawerFocusTarget(panelOf([down]), 'x').name, 'open-x', 'a row with every answer disabled falls back to Open')
 })
 
-test('Alt A and Alt D send nothing while deckd is down, the prompt is queued, an answer is in flight, or one did not land', async () => {
+test('Alt A and Alt D send nothing while deckd is down, the prompt is queued, an answer is in flight, one did not land, or no options were parsed', async () => {
   const blocked = [
     ['deckd outage flag', {}, state => ({ ...state, deckdOutage: true })],
     ['deckd health down', {}, state => ({ ...state, data: { ...state.data, health: [{ dep: 'deckd', state: 'down' }] } })],
@@ -347,7 +347,9 @@ test('Alt A and Alt D send nothing while deckd is down, the prompt is queued, an
     ['prompt queued', { screenMatch: 'queued' }],
     ['answer sending', { delivery: 'sending' }],
     ['answer verifying', { delivery: 'verifying' }],
-    ['answer did not land', { delivery: 'did_not_land' }]
+    ['answer did not land', { delivery: 'did_not_land' }],
+    ['no options parsed, deckd up', { options: [] }, state => ({ ...state, data: { ...state.data, health: [{ dep: 'deckd', state: 'up' }] } })],
+    ['options missing, deckd up', { options: undefined }, state => ({ ...state, data: { ...state.data, health: [{ dep: 'deckd', state: 'up' }] } })]
   ]
   for (const tier of ['safe', 'caution']) {
     for (const [why, extra, shape = state => state] of blocked) {
