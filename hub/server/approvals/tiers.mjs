@@ -81,6 +81,25 @@ const TEXT_COMMANDS = Object.freeze(['echo', 'printf'])
 // directory when they are given none; the tools are not run in this suite), so every path operand
 // is a write target.
 const OPERAND_WRITERS = Object.freeze(['terraform fmt', 'ruff check', 'ruff format', 'go fmt'])
+// D-89 (3): the formatter and fixer modes of Safe tools, keyed by command and subcommand. `writes`
+// tells the mode from the arguments after those two words. `named` tools rewrite only the files
+// they are given (a directory operand, or none, means every file under it, or under the working
+// directory); the others rewrite their whole package or crate whatever they are given. The modes
+// are taken from each tool's documentation (`ruff help`, `cargo fmt --help`, `go help fmt`,
+// `terraform fmt -help`, the eslint and prettier CLI docs); none of these tools is run here.
+const FIXERS = Object.freeze({
+  'ruff check': { named: true, writes: args => args.includes('--fix') && !args.includes('--diff') },
+  'ruff format': { named: true, writes: args => !args.includes('--check') && !args.includes('--diff') },
+  'terraform fmt': { named: true, writes: args => !args.includes('-check') && !args.includes('-write=false') },
+  'npx eslint': { named: true, writes: args => args.includes('--fix') },
+  'npx prettier': { named: true, writes: args => args.includes('--write') || args.includes('-w') },
+  'go fmt': { named: false, writes: args => !args.includes('-n') },
+  'cargo fmt': { named: false, writes: args => !args.includes('--check') }
+})
+// D-89 (3): runners and checkers that write caches, reports or build outputs into their working
+// directory or next to the paths they are given (pytest's .pytest_cache at its rootdir, coverage's
+// .coverage and htmlcov, mypy's .mypy_cache, ruff's .ruff_cache), by command word.
+const RUNNERS = Object.freeze(['pytest', 'python', 'python3', 'uv', 'mypy', 'ruff', 'black', 'pyright', 'cargo', 'go', 'gofmt', 'golangci-lint', 'staticcheck', 'npm', 'pnpm', 'yarn', 'node', 'npx', 'terraform'])
 const FILE_WRITE_TOOLS = Object.freeze(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 const GLOB_LIMIT = 1000
 const GLOB_VISIT_LIMIT = 20000
@@ -90,17 +109,22 @@ const GIT_SAFE_GLOBALS = Object.freeze(['--no-pager', '-P'])
 
 /** The sensitive list of 07-approvals 3.5 (F9), as written there. */
 export const SENSITIVE_PATHS = Object.freeze(['~/.ssh/**', '~/.gnupg/**', '~/.aws/**', '~/.config/gh/**', '~/.netrc', '**/.env', '**/.env.*', '~/.claude/.credentials.json', '~/.git-credentials', '~/.npmrc', '~/.pypirc', '~/.docker/config.json', '~/.kube/config', '~/.config/gcloud/**', '~/.password-store/**', '~/.local/share/keyrings/**', '*.pem', '**/id_* (not *.pub)', '**/.envrc'])
-/** The execution-config list of 07-approvals 3.5 (F4, D-80: not `.envrc`). */
-export const EXECUTION_CONFIG = Object.freeze(['.cargo/config*', 'build.rs', 'package.json', '.npmrc', '.yarnrc*', 'Makefile', 'justfile', 'conftest.py', 'pyproject.toml', 'setup.py', 'go.mod', '.husky/**', '.githooks/**', '.github/workflows/**', '.claude/commands/**', '.claude/agents/**', '.claude/skills/**'])
+/**
+ * The execution-config list of 07-approvals 3.5 (F4, D-80: not `.envrc`), with the alternate names
+ * and tool config files of D-89 (1).
+ */
+export const EXECUTION_CONFIG = Object.freeze(['.cargo/config*', 'build.rs', 'package.json', '.npmrc', '.yarnrc*', 'Makefile', 'GNUmakefile', 'BSDmakefile', 'justfile', '.justfile', 'conftest.py', 'pyproject.toml', 'pytest.ini', '.pytest.ini', 'tox.ini', 'setup.cfg', '.coveragerc', 'mypy.ini', '.mypy.ini', '.golangci.yml', '.golangci.yaml', '.golangci.toml', '.golangci.json', 'setup.py', 'go.mod', 'go.work','.husky/**', '.githooks/**', '.github/workflows/**', '.claude/commands/**', '.claude/agents/**', '.claude/skills/**'])
 
 const within = (target, root) => typeof target === 'string' && typeof root === 'string' && (target === root || target.startsWith(root.endsWith('/') ? root : `${root}/`))
 
 // Name checks compare folded text on every platform: a case-insensitive file system (the macOS
 // default) opens `.GIT/config` as `.git/config` and `.ENV` as `.env`, and HFS+ also ignores the
 // zero-width code points git's is_hfs_dotgit() skips. Repo scope is not folded, so a case variant
-// of the repo path reads as outside the repo, which only raises a tier.
+// of the repo path reads as outside the repo, which only raises a tier. D-89 (2): the text is
+// normalized with NFKC first, which maps U+017F (long s) to s and the st ligatures to st, as the
+// Unicode case folding of a casefold file system does; toLowerCase alone keeps them.
 const HFS_IGNORED = /[‌-‏‪-‮⁪-⁯﻿]/g
-const fold = text => String(text).replace(HFS_IGNORED, '').toLowerCase()
+const fold = text => String(text).replace(HFS_IGNORED, '').normalize('NFKC').replace(HFS_IGNORED, '').toLowerCase()
 const withinFolded = (target, root) => typeof target === 'string' && typeof root === 'string' && within(fold(target), fold(root))
 // `location` relative to `base`, both folded; null when it is not strictly below `base`.
 function relFolded(location, base) {
@@ -162,10 +186,12 @@ function isSensitive(location, home) {
   return ['.ssh', '.gnupg', '.aws', '.config/gh', '.config/gcloud', '.password-store', '.local/share/keyrings'].some(dir => rel === dir || rel.startsWith(`${dir}/`))
 }
 
+// The plain file names of the list, folded (the patterns are matched below).
+const EXECUTION_CONFIG_NAMES = Object.freeze(EXECUTION_CONFIG.filter(name => !/[*/]/.test(name)).map(name => name.toLowerCase()))
 function isExecutionConfig(rel) {
   const parts = fold(rel).split('/')
   const base = parts.at(-1)
-  if (['build.rs', 'package.json', '.npmrc', 'makefile', 'justfile', 'conftest.py', 'pyproject.toml', 'setup.py', 'go.mod'].includes(base) || base.startsWith('.yarnrc')) return true
+  if (EXECUTION_CONFIG_NAMES.includes(base) || base.startsWith('.yarnrc')) return true
   if (parts.at(-2) === '.cargo' && base.startsWith('config')) return true
   const dirs = parts.slice(0, -1)
   return dirs.some((part, k) => ['.husky', '.githooks'].includes(part)
@@ -1009,6 +1035,37 @@ function cargoTargetVerdicts(list, segment, ctx, text) {
   return dirs.map(dir => writeVerdict(dir === null ? null : path.join(dir, 'CACHEDIR.TAG'), ctx, text)).filter(Boolean)
 }
 
+// Whether a fixer is given only regular files by name: every word after the subcommand that is
+// not an option is a literal path to an existing regular file (a glob counts by its matches), and
+// there is at least one. A tool that rewrites its whole package never is.
+function namesOnlyFiles(words, info, cwd, named) {
+  if (!named || !cwd) return false
+  const files = []
+  for (let k = 2, parsing = true; k < words.length; k++) {
+    const word = words[k]
+    if (info[k] && !info[k].literal && !info[k].glob) return false
+    if (parsing && word === '--') { parsing = false; continue }
+    if (parsing && word.startsWith('-') && word !== '-') continue
+    if (info[k]?.glob) {
+      const matches = expandGlob(word, cwd)
+      if (matches === null || !matches.length) return false
+      files.push(...matches)
+      continue
+    }
+    files.push(path.resolve(cwd, word))
+  }
+  return files.length > 0 && files.every(file => { try { return lstatSync(file).isFile() } catch { return false } })
+}
+
+// Whether `dir` lies inside .git or inside a directory on the execution-config list (D-89 (3)),
+// by its path as given and by its realpath.
+function inControlledDir(dir, ctx) {
+  return candidates(dir).some(candidate => isGitInternal(candidate) || [...ctx.scope, ...ctx.lexicalRoots].some(root => {
+    if (!within(candidate, root) || candidate === root) return false
+    return isExecutionConfig(`${path.relative(root, candidate)}/_`)
+  }))
+}
+
 function classifySegment(segment, ctx, ready, out) {
   const text = segment.words.join(' ')
   const push = item => out.reasons.push(item)
@@ -1117,6 +1174,12 @@ function classifySegment(segment, ctx, ready, out) {
     for (const verdict of goOutputVerdicts(list, words, info, segment, ctx, text)) push(verdict)
   }
   if (name === 'cargo') for (const verdict of cargoTargetVerdicts(list, segment, ctx, text)) push(verdict)
+  const fixer = FIXERS[`${name} ${list[1] ?? ''}`]
+  if (fixer && fixer.writes(list.slice(2)) && !namesOnlyFiles(words, info, segment.cwd, fixer.named)) push(reason('format.unnamed', 'caution', text, 'rewrites files it was not given by name'))
+  if (RUNNERS.includes(name)) {
+    const dirs = [segment.cwd, ...operands.filter(({ location }) => lexists(location)).map(({ location }) => isDirectory(location) ? location : path.dirname(location))]
+    if (dirs.some(dir => dir === null || inControlledDir(dir, ctx))) push(reason('runner.config-dir', 'caution', text, 'runs in .git or in a directory of hooks or build configuration'))
+  }
   if (OPERAND_WRITERS.includes(`${name} ${words[1] ?? ''}`)) {
     // A non-literal operand, or a glob too large to expand, is an unknown target (null).
     const targets = []

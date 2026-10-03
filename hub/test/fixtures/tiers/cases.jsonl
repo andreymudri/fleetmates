@@ -460,8 +460,8 @@
 {"toolName":"Bash","toolInput":{"command":"terraform fmt /home/you/.config/autostart"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
 {"toolName":"Bash","toolInput":{"command":"ruff check --fix /home/you/other"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
 {"toolName":"Bash","toolInput":{"command":"ruff format /home/you/other"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
-{"toolName":"Bash","toolInput":{"command":"ruff format src"},"cwd":"/home/you/repo","expected":"safe"}
-{"toolName":"Bash","toolInput":{"command":"terraform fmt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"ruff format src"},"cwd":"/home/you/repo","expected":"caution","reason":"rewrites files it was not given by name","note":"D-89 (3): a formatter over a directory (was safe)"}
+{"toolName":"Bash","toolInput":{"command":"terraform fmt"},"cwd":"/home/you/repo","expected":"caution","reason":"rewrites files it was not given by name","note":"D-89 (3): a formatter over the cwd (was safe)"}
 {"toolName":"Bash","toolInput":{"command":"go build -pkgdir=/home/you/.config/systemd/user"},"cwd":"/home/you/repo","expected":"caution"}
 {"toolName":"Bash","toolInput":{"command":"go build -ldflags=-extld=/tmp/evil"},"cwd":"/home/you/repo","expected":"caution"}
 {"toolName":"Bash","toolInput":{"command":"go test -cpuprofile=/home/you/.bashrc"},"cwd":"/home/you/repo","expected":"caution"}
@@ -521,7 +521,7 @@
 {"toolName":"Bash","toolInput":{"command":"go fmt /home/you/other"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
 {"toolName":"Bash","toolInput":{"command":"go fmt ../other"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
 {"toolName":"Bash","toolInput":{"command":"go fmt /home/you/.config/autostart"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
-{"toolName":"Bash","toolInput":{"command":"go fmt ./..."},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"go fmt ./..."},"cwd":"/home/you/repo","expected":"caution","reason":"rewrites files it was not given by name","note":"D-89 (3): go fmt rewrites whole packages (was safe)"}
 {"toolName":"Bash","toolInput":{"command":"go fmt"},"cwd":"/home/you/other","expected":"caution","reason":"writes outside the repo"}
 {"toolName":"Bash","toolInput":{"command":"ruff format"},"cwd":"/home/you/other","expected":"caution","reason":"writes outside the repo"}
 {"toolName":"Bash","toolInput":{"command":"ruff check --fix"},"cwd":"/home/you/other","expected":"caution","reason":"writes outside the repo"}
@@ -529,7 +529,7 @@
 {"toolName":"Bash","toolInput":{"command":"go build -modfile=alt.mod ."},"cwd":"/home/you/repo","expected":"caution"}
 {"toolName":"Bash","toolInput":{"command":"go test -modcacherw ."},"cwd":"/home/you/repo","expected":"caution"}
 {"toolName":"Bash","toolInput":{"command":"go vet -modfile=alt.mod ./..."},"cwd":"/home/you/repo","expected":"caution"}
-{"toolName":"Bash","toolInput":{"command":"go build -mod=mod ."},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"go build -mod=mod ."},"cwd":"/home/you/repo","expected":"caution","reason":"uses -mod=mod, which is not on the Safe option list","note":"D-89 (3): -mod=mod may update go.mod (was safe)"}
 {"toolName":"Bash","toolInput":{"command":"git branch foo"},"cwd":"/home/you/repo","expected":"caution","reason":"takes an operand outside the Safe pattern"}
 {"toolName":"Bash","toolInput":{"command":"git branch -v foo"},"cwd":"/home/you/repo","expected":"caution","reason":"takes an operand outside the Safe pattern"}
 {"toolName":"Bash","toolInput":{"command":"git branch -a foo"},"cwd":"/home/you/repo","expected":"caution","reason":"takes an operand outside the Safe pattern"}
@@ -679,3 +679,51 @@
 {"toolName":"Bash","toolInput":{"command":"sed -n -e p -e 1p src/a.txt"},"cwd":"/home/you/repo","expected":"safe"}
 {"toolName":"Bash","toolInput":{"command":"diff dA dB"},"cwd":"/home/you/repo","expected":"caution","reason":"compares directories"}
 {"toolName":"Bash","toolInput":{"command":"diff dA/x dB/x"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/GNUmakefile","content":"all:\n\t@echo x\n"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs","note":"D-89 (1): GNU make reads GNUmakefile before Makefile"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/BSDmakefile","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Edit","toolInput":{"file_path":"/home/you/repo/.justfile","old_string":"a","new_string":"b"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/go.work","content":"go 1.22\n"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/pytest.ini","content":"[pytest]\naddopts = --basetemp=/home/you/work\n"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs","note":"D-89 (1): pytest addopts can delete a directory outside the repo"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.pytest.ini","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/tox.ini","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/setup.cfg","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.coveragerc","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/mypy.ini","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.mypy.ini","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.golangci.yml","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.golangci.yaml","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.golangci.toml","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.golangci.json","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"sort -o GNUmakefile src/a.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"sort -o .justfile src/a.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"sort -o pytest.ini src/a.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"uniq -i src/a.txt GNUmakefile"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"git log --output=GNUmakefile"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/notes.ini","content":"x"},"cwd":"/home/you/repo","expected":"safe","note":"D-89 (1): an ordinary ini file stays Safe"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.claude/ſettings.local.json","content":"{}"},"cwd":"/home/you/repo","expected":"destructive","reason":"changes Claude Code settings or hooks","note":"D-89 (2): NFKC maps the long s to s"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.claude/ſkills/x/SKILL.md","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.huſky/pre-commit","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/confteſt.py","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/confteﬆ.py","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.mcp.jſon","content":"{}"},"cwd":"/home/you/repo","expected":"destructive","reason":"changes Claude Code settings or hooks"}
+{"toolName":"Bash","toolInput":{"command":"ruff check --fix"},"cwd":"/home/you/repo","expected":"caution","reason":"rewrites files it was not given by name","note":"D-89 (3): a fixer over the cwd"}
+{"toolName":"Bash","toolInput":{"command":"ruff check --fix ."},"cwd":"/home/you/repo","expected":"caution","reason":"rewrites files it was not given by name"}
+{"toolName":"Bash","toolInput":{"command":"ruff format"},"cwd":"/home/you/repo","expected":"caution","reason":"rewrites files it was not given by name"}
+{"toolName":"Bash","toolInput":{"command":"cargo fmt"},"cwd":"/home/you/repo","expected":"caution","reason":"rewrites files it was not given by name"}
+{"toolName":"Bash","toolInput":{"command":"cargo fmt -- build.rs"},"cwd":"/home/you/repo","expected":"caution","reason":"rewrites files it was not given by name"}
+{"toolName":"Bash","toolInput":{"command":"ruff check --fix src/a.txt"},"cwd":"/home/you/repo","expected":"safe","note":"D-89 (3): a fixer given a file by name"}
+{"toolName":"Bash","toolInput":{"command":"ruff format --check"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"cargo fmt --check"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"terraform fmt -check"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"go build -mod=mod ./..."},"cwd":"/home/you/repo","expected":"caution","reason":"uses -mod=mod, which is not on the Safe option list","note":"D-89 (3): only readonly and vendor"}
+{"toolName":"Bash","toolInput":{"command":"go test -mod=mod ./..."},"cwd":"/home/you/repo","expected":"caution","reason":"uses -mod=mod, which is not on the Safe option list"}
+{"toolName":"Bash","toolInput":{"command":"go build -mod mod ./..."},"cwd":"/home/you/repo","expected":"caution","reason":"uses -mod, which is not on the Safe option list"}
+{"toolName":"Bash","toolInput":{"command":"go build -mod=readonly ./..."},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"go test -mod=vendor ./..."},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"pytest"},"cwd":"/home/you/repo/.git/hooks","expected":"caution","reason":"runs in .git or in a directory of hooks or build configuration","note":"D-89 (3): pytest writes .pytest_cache in its rootdir"}
+{"toolName":"Bash","toolInput":{"command":"pytest --cov-report=html"},"cwd":"/home/you/repo/.git/hooks","expected":"caution","reason":"runs in .git or in a directory of hooks or build configuration"}
+{"toolName":"Bash","toolInput":{"command":"pytest"},"cwd":"/home/you/repo/.githooks","expected":"caution","reason":"runs in .git or in a directory of hooks or build configuration"}
+{"toolName":"Bash","toolInput":{"command":"mypy x.py"},"cwd":"/home/you/repo/.githooks","expected":"caution","reason":"runs in .git or in a directory of hooks or build configuration"}
+{"toolName":"Bash","toolInput":{"command":"pytest .githooks"},"cwd":"/home/you/repo","expected":"caution","reason":"runs in .git or in a directory of hooks or build configuration"}
+{"toolName":"Bash","toolInput":{"command":"pytest"},"cwd":"/home/you/repo","expected":"safe","note":"D-89: pytest from the repo root stays Safe"}
+{"toolName":"Bash","toolInput":{"command":"pytest -q"},"cwd":"/home/you/repo/src","expected":"safe"}

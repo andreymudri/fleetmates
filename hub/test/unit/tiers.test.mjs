@@ -507,6 +507,174 @@ test('diff of two directories is Caution without -r, and diff of two files is Sa
   } finally { s.close() }
 })
 
+// D-89 (2026-10-03), the extra phase 2 fix round. The entry ids a result carries, for messages.
+const ids = result => result.reasons.map(item => item.entryId).join(' ')
+const expectTier = (result, tier, id, label) => {
+  assert.equal(result.tier, tier, `${label}: ${ids(result)}`)
+  if (id) assert.ok(result.reasons.some(item => item.entryId === id), `${label}: no ${id} in ${ids(result)}`)
+}
+
+// D-89 (1): GNU make reads GNUmakefile before Makefile, bmake reads BSDmakefile, just reads
+// .justfile, go reads go.work beside go.mod, and pytest, coverage, mypy and golangci-lint read
+// their own config files (the round 4 reviews ran the make and pytest halves).
+test('the execution-config list holds the alternate make, just and go names and the tool config files (D-89 (1))', () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.repo, 'src'))
+    writeFileSync(path.join(s.repo, 'src', 'a.txt'), 'a\n')
+    const names = ['GNUmakefile', 'BSDmakefile', '.justfile', 'go.work', 'pytest.ini', '.pytest.ini', 'tox.ini', 'setup.cfg', '.coveragerc', 'mypy.ini', '.mypy.ini', '.golangci.yml', '.golangci.yaml', '.golangci.toml', '.golangci.json']
+    for (const name of [...names, 'Gnumakefile', 'sub/GNUmakefile', 'TOX.INI']) {
+      expectTier(s.run('Write', { file_path: name, content: 'x' }), 'caution', 'file.execution-config', `Write ${name}`)
+      expectTier(s.run('Edit', { file_path: name, old_string: 'a', new_string: 'b' }), 'caution', 'file.execution-config', `Edit ${name}`)
+      expectTier(s.bash(`sort -o ${name} src/a.txt`), 'caution', 'file.execution-config', `sort -o ${name}`)
+    }
+    expectTier(s.bash('uniq -i src/a.txt GNUmakefile'), 'caution', 'file.execution-config', 'uniq into GNUmakefile')
+    expectTier(s.bash('git log --output=GNUmakefile'), 'caution', 'file.execution-config', 'git log --output=GNUmakefile')
+    // Names that only look alike stay ordinary files.
+    for (const name of ['GNUmakefile.bak', 'notes.ini', 'src/go.work.txt']) expectTier(s.run('Write', { file_path: name, content: 'x' }), 'safe', null, `Write ${name}`)
+  } finally { s.close() }
+})
+
+// D-89 (2): Unicode case folding maps U+017F (long s) to s, and the st ligatures to st; NFKC does
+// the same for name checks. The test host is case-sensitive, so these pin the classifier's verdict.
+test('name checks normalize with NFKC before folding, so a long s or a ligature cannot hide a protected name (D-89 (2))', () => {
+  const s = sandbox()
+  try {
+    const longS = 'ſ'
+    const stLigature = 'ﬆ'
+    expectTier(s.run('Write', { file_path: `.claude/${longS}ettings.local.json`, content: '{}' }), 'destructive', 'floor.claude-settings', 'settings with a long s')
+    expectTier(s.run('Write', { file_path: `.claude/${longS}ettings.json`, content: '{}' }), 'destructive', 'floor.claude-settings', 'settings.json with a long s')
+    expectTier(s.run('Write', { file_path: `.mcp.j${longS}on`, content: '{}' }), 'destructive', 'floor.claude-settings', '.mcp.json with a long s')
+    for (const file of [`.claude/${longS}kills/x/SKILL.md`, `.hu${longS}ky/pre-commit`, `confte${longS}t.py`, `${longS}etup.py`, `.githook${longS}/pre-commit`, `confte${stLigature}.py`, 'pytest.ini'.replace('s', longS)]) {
+      expectTier(s.run('Write', { file_path: file, content: 'x' }), 'caution', 'file.execution-config', file)
+    }
+    expectTier(s.run('Read', { file_path: path.join(s.home, `.${longS}sh`, 'id_ed25519') }), 'caution', 'read.secret', 'Read ~/.ssh with a long s')
+    expectTier(s.run('Write', { file_path: path.join(s.home, `.ba${longS}hrc`), content: 'x' }), 'destructive', 'floor.persistence', '~/.bashrc with a long s')
+  } finally { s.close() }
+})
+
+// D-89 (3): a formatter or fixer that rewrites files the agent did not name (a directory, or the
+// working directory when no operand is given) is Caution. A named file still goes through the
+// write checks, so a named file on the execution-config list stays Caution too.
+test('formatter and fixer modes over a directory or the working directory are Caution, and check modes stay Safe (D-89 (3))', () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.repo, 'src'))
+    writeFileSync(path.join(s.repo, 'src', 'a.py'), 'x = 1\n')
+    writeFileSync(path.join(s.repo, 'src', 'main.tf'), '\n')
+    writeFileSync(path.join(s.repo, 'Cargo.toml'), '[package]\nname = "x"\n')
+    for (const command of ['ruff check --fix', 'ruff check --fix .', 'ruff check --unsafe-fixes --fix src', 'ruff format', 'ruff format .', 'ruff format src', 'cargo fmt', 'cargo fmt -- build.rs', 'go fmt ./...', 'go fmt', 'terraform fmt', 'terraform fmt src', 'npx eslint --fix .', 'npx eslint --fix', 'npx prettier --check --write .', 'npx prettier --check -w src']) {
+      expectTier(s.bash(command), 'caution', 'format.unnamed', command)
+    }
+    for (const command of ['ruff check', 'ruff check .', 'ruff check --fix src/a.py', 'ruff check --fix --diff .', 'ruff format --check', 'ruff format --diff .', 'ruff format src/a.py', 'cargo fmt --check', 'cargo fmt -- --check', 'terraform fmt -check', 'terraform fmt -write=false', 'terraform fmt src/main.tf']) {
+      expectTier(s.bash(command), 'safe', null, command)
+    }
+    // npx is not plain under D-87, so npx commands are Caution anyway; their check modes carry no
+    // fixer reason.
+    for (const command of ['npx eslint .', 'npx eslint --fix-dry-run .', 'npx prettier --check .']) {
+      const result = s.bash(command)
+      assert.ok(!result.reasons.some(item => item.entryId === 'format.unnamed'), `${command}: ${ids(result)}`)
+    }
+    expectTier(s.bash('ruff format setup.py'), 'caution', 'file.execution-config', 'ruff format setup.py')
+  } finally { s.close() }
+})
+
+// D-89 (3): `go help modules`: -mod=mod lets the go command update go.mod and go.sum.
+test('go -mod is Safe only as readonly or vendor (D-89 (3))', () => {
+  const s = sandbox()
+  try {
+    for (const command of ['go build -mod=mod ./...', 'go test -mod=mod ./...', 'go vet -mod=mod ./...', 'go build -mod mod ./...', 'go test -mod readonly ./...', 'go build --mod=readonly ./...']) {
+      expectTier(s.bash(command), 'caution', 'unknown.option', command)
+    }
+    for (const command of ['go build -mod=readonly ./...', 'go test -mod=vendor ./...', 'go vet -mod=readonly ./...']) expectTier(s.bash(command), 'safe', null, command)
+  } finally { s.close() }
+})
+
+// D-89 (3): pytest writes .pytest_cache at its rootdir (the cwd, or the common ancestor of its path
+// arguments, when no ini file is found upward; run on the test host by the round 4 review), and
+// coverage and mypy write their outputs into the cwd. Any Safe runner or checker that runs in .git
+// or in a directory on the execution-config list, or is pointed at one, is Caution.
+test('a runner or checker whose working directory or path argument lies in .git or an execution-config directory is Caution (D-89 (3))', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['.git/hooks', '.githooks/sub', '.husky', '.github/workflows', '.claude/skills/x', 'src']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    writeFileSync(path.join(s.repo, '.githooks', 'test_hook.py'), 'def test_a():\n    pass\n')
+    writeFileSync(path.join(s.repo, 'src', 'x.py'), 'x = 1\n')
+    writeFileSync(path.join(s.repo, 'package.json'), '{"scripts":{"test":"node --test"}}\n')
+    const at = dir => ({ cwd: path.join(s.repo, dir) })
+    for (const [command, dir] of [['pytest', '.git/hooks'], ['pytest --cov-report=html', '.git/hooks'], ['pytest', '.githooks'], ['pytest -q', '.githooks/sub'], ['mypy x.py', '.githooks'], ['python -m pytest', '.husky'], ['npm test', '.husky'], ['node --test', '.github/workflows'], ['staticcheck ./...', '.claude/skills/x'], ['pyright', '.git/hooks'], ['go vet ./...', '.githooks']]) {
+      const result = s.bash(command, at(dir))
+      assert.notEqual(result.tier, 'safe', `${command} in ${dir}: ${ids(result)}`)
+      assert.ok(result.reasons.some(item => item.entryId === 'runner.config-dir'), `${command} in ${dir}: ${ids(result)}`)
+    }
+    for (const command of ['pytest .githooks/test_hook.py', 'pytest .githooks', 'mypy .githooks/test_hook.py']) expectTier(s.bash(command), 'caution', 'runner.config-dir', command)
+    // The same runners from the repo root or an ordinary directory stay Safe.
+    for (const [command, dir] of [['pytest', ''], ['pytest -q', 'src'], ['mypy src/x.py', ''], ['mypy x.py', 'src'], ['npm test', ''], ['pytest src', '']]) expectTier(s.bash(command, at(dir)), 'safe', null, `${command} in ${dir || '.'}`)
+  } finally { s.close() }
+})
+
+// D-89: the everyday commands stay Safe from the root of a realistic repo.
+test('git status, git diff, git log, rg, grep -r, cargo test, npm test and pytest stay Safe at the root of a realistic repo (D-89)', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['.git/hooks', 'src', 'tests', 'node_modules/pkg', 'node_modules/.bin']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    writeFileSync(path.join(s.repo, 'node_modules', 'pkg', 'index.js'), 'module.exports = 1\n')
+    writeFileSync(path.join(s.repo, 'package.json'), '{"scripts":{"test":"node --test"}}\n')
+    writeFileSync(path.join(s.repo, 'Cargo.toml'), '[package]\nname = "x"\n')
+    writeFileSync(path.join(s.repo, 'go.mod'), 'module example.com/x\n')
+    writeFileSync(path.join(s.repo, 'pyproject.toml'), '[tool.pytest.ini_options]\n')
+    writeFileSync(path.join(s.repo, 'src', 'main.rs'), 'fn main() {}\n')
+    writeFileSync(path.join(s.repo, 'tests', 'test_a.py'), 'def test_a():\n    pass\n')
+    for (const command of ['git status', 'git diff', 'git log', 'rg foo src', 'grep -r foo src', 'cargo test', 'npm test', 'pytest', 'go test ./...']) expectTier(s.bash(command), 'safe', null, command)
+  } finally { s.close() }
+})
+
+// D-89 (4): cargo writes the default target directory next to the workspace root's Cargo.toml,
+// which may be above the member the command runs in (cargo 1.98, run by the round 4 review).
+test('cargo checks the target directory of every Cargo.toml from the working directory up (D-89 (4))', () => {
+  const s = sandbox()
+  try {
+    const ws = path.join(s.repo, 'ws')
+    for (const dir of ['.git/hooks', 'ws/member/src', '.githooks/sub']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    writeFileSync(path.join(ws, 'Cargo.toml'), '[workspace]\nmembers = ["member"]\n')
+    writeFileSync(path.join(ws, 'member', 'Cargo.toml'), '[package]\nname = "member"\n')
+    symlinkSync(path.join(s.repo, '.git', 'hooks'), path.join(ws, 'target'))
+    for (const command of ['cargo build', 'cargo test']) expectTier(s.bash(command, { cwd: path.join(ws, 'member') }), 'destructive', 'floor.git-dir', `${command} in a workspace member`)
+    // Without the link the member build is Safe.
+    rmSync(path.join(ws, 'target'))
+    expectTier(s.bash('cargo build', { cwd: path.join(ws, 'member') }), 'safe', null, 'cargo build in a member')
+    // A package at .githooks built from .githooks/sub writes .githooks/target.
+    writeFileSync(path.join(s.repo, '.githooks', 'Cargo.toml'), '[package]\nname = "y"\n')
+    for (const command of ['cargo build', 'cargo test']) expectTier(s.bash(command, { cwd: path.join(s.repo, '.githooks', 'sub') }), 'caution', 'file.execution-config', `${command} in .githooks/sub`)
+  } finally { s.close() }
+})
+
+// D-89 (4): a go `...` pattern is listed up to 5,000 directories; past that the deck cannot name
+// what go build writes, so it is Caution.
+test('a go ./... walk past 5,000 directories is Caution (D-89 (4))', () => {
+  const s = sandbox()
+  try {
+    for (let k = 0; k < 5001; k++) mkdirSync(path.join(s.repo, 'many', `d${k}`), { recursive: true })
+    expectTier(s.bash('go build ./...'), 'caution', 'go.output', 'go build over 5,001 directories')
+    rmSync(path.join(s.repo, 'many', 'd5000'), { recursive: true })
+    rmSync(path.join(s.repo, 'many', 'd4999'), { recursive: true })
+    expectTier(s.bash('go build ./...'), 'safe', null, 'go build over 4,999 directories and many/')
+  } finally { s.close() }
+})
+
+// D-89 (4): the out-of-repo CLAUDE.md floor and the ancestor-of-the-deck check fold case too.
+test('the CLAUDE.md floor and the deck-ancestor check fold case (D-89 (4))', () => {
+  const s = sandbox()
+  try {
+    for (const file of ['../claude.md', '../Claude.MD', '../CLAUDE.md']) expectTier(s.run('Write', { file_path: file, content: 'x' }), 'destructive', 'floor.claude-settings', `Write ${file}`)
+    for (const command of ['grep -r x ../.CONFIG', 'du -a ../.CONFIG', 'grep -r x ../.config']) expectTier(s.bash(command), 'destructive', 'floor.deck', command)
+    expectTier(s.run('Grep', { pattern: 'x', path: path.join(s.home, '.Config') }), 'destructive', 'floor.deck', 'Grep ~/.Config')
+  } finally { s.close() }
+})
+
 function storeSandbox() {
   const dir = mkdtempSync(path.join(tmpdir(), 'deck-tiers-store-'))
   const file = path.join(dir, 'tiers.json')
