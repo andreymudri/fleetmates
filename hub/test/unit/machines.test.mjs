@@ -4895,7 +4895,7 @@ test('public requests retain stored drawer matching delivery and notification fi
       delivery: row.delivery, screenMatch: row.screen_match, taskId: row.task_id, createdAt: row.created_at,
       answeredAt: row.answered_at, notifiedAt: row.notified_at, renotifiedAt: row.renotified_at,
       reasons: JSON.parse(row.reasons), rulePattern: row.rule_pattern, ruleNote: null,
-      description: JSON.parse(row.reasons)[0]?.description ?? null, confirmLabel: row.confirm_label, allowAlways: false })
+      description: JSON.parse(row.reasons).find(reason => reason.tier === row.tier)?.description ?? null, confirmLabel: row.confirm_label, allowAlways: false })
     const events = []
     const projector = createProjector({ store: h.store, publish: event => {
       assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))

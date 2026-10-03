@@ -79,9 +79,19 @@ function storedReasons(value) {
   } catch { return [] }
 }
 /**
+ * The reason `classify` in approvals/tiers.mjs reports as its description: the first reason at the
+ * request's tier whose id does not start with `safe.`, else the first reason at that tier. The rule
+ * is copied from `classify`, which computes it inline and exports no helper for it.
+ * @param {{ entryId: string, tier: string, description: string }[]} reasons
+ * @param {string|null} tier
+ */
+function headlineReason(reasons, tier) {
+  return reasons.find(item => item?.tier === tier && !String(item.entryId).startsWith('safe.')) ?? reasons.find(item => item?.tier === tier) ?? null
+}
+/**
  * The API view of a `requests` row (docs/deck/05-api.md). On top of the stored columns it carries the
  * classifier's `reasons`, the Safe rule candidate `rulePattern` and its `ruleNote` (read from the active
- * tiers entry that gave the candidate), `description` from the first reason, the Destructive
+ * tiers entry that gave the candidate), `description` from the classifier's headline reason (`headlineReason`), the Destructive
  * `confirmLabel`, and `allowAlways` computed from the stored options with `allowAlwaysFor` (D-77, D-95).
  * @param {object} row a `requests` row
  * @param {{ tiers?: { entries: object[] } }} [options]
@@ -117,7 +127,7 @@ export function requestView(row, { tiers = activeTiers() } = {}) {
     reasons,
     rulePattern,
     ruleNote: ruleEntry?.ruleNote ?? null,
-    description: reasons[0]?.description ?? null,
+    description: headlineReason(reasons, row.tier)?.description ?? null,
     confirmLabel: row.confirm_label ?? null,
     allowAlways: allowAlwaysFor(row, { options })
   }

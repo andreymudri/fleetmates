@@ -251,3 +251,14 @@ test('requestView adds reasons, rulePattern, ruleNote, description, confirmLabel
   assert.equal(view.allowAlways, true)
   assert.equal(requestView(row({ tier: 'safe', input: { command: 'npm test' }, rule: 'Bash(npm test:*)', reasons, options: [] })).allowAlways, false)
 })
+
+test('requestView describes a Destructive rm by the reason classify headlines, not the floor.plain reason that comes first', async () => {
+  const { classify } = await import('../../server/approvals/tiers.mjs')
+  const input = { command: 'rm -rf x' }
+  const classified = classify({ toolName: 'Bash', toolInput: input, cwd: '/home/you/work', repoRoot: '/home/you/work' })
+  assert.equal(classified.tier, 'destructive')
+  assert.equal(classified.reasons[0].entryId, 'floor.plain', 'the first stored reason is the plain-command floor')
+  const view = requestView(row({ tier: classified.tier, input, reasons: classified.reasons }))
+  assert.equal(view.description, 'deletes files')
+  assert.equal(view.description, classified.description)
+})
