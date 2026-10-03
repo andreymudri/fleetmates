@@ -11,7 +11,10 @@
         "key": null,
         "label": "Yes, I trust this folder"
       }
-    ]
+    ],
+    "title": "Accessing workspace:",
+    "body": "/home/you/fixture-repo",
+    "truncated": false
   },
   "idle": false,
   "statusRows": []
