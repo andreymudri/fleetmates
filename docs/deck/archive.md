@@ -68,6 +68,8 @@ auto-archive candidate with `archivedBy: 'auto'`.
   browser in localStorage under `deck.archivedOpen`.
 - Focus on an archived session shows "Archived. Unarchive to bring it back to Home." with Unarchive, a read-only
   terminal, and no Stop or Nudge, also for a live session.
+- Read-only views (observed session cards and the Focus header of an observed session) now carry the archive
+  control, because archiving changes deck metadata and never acts on the session.
 - Settings, Appearance: "Archive finished sessions after" with 6 hours, 12 hours, 24 hours, 3 days, 1 week and
   Never, and the help text "Sessions with unreviewed changes are never archived automatically."
 
@@ -95,13 +97,18 @@ auto-archive candidate with `archivedBy: 'auto'`.
   not), and 25 sessions archived by one "Archive all finished" paged through "Show more" with each listed once.
   The clock is injected through hook timestamps: a session's `ended_at` is the `hookTs` of its SessionEnd.
 - `hub/test/e2e/security.spec.mjs`: 14 tests, 14 pass, with the three archive routes asserted in the router table.
-- The other e2e specs (`observe`, `control`, `accessibility`, `settings-save`): 85 tests, 83 pass, 2 fail. Both
-  failures are in `observe.spec.mjs` and both count the new Archive buttons: "Home AC8 and read-only" asserts
-  `no button or input inside any card` and finds seven `card-archive` buttons, and "Focus AC1, AC8, steps and
-  ?tab=facts" asserts `only tabs are buttons` and finds one more button. Those assertions pin the behaviour before
-  the archive actions and need an owner decision; this run did not change them.
+- The other e2e specs (`observe`, `control`, `accessibility`, `settings-save`) at first: 85 tests, 83 pass, 2 fail.
+  Both failures were in `observe.spec.mjs`, and both counted the new Archive buttons. "Home AC8 and read-only"
+  asserted `no button or input inside any card` and found seven `card-archive` buttons. "Focus AC1, AC8, steps and
+  ?tab=facts" asserted `only tabs are buttons` and found one more button. Following plan amendment Step 2b, those two
+  checks now exclude exactly the archive control: `button.card-archive` in cards, and in Focus a `.focus-actions`
+  button reading exactly Archive or Unarchive. Every other control must still be absent. A stray non-archive button
+  added to an observed card, or to the Focus header, still fails each test.
+- All six e2e specs together (`observe`, `archive`, `security`, `control`, `accessibility`, `settings-save`,
+  `--test-concurrency=1`): 104 tests, 104 pass.
 - Mutations run against the archive specs, each failing the named test and then restored: dropping the archived
   filter in `homeLayout`; skipping `projector.unarchive` in the unarchive route; dropping the `changed_files`
   condition in `archive.mjs`; removing the `unarchiveNeedingOwner` call in the projector commit; removing the sweep
   after `prefs.changed` in `main.mjs`; passing the last row's `archivedAt` instead of `list.next` in the Home
-  `more` handler; and renaming the `sessions/archive-finished` route literal (the security spec).
+  `more` handler; renaming the `sessions/archive-finished` route literal (the security spec); and a stray
+  non-archive button in an observed card and in the Focus header (the two `observe.spec.mjs` read-only tests).
