@@ -40,7 +40,7 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0
 
 /**
  * The rule refused or accepted by {@link validatePattern}.
- * @typedef {{ ok: true, pattern: string, tool: string, tier: 'safe'|'caution', warning: 'toolWide'|null } | { ok: false, code: 'invalid_pattern'|'destructive_rule', message: string }} PatternVerdict
+ * @typedef {{ ok: true, pattern: string, tool: string, tier: 'safe'|'caution', warning: 'toolWide'|'readsAnyFile'|null } | { ok: false, code: 'invalid_pattern'|'destructive_rule', message: string }} PatternVerdict
  */
 
 /**
@@ -506,6 +506,23 @@ export function probeReaches(run, prefix, args) {
   return [...destructiveReasons(run(`${prefix} ${args}`))].some(key => !baseline.has(key))
 }
 
+/**
+ * Whether a Bash prefix's command reads its file operands, by the classifier's own read lists
+ * (D-99): tiers.mjs sends the operands of its read commands through the sensitive list even when
+ * the file does not exist, and every other command's only once it exists. So `<prefix> <p>` for a
+ * `.env` path `p` that does not exist gets `read.secret` exactly when the command is on those lists
+ * (cat, head, tail, less, grep, rg, diff and the like), and `true <p>` does not.
+ * @param {(command: string) => { reasons: object[] }} run
+ * @param {string} prefix
+ * @param {string|null} repoRoot
+ * @returns {boolean}
+ */
+export function readsFileOperands(run, prefix, repoRoot) {
+  const probe = path.join(absolute(repoRoot) ? repoRoot : process.cwd(), '.deck-read-probe', '.env')
+  const secret = result => result.reasons.some(item => item.entryId === 'read.secret')
+  return secret(run(`${prefix} ${probe}`)) && !secret(run(`true ${probe}`))
+}
+
 function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
   const body = inner.trim()
   if (body === '*' || body === '') return refused(body === '*' ? 'destructive_rule' : 'invalid_pattern', body === '*' ? RULE_COPY.destructive : RULE_COPY.invalid)
@@ -526,7 +543,8 @@ function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
   const result = run(command)
   if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
   if (prefix !== null && floorProbes({ env: ctx.env, homeDir: ctx.home }).some(probe => probeReaches(run, prefix, probe.args))) return refused('destructive_rule', RULE_COPY.destructive)
-  return { ok: true, pattern, tool: 'Bash', tier: own ? 'safe' : result.tier, warning: null }
+  const reads = prefix !== null && !own && readsFileOperands(run, prefix, repoRoot)
+  return { ok: true, pattern, tool: 'Bash', tier: own ? 'safe' : result.tier, warning: reads ? 'readsAnyFile' : null }
 }
 
 /**

@@ -187,17 +187,14 @@ test('every Safe tiers rule validates ok with tier safe and lists with destructi
   const store = openDeckDb(path.join(s.root, 'state', 'deck.db'))
   try {
     await s.settle()
-    // ruff check and terraform fmt rewrite the paths they are given (tiers.mjs OPERAND_WRITERS), so
-    // `ruff check <path>` and `terraform fmt <path>` reach the git-dir, Claude settings and
-    // persistence floors: their prefix rules fail the floor probes and stay refused.
-    const probeRefused = ['Bash(ruff check:*)', 'Bash(terraform fmt:*)']
-    for (const rule of probeRefused) assert.equal(validatePattern(rule, s.options).code, 'destructive_rule', rule)
-    const rules = DEFAULT_TIERS.entries.filter(entry => entry.tier === 'safe' && typeof entry.rule === 'string' && !entry.rule.includes('{') && !probeRefused.includes(entry.rule))
+    // D-98: no exceptions; the path-operand writers (ruff check, terraform fmt) carry no rule.
+    const rules = DEFAULT_TIERS.entries.filter(entry => entry.tier === 'safe' && typeof entry.rule === 'string' && !entry.rule.includes('{'))
     assert.ok(rules.some(entry => entry.rule === 'Bash(node --test:*)'))
     assert.ok(rules.some(entry => entry.rule === 'Bash(python -m pytest:*)'))
     for (const { rule } of rules) {
       const verdict = validatePattern(rule, s.options)
-      assert.deepEqual({ ok: verdict.ok, tier: verdict.tier }, { ok: true, tier: 'safe' }, rule)
+      // A Safe entry's own rule carries no warning (D-99).
+      assert.deepEqual({ ok: verdict.ok, tier: verdict.tier, warning: verdict.warning }, { ok: true, tier: 'safe', warning: null }, rule)
     }
     store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', s.repoRoot, 'rustot', 0, 0, 'rustot', 1)
     mkdirSync(path.join(s.repoRoot, '.claude'))
@@ -205,6 +202,51 @@ test('every Safe tiers rule validates ok with tier safe and lists with destructi
     const listed = listRules(store, s.repoRoot, { at: 1 })
     assert.equal(listed.rules.length, rules.length)
     for (const rule of listed.rules) assert.equal(rule.destructive, false, rule.pattern)
+  } finally { store.close(); s.close() }
+})
+
+// Mutation runs for this test: the `rule` field restored on safe.python.ruff-check, and separately on
+// safe.terraform.fmt, in tiers.default.json; this test failed for each.
+test('D-98: classify suggests no rule for ruff check or terraform fmt', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    mkdirSync(path.join(s.repoRoot, 'src'))
+    // Bare `terraform fmt` rewrites files, so it is Caution (D-90) and has no candidate either way;
+    // `-check` is its Safe form, the one a restored `rule` would show up on.
+    for (const command of ['ruff check src', 'terraform fmt -check']) {
+      const result = classify({ toolName: 'Bash', toolInput: { command }, cwd: s.repoRoot, repoRoot: s.repoRoot, homeDir: s.homeDir })
+      assert.equal(result.tier, 'safe', command)
+      assert.equal(result.ruleCandidate, null, command)
+      assert.equal(result.ruleNote, null, command)
+    }
+  } finally { s.close() }
+})
+
+// Mutation run for this test: the readsAnyFile warning dropped from bashVerdict; this test failed.
+test('D-99: a hand-typed prefix rule for a command that reads file operands carries readsAnyFile', async () => {
+  const s = sandbox()
+  const store = openDeckDb(path.join(s.root, 'state', 'deck.db'))
+  try {
+    await s.settle()
+    for (const pattern of ['Bash(cat:*)', 'Bash(head:*)', 'Bash(grep:*)', 'Bash(tail *)']) {
+      const verdict = validatePattern(pattern, s.options)
+      assert.equal(verdict.ok, true, pattern)
+      assert.equal(verdict.warning, 'readsAnyFile', pattern)
+    }
+    // rg and grep -r read directories recursively, and a recursive read of a directory holding a deck
+    // control is the floor.deck Destructive floor, so the floor probes refuse those prefixes outright.
+    for (const pattern of ['Bash(rg:*)', 'Bash(grep -r:*)']) assert.equal(validatePattern(pattern, s.options).code, 'destructive_rule', pattern)
+    for (const pattern of ['Bash(cat README.md)', 'Bash(npm test:*)', 'Bash(git status:*)', 'Bash(ls:*)']) {
+      const verdict = validatePattern(pattern, s.options)
+      assert.equal(verdict.ok, true, pattern)
+      assert.equal(verdict.warning, null, pattern)
+    }
+    store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', s.repoRoot, 'rustot', 0, 0, 'rustot', 1)
+    mkdirSync(path.join(s.repoRoot, '.claude'))
+    writeFileSync(path.join(s.repoRoot, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(cat:*)', 'Bash(cat README.md)'] } }))
+    const listed = listRules(store, s.repoRoot, { at: 1 })
+    assert.deepEqual(listed.rules.map(rule => [rule.pattern, rule.warning]), [['Bash(cat:*)', 'readsAnyFile'], ['Bash(cat README.md)', null]])
   } finally { store.close(); s.close() }
 })
 
