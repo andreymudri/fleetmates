@@ -124,6 +124,21 @@ test('an archived session is absent from Home, the Focus list and the palette', 
   assert.equal(Palette.paletteModel(state, { query: 'vault', now: NOW }).rows.filter(row => row.kind === 'session').length, 0)
 })
 
+test('an archived done session with unreviewed changes is absent from the calm Home open loops', async () => {
+  const { HomeView } = await load('screens/home/Home.jsx')
+  const changedFiles = [{ path: 'a.js', adds: 1, dels: 0 }]
+  const state = deck([
+    session('arch', 'vault', 'done', { alive: false, changedFiles, archivedAt: NOW - HOUR, archivedBy: 'owner' }),
+    session('open', 'web', 'done', { alive: false, changedFiles })
+  ], { archived: 1 })
+  const html = render(HomeView, { state, now: NOW, navigate: () => {} })
+  assert.match(html, /Calm seas\. No ships out\./, 'Home is calm')
+  const loops = html.slice(html.indexOf('calm-loops-title'), html.indexOf('home-archived'))
+  assert.match(loops, /web waits in port for review/, 'the unarchived done session is an open loop')
+  assert.doesNotMatch(loops, /vault/, 'the archived done session is not an open loop')
+  assert.doesNotMatch(html, /vault waits in port for review/)
+})
+
 test('Archive posts /archive with the id as one segment and its toast Undo posts /unarchive', async () => {
   const { archiveFlow, CARD_COPY } = await load('components/SessionCard.jsx')
   const api = recordingApi((method, to) => to.endsWith('/archive-finished') ? { ids: ['a', 'b'] } : { session: {} })
