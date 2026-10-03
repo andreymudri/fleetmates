@@ -6,6 +6,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import { openDeckDb } from './db/index.mjs'
 import { runRetention } from './db/retention.mjs'
 import { createProjector } from './machines/projector.mjs'
+import { autoArchiveCandidates } from './machines/archive.mjs'
 import { createIngestor, startHookSocket } from './ingest/socket.mjs'
 import { startSpoolDrain } from './ingest/spool.mjs'
 import { hookVersionOutdated } from './ingest/validate.mjs'
@@ -82,11 +83,14 @@ export async function createDeckServer(options = {}) {
   let hooksState
   const health = () => [link.health(), { ...hooksState }, ...['vault-mcp', 'scribed', 'notify', 'fleetmates'].map(dep => ({ dep, state: dep === 'scribed' ? recording?.snapshot().state ?? 'unknown' : 'unknown', reason: null, since: now(), nextProbeAt: null, attempt: 0 }))]
   const subscribers = new Set()
+  let archiveAfter
   const publish = event => {
     hub?.publish(event)
     for (const callback of subscribers) {
       try { callback(event) } catch {}
     }
+    // A prefs.changed that moves autoArchiveAfter sweeps once, after the event has reached every client.
+    if (event.type === 'prefs.changed' && event.data?.prefs?.autoArchiveAfter !== archiveAfter) setImmediate(() => archiveSweep())
   }
   const projector = createProjector({ store, now, publish, locateTask: taskForCwd })
   link = createDeckdLink({ env, connectDeckd, reconnectMs, random, now, store, projector, publish, timeoutMs: options.deckdTimeoutMs ?? 2000 })
@@ -251,6 +255,16 @@ export async function createDeckServer(options = {}) {
       publish({ seq: Number(row.seq), at: row.at, type: 'session.removed', data: { id: row.entity_id } })
     }
   }
+  // The auto-archive sweep (docs/plans/2026-10-02-deck-archive.md, Task 2): archives, as 'auto', every finished,
+  // unarchived session without unreviewed changes whose coalesce(ended_at, state_since) is autoArchiveAfter hours
+  // old or more. The projector commit runs only when there is a candidate, so an idle sweep appends no event.
+  function archiveSweep() {
+    if (stopped) return
+    try {
+      archiveAfter = api.preferences().prefs.autoArchiveAfter
+      if (autoArchiveCandidates(store, { at: now(), afterHours: archiveAfter }).length) projector.autoArchive(archiveAfter)
+    } catch {}
+  }
   function scheduleRetention() {
     if (stopped) return
     retentionTimeout = retentionTimer.set(() => {
@@ -283,6 +297,10 @@ export async function createDeckServer(options = {}) {
     privateDir(paths.spool)
     retention()
     scheduleRetention()
+    archiveSweep()
+    const sweep = setInterval(archiveSweep, options.archiveSweepMs ?? 600_000)
+    sweep.unref()
+    timers.push(sweep)
     if (options.notifications !== false) {
       const [{ createNotifier }, { createNotificationMachine }, { createScribedStatus }] = await Promise.all([
         import('./adapters/notify.mjs'), import('./machines/notification.mjs'), import('./adapters/scribed-status.mjs')

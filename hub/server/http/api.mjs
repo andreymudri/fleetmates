@@ -11,7 +11,8 @@ const defaults = {
   vaultPath: null, vaultCommand: ['npx', '-y', '@andreymudri/vault-mcp'], obsidianVaultName: null,
   turbidassistConfig: null, scribedCommand: 'scribed', researchWorkspace: '~/.local/share/fleetmates-deck/research/',
   ruleSuggestAfter: 5, textSize: 14, motion: 'system', terminalScreenReader: false, bell: true,
-  renotifyAfter: 10, notifyDone: true, quietInMeetings: true, notifyCrash: true, firstRunCompletedAt: null
+  renotifyAfter: 10, notifyDone: true, quietInMeetings: true, notifyCrash: true, firstRunCompletedAt: null,
+  autoArchiveAfter: 24
 }
 const configKeys = new Set(['port', 'scanRoot', 'lang', 'staleMinutes', 'claudeCommand', 'vaultPath', 'vaultCommand', 'obsidianVaultName', 'turbidassistConfig', 'scribedCommand', 'researchWorkspace'])
 const envKeys = { port: 'DECK_PORT', lang: 'DECK_LANG', vaultPath: 'VAULT_PATH' }
@@ -37,6 +38,8 @@ function validatePref(key, value) {
   if (key === 'textSize') return [13, 14, 15, 16].includes(value)
   if (key === 'ruleSuggestAfter') return [3, 5, null].includes(value)
   if (key === 'renotifyAfter') return [5, 10, 20, null].includes(value)
+  // Hours after which a finished session is auto-archived; null is Never.
+  if (key === 'autoArchiveAfter') return [6, 12, 24, 72, 168, null].includes(value)
   if (key === 'motion') return ['system', 'reduce'].includes(value)
   if (key === 'lang') return ['en', 'pt'].includes(value)
   if (key === 'port') return Number.isInteger(value) && value > 0 && value <= 65535
@@ -142,11 +145,23 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         const id = resolveRepo(q)
         const states = q.get('state')?.split(',')
         if (states?.some(state => !validStates.includes(state))) throw apiError(422, 'validation_failed')
+        // archived=1: only archived sessions, any age, ordered archivedAt desc then id. One archive-finished call or
+        // sweep stamps every session with the same ms, so its cursor is the opaque `<archivedAt>:<id>` of the last
+        // row, and the next page starts after that row in the same order; a bare ms `before` keeps every older one.
+        // archived=0: only sessions that are not archived. Without it, every session as before, `before` on startedAt.
+        const archived = q.get('archived')
+        if (archived !== null && !['0', '1'].includes(archived)) throw apiError(422, 'validation_failed', { fields: ['archived'] })
         const limit = integer(q, 'limit', 100, 1000)
-        const before = integer(q, 'before', Number.MAX_SAFE_INTEGER)
-        const all = projector.snapshot().sessions.filter(row => (!id || row.repoId === id) && (!states || states.includes(row.state)) && (q.get('active') !== '1' || row.state !== 'ended') && row.startedAt < before).sort((a, b) => b.startedAt - a.startedAt || a.id.localeCompare(b.id))
+        const cursor = archived === '1' && q.get('before')?.match(/^(\d+):(.+)$/s)
+        const before = cursor ? Number(cursor[1]) : integer(q, 'before', Number.MAX_SAFE_INTEGER)
+        if (cursor && (!Number.isSafeInteger(before) || before < 1)) throw apiError(422, 'validation_failed', { fields: ['before'] })
+        const key = archived === '1' ? 'archivedAt' : 'startedAt'
+        const after = row => row[key] < before || (cursor && row[key] === before && row.id.localeCompare(cursor[2]) > 0)
+        const all = projector.snapshot().sessions.filter(row => (!id || row.repoId === id) && (!states || states.includes(row.state)) && (q.get('active') !== '1' || row.state !== 'ended') &&
+          (archived === null || (archived === '1') === (row.archivedAt !== null)) && after(row)).sort((a, b) => b[key] - a[key] || a.id.localeCompare(b.id))
         const rows = all.slice(0, limit)
-        return ok({ sessions: rows, nextBefore: all.length > limit ? rows.at(-1).startedAt : null })
+        const last = rows.at(-1)
+        return ok({ sessions: rows, nextBefore: all.length > limit ? (archived === '1' ? `${last.archivedAt}:${last.id}` : last[key]) : null })
       }
       if (s[1] === 'sessions' && s.length === 3) {
         const row = session(s[2])
@@ -254,6 +269,17 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'stop') return launcher.stop(session(s[2]).id)
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'nudge') return launcher.nudge(session(s[2]).id)
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'relaunch') return launcher.relaunch(session(s[2]).id)
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'archive') {
+        const result = projector.archive(session(s[2]).id, 'owner')
+        if (!Array.isArray(result)) throw apiError(result.code === 'needs_you' ? 409 : 404, result.code)
+        return ok({ session: session(s[2]) })
+      }
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'unarchive') {
+        const row = session(s[2])
+        if (row.archivedAt !== null) projector.unarchive(row.id)
+        return ok({ session: session(row.id) })
+      }
+      if (route === 'sessions/archive-finished') return ok({ ids: projector.archiveFinished() })
       if (route === 'setup/hooks') return ok(await services.installHooks())
       if (route === 'setup/complete') {
         if (!(await services.checks()).some(check => check.id === 'hooks' && check.state === 'ok')) throw apiError(409, 'precondition_failed')
