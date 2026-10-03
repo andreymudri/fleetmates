@@ -91,6 +91,7 @@ Home shows only sessions the owner still cares about: any session can be archive
 - Modify: `docs/deck/06-storage.md`
 - Test: `hub/test/unit/db.test.mjs`
 - Create: `hub/test/unit/archive.test.mjs`
+- Test: `hub/test/unit/machines.test.mjs`
 
 - [ ] **Step 1:** `0003-archive.sql`: `ALTER TABLE sessions ADD COLUMN archived_at INTEGER;`, `ALTER TABLE sessions ADD COLUMN archived_by TEXT CHECK (archived_by IS NULL OR archived_by IN ('owner','auto'));`, and `CREATE INDEX sessions_archived ON sessions(archived_at) WHERE archived_at IS NOT NULL;`. `db.test.mjs`: the fresh-database version assertion becomes 3, the v1 to latest test expects 3, and a new test migrates a version 2 database to 3 with a `deck.db.pre-0003.bak` backup and both columns present (mutation: drop the backup call; the test fails).
 - [ ] **Step 2:** `archive.mjs` exports, all synchronous over the store and called inside a projector `commit`:
@@ -102,6 +103,7 @@ Home shows only sessions the owner still cares about: any session can be archive
 - [ ] **Step 3:** `projector.mjs`: `sessionView` adds `archivedAt` (number or null) and `archivedBy`. Inside `commit`, after `fn` and before the order event, call `unarchiveNeedingOwner` and append one `session.upserted` for each id it returns, so every path that opens a request (hooks, late reconcile, screen parse) unarchives in the same transaction. Add projector methods `archive(id, by)`, `unarchive(id)`, `archiveFinished()` and `autoArchive(afterHours)` that run the `archive.mjs` functions in `commit`, append `session.upserted` per changed session and one `counts`, and return the changed ids (or the refusal).
 - [ ] **Step 4:** `counts.mjs`: `projectCounts` and `projectHome` ignore archived sessions (`archived_at IS NULL` in their queries), and `projectCounts` adds `archived`: the number of archived sessions of any state.
 - [ ] **Step 5:** `06-storage.md`: document the two columns and the index in section 4.3 and section 12, the migration in section 7, and that retention is unchanged (archived ended sessions are deleted after 30 days like any ended session). No em dash.
+- [ ] **Step 5b:** `machines.test.mjs`: the zero-counts assertion ('new deck has zero counts before any session arrives') gains `archived: 0`; change no other assertion there.
 - [ ] **Step 6:** Tests in `archive.test.mjs` (use `openDeckDb` plus `createProjector`, and the 2.1.282 hook fixtures as `machines.test.mjs` does), each with its mutation:
   - archive then unarchive round trip, with `session.upserted` carrying `archivedAt` and `archivedBy` (mutation: omit `archivedAt` from `sessionView`);
   - archiving a session with an open request is refused with `needs_you` (mutation: skip the check);
