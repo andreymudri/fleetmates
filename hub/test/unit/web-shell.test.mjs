@@ -12,7 +12,8 @@ import { chromium } from 'playwright-core'
 import { captureToken, createApiClient, createConnection, wsProtocols, backoffMs, TOKEN_KEY } from '../../web/src/state/api.js'
 import {
   createDeckStore, reduce, initialState, matchRoute, resolveRoute, keyAction, documentTitle, badgeText,
-  selectLanguage, createAnnouncer, bannerFor, isRoute, parseNeedsFilter, needsFilterParam, readDensity, writeDensity
+  selectLanguage, createAnnouncer, bannerFor, isRoute, parseNeedsFilter, needsFilterParam, readDensity, writeDensity,
+  visibleSessions, archivedCount
 } from '../../web/src/state/deck-store.js'
 import { messages as en, format } from '../../web/src/i18n/en.js'
 import * as pt from '../../web/src/i18n/pt.js'
@@ -473,6 +474,33 @@ test('store buffers events during resync, swaps the snapshot atomically and drop
   state = reduce(state, { type: 'message', message: snapshotMessage(2, { sessions: [session('z')] }) })
   assert.equal(state.seq, 2, 'a new epoch snapshot restarts the sequence')
   assert.deepEqual(state.data.sessions.map(row => row.id), ['z'])
+})
+
+test('an archived upsert leaves order, visible sessions and the Alt digit keys; an unarchive brings it back', () => {
+  let state = reduce(reduce(initialState(), { type: 'resync' }), { type: 'message', message: snapshotMessage(1, {
+    sessions: [session('s1'), session('s2'), session('s3')], order: ['s1', 's2', 's3']
+  }) })
+  assert.equal(archivedCount(state), 0, 'counts without archived read as zero')
+  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 2, at: 20, data: session('s2', 'running', { archivedAt: 1000, archivedBy: 'owner' }) } })
+  const row = state.data.sessions.find(item => item.id === 's2')
+  assert.equal(row.archivedAt, 1000)
+  assert.equal(row.archivedBy, 'owner')
+  assert.deepEqual(state.data.order, ['s1', 's3'])
+  assert.deepEqual(visibleSessions(state).map(item => item.id), ['s1', 's3'])
+  const key = code => ({ code, altKey: true, shiftKey: false, ctrlKey: false, metaKey: false })
+  assert.deepEqual(keyAction(key('Digit2'), state), { type: 'navigate', to: '/s/s3' })
+
+  // An order that still names an archived id (a snapshot or order.changed raced the archive) skips it on Alt digits.
+  const raced = { ...state, data: { ...state.data, order: ['s2', 's1', 's3'] } }
+  assert.deepEqual(keyAction(key('Digit1'), raced), { type: 'navigate', to: '/s/s1' })
+
+  state = reduce(state, { type: 'message', message: { t: 'counts', seq: 3, at: 30, data: { ...counts(0), archived: 1 } } })
+  assert.equal(archivedCount(state), 1)
+
+  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 4, at: 40, data: session('s2', 'running', { archivedAt: null, archivedBy: null }) } })
+  assert.deepEqual(state.data.order, ['s1', 's3', 's2'])
+  assert.deepEqual(visibleSessions(state).map(item => item.id), ['s1', 's2', 's3'])
+  assert.equal(state.data.sessions.find(item => item.id === 's2').archivedAt, null)
 })
 
 test('needs toasts appear once per episode and never with the drawer open or the session in Focus', () => {
