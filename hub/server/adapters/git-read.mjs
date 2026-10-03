@@ -39,22 +39,34 @@ export function gitEnv(source = process.env) {
   return { ...env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_ASKPASS: '/bin/false', GIT_ATTR_NOSYSTEM: '1' }
 }
 
+const HOOKS_PATH_KEYS = '^(core\\.hookspath|include(if\\..+)?\\.path)$'
 /**
- * The two config reads of the classifier's core.hooksPath cache (D-92 (a)), the only multi-value
- * config reads `allowedCommand` accepts, each exactly as written: the values git applies, and every
- * raw hooksPath, include.path and includeIf.*.path value with the file it came from.
+ * The two config reads of the classifier's core.hooksPath cache (D-92 (a)), which with
+ * `hooksPathFileRead` are the only multi-value config reads `allowedCommand` accepts, each exactly as
+ * written: the values git applies, and every raw hooksPath, include.path and includeIf.*.path value
+ * with the file it came from.
  */
 export const HOOKS_PATH_READS = Object.freeze([
   Object.freeze(['config', '--type=path', '--get-all', 'core.hooksPath']),
-  Object.freeze(['config', '--null', '--show-origin', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$'])
+  Object.freeze(['config', '--null', '--show-origin', '--get-regexp', HOOKS_PATH_KEYS])
 ])
 /**
- * The config-location variables the user's own git honours. The HOOKS_PATH_READS, and no other
- * command, get them from the server's environment and read the system config, so they see the
+ * The third hooksPath read: the raw hooksPath, include.path and includeIf.*.path values of one config
+ * file, read alone (`--file` follows no include), whether or not git includes it now.
+ * @param {string} file an absolute path
+ * @returns {string[]}
+ */
+export function hooksPathFileRead(file) {
+  return ['config', '--file', file, '--null', '--get-regexp', HOOKS_PATH_KEYS]
+}
+const isFileRead = args => args.length === 6 && typeof args[2] === 'string' && path.isAbsolute(args[2]) && hooksPathFileRead(args[2]).every((word, k) => args[k] === word)
+/**
+ * The config-location variables the user's own git honours. The HOOKS_PATH_READS and
+ * `hooksPathFileRead`, and no other command, get them from the server's environment and read the system config, so they see the
  * hooksPath the user's git applies.
  */
 export const HOOKS_PATH_ENV = Object.freeze(['GIT_CONFIG_SYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM'])
-const isHooksPathRead = args => HOOKS_PATH_READS.some(form => form.length === args.length && form.every((word, k) => args[k] === word))
+const isHooksPathRead = args => isFileRead(args) || HOOKS_PATH_READS.some(form => form.length === args.length && form.every((word, k) => args[k] === word))
 
 /** Words before `--` (the options and revisions; pathspecs come after `--`). */
 function options(args) {

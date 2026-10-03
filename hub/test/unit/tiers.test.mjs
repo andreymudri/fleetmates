@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -842,11 +842,19 @@ const hooksSandbox = () => {
   return { ...s, at, write: (file, extra) => s.run('Write', { file_path: file, content: 'x' }, extra), settle: (root = s.repo) => hooksPathCache.load(root, s.home) }
 }
 
-// D-92 (a): the read-only git helper allows exactly the classifier's two hooksPath reads and no
+// D-92 (a): the read-only git helper allows exactly the classifier's three hooksPath reads and no
 // other multi-value or listing config read.
-test('the git helper allows exactly the two hooksPath config reads beyond the single-value reads (D-92 (a))', () => {
+test('the git helper allows exactly the three hooksPath config reads beyond the single-value reads (D-92 (a))', () => {
   assert.equal(allowedCommand(['config', '--type=path', '--get-all', 'core.hooksPath']), true)
   assert.equal(allowedCommand(['config', '--null', '--show-origin', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$']), true)
+  assert.equal(allowedCommand(['config', '--file', '/home/you/repo/conf/a.conf', '--null', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$']), true)
+  for (const args of [
+    ['config', '--file', 'conf/a.conf', '--null', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$'],
+    ['config', '--file', '/home/you/a.conf', '--null', '--get-regexp', '.'],
+    ['config', '--file', '/home/you/a.conf', '--null', '--list'],
+    ['config', '--file', '/home/you/a.conf', '--null', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$', 'x'],
+    ['config', '--file', '/home/you/a.conf', '--get-regexp', '^(core\\.hookspath|include(if\\..+)?\\.path)$']
+  ]) assert.equal(allowedCommand(args), false, args.join(' '))
   for (const args of [
     ['config', '--get-all', 'core.hooksPath'],
     ['config', '--get-all', '--type=path', 'core.hooksPath'],
@@ -903,17 +911,18 @@ test('core.hooksPath is read through git, so every form git honours protects its
       assert.deepEqual(await s.settle(), [s.at('h3'), s.at('h4')])
       expectTier(s.write('h3/pre-commit'), 'caution', 'file.execution-config', 'include.path')
       expectTier(s.write('h4/pre-commit'), 'caution', 'file.execution-config', '~/ include')
-      // includeIf: only the include whose condition git matches counts.
+      // includeIf: git applies the include whose condition matches; the raw values of one whose
+      // condition does not match now are protected too, since the condition can come true.
       writeFileSync(path.join(s.home, 'if-yes.cfg'), '[core]\n\thooksPath = h5\n')
       writeFileSync(path.join(s.home, 'if-no.cfg'), '[core]\n\thooksPath = h6\n')
       writeFileSync(path.join(s.home, '.gitconfig'), `[includeIf "gitdir:${s.repo}/"]\n\tpath = ~/if-yes.cfg\n[includeIf "gitdir:${path.join(s.root, 'elsewhere')}/"]\n\tpath = ~/if-no.cfg\n`)
-      assert.deepEqual(await s.settle(), [s.at('h5'), s.at('h3'), s.at('h4')])
+      assert.deepEqual(await s.settle(), [s.at('h5'), s.at('h3'), s.at('h4'), s.at('h6')])
       expectTier(s.write('h5/pre-commit'), 'caution', 'file.execution-config', 'includeIf that matches')
-      expectTier(s.write('h6/pre-commit'), 'safe', null, 'includeIf that does not match')
+      expectTier(s.write('h6/pre-commit'), 'caution', 'file.execution-config', 'includeIf that does not match now')
       // ~/.config/git/config, which git reads while XDG_CONFIG_HOME is unset.
       mkdirSync(path.join(s.home, '.config', 'git'), { recursive: true })
       writeFileSync(path.join(s.home, '.config', 'git', 'config'), '[core]\n\thooksPath = h7\n')
-      assert.deepEqual(await s.settle(), [s.at('h7'), s.at('h5'), s.at('h3'), s.at('h4')])
+      assert.deepEqual(await s.settle(), [s.at('h7'), s.at('h5'), s.at('h3'), s.at('h4'), s.at('h6')])
       expectTier(s.write('h7/pre-commit'), 'caution', 'file.execution-config', '~/.config/git/config')
     } finally { s.close() }
   })
@@ -1010,22 +1019,121 @@ test('an include target is protected and keyed, so setting hooksPath through it 
   })
 })
 
-// D-92 round 1: a read older than HOOKS_PATH_TTL_MS is not current. Until the re-read lands, the
-// old values and every hooks name stay protected (an includeIf condition such as onbranch can
-// change what git reads without any keyed file changing).
-test('a read older than the TTL is not current: hooks names are Caution again until the re-read lands (D-92 (a))', async () => {
+// D-92 round 2: with HEAD and every include target keyed, a confirmed read stays current however
+// long ago it ran, so an ordinary write under src/hooks (a React hooks directory) is Safe.
+test('a confirmed read stays current with time passed, so a write under src/hooks is Safe (D-92 (a))', async () => {
   await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
     const s = hooksSandbox()
     try {
       gitIn(s.repo, s.home, 'config', 'core.hooksPath', 'r1')
       assert.deepEqual(await s.settle(), [s.at('r1')])
-      expectTier(s.write('lib/hooks/x.js'), 'safe', null, 'a hooks name while the read is current')
       await new Promise(resolve => setTimeout(resolve, 2100))
-      expectTier(s.write('lib/hooks/x.js'), 'caution', 'file.execution-config', 'a hooks name once the TTL passed')
-      expectTier(s.write('r1/pre-commit'), 'caution', 'file.execution-config', 'the old value once the TTL passed')
-      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write once the TTL passed')
-      assert.deepEqual(await s.settle(), [s.at('r1')])
-      expectTier(s.write('lib/hooks/x.js'), 'safe', null, 'a hooks name after the re-read')
+      expectTier(s.write('src/hooks/useX.js'), 'safe', null, 'a hooks name 2.1 s after the read')
+      expectTier(s.write('lib/git-hooks/x.sh'), 'safe', null, 'a git-hooks name 2.1 s after the read')
+      expectTier(s.write('r1/pre-commit'), 'caution', 'file.execution-config', 'the hooks directory')
+    } finally { s.close() }
+  })
+})
+
+// D-92 round 2: an include target is read for its raw keys whether or not its condition holds now,
+// recursively. The security review's nest.mjs: an inactive includeIf onbranch target A includes B.
+test('the targets of an inactive includeIf are followed: a nested include and the hooksPath it sets are protected (D-92 (a))', async () => {
+  await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+    const s = hooksSandbox()
+    try {
+      mkdirSync(s.at('config'))
+      writeFileSync(s.at('config', 'a.conf'), '[include]\n\tpath = b.conf\n')
+      writeFileSync(s.at('config', 'b.conf'), '')
+      gitIn(s.repo, s.home, 'config', 'includeIf.onbranch:feature.path', '../config/a.conf')
+      assert.deepEqual(await s.settle(), [])
+      expectTier(s.write('config/a.conf'), 'caution', 'file.execution-config', 'the inactive includeIf target')
+      expectTier(s.write('config/b.conf'), 'caution', 'file.execution-config', 'the include nested in the inactive target')
+      writeFileSync(s.at('config', 'b.conf'), '[core]\n\thooksPath = tools/x\n')
+      expectTier(s.write('tools/x/pre-commit'), 'caution', 'file.execution-config', 'the hook right after the nested edit')
+      assert.deepEqual(await s.settle(), [s.at('tools', 'x')])
+      expectTier(s.write('tools/x/pre-commit'), 'caution', 'file.execution-config', 'the hook once read')
+      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write once read')
+    } finally { s.close() }
+  })
+})
+
+// D-92 round 2: HEAD is keyed, so a branch switch that turns on an includeIf onbranch is a config
+// change: the next write in the repo is Caution until the read for the new HEAD lands. The security
+// review's ob.mjs: the onbranch target sets hooksPath.
+test('a branch switch changes the key, and the onbranch target hooksPath is protected before and after it (D-92 (a))', async () => {
+  await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+    const s = hooksSandbox()
+    try {
+      mkdirSync(s.at('config'))
+      writeFileSync(s.at('config', 'f.conf'), '[core]\n\thooksPath = tools/f\n')
+      gitIn(s.repo, s.home, 'config', 'includeIf.onbranch:feat.path', '../config/f.conf')
+      gitIn(s.repo, s.home, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'x')
+      assert.deepEqual(await s.settle(), [s.at('tools', 'f')])
+      expectTier(s.write('tools/f/pre-commit'), 'caution', 'file.execution-config', 'the onbranch hooksPath before the switch')
+      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write before the switch')
+      gitIn(s.repo, s.home, 'checkout', '-q', '-b', 'feat')
+      expectTier(s.write('tools/f/pre-commit'), 'caution', 'file.execution-config', 'the onbranch hooksPath right after the switch')
+      expectTier(s.write('src/a.txt'), 'caution', 'file.execution-config', 'any write before the read for the new HEAD lands')
+      assert.deepEqual(await s.settle(), [s.at('tools', 'f')])
+      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write once read')
+    } finally { s.close() }
+  })
+})
+
+// D-92 round 2: a read is recorded under the key it started with. When a keyed file changes while
+// it runs, or it names a file that key did not hold, the read is not current and the repo reads as
+// changed until a read confirms it. A git wrapper that holds its output makes the window
+// deterministic: the config file is rewritten after git has read it and before the read lands.
+function slowGit(root, seconds) {
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim()
+  const dir = path.join(root, 'slow-bin')
+  mkdirSync(dir)
+  writeFileSync(path.join(dir, 'git'), `#!/bin/sh\nout=$(mktemp)\n"${real}" "$@" > "$out"\ncode=$?\nsleep ${seconds}\ncat "$out"\nrm -f "$out"\nexit $code\n`, { mode: 0o755 })
+  return `${dir}:${process.env.PATH}`
+}
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+test('a keyed include rewritten while a read runs is not taken as current (D-92 (a))', async () => {
+  await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+    const s = hooksSandbox()
+    try {
+      mkdirSync(s.at('conf'))
+      writeFileSync(s.at('conf', 'a.conf'), '[core]\n\thooksPath = old\n')
+      gitIn(s.repo, s.home, 'config', 'include.path', '../conf/a.conf')
+      assert.deepEqual(await s.settle(), [s.at('old')])
+      await withEnv({ XDG_CONFIG_HOME: undefined, PATH: slowGit(s.root, 0.6) }, async () => {
+        appendFileSync(s.at('.git', 'config'), '[deck]\n\tprobe = 1\n')
+        const read = hooksPathCache.next(s.repo, s.home)
+        await pause(250)
+        writeFileSync(s.at('conf', 'a.conf'), '[core]\n\thooksPath = evil\n')
+        await read
+        expectTier(s.write('evil/pre-commit'), 'caution', 'file.execution-config', 'the hook after the overlapping read landed')
+        expectTier(s.write('src/a.txt'), 'caution', 'file.execution-config', 'any write after the overlapping read landed')
+        assert.deepEqual(await s.settle(), [s.at('evil')])
+      })
+      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write once confirmed')
+    } finally { s.close() }
+  })
+})
+
+test('an include target a read finds for the first time and that is rewritten during that read is not taken as current (D-92 (a))', async () => {
+  await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+    const s = hooksSandbox()
+    try {
+      mkdirSync(s.at('conf'))
+      writeFileSync(s.at('conf', 'a.conf'), '[core]\n\thooksPath = old\n')
+      gitIn(s.repo, s.home, 'config', 'include.path', '../conf/a.conf')
+      await withEnv({ XDG_CONFIG_HOME: undefined, PATH: slowGit(s.root, 0.6) }, async () => {
+        const read = hooksPathCache.next(s.repo, s.home)
+        await pause(250)
+        writeFileSync(s.at('conf', 'a.conf'), '[core]\n\thooksPath = evil\n')
+        await read
+        expectTier(s.write('evil/pre-commit'), 'caution', 'file.execution-config', 'the hook after the first read landed')
+        expectTier(s.write('src/a.txt'), 'caution', 'file.execution-config', 'any write after the first read landed')
+        assert.deepEqual(await s.settle(), [s.at('evil')])
+      })
+      expectTier(s.write('evil/pre-commit'), 'caution', 'file.execution-config', 'the hook once confirmed')
+      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write once confirmed')
     } finally { s.close() }
   })
 })

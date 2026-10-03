@@ -7,7 +7,7 @@ import { existsSync, globSync, lstatSync, readdirSync, readFileSync, readlinkSyn
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { gitRead, HOOKS_PATH_ENV, HOOKS_PATH_READS } from '../adapters/git-read.mjs'
+import { gitRead, HOOKS_PATH_ENV, HOOKS_PATH_READS, hooksPathFileRead } from '../adapters/git-read.mjs'
 import { destructiveSql, legacyDestructive } from '../machines/request.mjs'
 import { setupPaths } from '../setup/paths.mjs'
 import { commandBase, gitSubcommandArgs, normalizeLongOption, parseCommand } from './shell.mjs'
@@ -587,94 +587,146 @@ function gitDirs(dir) {
 }
 
 // D-92 (a): core.hooksPath as git itself reads it, per work tree top and home directory, through
-// the two reads of the read-only helper's HOOKS_PATH_READS. `git config --type=path --get-all
-// core.hooksPath` gives the values git applies, with includes, includeIf conditions, `~/` and
-// `:(optional)` resolved by git (which drops an optional value whose path does not exist yet). `git
-// config --null --show-origin --get-regexp` over core.hookspath and the include and includeIf path
-// keys gives every raw value with the file it came from: the raw hooksPath values add the optional
-// ones git dropped, and the include targets (relative to their including file, conditions not
-// evaluated) are protected like the hooks directories and join the cache key. The helper's own
-// `-c core.hooksPath=/dev/null` comes back as the last value of the first read and as a "command
-// line" origin in the second; both are dropped.
+// the read-only helper's HOOKS_PATH_READS:
+// 1. `git config --type=path --get-all core.hooksPath` gives the values git applies now, with
+//    includes, includeIf conditions, `~/` and `:(optional)` resolved by git (which drops an
+//    optional value whose path does not exist yet).
+// 2. `git config --null --show-origin --get-regexp` over core.hookspath and the include and
+//    includeIf path keys gives every raw value git reads now with the file it came from.
+// 3. `git config --file <file> --null --get-regexp` over the same keys, for every include or
+//    includeIf target named anywhere (whether or not its condition holds now, and recursively),
+//    gives the raw values git would read from it once its condition holds.
+// Every raw hooksPath value is protected (`:(optional)` and `~/` applied by hand, taken from the
+// work tree top when relative), and every include target (taken from its including file's
+// directory, as git does) is protected and keyed. The helper's own `-c core.hooksPath=/dev/null`
+// comes back as the last value of read 1 and as a "command line" origin in read 2; both are dropped.
 //
-// The classifier is synchronous, so the reads are asynchronous: a classification starts them when
-// a repo is first seen, when the key changes (the stats of the repo, global and system config files,
-// of every file the last read named as a source or include target, and the config environment), and
-// when the last completed read is HOOKS_PATH_TTL_MS old. Until a read for the current key completes
-// (`ready`), the values of the last completed read stay protected and every directory named hooks
-// or git-hooks in the repo is protected too. While the key differs from the one the last completed
-// read was taken under (`changed`: a config source was written since), every write in the repo is
-// Caution, since the new hooks directory may have any name. A read that fails never completes.
-const HOOKS_PATH_TTL_MS = 2000
+// The key is the stats of the repo, global and system config files, of each work tree's HEAD (an
+// includeIf onbranch condition follows it), of every file a read named as a source or include
+// target, and the config environment. The classifier is synchronous, so the reads are
+// asynchronous: a classification starts them when a repo is first seen and whenever the key
+// differs from the one the last completed read started under. A read holds only for the key it
+// started under, so it is not current when a file of that key changed while it ran, or when it
+// named a file that key did not hold (whose state before the read is unknown); a confirming read
+// then starts at once. States:
+// - `ready`: the last confirmed read holds for the current key.
+// - before any read completes (or after the first one fails): the hooks names (directories named
+//   hooks or git-hooks) are protected.
+// - `changed`: a read completed but does not hold for the current key (a config source or HEAD was
+//   written, the read was not confirmed, or a later read failed). The last values stay protected
+//   and so does every write in the repo, since the new hooks directory may have any name.
+const HOOKS_PATH_RETRY_MS = 2000
+const HOOKS_PATH_CONFIRM_ROUNDS = 3
+const HOOKS_PATH_FILE_LIMIT = 64
 const HOOKS_PATH_LIMIT = 512
 const hooksPathEntries = new Map()
 
-function hooksPathKey(dirs, home, entry) {
+// The files whose stats make up the key, beside the sources a read named.
+function hooksPathBaseFiles(dirs, home) {
   const xdg = process.env.XDG_CONFIG_HOME
-  const files = [path.join(dirs.common, 'config'), path.join(dirs.gitdir, 'config.worktree'), '/etc/gitconfig']
+  const files = [path.join(dirs.common, 'config'), path.join(dirs.gitdir, 'config.worktree'), path.join(dirs.gitdir, 'HEAD'), path.join(dirs.common, 'HEAD'), '/etc/gitconfig']
   if (home) files.push(path.join(home, '.gitconfig'), path.join(home, '.config', 'git', 'config'))
   if (xdg && path.isAbsolute(xdg)) files.push(path.join(xdg, 'git', 'config'))
   for (const name of HOOKS_PATH_ENV) if (process.env[name] && path.isAbsolute(process.env[name])) files.push(process.env[name])
-  files.push(...entry.sources)
-  const environment = [xdg ?? '', ...HOOKS_PATH_ENV.map(name => process.env[name] ?? '')]
-  return [...environment, ...[...new Set(files)].map(file => `${file}=${statKey(file)}`)].join('|')
+  return files
 }
 
-// The raw values of the second read: hooksPath values with `:(optional)` and `~/` applied by hand
-// (taken from the work tree top when relative), include targets taken from their including file's
-// directory, and every file git named as an origin. Null when the output is not the expected shape.
+function hooksPathKey(dirs, home, sources) {
+  const files = [...new Set([...hooksPathBaseFiles(dirs, home), ...sources])]
+  const environment = [process.env.XDG_CONFIG_HOME ?? '', ...HOOKS_PATH_ENV.map(name => process.env[name] ?? '')]
+  return [...environment, ...files.map(file => `${file}=${statKey(file)}`)].join('|')
+}
+
+// One raw config value with `:(optional)` and `~/` applied, as git applies them to a path.
+function expandRaw(value, home) {
+  const text = value.startsWith(':(optional)') ? value.slice(':(optional)'.length) : value
+  return (text === '~' || text.startsWith('~/')) && home ? path.join(home, text.slice(1)) : text
+}
+
+// The `key\nvalue` entries of a `--null --get-regexp` output into `out`: hooksPath values taken from
+// the work tree top, include targets from the directory of `file`. False when the shape is wrong.
+function collectRaw(entries, file, top, home, out) {
+  for (const entry of entries) {
+    const newline = entry.indexOf('\n')
+    if (newline < 0) return false
+    const value = expandRaw(entry.slice(newline + 1), home)
+    if (!value) continue
+    if (entry.slice(0, newline) === 'core.hookspath') out.hooks.push(path.isAbsolute(value) ? path.normalize(value) : path.resolve(top, value))
+    else out.includes.push(path.isAbsolute(value) ? path.normalize(value) : path.resolve(path.dirname(file), value))
+  }
+  return true
+}
+
+// Read 2: every file git named as an origin, and the raw values. Null when the shape is wrong.
 function parseConfigSources(stdout, top, home) {
   const parts = String(stdout).split('\0')
   if (parts.at(-1) === '') parts.pop()
   if (parts.length % 2) return null
   const out = { hooks: [], includes: [], sources: [] }
-  const expand = value => {
-    const text = value.startsWith(':(optional)') ? value.slice(':(optional)'.length) : value
-    return (text === '~' || text.startsWith('~/')) && home ? path.join(home, text.slice(1)) : text
-  }
   for (let k = 0; k < parts.length; k += 2) {
-    const [origin, entry] = [parts[k], parts[k + 1]]
-    const newline = entry.indexOf('\n')
-    if (!origin.startsWith('file:') || newline < 0) continue
-    const file = path.resolve(top, origin.slice('file:'.length))
+    if (!parts[k].startsWith('file:')) continue
+    const file = path.resolve(top, parts[k].slice('file:'.length))
     out.sources.push(file)
-    const value = expand(entry.slice(newline + 1))
-    if (!value) continue
-    if (entry.slice(0, newline) === 'core.hookspath') out.hooks.push(path.isAbsolute(value) ? path.normalize(value) : path.resolve(top, value))
-    else out.includes.push(path.isAbsolute(value) ? path.normalize(value) : path.resolve(path.dirname(file), value))
+    if (!collectRaw([parts[k + 1]], file, top, home, out)) return null
   }
   return out
 }
 
-function readHooksPath(entry, dirs, home, key) {
+// Read 3, recursively: the raw values of every include target, whether or not git reads it now. A
+// target that does not exist or that git cannot parse holds no values (git cannot apply it either);
+// it stays keyed and protected. False when git could not run or printed an unexpected shape.
+async function readIncludeTargets(dirs, home, raw) {
+  const seen = new Set(raw.sources)
+  const queue = raw.includes.filter(file => !seen.has(file))
+  while (queue.length) {
+    const file = queue.shift()
+    if (seen.has(file)) continue
+    if (seen.size >= HOOKS_PATH_FILE_LIMIT) return false
+    seen.add(file)
+    const result = await gitRead(dirs.top, hooksPathFileRead(file), { home })
+    if (!result) return false
+    if (result.code !== 0) continue
+    const parts = String(result.stdout).split('\0')
+    if (parts.at(-1) === '') parts.pop()
+    const found = { hooks: [], includes: [] }
+    if (!collectRaw(parts, file, dirs.top, home, found)) return false
+    raw.hooks.push(...found.hooks)
+    raw.includes.push(...found.includes)
+    queue.push(...found.includes)
+  }
+  return true
+}
+
+function readHooksPath(entry, dirs, home, key, round = 0) {
   const [applied, sources] = HOOKS_PATH_READS
-  entry.pending = Promise.all([gitRead(dirs.top, [...applied], { home }), gitRead(dirs.top, [...sources], { home })]).then(([first, second]) => {
+  entry.pending = Promise.all([gitRead(dirs.top, [...applied], { home }), gitRead(dirs.top, [...sources], { home })]).then(async ([first, second]) => {
     const lines = first?.code === 0 ? String(first.stdout).split('\n') : null
     if (lines?.at(-1) === '') lines.pop()
     const raw = second?.code === 0 ? parseConfigSources(second.stdout, dirs.top, home) : null
-    if (lines?.at(-1) === '/dev/null' && raw) {
-      lines.pop()
-      // A relative core.hooksPath is taken from the top of the work tree (githooks(5)).
-      const values = lines.filter(Boolean).map(value => path.isAbsolute(value) ? path.normalize(value) : path.resolve(dirs.top, value))
-      // When a file of the key the read started under changed during the read, the result is
-      // recorded under a key that never matches, so the repo reads as changed until the next read.
-      const unchanged = hooksPathKey(dirs, home, entry) === key
-      entry.hooks = [...new Set([...values, ...raw.hooks])]
-      entry.includes = [...new Set(raw.includes)]
-      entry.sources = [...new Set([...raw.sources, ...raw.includes])]
-      entry.doneKey = unchanged ? hooksPathKey(dirs, home, entry) : `stale:${key}`
-      entry.doneAt = Date.now()
-    } else {
+    const complete = lines?.at(-1) === '/dev/null' && raw !== null && await readIncludeTargets(dirs, home, raw)
+    entry.pending = null
+    if (!complete) {
       entry.failedKey = key
       entry.failedAt = Date.now()
+      return
     }
-    entry.pending = null
+    lines.pop()
+    // A relative core.hooksPath is taken from the top of the work tree (githooks(5)).
+    const values = lines.filter(Boolean).map(value => path.isAbsolute(value) ? path.normalize(value) : path.resolve(dirs.top, value))
+    entry.hooks = [...new Set([...values, ...raw.hooks])]
+    entry.includes = [...new Set(raw.includes)]
+    entry.sources = [...new Set([...raw.sources, ...raw.includes])]
+    // The read holds for the key it started under. That key stops matching when a file of it
+    // changed during the read, and when the read named a file it did not hold (whose state before
+    // the read is unknown); a confirming read then starts at once.
+    entry.doneKey = key
+    const now = hooksPathKey(dirs, home, entry.sources)
+    if (now !== key && round + 1 < HOOKS_PATH_CONFIRM_ROUNDS) readHooksPath(entry, dirs, home, now, round + 1)
   })
 }
 
-// The hooksPath state of the repo holding `root` (see above): `hooks` and `includes` from the last
-// completed read, `ready` and `changed`. A directory outside any git work tree has no hooksPath and
-// is ready at once.
+// The hooksPath state of the repo holding `root` (see above). A directory outside any git work tree
+// has no hooksPath and is ready at once.
 function hooksPathState(root, home) {
   const dirs = gitDirs(root)
   if (!dirs) return { ready: true, changed: false, hooks: [], includes: [], pending: null, failed: false }
@@ -682,22 +734,24 @@ function hooksPathState(root, home) {
   let entry = hooksPathEntries.get(id)
   if (!entry) {
     if (hooksPathEntries.size >= HOOKS_PATH_LIMIT) hooksPathEntries.delete(hooksPathEntries.keys().next().value)
-    entry = { hooks: null, includes: [], sources: [], doneKey: null, doneAt: 0, failedKey: null, failedAt: 0, pending: null }
+    entry = { hooks: null, includes: [], sources: [], doneKey: null, failedKey: null, failedAt: 0, pending: null }
     hooksPathEntries.set(id, entry)
   }
-  const key = hooksPathKey(dirs, home, entry)
-  const now = Date.now()
+  const key = hooksPathKey(dirs, home, entry.sources)
   const current = entry.hooks !== null && entry.doneKey === key
-  const fresh = current && now - entry.doneAt < HOOKS_PATH_TTL_MS
-  const failed = entry.failedKey === key && now - entry.failedAt < HOOKS_PATH_TTL_MS
-  if (!entry.pending && !fresh && !failed) readHooksPath(entry, dirs, home, key)
-  return { ready: fresh, changed: entry.hooks !== null && !current, hooks: entry.hooks ?? [], includes: entry.includes, pending: entry.pending, failed }
+  // A failed read is retried at the next classification after HOOKS_PATH_RETRY_MS, so a repo git
+  // cannot read does not start git at every classification.
+  const failed = entry.failedKey === key && Date.now() - entry.failedAt < HOOKS_PATH_RETRY_MS
+  if (!entry.pending && !current && !failed) readHooksPath(entry, dirs, home, key)
+  return { ready: current, changed: entry.hooks !== null && !current, hooks: entry.hooks ?? [], includes: entry.includes, pending: entry.pending, failed }
 }
 
 /**
  * The per-repo core.hooksPath cache the classifier reads (D-92 (a)). `load` starts a read when one
- * is due and resolves the protected hooksPath values once a read for the current config has
- * completed, or the last values when the read failed; `clear` forgets every repo.
+ * is due and resolves the protected hooksPath values once a read for the current config is
+ * confirmed, or the last values when the read failed; `next` starts a read when one is due and
+ * resolves when that one read (not a confirming read it starts) has finished; `clear` forgets every
+ * repo.
  */
 export const hooksPathCache = Object.freeze({
   /**
@@ -706,12 +760,20 @@ export const hooksPathCache = Object.freeze({
    * @returns {Promise<string[]>}
    */
   async load(root, home) {
-    for (let round = 0; round < 5; round++) {
+    for (let round = 0; round < 10; round++) {
       const state = hooksPathState(root, home)
       if (state.ready || state.failed) return state.hooks
       await state.pending
     }
     return hooksPathState(root, home).hooks
+  },
+  /**
+   * @param {string} root a directory in the work tree
+   * @param {string} home the home directory git reads the global config from
+   * @returns {Promise<void>}
+   */
+  async next(root, home) {
+    await hooksPathState(root, home).pending
   },
   clear() { hooksPathEntries.clear() }
 })
