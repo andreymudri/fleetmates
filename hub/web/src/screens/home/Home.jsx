@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { CARD_COPY, QuietCard, SessionCard, controllable } from '../../components/SessionCard.jsx'
+import { ArchiveToast, CARD_COPY, QuietCard, SessionCard, archiveFlow, controllable, isArchived, useArchiveToast } from '../../components/SessionCard.jsx'
 import { COMPACT_STEPS, CompactCard } from '../../components/CompactCard.jsx'
 import { ConfirmDialog } from '../../components/ConfirmDialog.jsx'
 import { Counts } from '../../components/Counts.jsx'
@@ -7,8 +7,8 @@ import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
 import { MetaLine, StatusPill, pillParams, shown, stateLabel, titleText, translate } from '../../components/StatusPill.jsx'
 import { linkHandler } from '../../shell/Rail.jsx'
-import { nudgeSession, stopSession } from '../../state/actions.js'
-import { readDensity, writeDensity } from '../../state/deck-store.js'
+import { fetchArchived, nudgeSession, stopSession } from '../../state/actions.js'
+import { archivedCount, readDensity, writeDensity } from '../../state/deck-store.js'
 import { NeedsYouDrawer, deckApi, needsLinkDetail, openOverlay, repoFor } from '../drawer/NeedsYouDrawer.jsx'
 import { Palette, openLaunch, orderSessions } from '../palette/Palette.jsx'
 
@@ -53,7 +53,18 @@ export const HOME_COPY = Object.freeze({
   'home.card.team.gateFailed': 'Gate {n} failed',
   'home.card.team.statusUnreadable': 'status.json unreadable, retrying',
   'home.card.team.ask': 'task {taskId} · {summary}',
-  'home.card.team.moreRequests': '+{n} more'
+  'home.card.team.moreRequests': '+{n} more',
+  'home.archive.finished': 'Archive all finished',
+  'home.archived.toggle': 'Archived ({n})',
+  'home.archived.label': 'Archived sessions',
+  'home.archived.when': 'archived {relative}',
+  'home.archived.auto': 'archived automatically',
+  'home.archived.owner': 'archived by you',
+  'home.archived.open': 'Open',
+  'home.archived.unarchive': 'Unarchive',
+  'home.archived.more': 'Show more',
+  'home.archived.loading': 'Loading archived sessions',
+  'home.archived.failed': 'Could not load archived sessions.'
 })
 
 /** Longest a reorder waits while the pointer is over the grid or focus is in a card (home.md 7.2). */
@@ -218,7 +229,7 @@ const byStateThenNewest = states => (a, b) => states.indexOf(a.state) - states.i
 /**
  * Split sessions into the Home presentation (home.md 4, 5.6, 5.7): calm or grid, normal or crowded, the
  * main grid in urgency order, the quiet row (stale, idle, reviewed; at most {@link QUIET_MAX}) or, when
- * crowded, the strip (stale, done, idle, reviewed). Ended sessions, a run's teammates and sessions
+ * crowded, the strip (stale, done, idle, reviewed). Ended and archived sessions, a run's teammates and sessions
  * reviewed before local midnight never show.
  * @param {object[]} sessions
  * @param {{ order?: string[], requests?: object[], now?: number, crowdedBefore?: boolean }} [options]
@@ -226,7 +237,7 @@ const byStateThenNewest = states => (a, b) => states.indexOf(a.state) - states.i
  */
 export function homeLayout(sessions, { order = [], requests = [], now = Date.now(), crowdedBefore = false } = {}) {
   const start = midnight(now)
-  const visible = orderSessions(sessions, order, requests).filter(row => row.state !== 'ended' && row.role !== 'teammate' &&
+  const visible = orderSessions(sessions, order, requests).filter(row => row.state !== 'ended' && !isArchived(row) && row.role !== 'teammate' &&
     !(row.state === 'reviewed' && (row.reviewedAt ?? row.stateSince ?? now) < start))
   const quietAll = visible.filter(row => QUIET.includes(row.state))
   const count = visible.length
@@ -386,8 +397,133 @@ function StripChip({ session, repo, now, t, navigate }) {
   )
 }
 
-function Calm({ state, layout, now, t, navigate, lang }) {
-  const sessions = state.data.sessions.filter(row => row.state !== 'ended')
+/**
+ * The sessions "Archive all finished" would archive, as the client sees them. Finished: `alive` is false and the
+ * session has no open request; it also has no unreviewed changes (an empty `changedFiles`) and is not archived.
+ * @param {object[]} sessions
+ * @param {object[]} [requests]
+ * @returns {string[]}
+ */
+export function finishedIds(sessions = [], requests = []) {
+  const asking = new Set((requests ?? []).filter(row => (row.state ?? 'open') === 'open').map(row => row.sessionId))
+  return (sessions ?? []).filter(row => !row.alive && !asking.has(row.id) && !(row.changedFiles?.length) && !isArchived(row)).map(row => row.id)
+}
+
+const ARCHIVED_OPEN_KEY = 'deck.archivedOpen'
+/** Archived sessions one page of the Archived list fetches. */
+export const ARCHIVED_PAGE = 20
+
+/**
+ * Whether the Archived list is expanded in this browser, from `localStorage` `deck.archivedOpen` (closed by
+ * default; a storage that throws reads as closed).
+ * @param {Storage | undefined} storage
+ * @returns {boolean}
+ */
+export function readArchivedOpen(storage) {
+  try {
+    return storage?.getItem(ARCHIVED_OPEN_KEY) === 'open'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Remember whether the Archived list is expanded; storage errors are ignored.
+ * @param {Storage | undefined} storage
+ * @param {boolean} open
+ */
+export function writeArchivedOpen(storage, open) {
+  try { storage?.setItem(ARCHIVED_OPEN_KEY, open ? 'open' : 'closed') } catch {}
+}
+
+function ago(ms, lang) {
+  const minutes = Math.max(0, Math.round(ms / 60_000))
+  const format = new Intl.RelativeTimeFormat(lang, { numeric: 'always' })
+  if (minutes < 60) return format.format(-minutes, 'minute')
+  if (minutes < 1440) return format.format(-Math.round(minutes / 60), 'hour')
+  return format.format(-Math.round(minutes / 1440), 'day')
+}
+
+function ArchivedRow({ row, repos, now, lang, t, navigate, onUnarchive }) {
+  const href = sessionHref(row.id)
+  const title = titleText(row.task || translate(t, CARD_COPY, 'home.card.untitled'))
+  const by = row.archivedBy === 'auto' ? 'home.archived.auto' : 'home.archived.owner'
+  return (
+    <li className="archived-row">
+      <span className="archived-row-text">
+        <span className="archived-row-title"><bdi>{title}</bdi></span>
+        <MetaLine className="archived-row-meta" items={[shown(repoFor(repos, row.repoId).name),
+          Number.isFinite(row.archivedAt) ? translate(t, HOME_COPY, 'home.archived.when', { relative: ago(now - row.archivedAt, lang) }) : null,
+          translate(t, HOME_COPY, by)]} />
+      </span>
+      <a className="button button--ghost button--xs" href={href} onClick={navigate ? linkHandler(navigate, href) : undefined}>{translate(t, HOME_COPY, 'home.archived.open')}</a>
+      <button type="button" className="button button--secondary button--xs" onClick={() => onUnarchive(row)}>{translate(t, HOME_COPY, 'home.archived.unarchive')}</button>
+    </li>
+  )
+}
+
+/**
+ * "Archived (N)" at the bottom of the Home list: a toggle that expands an in-place list fetched with
+ * `fetchArchived` ({@link ARCHIVED_PAGE} a page, "Show more" while a page comes back full). Each row shows the
+ * session's task, repo, when it was archived and by whom, an Open link and Unarchive; the list is fetched again
+ * after an Unarchive and whenever N changes. The expanded state is kept in `deck.archivedOpen`.
+ * @param {{ count: number, api?: { get: Function }, storage?: Storage, repos?: object[], now: number, lang?: string, t?: Function,
+ *   navigate?: (to: string) => void, onUnarchive: (id: string) => Promise<unknown> }} props
+ */
+export function ArchivedSection({ count, api, storage, repos = [], now, lang = 'en', t, navigate, onUnarchive }) {
+  const [open, setOpen] = useState(() => readArchivedOpen(storage))
+  const [list, setList] = useState({ rows: [], full: false, next: null, loading: false, failed: false })
+  const [version, setVersion] = useState(0)
+  useEffect(() => {
+    if (!open || !api) return undefined
+    let current = true
+    setList(value => ({ ...value, loading: true, failed: false }))
+    fetchArchived(api, { limit: ARCHIVED_PAGE }).then(body => {
+      if (!current) return
+      const rows = body?.sessions ?? []
+      setList({ rows, full: rows.length >= ARCHIVED_PAGE, next: body?.nextBefore ?? rows.at(-1)?.archivedAt ?? null, loading: false, failed: false })
+    }, () => { if (current) setList(value => ({ ...value, loading: false, failed: true })) })
+    return () => { current = false }
+  }, [open, api, count, version])
+  const toggle = () => {
+    writeArchivedOpen(storage, !open)
+    setOpen(!open)
+  }
+  const more = () => {
+    setList(value => ({ ...value, loading: true }))
+    fetchArchived(api, { before: list.next, limit: ARCHIVED_PAGE }).then(body => {
+      const rows = body?.sessions ?? []
+      setList(value => ({ rows: [...value.rows, ...rows], full: rows.length >= ARCHIVED_PAGE, next: body?.nextBefore ?? rows.at(-1)?.archivedAt ?? null, loading: false, failed: false }))
+    }, () => setList(value => ({ ...value, loading: false, failed: true })))
+  }
+  const unarchive = row => Promise.resolve(onUnarchive(row.id)).then(() => setVersion(n => n + 1))
+  return (
+    <section className="home-archived" aria-label={translate(t, HOME_COPY, 'home.archived.label')}>
+      <button type="button" className="button button--ghost button--xs home-archived-toggle" aria-expanded={open ? 'true' : 'false'} aria-controls="home-archived-list"
+        onClick={toggle}>{translate(t, HOME_COPY, 'home.archived.toggle', { n: count })}</button>
+      {open ? (
+        <div className="home-archived-body" id="home-archived-list" aria-busy={list.loading ? 'true' : undefined}>
+          {list.rows.length ? (
+            <ul className="archived-rows">
+              {list.rows.map(row => <ArchivedRow key={row.id} row={row} repos={repos} now={now} lang={lang} t={t} navigate={navigate} onUnarchive={unarchive} />)}
+            </ul>
+          ) : null}
+          {list.loading && !list.rows.length ? <p className="archived-status">{translate(t, HOME_COPY, 'home.archived.loading')}</p> : null}
+          {list.failed ? <p className="archived-status" role="alert">{translate(t, HOME_COPY, 'home.archived.failed')}</p> : null}
+          {list.full && !list.loading ? <button type="button" className="button button--ghost button--xs archived-more" onClick={more}>{translate(t, HOME_COPY, 'home.archived.more')}</button> : null}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function ArchiveAllButton({ ids, t, onArchiveFinished }) {
+  if (!ids.length || !onArchiveFinished) return null
+  return <button type="button" className="button button--ghost button--xs home-archive-finished" onClick={() => onArchiveFinished()}>{translate(t, HOME_COPY, 'home.archive.finished')}</button>
+}
+
+function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archived = null }) {
+  const sessions = state.data.sessions.filter(row => row.state !== 'ended' && !isArchived(row))
   const recent = [...state.data.sessions].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0))
   const seen = new Set()
   const crew = []
@@ -398,7 +534,7 @@ function Calm({ state, layout, now, t, navigate, lang }) {
     crew.push({ seed: repo.crewSeed, slot: repo.crewSlot })
   }
   if (!sessions.length && !state.data.repos?.length) {
-    return <section className="home home--calm"><EmptyState kind="home" as="h1" t={t} crew={crew} /></section>
+    return <section className="home home--calm"><EmptyState kind="home" as="h1" t={t} crew={crew} />{archived}</section>
   }
   const date = new Date(now)
   const day = translate(t, HOME_COPY, 'home.calm.subtitle.day', {
@@ -415,6 +551,7 @@ function Calm({ state, layout, now, t, navigate, lang }) {
       </div>
       <section className="calm-section" aria-labelledby="calm-loops-title">
         <h2 className="calm-section-title" id="calm-loops-title">{translate(t, HOME_COPY, 'home.calm.log.openLoops')}</h2>
+        {archiveAll}
         {loops.length ? (
           <ul className="calm-loops">
             {loops.map(row => {
@@ -429,6 +566,7 @@ function Calm({ state, layout, now, t, navigate, lang }) {
           </ul>
         ) : <EmptyState kind="openLoops" t={t} />}
       </section>
+      {archived}
     </section>
   )
 }
@@ -439,16 +577,25 @@ function Calm({ state, layout, now, t, navigate, lang }) {
  * {@link CompactCard}s with PTY tails (`state.data.tails`) or observed hook `steps`; team cards from the
  * snapshot's runs, and the calm presentation. The quiet row offers Nudge and Stop… for controllable PTY
  * sessions through `onNudge` and `onStop`. The fleet scrolls under a fixed header. `onHold` reports the pointer
- * over the grid and focus inside a card, which hold reorders. Pure: no hooks, so tests can walk it.
+ * over the grid and focus inside a card, which hold reorders. Comfortable cards and quiet cards offer "Archive"
+ * through `onArchive`; "Archive all finished" (`onArchiveFinished`) shows next to the title while
+ * {@link finishedIds} is not empty; {@link ArchivedSection} ends the list while `counts.archived` is above
+ * zero, also on the calm Home. Pure apart from ArchivedSection, which holds the list's hooks.
  * @param {{ state: object, t?: (key: string, params?: object) => string, now?: number, navigate: (to: string) => void, layout?: ReturnType<typeof homeLayout>, onOverlay?: (overlay: 'palette'|'drawer', detail?: object) => void, onFocusCard?: (id: string) => void, onHold?: (kind: 'pointer'|'focus', held: boolean) => void, lang?: string,
- *   density?: 'comfortable' | 'compact', onDensity?: (value: string) => void, onLaunch?: () => void, steps?: Record<string, object[]>, onNudge?: (session: object) => void, onStop?: (session: object) => void }} props
+ *   density?: 'comfortable' | 'compact', onDensity?: (value: string) => void, onLaunch?: () => void, steps?: Record<string, object[]>, onNudge?: (session: object) => void, onStop?: (session: object) => void,
+ *   onArchive?: (session: object) => void, onArchiveFinished?: () => void, onUnarchive?: (id: string) => Promise<unknown>, api?: { get: Function }, storage?: Storage }} props
  */
 export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverlay = (overlay, detail) => openOverlay(overlay, undefined, detail), onFocusCard = focusCard, onHold = () => {}, lang = 'en',
-  density = 'comfortable', onDensity = () => {}, onLaunch = () => openLaunch(navigate), steps = {}, onNudge, onStop }) {
+  density = 'comfortable', onDensity = () => {}, onLaunch = () => openLaunch(navigate), steps = {}, onNudge, onStop, onArchive, onArchiveFinished, onUnarchive = () => Promise.resolve(), api, storage }) {
   const { sessions, requests, repos, order, counts, runs } = state.data
   const shape = layout ?? homeLayout(sessions, { order, requests, now })
   const teams = teamCards(runs, sessions, requests)
-  if (shape.calm && !teams.length) return <Calm state={state} layout={shape} now={now} t={t} navigate={navigate} lang={lang} />
+  const archivedN = archivedCount(state)
+  const archived = archivedN > 0
+    ? <ArchivedSection count={archivedN} api={api} storage={storage} repos={repos} now={now} lang={lang} t={t} navigate={navigate} onUnarchive={onUnarchive} />
+    : null
+  const archiveAll = <ArchiveAllButton ids={finishedIds(sessions, requests)} t={t} onArchiveFinished={onArchiveFinished} />
+  if (shape.calm && !teams.length) return <Calm state={state} layout={shape} now={now} t={t} navigate={navigate} lang={lang} archiveAll={archiveAll} archived={archived} />
   const leads = new Set(teams.map(team => team.lead?.id).filter(Boolean))
   const items = withTeams(shape.grid.filter(row => !leads.has(row.id)), teams)
   const inCard = target => !!target?.closest?.('.home article')
@@ -463,6 +610,7 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
     <section className="home" onFocus={event => onHold('focus', inCard(event.target))} onBlur={event => onHold('focus', inCard(event.relatedTarget))}>
       <header className="home-header">
         <h1 className="page-title">{translate(t, HOME_COPY, 'home.header.title')}</h1>
+        {archiveAll}
         <Counts counts={counts} t={t} onNeeds={() => onOverlay('drawer')}
           onRunning={() => { if (firstRunning) onFocusCard(firstRunning.id) }}
           onReview={() => { if (oldestDone) navigate(`${sessionHref(oldestDone.id)}?tab=changes`) }} />
@@ -486,6 +634,7 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
               : <CompactCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} t={t} now={now} navigate={navigate} deckdDown={deckdDown}
                 tail={tails[item.session.id]} steps={steps[item.session.id]} />)}
           </section>
+          {archived}
         </div>
       ) : (
       <div className="home-fleet">
@@ -493,7 +642,7 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
           <h2 className="sr-only" id="home-grid-title">{translate(t, HOME_COPY, 'home.grid.label')}</h2>
           {items.map(item => item.team
             ? <TeamCard key={item.team.key} team={item.team} repo={repoFor(repos, item.team.run.repoId)} t={t} navigate={navigate} onReview={id => onOverlay('drawer', { request: id })} />
-            : <SessionCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} now={now} lang={lang} t={t} navigate={navigate} />)}
+            : <SessionCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} now={now} lang={lang} t={t} navigate={navigate} onArchive={onArchive} />)}
         </section>
         {shape.quiet.length || shape.strip.length ? (
           <section className="quiet-row" aria-labelledby="home-quiet-title">
@@ -504,9 +653,10 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
                 {hidden > 0 ? <li><button type="button" className="button button--ghost button--xs strip-more" onClick={() => onOverlay('palette')}>{translate(t, HOME_COPY, 'home.quiet.strip.more', { n: hidden })}</button></li> : null}
               </ul>
             ) : shape.quiet.map(session => <QuietCard key={session.id} session={session} repo={repo(session)} now={now} lang={lang} t={t} navigate={navigate}
-              onNudge={onNudge} onStop={onStop} deckdDown={deckdDown} />)}
+              onNudge={onNudge} onStop={onStop} deckdDown={deckdDown} onArchive={onArchive} />)}
           </section>
         ) : null}
+        {archived}
       </div>
       )}
     </section>
@@ -528,11 +678,12 @@ export function useMinuteNow() {
 
 /**
  * The palette or the Needs-you drawer, whichever overlay the shell's view names.
- * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: object }} props
+ * `onArchive` runs the palette's "Archive session" so the screen under it shows the toast.
+ * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: object, onArchive?: (id: string) => Promise<unknown> }} props
  */
-export function ObserveOverlays({ state, t, navigate, api }) {
+export function ObserveOverlays({ state, t, navigate, api, onArchive }) {
   const overlay = state.view?.overlay
-  if (overlay === 'palette') return <Palette state={state} t={t} navigate={navigate} api={api} />
+  if (overlay === 'palette') return <Palette state={state} t={t} navigate={navigate} api={api} onArchive={onArchive} />
   if (overlay === 'drawer') return <NeedsYouDrawer state={state} t={t} navigate={navigate} />
   return null
 }
@@ -604,12 +755,16 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
   }, [])
   const toast = item => { if (dispatch) dispatch({ type: 'toast.push', ...item }) }
   const actions = homeActions({ api: http, setStopping, toast, repoName: session => repoFor(state.data.repos, session.repoId).name, t })
+  const [archiveToast, showArchiveToast] = useArchiveToast()
+  const flow = archiveFlow({ api: http, show: showArchiveToast, t })
   return (
     <>
       <HomeView state={{ ...state, data: { ...state.data, order: held.order } }} t={t} now={now} navigate={navigate} layout={layout} onHold={onHold}
-        density={density} onDensity={value => pickDensity(storage, value, setDensity)} steps={steps} onNudge={actions.nudge} onStop={actions.openStop} />
+        density={density} onDensity={value => pickDensity(storage, value, setDensity)} steps={steps} onNudge={actions.nudge} onStop={actions.openStop}
+        onArchive={session => flow.archive(session.id)} onArchiveFinished={flow.archiveFinished} onUnarchive={flow.unarchive} api={http} storage={storage} />
       <HomeStopDialog stopping={stopping} repos={state.data.repos} actions={actions} t={t} />
-      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} />
+      <ArchiveToast toast={archiveToast} t={t} onUndo={flow.undo} onDismiss={() => showArchiveToast(null)} />
+      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} onArchive={flow.archive} />
     </>
   )
 }

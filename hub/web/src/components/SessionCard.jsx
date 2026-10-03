@@ -1,7 +1,8 @@
-import React from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { CrewAvatar, poseFor } from './CrewAvatar.jsx'
 import { MetaLine, StatusPill, compactDuration, pillParams, shown, titleText, translate } from './StatusPill.jsx'
 import { linkHandler } from '../shell/Rail.jsx'
+import { archiveFinished, archiveSession, unarchiveSession } from '../state/actions.js'
 
 /**
  * English copy for the M1 (observe-only) cards: docs/deck/screens/home.md section 9 and
@@ -35,6 +36,15 @@ export const CARD_COPY = Object.freeze({
   'home.quiet.nudge': 'Nudge (send Enter)',
   'home.quiet.stop': 'Stop…',
   'home.quiet.deckdDown': 'deckd is reconnecting',
+  'home.card.archive': 'Archive',
+  'archive.toast.archived': 'Session archived',
+  'archive.toast.restored': 'Session restored',
+  'archive.toast.finished': 'Archived {n} finished sessions',
+  'archive.toast.needsYou': 'This session needs you. Answer it first.',
+  // No copy deck names a failure other than needs_you; the server's message follows the colon.
+  'archive.toast.failed': 'Could not change the archive: {message}',
+  'archive.toast.undo': 'Undo',
+  'archive.toast.dismiss': 'Dismiss',
   'tier.safe': 'Safe',
   'tier.caution': 'Caution',
   'tier.destructive': 'Destructive',
@@ -43,6 +53,7 @@ export const CARD_COPY = Object.freeze({
 
 const QUIET = new Set(['stale', 'idle', 'reviewed'])
 const NEEDS = new Set(['needs_approval', 'asked_you'])
+const TURN = new Set(['running', 'starting'])
 const MAX_STEPS = 3
 const MAX_FILES = 6
 
@@ -197,9 +208,10 @@ function crashLine(session, t) {
  * SessionCard, comfortable density, observe-only (docs/deck/design/components.md section 10, home.md 4.2).
  * Every agent-supplied string renders as a text node: titles through `titleText` inside `<bdi>`,
  * commands, paths and branches through `shown`. Open requests say "Answer in your terminal"; M1 never answers.
- * @param {{ session: object, repo?: { name: string, crewSeed?: string, crewSlot?: number, hat?: string }, requests?: object[], steps?: { text: string, tone?: string, glyph?: string }[], now?: number, lang?: string, t?: (key: string, params?: object) => string, navigate?: (to: string) => void }} props
+ * With `onArchive`, a session that is not running a turn (`running` or `starting`) gets "Archive" in its footer.
+ * @param {{ session: object, repo?: { name: string, crewSeed?: string, crewSlot?: number, hat?: string }, requests?: object[], steps?: { text: string, tone?: string, glyph?: string }[], now?: number, lang?: string, t?: (key: string, params?: object) => string, navigate?: (to: string) => void, onArchive?: (session: object) => void }} props
  */
-export function SessionCard({ session, repo, requests = [], steps, now = Date.now(), lang = 'en', t, navigate }) {
+export function SessionCard({ session, repo, requests = [], steps, now = Date.now(), lang = 'en', t, navigate, onArchive }) {
   const variant = cardVariant(session)
   const tone = String(session.state).replace(/_/g, '-')
   const open = openRequestsOf(session, requests)
@@ -210,6 +222,9 @@ export function SessionCard({ session, repo, requests = [], steps, now = Date.no
   const changesHref = `${sessionHref(session.id)}?tab=changes`
   const classes = ['session-card', `session-card--${variant}`, `session-card--${tone}`]
   if (NEEDS.has(session.state)) classes.push('motion-pulse')
+  const archive = onArchive && !TURN.has(session.state)
+    ? <button type="button" className="button button--ghost button--xs card-archive" onClick={() => onArchive(session)}>{translate(t, CARD_COPY, 'home.card.archive')}</button>
+    : null
   return (
     <article className={classes.join(' ')} aria-labelledby={domId(session.id)}>
       <CardHeader session={session} repo={repo} title={title} t={t} now={now} navigate={navigate} size="md" pillVariant="pill" />
@@ -225,14 +240,17 @@ export function SessionCard({ session, repo, requests = [], steps, now = Date.no
             Number.isFinite(session.startedAt) ? compactDuration(now - session.startedAt) : null,
             Number.isFinite(session.toolCalls) ? translate(t, CARD_COPY, 'home.card.meta.toolCalls', { n: session.toolCalls }) : null
           ]} />
+          {archive}
         </footer>
       ) : null}
       {variant === 'done' ? (
         <footer className="card-footer">
           <span className="card-footer-meta">{translate(t, CARD_COPY, 'home.card.done.finished', { relative: relative(now - (session.stateSince ?? now), lang) })}</span>
+          {archive}
           <a className="button button--purple button--xs" href={changesHref} onClick={navigate ? linkHandler(navigate, changesHref) : undefined}>{translate(t, CARD_COPY, 'home.card.done.review')}</a>
         </footer>
       ) : null}
+      {archive && variant !== 'solo-running' && variant !== 'done' ? <footer className="card-footer card-footer--archive">{archive}</footer> : null}
     </article>
   )
 }
@@ -256,11 +274,11 @@ export function controllable(session) {
  * QuietCard for the quiet row (components.md section 11, home.md 4.3): stale, idle or reviewed, one line, Open.
  * A {@link controllable} session adds "Nudge (send Enter)" when stale and "Stop…" when idle, calling `onNudge`
  * or `onStop` with the session; both are disabled with the visible reason "deckd is reconnecting" while
- * `deckdDown`. Observed sessions never get Nudge or Stop.
+ * `deckdDown`. Observed sessions never get Nudge or Stop. With `onArchive`, every quiet card adds "Archive".
  * @param {{ session: object, repo?: object, now?: number, lang?: string, t?: (key: string, params?: object) => string, navigate?: (to: string) => void,
- *   onNudge?: (session: object) => void, onStop?: (session: object) => void, deckdDown?: boolean }} props
+ *   onNudge?: (session: object) => void, onStop?: (session: object) => void, deckdDown?: boolean, onArchive?: (session: object) => void }} props
  */
-export function QuietCard({ session, repo, now = Date.now(), lang = 'en', t, navigate, onNudge = () => {}, onStop = () => {}, deckdDown = false }) {
+export function QuietCard({ session, repo, now = Date.now(), lang = 'en', t, navigate, onNudge = () => {}, onStop = () => {}, deckdDown = false, onArchive }) {
   const line = QUIET_LINES[session.state]?.(session)
   const href = sessionHref(session.id)
   const openLabel = session.state === 'stale' && session.origin !== 'observed' ? 'home.quiet.openTerminal' : 'home.quiet.open'
@@ -278,8 +296,80 @@ export function QuietCard({ session, repo, now = Date.now(), lang = 'en', t, nav
           <button type="button" className={`button ${control[2]} button--xs`} disabled={deckdDown} aria-describedby={deckdDown ? reasonId : undefined}
             onClick={() => control[1](session)}>{translate(t, CARD_COPY, control[0])}</button>
         ) : null}
+        {onArchive ? <button type="button" className="button button--ghost button--xs card-archive" onClick={() => onArchive(session)}>{translate(t, CARD_COPY, 'home.card.archive')}</button> : null}
       </div>
       {control && deckdDown ? <p className="quiet-reason" id={reasonId}>{translate(t, CARD_COPY, 'home.quiet.deckdDown')}</p> : null}
     </article>
+  )
+}
+
+/** How long an archive toast stays, with its Undo, in ms (the crew sheet's Undo toast also lasts 6 s). */
+export const ARCHIVE_TOAST_MS = 6000
+
+/**
+ * Whether a session is archived. Archived: `sessions.archived_at` is not null.
+ * @param {{ archivedAt?: number | null }} session
+ * @returns {boolean}
+ */
+export function isArchived(session) {
+  return session?.archivedAt != null
+}
+
+/**
+ * The archive actions behind every Archive and Unarchive button: each calls its helper from `actions.js`, then
+ * shows a toast through `show`. "Session archived" and "Session restored" carry an `undo` that calls the opposite
+ * helper; "Archived {n} finished sessions" carries one that unarchives exactly the ids the server archived. The
+ * toast an undo shows has no undo of its own. A 409 `needs_you` shows "This session needs you. Answer it first."
+ * and changes nothing. No confirm dialog: archive is reversible.
+ * @param {{ api: { post: Function }, show: (toast: { tone: 'success'|'error', text: string, undo?: { action: 'archive'|'unarchive', ids: string[] } }) => void, t?: Function }} options
+ * @returns {{ archive: (id: string) => Promise<void>, unarchive: (id: string) => Promise<void>, archiveFinished: () => Promise<void>, undo: (undo: { action: string, ids: string[] }) => Promise<void> }}
+ */
+export function archiveFlow({ api, show, t }) {
+  const text = (key, params) => translate(t, CARD_COPY, key, params)
+  const fail = error => show({ tone: 'error', text: error?.status === 409 && error?.code === 'needs_you'
+    ? text('archive.toast.needsYou')
+    : text('archive.toast.failed', { message: error?.message ?? error?.code ?? 'failed' }) })
+  const run = (work, toast) => work().then(result => show(toast(result)), fail)
+  return {
+    archive: id => run(() => archiveSession(api, id), () => ({ tone: 'success', text: text('archive.toast.archived'), undo: { action: 'unarchive', ids: [id] } })),
+    unarchive: id => run(() => unarchiveSession(api, id), () => ({ tone: 'success', text: text('archive.toast.restored'), undo: { action: 'archive', ids: [id] } })),
+    archiveFinished: () => run(() => archiveFinished(api), body => {
+      const ids = Array.isArray(body?.ids) ? body.ids : []
+      return { tone: 'success', text: text('archive.toast.finished', { n: ids.length }), undo: { action: 'unarchive', ids } }
+    }),
+    undo: ({ action, ids }) => run(async () => {
+      for (const id of ids) await (action === 'archive' ? archiveSession : unarchiveSession)(api, id)
+    }, () => ({ tone: 'success', text: text(action === 'archive' ? 'archive.toast.archived' : 'archive.toast.restored') }))
+  }
+}
+
+/**
+ * The archive toast a screen holds: the latest toast from {@link archiveFlow}, cleared after {@link ARCHIVE_TOAST_MS}.
+ * @returns {[object | null, (toast: object | null) => void]}
+ */
+export function useArchiveToast() {
+  const [toast, setToast] = useState(null)
+  const timer = useRef(null)
+  useEffect(() => () => clearTimeout(timer.current), [])
+  const show = next => {
+    clearTimeout(timer.current)
+    setToast(next)
+    if (next) timer.current = setTimeout(() => setToast(null), ARCHIVE_TOAST_MS)
+  }
+  return [toast, show]
+}
+
+/**
+ * The archive toast: its text, Undo when it has one, and Dismiss. An error is an alert, a success a status.
+ * @param {{ toast: { tone: string, text: string, undo?: object } | null, t?: Function, onUndo: (undo: object) => void, onDismiss: () => void }} props
+ */
+export function ArchiveToast({ toast, t, onUndo, onDismiss }) {
+  if (!toast) return null
+  return (
+    <div className={`archive-toast archive-toast--${toast.tone}`} role={toast.tone === 'error' ? 'alert' : 'status'}>
+      <p className="archive-toast-text">{toast.text}</p>
+      {toast.undo ? <button type="button" className="button button--xs" onClick={() => onUndo(toast.undo)}>{translate(t, CARD_COPY, 'archive.toast.undo')}</button> : null}
+      <button type="button" className="button button--ghost button--xs" onClick={onDismiss}>{translate(t, CARD_COPY, 'archive.toast.dismiss')}</button>
+    </div>
   )
 }
