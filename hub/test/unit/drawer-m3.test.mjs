@@ -339,6 +339,24 @@ test('initial focus is the first row\'s primary action, or its checkbox when the
   assert.equal(drawerFocusTarget(panelOf([down]), 'x').name, 'open-x', 'a row with every answer disabled falls back to Open')
 })
 
+test('Alt Shift A and the batch button leave out a Safe permission row with no parsed options', async () => {
+  for (const [why, extra] of [['empty options', { options: [] }], ['options missing', { options: undefined }]]) {
+    const requests = [request('a', 's1', 'safe'), request('b', 's2', 'safe', extra), request('c', 's2', 'safe')]
+    const state = stateWith({ requests, health: [{ dep: 'deckd', state: 'up' }] })
+    const api = fakeApi({ '/api/requests/answer-batch': { results: [] } })
+    const h = await harness(state, { api })
+    assert.deepEqual(h.m.batchIds(requests, state), ['a', 'c'], `${why}: batchIds skips b`)
+    h.key({ key: 'A', code: 'KeyA', altKey: true, shiftKey: true })
+    await h.settle()
+    assert.deepEqual(answers(api), [['POST', '/api/requests/answer-batch', { ids: ['a', 'c'], choice: 'allow' }]], `${why}: Alt Shift A does not send b`)
+    const batch = find(h.tree(), node => node.type === 'button' && textOf(node) === 'Allow both Safe once')[0]
+    assert.ok(batch, `${why}: the batch button counts only the 2 rows with options`)
+    batch.props.onClick()
+    await h.settle()
+    assert.deepEqual(answers(api).at(-1), ['POST', '/api/requests/answer-batch', { ids: ['a', 'c'], choice: 'allow' }], `${why}: the batch button does not send b`)
+  }
+})
+
 test('Alt A and Alt D send nothing while deckd is down, the prompt is queued, an answer is in flight, one did not land, or no options were parsed', async () => {
   const blocked = [
     ['deckd outage flag', {}, state => ({ ...state, deckdOutage: true })],
