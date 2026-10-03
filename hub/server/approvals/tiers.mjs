@@ -551,9 +551,9 @@ function configVerdict(location, ctx, segment) {
     if (roots.length && isConfigName(path.relative(roots[0], candidate))) return reason('file.config-name', 'caution', segment, 'changes a configuration file at the repo root or in a dot directory')
   }
   // D-91 (3): the real target of a linked execution-config entry, or the core.hooksPath directory,
-  // compared folded (D-92 (c)); D-92 (a): a hooks name while the hooksPath read is outstanding.
+  // compared folded (D-92 (c)); D-92 (a): any path in a repo whose hooksPath read is not current.
   const real = realExisting(location)
-  if (protectedTargets(ctx).some(target => withinFolded(real, target)) || underUnreadHooksName(location, ctx)) return reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs')
+  if (protectedTargets(ctx).some(target => withinFolded(real, target)) || underUnsettledRepo(location, ctx)) return reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs')
   return null
 }
 
@@ -613,11 +613,10 @@ function gitDirs(dir) {
 // key changed while it ran, or when it named a file that key did not hold (whose state before the
 // read is unknown); a confirming read then starts at once. States:
 // - `ready`: the last confirmed read holds for the current key.
-// - before the first read lands: the hooks names (directories named hooks or git-hooks) are
-//   protected.
-// - `changed`: any other state. A read landed but does not hold for the current key (a config
-//   source was written, the read was not confirmed), a read failed (the first one included), or
-//   read 3 stopped at HOOKS_PATH_FILE_LIMIT. Every value and include target found so far stays
+// - `changed`: any other state. No read has landed yet (the first classification in a repo since
+//   the server started), a read landed but does not hold for the current key (a config source was
+//   written, the read was not confirmed), a read failed (the first one included), or read 3
+//   stopped at HOOKS_PATH_FILE_LIMIT. Every value and include target found so far stays
 //   protected, and so does every write in the repo, since the hooks directory may have any name.
 //   A failed or stopped read is retried after HOOKS_PATH_RETRY_MS.
 const HOOKS_PATH_RETRY_MS = 2000
@@ -757,7 +756,7 @@ function hooksPathState(root, home) {
   // repo git cannot read does not start git at every classification.
   const failed = entry.failedKey === key && Date.now() - entry.failedAt < HOOKS_PATH_RETRY_MS
   if (!entry.pending && !current && !failed) readHooksPath(entry, dirs, home, key)
-  return { ready: current, changed: entry.hooks !== null && !current, hooks: entry.hooks ?? [], includes: entry.includes, pending: entry.pending, failed }
+  return { ready: current, changed: !current, hooks: entry.hooks ?? [], includes: entry.includes, pending: entry.pending, failed }
 }
 
 /**
@@ -814,20 +813,17 @@ function protectedLinks(root) {
 
 // The real paths a write may not reach at Safe, for every repo scope root of a classification: the
 // targets of linked entries, the core.hooksPath directories and the include targets of the git
-// config. Also collects the roots whose hooksPath read is not current (`ctx.hooksUnread`) and those
-// whose config changed since the last read (`ctx.hooksChanged`), and D-92 (b) the git dir and
+// config. Also collects the roots whose hooksPath read is not current (`ctx.hooksChanged`), and D-92 (b) the git dir and
 // common dir a `.git` file names when they lie inside a repo root (`ctx.gitDirTargets`), both as
 // named and by realpath.
 function protectedTargets(ctx) {
   if (!ctx.protectedTargets) {
     const targets = new Set()
-    const unread = new Set()
     const changed = new Set()
     const gitTargets = new Set()
     const roots = [...new Set(ctx.lexicalRoots)]
     for (const root of roots) {
       const hooks = hooksPathState(root, ctx.home)
-      if (!hooks.ready) unread.add(root)
       if (hooks.changed) changed.add(root)
       for (const location of [...protectedLinks(root), ...hooks.hooks, ...hooks.includes]) targets.add(realExisting(location))
       const dirs = gitDirs(root)
@@ -837,7 +833,6 @@ function protectedTargets(ctx) {
       }
     }
     ctx.protectedTargets = [...targets]
-    ctx.hooksUnread = [...unread]
     ctx.hooksChanged = [...changed]
     ctx.gitDirTargets = [...gitTargets]
   }
@@ -849,16 +844,11 @@ function gitDirTargets(ctx) {
 }
 const inGitDirTarget = (location, ctx) => candidates(location).some(candidate => gitDirTargets(ctx).some(dir => withinFolded(candidate, dir)))
 
-// D-92 (a): while the hooksPath read of a repo is not current, a directory named hooks or
-// git-hooks below its root may be the hooks directory; while its config changed since the last
-// read, any path below its root may be.
-function underUnreadHooksName(location, ctx) {
+// D-92 (a): while the hooksPath read of a repo is not current (none landed yet, or the config
+// changed since), any path below its root may be in the hooks directory.
+function underUnsettledRepo(location, ctx) {
   protectedTargets(ctx)
-  const below = (roots, test) => roots.some(root => candidates(location).some(candidate => {
-    const rel = relFolded(candidate, root)
-    return rel !== null && test(rel.split('/').slice(0, -1))
-  }))
-  return below(ctx.hooksChanged, () => true) || below(ctx.hooksUnread, dirs => dirs.some(part => part === 'hooks' || part === 'git-hooks'))
+  return ctx.hooksChanged.some(root => candidates(location).some(candidate => relFolded(candidate, root) !== null))
 }
 
 // Glob matching for argument globs: `*` is any text, `?` one character, and `-<N>` a number option.

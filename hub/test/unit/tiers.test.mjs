@@ -17,7 +17,10 @@ function sandbox() {
   for (const dir of [repo, deckPaths.config, deckPaths.state, deckPaths.runtime]) mkdirSync(dir, { recursive: true })
   const run = (toolName, toolInput, extra = {}) => classify({ toolName, toolInput, cwd: repo, repoRoot: repo, homeDir: home, deckPaths, ...extra })
   const bash = (command, extra) => run('Bash', { command }, extra)
-  return { root, home, repo, deckPaths, run, bash, close: () => rmSync(root, { recursive: true, force: true }) }
+  // D-92 (a): a repo whose hooksPath read has not landed reads as changed (every write Caution), so a
+  // test that expects a Safe write in a git work tree settles the read first.
+  const settle = (dir = repo) => hooksPathCache.load(dir, home)
+  return { root, home, repo, deckPaths, run, bash, settle, close: () => rmSync(root, { recursive: true, force: true }) }
 }
 
 test('maxTier returns the highest tier and ignores missing values', () => {
@@ -304,13 +307,14 @@ test('option values are not path operands, so a search with only -e or -A values
   } finally { s.close() }
 })
 
-test('git diff of a directory or outside a git work tree is Caution, and so are Bash writes to the execution-config list (D-88 (5), (6))', () => {
+test('git diff of a directory or outside a git work tree is Caution, and so are Bash writes to the execution-config list (D-88 (5), (6))', async () => {
   const s = sandbox()
   try {
     mkdirSync(path.join(s.repo, 'src'))
     assert.equal(s.bash('git diff').tier, 'caution', 'the sandbox repo is not a git work tree yet')
     mkdirSync(path.join(s.repo, '.git'))
     writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    await s.settle()
     assert.equal(s.bash('git diff').tier, 'safe')
     assert.equal(s.bash('git diff main --stat').tier, 'safe')
     assert.equal(s.bash('git diff src').tier, 'caution')
@@ -347,13 +351,14 @@ test('pathOperands, operandOpts and forwardOpts are validated like the other ent
 // Phase 2 round 3. On a case-insensitive file system (the macOS default) `.GIT/config` is
 // `.git/config`, so every name check folds case; the test host is case-sensitive, so these pin the
 // classifier's verdict, not what the kernel opens.
-test('path name checks fold case and HFS-ignorable characters, on every platform', () => {
+test('path name checks fold case and HFS-ignorable characters, on every platform', async () => {
   const s = sandbox()
   try {
     for (const dir of [path.join(s.repo, '.git', 'hooks'), path.join(s.repo, 'src'), path.join(s.home, '.ssh')]) mkdirSync(dir, { recursive: true })
     writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
     writeFileSync(path.join(s.repo, 'src', 'a.txt'), 'a\n')
     writeFileSync(path.join(s.repo, '.ENV'), 'SYNTHETIC=1\n')
+    await s.settle()
     writeFileSync(path.join(s.deckPaths.config, 'token'), 'synthetic')
     const expect = (result, tier, id, label) => {
       assert.equal(result.tier, tier, `${label}: ${result.reasons.map(item => item.entryId).join(' ')}`)
@@ -380,11 +385,12 @@ test('path name checks fold case and HFS-ignorable characters, on every platform
 // Go writes `-o DIR/` (or an existing DIR) as DIR/<package base name>, and a single main package
 // with no -o into the working directory (`go help build`; not run here: no Go toolchain on the test
 // host). go test writes DIR/<package>.test.
-test('go build and go test outputs into a directory or the working directory are judged as the file Go writes', () => {
+test('go build and go test outputs into a directory or the working directory are judged as the file Go writes', async () => {
   const s = sandbox()
   try {
     for (const dir of ['.git/hooks', '.githooks', '.husky', 'cmd/pre-commit', 'cmd/tool', 'bin', '.claude/hooks']) mkdirSync(path.join(s.repo, dir), { recursive: true })
     writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    await s.settle()
     const expect = (command, tier, id, cwd = s.repo) => {
       const result = s.bash(command, { cwd })
       assert.equal(result.tier, tier, `${command} in ${path.relative(s.repo, cwd) || '.'}: ${result.reasons.map(item => item.entryId).join(' ')}`)
@@ -629,7 +635,7 @@ test('a runner or checker whose working directory or path argument lies in .git 
 
 // D-89 and D-90: the everyday commands, and Write and Edit of ordinary source files, stay Safe from
 // the root of a realistic repo.
-test('git status, git diff, git log, rg, grep -r, cargo test, npm test, pytest and source file edits stay Safe at the root of a realistic repo (D-89, D-90)', () => {
+test('git status, git diff, git log, rg, grep -r, cargo test, npm test, pytest and source file edits stay Safe at the root of a realistic repo (D-89, D-90)', async () => {
   const s = sandbox()
   try {
     for (const dir of ['.git/hooks', 'src', 'tests', 'node_modules/pkg', 'node_modules/.bin']) mkdirSync(path.join(s.repo, dir), { recursive: true })
@@ -642,6 +648,7 @@ test('git status, git diff, git log, rg, grep -r, cargo test, npm test, pytest a
     writeFileSync(path.join(s.repo, 'src', 'main.rs'), 'fn main() {}\n')
     writeFileSync(path.join(s.repo, 'src', 'a.py'), 'x = 1\n')
     writeFileSync(path.join(s.repo, 'tests', 'test_a.py'), 'def test_a():\n    pass\n')
+    await s.settle()
     for (const command of ['git status', 'git diff', 'git log', 'rg foo src', 'grep -r foo src', 'cargo test', 'npm test', 'pytest', 'pytest tests/test_a.py::test_a', 'go test ./...']) expectTier(s.bash(command), 'safe', null, command)
     for (const file of ['src/a.py', 'src/main.rs', 'tests/test_a.py', 'src/new.py', 'README.md', 'src/settings.toml', 'src/.eslintrc.json']) {
       expectTier(s.run('Write', { file_path: file, content: 'x' }), 'safe', null, `Write ${file}`)
@@ -788,7 +795,7 @@ test('a pytest or mypy word that starts with @ is Caution (D-91 (2))', () => {
 // names, protect their real targets: any write whose realpath lies in one is Caution. The round 6
 // reviews ran git with .githooks -> tools/hooks and with core.hooksPath=scripts/git-hooks: an edit
 // of the real hook file ran at the next commit.
-test('a write into the real target of a linked execution-config entry or the core.hooksPath directory is Caution (D-91 (3))', () => {
+test('a write into the real target of a linked execution-config entry or the core.hooksPath directory is Caution (D-91 (3))', async () => {
   const s = sandbox()
   const writers = file => [
     ['Write', s.run('Write', { file_path: file, content: 'x' })],
@@ -808,6 +815,7 @@ test('a write into the real target of a linked execution-config entry or the cor
     symlinkSync('mk/real.mk', path.join(s.repo, 'Makefile'))
     symlinkSync('meta', path.join(s.repo, '.github'))
     symlinkSync('cfg/pkg.json', path.join(s.repo, 'package.json'))
+    await s.settle()
     for (const file of ['tools/hooks/pre-commit', 'tools/hooks/reference-transaction', 'mk/real.mk', '.agents/skills/x/SKILL.md', 'meta/workflows/ci.yml', 'cfg/pkg.json']) {
       for (const [tool, result] of writers(file)) expectTier(result, 'caution', 'file.execution-config', `${tool} ${file}`)
     }
@@ -877,15 +885,15 @@ test('the git helper allows exactly the three hooksPath config reads beyond the 
 // D-92 (a): core.hooksPath is read through the real git (`git config --type=path --get-all
 // core.hooksPath` through the read-only helper), so every form git honours counts: the
 // `:(optional)` prefix, include and includeIf files, `~/` paths, the XDG config file. Until the
-// first read of a repo completes, a write under any directory named hooks or git-hooks is Caution.
+// first read of a repo lands, every write in it is Caution (D-92 round 4; it was the hooks names only).
 test('core.hooksPath is read through git, so every form git honours protects its directory (D-92 (a))', async () => {
   await withXdg(undefined, async () => {
     const s = hooksSandbox()
     try {
       expectTier(s.write('scripts/git-hooks/pre-commit'), 'caution', 'file.execution-config', 'git-hooks before the first read')
       expectTier(s.write('web/HOOKS/useThing.js'), 'caution', 'file.execution-config', 'hooks before the first read, folded')
-      expectTier(s.write('src/hooks.js'), 'safe', null, 'a file named hooks before the first read')
-      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary file before the first read')
+      expectTier(s.write('src/hooks.js'), 'caution', 'file.execution-config', 'a file named hooks before the first read')
+      expectTier(s.write('src/a.txt'), 'caution', 'file.execution-config', 'an ordinary file before the first read')
       assert.deepEqual(await s.settle(), [])
       expectTier(s.write('scripts/git-hooks/pre-commit'), 'safe', null, 'git-hooks once git reports no hooksPath')
       expectTier(s.write('web/HOOKS/useThing.js'), 'safe', null, 'hooks once git reports no hooksPath')
@@ -1212,6 +1220,7 @@ test('a common dir inside the classified worktree is protected like .git (D-92 (
     gitIn(main, s.home, 'worktree', 'add', '-q', wt)
     gitIn(main, s.home, 'init', '-q', `--separate-git-dir=${path.join(wt, 'gd')}`)
     assert.equal(readFileSync(path.join(wt, '.git'), 'utf8').trim(), `gitdir: ${path.join(wt, 'gd', 'worktrees', 'wt')}`)
+    await s.settle(wt)
     const inTree = (file, tool = 'Write') => classify({ toolName: tool, toolInput: { file_path: file, content: 'x' }, cwd: wt, repoRoot: wt, homeDir: s.home, deckPaths: s.deckPaths })
     expectTier(inTree('gd/config'), 'destructive', 'floor.git-dir', 'the common dir config')
     expectTier(inTree('gd/hooks/pre-commit'), 'destructive', 'floor.git-dir', 'a hook in the common dir')
@@ -1302,11 +1311,46 @@ test('the confirming read starts by itself, so an ordinary write 1 s after the f
       mkdirSync(s.at('conf'))
       writeFileSync(s.at('conf', 'a'), '[x]\n\ty = 1\n')
       gitIn(s.repo, s.home, 'config', 'include.path', '../conf/a')
-      expectTier(s.write('src/a.txt'), 'safe', null, 'the first classification, which starts the first read')
+      expectTier(s.write('src/a.txt'), 'caution', 'file.execution-config', 'the first classification, which starts the first read')
       await pause(1000)
       expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write 1 s later')
     } finally { s.close() }
   })
+})
+
+// D-92 round 4: a repo with no landed hooksPath read reads as changed: the very first
+// classification in it is Caution for every write, whatever the hooks directory is named.
+test('the first classification in a repo, before any read lands, is Caution for every write (D-92 (a))', async () => {
+  await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+    const s = hooksSandbox()
+    try {
+      gitIn(s.repo, s.home, 'config', 'core.hooksPath', 'scripts/precommit')
+      expectTier(s.write('scripts/precommit/pre-commit'), 'caution', 'file.execution-config', 'the hook at the first classification')
+      assert.deepEqual(await s.settle(), [s.at('scripts', 'precommit')])
+      expectTier(s.write('src/a.js'), 'safe', null, 'an ordinary write once the read landed')
+      expectTier(s.write('scripts/precommit/pre-commit'), 'caution', 'file.execution-config', 'the hook once the read landed')
+    } finally { s.close() }
+  })
+})
+
+// D-92 round 4: an include.path set through the environment (GIT_CONFIG_COUNT/KEY/VALUE, a
+// "command line" origin in read 2) is followed like one from a file: its target is protected and
+// keyed, so rewriting it to set hooksPath leaves the hook write Caution.
+test('an include.path set through GIT_CONFIG_COUNT is followed, protected and keyed (D-92 (a))', async () => {
+  const s = hooksSandbox()
+  try {
+    mkdirSync(s.at('conf'))
+    writeFileSync(s.at('conf', 'inc'), '[x]\n\ty = 1\n')
+    await withEnv({ XDG_CONFIG_HOME: undefined, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'include.path', GIT_CONFIG_VALUE_0: s.at('conf', 'inc') }, async () => {
+      assert.deepEqual(await s.settle(), [])
+      expectTier(s.write('conf/inc'), 'caution', 'file.execution-config', 'the include target the environment names')
+      writeFileSync(s.at('conf', 'inc'), '[core]\n\thooksPath = tools/z\n')
+      expectTier(s.write('tools/z/pre-commit'), 'caution', 'file.execution-config', 'the hook right after the include edit')
+      assert.deepEqual(await s.settle(), [s.at('tools', 'z')])
+      expectTier(s.write('tools/z/pre-commit'), 'caution', 'file.execution-config', 'the hook once read')
+      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary write once read')
+    })
+  } finally { s.close() }
 })
 
 // D-92 (b): a `.git` file names a git dir (and through its commondir, a common dir); when either
@@ -1318,6 +1362,7 @@ test('a separate git dir inside the repo is protected like .git (D-92 (b))', asy
     mkdirSync(path.dirname(gd))
     gitIn(s.root, s.home, 'init', '-q', `--separate-git-dir=${gd}`, s.repo)
     assert.match(readFileSync(path.join(s.repo, '.git'), 'utf8'), /^gitdir: /)
+    await s.settle()
     for (const file of ['meta/gd/config', 'meta/gd/hooks/pre-commit', 'meta/gd/HEAD', 'meta/GD/config']) {
       expectTier(s.run('Write', { file_path: file, content: 'x' }), 'destructive', 'floor.git-dir', `Write ${file}`)
       expectTier(s.bash(`tee ${file} < /dev/null`), 'destructive', 'floor.git-dir', `tee ${file}`)
@@ -1327,6 +1372,7 @@ test('a separate git dir inside the repo is protected like .git (D-92 (b))', asy
     gitIn(s.repo, s.home, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'x')
     const wt = path.join(s.root, 'wt')
     gitIn(s.repo, s.home, 'worktree', 'add', '-q', wt)
+    await s.settle(wt)
     const inTree = file => classify({ toolName: 'Write', toolInput: { file_path: file, content: 'x' }, cwd: wt, repoRoot: wt, worktrees: [s.repo, wt], homeDir: s.home, deckPaths: s.deckPaths })
     expectTier(inTree(path.join(gd, 'config')), 'destructive', 'floor.git-dir', 'the common dir from a linked worktree')
     expectTier(inTree(path.join(gd, 'worktrees', 'wt', 'HEAD')), 'destructive', 'floor.git-dir', 'the worktree git dir')
@@ -1412,7 +1458,7 @@ test('a write through a link outside the repo into it is Caution, and a runner o
 
 // D-89 (4): cargo writes the default target directory next to the workspace root's Cargo.toml,
 // which may be above the member the command runs in (cargo 1.98, run by the round 4 review).
-test('cargo checks the target directory of every Cargo.toml from the working directory up (D-89 (4))', () => {
+test('cargo checks the target directory of every Cargo.toml from the working directory up (D-89 (4))', async () => {
   const s = sandbox()
   try {
     const ws = path.join(s.repo, 'ws')
@@ -1421,6 +1467,7 @@ test('cargo checks the target directory of every Cargo.toml from the working dir
     writeFileSync(path.join(ws, 'Cargo.toml'), '[workspace]\nmembers = ["member"]\n')
     writeFileSync(path.join(ws, 'member', 'Cargo.toml'), '[package]\nname = "member"\n')
     symlinkSync(path.join(s.repo, '.git', 'hooks'), path.join(ws, 'target'))
+    await s.settle()
     for (const command of ['cargo build', 'cargo test']) expectTier(s.bash(command, { cwd: path.join(ws, 'member') }), 'destructive', 'floor.git-dir', `${command} in a workspace member`)
     // Without the link the member build is Safe.
     rmSync(path.join(ws, 'target'))

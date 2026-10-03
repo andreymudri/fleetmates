@@ -127,7 +127,8 @@ export function allowedCommand(args) {
     case 'worktree':
       return rest[0] === 'list'
     case 'config':
-      // D-92 (a): the classifier's two core.hooksPath reads, exactly as written.
+      // D-92 (a): the classifier's three core.hooksPath reads (the two HOOKS_PATH_READS and
+      // hooksPathFileRead), exactly as written.
       if (isHooksPathRead(args)) return true
       return words.includes('--get') && words.every(word => ['--get', '--bool', '--type=bool', '--null', '-z'].includes(word) || !word.startsWith('-'))
     case 'diff':

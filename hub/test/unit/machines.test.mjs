@@ -4,16 +4,21 @@ import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { test } from 'node:test'
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
+
+// D-92 (a): the classifier treats a git repo whose hooksPath read has not landed as changed (every
+// write Caution); a test that expects a Safe write there settles the read first, with the home the
+// classifier uses when no homeDir is given.
+const settleHooks = (...roots) => Promise.all(roots.map(root => hooksPathCache.load(root, process.env.HOME && path.isAbsolute(process.env.HOME) ? process.env.HOME : homedir())))
 import { openDeckDb } from '../../server/db/index.mjs'
 import { runRetention } from '../../server/db/retention.mjs'
 import { createProjector, PROMPT_GONE_REASON, SCROLLBACK_CAP } from '../../server/machines/projector.mjs'
 import { applySessionHook, captureReviewBaseline, leadRunId } from '../../server/machines/session.mjs'
 import { projectHome } from '../../server/machines/counts.mjs'
 import { applyRequestHook, classifyHook, expireRequests, permissionTier } from '../../server/machines/request.mjs'
-import { classify, worktrees } from '../../server/approvals/tiers.mjs'
+import { classify, hooksPathCache, worktrees } from '../../server/approvals/tiers.mjs'
 
 function execFileSync(file, args, options = {}) {
   if (path.basename(file) !== 'git') return executeFile(file, args, options)
@@ -1609,7 +1614,7 @@ test('symlinked parents retain the deck control floor for reads and new writes',
   }
 })
 
-test('symlinked Git control files and parents retain the destructive write floor', () => {
+test('symlinked Git control files and parents retain the destructive write floor', async () => {
   const repo = mkdtempSync(path.join(tmpdir(), 'deck-git-link-'))
   try {
     mkdirSync(path.join(repo, '.git', 'hooks'), { recursive: true })
@@ -1621,6 +1626,7 @@ test('symlinked Git control files and parents retain the destructive write floor
     symlinkSync('.git/hooks', path.join(repo, 'hooks-link'))
     symlinkSync('.claude/settings.json', path.join(repo, 'settings-link'))
     symlinkSync('.mcp.json', path.join(repo, 'mcp-link'))
+    await settleHooks(repo)
     for (const file_path of ['config-link', 'hooks-link/pre-commit', path.join(repo, 'config-link'), 'settings-link', 'mcp-link']) {
       assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path, content: '[core]' } }, { repoRoot: repo }), 'destructive', file_path)
     }
@@ -4951,7 +4957,7 @@ test('public requests retain stored drawer matching delivery and notification fi
   } finally { reader.close(); h.close() }
 })
 
-test('observed linked worktrees share main repo identity but branch review and changes use their own tree', () => {
+test('observed linked worktrees share main repo identity but branch review and changes use their own tree', async () => {
   const h = harness()
   const root = path.dirname(h.file)
   const main = path.join(root, 'project')
@@ -4976,6 +4982,8 @@ test('observed linked worktrees share main repo identity but branch review and c
     assert.equal(repository.crew_seed, 'project')
     assert.equal(repository.crew_slot, 0)
     assert.equal(repository.crew_slot_shared, 0)
+    await worktrees.load(main)
+    await settleHooks(main, linked)
     send('PermissionRequest', 1500, { tool_name: 'Write', tool_input: { file_path: path.join(linked, 'CLAUDE.md'), content: 'synthetic local guidance' } })
     assert.equal(h.projector.snapshot().requests[0].tier, 'safe')
     writeFileSync(path.join(main, 'main-only.txt'), 'main edit\n')
