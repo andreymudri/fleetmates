@@ -61,11 +61,26 @@ export function hooksPathFileRead(file) {
 }
 const isFileRead = args => args.length === 6 && typeof args[2] === 'string' && path.isAbsolute(args[2]) && hooksPathFileRead(args[2]).every((word, k) => args[k] === word)
 /**
- * The config-location variables the user's own git honours. The HOOKS_PATH_READS and
- * `hooksPathFileRead`, and no other command, get them from the server's environment and read the system config, so they see the
- * hooksPath the user's git applies.
+ * The config-location variables the user's own git honours. With the variables that set config
+ * entries themselves (see `hooksPathEnvironment`), the HOOKS_PATH_READS and `hooksPathFileRead`, and
+ * no other command, get them from the server's environment and read the system config, so they see
+ * the hooksPath the user's git applies in that environment.
  */
 export const HOOKS_PATH_ENV = Object.freeze(['GIT_CONFIG_SYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM'])
+const CONFIG_ENTRY_ENV = /^(?:GIT_CONFIG_COUNT|GIT_CONFIG_PARAMETERS|GIT_CONFIG_KEY_\d+|GIT_CONFIG_VALUE_\d+)$/
+
+/**
+ * The git variables the hooksPath reads take from `source`: HOOKS_PATH_ENV, and GIT_CONFIG_COUNT,
+ * GIT_CONFIG_KEY_<n>, GIT_CONFIG_VALUE_<n> and GIT_CONFIG_PARAMETERS, which set config entries. Every
+ * other GIT_* variable stays stripped.
+ * @param {NodeJS.ProcessEnv} [source]
+ * @returns {Record<string, string>}
+ */
+export function hooksPathEnvironment(source = process.env) {
+  const out = {}
+  for (const [name, value] of Object.entries(source)) if (typeof value === 'string' && (HOOKS_PATH_ENV.includes(name) || CONFIG_ENTRY_ENV.test(name))) out[name] = value
+  return out
+}
 const isHooksPathRead = args => isFileRead(args) || HOOKS_PATH_READS.some(form => form.length === args.length && form.every((word, k) => args[k] === word))
 
 /** Words before `--` (the options and revisions; pathspecs come after `--`). */
@@ -130,7 +145,7 @@ export function allowedCommand(args) {
  * caller can read `git diff --no-index` exit 1 as "differences"; resolves null when git could not start,
  * timed out, was killed or wrote more than `maxBuffer` bytes. It never rejects. `home`, an absolute
  * path, replaces `HOME` in the child's environment, so the global config git reads is that home's.
- * The HOOKS_PATH_READS run without `GIT_CONFIG_NOSYSTEM` and with the HOOKS_PATH_ENV variables.
+ * The hooksPath reads run without `GIT_CONFIG_NOSYSTEM` and with the `hooksPathEnvironment` variables.
  * @param {string} root working directory of the git call
  * @param {string[]} args git arguments after the safe flags
  * @param {{ timeoutMs?: number, maxBuffer?: number, input?: string|Buffer, home?: string }} [options]
@@ -141,7 +156,7 @@ export function gitRead(root, args, { timeoutMs = 1500, maxBuffer = 1024 * 1024,
   const base = { ...gitEnv(), ...(typeof home === 'string' && path.isAbsolute(home) ? { HOME: home } : {}) }
   if (isHooksPathRead(args)) {
     delete base.GIT_CONFIG_NOSYSTEM
-    for (const name of HOOKS_PATH_ENV) if (typeof process.env[name] === 'string') base[name] = process.env[name]
+    Object.assign(base, hooksPathEnvironment())
   }
   const env = args[0] === 'diff' ? { ...base, GIT_DIR: '/dev/null' } : base
   return new Promise(resolve => {
