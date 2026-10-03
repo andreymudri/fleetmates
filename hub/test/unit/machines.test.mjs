@@ -4052,7 +4052,9 @@ test('sensitive requested names and canonical targets both enforce file write fl
     for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
       const tier = file => permissionTier({ cwd: root, tool_name: tool, tool_input: tool === 'NotebookEdit' ? { notebook_path: file, new_source: 'synthetic' } : { file_path: file, content: 'synthetic', edits: [] } }, { repoRoot: root })
       for (const target of targets) for (const file of [target, path.relative(root, target)]) assert.equal(tier(file), 'destructive', `${tool} ${file}`)
-      for (const file of ['ordinary', 'ordinary-alias', path.join(root, 'ordinary-alias')]) assert.equal(tier(file), 'safe', `${tool} ${file}`)
+      assert.equal(tier('ordinary'), 'safe', `${tool} ordinary`)
+      // D-90 (b): a file tool target through a symlink below the repo root is Caution.
+      for (const file of ['ordinary-alias', path.join(root, 'ordinary-alias')]) assert.equal(tier(file), 'caution', `${tool} ${file}`)
     }
     for (const target of targets) for (const file of [target, path.relative(root, target)]) {
       for (const command of [`tee '${file}'`, `sh -c 'printf x > "${file}"'`]) assert.equal(permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root }), 'destructive', command)
@@ -4108,8 +4110,12 @@ test('requested and canonical CLAUDE.md paths preserve local and global repo bou
     symlinkSync(repo, path.join(root, 'repo-alias'))
     const tier = (file, repoRoot = repo, cwd = repo) => permissionTier({ cwd, tool_name: 'Write', tool_input: { file_path: file, content: 'synthetic' } }, { repoRoot })
     for (const file of [path.join(outside, 'CLAUDE.md'), '../outside/CLAUDE.md', 'global-alias']) assert.equal(tier(file), 'destructive', file)
-    for (const file of ['CLAUDE.md', path.join(repo, 'CLAUDE.md'), 'plain']) assert.equal(tier(file), 'safe', file)
-    assert.equal(tier('CLAUDE.md', path.join(root, 'repo-alias'), path.join(root, 'repo-alias')), 'safe')
+    // D-90 (b): CLAUDE.md here links to plain inside the repo, so the file tools rate it Caution
+    // (through a symlink), not Destructive (the global CLAUDE.md floor).
+    assert.equal(tier('plain'), 'safe', 'plain')
+    for (const file of ['CLAUDE.md', path.join(repo, 'CLAUDE.md')]) assert.equal(tier(file), 'caution', file)
+    assert.equal(tier('CLAUDE.md', path.join(root, 'repo-alias'), path.join(root, 'repo-alias')), 'caution')
+    assert.equal(tier('plain', path.join(root, 'repo-alias'), path.join(root, 'repo-alias')), 'safe')
     for (const file of [path.join(outside, 'CLAUDE.md'), '../outside/CLAUDE.md', 'global-alias', 'CLAUDE.md', 'plain']) {
       const expected = ['CLAUDE.md', 'plain'].includes(file) ? 'caution' : 'destructive'
       for (const command of [`tee '${file}'`, `sh -c 'printf x > "${file}"'`]) assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), expected, command)

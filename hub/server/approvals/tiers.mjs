@@ -1,5 +1,5 @@
 // The approvals tier classifier (docs/deck/07-approvals.md section 3, with the tier review changes
-// adopted as D-75 to D-88). `classify` matches a permission request against the effective tiers
+// adopted as D-75 to D-90). `classify` matches a permission request against the effective tiers
 // set (tiers.default.json plus the user's tiers.json, see tiers-store.mjs), takes the highest
 // matching tier, and then applies the floors, which are code and cannot be lowered or disabled.
 import { createHash } from 'node:crypto'
@@ -81,20 +81,22 @@ const TEXT_COMMANDS = Object.freeze(['echo', 'printf'])
 // directory when they are given none; the tools are not run in this suite), so every path operand
 // is a write target.
 const OPERAND_WRITERS = Object.freeze(['terraform fmt', 'ruff check', 'ruff format', 'go fmt'])
-// D-89 (3): the formatter and fixer modes of Safe tools, keyed by command and subcommand. `writes`
-// tells the mode from the arguments after those two words. `named` tools rewrite only the files
-// they are given (a directory operand, or none, means every file under it, or under the working
-// directory); the others rewrite their whole package or crate whatever they are given. The modes
-// are taken from each tool's documentation (`ruff help`, `cargo fmt --help`, `go help fmt`,
-// `terraform fmt -help`, the eslint and prettier CLI docs); none of these tools is run here.
+// D-90 (a): formatters and fixers, keyed by command word and, where the tool has one, subcommand.
+// Each function says whether the option words before any `--` put the tool in an explicit check,
+// diff or dry-run mode, the only modes that write nothing. Any other invocation, and any invocation
+// holding `--`, is Caution: after `--` these tools read `--check` or `-n` as a file name, and some
+// (rustfmt through `cargo fmt --`) take options there that this table does not model. The modes are
+// taken from each tool's documentation (`ruff help`, `black --help`, `cargo fmt --help`, `go help
+// fmt`, `terraform fmt -help`, the eslint and prettier CLI docs); none of these tools is run here.
 const FIXERS = Object.freeze({
-  'ruff check': { named: true, writes: args => args.includes('--fix') && !args.includes('--diff') },
-  'ruff format': { named: true, writes: args => !args.includes('--check') && !args.includes('--diff') },
-  'terraform fmt': { named: true, writes: args => !args.includes('-check') && !args.includes('-write=false') },
-  'npx eslint': { named: true, writes: args => args.includes('--fix') },
-  'npx prettier': { named: true, writes: args => args.includes('--write') || args.includes('-w') },
-  'go fmt': { named: false, writes: args => !args.includes('-n') },
-  'cargo fmt': { named: false, writes: args => !args.includes('--check') }
+  'ruff check': args => !args.some(arg => arg.startsWith('--fix')) || args.includes('--diff'),
+  'ruff format': args => args.includes('--check') || args.includes('--diff'),
+  black: args => args.includes('--check') || args.includes('--diff'),
+  'terraform fmt': args => args.includes('-check') || args.includes('-write=false'),
+  'npx eslint': args => !args.some(arg => arg.startsWith('--fix') && arg !== '--fix-dry-run'),
+  'npx prettier': args => !args.includes('--write') && !args.includes('-w') && (args.includes('--check') || args.includes('-c') || args.includes('--list-different') || args.includes('-l')),
+  'go fmt': args => args.includes('-n'),
+  'cargo fmt': args => args.includes('--check')
 })
 // D-89 (3): runners and checkers that write caches, reports or build outputs into their working
 // directory or next to the paths they are given (pytest's .pytest_cache at its rootdir, coverage's
@@ -518,7 +520,30 @@ function writeVerdict(location, ctx, segment) {
   if (paths.some(candidate => isPersistence(candidate, ctx.home))) return reason('floor.persistence', 'destructive', segment, 'runs at the next login or shell start')
   if (inside === null) return reason('scope.outside', 'caution', segment, 'writes outside the repo')
   // D-88 (6): a Bash write to the execution-config list is Caution, as an Edit or Write is.
-  return isExecutionConfig(inside) ? reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs') : null
+  return configVerdict(location, ctx, segment)
+}
+
+// D-90 (c): a file whose name ends in .toml, .ini or .cfg, or starts with a dot, at the repo root
+// or inside a directory whose name starts with a dot. `rel` is relative to the repo scope root.
+function isConfigName(rel) {
+  const parts = fold(rel).split('/')
+  const base = parts.at(-1)
+  if (!/\.(?:toml|ini|cfg)$/.test(base) && !base.startsWith('.')) return false
+  const dirs = parts.slice(0, -1)
+  return dirs.length === 0 || dirs.some(part => part.startsWith('.'))
+}
+
+// The execution-config (D-88 (6), D-89 (1)) and configuration-name (D-90 (c)) verdict on a write
+// target inside the repo. D-90 (b): both checks run on the path as named and on its realpath, each
+// relative to the repo scope roots it lies under (the configuration-name check uses the deepest
+// one, so a worktree under `.claude/worktrees` is judged from its own root).
+function configVerdict(location, ctx, segment) {
+  for (const candidate of candidates(location)) {
+    const roots = ctx.lexicalRoots.filter(root => within(candidate, root) && candidate !== root).sort((a, b) => b.length - a.length)
+    if (roots.some(root => isExecutionConfig(path.relative(root, candidate)))) return reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs')
+    if (roots.length && isConfigName(path.relative(roots[0], candidate))) return reason('file.config-name', 'caution', segment, 'changes a configuration file at the repo root or in a dot directory')
+  }
+  return null
 }
 
 // Glob matching for argument globs: `*` is any text, `?` one character, and `-<N>` a number option.
@@ -1035,28 +1060,6 @@ function cargoTargetVerdicts(list, segment, ctx, text) {
   return dirs.map(dir => writeVerdict(dir === null ? null : path.join(dir, 'CACHEDIR.TAG'), ctx, text)).filter(Boolean)
 }
 
-// Whether a fixer is given only regular files by name: every word after the subcommand that is
-// not an option is a literal path to an existing regular file (a glob counts by its matches), and
-// there is at least one. A tool that rewrites its whole package never is.
-function namesOnlyFiles(words, info, cwd, named) {
-  if (!named || !cwd) return false
-  const files = []
-  for (let k = 2, parsing = true; k < words.length; k++) {
-    const word = words[k]
-    if (info[k] && !info[k].literal && !info[k].glob) return false
-    if (parsing && word === '--') { parsing = false; continue }
-    if (parsing && word.startsWith('-') && word !== '-') continue
-    if (info[k]?.glob) {
-      const matches = expandGlob(word, cwd)
-      if (matches === null || !matches.length) return false
-      files.push(...matches)
-      continue
-    }
-    files.push(path.resolve(cwd, word))
-  }
-  return files.length > 0 && files.every(file => { try { return lstatSync(file).isFile() } catch { return false } })
-}
-
 // Whether `dir` lies inside .git or inside a directory on the execution-config list (D-89 (3)),
 // by its path as given and by its realpath.
 function inControlledDir(dir, ctx) {
@@ -1174,11 +1177,42 @@ function classifySegment(segment, ctx, ready, out) {
     for (const verdict of goOutputVerdicts(list, words, info, segment, ctx, text)) push(verdict)
   }
   if (name === 'cargo') for (const verdict of cargoTargetVerdicts(list, segment, ctx, text)) push(verdict)
-  const fixer = FIXERS[`${name} ${list[1] ?? ''}`]
-  if (fixer && fixer.writes(list.slice(2)) && !namesOnlyFiles(words, info, segment.cwd, fixer.named)) push(reason('format.unnamed', 'caution', text, 'rewrites files it was not given by name'))
+  const subcommand = FIXERS[`${name} ${list[1] ?? ''}`] ? 2 : (FIXERS[name] ? 1 : 0)
+  if (subcommand) {
+    const args = list.slice(subcommand)
+    const end = args.indexOf('--')
+    if (end >= 0 || !FIXERS[list.slice(0, subcommand).join(' ')](args)) push(reason('format.writes', 'caution', text, 'rewrites files: not in a check or diff mode'))
+  }
   if (RUNNERS.includes(name)) {
-    const dirs = [segment.cwd, ...operands.filter(({ location }) => lexists(location)).map(({ location }) => isDirectory(location) ? location : path.dirname(location))]
+    // D-90 (d): a runner operand is cut at `::` and `[` (a pytest node id or parameter id; a glob
+    // that matches nothing reaches the runner as written), and one that names nothing is judged by
+    // its nearest existing ancestor, which must lie in the repo. A word the deck cannot read, or a
+    // glob too large to expand, is an unknown directory.
+    const targets = []
+    for (let k = 1; k < words.length; k++) {
+      const word = words[k]
+      if (info[k] && !info[k].literal && !info[k].glob) { targets.push(null); continue }
+      if (word.startsWith('-') || (!path.isAbsolute(word) && /\s/.test(word))) continue
+      if (info[k]?.glob) {
+        const matches = expandGlob(word, segment.cwd)
+        if (matches === null) { targets.push(null); continue }
+        if (matches.length) { targets.push(...matches); continue }
+      }
+      targets.push(resolveIn(word.split('::')[0].split('[')[0] || '.', segment.cwd))
+    }
+    const dirs = [segment.cwd]
+    let outside = false
+    for (const target of targets) {
+      // The walk up stops at the repo scope root a target lies under as written.
+      const root = target === null ? undefined : ctx.lexicalRoots.filter(dir => within(target, dir)).sort((a, b) => b.length - a.length)[0]
+      let found = target
+      while (found !== null && found !== root && !lexists(found)) found = path.dirname(found) === found ? null : path.dirname(found)
+      const dir = found === null ? null : (found === root || isDirectory(found) ? found : path.dirname(found))
+      if (dir !== null && !inScope(dir, ctx)) outside = true
+      dirs.push(dir)
+    }
     if (dirs.some(dir => dir === null || inControlledDir(dir, ctx))) push(reason('runner.config-dir', 'caution', text, 'runs in .git or in a directory of hooks or build configuration'))
+    if (outside) push(reason('runner.outside', 'caution', text, 'runs on a path outside the repo'))
   }
   if (OPERAND_WRITERS.includes(`${name} ${words[1] ?? ''}`)) {
     // A non-literal operand, or a glob too large to expand, is an unknown target (null).
@@ -1189,7 +1223,8 @@ function classifySegment(segment, ctx, ready, out) {
       if (info[k]?.glob) { targets.push(...(expandGlob(word, segment.cwd) ?? [null])); continue }
       if (info[k] && !info[k].literal) { targets.push(null); continue }
       if (parsing && word.startsWith('-') && word !== '-') continue
-      if (word !== '-') targets.push(resolveIn(word, segment.cwd))
+      // A go package pattern `DIR/...` stands for DIR and the packages under it.
+      if (word !== '-') targets.push(resolveIn(name === 'go' && word.includes('...') ? word.slice(0, word.indexOf('...')) || '.' : word, segment.cwd))
     }
     if (!targets.length) targets.push(segment.cwd)
     for (const target of targets) {
@@ -1388,8 +1423,12 @@ function classifyFileTool(toolName, toolInput, ctx, ready, reasons) {
   if (FILE_WRITE_TOOLS.includes(toolName)) {
     const verdict = writeVerdict(location, ctx, shown)
     if (verdict && verdict.tier === 'destructive') reasons.push(verdict)
-    const rel = scopeRelative(location, ctx.scope)
-    if (rel !== null && isExecutionConfig(rel)) reasons.push(reason('file.execution-config', 'caution', shown, 'changes what a build, test or hook runs'))
+    const config = configVerdict(location, ctx, shown)
+    if (config) reasons.push(config)
+    // D-90 (b): a target reached through a symlink below the repo root, or one whose realpath is
+    // in the repo while the path as named is not, is Caution.
+    const bare = bareCheck(location, ctx)
+    if (bare === 'symlink' || (bare === 'outside' && scopeRelative(location, ctx.scope) !== null)) reasons.push(reason('path.symlink', 'caution', shown, 'names a path through a symlink'))
   } else if (candidates(location).some(candidate => isSensitive(candidate, ctx.home))) reasons.push(reason('read.secret', 'caution', shown, 'reads a secret file'))
   const inside = scopeRelative(location, ctx.scope) !== null
   const entries = matchToolEntries(toolName, ready, entry => {

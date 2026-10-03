@@ -531,7 +531,7 @@ test('the execution-config list holds the alternate make, just and go names and 
     expectTier(s.bash('uniq -i src/a.txt GNUmakefile'), 'caution', 'file.execution-config', 'uniq into GNUmakefile')
     expectTier(s.bash('git log --output=GNUmakefile'), 'caution', 'file.execution-config', 'git log --output=GNUmakefile')
     // Names that only look alike stay ordinary files.
-    for (const name of ['GNUmakefile.bak', 'notes.ini', 'src/go.work.txt']) expectTier(s.run('Write', { file_path: name, content: 'x' }), 'safe', null, `Write ${name}`)
+    for (const name of ['GNUmakefile.bak', 'src/notes.ini', 'src/go.work.txt']) expectTier(s.run('Write', { file_path: name, content: 'x' }), 'safe', null, `Write ${name}`)
   } finally { s.close() }
 })
 
@@ -553,27 +553,38 @@ test('name checks normalize with NFKC before folding, so a long s or a ligature 
   } finally { s.close() }
 })
 
-// D-89 (3): a formatter or fixer that rewrites files the agent did not name (a directory, or the
-// working directory when no operand is given) is Caution. A named file still goes through the
-// write checks, so a named file on the execution-config list stays Caution too.
-test('formatter and fixer modes over a directory or the working directory are Caution, and check modes stay Safe (D-89 (3))', () => {
+// D-89 (3), narrowed by D-90 (a): a formatter or fixer is Safe only in an explicit check, diff or
+// dry-run mode, decided from the words before any `--`. Its fix or format mode is Caution whatever
+// it is given, a file by name included, and so is any invocation holding `--`.
+test('formatters and fixers are Safe only in a check or diff mode and never with -- (D-89 (3), D-90 (a))', () => {
   const s = sandbox()
   try {
     mkdirSync(path.join(s.repo, 'src'))
     writeFileSync(path.join(s.repo, 'src', 'a.py'), 'x = 1\n')
     writeFileSync(path.join(s.repo, 'src', 'main.tf'), '\n')
+    writeFileSync(path.join(s.repo, 'src', 'main.rs'), 'fn main() {}\n')
+    writeFileSync(path.join(s.repo, 'build.rs'), 'fn main(){println!("b");}\n')
     writeFileSync(path.join(s.repo, 'Cargo.toml'), '[package]\nname = "x"\n')
-    for (const command of ['ruff check --fix', 'ruff check --fix .', 'ruff check --unsafe-fixes --fix src', 'ruff format', 'ruff format .', 'ruff format src', 'cargo fmt', 'cargo fmt -- build.rs', 'go fmt ./...', 'go fmt', 'terraform fmt', 'terraform fmt src', 'npx eslint --fix .', 'npx eslint --fix', 'npx prettier --check --write .', 'npx prettier --check -w src']) {
-      expectTier(s.bash(command), 'caution', 'format.unnamed', command)
-    }
-    for (const command of ['ruff check', 'ruff check .', 'ruff check --fix src/a.py', 'ruff check --fix --diff .', 'ruff format --check', 'ruff format --diff .', 'ruff format src/a.py', 'cargo fmt --check', 'cargo fmt -- --check', 'terraform fmt -check', 'terraform fmt -write=false', 'terraform fmt src/main.tf']) {
+    const writes = [
+      // Fix and format modes, over the cwd, a directory or a named file.
+      'ruff check --fix', 'ruff check --fix .', 'ruff check --unsafe-fixes --fix src', 'ruff check --fix src/a.py', 'ruff format', 'ruff format .', 'ruff format src', 'ruff format src/a.py',
+      'cargo fmt', 'cargo fmt src/main.rs', 'go fmt ./...', 'go fmt', 'terraform fmt', 'terraform fmt src', 'terraform fmt src/main.tf', 'npx eslint --fix .', 'npx eslint --fix', 'npx prettier --check --write .', 'npx prettier --check -w src',
+      // Round 5: the check or diff word after `--` is a file operand, not the mode.
+      'ruff check --fix . -- --diff', 'ruff format . -- --check', 'ruff check --fix src -- --diff', 'terraform fmt -- -check', 'go fmt -- -n', 'ruff format -- --check .', 'ruff format -- --diff', 'ruff check --fix -- --diff .', 'terraform fmt -- -check .',
+      // Siblings: any `--` at all, including cargo's forwarding to rustfmt and a check mode before it.
+      'cargo fmt -- --check', 'cargo fmt -- build.rs', 'cargo fmt -- src/main.rs', 'cargo fmt --check -- src/main.rs', 'black --check -- src', 'ruff check -- src', 'ruff format --check -- src/a.py', 'terraform fmt -check -- src',
+      // Operands the deck cannot read are no check mode either.
+      'ruff format $F', 'ruff format "$F"', 'F=. ruff format $F'
+    ]
+    for (const command of writes) expectTier(s.bash(command), 'caution', 'format.writes', command)
+    for (const command of ['ruff check', 'ruff check .', 'ruff check src/a.py', 'ruff check --fix --diff .', 'ruff format --check', 'ruff format --diff .', 'ruff format --check src/a.py', 'black --check .', 'black --check --diff src', 'cargo fmt --check', 'go fmt -n ./...', 'terraform fmt -check', 'terraform fmt -write=false', 'terraform fmt -check src/main.tf']) {
       expectTier(s.bash(command), 'safe', null, command)
     }
     // npx is not plain under D-87, so npx commands are Caution anyway; their check modes carry no
     // fixer reason.
     for (const command of ['npx eslint .', 'npx eslint --fix-dry-run .', 'npx prettier --check .']) {
       const result = s.bash(command)
-      assert.ok(!result.reasons.some(item => item.entryId === 'format.unnamed'), `${command}: ${ids(result)}`)
+      assert.ok(!result.reasons.some(item => item.entryId === 'format.writes'), `${command}: ${ids(result)}`)
     }
     expectTier(s.bash('ruff format setup.py'), 'caution', 'file.execution-config', 'ruff format setup.py')
   } finally { s.close() }
@@ -614,8 +625,9 @@ test('a runner or checker whose working directory or path argument lies in .git 
   } finally { s.close() }
 })
 
-// D-89: the everyday commands stay Safe from the root of a realistic repo.
-test('git status, git diff, git log, rg, grep -r, cargo test, npm test and pytest stay Safe at the root of a realistic repo (D-89)', () => {
+// D-89 and D-90: the everyday commands, and Write and Edit of ordinary source files, stay Safe from
+// the root of a realistic repo.
+test('git status, git diff, git log, rg, grep -r, cargo test, npm test, pytest and source file edits stay Safe at the root of a realistic repo (D-89, D-90)', () => {
   const s = sandbox()
   try {
     for (const dir of ['.git/hooks', 'src', 'tests', 'node_modules/pkg', 'node_modules/.bin']) mkdirSync(path.join(s.repo, dir), { recursive: true })
@@ -626,8 +638,104 @@ test('git status, git diff, git log, rg, grep -r, cargo test, npm test and pytes
     writeFileSync(path.join(s.repo, 'go.mod'), 'module example.com/x\n')
     writeFileSync(path.join(s.repo, 'pyproject.toml'), '[tool.pytest.ini_options]\n')
     writeFileSync(path.join(s.repo, 'src', 'main.rs'), 'fn main() {}\n')
+    writeFileSync(path.join(s.repo, 'src', 'a.py'), 'x = 1\n')
     writeFileSync(path.join(s.repo, 'tests', 'test_a.py'), 'def test_a():\n    pass\n')
-    for (const command of ['git status', 'git diff', 'git log', 'rg foo src', 'grep -r foo src', 'cargo test', 'npm test', 'pytest', 'go test ./...']) expectTier(s.bash(command), 'safe', null, command)
+    for (const command of ['git status', 'git diff', 'git log', 'rg foo src', 'grep -r foo src', 'cargo test', 'npm test', 'pytest', 'pytest tests/test_a.py::test_a', 'go test ./...']) expectTier(s.bash(command), 'safe', null, command)
+    for (const file of ['src/a.py', 'src/main.rs', 'tests/test_a.py', 'src/new.py', 'README.md', 'src/settings.toml', 'src/.eslintrc.json']) {
+      expectTier(s.run('Write', { file_path: file, content: 'x' }), 'safe', null, `Write ${file}`)
+      expectTier(s.run('Edit', { file_path: file, old_string: 'x', new_string: 'y' }), 'safe', null, `Edit ${file}`)
+    }
+  } finally { s.close() }
+})
+
+// D-90 (b): the file tools treat a symlink below the repo root as Bash does (D-88 (1)), and the
+// execution-config and configuration-name checks read both the path as named and its realpath. The
+// round 5 review ran the hook half with real git: an edit through a linked .githooks ran at commit.
+test('a file tool target through a symlink is Caution, and the config lists see both the named and the real path (D-90 (b))', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['tools/hooks', 'hk', '.claude', '.agents/skills/x', 'mk', 'vendor/lib', 'src', '.githooks']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, 'tools', 'hooks', 'pre-commit'), '#!/bin/sh\n')
+    writeFileSync(path.join(s.repo, '.agents', 'skills', 'x', 'SKILL.md'), 'x\n')
+    writeFileSync(path.join(s.repo, 'mk', 'real.mk'), 'all:\n')
+    writeFileSync(path.join(s.repo, 'vendor', 'lib', 'a.py'), 'x = 1\n')
+    writeFileSync(path.join(s.repo, 'other.py'), 'x = 1\n')
+    symlinkSync('tools/hooks', path.join(s.repo, '.husky'))
+    symlinkSync('../.agents/skills', path.join(s.repo, '.claude', 'skills'))
+    symlinkSync('mk/real.mk', path.join(s.repo, 'Makefile'))
+    symlinkSync('../vendor/lib', path.join(s.repo, 'src', 'lib'))
+    symlinkSync('../other.py', path.join(s.repo, 'src', 'link.py'))
+    symlinkSync('.githooks', path.join(s.repo, 'hooks'))
+    const tools = [['Write', file => ({ file_path: file, content: 'x' })], ['Edit', file => ({ file_path: file, old_string: 'x', new_string: 'y' })], ['MultiEdit', file => ({ file_path: file, edits: [] })], ['NotebookEdit', file => ({ notebook_path: file, new_source: 'x' })]]
+    // The named path is on the execution-config list, the real one is not: both reasons.
+    for (const file of ['.husky/pre-commit', '.claude/skills/x/SKILL.md', '.claude/skills/y/SKILL.md', 'Makefile']) {
+      for (const [tool, input] of tools) {
+        const result = s.run(tool, input(file))
+        expectTier(result, 'caution', 'file.execution-config', `${tool} ${file}`)
+        expectTier(result, 'caution', 'path.symlink', `${tool} ${file}`)
+      }
+    }
+    // The real path is on the list, the named one is not.
+    expectTier(s.run('Write', { file_path: 'hooks/pre-commit', content: 'x' }), 'caution', 'file.execution-config', 'Write hooks/pre-commit')
+    // Siblings: any symlink below the root, to an ordinary directory or file.
+    for (const file of ['src/lib/a.py', 'src/lib/new.py', 'src/link.py']) expectTier(s.run('Write', { file_path: file, content: 'x' }), 'caution', 'path.symlink', `Write ${file}`)
+    // Without a link the same kind of path is Safe.
+    expectTier(s.run('Write', { file_path: 'vendor/lib/a.py', content: 'x' }), 'safe', null, 'Write vendor/lib/a.py')
+  } finally { s.close() }
+})
+
+// D-90 (c): a write to a .toml, .ini or .cfg file, or a dotfile, at the repo root or in any dot
+// directory is Caution, by the file tools and by Bash writers alike. pytest 9 reads pytest.toml and
+// .pytest.toml, and ruff reads ruff.toml and .ruff.toml (the round 5 review ran both effects).
+test('a .toml, .ini, .cfg or dotfile write at the repo root or in a dot directory is Caution (D-90 (c))', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['src', '.cargo', '.config', '.github', '.claude/worktrees/w/src']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, 'src', 'a.txt'), 'a\n')
+    const names = ['pytest.toml', '.pytest.toml', 'ruff.toml', '.ruff.toml', 'Cargo.toml', 'rust-toolchain.toml', 'x.cfg', 'X.INI', 'Future.Toml', '.gitignore', '.editorconfig', '.cargo/foo.toml', '.config/ruff.toml', '.github/x.cfg', '.config/.anything', 'src/.hidden/x.toml', 'RUFF.TOML']
+    for (const name of names) {
+      expectTier(s.run('Write', { file_path: name, content: 'x' }), 'caution', null, `Write ${name}`)
+      expectTier(s.run('Edit', { file_path: name, old_string: 'a', new_string: 'b' }), 'caution', null, `Edit ${name}`)
+      expectTier(s.bash(`sort -o ${name} src/a.txt`), 'caution', null, `sort -o ${name}`)
+      const reasons = [s.run('Write', { file_path: name, content: 'x' }), s.bash(`sort -o ${name} src/a.txt`)].flatMap(result => result.reasons.map(item => item.entryId))
+      assert.ok(reasons.filter(id => id === 'file.config-name' || id === 'file.execution-config').length >= 2, `${name}: ${reasons.join(' ')}`)
+    }
+    expectTier(s.bash('git log --output=ruff.toml'), 'caution', 'file.config-name', 'git log --output=ruff.toml')
+    // Ordinary names, or config names below the root outside a dot directory, stay Safe.
+    for (const name of ['src/x.toml', 'src/setup.cfg.txt', 'src/.eslintrc.json', 'README.md', '.github/README.md', 'src/pytest.toml']) {
+      expectTier(s.run('Write', { file_path: name, content: 'x' }), 'safe', null, `Write ${name}`)
+      expectTier(s.bash(`sort -o ${name} src/a.txt`), 'safe', null, `sort -o ${name}`)
+    }
+    // A worktree under .claude/worktrees is judged from its own root.
+    const wt = path.join(s.repo, '.claude', 'worktrees', 'w')
+    expectTier(s.run('Write', { file_path: path.join(wt, 'src', 'x.toml'), content: 'x' }, { worktrees: [wt] }), 'safe', null, 'Write a worktree src/x.toml')
+    expectTier(s.run('Write', { file_path: path.join(wt, 'ruff.toml'), content: 'x' }, { worktrees: [wt] }), 'caution', 'file.config-name', 'Write a worktree ruff.toml')
+  } finally { s.close() }
+})
+
+// D-90 (d): a runner operand is cut at `::` and `[` and, when it names nothing, judged by its
+// nearest existing ancestor. The round 5 review ran pytest 9.1.0 on a node id in .githooks and
+// .claude/skills: it wrote __pycache__/*.pyc next to the test file.
+test('runner operands are cut at :: and [ and judged by their nearest existing ancestor (D-90 (d))', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['.githooks', '.claude/skills/s', 'src']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, '.githooks', 'test_h.py'), 'def test_a():\n    assert True\n')
+    writeFileSync(path.join(s.repo, '.claude', 'skills', 's', 'test_s.py'), 'def test_a():\n    assert True\n')
+    writeFileSync(path.join(s.repo, 'src', 'test_x.py'), 'def test_a():\n    assert True\n')
+    symlinkSync('.githooks', path.join(s.repo, 'hooks'))
+    const flagged = ['pytest .githooks/test_h.py::test_a', 'pytest -q .githooks/test_h.py::test_a', 'pytest .githooks/test_h.py::', 'pytest .claude/skills/s/test_s.py::test_a',
+      'pytest .githooks/test_h.py::TestC::test_a', 'pytest .githooks/missing/test_x.py', 'pytest .claude/skills/s/new_test.py::test_a', 'mypy .githooks/nope.py']
+    for (const command of flagged) expectTier(s.bash(command), 'caution', 'runner.config-dir', command)
+    // The cut decides: past it, `..` would lead the path back out of .githooks.
+    expectTier(s.bash('pytest .githooks/test_h.py::a/../../src'), 'caution', 'runner.config-dir', 'pytest ::a/../../src')
+    expectTier(s.bash('pytest .githooks/test_h.py[a/../../src]'), 'caution', 'runner.config-dir', 'pytest [a/../../src]')
+    // The realpath half of the directory check: hooks links to .githooks.
+    expectTier(s.bash('pytest hooks/test_h.py'), 'caution', 'runner.config-dir', 'pytest hooks/test_h.py')
+    // No existing ancestor in the repo fails closed, and so does an unknown working directory.
+    expectTier(s.bash('pytest /nonexistent-deck-dir/x.py::test_a'), 'caution', 'runner.outside', 'pytest /nonexistent')
+    expectTier(s.bash('pytest', { cwd: undefined }), 'caution', 'runner.config-dir', 'pytest with no cwd')
+    for (const command of ['pytest src/test_x.py::test_a', 'pytest src/test_x.py::TestC::test_a', 'pytest src/missing.py', 'pytest -k test_a', 'npm test']) expectTier(s.bash(command), 'safe', null, command)
   } finally { s.close() }
 })
 
