@@ -72,7 +72,7 @@
 /* 1280 px (design-system 8.3): the list is 72 px of avatars and Alt digits, names stay in aria-label, and the
    details panel becomes an overlay drawer that Alt I opens. */
 @media (max-width: 1280px) {
-  .focus,
+  .focus-screen,
   .focus--panel-hidden {
     grid-template-columns: var(--layout-rail-collapsed-list) minmax(0, 1fr);
   }

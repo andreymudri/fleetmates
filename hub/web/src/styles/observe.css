@@ -295,13 +295,13 @@
 }
 
 /* Read-only Focus (focus.md 3, 4.4) */
-.focus {
+.focus-screen {
   display: grid;
   grid-template-columns: var(--layout-list) minmax(0, 1fr) var(--layout-panel-sm);
   min-height: 100%;
 }
 @media (max-width: 1439px) {
-  .focus { grid-template-columns: var(--layout-rail-collapsed-list) minmax(0, 1fr) var(--layout-panel-sm); }
+  .focus-screen { grid-template-columns: var(--layout-rail-collapsed-list) minmax(0, 1fr) var(--layout-panel-sm); }
   .focus-list-text,
   .focus-back .kbd { display: none; }
 }

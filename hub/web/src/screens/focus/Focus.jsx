@@ -458,7 +458,7 @@ export function FocusView({
   const session = state.data.sessions.find(row => row.id === sessionId)
   if (!session) {
     return (
-      <section className="focus focus--missing">
+      <section className="focus-screen focus--missing">
         <h1 className="page-title">{translate(t, FOCUS_COPY, 'focus.notFound.title')}</h1>
         <a className="button button--ghost" href="/" onClick={linkHandler(navigate, '/')}>{translate(t, FOCUS_COPY, 'focus.list.back')}</a>
       </section>
@@ -481,7 +481,7 @@ export function FocusView({
   const reasonId = `focus-deckd-reason-${session.id}`
   const panelLabel = translate(t, FOCUS_COPY, panelOpen ? 'focus.header.hidePanel' : 'focus.header.showPanel')
   const starting = session.state === 'starting' && Number.isFinite(session.stateSince) && now - session.stateSince > START_HINT_MS
-  const classes = ['focus', panelOpen ? null : 'focus--panel-hidden', drawerOpen ? 'focus--drawer-open' : null].filter(Boolean).join(' ')
+  const classes = ['focus-screen', panelOpen ? null : 'focus--panel-hidden', drawerOpen ? 'focus--drawer-open' : null].filter(Boolean).join(' ')
   const terminalLabel = `${shown(repo.name)} · ${task}`
   return (
     <div className={classes}>

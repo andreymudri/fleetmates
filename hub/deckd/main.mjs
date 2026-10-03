@@ -12,10 +12,11 @@ import { pathToFileURL } from 'node:url'
 import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP, MAX_LINE } from './protocol.mjs'
 import { PtyHost, DeckdError } from './pty-host.mjs'
 import { captureLoginEnv, dropSessionVars, changedNames } from './login-env.mjs'
+import { capHistory } from './screen-model.mjs'
 
 /** How long `exits` keeps an exit record. */
 const EXIT_RETENTION_MS = 24 * 60 * 60 * 1000
-/** Lines and bytes of output an exit record keeps as its `tail`. */
+/** Lines and bytes of output an exit record keeps as its `tail`; `history.data` shares the byte cap. */
 const EXIT_TAIL_LINES = 1000
 const EXIT_TAIL_BYTES = 256 * 1024
 /** Most names the hello answer lists in `loginEnvNames`. */
@@ -28,7 +29,7 @@ const GUARD_QUIET_MAX_MS = 5000
 
 /**
  * @typedef {{ socket: net.Socket, client: { kind: string, name?: string, pid?: number } | null, proto: number, dropped: Map<string, number> }} Conn
- * @typedef {{ ptyId: string, code: number, signal: string | null, at: number, tail: string }} ExitRecord
+ * @typedef {{ ptyId: string, code: number, signal: string | null, at: number, tail: string, history?: import('./screen-model.mjs').History }} ExitRecord
  */
 
 /**
@@ -162,14 +163,35 @@ function exitTail (host) {
 }
 
 /**
+ * The PTY's serialized history at exit, `data` cut to `maxBytes` by
+ * dropping whole leading lines. Undefined when serializing fails, so the exit
+ * is still recorded.
+ * @param {PtyHost} host
+ * @param {number} maxBytes
+ * @returns {Promise<import('./screen-model.mjs').History | undefined>}
+ */
+async function exitHistory (host, maxBytes) {
+  try {
+    await host.screen.flush()
+    const history = host.screen.history()
+    return { ...history, data: capHistory(history.data, maxBytes) }
+  } catch (err) {
+    console.error('deckd: could not serialize the history of', host.ptyId, /** @type {Error} */ (err).message)
+    return undefined
+  }
+}
+
+/**
  * Start deckd listening on `$runtimeDir/fleetmates-deck/deckd.sock`.
  * `loginEnv` is the environment `launched` sessions start from; when absent
  * it is this process's environment without Claude Code's session variables,
  * so a caller that passes none never runs a shell.
- * @param {{ runtimeDir: string, outputQueueCap?: number, version?: string, loginEnv?: Record<string, string> }} opts
+ * `historyCap` is the byte cap of an exit record's `history.data`
+ * (EXIT_TAIL_BYTES unless a test sets it).
+ * @param {{ runtimeDir: string, outputQueueCap?: number, version?: string, loginEnv?: Record<string, string>, historyCap?: number }} opts
  * @returns {Promise<{ socketPath: string, bootId: string, close: () => Promise<void> }>}
  */
-export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CAP, version = '0.0.0', loginEnv = dropSessionVars(process.env) }) {
+export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CAP, version = '0.0.0', loginEnv = dropSessionVars(process.env), historyCap = EXIT_TAIL_BYTES }) {
   await checkRuntimeDir(runtimeDir)
   const loginEnvNames = changedNames(loginEnv, process.env).slice(0, LOGIN_ENV_NAMES_MAX)
   const { dir, socketPath } = socketPaths(runtimeDir)
@@ -319,9 +341,13 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
         onOutput: (h, data) => {
           for (const [conn, { stream }] of h.clients) if (stream) sendOutput(conn, h.ptyId, data)
         },
-        onExit: (h, exit) => {
+        onExit: async (h, exit) => {
           const event = { ptyId: h.ptyId, ...exit }
-          const rec = { ...event, tail: exitTail(h) }
+          // The record (with `history`, read once the screen model has parsed
+          // every byte) is stored before the `exit` event goes out, so a
+          // client that asks `exits` on that event finds it.
+          const history = await exitHistory(h, historyCap)
+          const rec = { ...event, tail: exitTail(h), ...(history ? { history } : {}) }
           const cutoff = Date.now() - EXIT_RETENTION_MS
           exits = exits.filter((e) => e.at >= cutoff)
           exits.push(rec)
@@ -345,8 +371,8 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       const cutoff = Date.now() - EXIT_RETENTION_MS
       exits = exits.filter((e) => e.at >= cutoff)
       const found = exits.filter((e) => e.at >= since)
-      // `tail` is a proto 2 field.
-      return { exits: conn.proto >= 2 ? found : found.map(({ tail, ...e }) => e) }
+      // `tail` and `history` are proto 2 fields.
+      return { exits: conn.proto >= 2 ? found : found.map(({ tail, history, ...e }) => e) }
     },
     attach: (conn, req) => {
       const host = getHost(req.ptyId)
@@ -360,7 +386,7 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       detach(conn, getHost(req.ptyId))
       return {}
     },
-    screen: async (_conn, req) => {
+    screen: async (conn, req) => {
       const host = getHost(req.ptyId)
       await host.screen.flush()
       // `scrollback` is a line count: the newest N lines of raw output.
@@ -371,7 +397,9 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
         rows: host.rows,
         cursor: host.screen.cursor(),
         lines: host.screen.lines(),
-        scrollback: host.ring.tail(n).toString('base64')
+        scrollback: host.ring.tail(n).toString('base64'),
+        // `history` is a proto 2 field, sent only when asked for.
+        ...(req.history === true && conn.proto >= 2 ? { history: host.screen.history() } : {})
       }
     },
     watchScreen: (conn, req) => {
