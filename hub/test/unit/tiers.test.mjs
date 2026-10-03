@@ -342,6 +342,171 @@ test('pathOperands, operandOpts and forwardOpts are validated like the other ent
   assert.deepEqual(validateTiers({ version: 1, entries: [{ id: 'safe.user.a', tier: 'safe', tool: 'Bash', cmd: 'a', pathOperands: 'none', operandOpts: ['-l'], forwardOpts: [] }] }), { ok: true })
 })
 
+// Phase 2 round 3. On a case-insensitive file system (the macOS default) `.GIT/config` is
+// `.git/config`, so every name check folds case; the test host is case-sensitive, so these pin the
+// classifier's verdict, not what the kernel opens.
+test('path name checks fold case and HFS-ignorable characters, on every platform', () => {
+  const s = sandbox()
+  try {
+    for (const dir of [path.join(s.repo, '.git', 'hooks'), path.join(s.repo, 'src'), path.join(s.home, '.ssh')]) mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    writeFileSync(path.join(s.repo, 'src', 'a.txt'), 'a\n')
+    writeFileSync(path.join(s.repo, '.ENV'), 'SYNTHETIC=1\n')
+    writeFileSync(path.join(s.deckPaths.config, 'token'), 'synthetic')
+    const expect = (result, tier, id, label) => {
+      assert.equal(result.tier, tier, `${label}: ${result.reasons.map(item => item.entryId).join(' ')}`)
+      assert.ok(result.reasons.some(item => item.entryId === id), `${label}: no ${id} in ${result.reasons.map(item => item.entryId).join(' ')}`)
+    }
+    for (const command of ['sort -o .GIT/hooks/pre-commit src/a.txt', 'git diff --output=.GIT/hooks/x', 'sort -o .Git/config src/a.txt']) expect(s.bash(command), 'destructive', 'floor.git-dir', command)
+    for (const file of ['.GIT/hooks/pre-commit', '.Git/config', '.g‌it/config', 'src/.GiT/x']) expect(s.run('Write', { file_path: file, content: 'x' }), 'destructive', 'floor.git-dir', file)
+    for (const file of ['.CLAUDE/SETTINGS.LOCAL.JSON', '.claude/Settings.local.json', '.Claude/Hooks/x.sh', '.MCP.json']) expect(s.run('Write', { file_path: file, content: 'x' }), 'destructive', 'floor.claude-settings', file)
+    for (const file of ['PACKAGE.JSON', '.Husky/pre-commit', 'makefile', '.GitHub/Workflows/ci.yml', '.Cargo/Config.toml']) expect(s.run('Write', { file_path: file, content: 'x' }), 'caution', 'file.execution-config', file)
+    expect(s.run('Write', { file_path: path.join(s.home, '.BASHRC'), content: 'x' }), 'destructive', 'floor.persistence', '~/.BASHRC')
+    expect(s.bash('cat .ENV'), 'caution', 'read.secret', 'cat .ENV')
+    expect(s.run('Read', { file_path: '.ENV' }), 'caution', 'read.secret', 'Read .ENV')
+    expect(s.run('Read', { file_path: path.join(s.home, '.SSH', 'id_ed25519') }), 'caution', 'read.secret', 'Read ~/.SSH/id_ed25519')
+    expect(s.run('Read', { file_path: path.join(s.home, '.config', 'FLEETMATES', 'deck', 'token') }), 'destructive', 'floor.deck', 'Read the deck token by another case')
+    // A working directory inside `.GIT` is not a git work tree for git diff.
+    expect(s.bash('git diff', { cwd: path.join(s.repo, '.GIT') }), 'caution', 'git.no-work-tree', 'git diff in .GIT')
+    // The same names in their own case keep their verdicts, and an ordinary file stays Safe.
+    expect(s.run('Write', { file_path: '.git/config', content: 'x' }), 'destructive', 'floor.git-dir', '.git/config')
+    assert.equal(s.run('Write', { file_path: 'src/b.txt', content: 'x' }).tier, 'safe')
+    assert.equal(s.bash('cat src/a.txt').tier, 'safe')
+  } finally { s.close() }
+})
+
+// Go writes `-o DIR/` (or an existing DIR) as DIR/<package base name>, and a single main package
+// with no -o into the working directory (`go help build`; not run here: no Go toolchain on the test
+// host). go test writes DIR/<package>.test.
+test('go build and go test outputs into a directory or the working directory are judged as the file Go writes', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['.git/hooks', '.githooks', '.husky', 'cmd/pre-commit', 'cmd/tool', 'bin', '.claude/hooks']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    const expect = (command, tier, id, cwd = s.repo) => {
+      const result = s.bash(command, { cwd })
+      assert.equal(result.tier, tier, `${command} in ${path.relative(s.repo, cwd) || '.'}: ${result.reasons.map(item => item.entryId).join(' ')}`)
+      if (id) assert.ok(result.reasons.some(item => item.entryId === id), `${command}: no ${id} in ${result.reasons.map(item => item.entryId).join(' ')}`)
+    }
+    expect('go build -o .githooks/ ./cmd/pre-commit', 'caution', 'file.execution-config')
+    expect('go build -o .githooks ./cmd/pre-commit', 'caution', 'file.execution-config')
+    expect('go build -o .husky/ ./cmd/pre-commit', 'caution', 'file.execution-config')
+    expect('go build -o .git/hooks/ ./cmd/pre-commit', 'destructive', 'floor.git-dir')
+    expect('go build -o=.git/hooks/ ./cmd/pre-commit', 'destructive', 'floor.git-dir')
+    expect('go build --o .claude/hooks ./cmd/tool', 'destructive', 'floor.claude-settings')
+    expect('go test -o .githooks/ ./cmd/pre-commit', 'caution', 'file.execution-config')
+    expect('go build ../cmd/pre-commit', 'caution', 'file.execution-config', path.join(s.repo, '.githooks'))
+    expect('go build ../../cmd/pre-commit', 'destructive', 'floor.git-dir', path.join(s.repo, '.git', 'hooks'))
+    expect('go build', 'caution', 'file.execution-config', path.join(s.repo, '.githooks'))
+    expect('go build ./...', 'destructive', 'floor.git-dir', path.join(s.repo, '.git', 'hooks'))
+    expect('go build main.go', 'caution', 'file.execution-config', path.join(s.repo, '.githooks'))
+    // The module root is named after the last element of its module path, not its directory.
+    writeFileSync(path.join(s.repo, 'go.mod'), 'module example.com/x/package.json\n')
+    expect('go build', 'caution', 'file.execution-config')
+    expect('go build .', 'caution', 'file.execution-config')
+    writeFileSync(path.join(s.repo, 'go.mod'), '// a comment\nmodule "example.com/x/repo/v2"\n')
+    expect('go build', 'safe')
+    // A package below the working directory named after an execution-config file.
+    mkdirSync(path.join(s.repo, 'cmd', 'Makefile'))
+    expect('go build ./...', 'caution', 'file.execution-config')
+    expect('go build ./cmd/Makefile', 'caution', 'file.execution-config')
+    // go test names its binary <package>.test, which is not on the list.
+    expect('go test -o ./ ./cmd/Makefile', 'safe')
+    // Ordinary outputs stay Safe: a bin directory, the repo root, go test without -o.
+    rmSync(path.join(s.repo, 'cmd', 'Makefile'), { recursive: true })
+    for (const command of ['go build ./cmd/pre-commit', 'go build -o bin/ ./cmd/tool', 'go build -o bin/tool ./cmd/tool', 'go build ./...', 'go test ./...', 'go test -o bin/ ./cmd/tool', 'go vet ./...']) expect(command, 'safe')
+  } finally { s.close() }
+})
+
+test('cargo build into a --target-dir on the execution-config list is Caution', () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.repo, '.githooks'))
+    writeFileSync(path.join(s.repo, 'Cargo.toml'), '[package]\nname = "x"\n')
+    for (const command of ['cargo build --target-dir .githooks', 'cargo test --target-dir=.husky/t']) {
+      const result = s.bash(command)
+      assert.equal(result.tier, 'caution', command)
+      assert.ok(result.reasons.some(item => item.entryId === 'file.execution-config'), `${command}: ${result.reasons.map(item => item.entryId).join(' ')}`)
+    }
+    // The default target directory is next to the nearest Cargo.toml.
+    writeFileSync(path.join(s.repo, '.githooks', 'Cargo.toml'), '[package]\nname = "y"\n')
+    assert.equal(s.bash('cargo build', { cwd: path.join(s.repo, '.githooks') }).tier, 'caution')
+    assert.equal(s.bash('cargo build --target-dir target2').tier, 'safe')
+    assert.equal(s.bash('cargo build').tier, 'safe')
+  } finally { s.close() }
+})
+
+test('a git secret read is caught in an index-stage path, a pathspec with magic and an -L value', () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.repo, '.git'))
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    mkdirSync(path.join(s.repo, 'src'))
+    writeFileSync(path.join(s.repo, 'src', 'a.txt'), 'a\n')
+    for (const command of ['git show :0:.env', 'git show :2:.env', 'git show :.env', 'git log -L 1,1:.env', 'git log -p -L 1,5:.env', 'git log -L :main:.env', 'git log -L1,1:.env', 'git log -L 1,1:src/.env', 'git whatchanged -L 1,1:.env', 'git log -p -- \':(top).env\'', 'git log -p -- \':/.env\'', 'git diff :0:.env HEAD:src/a.txt', 'git show --abbrev HEAD:.env']) {
+      const result = s.bash(command)
+      assert.equal(result.tier, 'caution', `${command}: ${result.reasons.map(item => item.entryId).join(' ')}`)
+      assert.ok(result.reasons.some(item => item.entryId === 'read.secret'), `${command}: ${result.reasons.map(item => item.entryId).join(' ')}`)
+    }
+    for (const command of ['git log -L 1,1:src/a.txt', 'git show :0:src/a.txt', 'git log -L :main:src/a.txt']) assert.equal(s.bash(command).tier, 'safe', command)
+  } finally { s.close() }
+})
+
+// Each was run on this host (git 2.55, jq 1.8.2, docker CLI help) or, for tools not installed here,
+// is not modelled as taking a value, so the next word stays a path operand.
+test('a boolean or attached-only option never hides the next word from the path rule', () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.repo, '.git'))
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    mkdirSync(path.join(s.repo, 'src'))
+    const outside = path.join(s.root, 'outside')
+    mkdirSync(outside)
+    writeFileSync(path.join(outside, 'f.txt'), 'outside\n')
+    const file = path.join(outside, 'f.txt')
+    for (const command of [`git diff --abbrev ${file} /dev/null`, 'git diff --abbrev ../../outside/f.txt /dev/null', 'git diff --abbrev src', `git log --abbrev ${file}`, `staticcheck -tests ${outside}`, `docker logs -f ${file}`, `pytest -n ${file}`, `tree -L ${outside}`, `go test -run ${file} ./...`, `mypy -p ${file}`, `black -l ${file}`, `yq -o ${file} x`]) {
+      const result = s.bash(command)
+      assert.equal(result.tier, 'caution', `${command}: ${result.reasons.map(item => item.entryId).join(' ')}`)
+    }
+    // Options that take a value still do: the value is not a path operand.
+    writeFileSync(path.join(s.repo, 'src', 'a.txt'), 'a\n')
+    for (const command of ['git log -S /x/y', 'docker ps -f name=/x', 'docker logs -n 5 web', 'tree -L 2', 'pytest -k test_x', 'git log -n 3 -- src/a.txt']) assert.equal(s.bash(command).tier, 'safe', command)
+    // git config -t is --type, so the key after its value is the one set (git 2.55 sets
+    // core.fsmonitor for `git config -t bool core.fsmonitor false`).
+    const typed = s.bash('git config -t bool core.fsmonitor false')
+    assert.ok(typed.reasons.some(item => item.entryId === 'floor.git-config-write'), typed.reasons.map(item => item.entryId).join(' '))
+  } finally { s.close() }
+})
+
+test('sed scripts given with -e are each checked by the script rule (D-88 (4))', () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.repo, 'src'))
+    writeFileSync(path.join(s.repo, 'src', 'a.js'), 'a\n')
+    for (const command of ['sed -n -e p -e \'w out4\' src/a.js', 'sed -ne \'w out2\' -e p src/a.js','sed -e p -e \'1e touch x\' src/a.js']) {
+      const result = s.bash(command)
+      assert.equal(result.tier, 'caution', command)
+      assert.ok(result.reasons.some(item => item.entryId === 'sed.script'), `${command}: ${result.reasons.map(item => item.entryId).join(' ')}`)
+    }
+    for (const command of ['sed -n -e p -e 1p src/a.js', 'sed -ne 1p src/a.js', 'sed -n 1p src/a.js']) assert.equal(s.bash(command).tier, 'safe', command)
+  } finally { s.close() }
+})
+
+test('diff of two directories is Caution without -r, and diff of two files is Safe (D-88 (5))', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['d1', 'd2']) {
+      mkdirSync(path.join(s.repo, dir))
+      writeFileSync(path.join(s.repo, dir, 'x'), `${dir}\n`)
+    }
+    const result = s.bash('diff d1 d2')
+    assert.equal(result.tier, 'caution')
+    assert.ok(result.reasons.some(item => item.entryId === 'read.directory'), result.reasons.map(item => item.entryId).join(' '))
+    assert.equal(s.bash('diff -u d1 d2/x').tier, 'caution')
+    assert.equal(s.bash('diff d1/x d2/x').tier, 'safe')
+  } finally { s.close() }
+})
+
 function storeSandbox() {
   const dir = mkdtempSync(path.join(tmpdir(), 'deck-tiers-store-'))
   const file = path.join(dir, 'tiers.json')

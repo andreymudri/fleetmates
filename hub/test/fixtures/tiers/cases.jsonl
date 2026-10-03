@@ -650,3 +650,32 @@
 {"toolName":"Bash","toolInput":{"command":"yq '.a' notes.txt"},"cwd":"/home/you/repo","expected":"safe"}
 {"toolName":"Bash","toolInput":{"command":"git branch --contains /tmp/x"},"cwd":"/home/you/repo","expected":"safe"}
 {"toolName":"Bash","toolInput":{"command":"grep -r --frobnicate X tok"},"cwd":"/home/you","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"sort -o .GIT/hooks/pre-commit src/a.txt"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git","note":"phase 2 round 3: names fold case (APFS)"}
+{"toolName":"Bash","toolInput":{"command":"git diff --output=.GIT/hooks/x"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.Git/config","content":"x"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.CLAUDE/SETTINGS.LOCAL.JSON","content":"x"},"cwd":"/home/you/repo","expected":"destructive","reason":"changes Claude Code settings or hooks"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/PACKAGE.JSON","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/.Husky/pre-commit","content":"x"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"cat .ENV"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Read","toolInput":{"file_path":"/home/you/repo/.ENV"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"go build -o .githooks/ ./cmd/pre-commit"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs","note":"phase 2 round 3: go writes DIR/<package name>"}
+{"toolName":"Bash","toolInput":{"command":"go build -o .githooks ./cmd/pre-commit"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"go build -o .husky/ ./cmd/pre-commit"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"go build ../cmd/pre-commit"},"cwd":"/home/you/repo/.githooks","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"go build ../../cmd/pre-commit"},"cwd":"/home/you/repo/.git/hooks","expected":"destructive","reason":"writes inside .git"}
+{"toolName":"Bash","toolInput":{"command":"go build ./cmd/pre-commit"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"go build -o bin/ ./cmd/pre-commit"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git log -L 1,1:.env"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file","note":"phase 2 round 3: the file of an -L range"}
+{"toolName":"Bash","toolInput":{"command":"git log -p -L 1,5:.env"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git show :0:.env"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git log -L 1,1:src/a.txt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git diff --abbrev /home/you/project/notes.txt /dev/null"},"cwd":"/home/you/repo","expected":"caution","note":"phase 2 round 3: --abbrev takes no separate value"}
+{"toolName":"Bash","toolInput":{"command":"git diff --abbrev src"},"cwd":"/home/you/repo","expected":"caution","reason":"compares directories"}
+{"toolName":"Bash","toolInput":{"command":"git show --abbrev HEAD:.env"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"staticcheck -tests /home/you/project"},"cwd":"/home/you/repo","expected":"caution","note":"phase 2 round 3: -tests is a bool flag"}
+{"toolName":"Bash","toolInput":{"command":"docker logs -f /home/you/project/notes.txt"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"sed -n -e p -e 'w out4' src/a.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"the sed script can run a command or write a file"}
+{"toolName":"Bash","toolInput":{"command":"sed -ne 'w out2' -e p src/a.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"the sed script can run a command or write a file"}
+{"toolName":"Bash","toolInput":{"command":"sed -n -e p -e 1p src/a.txt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"diff dA dB"},"cwd":"/home/you/repo","expected":"caution","reason":"compares directories"}
+{"toolName":"Bash","toolInput":{"command":"diff dA/x dB/x"},"cwd":"/home/you/repo","expected":"safe"}

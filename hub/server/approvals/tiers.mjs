@@ -3,7 +3,7 @@
 // set (tiers.default.json plus the user's tiers.json, see tiers-store.mjs), takes the highest
 // matching tier, and then applies the floors, which are code and cannot be lowered or disabled.
 import { createHash } from 'node:crypto'
-import { existsSync, globSync, lstatSync, readFileSync, readlinkSync, statSync } from 'node:fs'
+import { existsSync, globSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -95,6 +95,20 @@ export const EXECUTION_CONFIG = Object.freeze(['.cargo/config*', 'build.rs', 'pa
 
 const within = (target, root) => typeof target === 'string' && typeof root === 'string' && (target === root || target.startsWith(root.endsWith('/') ? root : `${root}/`))
 
+// Name checks compare folded text on every platform: a case-insensitive file system (the macOS
+// default) opens `.GIT/config` as `.git/config` and `.ENV` as `.env`, and HFS+ also ignores the
+// zero-width code points git's is_hfs_dotgit() skips. Repo scope is not folded, so a case variant
+// of the repo path reads as outside the repo, which only raises a tier.
+const HFS_IGNORED = /[‌-‏‪-‮⁪-⁯﻿]/g
+const fold = text => String(text).replace(HFS_IGNORED, '').toLowerCase()
+const withinFolded = (target, root) => typeof target === 'string' && typeof root === 'string' && within(fold(target), fold(root))
+// `location` relative to `base`, both folded; null when it is not strictly below `base`.
+function relFolded(location, base) {
+  if (!base) return null
+  const rel = path.relative(fold(base), fold(location))
+  return !rel || rel.startsWith('..') || path.isAbsolute(rel) ? null : rel
+}
+
 // The path the kernel reaches for `location`, resolving every symlink on the way, including a
 // dangling one (its target is where a writer creates the file), with the missing tail kept as
 // written. A symlink loop resolves to the lexical path, which the kernel refuses to open (ELOOP).
@@ -133,27 +147,25 @@ const candidates = location => {
 }
 
 function isPersistence(location, home) {
-  if (!home) return false
-  const rel = path.relative(home, location)
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false
+  const rel = relFolded(location, home)
+  if (rel === null) return false
   return PERSISTENCE_FILES.includes(rel) || PERSISTENCE_DIRS.some(dir => rel === dir || rel.startsWith(`${dir}/`))
 }
 
 function isSensitive(location, home) {
-  const base = path.basename(location)
+  const base = fold(path.basename(location))
   if (base === '.env' || base.startsWith('.env.') || base === '.envrc' || base.endsWith('.pem')) return true
   if (base.startsWith('id_') && !base.endsWith('.pub')) return true
-  if (!home) return false
-  const rel = path.relative(home, location)
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false
+  const rel = relFolded(location, home)
+  if (rel === null) return false
   if (['.netrc', '.claude/.credentials.json', '.git-credentials', '.npmrc', '.pypirc', '.docker/config.json', '.kube/config'].includes(rel)) return true
   return ['.ssh', '.gnupg', '.aws', '.config/gh', '.config/gcloud', '.password-store', '.local/share/keyrings'].some(dir => rel === dir || rel.startsWith(`${dir}/`))
 }
 
 function isExecutionConfig(rel) {
-  const parts = rel.split('/')
+  const parts = fold(rel).split('/')
   const base = parts.at(-1)
-  if (['build.rs', 'package.json', '.npmrc', 'Makefile', 'justfile', 'conftest.py', 'pyproject.toml', 'setup.py', 'go.mod'].includes(base) || base.startsWith('.yarnrc')) return true
+  if (['build.rs', 'package.json', '.npmrc', 'makefile', 'justfile', 'conftest.py', 'pyproject.toml', 'setup.py', 'go.mod'].includes(base) || base.startsWith('.yarnrc')) return true
   if (parts.at(-2) === '.cargo' && base.startsWith('config')) return true
   const dirs = parts.slice(0, -1)
   return dirs.some((part, k) => ['.husky', '.githooks'].includes(part)
@@ -161,8 +173,11 @@ function isExecutionConfig(rel) {
     || (part === '.claude' && ['commands', 'agents', 'skills'].includes(dirs[k + 1])))
 }
 
-const isClaudeSettingsPath = location => path.basename(location) === '.mcp.json' || /(?:^|\/)\.claude\/settings[^/]*\.json$/.test(location) || /(?:^|\/)\.claude\/hooks(?:\/|$)/.test(location)
-const isGitInternal = location => location.split('/').includes('.git')
+const isClaudeSettingsPath = location => {
+  const folded = fold(location)
+  return path.basename(folded) === '.mcp.json' || /(?:^|\/)\.claude\/settings[^/]*\.json$/.test(folded) || /(?:^|\/)\.claude\/hooks(?:\/|$)/.test(folded)
+}
+const isGitInternal = location => fold(location).split('/').includes('.git')
 
 // Repo scope (07-approvals 3.5, F10): the repo root and its worktrees, by realpath; a worktree
 // under `$HOME/.*` or a persistence location is not repo scope.
@@ -187,7 +202,7 @@ function scopeRelative(location, scope) {
   for (const root of scope) {
     if (!within(real, root)) continue
     const rel = path.relative(root, real)
-    if (rel.split('/').includes('.git')) return null
+    if (isGitInternal(rel)) return null
     return rel
   }
   return null
@@ -219,9 +234,9 @@ const expandHome = (word, ctx) => (word === '~' || word.startsWith('~/')) && ctx
 // The sensitive-list locations under the home directory (07-approvals 3.5), for the ancestor check
 // of commands that read a whole directory.
 const HOME_SENSITIVE = Object.freeze(['.ssh', '.gnupg', '.aws', '.config/gh', '.netrc', '.claude/.credentials.json', '.git-credentials', '.npmrc', '.pypirc', '.docker/config.json', '.kube/config', '.config/gcloud', '.password-store', '.local/share/keyrings'])
-const holdsSecret = (location, ctx) => candidates(location).some(candidate => isSensitive(candidate, ctx.home) || (ctx.home && HOME_SENSITIVE.some(rel => within(path.join(ctx.home, rel), candidate))))
-const namesControl = (location, ctx) => candidates(location).some(candidate => ctx.deck.dirs.some(dir => within(candidate, dir)))
-const ancestorOfControl = (location, ctx) => candidates(location).some(candidate => ctx.deck.dirs.some(dir => within(dir, candidate) || within(candidate, dir)))
+const holdsSecret = (location, ctx) => candidates(location).some(candidate => isSensitive(candidate, ctx.home) || (ctx.home && HOME_SENSITIVE.some(rel => withinFolded(path.join(ctx.home, rel), candidate))))
+const namesControl = (location, ctx) => candidates(location).some(candidate => ctx.deck.dirs.some(dir => withinFolded(candidate, dir)))
+const ancestorOfControl = (location, ctx) => candidates(location).some(candidate => ctx.deck.dirs.some(dir => withinFolded(dir, candidate) || withinFolded(candidate, dir)))
 const LOOPBACK = /(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0):(\d+)/i
 const namesDeckPort = (text, ctx) => {
   const match = LOOPBACK.exec(text)
@@ -234,26 +249,32 @@ const namesDeckPort = (text, ctx) => {
 // `noPattern` options switch the pattern operand off (`rg --files`); `arity` is the number of value
 // words when it is not one, and `fileIndex` which of them is the file. `single` commands spell long
 // options with one dash and take no bundles (find, go).
+// Only an option that takes its value from the next word belongs in `values`: one whose value is
+// attached only (git `--abbrev[=<n>]`) or a boolean flag would hide the next word, a path, from the
+// path rule. The entries were checked on the test host against git 2.55 (each run with a pathspec
+// after it), GNU coreutils, grep, sed, diff and file `--help`, ripgrep, fd, jq 1.8.2, cargo 1.98
+// and pytest `--help`, and the docker CLI's per-subcommand help. Tools not installed there (go,
+// staticcheck, tree, yq, mypy, black, ruff, pytest plugins) have no values listed, so the word after
+// any of their options stays an operand the path rule checks.
 const spec = (values, extra = {}) => ({ values: new Set(values), files: new Set(extra.files ?? []), pattern: new Set(extra.pattern ?? []), noPattern: new Set(extra.noPattern ?? []), arity: extra.arity ?? {}, fileIndex: extra.fileIndex ?? {}, single: extra.single === true })
-const GIT_HISTORY_VALUES = ['-n', '-L', '-S', '-G', '-O', '--max-count', '--skip', '--author', '--committer', '--grep', '--since', '--until', '--after', '--before', '--output', '--diff-filter', '--format', '--date', '--abbrev']
-const CARGO_VALUES = ['-p', '-F', '-j', '-Z', '--package', '--features', '--bin', '--example', '--test', '--bench', '--exclude', '--jobs', '--target', '--target-dir', '--manifest-path', '--lockfile-path', '--artifact-dir', '--profile', '--message-format', '--color', '--config']
-const CARGO_FILES = ['--target-dir', '--manifest-path', '--lockfile-path', '--artifact-dir']
-const GO_VALUES = ['-o', '-p', '-cpu', '-mod', '-run', '-count', '-tags', '-timeout', '-bench', '-benchtime', '-covermode', '-coverpkg', '-list', '-skip', '-shuffle', '-parallel', '-C', '-modfile', '-overlay', '-pgo', '-exec', '-toolexec', '-ldflags', '-gcflags', '-asmflags', '-buildmode', '-compiler', '-installsuffix', '-pkgdir', '-coverprofile', '-cpuprofile', '-memprofile', '-blockprofile', '-mutexprofile', '-trace', '-outputdir', '-fuzz', '-fuzztime', '-f', '-vettool']
-const GO_FILES = ['-o', '-C', '-modfile', '-overlay', '-pkgdir', '-coverprofile', '-cpuprofile', '-memprofile', '-blockprofile', '-mutexprofile', '-trace', '-outputdir', '-vettool']
+const GIT_HISTORY_VALUES = ['-n', '-L', '-S', '-G', '-O', '--max-count', '--skip', '--author', '--committer', '--grep', '--since', '--until', '--after', '--before', '--output', '--diff-filter', '--format', '--date']
+const CARGO_VALUES = ['-p', '-F', '-j', '-Z', '-m', '--package', '--features', '--bin', '--example', '--test', '--bench', '--exclude', '--jobs', '--target', '--target-dir', '--manifest-path', '--artifact-dir', '--profile', '--message-format', '--color', '--config']
+const CARGO_FILES = ['--target-dir', '-m', '--manifest-path', '--artifact-dir']
 const VALUE_OPTIONS = Object.freeze({
   grep: spec(['-e', '-f', '-A', '-B', '-C', '-m', '-d', '-D', '--regexp', '--file', '--after-context', '--before-context', '--context', '--max-count', '--label', '--include', '--exclude', '--exclude-dir', '--exclude-from', '--binary-files', '--devices', '--directories', '--group-separator'], { files: ['-f', '--file', '--exclude-from'], pattern: ['-e', '-f', '--regexp', '--file'] }),
   rg: spec(['-e', '-f', '-g', '-t', '-T', '-A', '-B', '-C', '-m', '-M', '-j', '-r', '-E', '-d', '--regexp', '--file', '--glob', '--iglob', '--type', '--type-not', '--after-context', '--before-context', '--context', '--max-count', '--max-columns', '--threads', '--replace', '--encoding', '--max-depth', '--max-filesize', '--ignore-file', '--sort', '--sortr', '--color', '--colors', '--type-add', '--type-clear', '--pre', '--pre-glob', '--path-separator', '--context-separator', '--field-match-separator', '--field-context-separator', '--engine', '--dfa-size-limit', '--regex-size-limit', '--hyperlink-format', '--generate'], { files: ['-f', '--file', '--ignore-file'], pattern: ['-e', '-f', '--regexp', '--file'], noPattern: ['--files', '--type-list'] }),
   fd: spec(['-e', '-t', '-d', '-E', '-S', '-o', '-j', '-x', '-X', '--extension', '--type', '--max-depth', '--min-depth', '--exact-depth', '--exclude', '--size', '--owner', '--threads', '--changed-within', '--changed-before', '--base-directory', '--search-path', '--ignore-file', '--path-separator', '--format', '--and', '--color', '--batch-size', '--max-results'], { files: ['--base-directory', '--search-path', '--ignore-file'] }),
   'git grep': spec(['-e', '-f', '-A', '-B', '-C', '-m', '--max-count', '--context', '--after-context', '--before-context', '--threads', '--max-depth'], { files: ['-f'], pattern: ['-e', '-f'] }),
   sed: spec(['-e', '-f', '-l', '--expression', '--file', '--line-length'], { files: ['-f', '--file'], pattern: ['-e', '-f', '--expression', '--file'] }),
-  jq: spec(['--arg', '--argjson', '--slurpfile', '--rawfile', '--indent', '-f', '--from-file', '-L'], { files: ['--slurpfile', '--rawfile', '-f', '--from-file', '-L'], pattern: ['-f', '--from-file'], arity: { '--arg': 2, '--argjson': 2, '--slurpfile': 2, '--rawfile': 2 }, fileIndex: { '--slurpfile': 2, '--rawfile': 2 } }),
-  yq: spec(['-o', '-I', '-p', '-s', '--output-format', '--input-format', '--indent', '--split-exp', '--from-file'], { files: ['--from-file'], pattern: ['--from-file'] }),
+  // jq 1.8.2: -f is a flag, and the filter file is then the first operand (`jq -f -c f.jq d.json`).
+  jq: spec(['--arg', '--argjson', '--slurpfile', '--rawfile', '--indent', '-L'], { files: ['--slurpfile', '--rawfile', '-L'], pattern: ['-f', '--from-file'], arity: { '--arg': 2, '--argjson': 2, '--slurpfile': 2, '--rawfile': 2 }, fileIndex: { '--slurpfile': 2, '--rawfile': 2 } }),
+  yq: spec([], { pattern: ['--from-file'] }),
   head: spec(['-n', '-c', '--lines', '--bytes']),
   tail: spec(['-n', '-c', '-s', '--lines', '--bytes', '--sleep-interval', '--pid']),
   cut: spec(['-d', '-f', '-c', '-b', '--delimiter', '--fields', '--characters', '--bytes', '--output-delimiter']),
   sort: spec(['-k', '-t', '-o', '-S', '-T', '--key', '--field-separator', '--output', '--buffer-size', '--temporary-directory', '--files0-from', '--batch-size', '--parallel', '--compress-program', '--random-source'], { files: ['-o', '--output', '-T', '--temporary-directory', '--files0-from', '--random-source'] }),
   uniq: spec(['-f', '-s', '-w', '--skip-fields', '--skip-chars', '--check-chars']),
-  tree: spec(['-L', '-I', '-P', '-o', '-H', '-T', '--filelimit', '--charset', '--timefmt', '--sort', '--fromfile'], { files: ['-o'] }),
+  tree: spec([]),
   stat: spec(['-c', '--format', '--printf']),
   du: spec(['-d', '-B', '-t', '-X', '--max-depth', '--block-size', '--threshold', '--exclude', '--exclude-from', '--files0-from', '--time-style'], { files: ['-X', '--exclude-from', '--files0-from'] }),
   df: spec(['-x', '-t', '-B', '--type', '--exclude-type', '--block-size']),
@@ -273,18 +294,28 @@ const VALUE_OPTIONS = Object.freeze({
   'git add': spec(['--chmod', '--pathspec-from-file'], { files: ['--pathspec-from-file'] }),
   'git ls-files': spec(['-x', '-X', '--exclude', '--exclude-from', '--exclude-per-directory', '--format', '--with-tree'], { files: ['-X', '--exclude-from'] }),
   cargo: spec(CARGO_VALUES, { files: CARGO_FILES }),
-  go: spec(GO_VALUES, { files: GO_FILES, single: true }),
+  go: spec([], { single: true }),
   gofmt: spec([]),
-  staticcheck: spec(['-checks', '-tags', '-f', '-go', '-tests', '-matrix'], { single: true }),
-  pytest: spec(['-k', '-m', '-n', '-p', '-c', '-o', '-W', '--basetemp', '--rootdir', '--confcutdir', '--deselect', '--ignore', '--ignore-glob', '--junitxml', '--log-file', '--cov-config'], { files: ['-c', '--basetemp', '--rootdir', '--confcutdir', '--deselect', '--ignore', '--junitxml', '--log-file', '--cov-config'] }),
-  mypy: spec(['-p', '-m', '--package', '--module', '--config-file', '--cache-dir', '--python-executable'], { files: ['--config-file', '--cache-dir', '--python-executable'] }),
-  black: spec(['-l', '--line-length', '--config', '--target-version', '--include', '--exclude'], { files: ['--config'] }),
-  ruff: spec(['--config', '--select', '--ignore', '--extend-select', '--output-format', '--line-length', '--cache-dir', '--target-version'], { files: ['--config', '--cache-dir'] }),
-  docker: spec(['-n', '-f', '--tail', '--since', '--until', '--filter', '--format', '--last', '--type', '--status'])
+  staticcheck: spec([], { single: true }),
+  // -n (pytest-xdist) and --cov-config (pytest-cov) are plugin options not installed on the test host.
+  pytest: spec(['-k', '-m', '-p', '-c', '-o', '-W', '--basetemp', '--rootdir', '--confcutdir', '--deselect', '--ignore', '--ignore-glob', '--junitxml', '--log-file'], { files: ['-c', '--basetemp', '--rootdir', '--confcutdir', '--deselect', '--ignore', '--junitxml', '--log-file'] }),
+  mypy: spec([]),
+  black: spec([]),
+  ruff: spec([]),
+  // docker by subcommand: -f is --follow, a flag, for logs, and a value elsewhere.
+  'docker ps': spec(['-f', '-n', '--filter', '--format', '--last']),
+  'docker images': spec(['-f', '--filter', '--format']),
+  'docker logs': spec(['-n', '--tail', '--since', '--until']),
+  'docker inspect': spec(['-f', '--format', '--type']),
+  'docker version': spec(['-f', '--format']),
+  'docker info': spec(['-f', '--format']),
+  'docker compose ps': spec(['--filter', '--format', '--status']),
+  'docker compose logs': spec(['-n', '--tail', '--since', '--until', '--index'])
 })
 
-// The modelled spec for a command (git by subcommand), or null.
-const valueSpec = (name, list) => VALUE_OPTIONS[name === 'git' ? `git ${list[1]}` : name] ?? null
+// The modelled spec for a command, by its longest listed command words (git and docker by
+// subcommand), or null.
+const valueSpec = (name, list) => VALUE_OPTIONS[[name, list[1], list[2]].join(' ')] ?? VALUE_OPTIONS[[name, list[1]].join(' ')] ?? VALUE_OPTIONS[name] ?? null
 
 // Split a command's arguments (after its command words) into operands and option values by its
 // value-option spec. Words after `--` are operands. A value of an option the spec does not know is
@@ -420,7 +451,7 @@ function followsSymlinks(name, words) {
 
 // Whether `dir` lies in a git work tree: an ancestor holds `.git`, and `dir` is not inside one.
 function inGitWorkTree(dir) {
-  if (typeof dir !== 'string' || dir.split('/').includes('.git')) return false
+  if (typeof dir !== 'string' || isGitInternal(dir)) return false
   for (let current = dir; ; current = path.dirname(current)) {
     if (lexists(path.join(current, '.git'))) return true
     if (path.dirname(current) === current) return false
@@ -454,9 +485,9 @@ function writeVerdict(location, ctx, segment) {
   if (location === null) return reason('scope.outside', 'caution', segment, 'writes outside the repo')
   if (DEV_NULLS.has(location)) return null
   const paths = candidates(location)
-  if (paths.some(candidate => ctx.deck.dirs.some(dir => within(candidate, dir)))) return reason('floor.deck', 'destructive', segment, 'writes the deck\'s own files')
+  if (paths.some(candidate => ctx.deck.dirs.some(dir => withinFolded(candidate, dir)))) return reason('floor.deck', 'destructive', segment, 'writes the deck\'s own files')
   const inside = scopeRelative(location, ctx.scope)
-  if (paths.some(isClaudeSettingsPath) || (path.basename(location) === 'CLAUDE.md' && inside === null)) return reason('floor.claude-settings', 'destructive', segment, 'changes Claude Code settings or hooks')
+  if (paths.some(isClaudeSettingsPath) || (fold(path.basename(location)) === 'claude.md' && inside === null)) return reason('floor.claude-settings', 'destructive', segment, 'changes Claude Code settings or hooks')
   if (paths.some(isGitInternal)) return reason('floor.git-dir', 'destructive', segment, 'writes inside .git')
   if (paths.some(candidate => isPersistence(candidate, ctx.home))) return reason('floor.persistence', 'destructive', segment, 'runs at the next login or shell start')
   if (inside === null) return reason('scope.outside', 'caution', segment, 'writes outside the repo')
@@ -784,9 +815,22 @@ function scriptMatches(names, script) {
   return names.some(name => name.endsWith(':') ? script.startsWith(name) && script.length > name.length : script === name)
 }
 
+// The path a git revision or pathspec word names: `:N:path` (index stage N), `:(magic)path` and
+// short-magic `:/path`, `:!path`, `:^path` (gitglossary pathspec), `REV:path`, else the word.
+function gitPathPart(word) {
+  const stage = /^:[0-3]:(.*)$/s.exec(word)
+  if (stage) return stage[1]
+  const long = /^:\([^)]*\)(.*)$/s.exec(word)
+  if (long) return long[1]
+  const short = /^:[/!^]*:?(.*)$/s.exec(word)
+  if (short) return short[1]
+  return word.includes(':') ? word.slice(word.indexOf(':') + 1) : word
+}
+
 function gitConfigVerdict(rest, text) {
   const args = rest.slice(1)
-  const valueOptions = ['-f', '--file', '--blob', '--type', '--default', '--comment', '--value']
+  // -t is --type (git 2.55 `git config -h`), so `git config -t bool core.fsmonitor x` sets core.fsmonitor.
+  const valueOptions = ['-f', '-t', '--file', '--blob', '--type', '--default', '--comment', '--value']
   const readModes = ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--get-color', '--get-colorbool', '--list', '-l']
   const writeModes = ['--unset', '--unset-all', '--remove-section', '--rename-section', '--add', '--replace-all', '--edit', '-e']
   const operands = []
@@ -835,6 +879,134 @@ function gitGlobals(globals, segment, ctx) {
     safe = false
   }
   return { floors, safe }
+}
+
+// go build and go test outputs (`go help build`, `go help testflag`; not run here: no Go toolchain
+// on the test host). `-o DIR/`, or `-o` naming an existing directory, writes DIR/<name>; go build
+// with no -o writes a single main package to the working directory as <name>; go test writes
+// <name>.test. <name> is the last element of the package's import path without a /vN suffix, or the
+// first file's name for .go operands. The deck does not know which packages are main, so it judges
+// every name an operand can give: each word that is not an option is taken as a package (a value
+// of an option the deck does not model gives an extra name, which only adds checks). A `...`
+// pattern gives the names of the directories under it, skipping the ones go skips (names starting
+// with . or _, and testdata); a pattern the deck cannot list is Caution.
+const GO_WALK_LIMIT = 5000
+const goMajorVersion = element => /^v(?:[2-9]|[1-9]\d+)$/.test(element)
+function goModulePath(dir) {
+  let text
+  try { text = readFileSync(path.join(dir, 'go.mod'), 'utf8') } catch { return null }
+  const match = /^\s*module\s+(?:"([^"]+)"|([^\s/][^\s]*))/m.exec(text)
+  return match ? (match[1] ?? match[2]) : null
+}
+const importBase = elements => elements.length > 1 && goMajorVersion(elements.at(-1)) ? elements.at(-2) : elements.at(-1)
+// The names a package directory can build to: its own name, its module's name at a module root, and
+// its parent's name for a /vN directory. null when a go.mod cannot be read.
+function goDirNames(dir) {
+  const names = [path.basename(dir)]
+  if (goMajorVersion(path.basename(dir))) names.push(path.basename(path.dirname(dir)))
+  if (lexists(path.join(dir, 'go.mod'))) {
+    const module = goModulePath(dir)
+    if (module === null) return null
+    names.push(importBase(module.split('/')))
+  }
+  return names
+}
+function goPatternNames(base) {
+  const names = goDirNames(base)
+  if (names === null) return null
+  const pending = [base]
+  let seen = 0
+  while (pending.length) {
+    let entries
+    try { entries = readdirSync(pending.pop(), { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name.startsWith('_') || entry.name === 'testdata') continue
+      if (++seen > GO_WALK_LIMIT) return null
+      const dir = path.join(entry.parentPath, entry.name)
+      const more = goDirNames(dir)
+      if (more === null) return null
+      names.push(...more)
+      pending.push(dir)
+    }
+  }
+  return names
+}
+function goPackageNames(word, cwd) {
+  if (word.endsWith('.go')) return [path.basename(word, '.go')]
+  const relative = word === '.' || word === '..' || word.startsWith('./') || word.startsWith('../') || path.isAbsolute(word)
+  if (word.includes('...')) {
+    if (!relative || !cwd) return null
+    const prefix = word.slice(0, word.indexOf('...'))
+    return goPatternNames(path.resolve(cwd, prefix.endsWith('/') ? prefix : path.dirname(prefix || '.')))
+  }
+  if (relative) return cwd ? goDirNames(path.resolve(cwd, word)) : null
+  return [importBase(word.split('/'))]
+}
+function goOutputVerdicts(list, words, info, segment, ctx, text) {
+  if (list[1] !== 'build' && list[1] !== 'test') return []
+  const suffix = list[1] === 'test' ? '.test' : ''
+  const offset = words.length - list.length
+  const packages = []
+  const outputs = []
+  let unknown = false
+  for (let k = 2; k < list.length; k++) {
+    const word = list[k]
+    const literal = !info[k + offset] || info[k + offset].literal
+    const match = /^--?o=(.*)$/s.exec(word)
+    if (word === '-o' || word === '--o' || match) {
+      const value = match ? match[1] : list[++k]
+      if (value === undefined || (!match && info[k + offset] && !info[k + offset].literal) || !literal) { unknown = true; continue }
+      outputs.push(value)
+      continue
+    }
+    if (word.startsWith('-')) continue
+    if (!literal) { unknown = true; continue }
+    packages.push(word)
+  }
+  const dirs = []
+  for (const value of outputs) {
+    const location = resolveIn(value, segment.cwd)
+    if (location && (value.endsWith('/') || isDirectory(location))) dirs.push(location)
+  }
+  if (!outputs.length && list[1] === 'build') dirs.push(segment.cwd)
+  if (!dirs.length) return []
+  const verdicts = []
+  const fail = () => [reason('go.output', 'caution', text, 'writes a build output the deck cannot name')]
+  if (unknown || dirs.some(dir => typeof dir !== 'string')) return fail()
+  const names = []
+  for (const word of packages.length ? packages : ['.']) {
+    const more = goPackageNames(word, segment.cwd)
+    if (more === null) return fail()
+    names.push(...more)
+  }
+  for (const dir of dirs) {
+    for (const name of new Set(names)) {
+      const verdict = writeVerdict(path.join(dir, `${name}${suffix}`), ctx, text)
+      if (verdict) verdicts.push(verdict)
+    }
+  }
+  return verdicts
+}
+
+// cargo's build commands write CACHEDIR.TAG, debug/ and .rustc_info.json into the target directory
+// (cargo 1.98, run on the test host): --target-dir, else `target` next to the Cargo.toml cargo
+// finds from the working directory up (each one is checked, as the workspace root may be higher).
+const CARGO_BUILDS = Object.freeze(['build', 'check', 'test', 'clippy', 'doc', 'bench', 'nextest'])
+function cargoTargetVerdicts(list, segment, ctx, text) {
+  if (!CARGO_BUILDS.includes(list[1])) return []
+  const dirs = []
+  for (let k = 2; k < list.length; k++) {
+    if (list[k] === '--') break
+    if (list[k] === '--target-dir') dirs.push(resolveIn(list[k + 1] ?? '', segment.cwd))
+    else if (list[k].startsWith('--target-dir=')) dirs.push(resolveIn(list[k].slice(13), segment.cwd))
+  }
+  if (!dirs.length && segment.cwd) {
+    for (let current = segment.cwd; ; current = path.dirname(current)) {
+      if (lexists(path.join(current, 'Cargo.toml'))) dirs.push(path.join(current, 'target'))
+      if (path.dirname(current) === current) break
+    }
+  }
+  return dirs.map(dir => writeVerdict(dir === null ? null : path.join(dir, 'CACHEDIR.TAG'), ctx, text)).filter(Boolean)
 }
 
 function classifySegment(segment, ctx, ready, out) {
@@ -942,7 +1114,9 @@ function classifySegment(segment, ctx, ready, out) {
       const verdict = writeVerdict(info[k + 1] && !match && !info[k + 1].literal ? null : resolveIn(value, segment.cwd), ctx, text)
       if (verdict) push(verdict)
     }
+    for (const verdict of goOutputVerdicts(list, words, info, segment, ctx, text)) push(verdict)
   }
+  if (name === 'cargo') for (const verdict of cargoTargetVerdicts(list, segment, ctx, text)) push(verdict)
   if (OPERAND_WRITERS.includes(`${name} ${words[1] ?? ''}`)) {
     // A non-literal operand, or a glob too large to expand, is an unknown target (null).
     const targets = []
@@ -983,14 +1157,13 @@ function classifySegment(segment, ctx, ready, out) {
       }
     }
     // git read subcommands print a committed file whether or not the work tree still holds it:
-    // a pathspec or a `REV:path` naming a sensitive-list file is a secret read.
+    // a pathspec, a `REV:path`, an index-stage `:N:path` or the file of an `-L` range naming a
+    // sensitive-list file is a secret read.
     if (['show', 'log', 'diff', 'blame', 'grep', 'whatchanged'].includes(list[1])) {
       const split = segmentArgs(name, list, list.slice(2))
-      const named = list[1] === 'grep' && !split.patternGiven ? split.operands.slice(1) : split.operands
-      const secret = named.some(word => {
-        const part = word.includes(':') ? word.slice(word.indexOf(':') + 1) : word
-        return part !== '' && isSensitive(path.resolve(segment.cwd ?? '/', part), ctx.home)
-      })
+      const named = (list[1] === 'grep' && !split.patternGiven ? split.operands.slice(1) : split.operands).map(gitPathPart)
+      for (const value of split.values) if (value.option === '-L' && typeof value.word === 'string' && value.word.includes(':')) named.push(value.word.slice(value.word.lastIndexOf(':') + 1))
+      const secret = named.some(part => part !== '' && isSensitive(path.resolve(segment.cwd ?? '/', part), ctx.home))
       if (secret) push(reason('read.secret', 'caution', text, 'reads a secret file'))
     }
     if (list[1] === 'add' && list.slice(2).some(arg => !arg.startsWith('-') && (() => { const location = resolveIn(arg, segment.cwd); return location && candidates(location).some(candidate => isSensitive(candidate, ctx.home)) })())) push(reason('git.stages-secret', 'caution', text, 'stages a secret file'))

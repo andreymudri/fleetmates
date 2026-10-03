@@ -53,6 +53,11 @@ symlinkSync('../other2', path.join(repo, 'src2', 'l3'))
 symlinkSync(deckPaths.state, path.join(repo, 'other2', 'd'))
 symlinkSync('../.env', path.join(repo, 'src', 'link'))
 symlinkSync('/usr/bin/python3', path.join(repo, '.venv', 'bin', 'python'))
+// Phase 2 round 3: hook directories and a Go main package for the go build output rows, and two
+// directories for plain diff.
+for (const dir of ['.git/hooks', '.githooks', '.husky', 'cmd/pre-commit', 'bin', 'dA', 'dB']) mkdirSync(path.join(repo, dir), { recursive: true })
+writeFileSync(path.join(repo, 'dA', 'x'), 'a\n')
+writeFileSync(path.join(repo, 'dB', 'x'), 'b\n')
 writeFileSync(path.join(home, 'ng', 'sub', '.env'), 'TOKEN=synthetic\n')
 writeFileSync(path.join(home, 'wt2', 'cfg', '.env'), 'API_KEY=synthetic\n')
 Object.assign(process.env, {
