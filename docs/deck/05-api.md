@@ -82,7 +82,7 @@ Columns: request body or query, success response, error codes (section 4), miles
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/sessions` | query `state` (comma list), `repoKey`, `active=1` (not `ended`), `limit` (default 100), `before` (ms, on `startedAt`) | `{ sessions: Session[], nextBefore }` | `not_found` (unknown repoKey) | M1 | new-session conflict check, palette, history lists (Home reads the snapshot) |
+| GET | `/api/sessions` | query `state` (comma list), `repoKey`, `active=1` (not `ended`), `archived` (`1`: only archived sessions of any age, newest `archivedAt` first, `before` and `nextBefore` on `archivedAt`; `0`: only sessions that are not archived; absent: every session), `limit` (default 100), `before` (ms, on `startedAt` unless `archived=1`) | `{ sessions: Session[], nextBefore }` | `not_found` (unknown repoKey), `validation_failed` (`archived` other than `0` or `1`) | M1 (`archived`: session archive) | new-session conflict check, palette, history lists, the Home "Archived (N)" list (`archived=1`; Home otherwise reads the snapshot) |
 | GET | `/api/sessions/:id` | | `{ session: Session, requests: Request[], steps: Step[] }` | `not_found` | M1 | Focus deep link, palette |
 | GET | `/api/sessions/:id/steps` | query `limit` (default 50, max 200), `taskId` | `{ steps: Step[] }` | `not_found` | M1 | Home tails after a gap, Team crew panels |
 | POST | `/api/sessions` | `{ repoKey, task?, mode?: 'plain' \| 'fleetmates' }` (no other keys) | 201 `{ session: Session, warning?: { kind: 'repo_busy', sessionIds: string[] } }` | `not_found` (repo), `validation_failed` (an empty or blank task in `fleetmates` mode only; a task over 10,000 characters or holding NUL; an unknown key or mode), `deckd_unavailable`, `spawn_failed` | M2 | New session "Launch a ship" (`U.Launch`), "Run as a fleetmates job" (`mode: 'fleetmates'`, D-68); flow in 03-architecture 4.1 |
@@ -91,6 +91,9 @@ Columns: request body or query, success response, error codes (section 4), miles
 | POST | `/api/sessions/:id/mark-reviewed` | | `{ session }` | `invalid_state` (not `done`; state-machines 1.9 says 409) | M1 | Focus "Mark reviewed" (in the read-only Focus of M1, MS-O1), palette (`U.MarkReviewed`) |
 | POST | `/api/sessions/:id/relaunch` | | 202 `{ session }` | `invalid_state` (not `crashed`, or observed without `claudeSessionId`), `deckd_unavailable`, `spawn_failed` | M2 | Failures, Focus "Relaunch" (`U.Relaunch`, row 46) |
 | POST | `/api/sessions/:id/dismiss` | | `{ session }` | `invalid_state` (not `crashed`) | M1 | Failures, Focus "Dismiss" (`U.Dismiss`, row 47) |
+| POST | `/api/sessions/:id/archive` | | `{ session }` (`archivedBy: 'owner'`; a session already archived is answered unchanged) | `not_found`, `needs_you` (409: the session has an open request) | session archive | Home and Focus "Archive", palette |
+| POST | `/api/sessions/:id/unarchive` | | `{ session }` (`archivedAt` and `archivedBy` null; a session that is not archived is answered unchanged) | `not_found` | session archive | the Home "Archived (N)" list "Unarchive", the Undo of Archive |
+| POST | `/api/sessions/archive-finished` | | `{ ids: string[] }`: the sessions archived by the owner, every one finished (`alive` false, no open request), not archived and without unreviewed changes (empty `changedFiles`) | | session archive | Home "Archive all finished" |
 | GET | `/api/sessions/:id/diff` | query `path` (repo-relative) | `{ path, baseline, diff, binary, truncated }` (unified diff text, capped at 512 KiB) | `not_found` (path not in `changedFiles`), `validation_failed` (path escapes the repo) | M3 | Focus Changes tab |
 | GET | `/api/sessions/:id/disk` | | `{ cwd, mounts: [{ mount, sizeBytes, usedBytes, availBytes }] }` for the mount of `cwd` and of `$HOME` | `not_found` | M1 | Failures "Show disk usage" |
 | GET | `/api/sessions/:id/scrollback` | query `lines` (default 1000, max 5000) | `{ text, source: 'deckd' \| 'stored', truncated }` (ANSI kept; the SPA writes it into a read-only xterm) | `not_found` (no PTY and nothing stored) | M2 | Failures crash tail, "Ship's log" |
@@ -154,6 +157,8 @@ A slot change runs in one DB transaction ([design/crew.md](design/crew.md) 4.2).
 | PATCH | `/api/prefs` | partial `Prefs` | same as GET | `validation_failed`, `read_only_pref` (the value comes from the environment, SET-O1) | M1 | Settings controls, threshold Select |
 
 Which keys live in `config.json` and which in SQLite is [06-storage.md](06-storage.md) section 8; the API hides the split and reports the source per key.
+
+`autoArchiveAfter` (session archive) is stored in the SQLite `prefs` table, default 24. It is the number of hours after which a finished session (`alive` false, no open request) that is not archived and has no unreviewed changes is archived with `archivedBy: 'auto'`, measured from `endedAt`, or from `stateSince` when `endedAt` is null. PATCH accepts exactly 6, 12, 24, 72, 168 or null (Never). The server sweeps once at start, every 10 minutes, and once right after a `prefs.changed` that changes the value.
 
 ### 2.8 Runs (fleetmates, read only)
 
@@ -260,7 +265,7 @@ Close codes: 4400 bad or missing hello, 4401 token invalid, 4403 origin rejected
 
 ```
 { t: 'snapshot', seq, epoch, data: {
-    sessions: Session[],            // every session not 'ended', plus 'ended' of the last 24 h
+    sessions: Session[],            // every session not 'ended', plus 'ended' of the last 24 h, archived or not (archivedAt says which)
     requests: Request[],            // open requests
     runs: Run[],                    // runs with a live lead or active tasks
     repos: RepoView[],
@@ -283,7 +288,7 @@ Durable (carry `seq`):
 
 | Type | `data` | Emitted when | Consumers |
 |---|---|---|---|
-| `session.upserted` | `Session` (whole object) | any session field change: state, activity, files, branch, `lastInputFrom`, alive | Home, Focus, palette, Team, Rail |
+| `session.upserted` | `Session` (whole object) | any session field change: state, activity, files, branch, `lastInputFrom`, alive, `archivedAt` (archive, unarchive, the auto-archive sweep, and the automatic unarchive of an archived session that gets an open request, in the same transaction as that request) | Home, Focus, palette, Team, Rail |
 | `session.removed` | `{ id }` | a session row is deleted by retention (never for live sessions) | all lists |
 | `session.steps` | `{ sessionId, steps: Step[] }` (appended steps only) | tool step recorded | Home tails, Focus, Team crew panels |
 | `request.opened` | `Request` | request created | card, drawer, palette, toasts, bell |
@@ -330,8 +335,10 @@ Ephemeral (no `seq`):
 
 ```
 { needYouSessions, running, toReview, openRequests, requestSessions, oldestRequestAt,
-  perRun: [{ repoId, runId, needYou, total }] }
+  perRun: [{ repoId, runId, needYou, total }], archived }
 ```
+
+Archived sessions are left out of every count except `archived`, the number of archived sessions in any state (session archive).
 
 `openRequests` and `requestSessions` feed "4 requests from 3 ships"; `needYouSessions` feeds "3 need you". A team counts once in the three chips, under its most urgent state (02-domain 3).
 
@@ -579,6 +586,8 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {number|null} reviewedAt
  * @property {number} startedAt
  * @property {number|null} endedAt
+ * @property {number|null} archivedAt     ms when it was archived; null when it is not (session archive)
+ * @property {'owner'|'auto'|null} archivedBy   `owner`: Archive or "Archive all finished"; `auto`: the auto-archive sweep
  * @property {number} toolCalls            derived count of steps (home.md "31 tool calls")
  */
 
@@ -710,7 +719,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
 
 /** @typedef {{voyages: number, madePort: number, chartsAdded: number|null}} Recap */
 /** @typedef {{kind: 'vaultNote', ref: string}|{kind: 'meetingNote', ref: string}|{kind: 'runPlan', ref: {repoId: string, runId: string}}|{kind: 'postmeetLog', ref: string}} OpenRequest   (vaultNote: vault-relative path; meetingNote and postmeetLog: meeting id) */
-/** @typedef {{needYouSessions: number, running: number, toReview: number, openRequests: number, requestSessions: number, oldestRequestAt: number|null, perRun: {repoId: string, runId: string, needYou: number, total: number}[]}} Counts */
+/** @typedef {{needYouSessions: number, running: number, toReview: number, openRequests: number, requestSessions: number, oldestRequestAt: number|null, perRun: {repoId: string, runId: string, needYou: number, total: number}[], archived: number}} Counts */
 /** @typedef {{dep: 'deckd'|'hooks'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'warn'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number, deckdVersion?: string}} Health */
 /** @typedef {{id: 'claude'|'hooks'|'deckd'|'vault'|'scribed'|'notify', state: 'pending'|'checking'|'ok'|'warn'|'failed'|'optional_skipped', blocking: boolean, detail: string|null, error: string|null}} SetupCheck */   (warn: Claude Code newer than the tested version, state-machines 10.2)
 
@@ -722,6 +731,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {boolean} terminalScreenReader
  * @property {boolean} bell
  * @property {5|10|20|null} renotifyAfter   minutes; null = Never
+ * @property {6|12|24|72|168|null} autoArchiveAfter   hours; null = Never; default 24 (session archive)
  * @property {boolean} notifyDone
  * @property {boolean} quietInMeetings
  * @property {boolean} notifyCrash
