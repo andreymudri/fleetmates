@@ -12,6 +12,7 @@ import { startDeckServer } from '../../server/main.mjs'
 import { createProjector, PROMPT_GONE_REASON } from '../../server/machines/projector.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createDeckdLink } from '../../server/pty/link.mjs'
+import { readStoredHistory } from '../../server/screen/history.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
 
@@ -169,6 +170,50 @@ test('a process exiting 1 stores its last output as the session scrollback and e
   assert.ok(stored, 'a session_scrollback row was written')
   assert.match(stored.text, /final words before the crash/)
   assert.equal(stored.truncated, 0)
+})
+
+test('an exit from a proto 2 deckd reaches the projector with the history of its exit record, which is stored', async t => {
+  const { deck } = await server(t)
+  const exits = []
+  const signal = deck.projector.signal
+  deck.projector.signal = (id, sig, at) => {
+    if (sig.type === 'exit') exits.push(sig)
+    return signal.call(deck.projector, id, sig, at)
+  }
+  t.after(() => { deck.projector.signal = signal })
+  const { ptyId } = await spawnFake([{ expectInput: { match: 'go', timeoutMs: 10_000 } }, { print: 'history before the crash\r\n' }, { exit: { code: 1 } }])
+  const row = await until(() => sessionOf(deck, ptyId), 'the spawned row')
+  await write(deck, ptyId, 'go')
+  await until(() => sessionOf(deck, ptyId).state === 'crashed', 'the crash')
+  assert.equal(exits.length, 1)
+  assert.equal(typeof exits[0].history?.data, 'string', 'the exit signal carries history.data')
+  assert.match(exits[0].history.data, /history before the crash/)
+  assert.equal(typeof exits[0].tail, 'string', 'the raw tail still goes along')
+  const stored = deck.store.get('SELECT text FROM session_scrollback WHERE session_id=?', row.id)
+  assert.deepEqual(readStoredHistory(stored.text), { text: exits[0].history.data, size: { cols: 120, rows: 40 } })
+})
+
+test('an exit record with history applied at reconcile, for a session that ended while the server was away, stores the history', async t => {
+  const home = fs.mkdtempSync(path.join(dir, 'rec-'))
+  const store = openDeckDb(path.join(home, 'deck.db'))
+  const projector = createProjector({ store })
+  t.after(() => store.close())
+  const fake = replies => ({ proto: 2, deckdVersion: '9.9.9', request: async op => replies[op] ?? {}, on: () => () => {}, close() {} })
+  const startedAt = Date.now()
+  const first = createDeckdLink({ env: { XDG_RUNTIME_DIR: home }, connectDeckd: async () => fake({ list: { ptys: [{ ptyId: 'pty_rec', cwd: home, origin: 'wrapped', startedAt }] }, exits: { exits: [] } }), store, projector, publish: () => {} })
+  await first.start()
+  first.close()
+  const id = store.get('SELECT id FROM sessions WHERE pty_id=?', 'pty_rec').id
+  const history = { data: 'serialized \x1b[1mhistory\x1b[0m\r\nlast row', cols: 160, rows: 48 }
+  const tail = Buffer.from('raw tail bytes\r\n').toString('base64')
+  const second = createDeckdLink({ env: { XDG_RUNTIME_DIR: home }, connectDeckd: async () => fake({ list: { ptys: [] },
+    exits: { exits: [{ ptyId: 'pty_rec', code: 0, signal: null, at: startedAt + 1, tail, history }] } }), store, projector, publish: () => {} })
+  t.after(() => second.close())
+  await second.start()
+  const stored = store.get('SELECT text,truncated FROM session_scrollback WHERE session_id=?', id)
+  assert.ok(stored, 'the reconciled exit wrote a session_scrollback row')
+  assert.deepEqual(readStoredHistory(stored.text), { text: history.data, size: { cols: 160, rows: 48 } }, 'the history is stored, not the raw tail')
+  assert.equal(store.get('SELECT alive FROM sessions WHERE id=?', id).alive, 0)
 })
 
 test('a deckd that answers proto 1 is ok with reason deckd_outdated and its version, and stores no exit tail', async t => {
