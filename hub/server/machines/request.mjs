@@ -3,6 +3,7 @@ import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, stat
 import path from 'node:path'
 import { homedir } from 'node:os'
 import { activeTiers, classify, worktrees } from '../approvals/tiers.mjs'
+import { recordAllow, ruleThreshold } from '../approvals/rules.mjs'
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
@@ -941,6 +942,14 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
       ?? store.all('SELECT id, kind, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
     if (!row) return resumed
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: event === 'PermissionDenied' ? 'deny' : 'allow' }), at, row.id)
+    // D-73: an allow in the terminal counts toward "Make it a rule?"; recordAllow checks the tier,
+    // the pattern and that both hooks came from one Claude process (F16). Its failure never stops
+    // the hook from applying.
+    if (event === 'PostToolUse' && row.kind === 'permission') {
+      try { recordAllow(store, row, { via: 'terminal', at, threshold: ruleThreshold(store), closingPid: envelope.claudePid ?? null }) } catch {
+        try { process.stderr.write('deck: rule.count-error\n') } catch {}
+      }
+    }
     if (hook.tool_name === 'AskUserQuestion') {
       const relatedKind = row.kind === 'permission' ? 'question' : 'permission'
       const related = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind, at)
