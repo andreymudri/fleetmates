@@ -86,9 +86,12 @@ test('archive by the owner, then archived=1 lists it, archived=0 does not, and u
   assert.equal(only.nextBefore, null)
   const page = (await h.request('/api/sessions?archived=1&limit=1')).data
   assert.deepEqual(page.sessions.map(session => session.id), ['new'])
-  assert.equal(page.nextBefore, page.sessions[0].archivedAt)
-  const next = (await h.request(`/api/sessions?archived=1&limit=1&before=${page.nextBefore}`)).data
+  assert.equal(page.nextBefore, `${page.sessions[0].archivedAt}:new`, 'an opaque archivedAt:id cursor')
+  const next = (await h.request(`/api/sessions?archived=1&limit=1&before=${encodeURIComponent(page.nextBefore)}`)).data
   assert.deepEqual(next.sessions.map(session => session.id), ['old'])
+  const bare = (await h.request(`/api/sessions?archived=1&before=${page.sessions[0].archivedAt}`)).data
+  assert.deepEqual(bare.sessions.map(session => session.id), ['old'], 'a bare ms before still works, strictly older')
+  for (const before of ['x', '12:', ':a', '-1:a', '0:a']) assert.equal((await h.request(`/api/sessions?archived=1&before=${encodeURIComponent(before)}`)).status, 422, before)
   assert.deepEqual((await h.request('/api/sessions?archived=0')).data.sessions.map(session => session.id), ['kept'])
   assert.deepEqual((await h.request('/api/sessions')).data.sessions.map(session => session.id), ['kept', 'new', 'old'], 'no parameter: as before')
   assert.equal((await h.request('/api/sessions?archived=yes')).status, 422)
@@ -99,6 +102,27 @@ test('archive by the owner, then archived=1 lists it, archived=0 does not, and u
   assert.equal(back.data.session.archivedBy, null)
   assert.deepEqual((await h.request('/api/sessions?archived=1')).data.sessions.map(session => session.id), ['new'])
   assert.equal((await h.request('/api/sessions/old/unarchive', { method: 'POST' })).status, 200, 'unarchive of a session that is not archived')
+})
+
+test('archived=1 pages through more than limit sessions that share one archivedAt, each exactly once', async t => {
+  const h = await harness(t)
+  const ids = Array.from({ length: 25 }, (_, i) => `s${String(i).padStart(2, '0')}`)
+  for (const id of ids) row(h.deck, id)
+  row(h.deck, 'later')
+  assert.equal((await h.request('/api/sessions/archive-finished', { method: 'POST' })).data.ids.length, 26)
+  assert.equal(new Set(h.deck.store.all('SELECT archived_at FROM sessions').map(r => r.archived_at)).size, 1, 'one shared archivedAt')
+  const seen = []
+  let before = null
+  let pages = 0
+  do {
+    const query = `/api/sessions?archived=1&limit=10${before === null ? '' : `&before=${encodeURIComponent(before)}`}`
+    const page = (await h.request(query)).data
+    seen.push(...page.sessions.map(session => session.id))
+    before = page.nextBefore
+    assert.ok(++pages <= 3, 'paging ends')
+  } while (before !== null)
+  assert.equal(pages, 3)
+  assert.deepEqual(seen, [...ids, 'later'].sort(), 'every archived session once, in id order within one archivedAt')
 })
 
 test('archive and unarchive of an unknown session are 404, and archive of a session needing the owner is 409 needs_you', async t => {
@@ -229,4 +253,31 @@ test('an archived live session that gets a permission hook on the hook socket is
   assert.equal(upserted.data.archivedBy, null)
   await waitFor(() => messages.some(message => message.t === 'counts' && message.data.archived === 0), 'counts.archived back to 0')
   assert.equal(archived(h.deck, id).archived_at, null)
+})
+
+test('an idle sweep appends no event', async t => {
+  const h = await harness(t, { now: clock(), archiveSweepMs: 30 })
+  row(h.deck, 'fresh', { ended_at: BASE - HOUR, started_at: BASE - 2 * HOUR })
+  const events = () => h.deck.store.get('SELECT COUNT(*) AS n FROM events').n
+  const start = events()
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.equal(events(), start, 'no candidate: no counts event per tick')
+  assert.equal(archived(h.deck, 'fresh').archived_at, null)
+})
+
+test('close clears the sweep interval', async t => {
+  const SWEEP = 4321
+  const made = []
+  const cleared = new Set()
+  const setInterval = globalThis.setInterval
+  const clearInterval = globalThis.clearInterval
+  t.mock.method(globalThis, 'setInterval', (fn, ms, ...rest) => { const timer = setInterval(fn, ms, ...rest)
+    if (ms === SWEEP) made.push(timer)
+    return timer })
+  t.mock.method(globalThis, 'clearInterval', timer => { cleared.add(timer)
+    return clearInterval(timer) })
+  const h = await harness(t, { archiveSweepMs: SWEEP })
+  assert.equal(made.length, 1, 'one sweep interval')
+  await h.deck.close()
+  assert.ok(cleared.has(made[0]), 'the sweep interval is cleared on close')
 })

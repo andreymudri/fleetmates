@@ -145,17 +145,23 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         const id = resolveRepo(q)
         const states = q.get('state')?.split(',')
         if (states?.some(state => !validStates.includes(state))) throw apiError(422, 'validation_failed')
-        // archived=1: only archived sessions, any age, newest archivedAt first, `before` on archivedAt.
-        // archived=0: only sessions that are not archived. Without it, every session as before.
+        // archived=1: only archived sessions, any age, ordered archivedAt desc then id. One archive-finished call or
+        // sweep stamps every session with the same ms, so its cursor is the opaque `<archivedAt>:<id>` of the last
+        // row, and the next page starts after that row in the same order; a bare ms `before` keeps every older one.
+        // archived=0: only sessions that are not archived. Without it, every session as before, `before` on startedAt.
         const archived = q.get('archived')
         if (archived !== null && !['0', '1'].includes(archived)) throw apiError(422, 'validation_failed', { fields: ['archived'] })
         const limit = integer(q, 'limit', 100, 1000)
-        const before = integer(q, 'before', Number.MAX_SAFE_INTEGER)
+        const cursor = archived === '1' && q.get('before')?.match(/^(\d+):(.+)$/s)
+        const before = cursor ? Number(cursor[1]) : integer(q, 'before', Number.MAX_SAFE_INTEGER)
+        if (cursor && (!Number.isSafeInteger(before) || before < 1)) throw apiError(422, 'validation_failed', { fields: ['before'] })
         const key = archived === '1' ? 'archivedAt' : 'startedAt'
+        const after = row => row[key] < before || (cursor && row[key] === before && row.id.localeCompare(cursor[2]) > 0)
         const all = projector.snapshot().sessions.filter(row => (!id || row.repoId === id) && (!states || states.includes(row.state)) && (q.get('active') !== '1' || row.state !== 'ended') &&
-          (archived === null || (archived === '1') === (row.archivedAt !== null)) && row[key] < before).sort((a, b) => b[key] - a[key] || a.id.localeCompare(b.id))
+          (archived === null || (archived === '1') === (row.archivedAt !== null)) && after(row)).sort((a, b) => b[key] - a[key] || a.id.localeCompare(b.id))
         const rows = all.slice(0, limit)
-        return ok({ sessions: rows, nextBefore: all.length > limit ? rows.at(-1)[key] : null })
+        const last = rows.at(-1)
+        return ok({ sessions: rows, nextBefore: all.length > limit ? (archived === '1' ? `${last.archivedAt}:${last.id}` : last[key]) : null })
       }
       if (s[1] === 'sessions' && s.length === 3) {
         const row = session(s[2])
