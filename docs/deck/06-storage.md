@@ -185,9 +185,34 @@ CREATE TABLE session_steps (
 CREATE TABLE session_scrollback (
   session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
   captured_at INTEGER NOT NULL,
-  text        TEXT NOT NULL,                          -- raw bytes as UTF-8, ANSI kept, capped at 2 MiB
+  text        TEXT NOT NULL,                          -- serialized history or raw tail as UTF-8, ANSI kept, capped at 2 MiB
   truncated   INTEGER NOT NULL CHECK (truncated IN (0,1))
 ) STRICT;
+-- `text` holds deckd's serialized history (`history.data` of the exit record, 05-api.md 5.2) when the exit
+-- the projector applies carries one, cut by whole leading lines; otherwise the raw `tail` bytes, cut keeping
+-- their end. A history row starts with a size header, `ESC [ 8 ; rows ; cols t` (the XTWINOPS resize
+-- sequence), naming `history.rows` and `history.cols` clamped to 5..200 rows and 20..500 columns; the 2 MiB
+-- cap counts the header. A row without the header is a raw tail or was written before sizes were stored.
+-- `GET /api/sessions/:id/scrollback` serves every stored row rendered through a headless terminal of the
+-- size its header names, or 120x40 when it names none. Serialized history comes out as the same screen; a
+-- raw row comes out as rows drawn at 120x40 (best effort, since its original size is unknown). The headless
+-- terminal runs in one worker thread (node:worker_threads), started on the first render and given one render
+-- at a time, so a costly render never blocks the server's event loop. The main thread only reads the size
+-- header and cuts the input, each in one hand-written pass over the text. One render writes only the newest
+-- 256 KiB of the row, cut at a line start; when no line start is in reach the cut moves past any escape
+-- sequence it would split. In the worker the first parameter of each sequence whose cost grows with it is
+-- clamped (line insert, delete and scroll counts to the screen height; character insert, delete and erase
+-- and tab counts to the width; repeat counts to a screenful), whatever parameters, controls or C1
+-- introducer the sequence carries, and a repeat that would print more than 16 x width x height code units
+-- is dropped. The scrollback is sized from the input (at most 5000 rows), and the serialized output keeps
+-- its newest whole lines within 4 MiB. A render that takes over 2 seconds, and a worker that does not start,
+-- fails or exits, ends that worker (a fresh one serves the next render) and answers a fallback: the input
+-- with every escape sequence and every control character but CR and LF removed, the newest 5000 lines. The
+-- worker has a 512 MiB heap limit and an empty environment. The response says truncated when the stored row
+-- was cut, when the render left input or output out (the 256 KiB input cut, a repeat count clamped to a
+-- screenful, a full scrollback, the 4 MiB output cap, or the fallback), or when `lines` cut it. The server keeps the 64 most recently read renders in
+-- memory, fallbacks included, keyed by session, capture time and text length, so a repeat read does not
+-- render again.
 
 -- the forever row (Decided D-19: repo, branch, task, outcome, duration, gate result)
 CREATE TABLE session_summaries (

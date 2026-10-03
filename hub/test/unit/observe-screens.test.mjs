@@ -594,7 +594,7 @@ test('observe screens never inject HTML and their styles use tokens without priv
   assert.doesNotMatch(rules, /animation\s*:/)
   assert.doesNotMatch(rules, /outline\s*:\s*(none|0)/)
   assert.doesNotMatch(rules, /#[0-9a-f]{3,8}\b/i, 'no raw colors outside tokens')
-  for (const selector of ['.home-grid', '.quiet-row', '.quiet-strip', '.palette', '.drawer', '.focus']) assert.ok(rules.includes(`${selector} {`) || rules.includes(`${selector},`), `${selector} is styled`)
+  for (const selector of ['.home-grid', '.quiet-row', '.quiet-strip', '.palette', '.drawer', '.focus-screen']) assert.ok(rules.includes(`${selector} {`) || rules.includes(`${selector},`), `${selector} is styled`)
   assert.match(rules, /\.palette-scrim[^{]*\{[^}]*z-index:\s*var\(--z-palette\)/)
   assert.match(rules, /\.drawer-scrim[^{]*\{[^}]*z-index:\s*var\(--z-drawer\)/)
 })
