@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, test } from 'node:test'
@@ -76,7 +77,8 @@ symlinkSync('mk/real.mk', path.join(linked, 'Makefile'))
 symlinkSync('../vendor/lib', path.join(linked, 'src', 'lib'))
 symlinkSync('.husky', path.join(linked, 'hooks'))
 // D-91: a secret in a directory whose name has a space, a pytest argument file, a directory with a
-// space inside linked/.git, ~/hp whose .git/config sets core.hooksPath (no symlink), and links
+// space inside linked/.git, ~/hp, a git repo whose .git/config sets core.hooksPath (no symlink;
+// a real git since D-92 (a) reads the value through git), and links
 // outside the repos into them (~/alias -> repo, ~/out/notes.txt -> repo/notes.txt, ~/linkedalias
 // -> linked).
 mkdirSync(path.join(repo, 'a b'))
@@ -84,16 +86,33 @@ writeFileSync(path.join(repo, 'a b', '.env'), 'API_KEY=synthetic\n')
 writeFileSync(path.join(repo, 'src', 'args.txt'), '--basetemp=/tmp/x\n')
 mkdirSync(path.join(linked, '.git', 'a b'))
 writeFileSync(path.join(linked, '.git', 'a b', 'test_a.py'), 'def test_a():\n    assert True\n')
+const gitIn = (dir, ...args) => execFileSync('git', args, { cwd: dir, env: { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', XDG_CONFIG_HOME: path.join(home, '.config') }, stdio: 'pipe', timeout: 10000 })
 const hp = path.join(home, 'hp')
-for (const dir of ['.git', 'scripts/git-hooks']) mkdirSync(path.join(hp, dir), { recursive: true })
-writeFileSync(path.join(hp, '.git', 'HEAD'), 'ref: refs/heads/main\n')
-writeFileSync(path.join(hp, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n\thooksPath = scripts/git-hooks\n')
+mkdirSync(path.join(hp, 'scripts', 'git-hooks'), { recursive: true })
+gitIn(hp, 'init', '-q')
+gitIn(hp, 'config', 'core.hooksPath', 'scripts/git-hooks')
 writeFileSync(path.join(hp, 'notes.txt'), 'synthetic\n')
 mkdirSync(path.join(home, 'out'))
 symlinkSync(repo, path.join(home, 'alias'))
 symlinkSync(path.join(repo, 'notes.txt'), path.join(home, 'out', 'notes.txt'))
 symlinkSync(linked, path.join(home, 'linkedalias'))
 writeFileSync(path.join(home, 'ng', 'sub', '.env'), 'TOKEN=synthetic\n')
+// D-92 (e): ~/hq, a git repo whose hooksPath (tools/checks, a name the hooks fallback does not
+// cover) comes from an includeIf in ~/.gitconfig that matches it, beside one that matches nothing;
+// ~/lk, a repo whose .claude/settings.local.json, .cargo/config.toml and .yarnrc.yml are links into
+// cfg/.
+const hq = path.join(home, 'hq')
+for (const dir of ['tools/checks', 'tools/unused']) mkdirSync(path.join(hq, dir), { recursive: true })
+gitIn(hq, 'init', '-q')
+writeFileSync(path.join(home, 'hq.cfg'), '[core]\n\thooksPath = tools/checks\n')
+writeFileSync(path.join(home, 'none.cfg'), '[core]\n\thooksPath = tools/unused\n')
+writeFileSync(path.join(home, '.gitconfig'), `[includeIf "gitdir:${hq}/"]\n\tpath = ~/hq.cfg\n[includeIf "gitdir:${path.join(home, 'nowhere')}/"]\n\tpath = ~/none.cfg\n`)
+const lk = path.join(home, 'lk')
+for (const dir of ['cfg', '.claude', '.cargo']) mkdirSync(path.join(lk, dir), { recursive: true })
+for (const name of ['claude.json', 'cargo.toml', 'yarn.yml', 'other.json']) writeFileSync(path.join(lk, 'cfg', name), '{}\n')
+symlinkSync('../cfg/claude.json', path.join(lk, '.claude', 'settings.local.json'))
+symlinkSync('../cfg/cargo.toml', path.join(lk, '.cargo', 'config.toml'))
+symlinkSync('cfg/yarn.yml', path.join(lk, '.yarnrc.yml'))
 writeFileSync(path.join(home, 'wt2', 'cfg', '.env'), 'API_KEY=synthetic\n')
 Object.assign(process.env, {
   HOME: home,
@@ -124,6 +143,11 @@ const run = row => classify({
   homeDir: home,
   deckPaths
 })
+// D-92 (a): core.hooksPath is read through git in the background; every repo root the corpus
+// names is read before any row runs, so no row sees the fallback for an unread repo.
+const { hooksPathCache } = await import('../../server/approvals/tiers.mjs')
+const corpusRoots = new Set([path.join(home, 'repo'), ...cases.flatMap(row => [row.repoRoot, ...(row.worktrees ?? [])]).filter(item => typeof item === 'string').map(place)])
+for (const dir of corpusRoots) for (const form of new Set([dir, (() => { try { return realpathSync(dir) } catch { return dir } })()])) await hooksPathCache.load(form, home)
 const shown = row => `line ${row.line}: ${row.toolName} ${row.toolInput.command ?? row.toolInput.file_path ?? row.toolInput.url ?? ''}`
 
 test('every corpus case classifies at its expected tier, reason and rule candidate', () => {

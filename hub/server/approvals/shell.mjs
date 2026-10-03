@@ -50,6 +50,7 @@ const unsupportedWords = ['function', 'coproc', 'select']
 // string or argv this parser does not model. The reasons come from bash(1) and the tools' man
 // pages; bash could not be run in this worktree to check them.
 const REFUSED_COMMANDS = Object.freeze({
+  __proto__: null,
   let: 'evaluates every argument as arithmetic',
   read: 'assigns to NAME operands, which may carry an array subscript',
   mapfile: 'assigns to an array NAME and runs a -C callback',
@@ -152,9 +153,10 @@ const PLAIN_EXCLUDED_WRAPPERS = Object.freeze(['builtin', 'bunx', 'command', 'do
 // Runners excluded when a subcommand that runs a package or payload is one of their words: the
 // walker's runner table (`uv run`, `poetry run`, `pnpm exec`) and the package runners `npm exec`
 // (and its abbreviation `npm exe`), `npm x`, `pnpm dlx`, `yarn dlx`, `yarn exec`, `bun x` and `deno run`.
-const PLAIN_EXCLUDED_RUNNERS = Object.freeze({ uv: Object.freeze(['run']), poetry: Object.freeze(['run']), pnpm: Object.freeze(['exec', 'dlx']), npm: Object.freeze(['exec', 'exe', 'x']), yarn: Object.freeze(['dlx', 'exec']), bun: Object.freeze(['x']), deno: Object.freeze(['run']) })
+const PLAIN_EXCLUDED_RUNNERS = Object.freeze({ __proto__: null, uv: Object.freeze(['run']), poetry: Object.freeze(['run']), pnpm: Object.freeze(['exec', 'dlx']), npm: Object.freeze(['exec', 'exe', 'x']), yarn: Object.freeze(['dlx', 'exec']), bun: Object.freeze(['x']), deno: Object.freeze(['run']) })
 // Commands excluded only with an option or subcommand that runs a payload or writes a file.
 const PLAIN_CONDITIONAL = Object.freeze({
+  __proto__: null,
   find: word => ['-exec', '-execdir', '-ok', '-okdir', '-delete', '-fls'].includes(word) || word.startsWith('-fprint'),
   fd: word => /^-[^-]*[xX]/.test(word) || word.startsWith('--exec'),
   fdfind: word => /^-[^-]*[xX]/.test(word) || word.startsWith('--exec'),
@@ -912,7 +914,7 @@ class Parser {
 
   readAnsiC(word) {
     const s = this.s
-    const escapes = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"', a: '\u0007', b: '\b', e: '\u001b', E: '\u001b', f: '\f', v: '\v', '?': '?' }
+    const escapes = { __proto__: null, n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"', a: '\u0007', b: '\b', e: '\u001b', E: '\u001b', f: '\f', v: '\v', '?': '?' }
     let j = this.i + 2
     for (;;) {
       const char = s[j]
@@ -1066,6 +1068,7 @@ function scanOptions(words, start, spec, onValue = () => {}, onFlag = () => {}) 
 // The `time` entry is GNU time (/usr/bin/time); the Bash keyword `time` takes no options here and
 // is handled by the parser.
 const wrapperSpecs = {
+  __proto__: null,
   env: { strict: true, long: true, assigns: true, dashIsFlag: true, flags: ['-i', '--ignore-environment', '-0', '--null'], values: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'], other: ['-a', '--argv0'], extra: ['-v', '--debug', '--list-signal-handling'], optional: ['--block-signal', '--default-signal', '--ignore-signal'], refuse: ['--help', '--version'] },
   command: { strict: true, flags: ['-p'] },
   builtin: { strict: true },
@@ -1083,6 +1086,7 @@ const wrapperSpecs = {
 }
 
 const runnerValues = {
+  __proto__: null,
   'uv run': ['--with', '--with-editable', '--with-requirements', '-p', '--python', '--package', '--extra', '--group', '--only-group', '--no-group', '--env-file', '--directory', '--project', '--index', '--index-url', '--default-index', '--extra-index-url', '-f', '--find-links', '--config-file', '--cache-dir', '--color', '-P', '--upgrade-package', '--reinstall-package', '--refresh-package', '-C', '--config-setting', '--python-platform', '--resolution', '--prerelease', '--exclude-newer', '--link-mode', '--keyring-provider', '--index-strategy', '--allow-insecure-host', '--no-binary-package', '--no-build-package'],
   'poetry run': ['-C', '--directory', '-P', '--project'],
   'pnpm exec': ['-C', '--dir', '-F', '--filter', '--reporter', '--workspace-concurrency'],
@@ -1411,7 +1415,7 @@ class Walker {
       if (runner) {
         segment.wrappers.push(runner)
         let j = runner === 'npx --no-install' ? i + 1 : i + 2
-        const values = new Set(runnerValues[runner])
+        const values = new Set(Object.hasOwn(runnerValues, runner) ? runnerValues[runner] : [])
         while (j < words.length && words[j].literal && words[j].text.startsWith('-') && words[j].text !== '-') {
           const text = words[j].text
           if (text === '--') { j++; break }
@@ -1424,7 +1428,7 @@ class Walker {
         i = Math.min(j, words.length)
         continue
       }
-      const spec = wrapperSpecs[name]
+      const spec = Object.hasOwn(wrapperSpecs, name) ? wrapperSpecs[name] : null
       if (!spec) break
       if (name === 'command' && words.slice(i + 1).some(word => word.literal && /^-[a-zA-Z]*[vV]/.test(word.text))) break
       segment.wrappers.push(name)
@@ -2287,6 +2291,7 @@ class Walker {
 // Commands whose payload the walker parses from their own words; the shells of `shellSet` are
 // handled apart, since they also read a here-string or heredoc.
 const payloadHandlers = {
+  __proto__: null,
   eval: (walker, name, words, segment, ctx) => walker.stringPayload(words.slice(1), segment, ctx, 'eval'),
   trap: (walker, name, words, segment, ctx) => walker.trapPayload(words, segment, ctx),
   su: (walker, name, words, segment, ctx) => walker.suPayload(words, segment, ctx),
@@ -2413,6 +2418,7 @@ function refuseSet(args) {
 // need a value, those that take one only as `--opt=value`, and those that take none. They are
 // matched as getopt_long does (any unique prefix); an unknown or ambiguous one is refused.
 const copyLongOptions = {
+  __proto__: null,
   cp: {
     required: ['--no-preserve', '--sparse', '--suffix', '--target-directory'],
     optional: ['--backup', '--context', '--preserve', '--reflink', '--update'],

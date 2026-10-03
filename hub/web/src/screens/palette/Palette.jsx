@@ -3,11 +3,11 @@ import { CARD_COPY, isArchived } from '../../components/SessionCard.jsx'
 import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
 import { StatusPill, compactDuration, pillParams, shown, titleText, translate } from '../../components/StatusPill.jsx'
-import { archiveSession } from '../../state/actions.js'
+import { answerRequest, archiveSession } from '../../state/actions.js'
 import { matchRoute } from '../../state/deck-store.js'
-import { closeOverlay, deckApi, leaveOverlay, repoFor, tierOf, trapTab } from '../drawer/NeedsYouDrawer.jsx'
+import { answerable, closeOverlay, deckApi, deckdDown, leaveOverlay, openOverlay, repoFor, tierOf, trapTab } from '../drawer/NeedsYouDrawer.jsx'
 
-/** English copy for the palette (docs/deck/screens/palette.md section 9): M1 plus the M2 launch actions. */
+/** English copy for the palette (docs/deck/screens/palette.md section 9): M1, the M2 launch actions and the M3 answer keys. */
 export const PALETTE_COPY = Object.freeze({
   'palette.input.label': 'Search, ask or run',
   'palette.group.needs': 'Needs you',
@@ -16,6 +16,9 @@ export const PALETTE_COPY = Object.freeze({
   'palette.needs.title': '{repo} · {summary}',
   'palette.needs.waiting': 'waiting {duration}',
   'palette.needs.answerInTerminal': 'Answer in your terminal',
+  'palette.needs.allow.title': '{repo} · Allow {summary}',
+  'palette.answeredElsewhere': 'Request answered elsewhere',
+  'palette.allowed.toast': 'Allowed {summary} in {repo}',
   'palette.session.title': '{repo} · {detail}',
   'palette.action.markReviewed': 'Mark {repo} · {task} reviewed',
   'palette.action.launchIn': 'Launch a ship in {repo}',
@@ -161,8 +164,28 @@ function finish(entries, expanded, t, message = null) {
 }
 
 /**
+ * What Enter does on a Needs row (palette.md 5 and 6, D-85): `allow` for a Safe permission request of a deck PTY
+ * session the deck can answer now (deckd up, prompt on screen with parsed options, no answer in flight);
+ * `focus` for an observed session (or one the snapshot does not hold), whatever the tier; `drawer` (the drawer on
+ * that request) for every other row: Caution, Destructive, questions, and Safe while deckd is down or the prompt
+ * cannot be answered. Destructive is never `allow`.
+ * @param {object} request
+ * @param {object | null | undefined} session
+ * @param {boolean} down whether deckd is down
+ * @returns {'allow' | 'drawer' | 'focus'}
+ */
+export function needsAction(request, session, down) {
+  if (!session || session.origin === 'observed') return 'focus'
+  if (tierOf(request) === 'safe' && answerable(request, session, down)) return 'allow'
+  return 'drawer'
+}
+
+/**
  * The palette result model for a query: the Needs you, Sessions and Actions groups in that order, each capped
  * at {@link GROUP_MAX} unless expanded, and the flat list of selectable rows. Archived sessions are left out.
+ * A Needs row carries its Enter `action` ({@link needsAction}); only an `allow` row is titled
+ * "{repo} · Allow {summary}". An observed row keeps the M1 subtitle ending "Answer in your terminal"; a deck PTY
+ * row's subtitle ends with "deckd is reconnecting" while deckd is down.
  * Actions open with "Archive session" while `state.view.path` is the Focus route of a session that is not
  * archived. Then (palette.md 4.1): on an
  * empty query "Launch a ship" and "Launch a ship in {repo}" for the {@link RECENT_HARBORS} most recent repos;
@@ -183,6 +206,7 @@ export function paletteModel(state, { query = '', now = Date.now(), expanded = [
   const position = new Map(live.map((row, index) => [row.id, index + 1]))
   const byId = new Map(sessions.map(row => [row.id, row]))
   const untitled = translate(t, CARD_COPY, 'home.card.untitled')
+  const down = deckdDown(state)
 
   const needs = requests.filter(row => (row.state ?? 'open') === 'open')
     .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0) || String(a.id).localeCompare(String(b.id)))
@@ -192,11 +216,14 @@ export function paletteModel(state, { query = '', now = Date.now(), expanded = [
       if (!matchesQuery(query, [repo.name, request.summary, request.toolName, session?.task, session?.branch])) return []
       const tier = tierOf(request)
       const summary = tier === 'question' ? titleText(request.summary) : shown(request.summary)
+      const action = needsAction(request, session, down)
+      const tail = action === 'focus' ? translate(t, PALETTE_COPY, 'palette.needs.answerInTerminal') : down ? translate(t, CARD_COPY, 'home.quiet.deckdDown') : null
       const subtitle = [translate(t, CARD_COPY, `tier.${tier}`), request.toolName ? shown(request.toolName) : null,
         translate(t, PALETTE_COPY, 'palette.needs.waiting', { duration: compactDuration(now - (request.createdAt ?? now)) }),
-        translate(t, PALETTE_COPY, 'palette.needs.answerInTerminal')].filter(Boolean).join(' · ')
-      return [{ kind: 'needs', group: 'needs', key: `needs-${request.id}`, requestId: request.id, sessionId: request.sessionId, tier, repo, session,
-        title: translate(t, PALETTE_COPY, 'palette.needs.title', { repo: shown(repo.name), summary }), subtitle }]
+        tail].filter(Boolean).join(' · ')
+      return [{ kind: 'needs', group: 'needs', key: `needs-${request.id}`, requestId: request.id, sessionId: request.sessionId, tier, repo, session, action,
+        summary: shown(request.summary),
+        title: translate(t, PALETTE_COPY, action === 'allow' ? 'palette.needs.allow.title' : 'palette.needs.title', { repo: shown(repo.name), summary }), subtitle }]
     })
 
   const sessionRows = live.flatMap(session => {
@@ -272,15 +299,25 @@ export function openLaunch(navigate, to = '/new', env = globalThis.window) {
 }
 
 /**
- * Run a palette row. Session and Needs rows jump to Focus (answers arrive in M3); a launch row opens the
+ * Run a palette row. A Needs row follows its `action` ({@link needsAction}): `allow` calls `allow` with the row
+ * (by default `answerRequest` with `choice: 'allow'`; the palette stays open until the request closes),
+ * `drawer` leaves the palette and calls `openDrawer` with the request id (by default the drawer focused on that
+ * request); any other Needs row, and a Session row, jumps to Focus. A launch row opens the
  * new-session form through {@link openLaunch}, with `?repo=<repoKey>` when it names a repo; a review action
  * marks the session reviewed; "Archive session" calls `archive` with the session id, then closes; "Show all"
  * expands its group.
  * @param {object} row
- * @param {{ navigate: (to: string) => void, leave: () => void, onClose: () => void, expand: (group: string) => void, api: { post: Function }, win?: object, archive?: (id: string) => Promise<unknown> }} env
+ * @param {{ navigate: (to: string) => void, leave: () => void, onClose: () => void, expand: (group: string) => void, api: { post: Function }, win?: object, archive?: (id: string) => Promise<unknown>,
+ *   allow?: (row: object) => Promise<unknown>, openDrawer?: (requestId: string) => void }} env
  */
-export async function runRow(row, { navigate, leave, onClose, expand, api, win, archive = id => archiveSession(api, id) }) {
-  if (row.kind === 'session' || row.kind === 'needs') {
+export async function runRow(row, { navigate, leave, onClose, expand, api, win, archive = id => archiveSession(api, id),
+  allow = item => answerRequest(api, item.requestId, { choice: 'allow' }), openDrawer = id => openOverlay('drawer', win ?? globalThis.window, { request: id }) }) {
+  if (row.kind === 'needs' && row.action === 'allow') {
+    await allow(row)
+  } else if (row.kind === 'needs' && row.action === 'drawer') {
+    leave()
+    openDrawer(row.requestId)
+  } else if (row.kind === 'session' || row.kind === 'needs') {
     leave()
     navigate(`/s/${encodeURIComponent(row.sessionId)}`)
   } else if (row.kind === 'launch') {
@@ -295,9 +332,63 @@ export async function runRow(row, { navigate, leave, onClose, expand, api, win, 
   } else if (row.kind === 'showAll') expand(row.group)
 }
 
-function Option({ row, active, now, t, onRow, onHover }) {
+/**
+ * Whether the palette's own Allow has settled: `closed` once the request is no longer open (the palette closes
+ * and toasts), `failed` when its answer did not land (the palette stays open on the row), else null.
+ * @param {{ requestId: string } | null} pending
+ * @param {object[]} requests
+ * @returns {'closed' | 'failed' | null}
+ */
+export function allowSettled(pending, requests) {
+  if (!pending) return null
+  const row = (requests ?? []).find(item => item.id === pending.requestId)
+  if (!row || (row.state ?? 'open') !== 'open') return 'closed'
+  return row.delivery === 'did_not_land' ? 'failed' : null
+}
+
+/**
+ * The toast the palette shows after its Allow closed the request: "Allowed {summary} in {repo}".
+ * @param {{ summary: string, repo: string }} pending
+ * @param {Function} [t]
+ * @returns {string}
+ */
+export function allowedToast(pending, t) {
+  return translate(t, PALETTE_COPY, 'palette.allowed.toast', { summary: pending.summary, repo: pending.repo })
+}
+
+/**
+ * Keep the highlight on a row that stays, after the rows changed (palette.md 7): while the highlighted row is
+ * still listed it stays highlighted; when it left, the highlight moves to the next row that was after it (else
+ * the last row), and a Needs row that left by an answer other than the palette's own (`pendingId`) announces
+ * "Request answered elsewhere".
+ * @param {object[]} before rows shown before
+ * @param {number} active highlighted index before
+ * @param {object[]} rows rows now
+ * @param {string | null} pendingId the request the palette itself allowed
+ * @param {Function} [t]
+ * @returns {{ active: number, announce: string | null }}
+ */
+export function followHighlight(before, active, rows, pendingId, t) {
+  const current = before?.[active]
+  if (!current) return { active: Math.min(active, rows.length - 1), announce: null }
+  const at = rows.findIndex(row => row.key === current.key)
+  if (at >= 0) return { active: at, announce: null }
+  let next = rows.length - 1
+  for (const row of before.slice(active + 1)) {
+    const found = rows.findIndex(item => item.key === row.key)
+    if (found >= 0) {
+      next = found
+      break
+    }
+  }
+  const elsewhere = current.kind === 'needs' && current.requestId !== pendingId
+  return { active: next, announce: elsewhere ? translate(t, PALETTE_COPY, 'palette.answeredElsewhere') : null }
+}
+
+function Option({ row, active, now, t, onRow, onHover, pending }) {
   const selected = row.index === active
-  const common = { id: `palette-opt-${row.index}`, role: 'option', 'aria-selected': selected ? 'true' : 'false', onClick: () => onRow?.(row), onMouseMove: () => onHover?.(row.index) }
+  const busy = row.kind === 'needs' && !!pending && row.requestId === pending
+  const common = { id: `palette-opt-${row.index}`, role: 'option', 'aria-selected': selected ? 'true' : 'false', 'aria-busy': busy ? 'true' : undefined, onClick: () => onRow?.(row), onMouseMove: () => onHover?.(row.index) }
   if (row.kind === 'showAll') {
     return <li className="palette-row palette-row--more" {...common}><span className="palette-row-title">{row.title}</span></li>
   }
@@ -308,7 +399,7 @@ function Option({ row, active, now, t, onRow, onHover }) {
         ? <CrewAvatar seed={row.repo.crewSeed} slot={row.repo.crewSlot} pose={row.kind === 'launch' ? 'idle' : pose} hat={row.repo.hat} size="sm" />
         : <span className="palette-glyph" aria-hidden="true">+</span>}
       <span className="palette-row-text">
-        <span className="palette-row-title">{row.title}</span>
+        <span className="palette-row-title">{busy ? <span className="answer-spinner" aria-hidden="true" /> : null}{row.title}</span>
         {row.subtitle && (row.kind === 'needs' || row.kind === 'launch') ? <span className="palette-row-sub">{row.subtitle}</span> : null}
         {row.kind === 'session' ? <span className="palette-row-sub"><StatusPill state={row.session.state} params={pillParams(row.session, now)} role={row.session.role} variant="text" t={t} /></span> : null}
       </span>
@@ -318,10 +409,12 @@ function Option({ row, active, now, t, onRow, onHover }) {
 }
 
 /**
- * The palette dialog (combobox pattern, palette.md section 8). Pure: state lives in {@link Palette}.
- * @param {{ model: ReturnType<typeof paletteModel>, query: string, active: number, now?: number, t?: Function, onQuery?: (q: string) => void, onKeyDown?: Function, onRow?: (row: object) => void, onHover?: (index: number) => void, onClose?: () => void, inputRef?: object, panelRef?: object }} props
+ * The palette dialog (combobox pattern, palette.md section 8). Pure: state lives in {@link Palette}. `pending` is
+ * the request id the palette's Allow is waiting on (its row shows a spinner); `announce` is read politely.
+ * @param {{ model: ReturnType<typeof paletteModel>, query: string, active: number, now?: number, t?: Function, onQuery?: (q: string) => void, onKeyDown?: Function, onRow?: (row: object) => void, onHover?: (index: number) => void, onClose?: () => void, inputRef?: object, panelRef?: object,
+ *   pending?: string | null, announce?: string | null }} props
  */
-export function PaletteView({ model, query, active, now = Date.now(), t, onQuery, onKeyDown, onRow, onHover, onClose, inputRef, panelRef }) {
+export function PaletteView({ model, query, active, now = Date.now(), t, onQuery, onKeyDown, onRow, onHover, onClose, inputRef, panelRef, pending = null, announce = null }) {
   const label = translate(t, PALETTE_COPY, 'palette.input.label')
   return (
     <div className="palette-scrim" onClick={event => { if (event.target === event.currentTarget) onClose?.() }}>
@@ -334,13 +427,14 @@ export function PaletteView({ model, query, active, now = Date.now(), t, onQuery
             <li key={group.id} role="presentation" className={`palette-group palette-group--${group.id}`}>
               <p className="eyebrow palette-group-title" id={`palette-group-${group.id}`}>{group.label}</p>
               <ul role="group" aria-labelledby={`palette-group-${group.id}`}>
-                {group.rows.map(row => <Option key={row.key} row={row} active={active} now={now} t={t} onRow={onRow} onHover={onHover} />)}
+                {group.rows.map(row => <Option key={row.key} row={row} active={active} now={now} t={t} onRow={onRow} onHover={onHover} pending={pending} />)}
                 {group.more ? <Option row={group.more} active={active} now={now} t={t} onRow={onRow} onHover={onHover} /> : null}
               </ul>
             </li>
           ))}
         </ul>
         {model.rows.length ? null : model.message ? <p className="palette-message" role="status">{model.message}</p> : <EmptyState kind="palette" t={t} />}
+        {announce ? <p className="sr-only" role="status" aria-live="polite">{announce}</p> : null}
         <p className="palette-footer">{['palette.footer.move', 'palette.footer.run', 'palette.footer.close'].map(key => translate(t, PALETTE_COPY, key)).join(' · ')}</p>
       </div>
     </div>
@@ -351,13 +445,20 @@ export function PaletteView({ model, query, active, now = Date.now(), t, onQuery
  * The palette overlay: holds the query, highlight and expanded groups and wires {@link paletteKey},
  * {@link moveActive} and {@link runRow} to the input, with focus moved to the input on open and back to
  * the opener on close. `onArchive` runs "Archive session" (the screen under the palette shows its toast); without
- * it the row posts the archive directly. This browser wiring is not exercised by the unit tests; the functions it calls are.
- * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: { post: Function }, onClose?: () => void, onLeave?: () => void, onArchive?: (id: string) => Promise<unknown> }} props
+ * it the row posts the archive directly. Enter on an `allow` Needs row posts the answer and keeps the palette open
+ * with a spinner on the row until {@link allowSettled}: on `closed` the palette closes and `onToast` gets
+ * "Allowed {summary} in {repo}"; a refused answer or `failed` clears the spinner. A highlighted row that leaves moves
+ * the highlight by {@link followHighlight} and announces "Request answered elsewhere".
+ * This browser wiring is not exercised by the unit tests; the functions it calls are.
+ * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: { post: Function }, onClose?: () => void, onLeave?: () => void, onArchive?: (id: string) => Promise<unknown>,
+ *   onToast?: (toast: { tone: string, title: string }) => void }} props
  */
-export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(), onLeave = () => leaveOverlay(), onArchive }) {
+export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(), onLeave = () => leaveOverlay(), onArchive, onToast = () => {} }) {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
   const [expanded, setExpanded] = useState([])
+  const [pending, setPending] = useState(null)
+  const [announce, setAnnounce] = useState(null)
   const input = useRef(null)
   const panel = useRef(null)
   const now = Date.now()
@@ -370,7 +471,36 @@ export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(
   const current = Math.min(active, model.rows.length - 1)
   const env = { navigate, leave: onLeave, onClose, expand: group => setExpanded(list => [...list, group]), api: api ?? deckApi() }
   if (onArchive) env.archive = onArchive
+  env.allow = row => {
+    if (pending) return Promise.resolve()
+    const mine = { requestId: row.requestId, summary: row.summary, repo: shown(row.repo?.name ?? '') }
+    setPending(mine)
+    return answerRequest(env.api, row.requestId, { choice: 'allow' }).catch(error => {
+      setPending(null)
+      throw error
+    })
+  }
   const run = row => { runRow(row, env).catch(() => {}) }
+  useEffect(() => {
+    const settled = allowSettled(pending, state.data.requests)
+    if (settled === 'failed') setPending(null)
+    if (settled === 'closed') {
+      onToast({ tone: 'success', title: allowedToast(pending, t) })
+      setPending(null)
+      onClose()
+    }
+  }, [state.data.requests, pending])
+  const shownRows = useRef({ rows: model.rows, active: current })
+  useEffect(() => {
+    const before = shownRows.current
+    if (before.rows !== model.rows && before.rows.length) {
+      const moved = followHighlight(before.rows, before.active, model.rows, pending?.requestId ?? null, t)
+      if (moved.announce) setAnnounce(moved.announce)
+      if (moved.active !== current && moved.active >= 0) setActive(moved.active)
+    }
+  }, [state.data.requests])
+  // Declared after the effect above, so that effect reads the rows and highlight of the previous render.
+  useEffect(() => { shownRows.current = { rows: model.rows, active: current } })
   useEffect(() => {
     globalThis.document?.getElementById(`palette-opt-${current}`)?.scrollIntoView?.({ block: 'nearest' })
   }, [current])
@@ -385,6 +515,7 @@ export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(
   }
   return (
     <PaletteView model={model} query={query} active={current} now={now} t={t} inputRef={input} panelRef={panel} onKeyDown={onKeyDown} onClose={onClose}
+      pending={pending?.requestId ?? null} announce={announce}
       onQuery={value => { setQuery(value)
         setActive(0) }} onRow={run} onHover={setActive} />
   )

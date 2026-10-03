@@ -116,7 +116,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.compact-open { flex: none; }
+.compact-open,
+.compact-action { flex: none; }
 
 /* Quiet-row controls and the header launch: the disabled reason stays visible (home.md 8). */
 .quiet-reason,

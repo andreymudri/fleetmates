@@ -758,13 +758,30 @@ export function legacyDestructive(hook, { repoRoot } = {}) {
 }
 
 /**
- * The M3 classification of a hook (approvals/tiers.mjs `classify`) with the active tiers and the
- * repo's cached worktrees.
- * @param {{ tool_name?: string, tool_input?: object, cwd?: string }} hook
- * @param {{ repoRoot?: string }} [options]
+ * The classification `classifyHook` returns when the classifier throws (D-92 (d)): Caution with
+ * the single reason `classify.error`, so one hook can never stop a session's later hooks or a
+ * restart's spool replay from applying.
+ * @returns {{ tier: 'caution', reasons: object[], ruleCandidate: null, ruleNote: null, confirm: { template: null, count: null }, description: string }}
  */
-export function classifyHook(hook, { repoRoot } = {}) {
-  return classify({ toolName: hook.tool_name, toolInput: hook.tool_input, cwd: hook.cwd ?? null, repoRoot: repoRoot ?? null, worktrees: worktrees.get(repoRoot), tiers: activeTiers() })
+export function classifyErrorResult() {
+  const description = 'the request could not be classified'
+  return { tier: 'caution', reasons: [{ entryId: 'classify.error', tier: 'caution', segment: '', description }], ruleCandidate: null, ruleNote: null, confirm: { template: null, count: null }, description }
+}
+
+/**
+ * The M3 classification of a hook (approvals/tiers.mjs `classify`) with the active tiers and the
+ * repo's cached worktrees. Any exception from the classifier rates the request Caution with reason
+ * `classify.error`; only that reason id is logged, never the request or the error text.
+ * @param {{ tool_name?: string, tool_input?: object, cwd?: string }} hook
+ * @param {{ repoRoot?: string, classifier?: typeof classify }} [options]
+ */
+export function classifyHook(hook, { repoRoot, classifier = classify } = {}) {
+  try {
+    return classifier({ toolName: hook.tool_name, toolInput: hook.tool_input, cwd: hook.cwd ?? null, repoRoot: repoRoot ?? null, worktrees: worktrees.get(repoRoot), tiers: activeTiers() })
+  } catch {
+    try { process.stderr.write('deck: classify.error\n') } catch {}
+    return classifyErrorResult()
+  }
 }
 
 /**
