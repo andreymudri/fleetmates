@@ -3,6 +3,8 @@ import { capHistory } from '../../deckd/screen-model.mjs'
 import { dedupeKey } from '../ingest/validate.mjs'
 import { historySize, sizeHeader } from '../screen/history.mjs'
 import { isRunName } from '../adapters/fleetmates.mjs'
+import { allowAlwaysFor } from '../approvals/screen-match.mjs'
+import { activeTiers } from '../approvals/tiers.mjs'
 import { archiveFinished, archiveSession, autoArchiveCandidates, unarchiveNeedingOwner, unarchiveSession } from './archive.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
 import { applyRequestHook, expireRequests, isRequestOpening, reconcileRequestOpenings, resumedActivityEvents } from './request.mjs'
@@ -65,7 +67,31 @@ function sessionView(row, store) {
     toolCalls: store.get('SELECT COUNT(*) AS n FROM session_steps WHERE session_id=?', row.id).n
   }
 }
-function requestView(row) {
+/**
+ * The JSON `reasons` of a request row, or an empty list when it is missing or unreadable.
+ * @param {string|undefined} value
+ * @returns {{ entryId: string, tier: string, segment: string, description: string }[]}
+ */
+function storedReasons(value) {
+  try {
+    const reasons = JSON.parse(value ?? '[]')
+    return Array.isArray(reasons) ? reasons : []
+  } catch { return [] }
+}
+/**
+ * The API view of a `requests` row (docs/deck/05-api.md). On top of the stored columns it carries the
+ * classifier's `reasons`, the Safe rule candidate `rulePattern` and its `ruleNote` (read from the active
+ * tiers entry that gave the candidate), `description` from the first reason, the Destructive
+ * `confirmLabel`, and `allowAlways` computed from the stored options with `allowAlwaysFor` (D-77, D-95).
+ * @param {object} row a `requests` row
+ * @param {{ tiers?: { entries: object[] } }} [options]
+ */
+export function requestView(row, { tiers = activeTiers() } = {}) {
+  const reasons = storedReasons(row.reasons)
+  const rulePattern = row.rule_pattern ?? null
+  const entries = new Map((tiers?.entries ?? []).map(entry => [entry.id, entry]))
+  const ruleEntry = rulePattern === null ? null : reasons.map(reason => entries.get(reason?.entryId)).find(entry => entry?.tier === 'safe' && typeof entry.rule === 'string')
+  const options = JSON.parse(row.options)
   return {
     id: row.id,
     sessionId: row.session_id,
@@ -75,7 +101,7 @@ function requestView(row) {
     summary: row.summary,
     detail: JSON.parse(row.detail),
     why: row.why,
-    options: JSON.parse(row.options),
+    options,
     state: row.state,
     expiredReason: row.expired_reason,
     answer: row.answer ? JSON.parse(row.answer) : null,
@@ -87,7 +113,13 @@ function requestView(row) {
     createdAt: row.created_at,
     answeredAt: row.answered_at,
     notifiedAt: row.notified_at,
-    renotifiedAt: row.renotified_at
+    renotifiedAt: row.renotified_at,
+    reasons,
+    rulePattern,
+    ruleNote: ruleEntry?.ruleNote ?? null,
+    description: reasons[0]?.description ?? null,
+    confirmLabel: row.confirm_label ?? null,
+    allowAlways: allowAlwaysFor(row, { options })
   }
 }
 

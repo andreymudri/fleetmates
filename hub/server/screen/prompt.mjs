@@ -18,7 +18,7 @@ import { inputRow } from './status-region.mjs'
 
 /**
  * @typedef {{ key: string | null, label: string }} PromptOption
- * @typedef {{ kind: 'permission' | 'question' | 'trust', question: string, options: PromptOption[] }} Prompt
+ * @typedef {{ kind: 'permission' | 'question' | 'trust', question: string, options: PromptOption[], title: string | null, body: string | null, truncated: boolean }} Prompt
  */
 
 /** Top edge of a prompt box (and of the input box): a full row of `─`. */
@@ -42,6 +42,19 @@ const ESC_OPTION = /\(esc\)$/
 const SEPARATOR = /^[─╌]+$/
 /** The tab header of an AskUserQuestion box. */
 const QUESTION_TAB = /[☐☒]/
+/**
+ * The gutter the 2.1.285 `permission-bash-long` frame draws left of each row
+ * of a Bash command that wraps (`│ node --test`); the short command of
+ * `permission-2` has none.
+ */
+const GUTTER = /^│ ?/
+/**
+ * A row cut with an ellipsis. No captured frame shows a cut command (the
+ * long command of `permission-bash-long` wraps whole), so this marker is an
+ * assumption, chosen because it only widens matching to a prefix, which the
+ * F12 rule in approvals/screen-match.mjs then guards.
+ */
+const CUT = /…$/
 
 /**
  * Find the prompt box on screen. Returns `null` when there is none, or when
@@ -76,7 +89,35 @@ export function parsePrompt (lines, cursor) {
   let top = first - 1
   while (top >= 0 && !BOX_TOP.test(trimmed[top])) top--
   if (top === -1) return null
-  return { kind: kindOf(trimmed, top, first, options), question: question(trimmed, top, first), options }
+  const asked = question(trimmed, top, first)
+  return { kind: kindOf(trimmed, top, first, options), question: asked.text, options, ...content(trimmed, top, asked.row) }
+}
+
+/**
+ * The box's title and body (state-machines 2.3 `screenMatch`). The title is
+ * the first non-empty row inside the box ("Bash command", "Edit file",
+ * "Create file", "Fetch", "☐ Choice" in the 2.1.285 frames). The body is
+ * every row between the title and the question paragraph, one visible row
+ * per line joined with `\n`, trimmed, with the wrap gutter removed and a
+ * separator row kept as an empty line. Wrapped rows are not re-joined: in
+ * `permission-bash-long` one break falls on a space and the next one inside
+ * a word, so the row text alone cannot tell which a break was. When the
+ * question paragraph starts on the first row inside the box, the box has no
+ * title the parser can place: `title` and `body` are null.
+ * @param {string[]} trimmed
+ * @param {number} top
+ * @param {number} questionRow first row of the question paragraph
+ * @returns {{ title: string | null, body: string | null, truncated: boolean }}
+ */
+function content (trimmed, top, questionRow) {
+  let titleRow = top + 1
+  while (titleRow < questionRow && trimmed[titleRow] === '') titleRow++
+  if (titleRow >= questionRow) return { title: null, body: null, truncated: false }
+  const rows = trimmed.slice(titleRow + 1, questionRow)
+    .map((l) => SEPARATOR.test(l) ? '' : l.replace(GUTTER, '').trim())
+  while (rows.length > 0 && rows[0] === '') rows.shift()
+  while (rows.length > 0 && rows[rows.length - 1] === '') rows.pop()
+  return { title: trimmed[titleRow], body: rows.join('\n'), truncated: rows.some((l) => CUT.test(l)) }
 }
 
 /**
@@ -149,28 +190,30 @@ function unnumberedOptions (lines, trimmed) {
 
 /**
  * The nearest paragraph above the options that asks something (holds a `?`),
- * else the nearest paragraph. Wrapped rows are joined with one space.
+ * else the nearest paragraph. Wrapped rows are joined with one space. `row`
+ * is the paragraph's first row (`first` when there is no paragraph).
  * @param {string[]} trimmed
  * @param {number} top
  * @param {number} first row of the first option
- * @returns {string}
+ * @returns {{ text: string, row: number }}
  */
 function question (trimmed, top, first) {
-  /** @type {string[]} */
+  /** @type {{ text: string, row: number }[]} */
   const paragraphs = []
   /** @type {string[]} */
   let cur = []
-  const flush = () => {
-    if (cur.length > 0) paragraphs.push(cur.reverse().join(' '))
+  /** @param {number} row */
+  const flush = (row) => {
+    if (cur.length > 0) paragraphs.push({ text: cur.reverse().join(' '), row })
     cur = []
   }
   for (let r = first - 1; r > top; r--) {
     const l = trimmed[r]
-    if (l === '' || SEPARATOR.test(l)) flush()
+    if (l === '' || SEPARATOR.test(l)) flush(r + 1)
     else cur.push(l)
   }
-  flush()
-  return paragraphs.find((p) => p.includes('?')) ?? paragraphs[0] ?? ''
+  flush(top + 1)
+  return paragraphs.find((p) => p.text.includes('?')) ?? paragraphs[0] ?? { text: '', row: first }
 }
 
 /**

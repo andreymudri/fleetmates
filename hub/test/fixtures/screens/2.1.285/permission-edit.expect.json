@@ -15,7 +15,10 @@
         "key": "3",
         "label": "No"
       }
-    ]
+    ],
+    "title": "Edit file",
+    "body": "notes.txt\n\n1  first line\n2 +capture-edit",
+    "truncated": false
   },
   "idle": false,
   "statusRows": []

@@ -11,7 +11,10 @@
         "key": "2",
         "label": "No"
       }
-    ]
+    ],
+    "title": "Bash command",
+    "body": "node --test capture.test.mjs\nRun capture test suite\n\nPermission rule Bash requires confirmation for this command.\n/permissions to update rules",
+    "truncated": false
   },
   "idle": false,
   "statusRows": []
