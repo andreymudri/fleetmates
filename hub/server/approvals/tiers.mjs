@@ -1,9 +1,9 @@
 // The approvals tier classifier (docs/deck/07-approvals.md section 3, with the tier review changes
-// adopted as D-75 to D-87). `classify` matches a permission request against the effective tiers
+// adopted as D-75 to D-88). `classify` matches a permission request against the effective tiers
 // set (tiers.default.json plus the user's tiers.json, see tiers-store.mjs), takes the highest
 // matching tier, and then applies the floors, which are code and cannot be lowered or disabled.
 import { createHash } from 'node:crypto'
-import { existsSync, globSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, globSync, lstatSync, readFileSync, readlinkSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -95,18 +95,30 @@ export const EXECUTION_CONFIG = Object.freeze(['.cargo/config*', 'build.rs', 'pa
 
 const within = (target, root) => typeof target === 'string' && typeof root === 'string' && (target === root || target.startsWith(root.endsWith('/') ? root : `${root}/`))
 
+// The path the kernel reaches for `location`, resolving every symlink on the way, including a
+// dangling one (its target is where a writer creates the file), with the missing tail kept as
+// written. A symlink loop resolves to the lexical path, which the kernel refuses to open (ELOOP).
+const SYMLINK_HOPS = 40
 function realExisting(location) {
-  let current = path.resolve(location)
-  const missing = []
-  for (;;) {
-    try { return path.join(realpathSync(current), ...missing.reverse()) }
-    catch {
-      const parent = path.dirname(current)
-      if (parent === current) return path.resolve(location)
-      missing.push(path.basename(current))
-      current = parent
-    }
+  const lexical = path.resolve(location)
+  let pending = lexical.split('/').filter(Boolean)
+  let current = '/'
+  let hops = 0
+  while (pending.length) {
+    const part = pending.shift()
+    if (part === '.') continue
+    if (part === '..') { current = path.dirname(current); continue }
+    const next = path.join(current, part)
+    let stat
+    try { stat = lstatSync(next) } catch { return path.join(next, ...pending) }
+    if (!stat.isSymbolicLink()) { current = next; continue }
+    if (++hops > SYMLINK_HOPS) return lexical
+    let target
+    try { target = readlinkSync(next) } catch { return lexical }
+    if (target.startsWith('/')) current = '/'
+    pending = [...target.split('/').filter(Boolean), ...pending]
   }
+  return current
 }
 
 function resolveIn(location, cwd) {
@@ -154,18 +166,20 @@ const isGitInternal = location => location.split('/').includes('.git')
 
 // Repo scope (07-approvals 3.5, F10): the repo root and its worktrees, by realpath; a worktree
 // under `$HOME/.*` or a persistence location is not repo scope.
-function repoScope(repoRoot, worktrees, home) {
+// With `lexical`, each root is returned as given (normalized) and by realpath, for the D-88 checks
+// that walk a path's components from the root down.
+function repoScope(repoRoot, worktrees, home, lexical = false) {
   const roots = []
-  if (typeof repoRoot === 'string' && path.isAbsolute(repoRoot)) roots.push(realExisting(repoRoot))
+  if (typeof repoRoot === 'string' && path.isAbsolute(repoRoot)) roots.push(realExisting(repoRoot), ...(lexical ? [path.normalize(repoRoot)] : []))
   for (const tree of Array.isArray(worktrees) ? worktrees : []) {
     if (typeof tree !== 'string' || !path.isAbsolute(tree)) continue
     const real = realExisting(tree)
     const rel = home ? path.relative(home, real) : '..'
     const hidden = rel && !rel.startsWith('..') && !path.isAbsolute(rel) && rel.startsWith('.')
     if (hidden || isPersistence(real, home) || (home && isPersistence(path.resolve(tree), home))) continue
-    roots.push(real)
+    roots.push(real, ...(lexical ? [path.normalize(tree)] : []))
   }
-  return roots
+  return lexical ? [...new Set(roots)] : roots
 }
 
 function scopeRelative(location, scope) {
@@ -202,48 +216,10 @@ const inScope = (location, ctx) => {
 // A word that reads as a path: absolute, home-relative, dot-relative, or holding a slash.
 const syntaxPath = word => word.startsWith('/') || word.startsWith('~') || word === '.' || word === '..' || word.startsWith('./') || word.startsWith('../') || word.includes('/')
 const expandHome = (word, ctx) => (word === '~' || word.startsWith('~/')) && ctx.home ? path.join(ctx.home, word.slice(1)) : word
-const existsAt = location => { try { return Boolean(location) && existsSync(location) } catch { return false } }
 // The sensitive-list locations under the home directory (07-approvals 3.5), for the ancestor check
 // of commands that read a whole directory.
 const HOME_SENSITIVE = Object.freeze(['.ssh', '.gnupg', '.aws', '.config/gh', '.netrc', '.claude/.credentials.json', '.git-credentials', '.npmrc', '.pypirc', '.docker/config.json', '.kube/config', '.config/gcloud', '.password-store', '.local/share/keyrings'])
 const holdsSecret = (location, ctx) => candidates(location).some(candidate => isSensitive(candidate, ctx.home) || (ctx.home && HOME_SENSITIVE.some(rel => within(path.join(ctx.home, rel), candidate))))
-const WALK_LIMIT = 20000
-const WALK_MS = 200
-
-// Walk directory trees with lstat semantics (a symlink is resolved, never descended), bounded by
-// WALK_LIMIT entries and WALK_MS. Reports a symlink into the deck's files, a symlink out of the repo,
-// a sensitive-list file, and a walk that ran out of budget.
-function walkTrees(roots, ctx) {
-  const found = { deck: false, outside: false, secret: false, over: false }
-  const started = Date.now()
-  const stack = []
-  for (const root of roots) {
-    try { if (statSync(root).isDirectory()) stack.push(realpathSync(root)) } catch {}
-  }
-  const seen = new Set()
-  let count = 0
-  while (stack.length && !found.deck) {
-    const dir = stack.pop()
-    if (seen.has(dir)) continue
-    seen.add(dir)
-    let entries
-    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { continue }
-    for (const entry of entries) {
-      if (++count > WALK_LIMIT || Date.now() - started > WALK_MS) { found.over = true; return found }
-      const full = path.join(dir, entry.name)
-      if (isSensitive(full, ctx.home)) found.secret = true
-      if (entry.isSymbolicLink()) {
-        let target
-        try { target = realpathSync(full) } catch { continue }
-        if (ancestorOfControl(target, ctx)) found.deck = true
-        if (!inScope(target, ctx)) found.outside = true
-        if (holdsSecret(target, ctx)) found.secret = true
-      } else if (entry.isDirectory()) stack.push(full)
-    }
-  }
-  return found
-}
-
 const namesControl = (location, ctx) => candidates(location).some(candidate => ctx.deck.dirs.some(dir => within(candidate, dir)))
 const ancestorOfControl = (location, ctx) => candidates(location).some(candidate => ctx.deck.dirs.some(dir => within(dir, candidate) || within(candidate, dir)))
 const LOOPBACK = /(?:127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0):(\d+)/i
@@ -252,13 +228,222 @@ const namesDeckPort = (text, ctx) => {
   return Boolean(match && match[1] === ctx.deck.port)
 }
 
+// D-88 (2): options that take a value, per command (git per subcommand). A value is never a path
+// operand. `files` options name a file the command reads or writes, so their value is a path;
+// `pattern` options supply the pattern or script, so the command then takes no pattern operand;
+// `noPattern` options switch the pattern operand off (`rg --files`); `arity` is the number of value
+// words when it is not one, and `fileIndex` which of them is the file. `single` commands spell long
+// options with one dash and take no bundles (find, go).
+const spec = (values, extra = {}) => ({ values: new Set(values), files: new Set(extra.files ?? []), pattern: new Set(extra.pattern ?? []), noPattern: new Set(extra.noPattern ?? []), arity: extra.arity ?? {}, fileIndex: extra.fileIndex ?? {}, single: extra.single === true })
+const GIT_HISTORY_VALUES = ['-n', '-L', '-S', '-G', '-O', '--max-count', '--skip', '--author', '--committer', '--grep', '--since', '--until', '--after', '--before', '--output', '--diff-filter', '--format', '--date', '--abbrev']
+const CARGO_VALUES = ['-p', '-F', '-j', '-Z', '--package', '--features', '--bin', '--example', '--test', '--bench', '--exclude', '--jobs', '--target', '--target-dir', '--manifest-path', '--lockfile-path', '--artifact-dir', '--profile', '--message-format', '--color', '--config']
+const CARGO_FILES = ['--target-dir', '--manifest-path', '--lockfile-path', '--artifact-dir']
+const GO_VALUES = ['-o', '-p', '-cpu', '-mod', '-run', '-count', '-tags', '-timeout', '-bench', '-benchtime', '-covermode', '-coverpkg', '-list', '-skip', '-shuffle', '-parallel', '-C', '-modfile', '-overlay', '-pgo', '-exec', '-toolexec', '-ldflags', '-gcflags', '-asmflags', '-buildmode', '-compiler', '-installsuffix', '-pkgdir', '-coverprofile', '-cpuprofile', '-memprofile', '-blockprofile', '-mutexprofile', '-trace', '-outputdir', '-fuzz', '-fuzztime', '-f', '-vettool']
+const GO_FILES = ['-o', '-C', '-modfile', '-overlay', '-pkgdir', '-coverprofile', '-cpuprofile', '-memprofile', '-blockprofile', '-mutexprofile', '-trace', '-outputdir', '-vettool']
+const VALUE_OPTIONS = Object.freeze({
+  grep: spec(['-e', '-f', '-A', '-B', '-C', '-m', '-d', '-D', '--regexp', '--file', '--after-context', '--before-context', '--context', '--max-count', '--label', '--include', '--exclude', '--exclude-dir', '--exclude-from', '--binary-files', '--devices', '--directories', '--group-separator'], { files: ['-f', '--file', '--exclude-from'], pattern: ['-e', '-f', '--regexp', '--file'] }),
+  rg: spec(['-e', '-f', '-g', '-t', '-T', '-A', '-B', '-C', '-m', '-M', '-j', '-r', '-E', '-d', '--regexp', '--file', '--glob', '--iglob', '--type', '--type-not', '--after-context', '--before-context', '--context', '--max-count', '--max-columns', '--threads', '--replace', '--encoding', '--max-depth', '--max-filesize', '--ignore-file', '--sort', '--sortr', '--color', '--colors', '--type-add', '--type-clear', '--pre', '--pre-glob', '--path-separator', '--context-separator', '--field-match-separator', '--field-context-separator', '--engine', '--dfa-size-limit', '--regex-size-limit', '--hyperlink-format', '--generate'], { files: ['-f', '--file', '--ignore-file'], pattern: ['-e', '-f', '--regexp', '--file'], noPattern: ['--files', '--type-list'] }),
+  fd: spec(['-e', '-t', '-d', '-E', '-S', '-o', '-j', '-x', '-X', '--extension', '--type', '--max-depth', '--min-depth', '--exact-depth', '--exclude', '--size', '--owner', '--threads', '--changed-within', '--changed-before', '--base-directory', '--search-path', '--ignore-file', '--path-separator', '--format', '--and', '--color', '--batch-size', '--max-results'], { files: ['--base-directory', '--search-path', '--ignore-file'] }),
+  'git grep': spec(['-e', '-f', '-A', '-B', '-C', '-m', '--max-count', '--context', '--after-context', '--before-context', '--threads', '--max-depth'], { files: ['-f'], pattern: ['-e', '-f'] }),
+  sed: spec(['-e', '-f', '-l', '--expression', '--file', '--line-length'], { files: ['-f', '--file'], pattern: ['-e', '-f', '--expression', '--file'] }),
+  jq: spec(['--arg', '--argjson', '--slurpfile', '--rawfile', '--indent', '-f', '--from-file', '-L'], { files: ['--slurpfile', '--rawfile', '-f', '--from-file', '-L'], pattern: ['-f', '--from-file'], arity: { '--arg': 2, '--argjson': 2, '--slurpfile': 2, '--rawfile': 2 }, fileIndex: { '--slurpfile': 2, '--rawfile': 2 } }),
+  yq: spec(['-o', '-I', '-p', '-s', '--output-format', '--input-format', '--indent', '--split-exp', '--from-file'], { files: ['--from-file'], pattern: ['--from-file'] }),
+  head: spec(['-n', '-c', '--lines', '--bytes']),
+  tail: spec(['-n', '-c', '-s', '--lines', '--bytes', '--sleep-interval', '--pid']),
+  cut: spec(['-d', '-f', '-c', '-b', '--delimiter', '--fields', '--characters', '--bytes', '--output-delimiter']),
+  sort: spec(['-k', '-t', '-o', '-S', '-T', '--key', '--field-separator', '--output', '--buffer-size', '--temporary-directory', '--files0-from', '--batch-size', '--parallel', '--compress-program', '--random-source'], { files: ['-o', '--output', '-T', '--temporary-directory', '--files0-from', '--random-source'] }),
+  uniq: spec(['-f', '-s', '-w', '--skip-fields', '--skip-chars', '--check-chars']),
+  tree: spec(['-L', '-I', '-P', '-o', '-H', '-T', '--filelimit', '--charset', '--timefmt', '--sort', '--fromfile'], { files: ['-o'] }),
+  stat: spec(['-c', '--format', '--printf']),
+  du: spec(['-d', '-B', '-t', '-X', '--max-depth', '--block-size', '--threshold', '--exclude', '--exclude-from', '--files0-from', '--time-style'], { files: ['-X', '--exclude-from', '--files0-from'] }),
+  df: spec(['-x', '-t', '-B', '--type', '--exclude-type', '--block-size']),
+  diff: spec(['-U', '-x', '-X', '-I', '-S', '-L', '-F', '-C', '-W', '--label', '--exclude', '--exclude-from', '--ignore-matching-lines', '--starting-file', '--from-file', '--to-file', '--line-format', '--horizon-lines', '--width', '--show-function-line', '--tabsize'], { files: ['-X', '--exclude-from', '--from-file', '--to-file'] }),
+  cmp: spec(['-i', '-n', '--ignore-initial', '--bytes']),
+  file: spec(['-m', '-f', '-F', '-e', '-P', '--magic-file', '--files-from', '--separator', '--exclude', '--parameter'], { files: ['-m', '-f', '--magic-file', '--files-from'] }),
+  ls: spec(['-I', '-w', '-T', '--ignore', '--hide', '--width', '--tabsize', '--sort', '--format', '--time-style', '--block-size', '--quoting-style', '--indicator-style']),
+  wc: spec(['--files0-from'], { files: ['--files0-from'] }),
+  date: spec(['-d', '-f', '-r', '-s', '--date', '--file', '--reference', '--set'], { files: ['-f', '-r', '--file', '--reference'] }),
+  'git commit': spec(['-m', '-F', '-t', '-c', '-C', '--message', '--file', '--template', '--reuse-message', '--reedit-message', '--author', '--date', '--fixup', '--squash', '--cleanup', '--trailer'], { files: ['-F', '--file', '-t', '--template'] }),
+  'git log': spec(GIT_HISTORY_VALUES, { files: ['--output', '-O'] }),
+  'git show': spec(GIT_HISTORY_VALUES, { files: ['--output', '-O'] }),
+  'git diff': spec(GIT_HISTORY_VALUES, { files: ['--output', '-O'] }),
+  'git blame': spec(['-L', '-S', '--contents', '--date', '--ignore-rev', '--ignore-revs-file'], { files: ['-S', '--contents', '--ignore-revs-file'] }),
+  'git branch': spec(['--contains', '--no-contains', '--merged', '--no-merged', '--points-at', '--sort', '--format', '-u', '--set-upstream-to']),
+  'git stash': spec(['-n', '--max-count', '--format', '--date']),
+  'git add': spec(['--chmod', '--pathspec-from-file'], { files: ['--pathspec-from-file'] }),
+  'git ls-files': spec(['-x', '-X', '--exclude', '--exclude-from', '--exclude-per-directory', '--format', '--with-tree'], { files: ['-X', '--exclude-from'] }),
+  cargo: spec(CARGO_VALUES, { files: CARGO_FILES }),
+  go: spec(GO_VALUES, { files: GO_FILES, single: true }),
+  gofmt: spec([]),
+  staticcheck: spec(['-checks', '-tags', '-f', '-go', '-tests', '-matrix'], { single: true }),
+  pytest: spec(['-k', '-m', '-n', '-p', '-c', '-o', '-W', '--basetemp', '--rootdir', '--confcutdir', '--deselect', '--ignore', '--ignore-glob', '--junitxml', '--log-file', '--cov-config'], { files: ['-c', '--basetemp', '--rootdir', '--confcutdir', '--deselect', '--ignore', '--junitxml', '--log-file', '--cov-config'] }),
+  mypy: spec(['-p', '-m', '--package', '--module', '--config-file', '--cache-dir', '--python-executable'], { files: ['--config-file', '--cache-dir', '--python-executable'] }),
+  black: spec(['-l', '--line-length', '--config', '--target-version', '--include', '--exclude'], { files: ['--config'] }),
+  ruff: spec(['--config', '--select', '--ignore', '--extend-select', '--output-format', '--line-length', '--cache-dir', '--target-version'], { files: ['--config', '--cache-dir'] }),
+  docker: spec(['-n', '-f', '--tail', '--since', '--until', '--filter', '--format', '--last', '--type', '--status'])
+})
+
+// The modelled spec for a command (git by subcommand), or null.
+const valueSpec = (name, list) => VALUE_OPTIONS[name === 'git' ? `git ${list[1]}` : name] ?? null
+
+// Split a command's arguments (after its command words) into operands and option values by its
+// value-option spec. Words after `--` are operands. A value of an option the spec does not know is
+// returned with `modelled: false`, and only attached values (`--x=V`, `-xV`) can be one.
+function splitArgs(words, valueSpecOf) {
+  const out = { operands: [], values: [], patternGiven: false, noPattern: false }
+  const known = valueSpecOf ?? spec([])
+  const value = (word, option, index = 1) => out.values.push({ word, option, modelled: true, file: known.files.has(option) && (known.fileIndex[option] ?? 1) === index })
+  for (let k = 0, options = true; k < words.length; k++) {
+    const word = words[k]
+    if (options && word === '--') { options = false; continue }
+    if (!options || word === '-' || !word.startsWith('-')) { out.operands.push(word); continue }
+    if (word.startsWith('--') || known.single) {
+      const equal = word.indexOf('=')
+      const name = equal > 0 ? word.slice(0, equal) : word
+      const option = known.single && name.startsWith('--') ? name.slice(1) : name
+      if (known.pattern.has(option)) out.patternGiven = true
+      if (known.noPattern.has(option)) out.noPattern = true
+      if (equal > 0) {
+        if (known.values.has(option)) value(word.slice(equal + 1), option)
+        else out.values.push({ word: word.slice(equal + 1), option, modelled: false, file: false })
+        continue
+      }
+      if (!known.values.has(option)) continue
+      const arity = known.arity[option] ?? 1
+      for (let j = 1; j <= arity && k + 1 < words.length; j++) value(words[++k], option, j)
+      continue
+    }
+    let consumed = false
+    for (let c = 1; c < word.length; c++) {
+      const flag = `-${word[c]}`
+      if (known.pattern.has(flag)) out.patternGiven = true
+      if (!known.values.has(flag)) continue
+      consumed = true
+      if (c + 1 < word.length) value(word.slice(c + 1), flag)
+      else if (k + 1 < words.length) value(words[++k], flag)
+      break
+    }
+    if (!consumed && word.length > 2) out.values.push({ word: word.slice(2), option: word.slice(0, 2), modelled: false, file: false })
+  }
+  return out
+}
+
+// find(1): leading -H -L -P -D -O options, then the start points, then the expression. Values of
+// the predicates are not paths, except the files -newer, -samefile and the -fprint family name.
+const FIND_VALUE = new Set(['-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename', '-type', '-xtype', '-maxdepth', '-mindepth', '-size', '-mtime', '-mmin', '-atime', '-amin', '-ctime', '-cmin', '-regex', '-iregex', '-perm', '-user', '-group', '-uid', '-gid', '-links', '-inum', '-regextype', '-printf', '-fstype', '-lname', '-ilname', '-used', '-context', '-files0-from'])
+const FIND_FILE = new Set(['-newer', '-anewer', '-cnewer', '-samefile', '-fprint', '-fprint0', '-fls', '-files0-from'])
+function splitFind(words) {
+  const out = { operands: [], values: [], patternGiven: false, noPattern: true, follows: false }
+  let k = 0
+  for (; k < words.length; k++) {
+    const word = words[k]
+    if (['-H', '-L'].includes(word)) { out.follows = true; continue }
+    if (word === '-P' || /^-O\d*$/.test(word)) continue
+    if (word === '-D') { k++; continue }
+    break
+  }
+  for (; k < words.length && !words[k].startsWith('-') && !['(', ')', '!', ','].includes(words[k]); k++) out.operands.push(words[k])
+  for (; k < words.length; k++) {
+    const word = words[k]
+    if (word === '-follow') out.follows = true
+    if (word === '-fprintf') { out.values.push({ word: words[k + 1], option: word, modelled: true, file: true }); k += 2; continue }
+    if (/^-newer[acmB][acmBt]$/.test(word)) { out.values.push({ word: words[k + 1], option: word, modelled: true, file: !word.endsWith('t') }); k++; continue }
+    if (FIND_FILE.has(word) || FIND_VALUE.has(word)) { out.values.push({ word: words[k + 1], option: word, modelled: true, file: FIND_FILE.has(word) }); k++ }
+  }
+  return out
+}
+
+// The arguments of a segment split for the path rules: the command's own spec, find's grammar.
+const segmentArgs = (name, list, words) => name === 'find' ? splitFind(words) : splitArgs(words, valueSpec(name, list))
+
+// Whether something exists at `location` without following a final symlink.
+const lexists = location => { try { lstatSync(location); return true } catch { return false } }
+
+// D-88 (1): a location is bare when it lies lexically under a repo scope root and no component
+// below that root is a symlink. Returns null, 'outside' or 'symlink' (a component that cannot be
+// checked counts as a symlink).
+function bareCheck(location, ctx) {
+  const root = ctx.lexicalRoots.filter(dir => within(location, dir)).sort((a, b) => b.length - a.length)[0]
+  if (!root) return 'outside'
+  const rel = path.relative(root, location)
+  let current = root
+  for (const part of rel ? rel.split('/') : []) {
+    current = path.join(current, part)
+    let stat
+    try { stat = lstatSync(current) } catch (error) { return ['ENOENT', 'ENOTDIR'].includes(error?.code) ? null : 'symlink' }
+    if (stat.isSymbolicLink()) return 'symlink'
+  }
+  return null
+}
+
+const BARE_REASONS = Object.freeze({
+  cwd: ['scope.cwd', 'runs in a directory outside the repo or reached through a symlink'],
+  absolute: ['path.absolute', 'names an absolute or home path'],
+  symlink: ['path.symlink', 'names a path through a symlink'],
+  outside: ['scope.read-outside', 'reads outside the repo'],
+  dotdot: ['path.dotdot', 'names a path that leaves a directory with ..']
+})
+
+// The D-88 (1) verdict on one word of a Safe candidate, resolved against `cwd`. A word that names
+// nothing that exists and does not read as a path is text; so is a pattern operand that names
+// nothing that exists.
+function wordVerdict(word, cwd, ctx, pattern = false) {
+  if (typeof word !== 'string' || word === '-' || DEV_NULLS.has(word)) return null
+  if (word.startsWith('/') || word.startsWith('~')) {
+    const location = expandHome(word, ctx)
+    if (pattern && !lexists(location)) return null
+    return inScope(location, ctx) ? 'absolute' : 'outside'
+  }
+  const location = path.resolve(cwd, word)
+  if (!lexists(location) && (pattern || !syntaxPath(word))) return null
+  const parts = word.split('/')
+  if (parts.some((part, k) => part === '..' && parts.slice(0, k).some(before => before !== '..' && before !== '.' && before !== ''))) return 'dotdot'
+  return bareCheck(location, ctx)
+}
+
+// D-88 (3): recursive readers that follow symlinks, by the spellings each documents.
+function followsSymlinks(name, words) {
+  const short = flags => words.some(word => new RegExp(`^-[^-]*[${flags}]`).test(word))
+  const long = (...options) => words.some(word => options.some(option => word.length > 3 && option.startsWith(word.split('=')[0])))
+  if (name === 'grep') return short('R') || long('--dereference-recursive')
+  if (name === 'rg') return short('L') || long('--follow')
+  if (name === 'find') return splitFind(words.slice(1)).follows
+  if (name === 'diff') return short('r') || long('--recursive')
+  if (name === 'tree') return short('l')
+  if (name === 'du') return short('LD') || long('--dereference', '--dereference-args')
+  if (name === 'cp') return short('LH') || long('--dereference')
+  if (name === 'tar') return short('h') || /^[^-]*h/.test(words[1] ?? '') || long('--dereference')
+  if (name === 'ls') return (short('L') || long('--dereference')) && (short('R') || long('--recursive'))
+  if (name === 'rsync') return short('LkK') || long('--copy-links', '--copy-dirlinks', '--keep-dirlinks')
+  return false
+}
+
+// Whether `dir` lies in a git work tree: an ancestor holds `.git`, and `dir` is not inside one.
+function inGitWorkTree(dir) {
+  if (typeof dir !== 'string' || dir.split('/').includes('.git')) return false
+  for (let current = dir; ; current = path.dirname(current)) {
+    if (lexists(path.join(current, '.git'))) return true
+    if (path.dirname(current) === current) return false
+  }
+}
+
+const isDirectory = location => { try { return statSync(location).isDirectory() } catch { return false } }
+
+// jq and yq filters that read the environment or a file (jq `env`, `$ENV`, `import`, `include`;
+// yq `env`, `strenv`, `envsubst`, `load*`, `eval`).
+const FILTER_READS = Object.freeze({
+  jq: /\$ENV\b|\b(?:env|import|include|modulemeta|get_search_list)\b/,
+  yq: /\b(?:env|strenv|envsubst|load\w*|eval\w*)\b/
+})
+
 function context(input) {
   const home = typeof input.homeDir === 'string' && path.isAbsolute(input.homeDir) ? path.normalize(input.homeDir) : (process.env.HOME && path.isAbsolute(process.env.HOME) ? process.env.HOME : os.homedir())
   return {
     home,
     cwd: typeof input.cwd === 'string' && path.isAbsolute(input.cwd) ? path.normalize(input.cwd) : null,
     deck: deckControls(input.deckPaths, home),
-    scope: repoScope(input.repoRoot, input.worktrees, home)
+    scope: repoScope(input.repoRoot, input.worktrees, home),
+    lexicalRoots: repoScope(input.repoRoot, input.worktrees, home, true)
   }
 }
 
@@ -274,7 +459,9 @@ function writeVerdict(location, ctx, segment) {
   if (paths.some(isClaudeSettingsPath) || (path.basename(location) === 'CLAUDE.md' && inside === null)) return reason('floor.claude-settings', 'destructive', segment, 'changes Claude Code settings or hooks')
   if (paths.some(isGitInternal)) return reason('floor.git-dir', 'destructive', segment, 'writes inside .git')
   if (paths.some(candidate => isPersistence(candidate, ctx.home))) return reason('floor.persistence', 'destructive', segment, 'runs at the next login or shell start')
-  return inside === null ? reason('scope.outside', 'caution', segment, 'writes outside the repo') : null
+  if (inside === null) return reason('scope.outside', 'caution', segment, 'writes outside the repo')
+  // D-88 (6): a Bash write to the execution-config list is Caution, as an Edit or Write is.
+  return isExecutionConfig(inside) ? reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs') : null
 }
 
 // Glob matching for argument globs: `*` is any text, `?` one character, and `-<N>` a number option.
@@ -344,79 +531,118 @@ function disallowedOption(entry, rest) {
   return null
 }
 
-// sed's script rule (F2): Safe only for a literal script with no e, w, W, r or R command and no
-// e or w flag on s. Anything this reader does not understand is unsafe.
+// sed's script rule (D-88 (4)): Safe only for a script this small parser reads in full, made of the
+// commands p, d, = and q (with an exit code), each with optional line, step or regex addresses
+// (`!` allowed), and s/// with flags limited to g, p, I and a number. Everything else, including
+// labels, branches, a, i, c, y, braces, comments, the e, w, r, R, W commands and the e, w and m
+// flags of s, is not Safe. GNU sed 4.10 (checked) reads a bracket expression in a regex as one item
+// but not in a replacement, and lets blanks stand between s flags (`s/a/b/ w FILE` writes FILE).
+// A bracket expression holding the delimiter, a newline or a backslash is refused, so a reader
+// that does not know brackets ends the regex where this one does.
 export function sedScriptSafe(script) {
   if (typeof script !== 'string') return false
   let i = 0
   const n = script.length
   const at = () => script[i]
-  const skipSpace = () => { while (i < n && /[ \t]/.test(at())) i++ }
-  const readDelimited = delim => {
+  const skipBlank = () => { while (i < n && (at() === ' ' || at() === '\t')) i++ }
+  const digits = () => { const start = i; while (i < n && /[0-9]/.test(at())) i++; return i > start }
+  const bracket = delim => {
+    i++
+    if (at() === '^') i++
+    if (at() === ']') i++
     while (i < n) {
       const c = script[i]
-      if (c === '\\') { i += 2; continue }
-      if (c === '\n') return false
+      if (c === '\n' || c === '\\' || c === delim) return false
+      if (c === '[' && /[:.=]/.test(script[i + 1] ?? '')) {
+        const close = script.indexOf(`${script[i + 1]}]`, i + 2)
+        if (close < 0) return false
+        const inner = script.slice(i, close + 2)
+        if (inner.includes(delim) || inner.includes('\n') || inner.includes('\\')) return false
+        i = close + 2
+        continue
+      }
       i++
-      if (c === delim) return true
+      if (c === ']') return true
     }
     return false
   }
-  const readAddress = () => {
+  // A regex after its opening delimiter, through the closing one.
+  const regex = delim => {
+    while (i < n) {
+      const c = script[i]
+      if (c === '\n') return false
+      if (c === '\\') { if (i + 1 >= n || script[i + 1] === '\n') return false; i += 2; continue }
+      if (c === delim) { i++; return true }
+      if (c === '[') { if (!bracket(delim)) return false; continue }
+      i++
+    }
+    return false
+  }
+  const badDelim = delim => !delim || '\n\\[]'.includes(delim)
+  // true when an address was read, false when there is none, null when it cannot be read.
+  const address = () => {
     const c = at()
-    if (/[0-9]/.test(c)) { while (i < n && /[0-9~]/.test(at())) i++; return true }
+    if (c !== undefined && /[0-9]/.test(c)) {
+      digits()
+      if (at() === '~') { i++; if (!digits()) return null }
+      return true
+    }
     if (c === '$') { i++; return true }
     if (c === '/' || c === '\\') {
       let delim = '/'
-      if (c === '\\') { delim = script[i + 1]; if (!delim || delim === '\n') return null; i += 2 } else i++
-      if (!readDelimited(delim)) return null
+      if (c === '\\') { delim = script[i + 1]; if (badDelim(delim)) return null; i += 2 } else i++
+      if (!regex(delim)) return null
       while (i < n && /[IM]/.test(at())) i++
       return true
     }
     return false
   }
-  const toLineEnd = stops => { while (i < n && !stops.includes(at())) i++ }
-  while (i < n) {
-    while (i < n && /[\s;]/.test(at())) i++
-    if (i >= n) break
-    const first = readAddress()
+  const substitute = () => {
+    const delim = at()
+    if (badDelim(delim)) return false
+    i++
+    if (!regex(delim)) return false
+    let closed = false
+    while (i < n) {
+      const c = script[i]
+      if (c === '\n') return false
+      if (c === '\\') { if (i + 1 >= n || script[i + 1] === '\n') return false; i += 2; continue }
+      i++
+      if (c === delim) { closed = true; break }
+    }
+    if (!closed) return false
+    for (;;) {
+      skipBlank()
+      const c = at()
+      if (c === undefined || c === ';' || c === '\n') return true
+      if (!/[gpI0-9]/.test(c)) return false
+      i++
+    }
+  }
+  for (;;) {
+    while (i < n && /[ \t\n;]/.test(at())) i++
+    if (i >= n) return true
+    const first = address()
     if (first === null) return false
     if (first) {
-      skipSpace()
+      skipBlank()
       if (at() === ',') {
         i++
-        skipSpace()
-        if (at() === '+' || at() === '~') { i++; while (i < n && /[0-9]/.test(at())) i++ }
-        else if (readAddress() !== true) return false
+        skipBlank()
+        if (at() === '+' || at() === '~') { i++; if (!digits()) return false }
+        else if (address() !== true) return false
       }
     }
-    skipSpace()
-    while (at() === '!') { i++; skipSpace() }
+    skipBlank()
+    while (at() === '!') { i++; skipBlank() }
     const command = at()
     i++
-    if ('{}=dDgGhHnNpPxzF'.includes(command)) continue
-    if ('qQlL'.includes(command)) { skipSpace(); while (i < n && /[0-9]/.test(at())) i++; continue }
-    if (command === '#') { toLineEnd('\n'); continue }
-    if (':btTv'.includes(command)) { toLineEnd(';\n'); continue }
-    if ('aic'.includes(command)) {
-      while (i < n && at() !== '\n') { if (at() === '\\') i++; i++ }
-      continue
-    }
-    if (command === 's' || command === 'y') {
-      const delim = at()
-      if (!delim || delim === '\\' || delim === '\n') return false
-      i++
-      if (!readDelimited(delim) || !readDelimited(delim)) return false
-      if (command === 'y') continue
-      while (i < n && !/[;\n}\s]/.test(at())) {
-        if (!/[gpiImM0-9]/.test(at())) return false
-        i++
-      }
-      continue
-    }
-    return false
+    if (command === 's') { if (!substitute()) return false }
+    else if (command === 'q') { skipBlank(); digits() }
+    else if (command !== 'p' && command !== 'd' && command !== '=') return false
+    skipBlank()
+    if (i < n && at() !== ';' && at() !== '\n') return false
   }
-  return true
 }
 
 function sedScripts(rest) {
@@ -677,20 +903,30 @@ function classifySegment(segment, ctx, ready, out) {
   // recurses into directory operands like diff -r (git-diff(1)).
   const gitDiff = name === 'git' && list[1] === 'diff'
   if (recursive || gitDiff || name === 'diff') {
-    const roots = operands.map(operand => operand.location)
-    const implicit = recursive && roots.length <= (['grep', 'rg', 'fd'].includes(name) ? 1 : 0) && segment.cwd
+    // The roots are the path operands: option values are not (D-88 (2)), nor is the pattern operand
+    // of grep, rg, fd and git grep. A glob root stands for its expansion.
+    const split = segmentArgs(name, list, name === 'git' ? list.slice(2) : words.slice(1))
+    const patternSlot = ['grep', 'rg', 'fd'].includes(name) || (name === 'git' && list[1] === 'grep')
+    const rootWords = patternSlot && !split.patternGiven && !split.noPattern ? split.operands.slice(1) : split.operands
+    const roots = rootWords.flatMap(word => {
+      const expanded = operands.filter(item => item.word === word).map(item => item.location)
+      return expanded.length ? expanded : [resolveIn(word, segment.cwd)].filter(Boolean)
+    })
+    // With no root that exists, the command reads the working directory (a root that names nothing
+    // is read as the cwd too, so an option the spec misses cannot hide the cwd).
+    const implicit = recursive && !roots.some(lexists) && segment.cwd
     if (implicit) roots.push(segment.cwd)
     if ((recursive || gitDiff) && roots.some(root => ancestorOfControl(root, ctx))) push(reason('floor.deck', 'destructive', text, 'reads a directory that holds the deck\'s own files'))
     // diff without -r still prints every top-level file of a directory operand.
     if (roots.some(root => holdsSecret(root, ctx))) push(reason('read.secret', 'caution', text, 'reads a secret file'))
     if (implicit && !inScope(segment.cwd, ctx)) push(reason('scope.read-outside', 'caution', text, 'reads outside the repo'))
-    // Symlinks under the roots inside the repo (roots outside it are rated by the read scope).
-    const walk = (!gitDiff || list.includes('--no-index')) ? walkTrees(roots.filter(root => inScope(root, ctx)), ctx) : null
-    if (walk?.deck) push(reason('floor.deck', 'destructive', text, 'reads a directory that holds the deck\'s own files'))
-    if (walk?.outside) push(reason('scope.read-outside', 'caution', text, 'reads outside the repo'))
-    if (walk?.secret) push(reason('read.secret', 'caution', text, 'reads a secret file'))
-    if (walk?.over) push(reason('scope.walk-limit', 'caution', text, 'reads a directory too large to check'))
+    // D-88 (5): git diff compares directories (as --no-index) or runs outside a work tree only at
+    // Caution. diff on a directory reads the files in it, following their symlinks.
+    if ((gitDiff || name === 'diff') && roots.some(isDirectory)) push(reason('read.directory', 'caution', text, 'compares directories'))
+    if (gitDiff && !inGitWorkTree(segment.cwd)) push(reason('git.no-work-tree', 'caution', text, 'runs git diff outside a git work tree'))
   }
+  // D-88 (3): a recursive reader that follows symlinks reads wherever a link in the tree points.
+  if (followsSymlinks(name, words)) push(reason('read.follows-symlinks', 'caution', text, 'reads a directory tree following symlinks'))
   const sensitive = ({ location }) => candidates(location).some(candidate => isSensitive(candidate, ctx.home))
   const exists = ({ location }) => { try { return existsSync(location) } catch { return false } }
   if ((READ_COMMANDS.includes(name) && operands.some(sensitive)) || (!TEXT_COMMANDS.includes(name) && named.some(item => exists(item) && sensitive(item)))) push(reason('read.secret', 'caution', text, 'reads a secret file'))
@@ -746,50 +982,55 @@ function classifySegment(segment, ctx, ready, out) {
         if (verdict) push(verdict)
       }
     }
+    // git read subcommands print a committed file whether or not the work tree still holds it:
+    // a pathspec or a `REV:path` naming a sensitive-list file is a secret read.
+    if (['show', 'log', 'diff', 'blame', 'grep', 'whatchanged'].includes(list[1])) {
+      const split = segmentArgs(name, list, list.slice(2))
+      const named = list[1] === 'grep' && !split.patternGiven ? split.operands.slice(1) : split.operands
+      const secret = named.some(word => {
+        const part = word.includes(':') ? word.slice(word.indexOf(':') + 1) : word
+        return part !== '' && isSensitive(path.resolve(segment.cwd ?? '/', part), ctx.home)
+      })
+      if (secret) push(reason('read.secret', 'caution', text, 'reads a secret file'))
+    }
     if (list[1] === 'add' && list.slice(2).some(arg => !arg.startsWith('-') && (() => { const location = resolveIn(arg, segment.cwd); return location && candidates(location).some(candidate => isSensitive(candidate, ctx.home)) })())) push(reason('git.stages-secret', 'caution', text, 'stages a secret file'))
   }
   matchEntries(segment, ctx, ready, out, { name, list, text, words })
 }
 
-// Read scope of a Safe candidate (07-approvals 3.5, the Bash side of the Read tool's "reads outside
-// the repo"): every path operand and every path value of an option, resolved with symlinks
-// followed, must lie inside the repo. A word is a path when it looks like one (syntaxPath) or names
-// something that exists. `pathOperands: "none"` entries take text only; `"afterFirst"` entries take
-// a pattern, script or filter first, which counts only when it names an existing path.
-function readsOutside(entry, tail, segment, ctx) {
-  if (entry.pathOperands === 'none') return false
-  const outside = location => location === null || (!DEV_NULLS.has(location) && !inScope(location, ctx))
-  let first = entry.pathOperands === 'afterFirst'
-  let operandsOnly = false
-  for (let k = 0; k < tail.words.length; k++) {
-    const word = tail.words[k]
-    const info = tail.info[k]
-    if (info?.glob) {
-      const matches = expandGlob(word, segment.cwd)
-      if (matches?.some(outside)) return true
-      first = false
-      continue
-    }
-    if (info && !info.literal) return true
-    if (!operandsOnly && word === '--') { operandsOnly = true; continue }
-    if (!operandsOnly && word.startsWith('-') && word !== '-') {
-      const equal = word.indexOf('=')
-      const value = equal > 0 ? word.slice(equal + 1) : (!word.startsWith('--') && word.length > 2 ? word.slice(2) : '')
-      if (value && syntaxPath(value) && outside(resolveIn(expandHome(value, ctx), segment.cwd))) return true
-      continue
-    }
-    if (word === '-') continue
-    const location = resolveIn(expandHome(word, ctx), segment.cwd)
-    if (first) {
-      first = false
-      if (existsAt(location) && outside(location)) return true
-      continue
-    }
-    if (!path.isAbsolute(word) && /\s/.test(word)) continue
-    if (!syntaxPath(word) && !existsAt(location)) continue
-    if (outside(location)) return true
+// D-88 (1) and (2), the path rule of a Safe candidate: the working directory and every path the
+// command names must be bare, a plain relative path that stays lexically inside the repo scope with
+// no symlink in any component below the scope root. Absolute and `~` paths are not bare, even inside
+// the repo. A path is an operand that names something that exists (lstat) or reads as a path
+// (syntaxPath), the value of an option that names a file, or a write target. Values of options
+// that take a pattern, script or number are never paths. The pattern operand of a `"afterFirst"`
+// entry counts only when it names something that exists. `pathOperands: "none"` entries take
+// text only and do not read the working directory.
+function bareVerdict(entry, name, list, tail, segment, ctx, text) {
+  if (entry.pathOperands === 'none') return null
+  const fail = kind => reason(BARE_REASONS[kind][0], 'caution', text, BARE_REASONS[kind][1])
+  const cwd = segment.cwd
+  if (!cwd || bareCheck(cwd, ctx) !== null) return fail('cwd')
+  if (tail.info.some(info => info && (!info.literal || info.glob))) return fail('outside')
+  const split = segmentArgs(name, list, tail.words)
+  for (const value of split.values) {
+    if (!value.file && (value.modelled || !syntaxPath(String(value.word ?? '')))) continue
+    const verdict = wordVerdict(value.word, cwd, ctx)
+    if (verdict) return fail(verdict)
   }
-  return false
+  const patternFirst = entry.pathOperands === 'afterFirst' && !split.patternGiven && !split.noPattern
+  for (let k = 0; k < split.operands.length; k++) {
+    const verdict = wordVerdict(split.operands[k], cwd, ctx, patternFirst && k === 0)
+    if (verdict) return fail(verdict)
+  }
+  for (const write of segment.writes) {
+    if (typeof write.path !== 'string' || DEV_NULLS.has(write.path)) continue
+    const verdict = bareCheck(write.path, ctx)
+    if (verdict) return fail(verdict === 'outside' ? 'outside' : 'symlink')
+  }
+  // jq and yq: a filter that reads the environment or a file reads outside the repo.
+  if (FILTER_READS[name] && !split.patternGiven && split.operands.length && FILTER_READS[name].test(split.operands[0])) return fail('outside')
+  return null
 }
 
 // Words after `--` that an entry forwards to another program (the test binary, a package script):
@@ -864,7 +1105,8 @@ function matchEntries(segment, ctx, ready, out, { name, list, text, words }) {
         const forwarded = forwardedVerdicts(entry, tail, segment, ctx, text)
         if (forwarded.length) { out.reasons.push(...forwarded); continue }
       }
-      if (readsOutside(entry, tail, segment, ctx)) { out.reasons.push(reason('scope.read-outside', 'caution', text, 'reads outside the repo')); continue }
+      const bare = bareVerdict(entry, name, list, tail, segment, ctx, text)
+      if (bare) { out.reasons.push(bare); continue }
       if (!safeEntry) safeEntry = { entry, script: Array.isArray(entry.script) ? found.rest.find(arg => !arg.startsWith('-')) : null }
     }
     matched = true

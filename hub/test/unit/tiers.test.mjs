@@ -160,9 +160,11 @@ test('the worktree cache reads git worktree list once per repo and drops a repo 
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('the sed script rule rejects e, w, W, r and R commands and the e and w flags (F2)', () => {
-  for (const script of ['1,5p', 's/a/b/g', 's|a|b|2', '/x/d', '$!N;P;D', 'y/abc/xyz/', '1a text', '/start/,/end/{p}']) assert.equal(sedScriptSafe(script), true, script)
-  for (const script of ['1e rm -rf x', 'w /tmp/x', 's/a/b/e', 's/a/b/w /tmp/x', 'r /etc/passwd', 'R x', 'W x', '1,5p;e x', undefined, 's/a/b']) assert.equal(sedScriptSafe(script), false, String(script))
+test('the sed script rule takes only p, d, =, q and s with g, p, I or a number (D-88 (4))', () => {
+  for (const script of ['1,5p', 's/a/b/g', 's|a|b|2', '/x/d', '$p', '1~2p', '0,/re/p', '/a/,+2d', '/a/I,/b/Mp', '1!d', '1! p', 'q', 'q5', '=', 'p;p', 's/a/b/ p', 's/[0-9]/x/g', 's/[[:alpha:]]/x/', '\\,a,p', 's/a/b/gI3']) assert.equal(sedScriptSafe(script), true, script)
+  // GNU sed 4.10 ends a label at a blank and runs what follows (`:a e CMD`), and reads blanks
+  // between s flags (`s/a/b/ w FILE` writes FILE).
+  for (const script of [':a e touch x', ':a w /tmp/x', ':a', 'b', 'ta', 's/a/b/ e', 's/a/b/ w x', 's/a/b/m', 's/a/b/i', '$!N;P;D', 'y/abc/xyz/', '1a text', '/start/,/end/{p}', '#n', 'p x', 'l', '1e rm -rf x', 'w /tmp/x', 's/a/b/e', 's/a/b/w /tmp/x', 'r /etc/passwd', 'R x', 'W x', '1,5p;e x', undefined, 's/a/b', 's/[/]/e/', 's/[\\/]/x/e', 's[a[b[', '/a/,x', 's/a/[/]/']) assert.equal(sedScriptSafe(script), false, String(script))
 })
 
 test('every Safe Bash default can be plain, or is listed as unreachable under D-87', () => {
@@ -205,58 +207,131 @@ test('the shipped defaults validate, every Safe Bash entry lists its options, an
   assert.equal(new Set(DEFAULT_TIERS.entries.map(entry => entry.id)).size, DEFAULT_TIERS.entries.length)
 })
 
-test('a recursive read inside the repo rates the symlinks under it: into the deck state, out of the repo, or a loop', () => {
+test('a recursive reader that follows symlinks is Caution, and one that does not keeps its tier (D-88 (3))', () => {
   const s = sandbox()
   try {
     // A committed symlink to ~/.local/state reaches the deck token at fleetmates/deck/token.
     symlinkSync(path.join(s.home, '.local', 'state'), path.join(s.repo, 'notes'))
-    for (const command of ['grep -R DECK .', 'grep -rR DECK', 'diff -rN . ../empty', 'ls -R', 'tree', 'rg DECK']) {
+    mkdirSync(path.join(s.repo, 'empty'))
+    for (const command of ['grep -R DECK .', 'grep -rR DECK', 'grep --dereference-recursive DECK', 'grep --derefer DECK', 'diff -rN . empty', 'find -L . -name token', 'find . -follow -name token']) {
+      const result = s.bash(command)
+      assert.equal(result.tier, 'caution', command)
+      assert.ok(result.reasons.some(item => item.entryId === 'read.follows-symlinks'), command)
+    }
+    // grep -r, rg, ls -R, du -a and find without -L do not read through a link inside the tree
+    // (each run by hand on this host). tree is not installed here, so its default is unverified.
+    for (const command of ['grep -r DECK .', 'rg DECK', 'ls -R', 'tree', 'find . -name token', 'du -a']) assert.equal(s.bash(command).tier, 'safe', command)
+  } finally { s.close() }
+})
+
+test('rg, grep -r and ls -R stay Safe over a 25,000-entry node_modules and a link out of the repo, and grep -R is Caution (D-88 (3))', () => {
+  const s = sandbox()
+  try {
+    const pkg = path.join(s.repo, 'node_modules', 'pkg')
+    mkdirSync(pkg, { recursive: true })
+    for (let k = 0; k < 25000; k++) writeFileSync(path.join(pkg, String(k)), '')
+    mkdirSync(path.join(s.home, 'elsewhere'))
+    symlinkSync(path.join(s.home, 'elsewhere'), path.join(s.repo, 'node_modules', 'mylib'))
+    for (const command of ['rg foo', 'grep -rn foo .', 'ls -R']) {
+      const result = s.bash(command)
+      assert.equal(result.tier, 'safe', `${command}: ${result.reasons.map(item => item.entryId).join(' ')}`)
+    }
+    assert.equal(s.bash('grep -R foo .').tier, 'caution')
+  } finally { s.close() }
+})
+
+test('every path a Safe command names is a bare relative path: no symlink, dangling or not, and no absolute path (D-88 (1))', () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.repo, 'src'))
+    writeFileSync(path.join(s.repo, 'src', 'a.txt'), 'a\n')
+    writeFileSync(path.join(s.repo, '.env'), 'SYNTHETIC=1\n')
+    // A dangling link resolves to the file a writer would create, so every write floor applies.
+    mkdirSync(path.join(s.home, '.config', 'autostart'), { recursive: true })
+    symlinkSync(path.join(s.home, '.config', 'autostart', 'x.desktop'), path.join(s.repo, 'dang'))
+    for (const command of ['sort -o dang src/a.txt', 'uniq src/a.txt dang']) {
       const result = s.bash(command)
       assert.equal(result.tier, 'destructive', command)
-      assert.ok(result.reasons.some(item => item.entryId === 'floor.deck'), command)
+      assert.ok(result.reasons.some(item => item.entryId === 'floor.persistence'), command)
     }
-    rmSync(path.join(s.repo, 'notes'))
-    // `.git` is walked too: grep -R follows a symlink there like anywhere else.
-    mkdirSync(path.join(s.repo, '.git'))
-    symlinkSync(path.join(s.home, '.local', 'state'), path.join(s.repo, '.git', 'cache'))
-    assert.equal(s.bash('grep -R DECK .').tier, 'destructive')
-    rmSync(path.join(s.repo, '.git'), { recursive: true })
-    // A symlink to a directory outside the repo: a read outside it.
-    mkdirSync(path.join(s.home, 'elsewhere'))
-    symlinkSync(path.join(s.home, 'elsewhere'), path.join(s.repo, 'vendor'))
-    const outside = s.bash('grep -r x .')
-    assert.equal(outside.tier, 'caution')
-    assert.ok(outside.reasons.some(item => item.description === 'reads outside the repo'))
-    rmSync(path.join(s.repo, 'vendor'))
-    // A loop inside the repo is resolved, not followed, and stays Safe.
+    assert.equal(s.run('Write', { file_path: path.join(s.repo, 'dang'), content: 'x' }).tier, 'destructive')
+    // A link to an in-repo secret: naming it is Caution, and so is a reader that follows it.
+    symlinkSync('../.env', path.join(s.repo, 'src', 'link'))
+    const named = s.bash('cat src/link')
+    assert.equal(named.tier, 'caution')
+    assert.ok(named.reasons.some(item => item.entryId === 'path.symlink'))
+    assert.equal(s.bash('grep -R x src').tier, 'caution')
+    assert.equal(s.bash('cat src/a.txt').tier, 'safe')
+    const absolute = s.bash(`cat ${path.join(s.repo, 'src', 'a.txt')}`)
+    assert.equal(absolute.tier, 'caution')
+    assert.ok(absolute.reasons.some(item => item.entryId === 'path.absolute'))
+    // The working directory is judged too: reached through a symlink, or outside the repo.
+    symlinkSync('src', path.join(s.repo, 'via'))
+    assert.equal(s.bash('ls', { cwd: path.join(s.repo, 'via') }).tier, 'caution')
+    assert.equal(s.bash('ls', { cwd: s.home }).tier, 'caution')
+    assert.equal(s.bash('date', { cwd: s.home }).tier, 'safe')
+    // `..` after a name is refused by the path rule as well as by the D-87 plain floor.
+    assert.ok(s.bash('cat src/../src/a.txt').reasons.some(item => item.entryId === 'path.dotdot'))
+    // A write target the parser records from an entry's outputOpts is checked by lstat even when
+    // the value spec does not know the option (a user entry): here a link to an in-repo file.
+    symlinkSync('src/a.txt', path.join(s.repo, 'inlink'))
+    const tiers = effectiveTiers(DEFAULT_TIERS, { version: 1, entries: [{ id: 'safe.user.sort', tier: 'safe', tool: 'Bash', cmd: 'sort', allowOpts: [], outputOpts: ['--into'] }] })
+    const userWrite = s.bash('sort --into=inlink src/a.txt', { tiers })
+    assert.ok(userWrite.reasons.some(item => item.entryId === 'path.symlink'), userWrite.reasons.map(item => item.entryId).join(' '))
+  } finally { s.close() }
+})
+
+test('option values are not path operands, so a search with only -e or -A values reads the cwd (D-88 (2))', () => {
+  const s = sandbox()
+  try {
+    writeFileSync(path.join(s.deckPaths.state, 'token'), 'synthetic')
+    // The cwd is the home directory, an ancestor of the deck state.
+    for (const command of ['grep -r -e tok -e x', 'grep -r -A 1 tok', 'grep -rB 1 tok', 'rg -e tok -e x', 'rg -g x tok', 'find -name token', 'git grep -e tok -e x']) {
+      const result = s.bash(command, { cwd: s.home })
+      assert.ok(result.reasons.some(item => item.entryId === 'floor.deck' || item.entryId === 'scope.cwd'), `${command}: ${result.reasons.map(item => item.entryId).join(' ')}`)
+      assert.notEqual(result.tier, 'safe', command)
+    }
+    assert.equal(s.bash('grep -r -e tok -e x', { cwd: s.home }).tier, 'destructive')
+    assert.equal(s.bash('grep -r -A 1 tok', { cwd: s.home }).tier, 'destructive')
+    // A pattern given by -e is not a path, nor is the value of -A; the operand after them is.
+    assert.equal(s.bash('grep -e /etc/passwd -A 1 .').tier, 'safe')
+    assert.equal(s.bash(`grep -e x -A 1 ${path.join(s.home, '.ssh')}`).tier, 'caution')
+    // A file an option reads is a path: git commit -F, sort -o.
+    assert.equal(s.bash('git commit -F /tmp/msg').tier, 'caution')
+    assert.equal(s.bash('git commit -m /tmp/msg').tier, 'safe')
+  } finally { s.close() }
+})
+
+test('git diff of a directory or outside a git work tree is Caution, and so are Bash writes to the execution-config list (D-88 (5), (6))', () => {
+  const s = sandbox()
+  try {
     mkdirSync(path.join(s.repo, 'src'))
-    symlinkSync('..', path.join(s.repo, 'src', 'up'))
-    assert.equal(s.bash('grep -r x .').tier, 'safe')
+    assert.equal(s.bash('git diff').tier, 'caution', 'the sandbox repo is not a git work tree yet')
+    mkdirSync(path.join(s.repo, '.git'))
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    assert.equal(s.bash('git diff').tier, 'safe')
+    assert.equal(s.bash('git diff main --stat').tier, 'safe')
+    assert.equal(s.bash('git diff src').tier, 'caution')
+    assert.equal(s.bash('git diff -- src').tier, 'caution')
+    for (const command of ['sort -o package.json src/p.json', 'uniq src/p.json Makefile', 'git diff --output=.github/workflows/ci.yml', 'sort -o .husky/pre-commit x']) {
+      const result = s.bash(command)
+      assert.equal(result.tier, 'caution', command)
+      assert.ok(result.reasons.some(item => item.entryId === 'file.execution-config'), command)
+    }
+    assert.equal(s.bash('sort -o out.txt src/p.json').tier, 'safe')
+    for (const command of ['git grep --untracked x', 'git grep --no-exclude-standard x', 'docker compose config']) assert.equal(s.bash(command).tier, 'caution', command)
   } finally { s.close() }
 })
 
-test('a recursive read over a repo tree holding a sensitive-list file is "reads a secret file"', () => {
+test('jq filters that read the environment or a module file are Caution', () => {
   const s = sandbox()
   try {
-    mkdirSync(path.join(s.repo, 'config'))
-    assert.equal(s.bash('grep -r x .').tier, 'safe')
-    writeFileSync(path.join(s.repo, 'config', '.env'), 'SYNTHETIC=1\n')
-    const result = s.bash('grep -r x .')
-    assert.equal(result.tier, 'caution')
-    assert.ok(result.reasons.some(item => item.entryId === 'read.secret'))
-  } finally { s.close() }
-})
-
-test('a recursive read over more entries than the walk checks is Caution', () => {
-  const s = sandbox()
-  try {
-    const big = path.join(s.repo, 'big')
-    mkdirSync(big)
-    for (let k = 0; k < 20001; k++) writeFileSync(path.join(big, String(k)), '')
-    const result = s.bash('grep -r x big')
-    assert.equal(result.tier, 'caution')
-    assert.ok(result.reasons.some(item => item.description === 'reads a directory too large to check'))
-    assert.equal(s.bash('grep -r x src', {}).tier, 'safe')
+    writeFileSync(path.join(s.repo, 'p.json'), '{}\n')
+    for (const command of ['jq -n env', 'jq -n \'$ENV.HOME\'', 'jq -n \'import "x" as $d; $d\'', 'jq \'include "x"; .\' p.json']) assert.equal(s.bash(command).tier, 'caution', command)
+    assert.equal(s.bash('jq .a p.json').tier, 'safe')
+    assert.equal(s.bash('jq -r --arg env x .a p.json').tier, 'safe')
+    // yq is not installed on the test host; its env and load functions are taken from its docs.
+    for (const command of ['yq \'.a | env(HOME)\' p.json', 'yq \'load(x)\' p.json']) assert.ok(s.bash(command).reasons.some(item => item.entryId === 'scope.read-outside'), command)
   } finally { s.close() }
 })
 

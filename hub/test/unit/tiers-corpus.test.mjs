@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, test } from 'node:test'
@@ -32,6 +32,29 @@ writeFileSync(path.join(home, '.docker', 'config.json'), '{}\n')
 writeFileSync(path.join(home, '.kube', 'config'), 'synthetic\n')
 writeFileSync(path.join(home, 'project', 'notes.txt'), 'synthetic\n')
 writeFileSync(path.join(home, 'project', 'package.json'), '{}\n')
+// D-88 shapes from the phase 2 round 2 reviews. The repo is a git work tree (a `.git` with a HEAD),
+// holds a synthetic .env, dangling symlinks to a persistence file, into the deck state and out of
+// the repo, a symlink to the deck state dir, a two-hop chain to ~/.ssh and the deck state, a
+// symlink to its own .env, and a venv-style link out of the repo. ~/ng is a project that is not
+// a git work tree, and ~/wt2 a second worktree.
+const repo = path.join(home, 'repo')
+for (const dir of ['.git', 'empty', 'src2', 'other', 'other2', '.venv/bin', '../ng/sub', '../ng/empty', '../wt2/cfg']) mkdirSync(path.join(repo, dir), { recursive: true })
+writeFileSync(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+writeFileSync(path.join(repo, '.env'), 'API_KEY=synthetic\n')
+writeFileSync(path.join(repo, 'src', 'a.txt'), 'b\na\n')
+writeFileSync(path.join(repo, 'src', 'p.json'), '{"scripts":{"test":"echo synthetic"}}\n')
+symlinkSync(path.join(home, '.config', 'autostart', 'evil.desktop'), path.join(repo, 'dang'))
+symlinkSync(path.join(deckPaths.state, 'newfile'), path.join(repo, 'dang2'))
+symlinkSync(path.join(root, 'outside-new'), path.join(repo, 'dang3'))
+symlinkSync(deckPaths.state, path.join(repo, 'src', 'statelink'))
+symlinkSync('../other', path.join(repo, 'src2', 'l1'))
+symlinkSync(path.join(home, '.ssh'), path.join(repo, 'other', 'l2'))
+symlinkSync('../other2', path.join(repo, 'src2', 'l3'))
+symlinkSync(deckPaths.state, path.join(repo, 'other2', 'd'))
+symlinkSync('../.env', path.join(repo, 'src', 'link'))
+symlinkSync('/usr/bin/python3', path.join(repo, '.venv', 'bin', 'python'))
+writeFileSync(path.join(home, 'ng', 'sub', '.env'), 'TOKEN=synthetic\n')
+writeFileSync(path.join(home, 'wt2', 'cfg', '.env'), 'API_KEY=synthetic\n')
 Object.assign(process.env, {
   HOME: home,
   XDG_CONFIG_HOME: path.join(home, '.config'),

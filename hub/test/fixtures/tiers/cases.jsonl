@@ -471,8 +471,8 @@
 {"toolName":"Bash","toolInput":{"command":"git diff /home/you/.config/fleetmates /tmp"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
 {"toolName":"Bash","toolInput":{"command":"git diff --stat /home/you/.config /home/you/empty"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
 {"toolName":"Bash","toolInput":{"command":"git diff /home/you/project /home/you/work"},"cwd":"/home/you/repo","expected":"caution","reason":"reads outside the repo"}
-{"toolName":"Bash","toolInput":{"command":"git diff src"},"cwd":"/home/you/repo","expected":"safe"}
-{"toolName":"Bash","toolInput":{"command":"git diff main -- src"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git diff src"},"cwd":"/home/you/repo","expected":"caution","reason":"compares directories"}
+{"toolName":"Bash","toolInput":{"command":"git diff main -- src"},"cwd":"/home/you/repo","expected":"caution","reason":"compares directories"}
 {"toolName":"Bash","toolInput":{"command":"git diff origin/main"},"cwd":"/home/you/repo","expected":"safe"}
 {"toolName":"Bash","toolInput":{"command":"diff -N /home/you /home/you/empty"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
 {"toolName":"Bash","toolInput":{"command":"diff -N /home/you/.claude /home/you/empty"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
@@ -498,7 +498,7 @@
 {"toolName":"Bash","toolInput":{"command":"diff -u notes.txt /dev/null"},"cwd":"/home/you/repo","expected":"safe"}
 {"toolName":"Bash","toolInput":{"command":"git log -- /home/you/project"},"cwd":"/home/you/repo","expected":"caution","reason":"reads outside the repo"}
 {"toolName":"Bash","toolInput":{"command":"git log --format=%h -- ../project"},"cwd":"/home/you/repo","expected":"caution","reason":"reads outside the repo"}
-{"toolName":"Bash","toolInput":{"command":"grep --exclude-dir=/home/you/work -r x src"},"cwd":"/home/you/repo","expected":"caution","reason":"reads outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"grep --exclude-dir=/home/you/work -r x src"},"cwd":"/home/you/repo","expected":"safe"}
 {"toolName":"Bash","toolInput":{"command":"rg foo"},"cwd":"/home/you/project","expected":"caution","reason":"reads outside the repo"}
 {"toolName":"Bash","toolInput":{"command":"ls -R"},"cwd":"/home/you/project","expected":"caution","reason":"reads outside the repo"}
 {"toolName":"Bash","toolInput":{"command":"cargo test -- --logfile /home/you/.bashrc"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
@@ -547,3 +547,106 @@
 {"toolName":"Bash","toolInput":{"command":"diff --recursive /home/you/.config/fleetmates /home/you/other"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
 {"toolName":"Bash","toolInput":{"command":"ls --recursive /home/you/.config"},"cwd":"/home/you/repo","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
 {"toolName":"Bash","toolInput":{"command":"grep -rn /api/v1/users src"},"cwd":"/home/you/repo","expected":"safe","note":"the pattern is not a path (pathOperands afterFirst)"}
+{"toolName":"Bash","toolInput":{"command":"sort -o dang src/a.txt"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"sort -o dang2 src/a.txt"},"cwd":"/home/you/repo","expected":"destructive","reason":"writes the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"git diff --output=dang"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"uniq src/a.txt dang"},"cwd":"/home/you/repo","expected":"destructive","reason":"runs at the next login or shell start"}
+{"toolName":"Bash","toolInput":{"command":"sort -o dang3 src/a.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"writes outside the repo"}
+{"toolName":"Bash","toolInput":{"command":"tree -o dang"},"cwd":"/home/you/repo","expected":"destructive"}
+{"toolName":"Bash","toolInput":{"command":"find . -fprint dang2"},"cwd":"/home/you/repo","expected":"destructive"}
+{"toolName":"Bash","toolInput":{"command":"cat dang"},"cwd":"/home/you/repo","expected":"caution","reason":"names a path through a symlink"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/dang","content":"x"},"cwd":"/home/you/repo","expected":"destructive"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/dang2","content":"x"},"cwd":"/home/you/repo","expected":"destructive"}
+{"toolName":"Write","toolInput":{"file_path":"/home/you/repo/dang3","content":"x"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Edit","toolInput":{"file_path":"/home/you/repo/dang","content":"x"},"cwd":"/home/you/repo","expected":"destructive"}
+{"toolName":"Bash","toolInput":{"command":"grep -R tok"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a directory tree following symlinks"}
+{"toolName":"Bash","toolInput":{"command":"grep -R -e tok -e x"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a directory tree following symlinks"}
+{"toolName":"Bash","toolInput":{"command":"grep -R -e tok"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"grep -r tok"},"cwd":"/home/you","expected":"destructive"}
+{"toolName":"Bash","toolInput":{"command":"grep -r -e tok -e x"},"cwd":"/home/you","expected":"destructive","reason":"reads a directory that holds the deck's own files"}
+{"toolName":"Bash","toolInput":{"command":"find -name token"},"cwd":"/home/you","expected":"destructive"}
+{"toolName":"Bash","toolInput":{"command":"rg -e tok -e x"},"cwd":"/home/you","expected":"destructive"}
+{"toolName":"Bash","toolInput":{"command":"grep -R k src2"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"grep -R tok src2"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"grep -rR k src2"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"diff -rN src2 empty"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"find -L src2 -type f"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"grep -R tok src2/l3"},"cwd":"/home/you/repo","expected":"caution","reason":"names a path through a symlink"}
+{"toolName":"Bash","toolInput":{"command":"grep -r k src2"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"cat src2/l3/d/token"},"cwd":"/home/you/repo","expected":"destructive"}
+{"toolName":"Bash","toolInput":{"command":"ls"},"cwd":"/home/you/repo/src2/l3","expected":"caution","reason":"runs in a directory outside the repo or reached through a symlink"}
+{"toolName":"Bash","toolInput":{"command":"sed ':a e touch /tmp/x' notes.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"the sed script can run a command or write a file"}
+{"toolName":"Bash","toolInput":{"command":"sed -n ':a w /home/you/.bashrc' notes.txt"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"sed 's/a/b/ w out.txt' notes.txt"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"sed 's/a/b/ e' notes.txt"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"sed -n '$!N;P;D' notes.txt"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"sed -n '/a/,+2p' notes.txt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"sed 's/a/b/gI' notes.txt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git diff sub empty"},"cwd":"/home/you/ng","expected":"caution","repoRoot":"/home/you/ng","reason":"compares directories"}
+{"toolName":"Bash","toolInput":{"command":"git diff --stat sub empty"},"cwd":"/home/you/ng","expected":"caution","repoRoot":"/home/you/ng"}
+{"toolName":"Bash","toolInput":{"command":"git diff sub/.env empty/x"},"cwd":"/home/you/ng","expected":"caution","repoRoot":"/home/you/ng","reason":"runs git diff outside a git work tree"}
+{"toolName":"Bash","toolInput":{"command":"cat sub/.env"},"cwd":"/home/you/ng","expected":"caution","repoRoot":"/home/you/ng","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git diff ../wt2/cfg empty"},"cwd":"/home/you/repo","expected":"caution","worktrees":["/home/you/wt2"],"reason":"compares directories"}
+{"toolName":"Bash","toolInput":{"command":"git diff /home/you/wt2/cfg /home/you/repo/empty"},"cwd":"/home/you/repo","expected":"caution","worktrees":["/home/you/wt2"]}
+{"toolName":"Bash","toolInput":{"command":"git diff"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git grep --untracked --no-exclude-standard API_KEY"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"git grep --untracked API_KEY"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"git grep --no-index API_KEY"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"git grep API_KEY"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"grep -R -A 1 tok"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"grep -R -B 1 k"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"grep -RA 1 tok"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"find -L -name token"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"grep -R -A 1 tok ."},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"grep -rR -A1 tok"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"find . -name token"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"grep -r -A 1 tok"},"cwd":"/home/you","expected":"destructive"}
+{"toolName":"Bash","toolInput":{"command":"grep -r -A 1 tok"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"grep -R x src"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"diff -r src src"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"cat src/link"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"sort -o package.json src/p.json"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"sort -o .husky/pre-commit src/p.json"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"sort -o .claude/commands/x.md src/p.json"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"uniq src/p.json Makefile"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"git diff --output=.github/workflows/ci.yml"},"cwd":"/home/you/repo","expected":"caution","reason":"changes what a build, test or hook runs"}
+{"toolName":"Bash","toolInput":{"command":"sort -o out.txt src/p.json"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"rg foo"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"rg -n foo"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"rg -l TODO"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"grep -rn foo ."},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"grep -r needle ."},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"ls -R"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"ls -R src"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"tree"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"find . -name x"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"du -a"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"du -sh ."},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"rg foo src"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"grep -r foo src"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"cargo test"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git branch"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git branch -a"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"npm test -- --watch=false"},"cwd":"/home/you/repo","expected":"caution","reason":"passes options to the test program"}
+{"toolName":"Bash","toolInput":{"command":"diff -r . ."},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"ls .venv/bin/python"},"cwd":"/home/you/repo","expected":"caution","reason":"names a path through a symlink"}
+{"toolName":"Bash","toolInput":{"command":"docker compose config"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"cat /home/you/repo/notes.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"names an absolute or home path"}
+{"toolName":"Bash","toolInput":{"command":"cat notes.txt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"cat src/statelink/token"},"cwd":"/home/you/repo","expected":"destructive"}
+{"toolName":"Bash","toolInput":{"command":"git commit -F /home/you/.ssh/id_ed25519"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"git commit -m /tmp/x"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"grep -e /etc/passwd notes.txt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"jq -n env"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"jq -n '$ENV'"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"jq -n 'import \"x\" as $d; $d'"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"jq .scripts src/p.json"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git show HEAD:.env"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git show main:config/.env.local"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git log -p -- secrets/id_rsa"},"cwd":"/home/you/repo","expected":"caution","reason":"reads a secret file"}
+{"toolName":"Bash","toolInput":{"command":"git log -p -- id_rsa.pub"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git show HEAD:notes.txt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"yq '.a | env(HOME)' notes.txt"},"cwd":"/home/you/repo","expected":"caution"}
+{"toolName":"Bash","toolInput":{"command":"yq '.a' notes.txt"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"git branch --contains /tmp/x"},"cwd":"/home/you/repo","expected":"safe"}
+{"toolName":"Bash","toolInput":{"command":"grep -r --frobnicate X tok"},"cwd":"/home/you","expected":"destructive","reason":"reads a directory that holds the deck's own files"}

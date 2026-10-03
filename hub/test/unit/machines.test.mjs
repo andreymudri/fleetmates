@@ -1622,7 +1622,8 @@ test('Bash writes resolve relative sensitive targets and symlink aliases', () =>
     execFileSync('/bin/sh', ['-c', settingsWrite], { cwd, timeout: 1000 })
     assert.equal(readFileSync(path.join(cwd, 'settings.local.json'), 'utf8'), '{}')
     assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command: settingsWrite } }, { repoRoot: repo }), 'destructive')
-    for (const [command, expected] of [["printf 'config-link'", 'safe'], ['cat config-link', 'safe'], ['printf x > ordinary.txt', 'caution']]) {
+    // D-88 (1): reading through a symlink is Caution (it is not a write, so not Destructive).
+    for (const [command, expected] of [["printf 'config-link'", 'safe'], ['cat config-link', 'caution'], ['printf x > ordinary.txt', 'caution']]) {
       assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), expected, command)
     }
   } finally { rmSync(repo, { recursive: true, force: true }) }

@@ -17,7 +17,7 @@ async function withDatabase(fn) {
 test('opens strict M1 schema with private files, WAL, foreign keys and a stable epoch', async () => withDatabase(async file => {
   const store = openDeckDb(file)
   try {
-    assert.equal(store.get('PRAGMA user_version').user_version, 3)
+    assert.equal(store.get('PRAGMA user_version').user_version, 4)
     assert.equal(store.get('PRAGMA journal_mode').journal_mode, 'wal')
     assert.equal(store.get('PRAGMA foreign_keys').foreign_keys, 1)
     assert.equal(store.get('PRAGMA auto_vacuum').auto_vacuum, 2)
@@ -98,7 +98,7 @@ test('a version 1 database migrates to the latest version with a pre-0002 backup
   db.close()
   const store = openDeckDb(file)
   try {
-    assert.equal(store.get('PRAGMA user_version').user_version, 3)
+    assert.equal(store.get('PRAGMA user_version').user_version, 4)
     assert.ok(store.all('PRAGMA table_info(sessions)').some(column => column.name === 'launch_task'), 'sessions.launch_task exists')
   } finally { store.close() }
   const backups = (await readdir(path.dirname(file))).filter(name => name.includes('.pre-0002.bak'))
@@ -107,7 +107,7 @@ test('a version 1 database migrates to the latest version with a pre-0002 backup
   try { assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 1) } finally { backup.close() }
 }))
 
-test('a version 2 database migrates to 3 with a pre-0003 backup and gains request reasons and the approvals audit', async () => withDatabase(async file => {
+test('a version 2 database migrates to 4 with a pre-0003 backup (0003 belongs to the archive run, the runner allows the gap and names a backup after the version it migrates to next) and gains request reasons and the approvals audit', async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
   for (const name of ['0001-init.sql', '0002-launch.sql']) db.exec(await readFile(fileURLToPath(new URL(`../../server/db/migrations/${name}`, import.meta.url)), 'utf8'))
@@ -118,7 +118,7 @@ test('a version 2 database migrates to 3 with a pre-0003 backup and gains reques
   db.close()
   const store = openDeckDb(file)
   try {
-    assert.equal(store.get('PRAGMA user_version').user_version, 3)
+    assert.equal(store.get('PRAGMA user_version').user_version, 4)
     assert.deepEqual({ ...store.get('SELECT reasons, confirm_label FROM requests WHERE id = ?', 'q1') }, { reasons: '[]', confirm_label: null })
     assert.throws(() => store.run("UPDATE requests SET reasons = 'not json' WHERE id = 'q1'"), /CHECK/)
     const columns = store.all('PRAGMA table_info(approval_audit)').map(column => column.name)
