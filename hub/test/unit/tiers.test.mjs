@@ -739,6 +739,135 @@ test('runner operands are cut at :: and [ and judged by their nearest existing a
   } finally { s.close() }
 })
 
+// D-91 (1): a word that holds white space is judged like any other word, as a path operand, a
+// runner operand and a secret read. Only the value of an option that takes a pattern or script
+// (grep -e, pytest -k and -m, node --test-name-pattern) and the script or pattern operand of sed,
+// awk, jq, grep and rg are left out. A runner operand with white space that names nothing after the
+// `::` and `[` cut is an unknown target. The round 6 review ran pytest 9.1.0 on `.git/a b` and on
+// node ids with a space: each wrote __pycache__ into the directory.
+test('a word with white space is judged like any other word, except the value of a pattern or script option (D-91 (1))', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['a b', '.githooks', '.claude/skills/s', 'src', '.git/a b']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    writeFileSync(path.join(s.repo, 'a b', '.env'), 'SECRET=synthetic\n')
+    writeFileSync(path.join(s.repo, '.githooks', 'test_h.py'), 'def test_a():\n    assert True\n')
+    writeFileSync(path.join(s.repo, '.claude', 'skills', 's', 'test_s.py'), 'def test_a():\n    assert True\n')
+    writeFileSync(path.join(s.repo, '.git', 'a b', 'test_a.py'), 'def test_a():\n    assert True\n')
+    writeFileSync(path.join(s.repo, 'src', 'test_x.py'), 'def test_a():\n    assert True\n')
+    for (const command of ['cat "a b/.env"', 'head "a b/.env"', 'tail -n 1 "a b/.env"', 'grep x "a b/.env"', 'cat src/test_x.py "a b/.env"', 'wc --files0-from="a b/.env"']) expectTier(s.bash(command), 'caution', 'read.secret', command)
+    const flagged = ['pytest ".githooks/test_h.py::test a"', 'pytest ".githooks/test_h.py:: x"', 'pytest ".claude/skills/s/test_s.py::test_a or"', 'pytest ".githooks "', 'pytest ".git/a b"', 'mypy ".git/a b"', 'pytest ".git/x y"', 'pytest "src/missing file.py"', 'pytest -k a ".githooks "', 'python -m pytest ".githooks/test_h.py::test a"']
+    for (const command of flagged) expectTier(s.bash(command), 'caution', 'runner.config-dir', command)
+    // The values of pattern options and the script or pattern operands stay text.
+    const text = ['pytest -k "a b/.env"', 'pytest -k ".githooks x"', 'pytest -m "slow and not db"', 'pytest -q -k "test a" src', 'pytest "src/test_x.py::test a"', 'grep -e "a b/.env" src/test_x.py', 'grep "x a b/.env" src/test_x.py', 'rg "a b/.env" src', 'sed -n \'s/a b/c/p\' src/test_x.py', 'sed -e \'s/a b/c/\' src/test_x.py']
+    for (const command of text) expectTier(s.bash(command), 'safe', null, command)
+    // node is not plain under D-87, so it is Caution anyway; its test name pattern is no target.
+    const node = s.bash('node --test --test-name-pattern "a b/.env"')
+    assert.ok(!node.reasons.some(item => item.entryId === 'runner.config-dir'), ids(node))
+  } finally { s.close() }
+})
+
+// D-91 (2): pytest 8.2 and later, and mypy's argparse, read more arguments from FILE for a word
+// `@FILE`, which would bypass the option lists. The round 6 review ran pytest 9.1.0 on an argument
+// file holding --basetemp outside the repo: it emptied that directory.
+test('a pytest or mypy word that starts with @ is Caution (D-91 (2))', () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.repo, 'src'))
+    writeFileSync(path.join(s.repo, 'src', 'args.txt'), '--basetemp=/tmp/x\n')
+    for (const command of ['pytest @src/args.txt', 'pytest -q @src/args.txt', 'pytest src @src/args.txt', 'pytest @missing', 'pytest -- @src/args.txt', 'mypy @src/args.txt', 'mypy src @src/args.txt', 'python -m pytest @src/args.txt', 'python3 -m pytest @src/args.txt']) {
+      expectTier(s.bash(command), 'caution', 'unknown.option', command)
+    }
+    for (const command of ['pytest src', 'pytest -k a@b src', 'mypy src']) expectTier(s.bash(command), 'safe', null, command)
+  } finally { s.close() }
+})
+
+// D-91 (3): a root-anchored execution-config entry that is a symlink, and the directory core.hooksPath
+// names, protect their real targets: any write whose realpath lies in one is Caution. The round 6
+// reviews ran git with .githooks -> tools/hooks and with core.hooksPath=scripts/git-hooks: an edit
+// of the real hook file ran at the next commit.
+test('a write into the real target of a linked execution-config entry or the core.hooksPath directory is Caution (D-91 (3))', () => {
+  const s = sandbox()
+  const writers = file => [
+    ['Write', s.run('Write', { file_path: file, content: 'x' })],
+    ['Edit', s.run('Edit', { file_path: file, old_string: 'a', new_string: 'b' })],
+    ['MultiEdit', s.run('MultiEdit', { file_path: file, edits: [] })],
+    ['NotebookEdit', s.run('NotebookEdit', { notebook_path: file, new_source: 'x' })],
+    ['sort -o', s.bash(`sort -o ${file} src/a.txt`)]
+  ]
+  try {
+    for (const dir of ['.git', 'tools/hooks', '.agents/skills/x', '.claude', 'mk', 'meta/workflows', 'src', 'scripts/git-hooks', 'cfg']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    writeFileSync(path.join(s.repo, 'tools', 'hooks', 'pre-commit'), '#!/bin/sh\n')
+    writeFileSync(path.join(s.repo, 'mk', 'real.mk'), 'all:\n')
+    writeFileSync(path.join(s.repo, 'src', 'a.txt'), 'a\n')
+    symlinkSync('tools/hooks', path.join(s.repo, '.githooks'))
+    symlinkSync('../.agents/skills', path.join(s.repo, '.claude', 'skills'))
+    symlinkSync('mk/real.mk', path.join(s.repo, 'Makefile'))
+    symlinkSync('meta', path.join(s.repo, '.github'))
+    symlinkSync('cfg/pkg.json', path.join(s.repo, 'package.json'))
+    for (const file of ['tools/hooks/pre-commit', 'tools/hooks/reference-transaction', 'mk/real.mk', '.agents/skills/x/SKILL.md', 'meta/workflows/ci.yml', 'cfg/pkg.json']) {
+      for (const [tool, result] of writers(file)) expectTier(result, 'caution', 'file.execution-config', `${tool} ${file}`)
+    }
+    // Siblings of the targets stay ordinary files.
+    for (const file of ['tools/other.sh', 'mk/other.mk', 'cfg/other.json', 'src/a.py']) expectTier(s.run('Write', { file_path: file, content: 'x' }), 'safe', null, `Write ${file}`)
+    // core.hooksPath, with no symlink: read from .git/config, folded, quoted, through include.path
+    // and from the home git config; a change is seen at the next classification.
+    expectTier(s.run('Write', { file_path: 'scripts/git-hooks/pre-commit', content: 'x' }), 'safe', null, 'before core.hooksPath')
+    writeFileSync(path.join(s.repo, '.git', 'config'), '[core]\n\tbare = false\n[Core]\n\tHooksPath = scripts/git-hooks ; a comment\n')
+    for (const [tool, result] of writers('scripts/git-hooks/pre-commit')) expectTier(result, 'caution', 'file.execution-config', `${tool} hooksPath`)
+    expectTier(s.run('Write', { file_path: 'scripts/other.sh', content: 'x' }), 'safe', null, 'Write scripts/other.sh')
+    mkdirSync(path.join(s.repo, 'h2'))
+    writeFileSync(path.join(s.repo, '.git', 'config'), '[include]\n\tpath = extra.cfg\n')
+    writeFileSync(path.join(s.repo, '.git', 'extra.cfg'), '[core]\n\thookspath = "h2"\n')
+    expectTier(s.run('Write', { file_path: 'h2/pre-push', content: 'x' }), 'caution', 'file.execution-config', 'hooksPath through include.path')
+    expectTier(s.run('Write', { file_path: 'scripts/git-hooks/pre-commit', content: 'x' }), 'safe', null, 'the old hooksPath')
+    writeFileSync(path.join(s.home, '.gitconfig'), '[core]\n  hooksPath = h3\n')
+    expectTier(s.run('Write', { file_path: 'h3/pre-commit', content: 'x' }), 'caution', 'file.execution-config', 'hooksPath from ~/.gitconfig, relative to the work tree')
+    // A linked worktree reads the common config and its own config.worktree.
+    const wt = path.join(s.root, 'wt')
+    mkdirSync(path.join(s.repo, '.git', 'worktrees', 'wt'), { recursive: true })
+    mkdirSync(path.join(wt, 'h4'), { recursive: true })
+    writeFileSync(path.join(wt, '.git'), `gitdir: ${path.join(s.repo, '.git', 'worktrees', 'wt')}\n`)
+    writeFileSync(path.join(s.repo, '.git', 'worktrees', 'wt', 'commondir'), '../..\n')
+    writeFileSync(path.join(s.repo, '.git', 'worktrees', 'wt', 'config.worktree'), '[core]\n\thooksPath = h4\n')
+    const inTree = file => classify({ toolName: 'Write', toolInput: { file_path: file, content: 'x' }, cwd: wt, repoRoot: wt, homeDir: s.home, deckPaths: s.deckPaths })
+    expectTier(inTree('h4/pre-commit'), 'caution', 'file.execution-config', 'worktree config.worktree hooksPath')
+    expectTier(inTree('h2/pre-commit'), 'caution', 'file.execution-config', 'worktree common config hooksPath')
+    expectTier(inTree('h5/pre-commit'), 'safe', null, 'worktree ordinary file')
+    // A repo root below the work tree top still resolves a relative hooksPath from the top.
+    mkdirSync(path.join(s.repo, 'pkg', 'hooks'), { recursive: true })
+    writeFileSync(path.join(s.repo, '.git', 'extra.cfg'), '[core]\n\thookspath = pkg/hooks\n')
+    const pkg = path.join(s.repo, 'pkg')
+    expectTier(s.run('Write', { file_path: 'hooks/pre-commit', content: 'x' }, { cwd: pkg, repoRoot: pkg }), 'caution', 'file.execution-config', 'hooksPath from the work tree top')
+  } finally { s.close() }
+})
+
+// D-91 (4): the second half of the D-90 (b) check (a path named outside the repo whose realpath is
+// inside it) and the nearest-ancestor walk of D-90 (d), each pinned by its own rows.
+test('a write through a link outside the repo into it is Caution, and a runner operand is judged by its nearest existing ancestor (D-91 (4))', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['mk', 'src', '.githooks/sub', '.git']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    writeFileSync(path.join(s.repo, 'other.py'), 'x = 1\n')
+    writeFileSync(path.join(s.repo, 'src', 'a.txt'), 'a\n')
+    writeFileSync(path.join(s.repo, 'mk', 'real.mk'), 'all:\n')
+    symlinkSync('mk/real.mk', path.join(s.repo, 'Makefile'))
+    mkdirSync(path.join(s.root, 'out'))
+    symlinkSync(path.join(s.repo, 'other.py'), path.join(s.root, 'out', 'alias.py'))
+    symlinkSync(s.repo, path.join(s.root, 'alias'))
+    for (const file of [path.join(s.root, 'out', 'alias.py'), path.join(s.root, 'alias', 'src', 'a.txt'), path.join(s.root, 'alias', 'src', 'new.txt'), path.join(s.root, 'alias', 'Makefile')]) {
+      expectTier(s.run('Write', { file_path: file, content: 'x' }), 'caution', 'path.symlink', `Write ${file}`)
+      expectTier(s.run('Edit', { file_path: file, old_string: 'a', new_string: 'b' }), 'caution', 'path.symlink', `Edit ${file}`)
+    }
+    // The walk: a missing path is judged by the directory that exists above it, so a missing name
+    // that only looks like a hook directory below src is Safe, and one below .githooks is not.
+    for (const command of ['pytest src/.githooks/missing.py', 'pytest src/.git/missing.py', 'pytest src/missing/.husky/x.py']) expectTier(s.bash(command), 'safe', null, command)
+    for (const command of ['pytest .githooks/sub/missing/x.py', 'pytest .githooks/sub/missing']) expectTier(s.bash(command), 'caution', 'runner.config-dir', command)
+  } finally { s.close() }
+})
+
 // D-89 (4): cargo writes the default target directory next to the workspace root's Cargo.toml,
 // which may be above the member the command runs in (cargo 1.98, run by the round 4 review).
 test('cargo checks the target directory of every Cargo.toml from the working directory up (D-89 (4))', () => {

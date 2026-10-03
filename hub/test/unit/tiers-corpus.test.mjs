@@ -75,6 +75,24 @@ symlinkSync('../.agents/skills', path.join(linked, '.claude', 'skills'))
 symlinkSync('mk/real.mk', path.join(linked, 'Makefile'))
 symlinkSync('../vendor/lib', path.join(linked, 'src', 'lib'))
 symlinkSync('.husky', path.join(linked, 'hooks'))
+// D-91: a secret in a directory whose name has a space, a pytest argument file, a directory with a
+// space inside linked/.git, ~/hp whose .git/config sets core.hooksPath (no symlink), and links
+// outside the repos into them (~/alias -> repo, ~/out/notes.txt -> repo/notes.txt, ~/linkedalias
+// -> linked).
+mkdirSync(path.join(repo, 'a b'))
+writeFileSync(path.join(repo, 'a b', '.env'), 'API_KEY=synthetic\n')
+writeFileSync(path.join(repo, 'src', 'args.txt'), '--basetemp=/tmp/x\n')
+mkdirSync(path.join(linked, '.git', 'a b'))
+writeFileSync(path.join(linked, '.git', 'a b', 'test_a.py'), 'def test_a():\n    assert True\n')
+const hp = path.join(home, 'hp')
+for (const dir of ['.git', 'scripts/git-hooks']) mkdirSync(path.join(hp, dir), { recursive: true })
+writeFileSync(path.join(hp, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+writeFileSync(path.join(hp, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n\thooksPath = scripts/git-hooks\n')
+writeFileSync(path.join(hp, 'notes.txt'), 'synthetic\n')
+mkdirSync(path.join(home, 'out'))
+symlinkSync(repo, path.join(home, 'alias'))
+symlinkSync(path.join(repo, 'notes.txt'), path.join(home, 'out', 'notes.txt'))
+symlinkSync(linked, path.join(home, 'linkedalias'))
 writeFileSync(path.join(home, 'ng', 'sub', '.env'), 'TOKEN=synthetic\n')
 writeFileSync(path.join(home, 'wt2', 'cfg', '.env'), 'API_KEY=synthetic\n')
 Object.assign(process.env, {

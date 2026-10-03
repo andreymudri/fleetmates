@@ -1,5 +1,5 @@
 // The approvals tier classifier (docs/deck/07-approvals.md section 3, with the tier review changes
-// adopted as D-75 to D-90). `classify` matches a permission request against the effective tiers
+// adopted as D-75 to D-91). `classify` matches a permission request against the effective tiers
 // set (tiers.default.json plus the user's tiers.json, see tiers-store.mjs), takes the highest
 // matching tier, and then applies the floors, which are code and cannot be lowered or disabled.
 import { createHash } from 'node:crypto'
@@ -343,7 +343,8 @@ const VALUE_OPTIONS = Object.freeze({
 
 // The modelled spec for a command, by its longest listed command words (git and docker by
 // subcommand), or null.
-const valueSpec = (name, list) => VALUE_OPTIONS[[name, list[1], list[2]].join(' ')] ?? VALUE_OPTIONS[[name, list[1]].join(' ')] ?? VALUE_OPTIONS[name] ?? null
+const ownSpec = key => Object.hasOwn(VALUE_OPTIONS, key) ? VALUE_OPTIONS[key] : undefined
+const valueSpec = (name, list) => ownSpec([name, list[1], list[2]].join(' ')) ?? ownSpec([name, list[1]].join(' ')) ?? ownSpec(name) ?? null
 
 // Split a command's arguments (after its command words) into operands and option values by its
 // value-option spec. Words after `--` are operands. A value of an option the spec does not know is
@@ -543,7 +544,121 @@ function configVerdict(location, ctx, segment) {
     if (roots.some(root => isExecutionConfig(path.relative(root, candidate)))) return reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs')
     if (roots.length && isConfigName(path.relative(roots[0], candidate))) return reason('file.config-name', 'caution', segment, 'changes a configuration file at the repo root or in a dot directory')
   }
+  // D-91 (3): the real target of a linked execution-config entry, or the core.hooksPath directory.
+  const real = realExisting(location)
+  if (protectedTargets(ctx).some(target => within(real, target))) return reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs')
   return null
+}
+
+// D-91 (3): the root-anchored names of the execution-config list and of the floors, which a repo
+// may hold as symlinks into ordinary directories, and the directories whose entries are matched by
+// name (`.yarnrc*` at the root, `.cargo/config*`, `.claude/settings*.json`).
+const LINKED_NAMES = Object.freeze([...EXECUTION_CONFIG.filter(name => !/[*/]/.test(name)), '.cargo', '.husky', '.githooks', '.github', '.github/workflows', '.claude', '.claude/commands', '.claude/agents', '.claude/skills', '.claude/hooks', '.mcp.json', '.git'])
+const LINKED_PATTERNS = Object.freeze([['', /^\.yarnrc/], ['.cargo', /^config/], ['.claude', /^settings.*\.json$/]])
+const isLink = location => { try { return lstatSync(location).isSymbolicLink() } catch { return false } }
+const statKey = location => { try { const stat = statSync(location, { bigint: true }); return `${stat.ino}:${stat.mtimeNs}:${stat.size}` } catch { return '-' } }
+
+// The git work tree top level at or above `dir`, with its git dir and common dir.
+function gitDirs(dir) {
+  for (let current = dir; ; current = path.dirname(current)) {
+    const dotgit = path.join(current, '.git')
+    let gitdir = null
+    try {
+      if (statSync(dotgit).isDirectory()) gitdir = dotgit
+      else {
+        const match = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotgit, 'utf8'))
+        if (match) gitdir = path.resolve(current, match[1])
+      }
+    } catch {}
+    if (gitdir) {
+      let common = gitdir
+      try { common = path.resolve(gitdir, readFileSync(path.join(gitdir, 'commondir'), 'utf8').trim()) } catch {}
+      return { top: current, gitdir, common }
+    }
+    if (path.dirname(current) === current) return null
+  }
+}
+
+// One git config value: quotes removed, the escapes git documents applied, a comment cut off.
+function configValue(text) {
+  let out = ''
+  let quoted = false
+  let pending = ''
+  for (let k = 0; k < text.length; k++) {
+    const char = text[k]
+    if (char === '\\' && k + 1 < text.length) { out += pending + ({ n: '\n', t: '\t', b: '\b' }[text[k + 1]] ?? text[k + 1]); pending = ''; k++; continue }
+    if (char === '"') { out += pending; pending = ''; quoted = !quoted; continue }
+    if (!quoted && (char === '#' || char === ';')) break
+    if (!quoted && /\s/.test(char)) { if (out) pending += char; continue }
+    out += pending + char
+    pending = ''
+  }
+  return out
+}
+
+// Every core.hooksPath value in a git config file and the files it includes (include.path and
+// includeIf.*.path, the conditions not evaluated, so a conditional include always counts). `files`
+// collects every file read or looked for, for the cache key.
+function readHooksPaths(file, home, out, files, depth = 0) {
+  if (depth > 10 || files.includes(file)) return
+  files.push(file)
+  let text
+  try { text = readFileSync(file, 'utf8') } catch { return }
+  let section = ''
+  for (let line of text.replace(/\\\r?\n/g, '').split(/\r?\n/)) {
+    const header = /^\s*\[\s*([A-Za-z0-9.-]+)(?:\s+"(?:[^"\\]|\\.)*")?\s*\]/.exec(line)
+    if (header) { section = header[1].toLowerCase(); line = line.slice(header[0].length) }
+    const entry = /^\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=(.*))?$/.exec(line)
+    if (!entry || entry[2] === undefined) continue
+    const key = entry[1].toLowerCase()
+    const value = configValue(entry[2])
+    if (!value) continue
+    const expanded = value.startsWith('~/') && home ? path.join(home, value.slice(2)) : value
+    if (section === 'core' && key === 'hookspath') out.push(expanded)
+    if ((section === 'include' || section === 'includeif') && key === 'path') readHooksPaths(path.resolve(path.dirname(file), expanded), home, out, files, depth + 1)
+  }
+}
+
+// Per repo root: the listed names found as symlinks and the core.hooksPath directories, cached
+// under a key built from the stats of the root, the directories searched by pattern and every git
+// config file read, so a new link or a config edit is seen at the next classification. The links
+// are resolved at each call, so a link changed further along the path is seen too.
+const protectedCache = new Map()
+function protectedFor(root, home) {
+  const dirs = gitDirs(root)
+  const configs = dirs ? [path.join(dirs.common, 'config'), path.join(dirs.gitdir, 'config.worktree')] : []
+  if (home) configs.push(path.join(home, '.gitconfig'), path.join(home, '.config', 'git', 'config'))
+  const roots = [root, ...['.cargo', '.claude', '.github'].map(name => path.join(root, name))]
+  const dirKey = [...roots.map((dir, k) => k === 0 ? (() => { try { const stat = lstatSync(dir, { bigint: true }); return `${stat.ino}:${stat.mtimeNs}` } catch { return '-' } })() : statKey(dir)), dirs?.top ?? '', ...configs].join('|')
+  const cached = protectedCache.get(root)
+  if (cached && cached.dirKey === dirKey && cached.files.map(statKey).join('|') === cached.fileKey) return cached
+  const links = LINKED_NAMES.map(name => path.join(root, name)).filter(isLink)
+  for (const [dir, pattern] of LINKED_PATTERNS) {
+    let names = []
+    try { names = readdirSync(path.join(root, dir)) } catch {}
+    for (const name of names) if (pattern.test(name) && isLink(path.join(root, dir, name))) links.push(path.join(root, dir, name))
+  }
+  const values = []
+  const files = []
+  for (const file of configs) readHooksPaths(file, home, values, files)
+  // A relative core.hooksPath is taken from the top of the work tree (githooks(5)).
+  const hooks = values.map(value => path.isAbsolute(value) ? path.normalize(value) : path.resolve(dirs?.top ?? root, value))
+  const entry = { dirKey, files, fileKey: files.map(statKey).join('|'), links, hooks }
+  protectedCache.set(root, entry)
+  return entry
+}
+
+// The real paths a write may not reach at Safe, for every repo scope root of a classification.
+function protectedTargets(ctx) {
+  if (!ctx.protectedTargets) {
+    const targets = new Set()
+    for (const root of new Set(ctx.lexicalRoots)) {
+      const { links, hooks } = protectedFor(root, ctx.home)
+      for (const location of [...links, ...hooks]) targets.add(realExisting(location))
+    }
+    ctx.protectedTargets = [...targets]
+  }
+  return ctx.protectedTargets
 }
 
 // Glob matching for argument globs: `*` is any text, `?` one character, and `-<N>` a number option.
@@ -1069,6 +1184,36 @@ function inControlledDir(dir, ctx) {
   }))
 }
 
+// D-91 (1): the options that take a pattern or script beyond the value-option specs (pytest -k and
+// -m select tests by expression, node --test-name-pattern by regular expression; the shells' -c and
+// the interpreters' -c and -e take the script itself), and the commands whose first operand is a
+// script or pattern when no option gave one.
+const SHELL_SCRIPT = ['-c']
+const PATTERN_OPTIONS = Object.freeze({ pytest: ['-k', '-m'], node: ['--test-name-pattern', '--test-skip-pattern', '-e', '-p', '--eval', '--print'], sh: SHELL_SCRIPT, bash: SHELL_SCRIPT, dash: SHELL_SCRIPT, zsh: SHELL_SCRIPT, ksh: SHELL_SCRIPT, fish: SHELL_SCRIPT, python: SHELL_SCRIPT, python3: SHELL_SCRIPT, perl: ['-e', '-E'], ruby: ['-e'] })
+const SCRIPT_OPERAND = Object.freeze(['sed', 'awk', 'gawk', 'mawk', 'jq', 'yq', 'grep', 'egrep', 'fgrep', 'rg'])
+// The words of a segment that are pattern or script text: the option names whose value is one, and
+// the indexes in `words` of the values given in the next word and of the script or pattern operand.
+function scriptText(name, list, words) {
+  const known = valueSpec(name, list) ?? spec([])
+  const module = (name === 'python' || name === 'python3') && list[1] === '-m' ? list[2] : null
+  const options = new Set([...known.pattern].filter(option => !known.files.has(option)))
+  for (const key of [name, module]) for (const option of Object.hasOwn(PATTERN_OPTIONS, key ?? '') ? PATTERN_OPTIONS[key] : []) options.add(option)
+  const indexes = new Set()
+  let operand = SCRIPT_OPERAND.includes(name) && !segmentArgs(name, list, words.slice(1)).patternGiven
+  for (let k = 1; k < words.length; k++) {
+    const word = words[k]
+    if (word === '--') { if (operand && k + 1 < words.length) indexes.add(k + 1); break }
+    if (word.startsWith('-') && word !== '-') {
+      const short = !word.startsWith('--') && !known.single && word.length > 2 ? `-${word.at(-1)}` : null
+      if (options.has(word) || (short && options.has(short) && !options.has(word.slice(0, 2)))) indexes.add(k + 1)
+      if (known.values.has(word) || options.has(word) || (short && options.has(short))) k++
+      continue
+    }
+    if (operand) { indexes.add(k); operand = false }
+  }
+  return { options, indexes }
+}
+
 function classifySegment(segment, ctx, ready, out) {
   const text = segment.words.join(' ')
   const push = item => out.reasons.push(item)
@@ -1094,6 +1239,9 @@ function classifySegment(segment, ctx, ready, out) {
   // The file an option names in its own word: `--file=PATH`, `--pathspec-from-file=PATH` or a
   // stuck short value such as `-FPATH`. An option's value in the next word is an operand already.
   const optionValues = []
+  // D-91 (1): a word with white space is judged like any other word, except pattern or script text.
+  const script = scriptText(name, list, words)
+  const textWord = (word, k) => /\s/.test(word) && script.indexes.has(k)
   for (let k = 1; k < words.length; k++) {
     const word = words[k]
     if (info[k]?.glob) {
@@ -1107,12 +1255,12 @@ function classifySegment(segment, ctx, ready, out) {
     if (word.startsWith('-') && word !== '--') {
       const equal = word.indexOf('=')
       const value = equal > 0 ? word.slice(equal + 1) : (!word.startsWith('--') && word.length > 2 ? word.slice(2) : '')
-      const location = value && !/\s/.test(value) ? resolveIn(value, segment.cwd) : null
+      const option = equal > 0 ? word.slice(0, equal) : word.slice(0, 2)
+      const location = value && !(/\s/.test(value) && script.options.has(option)) ? resolveIn(value, segment.cwd) : null
       if (location) optionValues.push({ location, word })
       continue
     }
-    // A relative word with white space is a script or text argument (`sh -c 'echo x'`), not a path.
-    if (!path.isAbsolute(word) && /\s/.test(word)) continue
+    if (textWord(word, k)) continue
     const location = resolveIn(word, segment.cwd)
     if (location) operands.push({ location, word })
   }
@@ -1187,19 +1335,26 @@ function classifySegment(segment, ctx, ready, out) {
     // D-90 (d): a runner operand is cut at `::` and `[` (a pytest node id or parameter id; a glob
     // that matches nothing reaches the runner as written), and one that names nothing is judged by
     // its nearest existing ancestor, which must lie in the repo. A word the deck cannot read, or a
-    // glob too large to expand, is an unknown directory.
+    // glob too large to expand, is an unknown directory. D-91 (1): so is an operand that still holds
+    // white space after the cut and names nothing; only pattern or script text is left out.
     const targets = []
     for (let k = 1; k < words.length; k++) {
       const word = words[k]
       if (info[k] && !info[k].literal && !info[k].glob) { targets.push(null); continue }
-      if (word.startsWith('-') || (!path.isAbsolute(word) && /\s/.test(word))) continue
+      if (word.startsWith('-') || textWord(word, k)) continue
       if (info[k]?.glob) {
         const matches = expandGlob(word, segment.cwd)
         if (matches === null) { targets.push(null); continue }
         if (matches.length) { targets.push(...matches); continue }
       }
-      targets.push(resolveIn(word.split('::')[0].split('[')[0] || '.', segment.cwd))
+      const cut = word.split('::')[0].split('[')[0] || '.'
+      const target = resolveIn(cut, segment.cwd)
+      targets.push(target !== null && /\s/.test(cut) && !lexists(target) ? null : target)
     }
+    // D-91 (2): pytest 8.2 and later, and mypy (argparse fromfile_prefix_chars), read more arguments
+    // from FILE for a word `@FILE`, which no option list here can see.
+    const pyTool = ['python', 'python3'].includes(name) && list[1] === '-m' ? list[2] : name
+    if (['pytest', 'mypy'].includes(pyTool) && words.slice(1).some(word => word.startsWith('@'))) push(reason('unknown.option', 'caution', text, 'reads more arguments from a file'))
     const dirs = [segment.cwd]
     let outside = false
     for (const target of targets) {
@@ -1465,7 +1620,8 @@ function actionInput(toolName, toolInput) {
 
 /**
  * Classify a permission request (docs/deck/07-approvals.md 3.2). Pure except for the read-only
- * realpath and glob checks of the paths it names.
+ * realpath and glob checks of the paths it names, and the read-only, cached D-91 (3) look at the
+ * repo's root-level links and git config files (read as files, not through git).
  * @param {{ toolName: string, toolInput?: object, cwd?: string, repoRoot?: string, worktrees?: string[], homeDir?: string, deckPaths?: { config?: string, state?: string, runtime?: string|null, token?: string, port?: number|string }, tiers?: { entries: object[] } }} input
  * @returns {{ tier: 'safe'|'caution'|'destructive', reasons: { entryId: string, tier: string, segment: string, description: string }[], ruleCandidate: string|null, ruleNote: string|null, confirm: { template: string|null, count: string|null }, description: string }}
  */
