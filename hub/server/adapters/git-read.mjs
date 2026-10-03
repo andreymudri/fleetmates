@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import path from 'node:path'
 
 /**
  * The configuration overrides of docs/deck/08-security.md section 4.8, placed before every git command,
@@ -82,6 +83,8 @@ export function allowedCommand(args) {
     case 'worktree':
       return rest[0] === 'list'
     case 'config':
+      // D-92 (a): the one multi-value read, the classifier's core.hooksPath lookup, exactly as written.
+      if (rest.length === 3 && rest[0] === '--type=path' && rest[1] === '--get-all' && rest[2] === 'core.hooksPath') return true
       return words.includes('--get') && words.every(word => ['--get', '--bool', '--type=bool', '--null', '-z'].includes(word) || !word.startsWith('-'))
     case 'diff':
       return ['--no-index', '--no-ext-diff', '--no-textconv'].every(word => words.includes(word))
@@ -96,15 +99,17 @@ export function allowedCommand(args) {
  * and resolves null. `diff --no-index` runs with `GIT_DIR=/dev/null`, so git finds no repository and no
  * repository attributes apply to the two files. Resolves `{ code, stdout }` for any exit status, so a
  * caller can read `git diff --no-index` exit 1 as "differences"; resolves null when git could not start,
- * timed out, was killed or wrote more than `maxBuffer` bytes. It never rejects.
+ * timed out, was killed or wrote more than `maxBuffer` bytes. It never rejects. `home`, an absolute
+ * path, replaces `HOME` in the child's environment, so the global config git reads is that home's.
  * @param {string} root working directory of the git call
  * @param {string[]} args git arguments after the safe flags
- * @param {{ timeoutMs?: number, maxBuffer?: number, input?: string|Buffer }} [options]
+ * @param {{ timeoutMs?: number, maxBuffer?: number, input?: string|Buffer, home?: string }} [options]
  * @returns {Promise<{ code: number, stdout: Buffer } | null>}
  */
-export function gitRead(root, args, { timeoutMs = 1500, maxBuffer = 1024 * 1024, input } = {}) {
+export function gitRead(root, args, { timeoutMs = 1500, maxBuffer = 1024 * 1024, input, home } = {}) {
   if (!allowedCommand(args)) return Promise.resolve(null)
-  const env = args[0] === 'diff' ? { ...gitEnv(), GIT_DIR: '/dev/null' } : gitEnv()
+  const base = typeof home === 'string' && path.isAbsolute(home) ? { ...gitEnv(), HOME: home } : gitEnv()
+  const env = args[0] === 'diff' ? { ...base, GIT_DIR: '/dev/null' } : base
   return new Promise(resolve => {
     let child
     try {

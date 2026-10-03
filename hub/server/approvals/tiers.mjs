@@ -284,7 +284,8 @@ const namesDeckPort = (text, ctx) => {
 // after it), GNU coreutils, grep, sed, diff and file `--help`, ripgrep, fd, jq 1.8.2, cargo 1.98
 // and pytest `--help`, and the docker CLI's per-subcommand help. Tools not installed there (go,
 // staticcheck, tree, yq, mypy, black, ruff, pytest plugins) have no values listed, so the word after
-// any of their options stays an operand the path rule checks.
+// any of their options stays an operand the path rule checks, except go's -run, -bench, -skip and
+// -list (D-92 (e)), taken from `go help testflag` and not run.
 const spec = (values, extra = {}) => ({ values: new Set(values), files: new Set(extra.files ?? []), pattern: new Set(extra.pattern ?? []), noPattern: new Set(extra.noPattern ?? []), arity: { __proto__: null, ...extra.arity }, fileIndex: { __proto__: null, ...extra.fileIndex }, single: extra.single === true })
 const GIT_HISTORY_VALUES = ['-n', '-L', '-S', '-G', '-O', '--max-count', '--skip', '--author', '--committer', '--grep', '--since', '--until', '--after', '--before', '--output', '--diff-filter', '--format', '--date']
 const CARGO_VALUES = ['-p', '-F', '-j', '-Z', '-m', '--package', '--features', '--bin', '--example', '--test', '--bench', '--exclude', '--jobs', '--target', '--target-dir', '--manifest-path', '--artifact-dir', '--profile', '--message-format', '--color', '--config']
@@ -324,7 +325,8 @@ const VALUE_OPTIONS = Object.freeze({
   'git add': spec(['--chmod', '--pathspec-from-file'], { files: ['--pathspec-from-file'] }),
   'git ls-files': spec(['-x', '-X', '--exclude', '--exclude-from', '--exclude-per-directory', '--format', '--with-tree'], { files: ['-X', '--exclude-from'] }),
   cargo: spec(CARGO_VALUES, { files: CARGO_FILES }),
-  go: spec([], { single: true }),
+  // D-92 (e): go test's -run, -bench, -skip and -list take a regular expression (`go help testflag`).
+  go: spec(['-run', '-bench', '-skip', '-list'], { single: true, pattern: ['-run', '-bench', '-skip', '-list'] }),
   gofmt: spec([]),
   staticcheck: spec([], { single: true }),
   // -n (pytest-xdist) and --cov-config (pytest-cov) are plugin options not installed on the test host.
@@ -521,7 +523,7 @@ function writeVerdict(location, ctx, segment) {
   if (paths.some(candidate => ctx.deck.dirs.some(dir => withinFolded(candidate, dir)))) return reason('floor.deck', 'destructive', segment, 'writes the deck\'s own files')
   const inside = scopeRelative(location, ctx.scope)
   if (paths.some(isClaudeSettingsPath) || (fold(path.basename(location)) === 'claude.md' && inside === null)) return reason('floor.claude-settings', 'destructive', segment, 'changes Claude Code settings or hooks')
-  if (paths.some(isGitInternal)) return reason('floor.git-dir', 'destructive', segment, 'writes inside .git')
+  if (paths.some(isGitInternal) || inGitDirTarget(location, ctx)) return reason('floor.git-dir', 'destructive', segment, 'writes inside .git')
   if (paths.some(candidate => isPersistence(candidate, ctx.home))) return reason('floor.persistence', 'destructive', segment, 'runs at the next login or shell start')
   if (inside === null) return reason('scope.outside', 'caution', segment, 'writes outside the repo')
   // D-88 (6): a Bash write to the execution-config list is Caution, as an Edit or Write is.
@@ -548,9 +550,10 @@ function configVerdict(location, ctx, segment) {
     if (roots.some(root => isExecutionConfig(path.relative(root, candidate)))) return reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs')
     if (roots.length && isConfigName(path.relative(roots[0], candidate))) return reason('file.config-name', 'caution', segment, 'changes a configuration file at the repo root or in a dot directory')
   }
-  // D-91 (3): the real target of a linked execution-config entry, or the core.hooksPath directory.
+  // D-91 (3): the real target of a linked execution-config entry, or the core.hooksPath directory,
+  // compared folded (D-92 (c)); D-92 (a): a hooks name while the hooksPath read is outstanding.
   const real = realExisting(location)
-  if (protectedTargets(ctx).some(target => within(real, target))) return reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs')
+  if (protectedTargets(ctx).some(target => withinFolded(real, target)) || underUnreadHooksName(location, ctx)) return reason('file.execution-config', 'caution', segment, 'changes what a build, test or hook runs')
   return null
 }
 
@@ -583,86 +586,150 @@ function gitDirs(dir) {
   }
 }
 
-// One git config value: quotes removed, the escapes git documents applied, a comment cut off.
-function configValue(text) {
-  let out = ''
-  let quoted = false
-  let pending = ''
-  for (let k = 0; k < text.length; k++) {
-    const char = text[k]
-    if (char === '\\' && k + 1 < text.length) { out += pending + ({ n: '\n', t: '\t', b: '\b' }[text[k + 1]] ?? text[k + 1]); pending = ''; k++; continue }
-    if (char === '"') { out += pending; pending = ''; quoted = !quoted; continue }
-    if (!quoted && (char === '#' || char === ';')) break
-    if (!quoted && /\s/.test(char)) { if (out) pending += char; continue }
-    out += pending + char
-    pending = ''
-  }
-  return out
+// D-92 (a): core.hooksPath as git itself reads it, per work tree top and home directory, through
+// the read-only helper (`git config --type=path --get-all core.hooksPath`), so include and
+// includeIf files, `~/` and the `:(optional)` prefix count exactly as git applies them. The
+// helper's own `-c core.hooksPath=/dev/null` comes back as the last value and is dropped. The
+// classifier is synchronous, so the read is asynchronous: a classification that first sees a repo
+// starts it, and one that sees the key changed (the stats of the repo config files and of the
+// global config files, and XDG_CONFIG_HOME) starts it again. Until a read for the current key
+// completes, the values of the last read stay protected and so does every directory named hooks or
+// git-hooks in the repo. An edit to an included file alone does not change the key; it is seen by
+// the next read, which a classification also starts once the last read is HOOKS_PATH_TTL_MS old.
+const HOOKS_PATH_ARGS = Object.freeze(['config', '--type=path', '--get-all', 'core.hooksPath'])
+const HOOKS_PATH_TTL_MS = 2000
+const HOOKS_PATH_LIMIT = 512
+const hooksPathEntries = new Map()
+
+function hooksPathKey(dirs, home) {
+  const xdg = process.env.XDG_CONFIG_HOME
+  const files = [path.join(dirs.common, 'config'), path.join(dirs.gitdir, 'config.worktree')]
+  if (home) files.push(path.join(home, '.gitconfig'), path.join(home, '.config', 'git', 'config'))
+  if (xdg && path.isAbsolute(xdg)) files.push(path.join(xdg, 'git', 'config'))
+  return [xdg ?? '', ...files.map(file => `${file}=${statKey(file)}`)].join('|')
 }
 
-// Every core.hooksPath value in a git config file and the files it includes (include.path and
-// includeIf.*.path, the conditions not evaluated, so a conditional include always counts). `files`
-// collects every file read or looked for, for the cache key.
-function readHooksPaths(file, home, out, files, depth = 0) {
-  if (depth > 10 || files.includes(file)) return
-  files.push(file)
-  let text
-  try { text = readFileSync(file, 'utf8') } catch { return }
-  let section = ''
-  for (let line of text.replace(/\\\r?\n/g, '').split(/\r?\n/)) {
-    const header = /^\s*\[\s*([A-Za-z0-9.-]+)(?:\s+"(?:[^"\\]|\\.)*")?\s*\]/.exec(line)
-    if (header) { section = header[1].toLowerCase(); line = line.slice(header[0].length) }
-    const entry = /^\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=(.*))?$/.exec(line)
-    if (!entry || entry[2] === undefined) continue
-    const key = entry[1].toLowerCase()
-    const value = configValue(entry[2])
-    if (!value) continue
-    const expanded = value.startsWith('~/') && home ? path.join(home, value.slice(2)) : value
-    if (section === 'core' && key === 'hookspath') out.push(expanded)
-    if ((section === 'include' || section === 'includeif') && key === 'path') readHooksPaths(path.resolve(path.dirname(file), expanded), home, out, files, depth + 1)
-  }
+function readHooksPath(entry, dirs, home, key) {
+  entry.pending = gitRead(dirs.top, [...HOOKS_PATH_ARGS], { home }).then(result => {
+    const lines = result?.code === 0 ? String(result.stdout).split('\n') : null
+    if (lines?.at(-1) === '') lines.pop()
+    if (lines?.at(-1) === '/dev/null') {
+      lines.pop()
+      // A relative core.hooksPath is taken from the top of the work tree (githooks(5)).
+      entry.hooks = lines.filter(Boolean).map(value => path.isAbsolute(value) ? path.normalize(value) : path.resolve(dirs.top, value))
+      entry.doneKey = key
+      entry.doneAt = Date.now()
+    } else {
+      entry.failedKey = key
+      entry.failedAt = Date.now()
+    }
+    entry.pending = null
+  })
 }
 
-// Per repo root: the listed names found as symlinks and the core.hooksPath directories, cached
-// under a key built from the stats of the root, the directories searched by pattern and every git
-// config file read, so a new link or a config edit is seen at the next classification. The links
-// are resolved at each call, so a link changed further along the path is seen too.
-const protectedCache = new Map()
-function protectedFor(root, home) {
+// The hooksPath state of the repo holding `root`: `ready` once a read for the current key has
+// completed, `hooks` the resolved values of the last completed read. A directory outside any git
+// work tree has no hooksPath and is ready at once.
+function hooksPathState(root, home) {
   const dirs = gitDirs(root)
-  const configs = dirs ? [path.join(dirs.common, 'config'), path.join(dirs.gitdir, 'config.worktree')] : []
-  if (home) configs.push(path.join(home, '.gitconfig'), path.join(home, '.config', 'git', 'config'))
+  if (!dirs) return { ready: true, hooks: [], pending: null }
+  const id = `${dirs.top}\u0000${home ?? ''}`
+  let entry = hooksPathEntries.get(id)
+  if (!entry) {
+    if (hooksPathEntries.size >= HOOKS_PATH_LIMIT) hooksPathEntries.delete(hooksPathEntries.keys().next().value)
+    entry = { hooks: null, doneKey: null, doneAt: 0, failedKey: null, failedAt: 0, pending: null }
+    hooksPathEntries.set(id, entry)
+  }
+  const key = hooksPathKey(dirs, home)
+  const now = Date.now()
+  if (!entry.pending) {
+    const changed = key !== entry.doneKey && (key !== entry.failedKey || now - entry.failedAt >= HOOKS_PATH_TTL_MS)
+    if (changed || (key === entry.doneKey && now - entry.doneAt >= HOOKS_PATH_TTL_MS)) readHooksPath(entry, dirs, home, key)
+  }
+  return { ready: entry.hooks !== null && entry.doneKey === key, hooks: entry.hooks ?? [], pending: entry.pending }
+}
+
+/**
+ * The per-repo core.hooksPath cache the classifier reads (D-92 (a)). `load` starts a read when one
+ * is due and resolves the resolved hooksPath values once a read for the current config has
+ * completed; `clear` forgets every repo.
+ */
+export const hooksPathCache = Object.freeze({
+  /**
+   * @param {string} root a directory in the work tree
+   * @param {string} home the home directory git reads the global config from
+   * @returns {Promise<string[]>}
+   */
+  async load(root, home) {
+    for (let round = 0; round < 5; round++) {
+      const state = hooksPathState(root, home)
+      if (state.ready && !state.pending) return state.hooks
+      if (state.pending) await state.pending
+      else await new Promise(resolve => setTimeout(resolve, HOOKS_PATH_TTL_MS))
+    }
+    return hooksPathState(root, home).hooks
+  },
+  clear() { hooksPathEntries.clear() }
+})
+
+// Per repo root: the listed names found as symlinks, cached under a key built from the stats of
+// the root and the directories searched by pattern, so a new link is seen at the next
+// classification. The links are resolved at each call, so a link changed further along the path
+// is seen too.
+const protectedCache = new Map()
+function protectedLinks(root) {
   const roots = [root, ...['.cargo', '.claude', '.github'].map(name => path.join(root, name))]
-  const dirKey = [...roots.map((dir, k) => k === 0 ? (() => { try { const stat = lstatSync(dir, { bigint: true }); return `${stat.ino}:${stat.mtimeNs}` } catch { return '-' } })() : statKey(dir)), dirs?.top ?? '', ...configs].join('|')
+  const dirKey = roots.map((dir, k) => k === 0 ? (() => { try { const stat = lstatSync(dir, { bigint: true }); return `${stat.ino}:${stat.mtimeNs}` } catch { return '-' } })() : statKey(dir)).join('|')
   const cached = protectedCache.get(root)
-  if (cached && cached.dirKey === dirKey && cached.files.map(statKey).join('|') === cached.fileKey) return cached
+  if (cached && cached.dirKey === dirKey) return cached.links
   const links = LINKED_NAMES.map(name => path.join(root, name)).filter(isLink)
   for (const [dir, pattern] of LINKED_PATTERNS) {
     let names = []
     try { names = readdirSync(path.join(root, dir)) } catch {}
     for (const name of names) if (pattern.test(name) && isLink(path.join(root, dir, name))) links.push(path.join(root, dir, name))
   }
-  const values = []
-  const files = []
-  for (const file of configs) readHooksPaths(file, home, values, files)
-  // A relative core.hooksPath is taken from the top of the work tree (githooks(5)).
-  const hooks = values.map(value => path.isAbsolute(value) ? path.normalize(value) : path.resolve(dirs?.top ?? root, value))
-  const entry = { dirKey, files, fileKey: files.map(statKey).join('|'), links, hooks }
-  protectedCache.set(root, entry)
-  return entry
+  protectedCache.set(root, { dirKey, links })
+  return links
 }
 
-// The real paths a write may not reach at Safe, for every repo scope root of a classification.
+// The real paths a write may not reach at Safe, for every repo scope root of a classification: the
+// targets of linked entries and the core.hooksPath directories. Also collects the roots whose
+// hooksPath read has not completed (`ctx.hooksUnread`), and D-92 (b) the git dir and common dir a
+// `.git` file names when they lie inside a repo root (`ctx.gitDirTargets`), both as named and by
+// realpath.
 function protectedTargets(ctx) {
   if (!ctx.protectedTargets) {
     const targets = new Set()
-    for (const root of new Set(ctx.lexicalRoots)) {
-      const { links, hooks } = protectedFor(root, ctx.home)
-      for (const location of [...links, ...hooks]) targets.add(realExisting(location))
+    const unread = new Set()
+    const gitTargets = new Set()
+    const roots = [...new Set(ctx.lexicalRoots)]
+    for (const root of roots) {
+      const hooks = hooksPathState(root, ctx.home)
+      if (!hooks.ready) unread.add(root)
+      for (const location of [...protectedLinks(root), ...hooks.hooks]) targets.add(realExisting(location))
+      const dirs = gitDirs(root)
+      if (!dirs || dirs.gitdir === path.join(dirs.top, '.git')) continue
+      for (const dir of [dirs.gitdir, dirs.common]) {
+        for (const form of new Set([path.normalize(dir), realExisting(dir)])) if ([...roots, ...ctx.scope].some(base => withinFolded(form, base))) gitTargets.add(form)
+      }
     }
     ctx.protectedTargets = [...targets]
+    ctx.hooksUnread = [...unread]
+    ctx.gitDirTargets = [...gitTargets]
   }
   return ctx.protectedTargets
+}
+const gitDirTargets = ctx => { protectedTargets(ctx); return ctx.gitDirTargets }
+const inGitDirTarget = (location, ctx) => candidates(location).some(candidate => gitDirTargets(ctx).some(dir => withinFolded(candidate, dir)))
+
+// D-92 (a): while the hooksPath read of a repo has not completed, a directory named hooks or
+// git-hooks below its root may be the hooks directory.
+function underUnreadHooksName(location, ctx) {
+  protectedTargets(ctx)
+  return ctx.hooksUnread.some(root => candidates(location).some(candidate => {
+    const rel = relFolded(candidate, root)
+    return rel !== null && rel.split('/').slice(0, -1).some(part => part === 'hooks' || part === 'git-hooks')
+  }))
 }
 
 // Glob matching for argument globs: `*` is any text, `?` one character, and `-<N>` a number option.
@@ -1182,7 +1249,7 @@ function cargoTargetVerdicts(list, segment, ctx, text) {
 // Whether `dir` lies inside .git or inside a directory on the execution-config list (D-89 (3)),
 // by its path as given and by its realpath.
 function inControlledDir(dir, ctx) {
-  return candidates(dir).some(candidate => isGitInternal(candidate) || [...ctx.scope, ...ctx.lexicalRoots].some(root => {
+  return inGitDirTarget(dir, ctx) || candidates(dir).some(candidate => isGitInternal(candidate) || [...ctx.scope, ...ctx.lexicalRoots].some(root => {
     if (!within(candidate, root) || candidate === root) return false
     return isExecutionConfig(`${path.relative(root, candidate)}/_`)
   }))
@@ -1624,8 +1691,9 @@ function actionInput(toolName, toolInput) {
 
 /**
  * Classify a permission request (docs/deck/07-approvals.md 3.2). Pure except for the read-only
- * realpath and glob checks of the paths it names, and the read-only, cached D-91 (3) look at the
- * repo's root-level links and git config files (read as files, not through git).
+ * realpath and glob checks of the paths it names, the read-only, cached D-91 (3) look at the repo's
+ * root-level links and `.git` file, and the D-92 (a) core.hooksPath cache, whose git read it starts
+ * in the background when one is due (`hooksPathCache`).
  * @param {{ toolName: string, toolInput?: object, cwd?: string, repoRoot?: string, worktrees?: string[], homeDir?: string, deckPaths?: { config?: string, state?: string, runtime?: string|null, token?: string, port?: number|string }, tiers?: { entries: object[] } }} input
  * @returns {{ tier: 'safe'|'caution'|'destructive', reasons: { entryId: string, tier: string, segment: string, description: string }[], ruleCandidate: string|null, ruleNote: string|null, confirm: { template: string|null, count: string|null }, description: string }}
  */

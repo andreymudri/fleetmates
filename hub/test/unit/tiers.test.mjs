@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
-import { classify, createWorktreeCache, DEFAULT_TIERS, maxTier, sedScriptSafe, tiersSha256 } from '../../server/approvals/tiers.mjs'
+import { classify, createWorktreeCache, DEFAULT_TIERS, hooksPathCache, maxTier, sedScriptSafe, tiersSha256 } from '../../server/approvals/tiers.mjs'
 import { createTiersStore, effectiveTiers, ENTRY_KEYS, validateTiers } from '../../server/approvals/tiers-store.mjs'
 import { isPlain } from '../../server/approvals/shell.mjs'
+import { allowedCommand } from '../../server/adapters/git-read.mjs'
 
 function sandbox() {
   const root = mkdtempSync(path.join(tmpdir(), 'deck-tiers-unit-'))
@@ -811,35 +813,228 @@ test('a write into the real target of a linked execution-config entry or the cor
     }
     // Siblings of the targets stay ordinary files.
     for (const file of ['tools/other.sh', 'mk/other.mk', 'cfg/other.json', 'src/a.py']) expectTier(s.run('Write', { file_path: file, content: 'x' }), 'safe', null, `Write ${file}`)
-    // core.hooksPath, with no symlink: read from .git/config, folded, quoted, through include.path
-    // and from the home git config; a change is seen at the next classification.
-    expectTier(s.run('Write', { file_path: 'scripts/git-hooks/pre-commit', content: 'x' }), 'safe', null, 'before core.hooksPath')
-    writeFileSync(path.join(s.repo, '.git', 'config'), '[core]\n\tbare = false\n[Core]\n\tHooksPath = scripts/git-hooks ; a comment\n')
-    for (const [tool, result] of writers('scripts/git-hooks/pre-commit')) expectTier(result, 'caution', 'file.execution-config', `${tool} hooksPath`)
-    expectTier(s.run('Write', { file_path: 'scripts/other.sh', content: 'x' }), 'safe', null, 'Write scripts/other.sh')
-    mkdirSync(path.join(s.repo, 'h2'))
-    writeFileSync(path.join(s.repo, '.git', 'config'), '[include]\n\tpath = extra.cfg\n')
-    writeFileSync(path.join(s.repo, '.git', 'extra.cfg'), '[core]\n\thookspath = "h2"\n')
-    expectTier(s.run('Write', { file_path: 'h2/pre-push', content: 'x' }), 'caution', 'file.execution-config', 'hooksPath through include.path')
-    expectTier(s.run('Write', { file_path: 'scripts/git-hooks/pre-commit', content: 'x' }), 'safe', null, 'the old hooksPath')
-    writeFileSync(path.join(s.home, '.gitconfig'), '[core]\n  hooksPath = h3\n')
-    expectTier(s.run('Write', { file_path: 'h3/pre-commit', content: 'x' }), 'caution', 'file.execution-config', 'hooksPath from ~/.gitconfig, relative to the work tree')
-    // A linked worktree reads the common config and its own config.worktree.
+    // core.hooksPath (read through git since D-92 (a)) has its own tests below.
+  } finally { s.close() }
+})
+
+// D-92: a real git for the core.hooksPath tests, run with the sandbox home, no system config and the
+// XDG_CONFIG_HOME the classifier's own git call sees.
+const gitIn = (dir, home, ...args) => execFileSync('git', args, { cwd: dir, env: { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: '1', ...(process.env.XDG_CONFIG_HOME ? { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME } : {}) }, stdio: 'pipe', timeout: 10000 })
+async function withXdg(value, fn) {
+  const saved = process.env.XDG_CONFIG_HOME
+  if (value === undefined) delete process.env.XDG_CONFIG_HOME
+  else process.env.XDG_CONFIG_HOME = value
+  try { return await fn() } finally {
+    if (saved === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = saved
+  }
+}
+const hooksSandbox = () => {
+  const s = sandbox()
+  gitIn(s.repo, s.home, 'init', '-q')
+  const at = (...parts) => path.join(s.repo, ...parts)
+  return { ...s, at, write: (file, extra) => s.run('Write', { file_path: file, content: 'x' }, extra), settle: (root = s.repo) => hooksPathCache.load(root, s.home) }
+}
+
+// D-92 (a): the read-only git helper allows exactly the classifier's hooksPath read and no other
+// multi-value or listing config read.
+test('the git helper allows exactly `config --type=path --get-all core.hooksPath` beyond the single-value reads (D-92 (a))', () => {
+  assert.equal(allowedCommand(['config', '--type=path', '--get-all', 'core.hooksPath']), true)
+  for (const args of [
+    ['config', '--get-all', 'core.hooksPath'],
+    ['config', '--get-all', '--type=path', 'core.hooksPath'],
+    ['config', '--type=path', '--get-all', 'core.fsmonitor'],
+    ['config', '--type=path', '--get-all', 'core.hookspath'],
+    ['config', '--type=path', '--get-all', 'core.hooksPath', 'x'],
+    ['config', '--type=path', '--get-all', '--show-origin', 'core.hooksPath'],
+    ['config', '--type=path', '--get-regexp', 'core.hooksPath'],
+    ['config', '--type=path', '--list'],
+    ['config', '--get-all', 'core.hooksPath', '--type=path']
+  ]) assert.equal(allowedCommand(args), false, args.join(' '))
+  // The single-value reads allowed before stay allowed.
+  assert.equal(allowedCommand(['config', '--get', 'user.name']), true)
+})
+
+// D-92 (a): core.hooksPath is read through the real git (`git config --type=path --get-all
+// core.hooksPath` through the read-only helper), so every form git honours counts: the
+// `:(optional)` prefix, include and includeIf files, `~/` paths, the XDG config file. Until the
+// first read of a repo completes, a write under any directory named hooks or git-hooks is Caution.
+test('core.hooksPath is read through git, so every form git honours protects its directory (D-92 (a))', async () => {
+  await withXdg(undefined, async () => {
+    const s = hooksSandbox()
+    try {
+      expectTier(s.write('scripts/git-hooks/pre-commit'), 'caution', 'file.execution-config', 'git-hooks before the first read')
+      expectTier(s.write('web/HOOKS/useThing.js'), 'caution', 'file.execution-config', 'hooks before the first read, folded')
+      expectTier(s.write('src/hooks.js'), 'safe', null, 'a file named hooks before the first read')
+      expectTier(s.write('src/a.txt'), 'safe', null, 'an ordinary file before the first read')
+      assert.deepEqual(await s.settle(), [])
+      expectTier(s.write('scripts/git-hooks/pre-commit'), 'safe', null, 'git-hooks once git reports no hooksPath')
+      expectTier(s.write('web/HOOKS/useThing.js'), 'safe', null, 'hooks once git reports no hooksPath')
+      // The config file as git parses it: a folded section and key, a quoted value, a comment.
+      writeFileSync(s.at('.git', 'config'), `${readFileSync(s.at('.git', 'config'), 'utf8')}[Core]\n\tHooksPath = "h1" ; a comment\n`)
+      assert.deepEqual(await s.settle(), [s.at('h1')])
+      expectTier(s.write('h1/pre-commit'), 'caution', 'file.execution-config', 'hooksPath in .git/config')
+      expectTier(s.write('h1x/pre-commit'), 'safe', null, 'a sibling of the hooks directory')
+      // :(optional): git drops the prefix, and drops the value when the path does not exist.
+      gitIn(s.repo, s.home, 'config', '--unset-all', 'core.hooksPath')
+      mkdirSync(s.at('h2'))
+      gitIn(s.repo, s.home, 'config', '--add', 'core.hooksPath', ':(optional)h2')
+      gitIn(s.repo, s.home, 'config', '--add', 'core.hooksPath', ':(optional)~/missing')
+      assert.deepEqual(await s.settle(), [s.at('h2')])
+      expectTier(s.write('h2/pre-commit'), 'caution', 'file.execution-config', ':(optional) prefix')
+      // include.path relative to the including file, and a `~/` include.
+      gitIn(s.repo, s.home, 'config', '--unset-all', 'core.hooksPath')
+      writeFileSync(s.at('.git', 'extra.cfg'), '[core]\n\thookspath = h3\n')
+      writeFileSync(path.join(s.home, 'home-inc.cfg'), '[core]\n\thooksPath = h4\n')
+      gitIn(s.repo, s.home, 'config', '--add', 'include.path', 'extra.cfg')
+      gitIn(s.repo, s.home, 'config', '--add', 'include.path', '~/home-inc.cfg')
+      assert.deepEqual(await s.settle(), [s.at('h3'), s.at('h4')])
+      expectTier(s.write('h3/pre-commit'), 'caution', 'file.execution-config', 'include.path')
+      expectTier(s.write('h4/pre-commit'), 'caution', 'file.execution-config', '~/ include')
+      // includeIf: only the include whose condition git matches counts.
+      writeFileSync(path.join(s.home, 'if-yes.cfg'), '[core]\n\thooksPath = h5\n')
+      writeFileSync(path.join(s.home, 'if-no.cfg'), '[core]\n\thooksPath = h6\n')
+      writeFileSync(path.join(s.home, '.gitconfig'), `[includeIf "gitdir:${s.repo}/"]\n\tpath = ~/if-yes.cfg\n[includeIf "gitdir:${path.join(s.root, 'elsewhere')}/"]\n\tpath = ~/if-no.cfg\n`)
+      assert.deepEqual(await s.settle(), [s.at('h5'), s.at('h3'), s.at('h4')])
+      expectTier(s.write('h5/pre-commit'), 'caution', 'file.execution-config', 'includeIf that matches')
+      expectTier(s.write('h6/pre-commit'), 'safe', null, 'includeIf that does not match')
+      // ~/.config/git/config, which git reads while XDG_CONFIG_HOME is unset.
+      mkdirSync(path.join(s.home, '.config', 'git'), { recursive: true })
+      writeFileSync(path.join(s.home, '.config', 'git', 'config'), '[core]\n\thooksPath = h7\n')
+      assert.deepEqual(await s.settle(), [s.at('h7'), s.at('h5'), s.at('h3'), s.at('h4')])
+      expectTier(s.write('h7/pre-commit'), 'caution', 'file.execution-config', '~/.config/git/config')
+    } finally { s.close() }
+  })
+})
+
+test('core.hooksPath from $XDG_CONFIG_HOME/git/config, a linked worktree and a repo root below the work tree top (D-92 (a))', async () => {
+  const s = hooksSandbox()
+  const xdg = path.join(s.root, 'xdg')
+  try {
+    await withXdg(xdg, async () => {
+      mkdirSync(path.join(xdg, 'git'), { recursive: true })
+      writeFileSync(path.join(xdg, 'git', 'config'), '[core]\n\thooksPath = x1\n')
+      mkdirSync(path.join(s.home, '.config', 'git'), { recursive: true })
+      writeFileSync(path.join(s.home, '.config', 'git', 'config'), '[core]\n\thooksPath = x2\n')
+      // git reads $XDG_CONFIG_HOME/git/config instead of ~/.config/git/config.
+      assert.deepEqual(await s.settle(), [s.at('x1')])
+      expectTier(s.write('x1/pre-commit'), 'caution', 'file.execution-config', '$XDG_CONFIG_HOME/git/config')
+      expectTier(s.write('x2/pre-commit'), 'safe', null, '~/.config/git/config is not read')
+      // A linked worktree reads its own config.worktree once worktreeConfig is on.
+      gitIn(s.repo, s.home, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'x')
+      const wt = path.join(s.root, 'wt')
+      gitIn(s.repo, s.home, 'worktree', 'add', '-q', wt)
+      gitIn(s.repo, s.home, 'config', 'extensions.worktreeConfig', 'true')
+      gitIn(wt, s.home, 'config', '--worktree', 'core.hooksPath', 'w1')
+      assert.deepEqual(await s.settle(wt), [path.join(wt, 'x1'), path.join(wt, 'w1')])
+      const inTree = file => classify({ toolName: 'Write', toolInput: { file_path: file, content: 'x' }, cwd: wt, repoRoot: wt, homeDir: s.home, deckPaths: s.deckPaths })
+      expectTier(inTree('w1/pre-commit'), 'caution', 'file.execution-config', 'config.worktree')
+      expectTier(inTree('w2/pre-commit'), 'safe', null, 'an ordinary worktree file')
+      // A repo root below the work tree top takes a relative value from the top.
+      const pkg = s.at('pkg')
+      mkdirSync(pkg)
+      gitIn(s.repo, s.home, 'config', 'core.hooksPath', 'pkg/checks')
+      assert.deepEqual(await s.settle(pkg), [s.at('x1'), s.at('pkg', 'checks')])
+      expectTier(s.write('checks/pre-commit', { cwd: pkg, repoRoot: pkg }), 'caution', 'file.execution-config', 'from the work tree top')
+    })
+  } finally { s.close() }
+})
+
+test('a changed git config is read again: the old directory and every hooks name stay protected until the new read completes (D-92 (a))', async () => {
+  await withXdg(undefined, async () => {
+    const s = hooksSandbox()
+    try {
+      gitIn(s.repo, s.home, 'config', 'core.hooksPath', 'r1')
+      assert.deepEqual(await s.settle(), [s.at('r1')])
+      expectTier(s.write('lib/hooks/x.js'), 'safe', null, 'a hooks directory once read')
+      gitIn(s.repo, s.home, 'config', 'core.hooksPath', 'r2')
+      // This classification sees the changed config and starts the read; it has not completed.
+      expectTier(s.write('r1/pre-commit'), 'caution', 'file.execution-config', 'the old directory during the read')
+      expectTier(s.write('lib/hooks/x.js'), 'caution', 'file.execution-config', 'a hooks directory during the read')
+      assert.deepEqual(await s.settle(), [s.at('r2')])
+      expectTier(s.write('r2/pre-commit'), 'caution', 'file.execution-config', 'the new directory')
+      expectTier(s.write('r1/pre-commit'), 'safe', null, 'the old directory after the read')
+      expectTier(s.write('lib/hooks/x.js'), 'safe', null, 'a hooks directory after the read')
+      // A ~/.gitconfig edit changes the key too.
+      writeFileSync(path.join(s.home, '.gitconfig'), '[core]\n\thooksPath = r3\n')
+      assert.deepEqual(await s.settle(), [s.at('r3'), s.at('r2')])
+    } finally { s.close() }
+  })
+})
+
+// D-92 (b): a `.git` file names a git dir (and through its commondir, a common dir); when either
+// lies inside a repo root it is protected like `.git`.
+test('a separate git dir inside the repo is protected like .git (D-92 (b))', async () => {
+  const s = sandbox()
+  try {
+    const gd = path.join(s.repo, 'meta', 'gd')
+    mkdirSync(path.dirname(gd))
+    gitIn(s.root, s.home, 'init', '-q', `--separate-git-dir=${gd}`, s.repo)
+    assert.match(readFileSync(path.join(s.repo, '.git'), 'utf8'), /^gitdir: /)
+    for (const file of ['meta/gd/config', 'meta/gd/hooks/pre-commit', 'meta/gd/HEAD', 'meta/GD/config']) {
+      expectTier(s.run('Write', { file_path: file, content: 'x' }), 'destructive', 'floor.git-dir', `Write ${file}`)
+      expectTier(s.bash(`tee ${file} < /dev/null`), 'destructive', 'floor.git-dir', `tee ${file}`)
+    }
+    expectTier(s.run('Write', { file_path: 'meta/notes.txt', content: 'x' }), 'safe', null, 'beside the git dir')
+    // A linked worktree's git dir lies in the common dir, which lies in the main repo root.
+    gitIn(s.repo, s.home, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'x')
     const wt = path.join(s.root, 'wt')
-    mkdirSync(path.join(s.repo, '.git', 'worktrees', 'wt'), { recursive: true })
-    mkdirSync(path.join(wt, 'h4'), { recursive: true })
-    writeFileSync(path.join(wt, '.git'), `gitdir: ${path.join(s.repo, '.git', 'worktrees', 'wt')}\n`)
-    writeFileSync(path.join(s.repo, '.git', 'worktrees', 'wt', 'commondir'), '../..\n')
-    writeFileSync(path.join(s.repo, '.git', 'worktrees', 'wt', 'config.worktree'), '[core]\n\thooksPath = h4\n')
-    const inTree = file => classify({ toolName: 'Write', toolInput: { file_path: file, content: 'x' }, cwd: wt, repoRoot: wt, homeDir: s.home, deckPaths: s.deckPaths })
-    expectTier(inTree('h4/pre-commit'), 'caution', 'file.execution-config', 'worktree config.worktree hooksPath')
-    expectTier(inTree('h2/pre-commit'), 'caution', 'file.execution-config', 'worktree common config hooksPath')
-    expectTier(inTree('h5/pre-commit'), 'safe', null, 'worktree ordinary file')
-    // A repo root below the work tree top still resolves a relative hooksPath from the top.
-    mkdirSync(path.join(s.repo, 'pkg', 'hooks'), { recursive: true })
-    writeFileSync(path.join(s.repo, '.git', 'extra.cfg'), '[core]\n\thookspath = pkg/hooks\n')
-    const pkg = path.join(s.repo, 'pkg')
-    expectTier(s.run('Write', { file_path: 'hooks/pre-commit', content: 'x' }, { cwd: pkg, repoRoot: pkg }), 'caution', 'file.execution-config', 'hooksPath from the work tree top')
+    gitIn(s.repo, s.home, 'worktree', 'add', '-q', wt)
+    const inTree = file => classify({ toolName: 'Write', toolInput: { file_path: file, content: 'x' }, cwd: wt, repoRoot: wt, worktrees: [s.repo, wt], homeDir: s.home, deckPaths: s.deckPaths })
+    expectTier(inTree(path.join(gd, 'config')), 'destructive', 'floor.git-dir', 'the common dir from a linked worktree')
+    expectTier(inTree(path.join(gd, 'worktrees', 'wt', 'HEAD')), 'destructive', 'floor.git-dir', 'the worktree git dir')
+    expectTier(inTree('notes.txt'), 'safe', null, 'an ordinary worktree file')
+    // A runner whose working directory is the git dir is judged as one run in .git.
+    expectTier(s.bash('pytest', { cwd: gd }), 'caution', 'runner.config-dir', 'pytest in the git dir')
+  } finally { s.close() }
+})
+
+// D-92 (c): the protected targets compare folded, like every other name check, so a case variant
+// of the hooksPath directory or of a linked entry's target is protected too.
+test('the protected-target comparison is case folded (D-92 (c))', async () => {
+  await withXdg(undefined, async () => {
+    const s = hooksSandbox()
+    try {
+      mkdirSync(s.at('tools', 'hooks'), { recursive: true })
+      mkdirSync(s.at('tools', 'hk'), { recursive: true })
+      symlinkSync('tools/hk', s.at('.githooks'))
+      gitIn(s.repo, s.home, 'config', 'core.hooksPath', 'tools/hooks')
+      assert.deepEqual(await s.settle(), [s.at('tools', 'hooks')])
+      expectTier(s.write('TOOLS/hooks/pre-commit'), 'caution', 'file.execution-config', 'TOOLS/hooks against tools/hooks')
+      expectTier(s.write('Tools/Hooks/pre-commit'), 'caution', 'file.execution-config', 'Tools/Hooks against tools/hooks')
+      expectTier(s.write('TOOLS/HK/pre-commit'), 'caution', 'file.execution-config', 'TOOLS/HK against the .githooks target')
+      expectTier(s.write('TOOLS/other.sh'), 'safe', null, 'a sibling')
+    } finally { s.close() }
+  })
+})
+
+// D-92 (e): linked `.claude/settings*.json`, `.cargo/config*` and `.yarnrc*` entries protect their
+// real targets, and a link made after the first classification is seen at the next one.
+test('a link to a .claude/settings*.json, .cargo/config* or .yarnrc* target made after the first classification protects the target (D-92 (e))', () => {
+  const s = sandbox()
+  try {
+    for (const dir of ['cfg', '.claude', '.cargo']) mkdirSync(path.join(s.repo, dir), { recursive: true })
+    for (const [link, target] of [['.claude/settings.local.json', 'cfg/claude.json'], ['.cargo/config.toml', 'cfg/cargo.toml'], ['.yarnrc.yml', 'cfg/yarn.yml']]) {
+      writeFileSync(path.join(s.repo, target), '{}\n')
+      expectTier(s.run('Write', { file_path: target, content: 'x' }), 'safe', null, `${target} before ${link}`)
+      symlinkSync(path.relative(path.dirname(path.join(s.repo, link)), path.join(s.repo, target)), path.join(s.repo, link))
+      expectTier(s.run('Write', { file_path: target, content: 'x' }), 'caution', 'file.execution-config', `${target} after ${link}`)
+      expectTier(s.bash(`sort -o ${target} cfg/other.txt`), 'caution', 'file.execution-config', `sort -o ${target}`)
+    }
+    expectTier(s.run('Write', { file_path: 'cfg/other.json', content: 'x' }), 'safe', null, 'a sibling')
+  } finally { s.close() }
+})
+
+// D-92 (e): go test reads -run, -bench, -skip and -list as regular expressions (`go help
+// testflag`; go is not installed on the test host, so this was not run), so their value is
+// pattern text, never a path operand.
+test('go -run, -bench, -skip and -list take a pattern, so a value with white space is text (D-92 (e))', () => {
+  const s = sandbox()
+  try {
+    for (const option of ['-run', '-bench', '-skip', '-list']) {
+      for (const form of [`${option} "A B"`, `${option}="A B"`, `${option} "A/B C"`]) expectTier(s.bash(`go test ${form} ./...`), 'safe', null, form)
+      expectTier(s.bash(`go test ${option} "A B" /etc`), 'caution', null, `${option} with an outside operand`)
+    }
   } finally { s.close() }
 })
 
