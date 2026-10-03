@@ -366,7 +366,7 @@ test('Settings nav lists the sections with live subtitles and marks the current 
   const routes = []
   assert.deepEqual(settingsNav(prefs).map(row => [row.id, row.title, row.sub, row.href]), [
     ['appearance', 'Appearance and language', 'Density, text size 14px, motion, EN / PT-BR', '/settings/appearance'],
-    ['rules', 'Approval rules', 'Arrives with answering from the deck', '/settings/rules'],
+    ['rules', 'Approval rules', '', '/settings/rules'],
     ['notifications', 'Notifications', 'Ship\'s bell, re-notify 10 min, quiet in meetings', '/settings/notifications'],
     ['connections', 'Connections', '~/dev, vault, scribed, re-run checklist', '/settings/connections'],
     ['crew', 'Crew', 'Colors, shapes and hats per repo', '/settings/crew']
@@ -380,13 +380,12 @@ test('Settings nav lists the sections with live subtitles and marks the current 
   const html = render(SettingsView, { section: 'notifications', prefs, navigate: () => {}, children: 'BODY' })
   assert.match(html, /<nav class="settings-nav" aria-label="Settings sections"><h1 class="settings-title">Settings<\/h1>/)
   assert.match(html, /BODY/)
-  const later = render(SettingsView, { section: 'rules', prefs, navigate: () => {}, children: 'BODY' })
-  assert.doesNotMatch(later, /BODY/)
-  assert.match(later, /This section arrives in a later milestone\./)
-  // M2 renders Appearance; Approval rules stays a later section.
-  const appearance = render(SettingsView, { section: 'appearance', prefs, navigate: () => {}, children: 'BODY' })
-  assert.match(appearance, /BODY/)
-  assert.doesNotMatch(appearance, /later milestone/)
+  // M3 renders Approval rules: the later-milestone note applies to no section.
+  for (const section of settings.SECTIONS) {
+    const html = render(SettingsView, { section, prefs, navigate: () => {}, children: 'BODY' })
+    assert.match(html, /BODY/, section)
+    assert.doesNotMatch(html, /later milestone/, section)
+  }
   const loading = render(SettingsView, { section: 'notifications', prefs, loading: true, navigate: () => {}, children: 'BODY' })
   assert.match(loading, /aria-busy="true"/)
   assert.equal((loading.match(/class="skeleton-panel/g) ?? []).length, 3)
