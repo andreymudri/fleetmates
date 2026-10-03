@@ -431,6 +431,36 @@ test('Notifications controls are bound to prefs, save each change immediately an
   assert.deepEqual(api.calls, [{ method: 'PATCH', url: '/api/prefs', body: { renotifyAfter: null } }])
 })
 
+test('Appearance offers the auto-archive delay after Density, 24 hours by default, and Never PATCHes autoArchiveAfter null', async () => {
+  const { AppearanceSection, savePref } = settings
+  const api = fakeApi({ 'PATCH /api/prefs': { prefs: {}, sources: {} } })
+  const saves = []
+  const props = { prefs: { textSize: 14, motion: 'system' }, sources: {}, repos: [], storage: { getItem: () => null, setItem() {} }, navigate() {},
+    onChange: (key, value) => saves.push(savePref(api, key, value)) }
+  const tree = AppearanceSection(props)
+  const all = controls(tree)
+  const select = all.find(node => node.props.id === 'pref-autoArchiveAfter')
+  assert.ok(select, 'the auto-archive select renders')
+  assert.equal(select.props.value, '24')
+  assert.equal(select.props.disabled, false)
+  assert.deepEqual(elements(select.props.children, ['option']).map(node => [node.props.value, textOf(node)]),
+    [['6', '6 hours'], ['12', '12 hours'], ['24', '24 hours'], ['72', '3 days'], ['168', '1 week'], ['never', 'Never']])
+  const textSize = all.findIndex(node => node.props.id === 'pref-textSize')
+  assert.equal(textOf(all[all.indexOf(select) - 1]), 'Compact', 'the select follows the density control')
+  assert.equal(all.indexOf(select) + 1, textSize, 'and precedes Text size')
+  const html = render(AppearanceSection, props)
+  assert.match(html, /Archive finished sessions after/)
+  assert.match(html, /Sessions with unreviewed changes are never archived automatically\./)
+  select.props.onChange({ target: { value: 'never' } })
+  select.props.onChange({ target: { value: '168' } })
+  await Promise.all(saves)
+  assert.deepEqual(api.calls, [{ method: 'PATCH', url: '/api/prefs', body: { autoArchiveAfter: null } }, { method: 'PATCH', url: '/api/prefs', body: { autoArchiveAfter: 168 } }])
+  const never = controls(AppearanceSection({ ...props, prefs: { autoArchiveAfter: null } })).find(node => node.props.id === 'pref-autoArchiveAfter')
+  assert.equal(never.props.value, 'never')
+  const locked = controls(AppearanceSection({ ...props, sources: { autoArchiveAfter: 'env' } })).find(node => node.props.id === 'pref-autoArchiveAfter')
+  assert.equal(locked.props.disabled, true)
+})
+
 test('Connections edits folders and the commands the server runs only through its save handler, and parses them back', () => {
   const { ConnectionsSection, parsePref, prefText, depStatus, COMMAND_PREFS } = settings
   assert.deepEqual(COMMAND_PREFS.map(pref => pref.key), ['claudeCommand', 'scribedCommand', 'vaultCommand'])

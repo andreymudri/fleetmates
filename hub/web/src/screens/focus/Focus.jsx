@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { CARD_COPY } from '../../components/SessionCard.jsx'
+import { ArchiveToast, CARD_COPY, archiveFlow, isArchived, useArchiveToast } from '../../components/SessionCard.jsx'
 import { ConfirmDialog } from '../../components/ConfirmDialog.jsx'
 import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { DiffView } from '../../components/DiffView.jsx'
@@ -109,7 +109,11 @@ export const FOCUS_COPY = Object.freeze({
   'focus.facts.lastInput': 'Last input from',
   'focus.facts.transcript': 'Transcript',
   'focus.facts.baseline': 'Changes measured since',
-  'focus.notFound.title': 'This session is not on the deck.'
+  'focus.notFound.title': 'This session is not on the deck.',
+  'focus.header.archive': 'Archive',
+  'focus.header.unarchive': 'Unarchive',
+  'focus.archived.banner': 'Archived. Unarchive to bring it back to Home.',
+  'focus.archived.unarchive': 'Unarchive'
 })
 
 const NEEDS = new Set(['needs_approval', 'asked_you'])
@@ -322,7 +326,7 @@ function InputIndicator({ session, source, collision, t }) {
 }
 
 function SessionList({ state, sessionId, now, t, navigate }) {
-  const live = orderSessions(state.data.sessions.filter(row => row.state !== 'ended'), state.data.order, state.data.requests)
+  const live = orderSessions(state.data.sessions.filter(row => row.state !== 'ended' && !isArchived(row)), state.data.order, state.data.requests)
   const teams = teamCards(state.data.runs ?? [], state.data.sessions, state.data.requests ?? [])
   return (
     <aside className="focus-list" aria-label={translate(t, FOCUS_COPY, 'focus.list.label')}>
@@ -513,8 +517,13 @@ function CrashBanner({ session, t, deckdDown, reasonId, onRelaunch, onDismiss })
  * indicator, the collision chip, the leave hint, Hide panel and Stop… (an observed one keeps the M1 header); while deckd is down the terminal input and Stop are
  * disabled with the reason "deckd is reconnecting". A PTY session's on-screen request gets the PromptBar (its
  * other open requests keep the "Answer in your terminal" bar). The details panel lists changed files as a
- * listbox with the selected file's DiffView under it, and the Facts rows of FOC-O3. Pure: no hooks, so tests
- * can walk it (TerminalView, ConfirmDialog and PromptReply hold the hooks).
+ * listbox with the selected file's DiffView under it, and the Facts rows of FOC-O3. The header offers "Archive"
+ * when `onArchive` is given, or "Unarchive" (`onUnarchive`) for an archived session, which also gets the banner
+ * "Archived. Unarchive to bring it back to Home." with Unarchive, a read-only terminal, no PromptBar (its open
+ * requests keep the "Answer in your terminal" bar), and no Stop or Nudge even while it is live. The session
+ * list skips archived sessions. `fallback` is a session row to show when the store does not hold `sessionId`
+ * (an older archived session). Pure: no hooks, so tests can walk it (TerminalView, ConfirmDialog and
+ * PromptReply hold the hooks).
  * @param {{
  *   state: object, sessionId: string, t?: Function, now?: number, lang?: string, navigate: (to: string) => void,
  *   steps: object[] | null, tab: 'changes'|'facts', onTab: (tab: string) => void, onMarkReviewed?: () => void,
@@ -527,16 +536,18 @@ function CrashBanner({ session, t, deckdDown, reasonId, onRelaunch, onDismiss })
  *   confirmLink?: (url: string) => boolean, confirmPaste?: (size: string) => boolean | Promise<boolean>,
  *   diff?: { path: string, status: 'loading' | 'error' | 'ready', data?: object, message?: string } | null, onRetryDiff?: () => void,
  *   answer?: { requestId: string, busy: object | null, guard: 'typing' | 'refused' | null } | null, confirmed?: boolean,
- *   onConfirm?: (checked: boolean) => void, onAnswer?: (request: object, body: object) => void
+ *   onConfirm?: (checked: boolean) => void, onAnswer?: (request: object, body: object) => void,
+ *   onArchive?: () => void, onUnarchive?: () => void, fallback?: object | null
  * }} props
  */
 export function FocusView({
   state, sessionId, t, now = Date.now(), lang = 'en', navigate, steps, tab, onTab, onMarkReviewed, reviewing = false, reviewError = null,
   client = null, scrollback = null, terminalFocused = false, onTerminalFocus, collision, panelOpen = true, drawerOpen = false, onTogglePanel,
   confirming = false, onStop, onConfirmStop, onCancelStop, onNudge, onRelaunch, onDismiss, stopError = null, selectedFile = null, onSelectFile,
-  confirmLink, confirmPaste, diff = null, onRetryDiff, answer = null, confirmed = false, onConfirm, onAnswer = () => {}
+  confirmLink, confirmPaste, diff = null, onRetryDiff, answer = null, confirmed = false, onConfirm, onAnswer = () => {},
+  onArchive, onUnarchive, fallback = null
 }) {
-  const session = state.data.sessions.find(row => row.id === sessionId)
+  const session = state.data.sessions.find(row => row.id === sessionId) ?? (fallback?.id === sessionId ? fallback : undefined)
   if (!session) {
     return (
       <section className="focus-screen focus--missing">
@@ -556,6 +567,9 @@ export function FocusView({
   const runHref = session.role === 'lead' && session.runRef ? `/runs/${encodeURIComponent(repo.name)}/${encodeURIComponent(session.runRef.runId)}` : null
   const pty = isPty(session)
   const live = isLive(session)
+  const archived = isArchived(session)
+  // Stop and Nudge act on a live session that is not archived; an archived one is read-only here.
+  const controls = live && !archived
   const deckd = deckdOf(state)
   const source = state.data.inputSources?.[session.id] ?? null
   const chip = collision ?? source?.state === 'collision'
@@ -588,7 +602,13 @@ export function FocusView({
                 {panelLabel}<kbd className="kbd" aria-hidden="true">Alt I</kbd>
               </button>
             ) : null}
-            {live
+            {archived && onUnarchive
+              ? <button type="button" className="button button--secondary button--xs" onClick={onUnarchive}>{translate(t, FOCUS_COPY, 'focus.header.unarchive')}</button>
+              : null}
+            {!archived && onArchive
+              ? <button type="button" className="button button--ghost button--xs" onClick={onArchive}>{translate(t, FOCUS_COPY, 'focus.header.archive')}</button>
+              : null}
+            {controls
               ? <button type="button" className="button button--danger button--xs" disabled={deckd.down} aria-describedby={deckd.down ? reasonId : undefined} onClick={onStop}>{translate(t, FOCUS_COPY, 'focus.header.stop')}</button>
               : null}
           </div>
@@ -596,11 +616,17 @@ export function FocusView({
         {pty && deckd.down ? <p className="focus-reason" id={reasonId}>{translate(t, FOCUS_COPY, 'focus.prompt.deckdDown')}</p> : null}
         {reviewError ? <p className="focus-error" role="alert">{translate(t, FOCUS_COPY, 'focus.header.reviewFailed')}</p> : null}
         {stopError ? <p className="focus-error" role="alert">{stopError}</p> : null}
+        {archived ? (
+          <p className="focus-banner focus-banner--archived">
+            <span className="focus-banner-text">{translate(t, FOCUS_COPY, 'focus.archived.banner')}</span>
+            {onUnarchive ? <>{' '}<button type="button" className="button button--secondary button--xs" onClick={onUnarchive}>{translate(t, FOCUS_COPY, 'focus.archived.unarchive')}</button></> : null}
+          </p>
+        ) : null}
         {session.origin === 'observed' ? <p className="focus-banner focus-banner--info">{translate(t, FOCUS_COPY, 'focus.observed.banner')}</p> : null}
         {session.state === 'stale' ? (
           <p className="focus-banner focus-banner--hint">
             {translate(t, FOCUS_COPY, 'focus.stale.line', { time: clock(session.lastActivityAt ?? session.stateSince, lang) })}
-            {live ? (
+            {controls ? (
               <> <button type="button" className="button button--amber-outline button--xs" disabled={deckd.down} aria-describedby={deckd.down ? reasonId : undefined} onClick={onNudge}>
                 {translate(t, FOCUS_COPY, 'focus.stale.nudge')}
               </button></>
@@ -612,7 +638,7 @@ export function FocusView({
         {session.joinedMidLife ? <p className="focus-banner focus-banner--info">{translate(t, FOCUS_COPY, 'focus.joinedLate', { time: clock(session.startedAt, lang) })}</p> : null}
         {!pty ? <ActivityLog steps={steps} t={t} lang={lang} /> : live ? (
           <div className="focus-terminal">
-            <TerminalView key={`live:${session.id}`} sessionId={session.id} label={terminalLabel} readOnly={deckd.down} deckdUp={deckd.up}
+            <TerminalView key={`live:${session.id}`} sessionId={session.id} label={terminalLabel} readOnly={deckd.down || archived} deckdUp={deckd.up}
               screenReaderMode={!!state.data.prefs?.terminalScreenReader} client={client} autoFocus onFocusChange={onTerminalFocus}
               confirmLink={confirmLink ?? (() => false)} confirmPaste={confirmPaste} t={t} />
           </div>
@@ -622,7 +648,7 @@ export function FocusView({
               screenReaderMode={!!state.data.prefs?.terminalScreenReader} client={null} initialText={scrollback ?? ''} confirmLink={confirmLink ?? (() => false)} t={t} />
           </div>
         )}
-        {open.map(request => pty && request === prompt ? (
+        {open.map(request => pty && !archived && request === prompt ? (
           <PromptBar key={request.id} request={request} session={session} deckd={deckd} labels={promptLabels(t)} confirmed={confirmed} onConfirm={onConfirm}
             onAnswer={body => onAnswer(request, body)} busy={answer?.requestId === request.id ? answer.busy : null} guard={answer?.requestId === request.id ? answer.guard : null}
             badge={<span className={`tier-badge tier-badge--${tierOf(request)}`}>{translate(t, CARD_COPY, `tier.${tierOf(request)}`)}</span>} />
@@ -647,7 +673,9 @@ const narrow = () => !!globalThis.matchMedia?.(NARROW).matches
  * for 3 s, the Stop dialog and the link and paste dialogs, and opens the Needs-you drawer once for a D-69
  * `?needs=` link. It loads the selected changed file's diff (again when the file's counts change, or on
  * Retry), posts PromptBar answers, keeps the Destructive checkbox per request and summary, and turns `1`, `2`
- * and `3` typed outside the terminal into answers through {@link promptKeyBody}. `client` is the terminal client (Task 14 wires it); `dispatch` takes the store's `toast.push`.
+ * and `3` typed outside the terminal into answers through {@link promptKeyBody}, except on an archived session.
+ * `client` is the terminal client (Task 14 wires it); `dispatch` takes the store's `toast.push`.
+ * Archive and Unarchive run through `archiveFlow` with their own Undo toast, also for the palette's "Archive session".
  * This browser wiring is not exercised by the unit tests; {@link FocusView} and the exported helpers are.
  * @param {{ route: { params: { sessionId: string } }, state: object, t?: Function, navigate: (to: string) => void, api?: object,
  *   search?: string, client?: object | null, dispatch?: (action: object) => void,
@@ -659,7 +687,19 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
   const minute = useMinuteNow()
   const [tick, setTick] = useState(0)
   const http = api ?? deckApi()
-  const session = state.data.sessions.find(row => row.id === id)
+  const stored = state.data.sessions.find(row => row.id === id)
+  // An archived session older than the snapshot's window is not in the store; the Archived list's Open link
+  // still reaches it, so Focus reads the row itself (`GET /api/sessions/:id`).
+  const [fallback, setFallback] = useState(null)
+  useEffect(() => {
+    if (stored) return undefined
+    let current = true
+    http.get(`/api/sessions/${seg(id)}`).then(data => { if (current && data?.session) setFallback(data.session) }, () => {})
+    return () => { current = false }
+  }, [http, id, !!stored])
+  const session = stored ?? (fallback?.id === id ? fallback : undefined)
+  const [archiveToast, showArchiveToast] = useArchiveToast()
+  const flow = archiveFlow({ api: http, show: showArchiveToast, t })
   const [steps, setSteps] = useState(null)
   const params = new URLSearchParams(search)
   const wanted = params.get('tab') === 'facts' ? 'facts' : 'changes'
@@ -693,7 +733,9 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
   const diffPath = shownFile(files, selectedFile)
   const diffFile = files.find(file => file.path === diffPath)
   const diffRev = diffFile ? `${diffFile.adds ?? 0}:${diffFile.dels ?? 0}` : ''
-  const prompt = known && isPty(session)
+  // An archived session is read-only here, so its on-screen request takes no answer keys (the server unarchives
+  // a session that needs the owner, so the answer controls return as soon as it does).
+  const prompt = known && isPty(session) && !isArchived(session)
     ? onScreenRequest((state.data.requests ?? []).filter(row => row.sessionId === id && (row.state ?? 'open') === 'open').sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)))
     : null
   // The Destructive checkbox resets when the request or its summary changes (state-machines 2.5).
@@ -818,7 +860,9 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
         selectedFile={selectedFile} onSelectFile={setSelectedFile} confirmLink={confirmLink} confirmPaste={confirmPaste}
         diff={diff} onRetryDiff={() => { setDiff(prev => prev && { path: prev.path, status: 'loading' })
           setDiffRetry(value => value + 1) }}
-        answer={answer} confirmed={confirmed} onConfirm={checked => setConfirm({ key: confirmKey, checked })} onAnswer={onAnswer} />
+        answer={answer} confirmed={confirmed} onConfirm={checked => setConfirm({ key: confirmKey, checked })} onAnswer={onAnswer}
+        onArchive={() => flow.archive(id)} onUnarchive={() => flow.unarchive(id)} fallback={session === stored ? null : session} />
+      <ArchiveToast toast={archiveToast} t={t} onUndo={flow.undo} onDismiss={() => showArchiveToast(null)} />
       {linkAsk ? (
         <ConfirmDialog title={translate(t, FOCUS_COPY, 'focus.link.title')} body={linkAsk} confirmLabel={translate(t, FOCUS_COPY, 'focus.link.confirm')}
           cancelLabel={translate(t, FOCUS_COPY, 'focus.stop.cancel')} onCancel={() => setLinkAsk(null)}
@@ -830,7 +874,7 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
           confirmLabel={translate(t, FOCUS_COPY, 'focus.paste.confirm')} cancelLabel={translate(t, FOCUS_COPY, 'focus.stop.cancel')}
           onCancel={() => answerPaste(false)} onConfirm={() => answerPaste(true)} t={t} />
       ) : null}
-      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} />
+      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} onArchive={flow.archive} />
     </>
   )
 }

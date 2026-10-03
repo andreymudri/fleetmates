@@ -177,3 +177,46 @@ export function dismissRuleOffer(api, { repoKey, pattern }) {
 export function fetchDiff(api, sessionId, path) {
   return api.get(`${session(sessionId, 'diff')}?path=${seg(path)}`)
 }
+
+/**
+ * Archive a session (`POST /api/sessions/:id/archive`); the server refuses one that needs the owner
+ * with a 409 `needs_you` `ApiError`.
+ * @param {{ post: Function }} api
+ * @param {string} id
+ * @returns {Promise<{ session: object }>}
+ */
+export function archiveSession(api, id) {
+  return api.post(session(id, 'archive'))
+}
+
+/**
+ * Unarchive a session (`POST /api/sessions/:id/unarchive`).
+ * @param {{ post: Function }} api
+ * @param {string} id
+ * @returns {Promise<{ session: object }>}
+ */
+export function unarchiveSession(api, id) {
+  return api.post(session(id, 'unarchive'))
+}
+
+/**
+ * Archive every finished session without unreviewed changes (`POST /api/sessions/archive-finished`).
+ * @param {{ post: Function }} api
+ * @returns {Promise<{ ids: string[] }>}
+ */
+export function archiveFinished(api) {
+  return api.post('/api/sessions/archive-finished')
+}
+
+/**
+ * Read a page of archived sessions (`GET /api/sessions?archived=1`), newest archive first.
+ * @param {{ get: Function }} api
+ * @param {{ before?: string, limit?: number }} [page]
+ * @returns {Promise<unknown>}
+ */
+export function fetchArchived(api, { before, limit } = {}) {
+  const query = new URLSearchParams({ archived: '1' })
+  if (before !== undefined) query.set('before', String(before))
+  if (limit !== undefined) query.set('limit', String(limit))
+  return api.get(`/api/sessions?${query}`)
+}

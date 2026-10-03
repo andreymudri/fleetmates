@@ -2,7 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   launchSession, stopSession, nudgeSession, relaunchSession, fetchScrollback, patchCrew, fetchRunPlan, openRunPlan,
-  answerRequest, answerBatch, sendFollowup, fetchRules, addRule, revokeRule, dismissRuleOffer, fetchDiff
+  answerRequest, answerBatch, sendFollowup, fetchRules, addRule, revokeRule, dismissRuleOffer, fetchDiff,
+  archiveSession, unarchiveSession, archiveFinished, fetchArchived
 } from '../../web/src/state/actions.js'
 import { createApiClient } from '../../web/src/state/api.js'
 
@@ -43,6 +44,29 @@ test('each action helper calls the right method and path with encoded segments',
     ['GET', '/api/runs/work%2Fapi/2026%2Fsubstop/plan'],
     ['POST', '/api/open', { kind: 'runPlan', ref: { repoId: '/home/you/dev/work/api', runId: '2026/substop' } }]
   ])
+})
+
+test('the archive helpers call the archive routes with the id as one encoded segment', async () => {
+  const api = recordingApi()
+  const id = 'a/b?c#d'
+  assert.deepEqual(await archiveSession(api, id), { ok: 'POST', path: '/api/sessions/a%2Fb%3Fc%23d/archive' })
+  await unarchiveSession(api, id)
+  await archiveFinished(api)
+  await fetchArchived(api)
+  await fetchArchived(api, { limit: 50 })
+  await fetchArchived(api, { before: 'c/1&x', limit: 20 })
+  assert.deepEqual(api.calls, [
+    ['POST', '/api/sessions/a%2Fb%3Fc%23d/archive'],
+    ['POST', '/api/sessions/a%2Fb%3Fc%23d/unarchive'],
+    ['POST', '/api/sessions/archive-finished'],
+    ['GET', '/api/sessions?archived=1'],
+    ['GET', '/api/sessions?archived=1&limit=50'],
+    ['GET', '/api/sessions?archived=1&before=c%2F1%26x&limit=20']
+  ])
+
+  const failure = Object.assign(new Error('needs you'), { status: 409, code: 'needs_you' })
+  api.failNext(failure)
+  await assert.rejects(archiveSession(api, 's1'), error => error === failure)
 })
 
 test('a helper returns the API body and throws its ApiError unchanged', async () => {

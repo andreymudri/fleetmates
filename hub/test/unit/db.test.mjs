@@ -107,7 +107,7 @@ test('a version 1 database migrates to the latest version with a pre-0002 backup
   try { assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 1) } finally { backup.close() }
 }))
 
-test('a version 2 database migrates to 4 with a pre-0003 backup (0003 belongs to the archive run, the runner allows the gap and names a backup after the version it migrates to next) and gains request reasons and the approvals audit', async () => withDatabase(async file => {
+test('a version 2 database migrates to 4 with a pre-0003 backup and gains sessions.archived_at and archived_by, request reasons and the approvals audit', async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
   for (const name of ['0001-init.sql', '0002-launch.sql']) db.exec(await readFile(fileURLToPath(new URL(`../../server/db/migrations/${name}`, import.meta.url)), 'utf8'))
@@ -127,6 +127,11 @@ test('a version 2 database migrates to 4 with a pre-0003 backup (0003 belongs to
     store.run("INSERT INTO approval_audit(at, kind, tier, reasons, via) VALUES(1, 'answered', 'safe', '[\"safe.shell.ls\"]', 'browser')")
     assert.throws(() => store.run("INSERT INTO approval_audit(at, kind) VALUES(1, 'approved')"), /CHECK/)
     assert.throws(() => store.run("INSERT INTO approval_audit(at, kind, via) VALUES(1, 'answered', 'keyboard')"), /CHECK/)
+    const sessionColumns = store.all('PRAGMA table_info(sessions)').map(column => column.name)
+    assert.ok(sessionColumns.includes('archived_at'), 'sessions.archived_at exists')
+    assert.ok(sessionColumns.includes('archived_by'), 'sessions.archived_by exists')
+    assert.equal(store.get("SELECT count(*) AS n FROM sqlite_schema WHERE type = 'index' AND name = 'sessions_archived'").n, 1)
+    assert.throws(() => store.run("INSERT INTO sessions(id,origin,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at,archived_at,archived_by) VALUES('s','wrapped','/r','/r','done',1,1,1,0,1,1,'someone')"), /CHECK/)
   } finally { store.close() }
   const backups = (await readdir(path.dirname(file))).filter(name => name.includes('.pre-0003.bak'))
   assert.equal(backups.length, 1)

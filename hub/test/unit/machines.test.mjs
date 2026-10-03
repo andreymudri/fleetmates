@@ -915,7 +915,7 @@ test('new deck has zero counts before any session arrives', () => {
   try {
     assert.deepEqual(h.projector.snapshot().counts, {
       needYouSessions: 0, running: 0, toReview: 0, openRequests: 0,
-      requestSessions: 0, oldestRequestAt: null, perRun: []
+      requestSessions: 0, oldestRequestAt: null, perRun: [], archived: 0
     })
   } finally { h.close() }
 })

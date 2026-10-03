@@ -3,6 +3,7 @@ import { capHistory } from '../../deckd/screen-model.mjs'
 import { dedupeKey } from '../ingest/validate.mjs'
 import { historySize, sizeHeader } from '../screen/history.mjs'
 import { isRunName } from '../adapters/fleetmates.mjs'
+import { archiveFinished, archiveSession, autoArchiveCandidates, unarchiveNeedingOwner, unarchiveSession } from './archive.mjs'
 import { projectCounts, projectHome } from './counts.mjs'
 import { applyRequestHook, expireRequests, isRequestOpening, reconcileRequestOpenings, resumedActivityEvents } from './request.mjs'
 import { applySessionHook, applySubagentLifecycle, captureReviewBaseline, ignoresSessionHook, isObsoleteSessionStart, leadRunId, persistSessionSummary, recordSessionIdentity, recordToolStep, refreshSessionChanges, workingRoot, resolveSession, sameKnownProcess } from './session.mjs'
@@ -59,6 +60,8 @@ function sessionView(row, store) {
     reviewBaseline: reviewBaselineHead(row.review_baseline),
     startedAt: row.started_at,
     endedAt: row.ended_at,
+    archivedAt: row.archived_at ?? null,
+    archivedBy: row.archived_by ?? null,
     toolCalls: store.get('SELECT COUNT(*) AS n FROM session_steps WHERE session_id=?', row.id).n
   }
 }
@@ -151,7 +154,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
   }
   // The urgency order is the snapshot's `home.order`; only the fields it sorts on are read here.
   function urgencyOrder() {
-    const sessions = store.all('SELECT id, state, state_since FROM sessions').map(row => ({ id: row.id, state: row.state, stateSince: row.state_since }))
+    const sessions = store.all('SELECT id, state, state_since, archived_at FROM sessions').map(row => ({ id: row.id, state: row.state, stateSince: row.state_since, archivedAt: row.archived_at }))
     const requests = store.all('SELECT session_id, created_at FROM requests WHERE state = ?', 'open').map(row => ({ sessionId: row.session_id, createdAt: row.created_at, state: 'open' }))
     return projectHome(sessions, requests).order
   }
@@ -171,6 +174,13 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
     let order
     store.tx(() => {
       fn()
+      // Every path that opens a request (hooks, late reconcile, screen parse) unarchives in the same transaction.
+      const unarchived = unarchiveNeedingOwner(store)
+      if (unarchived.length) {
+        const at = now()
+        for (const id of unarchived) store.appendEvent({ at, type: 'session.upserted', entityId: id, data: sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store) })
+        store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
+      }
       order = orderEvent(now())
     })
     publishedOrder = order
@@ -222,8 +232,62 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
       store.appendEvent({ at, type: 'request.closed', entityId: row.id, data: requestView(row) })
     }
   }
+  // Runs one archive change in `commit`: a `session.upserted` per changed session and one `counts`.
+  function archiveCommit(change) {
+    let result
+    commit(() => {
+      result = change()
+      if (!Array.isArray(result)) return
+      const at = now()
+      for (const id of result) store.appendEvent({ at, type: 'session.upserted', entityId: id, data: sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store) })
+      store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
+    })
+    return result
+  }
   return {
     snapshot,
+    /**
+     * Archive one session (`archived_by` = `by`, `archived_at` = now).
+     * @param {string} id session id
+     * @param {'owner'|'auto'} by who archived it
+     * @returns {string[] | { ok: false, code: 'not_found'|'needs_you' }} the changed ids (empty when already
+     *   archived), or the refusal
+     */
+    archive(id, by) {
+      return archiveCommit(() => {
+        const result = archiveSession(store, id, { by, at: now() })
+        if (!result.ok) return result
+        return result.changed ? [id] : []
+      })
+    },
+    /**
+     * Clear the archive of one session.
+     * @param {string} id session id
+     * @returns {string[]} the changed ids (empty when it was not archived or does not exist)
+     */
+    unarchive(id) {
+      return archiveCommit(() => unarchiveSession(store, id).changed ? [id] : [])
+    },
+    /**
+     * Archive, by the owner, every finished session without unreviewed changes.
+     * @returns {string[]} the archived ids
+     */
+    archiveFinished() {
+      return archiveCommit(() => archiveFinished(store, { at: now() }))
+    },
+    /**
+     * Archive, as `'auto'`, every auto-archive candidate for a delay of `afterHours` (null means never).
+     * @param {number|null} afterHours the `autoArchiveAfter` pref
+     * @returns {string[]} the archived ids
+     */
+    autoArchive(afterHours) {
+      return archiveCommit(() => {
+        const at = now()
+        const ids = autoArchiveCandidates(store, { at, afterHours })
+        for (const id of ids) archiveSession(store, id, { by: 'auto', at })
+        return ids
+      })
+    },
     /**
      * Insert a session row the deck itself started (the launch flow, state-machines row 1) in one transaction
      * and append `session.upserted`, `counts` and, when the urgency order moved, `order.changed`. A live row

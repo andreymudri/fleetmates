@@ -451,9 +451,11 @@ if (import.meta.main) {
       const box = card(page, h.ids.get(key)).locator('.request-box')
       assert.equal(await box.locator('.request-terminal').textContent(), 'Answer in your terminal')
     }
-    // Structural, not label matching: the only interactive elements inside cards are links to Focus.
+    // Structural, not label matching: the only interactive elements inside cards are links to Focus, plus the
+    // archive control (`button.card-archive`), which changes deck metadata and never acts on the session.
     const controls = await page.$$eval('.home-grid article, .quiet-row article', cards => cards.flatMap(card =>
-      [...card.querySelectorAll('button, input, select, textarea, [role="button"], [contenteditable="true"]')].map(el => el.outerHTML.slice(0, 80))))
+      [...card.querySelectorAll('button, input, select, textarea, [role="button"], [contenteditable="true"]')]
+        .filter(el => !el.matches('button.card-archive')).map(el => el.outerHTML.slice(0, 80))))
     assert.deepEqual(controls, [], 'no button or input inside any card')
     const links = await page.$$eval('.home-grid article a, .quiet-row article a', anchors => anchors.map(a => new URL(a.href).pathname))
     assert.ok(links.length > 0 && links.every(href => href.startsWith('/s/')), 'every card link goes to a Focus route')
@@ -790,9 +792,12 @@ if (import.meta.main) {
     assert.equal(await page.getAttribute('.focus-tab[aria-selected="true"]', 'id'), 'focus-tab-facts')
     await page.waitForSelector('.focus-steps, .focus-log-empty', { timeout: 5000 })
     assert.deepEqual(steps, [`/api/sessions/${rustot}/steps`], 'Focus fetched the session steps once')
-    // Structural read-only check: no form control anywhere in Focus; its only buttons are the tabs (Mark reviewed is for done sessions).
+    // Structural read-only check: no form control anywhere in Focus; its only buttons are the tabs (Mark reviewed is for done sessions)
+    // and the header's archive control (a `.focus-actions` button reading exactly Archive or Unarchive), which changes deck metadata only.
     assert.equal(await page.locator('.focus-screen :is(input, select, textarea, [contenteditable="true"])').count(), 0)
-    const buttons = await page.$$eval('.focus-screen button', rows => rows.map(row => row.getAttribute('role') ?? row.className))
+    const buttons = await page.$$eval('.focus-screen button', rows => rows
+      .filter(row => !(row.parentElement?.matches('.focus-header .focus-actions') && !row.hasAttribute('role') && ['Archive', 'Unarchive'].includes(row.textContent)))
+      .map(row => row.getAttribute('role') ?? row.className))
     assert.ok(buttons.every(role => role === 'tab'), `only tabs are buttons: ${buttons.join(', ')}`)
     assert.equal(await page.textContent('.focus-request .request-terminal'), 'Answer in your terminal')
     await page.focus('#focus-tab-facts')
