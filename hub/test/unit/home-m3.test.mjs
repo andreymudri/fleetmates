@@ -194,6 +194,27 @@ test('the compact strip keeps two xs buttons per variant', async () => {
   assert.deepEqual(reviewed, ['r1'])
 })
 
+test('the compact strip locks its answers while one is in flight or the prompt is queued, and falls back to Open and Review', async () => {
+  const { stripActions } = await load('components/CompactCard.jsx')
+  const kinds = actions => actions.map(action => action.kind)
+  const locked = actions => actions.every(action => action.disabled === true)
+  assert.ok(!locked(stripActions({ session: session(), request: request() })), 'idle: both answers enabled')
+  for (const delivery of ['sending', 'verifying']) {
+    const actions = stripActions({ session: session(), request: request({ delivery }) })
+    assert.deepEqual(kinds(actions), ['deny', 'allow'], delivery)
+    assert.ok(locked(actions), `${delivery}: Deny and Allow once are disabled while an answer is in flight`)
+  }
+  const sent = stripActions({ session: session(), request: request(), busy: { choice: 'allow' } })
+  assert.ok(locked(sent), 'the card\'s own answer in flight locks both buttons')
+  assert.deepEqual(sent.map(action => !!action.spinner), [false, true], 'the spinner sits in the chosen button')
+  const queued = stripActions({ session: session(), request: request({ screenMatch: 'queued' }) })
+  assert.deepEqual(kinds(queued), ['deny', 'allow'])
+  assert.ok(locked(queued), 'a queued prompt disables both answers')
+  assert.deepEqual(kinds(stripActions({ session: session(), request: request({ delivery: 'did_not_land' }) })), ['open', 'review'], 'an answer that did not land falls back to Open and Review')
+  assert.deepEqual(kinds(stripActions({ session: session(), request: request({ options: [] }) })), ['open', 'review'], 'no parsed options: never guess, Open and Review')
+  assert.deepEqual(kinds(stripActions({ session: session(), request: request({ options: undefined }) })), ['open', 'review'])
+})
+
 test('HomeView passes the answer props to its cards and opens the drawer on a Destructive review', async () => {
   const { HomeView } = await load('screens/home/Home.jsx')
   const overlays = []
