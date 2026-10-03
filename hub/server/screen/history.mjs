@@ -284,12 +284,14 @@ export function capOutput(data) {
  * arguments and a bounded heap. It posts `{ ready: true }` once the terminal is loaded, then answers each
  * `{ id, text, cols, rows }` with `{ id, data, truncated }` or `{ id, error: true }`, and `{ probe: 'env' }`
  * with `{ probe: 'env', envNames, execArgv, resourceLimits }` (names only, never values), for tests.
+ * `env` replaces the empty environment; it exists so a test can check the probe never answers values.
+ * @param {{ env?: Record<string, string> }} [options]
  * @returns {Worker}
  */
-export function spawnHistoryWorker() {
+export function spawnHistoryWorker({ env = {} } = {}) {
   return new Worker(new URL(import.meta.url), {
     workerData: { [WORKER_MARK]: true },
-    env: {},
+    env,
     execArgv: [],
     stdout: false,
     resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB }
@@ -301,8 +303,9 @@ export function spawnHistoryWorker() {
  * longer than `timeoutMs`, a worker that is not ready within `startupMs`, fails to start, errors or exits,
  * and a worker that reports an error each end that worker (`terminate()`) and answer `fallbackHistory`; the
  * next render starts a fresh worker. The worker is unreferenced, so an idle renderer never keeps the
- * process alive. Only the newest `RENDER_INPUT_CAP` bytes (`newestInput`) are sent.
- * @param {{ timeoutMs?: number, startupMs?: number, spawn?: () => Worker }} [options]
+ * process alive. Only the newest `RENDER_INPUT_CAP` bytes (`newestInput`) are sent. `startupMs` may be a
+ * function, called once per started worker, so a test can time one worker differently from the next.
+ * @param {{ timeoutMs?: number, startupMs?: number | (() => number), spawn?: () => Worker }} [options]
  */
 export function createHistoryRenderer({ timeoutMs = RENDER_TIMEOUT_MS, startupMs = RENDER_STARTUP_MS, spawn = spawnHistoryWorker } = {}) {
   /** @type {Worker | null} */
@@ -336,7 +339,7 @@ export function createHistoryRenderer({ timeoutMs = RENDER_TIMEOUT_MS, startupMs
       const onMessage = message => {
         if (message?.ready) settle(undefined)
       }
-      const timer = setTimeout(() => settle(new Error('render worker did not start')), startupMs)
+      const timer = setTimeout(() => settle(new Error('render worker did not start')), typeof startupMs === 'function' ? startupMs() : startupMs)
       w.on('message', onMessage)
       w.on('error', settle)
       w.on('exit', settle)
@@ -422,6 +425,12 @@ let shared = null
 export function renderHistory(text, options) {
   shared ??= createHistoryRenderer()
   return shared.render(text, options)
+}
+
+/** End the shared render worker of `renderHistory`, if one runs; the next render starts another. For tests. */
+export function closeSharedRenderer() {
+  shared?.close()
+  shared = null
 }
 
 // ---------------------------------------------------------------------------------------------------------

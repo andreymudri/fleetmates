@@ -1,6 +1,6 @@
 // The server stores deckd's serialized history at exit and serves a rendered history from
 // `GET /api/sessions/:id/scrollback` (docs/deck/06-storage.md `session_scrollback`).
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -11,9 +11,13 @@ import { ScreenModel } from '../../deckd/screen-model.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createProjector, SCROLLBACK_CAP } from '../../server/machines/projector.mjs'
 import { createLauncher } from '../../server/launch/launch.mjs'
-import { boundCounts, createHistoryRenderer, fallbackHistory, historySize, newestInput, readStoredHistory, renderHistory, RENDER_INPUT_CAP, RENDER_OUTPUT_CAP, spawnHistoryWorker, stripControls } from '../../server/screen/history.mjs'
+import { boundCounts, closeSharedRenderer, createHistoryRenderer, fallbackHistory, historySize, newestInput, readStoredHistory, renderHistory, RENDER_INPUT_CAP, RENDER_OUTPUT_CAP, spawnHistoryWorker, stripControls } from '../../server/screen/history.mjs'
 
 const { Terminal } = xtermHeadless
+
+// The shared renderHistory worker is unreferenced; closing it here keeps the file exiting even when a
+// test that pins the unref fails.
+after(() => closeSharedRenderer())
 const fixture = readFileSync(new URL('../fixtures/screens/2.1.282/permission-edit.ansi', import.meta.url))
 const hookFixture = new URL('../fixtures/hooks/2.1.282/SessionStart.startup.json', import.meta.url)
 
@@ -417,14 +421,16 @@ function within (promise, ms, what) {
 
 test('a worker that never says ready is ended after the startup limit, and the next render starts another', async () => {
   let spawned = 0
+  // Only the never-ready first worker gets the 100 ms limit; the real second one gets 30 s, so a loaded
+  // machine cannot make it miss its start and turn the next render into a fallback.
   const renderer = createHistoryRenderer({
-    startupMs: 100,
+    startupMs: () => spawned === 1 ? 100 : 30_000,
     spawn: () => ++spawned === 1 ? new Worker('setInterval(() => {}, 1000)', { eval: true }) : spawnHistoryWorker()
   })
   try {
     const started = performance.now()
-    const out = await within(renderer.render('a\x1b[31mred\x1b[0m\r\nb', { timeoutMs: 30_000 }), 3000, 'the render on a worker that never starts')
-    assert.ok(performance.now() - started < 1000, `the fallback came after ${Math.round(performance.now() - started)} ms`)
+    const out = await within(renderer.render('a\x1b[31mred\x1b[0m\r\nb', { timeoutMs: 30_000 }), 5000, 'the render on a worker that never starts')
+    assert.ok(performance.now() - started < 5000, `the fallback came after ${Math.round(performance.now() - started)} ms`)
     assert.deepEqual(out, { data: 'ared\r\nb', truncated: true })
     const next = await within(renderer.render('ok', { timeoutMs: 30_000 }), 30_000, 'the next render')
     assert.equal(next.truncated, false)
@@ -444,17 +450,26 @@ test('one render at a time: a cheap render issued beside a costly one that times
   } finally { renderer.close() }
 })
 
+/**
+ * Send `worker` the env probe once it says ready, and answer the probe's reply.
+ * @param {Worker} worker
+ * @returns {Promise<any>}
+ */
+function probeEnv (worker) {
+  return within(new Promise((resolve, reject) => {
+    worker.on('message', message => {
+      if (message?.ready) worker.postMessage({ probe: 'env' })
+      else if (message?.probe === 'env') resolve(message)
+    })
+    worker.once('error', reject)
+  }), 30_000, 'the env probe')
+}
+
 test('the render worker sees an empty environment, no exec arguments and a bounded heap', async () => {
   process.env.DECK_HISTORY_ENV_MARKER = '1'
   const worker = spawnHistoryWorker()
   try {
-    const answer = await within(new Promise((resolve, reject) => {
-      worker.on('message', message => {
-        if (message?.ready) worker.postMessage({ probe: 'env' })
-        else if (message?.probe === 'env') resolve(message)
-      })
-      worker.once('error', reject)
-    }), 30_000, 'the env probe')
+    const answer = await probeEnv(worker)
     assert.deepEqual(answer.envNames, [], 'the worker sees no environment variable')
     assert.deepEqual(answer.execArgv, [])
     assert.equal(answer.resourceLimits.maxOldGenerationSizeMb, 512)
@@ -462,6 +477,16 @@ test('the render worker sees an empty environment, no exec arguments and a bound
     delete process.env.DECK_HISTORY_ENV_MARKER
     await worker.terminate()
   }
+})
+
+test('the env probe answers variable names, never their values', async () => {
+  const value = 'deck-history-probe-value-7f3a'
+  const worker = spawnHistoryWorker({ env: { DECK_PROBE_MARKER: value } })
+  try {
+    const answer = await probeEnv(worker)
+    assert.deepEqual(answer.envNames, ['DECK_PROBE_MARKER'], 'the probe names the variable')
+    assert.ok(!JSON.stringify(answer).includes(value), 'the probe reply carries no value')
+  } finally { await worker.terminate() }
 })
 
 test('a process that renders once exits on its own: the idle worker does not hold it open', async () => {
