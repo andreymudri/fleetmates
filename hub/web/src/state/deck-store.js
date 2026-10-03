@@ -3,6 +3,9 @@ import * as ptCatalog from '../i18n/pt.js'
 
 const NEEDS_STATES = new Set(['needs_approval', 'asked_you'])
 
+// Archived: the session row carries a non-null `archivedAt`.
+const isArchived = row => row?.archivedAt != null
+
 /** @returns {Record<string, any>} the empty data a snapshot replaces */
 function emptyData() {
   return {
@@ -89,7 +92,10 @@ function applyEvent(state, message, live) {
       const previous = d.sessions.find(row => row.id === data.id)
       next.data = { ...d, sessions: upsert(d.sessions, data) }
       // The server publishes no order.changed when a session only leaves the order, so drop it here.
-      if (data.state === 'ended' && d.order.includes(data.id)) next.data.order = d.order.filter(id => id !== data.id)
+      // An archived session leaves the order the same way.
+      if ((data.state === 'ended' || isArchived(data)) && d.order.includes(data.id)) next.data.order = d.order.filter(id => id !== data.id)
+      // An unarchived session rejoins at the end until the server's order.changed places it.
+      else if (isArchived(previous) && !isArchived(data) && data.state !== 'ended' && !d.order.includes(data.id)) next.data.order = [...d.order, data.id]
       if (!NEEDS_STATES.has(data.state) && next.episodes[data.id]) {
         const episodes = { ...next.episodes }
         delete episodes[data.id]
@@ -220,6 +226,24 @@ function receive(state, message) {
       if (message.seq <= state.seq) return state
       return applyEvent(state, message, !state.syncing)
   }
+}
+
+/**
+ * The sessions Home, Focus and the palette show: every session that is not archived.
+ * @param {Record<string, any>} state
+ * @returns {Array<Record<string, any>>}
+ */
+export function visibleSessions(state) {
+  return state.data.sessions.filter(row => !isArchived(row))
+}
+
+/**
+ * How many sessions are archived, from the server's `counts.archived`; zero before counts arrive.
+ * @param {Record<string, any>} state
+ * @returns {number}
+ */
+export function archivedCount(state) {
+  return state.data.counts?.archived ?? 0
 }
 
 /**
@@ -354,7 +378,8 @@ export function keyAction(event, state) {
   if (event.shiftKey) return SECTIONS[event.code] ? { type: 'navigate', to: SECTIONS[event.code] } : null
   const digit = /^Digit([1-9])$/.exec(event.code)
   if (digit) {
-    const id = state.data.order[Number(digit[1]) - 1]
+    const archived = new Set(state.data.sessions.filter(isArchived).map(row => row.id))
+    const id = state.data.order.filter(item => !archived.has(item))[Number(digit[1]) - 1]
     return id ? { type: 'navigate', to: `/s/${encodeURIComponent(id)}` } : null
   }
   if (event.code === 'Escape') return { type: 'navigate', to: '/' }

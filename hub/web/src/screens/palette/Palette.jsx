@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { CARD_COPY } from '../../components/SessionCard.jsx'
+import { CARD_COPY, isArchived } from '../../components/SessionCard.jsx'
 import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
 import { StatusPill, compactDuration, pillParams, shown, titleText, translate } from '../../components/StatusPill.jsx'
+import { archiveSession } from '../../state/actions.js'
+import { matchRoute } from '../../state/deck-store.js'
 import { closeOverlay, deckApi, leaveOverlay, repoFor, tierOf, trapTab } from '../drawer/NeedsYouDrawer.jsx'
 
 /** English copy for the palette (docs/deck/screens/palette.md section 9): M1 plus the M2 launch actions. */
@@ -19,6 +21,7 @@ export const PALETTE_COPY = Object.freeze({
   'palette.action.launchIn': 'Launch a ship in {repo}',
   'palette.action.launchIn.sub': 'Recent harbor',
   'palette.action.launch': 'Launch a ship',
+  'palette.action.archive': 'Archive session',
   'palette.command.unknown': 'No command named "{name}". Try research or launch.',
   'palette.group.showAll': 'Show all {n} {group}',
   'palette.group.showAll.needs': 'requests',
@@ -159,7 +162,9 @@ function finish(entries, expanded, t, message = null) {
 
 /**
  * The palette result model for a query: the Needs you, Sessions and Actions groups in that order, each capped
- * at {@link GROUP_MAX} unless expanded, and the flat list of selectable rows. Actions (palette.md 4.1): on an
+ * at {@link GROUP_MAX} unless expanded, and the flat list of selectable rows. Archived sessions are left out.
+ * Actions open with "Archive session" while `state.view.path` is the Focus route of a session that is not
+ * archived. Then (palette.md 4.1): on an
  * empty query "Launch a ship" and "Launch a ship in {repo}" for the {@link RECENT_HARBORS} most recent repos;
  * with a query, a launch row per matching repo; then "Mark reviewed" for matching done sessions. A query
  * starting with `>` is command mode ({@link commandRows}); `message` carries its unknown-command line.
@@ -174,7 +179,7 @@ export function paletteModel(state, { query = '', now = Date.now(), expanded = [
     const command = commandRows(typed.slice(1), repos, t)
     return finish([['actions', command.rows]], expanded, t, command.message)
   }
-  const live = orderSessions(sessions.filter(row => row.state !== 'ended'), order, requests)
+  const live = orderSessions(sessions.filter(row => row.state !== 'ended' && !isArchived(row)), order, requests)
   const position = new Map(live.map((row, index) => [row.id, index + 1]))
   const byId = new Map(sessions.map(row => [row.id, row]))
   const untitled = translate(t, CARD_COPY, 'home.card.untitled')
@@ -213,7 +218,15 @@ export function paletteModel(state, { query = '', now = Date.now(), expanded = [
       title: translate(t, PALETTE_COPY, 'palette.action.markReviewed', { repo: shown(repo.name), task: titleText(session.task || untitled) }) }]
   })
 
-  return finish([['needs', needs], ['sessions', sessionRows], ['actions', [...launches, ...reviews]]], expanded, t)
+  // "Archive session" acts on the session Focus shows, while it is not archived.
+  const route = matchRoute(state.view?.path ?? '/')
+  const focused = route.name === 'focus' ? byId.get(route.params.sessionId) : null
+  const archiveTitle = translate(t, PALETTE_COPY, 'palette.action.archive')
+  const archives = focused && !isArchived(focused) && matchesQuery(query, [archiveTitle, repoFor(repos, focused.repoId).name, focused.task])
+    ? [{ kind: 'archive', group: 'actions', key: `archive-${focused.id}`, sessionId: focused.id, session: focused, repo: repoFor(repos, focused.repoId), title: archiveTitle }]
+    : []
+
+  return finish([['needs', needs], ['sessions', sessionRows], ['actions', [...archives, ...launches, ...reviews]]], expanded, t)
 }
 
 /**
@@ -261,11 +274,12 @@ export function openLaunch(navigate, to = '/new', env = globalThis.window) {
 /**
  * Run a palette row. Session and Needs rows jump to Focus (answers arrive in M3); a launch row opens the
  * new-session form through {@link openLaunch}, with `?repo=<repoKey>` when it names a repo; a review action
- * marks the session reviewed; "Show all" expands its group.
+ * marks the session reviewed; "Archive session" calls `archive` with the session id, then closes; "Show all"
+ * expands its group.
  * @param {object} row
- * @param {{ navigate: (to: string) => void, leave: () => void, onClose: () => void, expand: (group: string) => void, api: { post: Function }, win?: object }} env
+ * @param {{ navigate: (to: string) => void, leave: () => void, onClose: () => void, expand: (group: string) => void, api: { post: Function }, win?: object, archive?: (id: string) => Promise<unknown> }} env
  */
-export async function runRow(row, { navigate, leave, onClose, expand, api, win }) {
+export async function runRow(row, { navigate, leave, onClose, expand, api, win, archive = id => archiveSession(api, id) }) {
   if (row.kind === 'session' || row.kind === 'needs') {
     leave()
     navigate(`/s/${encodeURIComponent(row.sessionId)}`)
@@ -274,6 +288,9 @@ export async function runRow(row, { navigate, leave, onClose, expand, api, win }
     openLaunch(navigate, row.repoKey ? `/new?repo=${encodeURIComponent(row.repoKey)}` : '/new', win)
   } else if (row.kind === 'review') {
     await api.post(`/api/sessions/${encodeURIComponent(row.sessionId)}/mark-reviewed`)
+    onClose()
+  } else if (row.kind === 'archive') {
+    await archive(row.sessionId)
     onClose()
   } else if (row.kind === 'showAll') expand(row.group)
 }
@@ -333,10 +350,11 @@ export function PaletteView({ model, query, active, now = Date.now(), t, onQuery
 /**
  * The palette overlay: holds the query, highlight and expanded groups and wires {@link paletteKey},
  * {@link moveActive} and {@link runRow} to the input, with focus moved to the input on open and back to
- * the opener on close. This browser wiring is not exercised by the unit tests; the functions it calls are.
- * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: { post: Function }, onClose?: () => void, onLeave?: () => void }} props
+ * the opener on close. `onArchive` runs "Archive session" (the screen under the palette shows its toast); without
+ * it the row posts the archive directly. This browser wiring is not exercised by the unit tests; the functions it calls are.
+ * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: { post: Function }, onClose?: () => void, onLeave?: () => void, onArchive?: (id: string) => Promise<unknown> }} props
  */
-export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(), onLeave = () => leaveOverlay() }) {
+export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(), onLeave = () => leaveOverlay(), onArchive }) {
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
   const [expanded, setExpanded] = useState([])
@@ -351,6 +369,7 @@ export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(
   const model = paletteModel(state, { query, now, expanded, t })
   const current = Math.min(active, model.rows.length - 1)
   const env = { navigate, leave: onLeave, onClose, expand: group => setExpanded(list => [...list, group]), api: api ?? deckApi() }
+  if (onArchive) env.archive = onArchive
   const run = row => { runRow(row, env).catch(() => {}) }
   useEffect(() => {
     globalThis.document?.getElementById(`palette-opt-${current}`)?.scrollIntoView?.({ block: 'nearest' })

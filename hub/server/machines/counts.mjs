@@ -2,10 +2,11 @@ const chipPriority = { crashed: 4, stale: 3, starting: 2, running: 2, done: 1 }
 
 /** Read the Home, Rail and drawer counts from one database projection. */
 export function projectCounts(store) {
-  const sessions = store.all('SELECT id, state, run_repo_id, run_id FROM sessions WHERE state <> ?', 'ended')
-  const requests = store.all('SELECT session_id, created_at FROM requests WHERE state = ?', 'open')
+  // Archived sessions (`archived_at` not null) and their requests count only in `archived`.
+  const sessions = store.all('SELECT id, state, run_repo_id, run_id FROM sessions WHERE state <> ? AND archived_at IS NULL', 'ended')
+  const requests = store.all('SELECT r.session_id, r.created_at FROM requests r JOIN sessions s ON s.id = r.session_id WHERE r.state = ? AND s.archived_at IS NULL', 'open')
   const requestSessions = new Set(requests.map(row => row.session_id))
-  const counts = { needYouSessions: 0, running: 0, toReview: 0, openRequests: requests.length, requestSessions: requestSessions.size, oldestRequestAt: requests.length ? Math.min(...requests.map(row => row.created_at)) : null, perRun: [] }
+  const counts = { needYouSessions: 0, running: 0, toReview: 0, openRequests: requests.length, requestSessions: requestSessions.size, oldestRequestAt: requests.length ? Math.min(...requests.map(row => row.created_at)) : null, perRun: [], archived: store.get('SELECT count(*) AS n FROM sessions WHERE archived_at IS NOT NULL').n }
   const runs = new Map()
   const chips = new Map()
   for (const row of sessions) {
@@ -30,8 +31,9 @@ export function projectCounts(store) {
 
 const urgency = { needs_approval: 0, asked_you: 1, crashed: 2, starting: 3, running: 3, done: 4, stale: 5, idle: 6, reviewed: 7, ended: 8 }
 
-/** Derive grid, quiet row and Rail order from persisted session states. */
-export function projectHome(sessions, requests = []) {
+/** Derive grid, quiet row and Rail order from persisted session states; archived sessions are left out. */
+export function projectHome(allSessions, requests = []) {
+  const sessions = allSessions.filter(row => row.archivedAt == null)
   const oldestRequest = new Map()
   for (const request of requests) {
     if (request.state !== 'open') continue
