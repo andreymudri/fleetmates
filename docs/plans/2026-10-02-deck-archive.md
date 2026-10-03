@@ -182,10 +182,12 @@ Home shows only sessions the owner still cares about: any session can be archive
 **Files:**
 - Create: `hub/test/e2e/archive.spec.mjs`
 - Modify: `hub/test/e2e/security.spec.mjs`
+- Test: `hub/test/e2e/observe.spec.mjs`
 - Create: `docs/deck/archive.md`
 
 **Depends:** T2, T4, T5
 
 - [ ] **Step 1:** `archive.spec.mjs` against a real deck server (the `startDeck` and `openDeck` helpers of `observe.spec.mjs`, headless `/usr/bin/chromium`): archive a finished session from its card and see it leave Home and appear under "Archived (1)"; Unarchive brings it back; "Archive all finished" leaves a session with unreviewed changes in place; an archived live session that receives a permission hook reappears on Home with its needs-you state without a reload; set "Archive finished sessions after" to 6 hours with an injected clock and see an old finished session move to Archived after a sweep (mutation for each: the corresponding server or web line from Tasks 1, 2 and 5, named in the result).
 - [ ] **Step 2:** `security.spec.mjs`: the route table now includes the three new routes, and each refuses a missing or wrong token (the existing loop; add the routes to its expected list only if the test enumerates them explicitly).
+- [ ] **Step 2b:** `observe.spec.mjs`: the M1 read-only assertions at the "Home AC8 and read-only" test (no button or input inside any card) and the "Focus AC1, AC8, steps" test (only tabs are buttons) now exclude exactly the archive control (the card `.card-archive` button and the Focus header Archive or Unarchive button), because archiving changes deck metadata and never acts on the session. Every other control must still be absent; change no other assertion, and record in `docs/deck/archive.md` that read-only views now carry the archive control.
 - [ ] **Step 3:** `docs/deck/archive.md`: the owner decisions, the Definitions, the routes and the pref, what Archived looks like, and the measured results of this run (test counts, the e2e run). No em dash, placeholders for personal paths.
