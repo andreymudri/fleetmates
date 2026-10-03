@@ -75,6 +75,14 @@ export const SETTINGS_COPY = Object.freeze({
   'settings.appearance.density': 'Density',
   'settings.appearance.density.comfortable': 'Comfortable',
   'settings.appearance.density.compact': 'Compact',
+  'settings.appearance.autoArchive': 'Archive finished sessions after',
+  'settings.appearance.autoArchive.6': '6 hours',
+  'settings.appearance.autoArchive.12': '12 hours',
+  'settings.appearance.autoArchive.24': '24 hours',
+  'settings.appearance.autoArchive.72': '3 days',
+  'settings.appearance.autoArchive.168': '1 week',
+  'settings.appearance.autoArchive.never': 'Never',
+  'settings.appearance.autoArchive.hint': 'Sessions with unreviewed changes are never archived automatically.',
   'settings.appearance.textSize': 'Text size',
   'settings.appearance.textSize.default': '{n}px (default)',
   'settings.appearance.textSize.option': '{n}px',
@@ -103,6 +111,8 @@ export const TEXT_SIZES = Object.freeze([13, 14, 15, 16])
 /** Motion preference values (settings.md 4.3). */
 export const MOTIONS = Object.freeze(['system', 'reduce'])
 const DENSITY_OPTIONS = ['comfortable', 'compact']
+/** Auto-archive delays offered in Appearance, in hours; null means never. 24 is the default. */
+export const AUTO_ARCHIVE_AFTER = Object.freeze([6, 12, 24, 72, 168, null])
 
 // The page's localStorage, read through `window` so a server render (no window) never touches Node's own storage global.
 function browserStorage() {
@@ -320,8 +330,8 @@ function RadioButtons({ label, values, current, text, onPick, className = 'segme
 }
 
 /**
- * Appearance and language section, pure (settings.md 4.3): Density (per browser, `deck.density`), Text size and
- * Motion (`PATCH /api/prefs`), the language as a read-only row (SET-O1), the terminal screen reader mode
+ * Appearance and language section, pure (settings.md 4.3): Density (per browser, `deck.density`), the auto-archive
+ * delay, Text size and Motion (`PATCH /api/prefs`), the language as a read-only row (SET-O1), the terminal screen reader mode
  * (off by default) and the shared colors line with its link to the Crew sheet.
  * @param {{ prefs: object, sources?: object, repos?: object[], t?: Function, errors?: Record<string, string>, storage?: Storage, density?: string, navigate: (to: string) => void, onChange: (key: string, value: unknown) => void, onDensity?: (value: string) => void }} props
  */
@@ -330,6 +340,7 @@ export function AppearanceSection({ prefs, sources = {}, repos = [], t, errors =
   const size = TEXT_SIZES.includes(prefs.textSize) ? prefs.textSize : 14
   const motion = MOTIONS.includes(prefs.motion) ? prefs.motion : 'system'
   const currentDensity = density ?? readDensity(storage)
+  const archiveAfter = AUTO_ARCHIVE_AFTER.includes(prefs.autoArchiveAfter) ? prefs.autoArchiveAfter : 24
   const lang = prefs.lang === 'pt' ? 'pt' : 'en'
   const language = tr(`settings.appearance.language.${lang}`)
   const shared = sharedRepos(repos)
@@ -341,6 +352,17 @@ export function AppearanceSection({ prefs, sources = {}, repos = [], t, errors =
         <RadioButtons label={tr('settings.appearance.density')} values={DENSITY_OPTIONS} current={currentDensity} text={value => tr(`settings.appearance.density.${value}`)}
           onPick={value => { writeDensity(storage, value)
             onDensity(value) }} />
+      </Field>
+      <Field hint={tr('settings.appearance.autoArchive.hint')} error={errors.autoArchiveAfter}>
+        <label className="setting-select" htmlFor="pref-autoArchiveAfter">{tr('settings.appearance.autoArchive')}
+          <select id="pref-autoArchiveAfter" value={archiveAfter === null ? 'never' : String(archiveAfter)} disabled={sources.autoArchiveAfter === 'env'}
+            onChange={event => onChange('autoArchiveAfter', event.target.value === 'never' ? null : Number(event.target.value))}>
+            {AUTO_ARCHIVE_AFTER.map(hours => {
+              const value = hours === null ? 'never' : String(hours)
+              return <option key={value} value={value}>{tr(`settings.appearance.autoArchive.${value}`)}</option>
+            })}
+          </select>
+        </label>
       </Field>
       <Field error={errors.textSize}>
         <label className="setting-select" htmlFor="pref-textSize">{tr('settings.appearance.textSize')}
