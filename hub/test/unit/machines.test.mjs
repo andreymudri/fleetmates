@@ -12,8 +12,8 @@ import { runRetention } from '../../server/db/retention.mjs'
 import { createProjector, PROMPT_GONE_REASON, SCROLLBACK_CAP } from '../../server/machines/projector.mjs'
 import { applySessionHook, captureReviewBaseline, leadRunId } from '../../server/machines/session.mjs'
 import { projectHome } from '../../server/machines/counts.mjs'
-import { applyRequestHook, expireRequests, permissionTier } from '../../server/machines/request.mjs'
-import { worktrees } from '../../server/approvals/tiers.mjs'
+import { applyRequestHook, classifyHook, expireRequests, permissionTier } from '../../server/machines/request.mjs'
+import { classify, worktrees } from '../../server/approvals/tiers.mjs'
 
 function execFileSync(file, args, options = {}) {
   if (path.basename(file) !== 'git') return executeFile(file, args, options)
@@ -210,6 +210,30 @@ test('literal embedded shell writes retain sensitive floors and command-local di
     ]) assert.equal(tier(command), 'caution', command)
     assert.equal(existsSync(path.join(controls, 'settings.json')), false)
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// D-92 (d): any exception from the classifier rates the request Caution with reason classify.error,
+// and only the reason id reaches the log, never the command or the error text.
+test('classifyHook rates a request Caution with classify.error when the classifier throws, logging only the reason id', () => {
+  const written = []
+  const write = process.stderr.write
+  process.stderr.write = chunk => { written.push(String(chunk)); return true }
+  let result
+  try {
+    result = classifyHook({ cwd: '/home/you/repo', tool_name: 'Bash', tool_input: { command: 'secret-command TOKEN=abc' } }, { repoRoot: null, classifier: () => { throw Error('boom secret-command') } })
+  } finally { process.stderr.write = write }
+  assert.equal(result.tier, 'caution')
+  assert.deepEqual(result.reasons.map(item => [item.entryId, item.tier]), [['classify.error', 'caution']])
+  assert.equal(result.ruleCandidate, null)
+  assert.deepEqual(result.confirm, { template: null, count: null })
+  assert.deepEqual(written, ['deck: classify.error\n'])
+  // The real classifier, given words that name Object.prototype members, returns its own verdict:
+  // it does not throw, so classifyHook never falls back to classify.error for them.
+  for (const command of ['constructor', '__proto__', 'toString', 'hasOwnProperty x', 'ls && constructor', 'env constructor']) {
+    const real = classify({ toolName: 'Bash', toolInput: { command }, cwd: '/home/you/repo', repoRoot: null })
+    assert.equal(real.tier, 'caution', command)
+    assert.ok(real.reasons.length && !real.reasons.some(item => item.entryId === 'classify.error'), command)
+  }
 })
 
 test('configured Claude settings retain the write floor for literal aliases and known shell paths', () => {

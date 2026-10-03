@@ -89,6 +89,7 @@ const OPERAND_WRITERS = Object.freeze(['terraform fmt', 'ruff check', 'ruff form
 // taken from each tool's documentation (`ruff help`, `black --help`, `cargo fmt --help`, `go help
 // fmt`, `terraform fmt -help`, the eslint and prettier CLI docs); none of these tools is run here.
 const FIXERS = Object.freeze({
+  __proto__: null,
   'ruff check': args => !args.some(arg => arg.startsWith('--fix')) || args.includes('--diff'),
   'ruff format': args => args.includes('--check') || args.includes('--diff'),
   black: args => args.includes('--check') || args.includes('--diff'),
@@ -284,11 +285,12 @@ const namesDeckPort = (text, ctx) => {
 // and pytest `--help`, and the docker CLI's per-subcommand help. Tools not installed there (go,
 // staticcheck, tree, yq, mypy, black, ruff, pytest plugins) have no values listed, so the word after
 // any of their options stays an operand the path rule checks.
-const spec = (values, extra = {}) => ({ values: new Set(values), files: new Set(extra.files ?? []), pattern: new Set(extra.pattern ?? []), noPattern: new Set(extra.noPattern ?? []), arity: extra.arity ?? {}, fileIndex: extra.fileIndex ?? {}, single: extra.single === true })
+const spec = (values, extra = {}) => ({ values: new Set(values), files: new Set(extra.files ?? []), pattern: new Set(extra.pattern ?? []), noPattern: new Set(extra.noPattern ?? []), arity: { __proto__: null, ...extra.arity }, fileIndex: { __proto__: null, ...extra.fileIndex }, single: extra.single === true })
 const GIT_HISTORY_VALUES = ['-n', '-L', '-S', '-G', '-O', '--max-count', '--skip', '--author', '--committer', '--grep', '--since', '--until', '--after', '--before', '--output', '--diff-filter', '--format', '--date']
 const CARGO_VALUES = ['-p', '-F', '-j', '-Z', '-m', '--package', '--features', '--bin', '--example', '--test', '--bench', '--exclude', '--jobs', '--target', '--target-dir', '--manifest-path', '--artifact-dir', '--profile', '--message-format', '--color', '--config']
 const CARGO_FILES = ['--target-dir', '-m', '--manifest-path', '--artifact-dir']
 const VALUE_OPTIONS = Object.freeze({
+  __proto__: null,
   grep: spec(['-e', '-f', '-A', '-B', '-C', '-m', '-d', '-D', '--regexp', '--file', '--after-context', '--before-context', '--context', '--max-count', '--label', '--include', '--exclude', '--exclude-dir', '--exclude-from', '--binary-files', '--devices', '--directories', '--group-separator'], { files: ['-f', '--file', '--exclude-from'], pattern: ['-e', '-f', '--regexp', '--file'] }),
   rg: spec(['-e', '-f', '-g', '-t', '-T', '-A', '-B', '-C', '-m', '-M', '-j', '-r', '-E', '-d', '--regexp', '--file', '--glob', '--iglob', '--type', '--type-not', '--after-context', '--before-context', '--context', '--max-count', '--max-columns', '--threads', '--replace', '--encoding', '--max-depth', '--max-filesize', '--ignore-file', '--sort', '--sortr', '--color', '--colors', '--type-add', '--type-clear', '--pre', '--pre-glob', '--path-separator', '--context-separator', '--field-match-separator', '--field-context-separator', '--engine', '--dfa-size-limit', '--regex-size-limit', '--hyperlink-format', '--generate'], { files: ['-f', '--file', '--ignore-file'], pattern: ['-e', '-f', '--regexp', '--file'], noPattern: ['--files', '--type-list'] }),
   fd: spec(['-e', '-t', '-d', '-E', '-S', '-o', '-j', '-x', '-X', '--extension', '--type', '--max-depth', '--min-depth', '--exact-depth', '--exclude', '--size', '--owner', '--threads', '--changed-within', '--changed-before', '--base-directory', '--search-path', '--ignore-file', '--path-separator', '--format', '--and', '--color', '--batch-size', '--max-results'], { files: ['--base-directory', '--search-path', '--ignore-file'] }),
@@ -437,6 +439,7 @@ function bareCheck(location, ctx) {
 }
 
 const BARE_REASONS = Object.freeze({
+  __proto__: null,
   cwd: ['scope.cwd', 'runs in a directory outside the repo or reached through a symlink'],
   absolute: ['path.absolute', 'names an absolute or home path'],
   symlink: ['path.symlink', 'names a path through a symlink'],
@@ -492,6 +495,7 @@ const isDirectory = location => { try { return statSync(location).isDirectory() 
 // jq and yq filters that read the environment or a file (jq `env`, `$ENV`, `import`, `include`;
 // yq `env`, `strenv`, `envsubst`, `load*`, `eval`).
 const FILTER_READS = Object.freeze({
+  __proto__: null,
   jq: /\$ENV\b|\b(?:env|import|include|modulemeta|get_search_list)\b/,
   yq: /\b(?:env|strenv|envsubst|load\w*|eval\w*)\b/
 })
@@ -1189,7 +1193,7 @@ function inControlledDir(dir, ctx) {
 // the interpreters' -c and -e take the script itself), and the commands whose first operand is a
 // script or pattern when no option gave one.
 const SHELL_SCRIPT = ['-c']
-const PATTERN_OPTIONS = Object.freeze({ pytest: ['-k', '-m'], node: ['--test-name-pattern', '--test-skip-pattern', '-e', '-p', '--eval', '--print'], sh: SHELL_SCRIPT, bash: SHELL_SCRIPT, dash: SHELL_SCRIPT, zsh: SHELL_SCRIPT, ksh: SHELL_SCRIPT, fish: SHELL_SCRIPT, python: SHELL_SCRIPT, python3: SHELL_SCRIPT, perl: ['-e', '-E'], ruby: ['-e'] })
+const PATTERN_OPTIONS = Object.freeze({ __proto__: null, pytest: ['-k', '-m'], node: ['--test-name-pattern', '--test-skip-pattern', '-e', '-p', '--eval', '--print'], sh: SHELL_SCRIPT, bash: SHELL_SCRIPT, dash: SHELL_SCRIPT, zsh: SHELL_SCRIPT, ksh: SHELL_SCRIPT, fish: SHELL_SCRIPT, python: SHELL_SCRIPT, python3: SHELL_SCRIPT, perl: ['-e', '-E'], ruby: ['-e'] })
 const SCRIPT_OPERAND = Object.freeze(['sed', 'awk', 'gawk', 'mawk', 'jq', 'yq', 'grep', 'egrep', 'fgrep', 'rg'])
 // The words of a segment that are pattern or script text: the option names whose value is one, and
 // the indexes in `words` of the values given in the next word and of the script or pattern operand.
@@ -1325,7 +1329,7 @@ function classifySegment(segment, ctx, ready, out) {
     for (const verdict of goOutputVerdicts(list, words, info, segment, ctx, text)) push(verdict)
   }
   if (name === 'cargo') for (const verdict of cargoTargetVerdicts(list, segment, ctx, text)) push(verdict)
-  const subcommand = FIXERS[`${name} ${list[1] ?? ''}`] ? 2 : (FIXERS[name] ? 1 : 0)
+  const subcommand = Object.hasOwn(FIXERS, `${name} ${list[1] ?? ''}`) ? 2 : (Object.hasOwn(FIXERS, name) ? 1 : 0)
   if (subcommand) {
     const args = list.slice(subcommand)
     const end = args.indexOf('--')
@@ -1455,7 +1459,7 @@ function bareVerdict(entry, name, list, tail, segment, ctx, text) {
     if (verdict) return fail(verdict === 'outside' ? 'outside' : 'symlink')
   }
   // jq and yq: a filter that reads the environment or a file reads outside the repo.
-  if (FILTER_READS[name] && !split.patternGiven && split.operands.length && FILTER_READS[name].test(split.operands[0])) return fail('outside')
+  if (Object.hasOwn(FILTER_READS, name) && !split.patternGiven && split.operands.length && FILTER_READS[name].test(split.operands[0])) return fail('outside')
   return null
 }
 

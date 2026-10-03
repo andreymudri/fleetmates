@@ -993,3 +993,20 @@ test('the store watches the user file and swaps in a valid edit', async () => {
     assert.ok(tiers.entries.some(entry => entry.id === 'caution.user.watched'))
   } finally { store.close(); s.close() }
 })
+
+// D-92 (d): the classifier's word-keyed tables (the fixer modes, the value-option specs, the jq and
+// yq filter checks, the pattern options) hold own properties only. Before Task 20, `__proto__ x`
+// threw and `hasOwnProperty x` read as a formatter that rewrites files.
+test('words that name Object.prototype members classify as unknown commands without throwing (D-92 (d))', () => {
+  const s = sandbox()
+  try {
+    for (const word of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable', 'valueOf', '__lookupGetter__']) {
+      for (const command of [word, `${word} x`, `ls && ${word}`, `env ${word}`, `${word} --check x`, `git ${word}`, `docker ${word} x`]) {
+        const result = s.bash(command)
+        expectTier(result, 'caution', null, command)
+        assert.ok(!result.reasons.some(item => ['format.writes', 'classify.error'].includes(item.entryId)), `${command}: ${ids(result)}`)
+      }
+    }
+    for (const toolName of ['constructor', '__proto__', 'toString']) expectTier(s.run(toolName, {}), 'caution', 'unknown.tool', toolName)
+  } finally { s.close() }
+})

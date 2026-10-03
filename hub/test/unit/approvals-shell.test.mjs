@@ -1235,3 +1235,22 @@ test('curl and wget options that let the server or a wgetrc choose the file writ
   assert.deepEqual(writePaths('wget --conf rc http://h/y'), [null, '/home/you/repo/y'], 'a prefix of --config')
   assert.deepEqual(writePaths('wget --conf=rc http://h/y'), [null, '/home/you/repo/y'])
 })
+
+// D-92 (d): every table the parser keys by a word holds own properties only, so a command, wrapper
+// target or runner that names an Object.prototype member reads as unknown instead of reaching a
+// prototype function (before Task 20, `constructor` threw out of parseCommand).
+test('words that name Object.prototype members parse as ordinary unknown commands', () => {
+  const proto = ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf', '__defineGetter__', 'isPrototypeOf']
+  for (const word of proto) {
+    for (const command of [word, `${word} x`, `ls && ${word}`, `env ${word}`, `sudo ${word}`, `timeout 1 ${word}`, `command ${word}`, `nice ${word} x`, `xargs ${word}`, `find . -exec ${word} {} \\;`, `npm exec ${word}`, `git ${word}`, `docker ${word}`]) {
+      assert.equal(typeof parseCommand(command, { cwd, homeDir }).ok, 'boolean', command)
+      assert.equal(isPlain(command), false, command)
+      assert.equal(isPlainText(command), false, command)
+    }
+    assert.equal(plainCommandAllowed([word]), false, word)
+    assert.equal(plainCommandAllowed([word, 'x']), false, word)
+    // A wrapper's payload keeps the prototype word as its command.
+    assert.equal(lines(parse(`env ${word} x`)).at(-1), `${word} x`, word)
+    assert.equal(lines(parse(`${word} x`))[0], `${word} x`, word)
+  }
+})
