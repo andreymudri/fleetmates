@@ -549,6 +549,20 @@ test('an archived upsert leaves order, visible sessions and the Alt digit keys; 
   assert.equal(state.data.sessions.find(item => item.id === 's2').archivedAt, null)
 })
 
+test('an archived session that receives a request leaves the archive and its request appears', () => {
+  let state = reduce(reduce(initialState(), { type: 'resync' }), { type: 'message', message: snapshotMessage(1, {
+    sessions: [session('s1'), session('s2', 'running', { archivedAt: 1000, archivedBy: 'owner' })], order: ['s1'], counts: { ...counts(0), archived: 1 }
+  }) })
+  assert.deepEqual(visibleSessions(state).map(item => item.id), ['s1'], 'the archived session starts hidden')
+  // The server unarchives a session that needs the owner in the same commit as the request, then sends both events.
+  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 2, at: 20, data: session('s2', 'needs_you', { archivedAt: null, archivedBy: null }) } })
+  state = reduce(state, { type: 'message', message: { t: 'request.opened', seq: 3, at: 30, data: { id: 'r1', sessionId: 's2', kind: 'permission', tier: 'caution', summary: 'cargo test', state: 'open' } } })
+  assert.deepEqual(visibleSessions(state).map(item => item.id), ['s1', 's2'], 'the session is visible again')
+  assert.deepEqual(state.data.order, ['s1', 's2'], 'the session rejoins the order')
+  assert.equal(state.data.sessions.find(item => item.id === 's2').archivedAt, null)
+  assert.deepEqual(state.data.requests.filter(row => row.sessionId === 's2').map(row => row.id), ['r1'], 'its request is open in the store')
+})
+
 test('needs toasts appear once per episode and never with the drawer open or the session in Focus', () => {
   const opened = (seq, id, sessionId, kind = 'permission') => ({ type: 'message', message: { t: 'request.opened', seq, at: seq, data: { id, sessionId, kind, summary: 'cargo test --release combat::' } } })
   let state = reduce(reduce(initialState(), { type: 'resync' }), { type: 'message', message: snapshotMessage(1, {
