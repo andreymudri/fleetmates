@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { CARD_COPY } from '../../components/SessionCard.jsx'
+import { ArchiveToast, CARD_COPY, archiveFlow, isArchived, useArchiveToast } from '../../components/SessionCard.jsx'
 import { ConfirmDialog } from '../../components/ConfirmDialog.jsx'
 import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
@@ -87,7 +87,11 @@ export const FOCUS_COPY = Object.freeze({
   'focus.facts.lastInput': 'Last input from',
   'focus.facts.transcript': 'Transcript',
   'focus.facts.baseline': 'Changes measured since',
-  'focus.notFound.title': 'This session is not on the deck.'
+  'focus.notFound.title': 'This session is not on the deck.',
+  'focus.header.archive': 'Archive',
+  'focus.header.unarchive': 'Unarchive',
+  'focus.archived.banner': 'Archived. Unarchive to bring it back to Home.',
+  'focus.archived.unarchive': 'Unarchive'
 })
 
 const NEEDS = new Set(['needs_approval', 'asked_you'])
@@ -246,7 +250,7 @@ function InputIndicator({ session, source, collision, t }) {
 }
 
 function SessionList({ state, sessionId, now, t, navigate }) {
-  const live = orderSessions(state.data.sessions.filter(row => row.state !== 'ended'), state.data.order, state.data.requests)
+  const live = orderSessions(state.data.sessions.filter(row => row.state !== 'ended' && !isArchived(row)), state.data.order, state.data.requests)
   const teams = teamCards(state.data.runs ?? [], state.data.sessions, state.data.requests ?? [])
   return (
     <aside className="focus-list" aria-label={translate(t, FOCUS_COPY, 'focus.list.label')}>
@@ -436,7 +440,11 @@ function CrashBanner({ session, t, deckdDown, reasonId, onRelaunch, onDismiss })
  * crashed one gets a read-only TerminalView filled from `scrollback`. A PTY session's header carries the input
  * indicator, the collision chip, the leave hint, Hide panel and Stop… (an observed one keeps the M1 header); while deckd is down the terminal input and Stop are
  * disabled with the reason "deckd is reconnecting". The details panel lists changed files as a listbox and the
- * Facts rows of FOC-O3. Pure: no hooks, so tests can walk it (TerminalView and ConfirmDialog hold the hooks).
+ * Facts rows of FOC-O3. The header offers "Archive" when `onArchive` is given, or "Unarchive" (`onUnarchive`) for an
+ * archived session, which also gets the banner "Archived. Unarchive to bring it back to Home." with Unarchive, a read-only
+ * terminal, and no Stop or Nudge even while it is live. The session list skips archived sessions.
+ * `fallback` is a session row to show when the store does not hold `sessionId` (an older archived session).
+ * Pure: no hooks, so tests can walk it (TerminalView and ConfirmDialog hold the hooks).
  * @param {{
  *   state: object, sessionId: string, t?: Function, now?: number, lang?: string, navigate: (to: string) => void,
  *   steps: object[] | null, tab: 'changes'|'facts', onTab: (tab: string) => void, onMarkReviewed?: () => void,
@@ -446,16 +454,17 @@ function CrashBanner({ session, t, deckdDown, reasonId, onRelaunch, onDismiss })
  *   onStop?: () => void, onConfirmStop?: () => void, onCancelStop?: () => void, onNudge?: () => void,
  *   onRelaunch?: () => void, onDismiss?: () => void, stopError?: string | null,
  *   selectedFile?: string | null, onSelectFile?: (path: string) => void,
- *   confirmLink?: (url: string) => boolean, confirmPaste?: (size: string) => boolean | Promise<boolean>
+ *   confirmLink?: (url: string) => boolean, confirmPaste?: (size: string) => boolean | Promise<boolean>,
+ *   onArchive?: () => void, onUnarchive?: () => void, fallback?: object | null
  * }} props
  */
 export function FocusView({
   state, sessionId, t, now = Date.now(), lang = 'en', navigate, steps, tab, onTab, onMarkReviewed, reviewing = false, reviewError = null,
   client = null, scrollback = null, terminalFocused = false, onTerminalFocus, collision, panelOpen = true, drawerOpen = false, onTogglePanel,
   confirming = false, onStop, onConfirmStop, onCancelStop, onNudge, onRelaunch, onDismiss, stopError = null, selectedFile = null, onSelectFile,
-  confirmLink, confirmPaste
+  confirmLink, confirmPaste, onArchive, onUnarchive, fallback = null
 }) {
-  const session = state.data.sessions.find(row => row.id === sessionId)
+  const session = state.data.sessions.find(row => row.id === sessionId) ?? (fallback?.id === sessionId ? fallback : undefined)
   if (!session) {
     return (
       <section className="focus-screen focus--missing">
@@ -475,6 +484,9 @@ export function FocusView({
   const runHref = session.role === 'lead' && session.runRef ? `/runs/${encodeURIComponent(repo.name)}/${encodeURIComponent(session.runRef.runId)}` : null
   const pty = isPty(session)
   const live = isLive(session)
+  const archived = isArchived(session)
+  // Stop and Nudge act on a live session that is not archived; an archived one is read-only here.
+  const controls = live && !archived
   const deckd = deckdOf(state)
   const source = state.data.inputSources?.[session.id] ?? null
   const chip = collision ?? source?.state === 'collision'
@@ -506,7 +518,13 @@ export function FocusView({
                 {panelLabel}<kbd className="kbd" aria-hidden="true">Alt I</kbd>
               </button>
             ) : null}
-            {live
+            {archived && onUnarchive
+              ? <button type="button" className="button button--secondary button--xs" onClick={onUnarchive}>{translate(t, FOCUS_COPY, 'focus.header.unarchive')}</button>
+              : null}
+            {!archived && onArchive
+              ? <button type="button" className="button button--ghost button--xs" onClick={onArchive}>{translate(t, FOCUS_COPY, 'focus.header.archive')}</button>
+              : null}
+            {controls
               ? <button type="button" className="button button--danger button--xs" disabled={deckd.down} aria-describedby={deckd.down ? reasonId : undefined} onClick={onStop}>{translate(t, FOCUS_COPY, 'focus.header.stop')}</button>
               : null}
           </div>
@@ -514,11 +532,17 @@ export function FocusView({
         {pty && deckd.down ? <p className="focus-reason" id={reasonId}>{translate(t, FOCUS_COPY, 'focus.prompt.deckdDown')}</p> : null}
         {reviewError ? <p className="focus-error" role="alert">{translate(t, FOCUS_COPY, 'focus.header.reviewFailed')}</p> : null}
         {stopError ? <p className="focus-error" role="alert">{stopError}</p> : null}
+        {archived ? (
+          <p className="focus-banner focus-banner--archived">
+            <span className="focus-banner-text">{translate(t, FOCUS_COPY, 'focus.archived.banner')}</span>
+            {onUnarchive ? <>{' '}<button type="button" className="button button--secondary button--xs" onClick={onUnarchive}>{translate(t, FOCUS_COPY, 'focus.archived.unarchive')}</button></> : null}
+          </p>
+        ) : null}
         {session.origin === 'observed' ? <p className="focus-banner focus-banner--info">{translate(t, FOCUS_COPY, 'focus.observed.banner')}</p> : null}
         {session.state === 'stale' ? (
           <p className="focus-banner focus-banner--hint">
             {translate(t, FOCUS_COPY, 'focus.stale.line', { time: clock(session.lastActivityAt ?? session.stateSince, lang) })}
-            {live ? (
+            {controls ? (
               <> <button type="button" className="button button--amber-outline button--xs" disabled={deckd.down} aria-describedby={deckd.down ? reasonId : undefined} onClick={onNudge}>
                 {translate(t, FOCUS_COPY, 'focus.stale.nudge')}
               </button></>
@@ -530,7 +554,7 @@ export function FocusView({
         {session.joinedMidLife ? <p className="focus-banner focus-banner--info">{translate(t, FOCUS_COPY, 'focus.joinedLate', { time: clock(session.startedAt, lang) })}</p> : null}
         {!pty ? <ActivityLog steps={steps} t={t} lang={lang} /> : live ? (
           <div className="focus-terminal">
-            <TerminalView key={`live:${session.id}`} sessionId={session.id} label={terminalLabel} readOnly={deckd.down} deckdUp={deckd.up}
+            <TerminalView key={`live:${session.id}`} sessionId={session.id} label={terminalLabel} readOnly={deckd.down || archived} deckdUp={deckd.up}
               screenReaderMode={!!state.data.prefs?.terminalScreenReader} client={client} autoFocus onFocusChange={onTerminalFocus}
               confirmLink={confirmLink ?? (() => false)} confirmPaste={confirmPaste} t={t} />
           </div>
@@ -560,6 +584,7 @@ const narrow = () => !!globalThis.matchMedia?.(NARROW).matches
  * capture-phase listener; at 1280 px and below it opens the details as an overlay drawer), the collision chip
  * for 3 s, the Stop dialog and the link and paste dialogs, and opens the Needs-you drawer once for a D-69
  * `?needs=` link. `client` is the terminal client (Task 14 wires it); `dispatch` takes the store's `toast.push`.
+ * Archive and Unarchive run through `archiveFlow` with their own Undo toast, also for the palette's "Archive session".
  * This browser wiring is not exercised by the unit tests; {@link FocusView} and the exported helpers are.
  * @param {{ route: { params: { sessionId: string } }, state: object, t?: Function, navigate: (to: string) => void, api?: object,
  *   search?: string, client?: object | null, dispatch?: (action: object) => void,
@@ -571,7 +596,19 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
   const minute = useMinuteNow()
   const [tick, setTick] = useState(0)
   const http = api ?? deckApi()
-  const session = state.data.sessions.find(row => row.id === id)
+  const stored = state.data.sessions.find(row => row.id === id)
+  // An archived session older than the snapshot's window is not in the store; the Archived list's Open link
+  // still reaches it, so Focus reads the row itself (`GET /api/sessions/:id`).
+  const [fallback, setFallback] = useState(null)
+  useEffect(() => {
+    if (stored) return undefined
+    let current = true
+    http.get(`/api/sessions/${seg(id)}`).then(data => { if (current && data?.session) setFallback(data.session) }, () => {})
+    return () => { current = false }
+  }, [http, id, !!stored])
+  const session = stored ?? (fallback?.id === id ? fallback : undefined)
+  const [archiveToast, showArchiveToast] = useArchiveToast()
+  const flow = archiveFlow({ api: http, show: showArchiveToast, t })
   const [steps, setSteps] = useState(null)
   const params = new URLSearchParams(search)
   const wanted = params.get('tab') === 'facts' ? 'facts' : 'changes'
@@ -683,7 +720,9 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
         onTogglePanel={togglePanel} confirming={confirming} onStop={() => { setStopError(null)
           actions.openStop() }} onConfirmStop={actions.confirmStop} onCancelStop={actions.cancelStop}
         onNudge={actions.nudge} onRelaunch={actions.relaunch} onDismiss={actions.dismiss} stopError={stopError}
-        selectedFile={selectedFile} onSelectFile={setSelectedFile} confirmLink={confirmLink} confirmPaste={confirmPaste} />
+        selectedFile={selectedFile} onSelectFile={setSelectedFile} confirmLink={confirmLink} confirmPaste={confirmPaste}
+        onArchive={() => flow.archive(id)} onUnarchive={() => flow.unarchive(id)} fallback={session === stored ? null : session} />
+      <ArchiveToast toast={archiveToast} t={t} onUndo={flow.undo} onDismiss={() => showArchiveToast(null)} />
       {linkAsk ? (
         <ConfirmDialog title={translate(t, FOCUS_COPY, 'focus.link.title')} body={linkAsk} confirmLabel={translate(t, FOCUS_COPY, 'focus.link.confirm')}
           cancelLabel={translate(t, FOCUS_COPY, 'focus.stop.cancel')} onCancel={() => setLinkAsk(null)}
@@ -695,7 +734,7 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
           confirmLabel={translate(t, FOCUS_COPY, 'focus.paste.confirm')} cancelLabel={translate(t, FOCUS_COPY, 'focus.stop.cancel')}
           onCancel={() => answerPaste(false)} onConfirm={() => answerPaste(true)} t={t} />
       ) : null}
-      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} />
+      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} onArchive={flow.archive} />
     </>
   )
 }
