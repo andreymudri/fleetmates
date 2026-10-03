@@ -7,7 +7,7 @@ import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
 import { MetaLine, StatusPill, pillParams, shown, stateLabel, titleText, translate } from '../../components/StatusPill.jsx'
 import { linkHandler } from '../../shell/Rail.jsx'
-import { fetchArchived, nudgeSession, stopSession } from '../../state/actions.js'
+import { addRule, answerRequest, fetchArchived, nudgeSession, revokeRule, stopSession } from '../../state/actions.js'
 import { archivedCount, readDensity, writeDensity } from '../../state/deck-store.js'
 import { NeedsYouDrawer, deckApi, needsLinkDetail, openOverlay, repoFor } from '../drawer/NeedsYouDrawer.jsx'
 import { Palette, openLaunch, orderSessions } from '../palette/Palette.jsx'
@@ -337,6 +337,54 @@ export function homeActions({ api, setStopping, toast, repoName, t }) {
 }
 
 /**
+ * The card answer and rule calls Home holds (home.md 6): `answer` keeps the AnswerBody in flight for the card
+ * through `setAnswers` (so the chosen button shows its spinner) and posts it with `answerRequest`; a refused
+ * answer drops it again. `acceptRule` adds the offered rule with `source: 'suggested'` and shows
+ * "Rule added to {repo}: {pattern}" with an Undo; `undo` revokes that rule.
+ * @param {{ api: object, setAnswers: (next: Record<string, object> | ((map: Record<string, object>) => Record<string, object>)) => void,
+ *   show: (toast: { tone: string, text: string, undo?: { repoKey: string, pattern: string } } | null) => void, repos?: object[], t?: Function }} options
+ * @returns {{ answer: (request: object, body: object) => Promise<void>, acceptRule: (offer: object) => Promise<void>, undo: (undo: { repoKey: string, pattern: string }) => Promise<void> }}
+ */
+export function homeAnswerActions({ api, setAnswers, show, repos = [], t }) {
+  const drop = id => setAnswers(map => {
+    const next = { ...map }
+    delete next[id]
+    return next
+  })
+  return {
+    answer(request, body) {
+      setAnswers(map => ({ ...map, [request.id]: body }))
+      return answerRequest(api, request.id, body).then(() => {}, () => drop(request.id))
+    },
+    acceptRule(offer) {
+      const row = (repos ?? []).find(item => item.id === offer.repoId)
+      const name = repoFor(repos, offer.repoId).name
+      const repoKey = row?.repoKey ?? name
+      return addRule(api, { repoKey, pattern: offer.pattern, source: 'suggested' }).then(reply => {
+        const pattern = reply?.rule?.pattern ?? offer.pattern
+        show({ tone: 'success', text: translate(t, CARD_COPY, 'home.card.rule.added', { repo: shown(name), pattern: shown(pattern) }), undo: { repoKey, pattern } })
+      }, () => {})
+    },
+    undo(undo) {
+      show(null)
+      return revokeRule(api, undo.repoKey, undo.pattern).then(() => {}, () => {})
+    }
+  }
+}
+
+/**
+ * The answers in flight that still matter: those of requests that are still open (a request that did not land
+ * stays open, so its body is kept for "Try again").
+ * @param {Record<string, object>} answers
+ * @param {object[]} requests
+ * @returns {Record<string, object>}
+ */
+export function pruneAnswers(answers, requests) {
+  const open = new Set((requests ?? []).filter(row => (row.state ?? 'open') === 'open').map(row => row.id))
+  return Object.fromEntries(Object.entries(answers ?? {}).filter(([id]) => open.has(id)))
+}
+
+/**
  * The quiet-row Stop dialog Home holds: null while nothing is `stopping`, else a danger {@link ConfirmDialog}
  * titled "Stop {repo} · {task}?" whose Confirm calls `actions.confirmStop` for that session and whose Cancel
  * calls `actions.cancelStop`. Pure: it returns the element and runs no hooks itself.
@@ -580,13 +628,18 @@ function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archiv
  * over the grid and focus inside a card, which hold reorders. Comfortable cards and quiet cards offer "Archive"
  * through `onArchive`; "Archive all finished" (`onArchiveFinished`) shows next to the title while
  * {@link finishedIds} is not empty; {@link ArchivedSection} ends the list while `counts.archived` is above
- * zero, also on the calm Home. Pure apart from ArchivedSection, which holds the list's hooks.
+ * zero, also on the calm Home. Cards answer inline (M3): `answers` and `onAnswer` drive the answer buttons of
+ * comfortable and compact cards, `onReview` (by default the drawer on that request) backs "Review in Needs you",
+ * "Review" and "Reply", and `onAcceptRule` the rule suggestion lines of `data.ruleOffers`; the cards get the deckd
+ * outage from {@link deckdDownOf}. Pure apart from ArchivedSection, which holds the list's hooks.
  * @param {{ state: object, t?: (key: string, params?: object) => string, now?: number, navigate: (to: string) => void, layout?: ReturnType<typeof homeLayout>, onOverlay?: (overlay: 'palette'|'drawer', detail?: object) => void, onFocusCard?: (id: string) => void, onHold?: (kind: 'pointer'|'focus', held: boolean) => void, lang?: string,
  *   density?: 'comfortable' | 'compact', onDensity?: (value: string) => void, onLaunch?: () => void, steps?: Record<string, object[]>, onNudge?: (session: object) => void, onStop?: (session: object) => void,
- *   onArchive?: (session: object) => void, onArchiveFinished?: () => void, onUnarchive?: (id: string) => Promise<unknown>, api?: { get: Function }, storage?: Storage }} props
+ *   onArchive?: (session: object) => void, onArchiveFinished?: () => void, onUnarchive?: (id: string) => Promise<unknown>, api?: { get: Function }, storage?: Storage,
+ *   answers?: Record<string, object>, onAnswer?: (request: object, body: object) => void, onReview?: (requestId: string) => void, onAcceptRule?: (offer: object) => void }} props
  */
 export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverlay = (overlay, detail) => openOverlay(overlay, undefined, detail), onFocusCard = focusCard, onHold = () => {}, lang = 'en',
-  density = 'comfortable', onDensity = () => {}, onLaunch = () => openLaunch(navigate), steps = {}, onNudge, onStop, onArchive, onArchiveFinished, onUnarchive = () => Promise.resolve(), api, storage }) {
+  density = 'comfortable', onDensity = () => {}, onLaunch = () => openLaunch(navigate), steps = {}, onNudge, onStop, onArchive, onArchiveFinished, onUnarchive = () => Promise.resolve(), api, storage,
+  answers = {}, onAnswer = () => {}, onReview = id => onOverlay('drawer', { request: id }), onAcceptRule = () => {} }) {
   const { sessions, requests, repos, order, counts, runs } = state.data
   const shape = layout ?? homeLayout(sessions, { order, requests, now })
   const teams = teamCards(runs, sessions, requests)
@@ -606,6 +659,7 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
   const compact = density === 'compact'
   const deckdDown = deckdDownOf(state)
   const tails = state.data.tails ?? {}
+  const answering = { deckdDown, answers, onAnswer, onReview }
   return (
     <section className="home" onFocus={event => onHold('focus', inCard(event.target))} onBlur={event => onHold('focus', inCard(event.relatedTarget))}>
       <header className="home-header">
@@ -628,10 +682,10 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
           <section className="home-grid home-grid--compact" aria-labelledby="home-grid-title" onPointerEnter={() => onHold('pointer', true)} onPointerLeave={() => onHold('pointer', false)}>
             <h2 className="sr-only" id="home-grid-title">{translate(t, HOME_COPY, 'home.grid.label')}</h2>
             {compactEntries(shape, teams).map(item => item.team
-              ? <CompactCard key={item.team.key} team={item.team} repo={repoFor(repos, item.team.run.repoId)} t={t} now={now} navigate={navigate} deckdDown={deckdDown}
+              ? <CompactCard key={item.team.key} team={item.team} repo={repoFor(repos, item.team.run.repoId)} t={t} now={now} navigate={navigate} {...answering}
                 label={item.team.needs ? translate(t, HOME_COPY, 'home.card.team.pill', { needs: item.team.needs, total: item.team.total }) : undefined}
                 tail={item.team.lead ? tails[item.team.lead.id] : undefined} steps={item.team.lead ? steps[item.team.lead.id] : undefined} />
-              : <CompactCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} t={t} now={now} navigate={navigate} deckdDown={deckdDown}
+              : <CompactCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} t={t} now={now} navigate={navigate} {...answering}
                 tail={tails[item.session.id]} steps={steps[item.session.id]} />)}
           </section>
           {archived}
@@ -642,7 +696,8 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
           <h2 className="sr-only" id="home-grid-title">{translate(t, HOME_COPY, 'home.grid.label')}</h2>
           {items.map(item => item.team
             ? <TeamCard key={item.team.key} team={item.team} repo={repoFor(repos, item.team.run.repoId)} t={t} navigate={navigate} onReview={id => onOverlay('drawer', { request: id })} />
-            : <SessionCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} now={now} lang={lang} t={t} navigate={navigate} onArchive={onArchive} />)}
+            : <SessionCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} now={now} lang={lang} t={t} navigate={navigate} onArchive={onArchive}
+              {...answering} ruleOffers={state.data.ruleOffers ?? []} onAcceptRule={onAcceptRule} />)}
         </section>
         {shape.quiet.length || shape.strip.length ? (
           <section className="quiet-row" aria-labelledby="home-quiet-title">
@@ -678,12 +733,13 @@ export function useMinuteNow() {
 
 /**
  * The palette or the Needs-you drawer, whichever overlay the shell's view names.
- * `onArchive` runs the palette's "Archive session" so the screen under it shows the toast.
- * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: object, onArchive?: (id: string) => Promise<unknown> }} props
+ * `onArchive` runs the palette's "Archive session" so the screen under it shows the toast; `onToast` shows the
+ * palette's "Allowed {summary} in {repo}" once it has closed.
+ * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: object, onArchive?: (id: string) => Promise<unknown>, onToast?: (toast: { tone: string, title: string }) => void }} props
  */
-export function ObserveOverlays({ state, t, navigate, api, onArchive }) {
+export function ObserveOverlays({ state, t, navigate, api, onArchive, onToast }) {
   const overlay = state.view?.overlay
-  if (overlay === 'palette') return <Palette state={state} t={t} navigate={navigate} api={api} onArchive={onArchive} />
+  if (overlay === 'palette') return <Palette state={state} t={t} navigate={navigate} api={api} onArchive={onArchive} onToast={onToast} />
   if (overlay === 'drawer') return <NeedsYouDrawer state={state} t={t} navigate={navigate} />
   return null
 }
@@ -695,9 +751,11 @@ export function ObserveOverlays({ state, t, navigate, api, onArchive }) {
  * ({@link pickDensity} writes it), subscribes `terminals.subscribeTails` to {@link tailSubscription} (cleared on
  * leaving compact and on unmount), loads the last hook steps of observed compact sessions, holds the Stop
  * dialog of {@link homeActions} in {@link HomeStopDialog}, and opens the Needs-you drawer once for a `?needs=` link
- * ({@link needsLinkDetail}). The effects are browser wiring the unit tests do not run; the static render,
- * {@link homeLayout}, {@link heldOrder}, {@link tailSubscription}, {@link homeActions}, {@link HomeStopDialog} and
- * {@link HomeView} are unit tested.
+ * ({@link needsLinkDetail}). Card answers run through {@link homeAnswerActions}, with the answers in flight pruned by
+ * {@link pruneAnswers} as requests close and the rule toast (with its Undo) held like the archive toast.
+ * The effects are browser wiring the unit tests do not run; the static render,
+ * {@link homeLayout}, {@link heldOrder}, {@link tailSubscription}, {@link homeActions}, {@link homeAnswerActions},
+ * {@link pruneAnswers}, {@link HomeStopDialog} and {@link HomeView} are unit tested.
  * @param {{ state: object, t?: Function, navigate: (to: string) => void, api?: object, terminals?: { subscribeTails: (ids: string[]) => boolean } | null,
  *   storage?: Storage, search?: string, dispatch?: (action: object) => void, onOverlay?: (overlay: 'palette'|'drawer', detail?: object) => void }} props
  */
@@ -757,14 +815,25 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
   const actions = homeActions({ api: http, setStopping, toast, repoName: session => repoFor(state.data.repos, session.repoId).name, t })
   const [archiveToast, showArchiveToast] = useArchiveToast()
   const flow = archiveFlow({ api: http, show: showArchiveToast, t })
+  const [answers, setAnswers] = useState({})
+  useEffect(() => {
+    setAnswers(map => {
+      const next = pruneAnswers(map, state.data.requests)
+      return Object.keys(next).length === Object.keys(map).length ? map : next
+    })
+  }, [state.data.requests])
+  const [ruleToast, showRuleToast] = useArchiveToast()
+  const answering = homeAnswerActions({ api: http, setAnswers, show: showRuleToast, repos: state.data.repos, t })
   return (
     <>
       <HomeView state={{ ...state, data: { ...state.data, order: held.order } }} t={t} now={now} navigate={navigate} layout={layout} onHold={onHold}
         density={density} onDensity={value => pickDensity(storage, value, setDensity)} steps={steps} onNudge={actions.nudge} onStop={actions.openStop}
-        onArchive={session => flow.archive(session.id)} onArchiveFinished={flow.archiveFinished} onUnarchive={flow.unarchive} api={http} storage={storage} />
+        onArchive={session => flow.archive(session.id)} onArchiveFinished={flow.archiveFinished} onUnarchive={flow.unarchive} api={http} storage={storage}
+        answers={answers} onAnswer={answering.answer} onReview={id => onOverlay('drawer', { request: id })} onAcceptRule={answering.acceptRule} />
       <HomeStopDialog stopping={stopping} repos={state.data.repos} actions={actions} t={t} />
       <ArchiveToast toast={archiveToast} t={t} onUndo={flow.undo} onDismiss={() => showArchiveToast(null)} />
-      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} onArchive={flow.archive} />
+      <ArchiveToast toast={ruleToast} t={t} onUndo={answering.undo} onDismiss={() => showRuleToast(null)} />
+      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} onArchive={flow.archive} onToast={toast} />
     </>
   )
 }

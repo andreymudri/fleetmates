@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { CrewAvatar, poseFor } from './CrewAvatar.jsx'
 import { MetaLine, StatusPill, compactDuration, pillParams, shown, titleText, translate } from './StatusPill.jsx'
+import { AnswerControls } from './AnswerControls.jsx'
 import { linkHandler } from '../shell/Rail.jsx'
 import { archiveFinished, archiveSession, unarchiveSession } from '../state/actions.js'
 
 /**
- * English copy for the M1 (observe-only) cards: docs/deck/screens/home.md section 9 and
- * failures-and-loading.md section 4.
+ * English copy for the cards: docs/deck/screens/home.md section 9 and failures-and-loading.md section 4,
+ * with the M3 answer and rule suggestion keys of home.md section 9.
  */
 export const CARD_COPY = Object.freeze({
   'home.card.untitled': 'Untitled',
@@ -22,6 +23,19 @@ export const CARD_COPY = Object.freeze({
   'home.card.request.answerInTerminal': 'Answer in your terminal',
   'home.card.request.open': 'Open',
   'home.card.request.more': '{n, plural, one {+# more request} other {+# more requests}}',
+  'home.card.request.deny': 'Deny',
+  'home.card.request.allowOnce': 'Allow once',
+  'home.card.request.reviewInDrawer': 'Review in Needs you',
+  'home.card.request.didNotLand': 'Your answer did not reach {repo}. The prompt is still open in its terminal.',
+  'home.card.request.tryAgain': 'Try again',
+  'home.card.request.openTerminal': 'Open terminal',
+  'home.card.request.deckdDown': 'deckd is reconnecting. Answer in your terminal for now.',
+  'home.card.rule.short': 'Allowed {n} times. Always allow in {repo}?',
+  'home.card.rule.anyFlags': 'Any flags.',
+  'home.card.rule.added': 'Rule added to {repo}: {pattern}',
+  'home.card.rule.undo': 'Undo',
+  'home.card.question.reply.label': 'Reply to {repo}',
+  'home.card.question.reply': 'Reply',
   'home.card.files.eyebrow': 'Changed files',
   'home.card.files.more': '+{n} more',
   'home.card.meta.toolCalls': '{n, plural, one {# tool call} other {# tool calls}}',
@@ -146,12 +160,40 @@ function Steps({ steps }) {
   )
 }
 
-function RequestBox({ session, open, t, navigate }) {
+/**
+ * The answer labels a card hands to {@link AnswerControls}, from the card copy (home.md section 9).
+ * @param {(key: string, params?: object) => string} [t]
+ * @returns {object}
+ */
+export function cardAnswerLabels(t) {
+  const tr = key => translate(t, CARD_COPY, key)
+  return {
+    deny: tr('home.card.request.deny'), allowOnce: tr('home.card.request.allowOnce'), reviewInDrawer: tr('home.card.request.reviewInDrawer'),
+    answerInTerminal: tr('home.card.request.answerInTerminal'), open: tr('home.card.request.open'), openTerminal: tr('home.card.request.openTerminal'),
+    deckdDown: tr('home.card.request.deckdDown'), didNotLand: tr('home.card.request.didNotLand'), tryAgain: tr('home.card.request.tryAgain'),
+    replyLabel: tr('home.card.question.reply.label'), replyPlaceholder: tr('home.card.question.reply.label'), reply: tr('home.card.question.reply')
+  }
+}
+
+/**
+ * The request as a card shows it: while the card holds an answer in flight (`busy`) and the server has not
+ * reported a delivery yet, it already reads as `sending`, so the chosen button gets its spinner at once.
+ * @param {object} request
+ * @param {object | null | undefined} busy
+ * @returns {object}
+ */
+export function withLocalDelivery(request, busy) {
+  return busy && (request.delivery ?? 'idle') === 'idle' ? { ...request, delivery: 'sending' } : request
+}
+
+function RequestBox({ session, open, t, navigate, deckdDown, answers, onAnswer, onReview }) {
   const [request] = open
   const question = request.kind === 'question'
   const tier = question ? 'question' : request.tier ?? 'caution'
   const more = open.length - 1
   const href = sessionHref(session.id)
+  const observed = session.origin === 'observed'
+  const busy = answers?.[request.id] ?? null
   return (
     <div className={`request-box request-box--${question ? 'question' : 'permission'}`} data-request={request.id}>
       <p className="request-head">
@@ -161,12 +203,37 @@ function RequestBox({ session, open, t, navigate }) {
       {question
         ? <p className="request-question"><bdi>{titleText(request.summary)}</bdi></p>
         : <code className="request-command">{shown(request.summary)}</code>}
-      <div className="request-actions">
-        <span className="request-terminal">{translate(t, CARD_COPY, 'home.card.request.answerInTerminal')}</span>
-        <a className="button button--ghost button--xs" href={href} onClick={navigate ? linkHandler(navigate, href) : undefined}>{translate(t, CARD_COPY, 'home.card.request.open')}</a>
-      </div>
+      {observed ? (
+        <div className="request-actions">
+          <span className="request-terminal">{translate(t, CARD_COPY, 'home.card.request.answerInTerminal')}</span>
+          <a className="button button--ghost button--xs" href={href} onClick={navigate ? linkHandler(navigate, href) : undefined}>{translate(t, CARD_COPY, 'home.card.request.open')}</a>
+        </div>
+      ) : (
+        <div className="request-answer">
+          <AnswerControls request={withLocalDelivery(request, busy)} session={session} surface="card" deckd={{ down: !!deckdDown }} labels={cardAnswerLabels(t)} busy={busy}
+            onAnswer={body => onAnswer(request, body)}
+            onOpen={() => (!question && request.tier === 'destructive' ? onReview(request.id) : navigate?.(href))} />
+        </div>
+      )}
       {more > 0 ? <p className="request-more">{translate(t, CARD_COPY, 'home.card.request.more', { n: more })}</p> : null}
     </div>
+  )
+}
+
+function RuleLines({ session, repo, offers, t, onAcceptRule }) {
+  const mine = (offers ?? []).filter(offer => offer.repoId === session.repoId)
+  if (!mine.length) return null
+  return (
+    <ul className="card-rules">
+      {mine.map(offer => (
+        <li key={offer.pattern} className="card-rule">
+          <button type="button" className="card-rule-accept" onClick={() => onAcceptRule(offer)}>
+            {translate(t, CARD_COPY, 'home.card.rule.short', { n: offer.count, repo: shown(repoLabel(repo, session)) })}
+            {offer.ruleNote === 'anyFlags' ? <span className="card-rule-note">{` ${translate(t, CARD_COPY, 'home.card.rule.anyFlags')}`}</span> : null}
+          </button>
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -205,13 +272,24 @@ function crashLine(session, t) {
 }
 
 /**
- * SessionCard, comfortable density, observe-only (docs/deck/design/components.md section 10, home.md 4.2).
+ * SessionCard, comfortable density (docs/deck/design/components.md section 10, home.md 4.2).
  * Every agent-supplied string renders as a text node: titles through `titleText` inside `<bdi>`,
- * commands, paths and branches through `shown`. Open requests say "Answer in your terminal"; M1 never answers.
+ * commands, paths and branches through `shown`. The oldest open request of a deck PTY session answers through
+ * {@link AnswerControls} (`surface: 'card'`): Safe and Caution get "Deny" and "Allow once" (`onAnswer` with the
+ * request and the AnswerBody), a question its options and Reply, and Destructive only "Review in Needs you",
+ * which calls `onReview` with the request id. `answers` holds the AnswerBody in flight per request id;
+ * `deckdDown` disables the buttons with "deckd is reconnecting. Answer in your terminal for now.". An observed
+ * session keeps "Answer in your terminal" and an Open link, with no button. An approval card of a PTY session lists
+ * the rule suggestions of its repo from `ruleOffers` ("Allowed {n} times. Always allow in {repo}?", plus
+ * "Any flags." for `anyFlags`); a click calls `onAcceptRule` with the offer.
  * With `onArchive`, a session that is not running a turn (`running` or `starting`) gets "Archive" in its footer.
- * @param {{ session: object, repo?: { name: string, crewSeed?: string, crewSlot?: number, hat?: string }, requests?: object[], steps?: { text: string, tone?: string, glyph?: string }[], now?: number, lang?: string, t?: (key: string, params?: object) => string, navigate?: (to: string) => void, onArchive?: (session: object) => void }} props
+ * Pure: no hooks.
+ * @param {{ session: object, repo?: { name: string, crewSeed?: string, crewSlot?: number, hat?: string }, requests?: object[], steps?: { text: string, tone?: string, glyph?: string }[], now?: number, lang?: string, t?: (key: string, params?: object) => string, navigate?: (to: string) => void, onArchive?: (session: object) => void,
+ *   deckdDown?: boolean, answers?: Record<string, object>, onAnswer?: (request: object, body: object) => void, onReview?: (requestId: string) => void,
+ *   ruleOffers?: { repoId: string, pattern: string, count: number, ruleNote?: string | null }[], onAcceptRule?: (offer: object) => void }} props
  */
-export function SessionCard({ session, repo, requests = [], steps, now = Date.now(), lang = 'en', t, navigate, onArchive }) {
+export function SessionCard({ session, repo, requests = [], steps, now = Date.now(), lang = 'en', t, navigate, onArchive,
+  deckdDown = false, answers = {}, onAnswer = () => {}, onReview = () => {}, ruleOffers = [], onAcceptRule = () => {} }) {
   const variant = cardVariant(session)
   const tone = String(session.state).replace(/_/g, '-')
   const open = openRequestsOf(session, requests)
@@ -230,7 +308,8 @@ export function SessionCard({ session, repo, requests = [], steps, now = Date.no
       <CardHeader session={session} repo={repo} title={title} t={t} now={now} navigate={navigate} size="md" pillVariant="pill" />
       <Steps steps={steps} />
       {now_ ? <p className="card-now">{now_}</p> : null}
-      {open.length && NEEDS.has(session.state) ? <RequestBox session={session} open={open} t={t} navigate={navigate} /> : null}
+      {open.length && NEEDS.has(session.state) ? <RequestBox session={session} open={open} t={t} navigate={navigate} deckdDown={deckdDown} answers={answers} onAnswer={onAnswer} onReview={onReview} /> : null}
+      {variant === 'approval' && session.origin !== 'observed' ? <RuleLines session={session} repo={repo} offers={ruleOffers} t={t} onAcceptRule={onAcceptRule} /> : null}
       {variant === 'crashed' ? <p className="card-hint">{crashLine(session, t)}</p> : null}
       {variant === 'solo-running' || variant === 'done' ? <FileChips session={session} t={t} navigate={navigate} /> : null}
       {session.joinedMidLife ? <p className="card-note">{translate(t, CARD_COPY, 'home.card.joinedLate', { time: clock(session.startedAt, lang) })}</p> : null}
