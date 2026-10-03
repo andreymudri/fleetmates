@@ -1,13 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { execFileSync } from 'node:child_process'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { runnerImport } from 'vite'
+import { build, runnerImport } from 'vite'
 import { chromium } from 'playwright-core'
 import { captureToken, createApiClient, createConnection, wsProtocols, backoffMs, TOKEN_KEY } from '../../web/src/state/api.js'
 import {
@@ -555,12 +556,121 @@ test('an archived session that receives a request leaves the archive and its req
   }) })
   assert.deepEqual(visibleSessions(state).map(item => item.id), ['s1'], 'the archived session starts hidden')
   // The server unarchives a session that needs the owner in the same commit as the request, then sends both events.
-  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 2, at: 20, data: session('s2', 'needs_you', { archivedAt: null, archivedBy: null }) } })
+  state = reduce(state, { type: 'message', message: { t: 'session.upserted', seq: 2, at: 20, data: session('s2', 'needs_approval', { archivedAt: null, archivedBy: null }) } })
   state = reduce(state, { type: 'message', message: { t: 'request.opened', seq: 3, at: 30, data: { id: 'r1', sessionId: 's2', kind: 'permission', tier: 'caution', summary: 'cargo test', state: 'open' } } })
   assert.deepEqual(visibleSessions(state).map(item => item.id), ['s1', 's2'], 'the session is visible again')
   assert.deepEqual(state.data.order, ['s1', 's2'], 'the session rejoins the order')
   assert.equal(state.data.sessions.find(item => item.id === 's2').archivedAt, null)
   assert.deepEqual(state.data.requests.filter(row => row.sessionId === 's2').map(row => row.id), ['r1'], 'its request is open in the store')
+})
+
+const FOCUS_NOW = 1_800_000_000_000
+const focusRow = (extra = {}) => ({
+  id: 's1', repoId: '/home/you/dev/rustot', origin: 'wrapped', ptyId: 'pty-s1', alive: true, task: 'Port the damage formula', branch: 'combat-tick',
+  state: 'needs_approval', stateSince: FOCUS_NOW - 60_000, lastActivityAt: FOCUS_NOW, startedAt: FOCUS_NOW - 600_000, changedFiles: [], cwd: '/home/you/dev/rustot',
+  toolCalls: 0, sessionAliases: [], lastInputFrom: null, lastInputName: null, ...extra
+})
+const focusRequest = { id: 'r1', sessionId: 's1', kind: 'permission', tier: 'safe', summary: 'cargo test', state: 'open', createdAt: FOCUS_NOW - 60_000,
+  delivery: 'idle', screenMatch: 'on_screen', options: [{ key: '1', label: 'Yes' }, { key: '3', label: 'No' }], allowAlways: false, confirmLabel: null }
+
+test('Focus on an archived live PTY session shows the request as an "Answer in your terminal" bar, not the PromptBar', async () => {
+  const { module: Focus } = await runnerImport(path.join(hub, 'web/src/screens/focus/Focus.jsx'), { configFile: false, logLevel: 'silent', root: hub })
+  const render = row => renderToStaticMarkup(Focus.FocusView({
+    now: FOCUS_NOW, navigate: () => {}, steps: [], tab: 'changes', onTab: () => {}, sessionId: 's1', onUnarchive: () => {},
+    client: { attach: () => ({ write: () => true, resize: () => true, detach() {} }) },
+    state: {
+      loaded: true, deckdOutage: false, connection: { state: 'live', attempt: 0, nextAt: null }, view: { path: '/', overlay: null },
+      data: { sessions: [row], requests: [focusRequest], runs: [], order: ['s1'], health: [], prefs: {}, inputSources: {}, tails: {},
+        repos: [{ id: '/home/you/dev/rustot', name: 'rustot', crew: { slot: 0, seed: 'rustot', hat: 'none' } }], counts: null, recap: null, setup: { firstRunCompletedAt: 1 } }
+    }
+  }))
+  const live = render(focusRow())
+  assert.match(live, /prompt-bar/, 'control: the same session unarchived gets the PromptBar')
+  const archived = render(focusRow({ archivedAt: FOCUS_NOW - 1000, archivedBy: 'owner' }))
+  assert.doesNotMatch(archived, /prompt-bar/, 'no PromptBar while archived')
+  assert.match(archived, /class="focus-request focus-request--safe"[^>]*>.*<span class="request-terminal">Answer in your terminal/, 'the request keeps the terminal bar')
+  assert.match(archived, /focus-banner--archived/)
+})
+
+// The real Focus route with a stub terminal client and an API double that records every call in `window.calls`.
+// `window.h.archive(at)` sets s1's `archivedAt`.
+const ARCHIVED_FOCUS_HARNESS = `import React, { useState } from 'react'
+import { createRoot } from 'react-dom/client'
+import { Focus } from '@hub/web/src/screens/focus/Focus.jsx'
+
+const h = window.h = {}
+const calls = window.calls = []
+const client = { attach: () => ({ write: () => true, resize: () => true, detach() {} }) }
+const api = {
+  get: async to => { calls.push(['GET', to])
+    return { path: 'src/a.rs', baseline: 'abc', binary: false, truncated: false, diff: '@@ -1 +1 @@\\n-old\\n+new\\n' } },
+  post: async (to, body) => { calls.push(['POST', to, body])
+    return { request: {} } }
+}
+const base = ${JSON.stringify(focusRow({ changedFiles: [{ path: 'src/a.rs', adds: 1, dels: 1 }] }))}
+const request = ${JSON.stringify(focusRequest)}
+function App() {
+  const [archivedAt, setArchivedAt] = useState(1000)
+  h.archive = setArchivedAt
+  const row = { ...base, stateSince: Date.now(), lastActivityAt: Date.now(), startedAt: Date.now(), archivedAt, archivedBy: archivedAt == null ? null : 'owner' }
+  const state = {
+    loaded: true, deckdOutage: false, connection: { state: 'live', attempt: 0, nextAt: null }, view: { path: '/', overlay: null },
+    data: { sessions: [row], requests: [request], runs: [], order: ['s1'], health: [], prefs: {}, tails: {}, inputSources: {},
+      repos: [{ id: '/home/you/dev/rustot', name: 'rustot', crew: { slot: 0, seed: 'rustot', hat: 'none' } }], counts: null, recap: null,
+      setup: { firstRunCompletedAt: 1 } }
+  }
+  return <><span id="mark">{archivedAt == null ? 'live' : 'archived'}</span><Focus route={{ params: { sessionId: 's1' } }} state={state} navigate={() => {}} api={api}
+    search="" client={client} dispatch={() => {}} onOverlay={() => {}} /></>
+}
+createRoot(document.getElementById('root')).render(<App />)
+`
+
+test('in Chromium the Focus route ignores the 1 answer key on an archived session and takes it once the session is unarchived', async t => {
+  const executablePath = await findChromium()
+  assert.ok(executablePath, 'Chromium or Chrome is required for the Focus browser test')
+  const dir = await mkdtemp(path.join(tmpdir(), 'focusarc-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(path.join(dir, 'index.html'), '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>t</title></head><body><div id="root" style="width:1600px;height:900px"></div><script type="module" src="./entry.jsx"></script></body></html>')
+  await writeFile(path.join(dir, 'entry.jsx'), ARCHIVED_FOCUS_HARNESS)
+  const out = path.join(dir, 'dist')
+  await build({
+    root: dir, base: './', configFile: false, logLevel: 'silent',
+    resolve: { alias: { '@hub': hub, react: path.join(hub, 'node_modules/react'), 'react-dom': path.join(hub, 'node_modules/react-dom') } },
+    build: { outDir: out, emptyOutDir: true }
+  })
+  const server = createServer(async (req, res) => {
+    const name = new URL(req.url, 'http://x').pathname
+    try {
+      const body = await readFile(path.join(out, name === '/' ? 'index.html' : path.normalize(name)))
+      res.writeHead(200, { 'content-type': name.endsWith('.js') ? 'text/javascript' : name.endsWith('.css') ? 'text/css' : 'text/html' }).end(body)
+    } catch { res.writeHead(404).end() }
+  }).listen(0, '127.0.0.1')
+  await new Promise(resolve => server.once('listening', resolve))
+  t.after(() => server.close())
+  const browser = await chromium.launch({ executablePath, headless: true })
+  t.after(() => browser.close())
+  const page = await browser.newPage()
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  await page.goto(`http://127.0.0.1:${server.address().port}/`)
+  await page.waitForFunction(() => document.getElementById('mark')?.textContent === 'archived', null, { timeout: 10_000 })
+  const posts = () => page.evaluate(() => window.calls.filter(call => call[0] === 'POST'))
+  // The digit answers only with the terminal unfocused, so focus the changed-files listbox first.
+  await page.focus('[role="listbox"]')
+  await page.waitForFunction(() => !document.activeElement?.closest('.terminal-view'), null, { timeout: 5000 })
+  await page.keyboard.press('1')
+  await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 200)))
+  assert.deepEqual(await posts(), [], 'no answer while the session is archived')
+
+  // Control: the same request and focus, once the session is unarchived, takes the key.
+  await page.evaluate(() => window.h.archive(null))
+  await page.waitForFunction(() => document.getElementById('mark')?.textContent === 'live' && !!document.querySelector('.prompt-bar'), null, { timeout: 5000 })
+  await page.focus('[role="listbox"]')
+  await page.waitForFunction(() => !document.activeElement?.closest('.terminal-view'), null, { timeout: 5000 })
+  await page.keyboard.press('1')
+  await page.waitForFunction(() => window.calls.some(call => call[0] === 'POST'), null, { timeout: 5000 })
+  assert.deepEqual(await posts(), [['POST', '/api/requests/r1/answer', { choice: 'allow' }]])
+  assert.deepEqual(errors, [])
 })
 
 test('needs toasts appear once per episode and never with the drawer open or the session in Focus', () => {
