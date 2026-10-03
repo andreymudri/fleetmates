@@ -144,6 +144,11 @@ CREATE TABLE sessions (
   launch_task         TEXT,                           -- migration 0002-launch (M2): the first prompt still to type into a
                                                       -- launched session once its idle input box shows; NULL once typed,
                                                       -- and for every row the launch flow did not create
+  archived_at         INTEGER,                        -- migration 0003-archive: when the session was archived (ms); NULL when
+                                                      -- not archived. Hidden from Home, the Focus ship list, the palette and
+                                                      -- the counts; cleared automatically when the session needs the owner
+  archived_by         TEXT CHECK (archived_by IS NULL OR archived_by IN ('owner','auto')),  -- migration 0003-archive:
+                                                      -- 'owner' (Archive, Archive all finished) or 'auto' (the sweep)
   CHECK (state <> 'starting' OR origin <> 'observed'),            -- state-machines 1.6 impossible states
   CHECK ((run_id IS NULL) = (run_repo_id IS NULL))
 ) STRICT;
@@ -155,6 +160,7 @@ CREATE UNIQUE INDEX sessions_process_live ON sessions(process_key)
   WHERE process_key IS NOT NULL AND alive = 1;                     -- "two deck sessions for one process key" is impossible
 CREATE INDEX sessions_run          ON sessions(run_repo_id, run_id) WHERE run_id IS NOT NULL;
 CREATE INDEX sessions_ended        ON sessions(ended_at) WHERE state = 'ended';
+CREATE INDEX sessions_archived     ON sessions(archived_at) WHERE archived_at IS NOT NULL;  -- migration 0003-archive
 
 -- earlier Claude session ids of a deck session (02-domain `session_aliases`, state-machines 1.2)
 CREATE TABLE session_aliases (
@@ -633,6 +639,7 @@ Then `PRAGMA incremental_vacuum;`, `PRAGMA wal_checkpoint(TRUNCATE);`, `meta.las
 | `session_summaries`, `rule_audit`, `rule_counters`, `rules`, `repos` (live) | forever | Decided (summaries), Proposed (others) |
 | `sessions` in `done` with `alive = 0`, or `crashed` not dismissed | until reviewed or dismissed; retention never deletes unreviewed work (02-domain 3) | Proposed |
 | `sessions` in `ended` and their detail | 30 days after `ended_at` (DB-O1) | Decided figure |
+| archived `sessions` | same as any session: archiving changes no retention rule, so an archived ended session is deleted 30 days after `ended_at` and an archived session with unreviewed work is kept | Decided (owner, 2026-10-02) |
 | `hook_events`, `events`, `rejected_events`, `session_scrollback`, closed `requests`, `note_reads` | 30 days | Decided figure |
 | `session_steps` | newest 200 per session, then with the session | Proposed |
 | `ask_threads`, `ask_messages`, `misses`, `captures` | forever (small, user content the owner asked for: misses log, captures) | Proposed (DB-O3) |
@@ -648,6 +655,7 @@ Then `PRAGMA incremental_vacuum;`, `PRAGMA wal_checkpoint(TRUNCATE);`, `meta.las
 - Forward only. If `user_version` is **ahead** of the newest file (a downgrade), the server refuses to start: "deck.db was written by a newer deck (schema N). Upgrade, or restore deck.db.pre-*.bak." Never auto-downgrade.
 - SQLite cannot alter a `CHECK` or drop most constraints in place, so enum additions and column changes use the 12-step table rebuild (create new, copy, drop, rename, recreate indexes and triggers) inside the migration transaction with `PRAGMA foreign_keys = OFF` around it and `PRAGMA foreign_key_check` before commit.
 - A data-only fix (for example re-deriving `rule_pattern`) is a migration file too, never startup code.
+- Applied so far: `0001-init.sql` (section 4), `0002-launch.sql` (`sessions.launch_task`), `0003-archive.sql` (`sessions.archived_at`, `sessions.archived_by` and the partial index `sessions_archived`, section 4.3).
 - Tests ([09-testing.md](09-testing.md)): apply all migrations to an empty database and compare `sqlite_schema` with a checked-in snapshot; apply the newest migration to a fixture database of each earlier version; the downgrade refusal.
 
 ## 8. What lives outside SQLite
@@ -746,6 +754,7 @@ Everything below is used by this schema or by [05-api.md](05-api.md) and is not 
 | Session | `steps` (entity `Step`) | home.md `session.steps` ring buffer |
 | Session | `toolCalls` (derived) | home.md footer "31 tool calls" |
 | Session | `launch_task` (server-only column, migration `0002-launch`, M2) | the launch flow types the task only after the idle input box appears (03-architecture 4.1), so the text waits in the row until then; it is not part of the session view |
+| Session | `archivedAt`, `archivedBy` (columns `archived_at`, `archived_by`, migration `0003-archive`) | the owner hides sessions from Home without deleting them; any session can be archived, one that needs the owner is unarchived automatically, and finished sessions without unreviewed changes can be archived in bulk or by the auto-archive sweep |
 | Request | `screenMatch` | state-machines 12.5; now also in 02-domain 2.3 |
 | Request | `taskId` | teammate attribution (state-machines 11) |
 | Request | `rulePattern` | the Claude Code pattern of the matched tiers.json entry, key of the rule counter |
