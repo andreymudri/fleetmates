@@ -73,9 +73,10 @@ export function raiseTiers (store, classifyFn, at) {
 }
 
 /**
- * Fill the Destructive confirm label of a request (07-approvals 8, D-72): the `confirm` template of
- * the first Destructive tiers entry among its reasons, with `{n}` replaced by the count `countFor`
- * gives for the shell segment that entry matched. When the template is missing, the count is not a
+ * Fill the Destructive confirm label of a request (07-approvals 8, D-72): when exactly one of its
+ * reasons is a Destructive tiers entry, that entry's `confirm` template, with `{n}` replaced by the
+ * count `countFor` gives for the shell segment the entry matched. When two or more reasons are
+ * Destructive entries (with or without a template), the template is missing, the count is not a
  * whole number, or `countFor` throws, the label is FALLBACK_CONFIRM_LABEL. Writes `confirm_label`
  * and appends `request.updated`. Resolves null for a request that is missing or not Destructive.
  * @param {Store} store
@@ -106,9 +107,12 @@ async function confirmLabel (row, cwd, { countFor, tiers }) {
   let reasons
   try { reasons = JSON.parse(row.reasons) } catch { reasons = [] }
   const entries = new Map((tiers?.entries ?? []).map((/** @type {any} */ entry) => [entry.id, entry]))
-  const hit = (Array.isArray(reasons) ? reasons : []).map((reason) => ({ reason, entry: entries.get(reason?.entryId) }))
-    .find(({ entry }) => entry?.tier === 'destructive' && typeof entry.confirm === 'string')
-  if (!hit) return FALLBACK_CONFIRM_LABEL
+  const destructive = (Array.isArray(reasons) ? reasons : []).map((reason) => ({ reason, entry: entries.get(reason?.entryId) }))
+    .filter(({ entry }) => entry?.tier === 'destructive')
+  // One label cannot speak for two Destructive segments (`rm a && rm b c d`, `rm a; git push --force`).
+  if (destructive.length !== 1) return FALLBACK_CONFIRM_LABEL
+  const [hit] = destructive
+  if (typeof hit.entry.confirm !== 'string') return FALLBACK_CONFIRM_LABEL
   const template = hit.entry.confirm
   if (!template.includes('{n}')) return template
   if (typeof hit.entry.count !== 'string' || typeof cwd !== 'string') return FALLBACK_CONFIRM_LABEL

@@ -262,3 +262,56 @@ test('requestView describes a Destructive rm by the reason classify headlines, n
   assert.equal(view.description, 'deletes files')
   assert.equal(view.description, classified.description)
 })
+
+test('fillConfirmLabel counts only a single Destructive segment: two or more Destructive reasons give the fallback (D-72)', async () => {
+  const { classify } = await import('../../server/approvals/tiers.mjs')
+  const h = harness()
+  try {
+    const add = (/** @type {string} */ id, /** @type {string} */ command) => {
+      const classified = classify({ toolName: 'Bash', toolInput: { command }, cwd: '/repo', repoRoot: '/repo' })
+      assert.equal(classified.tier, 'destructive', command)
+      h.insert(row({ id, tier: 'destructive', input: { command }, reasons: classified.reasons }))
+    }
+    add('two-rm', 'rm a && rm b c d')
+    add('rm-push', 'rm a; git push --force origin main')
+    add('one-rm', 'rm a b c')
+    const countFor = async (/** @type {string} */ kind, /** @type {string[]} */ argv) => kind === 'rm_paths' ? argv.length - 1 : 7
+    assert.equal(await fillConfirmLabel(h.store, 'two-rm', { countFor }), FALLBACK_CONFIRM_LABEL, 'two rm segments')
+    assert.equal(await fillConfirmLabel(h.store, 'rm-push', { countFor }), FALLBACK_CONFIRM_LABEL, 'rm and a force push')
+    assert.equal(await fillConfirmLabel(h.store, 'one-rm', { countFor }), 'I checked the 3 paths that will be deleted')
+  } finally {
+    h.close()
+  }
+})
+
+test('a truncated Bash prompt matches the request whose command starts with the visible cut text', () => {
+  // Hand-written prompt: no captured frame shows a cut command (prompt.mjs CUT).
+  const prompt = { kind: /** @type {const} */ ('permission'), question: 'Do you want to proceed?', options: [{ key: '1', label: 'Yes' }, { key: '2', label: 'No' }], title: 'Bash command', body: 'node --test --name="abcdef…\nRun tests', truncated: true }
+  const request = row({ id: 'cut', input: { command: 'node --test --name="abcdefghij"', description: 'Run tests' } })
+  assert.deepEqual(matchPrompt(prompt, [request]), { onScreen: 'cut', queued: [], ambiguous: false })
+  const other = row({ id: 'other', input: { command: 'node --test --name="abcxyz"', description: 'Run tests' } })
+  assert.deepEqual(matchPrompt(prompt, [other]), { onScreen: null, queued: ['other'], ambiguous: false })
+})
+
+test('a truncated prompt widens a WebFetch URL to a prefix only when the URL row itself ends in the cut marker', () => {
+  // Hand-written prompts: no captured frame shows a cut URL.
+  const fetchBox = (/** @type {string} */ url) => ({ kind: /** @type {const} */ ('permission'), question: 'Do you want to allow Claude to fetch this content?', options: [{ key: '1', label: 'Yes' }], title: 'Fetch', body: `url: ${url}\nprompt: a long prompt…`, truncated: true })
+  const request = row({ id: 'fetch', tool: 'WebFetch', input: { url: 'https://example.com/docs/page' } })
+  assert.equal(matchPrompt(fetchBox('https://example.com/docs/…'), [request]).onScreen, 'fetch', 'a cut URL row matches by prefix')
+  assert.equal(matchPrompt(fetchBox('https://example.com/docs'), [request]).onScreen, null, 'a whole URL row must equal the URL even when another row is cut')
+})
+
+test('F12 blocks only on a strictly higher tier: a Caution prompt stays on screen beside Safe and Caution requests sharing its prefix', () => {
+  const prompt = { kind: /** @type {const} */ ('permission'), question: 'Do you want to proceed?', options: [{ key: '1', label: 'Yes' }, { key: '2', label: 'No' }], title: 'Bash command', body: 'git fetch\nFetch', truncated: false }
+  const fetch = row({ id: 'fetch', tier: 'caution', input: { command: 'git fetch', description: 'Fetch' } })
+  const dry = row({ id: 'dry', tier: 'safe', input: { command: 'git fetch --dry-run', description: 'Check' } })
+  const all = row({ id: 'all', tier: 'caution', input: { command: 'git fetch --all', description: 'All' } })
+  assert.deepEqual(matchPrompt(prompt, [fetch, dry]), { onScreen: 'fetch', queued: ['dry'], ambiguous: false }, 'a lower tier sharing the prefix')
+  assert.deepEqual(matchPrompt(prompt, [fetch, all]), { onScreen: 'fetch', queued: ['all'], ambiguous: false }, 'the same tier sharing the prefix')
+})
+
+test('allowAlwaysFor is false for a Safe WebFetch request even when option 2 names its own rule pattern', () => {
+  const request = row({ tier: 'safe', tool: 'WebFetch', input: { url: 'https://example.com' }, rule: 'WebFetch(domain:example.com)' })
+  const prompt = { options: [{ key: '1', label: 'Yes' }, { key: '2', label: "Yes, and don't ask again for WebFetch(domain:example.com)" }, { key: '3', label: 'No' }] }
+  assert.equal(allowAlwaysFor(request, prompt), false)
+})
