@@ -219,13 +219,13 @@ test('long agent text never pushes the deck\'s own words out of a popup: "needs 
   const tier = command => requests.find(row => row.summary === command).tier
   assert.equal(tier(long), 'destructive')
   const byTitle = Object.fromEntries(popups().map(([title, body]) => [title, body]))
-  assert.deepEqual([...grouped, ...few].map(tier), ['caution', 'caution', 'caution', 'caution', 'caution'])
+  assert.deepEqual([...grouped, ...few].map(tier), ['safe', 'safe', 'safe', 'safe', 'safe'])
   const longTitle = `needs you · destructive · ${task.slice(0, 53)}…`
-  assert.deepEqual(Object.keys(byTitle).sort(), [longTitle, 'needs you (2 requests) · caution · few asks', 'needs you (3 requests) · caution · group work'].sort())
+  assert.deepEqual(Object.keys(byTitle).sort(), [longTitle, 'needs you (2 requests) · safe · few asks', 'needs you (3 requests) · safe · group work'].sort())
   assert.equal(byTitle[longTitle], `Answer in your terminal\ndestructive · ${long.slice(0, 161).replace(/"/g, '&quot;')}…`)
-  assert.deepEqual(byTitle['needs you (3 requests) · caution · group work'].split('\n'), ['Answer in your terminal', `${tier(grouped[0])} · ${grouped[0].slice(0, 125)}…`, ...grouped.slice(1).map(command => `${tier(command)} · ${command}`)],
+  assert.deepEqual(byTitle['needs you (3 requests) · safe · group work'].split('\n'), ['Answer in your terminal', `${tier(grouped[0])} · ${grouped[0].slice(0, 134)}…`, ...grouped.slice(1).map(command => `${tier(command)} · ${command}`)],
     'a long first summary shares the room instead of pushing the later requests out')
-  assert.deepEqual(byTitle['needs you (2 requests) · caution · few asks'].split('\n'), ['Answer in your terminal', ...few.map(command => `${tier(command)} · ${command}`)])
+  assert.deepEqual(byTitle['needs you (2 requests) · safe · few asks'].split('\n'), ['Answer in your terminal', ...few.map(command => `${tier(command)} · ${command}`)])
   for (const [title, body] of popups()) {
     assert.ok(Array.from(title.replace(/&[a-z]+;/g, '_')).length <= 80 && Array.from(body.replace(/&[a-z]+;/g, '_')).length <= 200)
   }
@@ -287,7 +287,7 @@ test('a long milder request first never hides a later destructive one in a group
   h.send('g', 'PermissionRequest', at + 300, { tool_name: 'Bash', tool_input: { command: curl } })
   const [[title, body]] = await until(1)
   assert.equal(title, 'needs you (2 requests) · destructive · grouped')
-  assert.deepEqual(body.split('\n'), ['Answer in your terminal', `destructive · ${curl}`, `caution · ${long.slice(0, 115)}…`])
+  assert.deepEqual(body.split('\n'), ['Answer in your terminal', `destructive · ${curl}`, `safe · ${long.slice(0, 118)}…`])
 })
 
 test('done and crash popups for a long task keep "made port" and "crashed" through the notification machine', async t => {
