@@ -160,6 +160,9 @@ test('tokens: every route in the router table answers 401 without the token and 
   const m2 = ['POST /api/sessions', 'POST /api/sessions/x/stop', 'POST /api/sessions/x/nudge', 'POST /api/sessions/x/relaunch',
     'GET /api/sessions/x/scrollback', 'POST /api/open', 'PATCH /api/repos/x/crew', 'GET /api/runs/x/x/plan']
   assert.deepEqual(m2.filter(route => !listed.has(route)), [], 'the router table lists every M2 route')
+  // The archive routes (docs/plans/2026-10-02-deck-archive.md, Task 2), refused by the same loop.
+  const archive = ['POST /api/sessions/x/archive', 'POST /api/sessions/x/unarchive', 'POST /api/sessions/archive-finished']
+  assert.deepEqual(archive.filter(route => !listed.has(route)), [], 'the router table lists every archive route')
   const origin = `http://127.0.0.1:${h.port}`
   for (const route of routes) {
     for (const [name, authorization] of [['no token', undefined], ['wrong token', `Bearer ${'b'.repeat(43)}`], ['token in the query', undefined]]) {
