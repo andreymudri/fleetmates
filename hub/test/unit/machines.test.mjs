@@ -217,7 +217,10 @@ test('literal embedded shell writes retain sensitive floors and command-local di
 test('classifyHook rates a request Caution with classify.error when the classifier throws, logging only the reason id', () => {
   const written = []
   const write = process.stderr.write
-  process.stderr.write = chunk => { written.push(String(chunk)); return true }
+  process.stderr.write = chunk => {
+    written.push(String(chunk))
+    return true
+  }
   let result
   try {
     result = classifyHook({ cwd: '/home/you/repo', tool_name: 'Bash', tool_input: { command: 'secret-command TOKEN=abc' } }, { repoRoot: null, classifier: () => { throw Error('boom secret-command') } })

@@ -719,7 +719,10 @@ function protectedTargets(ctx) {
   }
   return ctx.protectedTargets
 }
-const gitDirTargets = ctx => { protectedTargets(ctx); return ctx.gitDirTargets }
+function gitDirTargets(ctx) {
+  protectedTargets(ctx)
+  return ctx.gitDirTargets
+}
 const inGitDirTarget = (location, ctx) => candidates(location).some(candidate => gitDirTargets(ctx).some(dir => withinFolded(candidate, dir)))
 
 // D-92 (a): while the hooksPath read of a repo has not completed, a directory named hooks or
