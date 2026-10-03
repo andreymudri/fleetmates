@@ -215,6 +215,24 @@ test('the compact strip locks its answers while one is in flight or the prompt i
   assert.deepEqual(kinds(stripActions({ session: session(), request: request({ options: undefined }) })), ['open', 'review'])
 })
 
+test('a card still holding an answer that did not land shows "Try again" with no spinner, and resends that answer', async () => {
+  const { SessionCard, withLocalDelivery } = await load('components/SessionCard.jsx')
+  const { stripActions } = await load('components/CompactCard.jsx')
+  const busy = { choice: 'allow' }
+  const failed = request({ delivery: 'did_not_land' })
+  assert.equal(withLocalDelivery(failed, busy), failed, 'a reported delivery is never overridden by the local answer')
+  assert.equal(withLocalDelivery(request({ delivery: 'verifying' }), busy).delivery, 'verifying')
+  const sent = []
+  const props = { session: session(), repo: REPO, requests: [failed], now: NOW, answers: { r1: busy }, onAnswer: (row, body) => sent.push([row.id, body]) }
+  const html = render(SessionCard, props)
+  assert.match(html, /Your answer did not reach rustot\. The prompt is still open in its terminal\./)
+  assert.ok(button(html, 'Try again'), '"Try again" is offered')
+  assert.doesNotMatch(html, /aria-busy="true"|answer-spinner/, 'no spinner that never stops')
+  findButton(SessionCard(props), 'Try again').props.onClick()
+  assert.deepEqual(sent, [['r1', busy]], 'Try again resends the kept answer')
+  assert.deepEqual(stripActions({ session: session(), request: failed, busy }).map(action => action.kind), ['open', 'review'], 'the compact strip falls back too')
+})
+
 test('HomeView passes the answer props to its cards and opens the drawer on a Destructive review', async () => {
   const { HomeView } = await load('screens/home/Home.jsx')
   const overlays = []
