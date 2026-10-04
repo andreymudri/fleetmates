@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { Rail, linkHandler } from './Rail.jsx'
+import { RecBar, recBarShown } from './RecBar.jsx'
+import { pinMoment, stopMeeting } from '../state/actions.js'
 import { messages as en, format } from '../i18n/en.js'
 import { bannerFor, createAnnouncer, documentTitle, keyAction, matchRoute, resolveRoute, selectLanguage } from '../state/deck-store.js'
 
@@ -129,11 +131,29 @@ function Toasts({ toasts, t, navigate, dismiss }) {
 }
 
 /**
- * The shell for one route: skip link, Rail, banners, main, toasts and the live region.
- * Renders without a window so it can be tested with `renderToStaticMarkup`.
- * @param {{ store: object, path: string, search?: string, navigate: (to: string) => void, onRetry: (kind: string) => void, onReload?: () => void, announcement?: string, now?: number, screens?: Record<string, Function> }} props
+ * Pin the current moment of the meeting being recorded, the shell's answer to `{ type: 'pin' }` (Alt P) and to the
+ * recording bar's "Pin moment". It pins the recorder's meeting whatever screen is open, and nothing when the
+ * recorder is not recording. A failure is pushed as an error toast through `dispatch` when one is given.
+ * @param {{ post: Function } | undefined} api
+ * @param {Record<string, any>} state
+ * @param {(action: object) => void} [dispatch]
+ * @returns {Promise<unknown>}
  */
-export function App({ store, path, search = '', navigate, onRetry, onReload = () => {}, announcement = '', now, screens }) {
+export function pinFromKey(api, state, dispatch) {
+  const recorder = state.data.recorder
+  if (!api || recorder?.state !== 'recording' || !recorder.meetingId) return Promise.resolve(null)
+  return pinMoment(api, recorder.meetingId).catch(error => {
+    dispatch?.({ type: 'toast.push', tone: 'error', title: String(error?.message ?? error) })
+    return null
+  })
+}
+
+/**
+ * The shell for one route: the recording bar, skip link, Rail, banners, main, toasts and the live region.
+ * Renders without a window so it can be tested with `renderToStaticMarkup`.
+ * @param {{ store: object, path: string, search?: string, navigate: (to: string) => void, onRetry: (kind: string) => void, onReload?: () => void, announcement?: string, now?: number, screens?: Record<string, Function>, api?: { post: Function } }} props
+ */
+export function App({ store, path, search = '', navigate, onRetry, onReload = () => {}, announcement = '', now, screens, api }) {
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState)
   const language = selectLanguage(state.data.prefs)
   const t = makeTranslator(language)
@@ -143,8 +163,13 @@ export function App({ store, path, search = '', navigate, onRetry, onReload = ()
   const route = matchRoute(path)
   const banner = bannerFor(state, now ?? Date.now())
   const stale = state.loaded && connection === 'reconnecting'
+  const recorder = state.data.recorder
+  const recording = recBarShown(recorder)
+  const toastError = error => store.dispatch({ type: 'toast.push', tone: 'error', title: String(error?.message ?? error) })
+  const onStop = () => { if (api) stopMeeting(api).catch(toastError) }
   return (
-    <div className={`shell${stale ? ' shell--stale' : ''}`} lang={language.lang}>
+    <div className={`shell${recording ? ' shell--recording' : ''}${stale ? ' shell--stale' : ''}`} lang={language.lang}>
+      {recording ? <RecBar recorder={recorder} t={t} lang={language.lang} navigate={navigate} onPin={() => pinFromKey(api, store.getState(), store.dispatch)} onStop={onStop} /> : null}
       <a className="sr-only-focusable sr-only skip-link" href="#main">{t('shell.skip')}</a>
       <Rail t={t} path={path} counts={state.loaded ? state.data.counts : null} recording={state.data.recorder?.state === 'recording'} navigate={navigate} />
       <main id="main" aria-busy={state.loaded ? undefined : 'true'} tabIndex={-1} className="shell-main">
@@ -215,6 +240,7 @@ export function Shell({ store, connection, api, screens }) {
       event.preventDefault()
       event.stopPropagation()
       if (action.type === 'navigate') navigate(action.to)
+      else if (action.type === 'pin') pinFromKey(api, store.getState(), store.dispatch)
       else if (action.type === 'overlay') {
         overlayRef.current = action.overlay
         window.history.pushState({ overlay: action.overlay }, '', window.location.pathname + window.location.search)
@@ -223,7 +249,7 @@ export function Shell({ store, connection, api, screens }) {
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [store, navigate])
+  }, [store, navigate, api])
 
   const language = selectLanguage(state.data.prefs)
   const t = useMemo(() => makeTranslator(language), [language.lang, language.messages])
@@ -264,5 +290,5 @@ export function Shell({ store, connection, api, screens }) {
     if (kind === 'server') connection.retryNow()
     else api?.post('/api/deps/deckd/retry').catch(() => {})
   }, [connection, api])
-  return <App store={store} path={path} navigate={navigate} onRetry={onRetry} onReload={() => window.location.reload()} announcement={announcement} now={now} screens={screens} search={search} />
+  return <App store={store} path={path} navigate={navigate} onRetry={onRetry} onReload={() => window.location.reload()} announcement={announcement} now={now} screens={screens} search={search} api={api} />
 }
