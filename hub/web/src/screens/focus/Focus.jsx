@@ -874,7 +874,8 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
           confirmLabel={translate(t, FOCUS_COPY, 'focus.paste.confirm')} cancelLabel={translate(t, FOCUS_COPY, 'focus.stop.cancel')}
           onCancel={() => answerPaste(false)} onConfirm={() => answerPaste(true)} t={t} />
       ) : null}
-      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} onArchive={flow.archive} />
+      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} onArchive={flow.archive}
+        onToast={dispatch ? item => dispatch({ type: 'toast.push', ...item }) : undefined} />
     </>
   )
 }

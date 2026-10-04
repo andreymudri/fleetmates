@@ -21,6 +21,16 @@ import { createApi } from './http/api.mjs'
 import { createRouter, apiError } from './http/router.mjs'
 import { readToken } from './http/auth.mjs'
 import { createWsHub } from './ws/hub.mjs'
+import { authorize } from './http/auth.mjs'
+import { openInBrowser } from './setup/browser.mjs'
+import { createTiersStore } from './approvals/tiers-store.mjs'
+import { setActiveTiers } from './approvals/tiers.mjs'
+import { applyScreen, fillConfirmLabel, raiseTiers } from './approvals/request-updates.mjs'
+import { createDeliverer, recordAnswered, recover as recoverDeliveries } from './approvals/deliver.mjs'
+import { createRules, offers as ruleOffers, recordAllow, ruleThreshold } from './approvals/rules.mjs'
+import { record as recordAudit } from './approvals/audit.mjs'
+import { countFor } from './approvals/confirm-count.mjs'
+import { classifyHook } from './machines/request.mjs'
 const builtSpa = fileURLToPath(new URL('../web/dist/', import.meta.url))
 const deckVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 // Consecutive envelopes at the current deckHookVersion that return an outdated hooks row to ok.
@@ -84,18 +94,144 @@ export async function createDeckServer(options = {}) {
   const health = () => [link.health(), { ...hooksState }, ...['vault-mcp', 'scribed', 'notify', 'fleetmates'].map(dep => ({ dep, state: dep === 'scribed' ? recording?.snapshot().state ?? 'unknown' : 'unknown', reason: null, since: now(), nextProbeAt: null, attempt: 0 }))]
   const subscribers = new Set()
   let archiveAfter
+  let approvalsEvent = () => {}
   const publish = event => {
     hub?.publish(event)
     for (const callback of subscribers) {
       try { callback(event) } catch {}
     }
+    try { approvalsEvent(event) } catch {}
     // A prefs.changed that moves autoArchiveAfter sweeps once, after the event has reached every client.
     if (event.type === 'prefs.changed' && event.data?.prefs?.autoArchiveAfter !== archiveAfter) setImmediate(() => archiveSweep())
   }
   const projector = createProjector({ store, now, publish, locateTask: taskForCwd })
   link = createDeckdLink({ env, connectDeckd, reconnectMs, random, now, store, projector, publish, timeoutMs: options.deckdTimeoutMs ?? 2000 })
+  // M3 wiring (docs/plans/2026-10-02-deck-m3.md, Task 16): tiers, screen match, confirm labels, delivery, rules,
+  // the approvals audit and popup actions.
+  const maxSeq = () => Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq)
+  /** Publish the events appended after `before`, or only those of one type and entity. */
+  const publishSince = (before, type = null, entityId = null) => {
+    for (const row of store.all('SELECT seq, at, type, entity_id, data FROM events WHERE seq > ? ORDER BY seq', before)) {
+      if (type !== null && (row.type !== type || row.entity_id !== entityId)) continue
+      publish({ seq: Number(row.seq), at: row.at, type: row.type, entityId: row.entity_id, data: JSON.parse(row.data) })
+    }
+  }
+  /** Run a store change and publish the events it appended. */
+  const commit = fn => {
+    const before = maxSeq()
+    const result = fn()
+    publishSince(before)
+    return result
+  }
+  /** One approvals audit row; a failing audit write never stops the change that caused it. */
+  const audit = event => {
+    try { recordAudit(store, { at: now(), ...event }) } catch {
+      try { process.stderr.write('deck: audit.error\n') } catch {}
+    }
+  }
+  /** The classifier over a stored permission request (null for one without its tool input). */
+  const classifyRow = row => {
+    if (!row.tool_name) return null
+    let input = {}
+    try { input = JSON.parse(row.detail) ?? {} } catch {}
+    const session = store.get('SELECT cwd, repo_id FROM sessions WHERE id=?', row.session_id)
+    return classifyHook({ tool_name: row.tool_name, tool_input: input, cwd: session?.cwd ?? null }, { repoRoot: session?.repo_id ?? undefined })
+  }
+  // The tiers store on <config>/tiers.json (07-approvals 4.1). A change raises the open requests' tiers and is
+  // audited as tiers_loaded; a file that fails to parse or validate keeps the previous set and is audited as
+  // tiers_rejected, once per distinct error.
+  const tiersStore = createTiersStore({ file: path.join(paths.config, 'tiers.json'), watch: false })
+  setActiveTiers(() => tiersStore.current())
+  let tiersRejected = null
+  const tiersAudit = () => {
+    const status = tiersStore.status()
+    if (status.ok) {
+      tiersRejected = null
+      audit({ kind: 'tiers_loaded', tiersSha256: tiersStore.sha256() })
+      return
+    }
+    const key = `${status.line}:${status.message}`
+    if (key === tiersRejected) return
+    tiersRejected = key
+    audit({ kind: 'tiers_rejected', summary: `line ${status.line ?? '?'}: ${status.message ?? ''}`, tiersSha256: tiersStore.sha256() })
+  }
+  tiersStore.onChange(() => {
+    try { commit(() => raiseTiers(store, classifyRow, now())) } catch {}
+  })
+  let tiersWatcher = null
+  let tiersTimer = null
+  const reloadTiers = () => {
+    tiersTimer = null
+    if (stopped) return
+    const before = tiersStore.sha256()
+    const loaded = tiersStore.reload()
+    if (!loaded || tiersStore.sha256() !== before) tiersAudit()
+    else tiersRejected = null
+  }
+  try {
+    tiersWatcher = fs.watch(paths.config, (kind, name) => {
+      if (name !== null && name !== 'tiers.json') return
+      clearTimeout(tiersTimer)
+      tiersTimer = setTimeout(reloadTiers, options.tiersDebounceMs ?? 50)
+    })
+    tiersWatcher.on('error', () => {})
+  } catch { tiersWatcher = null }
+  tiersAudit()
+  // The last parsed prompt of each PTY. A frame usually reaches the server before the PermissionRequest hook
+  // that opens its request, so after each applied hook the PTY's last prompt is matched again.
+  const lastPrompt = new Map()
+  link.onParsed(event => {
+    lastPrompt.set(event.ptyId, event.parsed.prompt)
+    if (!event.sessionId) return
+    try { commit(() => applyScreen(store, event.sessionId, event.parsed.prompt, now())) } catch {}
+  })
+  const reapplyScreen = envelope => {
+    if (typeof envelope.ptyId !== 'string' || !lastPrompt.has(envelope.ptyId)) return
+    const sessionId = store.get('SELECT id FROM sessions WHERE pty_id=? AND alive=1', envelope.ptyId)?.id
+    if (!sessionId) return
+    try { commit(() => applyScreen(store, sessionId, lastPrompt.get(envelope.ptyId), now())) } catch {}
+  }
+  // Rules and the suggestion threshold (`ruleSuggestAfter`), re-read on every prefs.changed.
+  let threshold = ruleThreshold(store)
+  const rules = createRules({ store, paths, publish, now })
+  // Delivery: whatever a crash left in flight is recovered before the deliverer accepts an answer.
+  recoverDeliveries(store, { now })
+  const deliverer = createDeliverer({ store, link, publish, now, rules: { recordAllow, ruleThreshold: () => threshold }, ...options.deliver })
+  // Confirm labels of Destructive requests, filled outside the hook transaction; close() waits for them.
+  const labelWork = new Set()
+  const fillLabel = id => {
+    const before = maxSeq()
+    const work = fillConfirmLabel(store, id, { countFor, tiers: tiersStore.current(), at: now() })
+      .then(() => { if (!stopped) publishSince(before, 'request.updated', id) }, () => {})
+      .finally(() => labelWork.delete(work))
+    labelWork.add(work)
+  }
+  // Audit rows nothing else writes: `expired`, and `answered` via terminal for a request closed by a terminal
+  // answer. The `answered` row goes through deliver.mjs `recordAnswered`, the one writer the deliverer and
+  // `recover` use too, which appends it only when the request has none, so it is never written twice.
+  const auditClosed = view => {
+    const repoId = store.get('SELECT repo_id FROM sessions WHERE id=?', view.sessionId)?.repo_id ?? null
+    const base = { requestId: view.id, sessionId: view.sessionId, repoId, tier: view.tier ?? null, reasons: view.reasons ?? [], summary: view.summary ?? null }
+    if (view.state === 'expired') return audit({ kind: 'expired', ...base })
+    const answer = view.answer
+    if (view.state !== 'answered' || answer?.via !== 'terminal' || answer.pending || view.delivery === 'sending') return
+    try { recordAnswered(store, { at: now(), ...base, via: 'terminal', choice: typeof answer.choice === 'string' ? answer.choice : null }) } catch {
+      try { process.stderr.write('deck: audit.error\n') } catch {}
+    }
+  }
+  approvalsEvent = event => {
+    if (stopped) return
+    if (event.type === 'request.opened' && event.data?.tier === 'destructive') fillLabel(event.data.id)
+    if (event.type === 'request.closed' && event.data?.id) auditClosed(event.data)
+    const prefs = event.type === 'prefs.changed' ? event.data?.prefs : null
+    if (prefs && Object.hasOwn(prefs, 'ruleSuggestAfter') && prefs.ruleSuggestAfter !== threshold) {
+      threshold = prefs.ruleSuggestAfter
+      rules.setThreshold(threshold)
+    }
+  }
   const ingest = createIngestor({ now, onEvent: envelope => { projector.applyHooks([envelope])
-    noteHookVersion(envelope) }, onRejected: row => store.run('INSERT INTO rejected_events(received_at,via,reason,raw) VALUES(?,?,?,?)', row.receivedAt, row.via, row.reason, '') })
+    noteHookVersion(envelope)
+    reapplyScreen(envelope) }, onRejected: row => store.run('INSERT INTO rejected_events(received_at,via,reason,raw) VALUES(?,?,?,?)', row.receivedAt, row.via, row.reason, '') })
   const scanRoot = () => {
     const root = api?.preferences().prefs.scanRoot ?? config.scanRoot ?? '~/dev'
     return root.startsWith('~/') ? path.join(paths.home, root.slice(2)) : path.resolve(root)
@@ -228,7 +364,9 @@ export async function createDeckServer(options = {}) {
     },
     ...options.services
   }
-  api = createApi({ store, projector, paths, env, now, publish, services, link, runReader: reader, health, recorder: () => ({ state: recording?.isRecording() ? 'recording' : 'idle' }) })
+  api = createApi({ store, projector, paths, env, now, publish, services, link, runReader: reader, health, recorder: () => ({ state: recording?.isRecording() ? 'recording' : 'idle' }),
+    approvals: { deliverer, rules, threshold: () => threshold, tiersStatus: () => tiersStore.status(),
+      ruleOffers: () => ruleOffers(store, { threshold, tiers: tiersStore.current() }), ...(options.diff ? { diff: options.diff } : {}) } })
   function refreshToken() {
     try {
       const next = readToken(paths.token)
@@ -242,6 +380,46 @@ export async function createDeckServer(options = {}) {
   }
   const server = http.createServer(createRouter({ api: api.route, staticDir: options.staticDir ?? builtSpa, getToken: refreshToken, getPort: () => boundPort }))
   hub = createWsHub({ server, store, epoch, link, snapshot: api.snapshot, getToken: refreshToken, getPort: () => boundPort, now, heartbeatMs: options.heartbeatMs, helloTimeoutMs: options.helloTimeoutMs })
+  // Deck tabs: WebSocket upgrades that pass the hub's own checks, until their socket closes. A popup "Open"
+  // navigates a connected tab and otherwise opens the deck in the browser.
+  const tabs = new Set()
+  server.on('upgrade', (req, socket) => {
+    try { if (req.url !== '/api/ws' || authorize(req, { port: boundPort, token: refreshToken(), upgrade: true })) return } catch { return }
+    tabs.add(socket)
+    socket.once('close', () => tabs.delete(socket))
+  })
+  /** Open one session (popup "Open", 04-integrations 5): `ui.navigate` to a connected tab, else the fragment URL. */
+  function openSession(sessionId) {
+    const to = `/s/${encodeURIComponent(sessionId)}`
+    if (tabs.size) {
+      publish({ type: 'ui.navigate', at: now(), data: { path: to } })
+      return Promise.resolve()
+    }
+    // The token travels in the fragment of a private bootstrap file (0600, in the state directory made 0700 again
+    // right before the write, so a directory loosened after start cannot expose it), as `fleetmates-deck open`
+    // does, never in argv; the opener gets the environment without the deck token.
+    const url = `http://127.0.0.1:${boundPort}/#token=${currentToken}&to=${encodeURIComponent(to)}`
+    const bootstrap = path.join(paths.state, 'open.html')
+    const temp = path.join(paths.state, `.open-${process.pid}-${Date.now()}.tmp`)
+    try {
+      privateDir(paths.state)
+      fs.writeFileSync(temp, `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${JSON.stringify(url)})</script>\n`, { flag: 'wx', mode: 0o600 })
+      fs.renameSync(temp, bootstrap)
+    } catch { return Promise.resolve() } finally { try { fs.unlinkSync(temp) } catch {} }
+    return Promise.resolve().then(() => (options.openBrowser ?? openInBrowser)(bootstrap, { env: processEnv })).catch(() => {})
+  }
+  /**
+   * A popup action (Task 5): `allow` answers the single Safe request through the deliverer, anything else opens.
+   * An allow the deliverer refuses at click time (the tier rose, the prompt left the screen) opens the session
+   * instead (state-machines 2.7 row 6).
+   */
+  function popupAction({ key, requestIds, sessionId }) {
+    if (key === 'allow' && requestIds.length === 1) {
+      deliverer.answer(requestIds[0], { choice: 'allow' }, { via: 'popup' }).catch(() => { if (!stopped) openSession(sessionId) })
+      return
+    }
+    openSession(sessionId)
+  }
   let hooks
   let spool
   let runPass = () => {}
@@ -277,12 +455,19 @@ export async function createDeckServer(options = {}) {
   async function close() {
     if (stopped) return
     stopped = true
+    deliverer.close()
+    clearTimeout(tiersTimer)
+    tiersWatcher?.close()
+    tiersStore.close()
+    setActiveTiers(null)
     link.close()
     if (retentionTimeout !== null) retentionTimer.clear(retentionTimeout)
     retentionTimeout = null
     for (const timer of timers) clearInterval(timer)
     recording?.stop()
     await notificationWork.catch(() => {})
+    notifications?.close()
+    await Promise.allSettled([...labelWork])
     spool?.close()
     ingest.close()
     reader.close?.()
@@ -310,7 +495,7 @@ export async function createDeckServer(options = {}) {
         now, ...(options.scribedProbe ? { status: options.scribedProbe } : {}),
         pollMs: options.scribedPollMs ?? 2000, timeoutMs: options.scribedTimeoutMs ?? 1000
       })
-      notifications = createNotificationMachine({ store, now, publish,
+      notifications = createNotificationMachine({ store, now, publish, onAction: popupAction,
         notifier: options.notifier ?? createNotifier({ env: processEnv }), recording: () => recording.isRecording() })
       await recording.start()
     }

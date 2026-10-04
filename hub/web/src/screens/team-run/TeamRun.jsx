@@ -517,9 +517,11 @@ export function TeamRunView({
  * worker's `?taskId=` steps again whenever the lead's activity moves, falls back to the plan's heading for
  * the title, redirects an unknown `repoKey` with `?repoId=` (API-O2), and runs Stop run and the plan drawer.
  * This browser wiring is not exercised by the unit tests; {@link TeamRunView} and {@link teamRedirect} are.
- * @param {{ route: { params: { repoKey: string, runId: string } }, state: object, t?: Function, navigate: Function, api?: object, search?: string }} props
+ * `dispatch` takes the store's `toast.push` for the palette's toast over this screen.
+ * @param {{ route: { params: { repoKey: string, runId: string } }, state: object, t?: Function, navigate: Function, api?: object, search?: string,
+ *   dispatch?: (action: object) => void }} props
  */
-export function TeamRun({ route, state, t, navigate, api, search = globalThis.location?.search ?? '' }) {
+export function TeamRun({ route, state, t, navigate, api, search = globalThis.location?.search ?? '', dispatch }) {
   const { repoKey, runId } = route.params
   const client = api ?? deckApi()
   const now = useMinuteNow()
@@ -587,7 +589,7 @@ export function TeamRun({ route, state, t, navigate, api, search = globalThis.lo
         onReview={filter => openOverlay('drawer', globalThis.window, { filter })} onOpenPlan={() => setPlanOpen(true)}
         onStop={() => setConfirming(true)} onConfirmStop={onConfirmStop} onCancelStop={() => setConfirming(false)} />
       {planOpen && run ? <PlanDrawer api={client} repoKey={repoKey} repoId={run.repoId} runId={run.runId} t={t} onClose={() => setPlanOpen(false)} /> : null}
-      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} />
+      <ObserveOverlays state={state} t={t} navigate={navigate} api={api} onToast={dispatch ? item => dispatch({ type: 'toast.push', ...item }) : undefined} />
     </>
   )
 }

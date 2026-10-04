@@ -122,6 +122,22 @@ export function answerKeys (row, body, prompt) {
 }
 
 /**
+ * The one writer of a request's `answered` audit row (07-approvals 11): the row is appended only when the
+ * request has none yet, so the deliverer, the server's terminal-answer audit and `recover` can never write it
+ * twice. The check and the insert run in one synchronous turn on the deck's single database connection, with
+ * nothing awaited between them. `record` defaults to audit.mjs `record`.
+ * @param {{ get: Function, run: Function }} store
+ * @param {object} event an AuditEvent; `kind` is forced to `answered`
+ * @param {Function} [record]
+ * @returns {number | null} the row id, or null when the request already has its `answered` row
+ */
+export function recordAnswered (store, event, record = auditLog.record) {
+  const requestId = /** @type {any} */ (event).requestId ?? null
+  if (requestId !== null && store.get("SELECT id FROM approval_audit WHERE request_id = ? AND kind = 'answered' LIMIT 1", requestId)) return null
+  return record(store, { ...event, kind: 'answered' })
+}
+
+/**
  * @typedef {{ run: Function, get: Function, all: Function, appendEvent: Function, tx: Function }} Store
  * @typedef {{ connected: boolean, features: string[], request: (op: string, fields?: object) => Promise<any>,
  *   writeGuarded: (ptyId: string, data: string, guard: { rev: number, quietMs: number }) => Promise<any>,
@@ -205,8 +221,10 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
   function note (kind, row, extra = {}) {
     try {
       const session = row ? getSession(row.session_id) : null
-      audit.record(store, { kind, at: now(), requestId: row?.id ?? null, sessionId: row?.session_id ?? null, repoId: session?.repo_id ?? null,
-        tier: row?.tier ?? null, reasons: row?.reasons ?? [], summary: row?.summary ?? null, ...extra })
+      const event = { kind, at: now(), requestId: row?.id ?? null, sessionId: row?.session_id ?? null, repoId: session?.repo_id ?? null,
+        tier: row?.tier ?? null, reasons: row?.reasons ?? [], summary: row?.summary ?? null, ...extra }
+      if (kind === 'answered') recordAnswered(store, event, audit.record)
+      else audit.record(store, event)
     } catch {
       try { process.stderr.write('deck: audit.error\n') } catch {}
     }
@@ -637,6 +655,58 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
       watches.clear()
     }
   }
+}
+
+/**
+ * Recover delivery state left by a crash or restart, once at start and before the deliverer accepts an
+ * answer (M3 Task 16). No key is written and nothing is retried:
+ * - an open request whose delivery is `sending` or `verifying` goes back to `idle` with its earlier answer
+ *   (the attempt's `prior`, the did_not_land answer a Try again carried, else none);
+ * - a closed request whose answer still holds a `pending` verdict, or whose delivery is still `sending`,
+ *   was closed while the deck's write was in flight and no one settled it: an answered row becomes a
+ *   terminal answer with the hook's choice and one `answered` audit row, and an expired row has its
+ *   attempt cleared.
+ * Each changed row appends `request.updated`.
+ * @param {Store} store
+ * @param {{ now?: () => number, audit?: { record: Function } }} [options]
+ * @returns {{ reset: string[], settled: string[] }} ids of the open rows reset and the closed rows settled
+ */
+export function recover (store, { now = Date.now, audit = auditLog } = {}) {
+  const reset = []
+  const settled = []
+  const parse = (/** @type {string | null} */ text) => { try { return JSON.parse(text ?? 'null') } catch { return null } }
+  store.tx(() => {
+    const at = now()
+    const write = (/** @type {string} */ id, /** @type {string} */ delivery, /** @type {string | null} */ answer) => {
+      store.run('UPDATE requests SET delivery = ?, answer = ? WHERE id = ?', delivery, answer, id)
+      store.appendEvent({ at, type: 'request.updated', entityId: id, data: requestView(store.get('SELECT * FROM requests WHERE id = ?', id)) })
+    }
+    for (const row of store.all("SELECT * FROM requests WHERE state = 'open' AND delivery IN ('sending', 'verifying') ORDER BY created_at, id")) {
+      const prior = parse(row.answer)?.prior
+      write(row.id, 'idle', prior && typeof prior === 'object' && typeof prior.choice === 'string' ? JSON.stringify(prior) : null)
+      reset.push(row.id)
+    }
+    for (const row of store.all("SELECT * FROM requests WHERE state <> 'open' ORDER BY created_at, id")) {
+      const answer = parse(row.answer)
+      if (!answer?.pending && row.delivery !== 'sending') continue
+      if (row.state !== 'answered') {
+        write(row.id, 'idle', null)
+        settled.push(row.id)
+        continue
+      }
+      const choice = typeof answer?.choice === 'string' ? answer.choice : null
+      write(row.id, 'idle', JSON.stringify({ via: 'terminal', choice }))
+      try {
+        const session = store.get('SELECT repo_id FROM sessions WHERE id = ?', row.session_id)
+        recordAnswered(store, { kind: 'answered', at, requestId: row.id, sessionId: row.session_id, repoId: session?.repo_id ?? null,
+          tier: row.tier ?? null, reasons: row.reasons ?? [], summary: row.summary ?? null, via: 'terminal', choice }, audit.record)
+      } catch {
+        try { process.stderr.write('deck: audit.error\n') } catch {}
+      }
+      settled.push(row.id)
+    }
+  })
+  return { reset, settled }
 }
 
 /**

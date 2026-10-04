@@ -118,7 +118,9 @@ export function FailureNotices({ model, repos = [], t, navigate, history = false
  * from M2, each given the real authenticated `api` (so a 401 from any of them reaches the shell's fatal state through
  * the api's `onFatal`). Home, Focus, Settings, Team run and the Crew sheet place the failure notices; First run is
  * full-bleed, and New session shows deckd down in its own form over the screen it renders beneath it. Home and Focus
- * get the terminal client (`terminals`) and the store's `dispatch` for their toasts; New session gets this map itself.
+ * get the terminal client (`terminals`) and the store's `dispatch` for their toasts, as do Team run and Settings (the
+ * revoke toast); every observe overlay gets `onToast`, so the palette's "Allowed ..." toast shows from every screen
+ * (M3 Task 16). New session gets this map itself.
  * Settings, the Crew sheet and New session render the observe overlays (palette, Needs-you drawer) here; the other
  * screens render their own. New session renders them outside its inert background, which renders without them.
  * The route components are plain functions without hooks, so tests can call them.
@@ -126,6 +128,7 @@ export function FailureNotices({ model, repos = [], t, navigate, history = false
  * @returns {Record<string, Function>}
  */
 export function deckScreens({ api, feed, terminals = null, dispatch, now = Date.now }) {
+  const toast = dispatch ? item => dispatch({ type: 'toast.push', ...item }) : undefined
   const notices = (props, history) => (
     <FailureNotices model={failureModel(props.state, now())} repos={props.state.data.repos} t={props.t} navigate={props.navigate} history={history}
       onStartDeckd={() => { api.post('/api/deps/deckd/start').catch(() => {}) }} />
@@ -146,19 +149,19 @@ export function deckScreens({ api, feed, terminals = null, dispatch, now = Date.
       return (
         <>
           <NewSession search={props.search} state={props.state} t={props.t} navigate={props.navigate} api={api} screens={screens} />
-          <ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} />
+          <ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} />
         </>
       )
     },
     team: function TeamRunScreen(props) {
-      return <>{notices(props, false)}<TeamRun route={props.route} search={props.search} state={props.state} t={props.t} navigate={props.navigate} api={api} /></>
+      return <>{notices(props, false)}<TeamRun route={props.route} search={props.search} state={props.state} t={props.t} navigate={props.navigate} api={api} dispatch={dispatch} /></>
     },
     crew: function CrewScreen(props) {
       return (
         <>
           {notices(props, false)}
           <CrewSheet route={props.route} search={props.search} state={props.state} t={props.t} navigate={props.navigate} api={api} />
-          <ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} />
+          <ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} />
         </>
       )
     },
@@ -169,8 +172,8 @@ export function deckScreens({ api, feed, terminals = null, dispatch, now = Date.
       return (
         <>
           {notices(props, false)}
-          <Settings route={props.route} state={props.state} t={props.t} navigate={props.navigate} api={api} feed={feed} />
-          <ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} />
+          <Settings route={props.route} state={props.state} t={props.t} navigate={props.navigate} api={api} feed={feed} dispatch={dispatch} />
+          <ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} />
         </>
       )
     }
