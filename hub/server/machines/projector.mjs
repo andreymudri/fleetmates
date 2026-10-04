@@ -416,6 +416,15 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
             store.run('UPDATE sessions SET state=? WHERE id=?', state, session.id)
             session = store.get('SELECT * FROM sessions WHERE id=?', session.id)
           }
+          // Rule 2 lets a late event update bookkeeping: a `--run` command stamped behind an early-flushed
+          // PermissionRequest still joins its run, when it comes from the session's own Claude process. The run join
+          // touches only the role and run columns, never the session state.
+          let joinChanged = false
+          if (late && session.alive && hook.hook_event_name === 'PreToolUse' && hook.tool_name === 'Bash' && sameKnownProcess(store, session, envelope)) {
+            const joined = joinLead(session, hook, envelope.hookTs)
+            joinChanged = joined.role !== session.role || joined.run_id !== session.run_id
+            session = joined
+          }
           if (!late) {
             const known = !!session
             if (!known) session = applySessionHook(store, envelope, null, false)
@@ -443,7 +452,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
             }
           }
           if (session) persistSessionSummary(store, session)
-          if (session && (!late || requestChanged || identityChanged || replacementChanged || lifecycleChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session, store) })
+          if (session && (!late || requestChanged || identityChanged || replacementChanged || lifecycleChanged || joinChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session, store) })
         }
         store.appendEvent({ at: now(), type: 'counts', data: projectCounts(store) })
       })

@@ -67,8 +67,9 @@ async function harness(t, { runPollMs = 3_600_000, record = true } = {}) {
     fs.rmSync(dir, { recursive: true, force: true }) })
   let at = 1_790_000_000_000
   let tool = 0
-  const send = (sessionId, cwd, hook, hookTs = at += 1000) => {
-    deck.ingest.receive(JSON.stringify({ v: 1, hookTs, ptyId: null, claudePid: null, pidChain: [], truncated: false,
+  // `envelope` overrides envelope fields, such as the `claudePid` the hook was stamped with.
+  const send = (sessionId, cwd, hook, hookTs = at += 1000, envelope = {}) => {
+    deck.ingest.receive(JSON.stringify({ v: 1, hookTs, ptyId: null, claudePid: null, pidChain: [], truncated: false, ...envelope,
       hook: { ...base, session_id: sessionId, cwd, tool_use_id: `toolu_${++tool}`, ...hook } }))
     deck.ingest.flush()
   }
@@ -292,6 +293,40 @@ test('a lead that names another run moves its runRef and becomes that run\'s lea
   assert.equal(lead.role, 'lead')
   assert.deepEqual(lead.runRef, { repoId: h.repo, runId: 'r2', taskId: null })
   assert.equal(h.deck.store.get('SELECT lead_session_id FROM runs WHERE repo_id=? AND run_id=?', h.repo, 'r2')?.lead_session_id, lead.id)
+})
+
+// deck-hook stamps hookTs in its own process, so hooks fired a few ms apart can be stamped out of order. Here a
+// PermissionRequest stamped T+20 is ingested before the --run PreToolUse stamped T+10, which is then judged late
+// (state-machines 1.4 rule 2, applied=0). The run join is bookkeeping, so it still happens for the same process.
+async function lateRunCommand(t, runPid) {
+  const h = await harness(t)
+  const at = h.lastTs() + 1000
+  h.send('lead-1', h.repo, { hook_event_name: 'SessionStart', source: 'startup', tool_name: undefined, tool_input: undefined }, at, { ptyId: 'pty-lead', claudePid: 4242 })
+  h.send('lead-1', h.repo, { hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'npm test' } }, at + 20, { ptyId: 'pty-lead', claudePid: 4242 })
+  const before = h.sessionFor('lead-1')
+  assert.equal(before.state, 'needs_approval')
+  h.send('lead-1', h.repo, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'node scripts/cli.mjs dispatch --run r1 --phase 1' } }, at + 10, { ptyId: 'pty-lead', claudePid: runPid })
+  const late = h.deck.store.get("SELECT session_id, applied FROM hook_events WHERE event='PreToolUse' AND hook_ts=?", at + 10)
+  assert.deepEqual([late.session_id, late.applied], [before.id, 0], 'the --run PreToolUse resolved to the session and was judged late')
+  return { h, before }
+}
+
+test('a late --run PreToolUse from the same Claude process still makes the session the run lead', async t => {
+  const { h, before } = await lateRunCommand(t, 4242)
+  const lead = h.sessionFor('lead-1')
+  assert.equal(lead.role, 'lead')
+  assert.deepEqual(lead.runRef, { repoId: h.repo, runId: 'r1', taskId: null })
+  assert.equal(h.deck.store.get('SELECT lead_session_id FROM runs WHERE repo_id=? AND run_id=?', h.repo, 'r1')?.lead_session_id, lead.id)
+  // A late event never changes the session state.
+  assert.deepEqual([lead.state, lead.stateSince], [before.state, before.stateSince])
+  const upserted = h.events.filter(event => event.type === 'session.upserted' && event.entityId === lead.id).at(-1)
+  assert.equal(upserted.data.role, 'lead', 'clients are told about the join')
+})
+
+test('a late --run PreToolUse from a different Claude process does not join the run', async t => {
+  const { h } = await lateRunCommand(t, 5151)
+  assert.equal(h.sessionFor('lead-1').role, 'solo')
+  assert.equal(h.deck.store.all('SELECT * FROM runs').length, 0)
 })
 
 /** Await a condition the server reaches on its own; the deadline only turns a hang into a failure. */
