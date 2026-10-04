@@ -354,6 +354,18 @@ Rules:
 | Confidential meetings | With a confidential tag fixture, grep the SQLite file, the WAL, the server's stdout and stderr (M4 has no debug log, D-121) and the spool for sentinel transcript strings: zero hits (qa 2.9) |
 | Static path traversal | `GET /../../etc/passwd` and encoded variants return 404 |
 
+The M4 security tests that exist in 0.4.0 (run for [m4-exit.md](m4-exit.md)):
+
+| Threat | Test |
+|---|---|
+| Confidential meetings | `hub/test/integration/meetings-confidential.test.mjs`: "client-a: a recorded, pinned, asked, searched, read and synthesized meeting and a spooled hook leave zero sentinel hits" and "pessoal: the same leaves zero sentinel hits except the pin labels in deck.db" (the database, its WAL, the server's stdout and stderr and the spool). `hub/test/e2e/meetings.spec.mjs` "meetings AC9" (the database after a confidential recording and a reload) and `hub/test/e2e/security.spec.mjs` "confidential live meeting (M4): browser storage and the Cache API hold no sentinel, and every meeting.transcript frame is ephemeral" |
+| Ephemeral meeting streams | `hub/test/integration/meetings-api.test.mjs` "a meeting ask streams ask.delta and ask.done without seq, and no ask event can reach the events table" |
+| Untrusted meeting text | `security.spec.mjs` "untrusted text (M4): qa 1.7 payloads in a tag, a title, note sections, action items, transcript lines, a search hit, live lines, ask text and scribed messages render literally" and "untrusted text (M4): escape, bell and bidi controls in meeting text never reach the DOM raw"; `meetings.spec.mjs` "meetings AC12" |
+| Files under `session_dir` | `meetings-api.test.mjs` "open postmeetLog of a log symlinked out of session_dir is 403 path_not_allowed and opens nothing", "a hook envelope whose cwd is inside session_dir creates no session, one outside does", "a hook whose cwd is a symlink outside session_dir pointing into it is dropped" and "the hook guard keeps the last good session_dir when config.yaml stops reading, so a prompt from inside it is never stored" |
+| Child processes | `meetings-api.test.mjs` "POST /api/deps/scribed/start runs the systemd-run shim with the decided argv and no token in its environment"; `meetings.spec.mjs` "host isolation: every host binary resolves to its shim, and no session bus, display, agent or token reaches a child" and ""Start scribed" from the degraded card runs the systemd-run shim with the decided argv, and the card recovers when scribed answers" |
+| scribed socket | `meetings-api.test.mjs` "without XDG_RUNTIME_DIR in its env the server never reaches the socket of the process environment" |
+| Missing or wrong token on the meeting routes | `security.spec.mjs` "tokens: every route in the router table answers 401 without the token and with a wrong one, and the WebSocket refuses both", whose `routerTable()` reads the meeting routes of `api.mjs`, including the `items/:itemKey/dismiss` shape |
+
 ### 11.2 Accessibility
 
 - **Automated from M1 (Proposed)**: `@axe-core/playwright` on every fixture screen and overlay, zero serious or critical violations (qa 1.9); keyboard map and focus trap tests (qa 1.3); reduced motion (qa 1.4); contrast via axe (qa 1.5).

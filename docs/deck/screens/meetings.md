@@ -185,7 +185,7 @@ The bell is muted during recording; popups still show (quiet mode, state-machine
 
 ## 8. Accessibility
 
-- Recording bar is `role="status"` and announces only "Recording started" and "Recording stopped"; the timer is `aria-hidden`, with a static "Recording, started 14:00" exposed (components Banner).
+- Recording bar: only "Recording started" and "Recording stopped" are announced; the timer is `aria-hidden`, with a static "Recording, started 14:00" exposed (components Banner). As built in 0.4.0 the bar is not `role="status"`: it is a `role="region"` landmark labelled "Recording", the two announcements go through the shell's polite live region (`shell.announce.recStart` and its pair), and while the bar shows it holds the shell's skip link as its first child, so the skip link stays the first focusable element and sits inside a landmark (M4-T17-F4, fixed by M4 Task 19).
 - Transcript container `role="log"` with `aria-live="off"` and a toggle "Read new lines aloud" (components TranscriptLine), off by default.
 - `lang="pt-BR"` on transcript lines, summaries, decisions, action items, pins and PT answers.
 - Speakers are labelled in text ("Você", "Sala"), never colour only.
@@ -202,6 +202,7 @@ The bell is muted during recording; popups still show (quiet mode, state-machine
 | `meetings.recordingOpen` | Recording · Open |
 | `meetings.tag.confidential` | transcript not stored |
 | `meetings.tag.menuLabel` | Record with tag |
+| `meetings.tag.option` | {tag} · {note} |
 | `meetings.starting` | Starting… |
 | `meetings.startSlow` | scribed did not confirm the start. Checking… |
 | `meetings.refused` | scribed refused: {message} |
@@ -217,10 +218,14 @@ The bell is muted during recording; popups still show (quiet mode, state-machine
 | `meetings.post.transcribed` | Summarizing… |
 | `meetings.post.names` | Needs speaker names |
 | `meetings.post.namesHint` | Needs speaker names. Run: postmeet name {session} |
+| `meetings.post.interrupted` | Recording interrupted |
 | `meetings.post.failed` | Summary failed |
 | `meetings.post.failedBody` | Summary failed. The batch log stopped at {time}. |
 | `meetings.post.openLog` | Open log |
 | `meetings.copy` | Copy |
+| `meetings.duration` | {n} min |
+| `meetings.drawer.close` | Close |
+| `meetings.toast.dismiss` | Dismiss |
 | `meetings.empty` | No meetings yet. Press Record, or start one with scribe; it shows up here. |
 | `meetings.noConfig` | TurbidAssist is not configured for the deck: config.yaml not found at {path}. |
 | `meetings.fixInSettings` | Fix in Settings |
@@ -263,11 +268,16 @@ The bell is muted during recording; popups still show (quiet mode, state-machine
 | `meetings.ask.placeholder` | Ask without leaving the call |
 | `meetings.ask.label` | Ask during the meeting |
 | `meetings.ask.asking` | Asking… |
+| `meetings.ask.stop` | Stop |
+| `meetings.ask.stopped` | Stopped here; the answer may still be saved to the meeting |
+| `meetings.ask.retry` | Try again |
 | `meetings.ask.error` | The ask did not finish: {message}. |
 | `meetings.ask.save` | Save answer to meeting note |
 | `meetings.ask.copy` | Copy |
 | `meetings.ask.autoSaved` | Answers are added to the meeting note when it is summarized. |
 | `meetings.pins.title` | Pins · {n} |
+
+As built in 0.4.0, M4 added `meetings.tag.option` (the tag menu option of a confidential tag, whose note is "transcript not stored"), `meetings.post.interrupted` (a recording that ended without a stop), `meetings.duration`, `meetings.drawer.close`, `meetings.toast.dismiss`, and the ask `meetings.ask.stop`, `meetings.ask.stopped` and `meetings.ask.retry`. `meetings.ask.save` and `meetings.detail.researchFirst` are not rendered in M4 (MEET-O8, Q6). The recording bar strings live in `REC_COPY` of `hub/web/src/shell/RecBar.jsx`, the rest in the `*_COPY` objects of `hub/web/src/screens/meetings/`.
 
 ## 10. Acceptance criteria
 
@@ -289,14 +299,14 @@ The bell is muted during recording; popups still show (quiet mode, state-machine
 
 | Id | Gap | Status |
 |---|---|---|
-| MEET-O1 | Source label (Teams, Meet, Discord): `routed_apps` exists only in live `status`; `session.json` does not store it. Meetings recorded while the deck was not polling have no source. | Default applied in M4, owner may revisit before exit: the deck records `routed_apps` seen during polling into its own Meeting row; unknown shows no source item. |
-| MEET-O2 | Pins are not in TurbidAssist (no command, event, file or field). The deck stores them; postmeet does not know them, so they never reach the vault note. | Default applied in M4, owner may revisit before exit: deck-stored pins shown in the deck only (TurbidAssist change T1 not taken). |
-| MEET-O3 | Live meeting title: nothing names a meeting before synthesis; only the tag exists. | Default applied in M4, owner may revisit before exit: "{Tag} · started {time}". |
+| MEET-O1 | Source label (Teams, Meet, Discord): `routed_apps` exists only in live `status`; `session.json` does not store it. Meetings recorded while the deck was not polling have no source. | Default shipped in 0.4.0, still the owner's to revisit before exit: the deck records `routed_apps` seen during polling into its own Meeting row; unknown shows no source item. |
+| MEET-O2 | Pins are not in TurbidAssist (no command, event, file or field). The deck stores them; postmeet does not know them, so they never reach the vault note. | Default shipped in 0.4.0, still the owner's to revisit before exit: deck-stored pins shown in the deck only (TurbidAssist change T1 not taken). |
+| MEET-O3 | Live meeting title: nothing names a meeting before synthesis; only the tag exists. | Default shipped in 0.4.0, still the owner's to revisit before exit: "{Tag} · started {time}". |
 | MEET-O4 | Live ask "uses the transcript and your vault": scribed `ask` runs `claude -p` with no tools and no MCP servers, so it cannot read the vault (integration contract 2.6). | **Decided** 2026-10-04 (D-105): scribed `ask` (transcript only) with the eyebrow "Ask · uses the transcript" and no citations. No deck-side engine; TurbidAssist change T3 not taken. |
-| MEET-O5 | Partial (in-progress) transcript lines: scribed emits whole ASR segments only. | Default applied in M4, owner may revisit before exit: no partial lines; "Listening…" after 5 s without a new line. |
-| MEET-O6 | "Launch as session" from action items: "Tasks from meetings" was not selected in the scope question (D-29) but is designed (Q6); the item has no repo. | Default applied in M4, owner may revisit before exit: the button opens the new-session form with the task prefilled and the repo picker focused; "Dismiss" with Undo for 6 s; "Research first" not rendered until M6. |
+| MEET-O5 | Partial (in-progress) transcript lines: scribed emits whole ASR segments only. | Default shipped in 0.4.0, still the owner's to revisit before exit: no partial lines; "Listening…" after 5 s without a new line. |
+| MEET-O6 | "Launch as session" from action items: "Tasks from meetings" was not selected in the scope question (D-29) but is designed (Q6); the item has no repo. | Default shipped in 0.4.0, still the owner's to revisit before exit: the button opens the new-session form with the task prefilled and the repo picker focused; "Dismiss" with Undo for 6 s; "Research first" not rendered until M6. |
 | MEET-O7 | Transcript search for confidential tags: the deck must not persist transcript text for them (02-domain 2.6), but search needs text. | **Decided** 2026-10-04 (D-109): search includes confidential meetings, reading session files on demand for every tag; it never indexes, caches or persists their text. |
-| MEET-O8 | "Save answer to meeting note": no protocol path exists. scribed already records `ask_done` answers in `asks.jsonl`, and postmeet renders them under "Perguntas ao vivo" only when `store_transcript` is true. | Default applied in M4, owner may revisit before exit: no Save button; with the scribed engine and a non-confidential tag show the muted line "Answers are added to the meeting note when it is summarized." |
+| MEET-O8 | "Save answer to meeting note": no protocol path exists. scribed already records `ask_done` answers in `asks.jsonl`, and postmeet renders them under "Perguntas ao vivo" only when `store_transcript` is true. | Default shipped in 0.4.0, still the owner's to revisit before exit: no Save button; with the scribed engine and a non-confidential tag show the muted line "Answers are added to the meeting note when it is summarized." |
 | MEET-O9 | Live decisions and action items: not produced live (only by the batch). | Decided by data: the live view shows none. |
 | MEET-O10 | "Start scribed" (SM-O13, FAIL-O1). | **Decided** 2026-10-04 with SM-O13 (D-106): `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`. |
 | MEET-O11 | Where the deck finds TurbidAssist's `config.yaml` and `session_dir`. | **Decided** 2026-10-04 (D-107): Settings, Connections field "TurbidAssist config" (path), default `~/dev/turbidassist/config.yaml` when present; `session_dir` is read from it. |

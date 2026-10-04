@@ -132,6 +132,16 @@ Both start at login (`default.target` of the user manager). No lingering is need
 
 Anything the web server spawns lives in its cgroup and dies when the web server unit stops or restarts: `claude -p` Ask children (acceptable, the question is kept and the UI shows the error), the vault-mcp child (restarted with the server), `notify-send` processes waiting for an action (the popup's "Open" becomes a no-op). **scribed is the exception**: a scribed spawned as a plain detached child would stay in the web unit's cgroup, so a web server restart would kill it and any recording in progress. Decided 2026-10-04 (OPS-O1, SM-O13, FAIL-O1, D-106): the deck starts it with `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, so it gets its own transient unit outside the deck's cgroup and the login environment (including `HF_TOKEN`). TurbidAssist change T4 (a `scribed.service` unit, [04-integrations.md](04-integrations.md) section 4.3) is not taken.
 
+As built in 0.4.0 (`hub/server/meetings/start-scribed.mjs`): "Start scribed" (`POST /api/deps/scribed/start`) first asks scribed for `status`; when it answers, nothing is spawned. Otherwise it runs `systemd-run` with an argv array, a 5 s timeout and the web server's environment without any key whose name contains `TOKEN`, `SECRET`, `PASSWORD` or `AUTHORIZATION`, then probes every 100 ms for up to 10 s. When the Settings `scribedCommand` is the default `scribed` the argv is exactly the decided command above; any other value is passed as one argument after `-c 'exec "$0"'`, so the setting never reaches a shell parser. A non-zero `systemd-run` exit is 502 `dependency_start_failed` with `details.exitCode` and the last 2 KiB of its stderr (redacted); no answer within 10 s is the same code with `details.reason: 'no_socket'`. The server finds the socket only under its own `XDG_RUNTIME_DIR` and never falls back to another path.
+
+The `turbidassist-scribed` unit is transient: it exists while scribed runs, and with `--collect` systemd unloads it when scribed exits, failed or not (systemd-run(1)), so there is no unit file to edit or enable. To inspect it:
+
+    systemctl --user status turbidassist-scribed
+    journalctl --user -u turbidassist-scribed --since "1 hour ago"
+    ls -l "$XDG_RUNTIME_DIR/turbidassist.sock"
+
+Stop it with `systemctl --user stop turbidassist-scribed` only when no meeting records: stopping scribed during a recording ends that recording. Because the unit is outside the web server's cgroup, a web server restart is meant to leave it and its recording running; that is part of exit criterion 5 and has not been checked on a real recording yet ([m4-exit.md](m4-exit.md)).
+
 The environment of the systemd user manager is not the login shell's (no `PATH` additions from `.zshrc`, mise, nvm, no exported keys). Sessions started with `fm claude` get the terminal's environment (03-architecture 2.4). Sessions launched from the UI need the login environment (03-architecture 2.1); OPS-O2 covers how deckd obtains it.
 
 ## 4. Start, stop, restart

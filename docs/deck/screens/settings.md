@@ -91,7 +91,7 @@ Answers **"How is the deck set up, and what have I allowed it to do?"** The main
 | Repo scan root | TextInput + "Rescan" | `config.scanRoot` (`~/dev`, Decided) | "Repos folder", "~/dev", "{n} repos found" |
 | Vault | TextInput (read-only when set by environment) + status | vault-mcp `VAULT_PATH`, health | "Vault", "VAULT_PATH=/home/you/vault · 76 notes indexed" |
 | Obsidian vault name | TextInput | MEM-O5 | "Obsidian vault name" |
-| TurbidAssist config | TextInput + status | MEET-O11 | "TurbidAssist config.yaml" |
+| TurbidAssist config | TextInput + status | MEET-O11 | "TurbidAssist config.yaml"; status "Read {n} tags from {path}." or "config.yaml not found at {path}." (as built in 0.4.0, from `GET /api/meetings` `configPath` and `configError`) |
 | scribed | status + "Start scribed" | health | "scribed reachable" / "scribed socket not found" |
 | deckd | status + "Start deckd" | health | "deckd running · pid 48213 · up 2 min" |
 | Hooks | status + "Install hooks" | first-run check | "Observation hooks installed" |
@@ -221,6 +221,8 @@ Answers **"How is the deck set up, and what have I allowed it to do?"** The main
 | `settings.conn.vault` | Vault |
 | `settings.conn.obsidian` | Obsidian vault name |
 | `settings.conn.turbid` | TurbidAssist config.yaml |
+| `settings.conn.turbid.missing` | config.yaml not found at {path}. |
+| `settings.conn.turbid.read` | Read {n} tags from {path}. |
 | `settings.conn.checklist` | Run the setup checklist again |
 | `settings.conn.stale` | A running session counts as adrift after {n} min without activity. |
 | `settings.saveError` | Could not save {setting}: {error} |

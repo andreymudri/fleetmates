@@ -67,7 +67,7 @@ Columns: request body or query, success response, error codes (section 4), miles
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/version` | | `{ apiVersion, deckVersion, build }`: `deckVersion` is the `hub/package.json` version, `build` the milestone (`m2`) | | M1 | shell (version skew, section 8) |
+| GET | `/api/version` | | `{ apiVersion, deckVersion, build }`: `deckVersion` is the `hub/package.json` version, `build` the milestone (`m4` in 0.4.0) | | M1 | shell (version skew, section 8) |
 | GET | `/api/setup/checks` | | `{ checks: SetupCheck[] }` with every automatic check in `checking`; each result then arrives as WS `setup.check` | | M1 | First run open and "Check again" (`U.CheckAgain`), Settings Connections |
 | POST | `/api/setup/hooks` | | `{ check: SetupCheck, backupPath }` after install and re-check | `settings_io_failed`, `validation_failed` (the file is not JSON; nothing written) | M1 | First run "Install hooks" (`U.Fix`), Settings |
 | POST | `/api/setup/complete` | | `{ firstRunCompletedAt }` | `precondition_failed` (hooks check not `ok`; Decided gate) | M1 | First run "Set sail" |
@@ -219,19 +219,21 @@ Save uses exactly the parameters of the preview named by `previewId` without `pr
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/meetings` | query `before`, `limit` (default 50) | `{ meetings: MeetingListItem[], recorder: Recorder, tags: MeetingTag[], configError? }` | | M4 | Meetings list, Calm "Last meeting" |
-| GET | `/api/meetings/:id` | | `{ meeting: Meeting, note: MeetingNote \| null, pins: Pin[] }` | `not_found` | M4 | Meeting detail |
-| GET | `/api/meetings/:id/transcript` | | `{ source: 'batch' \| 'live', lines: TranscriptLine[] }`, read from disk on every call, never cached (MEET-O7) | `not_found` | M4 | "Full transcript" drawer |
-| GET | `/api/meetings/:id/log` | query `lines` (default 200) | `{ text }` (tail of `postmeet.log`) | `not_found` | M4 | "Open log" |
-| GET | `/api/meetings/search` | query `q` (min 2 chars) | `{ hits: [{ meetingId, t0, speaker, snippet }], meetingCount }`, on-demand file scan, no index; confidential meetings included and never cached (MEET-O7, D-109) | `validation_failed` | M4 | Meetings search field |
-| POST | `/api/meetings/start` | `{ tag }` | waits up to `scribedStartTimeout` (20 s) for scribed's answer (D-117): `ok` gives 202 `{ recorder }` with `recording`; a timeout gives 202 `{ recorder }` with `starting`, and the next poll decides (state-machines 6.3 row 7); WS `meeting.status` | `unknown_tag` (before any command), `scribed_refused` (409, when scribed answers `error`; its message verbatim in `details.text`), `scribed_unavailable` | M4 | Tag menu (`U.StartWithTag`) |
+| GET | `/api/meetings` | query `before`, `limit` (default 50, at most 500) | `{ meetings: MeetingListItem[], recorder: Recorder, tags: MeetingTag[], model: string \| null, configPath: string \| null, configError: { code, line, message, path } \| null }` (as built in 0.4.0: `model` is the batch model of `config.yaml`, `configPath` the located file; `configError` is null when the config reads) | `validation_failed` (`limit`, `before`) | M4 | Meetings list, Calm "Last meeting" |
+| GET | `/api/meetings/:id` | | `{ meeting: Meeting & { title, logAt }, note: (MeetingNote & { title }) \| null, pins: Pin[], speakers: string[] \| null, model: string \| null, asks? }` (as built in 0.4.0: `speakers` is the distinct speaker names of the transcript, null without one; `logAt` the `postmeet.log` mtime or null; `asks`, scribed's ask history, only while this meeting records) | `not_found` | M4 | Meeting detail, live view |
+| GET | `/api/meetings/:id/transcript` | | `{ source: 'batch' \| 'live', lines: TranscriptLine[] }`: the recorder's ring (`live`) while this meeting records or stops, else read from disk on every call, never cached (MEET-O7) | `not_found`, `path_not_allowed` | M4 | "Full transcript" drawer |
+| GET | `/api/meetings/:id/log` | query `lines` (1 to 1000, default 200) | `{ text }` (tail of `postmeet.log`) | `not_found`, `validation_failed`, `path_not_allowed` | M4 | "Open log" |
+| GET | `/api/meetings/search` | query `q` (min 2 chars after case and accent folding) | `{ hits: [{ meetingId, t0, speaker, snippet, ranges }], meetingCount, partial }`, on-demand file scan, no index; confidential meetings included and never cached (MEET-O7, D-109). `snippet` is at most 160 characters around the match and `ranges` holds the `[start, end]` offsets of every match inside it; `partial` is true when the 2 s budget or the 200-hit cap stopped the scan | `validation_failed` | M4 | Meetings search field |
+| POST | `/api/meetings/start` | `{ tag }` | waits up to `scribedStartTimeout` (20 s) for scribed's answer (D-117): `ok` gives 202 `{ recorder }` with `recording`; as built in 0.4.0 a timeout gives 202 `{ recorder }` with `idle` (not `starting`), and the next poll decides (state-machines 6.3 row 7; the screen shows that scribed did not confirm); WS `meeting.status` | `unknown_tag` (before any command), `invalid_state` (409, `details.state`, while the recorder is `starting`, `recording` or `stopping`), `scribed_refused` (409, when scribed answers `error`; its message verbatim in `details.text`), `scribed_unavailable` (503, retryable) | M4 | Tag menu (`U.StartWithTag`) |
 | POST | `/api/meetings/stop` | | 202 `{ recorder }` with `stopping` at once (D-117); the server does not hold the request for scribed's long `stop`, and a later scribed `error` reaches the client as `lastError` on `meeting.status` | `not_recording` | M4 | "Stop and summarize" (`U.StopAndSummarize`) |
 | POST | `/api/meetings/:id/pins` | `{ t?: number }` (default: current `elapsed_s`); a clicked transcript line sends its `t0` as `t` (D-119) | 201 `{ pin: Pin }` or 200 with the existing pin when within 2 s of another | `not_recording`, `not_found` | M4 | "Pin moment", `Alt P`, transcript line click (`U.Pin`) |
 | DELETE | `/api/meetings/:id/pins/:pinId` | | 204 | `not_found` | M4 | transcript line click on a pinned line |
 | POST | `/api/meetings/:id/items/:itemKey/dismiss` | | 204 | `not_found` | M4 | action item "Dismiss" |
 | DELETE | `/api/meetings/:id/items/:itemKey/dismiss` | | 204 | | M4 | toast "Undo" |
 
-The pin label is computed by the server (newest transcript line, first 80 characters) and is `null` for a confidential tag (04-integrations 4.2).
+The pin label is computed by the server (newest transcript line, first 80 characters) and is `null` for a confidential tag (04-integrations 4.2). As built in 0.4.0 the server takes the ring line whose `t0` equals the sent `t` when there is one, else the newest line.
+
+As built in 0.4.0, the meeting kinds of `POST /api/open` (`meetingNote`, `postmeetLog`) answer 422 `validation_failed` with `details.reason: 'kind_not_available'` while no `config.yaml` reads, the same answer a server without the meeting services gives. `POST /api/ask/:messageId/cancel` stays M5: in M4 the live view's "Stop" freezes the answer on screen only, keeps the composer busy until scribed ends the answer, and says "Stopped here; the answer may still be saved to the meeting".
 
 ## 3. WebSocket
 
@@ -337,11 +339,14 @@ Ephemeral (no `seq`):
 | `ask.done` | `{ threadId, message: AskMessage }` | final message with citations, `isMiss`, `generalKnowledge` |
 | `ask.error` | `{ threadId, messageId, error: ApiError }` | |
 | `meeting.transcript` | `{ meetingId, line: TranscriptLine }` | live lines from scribed `subscribe`; never persisted, for any tag |
+| `meeting.recovered` | `{ meetingId, count, ephemeral: true }` | as built in 0.4.0: sent after a subscription gap was filled (from the live events file, else scribed `tail`) with `count` lines, which arrive before it as `meeting.transcript`; never persisted |
 | `screen.tail` | `{ sessionId, lines: string[] }` | compact card tails (M2), ANSI stripped, at most 1 per second per session, only while a Home compact view is subscribed (`sub.tails`, 3.6) |
 | `input.source` | `{ sessionId, state: 'quiet' \| 'terminal_active' \| 'browser_active' \| 'collision', from: 'terminal' \| 'browser' \| null, name: string \| null, detached: boolean }` | shared input machine (state-machines 3); drives "Last typed from: terminal (kitty)" and the collision chip. `detached` is true once the last `fm` terminal client of the PTY has detached (M2) |
 | `ui.navigate` | `{ path }` | notification "Open" action (04-integrations 5); only the most recently focused tab obeys |
 | `hb` | `{ seq, at }` | heartbeat |
 | `error` | `ApiError` | a client message was invalid (unknown type, bad attach) |
+
+As built in 0.4.0, every meeting stream event (`meeting.transcript`, `meeting.recovered`, `ask.delta`, `ask.done`, `ask.error`) carries `ephemeral: true` inside `data`, and the event store refuses to append any of them to `events` (`ephemeralEvents` in `hub/server/db/index.mjs` throws). A meeting ask's `ask.done` message has `citations: []` and `persisted: false`.
 
 `Counts` is produced by one query (02-domain 3):
 
@@ -405,7 +410,7 @@ One JSON shape for every non-2xx response and for `error`, `ask.error`, `term.er
 
 - `code` is stable and machine-read; the SPA maps it to copy in its i18n catalog. `message` is an English fallback for logs and for codes the SPA does not know.
 - Messages from scribed and vault-mcp are passed through verbatim in `details.text` (Portuguese for scribed; 04-integrations 4.1) and shown as the screens specify ("scribed refused: <message>").
-- `retryable: true` means the same request may succeed unchanged later. As built in M3 the answer and rule routes set it for `deckd_unavailable`, `typing_in_terminal` and `settings_changed` only.
+- `retryable: true` means the same request may succeed unchanged later. As built in M3 the answer and rule routes set it for `deckd_unavailable`, `typing_in_terminal` and `settings_changed` only; M4 adds `scribed_unavailable`, which the API sends with `retryable: true` (the `retryableCodes` set of `hub/server/http/api.mjs`; pinned for `POST /api/meetings/start` and for `ask.error`).
 
 | Code | HTTP | Meaning |
 |---|---|---|
@@ -695,10 +700,15 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {string[]} apps
  * @property {boolean} stuck                deck-derived (state-machines 6.4)
  */
-/** @typedef {Meeting & {title: string, actionItemCount: number|null}} MeetingListItem */
+/**
+ * As built in 0.4.0: `title` is null until a note is found, `stuck` is read per request, and `interrupted` is true
+ * when the session directory has no `session.json`, holds `transcript.jsonl`, is not the meeting being recorded,
+ * and nothing in it was written for more than 1 h (a recording that ended without a stop).
+ * @typedef {Meeting & {title: string|null, actionItemCount: number|null, interrupted: boolean}} MeetingListItem
+ */
 /** @typedef {{summary: string, decisions: string[], actionItems: {key: string, text: string, owner: string|null, dismissed: boolean}[]}} MeetingNote */
 /** @typedef {{id: string, t: number, label: string|null, createdAt: number}} Pin */
-/** @typedef {{t0: number, t1: number, speaker: string, text: string}} TranscriptLine */
+/** @typedef {{t0: number, t1: number, speaker: string, text: string, asrModel?: string|null}} TranscriptLine   (`asrModel` on live lines, as built in 0.4.0) */
 /** @typedef {{tag: string, confidential: boolean, isDefault: boolean}} MeetingTag */
 /**
  * The recorder view (D-118). There is no `error` state: a failed command sets `lastError`, which the client shows as

@@ -441,6 +441,8 @@ Rows are kept while the run directory exists and dropped 30 days after it disapp
 
 The deck keeps only facts TurbidAssist does not have: the source label seen while polling (MEET-O1), pins (MEET-O2), dismissed action items, and a cached manifest state for list rendering. No transcript, title, summary or ask text is stored for any meeting (section 10).
 
+As built in 0.4.0: migration `hub/server/db/migrations/0005-meetings.sql` (`user_version` 5) creates the three tables, the two indexes `meetings_started` and `meeting_pins_meeting`, and the three triggers below, with the statements shown here except the `ask_threads` `DELETE`, which M5 adds. In the file the indexes follow the tables.
+
 ```sql
 CREATE TABLE meetings (
   id            TEXT PRIMARY KEY,                     -- TurbidAssist session_id, '2026-09-08T14-00-12'
@@ -696,7 +698,7 @@ Then `PRAGMA incremental_vacuum;`, `PRAGMA wal_checkpoint(TRUNCATE);`, `meta.las
 - Forward only. If `user_version` is **ahead** of the newest file (a downgrade), the server refuses to start: "deck.db was written by a newer deck (schema N). Upgrade, or restore deck.db.pre-*.bak." Never auto-downgrade.
 - SQLite cannot alter a `CHECK` or drop most constraints in place, so enum additions and column changes use the 12-step table rebuild (create new, copy, drop, rename, recreate indexes and triggers) inside the migration transaction with `PRAGMA foreign_keys = OFF` around it and `PRAGMA foreign_key_check` before commit.
 - A data-only fix (for example re-deriving `rule_pattern`) is a migration file too, never startup code.
-- Applied so far: `0001-init.sql` (section 4), `0002-launch.sql` (`sessions.launch_task`), `0003-archive.sql` (`sessions.archived_at`, `sessions.archived_by` and the partial index `sessions_archived`, section 4.3), `0004-approvals.sql` (M3: `requests.reasons`, `requests.confirm_label`, the `approval_audit` table and its index, sections 4.4 and 4.5). The session archive run owns 0003, so the M3 approvals migration is 0004; the runner skips every file at or below the database version, so both numbers are fixed.
+- Applied so far: `0001-init.sql` (section 4), `0002-launch.sql` (`sessions.launch_task`), `0003-archive.sql` (`sessions.archived_at`, `sessions.archived_by` and the partial index `sessions_archived`, section 4.3), `0004-approvals.sql` (M3: `requests.reasons`, `requests.confirm_label`, the `approval_audit` table and its index, sections 4.4 and 4.5), `0005-meetings.sql` (M4: the `meetings`, `meeting_pins` and `meeting_item_dismissals` tables with their indexes and triggers, section 4.9). The session archive run owns 0003, so the M3 approvals migration is 0004; the runner skips every file at or below the database version, so both numbers are fixed.
 - Tests ([09-testing.md](09-testing.md)): apply all migrations to an empty database and compare `sqlite_schema` with a checked-in snapshot; apply the newest migration to a fixture database of each earlier version; the downgrade refusal.
 
 ## 8. What lives outside SQLite

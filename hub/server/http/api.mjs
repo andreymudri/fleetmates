@@ -370,7 +370,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     const ok = data => ({ data })
     if (!['GET', 'PATCH', 'POST', 'DELETE'].includes(method)) throw apiError(404, 'not_found')
     if (method === 'GET') {
-      if (route === 'version') return ok({ apiVersion: 1, deckVersion, build: 'm3' })
+      if (route === 'version') return ok({ apiVersion: 1, deckVersion, build: 'm4' })
       if (route === 'health') return ok({ deps: health() })
       if (route === 'prefs') return ok(preferences())
       if (route === 'repos') return ok({ repos: repos(q.get('archived') === '1') })
