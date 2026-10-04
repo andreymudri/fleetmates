@@ -1,0 +1,98 @@
+{
+  "comment": "Two prompts of one session (F12): two Safe requests open together and the screen shows one at a time on synthetic-permission-bash. Each 1 closes the shown prompt and draws the next.",
+  "version": "2.1.285",
+  "sessionId": "auto",
+  "steps": [
+    {
+      "hook": "SessionStart",
+      "with": {
+        "source": "startup"
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run test",
+          "description": "Run the tests"
+        }
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run lint",
+          "description": "Run the linter"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "synthetic-permission-bash",
+      "vars": {
+        "cmd": "npm run test",
+        "description": "Run the tests"
+      }
+    },
+    {
+      "expectKey": {
+        "1": "yes",
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "hook": "PostToolUse",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run test",
+          "description": "Run the tests"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "synthetic-permission-bash",
+      "vars": {
+        "cmd": "npm run lint",
+        "description": "Run the linter"
+      }
+    },
+    {
+      "expectKey": {
+        "1": "yes",
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "hook": "PostToolUse",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run lint",
+          "description": "Run the linter"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "tool-output"
+    },
+    {
+      "sleep": 600000
+    }
+  ]
+}

@@ -894,6 +894,25 @@ function transcriptQuestion(location) {
   return null
 }
 
+/** `delivery` values that mean the deck wrote keys for the request (state-machines 2.7 rows 12, 15, 16). */
+export const DECK_DELIVERIES = Object.freeze(['sending', 'verifying', 'did_not_land'])
+
+/**
+ * The `answer` a closing hook records. A request the deck sent keys for (`delivery` sending, verifying
+ * or did_not_land) keeps the deck's `via` and choice from the in-flight `answer` approvals/deliver.mjs
+ * wrote; the hook's own verdict wins when it is a deny. Any other request is answered in the terminal.
+ * @param {{ delivery?: string, answer?: string | null }} row
+ * @param {string} choice the terminal choice the hook implies
+ * @returns {{ via: string, choice: string }}
+ */
+export function closingAnswer(row, choice) {
+  if (!DECK_DELIVERIES.includes(row?.delivery)) return { via: 'terminal', choice }
+  let sent = null
+  try { sent = JSON.parse(row.answer ?? 'null') } catch {}
+  const via = ['browser', 'popup', 'batch'].includes(sent?.via) ? sent.via : 'browser'
+  return { via, choice: choice === 'deny' || typeof sent?.choice !== 'string' ? choice : sent.choice }
+}
+
 /**
  * Open, answer and expire observe-only requests inside the caller's transaction. A request it opens carries
  * `taskId` (the teammate task the hook is attributed to), which defaults to the session's `run_task_id`.
@@ -904,7 +923,13 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
   if (event === 'WorktreeCreate' || event === 'WorktreeRemove') worktrees.drop(session.repo_id)
   const at = envelope.hookTs
   const key = matchKey(hook)
-  const resumed = resumedActivityEvents.includes(event) && store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'observed' }), at, session.id, 'question', 'open', 'stop_question', 'elicitation', at).changes > 0
+  let resumed = false
+  if (resumedActivityEvents.includes(event)) {
+    for (const row of store.all('SELECT id, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', session.id, 'question', 'open', 'stop_question', 'elicitation', at)) {
+      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'observed')), at, row.id)
+      resumed = true
+    }
+  }
   if (late && !['PostToolUse', 'PostToolUseFailure', 'PermissionDenied', 'UserPromptSubmit'].includes(event)) return resumed
   let question = null
   if (event === 'Stop' && ['running', 'stale'].includes(session.state) && !session.subagents_active && !store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? LIMIT 1', session.id, 'open')) question = transcriptQuestion(hook.transcript_path ?? session.transcript_path)
@@ -937,31 +962,38 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
     const outcomeKind = event !== 'PermissionDenied' && hook.tool_name === 'AskUserQuestion' ? 'question' : 'permission'
-    const row = store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind, at)
-      ?? (outcomeKind === 'question' ? store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission', at) : null)
-      ?? store.all('SELECT id, kind, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
+    const row = store.get('SELECT id, kind, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind, at)
+      ?? (outcomeKind === 'question' ? store.get('SELECT id, kind, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission', at) : null)
+      ?? store.all('SELECT id, kind, summary, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
     if (!row) return resumed
-    store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: event === 'PermissionDenied' ? 'deny' : 'allow' }), at, row.id)
+    const closing = closingAnswer(row, event === 'PermissionDenied' ? 'deny' : 'allow')
+    store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closing), at, row.id)
     // D-73: an allow in the terminal counts toward "Make it a rule?"; recordAllow checks the tier,
     // the pattern and that both hooks came from one Claude process (F16). Its failure never stops
-    // the hook from applying.
-    if (event === 'PostToolUse' && row.kind === 'permission') {
+    // the hook from applying. A request the deck sent keys for is counted by approvals/deliver.mjs.
+    if (event === 'PostToolUse' && row.kind === 'permission' && closing.via === 'terminal') {
       try { recordAllow(store, row, { via: 'terminal', at, threshold: ruleThreshold(store), closingPid: envelope.claudePid ?? null }) } catch {
         try { process.stderr.write('deck: rule.count-error\n') } catch {}
       }
     }
     if (hook.tool_name === 'AskUserQuestion') {
       const relatedKind = row.kind === 'permission' ? 'question' : 'permission'
-      const related = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind, at)
+      const related = store.get('SELECT id, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind, at)
       if (related) {
         if (event === 'PermissionDenied') store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE id = ?', 'expired', 'interrupted', related.id)
-        else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'allow' }), at, related.id)
+        else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(related, 'allow')), at, related.id)
       }
     }
     return true
   }
   if (event === 'UserPromptSubmit') {
-    return store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND state = ? AND created_at <= ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'deny' }), at, session.id, 'open', at).changes > 0 || resumed
+    let changed = false
+    for (const row of store.all('SELECT id, kind, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND created_at <= ?', session.id, 'open', at)) {
+      // A reply the deck typed into a question is answered by its UserPromptSubmit (state-machines 2.6).
+      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, row.kind === 'question' && DECK_DELIVERIES.includes(row.delivery) ? 'reply' : 'deny')), at, row.id)
+      changed = true
+    }
+    return changed || resumed
   }
   if (event === 'Notification' && hook.notification_type === 'idle_prompt') return store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE session_id = ? AND state = ? AND source <> ?', 'expired', 'interrupted', session.id, 'open', 'stop_question').changes > 0
   return resumed

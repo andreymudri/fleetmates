@@ -1,0 +1,118 @@
+{
+  "comment": "A Safe Bash request on the SYNTHETIC synthetic-permission-always frame (D-95), whose deny option is 3. 3 gives PermissionDenied and idle-input; then the follow-up text arrives as one bracketed paste and Enter, and UserPromptSubmit fires.",
+  "version": "2.1.285",
+  "sessionId": "auto",
+  "steps": [
+    {
+      "hook": "SessionStart",
+      "with": {
+        "source": "startup"
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run test",
+          "description": "Run the tests"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "synthetic-permission-always",
+      "vars": {
+        "cmd": "npm run test",
+        "description": "Run the tests"
+      }
+    },
+    {
+      "expectKey": {
+        "1": "yes",
+        "2": "always",
+        "3": "no",
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "branch": {
+        "no": [
+          {
+            "hook": "PermissionDenied",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "npm run test",
+                "description": "Run the tests"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "idle-input"
+          },
+          {
+            "expectInput": {
+              "match": "^\u001b\\[200~[\\s\\S]*?\u001b\\[201~\r",
+              "timeoutMs": 120000
+            }
+          },
+          {
+            "hook": "UserPromptSubmit",
+            "with": {
+              "prompt": "$input"
+            }
+          }
+        ],
+        "yes": [
+          {
+            "hook": "PostToolUse",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "npm run test",
+                "description": "Run the tests"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "tool-output"
+          }
+        ],
+        "always": [
+          {
+            "hook": "PostToolUse",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "npm run test",
+                "description": "Run the tests"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "tool-output"
+          }
+        ]
+      }
+    },
+    {
+      "sleep": 600000
+    }
+  ]
+}

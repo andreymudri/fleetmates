@@ -39,6 +39,11 @@ export function reconnectDelay(attempt, baseMs, random = Math.random) {
  * @typedef {object} DeckdLink
  * @property {boolean} connected true once a connection finished its handshake and reconciliation, until it drops
  * @property {number} proto protocol version agreed with deckd, 0 while down
+ * @property {string[]} features optional features deckd announced in `hello` (such as `guardedWrite`), empty while down
+ * @property {(ptyId: string, data: string | Uint8Array, guard: { rev: number, quietMs: number }) => Promise<{ at: number }>} writeGuarded
+ *   a deck-source `write` with deckd's guard (05-api 5.2, D-84). Rejects `deckd_unavailable` while down,
+ *   `deckd_outdated` when deckd does not announce `guardedWrite`, and `screen_changed` or `typing_in_terminal`
+ *   (409, the latter `retryable`) when deckd refuses the guard
  * @property {(op: string, fields?: object) => Promise<any>} request one deckd request, bounded by `timeoutMs`;
  *   rejects with code `deckd_unavailable` (status 503) while down, with deckd's error code when deckd refuses it
  * @property {(ev: 'output' | 'exit' | 'screen' | 'input' | 'client' | 'dropped' | 'spawned' | 'up' | 'down', fn: (msg: any, seq?: number) => void) => () => void} on
@@ -282,6 +287,20 @@ export function createDeckdLink({ env, connectDeckd, reconnectMs = 1000, random 
   return {
     get connected() { return ready && client !== null },
     get proto() { return ready && client ? protoOf(client) : 0 },
+    get features() { return ready && client && Array.isArray(client.features) ? [...client.features] : [] },
+    async writeGuarded(ptyId, data, guard) {
+      if (!ready || !client) throw apiError(503, 'deckd_unavailable')
+      if (!Array.isArray(client.features) || !client.features.includes('guardedWrite')) throw apiError(503, 'deckd_outdated')
+      const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data)
+      try {
+        return await bounded(client.request('write', { ptyId, data: bytes.toString('base64'), source: { kind: 'deck' }, guard: { rev: guard.rev, quietMs: guard.quietMs } }))
+      } catch (error) {
+        if (error?.code === 'screen_changed') throw apiError(409, 'screen_changed')
+        if (error?.code === 'typing_in_terminal') throw Object.assign(apiError(409, 'typing_in_terminal'), { retryable: true })
+        if (error?.code === 'closed' || error?.code === 'timeout') throw apiError(503, 'deckd_unavailable')
+        throw error
+      }
+    },
     request(op, fields = {}) {
       if (!ready || !client) return Promise.reject(apiError(503, 'deckd_unavailable'))
       return bounded(client.request(op, fields))

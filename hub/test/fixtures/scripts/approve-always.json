@@ -1,0 +1,106 @@
+{
+  "comment": "SYNTHETIC (D-95): no captured Bash frame offers a 'don't ask again' option 2, so this uses synthetic-permission-always, whose option 2 reads 'Yes, and don't ask again for npm run test'. 2 allows always: PostToolUse and tool-output.",
+  "version": "2.1.285",
+  "sessionId": "auto",
+  "steps": [
+    {
+      "hook": "SessionStart",
+      "with": {
+        "source": "startup"
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run test",
+          "description": "Run the tests"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "synthetic-permission-always",
+      "vars": {
+        "cmd": "npm run test",
+        "description": "Run the tests"
+      }
+    },
+    {
+      "expectKey": {
+        "1": "yes",
+        "2": "always",
+        "3": "no",
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "branch": {
+        "yes": [
+          {
+            "hook": "PostToolUse",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "npm run test",
+                "description": "Run the tests"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "tool-output"
+          }
+        ],
+        "always": [
+          {
+            "hook": "PostToolUse",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "npm run test",
+                "description": "Run the tests"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "tool-output"
+          }
+        ],
+        "no": [
+          {
+            "hook": "PermissionDenied",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "npm run test",
+                "description": "Run the tests"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "idle-input"
+          }
+        ]
+      }
+    },
+    {
+      "sleep": 600000
+    }
+  ]
+}

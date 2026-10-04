@@ -1,0 +1,36 @@
+{
+  "comment": "The captured permission-2 frame with its own command (node --test capture.test.mjs, Caution) and the captured PermissionRequest.Bash payload. expectKey consumes one key and the prompt stays: no hook, no new frame.",
+  "version": "2.1.285",
+  "sessionId": "auto",
+  "steps": [
+    {
+      "hook": "SessionStart",
+      "with": {
+        "source": "startup"
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "Bash"
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "permission-2",
+      "vars": {
+        "cmd": "node --test capture.test.mjs"
+      }
+    },
+    {
+      "expectKey": {
+        "1": "yes",
+        "2": "no",
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "sleep": 600000
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "comment": "The captured question-options frame and its AskUserQuestion payloads. 1 or 2 picks an option; 3 ('Type something.') takes a bracketed paste and Enter. Each answer ends with PostToolUse and tool-output.",
+  "version": "2.1.285",
+  "sessionId": "auto",
+  "steps": [
+    {
+      "hook": "SessionStart",
+      "with": {
+        "source": "startup"
+      }
+    },
+    {
+      "hook": "PreToolUse",
+      "variant": "AskUserQuestion"
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "AskUserQuestion"
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "question-options"
+    },
+    {
+      "expectKey": {
+        "1": "a",
+        "2": "b",
+        "3": "other",
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "branch": {
+        "a": [
+          {
+            "hook": "PostToolUse",
+            "variant": "AskUserQuestion"
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "tool-output"
+          }
+        ],
+        "b": [
+          {
+            "hook": "PostToolUse",
+            "variant": "AskUserQuestion"
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "tool-output"
+          }
+        ],
+        "other": [
+          {
+            "expectInput": {
+              "match": "^\u001b\\[200~[\\s\\S]*?\u001b\\[201~\r",
+              "timeoutMs": 120000
+            }
+          },
+          {
+            "hook": "PostToolUse",
+            "variant": "AskUserQuestion"
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "tool-output"
+          }
+        ]
+      }
+    },
+    {
+      "sleep": 600000
+    }
+  ]
+}

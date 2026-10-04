@@ -1,0 +1,107 @@
+{
+  "comment": "A Safe request (npm run test) is drawn, then a second PermissionRequest with a Destructive command (rm -rf build) replaces the frame before any answer; both on synthetic-permission-bash. 1 then allows the Destructive prompt.",
+  "version": "2.1.285",
+  "sessionId": "auto",
+  "steps": [
+    {
+      "hook": "SessionStart",
+      "with": {
+        "source": "startup"
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run test",
+          "description": "Run the tests"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "synthetic-permission-bash",
+      "vars": {
+        "cmd": "npm run test",
+        "description": "Run the tests"
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "rm -rf build",
+          "description": "Remove the build directory"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "synthetic-permission-bash",
+      "vars": {
+        "cmd": "rm -rf build",
+        "description": "Remove the build directory"
+      }
+    },
+    {
+      "expectKey": {
+        "1": "yes",
+        "2": "no",
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "branch": {
+        "yes": [
+          {
+            "hook": "PostToolUse",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "rm -rf build",
+                "description": "Remove the build directory"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "tool-output"
+          }
+        ],
+        "no": [
+          {
+            "hook": "PermissionDenied",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "rm -rf build",
+                "description": "Remove the build directory"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "idle-input"
+          }
+        ]
+      }
+    },
+    {
+      "sleep": 600000
+    }
+  ]
+}
