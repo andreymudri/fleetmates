@@ -1,4 +1,4 @@
-{"cmd": "start", "tag": "optimas"}
+{"cmd": "start", "tag": "acme"}
 {"cmd": "stop"}
 {"cmd": "status"}
 {"cmd": "tail", "minutes": 5}
