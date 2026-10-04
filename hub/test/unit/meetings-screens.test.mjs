@@ -374,6 +374,14 @@ test('ESC, BEL and U+202E in meeting text render as visible tokens on the list, 
   assert.match(surfaces.detail, /<div class="meeting-summary" lang="pt-BR"><p>evil&lt;U\+202E&gt;txt\.exe [^<]*<\/p>\s*<ul>\s*<li>evil/, 'the summary is still markdown')
 })
 
+// M4 Task 20: hit ranges index the server's text, so a control character before the hit must not shift the mark,
+// and the text span is a bidi isolate through dir="auto" (an inner bdi would break the markup web-meetings pins).
+test('a hit after control characters marks exactly its range and the transcript text span is a dir="auto" isolate', async () => {
+  const { TranscriptLine } = await load('../../components/TranscriptLine.jsx')
+  const html = render(TranscriptLine, { line: { t0: 1, speaker: 'Você', snippet: '\u202e\u001b x hit y' }, ranges: [[5, 8]] })
+  assert.match(html, /<span class="transcript-line-text" dir="auto" lang="pt-BR">&lt;U\+202E&gt;&lt;U\+001B&gt; x <mark>hit<\/mark> y<\/span>/)
+})
+
 // M4 Task 20 (finding M4-T17-F3, axe landmark-no-duplicate-main): the shell's main#main is the only main, so the
 // Meetings screen renders no main element of its own.
 test('the Meetings screen renders no main landmark of its own', async t => {
