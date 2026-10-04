@@ -112,6 +112,11 @@ test('a duplicate key replaces the earlier one entirely, as PyYAML does', () => 
   const synthesisAgain = parse(`${head}    acme:\n      store_transcript: true\nsynthesis:\n  tag_policies:\n    acme:\n`)
   assert.equal(synthesisAgain.defaultTag, null)
   assert.deepEqual(policyFor(synthesisAgain, 'acme'), { confidential: true })
+  // A second top-level synthesis block without tag_policies drops the first block's tags.
+  const synthesisWithoutPolicies = parse(`${head}    acme:\n      store_transcript: true\nsynthesis:\n  default_tag: acme\n`)
+  assert.equal(synthesisWithoutPolicies.ok, true, JSON.stringify(synthesisWithoutPolicies.error))
+  assert.deepEqual(synthesisWithoutPolicies.tags, [])
+  assert.deepEqual(policyFor(synthesisWithoutPolicies, 'acme'), { confidential: true })
   const vaultAgain = parse('session_dir: /home/you/m\nvault:\n  path: /home/you/v\n  meetings_folder: M\nvault:\n  path: /home/you/w\n')
   assert.deepEqual([vaultAgain.vaultPath, vaultAgain.meetingsFolder], ['/home/you/w', null])
   const askAgain = parse('session_dir: /home/you/m\nask:\n  vault_mcp: true\nask:\n  backend: api\n')
