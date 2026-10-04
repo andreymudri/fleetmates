@@ -10,7 +10,7 @@ import { gitRead as defaultGitRead } from '../adapters/git-read.mjs'
 import { apiError } from '../http/router.mjs'
 import { matchKey } from '../machines/request.mjs'
 import { setupPaths } from '../setup/paths.mjs'
-import { commandBase, parseCommand, plainCommandAllowed, PLAIN_EXCLUSIONS } from './shell.mjs'
+import { commandBase } from './shell.mjs'
 import { activeTiers, classify as defaultClassify } from './tiers.mjs'
 
 /** Copy of the refusals (07-approvals 7.3, Decided; the script line is D-86). */
@@ -34,7 +34,7 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0
 
 /**
  * The rule refused or accepted by {@link validatePattern}.
- * @typedef {{ ok: true, pattern: string, tool: string, tier: 'safe'|'caution', warning: 'toolWide'|'readsAnyFile'|null } | { ok: false, code: 'invalid_pattern'|'destructive_rule', message: string }} PatternVerdict
+ * @typedef {{ ok: true, pattern: string, tool: string, tier: 'safe'|'caution', warning: 'toolWide'|null } | { ok: false, code: 'invalid_pattern'|'destructive_rule', message: string }} PatternVerdict
  */
 
 /**
@@ -417,7 +417,7 @@ export function floorProbes({ env = process.env, homeDir = null } = {}) {
  * Destructive floors with no probe, and why none is needed.
  */
 export const FLOOR_PROBE_EXEMPT = Object.freeze({
-  'floor.network-interpreter': 'needs a fetch command piped into an interpreter: no fetch command or interpreter is on the D-87 allowlist a prefix rule needs (D-100), and a pipe is a second command, which a prefix rule does not approve (07-approvals 7.1)',
+  'floor.network-interpreter': 'needs a fetch command piped into an interpreter: no fetch command or interpreter is the rule of a Safe tiers entry, the only prefix rules accepted (D-101), and a pipe is a second command, which a prefix rule does not approve (07-approvals 7.1)',
   'floor.m1': 'the M1 checks (deck controls, sensitive writes, destructive MCP tools and SQL, rm-style commands) are covered by the deck, write and persistence probes above and by the Destructive entries the prefix is compared with'
 })
 
@@ -438,42 +438,6 @@ function scriptPrefix(words) {
 function safeEntryRule(pattern, tiers) {
   return (tiers?.entries ?? []).some(entry => entry?.tier === 'safe' && typeof entry.rule === 'string' && !entry.rule.includes('{') && samePattern(entry.rule, pattern))
 }
-
-// D-87 word characters: letters, digits and `_ - . / : = @ % + ,`. No quote, escape, expansion,
-// glob, tilde, operator or redirect character can appear in a word made of these.
-const PLAIN_WORD = /^[A-Za-z0-9_\-./:=@%+,]+$/
-
-// Whether a word is an option that changes the directory or repository a command acts on (the
-// D-87 directory options: `-C` alone or in a short bundle, and `--git-dir`, `--work-tree` and the
-// rest of PLAIN_EXCLUSIONS.directoryOptions or an abbreviation of one).
-function directoryOption(word) {
-  if (/^-[A-Za-z]*C/.test(word)) return true
-  if (!word.startsWith('--') || word.length < 3) return false
-  const name = word.split('=')[0]
-  return PLAIN_EXCLUSIONS.directoryOptions.some(option => option.startsWith(name))
-}
-
-/**
- * Whether a Bash prefix is one plain command on the D-87 allowlist (D-100): every word plain
- * literal text with no assignment, no `..` component and no directory option; the classifier's
- * parser reads it as one simple command with no wrapper, payload, redirect, assignment or route;
- * and its command word and subcommand match `PLAIN_COMMANDS`.
- * @param {string} prefix
- * @returns {boolean}
- */
-export function plainPrefix(prefix) {
-  const words = prefix.split(' ')
-  if (words.some(word => !PLAIN_WORD.test(word) || word.split('/').includes('..') || directoryOption(word)) || words[0].includes('=')) return false
-  const parsed = parseCommand(prefix)
-  if (!parsed.ok || parsed.segments.length !== 1 || parsed.routes.length) return false
-  const [segment] = parsed.segments
-  if (segment.wrappers.length || segment.wrapperOptions || segment.payloadOf !== null || segment.redirects.length || segment.assignments.length) return false
-  return plainCommandAllowed(segment.words)
-}
-
-// Commands on the D-87 allowlist that still run a payload through their arguments (a sed `e`
-// script, `find -exec`): 07-approvals 7.3 (F13) refuses a prefix rule for them.
-const PLAIN_PAYLOAD_COMMANDS = Object.freeze(['sed', 'find'])
 
 function wordGlob(word) {
   return new RegExp(`^${word.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`)
@@ -516,23 +480,6 @@ export function probeReaches(run, prefix, args) {
   return [...destructiveReasons(run(`${prefix} ${args}`))].some(key => !baseline.has(key))
 }
 
-/**
- * Whether a Bash prefix's command reads its file operands, by the classifier's own read lists
- * (D-99): tiers.mjs sends the operands of its read commands through the sensitive list even when
- * the file does not exist, and every other command's only once it exists. So `<prefix> <p>` for a
- * `.env` path `p` that does not exist gets `read.secret` exactly when the command is on those lists
- * (cat, head, tail, less, grep, rg, diff and the like), and `true <p>` does not.
- * @param {(command: string) => { reasons: object[] }} run
- * @param {string} prefix
- * @param {string|null} repoRoot
- * @returns {boolean}
- */
-export function readsFileOperands(run, prefix, repoRoot) {
-  const probe = path.join(absolute(repoRoot) ? repoRoot : process.cwd(), '.deck-read-probe', '.env')
-  const secret = result => result.reasons.some(item => item.entryId === 'read.secret')
-  return secret(run(`${prefix} ${probe}`)) && !secret(run(`true ${probe}`))
-}
-
 function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
   const body = inner.trim()
   if (body === '*' || body === '') return refused(body === '*' ? 'destructive_rule' : 'invalid_pattern', body === '*' ? RULE_COPY.destructive : RULE_COPY.invalid)
@@ -546,17 +493,16 @@ function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
   const words = command.split(/\s+/)
   if (prefix !== null && scriptPrefix(words)) return refused('invalid_pattern', RULE_COPY.script)
   if (namesControl(command, ctx)) return refused('destructive_rule', RULE_COPY.destructive)
-  // D-100: a prefix rule must be one plain allowlisted command, unless it is a Safe entry's own rule
-  // (`Bash(node --test:*)`); either way it then goes through every check below.
+  // D-101: a prefix rule must be the rule of a Safe tiers entry. Such a rule then still goes through
+  // the Destructive entries, classify and the floor probes below, and is reported at tier safe.
   const own = prefix !== null && safeEntryRule(pattern, tiers)
-  if (prefix !== null && !own && (!plainPrefix(prefix) || PLAIN_PAYLOAD_COMMANDS.includes(words[0]))) return refused('destructive_rule', RULE_COPY.destructive)
+  if (prefix !== null && !own) return refused('destructive_rule', RULE_COPY.destructive)
   if (prefix !== null && reachesDestructive(words, tiers)) return refused('destructive_rule', RULE_COPY.destructive)
   const run = text => classify({ toolName: 'Bash', toolInput: { command: text }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, homeDir: ctx.home, deckPaths: ctx.deckPaths, tiers })
   const result = run(command)
   if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
   if (prefix !== null && floorProbes({ env: ctx.env, homeDir: ctx.home }).some(probe => probeReaches(run, prefix, probe.args))) return refused('destructive_rule', RULE_COPY.destructive)
-  const reads = prefix !== null && !own && readsFileOperands(run, prefix, repoRoot)
-  return { ok: true, pattern, tool: 'Bash', tier: own ? 'safe' : result.tier, warning: reads ? 'readsAnyFile' : null }
+  return { ok: true, pattern, tool: 'Bash', tier: own ? 'safe' : result.tier, warning: null }
 }
 
 /**
@@ -566,10 +512,8 @@ function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
  * (those carry `warning: 'toolWide'`). Refuses with `destructive_rule` and "Destructive commands
  * can never become rules.":
  * - a bare `Bash` or `Bash(*)`, and the tool-wide file tool rules;
- * - a Bash prefix that is not one plain command on the D-87 allowlist ({@link plainPrefix}, D-100;
- *   a Safe tiers entry's own rule is exempt from this one check), is `sed` or `find`, reaches a
- *   Destructive entry, or reaches a Destructive floor with any of the {@link floorProbes} arguments;
- *   an accepted prefix whose command reads file operands carries `warning: 'readsAnyFile'` (D-99);
+ * - a Bash prefix that is not the rule of a Safe tiers entry (D-101), and one that is but reaches a
+ *   Destructive entry or a Destructive floor with any of the {@link floorProbes} arguments;
  * - a Bash pattern the classifier rates Destructive, and a pattern naming the deck's controls or
  *   Claude Code settings;
  * - a path rule (`Read`, the file tools, `Glob`, `Grep`, `LS`) whose glob root, with `~` and `//`
@@ -779,7 +723,7 @@ function ruleView(row, tiers) {
  * @returns {Promise<{ rule: object, backupPath: string|null, beforeSha256: string|null, afterSha256: string }>}
  */
 export async function writeRule(store, { repoId, pattern, source, stateDir, at = Date.now(), gitRead = defaultGitRead, beforeRename, tiers = activeTiers(), publish } = {}) {
-  // D-100: the writer validates the pattern itself, so no caller can write a refused rule.
+  // The writer validates the pattern itself, so no caller can write a refused rule.
   const verdict = validatePattern(pattern, { tiers, repoRoot: repoId })
   if (!verdict.ok) throw apiError(422, verdict.code, { message: verdict.message })
   const done = rewrite(repoId, {

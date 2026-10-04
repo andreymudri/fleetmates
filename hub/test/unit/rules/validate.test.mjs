@@ -30,7 +30,7 @@ test('an npm or pnpm script prefix is invalid_pattern; the exact script rule is 
   }
 })
 
-// Mutation run for this test: the D-100 allowlist check removed from bashVerdict, so only Destructive
+// Mutation run for this test: the D-101 tiers-rule check removed from bashVerdict, so only Destructive
 // entries refuse a prefix (7.3 read literally); this test failed.
 test('every F13 pattern is refused with destructive_rule', () => {
   const refused = [
@@ -57,8 +57,8 @@ test('WebFetch(domain:...) and Bash(cargo test:*) are accepted; WebFetch carries
   assert.equal(validatePattern('WebSearch').warning, 'toolWide')
   assert.deepEqual(validatePattern('mcp__vault__vault_search'), { ok: true, pattern: 'mcp__vault__vault_search', tool: 'mcp__vault__vault_search', tier: 'safe', warning: null })
   assert.equal(validatePattern('Read(src/**)').ok, true)
-  // Caution patterns are accepted by hand, with their tier.
-  const caution = validatePattern('Bash(git log:*)')
+  // Caution patterns are accepted by hand, with their tier (an exact rule: D-101 refuses other prefixes).
+  const caution = validatePattern('Bash(git fetch origin)')
   assert.equal(caution.ok, true)
   assert.equal(caution.tier, 'caution')
 })
@@ -145,7 +145,7 @@ test('a Bash prefix whose arguments can reach a Destructive floor is refused; np
     for (const pattern of ['Bash(git config:*)', 'Bash(cp:*)', 'Bash(mv:*)', 'Bash(tee:*)', 'Bash(git config --global:*)', 'Bash(cp -r:*)']) {
       assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
     }
-    for (const pattern of ['Bash(npm test:*)', 'Bash(cargo test:*)', 'Bash(git status:*)', 'Bash(git log:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
+    for (const pattern of ['Bash(npm test:*)', 'Bash(cargo test:*)', 'Bash(go vet:*)', 'Bash(mypy:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
   } finally { s.close() }
 })
 
@@ -193,7 +193,6 @@ test('every Safe tiers rule validates ok with tier safe and lists with destructi
     assert.ok(rules.some(entry => entry.rule === 'Bash(python -m pytest:*)'))
     for (const { rule } of rules) {
       const verdict = validatePattern(rule, s.options)
-      // A Safe entry's own rule carries no warning (D-99).
       assert.deepEqual({ ok: verdict.ok, tier: verdict.tier, warning: verdict.warning }, { ok: true, tier: 'safe', warning: null }, rule)
     }
     store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', s.repoRoot, 'rustot', 0, 0, 'rustot', 1)
@@ -223,33 +222,6 @@ test('D-98: classify suggests no rule for ruff check or terraform fmt', async ()
   } finally { s.close() }
 })
 
-// Mutation run for this test: the readsAnyFile warning dropped from bashVerdict; this test failed.
-test('D-99: a hand-typed prefix rule for a command that reads file operands carries readsAnyFile', async () => {
-  const s = sandbox()
-  const store = openDeckDb(path.join(s.root, 'state', 'deck.db'))
-  try {
-    await s.settle()
-    for (const pattern of ['Bash(cat:*)', 'Bash(head:*)', 'Bash(grep:*)', 'Bash(tail *)']) {
-      const verdict = validatePattern(pattern, s.options)
-      assert.equal(verdict.ok, true, pattern)
-      assert.equal(verdict.warning, 'readsAnyFile', pattern)
-    }
-    // rg and grep -r read directories recursively, and a recursive read of a directory holding a deck
-    // control is the floor.deck Destructive floor, so the floor probes refuse those prefixes outright.
-    for (const pattern of ['Bash(rg:*)', 'Bash(grep -r:*)']) assert.equal(validatePattern(pattern, s.options).code, 'destructive_rule', pattern)
-    for (const pattern of ['Bash(cat README.md)', 'Bash(npm test:*)', 'Bash(git status:*)', 'Bash(ls:*)']) {
-      const verdict = validatePattern(pattern, s.options)
-      assert.equal(verdict.ok, true, pattern)
-      assert.equal(verdict.warning, null, pattern)
-    }
-    store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', s.repoRoot, 'rustot', 0, 0, 'rustot', 1)
-    mkdirSync(path.join(s.repoRoot, '.claude'))
-    writeFileSync(path.join(s.repoRoot, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(cat:*)', 'Bash(cat README.md)'] } }))
-    const listed = listRules(store, s.repoRoot, { at: 1 })
-    assert.deepEqual(listed.rules.map(rule => [rule.pattern, rule.warning]), [['Bash(cat:*)', 'readsAnyFile'], ['Bash(cat README.md)', null]])
-  } finally { store.close(); s.close() }
-})
-
 // Mutation run for this test: the npm and pnpm option scan reverted to looking at words[1] only; this
 // test failed.
 test('an npm or pnpm prefix with options before run, or a pnpm prefix naming a script, is refused', () => {
@@ -259,27 +231,36 @@ test('an npm or pnpm prefix with options before run, or a pnpm prefix naming a s
   assert.equal(validatePattern('Bash(npm run test)').ok, true)
   assert.equal(validatePattern('Bash(npm -s run test)').ok, true)
   assert.equal(validatePattern('Bash(npm test:*)').ok, true)
-  assert.equal(validatePattern('Bash(pnpm ls:*)').ok, true)
+  // D-101: a prefix that is not a tiers rule is refused, so `pnpm ls:*` no longer passes.
+  assert.equal(validatePattern('Bash(pnpm ls:*)').code, 'destructive_rule')
 })
 
 // Fix round 2 (phase 5 round 1 reviews).
 
-// Mutation run for this test: plainPrefix returned true in place of plainCommandAllowed(...), so any
-// plain-shaped command was accepted; this test failed.
-test('D-100: a Bash prefix rule must be one plain command on the D-87 allowlist', async () => {
+// Mutation run for this test: the D-101 refusal of a prefix that is not a tiers rule removed from
+// bashVerdict, so any prefix the other checks pass was accepted again; this test failed.
+test('D-101: a Bash prefix rule is accepted only as the rule of a Safe tiers entry', async () => {
   const s = sandbox()
+  const store = openDeckDb(path.join(s.root, 'state', 'deck.db'))
   try {
     await s.settle()
-    const refused = ['flock', 'watch', 'watch -n1', 'script', 'script -qc', 'runuser', 'chroot', 'FOO=1 bash', '"bash"', "'bash'", '\\bash', 'b""ash',
+    const refused = ['sort', 'git log', 'git show', 'git grep', 'go env', 'yq', 'git status', 'ls', 'cat', 'head', 'grep', 'tail', 'wc -l', 'git log --oneline',
+      'flock', 'watch', 'watch -n1', 'script', 'script -qc', 'runuser', 'chroot', 'FOO=1 bash', '"bash"', "'bash'", '\\bash', 'b""ash',
       'ls && bash', 'ls | bash', 'ls; bash', 'uvx', 'pipx run', 'tmux', 'screen', 'git submodule', 'git submodule foreach', 'git rebase', 'git bisect',
       'git bisect run', 'git fetch', 'git clone', 'git -C /tmp push', 'ls ../..', 'git --git-dir=x status', 'ls $HOME', 'ls ~', 'ls `id`']
     for (const prefix of refused) {
       for (const pattern of [`Bash(${prefix}:*)`, `Bash(${prefix} *)`]) assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
     }
-    for (const pattern of ['Bash(git status:*)', 'Bash(ls:*)', 'Bash(git log --oneline:*)', 'Bash(cargo build:*)', 'Bash(wc -l:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
-    // Exact rules keep the earlier checks: an exact command outside the allowlist is accepted at its tier.
-    assert.equal(validatePattern('Bash(git fetch origin)', s.options).ok, true)
-  } finally { s.close() }
+    // Exact rules keep their checks: accepted at their tier with no warning, or refused when Destructive.
+    for (const pattern of ['Bash(cat README.md)', 'Bash(git fetch origin)']) assert.deepEqual([validatePattern(pattern, s.options).ok, validatePattern(pattern, s.options).warning], [true, null], pattern)
+    assert.deepEqual(validatePattern('Bash(rm -rf x)', s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE })
+    // A hand-added prefix rule found in the file shows as Destructive; an exact one does not.
+    store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', s.repoRoot, 'rustot', 0, 0, 'rustot', 1)
+    mkdirSync(path.join(s.repoRoot, '.claude'))
+    writeFileSync(path.join(s.repoRoot, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(cat:*)', 'Bash(cat README.md)'] } }))
+    const listed = listRules(store, s.repoRoot, { at: 1 })
+    assert.deepEqual(listed.rules.map(rule => [rule.pattern, rule.destructive, rule.warning]), [['Bash(cat:*)', true, null], ['Bash(cat README.md)', false, null]])
+  } finally { store.close(); s.close() }
 })
 
 // Mutation run for this test: bashVerdict returned ok as soon as `own` held, skipping
