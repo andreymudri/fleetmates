@@ -74,11 +74,29 @@ test('the Last meeting action item row launches a session with the item text as 
   const item = { key: 'k1', text: 'Ligar o feature flag da 3.2 & testar', owner: 'Você', dismissed: false }
   const tree = Home.LastMeetingView({ meeting: MEETINGS[1], item, now: NOW, navigate: to => visits.push(to) })
   const html = render(Home.LastMeetingView, { meeting: MEETINGS[1], item, now: NOW, navigate: () => {} })
-  assert.match(html, /<p[^>]*lang="pt-BR"[^>]*>Ligar o feature flag da 3.2 &amp; testar<\/p>/, 'the item text is meeting content in pt-BR, rendered as text')
+  assert.match(html, /<p[^>]*lang="pt-BR"[^>]*><bdi>Ligar o feature flag da 3.2 &amp; testar<\/bdi><\/p>/, 'the item text is meeting content in pt-BR, rendered as text')
   const [launch] = buttonsIn(tree, 'Launch as session')
   assert.ok(launch, 'the row has "Launch as session"')
   launch.props.onClick()
   assert.deepEqual(visits, ['/new?task=' + encodeURIComponent(item.text)])
+})
+
+// M4-T17-F2 on Home (Task 19): bidi and control characters in meeting text become visible tokens inside <bdi>.
+const EVIL = 'evil\u202Etxt \u001b[31mred \u0007'
+const RAW_CONTROLS = /[\u202E\u001b\u0007]/
+
+test('the Last meeting title and action item neutralise U+202E, ESC and BEL inside bdi, and launch the raw item text', async () => {
+  const Home = await load('screens/home/Home.jsx')
+  const visits = []
+  const evilMeeting = { ...MEETINGS[1], title: EVIL, tag: EVIL }
+  const item = { key: 'k-evil', text: EVIL, owner: null, dismissed: false }
+  const html = render(Home.LastMeetingView, { meeting: evilMeeting, item, now: NOW, navigate: () => {} })
+  assert.doesNotMatch(html, RAW_CONTROLS, 'no raw U+202E, ESC or BEL reaches the markup')
+  assert.match(html, /<a [^>]*class="calm-meeting-title"[^>]*><bdi>[^<]*evil&lt;U\+202E&gt;txt &lt;U\+001B&gt;\[31mred &lt;U\+0007&gt;<\/bdi><\/a>/, 'the title shows the visible tokens inside bdi')
+  assert.match(html, /<p class="calm-loop-text"[^>]*><bdi>evil&lt;U\+202E&gt;txt &lt;U\+001B&gt;\[31mred &lt;U\+0007&gt;<\/bdi><\/p>/, 'the item shows the visible tokens inside bdi')
+  const [launch] = buttonsIn(Home.LastMeetingView({ meeting: evilMeeting, item, now: NOW, navigate: to => visits.push(to) }), 'Launch as session')
+  launch.props.onClick()
+  assert.deepEqual(visits, ['/new?task=' + encodeURIComponent(EVIL)], 'the task is the raw item text: data, not display')
 })
 
 test('Calm says "No meetings today." without a synthesized meeting of today, and Calm places the section', async () => {

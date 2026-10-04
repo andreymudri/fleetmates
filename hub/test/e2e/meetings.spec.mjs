@@ -507,9 +507,9 @@ if (import.meta.main) {
   // Finding M4-T17-F1 (S2, layout), fixed by Task 19. Task 17 measured the Rail shrinking by 16 px, not 40, while
   // recording (a content-box height on a Rail with 12 px top and bottom padding) and the shell 25 px taller than the
   // viewport (that and the 41 px bar: 40 px plus its 1 px bottom border). The recording height of the Rail now
-  // subtracts its padding, and the bar is border-box so its border sits inside the 40 px token. Only the Rail half is
-  // pinned here: without the bar's border-box this test still passes (the bar is 41 px and `.shell` scrolls 1 px
-  // inside itself, which `documentElement.scrollHeight` does not see; measured with Task 19's probe).
+  // subtracts its padding, and the bar is border-box so its border sits inside the 40 px token. Without the bar's
+  // border-box the bar is 41 px and `.shell` scrolls 1 px inside itself, which `documentElement.scrollHeight` does
+  // not see, so the last two assertions read the bar and `.shell` directly.
   spec('rail-and-shell AC6: while recording the Rail is 40 px shorter and the shell fits the viewport', async t => {
     const h = await startMeetings(t, { web: web.dir })
     const page = await openDeck(browser, h, '/')
@@ -520,6 +520,13 @@ if (import.meta.main) {
     const during = await sizes()
     assert.equal(before.rail - during.rail, 40, 'the Rail is 40 px shorter')
     assert.ok(during.scroll <= during.inner, `the shell fits the viewport (${during.scroll} of ${during.inner} px)`)
+    // The bar half (border-box): the bar is exactly the 40 px token and `.shell` does not scroll inside itself.
+    const bar = await page.evaluate(() => {
+      const shell = document.querySelector('.shell')
+      return { bar: document.querySelector('.rec-bar').offsetHeight, scroll: shell.scrollHeight, client: shell.clientHeight }
+    })
+    assert.equal(bar.bar, 40, 'the bar is 40 px tall, its border included')
+    assert.equal(bar.scroll, bar.client, `the shell does not overflow itself (${bar.scroll} of ${bar.client} px)`)
   })
 
   spec('failures-and-loading AC6: with scribed down the list loads, and only Record and the live view show the degraded card', async t => {

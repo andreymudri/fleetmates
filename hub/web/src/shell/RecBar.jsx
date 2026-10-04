@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { linkHandler } from './Rail.jsx'
-import { translate } from '../components/StatusPill.jsx'
+import { titleText, translate } from '../components/StatusPill.jsx'
 import { formatOffset } from '../components/TranscriptLine.jsx'
 import { motionReduced } from '../components/TerminalView.jsx'
 
@@ -72,7 +72,7 @@ export function RecBarView({ recorder, t, lang = 'en', elapsedS, reduced = false
       {skipLink}
       <span className={reduced ? 'rec-bar-dot' : 'rec-bar-dot motion-rec-pulse'} aria-hidden="true" />
       <span className="rec-bar-label">{label}</span>
-      <a className="rec-bar-title" href="/meetings/live" onClick={linkHandler(navigate, '/meetings/live')}>{say('meetings.live.title', { tag: tagTitle(recorder.tag), time })}</a>
+      <a className="rec-bar-title" href="/meetings/live" onClick={linkHandler(navigate, '/meetings/live')}><bdi>{titleText(say('meetings.live.title', { tag: tagTitle(recorder.tag), time }))}</bdi></a>
       <span className="rec-bar-timer" aria-hidden="true">{formatOffset(elapsedS)}</span>
       <span className="sr-only">{say('meetings.live.static.a11y', { time })}</span>
       {recorder.quiet
