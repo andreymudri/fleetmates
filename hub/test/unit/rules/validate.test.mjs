@@ -30,7 +30,7 @@ test('an npm or pnpm script prefix is invalid_pattern; the exact script rule is 
   }
 })
 
-// Mutation run for this test: the runsPayload check removed from bashVerdict, so only Destructive
+// Mutation run for this test: the D-100 allowlist check removed from bashVerdict, so only Destructive
 // entries refuse a prefix (7.3 read literally); this test failed.
 test('every F13 pattern is refused with destructive_rule', () => {
   const refused = [
@@ -58,7 +58,7 @@ test('WebFetch(domain:...) and Bash(cargo test:*) are accepted; WebFetch carries
   assert.deepEqual(validatePattern('mcp__vault__vault_search'), { ok: true, pattern: 'mcp__vault__vault_search', tool: 'mcp__vault__vault_search', tier: 'safe', warning: null })
   assert.equal(validatePattern('Read(src/**)').ok, true)
   // Caution patterns are accepted by hand, with their tier.
-  const caution = validatePattern('Bash(git fetch:*)')
+  const caution = validatePattern('Bash(git log:*)')
   assert.equal(caution.ok, true)
   assert.equal(caution.tier, 'caution')
 })
@@ -145,7 +145,7 @@ test('a Bash prefix whose arguments can reach a Destructive floor is refused; np
     for (const pattern of ['Bash(git config:*)', 'Bash(cp:*)', 'Bash(mv:*)', 'Bash(tee:*)', 'Bash(git config --global:*)', 'Bash(cp -r:*)']) {
       assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
     }
-    for (const pattern of ['Bash(npm test:*)', 'Bash(cargo test:*)', 'Bash(git status:*)', 'Bash(git fetch:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
+    for (const pattern of ['Bash(npm test:*)', 'Bash(cargo test:*)', 'Bash(git status:*)', 'Bash(git log:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
   } finally { s.close() }
 })
 
@@ -260,4 +260,66 @@ test('an npm or pnpm prefix with options before run, or a pnpm prefix naming a s
   assert.equal(validatePattern('Bash(npm -s run test)').ok, true)
   assert.equal(validatePattern('Bash(npm test:*)').ok, true)
   assert.equal(validatePattern('Bash(pnpm ls:*)').ok, true)
+})
+
+// Fix round 2 (phase 5 round 1 reviews).
+
+// Mutation run for this test: plainPrefix returned true in place of plainCommandAllowed(...), so any
+// plain-shaped command was accepted; this test failed.
+test('D-100: a Bash prefix rule must be one plain command on the D-87 allowlist', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    const refused = ['flock', 'watch', 'watch -n1', 'script', 'script -qc', 'runuser', 'chroot', 'FOO=1 bash', '"bash"', "'bash'", '\\bash', 'b""ash',
+      'ls && bash', 'ls | bash', 'ls; bash', 'uvx', 'pipx run', 'tmux', 'screen', 'git submodule', 'git submodule foreach', 'git rebase', 'git bisect',
+      'git bisect run', 'git fetch', 'git clone', 'git -C /tmp push', 'ls ../..', 'git --git-dir=x status', 'ls $HOME', 'ls ~', 'ls `id`']
+    for (const prefix of refused) {
+      for (const pattern of [`Bash(${prefix}:*)`, `Bash(${prefix} *)`]) assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
+    }
+    for (const pattern of ['Bash(git status:*)', 'Bash(ls:*)', 'Bash(git log --oneline:*)', 'Bash(cargo build:*)', 'Bash(wc -l:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
+    // Exact rules keep the earlier checks: an exact command outside the allowlist is accepted at its tier.
+    assert.equal(validatePattern('Bash(git fetch origin)', s.options).ok, true)
+  } finally { s.close() }
+})
+
+// Mutation run for this test: bashVerdict returned ok as soon as `own` held, skipping
+// reachesDestructive, classify and the floor probes; this test failed.
+test('a Safe tiers entry whose rule reaches a Destructive entry or floor is still refused', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    const tiers = { entries: [...DEFAULT_TIERS.entries, { id: 'safe.test.git', tier: 'safe', tool: 'Bash', cmd: 'git', rule: 'Bash(git:*)' }, { id: 'safe.test.cp', tier: 'safe', tool: 'Bash', cmd: 'cp', rule: 'Bash(cp:*)' }] }
+    for (const pattern of ['Bash(git:*)', 'Bash(cp:*)']) assert.equal(validatePattern(pattern, { ...s.options, tiers }).code, 'destructive_rule', pattern)
+  } finally { s.close() }
+})
+
+// Mutation runs for this test: related() returned inside(down) only, and separately pathVerdict
+// dropped `...roots.map(realExisting)`; this test failed for each.
+test('a glob root inside a protected path, or reaching one through a symlink, is refused', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    mkdirSync(path.join(s.homeDir, '.claude'))
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync(path.join(s.homeDir, '.claude'), path.join(s.repoRoot, 'cl'))
+    for (const pattern of ['Read(~/.claude/.credentials.json)', 'Read(~/.claude/projects/**)', 'Read(~/.config/systemd/user/x.service)', 'Read(cl/**)']) {
+      assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
+    }
+  } finally { s.close() }
+})
+
+// Mutation run for this test: globRoots kept only path.resolve('/', rest) for a `/p` glob; this test failed.
+test('a /p glob is read as absolute, repo-relative and .claude-relative', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    assert.deepEqual(validatePattern('Read(/hooks/**)', s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE })
+  } finally { s.close() }
+})
+
+// Mutation runs for this test: the `/^127\./` test removed, and separately the `..` host check
+// removed, from the WebFetch branch; this test failed for each.
+test('WebFetch refuses any 127.x host and a host with an empty label', () => {
+  assert.deepEqual(validatePattern('WebFetch(domain:127.0.0.2)'), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE })
+  assert.equal(validatePattern('WebFetch(domain:docs..rs)').code, 'invalid_pattern')
 })

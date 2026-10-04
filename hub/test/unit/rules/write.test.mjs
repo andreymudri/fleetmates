@@ -268,6 +268,19 @@ test('revoke reports already_removed, resets the counter and audits revoked or u
   } finally { h.close() }
 })
 
+// Mutation run for this test: the validatePattern call removed from writeRule; this test failed.
+test('writeRule validates the pattern itself and writes nothing for a refused one', async () => {
+  const h = harness('local-full.json')
+  try {
+    for (const [pattern, code] of [['Bash(rm:*)', 'destructive_rule'], ['Bash(bash:*)', 'destructive_rule'], ['Bash(npm run test:*)', 'invalid_pattern'], ['Edit', 'destructive_rule'], ['not a rule', 'invalid_pattern']]) {
+      await rejects(h.write(pattern), code)
+    }
+    assert.deepEqual(readFileSync(h.file), fixture('local-full.json'))
+    assert.equal(existsSync(path.join(h.state, 'backups')), false)
+    assert.equal(h.store.get('SELECT COUNT(*) AS n FROM rules').n, 0)
+  } finally { h.close() }
+})
+
 test('tracked asks git ls-files --error-unmatch for the settings file', async () => {
   const h = harness(null)
   try {

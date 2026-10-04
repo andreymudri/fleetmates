@@ -77,6 +77,23 @@ test('Caution and Destructive allows, a Safe request with no rule pattern, a den
   } finally { h.close() }
 })
 
+// Mutation runs for this test: recordAllow counted on from an `accepted` counter's count, and
+// separately dropped `counter?.state === 'offered' ||` from the offered check; this test failed for each.
+test('an accepted counter restarts from 0, and an offered counter stays offered when the threshold rises', () => {
+  const h = harness()
+  try {
+    // The rule was accepted, then left the file by hand: counting restarts at 1.
+    h.store.run("INSERT INTO rule_counters(repo_id,pattern,count,state,updated_at) VALUES(?,'Bash(cargo test:*)',7,'accepted',1)", h.repoId)
+    assert.deepEqual(h.allow(), { counted: true, offered: false, count: 1 })
+    assert.deepEqual({ ...h.counter() }, { count: 1, state: 'counting' })
+    // An offer made at threshold 3 stays offered after the threshold goes to 5.
+    for (let i = 0; i < 2; i++) h.allow({}, 3)
+    assert.equal(h.counter().state, 'offered')
+    assert.deepEqual(h.allow({}, 5), { counted: true, offered: true, count: 4 })
+    assert.deepEqual({ ...h.counter() }, { count: 4, state: 'offered' })
+  } finally { h.close() }
+})
+
 test('a pattern already in the settings file does not count and sets the machine to accepted', () => {
   const h = harness()
   try {

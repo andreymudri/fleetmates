@@ -10,7 +10,7 @@ import { gitRead as defaultGitRead } from '../adapters/git-read.mjs'
 import { apiError } from '../http/router.mjs'
 import { matchKey } from '../machines/request.mjs'
 import { setupPaths } from '../setup/paths.mjs'
-import { commandBase, FETCH_COMMANDS, INTERPRETERS, PLAIN_EXCLUSIONS, SHELL_RUNNERS } from './shell.mjs'
+import { commandBase, parseCommand, plainCommandAllowed, PLAIN_EXCLUSIONS } from './shell.mjs'
 import { activeTiers, classify as defaultClassify } from './tiers.mjs'
 
 /** Copy of the refusals (07-approvals 7.3, Decided; the script line is D-86). */
@@ -28,12 +28,6 @@ export const BACKUPS_KEPT = 20
 export const WRITE_ATTEMPTS = 3
 
 const FILE_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
-// F13 (D-76) and 07-approvals 7.3: command words a Bash prefix rule can never start with, because
-// the command runs another command, a script, or code through its options or its payload.
-const EXTRA_REFUSED = ['make', 'just', 'sed', 'awk', 'gawk', 'mawk', 'nawk', 'find', 'xargs', 'curl', 'wget']
-// Payload runners whose payload is behind a subcommand: only those subcommands are refused.
-const PAYLOAD_SUBCOMMANDS = Object.freeze({ __proto__: null, docker: ['exec', 'run', 'compose'], podman: ['exec', 'run', 'compose'], kubectl: ['exec', 'run', 'debug'] })
-const VERSIONED_INTERPRETER = /^(?:python|lua|perl|ruby|php|node)[0-9.]*$/
 // Text that names Claude Code settings or the deck's own controls (07-approvals 7.3).
 const CONTROL_TEXT = [/\.claude\/settings/i, /settings(?:\.local)?\.json/i, /\.claude\.json/i, /fleetmates[/-]deck/i, /deckd/i, /\bdeck[-.]token\b/i]
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'])
@@ -423,7 +417,7 @@ export function floorProbes({ env = process.env, homeDir = null } = {}) {
  * Destructive floors with no probe, and why none is needed.
  */
 export const FLOOR_PROBE_EXEMPT = Object.freeze({
-  'floor.network-interpreter': 'needs a fetch command piped into an interpreter: every fetch command and interpreter is refused as a prefix by the word list, and a pipe is a second command, which a prefix rule does not approve (07-approvals 7.1)',
+  'floor.network-interpreter': 'needs a fetch command piped into an interpreter: no fetch command or interpreter is on the D-87 allowlist a prefix rule needs (D-100), and a pipe is a second command, which a prefix rule does not approve (07-approvals 7.1)',
   'floor.m1': 'the M1 checks (deck controls, sensitive writes, destructive MCP tools and SQL, rm-style commands) are covered by the deck, write and persistence probes above and by the Destructive entries the prefix is compared with'
 })
 
@@ -445,25 +439,41 @@ function safeEntryRule(pattern, tiers) {
   return (tiers?.entries ?? []).some(entry => entry?.tier === 'safe' && typeof entry.rule === 'string' && !entry.rule.includes('{') && samePattern(entry.rule, pattern))
 }
 
-function isInterpreter(name) {
-  return INTERPRETERS.includes(name) || SHELL_RUNNERS.interpreters.includes(name) || PLAIN_EXCLUSIONS.interpreters.includes(name) || name.startsWith('python') || VERSIONED_INTERPRETER.test(name)
+// D-87 word characters: letters, digits and `_ - . / : = @ % + ,`. No quote, escape, expansion,
+// glob, tilde, operator or redirect character can appear in a word made of these.
+const PLAIN_WORD = /^[A-Za-z0-9_\-./:=@%+,]+$/
+
+// Whether a word is an option that changes the directory or repository a command acts on (the
+// D-87 directory options: `-C` alone or in a short bundle, and `--git-dir`, `--work-tree` and the
+// rest of PLAIN_EXCLUSIONS.directoryOptions or an abbreviation of one).
+function directoryOption(word) {
+  if (/^-[A-Za-z]*C/.test(word)) return true
+  if (!word.startsWith('--') || word.length < 3) return false
+  const name = word.split('=')[0]
+  return PLAIN_EXCLUSIONS.directoryOptions.some(option => option.startsWith(name))
 }
 
-// Whether a Bash prefix starts with a wrapper, shell, interpreter, runner or another command that
-// runs a payload (F13): such a prefix reaches every Destructive command through its payload.
-function runsPayload(words) {
-  const name = commandBase(words[0])
-  if (SHELL_RUNNERS.wrappers.includes(name) || PLAIN_EXCLUSIONS.wrappers.includes(name) || isInterpreter(name)) return true
-  if (EXTRA_REFUSED.includes(name) || FETCH_COMMANDS.includes(name)) return true
-  if (Object.hasOwn(PAYLOAD_SUBCOMMANDS, name)) return words.length === 1 || PAYLOAD_SUBCOMMANDS[name].includes(words[1])
-  if (SHELL_RUNNERS.payloads.includes(name)) return true
-  if (Object.hasOwn(PLAIN_EXCLUSIONS.runners, name) && (words.length === 1 || PLAIN_EXCLUSIONS.runners[name].includes(words[1]))) return true
-  const two = words.slice(0, 2).join(' ')
-  if (SHELL_RUNNERS.runners.some(runner => runner === two || (words.length === 1 && runner.split(' ')[0] === name))) return true
-  // `git -c`, and any other git option before the subcommand (`-C`, `--exec-path`, `--git-dir`).
-  if (name === 'git' && (words.length === 1 || words[1].startsWith('-'))) return true
-  return false
+/**
+ * Whether a Bash prefix is one plain command on the D-87 allowlist (D-100): every word plain
+ * literal text with no assignment, no `..` component and no directory option; the classifier's
+ * parser reads it as one simple command with no wrapper, payload, redirect, assignment or route;
+ * and its command word and subcommand match `PLAIN_COMMANDS`.
+ * @param {string} prefix
+ * @returns {boolean}
+ */
+export function plainPrefix(prefix) {
+  const words = prefix.split(' ')
+  if (words.some(word => !PLAIN_WORD.test(word) || word.split('/').includes('..') || directoryOption(word)) || words[0].includes('=')) return false
+  const parsed = parseCommand(prefix)
+  if (!parsed.ok || parsed.segments.length !== 1 || parsed.routes.length) return false
+  const [segment] = parsed.segments
+  if (segment.wrappers.length || segment.wrapperOptions || segment.payloadOf !== null || segment.redirects.length || segment.assignments.length) return false
+  return plainCommandAllowed(segment.words)
 }
+
+// Commands on the D-87 allowlist that still run a payload through their arguments (a sed `e`
+// script, `find -exec`): 07-approvals 7.3 (F13) refuses a prefix rule for them.
+const PLAIN_PAYLOAD_COMMANDS = Object.freeze(['sed', 'find'])
 
 function wordGlob(word) {
   return new RegExp(`^${word.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`)
@@ -536,9 +546,11 @@ function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
   const words = command.split(/\s+/)
   if (prefix !== null && scriptPrefix(words)) return refused('invalid_pattern', RULE_COPY.script)
   if (namesControl(command, ctx)) return refused('destructive_rule', RULE_COPY.destructive)
-  // A Safe entry's own rule (`Bash(node --test:*)`) skips the word list but not the checks below.
+  // D-100: a prefix rule must be one plain allowlisted command, unless it is a Safe entry's own rule
+  // (`Bash(node --test:*)`); either way it then goes through every check below.
   const own = prefix !== null && safeEntryRule(pattern, tiers)
-  if (prefix !== null && ((!own && runsPayload(words)) || reachesDestructive(words, tiers))) return refused('destructive_rule', RULE_COPY.destructive)
+  if (prefix !== null && !own && (!plainPrefix(prefix) || PLAIN_PAYLOAD_COMMANDS.includes(words[0]))) return refused('destructive_rule', RULE_COPY.destructive)
+  if (prefix !== null && reachesDestructive(words, tiers)) return refused('destructive_rule', RULE_COPY.destructive)
   const run = text => classify({ toolName: 'Bash', toolInput: { command: text }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, homeDir: ctx.home, deckPaths: ctx.deckPaths, tiers })
   const result = run(command)
   if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
@@ -554,9 +566,10 @@ function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
  * (those carry `warning: 'toolWide'`). Refuses with `destructive_rule` and "Destructive commands
  * can never become rules.":
  * - a bare `Bash` or `Bash(*)`, and the tool-wide file tool rules;
- * - a Bash prefix that reaches a Destructive entry, starts with a wrapper, shell, interpreter or
- *   runner (except the rule of a Safe tiers entry), or reaches a Destructive floor with any of the
- *   {@link floorProbes} arguments;
+ * - a Bash prefix that is not one plain command on the D-87 allowlist ({@link plainPrefix}, D-100;
+ *   a Safe tiers entry's own rule is exempt from this one check), is `sed` or `find`, reaches a
+ *   Destructive entry, or reaches a Destructive floor with any of the {@link floorProbes} arguments;
+ *   an accepted prefix whose command reads file operands carries `warning: 'readsAnyFile'` (D-99);
  * - a Bash pattern the classifier rates Destructive, and a pattern naming the deck's controls or
  *   Claude Code settings;
  * - a path rule (`Read`, the file tools, `Glob`, `Grep`, `LS`) whose glob root, with `~` and `//`
@@ -758,13 +771,17 @@ function ruleView(row, tiers) {
  * its bytes changed (`settings_changed` after 3 attempts), then renamed over the target and verified
  * to hold the pattern once. Then the mirror row, `rule_audit` (`added`) and `rule.upserted`; the
  * offer, if any, is withdrawn. `tracked` is whether `git ls-files --error-unmatch` knows the file.
- * The pattern is written as given: callers pass the deck's canvas form `Bash(<prefix>:*)` (D-97).
+ * The pattern is validated first ({@link validatePattern}; a refusal throws its `invalid_pattern` or
+ * `destructive_rule` code and nothing is written), then written as given: callers pass the deck's
+ * canvas form `Bash(<prefix>:*)` (D-97).
  * @param {{ get: Function, all: Function, run: Function, appendEvent: Function, tx: Function }} store
  * @param {{ repoId: string, pattern: string, source: 'suggested'|'manual', stateDir: string, at?: number, gitRead?: Function, beforeRename?: (attempt: number) => void, tiers?: object, publish?: Function }} options
  * @returns {Promise<{ rule: object, backupPath: string|null, beforeSha256: string|null, afterSha256: string }>}
  */
 export async function writeRule(store, { repoId, pattern, source, stateDir, at = Date.now(), gitRead = defaultGitRead, beforeRename, tiers = activeTiers(), publish } = {}) {
-  if (typeof pattern !== 'string' || !pattern) throw apiError(422, 'invalid_pattern')
+  // D-100: the writer validates the pattern itself, so no caller can write a refused rule.
+  const verdict = validatePattern(pattern, { tiers, repoRoot: repoId })
+  if (!verdict.ok) throw apiError(422, verdict.code, { message: verdict.message })
   const done = rewrite(repoId, {
     stateDir, at, beforeRename, create: true,
     change: data => {
