@@ -1,0 +1,63 @@
+{
+  "description": "M4 e2e scenario data on top of the meetings5 tree (hub/test/fixtures/meetings/meetings5.json, written by hub/test/helpers/meetings-tree.mjs): live transcript events as scribed sends them, ask deltas, scribed refusals, the sentinels of a confidential live meeting, and the qa-checklist 1.7 payloads for every meeting text field. Offsets are seconds from the recording start. Placeholders only.",
+  "live": [
+    { "t0": 30.0, "t1": 34.5, "source": "mic", "text": "Então o feature flag liga primeiro no beta interno, certo?", "lang": "pt", "asr_model": "medium-int8" },
+    { "t0": 60.0, "t1": 64.0, "source": "room", "text": "Cinco por cento no beta, todo mundo depois.", "lang": "pt", "asr_model": "medium-int8" },
+    { "t0": 90.0, "t1": 95.2, "source": "mic", "text": "Combinado, eu ligo amanhã cedo.", "lang": "pt", "asr_model": "medium-int8" }
+  ],
+  "elapsedS": 120,
+  "ask": {
+    "question": "qual foi o percentual combinado para o beta?",
+    "deltas": ["Cinco por cento ", "no beta interno."]
+  },
+  "refusals": {
+    "busy": "sessão já ativa; pare a atual antes"
+  },
+  "confidential": {
+    "tag": "client-a",
+    "sentinels": ["E2E-SENTINEL-41", "E2E-SENTINEL-42", "E2E-SENTINEL-43", "E2E-SENTINEL-44"],
+    "live": [
+      { "t0": 10.0, "t1": 14.0, "source": "mic", "text": "O codinome novo é E2E-SENTINEL-41.", "lang": "pt", "asr_model": "medium-int8" },
+      { "t0": 20.0, "t1": 25.0, "source": "room", "text": "Não repita E2E-SENTINEL-42 fora da sala.", "lang": "pt", "asr_model": "medium-int8" }
+    ],
+    "question": "o que significa E2E-SENTINEL-43?",
+    "deltas": ["É o codinome, ", "E2E-SENTINEL-44."]
+  },
+  "xss": {
+    "payloads": [
+      "<img src=x onerror=alert(1)>",
+      "<script>alert(2)</script>",
+      "<a href=\"javascript:alert(3)\">click</a>",
+      "evil‮txt.exe",
+      "\u001b[31mred\u001b[0m \u001b]0;title\u0007"
+    ],
+    "session": {
+      "key": "hostile",
+      "dayOffset": 0,
+      "time": "08:15:00",
+      "tag": "<img src=x onerror=alert(7)>",
+      "title": "<img src=x onerror=alert(8)> evil‮txt.exe",
+      "durationMin": 12,
+      "apps": [],
+      "summary": "<script>alert(2)</script> [click](javascript:alert(3)) <b>negrito</b> <img src=x onerror=alert(1)>",
+      "decisions": ["<img src=x onerror=alert(1)>", "<a href=\"javascript:alert(3)\">click</a>", "evil‮txt.exe"],
+      "actionItems": ["Você: <script>alert(2)</script>", "\u001b[31mred\u001b[0m \u001b]0;title\u0007"],
+      "transcript": [
+        { "t0": 1.0, "t1": 4.0, "speaker": "Você", "text": "<b>negrito</b> <img src=x onerror=alert(1)>" },
+        { "t0": 5.0, "t1": 8.0, "speaker": "SPEAKER_00", "text": "<script>alert(2)</script>" },
+        { "t0": 9.0, "t1": 12.0, "speaker": "<img src=x onerror=alert(9)>", "text": "<a href=\"javascript:alert(3)\">click</a>" },
+        { "t0": 13.0, "t1": 16.0, "speaker": "Você", "text": "evil‮txt.exe" },
+        { "t0": 17.0, "t1": 20.0, "speaker": "Você", "text": "\u001b[31mred\u001b[0m \u001b]0;title\u0007" }
+      ],
+      "asks": []
+    },
+    "live": [
+      { "t0": 2.0, "t1": 4.0, "source": "mic", "text": "<b>negrito</b> <img src=x onerror=alert(1)>", "lang": "pt", "asr_model": "medium-int8" },
+      { "t0": 5.0, "t1": 7.0, "source": "room", "text": "<script>alert(2)</script> <a href=\"javascript:alert(3)\">click</a>", "lang": "pt", "asr_model": "medium-int8" },
+      { "t0": 8.0, "t1": 10.0, "source": "mic", "text": "evil‮txt.exe \u001b[31mred\u001b[0m", "lang": "pt", "asr_model": "medium-int8" }
+    ],
+    "askQuestion": "<img src=x onerror=alert(10)>?",
+    "askDeltas": ["<img src=x onerror=alert(11)> ", "<script>alert(12)</script>"],
+    "scribedError": "<img src=x onerror=alert(13)> recusado: evil‮txt.exe"
+  }
+}

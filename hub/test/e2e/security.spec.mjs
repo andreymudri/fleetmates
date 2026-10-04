@@ -4,7 +4,9 @@
 // the terminal channel's refusals, the plan opener's path rules and untrusted text on the M2 screens, against
 // the control harness of control.spec.mjs (real deckd, fake claude); for M3 the answer, rule and diff routes in the
 // token table, the approval bypass attempts and untrusted text in option labels, rule patterns and diff text, against
-// the unblock harness of unblock.spec.mjs.
+// the unblock harness of unblock.spec.mjs; for M4 the meeting routes in the token table, untrusted text on every
+// meeting surface, and what a confidential live meeting leaves in the browser, against the meetings harness of
+// meetings.spec.mjs (fake scribed in this process, host binaries shimmed, see `isolateHost` there).
 // hub/test/integration/security.test.mjs covers the per-header HTTP and WebSocket rejections in
 // isolation; this suite drives the whole deck, a foreign page in Chromium, `init`, real deckd and the
 // real hooks socket.
@@ -24,8 +26,12 @@ import { WebSocket } from 'ws'
 import { TOKEN, buildWeb, envelopeFor, hookPayload, hub, launchBrowser, openDeck, startDeck, ui, until } from './observe.spec.mjs'
 import { control, logEntries, startControl, typedInto } from './control.spec.mjs'
 import { startUnblock, unblock } from './unblock.spec.mjs'
+import { checker as meetingChecker, hostileFixture, isolateHost, meetingsUi, startMeetings } from './meetings.spec.mjs'
 import { makeEnvelope } from '../../hook/deck-hook.mjs'
 import { FRAME_KIND, encodeFrame } from '../../server/pty-bridge/frames.mjs'
+
+// Shims first on PATH, a private XDG_RUNTIME_DIR and no session bus, display or token for Chromium and every child.
+isolateHost()
 
 let web
 let browser
@@ -77,7 +83,10 @@ function request(port, route, { method = 'GET', headers = {}, body } = {}) {
 /**
  * Every (method, path) the REST router answers, read from `hub/server/http/api.mjs` with comments
  * stripped: `route === '...'` literals under their method block (GET, PATCH, POST and, since M3, DELETE) and the
- * `s[1] === '...'` parameter shapes.
+ * `s[1] === '...'` parameter shapes, with an optional word at `s[3]` or `s[4]` (or a list of words at `s[3]`) and,
+ * since M4, an action at `s[5]`. Every other segment is a parameter: `s[1] === 'meetings' && s.length === 5 &&
+ * s[3] === 'pins'` is `/api/meetings/x/pins/x`, and `... s.length === 6 && s[3] === 'items' && s[5] === 'dismiss'` is
+ * `/api/meetings/x/items/x/dismiss`.
  * @returns {Promise<{ method: string, path: string }[]>}
  */
 async function routerTable() {
@@ -88,12 +97,17 @@ async function routerTable() {
   const methodAt = index => blocks.filter(([, start]) => start >= 0 && start <= index).at(-1)?.[0]
   const routes = []
   for (const match of body.matchAll(/route === '([^']+)'/g)) routes.push({ method: methodAt(match.index), path: `/api/${match[1]}` })
-  for (const match of body.matchAll(/s\[1\] === '(\w+)' && s\.length === (\d)(?: && (?:s\[(3|4)\] === '([\w-]+)'|\['([^\]]+)'\]\.includes\(s\[3\]\)))?/g)) {
-    const [, resource, length, , one, many] = match
+  for (const match of body.matchAll(/s\[1\] === '(\w+)' && s\.length === (\d)(?: && (?:s\[(3|4)\] === '([\w-]+)'|\['([^\]]+)'\]\.includes\(s\[3\]\)))?(?: && s\[5\] === '([\w-]+)')?/g)) {
+    const [, resource, length, at, one, many, action] = match
     const n = Number(length)
-    const tails = n === 3 ? [''] : one ? [one] : many ? many.split(/'\s*,\s*'/).map(item => item.replace(/'/g, '')) : ['x']
-    // Every segment between the resource and the last one is a parameter: /api/<resource>/x, /x/<tail>, /x/x/<tail>.
-    for (const tail of tails) routes.push({ method: methodAt(match.index), path: n === 3 ? `/api/${resource}/x` : ['/api', resource, ...Array(n - 3).fill('x'), tail].join('/') })
+    const words = one ? [one] : many ? many.split(/'\s*,\s*'/).map(item => item.replace(/'/g, '')) : [null]
+    // `s` is the path split on '/', so s[0] is 'api'; every segment the condition does not name is a parameter.
+    for (const word of words) {
+      const s = ['api', resource, ...Array(n - 2).fill('x')]
+      if (word !== null) s[one ? Number(at) : 3] = word
+      if (action) s[5] = action
+      routes.push({ method: methodAt(match.index), path: `/${s.join('/')}` })
+    }
   }
   return routes
 }
@@ -173,6 +187,11 @@ test('tokens: every route in the router table answers 401 without the token and 
   const m3 = ['POST /api/requests/x/answer', 'POST /api/requests/answer-batch', 'POST /api/requests/x/followup', 'GET /api/rules', 'POST /api/rules',
     'POST /api/rules/suggestions/dismiss', 'DELETE /api/rules/x/x', 'GET /api/sessions/x/diff']
   assert.deepEqual(m3.filter(route => !listed.has(route)), [], 'the router table lists every M3 route')
+  // The M4 meeting routes (05-api.md section 2.11 and the meeting scope of 2.9), refused by the same loop.
+  const m4 = ['GET /api/meetings', 'GET /api/meetings/search', 'GET /api/meetings/x', 'GET /api/meetings/x/transcript', 'GET /api/meetings/x/log',
+    'POST /api/meetings/start', 'POST /api/meetings/stop', 'POST /api/meetings/x/pins', 'DELETE /api/meetings/x/pins/x',
+    'POST /api/meetings/x/items/x/dismiss', 'DELETE /api/meetings/x/items/x/dismiss', 'POST /api/ask']
+  assert.deepEqual(m4.filter(route => !listed.has(route)), [], 'the router table lists every M4 route')
   const origin = `http://127.0.0.1:${h.port}`
   for (const route of routes) {
     // GET and DELETE carry no body: Node's client does not chunk a DELETE body, so one sent without a length
@@ -656,4 +675,142 @@ test('untrusted text (M2): escape, bell and bidi controls in plan markdown never
   await page.click('.team-actions button:text-is("Open plan")')
   await page.waitForFunction(() => document.querySelector('[role="dialog"]')?.textContent.includes('alert(9)'), null, { timeout: 5000 })
   await check('plan drawer')
+})
+
+// M4 (09-testing.md section 11.1, 08-security.md 4.12): untrusted meeting text and what a confidential live meeting
+// leaves in the browser, against the meetings harness of meetings.spec.mjs with the qa 1.7 hostile session of
+// hub/test/fixtures/ui/meetings.json in the tree.
+test('untrusted text (M4): qa 1.7 payloads in a tag, a title, note sections, action items, transcript lines, a search hit, live lines, ask text and scribed messages render literally', async t => {
+  const { xss } = meetingsUi
+  const h = await startMeetings(t, { web: web.dir, fixture: hostileFixture, fake: { askDeltas: xss.askDeltas } })
+  const id = h.tree.ids.hostile
+  const page = await openDeck(browser, h, '/meetings')
+  await page.waitForSelector('.meetings-row')
+  const check = meetingChecker(page, await page.$$eval('script', rows => rows.map(row => row.outerHTML)))
+  const list = await check('Meetings list', { controls: false })
+  // The row title is "{Tag} · {title}" with the tag capitalised per word.
+  assert.ok(list.includes('<img Src=x Onerror=alert(7)> · <img src=x onerror=alert(8)>'), 'the tag and the title are literal in their row')
+  await page.fill('#meetings-search', 'negrito')
+  await page.waitForSelector('.meetings-rows .transcript-line mark')
+  assert.ok((await check('search hit', { controls: false })).includes('<b>negrito</b>'), 'the hit snippet is literal')
+  await page.click(`a.meetings-row[href="/meetings/${id}"]`)
+  await page.waitForSelector('.meeting-summary')
+  const detail = await check('meeting detail', { controls: false })
+  assert.ok(detail.includes('<script>alert(2)</script>'), 'the summary\'s script tag is text')
+  assert.ok(detail.includes('<b>negrito</b>'), 'the summary\'s b tag is text')
+  assert.ok(detail.includes('[click](javascript:alert(3))'), 'a javascript: markdown link is not a link')
+  assert.ok(detail.includes('<a href="javascript:alert(3)">click</a>'), 'the decision is literal')
+  assert.ok(await page.locator('.meeting-item-text', { hasText: '<script>alert(2)</script>' }).count(), 'the action item is literal')
+  await page.click('button:text-is("Full transcript")')
+  await page.waitForSelector('.meeting-transcript .transcript-line')
+  const drawer = await check('Full transcript drawer', { controls: false })
+  for (const line of xss.session.transcript.slice(0, 3)) assert.ok(drawer.includes(line.text), `the line ${line.text} is literal`)
+  assert.ok(drawer.includes('<img src=x onerror=alert(9)>'), 'the speaker is literal')
+  await page.keyboard.press('Escape')
+  // A refused start whose message carries a payload.
+  h.fake.on('start', () => ({ type: 'error', cmd: 'start', message: xss.scribedError }))
+  await page.click('.meetings-record')
+  await page.click('[role="option"][data-tag="pessoal"]')
+  await page.waitForSelector('.archive-toast--error')
+  assert.ok((await check('refusal toast', { controls: false })).includes('<img src=x onerror=alert(13)> recusado'), 'scribed\'s refusal is literal')
+  h.fake.on('start', null)
+  // The live view: transcript events, an ask whose question and answer carry payloads, then an ask error.
+  const recorder = await h.record('pessoal')
+  await page.goto(`${h.base}/meetings/live`)
+  await page.waitForSelector('.live-log')
+  await h.push(xss.live, recorder.meetingId)
+  await page.waitForFunction(n => document.querySelectorAll('.live-log .transcript-line').length === n, xss.live.length, { timeout: 5000 })
+  await page.fill('.live-ask-input', xss.askQuestion)
+  await page.press('.live-ask-input', 'Enter')
+  await page.waitForFunction(text => document.querySelector('.live-ask-answer')?.textContent === text, xss.askDeltas.join(''), { timeout: 5000 })
+  const live = await check('live view', { controls: false })
+  assert.ok(live.includes(xss.live[1].text), 'a live line is literal')
+  assert.ok(live.includes(xss.askQuestion), 'the question is literal')
+  assert.ok(live.includes(xss.askDeltas.join('').trim()), 'the answer is literal')
+  h.fake.on('ask', () => ({ events: [{ type: 'error', cmd: 'ask', message: xss.scribedError }] }))
+  await page.fill('.live-ask-input', 'de novo?')
+  await page.press('.live-ask-input', 'Enter')
+  await page.waitForSelector('.live-ask-error')
+  assert.ok((await check('ask error', { controls: false })).includes('<img src=x onerror=alert(13)> recusado'), 'the ask error message is literal')
+  assert.deepEqual(page.dialogs, [], 'no dialog opened')
+  assert.deepEqual(page.errors, [])
+  assert.equal(new URL(page.url()).origin, h.base, 'no navigation away')
+})
+
+// Finding M4-T17-F2 (S2, security): meeting text reaches the DOM with its escape, bell and bidi override characters
+// raw, where qa-checklist 1.7 asks for bidi controls shown or neutralised and ANSI stripped, as the M1 to M3
+// surfaces do. The surfaces it was seen on are listed in the assertion's actual value. The M4 payloads are otherwise
+// literal (the test above). A todo test until a fix task lands.
+test('untrusted text (M4): escape, bell and bidi controls in meeting text never reach the DOM raw', { todo: 'M4-T17-F2: meeting surfaces render U+202E and ANSI escapes raw' }, async t => {
+  const { xss } = meetingsUi
+  const h = await startMeetings(t, { web: web.dir, fixture: hostileFixture })
+  const id = h.tree.ids.hostile
+  const page = await openDeck(browser, h, '/meetings')
+  await page.waitForSelector('.meetings-row')
+  const raw = {}
+  const scan = async where => {
+    const found = await page.evaluate(() => [...new Set(document.body.textContent.match(/[\u001b\u0007\u202e]/g) ?? [])].map(char => `U+${char.codePointAt(0).toString(16).padStart(4, '0').toUpperCase()}`))
+    if (found.length) raw[where] = found
+  }
+  await scan('Meetings list')
+  await page.goto(`${h.base}/meetings/${id}`)
+  await page.waitForSelector('.meeting-summary')
+  await scan('meeting detail')
+  await page.click('button:text-is("Full transcript")')
+  await page.waitForSelector('.meeting-transcript .transcript-line')
+  await scan('Full transcript drawer')
+  await page.keyboard.press('Escape')
+  const recorder = await h.record('pessoal')
+  await page.goto(`${h.base}/meetings/live`)
+  await page.waitForSelector('.live-log')
+  await h.push(xss.live, recorder.meetingId)
+  await page.waitForFunction(n => document.querySelectorAll('.live-log .transcript-line').length === n, xss.live.length, { timeout: 5000 })
+  await scan('live view')
+  assert.deepEqual(raw, {}, 'escape, bell and bidi controls never reach the DOM text raw')
+})
+
+test('confidential live meeting (M4): browser storage and the Cache API hold no sentinel, and every meeting.transcript frame is ephemeral', async t => {
+  const conf = meetingsUi.confidential
+  const h = await startMeetings(t, { web: web.dir, fake: { askDeltas: conf.deltas } })
+  const recorder = await h.record(conf.tag)
+  const frames = []
+  const page = await openDeck(browser, h, '/meetings/live', {
+    before: page => page.on('websocket', ws => ws.on('framereceived', frame => { if (typeof frame.payload === 'string') frames.push(JSON.parse(frame.payload)) }))
+  })
+  await page.waitForSelector('.live-log')
+  await h.push(conf.live, recorder.meetingId)
+  await page.waitForFunction(n => document.querySelectorAll('.live-log .transcript-line').length === n, conf.live.length, { timeout: 5000 })
+  await page.fill('.live-ask-input', conf.question)
+  await page.press('.live-ask-input', 'Enter')
+  await page.waitForFunction(text => document.querySelector('.live-ask-answer')?.textContent === text, conf.deltas.join(''), { timeout: 5000 })
+  const shown = await page.textContent('body')
+  assert.ok(conf.sentinels.every(sentinel => shown.includes(sentinel)), 'the sentinels reached the page, so the scan below can find them')
+  const stored = await page.evaluate(async () => {
+    const out = { session: { ...sessionStorage }, local: { ...localStorage }, indexed: [], caches: [] }
+    for (const info of await indexedDB.databases()) {
+      const db = await new Promise((resolve, reject) => {
+        const open = indexedDB.open(info.name)
+        open.onsuccess = () => resolve(open.result)
+        open.onerror = () => reject(open.error)
+      })
+      for (const name of db.objectStoreNames) {
+        const rows = await new Promise((resolve, reject) => {
+          const all = db.transaction(name).objectStore(name).getAll()
+          all.onsuccess = () => resolve(all.result)
+          all.onerror = () => reject(all.error)
+        })
+        out.indexed.push({ db: info.name, store: name, rows })
+      }
+      db.close()
+    }
+    for (const key of await caches.keys()) {
+      const cache = await caches.open(key)
+      for (const request of await cache.keys()) out.caches.push({ key, url: request.url, body: await (await cache.match(request)).text() })
+    }
+    return JSON.stringify(out)
+  })
+  assert.deepEqual(conf.sentinels.filter(sentinel => stored.includes(sentinel)), [], 'sessionStorage, localStorage, IndexedDB and the Cache API hold no sentinel')
+  const transcript = frames.filter(frame => frame.t === 'meeting.transcript')
+  assert.ok(transcript.length >= conf.live.length, `${transcript.length} meeting.transcript frames`)
+  assert.deepEqual(transcript.filter(frame => frame.data?.ephemeral !== true || 'seq' in frame), [], 'every meeting.transcript frame is ephemeral and unsequenced')
 })

@@ -1,6 +1,9 @@
 // M1, M2 and M3 accessibility (docs/deck/09-testing.md section 11.2, qa-checklist 1.3, 1.4, 1.5 and 1.9): axe on
 // every M1, M2 and M3 screen and overlay with zero serious or critical violations, the focus traps, the skip link,
 // the way out of the live terminal (WCAG 2.1.2) and reduced motion.
+// M4 adds the meeting surfaces (list, detail, Full transcript drawer, tag menu, live view, recording bar, degraded
+// card) against the meetings harness of meetings.spec.mjs, and the meeting keys: the tag menu listbox, Alt P with and
+// without the Focus terminal, and Stop and summarize, which is never a form default.
 //
 // axe-core is a hub development dependency (hub/package.json), so `npm ci --prefix hub` installs it. This
 // suite injects axe-core's own `axe.min.js` into the page, from AXE_CORE_PATH when set and otherwise from
@@ -16,6 +19,9 @@ import path from 'node:path'
 import { buildWeb, fakeDeckd, hub, launchBrowser, openDeck, startDeck, until } from './observe.spec.mjs'
 import { control, placed, startControl, typedInto } from './control.spec.mjs'
 import { startUnblock, unblock } from './unblock.spec.mjs'
+import { isolateHost, meetingsUi, startMeetings } from './meetings.spec.mjs'
+import { startFakeScribed } from '../fakes/fake-scribed.mjs'
+import { meetings5, writeMeetingsTree } from '../helpers/meetings-tree.mjs'
 
 async function findAxe() {
   const candidates = [process.env.AXE_CORE_PATH]
@@ -33,6 +39,9 @@ let axeSource
 const skipAxe = axePath ? false : 'axe-core is not installed in hub/node_modules and AXE_CORE_PATH is unset'
 /** Impacts that fail the suite (qa 1.9: zero serious or critical). */
 const BLOCKING = new Set(['serious', 'critical'])
+
+// Shims first on PATH, a private XDG_RUNTIME_DIR and no session bus, display or token for Chromium and every child.
+isolateHost()
 
 let web
 let browser
@@ -538,4 +547,123 @@ test('motion (qa 1.4): the terminal caret does not blink with Settings "Always r
   const page = await openDeck(browser, h, `/s/${vault.id}`, { reducedMotion: 'no-preference' })
   await page.waitForFunction(() => document.documentElement.getAttribute('data-motion') === 'reduce')
   assert.equal(await blinking(page), false, 'the Settings preference stops the blink')
+})
+
+// M4 (09-testing.md section 11.2, "end of M4"): the meeting surfaces. Every axe finding is printed with its impact by
+// the `after` above; serious and critical ones fail. Findings this audit made are recorded with their severity
+// (qa-checklist 0.4) next to the test that shows them; S1 and S2 ones are todo tests until their fix tasks land.
+// Recorded when this audit was written (axe-core 4.13.0, Chromium headless, 1920x1080):
+// - M4-T17-F3 (S3, axe `landmark-main-is-top-level`, `landmark-no-duplicate-main` and `landmark-unique`, all
+//   moderate): the Meetings screen renders its detail pane as a second `main` (`.meetings-detail-pane`,
+//   hub/web/src/screens/meetings/Meetings.jsx) inside the shell's `main#main`, on the list, the detail, the Full
+//   transcript drawer, the tag menu and the degraded card states.
+// - M4-T17-F4 (S3, axe `region`, moderate): with the recording bar shown, Home reports the skip link
+//   (`.sr-only-focusable`) as content outside every landmark.
+// - No serious or critical axe finding on any M4 surface audited below. The live view had no axe finding at all.
+// - M4-T17-F1 (S2, layout) and M4-T17-F2 (S2, security) are not accessibility findings: meetings.spec.mjs and
+//   security.spec.mjs.
+test('axe (M4): the Meetings list, the detail, the Full transcript drawer, the open tag menu, the live view, the recording bar and the degraded card', { skip: skipAxe }, async t => {
+  const audit = auditor()
+  const h = await startMeetings(t, { web: web.dir, variants: ['awaitingNames'] })
+  const page = await openDeck(browser, h, '/meetings')
+  await page.waitForSelector('.meeting-detail-title')
+  await audit.run(page, 'meetings-list-detail')
+  await page.click('button:text-is("Full transcript")')
+  await page.waitForSelector('.meeting-transcript .transcript-line')
+  await audit.run(page, 'meetings-transcript-drawer')
+  await page.keyboard.press('Escape')
+  await page.goto(`${h.base}/meetings/${h.tree.ids.awaitingNames}`)
+  await page.waitForSelector('.meeting-banner--hint')
+  await audit.run(page, 'meetings-detail-awaiting-names')
+  await page.click('.meetings-record')
+  await page.waitForSelector('[role="listbox"]')
+  await audit.run(page, 'meetings-tag-menu')
+  const recorder = await h.record('pessoal')
+  await page.goto(`${h.base}/meetings/live`)
+  await page.waitForSelector('.live-log')
+  await h.push(meetingsUi.live, recorder.meetingId)
+  await page.waitForFunction(n => document.querySelectorAll('.live-log .transcript-line').length === n, meetingsUi.live.length, { timeout: 5000 })
+  await page.click('.live-log .transcript-line >> nth=1')
+  await page.waitForSelector('.live-pin')
+  await page.fill('.live-ask-input', meetingsUi.ask.question)
+  await page.press('.live-ask-input', 'Enter')
+  await page.waitForSelector('.live-ask-answer')
+  await audit.run(page, 'meetings-live-view')
+  await page.goto(`${h.base}/`)
+  await page.waitForSelector('.rec-bar--recording')
+  await audit.run(page, 'recording-bar-home')
+  const down = await startMeetings(t, { web: web.dir, scribed: false })
+  const downPage = await openDeck(browser, down, '/meetings')
+  await downPage.waitForSelector('.degraded-card')
+  await audit.run(downPage, 'meetings-degraded-card')
+  audit.done()
+})
+
+test('keyboard (M4): the tag menu is a listbox driven by arrows and Enter', async t => {
+  const h = await startMeetings(t, { web: web.dir })
+  const page = await openDeck(browser, h, '/meetings')
+  await page.focus('.meetings-record')
+  await page.keyboard.press('Enter')
+  await page.waitForSelector('[role="listbox"]')
+  const focused = () => page.evaluate(() => document.activeElement?.getAttribute('data-tag'))
+  if ((await focused()) === null) await page.keyboard.press('Tab')
+  assert.equal(await focused(), 'pessoal', 'the default tag takes focus first')
+  await page.keyboard.press('ArrowDown')
+  assert.equal(await focused(), 'client-a')
+  await page.keyboard.press('ArrowDown')
+  assert.equal(await focused(), 'client-b')
+  await page.keyboard.press('ArrowUp')
+  assert.equal(await focused(), 'client-a')
+  await page.keyboard.press('Enter')
+  await page.waitForFunction(() => location.pathname === '/meetings/live', null, { timeout: 10_000 })
+  assert.deepEqual(h.fake.received.filter(row => row.parsed?.cmd === 'start').map(row => row.raw), ['{"cmd":"start","tag":"client-a"}'])
+})
+
+test('keyboard (M4): Alt P with the Focus terminal focused reaches the PTY and pins nothing, and Alt P elsewhere pins', async t => {
+  let fake
+  const h = await startControl(t, {
+    web: web.dir, team: false,
+    // The meetings5 tree in the control HOME and the fake scribed on its runtime directory, before the server starts.
+    prepare: async ({ home }) => {
+      await writeMeetingsTree(home, meetings5)
+      fake = await startFakeScribed({ dir: path.join(path.dirname(home), 'r') })
+    }
+  })
+  t.after(() => fake?.stop())
+  const started = await h.api('/api/meetings/start', 'POST', { tag: 'pessoal' })
+  assert.equal(started.status, 202, JSON.stringify(started.data))
+  const meetingId = started.data.recorder.meetingId
+  const pins = async () => (await h.api(`/api/meetings/${meetingId}`)).data.pins.length
+  const vault = await h.wrapped('vault-mcp')
+  const page = await openDeck(browser, h, `/s/${vault.id}`)
+  await page.waitForSelector('.terminal-view .xterm-rows')
+  await page.waitForSelector('.rec-bar--recording')
+  await page.click('.terminal-view .xterm-screen')
+  await page.waitForFunction(() => document.activeElement?.classList.contains('xterm-helper-textarea'))
+  const typedBefore = typedInto(vault.log)
+  await page.keyboard.press('Alt+KeyP')
+  await until(() => typedInto(vault.log).length > typedBefore.length, { timeout: 5000, message: 'the PTY to receive Alt P' })
+  assert.equal(typedInto(vault.log).slice(typedBefore.length), '\u001bp', 'the PTY receives ESC p')
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(await pins(), 0, 'no pin from the terminal')
+  await page.keyboard.press('Alt+Escape')
+  await page.waitForFunction(() => !document.activeElement?.classList.contains('xterm-helper-textarea'))
+  await page.keyboard.press('Alt+KeyP')
+  await until(async () => (await pins()) === 1, { timeout: 5000, message: 'the pin from outside the terminal' })
+})
+
+test('keyboard (M4): Stop and summarize is never a form default: Enter in the ask composer asks and stops nothing', async t => {
+  const h = await startMeetings(t, { web: web.dir })
+  await h.record('pessoal')
+  const page = await openDeck(browser, h, '/meetings/live')
+  await page.waitForSelector('.rec-bar--recording')
+  const stop = await page.$eval('button.button--danger-confirm', node => ({ text: node.textContent, type: node.getAttribute('type'), form: node.closest('form') !== null, focused: node === document.activeElement }))
+  assert.deepEqual(stop, { text: 'Stop and summarize', type: 'button', form: false, focused: false })
+  await page.fill('.live-ask-input', meetingsUi.ask.question)
+  await page.press('.live-ask-input', 'Enter')
+  await page.waitForSelector('.live-ask-answer')
+  const commands = h.fake.received.map(row => row.parsed?.cmd)
+  assert.ok(commands.includes('ask'), 'Enter asked')
+  assert.equal(commands.includes('stop'), false, 'Enter stopped nothing')
+  assert.equal((await h.recorder()).state, 'recording')
 })
