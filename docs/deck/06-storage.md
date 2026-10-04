@@ -450,7 +450,7 @@ CREATE TABLE meetings (
                   'awaiting_names','synthesized')),
   started_at    INTEGER,
   ended_at      INTEGER,
-  note_path     TEXT,                                 -- vault-relative, once synthesized; always null when confidential (D-116)
+  note_path     TEXT,                                 -- vault-relative, once synthesized; the meetings store writes null for a confidential row and meetings_became_confidential nulls it when a row turns confidential; a raw INSERT of an already-confidential row is not checked by the schema (D-116)
   apps          TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(apps)),  -- routed_apps labels seen while polling
   session_dir   TEXT,                                 -- absolute <session_dir>/<id>
   updated_at    INTEGER NOT NULL
@@ -489,11 +489,18 @@ CREATE TRIGGER meetings_became_confidential AFTER UPDATE OF confidential ON meet
 WHEN NEW.confidential = 1 AND OLD.confidential = 0
 BEGIN
   UPDATE meeting_pins SET label = NULL WHERE meeting_id = NEW.id;
+  UPDATE meetings SET note_path = NULL WHERE id = NEW.id AND note_path IS NOT NULL;
+  UPDATE events SET data = json_set(data, '$.label', NULL)
+   WHERE type = 'meeting.pin.added' AND (entity_id = NEW.id OR json_extract(data, '$.meetingId') = NEW.id);
+  UPDATE events SET data = json_set(data, '$.notePath', NULL)
+   WHERE type = 'meeting.updated' AND (entity_id = NEW.id OR json_extract(data, '$.id') = NEW.id);
   DELETE FROM ask_threads WHERE scope = 'meeting:' || NEW.id;  -- added in M5 with the ask_threads table (4.10)
 END;
 ```
 
-M4 creates these tables without `ask_threads`, which arrives in M5 (4.10; meeting asks are transient in M4), so the M4 `meetings_became_confidential` trigger only nulls pin labels; it gains the `ask_threads` `DELETE` in M5 with that table. `note_path` is stored only for a non-confidential meeting, because the note file name embeds the synthesized title; a confidential meeting's note is located again on each read (D-116, [11-meetings.md](11-meetings.md) 11.2).
+When a meeting's `confidential` goes from 0 to 1, by any writer, the `meetings_became_confidential` trigger of migration `0005-meetings.sql` scrubs four things: the labels of the meeting's pins, its `note_path`, `data.label` of its earlier `meeting.pin.added` events and `data.notePath` of its earlier `meeting.updated` events (events matched on `entity_id` or on the meeting id inside `data`). When its own write turns a row confidential, `upsertMeeting` runs, after the commit, `PRAGMA wal_checkpoint(TRUNCATE)` so the scrubbed pages leave the WAL (`secure_delete` is on); a checkpoint that SQLite reports busy is not retried and leaves that to a later checkpoint. M4 creates these tables without `ask_threads`, which arrives in M5 (4.10; meeting asks are transient in M4), so the M4 trigger has no `ask_threads` `DELETE`; M5 adds that statement to the four above and keeps them. `note_path` is stored only for a non-confidential meeting, because the note file name embeds the synthesized title: the meetings store writes null for a confidential row, and the trigger nulls it when a row turns confidential. The schema does not check a raw `INSERT` of a row that is already confidential, so the store is the only guard on that path. A confidential meeting's note is located again on each read (D-116, [11-meetings.md](11-meetings.md) 11.2).
+
+Known limit (owner decision pending): the pre-migration backups `deck.db.pre-NNNN.bak` (section 7) are copies taken before a migration, so a later rise to confidential does not scrub them. They keep pin labels, note paths and event data stored before the rise until they are rotated out (the newest 3 are kept). The same would hold for copies made with the proposed `fleetmates-deck backup` (section 9), which is not built yet.
 
 A meeting row is created when the deck first sees the session (its own `start`, a poll showing a recording by another client, or a `session.json` found on disk). Rows stay as long as the TurbidAssist session directory exists; when it disappears the row, pins and dismissals are deleted (TurbidAssist retention removes audio, not directories, so this is rare).
 
