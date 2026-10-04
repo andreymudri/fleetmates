@@ -19,7 +19,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import fs from 'node:fs'
 import path from 'node:path'
 import { TOKEN, buildWeb, card, hub, launchBrowser, openDeck, until } from './observe.spec.mjs'
-import { control, logEntries, placed, startControl, typedInto } from './control.spec.mjs'
+import { control, logEntries, placed, startControl } from './control.spec.mjs'
 
 /** The parsed `hub/test/fixtures/ui/unblock.json`. */
 export const unblock = JSON.parse(await readFile(new URL('../fixtures/ui/unblock.json', import.meta.url), 'utf8'))
