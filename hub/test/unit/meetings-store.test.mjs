@@ -90,6 +90,7 @@ test('upsertMeeting with confidential false on a confidential row keeps 1, and a
   assert.equal(view.confidential, true)
   assert.equal(view.state, 'synthesized')
   assert.equal(view.notePath, null)
+  assert.equal(store.get('SELECT note_path FROM meetings WHERE id = ?', 'm1').note_path, null)
 }))
 
 test('upsertMeeting raising confidentiality clears a stored note_path and pin labels', async () => withStore(store => {
@@ -97,7 +98,48 @@ test('upsertMeeting raising confidentiality clears a stored note_path and pin la
   addPin(store, 'm1', { t: 3, label: 'line', at: 2000 })
   const { meeting: view } = upsertMeeting(store, { id: 'm1', confidential: true, at: 3000 })
   assert.equal(view.notePath, null)
+  assert.equal(store.get('SELECT note_path FROM meetings WHERE id = ?', 'm1').note_path, null)
   assert.equal(pins(store, 'm1')[0].label, null)
+}))
+
+test('a new row whose confidential is omitted, null or not a boolean is stored confidential with no note_path', async () => withStore(store => {
+  const fields = { tag: 'acme', state: 'synthesized', notePath: 'Meetings/2026-09-08 acme Title.md', at: 1000 }
+  upsertMeeting(store, { id: 'omitted', ...fields })
+  upsertMeeting(store, { id: 'null', ...fields, confidential: null })
+  upsertMeeting(store, { id: 'yes', ...fields, confidential: 'yes' })
+  for (const id of ['omitted', 'null', 'yes']) {
+    assert.deepEqual({ ...store.get('SELECT confidential, note_path FROM meetings WHERE id = ?', id) }, { confidential: 1, note_path: null }, id)
+  }
+}))
+
+test('a raw UPDATE of confidential to 1 scrubs note_path and the meeting\'s earlier event label and notePath', async () => withStore(store => {
+  meeting(store, 'm1', { notePath: 'Meetings/2026-09-08 acme Title.md' })
+  meeting(store, 'm2', { notePath: 'Meetings/2026-09-08 acme Other.md' })
+  addPin(store, 'm1', { t: 3, label: 'pin label', at: 2000 })
+  addPin(store, 'm2', { t: 3, label: 'other label', at: 2000 })
+  store.run('UPDATE meetings SET confidential = 1 WHERE id = ?', 'm1')
+  assert.equal(store.get('SELECT note_path FROM meetings WHERE id = ?', 'm1').note_path, null)
+  const data = (id, type) => store.all('SELECT data FROM events WHERE entity_id = ? AND type = ? ORDER BY seq', id, type).map(row => JSON.parse(row.data))
+  assert.deepEqual(data('m1', 'meeting.updated').map(event => event.notePath), [null])
+  assert.deepEqual(data('m1', 'meeting.pin.added').map(event => event.label), [null])
+  assert.deepEqual(data('m2', 'meeting.updated').map(event => event.notePath), ['Meetings/2026-09-08 acme Other.md'])
+  assert.deepEqual(data('m2', 'meeting.pin.added').map(event => event.label), ['other label'])
+}))
+
+test('after a rise to confidential neither the note title nor the pin label is in deck.db, its WAL or its shm', async () => withStore((store, file) => {
+  meeting(store, 'm1', { notePath: 'Meetings/2026-09-08 acme SENTINEL-TITLE.md' })
+  addPin(store, 'm1', { t: 3, label: 'SENTINEL-LABEL said here', at: 2000 })
+  upsertMeeting(store, { id: 'm1', confidential: true, at: 3000 })
+  const scan = when => {
+    for (const suffix of ['', '-wal', '-shm']) {
+      if (!existsSync(file + suffix)) continue
+      const bytes = readFileSync(file + suffix)
+      for (const sentinel of ['SENTINEL-TITLE', 'SENTINEL-LABEL']) assert.equal(bytes.includes(Buffer.from(sentinel)), false, `${sentinel} in deck.db${suffix} ${when}`)
+    }
+  }
+  scan('while open')
+  store.close()
+  scan('after close')
 }))
 
 test('getMeeting and listMeetings return Meeting views, newest first, with before and limit', async () => withStore(store => {

@@ -61,13 +61,18 @@ const meetingRow = (store, id) => store.get('SELECT * FROM meetings WHERE id = ?
  * Confidentiality only rises: a confidential row stays confidential whatever `confidential` says,
  * and a new row whose `confidential` is not a boolean is confidential (fail closed, DB-O2).
  * `note_path` is written as null for a confidential row. Appends `meeting.updated` (data `Meeting`)
- * when the view changed.
+ * when the view changed. When the row turns confidential, the `meetings_became_confidential`
+ * trigger also scrubs the meeting's pin labels and the label and notePath of its earlier events,
+ * and after the commit a `PRAGMA wal_checkpoint(TRUNCATE)` moves the scrubbed pages out of the WAL
+ * (`secure_delete` is on). Its result is not checked: a checkpoint that SQLite reports busy (per
+ * the SQLite docs, while another connection reads; not tested here) leaves that to a later one.
  * @param {Store} store
  * @param {{ id: string, tag?: string, confidential?: boolean, state?: MeetingState, startedAt?: number|null, endedAt?: number|null, sessionDir?: string|null, notePath?: string|null, at: number }} fields
  * @returns {{ meeting: Meeting, events: StoredEvent[] }}
  */
 export function upsertMeeting (store, { id, tag, confidential, state, startedAt, endedAt, sessionDir, notePath, at }) {
-  return store.tx(() => {
+  let rose = false
+  const result = store.tx(() => {
     /** @type {StoredEvent[]} */
     const events = []
     const append = appender(store, events)
@@ -93,9 +98,12 @@ export function upsertMeeting (store, { id, tag, confidential, state, startedAt,
       )
     }
     const meeting = meetingView(meetingRow(store, id))
+    rose = before !== null && !before.confidential && meeting.confidential
     if (JSON.stringify(meeting) !== JSON.stringify(before)) append({ at, type: 'meeting.updated', entityId: id, data: meeting })
     return { meeting, events }
   })
+  if (rose) store.get('PRAGMA wal_checkpoint(TRUNCATE)')
+  return result
 }
 
 /**

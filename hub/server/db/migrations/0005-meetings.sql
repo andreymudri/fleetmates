@@ -9,7 +9,7 @@ CREATE TABLE meetings (
                   'awaiting_names','synthesized')),
   started_at    INTEGER,
   ended_at      INTEGER,
-  note_path     TEXT,                                 -- vault-relative, once synthesized; null for a confidential meeting (its file name embeds the title)
+  note_path     TEXT,                                 -- vault-relative, once synthesized; the file name embeds the title, so the meetings store writes null for a confidential row and meetings_became_confidential nulls it when a row turns confidential (a raw INSERT of a confidential row with a note_path is not checked)
   apps          TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(apps)),  -- routed_apps labels seen while polling
   session_dir   TEXT,                                 -- absolute <session_dir>/<id>
   updated_at    INTEGER NOT NULL
@@ -44,10 +44,18 @@ WHEN NEW.label IS NOT NULL
  AND COALESCE((SELECT confidential FROM meetings WHERE id = NEW.meeting_id), 1) <> 0
 BEGIN SELECT RAISE(ABORT, 'confidential meeting: pin label not allowed'); END;
 
--- a tag policy that becomes confidential later scrubs what was stored before; M5 adds the
--- DELETE of the meeting's ask_threads here, because that table does not exist yet
+-- a meeting whose confidential goes from 0 to 1, by any writer, has scrubbed: its pins' labels,
+-- its note_path, data.label of its earlier meeting.pin.added events and data.notePath of its
+-- earlier meeting.updated events (events written by hub/server/meetings/store.mjs, matched on
+-- entity_id or on the meeting id inside data). M5 adds the DELETE of the meeting's ask_threads
+-- here, because that table does not exist yet
 CREATE TRIGGER meetings_became_confidential AFTER UPDATE OF confidential ON meetings
 WHEN NEW.confidential = 1 AND OLD.confidential = 0
 BEGIN
   UPDATE meeting_pins SET label = NULL WHERE meeting_id = NEW.id;
+  UPDATE meetings SET note_path = NULL WHERE id = NEW.id AND note_path IS NOT NULL;
+  UPDATE events SET data = json_set(data, '$.label', NULL)
+   WHERE type = 'meeting.pin.added' AND (entity_id = NEW.id OR json_extract(data, '$.meetingId') = NEW.id);
+  UPDATE events SET data = json_set(data, '$.notePath', NULL)
+   WHERE type = 'meeting.updated' AND (entity_id = NEW.id OR json_extract(data, '$.id') = NEW.id);
 END;
