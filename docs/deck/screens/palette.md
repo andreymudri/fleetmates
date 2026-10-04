@@ -4,7 +4,7 @@
 |---|---|
 | Canvas board | `Palette` (Command palette, Alt K) over Home |
 | Route | none: global overlay on every route (Proposed) |
-| Milestone | M1 (Needs you and Sessions groups, jump to session). M2 adds Actions (launch). M3 adds answering from Needs you rows. M5 adds Memory group and `?` ask. M6 adds `> research`. |
+| Milestone | M1 (Needs you and Sessions groups, jump to session). M2 adds Actions (launch). M3 adds answering from Needs you rows. M5 adds Memory group and `?` ask: the Memory group lists `vault_search` note rows (folder only, PAL-O1 default), and `?question` from anywhere opens Memory with a new thread and the answer (D-127). M6 adds `> research`. |
 | Status | Decided (canvas layout, group order), Proposed (states, behaviour per milestone) |
 
 ## 1. Purpose
@@ -187,7 +187,7 @@ As built in M3: every M3 string of `PALETTE_COPY` is in the table above ("Archiv
 
 | Id | Gap | Status |
 |---|---|---|
-| PAL-O1 | Note rows' "6 links" needs `vault_graph` degree, which is a proposal not yet in vault-mcp v0.3.0. | **Open**. Default: show the folder only until `vault_graph` exists. |
+| PAL-O1 | Note rows' "6 links" needs `vault_graph` degree, which is a proposal not yet in vault-mcp v0.3.0. | Default applied in M5, owner may revisit before exit: note rows show the folder only. |
 | PAL-O2 | Fuzzy matching algorithm not specified by the canvas. | Proposed: substring plus word-prefix, case and accent insensitive. |
 | PAL-O3 | Whether Enter on a Safe Needs row should approve (fast) or open (safe). Tier rules allow the palette as a surface for Safe and Caution. | **Decided** 2026-10-02 (D-85). Enter approves Safe only, and only Safe row titles start with the verb "Allow"; on a Caution row Enter opens the request (the drawer, or Focus for an observed session); Destructive is never answered from the palette. |
 

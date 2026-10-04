@@ -262,8 +262,8 @@ The tag list is re-read when `config.yaml` changes; a meeting's confidentiality 
 
 As built in 0.4.0:
 
-- Confidentiality only rises. A stored row that is confidential makes the API's recorder view confidential even when the recorder still says otherwise, and a row that turns confidential has its pin labels, its note path and the matching event data scrubbed by the `meetings_became_confidential` trigger ([06-storage.md](06-storage.md) 4.9). Known limit, owner decision pending: the pre-migration backups `deck.db.pre-NNNN.bak` are not scrubbed (06-storage 4.9).
-- `meeting.transcript`, `meeting.recovered`, `ask.delta`, `ask.done` and `ask.error` carry `ephemeral: true` for every tag, and the event store throws on any attempt to append them.
+- Confidentiality only rises. A stored row that is confidential makes the API's recorder view confidential even when the recorder still says otherwise, and a row that turns confidential has its pin labels, its note path and the matching event data scrubbed by the `meetings_became_confidential` trigger ([06-storage.md](06-storage.md) 4.9). The pre-migration backups are scrubbed too (Decided 2026-10-04, D-133; M5 builds it): when a meeting rises to confidential, the deck scrubs its data in every `deck.db.pre-*.bak*` beside the database and deletes a backup it cannot scrub, logging only the file name (06-storage 4.9).
+- `meeting.transcript`, `meeting.recovered`, `ask.delta`, `ask.done` and `ask.error` carry `ephemeral: true` for every tag, and the event store throws on any attempt to append them. M5 keeps that rule for vault asks and adds `misses.changed` (4.15).
 - The recorder and the meeting ask log through a sink that defaults to a no-op (`meetingsLog` in `hub/server/main.mjs`), so a default server writes no meeting log line at all. Whether M5 wants a real sink is open ([m4-exit.md](m4-exit.md)).
 - Meeting text is rendered as text: control and bidi characters in meeting titles, tags, summaries, decisions, action items, speakers, transcript lines, search hits, ask questions and answers, scribed error text, the recording bar title and Home "Last meeting" are shown, inside `<bdi>`, as visible `<U+XXXX>` tokens (`titleText` in `hub/web/src/components/StatusPill.jsx`; M4-T17-F2, fixed by M4 Tasks 19 and 20). The Open log drawer shows `postmeet.log` text without that step (an open finding in [m4-exit.md](m4-exit.md)).
 
@@ -282,6 +282,16 @@ Summarized from [07-approvals.md](07-approvals.md): never batched, never a rule,
 - GitHub Actions pinned by commit SHA; workflows get `permissions: contents: read` unless a job needs more.
 - The hub is published from CI with npm provenance (`npm publish --provenance`), not from a laptop.
 - Runtime: Node 24+ pinned to a tested minor in CI ([03-architecture.md](03-architecture.md) section 3).
+- M5 adds exactly one dependency, the devDependency `@andreymudri/vault-mcp` pinned to `0.3.0`, for the contract test (D-135). No MCP SDK (the vault-mcp client is hand-written, D-134), no graph or layout library (D-136), no markdown or YAML library beyond the existing `markdown-it`.
+
+### 4.15 Vault access and Ask privacy (M5; Decided rule, plan enforcement)
+
+- **Vault access** ([10-memory-and-research.md](10-memory-and-research.md) 1.1, Decided): no new server module opens, reads, lists or writes a file under the vault path. Everything goes through vault-mcp. `hub/server/vault/*.mjs` and `hub/server/ask/*.mjs` never import `node:fs` for the vault, and `hub/server/ask/engine.mjs` touches only `<state>/ask/`. The existing meeting-note reads (M4, MTG-O1) are unchanged. The deck calls no vault-mcp write tool in M5.
+- **Ask process** (D-132, D-142): `claude -p --restricted` with the four vault read tools only, every write tool disallowed by name, cwd `<state>/ask/` (0700, empty), the env marker `FLEETMATES_DECK_ROLE=ask` (deck-hook drops every event that carries it). The owner-run check script proves the restriction against the real CLI; no task and no test runs the real CLI.
+- **Ask privacy**: question and answer text, note bodies and snippets never reach a log line, a notification, the `events` table or browser storage (`localStorage`, `sessionStorage`, IndexedDB, Cache API), except the graph layout cache of D-136, which holds paths and coordinates only. `ask.delta`, `ask.done`, `ask.error` and `misses.changed` are ephemeral and the event store refuses to append them. Logs record event types, ids, lengths, durations, exit codes and error codes only. Meeting-scope asks stay transient (D-144).
+- **Hook observation** (D-138): note reads and learn calls are taken from `PreToolUse` `tool_input` only; tool responses are never read.
+- **Untrusted vault text**: note titles, paths, tags, frontmatter, bodies, snippets, answers, general knowledge, questions, vault-mcp error text and repo names are rendered as text, never as HTML (4.5). Markdown (answers, note excerpts) goes through the existing `markdown-it` renderer with `html: false`, and links rendered from markdown are not followed to `javascript:` or other non-http(s) schemes. Titles, paths and single-line text go through `titleText` inside `<bdi>`.
+- **Routes**: every new `/api/*` route of M5 ([05-api.md](05-api.md) 2.9) keeps the token, Host and Origin checks (4.1, 4.2), and is written in a shape that `routerTable()` in `hub/test/e2e/security.spec.mjs` reads (D-145).
 
 ## 5. Checklists
 

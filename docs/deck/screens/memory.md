@@ -5,7 +5,7 @@
 | Canvas boards | `MemoryV1` (clustered overview + ask thread), `MemoryNote` (local graph on click + note panel) |
 | Routes | `/memory` (graph + ask), `/memory?view=browse|captures|misses`, `/memory?thread=<id>`, `/memory/note/*` (vault-relative path, for example `/memory/note/02-wiki/nestjs/bullmq-worker.md`) |
 | Milestone | M5 |
-| Status | Decided (layouts, graph styling rules, ask panel anatomy, note panel sections), Proposed (states, tabs other than Graph), Open where vault-mcp lacks the data. The owner said the memory UI is not final (Q5). |
+| Status | Decided (layouts, graph styling rules, ask panel anatomy, note panel sections), Proposed (states, tabs other than Graph), Open where vault-mcp lacks the data. The owner reviewed the UI on 2026-10-04 (D-127, Q5 and MEM-O8 Decided): the layout stands, with the clustered graph in the centre (about 1416 px at 1920) and the Ask panel on the right (440 px), and a node click swaps the panel for the note. Ask entry points: this panel (History, New thread), the palette `?question` from anywhere, and the Focus Memory tab. Views in M5: Browse by MOC (also the accessible alternative to the graph), Captures (notes captured today, no Revert), Misses (with "Research this", which hands off to M6) and the note panel's "Recently used". |
 
 ## 1. Purpose
 
@@ -55,10 +55,10 @@ Answers **"What does my vault know about this, and how does it connect?"** Ask a
 
 | Element | Component | Data binding | Notes |
 |---|---|---|---|
-| Nodes | KnowledgeGraph nodes | `vault_graph.nodes[]`: `id` (path), `title`, `domain` (02-wiki domain, or area mapping 4.2.1), `kind` (index when `00-index/index-knowledge.md`, MOC when path ends `-moc.md`, else note) | labels always for MOC, index, cited, new; leaves on hover or focus |
+| Nodes | KnowledgeGraph nodes | `vault_graph.nodes[]`: `id` (path), `title`, `domain` (02-wiki domain, or area mapping 4.2.1), `kind` (index when `00-index/index-knowledge.md`, MOC when path ends `-moc.md`, else note) | labels always for MOC, index, cited, new; leaves on hover or focus. In a graph over 300 notes, labels show only on clusters, MOCs and cited notes (D-128) |
 | Edges | KnowledgeGraph edges | `vault_graph.edges[]` | opacities per components KnowledgeGraph |
 | Cited | node flag | citations of the current thread's answers | teal glow |
-| New | node flag | created today and not yet opened (Proposed; MEM-O3) | " · new" suffix, `.motion-arrive` up to 60s |
+| New | node flag | a capture of today not yet opened in the deck (MEM-O3 Decided; D-137) | " · new" suffix, `.motion-arrive` up to 60s |
 | Hint | text muted | | "Scroll to zoom · drag to pan · links between domains stay faint until you hover or cite them · MOCs, cited and new notes are always labelled" |
 | Zoom | icon Buttons 36 | | "Zoom in", "Zoom out", "Fit" |
 | sr note | `.sr-only` link | | "A list view of the same notes is in Browse by MOC" |
@@ -105,7 +105,7 @@ A cluster per `02-wiki/<domain>`; notes under `03-projects/` form a "projects" c
 
 | Area | Loading | Empty | Degraded / error | Overflow |
 |---|---|---|---|---|
-| Graph | cluster label skeletons + "Loading the graph" (`aria-busy`) | "No notes yet. Captures and research land here." | vault-mcp down: DegradedCard replaces graph and panel ([failures-and-loading.md](failures-and-loading.md) 4.5); `vault_graph` missing (older vault-mcp): "This vault-mcp version has no graph tool. Browse by MOC still works." + link | more than 300 nodes: leaves unlabeled, clusters only, "Fit" on open (Proposed); `truncated: true` shows "Showing {n} of {total} notes" |
+| Graph | cluster label skeletons + "Loading the graph" (`aria-busy`) | "No notes yet. Captures and research land here." | vault-mcp down: DegradedCard replaces graph and panel ([failures-and-loading.md](failures-and-loading.md) 4.5); `vault_graph` missing (older vault-mcp): "This vault-mcp version has no graph tool. Browse by MOC still works." + link | more than 300 nodes: labels only on clusters, MOCs and cited notes, "Fit" on open (D-128); `truncated: true` shows "Showing {n} of {total} notes" |
 | Ask | thinking: "Searching your vault…" (3 dots as text), `aria-busy` | empty thread: "Ask anything about your vault. Answers cite the note and line." | error: "The ask did not finish: {reason}." + "Try again", question kept in the composer; timeout after 120s (state-machines 8) | long answers scroll the thread; citations wrap; more than 6 citations collapse to 6 + "+N sources" |
 | Ask streaming | text appends; citations render when the final block arrives | | "Citations unavailable for this answer" when the result block is missing (state-machines 8.3) | |
 | Ask cancelled | partial text + "Stopped" | | | |
@@ -244,14 +244,14 @@ Motion: graph Fit and zoom buttons 280ms; wheel and drag follow 1:1; new-node ar
 
 | Id | Gap | Status |
 |---|---|---|
-| MEM-O1 | `vault_graph` does not exist in vault-mcp v0.3.0; the graph needs it (proposal in the integration contract 1.11). | **Open** (M5 dependency). Default: Browse by MOC built from `vault_list` works without it; Graph tab shows `memory.graph.noTool`. |
-| MEM-O2 | Search misses log storage (deck SQLite vs vault-mcp) is undecided (Q8). | **Open**. Default: deck SQLite `Miss` table (02-domain 2.7). |
-| MEM-O3 | "Captures" and "new" note definitions: vault-mcp returns `mtime_ms`, not a creation date or the capturing session. | **Open**. Default: a capture is a note whose `criado` frontmatter is today (read through `vault_get_note` for recent `mtime_ms` notes) or a `vault_learn` call the deck observed; "new" = captured today and not opened in the deck yet. |
-| MEM-O4 | "Recent captures include revert" (D-60): no revert tool; `vault_delete` refuses notes with backlinks and structural notes. | **Open**. Default: no Revert button in v1. |
-| MEM-O5 | "Open in Obsidian" needs the Obsidian vault name; the deck knows only `VAULT_PATH`. | **Open**. Default: vault name = basename of `VAULT_PATH`, overridable in Settings, Connections. |
-| MEM-O6 | "Read by the discord-audit session (vault_search)": hooks do not expose search hits (tool responses are not relied on). | Proposed: list only `vault_get_note` reads; copy uses the real tool name. |
-| MEM-O7 | Ask output contract (SM-O16). | Open (tracked as SM-O16). |
-| MEM-O8 | Memory UI to be revisited with the owner (Q5). | **Open**. |
+| MEM-O1 | `vault_graph` does not exist in vault-mcp v0.3.0; the graph needs it (proposal in the integration contract 1.11). | **Decided** 2026-10-04 (D-129): the contract 1.11 shape as written, in vault-mcp 0.4.0, which the owner publishes (D-126). Without the tool, Browse by MOC built from `vault_list` still works and the graph shows `memory.graph.noTool`. |
+| MEM-O2 | Search misses log storage (deck SQLite vs vault-mcp) is undecided (Q8). | **Decided** 2026-10-04 (D-130): the deck SQLite `misses` table (migration 0006) with question, time, thread and resolution; no vault-mcp tool. Resolutions as D-140. |
+| MEM-O3 | "Captures" and "new" note definitions: vault-mcp returns `mtime_ms`, not a creation date or the capturing session. | **Decided** 2026-10-04: a capture is a note whose `criado` frontmatter is today (read through `vault_get_note` for notes whose `mtime_ms` is today) or a `vault_learn` call the deck observed; "new" = captured today and not opened in the deck yet. Mechanism in D-137. |
+| MEM-O4 | "Recent captures include revert" (D-60): no revert tool; `vault_delete` refuses notes with backlinks and structural notes. | **Decided** 2026-10-04 (recorded with D-137): no Revert button in v1. |
+| MEM-O5 | "Open in Obsidian" needs the Obsidian vault name; the deck knows only `VAULT_PATH`. | **Decided** 2026-10-04 (D-128): vault name = basename of `VAULT_PATH`, overridable in Settings, Connections (`obsidianVaultName`). |
+| MEM-O6 | "Read by the discord-audit session (vault_search)": hooks do not expose search hits (tool responses are not relied on). | Default applied in M5, owner may revisit before exit: list only `vault_get_note` reads (D-138); copy uses the real tool name. |
+| MEM-O7 | Ask output contract (SM-O16). | **Decided** 2026-10-04 with SM-O16 (D-131, D-141). |
+| MEM-O8 | Memory UI to be revisited with the owner (Q5). | **Decided** 2026-10-04 (D-127): the layout of this spec stands; see the Status line of the header. |
 
 ## 12. Changes from the canvas
 

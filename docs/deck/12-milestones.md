@@ -27,7 +27,7 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 1. **Order**: M0, M1, M2, M3, then M4, M5, M6 (Decided sequence). Work inside a milestone may run in parallel as fleetmates team runs (section 10).
 2. **Public at M1** (Decided). The M1 release checklist is in [13-operations.md](13-operations.md) section 13.5.
-3. **Gate: do not start M4 until M1 passes its one-week test** ([09-testing.md](09-testing.md) section 13). Reason given during design: the scope doubled with memory, research and meetings; the core must prove itself first. **Waived for M4** by the owner on 2026-10-04 (D-104, MS-O2 Decided): M4 starts after M3. The M1 dogfood week is still pending in [m1-exit.md](m1-exit.md), and M4 does not claim it.
+3. **Gate: do not start M4 until M1 passes its one-week test** ([09-testing.md](09-testing.md) section 13). Reason given during design: the scope doubled with memory, research and meetings; the core must prove itself first. **Waived for M4** by the owner on 2026-10-04 (D-104, MS-O2 Decided): M4 starts after M3. **Waived for M5 and M6** by the owner on 2026-10-04 (D-125): neither waits for the week. The M1 dogfood week is still pending in [m1-exit.md](m1-exit.md), and neither M4 nor M5 claims it.
 4. **Open items**: each milestone lists the Open items that must be decided before it starts, and the ones whose default can ship but must be confirmed before it exits (section 9).
 5. **Exit is testable**: every exit criterion below names an automated test, a measured number or a manual protocol with a pass rule.
 
@@ -182,13 +182,15 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 **Goal.** Ask the Obsidian vault and see it as a second brain with its connections (Decided), through vault-mcp only (Decided), with answers citing `path:line` and every miss logged (Decided: measure first, no embeddings).
 
+**Gate**: waived by the owner on 2026-10-04 for M5 and M6 (D-125). The M1 one-week test (section 1.2 rule 3) is still pending in [m1-exit.md](m1-exit.md), and M5 does not claim it.
+
 **Scope in**: long-lived vault-mcp client and health; Ask engine (`claude -p` with vault-mcp as its only tool, Decided) with threads, citations, general-knowledge block, misses; Memory tab (Graph with clusters and local graph, Browse by MOC, Captures, Misses, note panel); palette `?` ask and Memory group; Focus Memory tab; golden query export process.
 
 **Scope out**: embeddings or hybrid search (only if misses pile up, decided later); writing the vault (M6).
 
 | Repo | Deliverables |
 |---|---|
-| vault-mcp | `vault_graph` tool and `structuredContent` for `vault_get_note` and `vault_list` ([reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) 1.11), with tests; release 0.4 on npm |
+| vault-mcp | `vault_graph` tool ([reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) 1.11, shape accepted as written, D-129), with tests. The fleet builds it from a separate vault-mcp plan on a local branch of the vault-mcp repository and never pushes, tags or publishes; the owner publishes 0.4.0 to npm (D-126). `structuredContent` for `vault_get_note` and `vault_list` is not in that plan, so the deck keeps its text parsers |
 | fleetmates `hub/` | `server/adapters/vault-mcp.mjs`, `server/ask/`, misses; `web/` Memory screens, palette ask, Focus Memory tab; golden query export command |
 | TurbidAssist | none |
 
@@ -198,13 +200,13 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 **Exit criteria**:
 
-1. vault-mcp 0.4 published with `vault_graph`; the deck's tool schema snapshot test pins it.
+1. vault-mcp 0.4 published with `vault_graph`; the deck's tool schema snapshot test pins it. The owner publishes 0.4.0 (D-126); until then the contract test runs against the devDependency pinned to 0.3.0 (D-135), and bumping it and regenerating the `tools/list` snapshot is owner-pending.
 2. Memory acceptance criteria green with fixture `vault22`; Ask tests with fake `claude -p`: cited answer, miss logged with "Research this", general knowledge kept separate, argv check refuses any write tool.
 3. Graph budget met: under 500 ms at 1,000 notes.
 4. Golden queries: two weeks of real misses exported, reviewed, and the qualifying ones added to vault-mcp's suite.
 5. Manual: 20 real questions about the owner's vault; each answer cites `path:line` or is logged as a miss.
 
-**Dependencies**: M1 shell; vault-mcp 0.4. Gate from section 1.2.
+**Dependencies**: M1 shell; vault-mcp 0.4.0 for the graph (the deck degrades when the installed vault-mcp lacks `vault_graph`, D-126). The section 1.2 gate is waived for M5 (D-125).
 
 ## 8. M6 · Deep research
 
@@ -277,8 +279,8 @@ Collected from every doc (IDs with `-O` numbers, plus design-system section 15 a
 
 | When | Items |
 |---|---|
-| Before start | MEM-O8 (Memory UI to be revisited with the owner: "we will talk more on the ui subject later", Q5); MEM-O1 (`vault_graph` API shape, Q8); MEM-O2 (misses log storage, Q8); SM-O16 / MEM-O7 (Ask output contract) |
-| Before exit | MEM-O3 (captures and new notes); MEM-O4 (revert captures); MEM-O5 (Obsidian vault name); PAL-O1 (link counts) |
+| Before start | All decided on 2026-10-04. Gate (M1 week passed): waived for M5 and M6 by D-125, and the week is still pending; MS-O2 (gate scope): D-125; vault-mcp work and release: D-126; MEM-O8 / Q5 (Memory UI): D-127; MEM-O1 / Q8 (`vault_graph` shape): D-129; MEM-O2 / Q8 (misses log storage): D-130; SM-O16 / MEM-O7 (Ask output contract): D-131; KB-O1 (`--restricted` only, proven by an owner-run check): D-132; backup scrub when a meeting rises to confidential: D-133. The M5 plan's own decisions are D-134 to D-148 |
+| Before exit | MEM-O5 (Obsidian vault name): decided, D-128; MEM-O3 (captures and new notes) and MEM-O4 (no Revert in v1): decided on 2026-10-04, built as D-137; PAL-O1 (link counts): default applied, the folder only. Defaults applied in M5, which the owner may revisit before exit: MEM-O6 / FOC-O4 (only `vault_get_note` reads are listed, D-138); DB-O3 (threads, misses and captures kept forever); and the plan decisions D-134 to D-148 |
 
 ### M6
 
@@ -366,13 +368,16 @@ Sized for fleetmates team runs: each task owns a disjoint file set so teammates 
 
 | Task | Owns | Depends |
 |---|---|---|
-| V1 (vault-mcp repo) `vault_graph` and `structuredContent`, release 0.4 | vault-mcp `src/server/tools.ts`, `src/graph/*`, tests | none |
-| T1 vault-mcp client, parsers, health | `hub/server/adapters/vault-mcp.mjs`, `hub/test/contract/vault-mcp.test.mjs` | V1 |
-| T2 Ask engine and misses | `hub/server/ask/*`, `hub/test/fixtures/claude-p/*` | none |
-| T3 Memory graph view | `hub/web/src/screens/memory/graph/*` | T1 |
-| T4 Browse by MOC, note panel, Captures, Misses | `hub/web/src/screens/memory/browse/*`, `.../note/*`, `.../captures/*`, `.../misses/*` | T1 |
-| T5 Ask thread UI, palette `?`, Focus Memory tab | `hub/web/src/screens/memory/ask/*`, `hub/web/src/screens/palette/ask/*`, `hub/web/src/screens/focus/memory/*` | T2 |
-| T6 Golden query export command | `hub/bin/fleetmates-deck.mjs` (export subcommand), `hub/server/ask/export-misses.mjs` | T2 |
+| V1 (vault-mcp repo, its own plan run there on a local branch; the owner publishes, D-126) `vault_graph`, release 0.4.0 | vault-mcp `src/server/tools.ts`, `src/graph/*`, tests | none |
+| T1 vault-mcp client, parsers, health (hand-written client, D-134) | `hub/server/adapters/vault-mcp.mjs`, `hub/server/adapters/vault-text.mjs`, `hub/test/fakes/fake-vault-mcp.mjs`, `hub/test/contract/vault-mcp.test.mjs` (D-135) | none (degrades without V1) |
+| T2 Ask engine and misses | `hub/server/ask/engine.mjs`, `answer.mjs`, `store.mjs`, `service.mjs`, `hub/test/fixtures/claude-p/synthetic/*` (D-146) | none |
+| T3 Vault service, captures, hook observation | `hub/server/vault/service.mjs`, `captures.mjs`, `observe.mjs` | T1 |
+| T4 Memory screen, graph view and layout | `hub/web/src/screens/memory/Memory.jsx`, `KnowledgeGraph.jsx`, `graph-layout.js` (D-136) | T3 |
+| T5 Browse by MOC, note panel, Captures, Misses | `hub/web/src/screens/memory/NotePanel.jsx`, `MemoryLists.jsx` | T3 |
+| T6 Ask thread UI, palette `?`, Focus Memory tab | `hub/web/src/screens/memory/AskPanel.jsx`, `hub/web/src/screens/palette/Palette.jsx`, `hub/web/src/screens/focus/Focus.jsx` | T2 |
+| T7 Golden query export command (D-148) | `hub/bin/fleetmates-deck.mjs` (export subcommand), `hub/server/ask/export-misses.mjs` | T2 |
+
+File names follow the one-file-per-screen convention (D-147), not the per-view directories of the first draft. The run plan ([docs/plans/2026-10-04-deck-m5.md](../plans/2026-10-04-deck-m5.md)) has the authoritative task list.
 
 ### 10.7 M6
 
@@ -402,5 +407,5 @@ Sized for fleetmates team runs: each task owns a disjoint file set so teammates 
 | ID | Question | Default until decided | Blocks milestone |
 |---|---|---|---|
 | MS-O1 | M1 includes "jump to session" (palette, `Alt 1..9`) but Focus is M2. What does a jump open in M1? | The read-only Focus layout already specified for observed sessions in [screens/focus.md](screens/focus.md) (header, activity log, requests with "Answer in your terminal", no terminal), pulled forward into M1. | M1 |
-| MS-O2 | How far does "do not start M4 until M1 passes its one-week test" reach: only M4, or every milestone after M3; and does it hold PRs in vault-mcp and TurbidAssist (`vault_graph`, `preview`, fixture exporter)? | **Decided** 2026-10-04 (D-104): the gate is waived for M4, which starts after M3; the M1 week is still pending in [m1-exit.md](m1-exit.md). | M4 (decided) |
+| MS-O2 | How far does "do not start M4 until M1 passes its one-week test" reach: only M4, or every milestone after M3; and does it hold PRs in vault-mcp and TurbidAssist (`vault_graph`, `preview`, fixture exporter)? | **Decided** 2026-10-04 (D-104, D-125): the gate is waived for M4, which starts after M3, and for M5 and M6; the M1 week is still pending in [m1-exit.md](m1-exit.md). The vault-mcp work is done by the fleet on a local branch and the owner publishes (D-126). | M4, M5 and M6 (decided) |
 | MS-O3 | "Show rate-limit state instead of dollars" (D-09, Q16) has no screen and no milestone. | Later; not in any v1 milestone. | none |

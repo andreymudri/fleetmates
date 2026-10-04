@@ -97,7 +97,7 @@ Columns: request body or query, success response, error codes (section 4), miles
 | GET | `/api/sessions/:id/diff` | query `path` (repo-relative) | `{ path, baseline, diff, binary, truncated }` (unified diff text, capped at 512 KiB) | `not_found` (path not in `changedFiles`), `validation_failed` (path escapes the repo) | M3 | Focus Changes tab |
 | GET | `/api/sessions/:id/disk` | | `{ cwd, mounts: [{ mount, sizeBytes, usedBytes, availBytes }] }` for the mount of `cwd` and of `$HOME` | `not_found` | M1 | Failures "Show disk usage" |
 | GET | `/api/sessions/:id/scrollback` | query `lines` (default 1000, max 5000) | `{ text, source: 'deckd' \| 'stored', truncated }` (ANSI kept; the SPA writes it into a read-only xterm) | `not_found` (no PTY and nothing stored) | M2 | Failures crash tail, "Ship's log" |
-| GET | `/api/sessions/:id/memory` | | `{ related: Citation[], read: NoteRef[], learned: NoteRef[] }` | `vault_unavailable` (`related` needs vault-mcp; `read` and `learned` come from the deck DB and still return) | M5 | Focus Memory tab |
+| GET | `/api/sessions/:id/memory` | | `{ related: [{ path, title, line, snippet }] \| null, relatedError: ApiError \| null, read: [{ path, at }], learned: [{ path, title, at }] }`. `related` is `vault_search` on the session task, top 3; while vault-mcp is down it is null and `relatedError` carries the error (for example `vault_unavailable`). `read` and `learned` come from the deck DB (hook observation, D-138) and still return while vault-mcp is down | | M5 | Focus Memory tab |
 | GET | `/api/history` | query `repoKey`, `limit`, `before` | `{ summaries: SessionSummary[], nextBefore }` | | M1 | history views, Calm "Recent harbors" (Proposed endpoint; no screen names it yet) |
 
 ### 2.4 Requests (approvals and questions)
@@ -189,18 +189,22 @@ The deck never writes under `.fleetmates/` (04-integrations 1.2), so there are n
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/vault/graph` | query `tags` (comma), `status`, `folder`, `maxNodes` | `VaultGraph` (vault-mcp `vault_graph` structured output, [reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) 1.11) | `vault_unavailable`, `vault_tool_missing` (MEM-O1) | M5 | Memory graph, filter popover |
-| GET | `/api/vault/note` | query `path` | `{ note: NoteView, backlinks: NoteRef[], linksOut: NoteRef[], usage: NoteUsage }` | `vault_unavailable`, `vault_error` (`note not found` text verbatim in `details.text`) | M5 | Memory note panel |
-| GET | `/api/vault/search` | query `q`, `limit` (default 5) | `{ hits: [{ path, title, line, snippet }] }` | `vault_unavailable` | M5 (palette), M6 (research existing notes) | Research form topic check, palette note rows |
-| GET | `/api/vault/list` | query `folder`, `tags`, `tipo` | `{ notes: NoteRef[] }` | `vault_unavailable` | M5 | Browse by MOC, research domain list |
-| GET | `/api/vault/captures` | query `day` (`YYYY-MM-DD`, default today) | `{ captures: Capture[] }` | | M5 | Memory Captures tab, Calm "Charts added", recap |
-| GET | `/api/misses` | query `resolved` (`0` default, `1`) | `{ misses: Miss[] }` | | M5 | Memory Misses tab, Calm "Unanswered questions" |
-| POST | `/api/ask` | `{ threadId?: string, text, scope?: 'vault' \| 'meeting:<id>' }` (no `threadId`: new thread) | 202 `{ thread: AskThread, userMessage: AskMessage, assistantMessageId }`; stream via WS `ask.delta`, `ask.done`, `ask.error` | `validation_failed`, `vault_unavailable` (vault scope), `scribed_unavailable` or `not_recording` (meeting scope), `ask_in_progress` (one ask per thread) | M5 (vault), M4 (meeting scope) | Memory composer, palette `?` (`U.Ask`), live meeting composer |
-| POST | `/api/ask/:messageId/cancel` | | 202 | `not_found`, `invalid_state` (already finished) | M5 | "Stop" (`U.StopAsk`) |
-| GET | `/api/ask/threads` | query `scope` (default `vault`), `limit` | `{ threads: AskThread[] }` | | M5 | Memory "History" |
-| GET | `/api/ask/threads/:id` | | `{ thread: AskThread, messages: AskMessage[] }` | `not_found` | M5 | Memory thread restore |
+| GET | `/api/vault/graph` | query `tags` (comma), `status`, `folder`, `maxNodes` | 200 `VaultGraph` (vault-mcp `vault_graph` structured output, [reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) 1.11: `nodes[] { id, title, tipo, status, tags, area, domain, in_degree, out_degree, mtime_ms }`, `edges[] { source, target }`, optional `broken[]`, `truncated`, `counts { notes, edges, orphans, broken }`) | 501 `vault_tool_missing` with `details.tool: 'vault_graph'` (the installed vault-mcp lacks the tool, MEM-O1); 503 `vault_unavailable`; 502 `vault_error` (`details.tool`, `details.text` verbatim) | M5 | Memory graph, filter popover |
+| GET | `/api/vault/note` | query `path` | `{ note: { path, title, frontmatter, body, truncated, total }, backlinks: NoteRef[], linksOut: NoteRef[], usage: { citedIn: [{ threadId, title, at }], readBy: [{ sessionId, repoId, repoName, at, tool }] } }`. Reading a note marks today's capture of that path opened (D-145) | `vault_unavailable`, `vault_error` (`note not found` text verbatim in `details.text`) | M5 | Memory note panel |
+| GET | `/api/vault/search` | query `q`, `limit` (default 5, max 20) | `{ hits: [{ path, title, line, snippet, viaGraph }] }` | `vault_unavailable` | M5 (palette, Focus), M6 (research existing notes) | Research form topic check, palette note rows, Focus Related memory |
+| GET | `/api/vault/list` | query `folder`, `tags`, `tipo` | `{ notes: NoteRef[] }` (`NoteRef = { path, title, tipo, status, tags, domain }`, `domain` = `<d>` for `02-wiki/<d>/...`, else null) | `vault_unavailable` | M5 | Browse by MOC, research domain list |
+| GET | `/api/vault/captures` | query `day` (`YYYY-MM-DD`, default today in local time) | `{ day, captures: Capture[] }` (D-137) | | M5 | Memory Captures view, Calm "Charts added", recap |
+| GET | `/api/misses` | | `{ misses: Miss[], unresolved }` | | M5 | Memory Misses view, Calm "Unanswered questions" |
+| POST | `/api/misses/:id/resolve` | `{ resolvedBy: 'dismissed' \| 'note:<path>' }` (`research:<id>` is set by M6, D-140) | `{ miss: Miss }` | `not_found`, `validation_failed` | M5 | Misses "The vault has this", "Dismiss" |
+| POST | `/api/ask` | `{ threadId?: string, text, scope?: 'vault' \| 'meeting:<id>' }` (no `threadId`: new thread; no `scope`: `vault`, D-145) | 202 `{ thread: AskThread, userMessage: AskMessage, assistantMessageId }`; stream via WS `ask.delta`, `ask.done`, `ask.error` | `validation_failed` (empty text, text over 4,000 characters, unknown key), `not_found` (unknown `threadId`), `vault_unavailable` (503, retryable; vault scope), `scribed_unavailable` or `not_recording` (meeting scope), `ask_in_progress` (409, one ask per thread) | M5 (vault), M4 (meeting scope) | Memory composer, palette `?` (`U.Ask`), Focus Memory tab, live meeting composer |
+| POST | `/api/ask/:messageId/cancel` | | 202 `{ messageId }` | `not_found`, `invalid_state` (already finished) | M5 (a meeting-scope message keeps its M4 behaviour) | "Stop" (`U.StopAsk`) |
+| GET | `/api/threads` | query `limit` (default 30) | `{ threads: AskThread[] }`, newest first, vault scope only | | M5 | Memory "History" |
+| GET | `/api/threads/:id` | | `{ thread: AskThread, messages: AskMessage[] }` | `not_found` | M5 | Memory thread restore |
+| DELETE | `/api/threads/:id` | | `{ deleted: true }` | | M5 | History "Delete thread" |
 
-A `meeting:<id>` ask uses the scribed `ask` engine, over the transcript only and with no citations (MEET-O4, Decided 2026-10-04, D-105), and the deck stores no meeting ask for any tag ([06-storage.md](06-storage.md) section 10). The thread and message objects in the response are transient (`persisted: false`). In M4, `POST /api/ask` accepts only `scope: 'meeting:<id>'`; any other scope, including `vault` and a missing scope, is 422 `validation_failed` until the vault scope arrives in M5 (D-123).
+Paths (D-145, plan decision 2026-10-04; owner may revisit before exit): the thread routes are `/api/threads` and `/api/threads/:id`, not the `/api/ask/threads` of the first draft, because the `:id` form of that path fits none of the route shapes `routerTable()` in `hub/test/e2e/security.spec.mjs` reads. `/api/misses` and `/api/misses/:id/resolve` are additions. Every route keeps the token, Host and Origin checks. New error codes map in `codeStatus`: `vault_unavailable` 503 (retryable), `vault_tool_missing` 501, `vault_error` 502.
+
+A `meeting:<id>` ask uses the scribed `ask` engine, over the transcript only and with no citations (MEET-O4, Decided 2026-10-04, D-105), and the deck stores no meeting ask for any tag ([06-storage.md](06-storage.md) section 10; D-144). The thread and message objects in the response are transient (`persisted: false`). In M4, `POST /api/ask` accepted only `scope: 'meeting:<id>'` (D-123). For the vault scope D-123 is replaced by D-145 in M5: a missing scope means `vault`, and the vault scope is accepted.
 
 ### 2.10 Research (M6)
 
@@ -324,9 +328,8 @@ Durable (carry `seq`):
 | `meeting.pin.removed` | `{ meetingId, id }` | unpin | same |
 | `health.changed` | `Health` | dependency machine transition (state-machines 5) | banners, degraded cards, Settings |
 | `recap` | `Recap` | recap values change | Home subtitle, Calm |
-| `misses.changed` | `{ unresolved }` | miss inserted or resolved | Memory tab count |
 | `captures.changed` | `{ day, count }` | capture recorded | Memory tab count, recap |
-| `vault.changed` | `{ reason: 'deck_write' \| 'poll' }` | after a deck vault write or a changed graph on the 60 s poll | Memory refetches `/api/vault/graph` |
+| `vault.changed` | `{ reason: 'deck_write' \| 'poll' }` | after a deck vault write or a changed graph on the 60 s poll. No emitter until M6 (D-139): the deck writes nothing to the vault in M5, so the Memory screen refetches the graph every 60 s while it is visible (`document.visibilityState`); `vault.changed` arrives with the research save in M6 | Memory refetches `/api/vault/graph` |
 | `prefs.changed` | `{ prefs, sources }` | prefs saved (other tabs update) | Settings, appearance |
 | `notify.failed` | `{ stderr, exitCode }` | first failure per server run | toast |
 
@@ -338,6 +341,7 @@ Ephemeral (no `seq`):
 | `ask.delta` | `{ threadId, messageId, text }` | appended text |
 | `ask.done` | `{ threadId, message: AskMessage }` | final message with citations, `isMiss`, `generalKnowledge` |
 | `ask.error` | `{ threadId, messageId, error: ApiError }` | |
+| `misses.changed` | `{ unresolved, ephemeral: true }` | a miss inserted or resolved; ephemeral since M5 (D-139, in `ephemeralEvents`), so clients recover the count from `GET /api/misses`. Feeds the Memory tab count and Calm "Unanswered questions" |
 | `meeting.transcript` | `{ meetingId, line: TranscriptLine }` | live lines from scribed `subscribe`; never persisted, for any tag |
 | `meeting.recovered` | `{ meetingId, count, ephemeral: true }` | as built in 0.4.0: sent after a subscription gap was filled (from the live events file, else scribed `tail`) with `count` lines, which arrive before it as `meeting.transcript`; never persisted |
 | `screen.tail` | `{ sessionId, lines: string[] }` | compact card tails (M2), ANSI stripped, at most 1 per second per session, only while a Home compact view is subscribed (`sub.tails`, 3.6) |
@@ -347,6 +351,8 @@ Ephemeral (no `seq`):
 | `error` | `ApiError` | a client message was invalid (unknown type, bad attach) |
 
 As built in 0.4.0, every meeting stream event (`meeting.transcript`, `meeting.recovered`, `ask.delta`, `ask.done`, `ask.error`) carries `ephemeral: true` inside `data`, and the event store refuses to append any of them to `events` (`ephemeralEvents` in `hub/server/db/index.mjs` throws). A meeting ask's `ask.done` message has `citations: []` and `persisted: false`.
+
+In M5 the vault ask events `ask.delta`, `ask.done` and `ask.error` carry `ephemeral: true` the same way, and so does `misses.changed`. Question and answer text never reach the `events` table, a log line or a notification ([08-security.md](08-security.md)). The existing `health.changed` for `dep: 'vault-mcp'` gains `version` and `capabilities` (section 7).
 
 `Counts` is produced by one query (02-domain 3):
 
@@ -611,6 +617,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {number|null} archivedAt     ms when it was archived; null when it is not (session archive)
  * @property {'owner'|'auto'|null} archivedBy   `owner`: Archive or "Archive all finished"; `auto`: the auto-archive sweep
  * @property {number} toolCalls            derived count of steps (home.md "31 tool calls")
+ * @property {number} learnedToday         count of observed `vault_learn` calls of this session since local midnight; feeds the "learned" chip (M5, D-138)
  */
 
 /**
@@ -728,7 +735,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {{cmd: string, message: string, at: number}|null} lastError  scribed's message verbatim
  */
 
-/** @typedef {{id: string, title: string, scope: string, createdAt: number, persisted?: boolean}} AskThread */
+/** @typedef {{id: string, title: string, scope: string, createdAt: number, updatedAt: number, persisted?: boolean}} AskThread   (`updatedAt` M5) */
 /** @typedef {{path: string, line: number, viaGraph: boolean}} Citation */
 /**
  * @typedef {object} AskMessage
@@ -736,17 +743,20 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {string} threadId
  * @property {'user'|'assistant'} role
  * @property {string} text
- * @property {Citation[]} citations
+ * @property {Citation[]} citations         only citations that passed validation (D-141)
  * @property {string|null} generalKnowledge
  * @property {boolean} isMiss
- * @property {'complete'|'cancelled'|'error'} status   (Proposed field)
+ * @property {'complete'|'cancelled'|'error'} status   (M5)
+ * @property {string|null} error            the error message when `status` is `error`, for example `timed out after 120 s` (M5)
+ * @property {boolean} unverified           true when the answer had no valid `deck-answer` block; the UI shows "Citations unavailable for this answer" (M5, D-131)
+ * @property {number} droppedCitations      citations removed by validation (M5, D-141)
  * @property {number} createdAt
  */
-/** @typedef {{id: string, question: string, threadId: string|null, searchedTerms: string[], createdAt: number, resolvedBy: string|null}} Miss */
-/** @typedef {{path: string, title: string, capturedAt: number, sessionId: string|null, repoId: string|null, via: 'vault_learn'|'research'|'frontmatter'}} Capture */
-/** @typedef {{path: string, title: string, tipo?: string|null, domain?: string|null, atualizado?: string|null}} NoteRef */
-/** @typedef {{path: string, title: string, frontmatter: object, body: string}} NoteView */
-/** @typedef {{citedIn: {threadId: string, title: string, at: number}[], readBy: {sessionId: string, repoId: string, at: number, tool: string}[]}} NoteUsage */
+/** @typedef {{id: string, question: string, threadId: string|null, searchedTerms: string[], createdAt: number, resolvedBy: string|null}} Miss   (`resolvedBy`: null (open), `research:<id>` (M6), `note:<path>` or `dismissed`, D-140) */
+/** @typedef {{path: string, title: string, domain: string|null, capturedAt: number, via: 'vault_learn'|'frontmatter', sessionId: string|null, repoId: string|null, repoName: string|null, opened: boolean}} Capture   (M5, D-137; `via: 'research'` arrives with M6) */
+/** @typedef {{path: string, title: string, tipo: string|null, status: string|null, tags: string[], domain: string|null}} NoteRef   (`domain` = `<d>` for `02-wiki/<d>/...`, else null) */
+/** @typedef {{path: string, title: string, frontmatter: object, body: string, truncated: boolean, total: number}} NoteView */
+/** @typedef {{citedIn: {threadId: string, title: string, at: number}[], readBy: {sessionId: string, repoId: string, repoName: string, at: number, tool: string}[]}} NoteUsage */
 
 /**
  * @typedef {object} Research
@@ -769,10 +779,10 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {number} createdAt
  */
 
-/** @typedef {{voyages: number, madePort: number, chartsAdded: number|null}} Recap */
+/** @typedef {{voyages: number, madePort: number, chartsAdded: number|null}} Recap   (`chartsAdded` M5: captures of today, null while vault-mcp is down) */
 /** @typedef {{kind: 'vaultNote', ref: string}|{kind: 'meetingNote', ref: string}|{kind: 'runPlan', ref: {repoId: string, runId: string}}|{kind: 'postmeetLog', ref: string}} OpenRequest   (vaultNote: vault-relative path; meetingNote and postmeetLog: meeting id) */
 /** @typedef {{needYouSessions: number, running: number, toReview: number, openRequests: number, requestSessions: number, oldestRequestAt: number|null, perRun: {repoId: string, runId: string, needYou: number, total: number}[], archived: number}} Counts */
-/** @typedef {{dep: 'deckd'|'hooks'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'warn'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number, deckdVersion?: string}} Health */
+/** @typedef {{dep: 'deckd'|'hooks'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'warn'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number, deckdVersion?: string, version?: string|null, capabilities?: string[]}} Health   (`version` and `capabilities` on `dep: 'vault-mcp'`, M5: vault-mcp's `serverInfo.version` or null, and the detected capabilities from `graph`, `structured`, `preview`) */
 /** @typedef {{id: 'claude'|'hooks'|'deckd'|'vault'|'scribed'|'notify', state: 'pending'|'checking'|'ok'|'warn'|'failed'|'optional_skipped', blocking: boolean, detail: string|null, error: string|null}} SetupCheck */   (warn: Claude Code newer than the tested version, state-machines 10.2)
 
 /**
