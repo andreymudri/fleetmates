@@ -11,8 +11,87 @@ function emptyData() {
   return {
     sessions: [], requests: [], runs: [], repos: [], counts: null, order: [], recap: null, ruleOffers: [], rules: [], rulesRev: 0, research: [],
     recorder: { state: 'idle' }, health: [], prefs: {}, sources: {}, setup: { firstRunCompletedAt: null },
-    inputSources: {}, tails: {}
+    inputSources: {}, tails: {},
+    meetings: {}, meetingPins: {}, live: null, meetingAsk: {}, askThreads: {}, askPending: {}
   }
+}
+
+// Meeting state the browser builds itself (REST reads, durable meeting events, ephemeral streams). A snapshot
+// carries none of it, so a snapshot keeps it. None of it is ever written to browser storage (08-security 4.12).
+const MEETING_KEYS = ['meetings', 'meetingPins', 'live', 'meetingAsk', 'askThreads', 'askPending']
+
+/** The most live transcript lines the store keeps for the meeting being recorded; older lines are dropped. */
+export const LIVE_LINE_CAP = 10000
+// Ask streams whose thread the browser has not matched to a meeting yet (the stream can beat the POST answer).
+const ASK_PENDING_CAP = 16
+
+// Merge a meeting row by id. `meeting.updated` carries no title (06-storage 10.1), so a known title is kept.
+function mergeMeeting(meetings, row) {
+  if (typeof row?.id !== 'string' || !row.id) return meetings
+  const previous = meetings[row.id]
+  const merged = { ...previous, ...row }
+  if (row.title == null && previous?.title != null) merged.title = previous.title
+  return { ...meetings, [row.id]: merged }
+}
+
+// The live transcript after a meeting.status or a snapshot: kept only while the recorder is on the same meeting.
+function liveFor(live, recorder) {
+  return live && recorder?.meetingId === live.meetingId ? live : null
+}
+
+// Append lines, or with `divider` a number, a "{n} lines recovered" divider at the current end.
+function appendLive(data, meetingId, lines, divider) {
+  const current = data.live?.meetingId === meetingId ? data.live : { meetingId, lines: [], recovered: [] }
+  let next = lines.length ? current.lines.concat(lines) : current.lines
+  let recovered = divider === null ? current.recovered : [...current.recovered, { at: next.length, count: divider }]
+  const drop = next.length - LIVE_LINE_CAP
+  if (drop > 0) {
+    next = next.slice(drop)
+    recovered = recovered.map(item => ({ ...item, at: item.at - drop })).filter(item => item.at >= 0)
+  }
+  return { ...data, live: { meetingId, lines: next, recovered } }
+}
+
+// One ask answer as it streams: deltas append, `ask.done` replaces the text, `ask.error` keeps the error.
+function askStep(record, type, data) {
+  const base = record ?? { threadId: data.threadId, messageId: data.messageId ?? null, text: '', state: 'streaming', message: null, error: null }
+  if (type === 'ask.delta') return { ...base, text: base.text + String(data.text ?? '') }
+  if (type === 'ask.done') return { ...base, state: 'done', message: data.message ?? null, text: String(data.message?.text ?? base.text) }
+  return { ...base, state: 'error', error: data.error ?? null }
+}
+
+function applyAsk(state, message) {
+  const data = message.data
+  const threadId = data?.threadId
+  if (typeof threadId !== 'string' || !threadId) return state
+  const d = state.data
+  const meetingId = d.askThreads[threadId]
+  if (meetingId !== undefined) {
+    const record = d.meetingAsk[meetingId]
+    if (record?.threadId !== threadId) return state
+    return { ...state, data: { ...d, meetingAsk: { ...d.meetingAsk, [meetingId]: askStep(record, message.t, data) } } }
+  }
+  const pending = { ...d.askPending, [threadId]: askStep(d.askPending[threadId], message.t, data) }
+  const keys = Object.keys(pending)
+  for (const key of keys.slice(0, Math.max(0, keys.length - ASK_PENDING_CAP))) delete pending[key]
+  return { ...state, data: { ...d, askPending: pending } }
+}
+
+// Register the answer of POST /api/ask for a `meeting:<id>` thread; a stream that arrived first is folded in.
+function startMeetingAsk(state, action) {
+  const thread = action.thread
+  const scope = typeof thread?.scope === 'string' ? thread.scope : ''
+  if (!scope.startsWith('meeting:') || typeof thread.id !== 'string' || !thread.id) return state
+  const meetingId = scope.slice('meeting:'.length)
+  const d = state.data
+  const pending = d.askPending[thread.id]
+  const askPending = { ...d.askPending }
+  delete askPending[thread.id]
+  const record = {
+    threadId: thread.id, messageId: action.assistantMessageId ?? pending?.messageId ?? null, question: action.userMessage?.text ?? null,
+    text: pending?.text ?? '', state: pending?.state ?? 'streaming', message: pending?.message ?? null, error: pending?.error ?? null
+  }
+  return { ...state, data: { ...d, meetingAsk: { ...d.meetingAsk, [meetingId]: record }, askThreads: { ...d.askThreads, [thread.id]: meetingId }, askPending } }
 }
 
 /**
@@ -148,9 +227,27 @@ function applyEvent(state, message, live) {
       return next
     case 'meeting.status': {
       const was = d.recorder?.state === 'recording'
-      next.data = { ...d, recorder: data }
+      next.data = { ...d, recorder: data, live: liveFor(d.live, data) }
       const is = data?.state === 'recording'
       if (live && was !== is) next = announce(next, { kind: 'recording', text: t(is ? 'shell.announce.recStart' : 'shell.announce.recStop') })
+      return next
+    }
+    case 'meeting.updated':
+      next.data = { ...d, meetings: mergeMeeting(d.meetings, data) }
+      return next
+    case 'meeting.pin.added': {
+      const id = data?.meetingId
+      if (typeof id !== 'string' || !id) return next
+      const pin = { ...data }
+      delete pin.meetingId
+      const pins = upsert(d.meetingPins[id] ?? [], pin).sort((a, b) => (a.t ?? 0) - (b.t ?? 0))
+      next.data = { ...d, meetingPins: { ...d.meetingPins, [id]: pins } }
+      return next
+    }
+    case 'meeting.pin.removed': {
+      const id = data?.meetingId
+      if (typeof id !== 'string' || !id) return next
+      next.data = { ...d, meetingPins: { ...d.meetingPins, [id]: (d.meetingPins[id] ?? []).filter(pin => pin.id !== data.id) } }
       return next
     }
     case 'health.changed':
@@ -209,6 +306,16 @@ function applyEphemeral(state, message) {
   return { ...state, data: { ...state.data, tails: { ...state.data.tails, [id]: data.lines } } }
 }
 
+// Ephemeral meeting streams (05-api 3.4): kept only for the meeting the recorder is on, never buffered.
+function applyMeetingStream(state, message) {
+  const data = message.data
+  const id = data?.meetingId
+  if (typeof id !== 'string' || !id || state.data.recorder?.meetingId !== id) return state
+  if (message.t === 'meeting.transcript') return data.line && typeof data.line === 'object' ? { ...state, data: appendLive(state.data, id, [data.line], null) } : state
+  const count = Number(data.count)
+  return { ...state, data: appendLive(state.data, id, [], Number.isFinite(count) && count > 0 ? count : 0) }
+}
+
 function receive(state, message) {
   switch (message.t) {
     case 'welcome':
@@ -222,6 +329,8 @@ function receive(state, message) {
       data.tails = state.data.tails ?? {}
       // The snapshot carries no rules revision; keep counting from the last one so it never repeats.
       data.rulesRev = state.data.rulesRev ?? 0
+      for (const key of MEETING_KEYS) data[key] = state.data[key] ?? emptyData()[key]
+      data.live = liveFor(data.live, data.recorder)
       const episodes = Object.fromEntries(data.sessions.filter(row => NEEDS_STATES.has(row.state)).map(row => [row.id, true]))
       const open = new Set(data.requests.map(row => row.id))
       const toasts = state.toasts.filter(toast => toast.requestId === undefined || open.has(toast.requestId))
@@ -237,6 +346,13 @@ function receive(state, message) {
     case 'input.source':
     case 'screen.tail':
       return applyEphemeral(state, message)
+    case 'meeting.transcript':
+    case 'meeting.recovered':
+      return applyMeetingStream(state, message)
+    case 'ask.delta':
+    case 'ask.done':
+    case 'ask.error':
+      return applyAsk(state, message)
     default:
       if (message.seq === undefined) return state
       if (!state.loaded || state.syncing && !state.replaying) return { ...state, buffer: [...state.buffer, message] }
@@ -264,7 +380,9 @@ export function archivedCount(state) {
 }
 
 /**
- * Pure reducer for server messages and shell actions.
+ * Pure reducer for server messages and shell actions. Meeting actions: `meetings.fetched` `{ meetings }` merges
+ * REST list rows (with their titles) into `data.meetings`; `meeting.ask` `{ thread, userMessage,
+ * assistantMessageId }` (the POST /api/ask answer) ties a `meeting:<id>` thread to `data.meetingAsk[id]`.
  * @param {Record<string, any>} state
  * @param {{ type: string, [key: string]: any }} action
  * @returns {Record<string, any>}
@@ -287,6 +405,10 @@ export function reduce(state, action) {
       return { ...state, announcements: state.announcements.filter(item => !action.ids.includes(item.id)) }
     case 'navigated':
       return { ...state, navigateTo: null }
+    case 'meetings.fetched':
+      return { ...state, data: { ...state.data, meetings: (action.meetings ?? []).reduce(mergeMeeting, state.data.meetings) } }
+    case 'meeting.ask':
+      return startMeetingAsk(state, action)
     default:
       return state
   }
@@ -386,9 +508,10 @@ export function isGlobalChord(event) {
 
 /**
  * Map a keydown to a global shell action (keyboard.md, rail-and-shell.md section 6). Matches `event.code`.
- * @param {{ code: string, altKey: boolean, shiftKey: boolean, ctrlKey: boolean, metaKey: boolean }} event
+ * Alt P is `{ type: 'pin' }` only while the recorder is `recording` and the target is not inside `.terminal-view`.
+ * @param {{ code: string, altKey: boolean, shiftKey: boolean, ctrlKey: boolean, metaKey: boolean, target?: { closest?: Function } | null }} event
  * @param {Record<string, any>} state
- * @returns {{ type: 'navigate', to: string } | { type: 'overlay', overlay: string } | { type: 'details' } | null}
+ * @returns {{ type: 'navigate', to: string } | { type: 'overlay', overlay: string } | { type: 'details' } | { type: 'pin' } | null}
  */
 export function keyAction(event, state) {
   if (!event.altKey || event.ctrlKey || event.metaKey) return null
@@ -404,7 +527,13 @@ export function keyAction(event, state) {
   if (event.code === 'KeyU') return { type: 'overlay', overlay: 'drawer' }
   if (event.code === 'KeyN') return { type: 'navigate', to: '/new' }
   if (event.code === 'KeyI') return { type: 'details' }
+  if (event.code === 'KeyP') return state.data.recorder?.state === 'recording' && !insideTerminal(event.target) ? { type: 'pin' } : null
   return null
+}
+
+// Alt P is not a global chord: a focused terminal sends it to the PTY (keyboard.md section 1).
+function insideTerminal(target) {
+  return typeof target?.closest === 'function' && target.closest('.terminal-view') != null
 }
 
 /**

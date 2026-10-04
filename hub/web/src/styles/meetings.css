@@ -1,0 +1,35 @@
+/* Meetings list, detail and search (screens/meetings.md), and the DegradedCard (components 31) that replaces a
+   tab's backend-dependent part. Values are tokens from tokens.css. Imported once from main.jsx. */
+
+.degraded-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  padding: var(--space-20);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-2xl);
+  background: var(--bg-surface);
+}
+.degraded-card .eyebrow { margin: 0; }
+.degraded-card-title { margin: 0; font: var(--type-section-title); color: var(--text-strong); }
+.degraded-card-body { margin: 0; font: var(--type-body-sm); color: var(--text-secondary); }
+.degraded-card-command {
+  display: block;
+  padding: var(--space-8) var(--space-12);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  font: var(--type-mono);
+  color: var(--text-default);
+  overflow-x: auto;
+  white-space: pre;
+}
+.degraded-card-actions { display: flex; flex-wrap: wrap; gap: var(--space-8); }
+
+/* Search hits use TranscriptLine in its `hit` variant. */
+.transcript-line--hit .transcript-line-text { font: var(--type-body); }
+.transcript-line mark {
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-mark);
+  color: inherit;
+}
