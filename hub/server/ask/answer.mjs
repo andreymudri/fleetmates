@@ -145,6 +145,14 @@ function extraLines (value) {
 export const FRONTMATTER_SLACK = 32
 
 /**
+ * What vault-mcp 0.3.0 prints in place of content it does not render (`renderFrontmatterValue` and
+ * `joinBudgeted` in its dist/server/tools.js, Portuguese in both languages): a container one level down,
+ * `{objeto com N chave(s)}` or `[lista com N item(ns)]`, and the items left past the value budget,
+ * `, \u2026+N item(ns)`. Each hides lines the bound cannot count.
+ */
+const CONTAINER_SUMMARY_RE = /\{objeto com \d+ chave\(s\)\}|\[lista com \d+ item\(ns\)\]|\u2026\+\d+ item\(ns\)/
+
+/**
  * The D-141 line bound of a note from a vault-text `parseNote` result. It is an UPPER BOUND, not the
  * note's line count: the frontmatter's real height cannot be recovered from what vault-mcp prints (a
  * one-item block list prints as `tags: a`, comments and blank lines are not printed), so the frontmatter
@@ -153,7 +161,8 @@ export const FRONTMATTER_SLACK = 32
  * adds its own line count. A frontmatter deeper than that is still covered for the lines vault_search
  * reported, by rule (a) of validateCitations. A note cut short (`truncated`), longer than 200,000
  * characters, or whose frontmatter vault-mcp cut or may have elided (`frontmatterCut`, 32 keys, a
- * 512-character value) gives `Infinity`.
+ * 512-character value, a value holding a container summary such as `{objeto com 3 chave(s)}`) gives
+ * `Infinity`.
  * @param {{
  *   frontmatter?: Record<string, unknown> | [string, unknown][] | null, frontmatterCut?: boolean,
  *   body?: string, truncated?: boolean, total?: number
@@ -169,6 +178,7 @@ export function noteLineBound (note) {
   let lines = String(note.body ?? '').split('\n').length + 2 + FRONTMATTER_SLACK
   for (const [, value] of entries) {
     if (typeof value === 'string' && value.length >= MAX_FRONTMATTER_VALUE) return Infinity
+    if (typeof value === 'string' && CONTAINER_SUMMARY_RE.test(value)) return Infinity
     lines += 2 + extraLines(value)
   }
   return lines

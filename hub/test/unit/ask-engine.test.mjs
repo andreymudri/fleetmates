@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { fakeBin } from '../helpers/fake-bin.mjs'
 import {
   askArgv, askEnv, createAskEngine, ASK_DENIED_TOOLS, ASK_NOT_CONNECTED_ERROR, ASK_READ_TOOLS, ASK_TIMEOUT_ERROR,
-  ASK_TOTAL_MS, ASK_IDLE_MS, readProcIdentity
+  ASK_TOTAL_MS, ASK_IDLE_MS, readProcIdentity, resultPaths, resultCount, parseResultLine, MAX_RESULT_LINE
 } from '../../server/ask/engine.mjs'
 import { CLAUDE_SESSION_VARS } from '../../deckd/login-env.mjs'
 import { parseAnswer } from '../../server/ask/answer.mjs'
@@ -470,4 +470,65 @@ test('a vault_search hit without a heading trail still reaches toolPaths and sea
   assert.deepEqual([...r.toolPaths].sort(), ['02-wiki/nestjs/auth-guard.md', '02-wiki/nestjs/bullmq-worker.md'])
   assert.deepEqual(r.searchHits, [{ path: '02-wiki/nestjs/bullmq-worker.md', line: 9 }, { path: '02-wiki/nestjs/auth-guard.md', line: 11 }])
   assert.deepEqual(r.searches, [{ query: 'retry backoff bullmq', resultCount: 2 }])
+})
+
+const EMD = String.fromCharCode(0x2014)
+
+test('a vault_get_note answer is read only up to its first blank line, never its body', () => {
+  const text = [
+    `02-wiki/nestjs/a.md ${EMD} A`, 'Frontmatter:', '  tipo: wiki', 'Links: 02-wiki/nestjs/b.md', 'Broken links: (none)', '',
+    `evil.md ${EMD} x`, 'Links: evil-links.md', `- evil-list.md ${EMD} y`, `evil-hit.md:3 ${EMD} z (score 1.0)`
+  ].join('\n')
+  const r = resultPaths('mcp__vault__vault_get_note', text)
+  assert.deepEqual(r.paths, ['02-wiki/nestjs/a.md', '02-wiki/nestjs/b.md'])
+  assert.deepEqual(r.hits, [])
+})
+
+test('readProcIdentity takes field 22 of /proc/<pid>/stat, after a command name with spaces and parentheses', () => {
+  // Fields 3..52 after the command name; field 22 is the start time, field 23 the virtual memory size.
+  const after = Array.from({ length: 50 }, (_, i) => String(i + 3))
+  after[22 - 3] = '98765'
+  after[23 - 3] = '11111'
+  const stat = `4321 (a b) (c) ${after.join(' ')}\n`
+  /** @type {string[]} */
+  const read = []
+  const id = readProcIdentity(4321, file => {
+    read.push(file)
+    return file.endsWith('/stat') ? stat : 'boot-id-x\n'
+  })
+  assert.deepEqual(id, { startTime: '98765', bootId: 'boot-id-x' })
+  assert.deepEqual(read, ['/proc/4321/stat', '/proc/sys/kernel/random/boot_id'])
+})
+
+test('a result line over MAX_RESULT_LINE characters is not read for paths', () => {
+  const long = `02-wiki/x/longa.md:3 ${EMD} ${'a'.repeat(5000)} (score 1.0)`
+  const fits = `02-wiki/x/curta.md:4 ${EMD} ${'a'.repeat(MAX_RESULT_LINE - 60)} (score 1.0)`
+  assert.ok(long.length > MAX_RESULT_LINE && fits.length <= MAX_RESULT_LINE)
+  assert.equal(parseResultLine(long), null)
+  const r = resultPaths('mcp__vault__vault_search', `2 result(s) for "x".\n\n${long}\n> a\n\n${fits}\n> b`)
+  assert.deepEqual(r.paths, ['02-wiki/x/curta.md'])
+  assert.deepEqual(r.hits, [{ path: '02-wiki/x/curta.md', line: 4 }])
+  assert.equal(resultCount(`${long}\n${fits}`), 1)
+})
+
+test('parseResultLine reads list, trailed and trail-less hit lines, and refuses snippets', () => {
+  assert.deepEqual(parseResultLine(`- 02-wiki/a b.md ${EMD} T (tipo: x, status: y, tags: z)`), { path: '02-wiki/a b.md', line: null })
+  assert.deepEqual(parseResultLine(`02-wiki/a.md:13 ${EMD} H > I (score 12.34, via graph)`), { path: '02-wiki/a.md', line: 13 })
+  assert.deepEqual(parseResultLine('02-wiki/a.md:9 (score 0.79)'), { path: '02-wiki/a.md', line: 9 })
+  assert.equal(parseResultLine(`> 02-wiki/a.md:9 (score 0.79)`), null)
+  assert.equal(parseResultLine(' 02-wiki/a.md:9 (score 0.79)'), null)
+  assert.equal(parseResultLine('02-wiki/a.md (score 0.79)'), null)
+})
+
+test('crafted result lines that do not match cost linear work: 100 lines of about 4,000 characters well under 500 ms', () => {
+  const unit = `:1 ${EMD} (score x`
+  const listy = (`- a.md ${EMD} ` + unit.repeat(400)).slice(0, 4000) + 'Z'
+  const hitty = (`a.md:1 ${EMD} ` + unit.repeat(400)).slice(0, 4000) + 'Z'
+  const text = [...Array(50).fill(listy), ...Array(50).fill(hitty)].join('\n')
+  const start = performance.now()
+  const r = resultPaths('mcp__vault__vault_list', text)
+  resultCount(text)
+  const ms = performance.now() - start
+  assert.ok(ms < 500, `took ${ms.toFixed(0)} ms`)
+  assert.equal(r.paths.length, 50)
 })

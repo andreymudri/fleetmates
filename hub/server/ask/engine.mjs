@@ -33,15 +33,39 @@ const GET_NOTE_TOOL = 'mcp__vault__vault_get_note'
 const MARK = '```deck-answer'
 const MARK_RE = /^```deck-answer/m
 const EM = '\u2014'
+const SEP = ` ${EM} `
+const SCORE = ' (score '
+/** Longer result lines are not read for paths (vault-mcp's own lines are short). */
+export const MAX_RESULT_LINE = 4096
+
 /**
- * A vault_search hit line (contract 1.6): `<path>:<line> <EM> <trail> (score ...)`, or `<path>:<line> (score ...)`
- * when the chunk has no heading trail. Snippet lines start with `> ` and never match.
+ * Read one vault-mcp result line (contract 1.6) without a backtracking regex, so the work is linear in the
+ * line whatever an untrusted title holds:
+ * - `- <path> <EM> <title>...` (vault_list, vault_backlinks) gives `{ path, line: null }`;
+ * - `<path>:<line> <EM> <trail> (score ...)`, or `<path>:<line> (score ...)` when the chunk has no heading
+ *   trail (vault_search), gives `{ path, line }`.
+ * Snippet lines (`> `), lines starting with white space and lines over MAX_RESULT_LINE give null.
+ * @param {string} text
+ * @returns {{ path: string, line: number | null } | null}
  */
-const SEARCH_HIT_RE = new RegExp(`^([^>\\s].*?):(\\d+)(?: ${EM} .*)? \\(score [^)]*\\)$`)
-/** A vault_list or vault_backlinks line: `- <path> <EM> <title>...`. */
-const LIST_LINE_RE = new RegExp(`^- ([^>\\s].*?\\.md) ${EM} `)
-/** Longer result lines are not read for paths (vault-mcp's own lines are short; this bounds the regex work). */
-const MAX_RESULT_LINE = 4096
+export function parseResultLine (text) {
+  if (text.length > MAX_RESULT_LINE || !text || text[0] === '>' || /\s/.test(text[0])) return null
+  if (text.startsWith('- ')) {
+    const end = text.indexOf(SEP, 2)
+    const p = end < 0 ? '' : text.slice(2, end)
+    return p.endsWith('.md') && p[0] !== '>' && !/\s/.test(p[0]) ? { path: p, line: null } : null
+  }
+  if (!text.endsWith(')')) return null
+  const score = text.lastIndexOf(SCORE)
+  if (score < 0 || text.indexOf(')', score + SCORE.length) !== text.length - 1) return null
+  const head = text.slice(0, score)
+  const trail = head.indexOf(SEP)
+  const loc = trail < 0 ? head : head.slice(0, trail)
+  const colon = loc.lastIndexOf(':')
+  const num = loc.slice(colon + 1)
+  if (colon <= 0 || !/^\d+$/.test(num)) return null
+  return { path: loc.slice(0, colon), line: Number(num) }
+}
 
 const promptDir = path.dirname(fileURLToPath(import.meta.url))
 /** @type {Map<string, string>} */
@@ -140,7 +164,7 @@ function toolResultText (block) {
  * @param {string} text
  * @returns {{ paths: string[], hits: { path: string, line: number }[] }}
  */
-function resultPaths (tool, text) {
+export function resultPaths (tool, text) {
   const out = []
   /** @type {{ path: string, line: number }[]} */
   const hits = []
@@ -156,15 +180,10 @@ function resultPaths (tool, text) {
     return { paths: out, hits }
   }
   for (const line of lines) {
-    if (line.length > MAX_RESULT_LINE) continue
-    const hit = SEARCH_HIT_RE.exec(line)
-    if (hit) {
-      out.push(hit[1])
-      if (tool === SEARCH_TOOL) hits.push({ path: hit[1], line: Number(hit[2]) })
-      continue
-    }
-    const item = LIST_LINE_RE.exec(line)
-    if (item) out.push(item[1])
+    const found = parseResultLine(line)
+    if (!found) continue
+    out.push(found.path)
+    if (found.line !== null && tool === SEARCH_TOOL) hits.push({ path: found.path, line: found.line })
   }
   return { paths: out, hits }
 }
@@ -175,10 +194,10 @@ function resultPaths (tool, text) {
  * @param {string} text
  * @returns {number}
  */
-function resultCount (text) {
+export function resultCount (text) {
   const m = /^(\d+) /.exec(text)
   if (m) return Number(m[1])
-  return text.split('\n').filter(l => l.length <= MAX_RESULT_LINE && SEARCH_HIT_RE.test(l)).length
+  return text.split('\n').filter(l => parseResultLine(l)?.line != null).length
 }
 
 /**
@@ -201,15 +220,16 @@ function forwardable (text, final) {
  * boot) and the boot id (`/proc/sys/kernel/random/boot_id`). Null when either cannot be read (the process is
  * gone, or the system has no `/proc`, as on macOS).
  * @param {number} pid
+ * @param {(file: string) => string} [readText] reads a /proc file as text (injected by tests)
  * @returns {{ startTime: string, bootId: string } | null}
  */
-export function readProcIdentity (pid) {
+export function readProcIdentity (pid, readText = file => readFileSync(file, 'utf8')) {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const stat = readText(`/proc/${pid}/stat`)
     // The command name (field 2) is in parentheses and may hold spaces; fields after it start at field 3.
     const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
     const startTime = fields[22 - 3]
-    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+    const bootId = readText('/proc/sys/kernel/random/boot_id').trim()
     if (!/^\d+$/.test(startTime ?? '') || !bootId) return null
     return { startTime, bootId }
   } catch {

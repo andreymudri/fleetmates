@@ -233,3 +233,27 @@ test('the literal parseNote results match T2 parseNote when vault-text.mjs is pr
   assert.deepEqual(mod.parseNote(ONE_TAG_TEXT), ONE_TAG)
   assert.deepEqual(mod.parseNote(GUARDA_TEXT), GUARDA)
 })
+
+test('noteLineBound gives Infinity when a value holds a vault-mcp container summary', async () => {
+  // File: 2 fences, `tipo: wiki`, `fontes:` and 20 mappings of 3 lines each, then one body line = 65 lines.
+  // vault-mcp 0.3.0 prints each mapping one level down as `{objeto com 3 chave(s)}`.
+  const fontes = Array.from({ length: 20 }, () => '{objeto com 3 chave(s)}').join(', ')
+  assert.ok(fontes.length < 512)
+  const note = { ...listNote, frontmatter: { tipo: 'wiki', fontes }, body: 'body line', total: 9 }
+  assert.equal(noteLineBound(note), Infinity)
+  const r = await validateCitations([{ path: note.path, line: 65, viaGraph: false }],
+    { toolPaths: [note.path], knownPaths: [], lineBound: () => noteLineBound(note) })
+  assert.equal(r.kept.length, 1)
+  assert.equal(noteLineBound({ ...note, frontmatter: { aliases: '[lista com 4 item(ns)]' } }), Infinity)
+  const ellipsis = String.fromCharCode(0x2026)
+  assert.equal(noteLineBound({ ...note, frontmatter: { tags: `a, b, ${ellipsis}+5 item(ns)` } }), Infinity)
+  // A value that only mentions the words stays countable.
+  assert.equal(noteLineBound({ ...note, frontmatter: { resumo: 'um objeto com chaves' } }), 1 + 2 + 32 + 2)
+})
+
+test('rule (a) keeps an earlier line of a hit path even past the bound', async () => {
+  const path = ONE_TAG.path
+  const r = await validateCitations([{ path, line: 12, viaGraph: false }],
+    { toolPaths: [path], knownPaths: [], searchHits: [{ path, line: 13 }], lineBound: () => 10 })
+  assert.deepEqual(r.kept.map(c => c.line), [12])
+})
