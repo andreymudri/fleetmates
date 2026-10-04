@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { translate } from '../../components/StatusPill.jsx'
-import { TranscriptLine, formatOffset } from '../../components/TranscriptLine.jsx'
+import { titleText, translate } from '../../components/StatusPill.jsx'
+import { TranscriptLine, formatOffset, proseText } from '../../components/TranscriptLine.jsx'
 import { ArchiveToast, useArchiveToast } from '../../components/SessionCard.jsx'
 import { renderMarkdown } from '../team-run/PlanDrawer.jsx'
 import { trapTab } from '../drawer/NeedsYouDrawer.jsx'
@@ -196,8 +196,8 @@ export function TranscriptBody({ meeting, transcript, error = null, focusT = nul
   if (Number.isFinite(focusT)) target = lines.findIndex(line => line.t0 >= focusT - 0.001)
   return (
     <>
-      {meeting?.confidential ? <p className="meeting-muted">{translate(t, MEETING_DETAIL_COPY, 'meetings.detail.confidentialNote', { tag: meeting.tag })}</p> : null}
-      {error ? <p className="meeting-error" role="alert">{error}</p> : null}
+      {meeting?.confidential ? <p className="meeting-muted">{translate(t, MEETING_DETAIL_COPY, 'meetings.detail.confidentialNote', { tag: titleText(meeting.tag) })}</p> : null}
+      {error ? <p className="meeting-error" role="alert"><bdi>{titleText(error)}</bdi></p> : null}
       {transcript ? (
         <ol className="meeting-transcript">
           {lines.map((line, index) => <li key={`${line.t0}-${index}`} data-target={index === target ? 'true' : undefined}><TranscriptLine line={line} /></li>)}
@@ -236,8 +236,8 @@ export function MeetingDetailView({ detail, q = '', hits = [], dismissed = {}, l
   return (
     <div className="meeting-detail">
       <header className="meeting-detail-header">
-        <h2 className="meeting-detail-title">{meetingTitle(meeting, t)}</h2>
-        <p className="meeting-meta">{detailMeta(detail, now, t)}</p>
+        <h2 className="meeting-detail-title"><bdi>{titleText(meetingTitle(meeting, t))}</bdi></h2>
+        <p className="meeting-meta">{titleText(detailMeta(detail, now, t))}</p>
         <div className="meeting-detail-actions">
           {note ? <button type="button" className="button button--secondary button--sm" onClick={onOpenNote}>{text('meetings.detail.openNote')}</button> : null}
           <button type="button" className="button button--secondary button--sm" onClick={() => onTranscript?.()}>{text('meetings.detail.transcript')}</button>
@@ -245,7 +245,7 @@ export function MeetingDetailView({ detail, q = '', hits = [], dismissed = {}, l
       </header>
       {names ? (
         <div className="meeting-banner meeting-banner--hint" role="status">
-          <p className="meeting-banner-text">{text('meetings.post.namesHint', { session: meeting.id })}</p>
+          <p className="meeting-banner-text">{text('meetings.post.namesHint', { session: titleText(meeting.id) })}</p>
           <button type="button" className="button button--secondary button--xs" onClick={() => onCopy?.(command)}>{text('meetings.copy')}</button>
         </div>
       ) : null}
@@ -260,14 +260,14 @@ export function MeetingDetailView({ detail, q = '', hits = [], dismissed = {}, l
           {note?.summary ? (
             <section className="meeting-section" aria-label={text('meetings.detail.summary')}>
               <h3 className="eyebrow">{text('meetings.detail.summary')}</h3>
-              <div className="meeting-summary" lang="pt-BR">{renderMarkdown(note.summary)}</div>
+              <div className="meeting-summary" lang="pt-BR">{renderMarkdown(proseText(note.summary))}</div>
             </section>
           ) : null}
           {note ? (
             <section className="meeting-section" aria-label={text('meetings.detail.decisions')}>
               <h3 className="eyebrow">{text('meetings.detail.decisions')}</h3>
               {note.decisions?.length ? (
-                <ul className="meeting-decisions">{note.decisions.map((decision, index) => <li key={index} lang="pt-BR">{decision}</li>)}</ul>
+                <ul className="meeting-decisions">{note.decisions.map((decision, index) => <li key={index} lang="pt-BR"><bdi>{titleText(decision)}</bdi></li>)}</ul>
               ) : <p className="meeting-muted" lang="pt-BR">{NO_DECISIONS}</p>}
             </section>
           ) : null}
@@ -278,15 +278,15 @@ export function MeetingDetailView({ detail, q = '', hits = [], dismissed = {}, l
                 {pins.map(pin => (
                   <li key={pin.id} className="meeting-pin">
                     <span className="meeting-pin-time">{formatOffset(pin.t)}</span>
-                    {!meeting.confidential && pin.label ? <q className="meeting-pin-label" lang="pt-BR">{pin.label}</q> : null}
+                    {!meeting.confidential && pin.label ? <q className="meeting-pin-label" lang="pt-BR"><bdi>{titleText(pin.label)}</bdi></q> : null}
                   </li>
                 ))}
               </ul>
             </section>
           ) : null}
           {q && hits.length ? (
-            <section className="meeting-section" aria-label={text('meetings.detail.hits', { q, n: hits.length })}>
-              <h3 className="eyebrow">{text('meetings.detail.hits', { q, n: hits.length })}</h3>
+            <section className="meeting-section" aria-label={text('meetings.detail.hits', { q: titleText(q), n: hits.length })}>
+              <h3 className="eyebrow">{text('meetings.detail.hits', { q: titleText(q), n: hits.length })}</h3>
               <ul className="meeting-hits">
                 {hits.map((hit, index) => <li key={`${hit.t0}-${index}`}><TranscriptLine line={hit} ranges={hit.ranges} onClick={() => onTranscript?.(hit.t0)} /></li>)}
               </ul>
@@ -299,8 +299,8 @@ export function MeetingDetailView({ detail, q = '', hits = [], dismissed = {}, l
             <ul className="meeting-items">
               {items.map(item => (
                 <li key={item.key} className={leaving[item.key] ? 'meeting-item meeting-item--leaving' : 'meeting-item'}>
-                  <p className="meeting-item-text" lang="pt-BR">{item.text}</p>
-                  {item.owner ? <p className="meeting-item-owner" lang="pt-BR">{item.owner}</p> : null}
+                  <p className="meeting-item-text" lang="pt-BR"><bdi>{titleText(item.text)}</bdi></p>
+                  {item.owner ? <p className="meeting-item-owner" lang="pt-BR"><bdi>{titleText(item.owner)}</bdi></p> : null}
                   <div className="meeting-item-actions">
                     <button type="button" className="button button--primary button--sm" onClick={() => onLaunch?.(item)}>{text('meetings.detail.launch')}</button>
                     <button type="button" className="button button--ghost button--sm" onClick={() => onDismiss?.(item)}>{text('meetings.detail.dismiss')}</button>
