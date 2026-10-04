@@ -340,7 +340,7 @@ export function homeActions({ api, setStopping, toast, repoName, t }) {
  * The card answer and rule calls Home holds (home.md 6): `answer` keeps the AnswerBody in flight for the card
  * through `setAnswers` (so the chosen button shows its spinner) and posts it with `answerRequest`; a refused
  * answer drops it again. `acceptRule` adds the offered rule with `source: 'suggested'` and shows
- * "Rule added to {repo}: {pattern}" with an Undo; `undo` revokes that rule.
+ * "Rule added to {repo}: {pattern}" with an Undo; `undo` removes that rule as an undo (`?undo=1`).
  * @param {{ api: object, setAnswers: (next: Record<string, object> | ((map: Record<string, object>) => Record<string, object>)) => void,
  *   show: (toast: { tone: string, text: string, undo?: { repoKey: string, pattern: string } } | null) => void, repos?: object[], t?: Function }} options
  * @returns {{ answer: (request: object, body: object) => Promise<void>, acceptRule: (offer: object) => Promise<void>, undo: (undo: { repoKey: string, pattern: string }) => Promise<void> }}
@@ -367,7 +367,7 @@ export function homeAnswerActions({ api, setAnswers, show, repos = [], t }) {
     },
     undo(undo) {
       show(null)
-      return revokeRule(api, undo.repoKey, undo.pattern).then(() => {}, () => {})
+      return revokeRule(api, undo.repoKey, undo.pattern, { undo: true }).then(() => {}, () => {})
     }
   }
 }

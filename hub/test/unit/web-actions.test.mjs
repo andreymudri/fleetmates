@@ -6,6 +6,12 @@ import {
   archiveSession, unarchiveSession, archiveFinished, fetchArchived
 } from '../../web/src/state/actions.js'
 import { createApiClient } from '../../web/src/state/api.js'
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { runnerImport } from 'vite'
+
+const hub = fileURLToPath(new URL('../..', import.meta.url))
 
 // Records calls in the createApiClient shape; `fail` makes the next call throw an ApiError.
 function recordingApi() {
@@ -128,4 +134,30 @@ test('del sends DELETE with no body, and an M3 helper throws the ApiError unchan
   const failure = Object.assign(new Error('confirm'), { status: 409, code: 'confirm_required' })
   recording.failNext(failure)
   await assert.rejects(answerRequest(recording, 'r1', { choice: 'allow' }), error => error === failure)
+})
+
+test('revokeRule adds ?undo=1 only with { undo: true }; the Home toast Undo passes it and the Settings revoke does not', async () => {
+  const api = recordingApi()
+  await revokeRule(api, 'work/api', 'Bash(npm run test)', { undo: true })
+  await revokeRule(api, 'work/api', 'Bash(npm run test)', { undo: false })
+  await revokeRule(api, 'work/api', 'Bash(npm run test)')
+  assert.deepEqual(api.calls, [
+    ['DELETE', '/api/rules/work%2Fapi/Bash(npm%20run%20test)?undo=1'],
+    ['DELETE', '/api/rules/work%2Fapi/Bash(npm%20run%20test)'],
+    ['DELETE', '/api/rules/work%2Fapi/Bash(npm%20run%20test)']
+  ])
+
+  // The Home rule toast's Undo (homeAnswerActions().undo in Home.jsx) records an undo, not a revoke.
+  const { module: home } = await runnerImport(path.join(hub, 'web/src/screens/home/Home.jsx'), { configFile: false, logLevel: 'silent', root: hub })
+  const homeApi = recordingApi()
+  const toasts = []
+  const actions = home.homeAnswerActions({ api: homeApi, setAnswers: () => {}, show: toast => toasts.push(toast), repos: [] })
+  await actions.undo({ repoKey: 'rustot', pattern: 'Bash(npm run test)' })
+  assert.deepEqual(homeApi.calls, [['DELETE', '/api/rules/rustot/Bash(npm%20run%20test)?undo=1']])
+  assert.deepEqual(toasts, [null], 'the toast closes')
+
+  // The Settings revoke (ApprovalRules.jsx) passes no options, so the server records a revoke.
+  const source = (await readFile(path.join(hub, 'web/src/screens/settings/ApprovalRules.jsx'), 'utf8')).replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, '')
+  const calls = source.split('\n').filter(line => line.includes('revokeRule(')).map(line => line.trim())
+  assert.deepEqual(calls, ['revokeRule(api, repoName(repo), rule.pattern)'])
 })

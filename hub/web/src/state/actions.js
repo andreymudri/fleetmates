@@ -147,14 +147,17 @@ export function addRule(api, { repoKey, pattern, source }) {
 }
 
 /**
- * Revoke a rule (`DELETE /api/rules/:repoKey/:pattern`); the pattern is one encoded segment.
+ * Revoke a rule (`DELETE /api/rules/:repoKey/:pattern`); the pattern is one encoded segment. With
+ * `{ undo: true }` (the Undo of the rule-added toast) the call adds `?undo=1`, so the server records the
+ * removal as an `undo` rather than a `revoke`.
  * @param {{ del: Function }} api
  * @param {string} repoKey
  * @param {string} pattern
+ * @param {{ undo?: boolean }} [options]
  * @returns {Promise<{ removed: boolean, reason?: 'already_removed' }>}
  */
-export function revokeRule(api, repoKey, pattern) {
-  return api.del(`/api/rules/${seg(repoKey)}/${seg(pattern)}`)
+export function revokeRule(api, repoKey, pattern, { undo = false } = {}) {
+  return api.del(`/api/rules/${seg(repoKey)}/${seg(pattern)}${undo === true ? '?undo=1' : ''}`)
 }
 
 /**

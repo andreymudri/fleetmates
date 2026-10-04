@@ -674,7 +674,8 @@ if (import.meta.main) {
     assert.equal(await page.locator('.drawer :is(input, select, textarea, [contenteditable="true"])').count(), 0)
     const actions = await page.$$eval('.drawer-row .drawer-actions', rows => rows.map(row => [...row.children].map(child => `${child.tagName}:${child.textContent}`)))
     assert.ok(actions.every(row => JSON.stringify(row) === JSON.stringify(['SPAN:Answer in your terminal', 'A:Open'])), JSON.stringify(actions))
-    assert.equal(await page.textContent('.drawer-footer'), 'Answer in your terminal for now. Answering here arrives with approvals.')
+    // M3 answers from the drawer, so the footer is the M3 shortcut line, not the M1 "Answer in your terminal for now".
+    assert.equal(await page.textContent('.drawer-footer'), 'Alt A allow focused · Alt D deny · Alt Shift A allow all Safe · rules live in each repo\'s .claude/settings.local.json')
   })
 
   spec('Drawer: Esc and scrim clicks close it and return focus; an unknown tier is listed under Caution', async t => {

@@ -1,0 +1,48 @@
+{
+  "about": "UI fixture for the M3 Unblock end-to-end suites (hub/test/e2e/unblock.spec.mjs, accessibility.spec.mjs, security.spec.mjs), on top of the control harness of control.spec.mjs and its repos (hub/test/fixtures/ui/control.json). Every path uses the /home/you placeholder, which the harness replaces with a temporary HOME. `sessions.pty` are the two PTY sessions, spawned through deckd as `fm claude` does, each running a fake claude script (a name under hub/test/fixtures/scripts or inline steps); the Destructive one draws its prompt on the SYNTHETIC 2.1.285 bash frame (D-95). `sessions.observed` is a plain claude session fed through the hooks socket, with a Caution request and a question it cannot answer from the deck. `promptBar` names the extra PTY sessions the PromptBar audit needs for the Caution and question tiers. `ruleOffers` are two rule offers as the snapshot carries them (the second with ruleNote anyFlags, which no shipped tiers entry carries since D-103, so a test injects it). `rules5` is three repos holding five rules in their .claude/settings.local.json. `settingsLocal` is the settings file exit criterion 3 writes into: its keys and their order must survive a rule write and its Undo. `xss` holds the qa 1.7 payloads the security suite puts in an option label, a rule pattern and diff text.",
+  "claudeCodeVersion": "2.1.285",
+  "home": "/home/you",
+  "scanRoot": "/home/you/dev",
+  "threshold": 3,
+  "sessions": {
+    "pty": [
+      { "key": "safe", "repo": "vault-mcp", "script": "approve-safe", "summary": "npm run test", "tier": "safe" },
+      { "key": "destructive", "repo": "rustot", "summary": "rm -rf build", "tier": "destructive", "script": {
+        "version": "2.1.285", "sessionId": "auto", "steps": [
+          { "hook": "SessionStart", "with": { "source": "startup" } },
+          { "hook": "PermissionRequest", "variant": "Bash", "with": { "tool_name": "Bash", "tool_input": { "command": "rm -rf build", "description": "Remove the build directory" } } },
+          { "print": "\u001b[2J\u001b[H" },
+          { "frame": "synthetic-permission-bash", "vars": { "cmd": "rm -rf build", "description": "Remove the build directory" } },
+          { "expectKey": { "1": "yes", "2": "no", "timeoutMs": 120000 } },
+          { "sleep": 600000 }
+        ] } }
+    ],
+    "observed": { "key": "observed", "repo": "axios-like", "sessionId": "fx-unblock-observed", "hooks": [
+      { "e": "SessionStart", "ago": 900 },
+      { "e": "UserPromptSubmit", "ago": 880, "prompt": "retry policy" },
+      { "e": "PreToolUse", "ago": 300, "tool_name": "Bash", "tool_input": { "command": "curl -s https://example.com/status" } },
+      { "e": "PermissionRequest", "ago": 290, "tool_name": "Bash", "tool_input": { "command": "curl -s https://example.com/status" } },
+      { "e": "PreToolUse", "ago": 200, "tool_name": "AskUserQuestion", "tool_input": { "questions": [{ "question": "Which retry policy should the client use?", "header": "Retry", "options": [{ "label": "Exponential", "description": "Back off" }, { "label": "Fixed", "description": "Every second" }], "multiSelect": false }] } }
+    ] }
+  },
+  "promptBar": {
+    "caution": { "repo": "discord-audit", "script": "did-not-land", "summary": "node --test capture.test.mjs", "tier": "caution" },
+    "question": { "repo": "portfolio-site", "script": "question-options" }
+  },
+  "ruleOffers": [
+    { "repo": "vault-mcp", "pattern": "Bash(npm run test)", "count": 3, "threshold": 3, "ruleNote": null },
+    { "repo": "rustot", "pattern": "Bash(cargo test:*)", "count": 5, "threshold": 3, "ruleNote": "anyFlags" }
+  ],
+  "rules5": {
+    "vault-mcp": ["Bash(npm run lint)", "mcp__vault__vault_search"],
+    "rustot": ["Bash(npm run build)", "WebFetch(domain:docs.rs)"],
+    "fleetmates": ["mcp__vault__vault_get_note"]
+  },
+  "settingsLocal": "{\n  \"env\": {\n    \"FOO\": \"bar\"\n  },\n  \"permissions\": {\n    \"deny\": [\n      \"Read(./.env)\"\n    ],\n    \"allow\": [],\n    \"ask\": []\n  },\n  \"model\": \"sonnet\"\n}\n",
+  "byHand": "Bash(npm run typecheck)",
+  "xss": {
+    "optionLabel": "<img src=x onerror=alert(1)>",
+    "rulePattern": "Bash(<script>alert(2)</script>)",
+    "diffText": "<a href=\"javascript:alert(3)\">click</a> <img src=x onerror=alert(4)>"
+  }
+}
