@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { translate } from '../../components/StatusPill.jsx'
+import { titleText, translate } from '../../components/StatusPill.jsx'
 import { TranscriptLine } from '../../components/TranscriptLine.jsx'
 import { DegradedCard } from '../../components/DegradedCard.jsx'
 import { fetchMeetings, searchMeetings, startMeeting, startScribed, retryScribed } from '../../state/actions.js'
@@ -111,7 +111,7 @@ export function groupMeetings(meetings, now, t) {
  */
 export function searchHelper(result, q, t) {
   const hits = result?.hits ?? []
-  if (!hits.length) return text(t, 'meetings.search.none', { q })
+  if (!hits.length) return text(t, 'meetings.search.none', { q: titleText(q) })
   const meetings = Number.isFinite(result.meetingCount) ? result.meetingCount : new Set(hits.map(hit => hit.meetingId)).size
   return text(t, 'meetings.search.helper', { hits: hits.length, meetings })
 }
@@ -138,7 +138,7 @@ export function tagOptions(tags, t) {
   const preselected = list.find(item => item.isDefault)?.tag ?? list[0]?.tag
   return list.map(item => ({
     tag: item.tag,
-    label: item.confidential ? text(t, 'meetings.tag.option', { tag: item.tag, note: text(t, 'meetings.tag.confidential') }) : item.tag,
+    label: titleText(item.confidential ? text(t, 'meetings.tag.option', { tag: item.tag, note: text(t, 'meetings.tag.confidential') }) : item.tag),
     selected: item.tag === preselected
   }))
 }
@@ -209,7 +209,7 @@ export function TagMenu({ options, t, onPick, onClose }) {
     <ul className="meetings-tag-menu" role="listbox" aria-label={text(t, 'meetings.tag.menuLabel')} onKeyDown={onKeyDown}>
       {options.map(option => (
         <li key={option.tag} role="option" aria-selected={option.selected} tabIndex={option.selected ? 0 : -1} data-tag={option.tag}
-          className={option.selected ? 'meetings-tag meetings-tag--selected' : 'meetings-tag'} onClick={() => onPick(option.tag)}>{option.label}</li>
+          className={option.selected ? 'meetings-tag meetings-tag--selected' : 'meetings-tag'} onClick={() => onPick(option.tag)}><bdi>{option.label}</bdi></li>
       ))}
     </ul>
   )
@@ -224,10 +224,10 @@ function Row({ meeting, model, selected, hit, t, onOpen }) {
         onClick={event => { event.preventDefault()
           onOpen?.(meeting.id) }}>
         <span className="meetings-row-head">
-          <span className="meetings-row-title" lang="pt-BR">{meetingTitle(meeting, t)}</span>
+          <bdi className="meetings-row-title" lang="pt-BR">{titleText(meetingTitle(meeting, t))}</bdi>
           <span className="meetings-row-time">{clockTime(meeting.startedAt)}</span>
         </span>
-        <span className={post ? 'meetings-row-meta meetings-row-meta--post' : 'meetings-row-meta'}>{post ?? rowMeta(meeting, t)}</span>
+        <span className={post ? 'meetings-row-meta meetings-row-meta--post' : 'meetings-row-meta'}>{titleText(post ?? rowMeta(meeting, t))}</span>
       </a>
       {hit ? <TranscriptLine line={hit} ranges={hit.ranges} /> : null}
     </li>
@@ -276,13 +276,13 @@ export function MeetingsListView({ meetings = null, selectedId = null, recorder 
       </header>
       {configError ? (
         <div className="meeting-banner meeting-banner--error" role="alert">
-          <p className="meeting-banner-text">{text(t, 'meetings.noConfig', { path: configError.path ?? '' })}</p>
+          <p className="meeting-banner-text">{text(t, 'meetings.noConfig', { path: titleText(configError.path) })}</p>
           <button type="button" className="button button--secondary button--xs" onClick={onFixConfig}>{text(t, 'meetings.fixInSettings')}</button>
         </div>
       ) : null}
       {toast ? (
         <div className="archive-toast archive-toast--error" role="alert">
-          <p className="archive-toast-text">{toast.pt ? text(t, 'meetings.refused', { message: '' }) : null}<span lang={toast.pt ? 'pt-BR' : undefined}>{toast.message}</span></p>
+          <p className="archive-toast-text">{toast.pt ? text(t, 'meetings.refused', { message: '' }) : null}<bdi lang={toast.pt ? 'pt-BR' : undefined}>{titleText(toast.message)}</bdi></p>
           <button type="button" className="button button--ghost button--xs" onClick={onDismissToast}>{text(t, 'meetings.toast.dismiss')}</button>
         </div>
       ) : null}
@@ -404,10 +404,10 @@ export function Meetings({ route, search = '', state, t, navigate, api, now = Da
         onFixConfig={() => navigate('/settings/connections')} onDismissToast={() => setToast(null)}
         onStartScribed={() => { (onStartScribed ?? (() => startScribed(api)))()?.catch?.(() => {}) }}
         onRetryScribed={() => { (onRetryScribed ?? (() => retryScribed(api)))()?.catch?.(() => {}) }} />
-      <main className="meetings-detail-pane">
+      <div className="meetings-detail-pane">
         {selectedId ? <MeetingDetail key={selectedId} id={selectedId} api={api} t={t} navigate={navigate} now={now} q={result ? q.trim() : ''}
           hits={hitsFor(result, selectedId)} listItem={selected} detail={initial?.detail} /> : null}
-      </main>
+      </div>
     </div>
   )
 }

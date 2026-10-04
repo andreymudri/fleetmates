@@ -106,7 +106,7 @@ test('AC1: day groups read Today, Yesterday, Thursday and the newest row is sele
   assert.match(rows[0].tag, /aria-current="page"/, 'the newest meeting is selected on /meetings')
   assert.match(rows[0].text, /^Client A · weekly sync14:00Teams · 42 min · 3 action items$/)
   assert.equal(rows.filter(row => /aria-current/.test(row.tag)).length, 1)
-  assert.match(html, /<h2 class="meeting-detail-title">Client A · weekly sync<\/h2>/)
+  assert.match(html, /<h2 class="meeting-detail-title"><bdi>Client A · weekly sync<\/bdi><\/h2>/)
   assert.match(html, /<p class="meeting-meta">Today 14:00 · 42 min · Você \+ 3 speakers on Sala · transcribed with large-v3<\/p>/)
   assert.match(html, /<aside class="meetings-list" aria-label="Meetings"><header class="meetings-list-header"><h1 class="meetings-list-title">Meetings<\/h1>/)
 })
@@ -136,7 +136,7 @@ test('AC3: the tag menu lists pessoal, client-a, client-b with pessoal selected 
   const f = await fixture(t)
   const html = render(MeetingsListView, { meetings: f.list.meetings, tags: f.config.tags, menuOpen: true, now: f.now })
   assert.match(html, /<ul class="meetings-tag-menu" role="listbox" aria-label="Record with tag">/)
-  const options = [...html.matchAll(/<li role="option" aria-selected="(true|false)"[^>]*>([^<]*)<\/li>/g)].map(match => [match[2], match[1]])
+  const options = [...html.matchAll(/<li role="option" aria-selected="(true|false)"[^>]*><bdi>([^<]*)<\/bdi><\/li>/g)].map(match => [match[2], match[1]])
   assert.deepEqual(options, [['pessoal', 'true'], ['client-a · transcript not stored', 'false'], ['client-b · transcript not stored', 'false']])
 })
 
@@ -150,7 +150,7 @@ test('AC5: a refusal toasts "scribed refused: {message}" with the message in a p
   assert.deepEqual(api.calls, [['POST', '/api/meetings/start', { tag: 'client-a' }]])
   assert.deepEqual(went, [])
   const html = render(MeetingsListView, { meetings: [], toast, now: 0 })
-  assert.match(html, /role="alert"><p class="archive-toast-text">scribed refused: <span lang="pt-BR">sessão já ativa; pare a atual antes<\/span><\/p>/)
+  assert.match(html, /role="alert"><p class="archive-toast-text">scribed refused: <bdi lang="pt-BR">sessão já ativa; pare a atual antes<\/bdi><\/p>/)
 
   const ok = fakeApi({ post: () => Promise.resolve({ recorder: { state: 'recording', meetingId: 'm1' } }) })
   await startWithTag({ api: ok, navigate: to => went.push(to), show: () => {} })('pessoal')
@@ -243,9 +243,9 @@ test('AC12: <b> in a summary, a decision and an action item renders as literal t
   const html = render(MeetingDetailView, { detail, now: 0 })
   assert.doesNotMatch(html, /<b>/)
   assert.match(html, /<div class="meeting-summary" lang="pt-BR"><p>Resumo com &lt;b&gt;negrito&lt;\/b&gt; aqui\.<\/p><\/div>/)
-  assert.match(html, /<li lang="pt-BR">Decidir &lt;b&gt;isto&lt;\/b&gt;\.<\/li>/)
-  assert.match(html, /<p class="meeting-item-text" lang="pt-BR">fazer &lt;b&gt;aquilo&lt;\/b&gt;<\/p>/)
-  assert.match(html, /<p class="meeting-item-owner" lang="pt-BR">Você<\/p>/)
+  assert.match(html, /<li lang="pt-BR"><bdi>Decidir &lt;b&gt;isto&lt;\/b&gt;\.<\/bdi><\/li>/)
+  assert.match(html, /<p class="meeting-item-text" lang="pt-BR"><bdi>fazer &lt;b&gt;aquilo&lt;\/b&gt;<\/bdi><\/p>/)
+  assert.match(html, /<p class="meeting-item-owner" lang="pt-BR"><bdi>Você<\/bdi><\/p>/)
 })
 
 test('"Launch as session" opens /new with the encoded item text, and no "Research first" renders', async t => {
@@ -310,7 +310,7 @@ test('a confidential detail shows pins by time only and the transcript drawer sa
   assert.match(html, /<li class="meeting-pin"><span class="meeting-pin-time">18:11<\/span><\/li>/)
   assert.doesNotMatch(html, /Cinco por cento no beta<\/q>/)
   const open = render(MeetingDetailView, { detail: { ...f.details.planning, pins }, now: f.now })
-  assert.match(open, /<q class="meeting-pin-label" lang="pt-BR">Cinco por cento no beta<\/q>/)
+  assert.match(open, /<q class="meeting-pin-label" lang="pt-BR"><bdi>Cinco por cento no beta<\/bdi><\/q>/)
   assert.doesNotMatch(render(MeetingDetailView, { detail: weekly, now: f.now }), /Pinned moments/, 'hidden without pins')
   const lines = (await readTranscript(f.tree.sessionDir, weekly.meeting.id)).lines
   const body = render(TranscriptBody, { meeting: weekly.meeting, transcript: { lines }, focusT: 1500 })
@@ -335,4 +335,63 @@ test('the meeting screens render text only, import no CSS, and meetings.css styl
   assert.ok(start >= 0, 'meetings.css has the Meetings list block')
   const block = css.slice(start)
   assert.doesNotMatch(block, /#[0-9a-f]{3,8}\b|\brgba?\(/i, 'tokens only, no literal colors')
+})
+
+// M4 Task 20 (finding M4-T17-F2, qa-checklist 1.7, 08-security 4.5): escape, bell and bidi override characters in
+// server-provided meeting text show as visible <U+XXXX> tokens on every meeting surface, never raw.
+test('ESC, BEL and U+202E in meeting text render as visible tokens on the list, detail, transcript drawer and live view', async () => {
+  const { MeetingsListView } = await load('Meetings.jsx')
+  const { MeetingDetailView, TranscriptBody } = await load('MeetingDetail.jsx')
+  const { MeetingLiveView, liveItems } = await load('MeetingLive.jsx')
+  const evil = 'evil\u202etxt.exe \u001b[31mred\u001b[0m \u0007'
+  const tokens = ['evil<U+202E>txt.exe', '<U+001B>[31mred<U+001B>[0m', '<U+0007>']
+  const meeting = { id: 'm1', tag: `acme${evil}`, confidential: false, state: 'synthesized', startedAt: 0, endedAt: 60_000, apps: [evil], stuck: false, title: evil }
+  const line = { t0: 1, t1: 4, speaker: evil, text: evil }
+  const hit = { meetingId: 'm1', t0: 1, speaker: evil, snippet: `x ${evil}`, ranges: [[2, 6]] }
+  const surfaces = {
+    list: render(MeetingsListView, { meetings: [meeting], q: 'evil', result: { hits: [hit], meetingCount: 1 }, menuOpen: true,
+      tags: [{ tag: `acme${evil}`, confidential: true, isDefault: true }], toast: { message: evil, pt: true }, now: 0 }),
+    detail: render(MeetingDetailView, {
+      detail: { meeting, note: { title: evil, summary: `${evil}\n\n- ${evil}`, decisions: [evil], actionItems: [{ key: 'k', text: evil, owner: evil, dismissed: false }] },
+        pins: [{ id: 'p', t: 1, label: evil }], speakers: [evil], model: evil }, q: 'evil', hits: [hit], now: 0
+    }),
+    drawer: render(TranscriptBody, { meeting: { ...meeting, confidential: true }, transcript: { lines: [line, line] }, error: evil }),
+    live: render(MeetingLiveView, {
+      t: undefined, recorder: { state: 'recording', meetingId: 'm1', confidential: false }, items: liveItems([line], null), pins: [{ id: 'p', t: 1, label: evil }],
+      meta: `${evil} · PT-BR`, listening: false, lost: false, atBottom: true, readAloud: false, draft: '', busy: false,
+      thread: [{ id: 'a', question: evil, answer: `${evil}\n${evil}`, state: 'done', error: null }, { id: 'b', question: evil, answer: '', state: 'error', error: evil }],
+      onReadAloud: () => {}, onLineClick: () => {}, onJump: () => {}, onScroll: () => {}, onDraft: () => {}, onAsk: () => {},
+      onStopAsk: () => {}, onRetry: () => {}, onCopy: () => {}
+    })
+  }
+  for (const [where, html] of Object.entries(surfaces)) {
+    // A tag option's data-tag is the key Record starts with, never shown, so it keeps the tag as the config wrote it.
+    assert.doesNotMatch(html.replace(/ data-tag="[^"]*"/g, ''), /[\u001b\u0007\u202e]/, `${where}: no raw escape, bell or bidi override`)
+    for (const token of tokens) assert.ok(plain(html).includes(token), `${where}: shows ${token}`)
+  }
+  assert.match(surfaces.list, /<mark>evil<\/mark>&lt;U\+202E&gt;txt/, 'search-hit highlighting still marks the neutralised text')
+  assert.match(surfaces.live, /<p class="live-ask-answer" lang="pt-BR">evil&lt;U\+202E&gt;txt\.exe [^<]*\nevil/, 'a multi-line answer keeps its line break')
+  assert.match(surfaces.detail, /<div class="meeting-summary" lang="pt-BR"><p>evil&lt;U\+202E&gt;txt\.exe [^<]*<\/p>\s*<ul>\s*<li>evil/, 'the summary is still markdown')
+})
+
+// M4 Task 20: hit ranges index the server's text, so a control character before the hit must not shift the mark,
+// and the text span is a bidi isolate through dir="auto" (an inner bdi would break the markup web-meetings pins).
+test('a hit after control characters marks exactly its range and the transcript text span is a dir="auto" isolate', async () => {
+  const { TranscriptLine } = await load('../../components/TranscriptLine.jsx')
+  const html = render(TranscriptLine, { line: { t0: 1, speaker: 'Você', snippet: '\u202e\u001b x hit y' }, ranges: [[5, 8]] })
+  assert.match(html, /<span class="transcript-line-text" dir="auto" lang="pt-BR">&lt;U\+202E&gt;&lt;U\+001B&gt; x <mark>hit<\/mark> y<\/span>/)
+})
+
+// M4 Task 20 (finding M4-T17-F3, axe landmark-no-duplicate-main): the shell's main#main is the only main, so the
+// Meetings screen renders no main element of its own.
+test('the Meetings screen renders no main landmark of its own', async t => {
+  const { Meetings } = await load('Meetings.jsx')
+  const f = await fixture(t)
+  const html = render(Meetings, {
+    route: { name: 'meetings', params: {} }, search: '', state: { data: { recorder: { state: 'idle' }, meetings: {} } }, navigate: () => {},
+    api: fakeApi(), now: f.now, initial: { list: f.list, detail: f.details.weekly }
+  })
+  assert.match(html, /class="meetings-detail-pane"/, 'the detail pane renders')
+  assert.match(html, /meeting-detail-title/, 'with the selected meeting in it')
+  assert.doesNotMatch(html, /<main\b/)
 })

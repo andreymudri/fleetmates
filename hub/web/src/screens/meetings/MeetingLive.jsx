@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { translate } from '../../components/StatusPill.jsx'
-import { TranscriptLine, formatOffset } from '../../components/TranscriptLine.jsx'
+import { titleText, translate } from '../../components/StatusPill.jsx'
+import { TranscriptLine, formatOffset, proseText } from '../../components/TranscriptLine.jsx'
 import { askMeeting, fetchMeeting, fetchMeetingTranscript, pinMoment, unpinMoment } from '../../state/actions.js'
 
 /** The live view copy (screens/meetings.md section 9), plus the ask Stop strings this plan quotes (Task 14). */
@@ -148,8 +148,8 @@ export function toggleLinePin(api, meetingId, line, lines, pins) {
 function AskEntry({ entry, say, onStop, onRetry, onCopy }) {
   return (
     <li className="live-ask-entry">
-      <p className="live-ask-question" lang="pt-BR">{entry.question}</p>
-      {entry.answer ? <p className="live-ask-answer" lang="pt-BR">{entry.answer}</p> : null}
+      <p className="live-ask-question" lang="pt-BR"><bdi>{titleText(entry.question)}</bdi></p>
+      {entry.answer ? <p className="live-ask-answer" lang="pt-BR">{proseText(entry.answer)}</p> : null}
       {entry.state === 'streaming'
         ? (
           <p className="live-ask-status">
@@ -163,7 +163,7 @@ function AskEntry({ entry, say, onStop, onRetry, onCopy }) {
       {entry.state === 'error'
         ? (
           <p className="live-ask-error" role="alert">
-            {splitMessage(say('meetings.ask.error', { message: '\u0000' }), entry.error)}
+            <bdi>{splitMessage(say('meetings.ask.error', { message: '\u0000' }), titleText(entry.error))}</bdi>
             <button type="button" className="button button--ghost button--xs" onClick={() => onRetry(entry)}>{say('meetings.ask.retry')}</button>
           </p>
           )
@@ -200,7 +200,7 @@ export function MeetingLiveView({
       <section className="live-transcript" aria-label={say('meetings.live.heading')}>
         <header className="live-transcript-head">
           <h1 className="page-title">{say('meetings.live.heading')}</h1>
-          <p className="live-meta">{meta}</p>
+          <p className="live-meta">{titleText(meta)}</p>
           <label className="live-read-aloud">
             <input type="checkbox" checked={readAloud} onChange={event => onReadAloud(event.target.checked)} />
             {say('meetings.live.readAloud')}
@@ -232,7 +232,7 @@ export function MeetingLiveView({
             {pins.map(pin => (
               <li key={pin.id} className="live-pin">
                 <span className="live-pin-time">{formatOffset(pin.t)}</span>
-                {pin.label && !recorder?.confidential ? <span className="live-pin-label" lang="pt-BR">{pin.label}</span> : null}
+                {pin.label && !recorder?.confidential ? <bdi><span className="live-pin-label" lang="pt-BR">{titleText(pin.label)}</span></bdi> : null}
               </li>
             ))}
           </ol>

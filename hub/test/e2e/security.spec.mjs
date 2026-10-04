@@ -737,11 +737,11 @@ test('untrusted text (M4): qa 1.7 payloads in a tag, a title, note sections, act
   assert.equal(new URL(page.url()).origin, h.base, 'no navigation away')
 })
 
-// Finding M4-T17-F2 (S2, security): meeting text reaches the DOM with its escape, bell and bidi override characters
-// raw, where qa-checklist 1.7 asks for bidi controls shown or neutralised and ANSI stripped, as the M1 to M3
-// surfaces do. The surfaces it was seen on are listed in the assertion's actual value. The M4 payloads are otherwise
-// literal (the test above). A todo test until a fix task lands.
-test('untrusted text (M4): escape, bell and bidi controls in meeting text never reach the DOM raw', { todo: 'M4-T17-F2: meeting surfaces render U+202E and ANSI escapes raw' }, async t => {
+// Finding M4-T17-F2 (S2, security), fixed by M4 Task 20: meeting text reached the DOM with its escape, bell and bidi
+// override characters raw, where qa-checklist 1.7 asks for bidi controls shown or neutralised and ANSI stripped, as
+// the M1 to M3 surfaces do. The meeting surfaces now show them as visible <U+XXXX> tokens; a surface that regresses
+// is named in the assertion's actual value. The M4 payloads are otherwise literal (the test above).
+test('untrusted text (M4): escape, bell and bidi controls in meeting text never reach the DOM raw', async t => {
   const { xss } = meetingsUi
   const h = await startMeetings(t, { web: web.dir, fixture: hostileFixture })
   const id = h.tree.ids.hostile
