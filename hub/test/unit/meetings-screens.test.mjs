@@ -157,6 +157,31 @@ test('AC5: a refusal toasts "scribed refused: {message}" with the message in a p
   assert.deepEqual(went, ['/meetings/live'])
 })
 
+test('a start answered 202 without recording stops "Starting…" and says scribed did not confirm; the wait is bounded by the clock', async () => {
+  const { startWithTag, startView, MeetingsListView, START_SLOW_MS } = await load('Meetings.jsx')
+  const outcomes = []
+  const answer = state => fakeApi({ post: () => Promise.resolve({ recorder: { state, meetingId: null } }) })
+  const handlers = { navigate: to => outcomes.push(to), show: () => {}, onStarting: () => outcomes.push('starting'), onUnconfirmed: () => outcomes.push('unconfirmed'), onFailed: () => outcomes.push('failed') }
+  await startWithTag({ api: answer('idle'), ...handlers })('pessoal')
+  await startWithTag({ api: answer('starting'), ...handlers })('pessoal')
+  assert.deepEqual(outcomes, ['unconfirmed', 'starting'], 'an idle recorder after the 202 is not a start in progress')
+
+  const idle = { state: 'idle' }
+  assert.deepEqual(startView({ start: { phase: 'unconfirmed', at: 0 }, recorder: idle, now: 1 }), { busy: false, slow: true })
+  assert.deepEqual(startView({ start: { phase: 'pending', at: 1000 }, recorder: idle, now: 1000 + START_SLOW_MS - 1 }), { busy: true, slow: false })
+  assert.deepEqual(startView({ start: { phase: 'pending', at: 1000 }, recorder: idle, now: 1000 + START_SLOW_MS }), { busy: false, slow: true }, 'the injected clock bounds the wait')
+  assert.deepEqual(startView({ start: { phase: 'polling', at: 1000 }, recorder: { state: 'starting', since: 1000 }, now: 1000 + START_SLOW_MS }), { busy: false, slow: true })
+  assert.deepEqual(startView({ start: { phase: 'unconfirmed', at: 0 }, recorder: { state: 'recording' }, now: 1 }), { busy: false, slow: false })
+  assert.deepEqual(startView({ start: null, recorder: idle, now: 1 }), { busy: false, slow: false })
+
+  const view = startView({ start: { phase: 'unconfirmed', at: 0 }, recorder: idle, now: 1 })
+  const html = render(MeetingsListView, { meetings: [], recorder: idle, starting: view.busy, startSlow: view.slow, now: 0 })
+  const record = /<button type="button" class="button button--secondary button--sm meetings-record"([^>]*)>([\s\S]*?)<\/button>/.exec(html)
+  assert.doesNotMatch(record[1], /disabled/, 'Record is usable again')
+  assert.equal(plain(record[2]), 'Record')
+  assert.match(html, /<p class="meeting-muted" role="status">scribed did not confirm the start\. Checking…<\/p>/)
+})
+
 test('AC10: with scribed down the list still renders and the degraded card replaces Record', async t => {
   const { MeetingsListView } = await load('Meetings.jsx')
   const f = await fixture(t)

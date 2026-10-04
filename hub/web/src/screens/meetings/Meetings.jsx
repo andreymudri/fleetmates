@@ -147,22 +147,44 @@ export function tagOptions(tags, t) {
  * Start a recording with a tag: `startMeeting`, then `/meetings/live` when scribed answered `recording`
  * (`onStarting` when the server is still waiting for the poll); a refusal shows "scribed refused: {message}"
  * with scribed's message verbatim.
- * @param {{ api: object, navigate: (to: string) => void, show: (toast: { message: string, pt: boolean } | null) => void, onStarting?: () => void, onFailed?: () => void }} options
+ * A 202 whose recorder is neither `recording` nor `starting` (the server gave up waiting and the recorder is idle)
+ * calls `onUnconfirmed`, so Record is usable again and says scribed did not confirm.
+ * @param {{ api: object, navigate: (to: string) => void, show: (toast: { message: string, pt: boolean } | null) => void, onStarting?: () => void, onUnconfirmed?: () => void, onFailed?: () => void }} options
  * @returns {(tag: string) => Promise<void>}
  */
-export function startWithTag({ api, navigate, show, onStarting = () => {}, onFailed = () => {} }) {
+export function startWithTag({ api, navigate, show, onStarting = () => {}, onUnconfirmed = () => {}, onFailed = () => {} }) {
   return async tag => {
     show(null)
     try {
       const body = await startMeeting(api, tag)
-      if (body?.recorder?.state === 'recording') navigate('/meetings/live')
-      else onStarting()
+      const state = body?.recorder?.state
+      if (state === 'recording') navigate('/meetings/live')
+      else if (state === 'starting') onStarting()
+      else onUnconfirmed()
     } catch (error) {
       onFailed()
       if (error?.code === 'scribed_refused') show({ message: String(error.details?.text ?? error.message ?? ''), pt: true })
       else show({ message: String(error?.message ?? error?.code ?? 'failed'), pt: false })
     }
   }
+}
+
+/**
+ * What Record shows for a start (meetings.md 5.2). `start` is the screen's own start: `pending` while the POST is in
+ * flight, `polling` after a 202 `starting`, `unconfirmed` after a 202 that did not start, each with the clock time
+ * `at` it began. Record is busy ("Starting…") while the start is pending or polling, or while the recorder is
+ * `starting` for another client; after {@link START_SLOW_MS} by `now`, or once unconfirmed, it is usable again and
+ * says scribed did not confirm. A recording clears both.
+ * @param {{ start: { phase: 'pending'|'polling'|'unconfirmed', at: number } | null, recorder: { state: string, since?: number | null }, now: number }} input
+ * @returns {{ busy: boolean, slow: boolean }}
+ */
+export function startView({ start, recorder, now }) {
+  if (recorder?.state === 'recording') return { busy: false, slow: false }
+  if (start?.phase === 'unconfirmed') return { busy: false, slow: true }
+  if (start) return now - start.at >= START_SLOW_MS ? { busy: false, slow: true } : { busy: true, slow: false }
+  if (recorder?.state !== 'starting') return { busy: false, slow: false }
+  const slow = Number.isFinite(recorder.since) && now - recorder.since >= START_SLOW_MS
+  return { busy: true, slow }
 }
 
 /**
@@ -216,7 +238,8 @@ function Row({ meeting, model, selected, hit, t, onOpen }) {
  * The Meetings list aside without its data wiring (meetings.md 3.1, 4.1, 5.1): h1, the Record area (Record and the
  * tag menu, "Recording · Open", the scribed degraded card or the config notice), the search field and helper, the
  * refusal toast, then the day groups, five skeleton rows while loading, or the empty text. With a search result only
- * meetings with hits are listed, each with its first hit. Pure, so tests can render it and call its handlers.
+ * meetings with hits are listed, each with its first hit. `starting` and `startSlow` are {@link startView}'s `busy`
+ * and `slow`. Pure, so tests can render it and call its handlers.
  * @param {object} props
  */
 export function MeetingsListView({ meetings = null, selectedId = null, recorder = { state: 'idle' }, tags = [], configError = null, model = null,
@@ -231,14 +254,14 @@ export function MeetingsListView({ meetings = null, selectedId = null, recorder 
     record = <a className="meetings-recording-link" href="/meetings/live" onClick={event => { event.preventDefault()
       onOpenLive?.() }}><span className="meetings-rec-dot meetings-rec-dot--on" aria-hidden="true" />{text(t, 'meetings.recordingOpen')}</a>
   } else {
-    const busy = starting || state === 'starting'
+    const busy = starting
     record = (
       <div className="meetings-record-area">
         <button type="button" className="button button--secondary button--sm meetings-record" aria-haspopup="listbox" aria-expanded={menuOpen}
           aria-busy={busy || undefined} disabled={!!configError || state === 'stopping' || busy} onClick={onRecord}>
           <span className="meetings-rec-dot" aria-hidden="true" />{busy ? text(t, 'meetings.starting') : text(t, 'meetings.record')}
         </button>
-        {busy && startSlow ? <p className="meeting-muted" role="status">{text(t, 'meetings.startSlow')}</p> : null}
+        {startSlow ? <p className="meeting-muted" role="status">{text(t, 'meetings.startSlow')}</p> : null}
         {menuOpen && !configError ? <TagMenu options={tagOptions(tags, t)} t={t} onPick={onPick} onClose={onCloseMenu} /> : null}
       </div>
     )
@@ -312,14 +335,15 @@ const queryOf = search => {
  * store's `meeting.updated` rows, searches 300 ms after typing, starts recordings from the tag menu, and selects the
  * newest meeting on `/meetings`. `initial` seeds the reads (`{ list, result }`) for rendering without a server.
  * @param {{ route: { name: string, params: object }, search?: string, state: object, t?: Function, navigate: (to: string) => void, api: object,
- *   now?: number, dispatch?: Function, initial?: { list?: object, result?: object, detail?: object }, onStartScribed?: Function, onRetryScribed?: Function }} props
+ *   now?: number, clock?: () => number, dispatch?: Function, initial?: { list?: object, result?: object, detail?: object }, onStartScribed?: Function,
+ *   onRetryScribed?: Function }} props `clock` times the start wait of {@link startView} (default `Date.now`).
  */
-export function Meetings({ route, search = '', state, t, navigate, api, now = Date.now(), dispatch, initial, onStartScribed, onRetryScribed }) {
+export function Meetings({ route, search = '', state, t, navigate, api, now = Date.now(), clock = Date.now, dispatch, initial, onStartScribed, onRetryScribed }) {
   const [list, setList] = useState(initial?.list ?? null)
   const [q, setQ] = useState(() => queryOf(search))
   const [result, setResult] = useState(initial?.result ?? null)
   const [menuOpen, setMenuOpen] = useState(false)
-  const [starting, setStarting] = useState(false)
+  const [start, setStart] = useState(null)
   const [toast, setToast] = useState(null)
   const [, setTick] = useState(0)
   const debounce = useRef(null)
@@ -348,31 +372,33 @@ export function Meetings({ route, search = '', state, t, navigate, api, now = Da
   const recorder = state?.data?.recorder ?? list?.recorder ?? { state: 'idle' }
   const recordingNow = recorder.state === 'recording'
   useEffect(() => {
-    if (starting && recordingNow) { setStarting(false)
-      navigate('/meetings/live') }
-  }, [starting, recordingNow])
+    if (start && start.phase !== 'unconfirmed' && recordingNow) navigate('/meetings/live')
+    if (start && recordingNow) setStart(null)
+  }, [start, recordingNow])
+  const startedAt = start && start.phase !== 'unconfirmed' ? start.at : recorder.state === 'starting' && Number.isFinite(recorder.since) ? recorder.since : null
   useEffect(() => {
-    if (recorder.state !== 'starting' && !starting) return undefined
-    const timer = setTimeout(() => setTick(n => n + 1), START_SLOW_MS)
+    if (startedAt === null) return undefined
+    const timer = setTimeout(() => setTick(n => n + 1), Math.max(0, startedAt + START_SLOW_MS - clock()) + 10)
     return () => clearTimeout(timer)
-  }, [recorder.state, starting])
+  }, [startedAt])
+  const view = startView({ start, recorder, now: clock() })
   const meetings = list ? mergeRows(list.meetings, state?.data?.meetings) : null
   const newest = meetings ? groupMeetings(meetings, now, t)[0]?.meetings[0]?.id ?? null : null
   const selectedId = route?.name === 'meeting' ? route.params?.id ?? null : newest
   const selected = meetings?.find(meeting => meeting.id === selectedId) ?? null
-  const since = Number.isFinite(recorder.since) ? recorder.since : null
-  const pick = startWithTag({ api, navigate, show: setToast, onFailed: () => setStarting(false) })
+  const pick = startWithTag({ api, navigate, show: setToast, onStarting: () => setStart(current => current && { ...current, phase: 'polling' }),
+    onUnconfirmed: () => setStart(current => current && { ...current, phase: 'unconfirmed' }), onFailed: () => setStart(null) })
   const onPick = tag => {
     setMenuOpen(false)
-    setStarting(true)
+    setStart({ phase: 'pending', at: clock() })
     pick(tag)
   }
   const withQ = q.trim().length >= 2 ? `?q=${encodeURIComponent(q.trim())}` : ''
   return (
     <div className="meetings-screen">
       <MeetingsListView meetings={meetings} selectedId={selectedId} recorder={recorder} tags={list?.tags ?? []} configError={list?.configError ?? null}
-        model={list?.model ?? null} q={q} result={result} menuOpen={menuOpen} starting={starting}
-        startSlow={recorder.state === 'starting' && since !== null && Date.now() - since >= START_SLOW_MS} toast={toast} now={now} t={t}
+        model={list?.model ?? null} q={q} result={result} menuOpen={menuOpen} starting={view.busy}
+        startSlow={view.slow} toast={toast} now={now} t={t}
         onRecord={() => setMenuOpen(open => !open)} onPick={onPick} onCloseMenu={() => setMenuOpen(false)} onQuery={setQ}
         onOpen={id => navigate(`/meetings/${encodeURIComponent(id)}${withQ}`)} onOpenLive={() => navigate('/meetings/live')}
         onFixConfig={() => navigate('/settings/connections')} onDismissToast={() => setToast(null)}
