@@ -272,7 +272,8 @@ if (import.meta.main) {
   })
   const fixedClock = page => page.clock.setFixedTime(fixtureNow())
   const rowTitles = page => page.$$eval('.meetings-row-title', rows => rows.map(row => row.textContent))
-  const barText = page => page.textContent('.rec-bar')
+  // The bar's own text: since Task 19 the bar also holds the visually hidden skip link as its first child.
+  const barText = page => page.textContent('.rec-bar-text')
 
   spec('host isolation: every host binary resolves to its shim, and no session bus, display, agent or token reaches a child', async () => {
     const { shimDir, runtime, removed } = isolateHost()
@@ -402,7 +403,7 @@ if (import.meta.main) {
     assert.equal(h.fake.state.recording, false, 'scribed polls report recording:false')
     assert.equal((await h.recorder()).state, 'stopping')
     assert.equal(await barText(page), 'Stopping… saving the session')
-    await page.waitForFunction(() => document.querySelector('.rec-bar')?.textContent === 'Still stopping, scribed is closing the session', null, { timeout: 70_000 })
+    await page.waitForFunction(() => document.querySelector('.rec-bar-text')?.textContent === 'Still stopping, scribed is closing the session', null, { timeout: 70_000 })
     assert.ok(Date.now() - clicked >= 60_000, 'the slow text waits 60 s')
     await page.waitForSelector('.rec-bar', { state: 'detached', timeout: 20_000 })
   })
@@ -503,13 +504,13 @@ if (import.meta.main) {
     assert.equal(await page.getAttribute('.rail-item--meetings .rail-link', 'aria-label'), 'Meetings, recording')
   })
 
-  // Finding M4-T17-F1 (S2, layout): `.shell--recording > .rail` sets `height: calc(100vh - var(--layout-rec-bar))`
-  // (hub/web/src/styles/shell.css:247-248) on a content-box Rail with 12 px top and bottom padding (shell.css:33), so
-  // its border box shrinks by 16 px, not 40, and with the 41 px bar (40 px plus its 1 px bottom border, shell.css:259)
-  // the shell is 25 px taller than the viewport at 1920x1080: the bottom of the Rail (Settings) is pushed below the
-  // fold. Measured in Chromium: Rail 1080 px before, 1064 px while recording; main 1080 then 1040. A todo test until a
-  // fix task lands.
-  spec('rail-and-shell AC6: while recording the Rail is 40 px shorter and the shell fits the viewport', { todo: 'M4-T17-F1: the Rail shrinks by 16 px (content-box padding) and the shell overflows' }, async t => {
+  // Finding M4-T17-F1 (S2, layout), fixed by Task 19. Task 17 measured the Rail shrinking by 16 px, not 40, while
+  // recording (a content-box height on a Rail with 12 px top and bottom padding) and the shell 25 px taller than the
+  // viewport (that and the 41 px bar: 40 px plus its 1 px bottom border). The recording height of the Rail now
+  // subtracts its padding, and the bar is border-box so its border sits inside the 40 px token. Only the Rail half is
+  // pinned here: without the bar's border-box this test still passes (the bar is 41 px and `.shell` scrolls 1 px
+  // inside itself, which `documentElement.scrollHeight` does not see; measured with Task 19's probe).
+  spec('rail-and-shell AC6: while recording the Rail is 40 px shorter and the shell fits the viewport', async t => {
     const h = await startMeetings(t, { web: web.dir })
     const page = await openDeck(browser, h, '/')
     const sizes = () => page.evaluate(() => ({ rail: document.querySelector('nav.rail').getBoundingClientRect().height, scroll: document.documentElement.scrollHeight, inner: innerHeight }))
