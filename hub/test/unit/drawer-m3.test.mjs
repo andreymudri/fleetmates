@@ -294,6 +294,8 @@ test('T17-F2: when the focused row leaves, focus moves to the next row, else the
   assert.equal(refocusTarget(panelOf([fakeRow('a'), fakeRow('c')]), ['a', 'b', 'c'], 'b').name, 'allow-c', 'the next row first')
   assert.equal(refocusTarget(panelOf([fakeRow('a')]), ['a', 'c'], 'c').name, 'allow-a', 'the previous row when none follows')
   assert.equal(refocusTarget(panelOf([fakeRow('a'), fakeRow('b')]), ['a', 'b', 'c'], 'c').name, 'allow-b', 'the nearest previous row, not the first')
+  const openOnly = id => ({ getAttribute: () => id, matches: () => false, querySelector: selector => selector === 'a' ? element(`open-${id}`) : null })
+  assert.equal(refocusTarget(panelOf([fakeRow('a'), openOnly('c')]), ['a', 'b', 'c'], 'b').name, 'open-c', 'a next row with no primary action gets its Open link')
   assert.equal(refocusTarget(panelOf([]), ['a'], 'a').name, 'close', 'Close when no row is left')
   assert.equal(refocusTarget(panelOf([fakeRow('a'), fakeRow('c', { leaving: true })]), ['a', 'b', 'c'], 'b').name, 'allow-a', 'a row that is itself leaving is skipped')
 })
