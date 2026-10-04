@@ -10,6 +10,7 @@ import {
   decodeEvent,
   defaultSocketPath,
   encodeCommand,
+  ProtocolError,
   status,
   subscribe
 } from '../../server/adapters/scribed.mjs'
@@ -82,6 +83,47 @@ test('encodeCommand output for each commands.jsonl line parses deep-equal, raw U
   assert.ok(accented.includes('sessão já começou'))
 })
 
+const PLACEHOLDER_TAGS = ['pessoal', 'client-a', 'client-b', 'acme']
+
+/**
+ * Push every string `tag` value found anywhere inside `value` onto `out`.
+ * @param {unknown} value
+ * @param {string[]} out
+ */
+function collectTags (value, out) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectTags(item, out)
+  } else if (value !== null && typeof value === 'object') {
+    for (const [key, inner] of Object.entries(value)) {
+      if (key === 'tag' && typeof inner === 'string') out.push(inner)
+      else collectTags(inner, out)
+    }
+  }
+}
+
+test('fixtures use placeholder tags only', () => {
+  /** @type {string[]} */
+  const tags = []
+  for (const line of [...lines('commands.jsonl'), ...lines('events.jsonl')]) {
+    collectTags(JSON.parse(line), tags)
+  }
+  for (const { line, message } of lines('invalid.jsonl').map((l) => JSON.parse(l))) {
+    try { collectTags(JSON.parse(line), tags) } catch {}
+    for (const m of message.matchAll(/tag desconhecida: '([^']*)'/g)) tags.push(m[1])
+  }
+  assert.ok(tags.length > 0)
+  for (const tag of tags) assert.ok(PLACEHOLDER_TAGS.includes(tag), `tag ${JSON.stringify(tag)} is not a placeholder`)
+})
+
+test('decodeEvent throws a ProtocolError with code unknown_type for a type outside the closed list', () => {
+  assert.throws(() => decodeEvent('{"type": "pin", "t": 1}'), (err) => {
+    assert.ok(err instanceof ProtocolError)
+    assert.equal(/** @type {any} */ (err).code, 'unknown_type')
+    assert.match(/** @type {Error} */ (err).message, /^type desconhecido: 'pin'/)
+    return true
+  })
+})
+
 test('encodeCommand keeps only the keys of the command', () => {
   assert.equal(encodeCommand({ cmd: 'status', extra: 1 }), '{"cmd":"status"}\n')
 })
@@ -142,7 +184,7 @@ async function fakeScribed (onCommand) {
 }
 
 const IDLE = '{"type": "status", "recording": false, "session_id": null, "tag": null, "elapsed_s": 0, "routed_apps": []}\n'
-const REC = '{"type": "status", "recording": true, "session_id": "2026-09-08T14-00-12", "tag": "optimas", "elapsed_s": 812, "routed_apps": ["Chromium"]}\n'
+const REC = '{"type": "status", "recording": true, "session_id": "2026-09-08T14-00-12", "tag": "acme", "elapsed_s": 812, "routed_apps": ["Chromium"]}\n'
 
 test('status sends one status command and resolves with the decoded answer', async () => {
   const fake = await fakeScribed((socket, cmd) => {
