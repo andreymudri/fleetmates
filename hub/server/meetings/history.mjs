@@ -197,28 +197,61 @@ export function lockKey(info) {
 }
 
 const readProcLocks = () => fs.readFile('/proc/locks', 'utf8')
+const readMountinfo = () => fs.readFile('/proc/self/mountinfo', 'utf8')
 
-async function lockHeld(sessionDir, { now, procLocks }) {
+const unescapeMount = value => value.replace(/\\([0-7]{3})/g, (_, octal) => String.fromCharCode(parseInt(octal, 8)))
+
+/**
+ * The `major:minor` (decimal) of the mount that contains `file`, from `/proc/self/mountinfo` text: field 3 of the
+ * entry with the longest mount point that is `file` or one of its parents (the later entry on a tie, since a later
+ * mount shadows an earlier one). Mount points are decoded from mountinfo's octal escapes.
+ * @param {string} text mountinfo text
+ * @param {string} file absolute realpath
+ * @returns {string|null}
+ */
+export function mountDevice(text, file) {
+  let best = null
+  let bestLength = -1
+  for (const line of String(text).split('\n')) {
+    const fields = line.split(' ')
+    if (fields.length < 5 || !/^\d+:\d+$/.test(fields[2])) continue
+    const point = unescapeMount(fields[4])
+    const contains = point === '/' || file === point || file.startsWith(point + '/')
+    if (contains && point.length >= bestLength) { best = fields[2]; bestLength = point.length }
+  }
+  return best
+}
+
+async function lockHeld(sessionDir, { now, procLocks, mountinfo }) {
+  const lock = path.join(sessionDir, 'postmeet.lock')
   let info
-  try { info = await fs.lstat(path.join(sessionDir, 'postmeet.lock'), { bigint: true }) } catch { return false }
+  try { info = await fs.lstat(lock, { bigint: true }) } catch { return false }
   if (!info.isFile()) return false
   let text
   try { text = typeof procLocks === 'string' ? procLocks : await procLocks() } catch { text = null }
   if (typeof text !== 'string') return now - Number(info.mtimeMs) < QUIET_MS
-  return parseProcLocks(text).has(lockKey(info))
+  const held = parseProcLocks(text)
+  if (held.has(lockKey(info))) return true
+  // On btrfs, stat() reports the subvolume's anonymous device while /proc/locks reports the device that
+  // mountinfo lists for the mount, so the inode is also matched against that device.
+  let device = null
+  try { device = mountDevice(typeof mountinfo === 'string' ? mountinfo : await mountinfo(), await fs.realpath(lock)) } catch {}
+  return device !== null && held.has(`${device}:${info.ino}`)
 }
 
 /**
  * The post-processing state of one session and the deck-derived `stuck` flag (state-machines 6.4): stuck when
  * the session has a manifest, its state is not `synthesized`, `postmeet.log` (or, without a log, `session.json`)
  * has not changed for 10 minutes, and `<sessionDir>/postmeet.lock` is not held. Held means the lock file's
- * `major:minor:inode` is listed in `/proc/locks`; where that cannot be read, that the lock changed within 10 minutes.
+ * inode is listed in `/proc/locks` with the device `stat()` reports or the device `/proc/self/mountinfo` gives for
+ * the mount holding it (the two differ on btrfs subvolumes); where `/proc/locks` cannot be read, held means the
+ * lock changed within 10 minutes.
  * @param {string} sessionDir
  * @param {string} id
- * @param {{ now?: number, procLocks?: string | (() => string | Promise<string>) }} [options]
+ * @param {{ now?: number, procLocks?: string | (() => string | Promise<string>), mountinfo?: string | (() => string | Promise<string>) }} [options]
  * @returns {Promise<{ state: SessionEntry['state'], stuck: boolean }>}
  */
-export async function postState(sessionDir, id, { now = Date.now(), procLocks = readProcLocks } = {}) {
+export async function postState(sessionDir, id, { now = Date.now(), procLocks = readProcLocks, mountinfo = readMountinfo } = {}) {
   if (!SESSION_ID.test(id)) return { state: 'stopping', stuck: false }
   const manifest = await readManifest(sessionDir, id)
   if (!manifest.present) return { state: 'stopping', stuck: false }
@@ -229,7 +262,7 @@ export async function postState(sessionDir, id, { now = Date.now(), procLocks = 
     try { changed = (await fs.lstat(path.join(sessionDir, id, name))).mtimeMs; break } catch {}
   }
   if (changed === null || now - changed < QUIET_MS) return { state, stuck: false }
-  return { state, stuck: !await lockHeld(sessionDir, { now, procLocks }) }
+  return { state, stuck: !await lockHeld(sessionDir, { now, procLocks, mountinfo }) }
 }
 
 /**

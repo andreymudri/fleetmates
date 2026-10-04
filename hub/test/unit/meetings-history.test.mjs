@@ -1,12 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, mkdir, symlink, writeFile, unlink, utimes, stat } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, symlink, writeFile, unlink, utimes, stat, realpath } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import {
-  listSessions, postState, readTranscript, readLiveEvents, searchTranscripts, logTail, speakers, lockKey, parseTranscriptMd
+  listSessions, postState, readTranscript, readLiveEvents, searchTranscripts, logTail, speakers, lockKey, parseTranscriptMd,
+  mountDevice, readInside
 } from '../../server/meetings/history.mjs'
 import { writeMeetingsTree, meetings5, VARIANTS } from '../helpers/meetings-tree.mjs'
 
@@ -103,7 +104,36 @@ test('postState without /proc/locks treats a lock changed within 10 minutes as h
   assert.equal((await postState(m.sessionDir, m.ids.stuck, { now: m.now, procLocks: unreadable })).stuck, true)
 })
 
-test('postState reads a real flock(1) lock from /proc/locks', { skip: !(existsSync('/proc/locks') && existsSync('/usr/bin/flock')) && 'needs Linux /proc/locks and /usr/bin/flock' }, async t => {
+test('postState detects a btrfs-style lock: /proc/locks lists the mount device, stat() an anonymous one', async t => {
+  const m = await tree(t, { variants: ['stuck'] })
+  const lock = path.join(m.sessionDir, 'postmeet.lock')
+  await writeFile(lock, '')
+  const info = await stat(lock, { bigint: true })
+  const statDev = lockKey(info).split(':').slice(0, 2).join(':')
+  const mountDev = statDev === '0:29' ? '0:31' : '0:29'
+  const root = await realpath(m.root)
+  const mountinfo = [
+    `32 2 0:99 /@ / rw,relatime shared:1 - btrfs /dev/mapper/root rw,subvol=/@`,
+    `58 32 ${mountDev} /@home ${root} rw,relatime shared:206 - btrfs /dev/mapper/root rw,subvol=/@home`,
+    `70 58 0:98 / ${root}-other rw,relatime - tmpfs tmpfs rw`
+  ].join('\n') + '\n'
+  const options = { now: m.now, mountinfo }
+  const held = procLine(`${mountDev}:${info.ino}`)
+  assert.equal((await postState(m.sessionDir, m.ids.stuck, { ...options, procLocks: held })).stuck, false)
+  assert.equal((await postState(m.sessionDir, m.ids.stuck, { ...options, procLocks: procLine(`${mountDev}:${info.ino + 1n}`) })).stuck, true)
+  assert.equal((await postState(m.sessionDir, m.ids.stuck, { ...options, procLocks: procLine(`0:98:${info.ino}`) })).stuck, true)
+  const elsewhere = `32 2 0:99 / / rw - ext4 /dev/x rw\n70 32 ${mountDev} / ${root}-other rw - tmpfs tmpfs rw\n`
+  assert.equal((await postState(m.sessionDir, m.ids.stuck, { now: m.now, mountinfo: elsewhere, procLocks: held })).stuck, true)
+})
+
+test('mountDevice picks the longest containing mount point and decodes octal escapes', () => {
+  const text = '1 0 0:10 / / rw - ext4 a rw\n2 1 0:40 / /mnt/with\\040space rw - x y rw\n3 1 0:41 / /mnt/with rw - x y rw\n'
+  assert.equal(mountDevice(text, '/mnt/with space/a'), '0:40')
+  assert.equal(mountDevice(text, '/mnt/with/a'), '0:41')
+  assert.equal(mountDevice(text, '/mnt/without/a'), '0:10')
+})
+
+test('postState reads a real flock(1) lock from /proc/locks',{ skip: !(existsSync('/proc/locks') && existsSync('/usr/bin/flock')) && 'needs Linux /proc/locks and /usr/bin/flock' }, async t => {
   const m = await tree(t, { variants: ['stuck'] })
   const lock = path.join(m.sessionDir, 'postmeet.lock')
   await writeFile(lock, '')
@@ -137,6 +167,25 @@ test('readTranscript prefers transcript.json, then transcript.md, then transcrip
   assert.equal(speakers(live.lines), 2)
   await unlink(path.join(dir, 'transcript.jsonl'))
   assert.equal(await readTranscript(m.sessionDir, m.ids.weekly), null)
+})
+
+test('reads refuse a directory or a FIFO in place of a file, and a file over the cap', async t => {
+  const m = await tree(t, { variants: ['stuck'] })
+  const json = path.join(m.sessionDir, m.ids.weekly, 'transcript.json')
+  await unlink(json)
+  await mkdir(json)
+  await assert.rejects(readTranscript(m.sessionDir, m.ids.weekly), { code: 'refused' })
+  const mkfifo = ['/usr/bin/mkfifo', '/bin/mkfifo'].find(existsSync)
+  if (mkfifo) {
+    const log = path.join(m.sessionDir, m.ids.stuck, 'postmeet.log')
+    await unlink(log)
+    assert.equal(spawnSync(mkfifo, [log]).status, 0)
+    await assert.rejects(logTail(m.sessionDir, m.ids.stuck), { code: 'refused' })
+  } else t.diagnostic('no mkfifo binary: the FIFO case did not run')
+  const md = await stat(path.join(m.sessionDir, m.ids.planning, 'transcript.md'))
+  await assert.rejects(readInside(m.sessionDir, [m.ids.planning, 'transcript.md'], md.size - 1), { code: 'too_large' })
+  const exact = await readInside(m.sessionDir, [m.ids.planning, 'transcript.md'], md.size)
+  assert.equal(exact.bytes.length, md.size)
 })
 
 test('transcript.md reads [HH:MM:SS] with hours, and malformed lines are skipped and counted', () => {

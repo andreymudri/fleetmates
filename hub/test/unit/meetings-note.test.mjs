@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile, readFile, symlink, unlink } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, writeFile, readFile, symlink, unlink } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
@@ -36,6 +36,21 @@ test('findNote skips a symlinked note and a folder outside the vault', async t =
   assert.equal(await findNote(where(m, 'weekly', 'client-a')), null)
   assert.equal(await findNote({ ...where(m, 'planning', 'pessoal'), meetingsFolder: '../meetings' }), null)
   assert.equal(await findNote(where(m, 'planning', 'pessoal')), m.notes.planning)
+})
+
+test('findNote refuses a meetings folder that is the vault itself or outside it', async t => {
+  const m = await tree(t)
+  const body = (await readFile(path.join(m.vaultPath, m.notes.weekly), 'utf8'))
+  const name = path.basename(m.notes.weekly)
+  const outside = path.join(m.root, 'outside-vault')
+  await mkdir(outside)
+  for (const dir of [m.vaultPath, m.root, outside]) await writeFile(path.join(dir, name), body)
+  const base = where(m, 'weekly', 'client-a')
+  assert.equal(await findNote({ ...base, meetingsFolder: '.' }), null)
+  assert.equal(await findNote({ ...base, meetingsFolder: '..' }), null)
+  assert.equal(await findNote({ ...base, meetingsFolder: outside }), null)
+  assert.equal(await findNote({ ...base, meetingsFolder: '../outside-vault' }), null)
+  assert.equal(await findNote(base), m.notes.weekly)
 })
 
 test('readNote reads a vault-relative note and refuses a symlink', async t => {
