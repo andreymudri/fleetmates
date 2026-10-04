@@ -169,15 +169,31 @@ function parseSubset(text, home) {
   let pending = null
   let skip = null
 
+  const idOf = keys => keys.join('\u0000')
   const setScalar = (keys, value, line) => {
-    const name = keys.join('.')
-    values.set(name, value)
-    lines.set(name, line)
+    const id = idOf(keys)
+    values.set(id, value)
+    lines.set(id, line)
     if (keys.length === 4) stored.set(keys[2], value !== null && !value.quoted && TRUE_WORDS.has(value.text))
   }
   const closePending = () => {
     if (pending && pending.kind === 'scalar') setScalar(pending.keys, null, pending.line)
     pending = null
+  }
+  // PyYAML keeps the last of duplicate mapping keys and drops the earlier value whole (no merge), so a key seen
+  // again forgets everything recorded under it. A replaced tag keeps its first position, as a Python dict does.
+  const forget = keys => {
+    const id = idOf(keys)
+    for (const known of [...values.keys()]) {
+      if (known === id || known.startsWith(`${id}\u0000`)) { values.delete(known); lines.delete(known) }
+    }
+    const [a, b] = keys
+    if (a === 'synthesis' && (keys.length === 1 || (keys.length === 2 && b === 'tag_policies'))) {
+      tags.length = 0
+      stored.clear()
+    }
+    if (keys.length === 3 && a === 'synthesis' && b === 'tag_policies') stored.delete(keys[2])
+    if (keys.length === 1 && a === 'ask') askVaultMcp = false
   }
 
   const source = text.split(/\r?\n/)
@@ -241,6 +257,7 @@ function parseSubset(text, home) {
     const keys = [...top.keys, key]
     const kind = needKind(keys)
     const name = keys.join('.')
+    forget(keys)
     if (kind === 'presence') askVaultMcp = true
     if (keys.length === 3 && kind === 'map' && !tags.includes(key)) tags.push(key)
 
@@ -254,12 +271,12 @@ function parseSubset(text, home) {
   }
   closePending()
 
-  const scalar = name => values.get(name)?.text ?? null
+  const scalar = name => values.get(idOf(name.split('.')))?.text ?? null
   const absolute = name => {
     const value = scalar(name)
     if (value === null) return null
     const expanded = expandHome(value, home)
-    if (!path.isAbsolute(expanded)) throw new ConfigError('unsupported', lines.get(name) ?? null, `${name} must be an absolute path`)
+    if (!path.isAbsolute(expanded)) throw new ConfigError('unsupported', lines.get(idOf(name.split('.'))) ?? null, `${name} must be an absolute path`)
     return expanded
   }
   const sessionDir = absolute('session_dir')

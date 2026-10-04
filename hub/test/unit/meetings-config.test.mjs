@@ -95,6 +95,31 @@ test('a missing store_transcript is confidential', () => {
   assert.deepEqual(empty.tags.at(-1), { tag: 'client-b', confidential: true, isDefault: false })
 })
 
+test('a duplicate key replaces the earlier one entirely, as PyYAML does', () => {
+  const head = 'session_dir: /home/you/m\nsynthesis:\n  default_tag: acme\n  tag_policies:\n'
+  const trueThenOther = parse(`${head}    acme:\n      store_transcript: true\n    client-a:\n      store_transcript: true\n    acme:\n      other: 1\n`)
+  assert.equal(trueThenOther.ok, true, JSON.stringify(trueThenOther.error))
+  assert.deepEqual(policyFor(trueThenOther, 'acme'), { confidential: true })
+  assert.deepEqual(trueThenOther.tags.map(t => t.tag), ['acme', 'client-a'], 'a replaced key keeps its first position, as a Python dict does')
+  const otherThenTrue = parse(`${head}    acme:\n      other: 1\n    acme:\n      store_transcript: true\n`)
+  assert.deepEqual(policyFor(otherThenTrue, 'acme'), { confidential: false })
+  const emptyAgain = parse(`${head}    acme:\n      store_transcript: true\n    acme:\n`)
+  assert.deepEqual(policyFor(emptyAgain, 'acme'), { confidential: true })
+  // Every level: a second tag_policies or synthesis block replaces the first one's tags.
+  const policiesAgain = parse(`${head}    acme:\n      store_transcript: true\n  tag_policies:\n    client-a:\n      store_transcript: false\n`)
+  assert.deepEqual(policiesAgain.tags.map(t => t.tag), ['client-a'])
+  assert.deepEqual(policyFor(policiesAgain, 'acme'), { confidential: true })
+  const synthesisAgain = parse(`${head}    acme:\n      store_transcript: true\nsynthesis:\n  tag_policies:\n    acme:\n`)
+  assert.equal(synthesisAgain.defaultTag, null)
+  assert.deepEqual(policyFor(synthesisAgain, 'acme'), { confidential: true })
+  const vaultAgain = parse('session_dir: /home/you/m\nvault:\n  path: /home/you/v\n  meetings_folder: M\nvault:\n  path: /home/you/w\n')
+  assert.deepEqual([vaultAgain.vaultPath, vaultAgain.meetingsFolder], ['/home/you/w', null])
+  const askAgain = parse('session_dir: /home/you/m\nask:\n  vault_mcp: true\nask:\n  backend: api\n')
+  assert.equal(askAgain.askVaultMcp, false)
+  const scalarAgain = parse('session_dir: /home/you/m\nsession_dir: /home/you/n\n')
+  assert.equal(scalarAgain.sessionDir, '/home/you/n')
+})
+
 test('policyFor is confidential for an unknown tag and for an unreadable file', () => {
   const config = parse(SAMPLE)
   assert.deepEqual(policyFor(config, 'pessoal'), { confidential: false })
