@@ -178,12 +178,19 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
     store.run('UPDATE sessions SET role=?,run_repo_id=?,run_id=?,run_task_id=? WHERE id=?', 'teammate', session.repo_id, found.runId, found.taskId, session.id)
     return store.get('SELECT * FROM sessions WHERE id=?', session.id)
   }
+  // The run a Bash hook makes its session lead of, or null: a solo or lead session at the repo root running
+  // `scripts/cli.mjs ... --run <id>` from the repo root, with a valid run name.
+  function leadJoinRun(session, hook) {
+    if (!['solo', 'lead'].includes(session.role)) return null
+    const runId = leadRunId(hook.tool_input?.command)
+    if (runId === null || !isRunName(session.repo_id, runId)) return null
+    if (realPath(session.cwd) !== session.repo_id || realPath(hook.cwd ?? session.cwd) !== session.repo_id) return null
+    return runId
+  }
   // A lead names its run in `scripts/cli.mjs ... --run <id>` from the repo root; the run row records it.
   function joinLead(session, hook, at) {
-    if (!['solo', 'lead'].includes(session.role)) return session
-    const runId = leadRunId(hook.tool_input?.command)
-    if (runId === null || !isRunName(session.repo_id, runId)) return session
-    if (realPath(session.cwd) !== session.repo_id || realPath(hook.cwd ?? session.cwd) !== session.repo_id) return session
+    const runId = leadJoinRun(session, hook)
+    if (runId === null) return session
     store.run('UPDATE sessions SET role=?,run_repo_id=?,run_id=?,run_task_id=NULL WHERE id=?', 'lead', session.repo_id, runId, session.id)
     store.run('INSERT INTO runs(repo_id,run_id,lead_session_id,first_seen_at,last_seen_at) VALUES(?,?,?,?,?) ON CONFLICT(repo_id,run_id) DO UPDATE SET lead_session_id=excluded.lead_session_id,last_seen_at=MAX(last_seen_at,excluded.last_seen_at)',
       session.repo_id, runId, session.id, at, at)
@@ -416,6 +423,22 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
             store.run('UPDATE sessions SET state=? WHERE id=?', state, session.id)
             session = store.get('SELECT * FROM sessions WHERE id=?', session.id)
           }
+          // Rule 2 lets a late event update bookkeeping: a `--run` command stamped behind an early-flushed
+          // PermissionRequest still joins its run. The process check is `sameKnownProcess`, as for the other late
+          // rules: the envelope's PTY and Claude pid must match the session's known ones, and an envelope that carries
+          // neither passes. The late command joins only if no stored Bash PreToolUse of this session stamped strictly
+          // later would itself have joined: one that was applied, or late and from a process `sameKnownProcess`
+          // accepts by its stored PTY and pid, and that `leadJoinRun` accepts for the session's current role and
+          // cwd with its own payload. So the newest joining command keeps the run whatever order the hooks arrive in.
+          // The run join touches only the role and run columns, never the session state.
+          let joinChanged = false
+          const newerJoin = () => store.all("SELECT applied, pty_id, claude_pid, payload FROM hook_events WHERE session_id=? AND event='PreToolUse' AND hook_ts>? AND json_extract(payload,'$.tool_name')='Bash'", session.id, envelope.hookTs)
+            .some(row => (row.applied === 1 || sameKnownProcess(store, session, { ptyId: row.pty_id, claudePid: row.claude_pid })) && leadJoinRun(session, JSON.parse(row.payload)) !== null)
+          if (late && session.alive && hook.hook_event_name === 'PreToolUse' && hook.tool_name === 'Bash' && sameKnownProcess(store, session, envelope) && !newerJoin()) {
+            const joined = joinLead(session, hook, envelope.hookTs)
+            joinChanged = joined.role !== session.role || joined.run_id !== session.run_id
+            session = joined
+          }
           if (!late) {
             const known = !!session
             if (!known) session = applySessionHook(store, envelope, null, false)
@@ -443,7 +466,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
             }
           }
           if (session) persistSessionSummary(store, session)
-          if (session && (!late || requestChanged || identityChanged || replacementChanged || lifecycleChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session, store) })
+          if (session && (!late || requestChanged || identityChanged || replacementChanged || lifecycleChanged || joinChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session, store) })
         }
         store.appendEvent({ at: now(), type: 'counts', data: projectCounts(store) })
       })
