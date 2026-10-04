@@ -20,7 +20,8 @@ export const SUBSCRIBE_BACKOFF_MAX_MS = 30000
 export const SUBSCRIBE_RECONNECT_MS = 2000
 
 /**
- * @typedef {{ t0: number, t1: number, speaker: string, text: string }} TranscriptLine
+ * @typedef {{ t0: number, t1: number, speaker: string, text: string, asrModel: string|null }} TranscriptLine
+ *   `asrModel` is the event's `asr_model`, null when it has none or the line came from `tail`
  * @typedef {{ state: 'unavailable'|'idle'|'starting'|'recording'|'stopping', meetingId: string|null,
  *   tag: string|null, confidential: boolean, elapsedS: number, since: number|null, startedAt: number|null,
  *   apps: string[], quiet: boolean, slow: boolean, lost: boolean,
@@ -30,6 +31,20 @@ export const SUBSCRIBE_RECONNECT_MS = 2000
  */
 
 const TAIL_LINE = /^\[(\d+):(\d{2})\] ([^:]+?): (.*)$/
+
+/**
+ * The published line of a parsed `transcript` event, with the event's `asr_model` (the live view's meta line).
+ * @param {{ t0: number, t1: number, speaker: string, text: string, asrModel: string|null }} parsed
+ * @returns {TranscriptLine}
+ */
+const lineOf = parsed => ({ t0: parsed.t0, t1: parsed.t1, speaker: parsed.speaker, text: parsed.text, asrModel: parsed.asrModel })
+
+/**
+ * How a line prints in `tail`: whole seconds, speaker and text.
+ * @param {TranscriptLine} line
+ * @returns {string}
+ */
+const tailKey = line => `${Math.floor(line.t0)}\u0000${line.speaker}\u0000${line.text}`
 
 /**
  * Parse the plain `tail` text, one `[MM:SS] Speaker: texto` line per event (`MM` is total minutes). `t1` is the
@@ -43,7 +58,7 @@ export function parseTailText (text) {
   for (const raw of String(text).split('\n')) {
     const m = TAIL_LINE.exec(raw.replace(/\r$/, ''))
     if (!m || Number(m[2]) > 59) continue
-    lines.push({ t0: Number(m[1]) * 60 + Number(m[2]), t1: 0, speaker: m[3], text: m[4] })
+    lines.push({ t0: Number(m[1]) * 60 + Number(m[2]), t1: 0, speaker: m[3], text: m[4], asrModel: null })
   }
   for (let i = 0; i < lines.length; i++) lines[i].t1 = i + 1 < lines.length ? lines[i + 1].t0 : lines[i].t0
   return lines
@@ -220,6 +235,18 @@ export function createRecorder ({
     lastT1 = -Infinity
     held = null
     lostAt = null
+  }
+
+  /** The meeting fields of a lost meeting, for `restoreLost`. */
+  function lostMeeting () {
+    return { meetingId: /** @type {string} */ (meetingId), tag, confidential, elapsedS, startedAt, apps, ring, lastT1, lostAt }
+  }
+
+  /** @param {ReturnType<typeof lostMeeting>} saved */
+  function restoreLost (saved) {
+    ({ meetingId, tag, confidential, elapsedS, startedAt, apps, ring, lastT1, lostAt } = saved)
+    lost = true
+    held = null
   }
 
   /** @param {Partial<Health>} patch */
@@ -415,7 +442,7 @@ export function createRecorder ({
       log({ event: 'recorder.transcript_dropped', meetingId })
       return
     }
-    const line = { t0: parsed.t0, t1: parsed.t1, speaker: parsed.speaker, text: parsed.text }
+    const line = lineOf(parsed)
     if (held) held.push(line)
     else forward(line)
   }
@@ -423,7 +450,7 @@ export function createRecorder ({
   /** @param {Record<string, any>} event @returns {TranscriptLine|null} */
   const fileLine = event => {
     const parsed = transcriptLine(event)
-    return parsed ? { t0: parsed.t0, t1: parsed.t1, speaker: parsed.speaker, text: parsed.text } : null
+    return parsed ? lineOf(parsed) : null
   }
 
   /**
@@ -481,7 +508,11 @@ export function createRecorder ({
       source = 'tail'
       try {
         const minutes = Math.max(1, Math.ceil((now() - gapSince) / 60000))
-        lines = parseTailText(await client.tail(minutes)).filter(line => line.t0 >= after)
+        // `tail` prints whole seconds, so a line that started after `after` can print below it: keep from the
+        // second `after` falls in, minus the lines the ring already holds.
+        const from = Math.floor(after)
+        const seen = new Set(ring.filter(line => line.t1 >= from).map(tailKey))
+        lines = parseTailText(await client.tail(minutes)).filter(line => line.t0 >= from && !seen.has(tailKey(line)))
       } catch (err) {
         log({ event: 'recorder.gap_fill_failed', meetingId: id, error: /** @type {Error} */ (err)?.name ?? 'Error' })
         lines = []
@@ -546,15 +577,29 @@ export function createRecorder ({
    * Start a recording with `tag` (rows 4 to 7).
    * @param {string} wanted
    * @returns {Promise<Recorder>} the view after scribed's answer (`idle` after a timeout: the next poll decides)
-   * @throws {Error} `unknown_tag` (422) before any command, `recorder_busy` (409) while not idle, scribed's
-   *   `ScribedError` with `code: 'scribed_refused'` and `details.text` (its message verbatim), `ScribedUnavailable`
-   *   with `code: 'scribed_unavailable'`
+   * @throws {Error} `unknown_tag` (422) before any command, `invalid_state` (409, `details.state`) while starting,
+   *   recording or stopping, scribed's `ScribedError` with `code: 'scribed_refused'` and `details.text` (its message
+   *   verbatim), `ScribedUnavailable` with `code: 'scribed_unavailable'`
    */
   async function start (wanted) {
     const cfg = config()
     const known = cfg?.ok && Array.isArray(cfg.tags) && cfg.tags.some(/** @param {any} t */ t => t?.tag === wanted)
     if (typeof wanted !== 'string' || !known) throw recorderError('unknown_tag', 422, 'unknown tag')
-    if (state !== 'idle' && state !== 'unavailable') throw recorderError('recorder_busy', 409, `recorder is ${state}`)
+    if ((state !== 'idle' && state !== 'unavailable') || stopInFlight) {
+      throw recorderError('invalid_state', 409, `recorder is ${state}`, { state })
+    }
+    // A meeting lost when scribed went down is kept until scribed's answer says what became of it: a new session
+    // closes it, a failed start puts it back for the next poll to decide.
+    const previous = state === 'unavailable' && lost && meetingId !== null ? lostMeeting() : null
+    /** @param {Recorder['state']} fallback */
+    const settle = fallback => {
+      if (previous) {
+        restoreLost(previous)
+        setState('unavailable')
+      } else {
+        setState(fallback)
+      }
+    }
     clearMeeting()
     lastError = null
     setState('starting')
@@ -567,20 +612,20 @@ export function createRecorder ({
       if (closed) throw err
       if (err instanceof ScribedTimeout) {
         // Row 7: the next poll decides (row 11 may move to recording).
-        setState('idle')
+        settle('idle')
         publishView()
         log({ event: 'recorder.start_timeout' })
         return view()
       }
       if (err instanceof ScribedUnavailable) {
-        setState('idle')
+        settle('idle')
         healthFailed(err)
         publishView()
         throw Object.assign(err, { code: 'scribed_unavailable', status: 503 })
       }
       const message = /** @type {Error} */ (err)?.message ?? String(err)
       lastError = { cmd: 'start', message, at: now() }
-      setState('idle')
+      settle('idle')
       publishView()
       log({ event: 'recorder.start_refused', bytes: Buffer.byteLength(message) })
       if (err instanceof ScribedError) Object.assign(err, { code: 'scribed_refused', status: 409, details: { text: message } })
@@ -592,10 +637,11 @@ export function createRecorder ({
     const id = answer.session_id
     if (!id) {
       // No session named: the next poll joins it.
-      setState('idle')
+      settle('idle')
       publishView()
       return view()
     }
+    if (previous && previous.meetingId !== id) closeExternal(previous.meetingId)
     meetingId = id
     tag = wanted
     confidential = confidentialOf(wanted)

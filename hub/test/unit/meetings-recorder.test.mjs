@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { createScribedClient } from '../../server/adapters/scribed.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createRecorder, parseTailText } from '../../server/meetings/recorder.mjs'
-import { getMeeting } from '../../server/meetings/store.mjs'
+import { getMeeting, upsertMeeting } from '../../server/meetings/store.mjs'
 import { startFakeScribed } from '../fakes/fake-scribed.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 
@@ -59,7 +59,7 @@ const TAGS = [
   { tag: 'client-b', confidential: false, isDefault: false }
 ]
 
-async function setup (t, { fake: fakeOpts = {}, timeouts = {}, startFake = true } = {}) {
+async function setup (t, { fake: fakeOpts = {}, timeouts = {}, startFake = true, policy, ringCap } = {}) {
   const rt = await makeRuntimeDir()
   const root = await mkdtemp(path.join(os.tmpdir(), 'deck-rec-'))
   const sessionDir = path.join(root, 'meetings')
@@ -71,7 +71,7 @@ async function setup (t, { fake: fakeOpts = {}, timeouts = {}, startFake = true 
     appended.push(event.type)
     return append.call(store, event)
   }
-  const fake = startFake ? await startFakeScribed({ dir: rt.dir, ...fakeOpts }) : null
+  let fake = startFake ? await startFakeScribed({ dir: rt.dir, ...fakeOpts }) : null
   const client = createScribedClient({ socketPath: path.join(rt.dir, 'turbidassist.sock'), timeouts })
   const clock = fakeClock()
   const published = []
@@ -87,7 +87,9 @@ async function setup (t, { fake: fakeOpts = {}, timeouts = {}, startFake = true 
     onStopped: id => stopped.push(id),
     now: clock.now,
     timers: clock.timers,
-    log: entry => logs.push(entry)
+    log: entry => logs.push(entry),
+    ...(policy ? { policy } : {}),
+    ...(ringCap ? { ringCap } : {})
   })
   t.after(async () => {
     recorder.close()
@@ -98,7 +100,13 @@ async function setup (t, { fake: fakeOpts = {}, timeouts = {}, startFake = true 
   })
   const statusCount = () => fake.received.filter(r => r.parsed?.cmd === 'status').length
   return {
-    fake,
+    get fake () { return fake },
+    /** Stop the fake scribed (if running) and start a new one on the same socket. */
+    async restartFake (opts = {}) {
+      await fake?.stop()
+      fake = await startFakeScribed({ dir: rt.dir, ...fakeOpts, ...opts })
+      return fake
+    },
     store,
     clock,
     recorder,
@@ -273,16 +281,17 @@ test('row 15: a transcript event of another session is dropped', async t => {
   await tick(30)
   const lines = h.of('meeting.transcript')
   assert.equal(lines.length, 1)
-  assert.deepEqual(lines[0].data, { meetingId: id, line: { t0: 3, t1: 4, speaker: 'Sala', text: 'desta sessão' }, ephemeral: true })
-  assert.deepEqual(h.recorder.ring(id), [{ t0: 3, t1: 4, speaker: 'Sala', text: 'desta sessão' }])
+  const line = { t0: 3, t1: 4, speaker: 'Sala', text: 'desta sessão', asrModel: 'medium-int8' }
+  assert.deepEqual(lines[0].data, { meetingId: id, line, ephemeral: true })
+  assert.deepEqual(h.recorder.ring(id), [line])
 })
 
-async function recordWithOneLine (h, tag, text) {
+async function recordWithOneLine (h, tag, text, t0 = 0, t1 = 5) {
   await h.ready()
   await h.recorder.start(tag)
   const id = h.recorder.view().meetingId
   await waitFor(h.subscribed, 'a subscription')
-  const first = live(id, 0, 5, text)
+  const first = live(id, t0, t1, text)
   h.fake.pushTranscript(first)
   await waitFor(() => h.of('meeting.transcript').length === 1, 'the first line')
   const dir = path.join(h.sessionDir, id)
@@ -318,16 +327,16 @@ test('row 16: when transcript.jsonl cannot be read, tail fills the gap with the 
   const tail = h.fake.received.filter(r => r.parsed?.cmd === 'tail')
   assert.deepEqual(tail.map(r => r.parsed), [{ cmd: 'tail', minutes: 1 }])
   assert.deepEqual(h.of('meeting.transcript').slice(1).map(e => e.data.line), [
-    { t0: 6, t1: 62, speaker: 'Você', text: 'um' },
-    { t0: 62, t1: 62, speaker: 'Sala', text: 'dois' }
+    { t0: 6, t1: 62, speaker: 'Você', text: 'um', asrModel: null },
+    { t0: 62, t1: 62, speaker: 'Sala', text: 'dois', asrModel: null }
   ])
   assert.equal(h.of('meeting.recovered')[0].data.count, 2)
 })
 
 test('parseTailText reads total minutes and skips other lines', () => {
   assert.deepEqual(parseTailText('[62:05] Sala: oi\nlixo\n[00:61] Você: x\n[62:07] Você: tudo: bem\n'), [
-    { t0: 3725, t1: 3727, speaker: 'Sala', text: 'oi' },
-    { t0: 3727, t1: 3727, speaker: 'Você', text: 'tudo: bem' }
+    { t0: 3725, t1: 3727, speaker: 'Sala', text: 'oi', asrModel: null },
+    { t0: 3727, t1: 3727, speaker: 'Você', text: 'tudo: bem', asrModel: null }
   ])
 })
 
@@ -414,4 +423,182 @@ test('an unknown tag throws unknown_tag and sends nothing to scribed', async t =
   await assert.rejects(h.recorder.start('acme'), err => err.code === 'unknown_tag' && err.status === 422)
   assert.equal(h.fake.received.some(r => r.parsed?.cmd === 'start'), false)
   assert.equal(h.recorder.view().state, 'idle')
+})
+
+test('a second meeting\'s ring carries none of the first meeting\'s lines', async t => {
+  const second = '2026-10-04T10-05-00'
+  const h = await setup(t)
+  await h.ready()
+  h.fake.setStatus({ recording: true, session_id: otherId, tag: 'client-a', elapsed_s: 5 })
+  await h.poll()
+  await waitFor(h.subscribed, 'a subscription')
+  h.fake.pushTranscript(live(otherId, 1, 2, 'primeira reunião'))
+  await waitFor(() => h.recorder.ring(otherId).length === 1, 'the first line')
+  h.fake.setStatus({ recording: true, session_id: second, tag: 'pessoal', elapsed_s: 1 })
+  await h.poll()
+  assert.equal(h.recorder.view().meetingId, second)
+  await tick(30)
+  assert.deepEqual(h.recorder.ring(second), [])
+})
+
+for (const [name, answer] of [['undefined', undefined], ['null', null], ['an object without confidential', {}]]) {
+  test(`a policy answer of ${name} makes the meeting confidential (fail closed)`, async t => {
+    const h = await setup(t, { policy: () => answer })
+    await h.ready()
+    await h.recorder.start('pessoal')
+    assert.equal(h.recorder.view().confidential, true)
+    assert.equal(getMeeting(h.store, h.recorder.view().meetingId).confidential, true)
+  })
+}
+
+test('joining a meeting whose row is already confidential keeps it confidential', async t => {
+  const h = await setup(t)
+  await h.ready()
+  upsertMeeting(h.store, { id: otherId, tag: 'client-a', confidential: true, state: 'recording', startedAt: 1, at: 1 })
+  h.fake.setStatus({ recording: true, session_id: otherId, tag: 'pessoal', elapsed_s: 5 })
+  await h.poll()
+  assert.equal(h.recorder.view().state, 'recording')
+  assert.equal(h.recorder.view().confidential, true)
+})
+
+test('start while starting, recording or stopping throws invalid_state and sends no second start', async t => {
+  const h = await setup(t, { fake: { stopDelayMs: 300 } })
+  const starts = () => h.fake.received.filter(r => r.parsed?.cmd === 'start').length
+  await h.ready()
+  const first = h.recorder.start('pessoal')
+  assert.equal(h.recorder.view().state, 'starting')
+  await assert.rejects(h.recorder.start('pessoal'), err => err.code === 'invalid_state' && err.status === 409 && err.details.state === 'starting')
+  await first
+  await assert.rejects(h.recorder.start('pessoal'), err => err.code === 'invalid_state' && err.details.state === 'recording')
+  h.recorder.stop()
+  await assert.rejects(h.recorder.start('pessoal'), err => err.code === 'invalid_state' && err.details.state === 'stopping')
+  await tick(100)
+  assert.equal(starts(), 1)
+})
+
+async function loseMeeting (h) {
+  await h.ready()
+  await h.recorder.start('pessoal')
+  const lostId = h.recorder.view().meetingId
+  await h.fake.stop()
+  h.clock.advance(2000)
+  await waitFor(() => h.recorder.view().lost, 'the meeting to be lost')
+  assert.equal(h.recorder.view().state, 'unavailable')
+  return lostId
+}
+
+test('a start after scribed came back closes the meeting lost when it went down', async t => {
+  const next = '2026-10-04T10-05-00'
+  const h = await setup(t)
+  const lostId = await loseMeeting(h)
+  const fake = await h.restartFake()
+  fake.on('start', cmd => {
+    fake.setStatus({ recording: true, session_id: next, tag: cmd.tag, startedAt: Date.now() })
+    return { type: 'ok', cmd: 'start', session_id: next }
+  })
+  const view = await h.recorder.start('pessoal')
+  assert.equal(view.meetingId, next)
+  assert.equal(view.lost, false)
+  assert.equal(getMeeting(h.store, lostId).state, 'stopping')
+  assert.deepEqual(h.stopped, [lostId])
+})
+
+test('a refused start keeps the lost meeting for the next poll, which rejoins it', async t => {
+  const h = await setup(t)
+  const lostId = await loseMeeting(h)
+  await h.restartFake()
+  h.fake.setStatus({ recording: true, session_id: lostId, tag: 'pessoal', elapsed_s: 9 })
+  await assert.rejects(h.recorder.start('pessoal'), err => err.code === 'scribed_refused')
+  const view = h.recorder.view()
+  assert.equal(view.state, 'unavailable')
+  assert.equal(view.lost, true)
+  assert.equal(view.meetingId, lostId)
+  await h.poll()
+  assert.equal(h.recorder.view().state, 'recording')
+  assert.equal(h.recorder.view().meetingId, lostId)
+  assert.equal(getMeeting(h.store, lostId).state, 'recording')
+  assert.deepEqual(h.stopped, [])
+})
+
+test('the tail fallback keeps a line that prints below the last t1 and skips lines the ring holds', async t => {
+  const h = await setup(t, { fake: { tailText: '[00:05] Você: antes\n[00:05] Sala: logo depois\n[00:07] Você: um\n' } })
+  const { dir } = await recordWithOneLine(h, 'pessoal', 'antes', 5.0, 5.4)
+  const outside = path.join(h.sessionDir, 'outside.jsonl')
+  await writeFile(outside, '', { mode: 0o600 })
+  await symlink(outside, path.join(dir, 'transcript.jsonl'))
+  h.fake.endSubscribers()
+  await waitFor(() => h.logs.some(e => e.event === 'recorder.subscribe_closed'), 'the subscription to close')
+  h.clock.advance(2000)
+  await waitFor(() => h.of('meeting.recovered').length === 1, 'meeting.recovered')
+  assert.deepEqual(h.of('meeting.transcript').slice(1).map(e => e.data.line.text), ['logo depois', 'um'])
+})
+
+test('joining a meeting in progress fills the ring from transcript.jsonl', async t => {
+  const h = await setup(t)
+  await h.ready()
+  const dir = path.join(h.sessionDir, otherId)
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  await writeFile(path.join(dir, 'transcript.jsonl'), [live(otherId, 1, 2, 'um'), live(otherId, 2, 3, 'dois', 'room')].map(e => JSON.stringify(e)).join('\n') + '\n', { mode: 0o600 })
+  h.fake.setStatus({ recording: true, session_id: otherId, tag: 'pessoal', elapsed_s: 20 })
+  await h.poll()
+  await waitFor(() => h.recorder.ring(otherId).length === 2, 'the ring fill')
+  assert.deepEqual(h.recorder.ring(otherId).map(line => line.text), ['um', 'dois'])
+})
+
+test('back from row 2 on the same meeting, the ring is kept and the gap is filled', async t => {
+  const h = await setup(t)
+  const { id, dir, first } = await recordWithOneLine(h, 'pessoal', 'antes')
+  await writeFile(path.join(dir, 'transcript.jsonl'), JSON.stringify(first) + '\n', { mode: 0o600 })
+  await h.fake.stop()
+  h.clock.advance(2000)
+  await waitFor(() => h.recorder.view().lost, 'the meeting to be lost')
+  await appendFile(path.join(dir, 'transcript.jsonl'), [live(id, 5, 6, 'um'), live(id, 6, 7, 'dois')].map(e => JSON.stringify(e)).join('\n') + '\n')
+  await h.restartFake()
+  h.fake.setStatus({ recording: true, session_id: id, tag: 'pessoal', elapsed_s: 30 })
+  h.clock.advance(2000)
+  await waitFor(() => h.of('meeting.recovered').length === 1, 'meeting.recovered')
+  assert.equal(h.recorder.view().state, 'recording')
+  assert.equal(h.recorder.view().lost, false)
+  assert.equal(h.of('meeting.recovered')[0].data.count, 2)
+  assert.deepEqual(h.recorder.ring(id).map(line => line.text), ['antes', 'um', 'dois'])
+})
+
+test('row 10: a failed stop sets lastError and the next poll decides', async t => {
+  const message = 'não foi possível encerrar a sessão'
+  const h = await setup(t)
+  h.fake.on('stop', () => ({ type: 'error', cmd: 'stop', message }))
+  await h.ready()
+  await h.recorder.start('pessoal')
+  h.recorder.stop()
+  await waitFor(() => h.recorder.view().lastError !== null, 'lastError')
+  assert.equal(h.recorder.view().lastError.cmd, 'stop')
+  assert.equal(h.recorder.view().lastError.message, message)
+  assert.equal(h.recorder.view().state, 'stopping')
+  await h.poll()
+  assert.equal(h.recorder.view().state, 'recording')
+})
+
+test('the ring keeps the newest ringCap lines', async t => {
+  const h = await setup(t, { ringCap: 3 })
+  await h.ready()
+  await h.recorder.start('pessoal')
+  const id = h.recorder.view().meetingId
+  await waitFor(h.subscribed, 'a subscription')
+  for (let i = 0; i < 5; i++) h.fake.pushTranscript(live(id, i, i + 1, `l${i}`))
+  await waitFor(() => h.of('meeting.transcript').length === 5, 'five lines')
+  assert.deepEqual(h.recorder.ring(id).map(line => line.text), ['l2', 'l3', 'l4'])
+})
+
+test('a poll sent before a start answer cannot undo the start', async t => {
+  const h = await setup(t)
+  await h.ready()
+  const before = h.statusCount()
+  h.fake.on('status', () => ({ delayMs: 300, events: [{ type: 'status', recording: false, session_id: null, tag: null, elapsed_s: 0, routed_apps: [] }] }))
+  h.clock.advance(2000)
+  await waitFor(() => h.statusCount() > before, 'the poll to be sent')
+  await h.recorder.start('pessoal')
+  assert.equal(h.recorder.view().state, 'recording')
+  await tick(450)
+  assert.equal(h.recorder.view().state, 'recording')
+  assert.deepEqual(h.stopped, [])
 })
