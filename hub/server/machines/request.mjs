@@ -943,6 +943,12 @@ function judge(row, sent, choice, at, hook) {
   if (typeof sent?.choice !== 'string') return terminal
   if (Number.isFinite(sent.until) && Number.isFinite(at) && at > sent.until) return terminal
   if (['allow', 'deny'].includes(choice) && VERDICT_CHOICES.includes(sent.choice) && (choice === 'allow') !== (sent.choice !== 'deny')) return terminal
+  // A deck reply to a question asked in the conversation (stop_question) is proved by the UserPromptSubmit
+  // that carries the same text, judged by its digest.
+  if (row.kind === 'question' && row.tool_name !== 'AskUserQuestion' && sent.choice === 'reply' && typeof sent.digest === 'string') {
+    const typed = hook?.hook_event_name === 'UserPromptSubmit' && typeof hook.prompt === 'string' && replyDigest(row.id, hook.prompt) === sent.digest
+    if (!typed) return terminal
+  }
   if (row.kind === 'question' && row.tool_name === 'AskUserQuestion' && ['option', 'reply'].includes(sent.choice)) {
     const reported = hook?.hook_event_name === 'PostToolUse' ? reportedAnswers(hook) : null
     if (!reported) return terminal
@@ -971,8 +977,11 @@ function judge(row, sent, choice, at, hook) {
  *
  * While the deck's guarded write is in flight (`delivery` sending) the hook alone cannot tell whether
  * the deck's keys were typed: the answer is recorded as terminal with `pending` holding the verdict
- * that applies if deckd accepts the write, and approvals/deliver.mjs settles it once the write settles
- * (accepted: `pending`; refused: the terminal answer). A pending answer is not counted here.
+ * that applies if deckd accepts the write and, for a Try again, `prior` holding the verdict against
+ * the earlier did_not_land answer (the attempt's `prior`). approvals/deliver.mjs settles it once the
+ * write settles (accepted: `pending`; refused: `prior`, else the terminal answer). A pending answer is
+ * not counted here. A free-text reply to a stop_question is the deck's only when the UserPromptSubmit
+ * `prompt` has the deck's `replyDigest`.
  * @param {{ id?: string, delivery?: string, answer?: string | null, kind?: string, tool_name?: string | null }} row
  * @param {string} choice the terminal choice the hook implies
  * @param {number} [at] the hook's time
@@ -982,7 +991,13 @@ function judge(row, sent, choice, at, hook) {
 export function closingAnswer(row, choice, at, hook) {
   let sent = null
   try { sent = JSON.parse(row?.answer ?? 'null') } catch {}
-  if (row?.delivery === 'sending' && typeof sent?.choice === 'string') return { via: 'terminal', choice, pending: judge(row, sent, choice, at, hook) }
+  if (row?.delivery === 'sending' && typeof sent?.choice === 'string') {
+    // The verdict if deckd accepts the write, and (for a Try again) the verdict against the earlier
+    // did_not_land answer, which still owns the request if deckd refuses it (late proof, row 15).
+    const labelled = (/** @type {any} */ verdict, /** @type {any} */ by) => verdict.via === 'terminal' ? verdict : { ...verdict, label: typeof by?.label === 'string' ? by.label : null }
+    return { via: 'terminal', choice, pending: labelled(judge(row, sent, choice, at, hook), sent),
+      ...(sent.prior && typeof sent.prior === 'object' ? { prior: labelled(judge(row, sent.prior, choice, at, hook), sent.prior) } : {}) }
+  }
   if (!DECK_DELIVERIES.includes(row?.delivery)) return { via: 'terminal', choice }
   return judge(row, sent, choice, at, hook)
 }
@@ -999,7 +1014,7 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
   const key = matchKey(hook)
   let resumed = false
   if (resumedActivityEvents.includes(event)) {
-    for (const row of store.all('SELECT id, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', session.id, 'question', 'open', 'stop_question', 'elicitation', at)) {
+    for (const row of store.all('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', session.id, 'question', 'open', 'stop_question', 'elicitation', at)) {
       store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'observed', at, hook)), at, row.id)
       resumed = true
     }

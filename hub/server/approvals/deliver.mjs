@@ -291,6 +291,12 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
     deckdReady()
     busy.add(row.id)
     const previous = { delivery: row.delivery, answer: row.answer }
+    let prior = null
+    if (previous.delivery === 'did_not_land') {
+      try { prior = JSON.parse(previous.answer ?? 'null') } catch {}
+      if (typeof prior?.choice !== 'string') prior = null
+      else delete prior.prior
+    }
     let sending = false
     /** @type {{ via: string, choice: string, label: string | null }} */
     let sent = { via, choice: body.choice, label: null }
@@ -314,8 +320,11 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
         // closes the request while the write is in flight is recorded with a `pending` verdict, and
         // `settleSending` applies it once the write settles (request.mjs closingAnswer).
         // `until` bounds how long a closing hook still counts as the deck's answer.
+        // A Try again carries the earlier did_not_land answer as `prior`: if deckd refuses this write, a
+        // hook that arrived meanwhile is judged against it (late proof, state-machines 2.7 row 15).
         const answer = JSON.stringify({ ...sent, until: now() + verifyMs + lateMs,
-          ...(body.choice === 'reply' && row.tool_name === 'AskUserQuestion' ? { digest: replyDigest(row.id, sanitizePaste(body.text)) } : {}) })
+          ...(body.choice === 'reply' ? { digest: replyDigest(row.id, sanitizePaste(body.text)) } : {}),
+          ...(prior ? { prior } : {}) })
         update(row.id, { delivery: 'sending', answer })
         sending = true
         try {
@@ -332,8 +341,10 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
         stopWatch(row.id)
         const opened = updateOpen(row.id, { delivery: 'verifying', answer })
         if (!opened) {
-          // A hook closed it while the write was in flight: the write is accepted, so its pending verdict applies.
+          // A hook closed it while the write was in flight: the write is accepted, so its pending verdict
+          // applies. Closed some other way (expired): the attempt is cleared.
           const settled = settleSending(row.id, true, sent)
+          if (!settled) clearAttempt(row.id, previous.answer)
           return { request: requestView(getRow(row.id)), outcome: Promise.resolve(settled === 'deck' ? 'answered' : 'closed') }
         }
         row = opened
@@ -344,8 +355,10 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
       if (sending) {
         const current = getRow(row.id)
         if (current?.state === 'open') update(row.id, { delivery: previous.delivery === 'did_not_land' ? 'did_not_land' : 'idle', answer: previous.answer })
-        // A hook closed it while the write was in flight and the write was refused: a terminal answer.
+        // A hook closed it while the write was in flight and the write was refused: the earlier
+        // did_not_land answer's verdict, else a terminal answer. Closed some other way: clear the attempt.
         else if (settleSending(row.id, false, sent)) stopWatch(row.id)
+        else clearAttempt(row.id, previous.answer)
       }
       throw error
     } finally {
@@ -354,10 +367,24 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
   }
 
   /**
+   * A request closed without a pending verdict (expired by process end, idle prompt, supersede or
+   * session replacement) while the deck's write was in flight: the attempt is not an answer, so the
+   * earlier answer comes back and the delivery is idle.
+   * @param {string} id
+   * @param {string | null} previousAnswer
+   */
+  function clearAttempt (id, previousAnswer) {
+    const row = getRow(id)
+    if (!row || row.state === 'open' || row.delivery !== 'sending') return
+    update(id, { answer: row.state === 'answered' ? row.answer : previousAnswer, delivery: 'idle' })
+  }
+
+  /**
    * Apply the `pending` verdict a hook left on a request it closed while the deck's write was in flight
    * (request.mjs closingAnswer), exactly once. Accepted write: the verdict (the deck's answer when the
-   * hook agrees with it, proved as usual). Refused write: the terminal answer, with its audit row and
-   * the terminal Safe allow count (the hook's Claude process is checked, F16).
+   * hook agrees with it, proved as usual). Refused write: the verdict against the earlier did_not_land
+   * answer (`prior`) when there is one, else the terminal answer, with its audit row and the terminal
+   * Safe allow count (the hook's Claude process is checked, F16).
    * @param {string} id
    * @param {boolean} accepted
    * @param {{ via: string, choice: string, label: string | null }} sent
@@ -369,11 +396,11 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
     let answer = null
     try { answer = JSON.parse(row.answer ?? 'null') } catch {}
     if (!answer?.pending || typeof answer.choice !== 'string') return null
-    const final = accepted ? answer.pending : { via: 'terminal', choice: answer.choice }
-    // The closed row's delivery says what happened to the keys: typed (verifying) or not (idle).
-    const closed = update(id, { answer: JSON.stringify({ via: final.via, choice: final.choice }), delivery: accepted ? 'verifying' : 'idle' })
+    const final = accepted ? answer.pending : answer.prior ?? { via: 'terminal', choice: answer.choice }
+    // The closed row's delivery says what happened to the deck's keys: typed (verifying) or not (idle).
+    const closed = update(id, { answer: JSON.stringify({ via: final.via, choice: final.choice }), delivery: final.via !== 'terminal' ? 'verifying' : 'idle' })
     if (final.via !== 'terminal') {
-      proved(closed, sent)
+      proved(closed, accepted ? sent : { via: final.via, choice: final.choice, label: typeof final.label === 'string' ? final.label : null })
       return 'deck'
     }
     note('answered', closed, { via: 'terminal', choice: final.choice })
