@@ -845,13 +845,13 @@ Answer questions from the vault with citations, via `claude -p` with vault-mcp a
 | `asking` | `C.Delta` | | `streaming` | |
 | `asking`, `streaming` | `C.Done(result)` | parsed `isMiss=false` | `answered` | save `AskMessage(assistant)` with citations and `generalKnowledge` |
 | `asking`, `streaming` | `C.Done(result)` | parsed `isMiss=true` | `miss` | insert `Miss{question, searchedTerms}` |
-| `asking`, `streaming` | `C.Done` | result block missing or invalid, text present | `answered` | show the text; note "Citations unavailable for this answer" (Proposed) |
+| `asking`, `streaming` | `C.Done` | result block missing or invalid, text present | `answered` | show the text with no citations; note "Citations unavailable for this answer"; store `unverified: true` (D-131) |
 | `asking`, `streaming` | `C.Exit(non-zero)`, `T.AskTimeout` | | `error` | kill the child process group |
 | `asking`, `streaming` | `U.StopAsk` | | `cancelled` | kill the child |
 | `answered`, `miss`, `error`, `cancelled` | `U.Ask` | | `asking` | follow-up in the same thread |
-| `miss` | `U.ResearchThis` | | `miss` | open the research form prefilled with the question; `Miss.resolvedBy` set when that research saves |
+| `miss` | `U.ResearchThis` | | `miss` | open the research form prefilled with the question (`/research/new?topic=<question>&miss=<id>`, the shell's pending placeholder until M6, D-140); `Miss.resolvedBy` set to `research:<id>` when that research saves |
 
-Output contract (Proposed, SM-O16): the system prompt asks `claude -p` to end with one fenced JSON block `{ "citations": [{ "path", "line", "viaGraph" }], "isMiss": bool, "generalKnowledge": string | null }`; the deck strips the block from the displayed text. A citation whose `path` does not exist in the vault is dropped and counted.
+Output contract (**Decided** 2026-10-04, SM-O16, D-131): the system prompt asks `claude -p` to end with one fenced JSON block, fence tag `deck-answer`, `{ "citations": [{ "path", "line", "viaGraph" }], "isMiss": bool, "generalKnowledge": string | null, "searched": string[] }` ([10-memory-and-research.md](../10-memory-and-research.md) 2.3); the deck strips the block from the displayed text. The deck validates every citation against the vault and drops invalid ones (D-141, plan decision): a citation is kept when its `path` was returned by a tool result of this ask or is in the deck client's latest `vault_list` or `vault_graph` answer, and its `line` is an integer from 1 to the note's line bound computed from `vault_get_note`; dropped citations are counted. A missing or broken block gives an answer with no citations, flagged "Citations unavailable for this answer".
 
 ---
 
@@ -1036,6 +1036,6 @@ Add `processKey` (ptyId or claude pid), `sinceTs`, `subagentsActive`, `activity`
 | SM-O13 | "Start scribed" copy says `systemctl --user start scribed`, but TurbidAssist has no scribed unit (scribed is spawned on demand by `ScribeClient.ensure_daemon()`). Ship a unit, or spawn `scribed` detached like the reference client? | **Decided** 2026-10-04 (D-106): the deck starts it with `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, so scribed is not in the deck's cgroup and gets `HF_TOKEN`; TurbidAssist change T4 (a `scribed.service` unit, [04-integrations.md](../04-integrations.md) section 4.3) is not taken |
 | SM-O14 | In-deck speaker naming for `awaiting_names`, or only the `postmeet name` hint? | Default applied in M4, owner may revisit before exit: hint only (`postmeet name {session}` with Copy) |
 | SM-O15 | Research run output contract: where the lead writes the draft, sources and rejected sources (file names under `.fleetmates/<runId>/`), and which repo the research run lives in | To define with M6 |
-| SM-O16 | Ask output contract (final JSON block) and the prompt that produces it | As proposed in 8.3 |
+| SM-O16 | Ask output contract (final JSON block) and the prompt that produces it | **Decided** 2026-10-04 (D-131, validation D-141): as in 8.3 |
 | SM-O17 | Re-notify once or every 10 minutes while open? | Once |
 | SM-O18 | Should an incompatible Claude Code version block "Set sail"? The canvas blocks only on hooks | Warn only |

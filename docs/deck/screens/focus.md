@@ -4,7 +4,7 @@
 |---|---|
 | Canvas board | `Focus` (Focus · terminal first) |
 | Route | `/s/:sessionId` with optional `?tab=changes|facts|memory&file=<path>` |
-| Milestone | M1: the read-only layout (4.4) for jump to session, with "Mark reviewed" (MS-O1 default). M2 (session list, live terminal, header, Stop, shared input indicator). M3 adds the PromptBar answers and the Changes tab diff. M5 adds the Memory tab. |
+| Milestone | M1: the read-only layout (4.4) for jump to session, with "Mark reviewed" (MS-O1 default). M2 (session list, live terminal, header, Stop, shared input indicator). M3 adds the PromptBar answers and the Changes tab diff. M5 adds the Memory tab (D-127): Related memory (`vault_search` on the session task, top 3), the notes this session read (`vault_get_note`) and the notes it learned (`vault_learn`), from `GET /api/sessions/:id/memory`. |
 | Status | Decided (layout, terminal first, "Last typed from", same keys), Proposed (states, Facts tab content, observed view) |
 
 ## 1. Purpose
@@ -97,7 +97,7 @@ Unknown or ended-and-pruned id: a not-found state (5.4). An `ended` session stil
 | Changes | Diff | DiffView `unified` (panel under 720px, Decided) | `GET /api/sessions/:id/diff?path=` (git diff against `reviewBaseline`) | caption "src/combat/damage.rs · unified (panel is narrow)" |
 | Changes | Mark reviewed | Button `purple` at the list bottom when `done` | | "Mark reviewed" |
 | Facts | Facts list (Proposed, not on canvas) | `dl` | origin, started at, duration, Claude session id (+ aliases count), branch, cwd, tool calls, subagents active, last input from, transcript link, review baseline sha | labels in the copy deck |
-| Memory | Related memory | Citation `callout` list | `vault_search` on `task` (top 3) + notes this session read (`vault_get_note` tool_input paths) or wrote (`vault_learn`) (Proposed, M5) | eyebrow "Related memory"; "cargo test needs --release for combat parity" / "rust/cargo-release-tests.md:4" |
+| Memory | Related memory | Citation `callout` list | `vault_search` on `task` (top 3) + notes this session read (`vault_get_note` tool_input paths) or wrote (`vault_learn`) (M5; observed from `PreToolUse` hooks whatever the server name, D-138; read and learned still show while vault-mcp is down) | eyebrow "Related memory"; "cargo test needs --release for combat parity" / "rust/cargo-release-tests.md:4" |
 | Memory | Tab count | Tabs `countTone="teal"` | number of related notes | "Memory 2" |
 
 The canvas placed "Related memory" under the Changes tab; it moves to the Memory tab and a single compact callout stays under the diff when there is one strong match (Proposed, see 12).
@@ -325,7 +325,7 @@ Deviation: the PromptBar shows `focus.prompt.answerInTerminal` ("Answer in the t
 | FOC-O1 | Opening Focus "for a teammate" (Team task rows, crew terminals): fleetmates teammates are subagents of the lead with no PTY of their own (fleetmates contract 5). | **Decided** (D-69): teammate links open the lead's Focus with the drawer filtered to that task's requests; no per-teammate terminal. |
 | FOC-O2 | PTY size when the terminal client and the browser differ (SM-O12). | Open (tracked as SM-O12). |
 | FOC-O3 | Facts tab content was never designed. | Proposed (4.5). |
-| FOC-O4 | "Notes read by this session" in the Memory tab: hooks give `tool_input` paths for `vault_get_note` but not the hits of `vault_search` (tool responses are not relied on, state-machines 0.2). | Proposed: list `vault_get_note` paths only. |
+| FOC-O4 | "Notes read by this session" in the Memory tab: hooks give `tool_input` paths for `vault_get_note` but not the hits of `vault_search` (tool responses are not relied on, state-machines 0.2). | Default applied in M5, owner may revisit before exit: list `vault_get_note` paths only, from a `PreToolUse` whose `tool_name` matches `^mcp__.+__vault_get_note$` (D-138). |
 
 ## 12. Changes from the canvas
 

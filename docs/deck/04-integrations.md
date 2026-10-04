@@ -117,7 +117,10 @@ Proposed invocation, summarised; the full argv, flag reasons and process details
 - Runs on the owner's subscription, no API key (Decided).
 - Read-only vault tools only. The Ask never writes the vault; writing is research's job, behind review.
 - TurbidAssist already uses a close variant (`--restricted --safe-mode --strict-mcp-config --permission-prompts none`, `ask.py:168-225`), which is evidence these flags exist in the owner's installed version.
-- Output contract: see [10-memory-and-research.md](10-memory-and-research.md) section 2.3.
+- No `--safe-mode` (KB-O1 Decided, D-132): `--restricted` only. The proof is a check script the owner runs against the real CLI (`hub/test/capture/ask-restricted-check.mjs`), showing that Bash, Write, Edit and every vault write tool are refused and that the session's tools are exactly the four vault read tools; if it fails, the owner decides again. No build task and no test runs the real CLI.
+- The `--mcp-config` server runs the same `vaultCommand` as the deck's own client, default `npx -y @andreymudri/vault-mcp` (D-143). No `--model` in M5 (D-142).
+- Process rules (D-142): one ask in flight per thread, at most 2 overall, a third waits in a FIFO; 120 s total and 45 s without a stdout line both end it as `timed out after 120 s`; cancel is SIGTERM to the process group, then SIGKILL after 2 s; cwd `<state>/ask/`; running pids in `<state>/ask/running.json`, killed on the next start.
+- Output contract (Decided, SM-O16, D-131; validation D-141): see [10-memory-and-research.md](10-memory-and-research.md) section 2.3.
 
 ### 2.6 Transcript tail (Proposed)
 
@@ -148,8 +151,9 @@ Rules (every format detail below: verify against captured fixtures in M0):
 
 ### 3.2 How the deck uses it (Proposed)
 
-- One long-lived child process owned by the web server, via `@modelcontextprotocol/sdk` `Client` + `StdioClientTransport`, env `VAULT_PATH`, `VAULT_LANG=<DECK_LANG>`. Restart with backoff when it exits; health feeds the Memory tab.
-- Direct tool calls only for data the UI renders: `vault_graph`, `vault_get_note`, `vault_list`, `vault_backlinks`, `vault_learn` with `preview`. Text answers are parsed by small, tested parsers until structured output lands.
+- One long-lived child process owned by the web server, through the deck's own small hand-written MCP client over stdio (newline-delimited JSON-RPC 2.0: `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`) in `hub/server/adapters/vault-mcp.mjs`, not `@modelcontextprotocol/sdk` (D-134). It runs the `vaultCommand` setting, whose shipped default `npx -y @andreymudri/vault-mcp` stays (D-143), with env `VAULT_PATH`, `VAULT_LANG=<DECK_LANG>`. Restart with backoff when it exits; health feeds the Memory tab.
+- Direct tool calls only for data the UI renders: `vault_graph`, `vault_get_note`, `vault_list`, `vault_backlinks`, `vault_search`, and in M6 `vault_learn` with `preview`. The deck calls no vault-mcp write tool in M5. Text answers are parsed by small, tested parsers until structured output lands.
+- Hooks feed the Memory views (D-138): a `PreToolUse` whose `tool_name` matches `^mcp__.+__vault_get_note$` records a note read (`tool_input.path`), and one matching `^mcp__.+__vault_learn$` records a learn call, whatever server name the user registered. Tool responses are never read.
 - The Ask goes through `claude -p` with its own vault-mcp child (section 2.5), not through the deck's child.
 - Writes from the deck and from Claude sessions go through different vault-mcp processes; vault-mcp serializes writes per process only. Research save is the only deck write; it is rare and user-triggered.
 
@@ -162,6 +166,8 @@ Both are specified in detail, with schemas and code locations, in [reference/vau
 3. Optional, same PR: `structuredContent` for `vault_get_note` and `vault_list`, which removes the deck's text parsers.
 
 Ship these in vault-mcp before M5 (graph) and M6 (dry run). Until then the Memory graph tab shows "Graph needs vault-mcp 0.4" and research cannot save (no save without preview).
+
+For M5 (D-126, D-129): item 2 is built as the contract 1.11 shape, accepted as written, by its own plan run in the vault-mcp repository on a local branch; the fleet never pushes, tags or publishes, and the owner publishes 0.4.0. Item 3 is not in that plan. The deck's M5 plan never edits vault-mcp, depends only on the 1.11 shape, and degrades when the installed vault-mcp lacks `vault_graph`.
 
 ### 3.4 Research note conventions
 
