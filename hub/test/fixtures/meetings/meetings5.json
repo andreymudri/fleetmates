@@ -1,0 +1,181 @@
+{
+  "description": "The five synthesized sessions of meetings.md AC1 plus opt-in variants, written by hub/test/helpers/meetings-tree.mjs. Times are a day offset and a local time from the frozen now (a Saturday). Placeholders only.",
+  "now": "2026-09-12T16:30:00",
+  "confidentialTags": ["client-a", "client-b"],
+  "asrModel": "medium-int8",
+  "config": "# TurbidAssist config (placeholder copy of config.example.yaml)\nsession_dir: ~/meetings\nuser_name: Você\n\nvault:\n  path: ~/vault\n  meetings_folder: Meetings\n  tasks_note: Tasks/Inbox.md\n  git_commit: false\n\naudio:\n  sample_rate: 16000\n  meeting_sink: turbidassist_meeting\n  route_rules:\n    mic_in_use: true\n    allow_application_name: [\"Chromium\", \"Teams\", \"Discord\"]\n    deny_application_name: []\n  route_poll_s: 1.0\n\nrealtime:\n  model: medium\n  compute_type: int8\n  language: \"pt\"\n  context_minutes: 5\n\nask:\n  backend: claude_cli\n  claude_model: sonnet\n\nbatch:\n  model: large-v3\n  compute_type: float16\n  diarization: true\n  hf_token_env: HF_TOKEN\n  speaker_naming: raw\n  retention_days: 7\n\nsynthesis:\n  claude_model: sonnet\n  default_tag: pessoal\n  tag_policies:\n    pessoal:\n      store_transcript: true\n    client-a:\n      store_transcript: false\n    client-b:\n      store_transcript: false\n",
+  "sessions": [
+    {
+      "key": "weekly",
+      "dayOffset": 0,
+      "time": "14:00:00",
+      "tag": "client-a",
+      "title": "weekly sync",
+      "durationMin": 42,
+      "apps": ["Teams"],
+      "summary": "Revisamos o andamento da versão 3.2 com o time do cliente. O lançamento começa pelo beta interno e depois segue para todos os usuários. O monitoramento do rollout fica com o time de plataforma.",
+      "decisions": [
+        "Lançar a 3.2 primeiro no beta interno.",
+        "Cinco por cento no beta, todo mundo depois."
+      ],
+      "actionItems": [
+        "Você: ligar o feature flag da 3.2 no beta interno até quarta",
+        "SPEAKER_00: revisar o painel de métricas do rollout",
+        "atualizar a página de status antes do lançamento"
+      ],
+      "transcript": [
+        { "t0": 4.2, "t1": 9.8, "speaker": "Você", "text": "Bom dia, vamos começar pela versão 3.2." },
+        { "t0": 11.0, "t1": 17.5, "speaker": "SPEAKER_00", "text": "O build da 3.2 passou em todos os testes ontem." },
+        { "t0": 1060.0, "t1": 1066.4, "speaker": "Você", "text": "Então o feature flag liga primeiro no beta interno, certo?" },
+        { "t0": 1091.0, "t1": 1097.2, "speaker": "SPEAKER_01", "text": "Cinco por cento no beta, todo mundo depois." },
+        { "t0": 1500.0, "t1": 1508.0, "speaker": "SPEAKER_02", "text": "Quem desliga o Feature Flag se o erro voltar?" },
+        { "t0": 2400.5, "t1": 2405.0, "speaker": "Você", "text": "Combinado, obrigado a todos." }
+      ],
+      "asks": [
+        { "t": 1200.0, "question": "qual foi o prazo combinado para o beta?", "answer": "Quarta-feira, segundo a conversa." }
+      ]
+    },
+    {
+      "key": "planning",
+      "dayOffset": 0,
+      "time": "10:30:00",
+      "tag": "pessoal",
+      "title": "planejamento da semana",
+      "durationMin": 25,
+      "apps": ["Meet"],
+      "summary": "Organizei as prioridades da semana e separei o tempo de estudo.",
+      "decisions": ["Nenhuma decisão registrada."],
+      "actionItems": ["Nenhum action item registrado."],
+      "transcript": [
+        { "t0": 2.0, "t1": 6.5, "speaker": "Você", "text": "Primeiro item da semana é fechar o relatório." },
+        { "t0": 8.0, "t1": 12.0, "speaker": "SPEAKER_00", "text": "Depois vem a revisão do orçamento." }
+      ],
+      "asks": []
+    },
+    {
+      "key": "contract",
+      "dayOffset": -1,
+      "time": "16:00:00",
+      "tag": "client-b",
+      "title": "revisão do contrato",
+      "durationMin": 50,
+      "apps": ["Teams"],
+      "summary": "Passamos pelas cláusulas de suporte do contrato e pelo prazo de renovação.",
+      "decisions": ["Renovar por mais doze meses."],
+      "actionItems": ["Você: enviar a minuta revisada até sexta"],
+      "transcript": [
+        { "t0": 3.0, "t1": 8.0, "speaker": "Você", "text": "Vamos olhar a cláusula de suporte primeiro." },
+        { "t0": 9.5, "t1": 15.0, "speaker": "SPEAKER_00", "text": "O prazo de renovação vence no fim do mês." }
+      ],
+      "asks": []
+    },
+    {
+      "key": "retro",
+      "dayOffset": -1,
+      "time": "09:30:00",
+      "tag": "pessoal",
+      "title": "retrospectiva do sprint",
+      "durationMin": 30,
+      "apps": ["Discord"],
+      "summary": "Retrospectiva curta do sprint com foco no processo de deploy.",
+      "decisions": ["Manter o deploy às terças."],
+      "actionItems": ["documentar o processo de rollback"],
+      "transcript": [
+        { "t0": 5.0, "t1": 11.0, "speaker": "Você", "text": "O que funcionou bem neste sprint?" },
+        { "t0": 12.0, "t1": 21.0, "speaker": "SPEAKER_00", "text": "O feature flag novo substituiu o feature flag antigo sem downtime." }
+      ],
+      "asks": []
+    },
+    {
+      "key": "roadmap",
+      "dayOffset": -2,
+      "time": "11:00:00",
+      "tag": "pessoal",
+      "title": "conversa sobre o roadmap",
+      "durationMin": 35,
+      "apps": [],
+      "summary": "Conversa sobre o roadmap do trimestre e a próxima decisão de arquitetura.",
+      "decisions": ["Adiar a migração do banco para o próximo trimestre."],
+      "actionItems": ["SPEAKER_00: preparar a proposta de arquitetura"],
+      "transcript": [
+        { "t0": 1.5, "t1": 7.0, "speaker": "Você", "text": "A decisão sobre o banco fica para depois." },
+        { "t0": 8.0, "t1": 14.0, "speaker": "SPEAKER_00", "text": "Concordo, o roadmap já está cheio." }
+      ],
+      "asks": []
+    }
+  ],
+  "variants": {
+    "awaitingNames": {
+      "dayOffset": -1,
+      "time": "13:00:00",
+      "tag": "pessoal",
+      "state": "awaiting_names",
+      "durationMin": 20,
+      "apps": [],
+      "transcript": [
+        { "t0": 2.0, "t1": 6.0, "speaker": "Você", "text": "Linha com SENTINEL-1 para a varredura." },
+        { "t0": 7.0, "t1": 11.0, "speaker": "SPEAKER_00", "text": "Resposta da sala." }
+      ],
+      "asks": [{ "t": 9.0, "question": "pergunta SENTINEL-2?", "answer": "resposta curta" }],
+      "sentinels": ["SENTINEL-1", "SENTINEL-2"]
+    },
+    "stuck": {
+      "dayOffset": -2,
+      "time": "15:00:00",
+      "tag": "pessoal",
+      "state": "transcribed",
+      "durationMin": 15,
+      "apps": [],
+      "transcript": [
+        { "t0": 1.0, "t1": 5.0, "speaker": "Você", "text": "Linha com SENTINEL-3 antes do resumo." }
+      ],
+      "asks": [{ "t": 4.0, "question": "pergunta SENTINEL-4?", "answer": "resposta curta" }],
+      "sentinels": ["SENTINEL-3", "SENTINEL-4"]
+    },
+    "interrupted": {
+      "dayOffset": -2,
+      "time": "17:00:00",
+      "tag": "client-b",
+      "manifest": false,
+      "durationMin": 10,
+      "apps": [],
+      "transcript": [
+        { "t0": 1.0, "t1": 4.0, "speaker": "SPEAKER_00", "text": "Linha da sala com SENTINEL-5." }
+      ],
+      "asks": [{ "t": 3.0, "question": "pergunta SENTINEL-6?", "answer": "resposta curta" }],
+      "sentinels": ["SENTINEL-5", "SENTINEL-6"]
+    },
+    "recording": {
+      "dayOffset": 0,
+      "time": "16:18:00",
+      "tag": "client-a",
+      "manifest": false,
+      "fresh": true,
+      "durationMin": 12,
+      "apps": ["Teams"],
+      "transcript": [
+        { "t0": 2.0, "t1": 5.5, "speaker": "Você", "text": "Ao vivo com SENTINEL-7 na linha." },
+        { "t0": 6.0, "t1": 9.0, "speaker": "SPEAKER_00", "text": "Sala responde ao vivo." }
+      ],
+      "asks": [{ "t": 8.0, "question": "pergunta SENTINEL-8?", "answer": "resposta curta" }],
+      "sentinels": ["SENTINEL-7", "SENTINEL-8"]
+    },
+    "confidential": {
+      "dayOffset": 0,
+      "time": "12:00:00",
+      "tag": "client-a",
+      "title": "alinhamento confidencial",
+      "durationMin": 18,
+      "apps": ["Teams"],
+      "summary": "Alinhamento sobre o escopo do próximo trimestre.",
+      "decisions": ["Nenhuma decisão registrada."],
+      "actionItems": ["Você: confirmar o escopo por escrito"],
+      "transcript": [
+        { "t0": 3.0, "t1": 8.0, "speaker": "Você", "text": "O codinome do projeto é SENTINEL-9." },
+        { "t0": 9.0, "t1": 13.0, "speaker": "SPEAKER_00", "text": "Não repita SENTINEL-10 fora daqui." }
+      ],
+      "asks": [{ "t": 10.0, "question": "o que é SENTINEL-11?", "answer": "É o codinome, SENTINEL-12." }],
+      "sentinels": ["SENTINEL-9", "SENTINEL-10", "SENTINEL-11", "SENTINEL-12"]
+    }
+  }
+}
