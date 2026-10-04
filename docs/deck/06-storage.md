@@ -274,6 +274,9 @@ CREATE TABLE requests (
   screen_match    TEXT NOT NULL DEFAULT 'unknown' CHECK (screen_match IN ('on_screen','queued','unknown')),
   task_id         TEXT,                               -- teammate attribution (state-machines 11)
   rule_pattern    TEXT,                               -- Claude Code pattern of the matched tiers.json entry (SM-O11)
+  reasons         TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(reasons)),  -- migration 0004-approvals (M3): the
+                                                      -- classifier's matched entries [{entryId, tier, segment, description}]
+  confirm_label   TEXT,                               -- migration 0004-approvals (M3): the Destructive checkbox label
   created_at      INTEGER NOT NULL,
   answered_at     INTEGER,
   notified_at     INTEGER,
@@ -289,6 +292,8 @@ CREATE INDEX requests_created ON requests(created_at);
 ```
 
 A text, reply or free-text answer stored in `answer.text` is what the user typed into the deck; it is kept with the request for the 30-day window.
+
+As built in M3, migration `0004-approvals` adds `reasons` and `confirm_label` with `ALTER TABLE ... ADD COLUMN`, so in a migrated database they come after `renotified_at`; the listing above places them by meaning. A deck answer is stored in `answer` as `{via, choice}`, while it is being sent with the pending fields the delivery needs (a reply carries a digest salted with the request id, not the text).
 
 ### 4.5 Rules: mirror, counters, audit
 
@@ -330,7 +335,30 @@ CREATE TABLE rule_audit (
   request_id       TEXT                               -- the approval that crossed the threshold, when suggested
 ) STRICT;
 CREATE INDEX rule_audit_repo ON rule_audit(repo_id, at DESC);
+
+-- migration 0004-approvals (M3): append-only audit of request decisions and tiers loads
+-- (07-approvals 11). Rule events go to rule_audit above.
+CREATE TABLE approval_audit (
+  id            INTEGER PRIMARY KEY,
+  at            INTEGER NOT NULL,
+  kind          TEXT NOT NULL CHECK (kind IN ('answered','refused','did_not_land','expired','rule_added','rule_revoked',
+                  'rule_found','tiers_loaded','tiers_rejected')),
+  request_id    TEXT,                                 -- no FK: the audit outlives request retention
+  session_id    TEXT,
+  repo_id       TEXT,
+  tier          TEXT CHECK (tier IS NULL OR tier IN ('safe','caution','destructive')),
+  reasons       TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(reasons)),   -- matched entry ids
+  via           TEXT CHECK (via IS NULL OR via IN ('browser','terminal','popup','batch','settings')),
+  choice        TEXT,                                 -- the answer, or the error code of a refusal
+  option_label  TEXT,
+  confirm_label TEXT,                                 -- the exact checkbox text shown for a Destructive allow
+  summary       TEXT,                                 -- redacted with the log redaction rules (08-security 4.10)
+  tiers_sha256  TEXT
+) STRICT;
+CREATE INDEX approval_audit_at ON approval_audit(at);
 ```
+
+The server writes the kinds `answered`, `refused`, `did_not_land`, `expired`, `tiers_loaded` and `tiers_rejected` to `approval_audit`. The `rule_*` kinds the CHECK allows are not written there: rule events stay in `rule_audit`. `fleetmates-deck audit` reads both tables read-only ([13-operations.md](13-operations.md) section 4.2).
 
 Counter rules: a request `answered` with an allow choice, tier `safe`, and a non-null `rule_pattern` increments its `(repo_id, rule_pattern)` counter in the same transaction (terminal approvals included, SM-O10 default). Reaching `prefs.ruleSuggestAfter` moves it to `offered` (5 by default, Decided). Dismiss sets `count = 0, state = 'counting'`; Never freezes counting; accept and revoke move `accepted` and back to `counting` at 0. Destructive and Caution never touch counters (Decided). Requests that match no tiers.json entry have `rule_pattern` null and are never counted (SM-O11 default).
 
@@ -627,6 +655,8 @@ DELETE FROM session_scrollback WHERE captured_at < :cutoff;
 -- closed requests of long-lived sessions
 DELETE FROM requests  WHERE state <> 'open' AND created_at < :cutoff;
 DELETE FROM note_reads WHERE at < :cutoff;
+-- request rows of the approvals audit (M3; tiers rows are kept)
+DELETE FROM approval_audit WHERE at < :cutoff AND kind IN ('answered','refused','did_not_land','expired');
 -- research drafts after the job is finished (the saved note is in the vault)
 UPDATE research SET draft = NULL, preview = NULL
   WHERE state IN ('saved','discarded','failed') AND finished_at < :cutoff;
@@ -641,6 +671,8 @@ Then `PRAGMA incremental_vacuum;`, `PRAGMA wal_checkpoint(TRUNCATE);`, `meta.las
 | `sessions` in `ended` and their detail | 30 days after `ended_at` (DB-O1) | Decided figure |
 | archived `sessions` | same as any session: archiving changes no retention rule, so an archived ended session is deleted 30 days after `ended_at` and an archived session with unreviewed work is kept | Decided (owner, 2026-10-02) |
 | `hook_events`, `events`, `rejected_events`, `session_scrollback`, closed `requests`, `note_reads` | 30 days | Decided figure |
+| `approval_audit` rows of kind `answered`, `refused`, `did_not_land`, `expired` | 30 days (APR-O8 default) | Proposed (M3, as built) |
+| `approval_audit` rows of kind `tiers_loaded`, `tiers_rejected` | forever (small) | Proposed (M3, as built) |
 | `session_steps` | newest 200 per session, then with the session | Proposed |
 | `ask_threads`, `ask_messages`, `misses`, `captures` | forever (small, user content the owner asked for: misses log, captures) | Proposed (DB-O3) |
 | `research` row | forever; `draft` and `preview` 30 days after finishing | Proposed |
@@ -655,7 +687,7 @@ Then `PRAGMA incremental_vacuum;`, `PRAGMA wal_checkpoint(TRUNCATE);`, `meta.las
 - Forward only. If `user_version` is **ahead** of the newest file (a downgrade), the server refuses to start: "deck.db was written by a newer deck (schema N). Upgrade, or restore deck.db.pre-*.bak." Never auto-downgrade.
 - SQLite cannot alter a `CHECK` or drop most constraints in place, so enum additions and column changes use the 12-step table rebuild (create new, copy, drop, rename, recreate indexes and triggers) inside the migration transaction with `PRAGMA foreign_keys = OFF` around it and `PRAGMA foreign_key_check` before commit.
 - A data-only fix (for example re-deriving `rule_pattern`) is a migration file too, never startup code.
-- Applied so far: `0001-init.sql` (section 4), `0002-launch.sql` (`sessions.launch_task`), `0003-archive.sql` (`sessions.archived_at`, `sessions.archived_by` and the partial index `sessions_archived`, section 4.3).
+- Applied so far: `0001-init.sql` (section 4), `0002-launch.sql` (`sessions.launch_task`), `0003-archive.sql` (`sessions.archived_at`, `sessions.archived_by` and the partial index `sessions_archived`, section 4.3), `0004-approvals.sql` (M3: `requests.reasons`, `requests.confirm_label`, the `approval_audit` table and its index, sections 4.4 and 4.5). The session archive run owns 0003, so the M3 approvals migration is 0004; the runner skips every file at or below the database version, so both numbers are fixed.
 - Tests ([09-testing.md](09-testing.md)): apply all migrations to an empty database and compare `sqlite_schema` with a checked-in snapshot; apply the newest migration to a fixture database of each earlier version; the downgrade refusal.
 
 ## 8. What lives outside SQLite
@@ -758,6 +790,8 @@ Everything below is used by this schema or by [05-api.md](05-api.md) and is not 
 | Request | `screenMatch` | state-machines 12.5; now also in 02-domain 2.3 |
 | Request | `taskId` | teammate attribution (state-machines 11) |
 | Request | `rulePattern` | the Claude Code pattern of the matched tiers.json entry, key of the rule counter |
+| Request | `reasons`, `confirmLabel` (columns `reasons`, `confirm_label`, migration `0004-approvals`, M3) | the tier's matched entries for the "Why" line and the audit, and the Destructive checkbox label filled when the request opens (07-approvals 3.1 and 8) |
+| Request | `ruleNote`, `description`, `allowAlways` (derived in the request view, M3) | `ruleNote` from the tiers entry of `rulePattern`, `description` from the headline reason, `allowAlways` from the parsed options (D-77, D-95); not stored |
 | Request | `toolName` nullable | notification-only requests have no tool (state-machines 2.2) |
 | Rule | `createdAt` nullable, `seenAt` | rules found in the file have no date (SET-O5) |
 | RuleCounter, RuleAudit | new entities | 5-approval suggestion (Decided) and a history of rule changes |

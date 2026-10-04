@@ -168,6 +168,8 @@ The three `palette.group.showAll.*` words fill the `{group}` of `palette.group.s
 `empty.palette.title` lives in `EMPTY_COPY` (`hub/web/src/components/EmptyState.jsx`), shown when
 the palette has no row and no message.
 
+As built in M3: every M3 string of `PALETTE_COPY` is in the table above ("Archive session" belongs to the session archive, [archive.md](../archive.md)). Enter allows a Safe Needs row once (D-85); its "Allowed ..." toast shows on every screen that hosts the palette.
+
 ## 10. Acceptance criteria
 
 1. **Given** fixture `busy` on Home, **when** pressing `Alt K`, **then** a `role="dialog"` with a focused combobox appears within 160ms and the first option is the rustot request.

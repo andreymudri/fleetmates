@@ -7,7 +7,8 @@ into it.
 
 ![Home with nine sessions, three of them waiting on you](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
 
-**Status: 0.2.0, not published yet.** This is milestone M2, Control, on top of M1, Observe. The package name
+**Status: 0.3.0, not published yet.** This is milestone M3, Unblock, on top of M2, Control, and M1,
+Observe. The package name
 (`@andreymudri/fleetmates-deck`) and the command names (`fleetmates-deck`, `fm`) are still an open
 decision and may change before the first release.
 
@@ -71,17 +72,85 @@ the terminal you run it in.
 
 ### M2 limits
 
-- No answering from the browser yet: approval prompts and questions are answered by typing in the
-  mirrored terminal (or your own terminal). Answer buttons come in M3.
-- No diff view: Focus, Changes lists the changed files only.
+- Fleetmates teammates have no terminal of their own; the Team run page shows their tool steps.
+
+## What M3 adds
+
+Sessions that run in deckd (started with `fm claude` or from the deck) can be unblocked from the
+browser.
+
+- Answer permission prompts and questions from the Needs-you drawer (`Alt U`), Home cards, the
+  palette (`Alt K`) and the Focus PromptBar: Allow once, Deny, Reply, and the option buttons of a
+  question. The buttons carry the same option numbers as the terminal.
+- The deck types the option key into the session only when the terminal still shows the prompt you
+  answered and nobody typed in it during the last second. It then checks that the answer landed (the
+  prompt left the screen, or Claude Code reported the tool call). If not, the row says "Your answer
+  did not reach {repo}. The prompt is still open in its terminal." with Try again; the deck never
+  retries on its own.
+- Focus, Changes shows the diff of each changed file against the session's review baseline.
+- Team run "Review N requests" opens the drawer on that run's requests only.
+
+### Tiers
+
+Every permission request gets a tier, and the server enforces what each tier allows:
+
+| Tier | What it covers | What the deck lets you do |
+|---|---|---|
+| Safe | Reads, tests, builds, linters | Answer anywhere, batch ("Allow both Safe once", `Alt Shift A`), allow once from a popup, and get a rule suggestion |
+| Caution | Network, installs, writes outside the repo, anything the deck does not know | Answer one at a time; popups offer "Open" only |
+| Destructive | `rm`, `git push --force`, `git reset --hard`, deploys, database writes | Allow only after ticking a confirm checkbox, by click or Space; never in a batch, never from a popup, the palette or a shortcut, never a rule |
+
+A Bash command is Safe only when it is a plain command: simple commands from a fixed list, joined by
+`|`, `&&`, `||` or `;`, with literal words and plain relative paths that stay inside the repo.
+Anything else (variables, globs, `cd`, redirects to files, absolute or `~` paths, interpreters) is at
+least Caution. The drawer shows why a request got its tier.
+
+Tiers come from the shipped defaults in `server/approvals/tiers.default.json` plus your
+`~/.config/fleetmates/deck/tiers.json`, which `init` creates as a stub that extends the defaults
+(with `tiers.schema.json` beside it for your editor). You can add entries and disable default
+entries by id; the floors (the deck's own token and controls, Claude Code settings and hooks, `.git`,
+your shell start-up files and a few more) cannot be disabled. The file is watched: when it has an
+error, Settings, Approval rules shows "tiers.json has an error on line {line}: {message} Using the
+previous tiers." and the deck keeps the previous set, never a more permissive one.
+
+### Rules
+
+After you allow the same Safe command 5 times in a repo (or 3, or never, in Settings), the deck
+offers "Make it a rule?". Accepting writes an allow rule to `<repo>/.claude/settings.local.json`
+under `permissions.allow`, so it also applies when you run plain `claude` in a terminal. The deck
+keeps every other key and the order of the file, refuses to write through a symlink, and copies the
+previous file to `~/.local/state/fleetmates/deck/backups/rules/` (the newest 20 per repo) first.
+Rules you or Claude Code wrote by hand show as "added by hand". Settings, Approval rules lists the
+rules of each repo, adds one by hand and revokes one.
+
+The deck suggests rules only for exact `npm run` and `pnpm run` script names (`Bash(npm run test)`)
+and the read-only vault tools. Bash prefix rules such as `Bash(cargo test:*)` are refused, because a
+prefix rule also allows every option a later version of the tool adds. A running Claude Code session
+may keep an old rule until it restarts.
+
+### Audit
+
+`fleetmates-deck audit [--repo <name>] [--since <YYYY-MM-DD>]` prints every answer, refusal,
+answer that did not land, expired request, tiers load and rule change, oldest first, one per line,
+with secrets in the summaries masked. Request rows are kept 30 days; tiers and rule rows are kept.
+
+### M3 limits
+
+- Observed sessions (plain `claude`) are still answered in your terminal: the deck shows them with
+  "Answer in your terminal", and their popups offer "Open" only.
+- AskUserQuestion prompts with several questions or multi-select options, and MCP elicitation
+  dialogs, are answered in the terminal.
+- "Allow always" (Claude Code's option 2) is offered only when its label is exactly "Yes, and don't
+  ask again for <pattern>" and the pattern equals the deck's own rule suggestion. No real Bash prompt
+  captured so far shows that label, so for Bash the option is not offered.
 - Fleetmates teammates have no terminal of their own; the Team run page shows their tool steps.
 
 ## Requirements
 
 - Linux with systemd user services. macOS, Windows and WSL are not supported.
 - Node.js 24.2 or newer. CI uses the version in `hub/.node-version`.
-- Claude Code. The hook fixtures were captured from Claude Code 2.1.282; `fleetmates-deck doctor`
-  tells you when yours differs.
+- Claude Code. The hook and screen fixtures were captured from Claude Code 2.1.285;
+  `fleetmates-deck doctor` tells you when yours differs.
 - Chromium or Firefox.
 - For popups: `notify-send` (libnotify) and a notification daemon such as mako.
 - Build tools for `node-pty` only if no prebuilt binary matches your platform.
@@ -124,6 +193,7 @@ and opens `http://127.0.0.1:47800/` in your browser with the token in the URL fr
 | `fleetmates-deck doctor` | The setup checks in the terminal; exits 1 when the hooks are missing |
 | `fleetmates-deck status` | Units, sockets, hook state and Claude Code version as JSON |
 | `fleetmates-deck uninstall-hooks` | Removes only the deck's hook entries, after a backup |
+| `fleetmates-deck audit [--repo <name>] [--since <YYYY-MM-DD>]` | Prints the approvals and rule audit (M3) |
 | `fm claude [args]`, `fm attach <id\|repo>`, `fm ls` | Run, attach to and list sessions in the deck's PTY daemon (see above) |
 
 ## Security model
@@ -148,7 +218,8 @@ and opens `http://127.0.0.1:47800/` in your browser with the token in the URL fr
 | Sessions, requests, events and summaries | `~/.local/state/fleetmates/deck/deck.db` (SQLite) |
 | Token | `~/.local/state/fleetmates/deck/token` |
 | Hook events while the server is down | `~/.local/state/fleetmates/deck/spool/`, replayed and removed at the next start |
-| Configuration | `~/.config/fleetmates/deck/` |
+| Configuration, including `tiers.json` | `~/.config/fleetmates/deck/` |
+| Backups of `settings.local.json` before each rule write | `~/.local/state/fleetmates/deck/backups/rules/` |
 | Hook script copy | `~/.local/share/fleetmates-deck/hook/deck-hook.mjs` |
 | Units | `~/.config/systemd/user/fleetmates-deck.service`, `fleetmates-deckd.service` |
 
@@ -193,8 +264,8 @@ section 12.
 | Milestone | Adds |
 |---|---|
 | M1 Observe | Watch sessions, popups, First run, Settings |
-| M2 Control (this release) | Live terminals in the browser, launch sessions, `fm ls` and `fm attach`, Team run page, Crew sheet |
-| M3 Unblock | Answer approvals and questions from the deck, permission rules |
+| M2 Control | Live terminals in the browser, launch sessions, `fm ls` and `fm attach`, Team run page, Crew sheet |
+| M3 Unblock (this release) | Answer approvals and questions from the deck, permission rules |
 | M4 Meetings | TurbidAssist meetings |
 | M5 Memory ask | Ask the knowledge vault |
 | M6 Deep research | Research runs |
