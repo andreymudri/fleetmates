@@ -15,8 +15,8 @@ The owner waived the M1 one-week gate for M4 on 2026-10-04 (D-104, superseding t
 | Live transcript and ask Claude during the meeting | Decided (D-29) |
 | Transcript search, pin moments, rec bar on every screen | Decided (canvas) |
 | Live ask using the vault | **Decided** 2026-10-04 (MEET-O4, D-105): the live ask uses the transcript only, through scribed `ask`, with no citations. TurbidAssist change T3 is not taken and there is no deck-side engine (section 9) |
-| Action items: "Launch as session", "Research first", "Dismiss" | Default applied in M4, owner may revisit before exit (MEET-O6, Q6): "Launch as session" and "Dismiss" in M4 with deck-only state; "Research first" is not rendered until M6. See section 12 |
-| Save answer to meeting note | Default applied in M4, owner may revisit before exit (MEET-O8): no button |
+| Action items: "Launch as session", "Research first", "Dismiss" | Default shipped in 0.4.0, owner may revisit before exit (MEET-O6, Q6): "Launch as session" and "Dismiss" in M4 with deck-only state; "Research first" is not rendered until M6. See section 12 |
+| Save answer to meeting note | Default shipped in 0.4.0, owner may revisit before exit (MEET-O8): no button |
 
 ## 2. What the deck reads and writes
 
@@ -205,7 +205,7 @@ scribed's `ask` sends `## Transcript recente` (the last `realtime.context_minute
 - sends `{"cmd":"ask","question":...}` on its own connection and streams `ask_delta` to the browser as `ask.delta` with scope `meeting:<id>`, then `ask.done` on `ask_done` or `ask.error` with the Portuguese message verbatim;
 - calls `history` when the live view opens, so asks made from the TUI or CLI in the same meeting show up too;
 - labels the panel "Ask · uses the transcript" and renders no citations (screens/meetings.md 4.3);
-- "Stop" only stops displaying: scribed has no cancel, the `claude` child keeps running until it answers or hits its 120 s watchdog, and scribed records the answer in `asks.jsonl` if it completes. The UI says "Stopped here; the answer may still be saved to the meeting" (Proposed copy);
+- "Stop" only stops displaying: scribed has no cancel, the `claude` child keeps running until it answers or hits its 120 s watchdog, and scribed records the answer in `asks.jsonl` if it completes. The UI says "Stopped here; the answer may still be saved to the meeting". As built in 0.4.0 the composer stays busy until scribed ends the stopped answer (its `ask.done` or `ask.error`), and `POST /api/ask/:messageId/cancel` stays M5;
 - stores nothing (section 6).
 
 ### 9.2 With the vault (TurbidAssist change T3, not taken)
@@ -218,7 +218,7 @@ Alternative considered: a deck-side engine that takes the transcript with `tail`
 
 ### 10.1 v1: deck-stored (MEET-O2 default, applied in M4)
 
-- `POST /api/meetings/:id/pins` with `{ t? }` ([05-api.md](05-api.md) 2.11): the button and `Alt P` with no terminal focused send no `t`, and a click on a line sends that line's `t0` as `t` (D-119). The server sets `t = elapsed_s` at the moment of the request when absent, and `label` = the newest line's text, first 80 characters (non-confidential only). Pins within 2 s merge (state-machines 6.3 row 17).
+- `POST /api/meetings/:id/pins` with `{ t? }` ([05-api.md](05-api.md) 2.11): the button and `Alt P` with no terminal focused send no `t`, and a click on a line sends that line's `t0` as `t` (D-119). The server sets `t = elapsed_s` at the moment of the request when absent, and `label` = the newest line's text, first 80 characters (non-confidential only). As built in 0.4.0 the label is taken from the ring line whose `t0` equals the sent `t` when there is one, else from the newest line. Pins within 2 s merge (state-machines 6.3 row 17).
 - Stored in SQLite `meeting_pins { meetingId, t, label | null, createdAt }` ([06-storage.md](06-storage.md)). Shown in the live Pins list and in the detail's "Pinned moments" with the transcript line found at that offset in `transcript.md` or `transcript.jsonl`.
 - Limit: postmeet does not know about them, so pins never reach the vault note, and pins made from the TUI do not exist.
 
@@ -230,7 +230,7 @@ The owner did not take T1 on 2026-10-04; M4 builds none of this. When `status.pr
 
 ### 11.1 States (state-machines 6.4)
 
-The deck watches `<session_dir>/<id>/session.json` (fs.watch plus a 10 s poll) from `stop` until `synthesized`. It reads `state` only: `recorded`, `transcribed`, `awaiting_names`, `synthesized`; `stopping` is deck-derived. The `stuck` flag: `postmeet.log` has not grown for 10 minutes, no `postmeet.lock` is held, and the state is not `synthesized` (a failed synthesis leaves the manifest unchanged, contract 2.7). `postmeet.lock` counts as held when its `dev:inode` appears in `/proc/locks`; where `/proc/locks` does not exist (macOS), when the lock file changed within the last 10 minutes (D-115). Sessions that never got a manifest (scribed killed hard) show "Recording interrupted" when their directory has a `transcript.jsonl` but no `session.json` and scribed is not recording them (Proposed).
+The deck watches `<session_dir>/<id>/session.json` (fs.watch plus a 10 s poll) from `stop` until `synthesized`. It reads `state` only: `recorded`, `transcribed`, `awaiting_names`, `synthesized`; `stopping` is deck-derived. The `stuck` flag: `postmeet.log` has not grown for 10 minutes, no `postmeet.lock` is held, and the state is not `synthesized` (a failed synthesis leaves the manifest unchanged, contract 2.7). `postmeet.lock` counts as held when its `dev:inode` appears in `/proc/locks`; where `/proc/locks` does not exist (macOS), when the lock file changed within the last 10 minutes (D-115). Sessions that never got a manifest (scribed killed hard) show "Recording interrupted" when their directory has a `transcript.jsonl` but no `session.json`, nothing in it changed for more than 1 hour, and scribed is not recording them (as built in 0.4.0: `interrupted` on `MeetingListItem`, [05-api.md](05-api.md) section 7).
 
 The list is built at start and on change by reading every `session.json` under `session_dir` (one directory per session, `YYYY-MM-DDTHH-MM-SS[-N]`). Rows without a manifest older than 1 hour and not recording are listed as interrupted, not hidden.
 
@@ -272,7 +272,7 @@ Decided: while TurbidAssist is recording, notifications still pop up and no soun
 
 ## 14. Search
 
-`GET /api/meetings/search?q=` (debounced 300 ms in the browser). Decided 2026-10-04 (MEET-O7, D-109): confidential meetings are included in search, read from the session files on demand and never indexed, cached or persisted. Implementation: no index, an on-demand scan of each session's `transcript.md` (batch, preferred) or `transcript.jsonl`, newest meetings first, case- and accent-insensitive, capped at 2 s of work per query and 200 hits; results stream to the browser in pages. Confidential meetings are included in results but nothing is cached. Hits carry `{ meetingId, offsetSeconds, speaker, textRange }` so the UI marks ranges with `mark` elements without injecting HTML.
+`GET /api/meetings/search?q=` (debounced 300 ms in the browser). Decided 2026-10-04 (MEET-O7, D-109): confidential meetings are included in search, read from the session files on demand and never indexed, cached or persisted. Implementation: no index, an on-demand scan of each session's batch transcript (as built in 0.4.0: `transcript.json` segments first, else `transcript.md`) or the live `transcript.jsonl`, newest meetings first, case- and accent-insensitive, capped at 2 s of work per query and 200 hits. Confidential meetings are included in results but nothing is cached. As built in 0.4.0 the answer is one JSON body, `{ hits, meetingCount, partial }`, with `partial: true` when the time or hit cap stopped the scan; each hit is `{ meetingId, t0, speaker, snippet, ranges }`, a snippet of at most 160 characters around the match with the `[start, end]` offsets of every match inside it, so the UI marks ranges with `mark` elements without injecting HTML ([05-api.md](05-api.md) 2.11).
 
 ## 15. Contract tests (Decided: against `protocol.py` fixtures)
 
@@ -385,18 +385,18 @@ T4 is not taken (2026-10-04): "Start scribed" uses the `systemd-run` command of 
 
 | ID | Question | Default until decided | Blocks milestone |
 |---|---|---|---|
-| MTG-O1 | Past meeting notes are read from disk when vault-mcp is down, an exception to "the deck reaches the vault only through vault-mcp". Accept? | Default applied in M4, owner may revisit before exit: yes, read-only, limited to `vault.meetings_folder`, matched by frontmatter `session_id`; M4 reads notes from disk only (D-114) | M4 before exit |
-| MTG-O2 | Take TurbidAssist change T2 (status push, `stopping` visible, `protocol` field)? | Default applied in M4: T2 is not taken (2026-10-04), so poll `status` every 2 s | none |
+| MTG-O1 | Past meeting notes are read from disk when vault-mcp is down, an exception to "the deck reaches the vault only through vault-mcp". Accept? | Default shipped in 0.4.0, still the owner's to revisit before exit: yes, read-only, limited to `vault.meetings_folder`, matched by frontmatter `session_id`; M4 reads notes from disk only (D-114) | M4 before exit |
+| MTG-O2 | Take TurbidAssist change T2 (status push, `stopping` visible, `protocol` field)? | Default shipped in 0.4.0: T2 is not taken (2026-10-04), so poll `status` every 2 s | none |
 | MTG-O3 | Take TurbidAssist change T0 (fixture exporter), or generate fixtures from the deck's test harness by importing `protocol.py` with Python in CI? | **Decided** 2026-10-04 with TEST-O3 (D-108): T0 in TurbidAssist (`scripts/export_protocol_fixtures.py`, output in `hub/test/fixtures/scribed/<sha>/`); none exists yet, so the contract tests run on the hand-copied `d4ffb9d` fixtures | M4 (decided) |
-| MTG-O4 | Should action-item states (dismissed, launched) stay deck-only, or also update `Tasks/Inbox.md`? | Default applied in M4, owner may revisit before exit: deck-only; the vault is untouched | none |
-| MEET-O1 | Source label not persisted | Default applied in M4 (see [screens/meetings.md](screens/meetings.md) 11) | M4 before exit |
-| MEET-O2 | Pins not in TurbidAssist | Default applied in M4: deck-stored pins; T1 not taken | M4 before exit |
-| MEET-O3 | Live meeting title | Default applied in M4 (see screens/meetings.md 11) | M4 before exit |
+| MTG-O4 | Should action-item states (dismissed, launched) stay deck-only, or also update `Tasks/Inbox.md`? | Default shipped in 0.4.0, still the owner's to revisit before exit: deck-only; the vault is untouched | none |
+| MEET-O1 | Source label not persisted | Default shipped in 0.4.0 (see [screens/meetings.md](screens/meetings.md) 11) | M4 before exit |
+| MEET-O2 | Pins not in TurbidAssist | Default shipped in 0.4.0: deck-stored pins; T1 not taken | M4 before exit |
+| MEET-O3 | Live meeting title | Default shipped in 0.4.0 (see screens/meetings.md 11) | M4 before exit |
 | MEET-O4 | Live ask with vault access | **Decided** 2026-10-04 (D-105): transcript only; T3 not taken | M4 (decided) |
-| MEET-O5 | Partial transcript lines | Default applied in M4 (see screens/meetings.md 11) | M4 before exit |
-| MEET-O6 | "Launch as session" and the other action-item buttons (scope, Q6) | Default applied in M4 (see screens/meetings.md 11 and section 12) | M4 before exit |
+| MEET-O5 | Partial transcript lines | Default shipped in 0.4.0 (see screens/meetings.md 11) | M4 before exit |
+| MEET-O6 | "Launch as session" and the other action-item buttons (scope, Q6) | Default shipped in 0.4.0 (see screens/meetings.md 11 and section 12) | M4 before exit |
 | MEET-O7 | Transcript search without persisting text | **Decided** 2026-10-04 (D-109): confidential meetings included, read on demand, never indexed, cached or persisted (section 14) | M4 (decided) |
-| MEET-O8 | "Save answer to meeting note" | Default applied in M4: no button (see screens/meetings.md 11) | M4 before exit |
+| MEET-O8 | "Save answer to meeting note" | Default shipped in 0.4.0: no button (see screens/meetings.md 11) | M4 before exit |
 | MEET-O11 | Location of TurbidAssist `config.yaml` | **Decided** 2026-10-04 (D-107): the Settings field, section 2 | M4 (decided) |
 | SM-O13 | "Start scribed": unit or detached spawn | **Decided** 2026-10-04 (D-106): `systemd-run`, section 3.5; T4 not taken | M4 (decided) |
-| SM-O14 | In-deck speaker naming for `awaiting_names` | Default applied in M4: hint only (see state-machines 13) | M4 before exit |
+| SM-O14 | In-deck speaker naming for `awaiting_names` | Default shipped in 0.4.0: hint only (see state-machines 13) | M4 before exit |

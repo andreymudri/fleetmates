@@ -185,16 +185,23 @@ Ship these in vault-mcp before M5 (graph) and M6 (dry run). Until then the Memor
 - Tags: `start` requires a tag from `synthesis.tag_policies` in `config.yaml`. The Record button therefore needs a tag choice (default `synthesis.default_tag`). Not on the canvas; added in [screens/meetings.md](screens/meetings.md).
 - Confidential tags (`store_transcript: false`, for example `client-a`, `client-b`): the deck must not store transcript text, asks or pins text for those meetings in SQLite, logs or search indexes. It may show them live in memory only ([08-security.md](08-security.md)).
 
+As built in 0.4.0 (`hub/server/adapters/scribed.mjs` and `hub/server/meetings/`):
+
+- The server reaches the socket only as `$XDG_RUNTIME_DIR/turbidassist.sock` of its own environment; without `XDG_RUNTIME_DIR` it treats scribed as unavailable and never falls back to another path.
+- A hook envelope whose `cwd` is inside `session_dir` (after resolving symlinks) is dropped, so scribed's own `claude -p` children never show as sessions. When `config.yaml` stops reading, the hook guard keeps the last `session_dir` that read.
+- Without a readable `config.yaml`, `GET /api/meetings` still answers, with `configError` and no tags; a start is 422 `unknown_tag` before any command, the meeting kinds of `POST /api/open` answer `kind_not_available`, and the tag policy reads every tag as confidential (DB-O2, `policyFor` in `hub/server/meetings/config.mjs`).
+- The note of a non-confidential meeting is found once and its vault-relative path stored; a confidential meeting's note is located again on each read (D-116).
+
 ### 4.3 Gaps between the canvas and TurbidAssist today
 
 | Canvas shows | Reality | Rule (Decided, or the default applied in M4) |
 |---|---|---|
 | "Start scribed" runs `systemctl --user start scribed` | No systemd unit for scribed exists; clients spawn it detached (`ScribeClient.ensure_daemon()`) | **Decided** 2026-10-04 (D-106): the command is `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, so scribed is not in the deck's cgroup and gets `HF_TOKEN` ([11-meetings.md](11-meetings.md) section 3.5, OPS-O1). TurbidAssist change T4 (a `scribed.service` unit) is not taken |
-| Pin moment (Alt P), pinned moments list | No pin command, event or file | Default applied in M4 (MEET-O2): the deck stores pins `{meetingId, t, label}` in SQLite (not for confidential tags: time only, no label); a `pin` command in scribed (TurbidAssist change T1) is not taken |
+| Pin moment (Alt P), pinned moments list | No pin command, event or file | Default shipped in 0.4.0 (MEET-O2): the deck stores pins `{meetingId, t, label}` in SQLite (not for confidential tags: time only, no label); a `pin` command in scribed (TurbidAssist change T1) is not taken |
 | Live Ask "uses the transcript and your vault" | scribed `ask` runs `claude -p` with **no tools and no MCP** | **Decided** 2026-10-04 (MEET-O4, D-105): Live Ask uses scribed `ask` (transcript only), the copy says "Ask · uses the transcript", and there are no citations. Vault access (TurbidAssist change T3) is not taken, and there is no deck-side engine |
 | Decisions / action items during and right after the meeting | Only in the post-meeting note written by `postmeet` | Show "Summary arrives after the meeting is processed" until the note exists |
-| Source label (Teams, Meet, Discord) | Not persisted; `status.routed_apps` shows it live | Default applied in M4 (MEET-O1): the deck records `routed_apps` while polling and stores the label |
-| "Save answer to meeting note" | Asks are already stored by scribed (`asks.jsonl`) and appear in the note's "Perguntas ao vivo" when `store_transcript` is true | Default applied in M4 (MEET-O8): no extra button |
+| Source label (Teams, Meet, Discord) | Not persisted; `status.routed_apps` shows it live | Default shipped in 0.4.0 (MEET-O1): the deck records `routed_apps` while polling and stores the label |
+| "Save answer to meeting note" | Asks are already stored by scribed (`asks.jsonl`) and appear in the note's "Perguntas ao vivo" when `store_transcript` is true | Default shipped in 0.4.0 (MEET-O8): no extra button |
 
 ## 5. Desktop notifications (Decided: notify-send / mako, in-browser badge and sound)
 

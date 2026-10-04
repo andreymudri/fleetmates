@@ -5,7 +5,7 @@ export const TOKEN_KEY = 'fleetmates-deck.token'
 /** API version this build speaks (docs/deck/05-api.md section 8). */
 export const API_VERSION = 1
 /** Build id sent in `hello` and used to remember a client_outdated reload. */
-export const BUILD = 'm3'
+export const BUILD = 'm4'
 
 /**
  * Move `#token=<t>` from the URL fragment into sessionStorage and drop the fragment with

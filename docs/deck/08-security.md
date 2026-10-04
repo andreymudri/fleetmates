@@ -206,6 +206,8 @@ env: GIT_TERMINAL_PROMPT=0, GIT_OPTIONAL_LOCKS=0, GIT_CONFIG_NOSYSTEM=1, GIT_ASK
 
 All child processes (git, `notify-send`, `xdg-open`, `claude -p`, `scribed`, `pw-play`) are started with `execFile` or `spawn` and an argv array, never through a shell, with a timeout, and never with the deck token in their environment.
 
+As built in 0.4.0, "Start scribed" runs `systemd-run` (not scribed itself) with `execFile`, an argv array and a 5 s timeout, in the web server's environment minus every key whose name contains `TOKEN`, `SECRET`, `PASSWORD` or `AUTHORIZATION`. The login shell that the unit runs parses only the fixed string `exec scribed`, or `exec "$0"` with a custom `scribedCommand` as its own argument ([13-operations.md](13-operations.md) section 3.3, D-122).
+
 ### 4.9 notify-send and `POST /api/open` (Proposed)
 
 **notify-send** ([04-integrations.md](04-integrations.md) section 5):
@@ -220,11 +222,13 @@ All child processes (git, `notify-send`, `xdg-open`, `claude -p`, `scribed`, `pw
 | `kind` | `ref` | Server resolves and checks | Opens with |
 |---|---|---|---|
 | `vaultNote` | vault-relative path | realpath inside `VAULT_PATH`, regular file, `.md` | `obsidian://open?vault=<name>&file=<encoded path>` |
-| `meetingNote` | meeting id | note path from the deck's meeting row, then as `vaultNote` | same |
+| `meetingNote` | meeting id | note path from the deck's meeting row (as built in 0.4.0: for a confidential meeting, located again on disk, D-116), then as `vaultNote` | same |
 | `runPlan` | `{ repoId, runId }` | `plan.json` `planPath` resolved, realpath inside the repo scope, regular file, `.md` | `xdg-open <abs path>` |
 | `postmeetLog` | meeting id | `<session_dir>/<id>/postmeet.log`, realpath inside `session_dir`, regular file | `xdg-open <abs path>` |
 
 Refused always: symlinks that leave their root, non-regular files, files with any execute bit, `.desktop`, `.sh`, `.AppImage` and other extensions outside a small allowlist (`.md`, `.txt`, `.log`, `.json`). `xdg-open` gets one absolute path argument (it starts with `/`, so it cannot be read as an option) via `spawn` without a shell. External web URLs are never opened by the server (4.6).
+
+As built in 0.4.0, `meetingNote` and `postmeetLog` answer 422 `validation_failed` with `details.reason: 'kind_not_available'` while no `config.yaml` reads, and a `postmeet.log` symlinked out of `session_dir` is 403 `path_not_allowed` and opens nothing.
 
 ### 4.10 Logs, redaction and telemetry (Proposed)
 
@@ -255,6 +259,13 @@ A meeting is confidential when its tag's `store_transcript` is `false` in Turbid
 | Transcript search | confidential meetings are included, read from the session files on demand, never indexed, cached or persisted (MEET-O7, D-109) |
 
 The tag list is re-read when `config.yaml` changes; a meeting's confidentiality is fixed at start from the tag it was started with. If the deck cannot read `config.yaml`, every meeting is treated as confidential (fail closed).
+
+As built in 0.4.0:
+
+- Confidentiality only rises. A stored row that is confidential makes the API's recorder view confidential even when the recorder still says otherwise, and a row that turns confidential has its pin labels, its note path and the matching event data scrubbed by the `meetings_became_confidential` trigger ([06-storage.md](06-storage.md) 4.9). Known limit, owner decision pending: the pre-migration backups `deck.db.pre-NNNN.bak` are not scrubbed (06-storage 4.9).
+- `meeting.transcript`, `meeting.recovered`, `ask.delta`, `ask.done` and `ask.error` carry `ephemeral: true` for every tag, and the event store throws on any attempt to append them.
+- The recorder and the meeting ask log through a sink that defaults to a no-op (`meetingsLog` in `hub/server/main.mjs`), so a default server writes no meeting log line at all. Whether M5 wants a real sink is open ([m4-exit.md](m4-exit.md)).
+- Meeting text is rendered as text: control and bidi characters in meeting titles, tags, summaries, decisions, action items, speakers, transcript lines, search hits, ask questions and answers, scribed error text, the recording bar title and Home "Last meeting" are shown, inside `<bdi>`, as visible `<U+XXXX>` tokens (`titleText` in `hub/web/src/components/StatusPill.jsx`; M4-T17-F2, fixed by M4 Tasks 19 and 20). The Open log drawer shows `postmeet.log` text without that step (an open finding in [m4-exit.md](m4-exit.md)).
 
 ### 4.13 Destructive gating (Decided)
 

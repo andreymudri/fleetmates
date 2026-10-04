@@ -71,6 +71,13 @@ Width behaviour: the Rail never collapses (64px at every width). Below 1280 the 
 
 Content and states are specified in [meetings.md](meetings.md) 4.3; the shell owns its placement on every screen, the "Recording started" and "Recording stopped" announcements, and clicking the title to open `/meetings/live`.
 
+As built in 0.4.0 (`hub/web/src/shell/RecBar.jsx`, `hub/web/src/shell/App.jsx`, `hub/web/src/styles/shell.css`):
+
+- The bar shows while the recorder is `recording` or `stopping`, from any client. It is a `role="region"` landmark labelled "Recording". While it shows, the shell renders the skip link as the bar's first child, so the skip link stays the first focusable element and is inside a landmark (axe `region`, M4-T17-F4, fixed by M4 Task 19). Without the bar the skip link is the shell's first child, as before.
+- The announcements go through the shell's single live region (`shell.announce.recStart` and its pair in `hub/web/src/i18n/en.js`), not through the bar.
+- The bar is `box-sizing: border-box` with `height: var(--layout-rec-bar)` (40 px), so its bottom border is inside that height; while it shows, the Rail's height is the viewport minus the bar minus the Rail's own 12 px padding top and bottom, and main is the viewport minus the bar, so the shell fits the viewport (AC6; M4-T17-F1, fixed by M4 Task 19).
+- The bar's title link renders the tag through `titleText` inside `<bdi>` (M4-T17-F2).
+
 ### 4.3 Connection banners
 
 The browser-to-server and deckd banners ([failures-and-loading.md](failures-and-loading.md) 4.3, 4.4) render at the top of `main`, below the page header, on every shell screen. At most one banner shows: server link lost wins over deckd lost.
@@ -153,7 +160,7 @@ Motion: toasts enter 200ms, exit 160ms; the rec dot pulses; reduced motion fades
 - Landmarks: `nav aria-label="Deck sections"` (Rail), `main`, labelled `aside`s; one h1 per screen (owned by the screen).
 - Rail items: links with `aria-current="page"` on the active one; Tooltip on hover and focus (400ms), not native `title`.
 - Focus-visible ring on every Rail item with 2px offset.
-- Skip link first in tab order.
+- Skip link first in tab order. While the recording bar shows, the skip link is the first child of the bar's labelled region (4.2), so it stays first and inside a landmark.
 - Toast stack comes after `main` in the tab order; `Alt U` is the fast path to requests.
 - The bell never plays without a visible change (design-system 11.12).
 

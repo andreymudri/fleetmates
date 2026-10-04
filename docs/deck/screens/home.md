@@ -167,7 +167,7 @@ Compact "Reply" opens the drawer with the reply field focused (compact has no in
 | Captain's log card | CalmSection | `recap` | "Captain's log · today", "9 voyages · 3 made port · 1 chart added" | Decided |
 | Open loops | CalmSection link rows | sessions in `done` (row "{repo} waits in port for review" + "Review") | "Open loops before tomorrow" | done rows Proposed binding; git rows Open (HOME-O3) |
 | Charts added | CalmSection capture links | notes captured today (M5, see memory.md MEM-O3) | "Charts added to your vault", "Open Memory" | Decided layout |
-| Last meeting | CalmSection + ActionItemCard `row` | newest synthesized meeting today (M4) | "Last meeting", "Launch as session" | Decided layout; Launch as session Open (MEET-O6) |
+| Last meeting | CalmSection + ActionItemCard `row` | newest synthesized meeting today (M4) | "Last meeting", "Launch as session" | Decided layout; Launch as session is the MEET-O6 default shipped in 0.4.0, still the owner's to revisit |
 | Unanswered questions | row + Button `teal-outline xs` | unresolved `Miss` rows (M5) | "Unanswered questions", "Research this" | Decided |
 | Recent harbors | Button `secondary` chips with CrewAvatar sm pose none | 5 repos by latest session | "Recent harbors" | Decided |
 
@@ -481,6 +481,8 @@ API paths are Proposed; the state-machine event is the contract.
 | `home.quiet.strip.name` | {repo} · {task}, {state} |  |
 | `home.card.team.ask` | task {taskId} · {summary} |  |
 | `home.card.team.moreRequests` | +{n} more |  |
+
+As built in 0.4.0 (`hub/web/src/screens/home/Home.jsx`, M4 Task 15): the four `home.calm.meeting.*` strings of `HOME_COPY` are in the table above verbatim (checked for 0.4.0 with a script that reads `HOME_COPY` and looks for each string in this deck). "Last meeting" is the newest `synthesized` meeting that started on the local day, read from `GET /api/meetings` (from disk, so it loads with scribed down), with its first action item that is not dismissed; "Launch as session" opens `/new?task=` with the raw item text. The title and the item text render through `titleText` inside `<bdi>` with `lang="pt-BR"` (M4-T17-F2, fixed by M4 Task 19). Without a synthesized meeting today the section says "No meetings today.".
 
 As built in M3: every M3 string of `HOME_COPY`, `CARD_COPY` and `COMPACT_COPY` is in the table above; the session archive strings (`home.archive.*`, `home.archived.*`, `archive.toast.*`, `home.card.archive`) belong to the session archive ([archive.md](../archive.md)), which quotes some of them and is outside this copy deck. The rule-added toast's Undo revokes with `?undo=1`, so the server records it as an undo. After a Deny, a Home card does not offer the 30 s "Tell Claude what to do instead" field; the drawer does (the M3 plan did not ask for it on cards).
 

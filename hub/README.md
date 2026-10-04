@@ -7,8 +7,8 @@ into it.
 
 ![Home with nine sessions, three of them waiting on you](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
 
-**Status: 0.3.0, not published yet.** This is milestone M3, Unblock, on top of M2, Control, and M1,
-Observe. The package name
+**Status: 0.4.0, not published yet.** This is milestone M4, Meetings, on top of M3, Unblock, M2,
+Control, and M1, Observe. The package name
 (`@andreymudri/fleetmates-deck`) and the command names (`fleetmates-deck`, `fm`) are still an open
 decision and may change before the first release.
 
@@ -145,6 +145,66 @@ with secrets in the summaries masked. Request rows are kept 30 days; tiers and r
   captured so far shows that label, so for Bash the option is not offered.
 - Fleetmates teammates have no terminal of their own; the Team run page shows their tool steps.
 
+## What M4 adds
+
+TurbidAssist meetings, from the deck, over TurbidAssist's `scribed` socket. TurbidAssist itself is
+unchanged and stays optional: without it the rest of the deck works as before.
+
+- **Meetings** (`Alt Shift 3`): past meetings grouped by day with their post-processing state, the
+  synthesized note (summary, decisions, action items), pinned moments, the full transcript and the
+  `postmeet.log` tail. Search finds a phrase in every meeting's transcript.
+- **Record** with a tag from TurbidAssist's `config.yaml`. The live view shows the transcript as
+  scribed writes it, your pins and the live ask. A recording bar on every screen has "Pin moment"
+  (`Alt P`) and "Stop and summarize". A recording started elsewhere (the `scribe` CLI, the TUI, a
+  key binding) shows in the deck within one 2 s poll.
+- **Action items**: "Launch as session" opens the new-session form with the item as the task;
+  "Dismiss" hides it, with Undo. Home Calm shows "Last meeting" with its first open action item.
+
+### Where the deck finds `config.yaml`
+
+Settings, Connections, "TurbidAssist config.yaml" holds the path. The default is
+`~/dev/turbidassist/config.yaml` when that file exists; set the field when your checkout is
+elsewhere. The deck reads `session_dir`, the vault path, `vault.meetings_folder`, the batch model and
+the tags (`synthesis.tag_policies`) from it with its own small reader, and never writes to it. The
+status line under the field says "Read {n} tags from {path}." or "config.yaml not found at {path}.".
+
+### Start scribed
+
+When scribed is not running, Meetings shows a degraded card with "Start scribed" (also in Settings,
+Connections and First run). It runs
+
+    systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'
+
+so scribed runs in its own transient user unit, outside the deck's cgroup, with your login shell's
+environment. Restarting the deck web server is meant to leave that unit and a recording running.
+Inspect it with `systemctl --user status turbidassist-scribed` and
+`journalctl --user -u turbidassist-scribed`. A custom "scribed command" in Settings is passed to the
+shell as one argument, never parsed as shell text.
+
+### Quiet mode
+
+While any client records, the deck plays no bell; desktop popups still show. Settings, Notifications
+"Quiet in meetings" turns this off.
+
+### Confidential meetings
+
+A tag whose `store_transcript` is `false` in `config.yaml` is confidential, and so is a tag that is
+not in `config.yaml` or any meeting while `config.yaml` cannot be read. The deck stores no transcript
+text and no ask text for any meeting; for a confidential one it also stores no pin label and no note
+path. Live lines and ask answers reach the browser as ephemeral messages that are never written to
+the database or browser storage. Confidential meetings are included in search, read from the session
+files on each search and never indexed or cached.
+
+### M4 limits
+
+- The live ask uses the transcript only: it is scribed's `ask`, which cannot read your vault, and
+  shows no citations.
+- Pins are kept by the deck and shown only in the deck; they do not reach the meeting note.
+- No speaker naming in the deck: a meeting that needs names shows `postmeet name {session}` to copy.
+- Meeting notes are read from disk, read only, from `vault.meetings_folder`; reading through
+  vault-mcp comes in M5.
+- "Research first" and "Save answer to meeting note" are not shown.
+
 ## Requirements
 
 - Linux with systemd user services. macOS, Windows and WSL are not supported.
@@ -153,6 +213,8 @@ with secrets in the summaries masked. Request rows are kept 30 days; tiers and r
   `fleetmates-deck doctor` tells you when yours differs.
 - Chromium or Firefox.
 - For popups: `notify-send` (libnotify) and a notification daemon such as mako.
+- For Meetings (optional): TurbidAssist with its `scribed` daemon, and `systemd-run` for "Start
+  scribed".
 - Build tools for `node-pty` only if no prebuilt binary matches your platform.
 
 ## Install and first run
@@ -227,8 +289,11 @@ The policy is a summary row per session kept forever, and the event stream and s
 dropped after 30 days. The server runs this cleanup when it starts and then daily at 04:10 local
 time. Claude Code transcripts are linked by path, never copied.
 
-Meeting content: M1 only reads whether TurbidAssist is recording, to keep the bell quiet. It does
-not read or store transcripts.
+Meeting content: the database keeps, per meeting, its id, tag, confidential flag, state, times, the
+source apps seen while recording, the session directory, the note path (not for a confidential
+meeting), pins (with no label for a confidential meeting) and dismissed action items by a hash of
+their text. Transcripts, notes and asks are read from TurbidAssist's files each time and never
+copied.
 
 ## Uninstall
 
@@ -265,8 +330,8 @@ section 12.
 |---|---|
 | M1 Observe | Watch sessions, popups, First run, Settings |
 | M2 Control | Live terminals in the browser, launch sessions, `fm ls` and `fm attach`, Team run page, Crew sheet |
-| M3 Unblock (this release) | Answer approvals and questions from the deck, permission rules |
-| M4 Meetings | TurbidAssist meetings |
+| M3 Unblock | Answer approvals and questions from the deck, permission rules |
+| M4 Meetings (this release) | TurbidAssist meetings: record, live transcript and ask, notes, search |
 | M5 Memory ask | Ask the knowledge vault |
 | M6 Deep research | Research runs |
 
