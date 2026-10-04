@@ -1,0 +1,76 @@
+/* The Memory screen (screens/memory.md), owned by M5 Task 13, and the Citation and NoteChip components
+   (components 21 and 22), added by Task 8. Values are tokens from tokens.css. Imported once from main.jsx. */
+
+.citation {
+  display: inline-flex;
+  gap: var(--space-8);
+  align-items: center;
+  max-width: 100%;
+  padding: var(--space-8) var(--space-10);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+}
+.citation--source {
+  background: var(--brand-accent-tint);
+  color: var(--text-on-teal-tint);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+}
+.citation--source:hover { background: var(--color-teal-700); color: var(--text-on-teal-tint); }
+.citation--callout {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+  background: var(--bg-raised);
+  color: var(--text-default);
+}
+.citation--callout:hover { background: var(--bg-control); }
+.citation-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-round);
+  background: var(--brand-accent);
+}
+.citation-ref { overflow-wrap: anywhere; }
+.citation--callout .citation-ref {
+  color: var(--text-link);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+}
+.citation-title { font-weight: var(--font-weight-semibold); }
+.citation-snippet {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  white-space: pre-wrap;
+}
+
+.note-chip {
+  display: inline-flex;
+  gap: var(--space-6);
+  align-items: center;
+  border-radius: var(--radius-pill);
+  color: var(--text-link);
+  text-decoration: none;
+}
+.note-chip:hover { color: var(--text-link-hover); background: var(--bg-control); }
+.note-chip--inline { padding: 0 var(--space-6); white-space: nowrap; }
+.note-chip--learned {
+  padding: var(--space-4) var(--space-10);
+  background: var(--brand-accent-tint);
+  font-size: var(--font-size-sm);
+}
+.note-chip-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-round);
+  background: var(--text-muted);
+}
+.note-chip--learned .note-chip-dot { width: 8px; height: 8px; }
+.note-chip-dot[data-domain="index"] { background: var(--domain-index); }
+.note-chip-dot[data-domain="nestjs"] { background: var(--domain-nestjs); }
+.note-chip-dot[data-domain="docker"] { background: var(--domain-docker); }
+.note-chip-dot[data-domain="patterns"] { background: var(--domain-patterns); }
+.note-chip-dot[data-domain="concorrencia"] { background: var(--domain-concorrencia); }
+.note-chip-dot[data-domain="projects"] { background: var(--domain-projects); }
