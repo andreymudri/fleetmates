@@ -220,6 +220,54 @@ test('the ask thread shows Asking with Stop, the stopped note and the error with
   assert.match(done, />Copy</)
 })
 
+test('after Stop the composer stays disabled until the stopped ask ends, and ask_in_progress reads as still answering', async () => {
+  const { askView, askFailure, MeetingLiveView } = await load('screens/meetings/MeetingLive.jsx')
+  const record = { threadId: 'th1', question: 'quem liga?', text: 'Você liga na', state: 'streaming', error: null }
+  const stopped = { th1: 'Você liga' }
+  const waiting = askView({ history: [], earlier: [], record, stopped, local: null })
+  assert.equal(waiting.current.state, 'stopped')
+  assert.equal(waiting.busy, true, 'Stop does not reach the server, so the composer waits for the stopped answer to end')
+  const html = render(MeetingLiveView, viewProps({ thread: waiting.thread, busy: waiting.busy }))
+  assert.match(html, /Stopped here; the answer may still be saved to the meeting/)
+  assert.match(html, /<input class="live-ask-input"[^>]*disabled=""/)
+  const ended = askView({ history: [], earlier: [], record: { ...record, state: 'done', text: 'Você liga na quarta.' }, stopped, local: null })
+  assert.equal(ended.busy, false, 'the ask.done of the stopped ask frees the composer')
+  assert.equal(ended.thread[0].answer, 'Você liga', 'the stopped answer stays frozen')
+
+  const local = askFailure('de novo?', Object.assign(new Error('ask_in_progress'), { status: 409, code: 'ask_in_progress' }), 'f1')
+  assert.equal(local.state, 'waiting')
+  const inProgress = askView({ history: [], earlier: [], record: null, stopped: {}, local })
+  assert.equal(inProgress.busy, true)
+  const busyHtml = render(MeetingLiveView, viewProps({ thread: inProgress.thread, busy: true }))
+  assert.match(busyHtml, /Asking…/)
+  assert.doesNotMatch(busyHtml, /did not finish/, 'a 409 ask_in_progress is not shown as a failed ask')
+  assert.equal(askFailure('q', Object.assign(new Error('scribed_refused'), { code: 'scribed_refused', details: { text: 'sem sessão' } }), 'f2').error, 'sem sessão')
+})
+
+test('a failed ask or a retry never repeats the previous question and answer', async () => {
+  const { askView, askFailure, MeetingLiveView } = await load('screens/meetings/MeetingLive.jsx')
+  const record = { threadId: 'th1', question: 'primeira?', text: 'resposta', state: 'done', error: null }
+  const { current } = askView({ history: [], earlier: [], record, stopped: {}, local: null })
+  // Two asks failed in turn: each pushed the current ask into `earlier` before the POST was refused.
+  const earlier = [current, current]
+  const local = askFailure('segunda?', new Error('boom'), 'f2')
+  const { thread } = askView({ history: [], earlier, record, stopped: {}, local })
+  assert.deepEqual(thread.map(entry => entry.id), ['th1', 'f2'])
+  const html = render(MeetingLiveView, viewProps({ thread }))
+  assert.equal(html.match(/>primeira\?</g).length, 1)
+})
+
+test('a confidential meeting shows pin times without labels', async () => {
+  const { MeetingLiveView } = await load('screens/meetings/MeetingLive.jsx')
+  const pins = [{ id: 'p', t: 65, label: 'segredo do cliente' }]
+  const secret = render(MeetingLiveView, viewProps({ pins, recorder: recorder('recording', { tag: 'client-a', confidential: true }) }))
+  assert.match(secret, />01:05</)
+  assert.doesNotMatch(secret, /segredo do cliente/)
+  assert.doesNotMatch(secret, /live-pin-label/)
+  const open = render(MeetingLiveView, viewProps({ pins, recorder: recorder('recording', { tag: 'pessoal', confidential: false }) }))
+  assert.match(open, /<span class="live-pin-label" lang="pt-BR">segredo do cliente<\/span>/)
+})
+
 function viewProps(extra = {}) {
   return {
     t: undefined, recorder: recorder('recording', { tag: 'pessoal', confidential: false }), items: [], pins: [], meta: 'PT-BR',

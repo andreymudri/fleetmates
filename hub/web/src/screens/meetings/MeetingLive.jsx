@@ -158,6 +158,7 @@ function AskEntry({ entry, say, onStop, onRetry, onCopy }) {
           </p>
           )
         : null}
+      {entry.state === 'waiting' ? <p className="live-ask-status"><span>{say('meetings.ask.asking')}</span></p> : null}
       {entry.state === 'stopped' ? <p className="live-ask-note">{say('meetings.ask.stopped')}</p> : null}
       {entry.state === 'error'
         ? (
@@ -231,7 +232,7 @@ export function MeetingLiveView({
             {pins.map(pin => (
               <li key={pin.id} className="live-pin">
                 <span className="live-pin-time">{formatOffset(pin.t)}</span>
-                {pin.label ? <span className="live-pin-label" lang="pt-BR">{pin.label}</span> : null}
+                {pin.label && !recorder?.confidential ? <span className="live-pin-label" lang="pt-BR">{pin.label}</span> : null}
               </li>
             ))}
           </ol>
@@ -251,6 +252,62 @@ function entryOf(record, stopped) {
     state: frozen !== undefined ? 'stopped' : record.state, error
   }
 }
+
+/**
+ * The ask thread as shown: scribed history, the earlier asks of this view, the current store record and a local
+ * entry (a failed POST, or an ask scribed is still answering). An ask appears once, at its first position, in its
+ * latest version, so an ask that failed or was retried never repeats the previous question.
+ * @param {{ history: object[], earlier: object[], current: object | null, local: object | null }} input
+ * @returns {object[]}
+ */
+export function askThread({ history, earlier, current, local }) {
+  const order = []
+  const byId = new Map()
+  for (const entry of [...history, ...earlier, current, local]) {
+    if (!entry) continue
+    if (!byId.has(entry.id)) order.push(entry.id)
+    byId.set(entry.id, entry)
+  }
+  return order.map(id => byId.get(id))
+}
+
+/**
+ * Whether the composer waits: while the server is still answering, which a Stop does not end (Stop only freezes
+ * the display; M4 has no server cancel), so it waits for the record's `ask.done` or `ask.error`; and while a local
+ * entry says scribed is still answering another ask (`ask_in_progress`).
+ * @param {{ record: { state?: string } | null | undefined, local: { state?: string } | null }} input
+ * @returns {boolean}
+ */
+export function askBusy({ record, local }) {
+  return record?.state === 'streaming' || local?.state === 'waiting'
+}
+
+/**
+ * The ask aside's thread and whether its composer waits, from the store record of the current ask, the locally
+ * stopped answers (`threadId` to the text shown when Stop was pressed), the earlier asks and the local entry.
+ * @param {{ history: object[], earlier: object[], record: object | null | undefined, stopped: Record<string, string>, local: object | null }} input
+ * @returns {{ current: object | null, thread: object[], busy: boolean }}
+ */
+export function askView({ history, earlier, record, stopped, local }) {
+  const current = entryOf(record, stopped)
+  return { current, thread: askThread({ history, earlier, current, local }), busy: askBusy({ record, local }) }
+}
+
+/**
+ * The local thread entry for a rejected `POST /api/ask`: `ask_in_progress` (scribed is still answering an earlier,
+ * possibly stopped, ask) is a `waiting` entry shown as "Asking…", anything else an `error` entry with the message.
+ * @param {string} question
+ * @param {{ code?: string, message?: string, details?: { text?: string } } | unknown} error
+ * @param {string} id
+ * @returns {{ id: string, question: string, answer: string, state: 'waiting' | 'error', error: string | null }}
+ */
+export function askFailure(question, error, id) {
+  if (error?.code === 'ask_in_progress') return { id, question, answer: '', state: 'waiting', error: null }
+  return { id, question, answer: '', state: 'error', error: String(error?.details?.text ?? error?.message ?? error) }
+}
+
+/** How long a 409 `ask_in_progress` keeps the composer waiting before the question can be sent again. */
+export const ASK_WAIT_MS = 5000
 
 function mergePins(rest, removed, stored) {
   const byId = new Map()
@@ -331,9 +388,15 @@ export function MeetingLive({ state, t, api, dispatch, now = Date.now, clipboard
   }
 
   const record = meetingId ? state.data.meetingAsk?.[meetingId] : null
-  const current = entryOf(record, stopped)
-  const thread = [...history, ...earlier, ...(current ? [current] : []), ...(failed ? [failed] : [])]
-  const busy = current?.state === 'streaming'
+  const { current, thread, busy } = askView({ history, earlier, record, stopped, local: failed })
+  useEffect(() => {
+    if (failed?.state !== 'waiting') return undefined
+    const timer = window.setTimeout(() => {
+      setFailed(null)
+      setDraft(previous => previous || failed.question)
+    }, ASK_WAIT_MS)
+    return () => window.clearTimeout(timer)
+  }, [failed])
   const ask = text => {
     const question = String(text ?? '').trim()
     if (!question || !meetingId || busy) return
@@ -341,7 +404,7 @@ export function MeetingLive({ state, t, api, dispatch, now = Date.now, clipboard
     setFailed(null)
     setDraft('')
     askMeeting(api, meetingId, question).then(answer => dispatch?.({ type: 'meeting.ask', ...answer })).catch(error => {
-      setFailed({ id: `f${Date.now()}`, question, answer: '', state: 'error', error: String(error?.details?.text ?? error?.message ?? error) })
+      setFailed(askFailure(question, error, `f${Date.now()}`))
     })
   }
 
