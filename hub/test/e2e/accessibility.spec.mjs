@@ -329,9 +329,11 @@ test('keyboard (qa 1.3): the Stop dialog takes focus on Cancel, keeps Tab inside
 // by the `after` above; serious and critical ones fail. Findings this audit made are recorded with their severity
 // (qa-checklist 0.4) next to the test that shows them; S1 and S2 ones are todo tests until their fix tasks land.
 // Recorded when this audit was written:
-// - T17-F2 (S2, keyboard): focus leaves the drawer when the answered row leaves; the todo test below.
-// - T17-F3 (S3, axe `landmark-unique`, moderate): each drawer section is labelled by its count span alone
-//   (" · 1"), so two sections with the same count share a name. The M1 `drawer-busy` audit reports it too.
+// - T17-F2 (S2, keyboard): focus left the drawer when the answered row left. Fixed by Task 23; the test below
+//   that was its todo now runs.
+// - T17-F3 (S3, axe `landmark-unique`, moderate): each drawer section was labelled by its count span alone
+//   (" · 1"), so two sections with the same count shared a name. Fixed by Task 23: each section is named by its
+//   tier title and count, the text of its heading; the answering drawer audit below asserts axe reports no `landmark-unique`.
 // - No serious or critical axe finding on the answering drawer, the four PromptBars, Settings Approval rules with the
 //   revoke dialog, or the Changes diff.
 // - T17-F1 (S2) is functional, not an accessibility finding: unblock.spec.mjs.
@@ -372,6 +374,7 @@ test('axe (M3): the answering drawer with Safe, Caution, Destructive and questio
   await page.waitForSelector('.drawer-rule-note')
   assert.deepEqual(await page.$$eval('.drawer-section', rows => rows.map(row => row.className.match(/drawer-section--(\w+)/)[1])), ['safe', 'caution', 'question', 'destructive'])
   await audit.run(page, 'drawer-answering')
+  assert.deepEqual(screens['drawer-answering'].filter(row => row.id === 'landmark-unique'), [], 'T17-F3: four sections of one row each keep distinct names')
   await page.check('.drawer-section--destructive .answer-confirm input')
   await audit.run(page, 'drawer-answering-confirmed')
   for (const [session, tier] of [[safe, 'safe'], [caution, 'caution'], [destructive, 'destructive'], [question, 'question']]) {
@@ -448,11 +451,12 @@ test('keyboard (M3): the answering drawer traps Tab, opens on the checkbox when 
   assert.deepEqual(await page.$$eval('.confirm-actions button', rows => rows.map(row => row.textContent)), ['Cancel', 'Revoke rule'])
 })
 
-// Finding T17-F2 (S2, qa-checklist 0.4 "broken keyboard path"): when Alt A (or a click) answers the focused row and
-// the row leaves the drawer, focus falls to the page body. The drawer's keys (Up, Down, Alt A, Alt D, Esc) and its
-// Tab trap act only while focus is inside it, so the keyboard user is left outside a modal that is still open
-// (needs-you-drawer.md section 8: focus trap). A todo until the fix task this finding adds to the M3 plan lands.
-test('keyboard (M3): after Alt A answers the focused row and it leaves, focus stays in the drawer', { todo: 'T17-F2: focus falls to the body when the answered row leaves' }, async t => {
+// Finding T17-F2 (S2, qa-checklist 0.4 "broken keyboard path"): when Alt A (or a click) answered the focused row and
+// the row left the drawer, focus fell to the page body. The drawer's keys (Up, Down, Alt A, Alt D, Esc) and its
+// Tab trap act only while focus is inside it, so the keyboard user was left outside a modal that was still open
+// (needs-you-drawer.md section 8: focus trap). Fixed by Task 23: focus moves to the next row, else the previous
+// row, else Close.
+test('keyboard (M3): after Alt A answers the focused row and it leaves, focus stays in the drawer', async t => {
   const h = await startUnblock(t, { web: web.dir })
   const first = await h.pty(unblock.sessions.pty[0])
   const second = await h.pty({ repo: 'discord-audit', script: 'approve-safe', summary: 'npm run test' })
@@ -467,7 +471,26 @@ test('keyboard (M3): after Alt A answers the focused row and it leaves, focus st
   assert.equal(await page.evaluate(() => !!document.querySelector('.drawer')?.contains(document.activeElement)), true, `focus stays in the drawer, not on ${await page.evaluate(() => document.activeElement?.tagName)}`)
 })
 
-const running = page => page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running')
+// The refocus of T17-F2 acts only when focus fell to the page body. A denied row lingers with its follow-up field
+// and is no longer an answerable row, so a refocus that ignored where focus is would pull it off that field while
+// the user types, and a typed space would then press Close.
+test('keyboard (M3): typing in a denied row\'s follow-up field keeps focus there and the drawer open', async t => {
+  const h = await startUnblock(t, { web: web.dir })
+  const deny = await h.pty({ repo: 'discord-audit', script: 'deny-then-instruct', summary: 'npm run test' })
+  const page = await openDeck(browser, h)
+  await page.keyboard.press('Alt+KeyU')
+  const row = `.drawer-row[data-request="${deny.request.id}"]`
+  await page.waitForSelector(`${row} .answer-buttons button:not([disabled])`)
+  await page.click(`${row} .answer-buttons button:text-is("Deny")`)
+  await page.waitForSelector(`${row} .drawer-followup input`)
+  await page.focus(`${row} .drawer-followup input`)
+  await page.keyboard.type('use pnpm instead', { delay: 60 })
+  assert.equal(await page.evaluate(() => !!document.activeElement?.closest('.drawer-followup')), true, `focus stays in the follow-up field, not on ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 60))}`)
+  assert.equal(await page.inputValue(`${row} .drawer-followup input`), 'use pnpm instead')
+  assert.equal(await page.locator('.drawer').count(), 1, 'the drawer stays open')
+})
+
+const running = page =>page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running')
   .map(animation => `${animation.animationName ?? animation.transitionProperty ?? animation.constructor.name} on ${animation.effect?.target?.getAttribute?.('class') ?? '?'}`))
 
 test('motion (qa 1.4): with reduced motion nothing animates on the Crew page, Home or Focus', async t => {

@@ -1,4 +1,4 @@
-import React, { useEffect, useReducer, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { AnswerControls } from '../../components/AnswerControls.jsx'
 import { CARD_COPY } from '../../components/SessionCard.jsx'
 import { requestSummary } from '../../components/Counts.jsx'
@@ -145,6 +145,30 @@ export function drawerFocusTarget(panel, requestId) {
   const row = rowIn(panel, requestId)
   const named = row ? primaryIn(row) ?? row.querySelector('a') : null
   return named ?? primaryIn(panel.querySelector('.drawer-row')) ?? panel.querySelector('.drawer-row a') ?? panel.querySelector('.drawer-close')
+}
+
+const leaving = row => row?.matches?.('.drawer-row--leaving') === true
+const targetIn = row => row && !leaving(row) ? primaryIn(row) ?? row.querySelector('a') : null
+
+/**
+ * Where focus goes when the focused row leaves the drawer (T17-F2): the primary action (else Open) of the next
+ * row still shown, in the order the rows had before `leftId` left, else of the previous one, else Close. Rows that
+ * are themselves leaving (a note or the follow-up field) are skipped; so is a row with nothing to focus.
+ * @param {ParentNode | null} panel
+ * @param {string[]} previousIds the row ids in display order before the row left
+ * @param {string} leftId the row that held focus
+ * @returns {Element | null}
+ */
+export function refocusTarget(panel, previousIds, leftId) {
+  if (!panel) return null
+  const index = previousIds.indexOf(leftId)
+  const after = index < 0 ? [] : previousIds.slice(index + 1)
+  const before = index < 0 ? [] : previousIds.slice(0, index).reverse()
+  for (const id of [...after, ...before]) {
+    const target = targetIn(rowIn(panel, id))
+    if (target) return target
+  }
+  return panel.querySelector('.drawer-close')
 }
 
 /**
@@ -386,8 +410,8 @@ export function drawerLocal(local, action) {
  * The drawer's answer, batch, rule and follow-up calls over the REST helpers, reporting through `dispatch`
  * ({@link drawerLocal} actions). A single answer gets no toast; a batch gets one ("Allowed {ok} of {n}" or
  * "Allowed {ok} of {n}: {failed} did not land"); an accepted rule toasts "Rule added to {repo}: {pattern}"
- * with an Undo that revokes it. The body of every answer stays in `busy` until the request leaves, except
- * after a refusal, so a row that did not land can resend it.
+ * with an Undo that revokes it as an undo (`?undo=1`, like the Home toast). The body of every answer stays in
+ * `busy` until the request leaves, except after a refusal, so a row that did not land can resend it.
  * @param {{ api: object, dispatch: (action: object) => void, state: object, t?: Function, now?: () => number }} options
  */
 export function drawerActions({ api, dispatch, state, t, now = () => Date.now() }) {
@@ -428,7 +452,7 @@ export function drawerActions({ api, dispatch, state, t, now = () => Date.now() 
     },
     undo(item) {
       dispatch({ type: 'untoast', id: item.id })
-      return revokeRule(api, item.undo.repoKey, item.undo.pattern).catch(() => {})
+      return revokeRule(api, item.undo.repoKey, item.undo.pattern, { undo: true }).catch(() => {})
     },
     followup(id, text) {
       if (!String(text ?? '').trim()) {
@@ -577,8 +601,9 @@ function RuleOffers({ offers, state, t, actions }) {
  * "Answer in your terminal" and "Open", and nothing that answers. The Safe section carries the batch button
  * for 2 or more batchable Safe rows ({@link batchIds}) and the rule suggestion lines of `data.ruleOffers`
  * (with no Safe section they lead the body). Rows that left while shown keep their note or the follow-up field
- * (`local.lingering`); the drawer's toasts render above the footer. A run or task `filter` (D-69) keeps only
- * that run's or task's requests, and only those rows can be answered or batched, under the line
+ * (`local.lingering`); the drawer's toasts render above the footer. Each section's accessible name is its tier
+ * title and count, the text of its heading (for example "Safe · 1"), so two sections with the same count keep
+ * distinct names (T17-F3). A run or task `filter` (D-69) keeps only that run's or task's requests, and only those rows can be answered or batched, under the line
  * "Requests for {taskId}" or "Requests for run {runId}" with a "Show all" button calling `onShowAll`.
  * Pure: no hooks, so it can be walked in tests; `local` and `actions` come from {@link drawerLocal} and
  * {@link drawerActions}.
@@ -600,6 +625,8 @@ export function DrawerView({ state, t, now = Date.now(), navigate, onClose = () 
   const offers = (state.data.ruleOffers ?? []).filter(offer => !active || shownRepos.has(offer.repoId))
   const offersNode = <RuleOffers offers={offers} state={state} t={t} actions={actions} />
   const batch = batchIds(model.rows, state)
+  const tierTitle = tier => translate(t, CARD_COPY, `tier.${tier}`)
+  const countText = section => ` · ${section.requests.length}`
   const counts = state.data.counts
   const summary = requestSummary(counts, t)
   const oldest = counts?.oldestRequestAt
@@ -616,9 +643,9 @@ export function DrawerView({ state, t, now = Date.now(), navigate, onClose = () 
       <div className="drawer-body">
         {sections.some(section => section.tier === 'safe') ? null : offersNode}
         {sections.map(section => (
-          <section key={section.tier} className={`drawer-section drawer-section--${section.tier}`} aria-labelledby={`drawer-section-${section.tier}`}>
-            <h3 className="drawer-section-title"><span className={`tier-badge tier-badge--${section.tier}`}>{translate(t, CARD_COPY, `tier.${section.tier}`)}</span>
-              <span className="drawer-section-count" id={`drawer-section-${section.tier}`}>{` · ${section.requests.length}`}</span></h3>
+          <section key={section.tier} className={`drawer-section drawer-section--${section.tier}`} aria-label={`${tierTitle(section.tier)}${countText(section)}`}>
+            <h3 className="drawer-section-title"><span className={`tier-badge tier-badge--${section.tier}`}>{tierTitle(section.tier)}</span>
+              <span className="drawer-section-count">{countText(section)}</span></h3>
             {DRAWER_COPY[`drawer.${section.tier}.desc`] ? <p className="drawer-section-desc">{translate(t, DRAWER_COPY, `drawer.${section.tier}.desc`)}</p> : null}
             <ul className="drawer-rows">
               {section.requests.map(request => <Row key={request.id} request={request} state={state} now={now} t={t} go={go} focused={request.id === focused}
@@ -700,9 +727,11 @@ export function trapTab(event, container) {
  * names, else the first request's primary action, else its Open, else Close), focus returned to the opener on
  * close, and the history entry's filter ({@link drawerFilterFrom}), which "Show all" drops from the entry while
  * the drawer stays open. Requests that leave while shown are kept by {@link departures}; a timer prunes them and
- * the toasts. Closing (Esc, scrim, close button) resets the local state, so no checkbox stays ticked.
+ * the toasts. Closing (Esc, scrim, close button) resets the local state, so no checkbox stays ticked. When the
+ * focused row leaves (for example answered by Alt A) and focus falls to the page body, focus moves to
+ * {@link refocusTarget}, so the drawer keys, the Tab trap and Esc keep working (T17-F2).
  * This browser wiring is not exercised by the unit tests; {@link DrawerView}, {@link drawerLocal},
- * {@link drawerActions}, {@link drawerKeyDown}, {@link departures}, {@link drawerFilterFrom} and {@link trapTab} are.
+ * {@link drawerActions}, {@link drawerKeyDown}, {@link departures}, {@link drawerFilterFrom}, {@link refocusTarget} and {@link trapTab} are.
  * @param {{ state: object, t?: Function, navigate: (to: string) => void, onClose?: () => void, onLeave?: () => void, history?: History, api?: object }} props
  */
 export function NeedsYouDrawer({ history = globalThis.history, api, ...props }) {
@@ -744,6 +773,23 @@ export function NeedsYouDrawer({ history = globalThis.history, api, ...props }) 
     const timer = setInterval(() => dispatch({ type: 'prune', now: Date.now() }), 250)
     return () => clearInterval(timer)
   }, [timed])
+  // The row that last held focus (null when focus went to anything outside a row) and the row order last rendered.
+  const focusRow = useRef(null)
+  const order = useRef([])
+  useLayoutEffect(() => {
+    const root = panel.current
+    if (!root) return
+    const ids = [...root.querySelectorAll('.drawer-row')].filter(row => !leaving(row)).map(row => row.getAttribute('data-request'))
+    const doc = root.ownerDocument
+    const left = focusRow.current
+    if (left && !ids.includes(left) && (!doc.activeElement || doc.activeElement === doc.body)) {
+      const target = refocusTarget(root, order.current, left)
+      focusRow.current = target?.closest?.('.drawer-row')?.getAttribute('data-request') ?? null
+      target?.scrollIntoView?.({ block: 'nearest' })
+      target?.focus()
+    }
+    order.current = ids
+  })
   const close = props.onClose ?? (() => closeOverlay())
   const onClose = () => {
     dispatch({ type: 'close' })
@@ -766,6 +812,7 @@ export function NeedsYouDrawer({ history = globalThis.history, api, ...props }) 
   }
   const onFocus = event => {
     const id = event.target?.closest?.('.drawer-row')?.getAttribute('data-request')
+    focusRow.current = id ?? null
     if (id && id !== local.focused) dispatch({ type: 'focus', id })
   }
   return <DrawerView {...props} onClose={onClose} now={Date.now()} onKeyDown={onKeyDown} onFocus={onFocus} panelRef={panel} filter={filter} onShowAll={onShowAll}
