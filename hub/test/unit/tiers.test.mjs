@@ -91,7 +91,7 @@ test('a rule candidate comes only from a single plain Safe command with a rule (
   const s = sandbox()
   try {
     const cargo = s.bash('cargo test --release')
-    // D-102: cargo test has noneArg options, so its entry carries no rule; mypy keeps Bash(mypy:*).
+    // D-102, D-103: no tiers entry carries a Bash prefix rule, so cargo test has none.
     assert.equal(cargo.ruleCandidate, null)
     assert.equal(cargo.ruleNote, null)
     const script = s.bash('npm run lint')

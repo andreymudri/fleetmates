@@ -86,8 +86,8 @@ export function ruleThreshold(store) {
 }
 
 /**
- * The `ruleNote` of the tiers entry whose `rule` is this pattern (`anyFlags` for the runner
- * entries, D-78), or null.
+ * The `ruleNote` of the tiers entry whose `rule` is this pattern (`anyFlags`, D-78), or null. Since
+ * D-103 no default tiers entry carries one, so only a user tiers table can give a note.
  * @param {string} pattern
  * @param {{ entries?: object[] }} [tiers]
  * @returns {string|null}

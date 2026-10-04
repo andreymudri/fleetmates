@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { openDeckDb } from '../../../server/db/index.mjs'
-import { BACKUPS_KEPT, backupDir, listRules, revokeRule, writeRule } from '../../../server/approvals/rules.mjs'
+import { BACKUPS_KEPT, backupDir, listRules, revokeRule, samePattern, writeRule } from '../../../server/approvals/rules.mjs'
 
 // The settings writer, revoker and mirror (07-approvals 7.2, 7.4 and 9).
 
@@ -49,19 +49,19 @@ test('write then revoke leaves every other key byte-identical and the key and ar
     const h = harness(name)
     try {
       const before = name ? read(h.file) : {}
-      const result = await h.write('Bash(mypy:*)')
+      const result = await h.write('Bash(npm run test)')
       const after = read(h.file)
       assert.deepEqual(Object.keys(after), Object.keys(before).includes('permissions') ? Object.keys(before) : [...Object.keys(before), 'permissions'], String(name))
       assert.deepEqual(Object.keys(after.permissions), before.permissions ? Object.keys(before.permissions) : ['allow'])
-      assert.deepEqual(after.permissions.allow, [...(before.permissions?.allow ?? []), 'Bash(mypy:*)'])
+      assert.deepEqual(after.permissions.allow, [...(before.permissions?.allow ?? []), 'Bash(npm run test)'])
       for (const key of Object.keys(before)) if (key !== 'permissions') assert.equal(JSON.stringify(after[key]), JSON.stringify(before[key]))
       for (const key of Object.keys(before.permissions ?? {})) if (key !== 'allow') assert.equal(JSON.stringify(after.permissions[key]), JSON.stringify(before.permissions[key]))
       assert.ok(readFileSync(h.file, 'utf8').endsWith('}\n'))
-      assert.equal(result.rule.pattern, 'Bash(mypy:*)')
+      assert.equal(result.rule.pattern, 'Bash(npm run test)')
       assert.equal(result.rule.source, 'manual')
       assert.equal(result.rule.createdAt, 1_790_000_000_000)
       assert.equal(result.rule.tracked, false)
-      assert.deepEqual(await h.revoke('Bash(mypy:*)'), { removed: true })
+      assert.deepEqual(await h.revoke('Bash(npm run test)'), { removed: true })
       const revoked = read(h.file)
       assert.deepEqual(Object.keys(revoked), Object.keys(after))
       assert.deepEqual(Object.keys(revoked.permissions), Object.keys(after.permissions))
@@ -75,14 +75,14 @@ test('write then revoke leaves every other key byte-identical and the key and ar
 test('a new settings file is created 0600 and a write keeps the mode of an existing one', async () => {
   const h = harness(null)
   try {
-    await h.write('Bash(mypy:*)')
+    await h.write('Bash(npm run test)')
     assert.equal(statSync(h.file).mode & 0o777, 0o600)
   } finally { h.close() }
   const g = harness('local-full.json')
   try {
     const { chmodSync } = await import('node:fs')
     chmodSync(g.file, 0o640)
-    await g.write('Bash(mypy:*)')
+    await g.write('Bash(npm run test)')
     assert.equal(statSync(g.file).mode & 0o777, 0o640)
   } finally { g.close() }
 })
@@ -91,7 +91,7 @@ test('a wrong-typed or unreadable settings file is refused and nothing is writte
   for (const [name, errno] of [['local-wrong-types.json', /permissions is not an object/], ['local-invalid.json', /not valid JSON/]]) {
     const h = harness(name)
     try {
-      await rejects(h.write('Bash(mypy:*)'), 'settings_io_failed', errno)
+      await rejects(h.write('Bash(npm run test)'), 'settings_io_failed', errno)
       assert.deepEqual(readFileSync(h.file), fixture(name))
       assert.deepEqual(readdirSync(path.dirname(h.file)), ['settings.local.json'])
       assert.equal(existsSync(path.join(h.state, 'backups')), false)
@@ -104,9 +104,9 @@ test('a wrong-typed or unreadable settings file is refused and nothing is writte
   try {
     mkdirSync(path.dirname(h.file))
     writeFileSync(h.file, '[]\n')
-    await rejects(h.write('Bash(mypy:*)'), 'settings_io_failed', /top level is not an object/)
+    await rejects(h.write('Bash(npm run test)'), 'settings_io_failed', /top level is not an object/)
     writeFileSync(h.file, '{"permissions":{"allow":"Bash(ls)"}}\n')
-    await rejects(h.write('Bash(mypy:*)'), 'settings_io_failed', /permissions.allow is not an array/)
+    await rejects(h.write('Bash(npm run test)'), 'settings_io_failed', /permissions.allow is not an array/)
     assert.equal(readFileSync(h.file, 'utf8'), '{"permissions":{"allow":"Bash(ls)"}}\n')
   } finally { h.close() }
 })
@@ -122,13 +122,13 @@ test('a symlinked settings file and a symlinked .claude are refused and the targ
     writeFileSync(target, '{"keep":true}\n')
     mkdirSync(path.dirname(h.file))
     symlinkSync(target, h.file)
-    await rejects(h.write('Bash(mypy:*)'), 'settings_io_failed', /not a regular file/)
+    await rejects(h.write('Bash(npm run test)'), 'settings_io_failed', /not a regular file/)
     assert.equal(readFileSync(target, 'utf8'), '{"keep":true}\n')
     assert.ok(lstatSync(h.file).isSymbolicLink())
     rmSync(path.dirname(h.file), { recursive: true })
     writeFileSync(path.join(outside, 'settings.local.json'), '{"keep":true}\n')
     symlinkSync(outside, path.dirname(h.file))
-    await rejects(h.write('Bash(mypy:*)'), 'settings_io_failed', /not a regular file/)
+    await rejects(h.write('Bash(npm run test)'), 'settings_io_failed', /not a regular file/)
     assert.equal(readFileSync(path.join(outside, 'settings.local.json'), 'utf8'), '{"keep":true}\n')
     assert.deepEqual(readdirSync(outside).sort(), ['settings.json', 'settings.local.json'])
   } finally { h.close() }
@@ -139,27 +139,27 @@ test('a change between read and rename restarts the write; a change on every att
   const h = harness('local-full.json')
   try {
     let calls = 0
-    const result = await h.write('Bash(mypy:*)', {
+    const result = await h.write('Bash(npm run test)', {
       beforeRename: () => {
         if (++calls > 1) return
         const data = read(h.file)
-        data.permissions.allow.push('Bash(golangci-lint run:*)')
+        data.permissions.allow.push('Bash(npm run lint)')
         writeFileSync(h.file, `${JSON.stringify(data, null, 2)}\n`)
       }
     })
     assert.equal(calls, 2)
-    assert.equal(result.rule.pattern, 'Bash(mypy:*)')
-    assert.deepEqual(read(h.file).permissions.allow, ['Bash(cargo check:*)', 'WebFetch(domain:docs.rs)', 'Bash(golangci-lint run:*)', 'Bash(mypy:*)'])
+    assert.equal(result.rule.pattern, 'Bash(npm run test)')
+    assert.deepEqual(read(h.file).permissions.allow, ['Bash(cargo check:*)', 'WebFetch(domain:docs.rs)', 'Bash(npm run lint)', 'Bash(npm run test)'])
     assert.equal(readdirSync(path.dirname(h.file)).some(entry => entry.includes('deck-tmp')), false)
   } finally { h.close() }
   const g = harness('local-full.json')
   try {
     let calls = 0
-    await rejects(g.write('Bash(mypy:*)', { beforeRename: () => { calls++; writeFileSync(g.file, `${JSON.stringify({ ...read(g.file), touched: calls }, null, 2)}\n`) } }), 'settings_changed')
+    await rejects(g.write('Bash(npm run test)', { beforeRename: () => { calls++; writeFileSync(g.file, `${JSON.stringify({ ...read(g.file), touched: calls }, null, 2)}\n`) } }), 'settings_changed')
     assert.equal(calls, 3)
     const data = read(g.file)
     assert.equal(data.touched, 3)
-    assert.equal(data.permissions.allow.includes('Bash(mypy:*)'), false)
+    assert.equal(data.permissions.allow.includes('Bash(npm run test)'), false)
     assert.equal(readdirSync(path.dirname(g.file)).some(entry => entry.includes('deck-tmp')), false)
     assert.equal(g.store.get('SELECT COUNT(*) AS n FROM rules').n, 0)
   } finally { g.close() }
@@ -173,20 +173,20 @@ test('the backup is taken before the re-read compare, and a change landing after
     const dir = backupDir(h.state, h.repoId)
     const seen = []
     let calls = 0
-    const result = await h.write('Bash(mypy:*)', {
+    const result = await h.write('Bash(npm run test)', {
       beforeRename: () => {
         seen.push(existsSync(dir) ? readdirSync(dir).length : 0)
         if (++calls > 1) return
         const data = read(h.file)
-        data.permissions.allow.push('Bash(golangci-lint run:*)')
+        data.permissions.allow.push('Bash(npm run lint)')
         writeFileSync(h.file, `${JSON.stringify(data, null, 2)}\n`)
       }
     })
     // Each attempt had its backup on disk when the concurrent writer ran; the stale one is dropped.
     assert.deepEqual(seen, [1, 1])
-    assert.deepEqual(read(h.file).permissions.allow, ['Bash(cargo check:*)', 'WebFetch(domain:docs.rs)', 'Bash(golangci-lint run:*)', 'Bash(mypy:*)'])
+    assert.deepEqual(read(h.file).permissions.allow, ['Bash(cargo check:*)', 'WebFetch(domain:docs.rs)', 'Bash(npm run lint)', 'Bash(npm run test)'])
     assert.equal(readdirSync(dir).length, 1)
-    assert.ok(readFileSync(result.backupPath, 'utf8').includes('Bash(golangci-lint run:*)'))
+    assert.ok(readFileSync(result.backupPath, 'utf8').includes('Bash(npm run lint)'))
   } finally { h.close() }
 })
 
@@ -196,7 +196,7 @@ test('a settings file owned by another user is refused and left unchanged', asyn
   const getuid = process.getuid
   try {
     process.getuid = () => getuid.call(process) + 1
-    await rejects(h.write('Bash(mypy:*)'), 'settings_io_failed', /^not a regular file$/)
+    await rejects(h.write('Bash(npm run test)'), 'settings_io_failed', /^not a regular file$/)
     await rejects(Promise.resolve().then(() => h.revoke('Bash(cargo check:*)')), 'settings_io_failed', /^not a regular file$/)
     process.getuid = getuid
     assert.deepEqual(readFileSync(h.file), fixture('local-full.json'))
@@ -208,7 +208,7 @@ test('a settings file owned by another user is refused and left unchanged', asyn
 test('a backup of the previous bytes appears (0600) and the 21st write keeps 20', async () => {
   const h = harness('local-full.json')
   try {
-    const first = await h.write('Bash(mypy:*)')
+    const first = await h.write('Bash(npm run test)')
     const dir = backupDir(h.state, h.repoId)
     assert.equal(path.dirname(first.backupPath), dir)
     assert.match(path.basename(first.backupPath), /^\d{8}-\d{6}\.json$/)
@@ -224,21 +224,26 @@ test('a backup of the previous bytes appears (0600) and the 21st write keeps 20'
   } finally { h.close() }
   const g = harness(null)
   try {
-    assert.equal((await g.write('Bash(mypy:*)')).backupPath, null)
+    assert.equal((await g.write('Bash(npm run test)')).backupPath, null)
   } finally { g.close() }
 })
 
-test('an equivalent Bash(x *) is not added twice', async () => {
+// D-103: the writer refuses every Bash prefix rule, so `:*` against ` *` is pinned on samePattern and
+// on revoke, which removes a hand-added prefix rule in either form.
+test('an equivalent pattern is not added twice; a prefix rule is refused; revoke matches Bash(x *)', async () => {
+  assert.equal(samePattern('Bash(mypy:*)', 'Bash(mypy *)'), true)
   const h = harness(null)
   try {
     mkdirSync(path.dirname(h.file))
-    writeFileSync(h.file, `${JSON.stringify({ permissions: { allow: ['Bash(mypy *)'] } }, null, 2)}\n`)
+    writeFileSync(h.file, `${JSON.stringify({ permissions: { allow: ['Bash(npm  run  test)', 'Bash(mypy *)'] } }, null, 2)}\n`)
     const bytes = readFileSync(h.file)
-    await rejects(h.write('Bash(mypy:*)'), 'rule_exists')
-    await rejects(h.write('Bash(mypy  *)'), 'rule_exists')
+    await rejects(h.write('Bash(npm run test)'), 'rule_exists')
+    await rejects(h.write('Bash(mypy:*)'), 'destructive_rule')
+    await rejects(h.write('Bash(mypy  *)'), 'destructive_rule')
     assert.deepEqual(readFileSync(h.file), bytes)
     // Revoke removes the exact string found in the file, in either form.
     assert.deepEqual(await h.revoke('Bash(mypy:*)'), { removed: true })
+    assert.deepEqual(await h.revoke('Bash(npm run test)'), { removed: true })
     assert.deepEqual(read(h.file).permissions.allow, [])
   } finally { h.close() }
 })
@@ -246,25 +251,25 @@ test('an equivalent Bash(x *) is not added twice', async () => {
 test('revoke reports already_removed, resets the counter and audits revoked or undo', async () => {
   const h = harness('local-full.json')
   try {
-    h.store.run("INSERT INTO rule_counters(repo_id,pattern,count,state,updated_at) VALUES(?,'Bash(mypy:*)',5,'offered',1)", h.repoId)
-    const written = await writeRule(h.store, { repoId: h.repoId, pattern: 'Bash(mypy:*)', source: 'suggested', stateDir: h.state, at: 5, gitRead: async () => ({ code: 0, stdout: Buffer.alloc(0) }) })
+    h.store.run("INSERT INTO rule_counters(repo_id,pattern,count,state,updated_at) VALUES(?,'Bash(npm run test)',5,'offered',1)", h.repoId)
+    const written = await writeRule(h.store, { repoId: h.repoId, pattern: 'Bash(npm run test)', source: 'suggested', stateDir: h.state, at: 5, gitRead: async () => ({ code: 0, stdout: Buffer.alloc(0) }) })
     assert.equal(written.rule.source, 'suggested')
     assert.equal(written.rule.approvalsBefore, 5)
     assert.equal(written.rule.tracked, true)
     assert.equal(h.store.get('SELECT state FROM rule_counters WHERE repo_id = ?', h.repoId).state, 'accepted')
-    assert.deepEqual(h.events('rule.withdrawn'), [{ repoId: h.repoId, pattern: 'Bash(mypy:*)' }])
-    assert.deepEqual(await h.revoke('Bash(mypy:*)', { undo: true }), { removed: true })
+    assert.deepEqual(h.events('rule.withdrawn'), [{ repoId: h.repoId, pattern: 'Bash(npm run test)' }])
+    assert.deepEqual(await h.revoke('Bash(npm run test)', { undo: true }), { removed: true })
     assert.deepEqual({ ...h.store.get('SELECT count, state FROM rule_counters WHERE repo_id = ?', h.repoId) }, { count: 0, state: 'counting' })
-    assert.equal(h.store.get('SELECT COUNT(*) AS n FROM rules WHERE pattern = ?', 'Bash(mypy:*)').n, 0)
-    assert.deepEqual(await h.revoke('Bash(mypy:*)'), { removed: false, reason: 'already_removed' })
+    assert.equal(h.store.get('SELECT COUNT(*) AS n FROM rules WHERE pattern = ?', 'Bash(npm run test)').n, 0)
+    assert.deepEqual(await h.revoke('Bash(npm run test)'), { removed: false, reason: 'already_removed' })
     assert.deepEqual(h.audit(), [
-      { pattern: 'Bash(mypy:*)', action: 'added', actor: 'suggestion' },
-      { pattern: 'Bash(mypy:*)', action: 'undo', actor: 'manual' }
+      { pattern: 'Bash(npm run test)', action: 'added', actor: 'suggestion' },
+      { pattern: 'Bash(npm run test)', action: 'undo', actor: 'manual' }
     ])
-    assert.deepEqual(h.events('rule.removed'), [{ repoId: h.repoId, pattern: 'Bash(mypy:*)' }])
-    await h.write('Bash(golangci-lint run:*)')
-    await h.revoke('Bash(golangci-lint run:*)')
-    assert.deepEqual(h.audit().at(-1), { pattern: 'Bash(golangci-lint run:*)', action: 'revoked', actor: 'manual' })
+    assert.deepEqual(h.events('rule.removed'), [{ repoId: h.repoId, pattern: 'Bash(npm run test)' }])
+    await h.write('Bash(npm run lint)')
+    await h.revoke('Bash(npm run lint)')
+    assert.deepEqual(h.audit().at(-1), { pattern: 'Bash(npm run lint)', action: 'revoked', actor: 'manual' })
   } finally { h.close() }
 })
 
@@ -284,7 +289,7 @@ test('writeRule validates the pattern itself and writes nothing for a refused on
 test('tracked asks git ls-files --error-unmatch for the settings file', async () => {
   const h = harness(null)
   try {
-    await h.write('Bash(mypy:*)')
+    await h.write('Bash(npm run test)')
     assert.deepEqual(h.git, [[h.repoId, ['ls-files', '--error-unmatch', '.claude/settings.local.json']]])
   } finally { h.close() }
 })
@@ -294,20 +299,20 @@ test('tracked asks git ls-files --error-unmatch for the settings file', async ()
 test('a rule added to the file by hand shows as manual with null createdAt; a vanished rule is removed', async () => {
   const h = harness('local-full.json')
   try {
-    await h.write('Bash(mypy:*)')
+    await h.write('Bash(npm run test)')
     const data = read(h.file)
     data.permissions.allow.push('Bash(git push:*)')
     writeFileSync(h.file, `${JSON.stringify(data, null, 2)}\n`)
     const listed = listRules(h.store, h.repoId, { at: 9000 })
     assert.equal(listed.settingsPath, h.file)
     const by = Object.fromEntries(listed.rules.map(rule => [rule.pattern, rule]))
-    assert.deepEqual(Object.keys(by), ['Bash(cargo check:*)', 'WebFetch(domain:docs.rs)', 'Bash(mypy:*)', 'Bash(git push:*)'])
+    assert.deepEqual(Object.keys(by), ['Bash(cargo check:*)', 'WebFetch(domain:docs.rs)', 'Bash(npm run test)', 'Bash(git push:*)'])
     for (const pattern of ['Bash(cargo check:*)', 'WebFetch(domain:docs.rs)', 'Bash(git push:*)']) {
       assert.equal(by[pattern].source, 'manual')
       assert.equal(by[pattern].createdAt, null)
       assert.equal(by[pattern].approvalsBefore, null)
     }
-    assert.equal(by['Bash(mypy:*)'].createdAt, 1_790_000_000_000)
+    assert.equal(by['Bash(npm run test)'].createdAt, 1_790_000_000_000)
     assert.equal(by['Bash(git push:*)'].destructive, true)
     // D-102 took the rule off cargo check, so a hand-added Bash(cargo check:*) now shows as Destructive.
     assert.equal(by['Bash(cargo check:*)'].destructive, true)

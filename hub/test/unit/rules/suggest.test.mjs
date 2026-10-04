@@ -20,14 +20,14 @@ function harness() {
   store.run("INSERT INTO sessions(id,origin,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at) VALUES('s1','wrapped',?,?,'running',1,1,1,1,1)", repoId, repoId)
   let n = 0
   // An allowed (by default) Safe permission request with a rule candidate.
-  const request = ({ tier = 'safe', pattern = 'Bash(mypy:*)', choice = 'allow', kind = 'permission' } = {}) => {
+  const request = ({ tier = 'safe', pattern = 'Bash(npm run test)', choice = 'allow', kind = 'permission' } = {}) => {
     const id = `r${++n}`
     store.run('INSERT INTO requests(id,session_id,kind,tier,rule_pattern,tool_name,summary,state,source,match_key,answer,created_at,answered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
       id, 's1', kind, tier, pattern, 'Bash', 'cargo test', 'answered', 'permission_request', `key-${id}`, JSON.stringify({ via: 'browser', choice }), 100 + n, 200 + n)
     return { id }
   }
   const allow = (options = {}, threshold = 5) => store.tx(() => recordAllow(store, request(options), { via: 'browser', at: 1000 + n, threshold }))
-  const counter = (pattern = 'Bash(mypy:*)') => store.get('SELECT count, state FROM rule_counters WHERE repo_id = ? AND pattern = ?', repoId, pattern)
+  const counter = (pattern = 'Bash(npm run test)') => store.get('SELECT count, state FROM rule_counters WHERE repo_id = ? AND pattern = ?', repoId, pattern)
   const events = type => store.all('SELECT data FROM events WHERE type = ? ORDER BY seq', type).map(row => JSON.parse(row.data))
   return { root, repo, repoId, store, request, allow, counter, events, close() { store.close(); rmSync(root, { recursive: true, force: true }) } }
 }
@@ -47,7 +47,7 @@ test('the offer appears on the 5th Safe allow with threshold 5, on the 3rd with 
       assert.deepEqual(h.allow({}, threshold), { counted: true, offered: true, count: threshold })
       assert.deepEqual({ ...h.counter() }, { count: threshold, state: 'offered' })
       const [offer] = h.events('rule.offered')
-      assert.deepEqual(offer, { repoId: h.repoId, repoKey: 'rustot', pattern: 'Bash(mypy:*)', count: threshold, threshold, ruleNote: 'anyFlags' })
+      assert.deepEqual(offer, { repoId: h.repoId, repoKey: 'rustot', pattern: 'Bash(npm run test)', count: threshold, threshold, ruleNote: null })
       assert.deepEqual(offers(h.store, { threshold }), [offer])
     } finally { h.close() }
   }
@@ -83,7 +83,7 @@ test('an accepted counter restarts from 0, and an offered counter stays offered 
   const h = harness()
   try {
     // The rule was accepted, then left the file by hand: counting restarts at 1.
-    h.store.run("INSERT INTO rule_counters(repo_id,pattern,count,state,updated_at) VALUES(?,'Bash(mypy:*)',7,'accepted',1)", h.repoId)
+    h.store.run("INSERT INTO rule_counters(repo_id,pattern,count,state,updated_at) VALUES(?,'Bash(npm run test)',7,'accepted',1)", h.repoId)
     assert.deepEqual(h.allow(), { counted: true, offered: false, count: 1 })
     assert.deepEqual({ ...h.counter() }, { count: 1, state: 'counting' })
     // An offer made at threshold 3 stays offered after the threshold goes to 5.
@@ -98,7 +98,7 @@ test('a pattern already in the settings file does not count and sets the machine
   const h = harness()
   try {
     mkdirSync(path.join(h.repo, '.claude'))
-    writeFileSync(path.join(h.repo, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(mypy *)'] } }))
+    writeFileSync(path.join(h.repo, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(npm  run  test)'] } }))
     assert.deepEqual(h.allow(), { counted: false, offered: false, reason: 'in_settings' })
     assert.deepEqual({ ...h.counter() }, { count: 0, state: 'accepted' })
   } finally { h.close() }
@@ -110,10 +110,10 @@ test('dismiss restarts the count; the offer comes back after another threshold o
   try {
     for (let i = 0; i < 5; i++) h.allow()
     assert.equal(h.counter().state, 'offered')
-    assert.equal(h.store.tx(() => dismissOffer(h.store, h.repoId, 'Bash(mypy:*)', { at: 5000 })), true)
+    assert.equal(h.store.tx(() => dismissOffer(h.store, h.repoId, 'Bash(npm run test)', { at: 5000 })), true)
     assert.deepEqual({ ...h.counter() }, { count: 0, state: 'counting' })
-    assert.deepEqual(h.events('rule.withdrawn'), [{ repoId: h.repoId, pattern: 'Bash(mypy:*)' }])
-    assert.equal(h.store.tx(() => dismissOffer(h.store, h.repoId, 'Bash(mypy:*)')), false)
+    assert.deepEqual(h.events('rule.withdrawn'), [{ repoId: h.repoId, pattern: 'Bash(npm run test)' }])
+    assert.equal(h.store.tx(() => dismissOffer(h.store, h.repoId, 'Bash(npm run test)')), false)
     for (let i = 0; i < 4; i++) assert.equal(h.allow().offered, false)
     assert.equal(h.allow().offered, true)
     assert.equal(h.events('rule.offered').length, 2)
@@ -124,13 +124,13 @@ test('a threshold change to Never freezes the counters and withdraws the offers'
   const h = harness()
   try {
     for (let i = 0; i < 5; i++) h.allow()
-    for (let i = 0; i < 2; i++) h.allow({ pattern: 'Bash(golangci-lint run:*)' })
+    for (let i = 0; i < 2; i++) h.allow({ pattern: 'Bash(npm run lint)' })
     assert.equal(h.store.tx(() => applyThreshold(h.store, null, { at: 6000 })), 1)
-    assert.deepEqual(h.events('rule.withdrawn'), [{ repoId: h.repoId, pattern: 'Bash(mypy:*)' }])
+    assert.deepEqual(h.events('rule.withdrawn'), [{ repoId: h.repoId, pattern: 'Bash(npm run test)' }])
     assert.deepEqual(offers(h.store), [])
     assert.deepEqual({ ...h.counter() }, { count: 5, state: 'counting' })
-    for (let i = 0; i < 3; i++) h.allow({ pattern: 'Bash(golangci-lint run:*)' }, null)
-    assert.deepEqual({ ...h.counter('Bash(golangci-lint run:*)') }, { count: 2, state: 'counting' })
+    for (let i = 0; i < 3; i++) h.allow({ pattern: 'Bash(npm run lint)' }, null)
+    assert.deepEqual({ ...h.counter('Bash(npm run lint)') }, { count: 2, state: 'counting' })
   } finally { h.close() }
 })
 
@@ -145,15 +145,17 @@ test('ruleThreshold reads ruleSuggestAfter: 5 by default, 3, and null for Never'
   } finally { h.close() }
 })
 
+// D-103 left no ruleNote in the default tiers, so a user tiers table carries one here.
 test('createRules publishes what dismissOffer and setThreshold append, and offers() carries ruleNote', () => {
   const h = harness()
   try {
     const published = []
-    const rules = createRules({ store: h.store, paths: { state: path.join(h.root, 'state') }, publish: event => published.push(event), now: () => 7000 })
+    const tiers = () => ({ entries: [{ id: 'user.npm-test', tier: 'safe', tool: 'Bash', cmd: 'npm run test', rule: 'Bash(npm run test)', ruleNote: 'anyFlags' }] })
+    const rules = createRules({ store: h.store, paths: { state: path.join(h.root, 'state') }, publish: event => published.push(event), now: () => 7000, tiers })
     for (let i = 0; i < 5; i++) h.allow()
     assert.deepEqual(rules.offers().map(offer => offer.ruleNote), ['anyFlags'])
-    assert.equal(rules.dismissOffer(h.repoId, 'Bash(mypy:*)'), true)
-    assert.deepEqual(published.map(event => [event.type, event.data]), [['rule.withdrawn', { repoId: h.repoId, pattern: 'Bash(mypy:*)' }]])
+    assert.equal(rules.dismissOffer(h.repoId, 'Bash(npm run test)'), true)
+    assert.deepEqual(published.map(event => [event.type, event.data]), [['rule.withdrawn', { repoId: h.repoId, pattern: 'Bash(npm run test)' }]])
     assert.ok(Number.isInteger(published[0].seq))
   } finally { h.close() }
 })

@@ -46,13 +46,12 @@ test('every F13 pattern is refused with destructive_rule', () => {
   for (const pattern of refused) assert.deepEqual(validatePattern(pattern), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
 })
 
-test('WebFetch(domain:...) and Bash(mypy:*) are accepted; WebFetch carries the tool-wide warning', () => {
+test('WebFetch(domain:...) and an exact Bash rule are accepted; WebFetch carries the tool-wide warning', () => {
   const fetch = validatePattern('WebFetch(domain:docs.nestjs.com)')
   assert.deepEqual(fetch, { ok: true, pattern: 'WebFetch(domain:docs.nestjs.com)', tool: 'WebFetch', tier: 'caution', warning: null })
-  const cargo = validatePattern('Bash(mypy:*)')
-  assert.equal(cargo.ok, true)
-  assert.equal(cargo.warning, null)
-  assert.equal(validatePattern('Bash(mypy *)').ok, true)
+  const script = validatePattern('Bash(npm run test)')
+  assert.equal(script.ok, true)
+  assert.equal(script.warning, null)
   assert.deepEqual(validatePattern('WebFetch'), { ok: true, pattern: 'WebFetch', tool: 'WebFetch', tier: 'caution', warning: 'toolWide' })
   assert.equal(validatePattern('WebSearch').warning, 'toolWide')
   assert.deepEqual(validatePattern('mcp__vault__vault_search'), { ok: true, pattern: 'mcp__vault__vault_search', tool: 'mcp__vault__vault_search', tier: 'safe', warning: null })
@@ -137,15 +136,22 @@ test('a Read or file-tool glob whose root is, holds or lies inside a deck contro
   } finally { s.close() }
 })
 
-// Mutation run for this test: the floor probes removed from bashVerdict; this test failed.
-test('a Bash prefix whose arguments can reach a Destructive floor is refused; npm test stays accepted', async () => {
+// D-103 took every prefix rule out of the default tiers. A user tiers table can still carry one, so
+// this table puts the three removed rules back as the accepted control for the checks below.
+const D103_RULES = { 'safe.python.mypy': 'Bash(mypy:*)', 'safe.go.golangci-lint': 'Bash(golangci-lint run:*)', 'safe.terraform.validate': 'Bash(terraform validate:*)' }
+const PREFIX_TIERS = { entries: DEFAULT_TIERS.entries.map(entry => Object.hasOwn(D103_RULES, entry.id) ? { ...entry, rule: D103_RULES[entry.id] } : entry) }
+
+// Mutation run for this test: `own` forced to false in bashVerdict; this test failed on the accepted
+// control. Under D-101 the refused prefixes here are no tiers rules, so disabling the floor probes
+// leaves this test green; the Safe-entry test further down fails for that mutation instead.
+test('a Bash prefix whose arguments can reach a Destructive floor is refused; a user tiers prefix rule stays accepted', async () => {
   const s = sandbox()
   try {
     await s.settle()
     for (const pattern of ['Bash(git config:*)', 'Bash(cp:*)', 'Bash(mv:*)', 'Bash(tee:*)', 'Bash(git config --global:*)', 'Bash(cp -r:*)']) {
       assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
     }
-    for (const pattern of ['Bash(mypy:*)', 'Bash(golangci-lint run:*)', 'Bash(terraform validate:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
+    for (const pattern of Object.values(D103_RULES)) assert.equal(validatePattern(pattern, { ...s.options, tiers: PREFIX_TIERS }).ok, true, pattern)
   } finally { s.close() }
 })
 
@@ -181,25 +187,28 @@ test('the persistence lists match the floor lists in tiers.mjs', () => {
 })
 
 // Mutation runs for this test: `own` forced to false in bashVerdict, and separately the word list
-// applied to Safe entry rules again; this test failed for each.
+// applied to Safe entry rules again; this test failed for each (on the PREFIX_TIERS pass).
 test('every Safe tiers rule validates ok with tier safe and lists with destructive false', async () => {
   const s = sandbox()
   const store = openDeckDb(path.join(s.root, 'state', 'deck.db'))
   try {
     await s.settle()
-    // D-98: no exceptions; the path-operand writers (ruff check, terraform fmt) carry no rule.
-    const rules = DEFAULT_TIERS.entries.filter(entry => entry.tier === 'safe' && typeof entry.rule === 'string' && !entry.rule.includes('{'))
-    assert.deepEqual(rules.filter(entry => entry.tool === 'Bash').map(entry => entry.rule).sort(), ['Bash(golangci-lint run:*)', 'Bash(mypy:*)', 'Bash(terraform validate:*)'])
-    for (const { rule } of rules) {
-      const verdict = validatePattern(rule, s.options)
-      assert.deepEqual({ ok: verdict.ok, tier: verdict.tier, warning: verdict.warning }, { ok: true, tier: 'safe', warning: null }, rule)
-    }
     store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', s.repoRoot, 'rustot', 0, 0, 'rustot', 1)
     mkdirSync(path.join(s.repoRoot, '.claude'))
-    writeFileSync(path.join(s.repoRoot, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: rules.map(entry => entry.rule) } }))
-    const listed = listRules(store, s.repoRoot, { at: 1 })
-    assert.equal(listed.rules.length, rules.length)
-    for (const rule of listed.rules) assert.equal(rule.destructive, false, rule.pattern)
+    // D-98, D-103: the default table has no Bash rule other than the script templates; the user
+    // table with the D-103 rules put back has those three.
+    for (const [tiers, bash] of [[DEFAULT_TIERS, []], [PREFIX_TIERS, Object.values(D103_RULES).sort()]]) {
+      const rules = tiers.entries.filter(entry => entry.tier === 'safe' && typeof entry.rule === 'string' && !entry.rule.includes('{'))
+      assert.deepEqual(rules.filter(entry => entry.tool === 'Bash').map(entry => entry.rule).sort(), bash)
+      for (const { rule } of rules) {
+        const verdict = validatePattern(rule, { ...s.options, tiers })
+        assert.deepEqual({ ok: verdict.ok, tier: verdict.tier, warning: verdict.warning }, { ok: true, tier: 'safe', warning: null }, rule)
+      }
+      writeFileSync(path.join(s.repoRoot, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: rules.map(entry => entry.rule) } }))
+      const listed = listRules(store, s.repoRoot, { at: 1, tiers })
+      assert.equal(listed.rules.length, rules.length)
+      for (const rule of listed.rules) assert.equal(rule.destructive, false, rule.pattern)
+    }
   } finally { store.close(); s.close() }
 })
 
@@ -241,15 +250,18 @@ test('an npm or pnpm prefix with options before run, or a pnpm prefix naming a s
 // rule run code or write paths unclassified.
 const D102_REMOVED = ['safe.cargo.build', 'safe.cargo.check', 'safe.cargo.test', 'safe.cargo.nextest-run', 'safe.cargo.clippy', 'safe.cargo.fmt', 'safe.npm.test',
   'safe.node.test', 'safe.go.build', 'safe.go.test', 'safe.go.vet', 'safe.python.pytest', 'safe.python.pytest-module']
+// D-103: the last three prefix rules, removed because an option of a future version is approved too.
+const D103_REMOVED = Object.keys(D103_RULES)
 
-// Mutation run for this test: `"rule":"Bash(cargo build:*)","ruleNote":"anyFlags"` restored on
-// safe.cargo.build in tiers.default.json; this test failed.
-test('D-102: each entry that lost its rule stays Safe and gives no rule candidate', async () => {
+// Mutation runs for this test: `"rule":"Bash(cargo build:*)","ruleNote":"anyFlags"` restored on
+// safe.cargo.build in tiers.default.json, and separately `"rule":"Bash(mypy:*)"` on
+// safe.python.mypy; this test failed for each.
+test('D-102, D-103: each entry that lost its rule stays Safe and gives no rule candidate', async () => {
   const s = sandbox()
   try {
     await s.settle()
     const byId = new Map(DEFAULT_TIERS.entries.map(entry => [entry.id, entry]))
-    for (const id of D102_REMOVED) {
+    for (const id of [...D102_REMOVED, ...D103_REMOVED]) {
       const entry = byId.get(id)
       assert.equal(entry.tier, 'safe', id)
       assert.equal(entry.rule, undefined, id)
@@ -264,13 +276,39 @@ test('D-102: each entry that lost its rule stays Safe and gives no rule candidat
   } finally { s.close() }
 })
 
-// Mutation run for this test: the same restore of the cargo build rule; this test failed.
-test('D-102: no Safe entry with noneArg or output options carries a prefix rule; exact templates keep theirs', () => {
-  const payloadCapable = DEFAULT_TIERS.entries.filter(entry => entry.tier === 'safe' && ((entry.noneArg ?? []).length || (entry.outputOpts ?? []).length))
-  const prefixRules = payloadCapable.filter(entry => typeof entry.rule === 'string' && /(?::| )\*\)$/.test(entry.rule)).map(entry => entry.id)
-  assert.deepEqual(prefixRules, [])
-  const exact = payloadCapable.filter(entry => typeof entry.rule === 'string').map(entry => entry.rule).sort()
-  assert.deepEqual(exact, ['Bash(npm run {script})', 'Bash(pnpm run {script})'])
+// Mutation run for this test: `"rule":"Bash(mypy:*)"` restored on safe.python.mypy in
+// tiers.default.json; this test failed.
+test('D-103: no Safe Bash entry carries a prefix rule; the exact script templates keep theirs', () => {
+  const bash = DEFAULT_TIERS.entries.filter(entry => entry.tier === 'safe' && entry.tool === 'Bash' && typeof entry.rule === 'string')
+  assert.deepEqual(bash.filter(entry => entry.rule.includes(':*') || / \*\)$/.test(entry.rule)).map(entry => entry.id), [])
+  assert.deepEqual(bash.map(entry => entry.rule).sort(), ['Bash(npm run {script})', 'Bash(pnpm run {script})'])
+})
+
+// Mutation run for this test: the same restore of the mypy rule; this test failed.
+test('D-103: the three removed prefix rules are refused, in either form', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    for (const rule of Object.values(D103_RULES)) {
+      for (const pattern of [rule, rule.replace(':*)', ' *)')]) assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
+    }
+  } finally { s.close() }
+})
+
+// Mutation run for this test: the reachesDestructive line deleted from bashVerdict; this test failed.
+test('a user Safe entry whose prefix rule reaches a Destructive entry is refused by reachesDestructive', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    // Each prefix is a user tiers rule (so D-101 passes), is not Destructive on its own and reaches no
+    // floor probe; only its Destructive subcommands (kubectl delete, terraform destroy, docker rm)
+    // refuse it.
+    for (const cmd of ['kubectl', 'terraform', 'docker']) {
+      const rule = `Bash(${cmd}:*)`
+      const tiers = { entries: [...DEFAULT_TIERS.entries, { id: `user.${cmd}`, tier: 'safe', tool: 'Bash', cmd, rule }] }
+      assert.deepEqual(validatePattern(rule, { ...s.options, tiers }), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, rule)
+    }
+  } finally { s.close() }
 })
 
 // Mutation run for this test: the D-101 refusal of a prefix that is not a tiers rule removed from
