@@ -172,11 +172,30 @@ This is the full `fleetmates-deck` command list; [03-architecture.md](03-archite
 | `fleetmates-deck backup <dir>` | Consistent copy of `deck.db` with `VACUUM INTO` | 11 |
 | `fleetmates-deck restore <file>` | Stops the web unit, moves the current database aside, copies the backup in, new `epoch`, starts the unit | 11 |
 | `fleetmates-deck reset [--keep-crew]` | Stops the web unit, renames `deck.db*` aside, starts on an empty database with a new `epoch` | 11 |
-| `fleetmates-deck audit [--repo <name>] [--since <date>]` (M3) | Prints the approvals audit: rule events and request events ([07-approvals.md](07-approvals.md) section 11) | |
+| `fleetmates-deck audit [--repo <name>] [--since <YYYY-MM-DD>]` (M3) | Prints the approvals audit: rule events and request events ([07-approvals.md](07-approvals.md) section 11). Output below | 4.3 |
 | `fleetmates-deck export-misses --kind retrieval` (M5) | Writes resolved retrieval misses as JSONL for vault-mcp golden queries ([10-memory-and-research.md](10-memory-and-research.md) section 3.3) | |
 | `fleetmates-deck research prune --older-than 90d` (Later) | Removes old research runs from the research workspace ([10-memory-and-research.md](10-memory-and-research.md) section 8.2) | |
 | `fleetmates-deck report --since <date>` | Summarises the dogfood metrics ([09-testing.md](09-testing.md) section 13.3) | |
 | `fm claude`, `fm attach`, `fm ls` | Wrapped sessions ([03-architecture.md](03-architecture.md) section 2.4) | 4 |
+
+### 4.3 `fleetmates-deck audit` output (M3, as built)
+
+`audit` opens `deck.db` read-only and prints the rows of `approval_audit` and `rule_audit` ([06-storage.md](06-storage.md) section 4.5) merged, oldest first, one per line. Each line starts with the ISO 8601 UTC time of the event:
+
+    <time> <kind> repo=<name> tier=<tier> via=<via> choice=<choice> summary="<summary>"
+    <time> rule_<action> repo=<name> pattern="<pattern>" actor=<actor>
+
+- `kind` is `answered`, `refused`, `did_not_land`, `expired`, `tiers_loaded` or `tiers_rejected`. For a refusal, `choice` holds the error code (`confirm_required`, `not_on_screen` and the rest). A missing value prints as `-`.
+- `action` is `added`, `revoked`, `undo`, `found` or `vanished`; `actor` is `suggestion`, `manual` or `external`.
+- `summary` and `pattern` are JSON strings, redacted again on output with the log redaction rules of [08-security.md](08-security.md) section 4.10, so a bearer token prints as `***`.
+- `--repo <name>` keeps the rows of that repo by its display name (rows without a repo, such as `tiers_loaded`, are left out). `--since <YYYY-MM-DD>` keeps rows from local midnight of that day. Any other argument, or a date that does not exist, prints the usage line and exits 1. With no database yet it says "no deck database yet; start the deck first".
+
+Example, from the fixture of `hub/test/unit/setup.test.mjs` (times shortened):
+
+    2026-10-01T... refused repo=api tier=destructive via=browser choice=confirm_required summary="rm -rf build"
+    2026-10-02T... tiers_loaded repo=- tier=- via=- choice=- summary=""
+    2026-10-02T... rule_added repo=web pattern="Bash(npm run test)" actor=suggestion
+    2026-10-03T... answered repo=web tier=safe via=browser choice=allow summary="curl -H \"Authorization: Bearer ***\" https://example.invalid"
 
 ## 5. Files and directories
 

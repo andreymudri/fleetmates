@@ -105,8 +105,8 @@ Columns: request body or query, success response, error codes (section 4), miles
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
 | GET | `/api/requests` | query `state` (default `open`), `sessionId`, `runId` + `repoKey`, `taskId` | `{ requests: Request[] }` | | M1 (read-only) | Needs-you drawer, palette Needs group, Team filter `?needs=run:<runId>` |
-| POST | `/api/requests/:id/answer` | `AnswerBody` (below) | 202 `{ request }` with `delivery: 'sending'`; outcome via WS `request.updated` (`verifying`, `did_not_land`) and `request.closed` | `not_found`, `request_closed`, `read_only_session`, `not_on_screen`, `typing_in_terminal`, `confirm_required`, `tier_forbids`, `deckd_unavailable`, `answer_in_flight` | M3 | Home card, drawer, Focus PromptBar, palette, popup `N.Allow` path (server-internal) |
-| POST | `/api/requests/answer-batch` | `{ ids: string[], choice: 'allow' }` | 202 `{ results: [{ id, ok, error? }] }` | `batch_not_safe` (any id not Safe or not `permission`: whole batch refused, `details.ids`) | M3 | drawer "Allow both Safe once", `Alt Shift A` (`U.AllowAllSafe`) |
+| POST | `/api/requests/:id/answer` | `AnswerBody` (below) | 202 `{ request }` with `delivery: 'sending'`; outcome via WS `request.updated` (`verifying`, `did_not_land`) and `request.closed` | `not_found`, `validation_failed`, `request_closed`, `read_only_session`, `not_on_screen`, `typing_in_terminal`, `confirm_required`, `tier_forbids`, `options_unreadable`, `deckd_unavailable`, `deckd_outdated`, `answer_in_flight` | M3 | Home card, drawer, Focus PromptBar, palette, popup `N.Allow` path (server-internal) |
+| POST | `/api/requests/answer-batch` | `{ ids: string[], choice: 'allow' }` | 202 `{ results: [{ id, ok, error? }] }`; a per-id `error` is an answer code, or `skipped_not_safe` for an id that re-classified above Safe at send time (M3) | `batch_not_safe` (any id not Safe or not `permission`: whole batch refused, `details.ids`) | M3 | drawer "Allow both Safe once", `Alt Shift A` (`U.AllowAllSafe`) |
 | POST | `/api/requests/:id/followup` | `{ text }` | 202 | `followup_window_closed` (more than 30 s after a deck deny, state-machines 2.5), `read_only_session`, `deckd_unavailable` | M3 | "Tell Claude what to do instead" |
 
 `AnswerBody`:
@@ -121,23 +121,35 @@ Columns: request body or query, success response, error codes (section 4), miles
 Server rules, in this order (state-machines 2.5 and 2.6):
 
 1. Observed session: `read_only_session`.
-2. `allow_always` (Claude Code option 2) is accepted only for Safe (the Focus bar hides it for Caution and Destructive): else `tier_forbids`.
+2. `allow_always` (Claude Code option 2) is accepted only when the request's `allowAlways` is true (D-77, D-95: the parsed option 2 label is exactly "Yes, and don't ask again for <pattern>" and the pattern equals the deck's rule candidate, so the request is Safe): else `tier_forbids`.
 3. Destructive without `confirm: true`: `confirm_required`. Destructive is never accepted from `answer-batch` or from a popup.
 4. Send guards: `screenMatch` must be `on_screen` (`not_on_screen`), no terminal input within 1 s (`typing_in_terminal`, `retryable: true`), deckd connected (`deckd_unavailable`).
 5. A second answer while `sending` or `verifying`: `answer_in_flight`. A new answer while `did_not_land` is `U.TryAgain` and is accepted when the guards pass.
 
 The digit sent is the option key parsed from the screen (`request.options`), never a hard-coded number.
 
+As built in M3 (Tasks 10 and 16):
+
+- Statuses: every refusal of the rules above is 409, except `validation_failed` (422), `not_found` (404) and `deckd_unavailable` (503, `retryable: true`). `typing_in_terminal` is `retryable: true`. Section 4 lists the codes.
+- A `choice: 'option'` on a permission request is resolved against the parsed screen options: option 1 "Yes" counts as `allow`, an option whose label starts with "No" as `deny`, a "Yes, and don't ask again" option as `allow_always` (which then needs `allowAlways`); any other option is `tier_forbids`. A Destructive `deny` needs no `confirm`.
+- `options_unreadable` (409): the screen shows no option that fits the choice, the question needs a key sequence the deck does not have (AskUserQuestion with several questions or multi-select, APR-O6), or a `stop_question` got a choice other than `reply`.
+- `deckd_outdated` (409): deckd did not announce the `guardedWrite` feature in `hello` (section 5.2), so the deck never writes an answer through it. Restart deckd when no session you care about runs.
+- The keys go to deckd as a guarded `write` (section 5.2). When deckd refuses with `screen_changed`, the server reads the screen again and matches once more; if the prompt is still not this request's, the answer is `not_on_screen`.
+- A batch is answered in sequence within a session and in parallel across sessions. An id whose prompt is not on screen yet (queued behind another prompt of the session) is tried again until the 3 s verify timeout passes.
+- Open (carried to [m3-exit.md](m3-exit.md)): while `delivery` is `sending` or `did_not_land`, the `answer` field of the `Request` view holds the deck's pending answer, including the salted digest of a reply.
+
 ### 2.5 Rules
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/rules` | query `repoKey` (optional) | `{ threshold, repos: [{ repoKey, repoId, settingsPath, readError?, rules: RuleView[] }] }` | | M3 | Settings Approval rules |
+| GET | `/api/rules` | query `repoKey` (optional) | `{ threshold, tiersError, repos: [{ repoKey, repoId, settingsPath, readError?, rules: RuleView[] }] }`; `tiersError` is `{ line, message }` while the user `tiers.json` fails to parse or validate, else null (M3) | | M3 | Settings Approval rules |
 | POST | `/api/rules` | `{ repoKey, pattern, source: 'suggested' \| 'manual' }` | 201 `{ rule: RuleView }` | `invalid_pattern`, `destructive_rule` (pattern matches a Destructive tier entry), `rule_exists`, `settings_io_failed`, `settings_changed` (the file changed twice during the write; nothing written) | M3 | Home and drawer rule suggestion (`U.AcceptRule`), Settings "Add a rule…" |
-| DELETE | `/api/rules/:repoKey/:pattern` | pattern URL-encoded as one segment | `{ removed: true }` or `{ removed: false, reason: 'already_removed' }` | `settings_io_failed` | M3 | Settings "Revoke…" (`U.Revoke`), toast "Undo" after accepting a suggestion |
+| DELETE | `/api/rules/:repoKey/:pattern` | pattern URL-encoded as one segment; `?undo=1`, sent by a toast Undo, records the removal as `undo` in `rule_audit` instead of `revoked` (M3) | `{ removed: true }` or `{ removed: false, reason: 'already_removed' }` | `settings_io_failed` | M3 | Settings "Revoke…" (`U.Revoke`), toast "Undo" after accepting a suggestion |
 | POST | `/api/rules/suggestions/dismiss` | `{ repoKey, pattern }` | 204 | `not_found` (no offer) | M3 | `U.DismissRule` (state-machines 2.8) |
 
 Writes follow [04-integrations.md](04-integrations.md) 2.4 (re-read, merge, atomic write, retry once).
+
+As built in M3: `POST /api/rules` validates the pattern before it writes ([07-approvals.md](07-approvals.md) 7.3). A Bash prefix pattern (`:*` or ` *`) is refused with `destructive_rule` (D-101, D-103), and an npm or pnpm script prefix with `invalid_pattern` and the message "Script rules name one script exactly.". `GET /api/rules` re-reads each repo's settings file and refreshes the rule mirror, which can append `found` and `vanished` rows to `rule_audit` (07-approvals 7.4). So this GET writes deck state, against the "`GET` never changes state" line of [08-security.md](08-security.md) section 3.6. What it writes reflects the settings file, never the request's content. Open, recorded in [m3-exit.md](m3-exit.md).
 
 ### 2.6 Repos and crew
 
@@ -393,7 +405,7 @@ One JSON shape for every non-2xx response and for `error`, `ask.error`, `term.er
 
 - `code` is stable and machine-read; the SPA maps it to copy in its i18n catalog. `message` is an English fallback for logs and for codes the SPA does not know.
 - Messages from scribed and vault-mcp are passed through verbatim in `details.text` (Portuguese for scribed; 04-integrations 4.1) and shown as the screens specify ("scribed refused: <message>").
-- `retryable: true` means the same request may succeed unchanged later.
+- `retryable: true` means the same request may succeed unchanged later. As built in M3 the answer and rule routes set it for `deckd_unavailable`, `typing_in_terminal` and `settings_changed` only.
 
 | Code | HTTP | Meaning |
 |---|---|---|
@@ -411,9 +423,12 @@ One JSON shape for every non-2xx response and for `error`, `ask.error`, `term.er
 | `answer_in_flight` | 409 | an answer is being sent or verified |
 | `not_on_screen` | 409 | screen shows another prompt or cannot be read |
 | `typing_in_terminal` | 409 | terminal input within the typing guard (retryable) |
-| `confirm_required` | 422 | Destructive answer without `confirm: true` |
-| `tier_forbids` | 403 | the tier does not allow this path (option 2 outside Safe) |
-| `batch_not_safe` | 422 | batch contains a non-Safe or non-permission request |
+| `confirm_required` | 409 | Destructive answer without `confirm: true` (as built in M3; this table said 422 before) |
+| `tier_forbids` | 409 | the tier does not allow this path: option 2 where `allowAlways` is false, a popup or batch answer for anything but a Safe permission, or a permission option that is not Yes, No or "don't ask again" (as built in M3; this table said 403 before) |
+| `batch_not_safe` | 409 | batch contains a non-Safe or non-permission request (as built in M3; this table said 422 before) |
+| `skipped_not_safe` | n/a | per-id result of `answer-batch`: the id re-classified above Safe at send time and was not answered (M3) |
+| `options_unreadable` | 409 | the screen shows no option that fits the answer, or the prompt needs a key sequence the deck does not have (M3) |
+| `deckd_outdated` | 409 | deckd did not announce `guardedWrite`, so no answer is written until deckd restarts (M3). Also a `Health` reason (section 7) |
 | `followup_window_closed` | 409 | follow-up more than 30 s after the deny |
 | `invalid_pattern` | 422 | not Claude Code permission syntax |
 | `destructive_rule` | 422 | Destructive commands can never become rules (Decided) |
@@ -459,7 +474,7 @@ deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket
 
 | op | Request | Response | Notes |
 |---|---|---|---|
-| `hello` | `{ proto: 2, client: { kind: 'server' \| 'terminal', name?, pid } }` | `{ proto, deckdVersion, bootId }`, plus `loginEnvNames: string[]` at proto 2 | first message; deckd answers the lower of the asked `proto` and its own (2 since M2); a `proto` that is not an integer of at least 1 gets `unsupported_proto`. `bootId` changes when deckd restarts (all PTYs lost). `loginEnvNames` lists, sorted and at most 200, the names (never the values) of variables in the login environment that `launched` sessions start from which are new or differ from deckd's own service environment; `fleetmates-deck doctor` prints them |
+| `hello` | `{ proto: 2, client: { kind: 'server' \| 'terminal', name?, pid } }` | `{ proto, deckdVersion, bootId }`, plus `loginEnvNames: string[]` and `features: string[]` at proto 2 | first message; deckd answers the lower of the asked `proto` and its own (2 since M2); a `proto` that is not an integer of at least 1 gets `unsupported_proto`. `bootId` changes when deckd restarts (all PTYs lost). `loginEnvNames` lists, sorted and at most 200, the names (never the values) of variables in the login environment that `launched` sessions start from which are new or differ from deckd's own service environment; `fleetmates-deck doctor` prints them. `features` (M3) lists the optional additions this deckd supports; M3 announces `guardedWrite`. A client treats a missing `features` as an empty list |
 | `spawn` | `{ cwd, argv, env, cols, rows, origin: 'wrapped' \| 'launched' }` | `{ ptyId, pid, startedAt }` | deckd adds `FLEETMATES_DECK_PTY=<ptyId>` to `env`. `argv` is `['claude', ...]`; deckd refuses any other executable name (`spawn_refused`) |
 | `list` | | `{ ptys: [{ ptyId, pid, origin, cwd, argv, cols, rows, startedAt, clients: [{ kind, name }], lastInputFrom, lastInputAt }] }` | reconciliation (state-machines 1.4 rule 5) |
 | `exits` | `{ since }` | `{ exits: [{ ptyId, code, signal, at, tail, history }] }` | PTYs that exited while the server was away; kept 24 h in memory. `tail` (proto 2 only) is the base64 of the PTY's last 1,000 output lines, cut to at most 256 KiB at a line start; the server stores it in `session_scrollback` ([06-storage.md](06-storage.md)) for the ended session. `tail` remains the raw ring bytes for compatibility. `history` (proto 2 only) is `{ data, cols, rows }`: `data` is deckd's headless terminal serialized with `@xterm/addon-serialize` (up to 1,000 scrollback lines and the screen, colours and attributes kept, a UTF-8 string, not base64). It carries no terminal modes (no mouse tracking, bracketed paste, focus reporting or application cursor keys), so a read-only viewer keeps wheel scrolling and text selection, and it never switches to the alternate buffer (no `?1049h`, `?1047h` or `?47h`): when the PTY is on the alternate screen, `data` is the normal buffer's scrollback and screen followed by the alternate screen's rows, all written into the normal buffer. It is taken once every output byte is parsed and cut to at most 256 KiB by dropping whole leading lines after a `\r\n`; `cols` and `rows` are the terminal size at exit. Written into a terminal of another size it shows the rows as they looked (pinned for a 120x40 capture replayed at 96x30), which raw `tail` bytes do not. deckd stores the record before it sends the `exit` event |
@@ -467,7 +482,7 @@ deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket
 | `detach` | `{ ptyId }` | `{}` | |
 | `screen` | `{ ptyId, scrollback: number, history?: boolean }` | `{ rev, cols, rows, cursor: { x, y }, lines: string[], scrollback: string, history? }` | `lines`: visible screen as plain text rows (for parsing); `scrollback`: raw bytes (base64) for xterm replay, kept for compatibility. With `history: true` a proto 2 connection also gets `history: { data, cols, rows }`, the same shape as on the `exits` record but not capped; a proto 1 connection never gets it |
 | `watchScreen` | `{ ptyId, on: boolean }` | `{}` | turn on `screen` events for parsing (section 5.4) |
-| `write` | `{ ptyId, data, source: { kind: 'browser' \| 'deck' \| 'terminal', name? } }` | `{ at }` | `deck` = keystrokes the server generated (answers, Nudge, launch task); counted as browser in the shared input machine (state-machines 3.2 `I.DeckKeys`) |
+| `write` | `{ ptyId, data, source: { kind: 'browser' \| 'deck' \| 'terminal', name? }, guard?: { rev, quietMs } }` | `{ at }` | `deck` = keystrokes the server generated (answers, Nudge, launch task); counted as browser in the shared input machine (state-machines 3.2 `I.DeckKeys`). `guard` (M3, feature `guardedWrite`) is accepted only with `source.kind: 'deck'`, with `rev` an integer and `quietMs` an integer from 0 to 5000, else `bad_request`. deckd writes the bytes only when its screen model is still at `rev` with no output left unparsed, else error `screen_changed`, and when no `terminal` or `browser` input reached that PTY in the last `quietMs` milliseconds, else error `typing_in_terminal` (D-84). The server sends answers with `quietMs` 1000 |
 | `resize` | `{ ptyId, cols, rows, source }` | `{ cols, rows }` | deckd applies SM-O12 |
 | `kill` | `{ ptyId, signal: 'SIGTERM', graceMs: 5000 }` | `{}` | SIGTERM to the process group, SIGKILL after `graceMs` (row 50) |
 | `ping` | | `{ at }` | heartbeat every 5 s; 3 missed = link down (state-machines 4.2) |
@@ -483,6 +498,8 @@ deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket
 | `input` | `{ ptyId, source: { kind, name }, at, bytes }` | `I.TerminalBytes`, `I.BrowserBytes`, `I.DeckKeys` (byte count only, never content) |
 | `client` | `{ ptyId, change: 'attached' \| 'detached', client: { kind, name } }` | `I.ClientAttached`, `I.ClientDetached` |
 | `dropped` | `{ ptyId, bytes }` | the client must re-request `screen` |
+
+Guarded write (M3, as built). It replaces the `expectPrompt` field and the `E_PROMPT_CHANGED` error proposed in [07-approvals.md](07-approvals.md) section 5.1. deckd carries no prompt parser (section 5.4), so it cannot compare prompts; it compares the screen revision the server parsed, which changes whenever the screen does. The server matches the prompt to the request (`screenMatch`) before it sends, and deckd guarantees that the screen has not changed since. A deckd that does not announce `guardedWrite` is never sent an answer (`deckd_outdated`, section 4). The protocol stays `proto` 2: `features` and `guard` are additive.
 
 ### 5.4 Where screen parsing happens
 
@@ -626,6 +643,12 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {number|null} answeredAt
  * @property {number|null} notifiedAt
  * @property {number|null} renotifiedAt
+ * @property {{entryId: string, tier: Tier, segment: string, description: string}[]} reasons   every tiers entry or floor that matched (M3)
+ * @property {string|null} rulePattern      the Safe rule candidate, such as `Bash(npm run test)`; null when there is none (M3, D-74)
+ * @property {'anyFlags'|null} ruleNote      from the tiers entry that gave `rulePattern` (D-78); no shipped entry carries one since D-102
+ * @property {string|null} description      the classifier's headline reason, one line (DRW-O2, M3)
+ * @property {string|null} confirmLabel     the Destructive checkbox label, filled from the entry template (D-72, M3)
+ * @property {boolean} allowAlways          option 2 may be offered (D-77, D-95, M3)
  */
 
 /**
@@ -636,9 +659,12 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {number|null} approvalsBefore
  * @property {number|null} createdAt       null when found in the file and not written by the deck (SET-O5)
  * @property {Tier|null} tier              from the matching tiers.json entry
+ * @property {boolean} destructive         the pattern would be refused today as `destructive_rule`; Settings shows the Destructive line (07-approvals 7.4, M3)
+ * @property {boolean} tracked             the repo's settings file is tracked by git (07-approvals 7.2 step 9, M3)
+ * @property {'toolWide'|null} warning     `toolWide` for a tool-wide rule such as `WebFetch` (07-approvals 7.3, M3)
  */
 
-/** @typedef {{repoId: string, pattern: string, count: number, threshold: number}} RuleOffer */
+/** @typedef {{repoId: string, repoKey: string, pattern: string, count: number, threshold: number, ruleNote: 'anyFlags'|null}} RuleOffer   (`repoKey` and `ruleNote` M3) */
 
 /**
  * @typedef {object} Run

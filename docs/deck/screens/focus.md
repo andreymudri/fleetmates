@@ -286,8 +286,22 @@ The canvas placed "Related memory" under the Changes tab; it moves to the Memory
 | `focus.log.label` | Activity |
 | `focus.log.empty` | No activity recorded yet. |
 | `focus.log.loading` | Loading activity |
-| `focus.changes.caption` | Diffs arrive with approvals. |
+| `focus.changes.caption` | Diffs arrive with approvals. (M2 only; M3 shows the diff with `focus.changes.diffCaption`) |
 | `focus.facts.lastInput` | Last input from |
+
+M3 additions (as built, from `FOCUS_COPY` in `hub/web/src/screens/focus/Focus.jsx`):
+
+| Key | String |
+|---|---|
+| `focus.prompt.parseFailed` | Answer in the terminal |
+| `focus.prompt.sent` | Sent · checking… |
+| `focus.question.replyPlaceholder` | Reply to {repo} |
+| `focus.changes.binary` | Binary file, {size}. Open in editor. |
+| `focus.changes.fileEmpty` | No changes in this file. |
+| `focus.changes.truncated` | Diff truncated: too large to show in full. |
+| `focus.changes.loading` | Loading the diff |
+
+Deviation: the PromptBar shows `focus.prompt.answerInTerminal` ("Answer in the terminal" in the table above) under the key `focus.prompt.parseFailed`, because the code's `focus.prompt.answerInTerminal` keeps the M1 observed-bar wording "Answer in your terminal". The digit hint shows only on Safe, Caution and question bars.
 
 ## 10. Acceptance criteria
 

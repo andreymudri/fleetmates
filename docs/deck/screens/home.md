@@ -482,6 +482,8 @@ API paths are Proposed; the state-machine event is the contract.
 | `home.card.team.ask` | task {taskId} · {summary} |  |
 | `home.card.team.moreRequests` | +{n} more |  |
 
+As built in M3: every M3 string of `HOME_COPY`, `CARD_COPY` and `COMPACT_COPY` is in the table above; the session archive strings (`home.archive.*`, `home.archived.*`, `archive.toast.*`, `home.card.archive`) belong to the session archive ([archive.md](../archive.md)), which quotes some of them and is outside this copy deck. The rule-added toast's Undo revokes with `?undo=1`, so the server records it as an undo. After a Deny, a Home card does not offer the 30 s "Tell Claude what to do instead" field; the drawer does (the M3 plan did not ask for it on cards).
+
 ## 10. Acceptance criteria
 
 Fixtures are defined in [README.md](README.md) section 4.

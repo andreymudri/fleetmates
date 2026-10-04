@@ -147,6 +147,15 @@ Step verbs:
 | `echo.json` | Echoes every input byte immediately | keystroke latency budget, shared input |
 | `long-output.json` | 20,000 lines | scrollback ring limits, memory |
 
+Scripts that exist in `hub/test/fixtures/scripts/` after M3: `answered-in-terminal.json`, `approve-always.json`, `approve-safe.json`, `deny-then-instruct.json`, `did-not-land.json`, `echo.json`, `idle.json`, `question-options.json`, `resize.json`, `slow-start.json` and `subagents-parallel.json` from the table, plus two that are not in it:
+
+| Script | Covers | Used by |
+|---|---|---|
+| `prompt-swap.json` | A Safe request (`npm run test`) is drawn, then a Destructive `PermissionRequest` (`rm -rf build`) replaces the frame before any answer; a `1` then allows the Destructive prompt | `hub/test/integration/deliver.test.mjs`, `answer-api.test.mjs` |
+| `two-sources.json` | Echoes every input byte | the fake `claude` of `hub/test/integration/fm.test.mjs` (`fm claude`, `fm attach`) |
+
+The M3 scripts (`approve-safe`, `approve-always`, `deny-then-instruct`, `answered-in-terminal`, `did-not-land`, `question-options`, `subagents-parallel`, `prompt-swap`) replay the 2.1.285 frames or the synthetic frames marked as synthetic (`synthetic-permission-bash`, `synthetic-permission-always`, D-95). The rest of the table (`question-stop`, `spinner-hang`, the three `crash-*` scripts, `stop-requested`, `clear`, `compact`, `out-of-order`, `long-output`) does not exist as a fake script; whether other tests cover those cases was not checked for this list.
+
 ### 3.6 Ask engine mode (`claude -p`)
 
 With `-p`, the fake validates its argv against the invocation in [04-integrations.md](04-integrations.md) section 2.5 (fails with exit 98 on an unexpected tool or a missing `--strict-mcp-config`, so a regression that widens the Ask's tools fails a test), then replays a stream-json fixture from `hub/test/fixtures/claude-p/<cc-version>/<name>.jsonl` (`answer-cited`, `answer-miss`, `general-knowledge`, `error`, `timeout` via `hang`). The fixtures are captured from the real `claude -p` by the capture script.
@@ -234,6 +243,8 @@ Script: `hub/test/capture/capture-cc.mjs`, run by the owner on his machine, on h
 7. Run `npm test` in `hub/`. If ingest or parsers fail, fix them in the same PR as the fixtures.
 
 The same script records option labels exactly as printed, which the PromptBar and drawer must mirror (Decided: same options, same numbers as the terminal).
+
+As run in M3 (Task 19, D-83 as applied): the installed Claude Code was 2.1.285, not the pinned 2.1.282, and the owner chose to recapture on 2.1.285. The one authorized capture ran on 2026-10-02, unattended, at 120x40, and wrote `hub/test/fixtures/hooks/2.1.285/` and `hub/test/fixtures/screens/2.1.285/` with a `MANIFEST.json` that lists the redactions and the skipped steps. The script set an `ask` rule for each tool a step uses, so every step prompted. Steps `bash-2` (no `PostToolUse(Bash)`) and `bash-3` (no `PreToolUse(Bash)`) were skipped: the Bash prompt under an `ask` rule shows only "1. Yes" and "2. No", so there is no Bash option 2 label and no `option2-rule.json`. Edit and Write option 2 is "Yes, and switch to accept edits ..."; WebFetch option 2 is "Yes, and don't ask again for example.com". `testedClaudeCode` in `hub/package.json` moved to 2.1.285, and the 2.1.282 set stays as the earlier regression set. Several redactions were done by hand before commit and are listed in the manifest (compact summary and subagent message text, a claude.ai session link, prompt ids, the throwaway repo name); `capture-cc.mjs` does not do them yet ([m3-exit.md](m3-exit.md), open findings).
 
 ### 5.3 Claude Code upgrade procedure (policy Proposed)
 
