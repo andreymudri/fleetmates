@@ -450,7 +450,7 @@ CREATE TABLE meetings (
                   'awaiting_names','synthesized')),
   started_at    INTEGER,
   ended_at      INTEGER,
-  note_path     TEXT,                                 -- vault-relative, once synthesized
+  note_path     TEXT,                                 -- vault-relative, once synthesized; the meetings store writes null for a confidential row and meetings_became_confidential nulls it when a row turns confidential; a raw INSERT of an already-confidential row is not checked by the schema (D-116)
   apps          TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(apps)),  -- routed_apps labels seen while polling
   session_dir   TEXT,                                 -- absolute <session_dir>/<id>
   updated_at    INTEGER NOT NULL
@@ -489,9 +489,18 @@ CREATE TRIGGER meetings_became_confidential AFTER UPDATE OF confidential ON meet
 WHEN NEW.confidential = 1 AND OLD.confidential = 0
 BEGIN
   UPDATE meeting_pins SET label = NULL WHERE meeting_id = NEW.id;
-  DELETE FROM ask_threads WHERE scope = 'meeting:' || NEW.id;
+  UPDATE meetings SET note_path = NULL WHERE id = NEW.id AND note_path IS NOT NULL;
+  UPDATE events SET data = json_set(data, '$.label', NULL)
+   WHERE type = 'meeting.pin.added' AND (entity_id = NEW.id OR json_extract(data, '$.meetingId') = NEW.id);
+  UPDATE events SET data = json_set(data, '$.notePath', NULL)
+   WHERE type = 'meeting.updated' AND (entity_id = NEW.id OR json_extract(data, '$.id') = NEW.id);
+  DELETE FROM ask_threads WHERE scope = 'meeting:' || NEW.id;  -- added in M5 with the ask_threads table (4.10)
 END;
 ```
+
+When a meeting's `confidential` goes from 0 to 1, by any writer, the `meetings_became_confidential` trigger of migration `0005-meetings.sql` scrubs four things: the labels of the meeting's pins, its `note_path`, `data.label` of its earlier `meeting.pin.added` events and `data.notePath` of its earlier `meeting.updated` events (events matched on `entity_id` or on the meeting id inside `data`). When its own write turns a row confidential, `upsertMeeting` runs, after the commit, `PRAGMA wal_checkpoint(TRUNCATE)` so the scrubbed pages leave the WAL (`secure_delete` is on); a checkpoint that SQLite reports busy is not retried and leaves that to a later checkpoint. M4 creates these tables without `ask_threads`, which arrives in M5 (4.10; meeting asks are transient in M4), so the M4 trigger has no `ask_threads` `DELETE`; M5 adds that statement to the four above and keeps them. `note_path` is stored only for a non-confidential meeting, because the note file name embeds the synthesized title: the meetings store writes null for a confidential row, and the trigger nulls it when a row turns confidential. The schema does not check a raw `INSERT` of a row that is already confidential, so the store is the only guard on that path. A confidential meeting's note is located again on each read (D-116, [11-meetings.md](11-meetings.md) 11.2).
+
+Known limit (owner decision pending): the pre-migration backups `deck.db.pre-NNNN.bak` (section 7) are copies taken before a migration, so a later rise to confidential does not scrub them. They keep pin labels, note paths and event data stored before the rise until they are rotated out (the newest 3 are kept). The same would hold for copies made with the proposed `fleetmates-deck backup` (section 9), which is not built yet.
 
 A meeting row is created when the deck first sees the session (its own `start`, a poll showing a recording by another client, or a `session.json` found on disk). Rows stay as long as the TurbidAssist session directory exists; when it disappears the row, pins and dismissals are deleted (TurbidAssist retention removes audio, not directories, so this is rare).
 
@@ -701,7 +710,7 @@ Then `PRAGMA incremental_vacuum;`, `PRAGMA wal_checkpoint(TRUNCATE);`, `meta.las
 | `~/.local/state/fleetmates/deck/token` (0600) | browser token | server, `fleetmates-deck open` | `fleetmates-deck init` | Decided (0600 file), path Proposed |
 | `<repo>/.claude/settings.local.json` | rules in `permissions.allow` | Claude Code, server | server (merge, atomic write), Claude Code option 2, the user | Decided; SQLite holds only the mirror (4.5) |
 | `~/.claude/settings.json` | deck hooks next to fleetmates' | Claude Code | `fleetmates-deck init` (backup `settings.json.deck-backup-<ts>`) | Decided (user level) |
-| The vault | notes | vault-mcp; the deck only through vault-mcp (Decided). Exception by design: meeting notes written by `postmeet` are read from disk when vault-mcp is down ([screens/meetings.md](screens/meetings.md) 4.2.1) | vault-mcp (`vault_learn` from research save), `postmeet` | Decided |
+| The vault | notes | vault-mcp; the deck only through vault-mcp (Decided). Exception by design: meeting notes written by `postmeet` are read from disk, read only and limited to `vault.meetings_folder` (MTG-O1). In M4 that is the only way the deck reads them, because the vault-mcp client is M5 (D-114, [screens/meetings.md](screens/meetings.md) 4.2.1) | vault-mcp (`vault_learn` from research save), `postmeet` | Decided |
 | TurbidAssist | `config.yaml`, `<session_dir>/<id>/{session.json, transcript.jsonl, transcript.json, transcript.md, asks.jsonl, postmeet.log}` | server (read only, on demand) | scribed, postmeet | Decided (deck never writes them) |
 | fleetmates | `.fleetmates/<runId>/{plan.json, status.json}`, `.fleetmates/index/` | server (read only) | fleetmates | Decided |
 | Claude Code transcripts | `transcript_path` | server (tail for `why` and the first prompt) | Claude Code | Decided: linked, never copied |
@@ -740,13 +749,13 @@ A meeting is confidential when its tag's `synthesis.tag_policies.<tag>.store_tra
 
 Enforcement, in layers:
 
-1. **Nothing transcript-shaped is stored for any meeting.** The schema has no column for transcript lines, tail text, meeting titles, summaries, decisions or action item text. Live lines travel only as the ephemeral `meeting.transcript` WebSocket event, and the `events` writer refuses that type (4.6). Transcript search reads files on demand and keeps no index (MEET-O7 default). Full transcripts are read from disk per request and never cached. This goes beyond the Decided rule for non-confidential tags too; it costs nothing because TurbidAssist already keeps the files.
+1. **Nothing transcript-shaped is stored for any meeting.** The schema has no column for transcript lines, tail text, meeting titles, summaries, decisions or action item text. Live lines travel only as the ephemeral `meeting.transcript` WebSocket event, and the `events` writer refuses that type (4.6). Transcript search reads files on demand and keeps no index, and includes confidential meetings without caching them (MEET-O7, D-109). Full transcripts are read from disk per request and never cached. Meeting notes are read from disk in M4 (D-114), and their title and sections are never stored. This goes beyond the Decided rule for non-confidential tags too; it costs nothing because TurbidAssist already keeps the files.
 2. **Fail closed.** A tag not found in `config.yaml`, or an unreadable `config.yaml`, makes the meeting confidential (`confidential = 1`, DB-O2).
 3. **Triggers.** A pin label on a confidential meeting and a meeting-scoped ask thread for a confidential or unknown meeting abort the transaction (4.9, 4.10). A policy change to confidential nulls stored labels and deletes meeting-scoped threads.
 4. **Dismissals** store a sha1 of the action item text, never the text.
-5. **Logs.** Server and deckd logs record event types, ids and sizes, never scribed text, ask questions or answers, for any tag, including under `DECK_DEBUG=1`.
+5. **Logs.** Server and deckd logs record event types, ids and sizes, never scribed text, ask questions or answers, for any tag. The server's logs are its stdout and stderr (journald); M4 builds no `DECK_DEBUG=1` debug log (D-121).
 6. **Hygiene.** `secure_delete = ON` zeroes deleted content; the retention job checkpoints the WAL.
-7. **Test** (meetings.md acceptance 9): record the `recording` fixture (tag `client-a`), pin twice, ask once, stop; then scan the bytes of `deck.db`, `deck.db-wal` and the debug log for every fixture transcript line and ask text. Zero hits required. The same test runs with a non-confidential tag to prove the scan finds nothing there either, except pin labels.
+7. **Test** (meetings.md acceptance 9): record the `recording` fixture (tag `client-a`), pin twice, ask once, stop; then scan the bytes of `deck.db`, `deck.db-wal` and the server's captured stdout and stderr (D-121) for every fixture transcript line and ask text. Zero hits required. The same test runs with a non-confidential tag to prove the scan finds nothing there either, except pin labels.
 
 ### 10.2 Hook payloads
 

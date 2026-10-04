@@ -181,20 +181,20 @@ Ship these in vault-mcp before M5 (graph) and M6 (dry run). Until then the Memor
 - Poll `status` every 2 s, always, while the deck runs (TurbidAssist's own TUI polls at 2 s). Quiet mode depends on it, so the poll does not slow down when Meetings is not visible.
 - `stop` can take tens of seconds (thread joins up to 30 s each); no short timeout; the UI shows "Stopping and summarizing" until `status.recording` is false and the manifest appears.
 - `stopping` is not visible in `status`; the deck tracks it from its own `stop` call.
-- History: read `<session_dir>/*/session.json` (manifest `state`: `recorded`, `transcribed`, `awaiting_names`, `synthesized`) and the synthesized note in the vault (`<meetings_folder>/<date> <tag> <title>.md`, sections Resumo, Decisões, Action items in Portuguese). `session_dir` and `vault.meetings_folder` come from TurbidAssist's `config.yaml` (MEET-O11: location Open).
+- History: read `<session_dir>/*/session.json` (manifest `state`: `recorded`, `transcribed`, `awaiting_names`, `synthesized`) and the synthesized note in the vault (`<meetings_folder>/<date> <tag> <title>.md`, sections Resumo, Decisões, Action items in Portuguese). In M4 both are read from disk, read only; the note is limited to `vault.meetings_folder` and matched by frontmatter `session_id` (MTG-O1, D-114), and the vault-mcp client is M5. `session_dir` and `vault.meetings_folder` come from TurbidAssist's `config.yaml`, found through the Settings field "TurbidAssist config" (MEET-O11, Decided 2026-10-04, D-107).
 - Tags: `start` requires a tag from `synthesis.tag_policies` in `config.yaml`. The Record button therefore needs a tag choice (default `synthesis.default_tag`). Not on the canvas; added in [screens/meetings.md](screens/meetings.md).
 - Confidential tags (`store_transcript: false`, for example `client-a`, `client-b`): the deck must not store transcript text, asks or pins text for those meetings in SQLite, logs or search indexes. It may show them live in memory only ([08-security.md](08-security.md)).
 
-### 4.3 Gaps between the canvas and TurbidAssist today (Open)
+### 4.3 Gaps between the canvas and TurbidAssist today
 
-| Canvas shows | Reality | Default until decided |
+| Canvas shows | Reality | Rule (Decided, or the default applied in M4) |
 |---|---|---|
-| "Start scribed" runs `systemctl --user start scribed` | No systemd unit for scribed exists; clients spawn it detached (`ScribeClient.ensure_daemon()`) | The canvas copy shows `systemctl --user start scribed`; the real command is `systemd-run --user` running a login shell (`$SHELL -l -c 'exec scribed'`), so scribed is not in the deck's cgroup and gets `HF_TOKEN` ([11-meetings.md](11-meetings.md) section 3.5, OPS-O1). TurbidAssist change T4 (a `scribed.service` unit) is the later clean fix |
-| Pin moment (Alt P), pinned moments list | No pin command, event or file | Deck stores pins `{meetingId, t, label}` in SQLite (not for confidential tags: time only, no label); optional later: a `pin` command in scribed so `postmeet` can include pins |
-| Live Ask "uses the transcript and your vault" | scribed `ask` runs `claude -p` with **no tools and no MCP** | Live Ask uses scribed `ask` (transcript only) and the copy says "uses the transcript"; vault access is a TurbidAssist change (add vault-mcp to the ask backend's `--mcp-config`) |
+| "Start scribed" runs `systemctl --user start scribed` | No systemd unit for scribed exists; clients spawn it detached (`ScribeClient.ensure_daemon()`) | **Decided** 2026-10-04 (D-106): the command is `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, so scribed is not in the deck's cgroup and gets `HF_TOKEN` ([11-meetings.md](11-meetings.md) section 3.5, OPS-O1). TurbidAssist change T4 (a `scribed.service` unit) is not taken |
+| Pin moment (Alt P), pinned moments list | No pin command, event or file | Default applied in M4 (MEET-O2): the deck stores pins `{meetingId, t, label}` in SQLite (not for confidential tags: time only, no label); a `pin` command in scribed (TurbidAssist change T1) is not taken |
+| Live Ask "uses the transcript and your vault" | scribed `ask` runs `claude -p` with **no tools and no MCP** | **Decided** 2026-10-04 (MEET-O4, D-105): Live Ask uses scribed `ask` (transcript only), the copy says "Ask · uses the transcript", and there are no citations. Vault access (TurbidAssist change T3) is not taken, and there is no deck-side engine |
 | Decisions / action items during and right after the meeting | Only in the post-meeting note written by `postmeet` | Show "Summary arrives after the meeting is processed" until the note exists |
-| Source label (Teams, Meet, Discord) | Not persisted; `status.routed_apps` shows it live | Deck records `routed_apps` while polling and stores the label |
-| "Save answer to meeting note" | Asks are already stored by scribed (`asks.jsonl`) and appear in the note's "Perguntas ao vivo" when `store_transcript` is true | No extra button in v1 |
+| Source label (Teams, Meet, Discord) | Not persisted; `status.routed_apps` shows it live | Default applied in M4 (MEET-O1): the deck records `routed_apps` while polling and stores the label |
+| "Save answer to meeting note" | Asks are already stored by scribed (`asks.jsonl`) and appear in the note's "Perguntas ao vivo" when `store_transcript` is true | Default applied in M4 (MEET-O8): no extra button |
 
 ## 5. Desktop notifications (Decided: notify-send / mako, in-browser badge and sound)
 

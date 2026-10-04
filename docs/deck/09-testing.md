@@ -272,16 +272,18 @@ Run on the owner's machine with the pinned version, 15 minutes, before each mile
 
 ## 6. scribed contract tests (Decided; design Proposed)
 
-TurbidAssist has no JSON fixture files today; `realtime/scribe/protocol.py` is the single source of the wire format and is tested by its own pytest suite ([reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) sections 2.2 to 2.5, 2.13). The deck's fixtures are therefore **generated from `protocol.py`**, not hand-written.
+TurbidAssist has no JSON fixture files today; `realtime/scribe/protocol.py` is the single source of the wire format and is tested by its own pytest suite ([reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) sections 2.2 to 2.5, 2.13). The deck's fixtures are therefore meant to be **generated from `protocol.py`**, not hand-written.
 
-1. **Exporter** (TEST-O3 on where it lives; default in TurbidAssist as `scripts/export_protocol_fixtures.py`): imports `scribe.protocol`, builds every `Command` and `Event` dataclass with representative values (Portuguese text with accents, int and float numbers, optional keys present and absent, empty lists, idle `status`), and writes `Message.encode()` output line by line to `commands.jsonl` and `events.jsonl`. It also writes `invalid.jsonl`: lines that `decode_command` or `decode_event` reject, each with the exact `ProtocolError` message. `MANIFEST.json` records the TurbidAssist commit and a hash of `protocol.py`.
+**Until an exporter exists** (Decided 2026-10-04, D-108): TurbidAssist at d4ffb9d has no exporter, so the M4 contract tests run on the hand-copied set in `hub/test/fixtures/scribed/d4ffb9d/` (`MANIFEST.json` `"exporter": null`), whose tag is replaced with the placeholder `acme` (D-111). M4 exit criterion 1 stays owner-pending until the owner adds the exporter; the fleet never touches TurbidAssist.
+
+1. **Exporter** (Decided 2026-10-04, TEST-O3, D-108: in TurbidAssist as `scripts/export_protocol_fixtures.py`, output committed to `hub/test/fixtures/scribed/<sha>/`; none exists yet): imports `scribe.protocol`, builds every `Command` and `Event` dataclass with representative values (Portuguese text with accents, int and float numbers, optional keys present and absent, empty lists, idle `status`), and writes `Message.encode()` output line by line to `commands.jsonl` and `events.jsonl`. It also writes `invalid.jsonl`: lines that `decode_command` or `decode_event` reject, each with the exact `ProtocolError` message. `MANIFEST.json` records the TurbidAssist commit and a hash of `protocol.py`.
 2. **Scenarios**: the exporter also writes ordered exchanges the deck depends on: start then status recording then stop (with a long gap) then idle status; subscribe (one `status`, then `transcript` only); ask then `ask_delta` lines then `ask_done`; each command's `error` shape with Portuguese text.
 3. **Deck tests** (`hub/test/contract/scribed.test.mjs`):
    - the Node decoder parses every `events.jsonl` line into the expected object and rejects every `invalid.jsonl` event line;
-   - the Node encoder produces, for each command, JSON that parses equal to the fixture line and uses raw UTF-8 (no `\u` escapes for accents), one object per line;
-   - unknown keys in an event are ignored, unknown `type` is an error (mirrors `protocol.py`);
-   - a fake scribed server (`hub/test/fakes/fake-scribed.mjs`, a Unix socket replaying scenarios) drives the client through the meeting machine ([state-machines](interaction/state-machines.md) 6), including a `stop` that takes 30 s and a socket that disappears mid-recording.
-4. **Drift**: when `protocol.py` changes, the owner re-runs the exporter and commits the new directory; CI fails if the client no longer matches. A root-level check is not possible in CI unless the pipeline can check out TurbidAssist (TEST-O3).
+   - the Node encoder produces, for each command, JSON that parses equal to the fixture line and uses raw UTF-8 (no `\u` escapes for accents), one object per line; commands are not compared byte for byte, because Python's separators differ (D-120);
+   - unknown keys in an event are ignored, and an event of an unknown `type` is ignored and counted, not an error (forward compatible, D-110; `protocol.py` itself rejects it);
+   - a fake scribed server (`hub/test/fakes/fake-scribed.mjs`, a Unix socket replaying scenarios, run inside the test process) drives the client through the meeting machine ([state-machines](interaction/state-machines.md) 6), including a `stop` that takes 30 s and a socket that disappears mid-recording.
+4. **Drift**: when `protocol.py` changes, the owner re-runs the exporter and commits the new directory; CI fails if the client no longer matches. CI does not check out TurbidAssist (TEST-O3, D-108), so there is no CI job that regenerates the fixtures.
 
 ## 7. vault-mcp: golden queries and tool contracts
 
@@ -349,7 +351,7 @@ Rules:
 | deckd exposure | deckd has no TCP listener (inspect `/proc/<pid>/net/tcp` for its pid) |
 | Untrusted text (XSS) | qa-checklist 1.7 payloads (`<img onerror>`, `<script>`, `javascript:` links, U+202E, ANSI escapes) injected into every text field of every UI fixture: no new element, no dialog, no navigation, text visible literally. Server-side: ANSI stripped from crash tails; the markdown renderer runs with `html: false` |
 | Approval bypass | API tests: a Destructive request cannot be answered without `confirm: true`, never inside a batch, never from a notification action; no keyboard path approves it (qa 1.3) |
-| Confidential meetings | With a confidential tag fixture, grep the SQLite file, the WAL, the debug log and the spool for sentinel transcript strings: zero hits (qa 2.9) |
+| Confidential meetings | With a confidential tag fixture, grep the SQLite file, the WAL, the server's stdout and stderr (M4 has no debug log, D-121) and the spool for sentinel transcript strings: zero hits (qa 2.9) |
 | Static path traversal | `GET /../../etc/passwd` and encoded variants return 404 |
 
 ### 11.2 Accessibility
@@ -421,7 +423,7 @@ Written by the server to the deck database and summarised by a `fleetmates-deck 
 |---|---|---|---|
 | TEST-O1 | Should CI run a live Claude Code canary with real credentials (an API key, since the subscription cannot log in on CI) to capture hook and screen fixtures automatically when Claude Code releases? It costs money and needs a secret. | No. Fixtures are captured by the owner locally (5.2); `cc-watch` only detects new versions. | none |
 | TEST-O2 | The hook-to-UI budget (p95 under 300 ms, 03-architecture 7) includes the 250 ms reorder window (state-machines 0.3) plus a Node process start per hook; the budget is likely unreachable as written. Which gives: a bigger budget, a smaller window, or flushing the buffer early when the expected next event arrives? | Measure in M0. Proposed: flush a session's buffer as soon as a `Stop`, `PermissionRequest` or `Notification` is the latest event, keep 250 ms otherwise, and keep the 300 ms budget for those events only. | M1 |
-| TEST-O3 | Where does the scribed fixture exporter live, and can CI check out TurbidAssist to verify the fixtures against `protocol.py` on every run? | Exporter in TurbidAssist (`scripts/export_protocol_fixtures.py`); output committed to `hub/test/fixtures/scribed/<sha>/`; CI does not check out TurbidAssist. | M4 (M0 uses a minimal client) |
+| TEST-O3 | Where does the scribed fixture exporter live, and can CI check out TurbidAssist to verify the fixtures against `protocol.py` on every run? | **Decided** 2026-10-04 (D-108): exporter in TurbidAssist (`scripts/export_protocol_fixtures.py`); output committed to `hub/test/fixtures/scribed/<sha>/`; CI does not check out TurbidAssist. None exists yet; M4 tests on the hand-copied `d4ffb9d` set (section 6). | M4 (decided) |
 | TEST-O4 | How are status-check pane opens logged during the dogfood week? | A dev-only palette action `> log pane check` enabled by `DECK_DOGFOOD=1` that stores time, session and a one-line reason. | M1 |
 | TEST-O5 | Run Playwright on Firefox in CI too, or keep Firefox manual (qa-checklist 1.10)? | Manual. | none |
 | TEST-O6 | Fixtures and screenshots must keep placeholders; add a CI grep that fails on a denylist of real client names kept outside the repo? | Yes, denylist in a local untracked file, CI check runs only when present | M1 |

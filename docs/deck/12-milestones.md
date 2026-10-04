@@ -1,6 +1,6 @@
 # 12 · Milestones and delivery plan
 
-Status labels as in [02-domain.md](02-domain.md). **Decided**: the milestone sequence M0 to M6 and its content in outline (D-44, with the order "observe first" chosen explicitly: M1 status and alerts, M2 launch and chat, M3 unblock), public release at M1, the M1 done criterion (3+ parallel sessions for a full work week without opening a pane to check status), capacity of 10+ hours a week, and the Later list. The rule "do not start M4 until M1 passes its one-week test" was proposed during design and not contested; this plan treats it as binding. **Proposed**: scope splits per screen, deliverables, exit criteria wording, task breakdowns, relative sizes, and the per-milestone assignment of Open items (no existing doc had a "Blocks milestone" column; the assignment here is this doc's).
+Status labels as in [02-domain.md](02-domain.md). **Decided**: the milestone sequence M0 to M6 and its content in outline (D-44, with the order "observe first" chosen explicitly: M1 status and alerts, M2 launch and chat, M3 unblock), public release at M1, the M1 done criterion (3+ parallel sessions for a full work week without opening a pane to check status), capacity of 10+ hours a week, and the Later list. The rule "do not start M4 until M1 passes its one-week test" was proposed during design and not contested; the owner waived it for M4 on 2026-10-04 (D-104), and the M1 week is still pending. **Proposed**: scope splits per screen, deliverables, exit criteria wording, task breakdowns, relative sizes, and the per-milestone assignment of Open items (no existing doc had a "Blocks milestone" column; the assignment here is this doc's).
 
 Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integrations.md), [09-testing.md](09-testing.md) (exit tests, dogfood week), [13-operations.md](13-operations.md) (release), [screens/README.md](screens/README.md) (screen index with milestones), [15-open-questions.md](15-open-questions.md).
 
@@ -27,7 +27,7 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 1. **Order**: M0, M1, M2, M3, then M4, M5, M6 (Decided sequence). Work inside a milestone may run in parallel as fleetmates team runs (section 10).
 2. **Public at M1** (Decided). The M1 release checklist is in [13-operations.md](13-operations.md) section 13.5.
-3. **Gate: do not start M4 until M1 passes its one-week test** ([09-testing.md](09-testing.md) section 13). Reason given during design: the scope doubled with memory, research and meetings; the core must prove itself first. MS-O2 asks how far the gate reaches (default: all deck work from M4 on, but not separate-repo PRs).
+3. **Gate: do not start M4 until M1 passes its one-week test** ([09-testing.md](09-testing.md) section 13). Reason given during design: the scope doubled with memory, research and meetings; the core must prove itself first. **Waived for M4** by the owner on 2026-10-04 (D-104, MS-O2 Decided): M4 starts after M3. The M1 dogfood week is still pending in [m1-exit.md](m1-exit.md), and M4 does not claim it.
 4. **Open items**: each milestone lists the Open items that must be decided before it starts, and the ones whose default can ship but must be confirmed before it exits (section 9).
 5. **Exit is testable**: every exit criterion below names an automated test, a measured number or a manual protocol with a pass rule.
 
@@ -152,16 +152,16 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 **Goal.** Meetings in v1 (Decided): list past meetings with summaries, start and stop recording, live transcript and ask, through TurbidAssist's `scribed` socket.
 
-**Gate**: starts only after M1 passed its one-week test (section 1.2 rule 3).
+**Gate**: waived by the owner on 2026-10-04 (D-104): M4 starts after M3. The M1 one-week test (section 1.2 rule 3) is still pending in [m1-exit.md](m1-exit.md).
 
-**Scope in**: full scribed client (per-request connections, long-lived `subscribe`, 2 s status poll); meeting machine and post-states from `session.json` and vault notes; Record with a tag from `config.yaml`; rec bar on every screen; pins stored by the deck; confidential tag handling (no transcript text persisted); live ask per MEET-O4; "Start scribed" per OPS-O1; scribed degraded card; quiet mode wired to the full meeting machine.
+**Scope in**: full scribed client (per-request connections, long-lived `subscribe`, 2 s status poll); meeting machine and post-states from `session.json` and vault notes; Record with a tag from `config.yaml`; rec bar on every screen; pins stored by the deck; confidential tag handling (no transcript text persisted); live ask through scribed `ask`, transcript only (MEET-O4, D-105); "Start scribed" with `systemd-run` (OPS-O1, D-106); scribed degraded card; quiet mode wired to the full meeting machine.
 
 **Scope out**: in-deck speaker naming (SM-O14 default: hint only), live decisions and action items (not produced live, MEET-O9).
 
 | Repo | Deliverables |
 |---|---|
 | fleetmates `hub/` | `server/adapters/scribed.mjs` complete, meeting machine, history reader, pins; `web/` Meetings list, detail, search, live, rec bar |
-| TurbidAssist | Fixture exporter current with the protocol; optional, only if decided: a `scribed` user unit (SM-O13), a `pin` command (MEET-O2), vault access in `ask` (MEET-O4) |
+| TurbidAssist | None from the fleet. The fixture exporter (T0, D-108) is the owner's, and none exists at d4ffb9d. T1 (`pin`), T2 (status push), T3 (vault in `ask`) and T4 (`scribed.service`) are not taken (2026-10-04) |
 | vault-mcp | none |
 
 **Screens**: [meetings.md](screens/meetings.md), [rail-and-shell.md](screens/rail-and-shell.md) (rec bar, rec dot), [failures-and-loading.md](screens/failures-and-loading.md) (scribed degraded), [home.md](screens/home.md) (Calm "last meeting").
@@ -170,13 +170,13 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 **Exit criteria**:
 
-1. scribed contract tests green against fixtures exported from the current TurbidAssist commit.
+1. scribed contract tests green against fixtures exported from the current TurbidAssist commit. Until TurbidAssist has an exporter (D-108), the contract tests run on the hand-copied `d4ffb9d` fixtures (tag placeholder `acme`, D-111), and this criterion is owner-pending.
 2. With fake scribed: start, recording, a `stop` taking 30 s, post-states through `synthesized`; socket loss mid-recording; scribed down keeps past meetings listed.
 3. Confidential tag: zero sentinel transcript strings in the database, WAL, logs and spool (automated).
 4. Quiet mode: during a recording, requests produce popups and no bell (integration test with the notify and `pw-play` shims).
 5. Manual: three real meetings recorded end to end from the deck, at least one with a confidential tag; a web server restart during a recording does not stop it (OPS-O1).
 
-**Dependencies**: M1 passed its week (gate); M1 shell. Technically independent of M2 and M3.
+**Dependencies**: M1 shell (the M1 week gate is waived for M4, D-104). Technically independent of M2 and M3.
 
 ## 7. M5 · Memory ask
 
@@ -270,8 +270,8 @@ Collected from every doc (IDs with `-O` numbers, plus design-system section 15 a
 
 | When | Items |
 |---|---|
-| Before start | Gate: M1 week passed; MS-O2 (gate scope); MEET-O4 (live ask engine and vault access); MEET-O11 (TurbidAssist config location); SM-O13 / MEET-O10 / OPS-O1 (how scribed is started); TEST-O3 (fixture exporter location) |
-| Before exit | MEET-O1 (source label); MEET-O2 (pins); MEET-O3 (live title); MEET-O5 (partial lines); MEET-O6 / HOME-O8 ("Launch as session" from action items, Q6); MEET-O7 (confidential search); MEET-O8 (save answer to note); SM-O14 (speaker naming) |
+| Before start | All decided on 2026-10-04. Gate (M1 week passed): waived for M4 by D-104, and the week is still pending; MS-O2 (gate scope): D-104; MEET-O4 (live ask engine and vault access): D-105; SM-O13 / MEET-O10 / OPS-O1 / FAIL-O1 / FR-O2 (how scribed is started): D-106; MEET-O11 (TurbidAssist config location): D-107; TEST-O3 / MTG-O3 (fixture exporter location): D-108; MEET-O7 (confidential search): D-109; scribed protocol limits: D-110; fixture placeholder tag: D-111. The M4 plan's own decisions are D-112 to D-124 |
+| Before exit | Defaults applied in M4, which the owner may revisit before exit: MEET-O1 (source label: the deck records the `routed_apps` it sees while polling into its meeting row; none shows no source item); MEET-O2 (pins stored and shown by the deck only); MEET-O3 (live title "{Tag} · started {time}"); MEET-O5 (no partial lines; "Listening…" after 5 s without a new line); MEET-O6 / HOME-O8 / Q6 (action items in M4, deck-only state; "Launch as session" opens the new-session form with the task and the repo picker focused; "Dismiss" with Undo for 6 s; "Research first" not rendered until M6); MEET-O8 (no "Save answer to meeting note" button); SM-O14 (speaker naming: the `postmeet name` hint only); MTG-O1 (notes read from disk, D-114); MTG-O2 (poll `status` every 2 s); MTG-O4 (action-item states deck-only); DB-O2 (an unknown tag, or any meeting while `config.yaml` is unreadable, is confidential); and the plan decisions D-112 to D-124 |
 
 ### M5
 
@@ -356,10 +356,10 @@ Sized for fleetmates team runs: each task owns a disjoint file set so teammates 
 | Task | Owns | Depends |
 |---|---|---|
 | T1 scribed client complete and fake scribed | `hub/server/adapters/scribed.mjs`, `hub/test/fakes/fake-scribed.mjs`, `hub/test/contract/scribed.test.mjs` | none |
-| T2 Meeting machine, history reader, pins, confidential rules | `hub/server/meetings/*` | T1 |
+| T2 Meeting machine, history reader, pins, confidential rules | `hub/server/meetings/*.mjs` | T1 |
 | T3 Starting scribed (OPS-O1) | `hub/server/meetings/start-scribed.mjs` | T1 |
-| T4 Meetings list, detail, search | `hub/web/src/screens/meetings/*` | T2 |
-| T5 Meeting live, rec bar, quiet mode wiring | `hub/web/src/screens/meeting-live/*`, `hub/web/src/shell/rec-bar/*` | T2 |
+| T4 Meetings list, detail, search | `hub/web/src/screens/meetings/Meetings.jsx`, `hub/web/src/screens/meetings/MeetingDetail.jsx` | T2 |
+| T5 Meeting live, rec bar, quiet mode wiring | `hub/web/src/screens/meetings/MeetingLive.jsx`, `hub/web/src/shell/RecBar.jsx` (one file per screen, D-124) | T2 |
 | T6 "Launch as session" from action items (only if MEET-O6 says v1) | `hub/web/src/screens/meetings/actions/*` | T4 |
 
 ### 10.6 M5
@@ -402,5 +402,5 @@ Sized for fleetmates team runs: each task owns a disjoint file set so teammates 
 | ID | Question | Default until decided | Blocks milestone |
 |---|---|---|---|
 | MS-O1 | M1 includes "jump to session" (palette, `Alt 1..9`) but Focus is M2. What does a jump open in M1? | The read-only Focus layout already specified for observed sessions in [screens/focus.md](screens/focus.md) (header, activity log, requests with "Answer in your terminal", no terminal), pulled forward into M1. | M1 |
-| MS-O2 | How far does "do not start M4 until M1 passes its one-week test" reach: only M4, or every milestone after M3; and does it hold PRs in vault-mcp and TurbidAssist (`vault_graph`, `preview`, fixture exporter)? | Holds all deck work from M4 on; separate-repo PRs may proceed at any time. | M4 |
+| MS-O2 | How far does "do not start M4 until M1 passes its one-week test" reach: only M4, or every milestone after M3; and does it hold PRs in vault-mcp and TurbidAssist (`vault_graph`, `preview`, fixture exporter)? | **Decided** 2026-10-04 (D-104): the gate is waived for M4, which starts after M3; the M1 week is still pending in [m1-exit.md](m1-exit.md). | M4 (decided) |
 | MS-O3 | "Show rate-limit state instead of dollars" (D-09, Q16) has no screen and no milestone. | Later; not in any v1 milestone. | none |

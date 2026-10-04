@@ -200,7 +200,7 @@ The deck never writes under `.fleetmates/` (04-integrations 1.2), so there are n
 | GET | `/api/ask/threads` | query `scope` (default `vault`), `limit` | `{ threads: AskThread[] }` | | M5 | Memory "History" |
 | GET | `/api/ask/threads/:id` | | `{ thread: AskThread, messages: AskMessage[] }` | `not_found` | M5 | Memory thread restore |
 
-A `meeting:<id>` ask uses the scribed `ask` engine by default (MEET-O4) and is never stored for a confidential tag ([06-storage.md](06-storage.md) section 10). For the scribed engine the thread and message objects in the response are transient (`persisted: false`).
+A `meeting:<id>` ask uses the scribed `ask` engine, over the transcript only and with no citations (MEET-O4, Decided 2026-10-04, D-105), and the deck stores no meeting ask for any tag ([06-storage.md](06-storage.md) section 10). The thread and message objects in the response are transient (`persisted: false`). In M4, `POST /api/ask` accepts only `scope: 'meeting:<id>'`; any other scope, including `vault` and a missing scope, is 422 `validation_failed` until the vault scope arrives in M5 (D-123).
 
 ### 2.10 Research (M6)
 
@@ -223,10 +223,10 @@ Save uses exactly the parameters of the preview named by `previewId` without `pr
 | GET | `/api/meetings/:id` | | `{ meeting: Meeting, note: MeetingNote \| null, pins: Pin[] }` | `not_found` | M4 | Meeting detail |
 | GET | `/api/meetings/:id/transcript` | | `{ source: 'batch' \| 'live', lines: TranscriptLine[] }`, read from disk on every call, never cached (MEET-O7) | `not_found` | M4 | "Full transcript" drawer |
 | GET | `/api/meetings/:id/log` | query `lines` (default 200) | `{ text }` (tail of `postmeet.log`) | `not_found` | M4 | "Open log" |
-| GET | `/api/meetings/search` | query `q` (min 2 chars) | `{ hits: [{ meetingId, t0, speaker, snippet }], meetingCount }`, on-demand file scan, no index (MEET-O7) | `validation_failed` | M4 | Meetings search field |
-| POST | `/api/meetings/start` | `{ tag }` | 202 `{ recorder }` (`starting`); WS `meeting.status` | `unknown_tag`, `scribed_refused` (scribed message verbatim in `message`), `scribed_unavailable` | M4 | Tag menu (`U.StartWithTag`) |
-| POST | `/api/meetings/stop` | | 202 `{ recorder }` (`stopping`); the server does not hold the request for scribed's long `stop` | `not_recording`, `scribed_refused`, `scribed_unavailable` | M4 | "Stop and summarize" (`U.StopAndSummarize`) |
-| POST | `/api/meetings/:id/pins` | `{ t?: number }` (default: current `elapsed_s`) | 201 `{ pin: Pin }` or 200 with the existing pin when within 2 s of another | `not_recording`, `not_found` | M4 | "Pin moment", `Alt P`, transcript line click (`U.Pin`) |
+| GET | `/api/meetings/search` | query `q` (min 2 chars) | `{ hits: [{ meetingId, t0, speaker, snippet }], meetingCount }`, on-demand file scan, no index; confidential meetings included and never cached (MEET-O7, D-109) | `validation_failed` | M4 | Meetings search field |
+| POST | `/api/meetings/start` | `{ tag }` | waits up to `scribedStartTimeout` (20 s) for scribed's answer (D-117): `ok` gives 202 `{ recorder }` with `recording`; a timeout gives 202 `{ recorder }` with `starting`, and the next poll decides (state-machines 6.3 row 7); WS `meeting.status` | `unknown_tag` (before any command), `scribed_refused` (409, when scribed answers `error`; its message verbatim in `details.text`), `scribed_unavailable` | M4 | Tag menu (`U.StartWithTag`) |
+| POST | `/api/meetings/stop` | | 202 `{ recorder }` with `stopping` at once (D-117); the server does not hold the request for scribed's long `stop`, and a later scribed `error` reaches the client as `lastError` on `meeting.status` | `not_recording` | M4 | "Stop and summarize" (`U.StopAndSummarize`) |
+| POST | `/api/meetings/:id/pins` | `{ t?: number }` (default: current `elapsed_s`); a clicked transcript line sends its `t0` as `t` (D-119) | 201 `{ pin: Pin }` or 200 with the existing pin when within 2 s of another | `not_recording`, `not_found` | M4 | "Pin moment", `Alt P`, transcript line click (`U.Pin`) |
 | DELETE | `/api/meetings/:id/pins/:pinId` | | 204 | `not_found` | M4 | transcript line click on a pinned line |
 | POST | `/api/meetings/:id/items/:itemKey/dismiss` | | 204 | `not_found` | M4 | action item "Dismiss" |
 | DELETE | `/api/meetings/:id/items/:itemKey/dismiss` | | 204 | | M4 | toast "Undo" |
@@ -316,8 +316,8 @@ Durable (carry `seq`):
 | `rule.offered` | `RuleOffer` | a rule machine enters `offered` | card suggestion line, drawer |
 | `rule.withdrawn` | `{ repoId, pattern }` | offer accepted, dismissed or threshold set to Never | same |
 | `research.updated` | `Research` | state, stats, draft, `preview`, `previewError`, `savedPath` | research card, review |
-| `meeting.status` | `Recorder` | recorder state change (from the 2 s poll or the deck's own start/stop) | rec bar, Rail dot, quiet mode, Meetings |
-| `meeting.updated` | `MeetingListItem` | manifest `state`, `notePath`, `stuck`, `apps` changed | Meetings list and detail |
+| `meeting.status` | `Recorder` | recorder state change (from the 2 s poll or the deck's own start/stop); appended only when a field other than `elapsedS` changes (D-118) | rec bar, Rail dot, quiet mode, Meetings |
+| `meeting.updated` | `Meeting` (no `title` and no note text, because the event is durable and 06-storage 10.1 stores no title; the client keeps titles from its REST reads, D-116) | manifest `state`, `notePath`, `stuck`, `apps` changed | Meetings list and detail |
 | `meeting.pin.added` | `Pin & { meetingId }` | pin stored | live view, detail |
 | `meeting.pin.removed` | `{ meetingId, id }` | unpin | same |
 | `health.changed` | `Health` | dependency machine transition (state-machines 5) | banners, degraded cards, Settings |
@@ -700,7 +700,23 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
 /** @typedef {{id: string, t: number, label: string|null, createdAt: number}} Pin */
 /** @typedef {{t0: number, t1: number, speaker: string, text: string}} TranscriptLine */
 /** @typedef {{tag: string, confidential: boolean, isDefault: boolean}} MeetingTag */
-/** @typedef {{state: 'unavailable'|'idle'|'starting'|'recording'|'stopping'|'error', meetingId: string|null, tag: string|null, elapsedS: number, apps: string[], quiet: boolean}} Recorder */
+/**
+ * The recorder view (D-118). There is no `error` state: a failed command sets `lastError`, which the client shows as
+ * the transient error toast of state-machines 6.2.
+ * @typedef {object} Recorder
+ * @property {'unavailable'|'idle'|'starting'|'recording'|'stopping'} state
+ * @property {string|null} meetingId
+ * @property {string|null} tag
+ * @property {boolean} confidential
+ * @property {number} elapsedS
+ * @property {number|null} since
+ * @property {number|null} startedAt       start of the meeting being recorded
+ * @property {string[]} apps
+ * @property {boolean} quiet               true only while `recording` with "quiet in meetings" on
+ * @property {boolean} slow                a `stop` still in flight after 60 s
+ * @property {boolean} lost                scribed went down while recording
+ * @property {{cmd: string, message: string, at: number}|null} lastError  scribed's message verbatim
+ */
 
 /** @typedef {{id: string, title: string, scope: string, createdAt: number, persisted?: boolean}} AskThread */
 /** @typedef {{path: string, line: number, viaGraph: boolean}} Citation */

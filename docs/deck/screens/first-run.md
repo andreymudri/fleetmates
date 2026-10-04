@@ -75,7 +75,7 @@ Item 1 subtitle on the canvas contained a literal "[version]" placeholder; the p
 | Page open | run all automatic checks | `GET /api/setup/checks` (server runs probes) = `U.CheckAgain` on open |
 | "Install hooks" | back up `~/.claude/settings.json`, merge the deck hooks next to fleetmates' hooks, re-check | `POST /api/setup/hooks` = `U.Fix` |
 | "Start deckd" | `systemctl --user start` for the deckd unit, re-check | `U.Fix` |
-| "Start scribed" | FAIL-O1 default: `systemd-run --user` running a login shell (`$SHELL -l -c 'exec scribed'`), so scribed is outside the deck's cgroup and gets `HF_TOKEN`; the canvas copy shows `systemctl --user start scribed`, which needs TurbidAssist change T4 (a `scribed.service` unit). Then re-check | `U.Fix` |
+| "Start scribed" | FAIL-O1, Decided (D-106): `systemd-run --user` in its own `turbidassist-scribed` unit, running a login shell (`$SHELL -l -c 'exec scribed'`), so scribed is outside the deck's cgroup and gets `HF_TOKEN`; the canvas copy shows `systemctl --user start scribed`, which would need TurbidAssist change T4 (a `scribed.service` unit), not taken. Then re-check | `U.Fix` |
 | "Fix in Settings" | `/settings/connections#vault` | route |
 | "Send test ping" | one popup with the bell through mako | `U.SendTestPing` |
 | "Check again" | re-run every check | `U.CheckAgain` |
@@ -166,7 +166,7 @@ Each check result arrives as `setup.check` events so rows resolve independently 
 | Id | Gap | Status |
 |---|---|---|
 | FR-O1 | Should an incompatible Claude Code version block Set sail (SM-O18)? | Open (tracked as SM-O18). Default: warn only. |
-| FR-O2 | "Start scribed" mechanism (SM-O13, FAIL-O1). | Open. |
+| FR-O2 | "Start scribed" mechanism (SM-O13, FAIL-O1). | **Decided** 2026-10-04 with SM-O13 (D-106): `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`; TurbidAssist change T4 is not taken. |
 | FR-O3 | Hook installer must keep fleetmates' own hooks (SessionStart, SubagentStop) intact; merge rules and backup file name are not specified. | Proposed: back up to `~/.claude/settings.json.deck-backup-<timestamp>`, append deck hooks per event, never reorder existing entries. |
 | FR-O4 | Themed "Set sail" button (design-system 15.1). | Open. |
 
