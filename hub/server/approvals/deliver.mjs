@@ -122,6 +122,22 @@ export function answerKeys (row, body, prompt) {
 }
 
 /**
+ * The one writer of a request's `answered` audit row (07-approvals 11): the row is appended only when the
+ * request has none yet, so the deliverer, the server's terminal-answer audit and `recover` can never write it
+ * twice. The check and the insert run in one synchronous turn on the deck's single database connection, with
+ * nothing awaited between them. `record` defaults to audit.mjs `record`.
+ * @param {{ get: Function, run: Function }} store
+ * @param {object} event an AuditEvent; `kind` is forced to `answered`
+ * @param {Function} [record]
+ * @returns {number | null} the row id, or null when the request already has its `answered` row
+ */
+export function recordAnswered (store, event, record = auditLog.record) {
+  const requestId = /** @type {any} */ (event).requestId ?? null
+  if (requestId !== null && store.get("SELECT id FROM approval_audit WHERE request_id = ? AND kind = 'answered' LIMIT 1", requestId)) return null
+  return record(store, { ...event, kind: 'answered' })
+}
+
+/**
  * @typedef {{ run: Function, get: Function, all: Function, appendEvent: Function, tx: Function }} Store
  * @typedef {{ connected: boolean, features: string[], request: (op: string, fields?: object) => Promise<any>,
  *   writeGuarded: (ptyId: string, data: string, guard: { rev: number, quietMs: number }) => Promise<any>,
@@ -205,8 +221,10 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
   function note (kind, row, extra = {}) {
     try {
       const session = row ? getSession(row.session_id) : null
-      audit.record(store, { kind, at: now(), requestId: row?.id ?? null, sessionId: row?.session_id ?? null, repoId: session?.repo_id ?? null,
-        tier: row?.tier ?? null, reasons: row?.reasons ?? [], summary: row?.summary ?? null, ...extra })
+      const event = { kind, at: now(), requestId: row?.id ?? null, sessionId: row?.session_id ?? null, repoId: session?.repo_id ?? null,
+        tier: row?.tier ?? null, reasons: row?.reasons ?? [], summary: row?.summary ?? null, ...extra }
+      if (kind === 'answered') recordAnswered(store, event, audit.record)
+      else audit.record(store, event)
     } catch {
       try { process.stderr.write('deck: audit.error\n') } catch {}
     }
@@ -680,8 +698,8 @@ export function recover (store, { now = Date.now, audit = auditLog } = {}) {
       write(row.id, 'idle', JSON.stringify({ via: 'terminal', choice }))
       try {
         const session = store.get('SELECT repo_id FROM sessions WHERE id = ?', row.session_id)
-        audit.record(store, { kind: 'answered', at, requestId: row.id, sessionId: row.session_id, repoId: session?.repo_id ?? null,
-          tier: row.tier ?? null, reasons: row.reasons ?? [], summary: row.summary ?? null, via: 'terminal', choice })
+        recordAnswered(store, { kind: 'answered', at, requestId: row.id, sessionId: row.session_id, repoId: session?.repo_id ?? null,
+          tier: row.tier ?? null, reasons: row.reasons ?? [], summary: row.summary ?? null, via: 'terminal', choice }, audit.record)
       } catch {
         try { process.stderr.write('deck: audit.error\n') } catch {}
       }

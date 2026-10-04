@@ -87,6 +87,7 @@ async function server(t, options = {}) {
   fs.mkdirSync(config, { recursive: true, mode: 0o700 })
   const popups = []
   const opened = []
+  const openings = []
   let closed = 0
   const notifier = {
     async popup(spec) { popups.push(spec)
@@ -96,8 +97,10 @@ async function server(t, options = {}) {
   const deck = await startDeckServer({ env: { HOME: home, XDG_RUNTIME_DIR: rt.dir }, port: 0, staticDir, runPollMs: 3_600_000,
     runCommand: () => ({ status: 0, stdout: '', stderr: '' }), notifier, notificationTickMs: 100,
     scribedStatus: { start: async () => {}, stop() {}, snapshot: () => ({ state: 'unknown' }), isRecording: () => false },
-    openBrowser: async file => { opened.push(fs.readFileSync(file, 'utf8'))
-      return true }, ...options })
+    openBrowser: async (file, { env } = {}) => {
+      opened.push(fs.readFileSync(file, 'utf8'))
+      openings.push({ mode: fs.statSync(file).mode & 0o777, dirMode: fs.statSync(path.dirname(file)).mode & 0o777, env: { ...env } })
+      return true }, ...options, env: { HOME: home, XDG_RUNTIME_DIR: rt.dir, ...options.env } })
   t.after(() => deck.close())
   const published = []
   t.after(deck.subscribe(event => published.push(event)))
@@ -108,16 +111,17 @@ async function server(t, options = {}) {
     return { status: response.status, data: text ? JSON.parse(text) : null }
   }
   const post = (route, body) => request(route, { method: 'POST', body: JSON.stringify(body) })
-  return { deck, home, config, published, popups, opened, origin, request, post, notifierClosed: () => closed }
+  return { deck, home, state, config, published, popups, opened, openings, origin, request, post, notifierClosed: () => closed }
 }
 
 /**
  * One fake claude spawned through deckd as `fm claude` would, running `script` (a fixture name or a script
  * object), with each hook it logs fed to the server. `ptyId: null` makes the hooks those of an observed session.
  */
-async function spawn(t, h, script, { observed = false } = {}) {
+async function spawn(t, h, script, { observed = false, files = {} } = {}) {
   const cwd = fs.mkdtempSync(path.join(dir, 'repo-'))
   fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', lint: 'true' } }))
+  for (const [name, content] of Object.entries(files)) fs.writeFileSync(path.join(cwd, name), content)
   const log = path.join(dir, `fake-${++logs}.jsonl`)
   let scriptFile = path.join(scriptsDir, `${script}.json`)
   if (typeof script === 'object') {
@@ -215,15 +219,22 @@ test("an observed session's answer is 409 read_only_session", async t => {
 })
 
 test('a popup allow action on a Destructive request answers nothing and opens the session (exit criterion 1)', async t => {
-  const h = await server(t)
+  // A deck token variable in the server's environment never reaches the opener.
+  const h = await server(t, { env: { FLEETMATES_DECK_TOKEN: token } })
   const s = await spawn(t, h, destructive)
   const rm = await s.request('rm -rf build')
   const popup = await until(() => h.popups.find(spec => spec.onAction), 'the needs-you popup', 10000)
   assert.deepEqual(popup.actions, ['open'], 'a Destructive popup offers Open only')
+  // The state directory was loosened after start: the bootstrap file holding the token must stay private anyway.
+  fs.chmodSync(h.state, 0o755)
   // A forged allow click is still only an Open.
   popup.onAction('allow')
   await until(() => h.opened.length === 1, 'the browser opener')
   assert.match(h.opened[0], new RegExp(`#token=${token}&to=${encodeURIComponent(`/s/${rm.session_id}`)}`))
+  const [opening] = h.openings
+  assert.equal(opening.mode, 0o600, 'the bootstrap file is 0600')
+  assert.equal(opening.dirMode, 0o700, 'its directory is 0700 again')
+  assert.deepEqual(Object.entries(opening.env).filter(([key, value]) => /TOKEN/i.test(key) || String(value).includes(token)), [], 'the opener env carries no deck token')
   await sleep(300)
   assert.deepEqual(inputs(s.log), [], 'no key reached the Destructive prompt')
   assert.equal(s.row(rm.id).state, 'open')
@@ -320,4 +331,83 @@ test('the server audits an expired request and a terminal answer the deliverer d
   await until(() => d.row(rm.id).state === 'expired', 'the request to expire')
   await until(() => h.deck.store.get("SELECT id FROM approval_audit WHERE request_id = ? AND kind = 'expired'", rm.id), 'the expired audit row')
   assert.equal(h.deck.store.get('SELECT count(*) AS n FROM approval_audit WHERE request_id = ?', rm.id).n, 1)
+})
+
+test('a deck deny the closing hook contradicts gets exactly one answered audit row, written once by the server or the deliverer', async t => {
+  const h = await server(t, { notifications: false })
+  const s = await spawn(t, h, 'did-not-land')
+  const req = await s.request('node --test capture.test.mjs')
+  const denied = await h.post(`/api/requests/${req.id}/answer`, { choice: 'deny' })
+  assert.equal(denied.status, 202)
+  assert.equal(s.row(req.id).delivery, 'verifying')
+  // The tool ran anyway: a PostToolUse for the same input contradicts the deck's deny.
+  const opened = entries(s.log).find(entry => entry.hook && entry.payload.hook_event_name === 'PermissionRequest').payload
+  h.deck.ingest.receive(JSON.stringify({ v: 1, hookTs: Date.now(), ptyId: s.ptyId, claudePid: null, pidChain: [], truncated: false,
+    hook: { ...opened, hook_event_name: 'PostToolUse', tool_response: { stdout: '', stderr: '' } } }))
+  h.deck.ingest.flush()
+  await until(() => s.row(req.id).state === 'answered', 'the hook to close the request')
+  assert.deepEqual(JSON.parse(s.row(req.id).answer), { via: 'terminal', choice: 'allow' })
+  // Past the deliverer's proof poll, so both writers have had their turn.
+  await sleep(800)
+  const rows = h.deck.store.all("SELECT kind, via, choice FROM approval_audit WHERE request_id = ? AND kind = 'answered'", req.id).map(row => ({ ...row }))
+  assert.deepEqual(rows, [{ kind: 'answered', via: 'terminal', choice: 'allow' }])
+})
+
+test('the follow-up after a deck deny reaches the fake over HTTP as one sanitized paste', async t => {
+  const h = await server(t, { notifications: false })
+  const s = await spawn(t, h, 'deny-then-instruct')
+  const req = await s.request('npm run test')
+  const denied = await h.post(`/api/requests/${req.id}/answer`, { choice: 'deny' })
+  assert.equal(denied.status, 202)
+  await until(() => s.row(req.id).state === 'answered', 'the deny to land')
+  assert.deepEqual(inputs(s.log), ['3'])
+  const text = 'use pnpm\x1b[201~\x1b[A\x03 instead'
+  const sent = await until(async () => {
+    const response = await h.post(`/api/requests/${req.id}/followup`, { text })
+    if (response.status === 409 && response.data.error.code === 'followup_window_closed') return null
+    return response
+  }, 'the follow-up to be accepted')
+  assert.equal(sent.status, 202)
+  await until(() => entries(s.log).some(entry => entry.expectInput), 'the fake to take the paste')
+  assert.equal(entries(s.log).find(entry => entry.expectInput).expectInput, '\x1b[200~use pnpm[A instead\x1b[201~\r')
+})
+
+test('answer-batch refuses any choice but allow and answers nothing; with allow it returns one result per id', async t => {
+  const h = await server(t, { notifications: false })
+  const s = await spawn(t, h, 'approve-safe')
+  const req = await s.request('npm run test')
+  const deny = await h.post('/api/requests/answer-batch', { ids: [req.id], choice: 'deny' })
+  assert.equal(deny.status, 422)
+  assert.equal(deny.data.error.code, 'validation_failed')
+  assert.deepEqual(deny.data.error.details.fields, ['choice'])
+  await sleep(200)
+  assert.deepEqual(inputs(s.log), [], 'a refused batch types nothing')
+  assert.equal(s.row(req.id).state, 'open')
+  const allowed = await h.post('/api/requests/answer-batch', { ids: [req.id], choice: 'allow' })
+  assert.equal(allowed.status, 202)
+  assert.deepEqual(allowed.data.results, [{ id: req.id, ok: true }])
+  assert.deepEqual(inputs(s.log), ['1'])
+  assert.deepEqual(JSON.parse(s.row(req.id).answer), { via: 'batch', choice: 'allow' })
+})
+
+test('a popup allow the deliverer refuses at click time opens the session instead (state-machines 2.7 row 6)', async t => {
+  const h = await server(t)
+  const s = await spawn(t, h, inline([
+    { hook: 'PermissionRequest', variant: 'Bash', with: bashInput('cat notes.txt', 'Read the notes') }, CLEAR,
+    { frame: 'synthetic-permission-bash', vars: { cmd: 'cat notes.txt', description: 'Read the notes' } },
+    { expectKey: { 1: 'yes', 2: 'no', timeoutMs: 120000 } }
+  ]), { files: { 'notes.txt': 'notes\n' } })
+  const req = await s.request('cat notes.txt')
+  assert.equal(req.tier, 'safe')
+  const popup = await until(() => h.popups.find(spec => spec.onAction), 'the needs-you popup', 10000)
+  assert.deepEqual(popup.actions, ['allow', 'open'])
+  // The path operand became a symlink after the request opened: re-classified at click time, it is Caution (D-88).
+  fs.rmSync(path.join(s.cwd, 'notes.txt'))
+  fs.symlinkSync(path.join(s.cwd, 'package.json'), path.join(s.cwd, 'notes.txt'))
+  popup.onAction('allow')
+  await until(() => h.opened.length === 1, 'the session to open')
+  assert.match(h.opened[0], new RegExp(`&to=${encodeURIComponent(`/s/${req.session_id}`)}`))
+  assert.deepEqual(inputs(s.log), [])
+  assert.equal(s.row(req.id).tier, 'caution')
+  assert.equal(s.row(req.id).state, 'open')
 })

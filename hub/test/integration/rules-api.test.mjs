@@ -1,12 +1,18 @@
 // The rule routes over HTTP (docs/deck/05-api.md 2.5; M3 Task 16) against the real server with deckd offline:
 // add, list and revoke on a temp repo's .claude/settings.local.json keeping every other key, the Decided
-// refusal of a Destructive rule, and the suggestion threshold read again on every prefs change.
+// refusal of a Destructive rule, the suggestion threshold read again on every prefs change, the `tracked` flag of
+// GET, the toast Undo of DELETE and the retryable `settings_changed`.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { execFileSync } from 'node:child_process'
 import { startDeckServer } from '../../server/main.mjs'
+import { createApi } from '../../server/http/api.mjs'
+import { apiError } from '../../server/http/router.mjs'
+import { openDeckDb } from '../../server/db/index.mjs'
+import { createProjector } from '../../server/machines/projector.mjs'
 
 const token = 'a'.repeat(43)
 const hooks = new URL('../fixtures/hooks/2.1.285/', import.meta.url)
@@ -134,4 +140,59 @@ test('the threshold set to 3 through PATCH /api/prefs makes the third Safe termi
   await h.request('/api/prefs', { method: 'PATCH', body: JSON.stringify({ ruleSuggestAfter: null }) })
   assert.deepEqual((await h.deck.snapshot()).data.ruleOffers, [])
   assert.equal((await h.request('/api/rules')).data.threshold, null)
+})
+
+/** Point this process's git at a temporary home for the rest of the test, so no owner config is read. */
+function isolatedGit(t, home) {
+  const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
+  t.after(() => { for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value })
+  process.env.HOME = home
+  process.env.XDG_CONFIG_HOME = path.join(home, '.config')
+  process.env.GIT_CONFIG_NOSYSTEM = '1'
+}
+const git = (repo, ...args) => execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', ...args], { timeout: 5000 })
+
+test('GET /api/rules marks each rule tracked when git tracks the settings file, as POST does', async t => {
+  const h = await harness(t)
+  isolatedGit(t, path.dirname(h.repo))
+  const file = path.join(h.repo, '.claude/settings.local.json')
+  fs.writeFileSync(file, JSON.stringify({ permissions: { allow: ['mcp__vault__vault_search'] } }) + '\n')
+  git(h.repo, 'init', '-q')
+  const before = (await h.request('/api/rules?repoKey=shipyard')).data.repos[0].rules
+  assert.deepEqual(before.map(rule => [rule.pattern, rule.tracked]), [['mcp__vault__vault_search', false]], 'an untracked file')
+  git(h.repo, 'add', '-f', '.claude/settings.local.json')
+  git(h.repo, 'commit', '-qm', 'settings')
+  const after = (await h.request('/api/rules?repoKey=shipyard')).data.repos[0].rules
+  assert.deepEqual(after.map(rule => [rule.pattern, rule.tracked]), [['mcp__vault__vault_search', true]], 'a committed file')
+  const added = await h.request('/api/rules', { method: 'POST', body: JSON.stringify({ repoKey: 'shipyard', pattern: 'Bash(npm run test)', source: 'manual' }) })
+  assert.equal(added.data.rule.tracked, true, 'POST answers the same')
+})
+
+test('DELETE with ?undo=1 is the toast Undo: rule_audit records undo, and any other undo value is refused', async t => {
+  const h = await harness(t)
+  const added = await h.request('/api/rules', { method: 'POST', body: JSON.stringify({ repoKey: 'shipyard', pattern: 'mcp__vault__vault_search', source: 'suggested' }) })
+  assert.equal(added.status, 201)
+  const bad = await h.request('/api/rules/shipyard/mcp__vault__vault_search?undo=yes', { method: 'DELETE' })
+  assert.equal(bad.status, 422)
+  assert.deepEqual(bad.data.error.details.fields, ['undo'])
+  const undone = await h.request('/api/rules/shipyard/mcp__vault__vault_search?undo=1', { method: 'DELETE' })
+  assert.deepEqual(undone.data, { removed: true })
+  const actions = h.deck.store.all('SELECT action, actor FROM rule_audit WHERE pattern = ? ORDER BY id', 'mcp__vault__vault_search').map(row => ({ ...row }))
+  assert.deepEqual(actions, [{ action: 'added', actor: 'suggestion' }, { action: 'undo', actor: 'manual' }])
+})
+
+test('settings_changed answers 409 with retryable true (05-api section 4)', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rul-api-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const store = openDeckDb(path.join(dir, 'deck.db'))
+  t.after(() => store.close())
+  store.run("INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES('/home/you/dev/web','web',0,1,'web',0)")
+  const rules = { write: async () => { throw apiError(409, 'settings_changed', { path: '/home/you/dev/web/.claude/settings.local.json' }) } }
+  const api = createApi({ store, projector: createProjector({ store }), paths: { config: dir, state: dir }, services: {}, runReader: { list: async () => [] },
+    health: () => [], approvals: { rules, deliverer: {}, threshold: () => 5, tiersStatus: () => ({ ok: true }), ruleOffers: () => [] } })
+  const result = await api.route({ method: 'POST', segments: ['api', 'rules'], query: new URLSearchParams(), body: { repoKey: 'web', pattern: 'mcp__vault__vault_search', source: 'manual' } })
+  assert.equal(result.status, 409)
+  assert.equal(result.data.error.code, 'settings_changed')
+  assert.equal(result.data.error.retryable, true)
+  api.close()
 })

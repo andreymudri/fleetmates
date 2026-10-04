@@ -26,7 +26,7 @@ import { openInBrowser } from './setup/browser.mjs'
 import { createTiersStore } from './approvals/tiers-store.mjs'
 import { setActiveTiers } from './approvals/tiers.mjs'
 import { applyScreen, fillConfirmLabel, raiseTiers } from './approvals/request-updates.mjs'
-import { createDeliverer, recover as recoverDeliveries } from './approvals/deliver.mjs'
+import { createDeliverer, recordAnswered, recover as recoverDeliveries } from './approvals/deliver.mjs'
 import { createRules, offers as ruleOffers, recordAllow, ruleThreshold } from './approvals/rules.mjs'
 import { record as recordAudit } from './approvals/audit.mjs'
 import { countFor } from './approvals/confirm-count.mjs'
@@ -206,24 +206,18 @@ export async function createDeckServer(options = {}) {
       .finally(() => labelWork.delete(work))
     labelWork.add(work)
   }
-  // Audit rows nothing else writes: `expired`, and `answered` via terminal for a request the deliverer did not
-  // audit. A request the deck sent keys for is audited by the deliverer, so it is checked after its proof poll.
-  const auditTimers = new Set()
+  // Audit rows nothing else writes: `expired`, and `answered` via terminal for a request closed by a terminal
+  // answer. The `answered` row goes through deliver.mjs `recordAnswered`, the one writer the deliverer and
+  // `recover` use too, which appends it only when the request has none, so it is never written twice.
   const auditClosed = view => {
     const repoId = store.get('SELECT repo_id FROM sessions WHERE id=?', view.sessionId)?.repo_id ?? null
     const base = { requestId: view.id, sessionId: view.sessionId, repoId, tier: view.tier ?? null, reasons: view.reasons ?? [], summary: view.summary ?? null }
     if (view.state === 'expired') return audit({ kind: 'expired', ...base })
     const answer = view.answer
     if (view.state !== 'answered' || answer?.via !== 'terminal' || answer.pending || view.delivery === 'sending') return
-    const write = () => {
-      if (stopped || store.get("SELECT id FROM approval_audit WHERE request_id=? AND kind='answered' LIMIT 1", view.id)) return
-      audit({ kind: 'answered', ...base, via: 'terminal', choice: typeof answer.choice === 'string' ? answer.choice : null })
+    try { recordAnswered(store, { at: now(), ...base, via: 'terminal', choice: typeof answer.choice === 'string' ? answer.choice : null }) } catch {
+      try { process.stderr.write('deck: audit.error\n') } catch {}
     }
-    if (!['verifying', 'did_not_land'].includes(view.delivery)) return write()
-    const timer = setTimeout(() => { auditTimers.delete(timer)
-      write() }, options.auditSettleMs ?? 1000)
-    timer.unref()
-    auditTimers.add(timer)
   }
   approvalsEvent = event => {
     if (stopped) return
@@ -401,20 +395,27 @@ export async function createDeckServer(options = {}) {
       publish({ type: 'ui.navigate', at: now(), data: { path: to } })
       return Promise.resolve()
     }
-    // The token travels in the fragment of a private bootstrap file, as `fleetmates-deck open` does, never in argv.
+    // The token travels in the fragment of a private bootstrap file (0600, in the state directory made 0700 again
+    // right before the write, so a directory loosened after start cannot expose it), as `fleetmates-deck open`
+    // does, never in argv; the opener gets the environment without the deck token.
     const url = `http://127.0.0.1:${boundPort}/#token=${currentToken}&to=${encodeURIComponent(to)}`
     const bootstrap = path.join(paths.state, 'open.html')
     const temp = path.join(paths.state, `.open-${process.pid}-${Date.now()}.tmp`)
     try {
+      privateDir(paths.state)
       fs.writeFileSync(temp, `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${JSON.stringify(url)})</script>\n`, { flag: 'wx', mode: 0o600 })
       fs.renameSync(temp, bootstrap)
     } catch { return Promise.resolve() } finally { try { fs.unlinkSync(temp) } catch {} }
     return Promise.resolve().then(() => (options.openBrowser ?? openInBrowser)(bootstrap, { env: processEnv })).catch(() => {})
   }
-  /** A popup action (Task 5): `allow` answers the single Safe request through the deliverer, anything else opens. */
+  /**
+   * A popup action (Task 5): `allow` answers the single Safe request through the deliverer, anything else opens.
+   * An allow the deliverer refuses at click time (the tier rose, the prompt left the screen) opens the session
+   * instead (state-machines 2.7 row 6).
+   */
   function popupAction({ key, requestIds, sessionId }) {
     if (key === 'allow' && requestIds.length === 1) {
-      deliverer.answer(requestIds[0], { choice: 'allow' }, { via: 'popup' }).catch(() => {})
+      deliverer.answer(requestIds[0], { choice: 'allow' }, { via: 'popup' }).catch(() => { if (!stopped) openSession(sessionId) })
       return
     }
     openSession(sessionId)
@@ -459,8 +460,6 @@ export async function createDeckServer(options = {}) {
     tiersWatcher?.close()
     tiersStore.close()
     setActiveTiers(null)
-    for (const timer of auditTimers) clearTimeout(timer)
-    auditTimers.clear()
     link.close()
     if (retentionTimeout !== null) retentionTimer.clear(retentionTimeout)
     retentionTimeout = null

@@ -6,6 +6,7 @@ import { persistSessionSummary } from '../machines/session.mjs'
 import { projectCounts } from '../machines/counts.mjs'
 import { createLauncher, headBranch, SCROLLBACK_LINES, SCROLLBACK_LINES_MAX } from '../launch/launch.mjs'
 import { DiffError, sessionDiff } from '../adapters/git-diff.mjs'
+import { gitRead } from '../adapters/git-read.mjs'
 const deckVersion = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const defaults = {
   port: 47800, scanRoot: '~/dev', lang: 'en', staleMinutes: 20, claudeCommand: 'claude',
@@ -161,15 +162,29 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     if (!approvals) throw apiError(404, 'not_found')
     return approvals
   }
-  /** `GET /api/rules` (05-api 2.5): every repo that is not archived, or the one `repoKey` names. */
-  function rulesBody(query) {
+  /**
+   * Whether git tracks the repo's `.claude/settings.local.json`, asked as `POST /api/rules` asks it (rules.mjs
+   * `writeRule`): `git ls-files --error-unmatch` through the read-only git helper in the repo's real path.
+   */
+  async function settingsTracked(repoId) {
+    let root = repoId
+    try { root = fs.realpathSync(repoId) } catch {}
+    return (approvals?.gitRead ?? gitRead)(root, ['ls-files', '--error-unmatch', '.claude/settings.local.json']).then(result => result?.code === 0, () => false)
+  }
+  /**
+   * `GET /api/rules` (05-api 2.5): every repo that is not archived, or the one `repoKey` names. Each rule carries
+   * `tracked`, so Settings can show the tracked-file note.
+   */
+  async function rulesBody(query) {
     const { rules, threshold, tiersStatus } = m3()
     const id = resolveRepo(query)
     const status = tiersStatus()
+    const listed = repos().filter(repo => !id || repo.id === id).map(repo => ({ repoKey: repo.name, ...rules.listRules(repo.id) }))
+    const tracked = await Promise.all(listed.map(repo => settingsTracked(repo.repoId)))
     return {
       threshold: threshold(),
       tiersError: status.ok ? null : { line: status.line, message: status.message },
-      repos: repos().filter(repo => !id || repo.id === id).map(repo => ({ repoKey: repo.name, ...rules.listRules(repo.id) }))
+      repos: listed.map((repo, index) => ({ ...repo, rules: repo.rules.map(rule => ({ ...rule, tracked: tracked[index] })) }))
     }
   }
   /** The repo and pattern of a rule body: both non-empty strings, the repo known. */
@@ -230,7 +245,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
           throw error.code === 'not_found' ? apiError(404, 'not_found', { entity: 'path' }) : apiError(422, 'validation_failed', { fields: ['path'] })
         }
       }
-      if (route === 'rules') return ok(rulesBody(q))
+      if (route === 'rules') return ok(await rulesBody(q))
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'disk') return ok(await services.disk(filePath(session(s[2]).cwd, 'cwd')))
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'scrollback') return launcher.scrollback(session(s[2]).id, integer(q, 'lines', SCROLLBACK_LINES, SCROLLBACK_LINES_MAX))
       if (route === 'requests') {
@@ -407,7 +422,12 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       }
     }
     if (method === 'DELETE') {
-      if (s[1] === 'rules' && s.length === 4) return ok(m3().rules.revoke(resolveRepo(new URLSearchParams(), s[2]), s[3]))
+      if (s[1] === 'rules' && s.length === 4) {
+        // `?undo=1` is the toast Undo after accepting a suggestion: rule_audit records `undo` instead of `revoked`.
+        const undo = q.get('undo')
+        if (undo !== null && undo !== '1') throw apiError(422, 'validation_failed', { fields: ['undo'] })
+        return ok(m3().rules.revoke(resolveRepo(new URLSearchParams(), s[2]), s[3], { undo: undo === '1' }))
+      }
     }
     throw apiError(404, 'not_found')
   }
