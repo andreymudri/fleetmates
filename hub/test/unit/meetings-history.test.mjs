@@ -273,6 +273,46 @@ test('readTranscript reads the disk on every call, confidential sessions include
   assert.equal(await readTranscript(m.sessionDir, m.ids.confidential), null)
 })
 
+// Rewrites every transcript file with a same-length word and puts back its exact atime and mtime, so a cache
+// keyed on a file's size and mtime cannot tell the new text from the old.
+async function swapSameLength(dir, from, to) {
+  assert.equal(from.length, to.length)
+  for (const name of TRANSCRIPT_FILES) {
+    const file = path.join(dir, name)
+    const before = await stat(file)
+    await writeFile(file, (await readFile(file, 'utf8')).replaceAll(from, to))
+    await utimes(file, before.atime, before.mtime)
+    const after = await stat(file)
+    assert.equal(after.size, before.size)
+    assert.equal(after.mtimeMs, before.mtimeMs)
+  }
+}
+
+test('readTranscript returns a same-length rewrite with an unchanged mtime and size, confidential included', async t => {
+  const m = await tree(t, { variants: ['confidential'] })
+  const dir = path.join(m.sessionDir, m.ids.confidential)
+  const [word] = m.sentinels.confidential
+  const other = 'SENTINELA9'
+  assert.match(JSON.stringify(await readTranscript(m.sessionDir, m.ids.confidential)), new RegExp(`${word}\\.`))
+  await swapSameLength(dir, word, other)
+  const text = JSON.stringify(await readTranscript(m.sessionDir, m.ids.confidential))
+  assert.match(text, new RegExp(other))
+  assert.doesNotMatch(text, new RegExp(`${word}\\.`))
+})
+
+test('search returns a same-length rewrite with an unchanged mtime and size, confidential included', async t => {
+  const m = await tree(t, { variants: ['confidential'] })
+  const list = await listSessions(m.sessionDir, { now: m.now })
+  const dir = path.join(m.sessionDir, m.ids.confidential)
+  const [word] = m.sentinels.confidential
+  const other = 'SENTINELA9'
+  assert.equal((await searchTranscripts(list, `${word}.`)).hits.length, 1)
+  assert.equal((await searchTranscripts(list, other)).hits.length, 0)
+  await swapSameLength(dir, word, other)
+  assert.equal((await searchTranscripts(list, `${word}.`)).hits.length, 0)
+  assert.deepEqual((await searchTranscripts(list, other)).hits.map(h => h.meetingId), [m.ids.confidential])
+})
+
 test('search reaches the confidential variant (MEET-O7)', async t => {
   const m = await tree(t, { variants: ['confidential'] })
   const list = await listSessions(m.sessionDir, { now: m.now })
