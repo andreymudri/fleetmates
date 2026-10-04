@@ -417,10 +417,14 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
             session = store.get('SELECT * FROM sessions WHERE id=?', session.id)
           }
           // Rule 2 lets a late event update bookkeeping: a `--run` command stamped behind an early-flushed
-          // PermissionRequest still joins its run, when it comes from the session's own Claude process. The run join
-          // touches only the role and run columns, never the session state.
+          // PermissionRequest still joins its run. The process check is `sameKnownProcess`, as for the other late
+          // rules: the envelope's PTY and Claude pid must match the session's known ones, and an envelope that carries
+          // neither passes. A late command older than a `--run` command the session already applied joins nothing, so
+          // the newest command keeps the run. The run join touches only the role and run columns, never the state.
           let joinChanged = false
-          if (late && session.alive && hook.hook_event_name === 'PreToolUse' && hook.tool_name === 'Bash' && sameKnownProcess(store, session, envelope)) {
+          const newerRun = () => store.all("SELECT payload FROM hook_events WHERE session_id=? AND applied=1 AND event='PreToolUse' AND hook_ts>? AND json_extract(payload,'$.tool_name')='Bash'", session.id, envelope.hookTs)
+            .some(row => leadRunId(JSON.parse(row.payload).tool_input?.command) !== null)
+          if (late && session.alive && hook.hook_event_name === 'PreToolUse' && hook.tool_name === 'Bash' && sameKnownProcess(store, session, envelope) && !newerRun()) {
             const joined = joinLead(session, hook, envelope.hookTs)
             joinChanged = joined.role !== session.role || joined.run_id !== session.run_id
             session = joined

@@ -329,6 +329,20 @@ test('a late --run PreToolUse from a different Claude process does not join the 
   assert.equal(h.deck.store.all('SELECT * FROM runs').length, 0)
 })
 
+test('a late --run PreToolUse older than an applied --run does not move the session back to its run', async t => {
+  const h = await harness(t)
+  const at = h.lastTs() + 1000
+  const envelope = { ptyId: 'pty-lead', claudePid: 4242 }
+  h.send('lead-1', h.repo, { hook_event_name: 'SessionStart', source: 'startup', tool_name: undefined, tool_input: undefined }, at, envelope)
+  h.send('lead-1', h.repo, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'node scripts/cli.mjs dispatch --run r2 --phase 1' } }, at + 30, envelope)
+  assert.equal(h.sessionFor('lead-1').runRef.runId, 'r2')
+  h.send('lead-1', h.repo, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'node scripts/cli.mjs dispatch --run r1 --phase 1' } }, at + 10, envelope)
+  assert.equal(h.deck.store.get("SELECT applied FROM hook_events WHERE event='PreToolUse' AND hook_ts=?", at + 10).applied, 0, 'the r1 command was judged late')
+  const lead = h.sessionFor('lead-1')
+  assert.deepEqual([lead.role, lead.runRef.runId], ['lead', 'r2'])
+  assert.equal(h.deck.store.get('SELECT lead_session_id FROM runs WHERE repo_id=? AND run_id=?', h.repo, 'r1')?.lead_session_id ?? null, null)
+})
+
 /** Await a condition the server reaches on its own; the deadline only turns a hang into a failure. */
 async function waitFor(fn) {
   const until = Date.now() + 5000
