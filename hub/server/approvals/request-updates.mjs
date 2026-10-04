@@ -75,9 +75,10 @@ export function raiseTiers (store, classifyFn, at) {
 /**
  * Fill the Destructive confirm label of a request (07-approvals 8, D-72): when exactly one of its
  * reasons is a Destructive tiers entry, that entry's `confirm` template, with `{n}` replaced by the
- * count `countFor` gives for the shell segment the entry matched. When two or more reasons are
- * Destructive entries (with or without a template), the template is missing, the count is not a
- * whole number, or `countFor` throws, the label is FALLBACK_CONFIRM_LABEL. Writes `confirm_label`
+ * count `countFor` gives for the shell segment the entry matched, taken in that segment's directory.
+ * When two or more reasons are Destructive entries (with or without a template), the template is
+ * missing, the segment's directory is unknown (after `cd sub`), the count is not a whole number, or
+ * `countFor` throws, the label is FALLBACK_CONFIRM_LABEL. Writes `confirm_label`
  * and appends `request.updated`. Resolves null for a request that is missing or not Destructive.
  * @param {Store} store
  * @param {string} requestId
@@ -122,6 +123,9 @@ async function confirmLabel (row, cwd, { countFor, tiers }) {
   const segment = parsed.ok ? parsed.segments.find((/** @type {any} */ s) => s.words.join(' ') === hit.reason.segment) : null
   if (!segment) return FALLBACK_CONFIRM_LABEL
   let count
-  try { count = await countFor(hit.entry.count, segment.words, segment.cwd ?? cwd) } catch { return FALLBACK_CONFIRM_LABEL }
+  // The parser sets a segment's `cwd` to null when it cannot tell where it runs (after `cd sub`), so
+  // the count is never taken at the session directory instead.
+  if (typeof segment.cwd !== 'string' || !segment.cwd) return FALLBACK_CONFIRM_LABEL
+  try { count = await countFor(hit.entry.count, segment.words, segment.cwd) } catch { return FALLBACK_CONFIRM_LABEL }
   return Number.isInteger(count) && count >= 0 ? template.replace('{n}', String(count)) : FALLBACK_CONFIRM_LABEL
 }

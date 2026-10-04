@@ -315,3 +315,45 @@ test('allowAlwaysFor is false for a Safe WebFetch request even when option 2 nam
   const prompt = { options: [{ key: '1', label: 'Yes' }, { key: '2', label: "Yes, and don't ask again for WebFetch(domain:example.com)" }, { key: '3', label: 'No' }] }
   assert.equal(allowAlwaysFor(request, prompt), false)
 })
+
+test('fillConfirmLabel ignores non-Destructive reasons, keeps a template without {n}, refuses a negative count and an unknown segment directory', async () => {
+  const { classify } = await import('../../server/approvals/tiers.mjs')
+  const h = harness()
+  try {
+    const add = (/** @type {string} */ id, /** @type {string} */ command) => {
+      const classified = classify({ toolName: 'Bash', toolInput: { command }, cwd: '/repo', repoRoot: '/repo' })
+      assert.equal(classified.tier, 'destructive', command)
+      h.insert(row({ id, tier: 'destructive', input: { command }, reasons: classified.reasons }))
+    }
+    add('rm-status', 'rm a b && git status')
+    add('publish', 'npm publish')
+    add('cd-rm', 'cd sub && rm a')
+    /** @type {unknown[][]} */
+    const calls = []
+    const countFor = async (/** @type {string} */ kind, /** @type {string[]} */ argv, /** @type {string} */ root) => { calls.push([kind, argv, root]); return argv.length - 1 }
+    assert.equal(await fillConfirmLabel(h.store, 'rm-status', { countFor }), 'I checked the 2 paths that will be deleted', 'the Safe git status reason is not a Destructive entry')
+    assert.equal(await fillConfirmLabel(h.store, 'publish', { countFor }), 'I checked the version being published')
+    assert.equal(await fillConfirmLabel(h.store, 'rm-status', { countFor: async () => -1 }), FALLBACK_CONFIRM_LABEL, 'a negative count')
+    calls.length = 0
+    // After `cd sub` the shell parser does not know the directory the rm runs in, so the count is not
+    // taken at the session directory (/repo) but falls back.
+    assert.equal(await fillConfirmLabel(h.store, 'cd-rm', { countFor }), FALLBACK_CONFIRM_LABEL, 'an unknown segment directory')
+    assert.deepEqual(calls, [], 'countFor is not called for a segment whose directory is unknown')
+  } finally {
+    h.close()
+  }
+})
+
+test('raiseTiers writes nothing for an equal tier', () => {
+  const h = harness()
+  try {
+    const before = [{ entryId: 'old', tier: 'caution', segment: 'git fetch', description: 'old reason' }]
+    h.insert(row({ id: 'same', tier: 'caution', input: { command: 'git fetch' }, reasons: before }))
+    const changed = raiseTiers(h.store, () => ({ tier: 'caution', reasons: [{ entryId: 'new', tier: 'caution', segment: 'git fetch', description: 'new reason' }], ruleCandidate: null }), 30)
+    assert.deepEqual(changed, [])
+    assert.deepEqual(JSON.parse(h.get('same').reasons), before)
+    assert.equal(h.events().length, 0)
+  } finally {
+    h.close()
+  }
+})
