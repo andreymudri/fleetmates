@@ -19,7 +19,9 @@ import { connectDeckd } from '../../deckd/client.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createProjector } from '../../server/machines/projector.mjs'
 import { createDeckdLink } from '../../server/pty/link.mjs'
-import { createDeliverer } from '../../server/approvals/deliver.mjs'
+import { answerKeys, createDeliverer, sanitizePaste } from '../../server/approvals/deliver.mjs'
+import { ScreenModel } from '../../deckd/screen-model.mjs'
+import { ensureRepo } from '../../server/adapters/repos.mjs'
 import { applyScreen } from '../../server/approvals/request-updates.mjs'
 import { DEFAULT_TIERS, setActiveTiers } from '../../server/approvals/tiers.mjs'
 import { effectiveTiers } from '../../server/approvals/tiers-store.mjs'
@@ -76,10 +78,11 @@ const inputs = log => entries(log).filter(entry => typeof entry.input === 'strin
 
 /**
  * A server side (store, projector, deckd link, deliverer) and one fake claude spawned through deckd as
- * `fm claude` would, running the scenario `script`. `connect` wraps the deckd connection (to fake an
- * older deckd).
+ * `fm claude` would, running the scenario `script` (a fixture name, or a script object written to a
+ * temporary file). `connect` wraps the deckd connection (to fake an older deckd), `wrapLink` wraps the
+ * link the deliverer gets, and `claudePid` is stamped on every hook envelope.
  */
-async function scenario(t, script, { connect = connectDeckd, deliver = {} } = {}) {
+async function scenario(t, script, { connect = connectDeckd, deliver = {}, wrapLink = link => link, claudePid = null } = {}) {
   const home = fs.mkdtempSync(path.join(dir, 'home-'))
   const store = openDeckDb(path.join(home, 'state', 'deck.db'))
   const published = []
@@ -95,12 +98,17 @@ async function scenario(t, script, { connect = connectDeckd, deliver = {} } = {}
     lastPrompt.set(event.sessionId, event.parsed.prompt)
     applyScreen(store, event.sessionId, event.parsed.prompt, Date.now())
   })
-  const deliverer = createDeliverer({ store, link, publish, ...deliver })
+  const deliverer = createDeliverer({ store, link: wrapLink(link), publish, ...deliver })
   const cwd = fs.mkdtempSync(path.join(dir, 'repo-'))
   fs.writeFileSync(path.join(cwd, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', lint: 'true' } }))
   const log = path.join(dir, `fake-${++logs}.jsonl`)
+  let scriptFile = path.join(scriptsDir, `${script}.json`)
+  if (typeof script === 'object') {
+    scriptFile = path.join(dir, `script-${logs}.json`)
+    fs.writeFileSync(scriptFile, JSON.stringify(script))
+  }
   const reply = await term.request('spawn', { cwd, argv: ['claude'], cols: 120, rows: 40, origin: 'wrapped',
-    env: { PATH: bin.env.PATH, HOME: home, FAKE_CLAUDE_SCRIPT: path.join(scriptsDir, `${script}.json`), FAKE_CLAUDE_VERSION: VERSION, FAKE_CLAUDE_LOG: log } })
+    env: { PATH: bin.env.PATH, HOME: home, FAKE_CLAUDE_SCRIPT: scriptFile, FAKE_CLAUDE_VERSION: VERSION, FAKE_CLAUDE_LOG: log } })
   const ptyId = reply.ptyId
   // Hook pump: each hook the fake logs goes to the projector with the PTY's id.
   let fed = 0
@@ -108,7 +116,7 @@ async function scenario(t, script, { connect = connectDeckd, deliver = {} } = {}
   const pump = setInterval(() => {
     if (paused) return
     const hooks = entries(log).filter(entry => entry.hook)
-    for (const entry of hooks.slice(fed)) projector.applyHooks([{ hook: entry.payload, hookTs: entry.ts, receivedAt: Date.now(), ptyId, claudePid: null, via: 'socket' }])
+    for (const entry of hooks.slice(fed)) projector.applyHooks([{ hook: entry.payload, hookTs: entry.ts, receivedAt: Date.now(), ptyId, claudePid, via: 'socket' }])
     if (hooks.length > fed) {
       const sessionId = store.get('SELECT id FROM sessions WHERE pty_id = ?', ptyId)?.id
       if (sessionId && lastPrompt.has(sessionId)) applyScreen(store, sessionId, lastPrompt.get(sessionId), Date.now())
@@ -134,6 +142,29 @@ async function scenario(t, script, { connect = connectDeckd, deliver = {} } = {}
   /** Stop feeding hooks, so only the screen can prove an answer. */
   const pauseHooks = () => { paused = true }
   return { store, link, deliverer, ptyId, log, session, request, row, audits, published, cwd, pauseHooks }
+}
+
+/**
+ * The link as the deliverer sees it, with `writeGuarded` and `onParsed` replaced where given.
+ * `lossy` resolves every write without sending it, so an answer never lands.
+ */
+function linkWith(link, { writeGuarded, onParsed } = {}) {
+  return {
+    get connected() { return link.connected },
+    get features() { return link.features },
+    request: (...args) => link.request(...args),
+    writeGuarded: writeGuarded ?? ((...args) => link.writeGuarded(...args)),
+    onParsed: onParsed ?? (fn => link.onParsed(fn))
+  }
+}
+const lossy = link => linkWith(link, { writeGuarded: async () => ({ at: Date.now() }) })
+
+/** A PostToolUse for the captured Bash command, applied as the session's own hook. */
+function captureHook(s, event = 'PostToolUse') {
+  const fixture = JSON.parse(fs.readFileSync(path.resolve(here, '..', 'fixtures', 'hooks', VERSION, 'PostToolUse.Bash.json'), 'utf8'))
+  const { sessionId } = entries(s.log).find(entry => entry.ready)
+  const hook = { ...fixture, hook_event_name: event, session_id: sessionId, cwd: s.cwd }
+  createProjector({ store: s.store }).applyHooks([{ hook, hookTs: Date.now(), receivedAt: Date.now(), ptyId: s.ptyId, claudePid: null, via: 'socket' }])
 }
 
 async function refused(promise, code) {
@@ -344,4 +375,194 @@ test('a deckd without guardedWrite gives deckd_outdated', async t => {
   await refused(s.deliverer.answer(req.id, { choice: 'allow' }), 'deckd_outdated')
   await sleep(100)
   assert.deepEqual(inputs(s.log), [])
+})
+
+// Inline scripts for cases no fixture script draws. They use the same frames and payloads.
+const CLEAR = { print: '\u001b[2J\u001b[H' }
+const bashInput = (command, description) => ({ tool_name: 'Bash', tool_input: { command, description } })
+const inline = steps => ({ version: VERSION, sessionId: 'auto', steps: [{ hook: 'SessionStart', with: { source: 'startup' } }, ...steps, { sleep: 600000 }] })
+
+test('option on a permission resolves to allow, deny or allow-always and follows their checks', async t => {
+  // A Caution request on the SYNTHETIC always frame (D-95): option 2 would save a Claude Code rule.
+  const s = await scenario(t, 'approve-always')
+  const req = await s.request('npm run test')
+  setActiveTiers(() => effectiveTiers(DEFAULT_TIERS, { disable: ['safe.npm.run-script'] }))
+  t.after(() => setActiveTiers(null))
+  await refused(s.deliverer.answer(req.id, { choice: 'option', optionKey: '2' }), 'tier_forbids')
+  assert.equal(s.row(req.id).tier, 'caution')
+  await refused(s.deliverer.answer(req.id, { choice: 'option', optionKey: '2' }, { via: 'popup' }), 'tier_forbids')
+  await sleep(100)
+  assert.deepEqual(inputs(s.log), [], 'option 2 never reached the PTY')
+  // Option 3 is the "No" option: a deny.
+  const { outcome } = await s.deliverer.answer(req.id, { choice: 'option', optionKey: '3' })
+  assert.equal(await outcome, 'answered')
+  assert.deepEqual(inputs(s.log), ['3'])
+  assert.deepEqual(JSON.parse(s.row(req.id).answer), { via: 'browser', choice: 'deny' })
+
+  // A Destructive request on the same SYNTHETIC frame: option 2 is refused even with the box ticked,
+  // option 1 needs confirm like allow, option 3 is a deny that needs none.
+  const d = await scenario(t, inline([
+    { hook: 'PermissionRequest', variant: 'Bash', with: bashInput('rm -rf build', 'Remove the build directory') }, CLEAR,
+    { frame: 'synthetic-permission-always', vars: { cmd: 'rm -rf build', description: 'Remove the build directory' } },
+    { expectKey: { 1: 'yes', 2: 'always', 3: 'no', timeoutMs: 120000 } }
+  ]))
+  const rm = await d.request('rm -rf build')
+  assert.equal(rm.tier, 'destructive')
+  await refused(d.deliverer.answer(rm.id, { choice: 'option', optionKey: '2', confirm: true }), 'tier_forbids')
+  await refused(d.deliverer.answer(rm.id, { choice: 'option', optionKey: '1' }), 'confirm_required')
+  await sleep(100)
+  assert.deepEqual(inputs(d.log), [])
+  const denied = await d.deliverer.answer(rm.id, { choice: 'option', optionKey: '3' })
+  assert.equal(await denied.outcome, 'did_not_land', 'the inline script draws nothing after the key')
+  assert.deepEqual(inputs(d.log), ['3'])
+})
+
+test('answerKeys refuses a permission option that is neither Yes, No nor an offered allow-always', () => {
+  const row = { kind: 'permission', tool_name: 'Edit', tier: 'safe', detail: '{}', source: 'permission_request' }
+  const prompt = { kind: 'permission', question: 'Do you want to make this edit?', title: 'Edit file', body: '', truncated: false,
+    options: [{ key: '1', label: 'Yes' }, { key: '2', label: 'Yes, allow all edits during this session (shift+tab)' }, { key: '3', label: 'No' }] }
+  assert.throws(() => answerKeys(row, { choice: 'option', optionKey: '2' }, prompt), error => error.code === 'tier_forbids')
+  assert.deepEqual(answerKeys(row, { choice: 'option', optionKey: '1' }, prompt), { data: '1', label: 'Yes', choice: 'allow' })
+  assert.deepEqual(answerKeys(row, { choice: 'option', optionKey: '3' }, prompt), { data: '3', label: 'No', choice: 'deny' })
+})
+
+test('an AskUserQuestion with several questions or a multi-select question gets options_unreadable', async t => {
+  const script = JSON.parse(fs.readFileSync(path.join(scriptsDir, 'question-options.json'), 'utf8'))
+  const two = { questions: [
+    { question: 'Pick A or B?', header: 'Choice', options: [{ label: 'A', description: 'Option A' }, { label: 'B', description: 'Option B' }], multiSelect: false },
+    { question: 'Second question?', header: 'More', options: [{ label: 'C', description: 'Option C' }, { label: 'D', description: 'Option D' }], multiSelect: false }] }
+  const multi = { questions: [{ ...two.questions[0], multiSelect: true }] }
+  for (const toolInput of [two, multi]) {
+    const steps = script.steps.map(step => ['PreToolUse', 'PermissionRequest'].includes(step.hook) ? { ...step, with: { tool_name: 'AskUserQuestion', tool_input: toolInput } } : step)
+    const s = await scenario(t, { ...script, steps })
+    const question = await until(() => s.store.get("SELECT * FROM requests WHERE kind = 'question' AND state = 'open' AND screen_match = 'on_screen'"), 'the question on screen')
+    await refused(s.deliverer.answer(question.id, { choice: 'option', optionKey: '1' }), 'options_unreadable')
+    await refused(s.deliverer.answer(question.id, { choice: 'reply', text: 'neither' }), 'options_unreadable')
+    await sleep(100)
+    assert.deepEqual(inputs(s.log), [])
+  }
+})
+
+test('the closing hook wins over the deck choice: a terminal allow after a deck deny, a terminal deny after a deck allow', async t => {
+  // The deck's keys are lost, so each answer is did_not_land; then the owner answers in the terminal.
+  const a = await scenario(t, 'approve-safe', { wrapLink: lossy, claudePid: 4242 })
+  const reqA = await a.request('npm run test')
+  const sentA = await a.deliverer.answer(reqA.id, { choice: 'deny' })
+  assert.equal(await sentA.outcome, 'did_not_land')
+  await term.request('write', { ptyId: a.ptyId, data: b64('1'), source: { kind: 'terminal', name: 'test-terminal' } })
+  await until(() => a.row(reqA.id).state === 'answered', 'the PostToolUse to close it')
+  assert.deepEqual(JSON.parse(a.row(reqA.id).answer), { via: 'terminal', choice: 'allow' })
+  // A terminal Safe allow from the same Claude process takes the terminal count (D-73, F16).
+  assert.equal(a.store.get('SELECT count FROM rule_counters WHERE pattern = ?', 'Bash(npm run test)')?.count, 1)
+  await until(() => a.audits(reqA.id).at(-1).kind === 'answered', 'the answered audit')
+  assert.deepEqual([a.audits(reqA.id).at(-1).via, a.audits(reqA.id).at(-1).choice], ['terminal', 'allow'])
+  await refused(a.deliverer.followup(reqA.id, 'use pnpm'), 'followup_window_closed')
+
+  const b = await scenario(t, 'approve-safe', { wrapLink: lossy, claudePid: 4242 })
+  const reqB = await b.request('npm run test')
+  const sentB = await b.deliverer.answer(reqB.id, { choice: 'allow' })
+  assert.equal(await sentB.outcome, 'did_not_land')
+  await term.request('write', { ptyId: b.ptyId, data: b64('2'), source: { kind: 'terminal', name: 'test-terminal' } })
+  await until(() => b.row(reqB.id).state === 'answered', 'the PermissionDenied to close it')
+  assert.deepEqual(JSON.parse(b.row(reqB.id).answer), { via: 'terminal', choice: 'deny' })
+  assert.equal(b.store.get('SELECT count(*) AS n FROM rule_counters').n, 0)
+  await until(() => b.audits(reqB.id).at(-1).kind === 'answered', 'the answered audit')
+  assert.deepEqual([b.audits(reqB.id).at(-1).via, b.audits(reqB.id).at(-1).choice], ['terminal', 'deny'])
+})
+
+test('after the late watch ends, a closing hook is a terminal answer', async t => {
+  const s = await scenario(t, 'did-not-land', { deliver: { lateMs: 200 } })
+  const req = await s.request('node --test capture.test.mjs')
+  const { outcome } = await s.deliverer.answer(req.id, { choice: 'allow' })
+  assert.equal(await outcome, 'did_not_land')
+  await sleep(600)
+  captureHook(s)
+  assert.deepEqual(JSON.parse(s.row(req.id).answer), { via: 'terminal', choice: 'allow' })
+})
+
+test('a screen change after did_not_land is not proof of the deck answer', async t => {
+  const s = await scenario(t, 'approve-safe', { wrapLink: lossy, deliver: { verifyMs: 300 } })
+  const req = await s.request('npm run test')
+  const { outcome } = await s.deliverer.answer(req.id, { choice: 'allow' })
+  assert.equal(await outcome, 'did_not_land')
+  s.pauseHooks()
+  // The owner denies in the terminal; the prompt leaves the screen.
+  await term.request('write', { ptyId: s.ptyId, data: b64('2'), source: { kind: 'terminal', name: 'test-terminal' } })
+  await until(() => entries(s.log).some(entry => entry.hook === 'PermissionDenied'), 'the fake to deny')
+  await sleep(1500)
+  assert.notEqual(s.row(req.id).state, 'answered')
+  assert.equal(s.store.get('SELECT count(*) AS n FROM rule_counters').n, 0)
+  assert.deepEqual(s.audits(req.id).map(row => row.kind), ['did_not_land'])
+})
+
+test('a follow-up is refused when the screen after the deny is a new prompt, not the idle input box', async t => {
+  const s = await scenario(t, 'approve-always')
+  const req = await s.request('npm run test')
+  const { outcome } = await s.deliverer.answer(req.id, { choice: 'deny' })
+  assert.equal(await outcome, 'answered')
+  await s.request('npm run lint')
+  await refused(s.deliverer.followup(req.id, 'use pnpm'), 'followup_window_closed')
+  await sleep(200)
+  assert.deepEqual(inputs(s.log), ['3'], 'no paste reached the new prompt')
+})
+
+test('a deck allow its own hook proves is counted once with a real Claude pid', async t => {
+  const s = await scenario(t, 'approve-safe', { claudePid: 4242, wrapLink: link => linkWith(link, { onParsed: () => () => {} }) })
+  const req = await s.request('npm run test')
+  const { outcome } = await s.deliverer.answer(req.id, { choice: 'allow' })
+  assert.equal(await outcome, 'answered')
+  assert.deepEqual(JSON.parse(s.row(req.id).answer), { via: 'browser', choice: 'allow' })
+  await sleep(200)
+  assert.equal(s.store.get('SELECT count FROM rule_counters WHERE pattern = ?', 'Bash(npm run test)')?.count, 1)
+})
+
+test('a batch id that re-classifies above Safe is skipped_not_safe', async t => {
+  const s = await scenario(t, 'approve-safe')
+  const req = await s.request('npm run test')
+  setActiveTiers(() => effectiveTiers(DEFAULT_TIERS, { disable: ['safe.npm.run-script'] }))
+  t.after(() => setActiveTiers(null))
+  assert.deepEqual(await s.deliverer.batch([req.id]), [{ id: req.id, ok: false, error: 'skipped_not_safe' }])
+  assert.equal(s.audits(req.id).at(-1).choice, 'skipped_not_safe')
+  await sleep(100)
+  assert.deepEqual(inputs(s.log), [])
+})
+
+test('sanitizePaste removes a paste end marker that removing another one rebuilds', () => {
+  assert.equal(sanitizePaste('a\x1b[20\x1b[201~1~b'), 'ab')
+})
+
+/** Rows and cursor of a captured frame, rendered at the capture size. */
+async function rendered(name) {
+  const model = new ScreenModel({ cols: 120, rows: 40 })
+  try {
+    model.write(fs.readFileSync(path.resolve(here, '..', 'fixtures', 'screens', VERSION, `${name}.ansi`)))
+    await model.flush()
+    return { lines: model.lines(), cursor: model.cursor() }
+  } finally { model.dispose() }
+}
+
+test('a stop_question reply is typed only into the idle input box and its UserPromptSubmit proves it', async t => {
+  // Unit level: a stop_question comes from the transcript, which the fake does not write, so the link is
+  // a stub that serves captured frames and records writes.
+  const home = fs.mkdtempSync(path.join(dir, 'stop-'))
+  const store = openDeckDb(path.join(home, 'deck.db'))
+  const projector = createProjector({ store })
+  ensureRepo(store, home, Date.now)
+  projector.create({ id: 's-stop', origin: 'wrapped', pty_id: 'pty_stop', process_key: 'pty_stop', repo_id: home, cwd: home })
+  store.run('INSERT INTO requests(id, session_id, kind, summary, detail, options, state, source, match_key, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+    'q-stop', 's-stop', 'question', 'Ship it?', JSON.stringify({ question: 'Ship it?' }), '[]', 'open', 'stop_question', 'k-stop', Date.now() - 1000)
+  let screen = { rev: 1, ...(await rendered('permission-2')) }
+  const writes = []
+  const link = { connected: true, features: ['guardedWrite'], request: async () => screen, onParsed: () => () => {},
+    writeGuarded: async (ptyId, data) => { writes.push(data); return { at: Date.now() } } }
+  const deliverer = createDeliverer({ store, link })
+  t.after(() => { deliverer.close(); store.close() })
+  await refused(deliverer.answer('q-stop', { choice: 'reply', text: 'yes' }), 'not_on_screen')
+  assert.deepEqual(writes, [])
+  screen = { rev: 2, ...(await rendered('idle-input')) }
+  const { outcome } = await deliverer.answer('q-stop', { choice: 'reply', text: 'yes, ship\x1b[201~' })
+  assert.deepEqual(writes, ['\x1b[200~yes, ship\x1b[201~\r'])
+  projector.applyHooks([{ hook: { hook_event_name: 'UserPromptSubmit', session_id: 'claude-stop', cwd: home, prompt: 'yes, ship' }, hookTs: Date.now(), receivedAt: Date.now(), ptyId: 'pty_stop', claudePid: null, via: 'socket' }])
+  assert.equal(await outcome, 'answered')
+  assert.deepEqual(JSON.parse(store.get('SELECT answer FROM requests WHERE id = ?', 'q-stop').answer), { via: 'browser', choice: 'reply' })
 })

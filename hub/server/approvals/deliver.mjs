@@ -63,34 +63,62 @@ function promptKey (prompt) {
  */
 const refuse = (status, code, details) => apiError(status, code, details)
 
+/** Option 2 of a Bash prompt that would save a Claude Code allow rule (D-77, D-95). */
+const ALLOW_ALWAYS_LABEL = /^Yes, and don't ask again\b/
+
 /**
- * The bytes for one answer on the parsed prompt, and the label of the option they pick (state-machines
- * 2.6 keys, F17). Throws `options_unreadable` when the screen has no option that fits, and
+ * Whether an AskUserQuestion request needs a key sequence the deck cannot type yet: more than one
+ * question, or a multi-select question (07-approvals 5.3, APR-O6: "Answer in the terminal").
+ * @param {any} row
+ */
+function unreadableQuestion (row) {
+  let input = {}
+  try { input = JSON.parse(row.detail) ?? {} } catch {}
+  const questions = Array.isArray(input.questions) ? input.questions : []
+  return questions.length > 1 || questions.some((/** @type {any} */ q) => q?.multiSelect === true)
+}
+
+/**
+ * The bytes for one answer on the parsed prompt, the label of the option they pick and the choice
+ * they amount to (state-machines 2.6 keys, F17). On a permission request an `option` resolves to
+ * `allow` (option 1 "Yes"), `deny` (the "No" option) or `allow_always` (a "Yes, and don't ask again"
+ * option); any other option is `tier_forbids`. Throws `options_unreadable` when the screen has no
+ * option that fits or the question needs a key sequence (several questions, multi-select), and
  * `tier_forbids` for option 2 when the prompt does not offer it under D-77 and D-95.
  * @param {any} row the `requests` row
  * @param {{ choice: string, optionKey?: string, text?: string }} body
  * @param {import('../screen/prompt.mjs').Prompt | null} prompt
- * @returns {{ data: string, label: string | null }}
+ * @returns {{ data: string, label: string | null, choice: string }}
  */
 export function answerKeys (row, body, prompt) {
   if (row.source === 'stop_question') {
     if (body.choice !== 'reply') throw refuse(409, 'options_unreadable')
-    return { data: paste(body.text ?? ''), label: null }
+    return { data: paste(body.text ?? ''), label: null, choice: 'reply' }
   }
+  if (row.kind === 'question' && row.tool_name === 'AskUserQuestion' && unreadableQuestion(row)) throw refuse(409, 'options_unreadable')
   const options = (prompt?.options ?? []).filter((o) => typeof o?.key === 'string' && /^\d$/.test(o.key))
+  let choice = body.choice
   let option
-  if (body.choice === 'allow') option = options.find((o) => o.key === '1' && o.label === 'Yes')
-  else if (body.choice === 'allow_always') {
+  if (row.kind === 'permission' && choice === 'option') {
+    option = options.find((o) => o.key === String(body.optionKey))
+    if (!option) throw refuse(409, 'options_unreadable')
+    if (option.key === '1' && option.label === 'Yes') choice = 'allow'
+    else if (/^No\b/.test(option.label)) choice = 'deny'
+    else if (ALLOW_ALWAYS_LABEL.test(option.label)) choice = 'allow_always'
+    else throw refuse(403, 'tier_forbids')
+  }
+  if (choice === 'allow') option = options.find((o) => o.key === '1' && o.label === 'Yes')
+  else if (choice === 'allow_always') {
     if (!allowAlwaysFor(row, prompt)) throw refuse(403, 'tier_forbids')
     option = options.find((o) => o.key === '2')
-  } else if (body.choice === 'deny') option = options.find((o) => /^No\b/.test(o.label))
-  else if (body.choice === 'option') option = options.find((o) => o.key === String(body.optionKey))
-  else if (body.choice === 'reply' && row.kind === 'question' && row.tool_name === 'AskUserQuestion') {
+  } else if (choice === 'deny') option = options.find((o) => /^No\b/.test(o.label))
+  else if (choice === 'option') option = options.find((o) => o.key === String(body.optionKey))
+  else if (choice === 'reply' && row.kind === 'question' && row.tool_name === 'AskUserQuestion') {
     option = options.find((o) => o.label === FREE_TEXT_LABEL)
-    if (option) return { data: option.key + paste(body.text ?? ''), label: option.label }
+    if (option) return { data: option.key + paste(body.text ?? ''), label: option.label, choice }
   }
   if (!option) throw refuse(409, 'options_unreadable')
-  return { data: /** @type {string} */ (option.key), label: option.label }
+  return { data: /** @type {string} */ (option.key), label: option.label, choice }
 }
 
 /**
@@ -185,7 +213,8 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
   /**
    * The tier rules of 05-api 2.4 (2 and 3) and state-machines 2.5: option 2 only where the deck offers
    * it, popup and batch only for a Safe permission, and a Destructive answer other than deny only with
-   * `confirm: true`.
+   * `confirm: true`. An `option` on a permission request is checked again as the choice it resolves to
+   * once the screen is read (`answerKeys`), so here it skips the confirm rule.
    * @param {any} row
    * @param {any} body
    * @param {string} via
@@ -193,7 +222,7 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
   function tierChecks (row, body, via) {
     if (body.choice === 'allow_always' && !requestView(row).allowAlways) throw refuse(403, 'tier_forbids')
     if ((via === 'popup' || via === 'batch') && !(row.kind === 'permission' && row.tier === 'safe')) throw refuse(403, 'tier_forbids')
-    if (row.kind === 'permission' && row.tier === 'destructive' && body.choice !== 'deny' && body.confirm !== true) throw refuse(422, 'confirm_required')
+    if (row.kind === 'permission' && row.tier === 'destructive' && !['deny', 'option'].includes(body.choice) && body.confirm !== true) throw refuse(422, 'confirm_required')
   }
 
   /** @param {any} body @param {any} row */
@@ -261,8 +290,10 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
           if (row.screen_match !== 'on_screen') throw refuse(409, 'not_on_screen')
         }
         const keys = answerKeys(row, body, parsed.prompt)
+        if (row.kind === 'permission' && body.choice === 'option') tierChecks(row, { ...body, choice: keys.choice }, via)
         if (!sending) {
-          update(row.id, { delivery: 'sending', answer: JSON.stringify({ via, choice: body.choice }) })
+          // `until` bounds how long a closing hook still counts as the deck's answer (request.mjs closingAnswer).
+          update(row.id, { delivery: 'sending', answer: JSON.stringify({ via, choice: keys.choice, until: now() + verifyMs + lateMs }) })
           sending = true
         }
         try {
@@ -276,7 +307,7 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
           throw error
         }
         row = update(row.id, { delivery: 'verifying' })
-        const outcome = verify(row.id, session.pty_id, row.source === 'stop_question' ? undefined : promptKey(parsed.prompt), { via, choice: body.choice, label: keys.label })
+        const outcome = verify(row.id, session.pty_id, row.source === 'stop_question' ? undefined : promptKey(parsed.prompt), { via, choice: keys.choice, label: keys.label })
         return { request: requestView(row), outcome }
       }
     } catch (error) {
@@ -298,12 +329,20 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
 
   /**
    * Record an answer the deck proved: the audit row, the Safe allow count and the follow-up window.
+   * When the closing hook contradicted the deck's choice, request.mjs recorded the hook's verdict as a
+   * terminal answer (and counted a terminal Safe allow itself): only the audit row is written then, and
+   * the result is false.
    * @param {any} row the closed row
    * @param {{ via: string, choice: string, label: string | null }} sent
+   * @returns {boolean} whether the deck's answer is the one recorded
    */
   function proved (row, sent) {
     let answer = null
     try { answer = JSON.parse(row.answer ?? 'null') } catch {}
+    if (answer?.via === 'terminal') {
+      note('answered', row, { via: 'terminal', choice: typeof answer.choice === 'string' ? answer.choice : null })
+      return false
+    }
     const choice = typeof answer?.choice === 'string' ? answer.choice : sent.choice
     const allow = choice === 'allow' || choice === 'allow_always'
     note('answered', row, { via: sent.via, choice, optionLabel: sent.label,
@@ -316,12 +355,14 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
       }
     }
     if (choice === 'deny') denied.set(row.id, now())
+    return true
   }
 
   /**
    * Wait for proof (state-machines 2.6): a later screen whose prompt differs from `sentPrompt`, or the
    * request closing by its matching hook. No proof within `verifyMs` is `did_not_land`; a hook that
-   * closes the request later (within `lateMs`) still answers it. A screen change after `did_not_land`
+   * closes the request later (within `lateMs`) still answers it. A request closed by a hook that
+   * contradicts the deck's choice, or closed without an answer, settles `closed`. A screen change after `did_not_land`
    * is not taken as proof, because by then the owner may have answered in the terminal.
    * @param {string} id
    * @param {string} ptyId
@@ -357,10 +398,7 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
         const row = getRow(id)
         if (!row || row.state === 'open') return
         stop()
-        if (row.state === 'answered') {
-          proved(row, sent)
-          settle('answered')
-        } else settle('closed')
+        settle(row.state === 'answered' && proved(row, sent) ? 'answered' : 'closed')
       }
       const offParsed = link.onParsed((event) => {
         if (late || event.ptyId !== ptyId || sentPrompt === undefined) return

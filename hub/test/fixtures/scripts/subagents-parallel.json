@@ -1,5 +1,5 @@
 {
-  "comment": "Two prompts of one session (F12): two Safe requests open together and the screen shows one at a time on synthetic-permission-bash. Each 1 closes the shown prompt and draws the next.",
+  "comment": "Two prompts of one session (F12): two Safe requests open together and the screen shows one at a time on synthetic-permission-bash. Each 1 closes the shown prompt; the second prompt is drawn 700 ms after the first closes.",
   "version": "2.1.285",
   "sessionId": "auto",
   "steps": [
@@ -60,6 +60,9 @@
     },
     {
       "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "sleep": 700
     },
     {
       "frame": "synthetic-permission-bash",

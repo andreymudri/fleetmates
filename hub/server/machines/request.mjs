@@ -897,20 +897,30 @@ function transcriptQuestion(location) {
 /** `delivery` values that mean the deck wrote keys for the request (state-machines 2.7 rows 12, 15, 16). */
 export const DECK_DELIVERIES = Object.freeze(['sending', 'verifying', 'did_not_land'])
 
+/** Deck choices on a permission request that a hook's allow or deny verdict confirms or contradicts. */
+const VERDICT_CHOICES = Object.freeze(['allow', 'allow_always', 'deny'])
+
 /**
  * The `answer` a closing hook records. A request the deck sent keys for (`delivery` sending, verifying
  * or did_not_land) keeps the deck's `via` and choice from the in-flight `answer` approvals/deliver.mjs
- * wrote; the hook's own verdict wins when it is a deny. Any other request is answered in the terminal.
+ * wrote, while the hook arrives by that answer's `until` time. The hook's verdict wins over the deck:
+ * when the hook is an allow (`PostToolUse`) and the deck sent a deny, or the hook is a deny and the
+ * deck sent an allow, the request is a terminal answer with the hook's choice. A hook after `until`
+ * (the deck stopped watching), and any request the deck sent nothing for, is a terminal answer too.
  * @param {{ delivery?: string, answer?: string | null }} row
  * @param {string} choice the terminal choice the hook implies
+ * @param {number} [at] the hook's time
  * @returns {{ via: string, choice: string }}
  */
-export function closingAnswer(row, choice) {
+export function closingAnswer(row, choice, at) {
   if (!DECK_DELIVERIES.includes(row?.delivery)) return { via: 'terminal', choice }
   let sent = null
   try { sent = JSON.parse(row.answer ?? 'null') } catch {}
-  const via = ['browser', 'popup', 'batch'].includes(sent?.via) ? sent.via : 'browser'
-  return { via, choice: choice === 'deny' || typeof sent?.choice !== 'string' ? choice : sent.choice }
+  if (typeof sent?.choice !== 'string') return { via: 'terminal', choice }
+  if (Number.isFinite(sent.until) && Number.isFinite(at) && at > sent.until) return { via: 'terminal', choice }
+  if (['allow', 'deny'].includes(choice) && VERDICT_CHOICES.includes(sent.choice) && (choice === 'allow') !== (sent.choice !== 'deny')) return { via: 'terminal', choice }
+  const via = ['browser', 'popup', 'batch'].includes(sent.via) ? sent.via : 'browser'
+  return { via, choice: sent.choice }
 }
 
 /**
@@ -926,7 +936,7 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
   let resumed = false
   if (resumedActivityEvents.includes(event)) {
     for (const row of store.all('SELECT id, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', session.id, 'question', 'open', 'stop_question', 'elicitation', at)) {
-      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'observed')), at, row.id)
+      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'observed', at)), at, row.id)
       resumed = true
     }
   }
@@ -966,7 +976,7 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
       ?? (outcomeKind === 'question' ? store.get('SELECT id, kind, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission', at) : null)
       ?? store.all('SELECT id, kind, summary, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
     if (!row) return resumed
-    const closing = closingAnswer(row, event === 'PermissionDenied' ? 'deny' : 'allow')
+    const closing = closingAnswer(row, event === 'PermissionDenied' ? 'deny' : 'allow', at)
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closing), at, row.id)
     // D-73: an allow in the terminal counts toward "Make it a rule?"; recordAllow checks the tier,
     // the pattern and that both hooks came from one Claude process (F16). Its failure never stops
@@ -981,7 +991,7 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
       const related = store.get('SELECT id, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind, at)
       if (related) {
         if (event === 'PermissionDenied') store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE id = ?', 'expired', 'interrupted', related.id)
-        else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(related, 'allow')), at, related.id)
+        else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(related, 'allow', at)), at, related.id)
       }
     }
     return true
@@ -989,8 +999,8 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
   if (event === 'UserPromptSubmit') {
     let changed = false
     for (const row of store.all('SELECT id, kind, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND created_at <= ?', session.id, 'open', at)) {
-      // A reply the deck typed into a question is answered by its UserPromptSubmit (state-machines 2.6).
-      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, row.kind === 'question' && DECK_DELIVERIES.includes(row.delivery) ? 'reply' : 'deny')), at, row.id)
+      // A question the deck typed a reply into keeps that reply (closingAnswer); state-machines 2.6.
+      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'deny', at)), at, row.id)
       changed = true
     }
     return changed || resumed
