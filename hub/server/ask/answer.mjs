@@ -75,19 +75,28 @@ export function parseAnswer (text) {
 }
 
 /**
- * Keep a citation when its path was returned by one of this ask's tool results or is in the deck's latest
- * `vault_list`/`vault_graph` answer, and `lineBound(path)` gives `n` with `1 <= line <= n` (an integer line),
- * or `Infinity` (D-141). A bound that throws or is not a number drops the citation.
+ * Keep a citation with an integer `line >= 1` when either
+ * (a) a `vault_search` hit of this ask reported its path at that line or at a later one (`searchHits`), so a
+ *     line vault_search itself reported is never dropped (D-141), or
+ * (b) its path was returned by one of this ask's tool results or is in the deck's latest
+ *     `vault_list`/`vault_graph` answer, and `lineBound(path)` gives `n` with `line <= n`, or `Infinity`.
+ * A bound that throws or is not a number fails (b).
  * @param {Citation[]} citations
  * @param {{
  *   toolPaths: Iterable<string>,
  *   knownPaths: Iterable<string>,
+ *   searchHits?: Iterable<{ path: string, line: number }>,
  *   lineBound: (path: string) => number | Promise<number>
  * }} opts
  * @returns {Promise<{ kept: Citation[], dropped: Citation[] }>}
  */
-export async function validateCitations (citations, { toolPaths, knownPaths, lineBound }) {
+export async function validateCitations (citations, { toolPaths, knownPaths, searchHits = [], lineBound }) {
   const paths = new Set([...toolPaths, ...knownPaths])
+  /** @type {Map<string, number>} the largest line a search hit reported, per path */
+  const hitMax = new Map()
+  for (const h of searchHits) {
+    if (h && typeof h.path === 'string' && Number.isInteger(h.line)) hitMax.set(h.path, Math.max(hitMax.get(h.path) ?? 0, h.line))
+  }
   /** @type {Map<string, Promise<number|null>>} */
   const bounds = new Map()
   const boundOf = (/** @type {string} */ p) => {
@@ -103,10 +112,13 @@ export async function validateCitations (citations, { toolPaths, knownPaths, lin
   /** @type {Citation[]} */
   const dropped = []
   for (const c of citations) {
-    let ok = paths.has(c.path) && Number.isInteger(c.line) && c.line >= 1
-    if (ok) {
-      const n = await boundOf(c.path)
-      ok = n !== null && c.line <= n
+    let ok = Number.isInteger(c.line) && c.line >= 1
+    if (ok && !(c.line <= (hitMax.get(c.path) ?? 0))) {
+      ok = paths.has(c.path)
+      if (ok) {
+        const n = await boundOf(c.path)
+        ok = n !== null && c.line <= n
+      }
     }
     ;(ok ? kept : dropped).push(c)
   }
@@ -114,9 +126,9 @@ export async function validateCitations (citations, { toolPaths, knownPaths, lin
 }
 
 /**
- * Lines a frontmatter value takes beyond its key line: one per list item. An array counts its items; a
- * string holding commas counts its comma-separated parts (how a list may come back as text), which can only
- * over-count; an escaped `\n` (vault-mcp prints a newline as the two characters) adds one line each.
+ * Lines a frontmatter value may take beyond its key line, counted high: one per list item. An array counts
+ * its items; a string holding commas counts its comma-separated parts (how vault-mcp prints a list, `a, b`),
+ * which can only over-count; an escaped `\n` (vault-mcp prints a newline as the two characters) adds one each.
  * @param {unknown} value
  * @returns {number}
  */
@@ -129,25 +141,35 @@ function extraLines (value) {
   return items + breaks
 }
 
+/** Lines added to every frontmatter estimate for what vault-mcp does not print: comments and blank lines. */
+export const FRONTMATTER_SLACK = 32
+
 /**
- * The D-141 line bound of a note from a vault-text `parseNote` result: body lines, plus 2 for the
- * frontmatter fences, plus one line per frontmatter key and one per list item. It is an upper bound and
- * never smaller than the file's line count for the frontmatter shapes counted here. A note cut short
- * (`truncated`), longer than 200,000 characters, or with a frontmatter vault-mcp may have elided (32 keys,
- * a 512-character value) gives `Infinity`.
- * @param {{ frontmatter?: Record<string, unknown> | [string, unknown][] | null, body?: string, truncated?: boolean, total?: number }} note
+ * The D-141 line bound of a note from a vault-text `parseNote` result. It is an UPPER BOUND, not the
+ * note's line count: the frontmatter's real height cannot be recovered from what vault-mcp prints (a
+ * one-item block list prints as `tags: a`, comments and blank lines are not printed), so the frontmatter
+ * is over-estimated as 2 fences, plus 2 lines per printed key (key line and a possible single list item or
+ * wrapped value), plus 1 per further list item or escaped newline, plus FRONTMATTER_SLACK lines. The body
+ * adds its own line count. A frontmatter deeper than that is still covered for the lines vault_search
+ * reported, by rule (a) of validateCitations. A note cut short (`truncated`), longer than 200,000
+ * characters, or whose frontmatter vault-mcp cut or may have elided (`frontmatterCut`, 32 keys, a
+ * 512-character value) gives `Infinity`.
+ * @param {{
+ *   frontmatter?: Record<string, unknown> | [string, unknown][] | null, frontmatterCut?: boolean,
+ *   body?: string, truncated?: boolean, total?: number
+ * }} note
  * @returns {number}
  */
 export function noteLineBound (note) {
-  if (!note || note.truncated) return Infinity
+  if (!note || note.truncated || note.frontmatterCut) return Infinity
   if (typeof note.total === 'number' && note.total > MAX_BOUND_CHARS) return Infinity
   const fm = note.frontmatter
   const entries = !fm ? [] : Array.isArray(fm) ? fm : Object.entries(fm)
   if (entries.length >= MAX_FRONTMATTER_KEYS) return Infinity
-  let lines = String(note.body ?? '').split('\n').length + 2
+  let lines = String(note.body ?? '').split('\n').length + 2 + FRONTMATTER_SLACK
   for (const [, value] of entries) {
     if (typeof value === 'string' && value.length >= MAX_FRONTMATTER_VALUE) return Infinity
-    lines += 1 + extraLines(value)
+    lines += 2 + extraLines(value)
   }
   return lines
 }

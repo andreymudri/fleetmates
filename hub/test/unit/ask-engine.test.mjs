@@ -9,8 +9,9 @@ import { fileURLToPath } from 'node:url'
 import { fakeBin } from '../helpers/fake-bin.mjs'
 import {
   askArgv, askEnv, createAskEngine, ASK_DENIED_TOOLS, ASK_NOT_CONNECTED_ERROR, ASK_READ_TOOLS, ASK_TIMEOUT_ERROR,
-  ASK_TOTAL_MS, ASK_IDLE_MS
+  ASK_TOTAL_MS, ASK_IDLE_MS, readProcIdentity
 } from '../../server/ask/engine.mjs'
+import { CLAUDE_SESSION_VARS } from '../../deckd/login-env.mjs'
 import { parseAnswer } from '../../server/ask/answer.mjs'
 
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -79,9 +80,9 @@ function alive (pid) {
  * A temp state dir, the fake claude wrapper by absolute path, an isolated base env and an engine whose spawn
  * records every call before calling the real spawn.
  * @param {import('node:test').TestContext} t
- * @param {{ fixture: string, extraEnv?: Record<string, string>, maxConcurrent?: number }} opts
+ * @param {{ fixture: string, extraEnv?: Record<string, string>, maxConcurrent?: number, procIdentity?: (pid: number) => any }} opts
  */
-async function setup (t, { fixture, extraEnv = {}, maxConcurrent }) {
+async function setup (t, { fixture, extraEnv = {}, maxConcurrent, procIdentity }) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-ask-'))
   const bin = await fakeBin({})
   const runtime = path.join(dir, 'run')
@@ -114,6 +115,7 @@ async function setup (t, { fixture, extraEnv = {}, maxConcurrent }) {
     timers,
     log: entry => logs.push(entry),
     ...(maxConcurrent ? { maxConcurrent } : {}),
+    ...(procIdentity ? { procIdentity } : {}),
     spawn: /** @type {any} */ ((/** @type {string} */ cmd, /** @type {string[]} */ argv, /** @type {any} */ opts) => {
       const child = realSpawn(cmd, argv, opts)
       spawns.push({ cmd, argv, opts, pid: child.pid })
@@ -206,6 +208,14 @@ test('askEnv drops deck tokens, API keys, the desktop session and VAULT_AUTO_PUS
   assert.deepEqual(env, { PATH: '/usr/bin', HOME: '/home/you', CLAUDE_CODE_OAUTH_TOKEN: 'o', FLEETMATES_DECK_ROLE: 'ask' })
 })
 
+test('askEnv drops every Claude Code per-session variable deckd strips, the messaging token among them', () => {
+  const named = ['CLAUDE_CODE_MESSAGING_TOKEN', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_SSE_PORT', 'CLAUDECODE', 'CLAUDE_CODE_SESSION_ID']
+  for (const name of named) assert.ok(CLAUDE_SESSION_VARS.includes(name), name)
+  const base = Object.fromEntries([...CLAUDE_SESSION_VARS, ...named].map(n => [n, 'v']))
+  const env = askEnv({ PATH: '/usr/bin', CLAUDE_CODE_USE_BEDROCK: '1', ...base })
+  assert.deepEqual(env, { PATH: '/usr/bin', CLAUDE_CODE_USE_BEDROCK: '1', FLEETMATES_DECK_ROLE: 'ask' })
+})
+
 test('answer-cited completes: deltas in order without the block, toolPaths and searches from the stream', async (t) => {
   const { engine, logs } = await setup(t, { fixture: path.join(fixtures, 'answer-cited.jsonl') })
   /** @type {string[]} */
@@ -227,6 +237,7 @@ test('answer-cited completes: deltas in order without the block, toolPaths and s
   assert.equal(result.rawResult, result.text)
   assert.deepEqual([...result.toolPaths].sort(), ['02-wiki/nestjs/auth-guard.md', '02-wiki/nestjs/bullmq-worker.md'])
   assert.deepEqual(result.searches, [{ query: 'retry backoff bullmq', resultCount: 2 }])
+  assert.deepEqual(result.searchHits, [{ path: '02-wiki/nestjs/bullmq-worker.md', line: 13 }, { path: '02-wiki/nestjs/auth-guard.md', line: 11 }])
   assert.deepEqual(searchesSeen, [{ query: 'retry backoff bullmq' }])
   const logged = JSON.stringify(logs)
   assert.doesNotMatch(logged, /worker|retry|Como/)
@@ -365,30 +376,98 @@ test('the child gets FLEETMATES_DECK_ROLE=ask, no desktop or secret variables, t
   assert.doesNotMatch(JSON.stringify(await s.fakeLog()), /Como o worker/)
 })
 
-test('running.json lists a running ask, and reapOrphans kills a listed group and returns its thread', async (t) => {
+/** A procIdentity stand-in: every pid has start time `st-<pid>` on boot `boot-a`. */
+const fakeIdentity = (/** @type {number} */ pid) => ({ startTime: `st-${pid}`, bootId: 'boot-a' })
+
+test('running.json lists a running ask with its start time and boot id, and is emptied when it ends', async (t) => {
   const fixture = await hangFixture(t)
-  const s = await setup(t, { fixture })
+  const s = await setup(t, { fixture, procIdentity: fakeIdentity })
   /** @type {string[]} */
   const deltas = []
   const p = s.engine.run(ask('t-live', { onDelta: (/** @type {string} */ d) => deltas.push(d) }))
   await waitFor(() => deltas.length > 0)
   const runningFile = path.join(s.dir, 'state', 'ask', 'running.json')
   const listed = JSON.parse(await readFile(runningFile, 'utf8')).runs
-  assert.deepEqual(listed.map((/** @type {any} */ e) => [e.threadId, e.pid]), [['t-live', s.spawns[0].pid]])
+  const pid = s.spawns[0].pid
+  assert.deepEqual(listed.map((/** @type {any} */ e) => [e.threadId, e.pid, e.startTime, e.bootId]), [['t-live', pid, `st-${pid}`, 'boot-a']])
   s.engine.cancel(p.runId)
   await p
   assert.deepEqual(JSON.parse(await readFile(runningFile, 'utf8')).runs, [])
+})
 
+test('readProcIdentity reads a live pid start time and the boot id on Linux, and null for no process', { skip: process.platform !== 'linux' && 'needs /proc' }, () => {
+  const id = readProcIdentity(process.pid)
+  assert.ok(id)
+  assert.match(id.startTime, /^\d+$/)
+  assert.match(id.bootId, /^[0-9a-f-]{36}$/)
+  assert.equal(readProcIdentity(2 ** 22 + 7), null)
+})
+
+test('reapOrphans kills a listed group whose start time and boot id still match, and returns its thread', async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-ask-reap-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await mkdir(path.join(dir, 'run'), { mode: 0o700 })
   // An orphan left by a previous server: its own process group, listed in running.json.
   const orphan = realSpawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], {
-    detached: true, stdio: 'ignore', env: { PATH: '/usr/bin:/bin', XDG_RUNTIME_DIR: path.join(s.dir, 'run') }
+    detached: true, stdio: 'ignore', env: { PATH: '/usr/bin:/bin', XDG_RUNTIME_DIR: path.join(dir, 'run') }
   })
   const exited = new Promise(resolve => orphan.on('exit', resolve))
   t.after(() => { if (orphan.pid && alive(orphan.pid)) process.kill(-orphan.pid, 'SIGKILL') })
-  await writeFile(runningFile, JSON.stringify({ runs: [{ runId: 'r-old', threadId: 't-orphan', pid: orphan.pid, startedAt: 1 }] }))
-  const fresh = createAskEngine({ claudeCommand: s.claudeCommand, stateDir: path.join(s.dir, 'state'), spawn: /** @type {any} */ (() => { throw new Error('no spawn') }) })
+  const pid = /** @type {number} */ (orphan.pid)
+  await mkdir(path.join(dir, 'state', 'ask'), { recursive: true })
+  const runningFile = path.join(dir, 'state', 'ask', 'running.json')
+  await writeFile(runningFile, JSON.stringify({ runs: [{ runId: 'r-old', threadId: 't-orphan', pid, startedAt: 1, startTime: `st-${pid}`, bootId: 'boot-a' }] }))
+  const fresh = createAskEngine({
+    claudeCommand: '/nonexistent/claude', stateDir: path.join(dir, 'state'), procIdentity: fakeIdentity,
+    spawn: /** @type {any} */ (() => { throw new Error('no spawn') })
+  })
   assert.deepEqual(fresh.reapOrphans(), ['t-orphan'])
-  await exited
-  assert.equal(alive(/** @type {number} */ (orphan.pid)), false)
+  const gone = await Promise.race([exited.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 5000))])
+  assert.equal(gone, true, 'the orphan group was killed')
+  assert.equal(alive(pid), false)
   assert.deepEqual(JSON.parse(await readFile(runningFile, 'utf8')).runs, [])
+})
+
+test('reapOrphans kills nothing when the boot id or the start time differ, or the entry has no identity', async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-ask-reap-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await mkdir(path.join(dir, 'state', 'ask'), { recursive: true })
+  const runningFile = path.join(dir, 'state', 'ask', 'running.json')
+  /** @type {[number, string][]} */
+  const kills = []
+  const engine = createAskEngine({
+    claudeCommand: '/nonexistent/claude', stateDir: path.join(dir, 'state'), procIdentity: fakeIdentity,
+    killGroup: (pid, signal) => { kills.push([pid, signal]) },
+    spawn: /** @type {any} */ (() => { throw new Error('no spawn') })
+  })
+  await writeFile(runningFile, JSON.stringify({
+    runs: [
+      { runId: 'r1', threadId: 't-boot', pid: 4242, startedAt: 1, startTime: 'st-4242', bootId: 'boot-old' },
+      { runId: 'r2', threadId: 't-start', pid: 4243, startedAt: 1, startTime: 'st-1', bootId: 'boot-a' },
+      { runId: 'r3', threadId: 't-none', pid: 4244, startedAt: 1 }
+    ]
+  }))
+  assert.deepEqual(engine.reapOrphans(), ['t-boot', 't-start', 't-none'])
+  assert.deepEqual(kills, [])
+  assert.deepEqual(JSON.parse(await readFile(runningFile, 'utf8')).runs, [])
+  // The same entry with a matching identity is killed through the same injected killGroup.
+  await writeFile(runningFile, JSON.stringify({ runs: [{ runId: 'r4', threadId: 't-match', pid: 4245, startedAt: 1, startTime: 'st-4245', bootId: 'boot-a' }] }))
+  assert.deepEqual(engine.reapOrphans(), ['t-match'])
+  assert.deepEqual(kills, [[4245, 'SIGKILL']])
+})
+
+test('a vault_search hit without a heading trail still reaches toolPaths and searchHits', async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-ask-fx-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const raw = readFileSync(path.join(fixtures, 'answer-cited.jsonl'), 'utf8')
+  const withTrail = '02-wiki/nestjs/bullmq-worker.md:13 \\u2014 Worker BullMQ > Retry e backoff (score 12.34)'
+  assert.equal(raw.split(withTrail).length, 2, 'the fixture has the hit line once')
+  const fixture = path.join(dir, 'no-trail.jsonl')
+  await writeFile(fixture, raw.replace(withTrail, '02-wiki/nestjs/bullmq-worker.md:9 (score 12.34)'))
+  const s = await setup(t, { fixture })
+  const r = await s.engine.run(ask('t1'))
+  assert.equal(r.status, 'complete')
+  assert.deepEqual([...r.toolPaths].sort(), ['02-wiki/nestjs/auth-guard.md', '02-wiki/nestjs/bullmq-worker.md'])
+  assert.deepEqual(r.searchHits, [{ path: '02-wiki/nestjs/bullmq-worker.md', line: 9 }, { path: '02-wiki/nestjs/auth-guard.md', line: 11 }])
+  assert.deepEqual(r.searches, [{ query: 'retry backoff bullmq', resultCount: 2 }])
 })

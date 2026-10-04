@@ -1,8 +1,9 @@
 // The Ask engine (M5; 10-memory 2.2, 2.5, 2.6; D-142): runs `claude -p --restricted` with the four vault-mcp read
 // tools only, streams its stream-json answer, and enforces one ask per thread, at most `maxConcurrent` at once
-// (a FIFO behind them), a 120 s total and a 45 s idle limit, and cancel by process group. It touches only
-// `<stateDir>/ask/` (the empty 0700 cwd of every ask and `running.json`); the vault is reached by the child's
-// own vault-mcp, never from here. Logs carry run and thread ids, lengths, durations and exit codes only.
+// (a FIFO behind them), a 120 s total and a 45 s idle limit, and cancel by process group. It writes only
+// under `<stateDir>/ask/` (the empty 0700 cwd of every ask and `running.json`), and reads its own system
+// prompts and, on Linux, `/proc` for the identity of the processes it started; the vault is reached by the
+// child's own vault-mcp, never from here. Logs carry run and thread ids, lengths, durations and exit codes only.
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { spawn as nodeSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
@@ -10,6 +11,7 @@ import { StringDecoder } from 'node:string_decoder'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apiError } from '../http/router.mjs'
+import { CLAUDE_SESSION_VARS } from '../../deckd/login-env.mjs'
 
 /** The four vault-mcp read tools, the only tools an ask may run (D-132). */
 export const ASK_READ_TOOLS = Object.freeze(['vault_search', 'vault_get_note', 'vault_list', 'vault_backlinks'].map(t => `mcp__vault__${t}`))
@@ -31,8 +33,15 @@ const GET_NOTE_TOOL = 'mcp__vault__vault_get_note'
 const MARK = '```deck-answer'
 const MARK_RE = /^```deck-answer/m
 const EM = '\u2014'
-/** A vault-mcp line naming a note: `<path>:<line> <EM> ...` (search) or `- <path> <EM> ...` (list, backlinks). */
-const PATH_LINE_RE = new RegExp(`^(?:- )?([^>\\s][^\\n]*?\\.md)(?::\\d+)? ${EM} `)
+/**
+ * A vault_search hit line (contract 1.6): `<path>:<line> <EM> <trail> (score ...)`, or `<path>:<line> (score ...)`
+ * when the chunk has no heading trail. Snippet lines start with `> ` and never match.
+ */
+const SEARCH_HIT_RE = new RegExp(`^([^>\\s].*?):(\\d+)(?: ${EM} .*)? \\(score [^)]*\\)$`)
+/** A vault_list or vault_backlinks line: `- <path> <EM> <title>...`. */
+const LIST_LINE_RE = new RegExp(`^- ([^>\\s].*?\\.md) ${EM} `)
+/** Longer result lines are not read for paths (vault-mcp's own lines are short; this bounds the regex work). */
+const MAX_RESULT_LINE = 4096
 
 const promptDir = path.dirname(fileURLToPath(import.meta.url))
 /** @type {Map<string, string>} */
@@ -87,12 +96,14 @@ export function askArgv ({ mcpCommand, vaultPath, lang, systemPrompt }) {
 
 /**
  * Whether an environment variable stays out of an ask's env: deck tokens and other `FLEETMATES_DECK_*`
- * variables, API keys, the desktop session (D-Bus, X11, Wayland, SSH agent), and `VAULT_AUTO_PUSH` (the
- * vault-mcp child inherits claude's env, and an ask never writes).
+ * variables, API keys, the desktop session (D-Bus, X11, Wayland, SSH agent), `VAULT_AUTO_PUSH` (the
+ * vault-mcp child inherits claude's env, and an ask never writes), and Claude Code's per-session variables
+ * (`CLAUDE_SESSION_VARS` of deckd's login env, the messaging token among them), so an ask started by a server
+ * that itself runs inside a Claude Code session is not taken for that session's child.
  * @param {string} name
  */
 function dropped (name) {
-  return /^(DBUS_SESSION_BUS_ADDRESS|DISPLAY|WAYLAND_DISPLAY|SSH_AUTH_SOCK|VAULT_AUTO_PUSH|ANTHROPIC_AUTH_TOKEN)$/.test(name) ||
+  return CLAUDE_SESSION_VARS.includes(name) || /^(DBUS_SESSION_BUS_ADDRESS|DISPLAY|WAYLAND_DISPLAY|SSH_AUTH_SOCK|VAULT_AUTO_PUSH|ANTHROPIC_AUTH_TOKEN)$/.test(name) ||
     /^FLEETMATES_DECK_/.test(name) || /DECK.*TOKEN/i.test(name) || /API_?KEY/i.test(name)
 }
 
@@ -122,14 +133,17 @@ function toolResultText (block) {
 }
 
 /**
- * Note paths a vault tool answer returned. A `vault_get_note` answer is read up to its first blank line
- * (header and `Links:`), never its raw body; other answers by their result lines, never their `> ` snippets.
+ * Note paths a vault tool answer returned, and the `{ path, line }` hits of a `vault_search` answer. A
+ * `vault_get_note` answer is read up to its first blank line (header and `Links:`), never its raw body;
+ * other answers by their result lines, never their `> ` snippets.
  * @param {string} tool
  * @param {string} text
- * @returns {string[]}
+ * @returns {{ paths: string[], hits: { path: string, line: number }[] }}
  */
 function resultPaths (tool, text) {
   const out = []
+  /** @type {{ path: string, line: number }[]} */
+  const hits = []
   const lines = text.split('\n')
   if (tool === GET_NOTE_TOOL) {
     for (const line of lines) {
@@ -139,13 +153,20 @@ function resultPaths (tool, text) {
       const links = /^Links: (.+)$/.exec(line)
       if (links) for (const p of links[1].split(',')) if (p.trim().endsWith('.md')) out.push(p.trim())
     }
-    return out
+    return { paths: out, hits }
   }
   for (const line of lines) {
-    const m = PATH_LINE_RE.exec(line)
-    if (m) out.push(m[1])
+    if (line.length > MAX_RESULT_LINE) continue
+    const hit = SEARCH_HIT_RE.exec(line)
+    if (hit) {
+      out.push(hit[1])
+      if (tool === SEARCH_TOOL) hits.push({ path: hit[1], line: Number(hit[2]) })
+      continue
+    }
+    const item = LIST_LINE_RE.exec(line)
+    if (item) out.push(item[1])
   }
-  return out
+  return { paths: out, hits }
 }
 
 /**
@@ -157,7 +178,7 @@ function resultPaths (tool, text) {
 function resultCount (text) {
   const m = /^(\d+) /.exec(text)
   if (m) return Number(m[1])
-  return text.split('\n').filter(l => /^[^>\s].*?\.md:\d+ /.test(l)).length
+  return text.split('\n').filter(l => l.length <= MAX_RESULT_LINE && SEARCH_HIT_RE.test(l)).length
 }
 
 /**
@@ -176,8 +197,30 @@ function forwardable (text, final) {
 }
 
 /**
+ * The identity of a live process on Linux: its start time (field 22 of `/proc/<pid>/stat`, clock ticks since
+ * boot) and the boot id (`/proc/sys/kernel/random/boot_id`). Null when either cannot be read (the process is
+ * gone, or the system has no `/proc`, as on macOS).
+ * @param {number} pid
+ * @returns {{ startTime: string, bootId: string } | null}
+ */
+export function readProcIdentity (pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    // The command name (field 2) is in parentheses and may hold spaces; fields after it start at field 3.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    const startTime = fields[22 - 3]
+    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
+    if (!/^\d+$/.test(startTime ?? '') || !bootId) return null
+    return { startTime, bootId }
+  } catch {
+    return null
+  }
+}
+
+/**
  * @typedef {{
  *   status: 'complete'|'cancelled'|'error', text: string, rawResult: string|null, toolPaths: string[],
+ *   searchHits: { path: string, line: number }[],
  *   searches: { query: string, resultCount: number|null }[], durationMs: number, exitCode: number|null,
  *   error: string|null, stderrTail: string
  * }} AskRunResult
@@ -186,7 +229,8 @@ function forwardable (text, final) {
 
 /**
  * The Ask engine. `run()` starts or queues one `claude -p`; `cancel()` stops it; `reapOrphans()` kills the
- * process groups a previous server left in `running.json`.
+ * process groups a previous server left in `running.json`. `procIdentity` reads a pid's start time and boot
+ * id (default `readProcIdentity`), recorded at spawn and checked before a reap.
  * @param {{
  *   claudeCommand: string,
  *   spawn?: typeof nodeSpawn,
@@ -196,14 +240,16 @@ function forwardable (text, final) {
  *   timers?: Timers,
  *   log?: (entry: object) => void,
  *   maxConcurrent?: number,
- *   killGroup?: (pid: number, signal: NodeJS.Signals) => void
+ *   killGroup?: (pid: number, signal: NodeJS.Signals) => void,
+ *   procIdentity?: (pid: number) => { startTime: string, bootId: string } | null
  * }} opts
  */
 export function createAskEngine ({
   claudeCommand, spawn = nodeSpawn, stateDir, env = process.env, now = Date.now,
   timers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: h => clearTimeout(h) },
   log = () => {}, maxConcurrent = 2,
-  killGroup = (pid, signal) => { try { process.kill(-pid, signal) } catch {} }
+  killGroup = (pid, signal) => { try { process.kill(-pid, signal) } catch {} },
+  procIdentity = readProcIdentity
 }) {
   const askDir = path.join(stateDir, 'ask')
   const runningFile = path.join(askDir, 'running.json')
@@ -222,7 +268,7 @@ export function createAskEngine ({
 
   function writeRunning () {
     const list = [...runs.values()].filter(r => r.state === 'running' && r.pid)
-      .map(r => ({ runId: r.runId, threadId: r.threadId, pid: r.pid, startedAt: r.startedAt }))
+      .map(r => ({ runId: r.runId, threadId: r.threadId, pid: r.pid, startedAt: r.startedAt, startTime: r.identity?.startTime ?? null, bootId: r.identity?.bootId ?? null }))
     ensureDir()
     const tmp = `${runningFile}.${process.pid}.tmp`
     writeFileSync(tmp, JSON.stringify({ runs: list }) + '\n', { mode: 0o600 })
@@ -317,7 +363,11 @@ export function createAskEngine ({
         if (block?.type !== 'tool_result') continue
         const text = toolResultText(block)
         const tool = r.toolNames.get(block.tool_use_id) ?? ''
-        if (!block.is_error) for (const p of resultPaths(tool, text)) r.toolPaths.add(p)
+        if (!block.is_error) {
+          const found = resultPaths(tool, text)
+          for (const p of found.paths) r.toolPaths.add(p)
+          r.searchHits.push(...found.hits)
+        }
         const search = r.searchById.get(block.tool_use_id)
         if (search) search.resultCount = block.is_error ? 0 : resultCount(text)
       }
@@ -363,6 +413,7 @@ export function createAskEngine ({
       text: status === 'error' && r.failure ? '' : r.text,
       rawResult: typeof r.result?.result === 'string' ? r.result.result : null,
       toolPaths: [...r.toolPaths],
+      searchHits: r.searchHits.map((/** @type {any} */ h) => ({ ...h })),
       searches: r.searches.map((/** @type {any} */ s) => ({ ...s })),
       durationMs,
       exitCode: r.exitCode,
@@ -390,6 +441,7 @@ export function createAskEngine ({
     }
     r.child = child
     r.pid = child.pid ?? null
+    r.identity = r.pid ? procIdentity(r.pid) : null
     log({ event: 'ask.engine.start', runId: r.runId, threadId: r.threadId, length: String(prompt ?? '').length })
     child.on('error', (/** @type {any} */ err) => {
       r.failure ??= `could not start claude: ${err.code ?? err.message}`
@@ -450,8 +502,8 @@ export function createAskEngine ({
     promise.runId = runId
     const r = {
       runId, threadId: opts.threadId, opts, resolve, state: 'queued', queuedAt: now(), startedAt: null,
-      child: null, pid: null, text: '', sent: 0, lastDeltaAt: null, deltaTimer: null, totalTimer: null,
-      idleTimer: null, sawDelta: false, assistantText: [], toolNames: new Map(), toolPaths: new Set(),
+      child: null, pid: null, identity: null, text: '', sent: 0, lastDeltaAt: null, deltaTimer: null, totalTimer: null,
+      idleTimer: null, sawDelta: false, assistantText: [], toolNames: new Map(), toolPaths: new Set(), searchHits: [],
       searches: [], searchById: new Map(), stderr: Buffer.alloc(0), result: null, failure: null,
       cancelled: false, timedOut: false, exitCode: null, signal: null
     }
@@ -487,9 +539,12 @@ export function createAskEngine ({
   }
 
   /**
-   * Kill the process groups listed in `running.json` that still exist, and empty the list. Returns the
-   * thread id of every listed run, killed or already gone: all of them were interrupted by the restart.
-   * Call it once at start, before the first `run()`.
+   * Kill the process groups listed in `running.json` whose leader is still the process the deck started,
+   * and empty the list. A group is killed only when the pid's start time and the boot id both match the ones
+   * recorded at spawn; an entry without them, or with a pid now held by another process (pid reuse after a
+   * reboot or a long downtime), is dropped without killing anything. Returns the thread id of every listed
+   * run, killed or already gone: all of them were interrupted by the restart. Call it once at start, before
+   * the first `run()`.
    * @returns {string[]}
    */
   function reapOrphans () {
@@ -501,10 +556,9 @@ export function createAskEngine ({
     } catch {}
     const threads = []
     for (const e of listed) {
-      if (Number.isInteger(e?.pid) && e.pid > 1) {
-        let alive = false
-        try { process.kill(-e.pid, 0); alive = true } catch {}
-        if (alive) killGroup(e.pid, 'SIGKILL')
+      if (Number.isInteger(e?.pid) && e.pid > 1 && typeof e.startTime === 'string' && typeof e.bootId === 'string') {
+        const current = procIdentity(e.pid)
+        if (current && current.startTime === e.startTime && current.bootId === e.bootId) killGroup(e.pid, 'SIGKILL')
       }
       if (typeof e?.threadId === 'string') threads.push(e.threadId)
     }
