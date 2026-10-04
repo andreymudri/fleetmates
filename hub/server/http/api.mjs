@@ -5,6 +5,7 @@ import { parseOpenRequest, readRunPlan, resolveRunPlan } from './open.mjs'
 import { persistSessionSummary } from '../machines/session.mjs'
 import { projectCounts } from '../machines/counts.mjs'
 import { createLauncher, headBranch, SCROLLBACK_LINES, SCROLLBACK_LINES_MAX } from '../launch/launch.mjs'
+import { DiffError, sessionDiff } from '../adapters/git-diff.mjs'
 const deckVersion = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const defaults = {
   port: 47800, scanRoot: '~/dev', lang: 'en', staleMinutes: 20, claudeCommand: 'claude',
@@ -18,7 +19,32 @@ const configKeys = new Set(['port', 'scanRoot', 'lang', 'staleMinutes', 'claudeC
 const envKeys = { port: 'DECK_PORT', lang: 'DECK_LANG', vaultPath: 'VAULT_PATH' }
 const camel = row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]))
 // POST routes that take a JSON body; every other POST with a body is refused before routing.
-const postBodyRoutes = new Set(['open', 'sessions'])
+const postBodyRoutes = new Set(['open', 'sessions', 'requests/answer-batch', 'rules', 'rules/suggestions/dismiss'])
+/** Whether a POST to these segments may carry a body: the routes above and the request answer and follow-up. */
+const takesBody = (route, s) => postBodyRoutes.has(route) || (s[1] === 'requests' && s.length === 4 && ['answer', 'followup'].includes(s[3]))
+/** The keys each M3 body may hold (05-api 2.4 and 2.5); any other key is `validation_failed`. */
+const bodyKeys = {
+  answer: ['choice', 'optionKey', 'text', 'confirm'],
+  batch: ['ids', 'choice'],
+  followup: ['text'],
+  rule: ['repoKey', 'pattern', 'source'],
+  dismiss: ['repoKey', 'pattern']
+}
+/**
+ * HTTP statuses of the answer and rule codes, as 05-api section 4 lists them, with the answer refusals the
+ * M3 plan (Task 16) puts at 409. Codes not listed keep the status they were raised with.
+ */
+const codeStatus = {
+  confirm_required: 409, tier_forbids: 409, batch_not_safe: 409, not_on_screen: 409, answer_in_flight: 409, request_closed: 409,
+  read_only_session: 409, deckd_outdated: 409, typing_in_terminal: 409, followup_window_closed: 409, options_unreadable: 409,
+  invalid_pattern: 422, destructive_rule: 422, rule_exists: 409, settings_changed: 409, settings_io_failed: 500
+}
+/** Codes whose request may succeed unchanged later (05-api section 4 `retryable`). */
+const retryableCodes = new Set(['deckd_unavailable', 'typing_in_terminal', 'settings_changed'])
+function onlyKeys(body, keys) {
+  const unknown = Object.keys(body).filter(key => !keys.includes(key))
+  if (unknown.length) throw apiError(422, 'validation_failed', { fields: unknown })
+}
 const hats = ['none', 'cap', 'bandana']
 const validStates = ['starting', 'running', 'needs_approval', 'asked_you', 'done', 'stale', 'idle', 'reviewed', 'crashed', 'ended']
 function integer(query, name, fallback, max = Number.MAX_SAFE_INTEGER) {
@@ -46,8 +72,14 @@ function validatePref(key, value) {
   if (key === 'vaultCommand') return Array.isArray(value) && value.length > 0 && value.every(part => typeof part === 'string' && part.length && !part.includes('\0'))
   return (value === null && defaults[key] === null) || typeof value === 'string' && value.length > 0 && !value.includes('\0')
 }
-/** Build M1 REST reads and guarded writes over the canonical projector. */
-export function createApi({ store, projector, paths, env = {}, now = Date.now, publish, services, link, runReader, health, recorder = () => ({ state: 'idle' }) }) {
+/**
+ * Build the REST reads and guarded writes over the canonical projector. `approvals` carries the M3 services
+ * (Task 16): `deliverer` (approvals/deliver.mjs), `rules` (approvals/rules.mjs `createRules`), `threshold()`
+ * (the current `ruleSuggestAfter`), `tiersStatus()` (the tiers store's status), `ruleOffers()` (the
+ * snapshot's open offers) and optionally `diff` (git-diff `sessionDiff`). Without it the answer and rule
+ * routes answer 404 and the snapshot carries no offers.
+ */
+export function createApi({ store, projector, paths, env = {}, now = Date.now, publish, services, link, runReader, health, recorder = () => ({ state: 'idle' }), approvals = null }) {
   const configFile = path.join(paths.config, 'config.json')
   function preferences() {
     let config = {}
@@ -121,13 +153,35 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       data: { sessions: projection.sessions.filter(row => row.state !== 'ended' || row.endedAt >= now() - 86_400_000), requests: projection.requests.filter(row => row.state === 'open'),
         runs: withLeads(await runReader.list()).filter(activeRun), repos: repos(), counts: projection.counts, order: projection.home.order,
         recap: { reviewed: store.get('SELECT COUNT(*) AS n FROM sessions WHERE reviewed_at IS NOT NULL').n },
-        ruleOffers: [], research: [], recorder: recorder(), health: health(), prefs, setup: { firstRunCompletedAt: prefs.firstRunCompletedAt } }
+        ruleOffers: approvals?.ruleOffers() ?? [], research: [], recorder: recorder(), health: health(), prefs, setup: { firstRunCompletedAt: prefs.firstRunCompletedAt } }
     }
+  }
+  /** The M3 services, or 404 for a server built without them. */
+  function m3() {
+    if (!approvals) throw apiError(404, 'not_found')
+    return approvals
+  }
+  /** `GET /api/rules` (05-api 2.5): every repo that is not archived, or the one `repoKey` names. */
+  function rulesBody(query) {
+    const { rules, threshold, tiersStatus } = m3()
+    const id = resolveRepo(query)
+    const status = tiersStatus()
+    return {
+      threshold: threshold(),
+      tiersError: status.ok ? null : { line: status.line, message: status.message },
+      repos: repos().filter(repo => !id || repo.id === id).map(repo => ({ repoKey: repo.name, ...rules.listRules(repo.id) }))
+    }
+  }
+  /** The repo and pattern of a rule body: both non-empty strings, the repo known. */
+  function ruleTarget(body) {
+    const fields = ['repoKey', 'pattern'].filter(key => typeof body[key] !== 'string' || !body[key] || body[key].includes('\0'))
+    if (fields.length) throw apiError(422, 'validation_failed', { fields })
+    return { repoId: resolveRepo(new URLSearchParams(), body.repoKey), pattern: body.pattern }
   }
   async function route({ method, segments: s, query: q, body }) {
     const route = s.slice(1).join('/')
     const ok = data => ({ data })
-    if (!['GET', 'PATCH', 'POST'].includes(method)) throw apiError(404, 'not_found')
+    if (!['GET', 'PATCH', 'POST', 'DELETE'].includes(method)) throw apiError(404, 'not_found')
     if (method === 'GET') {
       if (route === 'version') return ok({ apiVersion: 1, deckVersion, build: 'm2' })
       if (route === 'health') return ok({ deps: health() })
@@ -168,6 +222,15 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return ok({ session: row, requests: projector.snapshot().requests.filter(request => request.sessionId === row.id), steps: steps(row.id, q) })
       }
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'steps') return ok({ steps: steps(s[2], q) })
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'diff') {
+        const row = session(s[2])
+        if (!q.has('path')) throw apiError(422, 'validation_failed', { fields: ['path'] })
+        try { return ok(await (approvals?.diff ?? sessionDiff)(store.get('SELECT * FROM sessions WHERE id=?', row.id), q.get('path'))) } catch (error) {
+          if (!(error instanceof DiffError)) throw error
+          throw error.code === 'not_found' ? apiError(404, 'not_found', { entity: 'path' }) : apiError(422, 'validation_failed', { fields: ['path'] })
+        }
+      }
+      if (route === 'rules') return ok(rulesBody(q))
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'disk') return ok(await services.disk(filePath(session(s[2]).cwd, 'cwd')))
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'scrollback') return launcher.scrollback(session(s[2]).id, integer(q, 'lines', SCROLLBACK_LINES, SCROLLBACK_LINES_MAX))
       if (route === 'requests') {
@@ -251,7 +314,35 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       return ok({ repo })
     }
     if (method === 'POST') {
-      if (Object.keys(body).length && !postBodyRoutes.has(route)) throw apiError(422, 'validation_failed')
+      if (Object.keys(body).length && !takesBody(route, s)) throw apiError(422, 'validation_failed')
+      if (s[1] === 'requests' && s.length === 4 && s[3] === 'answer') {
+        onlyKeys(body, bodyKeys.answer)
+        const { request } = await m3().deliverer.answer(s[2], body, { via: 'browser' })
+        return { status: 202, data: { request } }
+      }
+      if (route === 'requests/answer-batch') {
+        onlyKeys(body, bodyKeys.batch)
+        if (body.choice !== 'allow') throw apiError(422, 'validation_failed', { fields: ['choice'] })
+        return { status: 202, data: { results: await m3().deliverer.batch(body.ids) } }
+      }
+      if (s[1] === 'requests' && s.length === 4 && s[3] === 'followup') {
+        onlyKeys(body, bodyKeys.followup)
+        await m3().deliverer.followup(s[2], body.text)
+        return { status: 202, data: {} }
+      }
+      if (route === 'rules') {
+        onlyKeys(body, bodyKeys.rule)
+        const { repoId, pattern } = ruleTarget(body)
+        if (!['suggested', 'manual'].includes(body.source)) throw apiError(422, 'validation_failed', { fields: ['source'] })
+        const { rule } = await m3().rules.write(repoId, pattern, { source: body.source })
+        return { status: 201, data: { rule } }
+      }
+      if (route === 'rules/suggestions/dismiss') {
+        onlyKeys(body, bodyKeys.dismiss)
+        const { repoId, pattern } = ruleTarget(body)
+        if (!m3().rules.dismissOffer(repoId, pattern)) throw apiError(404, 'not_found', { entity: 'offer' })
+        return { status: 204, data: undefined }
+      }
       if (route === 'open') {
         const { ref } = parseOpenRequest(body)
         const run = (await runReader.list()).find(run => run.repoId === ref.repoId && run.runId === ref.runId)
@@ -315,13 +406,21 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return ok({ session: session(row.id) })
       }
     }
+    if (method === 'DELETE') {
+      if (s[1] === 'rules' && s.length === 4) return ok(m3().rules.revoke(resolveRepo(new URLSearchParams(), s[2]), s[3]))
+    }
     throw apiError(404, 'not_found')
   }
-  /** deckd down answers 503 `deckd_unavailable` with `retryable: true` (05-api 2.3); every other error is the router's. */
+  /**
+   * The answer and rule codes take the statuses of `codeStatus`, and deckd down (503), the typing guard and a
+   * settings file that kept changing are `retryable: true` (05-api 2.3, 2.4 and 4); every other error is the router's.
+   */
   async function handle(request) {
     try { return await route(request) } catch (error) {
-      if (error?.status !== 503 || error.code !== 'deckd_unavailable') throw error
-      return { status: 503, data: { error: { code: 'deckd_unavailable', message: 'deckd_unavailable', retryable: true } } }
+      const code = error?.code
+      if (!error?.status || typeof code !== 'string' || (!Object.hasOwn(codeStatus, code) && !(code === 'deckd_unavailable' && error.status === 503))) throw error
+      const details = error.details && Object.keys(error.details).length ? { details: error.details } : {}
+      return { status: codeStatus[code] ?? error.status, data: { error: { code, message: code, retryable: retryableCodes.has(code), ...details } } }
     }
   }
   return { route: handle, snapshot, preferences, repos, withLeads, close: () => launcher.close() }

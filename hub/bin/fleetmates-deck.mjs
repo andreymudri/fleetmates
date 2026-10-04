@@ -11,11 +11,17 @@ import { UNIT_NAMES, renderUnit, writeUnit } from '../server/setup/units.mjs'
 import { doctor, status } from '../server/setup/doctor.mjs'
 import { initChecks } from '../server/setup/wait.mjs'
 import { openInBrowser } from '../server/setup/browser.mjs'
+import { redact } from '../server/approvals/audit.mjs'
 
 const hub = fileURLToPath(new URL('..', import.meta.url))
 const paths = setupPaths()
 const command = deckHookCommand(process.execPath, paths.hook)
 const args = process.argv.slice(2)
+const USAGE = 'usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | uninstall-hooks | audit [--repo <name>] [--since <YYYY-MM-DD>]'
+// The user's tiers.json (07-approvals 4.1): created by init only when missing, with the schema copied beside it.
+const tiersFile = path.join(paths.config, 'tiers.json')
+const tiersSchema = path.join(paths.config, 'tiers.schema.json')
+const tiersStub = `${JSON.stringify({ $schema: './tiers.schema.json', version: 1, extends: 'default', disable: [], entries: [] }, null, 2)}\n`
 
 function run(file, argv) {
   const result = spawnSync(file, argv, { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -92,6 +98,7 @@ async function init(dryRun, rotateToken) {
     process.stdout.write(`hook version: ${versionFile} (${versionChanged ? 'would write' : 'unchanged'})\n`)
     process.stdout.write(`settings: ${changes ? 'would update' : 'unchanged'}\n`)
     process.stdout.write(`token: ${rotateToken ? 'would rotate' : 'would create if missing'}\n`)
+    process.stdout.write(`tiers: ${tiersFile} (${fs.existsSync(tiersFile) ? 'unchanged' : 'would create'})\n`)
     for (const unit of unitChanges) process.stdout.write(`${unit.name}: ${unit.changed ? 'would write' : 'unchanged'}\n`)
     return
   }
@@ -108,6 +115,9 @@ async function init(dryRun, rotateToken) {
     fs.renameSync(temp, paths.token)
   } else writeIfMissing(paths.token, `${randomBytes(32).toString('base64url')}\n`)
   fs.chmodSync(paths.token, 0o600)
+  if (writeIfMissing(tiersFile, tiersStub)) process.stdout.write(`tiers: ${tiersFile} created\n`)
+  fs.copyFileSync(path.join(hub, 'server/approvals/tiers.schema.json'), tiersSchema)
+  fs.chmodSync(tiersSchema, 0o600)
   let changedUnit = false
   let webUnitChanged = false
   for (const unit of unitChanges) {
@@ -124,8 +134,46 @@ async function init(dryRun, rotateToken) {
   if (checks.find(check => check.id === 'hooks')?.state !== 'ok') process.exitCode = 1
 }
 
+/**
+ * `audit [--repo <name>] [--since <YYYY-MM-DD>]`: the approvals audit (`approval_audit`) and the rule audit
+ * (`rule_audit`) oldest first, one row per line, read from the deck database without changing it. Summaries are
+ * redacted again on output (08-security 4.10). `--since` is local midnight of that day.
+ */
+async function audit(rest) {
+  let repo = null
+  let since = 0
+  for (let i = 0; i < rest.length; i += 2) {
+    const value = rest[i + 1]
+    if (rest[i] === '--repo' && typeof value === 'string' && value) repo = value
+    else if (rest[i] === '--since' && /^\d{4}-\d{2}-\d{2}$/.test(value ?? '')) {
+      const [year, month, day] = value.split('-').map(Number)
+      const date = new Date(year, month - 1, day)
+      if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) throw new Error(USAGE)
+      since = date.getTime()
+    } else throw new Error(USAGE)
+  }
+  const file = path.join(paths.state, 'deck.db')
+  if (!fs.existsSync(file)) throw new Error('no deck database yet; start the deck first')
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(file, { readOnly: true })
+  try {
+    const names = new Map(db.prepare('SELECT id, name FROM repos').all().map(row => [row.id, row.name]))
+    const repoName = id => id === null || id === undefined ? '-' : names.get(id) ?? path.basename(id)
+    const keep = row => !repo || (row.repo_id !== null && repoName(row.repo_id) === repo)
+    const shown = value => value === null || value === undefined ? '-' : String(value)
+    const rows = [
+      ...db.prepare('SELECT * FROM approval_audit WHERE at >= ? ORDER BY at, id').all(since).filter(keep).map(row => ({ at: row.at, order: 0, id: row.id,
+        line: `${row.kind} repo=${repoName(row.repo_id)} tier=${shown(row.tier)} via=${shown(row.via)} choice=${shown(row.choice)} summary=${JSON.stringify(redact(row.summary) ?? '')}` })),
+      ...db.prepare('SELECT * FROM rule_audit WHERE at >= ? ORDER BY at, id').all(since).filter(keep).map(row => ({ at: row.at, order: 1, id: row.id,
+        line: `rule_${row.action} repo=${repoName(row.repo_id)} pattern=${JSON.stringify(redact(row.pattern) ?? '')} actor=${row.actor}` }))
+    ].sort((a, b) => a.at - b.at || a.order - b.order || a.id - b.id)
+    for (const row of rows) process.stdout.write(`${new Date(row.at).toISOString()} ${row.line}\n`)
+  } finally { db.close() }
+}
+
 async function main() {
   const [name, ...rest] = args
+  if (name === 'audit') return audit(rest)
   if (name === 'init' && rest.every(arg => ['--dry-run', '--rotate-token'].includes(arg))) return init(rest.includes('--dry-run'), rest.includes('--rotate-token'))
   if (name === 'uninstall-hooks' && rest.length === 0) {
     const current = readSettings(paths.settings)
@@ -165,7 +213,7 @@ async function main() {
     if (!await openInBrowser(bootstrap)) throw new Error(`could not open a browser; open this file in your web browser: ${bootstrap}`)
     return
   }
-  throw new Error('usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | uninstall-hooks')
+  throw new Error(USAGE)
 }
 
 main().catch(error => { process.stderr.write(`fleetmates-deck: ${error.message}\n`); process.exitCode = 1 })

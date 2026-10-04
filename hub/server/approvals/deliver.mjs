@@ -640,6 +640,58 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
 }
 
 /**
+ * Recover delivery state left by a crash or restart, once at start and before the deliverer accepts an
+ * answer (M3 Task 16). No key is written and nothing is retried:
+ * - an open request whose delivery is `sending` or `verifying` goes back to `idle` with its earlier answer
+ *   (the attempt's `prior`, the did_not_land answer a Try again carried, else none);
+ * - a closed request whose answer still holds a `pending` verdict, or whose delivery is still `sending`,
+ *   was closed while the deck's write was in flight and no one settled it: an answered row becomes a
+ *   terminal answer with the hook's choice and one `answered` audit row, and an expired row has its
+ *   attempt cleared.
+ * Each changed row appends `request.updated`.
+ * @param {Store} store
+ * @param {{ now?: () => number, audit?: { record: Function } }} [options]
+ * @returns {{ reset: string[], settled: string[] }} ids of the open rows reset and the closed rows settled
+ */
+export function recover (store, { now = Date.now, audit = auditLog } = {}) {
+  const reset = []
+  const settled = []
+  const parse = (/** @type {string | null} */ text) => { try { return JSON.parse(text ?? 'null') } catch { return null } }
+  store.tx(() => {
+    const at = now()
+    const write = (/** @type {string} */ id, /** @type {string} */ delivery, /** @type {string | null} */ answer) => {
+      store.run('UPDATE requests SET delivery = ?, answer = ? WHERE id = ?', delivery, answer, id)
+      store.appendEvent({ at, type: 'request.updated', entityId: id, data: requestView(store.get('SELECT * FROM requests WHERE id = ?', id)) })
+    }
+    for (const row of store.all("SELECT * FROM requests WHERE state = 'open' AND delivery IN ('sending', 'verifying') ORDER BY created_at, id")) {
+      const prior = parse(row.answer)?.prior
+      write(row.id, 'idle', prior && typeof prior === 'object' && typeof prior.choice === 'string' ? JSON.stringify(prior) : null)
+      reset.push(row.id)
+    }
+    for (const row of store.all("SELECT * FROM requests WHERE state <> 'open' ORDER BY created_at, id")) {
+      const answer = parse(row.answer)
+      if (!answer?.pending && row.delivery !== 'sending') continue
+      if (row.state !== 'answered') {
+        write(row.id, 'idle', null)
+        settled.push(row.id)
+        continue
+      }
+      const choice = typeof answer?.choice === 'string' ? answer.choice : null
+      write(row.id, 'idle', JSON.stringify({ via: 'terminal', choice }))
+      try {
+        const session = store.get('SELECT repo_id FROM sessions WHERE id = ?', row.session_id)
+        audit.record(store, { kind: 'answered', at, requestId: row.id, sessionId: row.session_id, repoId: session?.repo_id ?? null,
+          tier: row.tier ?? null, reasons: row.reasons ?? [], summary: row.summary ?? null, via: 'terminal', choice })
+      } catch {
+        try { process.stderr.write('deck: audit.error\n') } catch {}
+      }
+      settled.push(row.id)
+    }
+  })
+  return { reset, settled }
+}
+
+/**
  * The classifier at answer time: the stored tool input in the session's directory and repo.
  * @param {any} row
  * @param {any} session
