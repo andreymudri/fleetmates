@@ -397,8 +397,12 @@ if (import.meta.main) {
     const bash = (command, cwd) => ({ tool_name: 'Bash', tool_input: { command, description: command }, cwd })
     const ask = (command, taskId) => [clear, { frame: 'synthetic-permission-bash', vars: { cmd: command, description: command } },
       { expectKey: { 1: 'yes', timeoutMs: 120000 } }, { hook: 'PostToolUse', variant: 'Bash', with: bash(command, worktrees[taskId]) }]
-    // Each hook runs its own deck-hook process, and back to back they reached the server out of order in some
-    // runs; the pause keeps them in the order a real session sends them.
+    // deck-hook is registered async, so the fake does not wait for it and fires these hooks within about a
+    // millisecond of each other; each deck-hook process stamps its own hookTs (hub/hook/deck-hook.mjs `main`), so
+    // stamps that close can come out inverted, and in some runs here they did. A real session spaces these hooks
+    // by seconds (the captured 2.1.285 sequence: PreToolUse 2062 ms after UserPromptSubmit, PermissionRequest
+    // 53 ms after that), so the pause stands in for that spacing. A late `--run` PreToolUse losing the lead join
+    // is Task 24's case (run-join.test.mjs), not this suite's.
     const spaced = hooks => hooks.flatMap(hook => [hook, { sleep: 150 }])
     return { version: unblock.claudeCodeVersion, sessionId: 'auto', steps: [
       ...spaced([
