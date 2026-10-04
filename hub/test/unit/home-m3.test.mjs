@@ -166,7 +166,7 @@ test('the rule suggestion line accepts the rule and toasts "Rule added to {repo}
   assert.equal(h.toasts.length, 1)
   assert.equal(h.toasts[0].text, 'Rule added to rustot: Bash(cargo test:*)')
   await h.actions.undo(h.toasts[0].undo)
-  assert.deepEqual(h.api.calls.at(-1), ['DELETE', '/api/rules/rustot/Bash(cargo%20test%3A*)'])
+  assert.deepEqual(h.api.calls.at(-1), ['DELETE', '/api/rules/rustot/Bash(cargo%20test%3A*)?undo=1'])
 })
 
 test('the compact strip keeps two xs buttons per variant', async () => {
