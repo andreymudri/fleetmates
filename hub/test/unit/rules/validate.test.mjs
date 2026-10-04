@@ -46,13 +46,13 @@ test('every F13 pattern is refused with destructive_rule', () => {
   for (const pattern of refused) assert.deepEqual(validatePattern(pattern), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
 })
 
-test('WebFetch(domain:...) and Bash(cargo test:*) are accepted; WebFetch carries the tool-wide warning', () => {
+test('WebFetch(domain:...) and Bash(mypy:*) are accepted; WebFetch carries the tool-wide warning', () => {
   const fetch = validatePattern('WebFetch(domain:docs.nestjs.com)')
   assert.deepEqual(fetch, { ok: true, pattern: 'WebFetch(domain:docs.nestjs.com)', tool: 'WebFetch', tier: 'caution', warning: null })
-  const cargo = validatePattern('Bash(cargo test:*)')
+  const cargo = validatePattern('Bash(mypy:*)')
   assert.equal(cargo.ok, true)
   assert.equal(cargo.warning, null)
-  assert.equal(validatePattern('Bash(cargo test *)').ok, true)
+  assert.equal(validatePattern('Bash(mypy *)').ok, true)
   assert.deepEqual(validatePattern('WebFetch'), { ok: true, pattern: 'WebFetch', tool: 'WebFetch', tier: 'caution', warning: 'toolWide' })
   assert.equal(validatePattern('WebSearch').warning, 'toolWide')
   assert.deepEqual(validatePattern('mcp__vault__vault_search'), { ok: true, pattern: 'mcp__vault__vault_search', tool: 'mcp__vault__vault_search', tier: 'safe', warning: null })
@@ -145,7 +145,7 @@ test('a Bash prefix whose arguments can reach a Destructive floor is refused; np
     for (const pattern of ['Bash(git config:*)', 'Bash(cp:*)', 'Bash(mv:*)', 'Bash(tee:*)', 'Bash(git config --global:*)', 'Bash(cp -r:*)']) {
       assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
     }
-    for (const pattern of ['Bash(npm test:*)', 'Bash(cargo test:*)', 'Bash(go vet:*)', 'Bash(mypy:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
+    for (const pattern of ['Bash(mypy:*)', 'Bash(golangci-lint run:*)', 'Bash(terraform validate:*)']) assert.equal(validatePattern(pattern, s.options).ok, true, pattern)
   } finally { s.close() }
 })
 
@@ -189,8 +189,7 @@ test('every Safe tiers rule validates ok with tier safe and lists with destructi
     await s.settle()
     // D-98: no exceptions; the path-operand writers (ruff check, terraform fmt) carry no rule.
     const rules = DEFAULT_TIERS.entries.filter(entry => entry.tier === 'safe' && typeof entry.rule === 'string' && !entry.rule.includes('{'))
-    assert.ok(rules.some(entry => entry.rule === 'Bash(node --test:*)'))
-    assert.ok(rules.some(entry => entry.rule === 'Bash(python -m pytest:*)'))
+    assert.deepEqual(rules.filter(entry => entry.tool === 'Bash').map(entry => entry.rule).sort(), ['Bash(golangci-lint run:*)', 'Bash(mypy:*)', 'Bash(terraform validate:*)'])
     for (const { rule } of rules) {
       const verdict = validatePattern(rule, s.options)
       assert.deepEqual({ ok: verdict.ok, tier: verdict.tier, warning: verdict.warning }, { ok: true, tier: 'safe', warning: null }, rule)
@@ -230,12 +229,49 @@ test('an npm or pnpm prefix with options before run, or a pnpm prefix naming a s
   }
   assert.equal(validatePattern('Bash(npm run test)').ok, true)
   assert.equal(validatePattern('Bash(npm -s run test)').ok, true)
-  assert.equal(validatePattern('Bash(npm test:*)').ok, true)
+  // D-102: npm test has noneArg options, so Bash(npm test:*) is no tiers rule and is refused (D-101).
+  assert.equal(validatePattern('Bash(npm test:*)').code, 'destructive_rule')
   // D-101: a prefix that is not a tiers rule is refused, so `pnpm ls:*` no longer passes.
   assert.equal(validatePattern('Bash(pnpm ls:*)').code, 'destructive_rule')
 })
 
 // Fix round 2 (phase 5 round 1 reviews).
+
+// D-102: the entries whose prefix rule was removed because a noneArg or output option lets a written
+// rule run code or write paths unclassified.
+const D102_REMOVED = ['safe.cargo.build', 'safe.cargo.check', 'safe.cargo.test', 'safe.cargo.nextest-run', 'safe.cargo.clippy', 'safe.cargo.fmt', 'safe.npm.test',
+  'safe.node.test', 'safe.go.build', 'safe.go.test', 'safe.go.vet', 'safe.python.pytest', 'safe.python.pytest-module']
+
+// Mutation run for this test: `"rule":"Bash(cargo build:*)","ruleNote":"anyFlags"` restored on
+// safe.cargo.build in tiers.default.json; this test failed.
+test('D-102: each entry that lost its rule stays Safe and gives no rule candidate', async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    const byId = new Map(DEFAULT_TIERS.entries.map(entry => [entry.id, entry]))
+    for (const id of D102_REMOVED) {
+      const entry = byId.get(id)
+      assert.equal(entry.tier, 'safe', id)
+      assert.equal(entry.rule, undefined, id)
+      assert.equal(entry.ruleNote, undefined, id)
+      const result = classify({ toolName: 'Bash', toolInput: { command: entry.cmd }, cwd: s.repoRoot, repoRoot: s.repoRoot, homeDir: s.homeDir })
+      assert.equal(result.ruleCandidate, null, id)
+      assert.equal(result.ruleNote, null, id)
+    }
+    // A command the entry rates Safe, so a restored rule would show up as a candidate here.
+    assert.equal(classify({ toolName: 'Bash', toolInput: { command: 'cargo build' }, cwd: s.repoRoot, repoRoot: s.repoRoot, homeDir: s.homeDir }).tier, 'safe')
+    assert.equal(byId.get('safe.python.ruff-check').ruleNote, undefined)
+  } finally { s.close() }
+})
+
+// Mutation run for this test: the same restore of the cargo build rule; this test failed.
+test('D-102: no Safe entry with noneArg or output options carries a prefix rule; exact templates keep theirs', () => {
+  const payloadCapable = DEFAULT_TIERS.entries.filter(entry => entry.tier === 'safe' && ((entry.noneArg ?? []).length || (entry.outputOpts ?? []).length))
+  const prefixRules = payloadCapable.filter(entry => typeof entry.rule === 'string' && /(?::| )\*\)$/.test(entry.rule)).map(entry => entry.id)
+  assert.deepEqual(prefixRules, [])
+  const exact = payloadCapable.filter(entry => typeof entry.rule === 'string').map(entry => entry.rule).sort()
+  assert.deepEqual(exact, ['Bash(npm run {script})', 'Bash(pnpm run {script})'])
+})
 
 // Mutation run for this test: the D-101 refusal of a prefix that is not a tiers rule removed from
 // bashVerdict, so any prefix the other checks pass was accepted again; this test failed.
