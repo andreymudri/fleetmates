@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 import {
   launchSession, stopSession, nudgeSession, relaunchSession, fetchScrollback, patchCrew, fetchRunPlan, openRunPlan,
   answerRequest, answerBatch, sendFollowup, fetchRules, addRule, revokeRule, dismissRuleOffer, fetchDiff,
-  archiveSession, unarchiveSession, archiveFinished, fetchArchived
+  archiveSession, unarchiveSession, archiveFinished, fetchArchived,
+  fetchMeetings, fetchMeeting, fetchMeetingTranscript, fetchMeetingLog, searchMeetings, startMeeting, stopMeeting,
+  pinMoment, unpinMoment, dismissItem, undismissItem, askMeeting, startScribed, retryScribed
 } from '../../web/src/state/actions.js'
 import { createApiClient } from '../../web/src/state/api.js'
 import { readFile } from 'node:fs/promises'
@@ -160,4 +162,52 @@ test('revokeRule adds ?undo=1 only with { undo: true }; the Home toast Undo pass
   const source = (await readFile(path.join(hub, 'web/src/screens/settings/ApprovalRules.jsx'), 'utf8')).replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, '')
   const calls = source.split('\n').filter(line => line.includes('revokeRule(')).map(line => line.trim())
   assert.deepEqual(calls, ['revokeRule(api, repoName(repo), rule.pattern)'])
+})
+
+test('the M4 meeting helpers call the 05-api 2.11 routes with every id and key as one encoded segment', async () => {
+  const api = recordingApi()
+  const id = 'a/b?c#d'
+  assert.deepEqual(await fetchMeetings(api), { ok: 'GET', path: '/api/meetings' })
+  await fetchMeetings(api, { before: 'c/1&x', limit: 20 })
+  await fetchMeeting(api, id)
+  await fetchMeetingTranscript(api, id)
+  await fetchMeetingLog(api, id)
+  await fetchMeetingLog(api, id, 500)
+  await searchMeetings(api, 'feature flag&x=1')
+  await startMeeting(api, 'client-a')
+  await stopMeeting(api)
+  await pinMoment(api, id)
+  await pinMoment(api, id, { t: 1060 })
+  await unpinMoment(api, id, 'p/1')
+  await dismissItem(api, id, 'item/2?x')
+  await undismissItem(api, id, 'item/2?x')
+  await askMeeting(api, id, 'o que ficou decidido?')
+  await startScribed(api)
+  await retryScribed(api)
+  assert.deepEqual(api.calls, [
+    ['GET', '/api/meetings'],
+    ['GET', '/api/meetings?before=c%2F1%26x&limit=20'],
+    ['GET', '/api/meetings/a%2Fb%3Fc%23d'],
+    ['GET', '/api/meetings/a%2Fb%3Fc%23d/transcript'],
+    ['GET', '/api/meetings/a%2Fb%3Fc%23d/log'],
+    ['GET', '/api/meetings/a%2Fb%3Fc%23d/log?lines=500'],
+    ['GET', '/api/meetings/search?q=feature%20flag%26x%3D1'],
+    ['POST', '/api/meetings/start', { tag: 'client-a' }],
+    ['POST', '/api/meetings/stop'],
+    ['POST', '/api/meetings/a%2Fb%3Fc%23d/pins'],
+    ['POST', '/api/meetings/a%2Fb%3Fc%23d/pins', { t: 1060 }],
+    ['DELETE', '/api/meetings/a%2Fb%3Fc%23d/pins/p%2F1'],
+    ['POST', '/api/meetings/a%2Fb%3Fc%23d/items/item%2F2%3Fx/dismiss'],
+    ['DELETE', '/api/meetings/a%2Fb%3Fc%23d/items/item%2F2%3Fx/dismiss'],
+    ['POST', '/api/ask', { text: 'o que ficou decidido?', scope: 'meeting:a/b?c#d' }],
+    ['POST', '/api/deps/scribed/start'],
+    ['POST', '/api/deps/scribed/retry']
+  ])
+  const [, dismissPath] = api.calls[12]
+  assert.equal(dismissPath.split('/').length, 7, 'a key holding / stays one path segment')
+  assert.equal(decodeURIComponent(dismissPath.split('/')[5]), 'item/2?x')
+
+  const failure = Object.assign(new Error('scribed refused'), { status: 409, code: 'scribed_refused', details: { text: 'sessão já ativa; pare a atual antes' } })
+  api.failNext(failure)
+  await assert.rejects(startMeeting(api, 'pessoal'), error => error === failure)
 })

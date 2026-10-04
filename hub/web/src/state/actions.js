@@ -1,6 +1,6 @@
 /**
- * REST helpers for the M2 session, crew and run actions and the M3 answer, rule and diff calls
- * (docs/deck/05-api.md sections 2.3, 2.4, 2.5, 2.6 and 2.8).
+ * REST helpers for the M2 session, crew and run actions, the M3 answer, rule and diff calls and the M4
+ * meeting calls (docs/deck/05-api.md sections 2.3, 2.4, 2.5, 2.6, 2.8, 2.9 and 2.11).
  * Each takes the client from `createApiClient`, encodes every path segment with `encodeURIComponent`,
  * and returns the API's body or throws its `ApiError` unchanged.
  */
@@ -222,4 +222,156 @@ export function fetchArchived(api, { before, limit } = {}) {
   if (before !== undefined) query.set('before', String(before))
   if (limit !== undefined) query.set('limit', String(limit))
   return api.get(`/api/sessions?${query}`)
+}
+
+// M4 meetings (05-api 2.11, the meeting scope of 2.9, and the scribed dependency routes).
+const meeting = (id, rest = '') => `/api/meetings/${seg(id)}${rest}`
+
+/**
+ * Read a page of meetings with the recorder, the config tags and any config error (`GET /api/meetings`).
+ * @param {{ get: Function }} api
+ * @param {{ before?: string | number, limit?: number }} [page]
+ * @returns {Promise<{ meetings: object[], recorder: object, tags: object[], configError?: object | null }>}
+ */
+export function fetchMeetings(api, { before, limit } = {}) {
+  const query = new URLSearchParams()
+  if (before !== undefined) query.set('before', String(before))
+  if (limit !== undefined) query.set('limit', String(limit))
+  const text = query.toString()
+  return api.get(`/api/meetings${text ? `?${text}` : ''}`)
+}
+
+/**
+ * Read one meeting with its note, pins, speakers and model (`GET /api/meetings/:id`).
+ * @param {{ get: Function }} api
+ * @param {string} id
+ * @returns {Promise<{ meeting: object, note: object | null, pins: object[], speakers?: number, model?: string | null }>}
+ */
+export function fetchMeeting(api, id) {
+  return api.get(meeting(id))
+}
+
+/**
+ * Read a meeting's transcript (`GET /api/meetings/:id/transcript`).
+ * @param {{ get: Function }} api
+ * @param {string} id
+ * @returns {Promise<{ source: 'batch' | 'live', lines: { t0: number, t1: number, speaker: string, text: string }[] }>}
+ */
+export function fetchMeetingTranscript(api, id) {
+  return api.get(meeting(id, '/transcript'))
+}
+
+/**
+ * Read the tail of a meeting's `postmeet.log`; `lines` is left to the server default when omitted.
+ * @param {{ get: Function }} api
+ * @param {string} id
+ * @param {number} [lines]
+ * @returns {Promise<{ text: string }>}
+ */
+export function fetchMeetingLog(api, id, lines) {
+  const query = lines === undefined ? '' : `?lines=${seg(lines)}`
+  return api.get(meeting(id, `/log${query}`))
+}
+
+/**
+ * Search the meeting transcripts (`GET /api/meetings/search?q=`).
+ * @param {{ get: Function }} api
+ * @param {string} q
+ * @returns {Promise<{ hits: { meetingId: string, t0: number, speaker: string, snippet: string, ranges: [number, number][] }[], meetingCount: number, partial?: boolean }>}
+ */
+export function searchMeetings(api, q) {
+  return api.get(`/api/meetings/search?q=${seg(q)}`)
+}
+
+/**
+ * Start recording with a config tag (`POST /api/meetings/start`).
+ * @param {{ post: Function }} api
+ * @param {string} tag
+ * @returns {Promise<{ recorder: object }>}
+ */
+export function startMeeting(api, tag) {
+  return api.post('/api/meetings/start', { tag })
+}
+
+/**
+ * Stop the current recording (`POST /api/meetings/stop`).
+ * @param {{ post: Function }} api
+ * @returns {Promise<{ recorder: object }>}
+ */
+export function stopMeeting(api) {
+  return api.post('/api/meetings/stop')
+}
+
+/**
+ * Pin a moment of the meeting being recorded (`POST /api/meetings/:id/pins`); without `t` the request has
+ * no body and the server picks the moment.
+ * @param {{ post: Function }} api
+ * @param {string} id
+ * @param {{ t?: number }} [moment]
+ * @returns {Promise<{ pin: object }>}
+ */
+export function pinMoment(api, id, { t } = {}) {
+  return t === undefined ? api.post(meeting(id, '/pins')) : api.post(meeting(id, '/pins'), { t })
+}
+
+/**
+ * Remove a pin (`DELETE /api/meetings/:id/pins/:pinId`).
+ * @param {{ del: Function }} api
+ * @param {string} id
+ * @param {string} pinId
+ * @returns {Promise<unknown>}
+ */
+export function unpinMoment(api, id, pinId) {
+  return api.del(meeting(id, `/pins/${seg(pinId)}`))
+}
+
+/**
+ * Dismiss a meeting's action item (`POST /api/meetings/:id/items/:key/dismiss`); the key is one encoded segment.
+ * @param {{ post: Function }} api
+ * @param {string} id
+ * @param {string} key
+ * @returns {Promise<unknown>}
+ */
+export function dismissItem(api, id, key) {
+  return api.post(meeting(id, `/items/${seg(key)}/dismiss`))
+}
+
+/**
+ * Undo an action item dismissal (`DELETE /api/meetings/:id/items/:key/dismiss`).
+ * @param {{ del: Function }} api
+ * @param {string} id
+ * @param {string} key
+ * @returns {Promise<unknown>}
+ */
+export function undismissItem(api, id, key) {
+  return api.del(meeting(id, `/items/${seg(key)}/dismiss`))
+}
+
+/**
+ * Ask about a meeting (`POST /api/ask` with `{ text, scope: 'meeting:<id>' }`).
+ * @param {{ post: Function }} api
+ * @param {string} id
+ * @param {string} text
+ * @returns {Promise<{ thread: object, userMessage: object, assistantMessageId: string }>}
+ */
+export function askMeeting(api, id, text) {
+  return api.post('/api/ask', { text, scope: `meeting:${id}` })
+}
+
+/**
+ * Start scribed, the degraded card's "Start scribed" (`POST /api/deps/scribed/start`).
+ * @param {{ post: Function }} api
+ * @returns {Promise<unknown>}
+ */
+export function startScribed(api) {
+  return api.post('/api/deps/scribed/start')
+}
+
+/**
+ * Probe scribed now, the degraded card's "Retry" (`POST /api/deps/scribed/retry`).
+ * @param {{ post: Function }} api
+ * @returns {Promise<unknown>}
+ */
+export function retryScribed(api) {
+  return api.post('/api/deps/scribed/retry')
 }

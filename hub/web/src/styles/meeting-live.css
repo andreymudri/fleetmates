@@ -1,0 +1,37 @@
+/* The live meeting view (screens/meetings.md 3.2) and the TranscriptLine base (components 34).
+   Values are tokens from tokens.css. Imported once from main.jsx. */
+
+.transcript-line {
+  display: flex;
+  gap: var(--space-14);
+  align-items: baseline;
+  width: 100%;
+  padding: var(--space-8) var(--space-12);
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-default);
+  text-align: left;
+  font: inherit;
+}
+button.transcript-line { cursor: pointer; }
+button.transcript-line:hover { background: var(--bg-raised); }
+.transcript-line-offset {
+  flex: 0 0 44px;
+  font: var(--type-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.transcript-line-speaker {
+  flex: 0 0 44px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-link);
+}
+.transcript-line-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.transcript-line--live .transcript-line-text { font: var(--type-prose); }
+.transcript-line--pinned {
+  border-left-color: var(--brand-accent);
+  background: var(--brand-accent-tint);
+}
