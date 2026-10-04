@@ -894,31 +894,61 @@ function transcriptQuestion(location) {
   return null
 }
 
-/** `delivery` values that mean the deck wrote keys for the request (state-machines 2.7 rows 12, 15, 16). */
-export const DECK_DELIVERIES = Object.freeze(['sending', 'verifying', 'did_not_land'])
+/**
+ * `delivery` values that mean deckd accepted the deck's keys for the request (state-machines 2.7 rows
+ * 12, 15, 16). `sending` is not one: approvals/deliver.mjs writes the deck's answer only once the
+ * guarded write is accepted, so a hook while the write is in flight is a terminal answer.
+ */
+export const DECK_DELIVERIES = Object.freeze(['verifying', 'did_not_land'])
 
 /** Deck choices on a permission request that a hook's allow or deny verdict confirms or contradicts. */
 const VERDICT_CHOICES = Object.freeze(['allow', 'allow_always', 'deny'])
 
 /**
- * The `answer` a closing hook records. A request the deck sent keys for (`delivery` sending, verifying
- * or did_not_land) keeps the deck's `via` and choice from the in-flight `answer` approvals/deliver.mjs
- * wrote, while the hook arrives by that answer's `until` time. The hook's verdict wins over the deck:
- * when the hook is an allow (`PostToolUse`) and the deck sent a deny, or the hook is a deny and the
- * deck sent an allow, the request is a terminal answer with the hook's choice. A hook after `until`
- * (the deck stopped watching), and any request the deck sent nothing for, is a terminal answer too.
- * @param {{ delivery?: string, answer?: string | null }} row
+ * The answers a closing AskUserQuestion hook reports (`tool_response.answers`, else
+ * `tool_input.answers`, as in the 2.1.285 PostToolUse fixture), or null when it reports none.
+ * @param {any} hook
+ * @returns {string[] | null}
+ */
+function reportedAnswers(hook) {
+  const answers = hook?.tool_response?.answers ?? hook?.tool_input?.answers
+  if (!answers || typeof answers !== 'object') return null
+  const values = Object.values(answers).filter(value => typeof value === 'string')
+  return values.length ? values : null
+}
+
+/**
+ * The `answer` a closing hook records. A request deckd accepted the deck's keys for (`delivery`
+ * verifying or did_not_land) keeps the deck's `via` and choice from the `answer` approvals/deliver.mjs
+ * wrote, while the hook arrives by that answer's `until` time and agrees with it. The hook wins
+ * whenever its evidence differs: an allow (`PostToolUse`) against a deck deny, a deny against a deck
+ * allow, and on an AskUserQuestion an answer the deck did not type (the hook's reported answer is not
+ * the label of the deck's option, or is an option label when the deck typed a free-text reply). An
+ * AskUserQuestion hook that reports no answer cannot show which option was chosen, so it is a terminal
+ * answer too, and so is a hook after `until` (the deck stopped watching) and any request the deck sent
+ * nothing for. Whether a permission allow was option 1 or option 2 ("don't ask again") is not in the
+ * 2.1.285 hook payloads, so that difference cannot be checked.
+ * @param {{ delivery?: string, answer?: string | null, kind?: string, tool_name?: string | null }} row
  * @param {string} choice the terminal choice the hook implies
  * @param {number} [at] the hook's time
+ * @param {any} [hook] the closing hook's payload
  * @returns {{ via: string, choice: string }}
  */
-export function closingAnswer(row, choice, at) {
-  if (!DECK_DELIVERIES.includes(row?.delivery)) return { via: 'terminal', choice }
+export function closingAnswer(row, choice, at, hook) {
+  const terminal = { via: 'terminal', choice }
+  if (!DECK_DELIVERIES.includes(row?.delivery)) return terminal
   let sent = null
   try { sent = JSON.parse(row.answer ?? 'null') } catch {}
-  if (typeof sent?.choice !== 'string') return { via: 'terminal', choice }
-  if (Number.isFinite(sent.until) && Number.isFinite(at) && at > sent.until) return { via: 'terminal', choice }
-  if (['allow', 'deny'].includes(choice) && VERDICT_CHOICES.includes(sent.choice) && (choice === 'allow') !== (sent.choice !== 'deny')) return { via: 'terminal', choice }
+  if (typeof sent?.choice !== 'string') return terminal
+  if (Number.isFinite(sent.until) && Number.isFinite(at) && at > sent.until) return terminal
+  if (['allow', 'deny'].includes(choice) && VERDICT_CHOICES.includes(sent.choice) && (choice === 'allow') !== (sent.choice !== 'deny')) return terminal
+  if (row.kind === 'question' && row.tool_name === 'AskUserQuestion' && ['option', 'reply'].includes(sent.choice)) {
+    const reported = hook?.hook_event_name === 'PostToolUse' ? reportedAnswers(hook) : null
+    if (!reported) return terminal
+    const labels = (hook.tool_input?.questions ?? []).flatMap(q => Array.isArray(q?.options) ? q.options.map(o => o?.label) : [])
+    const agrees = sent.choice === 'option' ? typeof sent.label === 'string' && reported.includes(sent.label) : reported.every(value => !labels.includes(value))
+    if (!agrees) return terminal
+  }
   const via = ['browser', 'popup', 'batch'].includes(sent.via) ? sent.via : 'browser'
   return { via, choice: sent.choice }
 }
@@ -936,7 +966,7 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
   let resumed = false
   if (resumedActivityEvents.includes(event)) {
     for (const row of store.all('SELECT id, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', session.id, 'question', 'open', 'stop_question', 'elicitation', at)) {
-      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'observed', at)), at, row.id)
+      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'observed', at, hook)), at, row.id)
       resumed = true
     }
   }
@@ -972,11 +1002,11 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
     const outcomeKind = event !== 'PermissionDenied' && hook.tool_name === 'AskUserQuestion' ? 'question' : 'permission'
-    const row = store.get('SELECT id, kind, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind, at)
-      ?? (outcomeKind === 'question' ? store.get('SELECT id, kind, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission', at) : null)
+    const row = store.get('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind, at)
+      ?? (outcomeKind === 'question' ? store.get('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission', at) : null)
       ?? store.all('SELECT id, kind, summary, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
     if (!row) return resumed
-    const closing = closingAnswer(row, event === 'PermissionDenied' ? 'deny' : 'allow', at)
+    const closing = closingAnswer(row, event === 'PermissionDenied' ? 'deny' : 'allow', at, hook)
     store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closing), at, row.id)
     // D-73: an allow in the terminal counts toward "Make it a rule?"; recordAllow checks the tier,
     // the pattern and that both hooks came from one Claude process (F16). Its failure never stops
@@ -988,19 +1018,19 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
     }
     if (hook.tool_name === 'AskUserQuestion') {
       const relatedKind = row.kind === 'permission' ? 'question' : 'permission'
-      const related = store.get('SELECT id, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind, at)
+      const related = store.get('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind, at)
       if (related) {
         if (event === 'PermissionDenied') store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE id = ?', 'expired', 'interrupted', related.id)
-        else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(related, 'allow', at)), at, related.id)
+        else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(related, 'allow', at, hook)), at, related.id)
       }
     }
     return true
   }
   if (event === 'UserPromptSubmit') {
     let changed = false
-    for (const row of store.all('SELECT id, kind, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND created_at <= ?', session.id, 'open', at)) {
-      // A question the deck typed a reply into keeps that reply (closingAnswer); state-machines 2.6.
-      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'deny', at)), at, row.id)
+    for (const row of store.all('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND created_at <= ?', session.id, 'open', at)) {
+      // closingAnswer decides whether the deck or the terminal answered (state-machines 2.7 rows 15 to 17).
+      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'deny', at, hook)), at, row.id)
       changed = true
     }
     return changed || resumed

@@ -566,3 +566,93 @@ test('a stop_question reply is typed only into the idle input box and its UserPr
   assert.equal(await outcome, 'answered')
   assert.deepEqual(JSON.parse(store.get('SELECT answer FROM requests WHERE id = ?', 'q-stop').answer), { via: 'browser', choice: 'reply' })
 })
+
+const terminalKey = (s, key) => term.request('write', { ptyId: s.ptyId, data: b64(key), source: { kind: 'terminal', name: 'test-terminal' } })
+
+test('a terminal answer while the deck keys are still in flight is a terminal answer, counted and audited', async t => {
+  // The owner presses 1 in the terminal before deckd answers the guarded write, which the keypress
+  // makes deckd refuse.
+  const ctx = {}
+  const s = await scenario(t, 'approve-safe', { claudePid: 4242, wrapLink: link => linkWith(link, { writeGuarded: async () => {
+    await terminalKey(ctx.s, '1')
+    await until(() => ctx.s.row(ctx.id).state === 'answered', 'the PostToolUse to close it')
+    throw Object.assign(new Error('typing_in_terminal'), { code: 'typing_in_terminal' })
+  } }) })
+  ctx.s = s
+  const req = await s.request('npm run test')
+  ctx.id = req.id
+  await refused(s.deliverer.answer(req.id, { choice: 'allow' }), 'typing_in_terminal')
+  assert.deepEqual(inputs(s.log), ['1'])
+  assert.deepEqual(JSON.parse(s.row(req.id).answer), { via: 'terminal', choice: 'allow' })
+  assert.equal(s.store.get('SELECT count FROM rule_counters WHERE pattern = ?', 'Bash(npm run test)')?.count, 1)
+  const answered = s.audits(req.id).filter(row => row.kind === 'answered')
+  assert.deepEqual(answered.map(row => [row.via, row.choice]), [['terminal', 'allow']])
+})
+
+test('an AskUserQuestion hook that reports another option than the deck typed is a terminal answer', async t => {
+  // The deck's option 1 (A) is lost; the owner picks 2 (B) in the terminal.
+  const s = await scenario(t, 'question-options', { wrapLink: lossy, deliver: { verifyMs: 300 } })
+  const question = await until(() => s.store.get("SELECT * FROM requests WHERE kind = 'question' AND state = 'open' AND screen_match = 'on_screen'"), 'the question on screen')
+  const { outcome } = await s.deliverer.answer(question.id, { choice: 'option', optionKey: '1' })
+  assert.equal(await outcome, 'did_not_land')
+  await terminalKey(s, '2')
+  await until(() => s.row(question.id).state === 'answered', 'the PostToolUse to close it')
+  assert.deepEqual(JSON.parse(s.row(question.id).answer), { via: 'terminal', choice: 'allow' })
+  await until(() => s.audits(question.id).at(-1).kind === 'answered', 'the answered audit')
+  const audit = s.audits(question.id).at(-1)
+  assert.deepEqual([audit.via, audit.option_label], ['terminal', null])
+
+  // The same hook naming the deck's option proves the deck answer (no screen proof here).
+  const p = await scenario(t, 'question-options', { wrapLink: link => linkWith(link, { onParsed: () => () => {} }) })
+  const q2 = await until(() => p.store.get("SELECT * FROM requests WHERE kind = 'question' AND state = 'open' AND screen_match = 'on_screen'"), 'the question on screen')
+  const proved = await p.deliverer.answer(q2.id, { choice: 'option', optionKey: '1' })
+  assert.equal(await proved.outcome, 'answered')
+  assert.deepEqual(JSON.parse(p.row(q2.id).answer), { via: 'browser', choice: 'option' })
+  assert.equal(p.audits(q2.id).at(-1).option_label, 'A')
+})
+
+test('a Try again refused at write time keeps watching the earlier did_not_land answer', async t => {
+  let writes = 0
+  const s = await scenario(t, 'approve-safe', { claudePid: 4242, deliver: { verifyMs: 500 },
+    wrapLink: link => linkWith(link, { writeGuarded: (...args) => ++writes === 1 ? Promise.resolve({ at: Date.now() }) : link.writeGuarded(...args) }) })
+  const req = await s.request('npm run test')
+  const first = await s.deliverer.answer(req.id, { choice: 'allow' })
+  assert.equal(await first.outcome, 'did_not_land')
+  await terminalKey(s, 'x')
+  await sleep(100)
+  await refused(s.deliverer.answer(req.id, { choice: 'allow' }), 'typing_in_terminal')
+  assert.equal(s.row(req.id).delivery, 'did_not_land')
+  await terminalKey(s, '1')
+  await until(() => s.row(req.id).state === 'answered', 'the PostToolUse to close it')
+  await until(() => s.audits(req.id).some(row => row.kind === 'answered'), 'the answered audit')
+  assert.equal(s.store.get('SELECT count FROM rule_counters WHERE pattern = ?', 'Bash(npm run test)')?.count, 1)
+})
+
+test('a UserPromptSubmit closing a deck allow that did not land is a terminal deny with no rule count', async t => {
+  const s = await scenario(t, 'approve-safe', { wrapLink: lossy, deliver: { verifyMs: 300 } })
+  const req = await s.request('npm run test')
+  const { outcome } = await s.deliverer.answer(req.id, { choice: 'allow' })
+  assert.equal(await outcome, 'did_not_land')
+  s.pauseHooks()
+  captureHook(s, 'UserPromptSubmit')
+  assert.deepEqual(JSON.parse(s.row(req.id).answer), { via: 'terminal', choice: 'deny' })
+  await until(() => s.audits(req.id).at(-1).kind === 'answered', 'the answered audit')
+  assert.deepEqual([s.audits(req.id).at(-1).via, s.audits(req.id).at(-1).choice], ['terminal', 'deny'])
+  assert.equal(s.store.get('SELECT count(*) AS n FROM rule_counters').n, 0)
+})
+
+test('a hook contradicting the deck inside the verify window settles closed, and batch reports it not ok', async t => {
+  const s = await scenario(t, 'approve-safe', { wrapLink: lossy })
+  const req = await s.request('npm run test')
+  const { outcome } = await s.deliverer.answer(req.id, { choice: 'allow' })
+  await terminalKey(s, '2')
+  assert.equal(await outcome, 'closed')
+  assert.deepEqual(JSON.parse(s.row(req.id).answer), { via: 'terminal', choice: 'deny' })
+
+  const b = await scenario(t, 'approve-safe', { wrapLink: lossy })
+  const reqB = await b.request('npm run test')
+  const results = b.deliverer.batch([reqB.id])
+  await until(() => b.row(reqB.id).delivery === 'verifying', 'the batch write')
+  await terminalKey(b, '2')
+  assert.deepEqual(await results, [{ id: reqB.id, ok: false, error: 'request_closed' }])
+})

@@ -182,6 +182,21 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
   }
 
   /**
+   * Like `update`, only while the request is open; returns the row, or null when it was closed.
+   * @param {string} id
+   * @param {Record<string, unknown>} fields
+   */
+  function updateOpen (id, fields) {
+    const names = Object.keys(fields)
+    let changed = false
+    commit(() => store.tx(() => {
+      changed = store.run(`UPDATE requests SET ${names.map((n) => `${n} = ?`).join(', ')} WHERE id = ? AND state = 'open'`, ...names.map((n) => fields[n]), id).changes > 0
+      if (changed) store.appendEvent({ at: now(), type: 'request.updated', entityId: id, data: requestView(getRow(id)) })
+    }))
+    return changed ? getRow(id) : null
+  }
+
+  /**
    * One audit row; a failing audit write never changes the answer's outcome.
    * @param {string} kind
    * @param {any} row
@@ -292,12 +307,12 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
         const keys = answerKeys(row, body, parsed.prompt)
         if (row.kind === 'permission' && body.choice === 'option') tierChecks(row, { ...body, choice: keys.choice }, via)
         if (!sending) {
-          // `until` bounds how long a closing hook still counts as the deck's answer (request.mjs closingAnswer).
-          update(row.id, { delivery: 'sending', answer: JSON.stringify({ via, choice: keys.choice, until: now() + verifyMs + lateMs }) })
+          // Only the delivery state: the deck's answer is written once deckd accepts the keys, so a hook
+          // while the write is in flight is a terminal answer (request.mjs closingAnswer).
+          update(row.id, { delivery: 'sending' })
           sending = true
         }
         try {
-          stopWatch(row.id)
           await link.writeGuarded(session.pty_id, keys.data, { rev, quietMs: QUIET_MS })
         } catch (error) {
           if (/** @type {any} */ (error)?.code === 'screen_changed') {
@@ -306,14 +321,26 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
           }
           throw error
         }
-        row = update(row.id, { delivery: 'verifying' })
+        // The keys are written: a late watch of an earlier did_not_land answer gives way to this one.
+        // Until here it kept watching, so a refused Try again leaves it running.
+        stopWatch(row.id)
+        // `until` bounds how long a closing hook still counts as the deck's answer (request.mjs closingAnswer).
+        const answer = JSON.stringify({ via, choice: keys.choice, label: keys.label, until: now() + verifyMs + lateMs })
+        row = updateOpen(row.id, { delivery: 'verifying', answer }) ?? getRow(row.id)
         const outcome = verify(row.id, session.pty_id, row.source === 'stop_question' ? undefined : promptKey(parsed.prompt), { via, choice: keys.choice, label: keys.label })
         return { request: requestView(row), outcome }
       }
     } catch (error) {
       if (sending) {
         const current = getRow(row.id)
-        if (current?.state === 'open') update(row.id, { delivery: previous.delivery === 'did_not_land' ? 'did_not_land' : 'idle', answer: previous.answer })
+        if (current?.state === 'open') update(row.id, { delivery: previous.delivery === 'did_not_land' ? 'did_not_land' : 'idle' })
+        // A hook closed it while the keys were in flight: a terminal answer, audited here unless a late
+        // watch of an earlier attempt is still running and audits it.
+        else if (current?.state === 'answered' && !watches.has(row.id)) {
+          let answer = null
+          try { answer = JSON.parse(current.answer ?? 'null') } catch {}
+          note('answered', current, { via: 'terminal', choice: typeof answer?.choice === 'string' ? answer.choice : null })
+        }
       }
       throw error
     } finally {
