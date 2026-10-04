@@ -1,5 +1,5 @@
-// M1 and M2 accessibility (docs/deck/09-testing.md section 11.2, qa-checklist 1.3, 1.4, 1.5 and 1.9): axe on
-// every M1 and M2 screen and overlay with zero serious or critical violations, the focus traps, the skip link,
+// M1, M2 and M3 accessibility (docs/deck/09-testing.md section 11.2, qa-checklist 1.3, 1.4, 1.5 and 1.9): axe on
+// every M1, M2 and M3 screen and overlay with zero serious or critical violations, the focus traps, the skip link,
 // the way out of the live terminal (WCAG 2.1.2) and reduced motion.
 //
 // axe-core is a hub development dependency (hub/package.json), so `npm ci --prefix hub` installs it. This
@@ -10,11 +10,12 @@
 //   mkdir -p /tmp/hx/e2e && TMPDIR=/tmp/hx/e2e node --test hub/test/e2e/accessibility.spec.mjs
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, readFile } from 'node:fs/promises'
+import { access, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { buildWeb, fakeDeckd, hub, launchBrowser, openDeck, startDeck } from './observe.spec.mjs'
-import { control, startControl, typedInto } from './control.spec.mjs'
+import { buildWeb, fakeDeckd, hub, launchBrowser, openDeck, startDeck, until } from './observe.spec.mjs'
+import { control, placed, startControl, typedInto } from './control.spec.mjs'
+import { startUnblock, unblock } from './unblock.spec.mjs'
 
 async function findAxe() {
   const candidates = [process.env.AXE_CORE_PATH]
@@ -321,6 +322,149 @@ test('keyboard (qa 1.3): the Stop dialog takes focus on Cancel, keeps Tab inside
   await page.waitForSelector('.confirm-dialog', { state: 'detached' })
   assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Stop…', 'focus returns to Stop')
   assert.equal(h.session(vault.id).alive, true, 'Esc stopped nothing')
+})
+
+// M3 (09-testing.md section 11.2, "end of M3"): the answering surfaces on the unblock harness of unblock.spec.mjs
+// (real deckd, fake claude, the SYNTHETIC 2.1.285 Bash frames of D-95). Every axe finding is printed with its impact
+// by the `after` above; serious and critical ones fail. Findings this audit made are recorded with their severity
+// (qa-checklist 0.4) next to the test that shows them; S1 and S2 ones are todo tests until their fix tasks land.
+// Recorded when this audit was written:
+// - T17-F2 (S2, keyboard): focus leaves the drawer when the answered row leaves; the todo test below.
+// - T17-F3 (S3, axe `landmark-unique`, moderate): each drawer section is labelled by its count span alone
+//   (" · 1"), so two sections with the same count share a name. The M1 `drawer-busy` audit reports it too.
+// - No serious or critical axe finding on the answering drawer, the four PromptBars, Settings Approval rules with the
+//   revoke dialog, or the Changes diff.
+// - T17-F1 (S2) is functional, not an accessibility finding: unblock.spec.mjs.
+
+/** A Focus page on a PTY session, wide enough that the Focus terminal keeps the fake's frame (see unblock.spec.mjs). */
+async function focusOn(h, session, tier) {
+  const page = await openDeck(browser, h, `/s/${session.id}`, { viewport: { width: 2560, height: 1440 } })
+  await page.waitForSelector(`.prompt-bar--${tier}`)
+  await page.waitForSelector('.terminal-view .xterm-rows')
+  await page.click('.prompt-bar-summary')
+  await page.waitForTimeout(300)
+  await page.waitForSelector(`.prompt-bar--${tier}`)
+  return page
+}
+
+/** The snapshot rewrite that adds the fixture's two rule offers (one `anyFlags`, which no shipped tiers entry has). */
+function withOffers(h) {
+  const ids = new Map(h.deck.store.all('SELECT id, name FROM repos').map(row => [row.name, row.id]))
+  const offers = unblock.ruleOffers.map(({ repo, ...offer }) => ({ ...offer, repoId: ids.get(repo), repoKey: repo }))
+  return message => message.t === 'snapshot' ? { ...message, data: { ...message.data, ruleOffers: offers } } : message
+}
+
+test('axe (M3): the answering drawer with Safe, Caution, Destructive and question rows and two rule offers, and the PromptBar for each tier', { skip: skipAxe }, async t => {
+  const audit = auditor()
+  const h = await startUnblock(t, { web: web.dir })
+  const [safeSpec, destructiveSpec] = unblock.sessions.pty
+  const safe = await h.pty(safeSpec)
+  const caution = await h.pty(unblock.promptBar.caution)
+  const destructive = await h.pty(destructiveSpec)
+  const question = await h.pty(unblock.promptBar.question)
+  const asked = await until(() => h.deck.store.get("SELECT * FROM requests WHERE session_id = ? AND kind = 'question' AND state = 'open' AND screen_match = 'on_screen'", question.id), { message: 'the question on screen' })
+  question.request = asked
+  await h.observedSession()
+  const page = await openDeck(browser, h, '/', { rewrite: withOffers(h) })
+  await page.keyboard.press('Alt+KeyU')
+  await page.waitForSelector('.drawer-section--destructive .answer-confirm input')
+  await page.waitForSelector('.drawer-section--question .answer-options button')
+  await page.waitForSelector('.drawer-rule-note')
+  assert.deepEqual(await page.$$eval('.drawer-section', rows => rows.map(row => row.className.match(/drawer-section--(\w+)/)[1])), ['safe', 'caution', 'question', 'destructive'])
+  await audit.run(page, 'drawer-answering')
+  await page.check('.drawer-section--destructive .answer-confirm input')
+  await audit.run(page, 'drawer-answering-confirmed')
+  for (const [session, tier] of [[safe, 'safe'], [caution, 'caution'], [destructive, 'destructive'], [question, 'question']]) {
+    const focus = await focusOn(h, session, tier)
+    await audit.run(focus, `promptbar-${tier}`)
+    await focus.close()
+  }
+  audit.done()
+})
+
+test('axe (M3): Settings Approval rules with the revoke dialog open, and the Changes diff', { skip: skipAxe }, async t => {
+  const audit = auditor()
+  const h = await startUnblock(t, { web: web.dir, rules: true })
+  const page = await openDeck(browser, h, '/settings/rules')
+  await page.waitForSelector('.rule-row')
+  assert.equal(await page.locator('.rule-row').count(), 5, 'rules5: five rules')
+  await audit.run(page, 'settings-rules')
+  await page.locator('.rule-row button', { hasText: 'Revoke…' }).first().click()
+  await page.waitForSelector('.confirm-dialog')
+  await audit.run(page, 'settings-rules-revoke')
+
+  // The Changes diff of an edited file. Focus asks for it by absolute path, which the server refuses (finding
+  // T17-F1, unblock.spec.mjs); the error state is audited as it stands, and the diff itself is audited from the
+  // server's own answer for the repo-relative path.
+  const repo = 'turbidassist'
+  const dir = path.join(placed(control.scanRoot, h.home), repo)
+  const session = { key: 'a11y-diff', repo, sessionId: 'fx-unblock-a11y-diff' }
+  const id = await h.observe(session, [{ e: 'SessionStart', ago: 60 }])
+  await writeFile(path.join(dir, 'README.md'), `${repo}\nedited by the session\n`)
+  const edit = { tool_name: 'Edit', tool_input: { file_path: path.join(dir, 'README.md'), old_string: repo, new_string: `${repo}\nedited by the session`, replace_all: false } }
+  await h.observe(session, [{ e: 'PreToolUse', ...edit }, { e: 'PostToolUse', ...edit }, { e: 'Stop' }])
+  await until(() => (h.session(id).changedFiles ?? []).length === 1, { message: 'the changed file' })
+  const diffPage = await openDeck(browser, h, `/s/${id}?tab=changes`)
+  await diffPage.waitForSelector('.diff-view:not(.diff-view--loading)')
+  await audit.run(diffPage, 'focus-changes-diff-as-served')
+  const served = await h.api(`/api/sessions/${id}/diff?path=README.md`)
+  assert.equal(served.status, 200)
+  await diffPage.route(/\/api\/sessions\/[^/]+\/diff\?/, route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(served.data) }))
+  await diffPage.reload()
+  await diffPage.waitForSelector('.diff-line--add')
+  await audit.run(diffPage, 'focus-changes-diff')
+  audit.done()
+})
+
+test('keyboard (M3): the answering drawer traps Tab, opens on the checkbox when its first request is Destructive, and the revoke dialog focuses Cancel', async t => {
+  const h = await startUnblock(t, { web: web.dir, rules: true })
+  const destructive = await h.pty(unblock.sessions.pty[1])
+  const page = await openDeck(browser, h)
+  await page.keyboard.press('Alt+KeyU')
+  await page.waitForSelector('.drawer .answer-confirm input')
+  assert.equal(await page.evaluate(() => document.activeElement?.matches('.drawer-row--destructive .answer-confirm input')), true, 'initial focus is the Destructive checkbox, never Allow')
+  // A Safe row joins: the first row is now Safe, so a fresh drawer opens on its Allow once.
+  const safe = await h.pty(unblock.sessions.pty[0])
+  await page.waitForSelector(`.drawer-row[data-request="${safe.request.id}"] .answer-buttons .button--primary:not([disabled])`)
+  const outside = []
+  for (let i = 0; i < 40; i++) {
+    await page.keyboard.press(i % 7 === 6 ? 'Shift+Tab' : 'Tab')
+    if (!(await page.evaluate(() => document.querySelector('.drawer')?.contains(document.activeElement)))) outside.push(await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 60)))
+  }
+  assert.deepEqual(outside, [], 'Tab never leaves the answering drawer')
+  await page.keyboard.press('Escape')
+  await page.waitForSelector('.drawer', { state: 'detached' })
+  await page.keyboard.press('Alt+KeyU')
+  await page.waitForSelector('.drawer')
+  assert.equal(await page.evaluate(id => document.activeElement?.closest('.drawer-row')?.dataset.request, safe.request.id), safe.request.id, 'with a Safe row first, focus opens on it')
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Allow once')
+  assert.deepEqual(h.inputs(destructive.log), [], 'nothing was answered')
+
+  await page.goto(`${h.base}/settings/rules`)
+  await page.waitForSelector('.rule-row')
+  await page.locator('.rule-row button', { hasText: 'Revoke…' }).first().click()
+  await page.waitForSelector('.confirm-dialog')
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Cancel', 'the revoke dialog opens on Cancel')
+  assert.deepEqual(await page.$$eval('.confirm-actions button', rows => rows.map(row => row.textContent)), ['Cancel', 'Revoke rule'])
+})
+
+// Finding T17-F2 (S2, qa-checklist 0.4 "broken keyboard path"): when Alt A (or a click) answers the focused row and
+// the row leaves the drawer, focus falls to the page body. The drawer's keys (Up, Down, Alt A, Alt D, Esc) and its
+// Tab trap act only while focus is inside it, so the keyboard user is left outside a modal that is still open
+// (needs-you-drawer.md section 8: focus trap). A todo until the fix task this finding adds to the M3 plan lands.
+test('keyboard (M3): after Alt A answers the focused row and it leaves, focus stays in the drawer', { todo: 'T17-F2: focus falls to the body when the answered row leaves' }, async t => {
+  const h = await startUnblock(t, { web: web.dir })
+  const first = await h.pty(unblock.sessions.pty[0])
+  const second = await h.pty({ repo: 'discord-audit', script: 'approve-safe', summary: 'npm run test' })
+  const page = await openDeck(browser, h)
+  await page.keyboard.press('Alt+KeyU')
+  await page.waitForSelector(`.drawer-row[data-request="${second.request.id}"]`)
+  const focused = await page.evaluate(() => document.activeElement?.closest('.drawer-row')?.dataset.request)
+  await page.keyboard.press('Alt+KeyA')
+  await until(() => h.row(focused).state === 'answered', { message: 'the focused row to be answered' })
+  await page.waitForSelector(`.drawer-row[data-request="${focused}"]`, { state: 'detached' })
+  assert.deepEqual([h.inputs(first.log).length + h.inputs(second.log).length], [1])
+  assert.equal(await page.evaluate(() => !!document.querySelector('.drawer')?.contains(document.activeElement)), true, `focus stays in the drawer, not on ${await page.evaluate(() => document.activeElement?.tagName)}`)
 })
 
 const running = page => page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running')
