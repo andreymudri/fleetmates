@@ -4,6 +4,7 @@ import { linkHandler } from '../../shell/Rail.jsx'
 import { deckApi } from '../drawer/NeedsYouDrawer.jsx'
 import { Checklist } from '../first-run/FirstRun.jsx'
 import { readDensity, writeDensity } from '../../state/deck-store.js'
+import { fetchMeetings } from '../../state/actions.js'
 import { ApprovalRules, rulesNavSub, useRules } from './ApprovalRules.jsx'
 
 /** English copy for the M1 Settings sections (docs/deck/screens/settings.md section 9) plus the M1-only rows. */
@@ -42,6 +43,8 @@ export const SETTINGS_COPY = Object.freeze({
   'settings.conn.vault': 'Vault',
   'settings.conn.obsidian': 'Obsidian vault name',
   'settings.conn.turbid': 'TurbidAssist config.yaml',
+  'settings.conn.turbid.missing': 'config.yaml not found at {path}.',
+  'settings.conn.turbid.read': 'Read {n} tags from {path}.',
   'settings.conn.commands': 'Commands the deck runs',
   'settings.conn.claudeCommand': 'Claude Code command',
   'settings.conn.scribedCommand': 'scribed command',
@@ -277,6 +280,31 @@ export function notifyStatus(status, t) {
   return { tone: 'todo', text: tr('settings.notify.untested') }
 }
 
+/** The `config.yaml` path the server tries when the `turbidassistConfig` preference is unset (MEET-O11). */
+export const TURBID_DEFAULT_PATH = '~/dev/turbidassist/config.yaml'
+
+/**
+ * The TurbidAssist status line under the "TurbidAssist config.yaml" field, from a `GET /api/meetings` body:
+ * "config.yaml not found at {path}." while `configError` is set (its `path`, else the preference, else the default),
+ * else "Read {n} tags from {path}." (the body's `configPath` when the server sends one, else the preference, else the
+ * default). Null before the list has loaded. The path is server or setting text and goes through `shown`.
+ * @param {{ tags?: object[], configError?: { path?: string | null } | null, configPath?: string | null } | null | undefined} list
+ * @param {string | null | undefined} pref the `turbidassistConfig` preference
+ * @param {Function} [t]
+ * @returns {{ tone: 'ok'|'bad', text: string } | null}
+ */
+export function turbidStatus(list, pref, t) {
+  if (!list || typeof list !== 'object') return null
+  const tr = (key, params) => translate(t, SETTINGS_COPY, key, params)
+  const fallback = typeof pref === 'string' && pref ? pref : TURBID_DEFAULT_PATH
+  if (list.configError) {
+    const path = typeof list.configError.path === 'string' && list.configError.path ? list.configError.path : fallback
+    return { tone: 'bad', text: tr('settings.conn.turbid.missing', { path: shown(path) }) }
+  }
+  const path = typeof list.configPath === 'string' && list.configPath ? list.configPath : fallback
+  return { tone: 'ok', text: tr('settings.conn.turbid.read', { n: Array.isArray(list.tags) ? list.tags.length : 0, path: shown(path) }) }
+}
+
 /**
  * One dependency status line for Connections from its health row; the reason is server text and goes through `shown`.
  * @param {object | undefined} row a Health row
@@ -474,9 +502,10 @@ function TextPref({ pref, value, locked, t, error, note = null, onSave, onNote =
  * Connections section, pure (settings.md 4.5): folders, vault, TurbidAssist, the commands the deck runs,
  * dependency statuses with their start actions, the inline checklist and the stale threshold.
  * `notes` holds each field's last Save outcome as a copy key (saved, unchanged or a refusal); `onNote` sets or clears it.
- * @param {{ prefs: object, sources?: object, health?: object[], t?: Function, errors?: Record<string, string>, notes?: Record<string, string>, found?: number | null, busy?: Record<string, boolean>, startErrors?: Record<string, string>, checklist?: React.ReactNode, onSave: (key: string, value: unknown) => void, onNote?: (key: string, note: string | null) => void, onRescan: () => void, onStart: (dep: string) => void, onChecklist: () => void }} props
+ * `turbid` is the {@link turbidStatus} line shown under the "TurbidAssist config.yaml" field.
+ * @param {{ prefs: object, sources?: object, health?: object[], t?: Function, errors?: Record<string, string>, notes?: Record<string, string>, found?: number | null, busy?: Record<string, boolean>, startErrors?: Record<string, string>, checklist?: React.ReactNode, turbid?: { tone: string, text: string } | null, onSave: (key: string, value: unknown) => void, onNote?: (key: string, note: string | null) => void, onRescan: () => void, onStart: (dep: string) => void, onChecklist: () => void }} props
  */
-export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors = {}, notes = {}, found = null, busy = {}, startErrors = {}, checklist = null, onSave, onNote, onRescan, onStart, onChecklist }) {
+export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors = {}, notes = {}, found = null, busy = {}, startErrors = {}, checklist = null, turbid = null, onSave, onNote, onRescan, onStart, onChecklist }) {
   const tr = (key, params) => translate(t, SETTINGS_COPY, key, params)
   const text = pref => <TextPref key={pref.key} pref={pref} value={prefs[pref.key]} locked={sources[pref.key] === 'env'} t={t} error={errors[pref.key]} note={notes[pref.key] ?? null} onSave={onSave} onNote={onNote} />
   return (
@@ -488,6 +517,7 @@ export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors
         {found === null ? null : <span className="setting-hint" role="status">{tr('settings.conn.repos', { n: found })}</span>}
       </div>
       {CONNECTION_PREFS.slice(1).map(text)}
+      {turbid ? <p className={turbid.tone === 'ok' ? 'setting-hint turbid-status' : 'setting-error turbid-status'} role="status"><bdi>{turbid.text}</bdi></p> : null}
       <h3 className="settings-subheading">{tr('settings.conn.commands')}</h3>
       {COMMAND_PREFS.map(text)}
       <h3 className="settings-subheading">{tr('settings.conn.services')}</h3>
@@ -552,7 +582,8 @@ function failure(error) {
  * The `/settings/:section` route screen: loads preference sources, saves each control immediately through the
  * authenticated api, reverts on failure with "Could not save {setting}: {error}", and embeds the checklist in
  * Connections. The rules are fetched on mount and whenever `data.rulesRev` changes, for the nav subtitle and
- * the Approval rules section. Browser wiring; the pure sections and {@link savePref} carry the tested behavior.
+ * the Approval rules section. Connections reads `GET /api/meetings` when it opens and after the TurbidAssist
+ * preference changes, for the {@link turbidStatus} line. Browser wiring; the pure sections and {@link savePref} carry the tested behavior.
  * @param {{ route: { params: { section?: string } }, state: object, t?: Function, navigate: (to: string) => void, api?: object, feed?: object, dispatch?: Function }} props
  */
 export function Settings({ route, state, t, navigate, api, feed, dispatch }) {
@@ -581,6 +612,13 @@ export function Settings({ route, state, t, navigate, api, feed, dispatch }) {
     globalThis.document?.getElementById(globalThis.location.hash.slice(1))?.focus()
   }, [section, sources])
   const prefs = { ...state.data.prefs, ...pending }
+  const [meetingsList, setMeetingsList] = useState(null)
+  useEffect(() => {
+    if (section !== 'connections') return undefined
+    let current = true
+    fetchMeetings(client).then(data => { if (current) setMeetingsList(data ?? null) }, () => { if (current) setMeetingsList(null) })
+    return () => { current = false }
+  }, [client, section, prefs.turbidassistConfig])
   const known = { ...(sources ?? {}), ...state.data.sources }
   const onNote = (key, note) => setNotes(map => (map[key] ?? null) === note ? map : { ...map, [key]: note })
   const onSave = (key, value) => {
@@ -618,6 +656,7 @@ export function Settings({ route, state, t, navigate, api, feed, dispatch }) {
   } else if (section === 'connections') {
     body = <ConnectionsSection prefs={prefs} sources={known} health={state.data.health} t={t} errors={errors} notes={notes} found={found} busy={busy} startErrors={startErrors}
       checklist={checklist ? <Checklist state={state} t={t} navigate={navigate} api={client} feed={feed} mode="rerun" onDone={() => setChecklist(false)} /> : null}
+      turbid={turbidStatus(meetingsList, prefs.turbidassistConfig, t)}
       onSave={onSave} onNote={onNote} onRescan={onRescan} onStart={onStart} onChecklist={() => setChecklist(true)} />
   }
   return <SettingsView section={section} prefs={prefs} rules={rules.data} loading={sources === null} t={t} navigate={navigate}>{body}</SettingsView>
