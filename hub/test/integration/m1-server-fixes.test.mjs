@@ -50,7 +50,7 @@ function initRepo(dir) {
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
-const healthRows = deck => deck.store.all('SELECT at,data FROM events WHERE type=? ORDER BY seq', 'health.changed').map(row => ({ at: row.at, data: JSON.parse(row.data) }))
+const healthRows = deck => deck.store.all('SELECT at,data FROM events WHERE type=? ORDER BY seq', 'health.changed').map(row => ({ at: row.at, data: JSON.parse(row.data) })).filter(row => row.data.dep === 'deckd')
 
 function fakeDeckd(reply = {}) {
   const listeners = new Map()

@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { apiError } from './router.mjs'
+import { SESSION_ID } from '../meetings/history.mjs'
 
 /** Largest plan the API returns; the rest is cut and `truncated` is set (05-api 2.8). */
 export const PLAN_CAP = 256 * 1024
@@ -57,23 +58,78 @@ export async function readRunPlan(file) {
   } finally { await handle.close() }
 }
 
-const laterKinds = new Set(['vaultNote', 'meetingNote', 'postmeetLog'])
+const laterKinds = new Set(['vaultNote'])
+const meetingKinds = new Set(['meetingNote', 'postmeetLog'])
 
 /**
- * Validate a `POST /api/open` body. Only `runPlan` is served in M2; the later kinds are refused with
- * `details.reason: 'kind_not_available'`, and an unknown kind or malformed ref is a plain 422.
+ * Validate a `POST /api/open` body. `runPlan` takes `{ repoId, runId }`; `meetingNote` and `postmeetLog` (M4) take a
+ * meeting id string. `vaultNote` (M5) is refused with `details.reason: 'kind_not_available'`, and an unknown kind or
+ * malformed ref is a plain 422.
  * @param {object} body the parsed request body
- * @returns {{ kind: 'runPlan', ref: { repoId: string, runId: string } }}
+ * @returns {{ kind: 'runPlan', ref: { repoId: string, runId: string } } | { kind: 'meetingNote' | 'postmeetLog', ref: string }}
  */
 export function parseOpenRequest(body) {
   const keys = Object.keys(body)
   if (keys.some(key => !['kind', 'ref'].includes(key))) throw apiError(422, 'validation_failed', { fields: keys.filter(key => !['kind', 'ref'].includes(key)) })
   const { kind, ref } = body
   if (laterKinds.has(kind)) throw apiError(422, 'validation_failed', { fields: ['kind'], reason: 'kind_not_available' })
-  if (kind !== 'runPlan') throw apiError(422, 'validation_failed', { fields: ['kind'] })
   const text = value => typeof value === 'string' && value.length > 0 && !value.includes('\0')
+  if (meetingKinds.has(kind)) {
+    if (!text(ref)) throw apiError(422, 'validation_failed', { fields: ['ref'] })
+    return { kind, ref }
+  }
+  if (kind !== 'runPlan') throw apiError(422, 'validation_failed', { fields: ['kind'] })
   if (!ref || typeof ref !== 'object' || Array.isArray(ref) || Object.keys(ref).some(key => !['repoId', 'runId'].includes(key)) || !text(ref.repoId) || !text(ref.runId)) {
     throw apiError(422, 'validation_failed', { fields: ['ref'] })
   }
   return { kind, ref: { repoId: ref.repoId, runId: ref.runId } }
+}
+
+/**
+ * The realpath of `target` when it sits inside the realpath of `root` and is a regular file with no execute bit and
+ * the extension `ext` (08-security 4.9).
+ * @param {string} root
+ * @param {string} target absolute, or relative to `root`
+ * @param {string} ext lower-case extension with its dot
+ * @returns {Promise<{ root: string, file: string }>}
+ * @throws 404 `not_found` when the root or the file does not exist; 403 `path_not_allowed` for any refused path
+ */
+async function resolveInside(root, target, ext) {
+  if (typeof root !== 'string' || !root || root.includes('\0') || typeof target !== 'string' || target.includes('\0')) throw notAllowed()
+  let realRoot
+  try { realRoot = await fs.realpath(root) } catch (error) { throw missing(error) ? apiError(404, 'not_found') : notAllowed() }
+  let file
+  try { file = await fs.realpath(path.resolve(realRoot, target)) } catch (error) { throw missing(error) ? apiError(404, 'not_found') : notAllowed() }
+  if (!file.startsWith(realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep)) throw notAllowed()
+  const info = await fs.stat(file)
+  if (!info.isFile() || (info.mode & 0o111) !== 0 || path.extname(file).toLowerCase() !== ext) throw notAllowed()
+  return { root: realRoot, file }
+}
+
+/**
+ * The `obsidian://open` URL of a meeting note (kind `meetingNote`): `notePath` is vault-relative; its realpath must
+ * stay inside the vault's, be a regular `.md` file and carry no execute bit.
+ * @param {{ vaultPath: string, notePath: string, vaultName?: string | null }} where `vaultName` defaults to the
+ *   basename of the vault directory's realpath
+ * @returns {Promise<string>} `obsidian://open?vault=<name>&file=<encoded vault-relative path>`
+ * @throws 404 `not_found` or 403 `path_not_allowed`
+ */
+export async function resolveMeetingNote({ vaultPath, notePath, vaultName = null }) {
+  if (typeof notePath !== 'string' || !notePath || path.isAbsolute(notePath)) throw notAllowed()
+  const { root, file } = await resolveInside(vaultPath, notePath, '.md')
+  const name = typeof vaultName === 'string' && vaultName ? vaultName : path.basename(root)
+  return `obsidian://open?vault=${encodeURIComponent(name)}&file=${encodeURIComponent(path.relative(root, file))}`
+}
+
+/**
+ * The absolute realpath of a meeting's `postmeet.log` (kind `postmeetLog`): `<sessionDir>/<id>/postmeet.log`, its
+ * realpath inside `sessionDir`'s, a regular `.log` file with no execute bit.
+ * @param {string} sessionDir
+ * @param {string} id a session id
+ * @returns {Promise<string>}
+ * @throws 404 `not_found` or 403 `path_not_allowed`
+ */
+export async function resolvePostmeetLog(sessionDir, id) {
+  if (typeof id !== 'string' || !SESSION_ID.test(id)) throw apiError(404, 'not_found')
+  return (await resolveInside(sessionDir, path.join(id, 'postmeet.log'), '.log')).file
 }

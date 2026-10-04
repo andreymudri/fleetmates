@@ -8,7 +8,8 @@ const migrationsDir = fileURLToPath(new URL('./migrations/', import.meta.url))
 const migrations = readdirSync(migrationsDir).filter(name => /^\d{4}[-_].+\.sql$/.test(name)).sort()
 const latestVersion = Number(migrations.at(-1)?.slice(0, 4) ?? 0)
 const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
-const ephemeralEvents = new Set(['meeting.transcript', 'ask.delta', 'screen.tail', 'input.source', 'setup.check', 'ui.navigate', 'hb'])
+// Ephemeral events of 05-api 3.4: published without `seq` and never appended to `events`.
+const ephemeralEvents = new Set(['meeting.transcript', 'meeting.recovered', 'ask.delta', 'ask.done', 'ask.error', 'screen.tail', 'input.source', 'setup.check', 'ui.navigate', 'hb', 'error'])
 
 function newEpoch(now = Date.now()) {
   let time = BigInt(now)

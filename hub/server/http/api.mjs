@@ -1,7 +1,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { apiError } from './router.mjs'
-import { parseOpenRequest, readRunPlan, resolveRunPlan } from './open.mjs'
+import { parseOpenRequest, readRunPlan, resolveMeetingNote, resolvePostmeetLog, resolveRunPlan } from './open.mjs'
+import { MeetingFileError, SESSION_ID, foldText, listSessions, logTail, postState, readTranscript, searchTranscripts } from '../meetings/history.mjs'
+import { findNote, parseNote, readNote } from '../meetings/note.mjs'
+import { addPin, dismissItem, dismissed as dismissedKeys, getMeeting, listMeetings, pins as meetingPins, removePin, undismissItem } from '../meetings/store.mjs'
 import { persistSessionSummary } from '../machines/session.mjs'
 import { projectCounts } from '../machines/counts.mjs'
 import { createLauncher, headBranch, SCROLLBACK_LINES, SCROLLBACK_LINES_MAX } from '../launch/launch.mjs'
@@ -20,16 +23,20 @@ const configKeys = new Set(['port', 'scanRoot', 'lang', 'staleMinutes', 'claudeC
 const envKeys = { port: 'DECK_PORT', lang: 'DECK_LANG', vaultPath: 'VAULT_PATH' }
 const camel = row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]))
 // POST routes that take a JSON body; every other POST with a body is refused before routing.
-const postBodyRoutes = new Set(['open', 'sessions', 'requests/answer-batch', 'rules', 'rules/suggestions/dismiss'])
-/** Whether a POST to these segments may carry a body: the routes above and the request answer and follow-up. */
-const takesBody = (route, s) => postBodyRoutes.has(route) || (s[1] === 'requests' && s.length === 4 && ['answer', 'followup'].includes(s[3]))
+const postBodyRoutes = new Set(['open', 'sessions', 'requests/answer-batch', 'rules', 'rules/suggestions/dismiss', 'meetings/start', 'ask'])
+/** Whether a POST to these segments may carry a body: the routes above, the request answer and follow-up, and meeting pins. */
+const takesBody = (route, s) => postBodyRoutes.has(route) || (s[1] === 'requests' && s.length === 4 && ['answer', 'followup'].includes(s[3])) ||
+  (s[1] === 'meetings' && s.length === 4 && s[3] === 'pins')
 /** The keys each M3 body may hold (05-api 2.4 and 2.5); any other key is `validation_failed`. */
 const bodyKeys = {
   answer: ['choice', 'optionKey', 'text', 'confirm'],
   batch: ['ids', 'choice'],
   followup: ['text'],
   rule: ['repoKey', 'pattern', 'source'],
-  dismiss: ['repoKey', 'pattern']
+  dismiss: ['repoKey', 'pattern'],
+  start: ['tag'],
+  pins: ['t'],
+  ask: ['text', 'scope', 'threadId']
 }
 /**
  * HTTP statuses of the answer and rule codes, as 05-api section 4 lists them, with the answer refusals the
@@ -38,10 +45,11 @@ const bodyKeys = {
 const codeStatus = {
   confirm_required: 409, tier_forbids: 409, batch_not_safe: 409, not_on_screen: 409, answer_in_flight: 409, request_closed: 409,
   read_only_session: 409, deckd_outdated: 409, typing_in_terminal: 409, followup_window_closed: 409, options_unreadable: 409,
-  invalid_pattern: 422, destructive_rule: 422, rule_exists: 409, settings_changed: 409, settings_io_failed: 500
+  invalid_pattern: 422, destructive_rule: 422, rule_exists: 409, settings_changed: 409, settings_io_failed: 500,
+  unknown_tag: 422, scribed_refused: 409, scribed_unavailable: 503, not_recording: 409, ask_in_progress: 409, dependency_start_failed: 502
 }
 /** Codes whose request may succeed unchanged later (05-api section 4 `retryable`). */
-const retryableCodes = new Set(['deckd_unavailable', 'typing_in_terminal', 'settings_changed'])
+const retryableCodes = new Set(['deckd_unavailable', 'typing_in_terminal', 'settings_changed', 'scribed_unavailable'])
 function onlyKeys(body, keys) {
   const unknown = Object.keys(body).filter(key => !keys.includes(key))
   if (unknown.length) throw apiError(422, 'validation_failed', { fields: unknown })
@@ -78,9 +86,11 @@ function validatePref(key, value) {
  * (Task 16): `deliverer` (approvals/deliver.mjs), `rules` (approvals/rules.mjs `createRules`), `threshold()`
  * (the current `ruleSuggestAfter`), `tiersStatus()` (the tiers store's status), `ruleOffers()` (the
  * snapshot's open offers) and optionally `diff` (git-diff `sessionDiff`). Without it the answer and rule
- * routes answer 404 and the snapshot carries no offers.
+ * routes answer 404 and the snapshot carries no offers. `meetings` carries the M4 services (Task 11): `config()` (the
+ * Task 4 config result), `recorder` (meetings/recorder.mjs) and `ask` (meetings/ask.mjs); without it the meeting routes
+ * answer 404 and the snapshot's recorder comes from `recorder()`.
  */
-export function createApi({ store, projector, paths, env = {}, now = Date.now, publish, services, link, runReader, health, recorder = () => ({ state: 'idle' }), approvals = null }) {
+export function createApi({ store, projector, paths, env = {}, now = Date.now, publish, services, link, runReader, health, recorder = () => ({ state: 'idle' }), approvals = null, meetings = null }) {
   const configFile = path.join(paths.config, 'config.json')
   function preferences() {
     let config = {}
@@ -154,8 +164,170 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       data: { sessions: projection.sessions.filter(row => row.state !== 'ended' || row.endedAt >= now() - 86_400_000), requests: projection.requests.filter(row => row.state === 'open'),
         runs: withLeads(await runReader.list()).filter(activeRun), repos: repos(), counts: projection.counts, order: projection.home.order,
         recap: { reviewed: store.get('SELECT COUNT(*) AS n FROM sessions WHERE reviewed_at IS NOT NULL').n },
-        ruleOffers: approvals?.ruleOffers() ?? [], research: [], recorder: recorder(), health: health(), prefs, setup: { firstRunCompletedAt: prefs.firstRunCompletedAt } }
+        ruleOffers: approvals?.ruleOffers() ?? [], research: [], recorder: meetings ? recorderView() : recorder(), health: health(), prefs, setup: { firstRunCompletedAt: prefs.firstRunCompletedAt } }
     }
+  }
+  /** The M4 meeting services, or 404 for a server built without them. */
+  function mtg() {
+    if (!meetings) throw apiError(404, 'not_found')
+    return meetings
+  }
+  /** The config result when it read ok, else null. */
+  function meetingConfig() {
+    const config = mtg().config()
+    return config?.ok ? config : null
+  }
+  /** The recorder view; confidentiality only rises, so a stored confidential row marks the view confidential. */
+  function recorderView(view = mtg().recorder.view()) {
+    if (view.meetingId && !view.confidential && getMeeting(store, view.meetingId)?.confidential) return { ...view, confidential: true }
+    return view
+  }
+  const publishStored = events => { for (const row of events) publish({ seq: row.seq, at: row.at, type: row.type, entityId: row.entityId, data: row.data }) }
+  /** The stored meeting `id`, or 404. */
+  function meetingRow(id) {
+    const row = typeof id === 'string' && SESSION_ID.test(id) ? getMeeting(store, id) : null
+    if (!row) throw apiError(404, 'not_found')
+    return row
+  }
+  /** The vault-relative note path of a meeting: the stored one, else looked up on disk once it is synthesized. */
+  async function notePathOf(config, meeting) {
+    if (meeting.notePath) return meeting.notePath
+    if (meeting.state !== 'synthesized' || !config.vaultPath || !config.meetingsFolder) return null
+    try { return await findNote({ vaultPath: config.vaultPath, meetingsFolder: config.meetingsFolder, id: meeting.id, tag: meeting.tag, date: meeting.id.slice(0, 10) }) } catch { return null }
+  }
+  /** The parsed meeting note, read from disk on each call, or null. */
+  async function noteOf(config, meeting) {
+    if (!config?.vaultPath) return null
+    const notePath = await notePathOf(config, meeting)
+    if (!notePath) return null
+    try {
+      const text = await readNote({ vaultPath: config.vaultPath, notePath })
+      return text === null ? null : parseNote(text)
+    } catch { return null }
+  }
+  /** The deck-derived `stuck` flag of state-machines 6.4, false while recording, synthesized or without a config. */
+  async function stuckOf(config, meeting) {
+    if (!config || ['synthesized', 'recording'].includes(meeting.state)) return false
+    try { return (await postState(config.sessionDir, meeting.id, { now: now() })).stuck } catch { return false }
+  }
+  const refused = error => {
+    if (error instanceof MeetingFileError) throw apiError(403, 'path_not_allowed')
+    throw error
+  }
+  /** `GET /api/meetings`: the stored rows with title, open action item count, stuck and interrupted read per request. */
+  async function meetingList(q) {
+    const raw = mtg().config()
+    const config = raw?.ok ? raw : null
+    const limit = integer(q, 'limit', 50, 500)
+    const before = q.has('before') ? integer(q, 'before', null) : null
+    const view = recorderView()
+    const interrupted = new Map()
+    if (config) {
+      try { for (const entry of await listSessions(config.sessionDir, { now: now(), recordingId: view.meetingId })) interrupted.set(entry.id, entry.interrupted) } catch {}
+    }
+    const items = await Promise.all(listMeetings(store, { before, limit }).map(async row => {
+      const note = await noteOf(config, row)
+      const gone = new Set(dismissedKeys(store, row.id))
+      const actionItemCount = note ? note.actionItems.filter(item => !gone.has(item.key)).length : null
+      return { ...row, title: note?.title ?? null, actionItemCount, stuck: await stuckOf(config, row), interrupted: interrupted.get(row.id) === true }
+    }))
+    const configError = config ? null : { code: raw?.error?.code ?? 'not_found', line: raw?.error?.line ?? null, message: raw?.error?.message ?? 'no TurbidAssist config located', path: raw?.path ?? null }
+    return { meetings: items, recorder: view, tags: config ? config.tags : [], model: config?.batchModel ?? null, configPath: raw?.path ?? null, configError }
+  }
+  /** `GET /api/meetings/:id`: the meeting, its note with dismissals, pins, distinct speaker names and model, read per request. */
+  async function meetingDetail(id) {
+    const row = meetingRow(id)
+    const config = meetingConfig()
+    const note = await noteOf(config, row)
+    const gone = new Set(dismissedKeys(store, row.id))
+    let speakers = null
+    let logAt = null
+    if (config) {
+      try {
+        const transcript = await readTranscript(config.sessionDir, row.id)
+        if (transcript) speakers = [...new Set(transcript.lines.map(line => line.speaker))]
+      } catch {}
+      try { logAt = fs.lstatSync(path.join(config.sessionDir, row.id, 'postmeet.log')).mtimeMs } catch {}
+    }
+    const data = {
+      meeting: { ...row, title: note?.title ?? null, stuck: await stuckOf(config, row), logAt },
+      note: note ? { title: note.title, summary: note.summary, decisions: note.decisions, actionItems: note.actionItems.map(item => ({ ...item, dismissed: gone.has(item.key) })) } : null,
+      pins: meetingPins(store, row.id), speakers, model: config?.batchModel ?? null
+    }
+    const view = recorderView()
+    if (view.state === 'recording' && view.meetingId === row.id) {
+      try { data.asks = await mtg().ask.history(row.id) } catch {}
+    }
+    return data
+  }
+  /** `GET /api/meetings/:id/transcript`: the recorder ring for the meeting being recorded, else the disk, never cached. */
+  async function meetingTranscript(id) {
+    const row = meetingRow(id)
+    const view = recorderView()
+    if (view.meetingId === row.id && ['recording', 'stopping'].includes(view.state)) return { source: 'live', lines: mtg().recorder.ring(row.id) }
+    const config = meetingConfig()
+    if (!config) throw apiError(404, 'not_found')
+    const transcript = await readTranscript(config.sessionDir, row.id).catch(refused)
+    if (!transcript) throw apiError(404, 'not_found')
+    return { source: transcript.source, lines: transcript.lines }
+  }
+  /** `GET /api/meetings/:id/log`: the last `lines` (1 to 1000, default 200) lines of `postmeet.log`. */
+  async function meetingLog(id, q) {
+    const row = meetingRow(id)
+    const lines = integer(q, 'lines', 200, 1000)
+    const config = meetingConfig()
+    const text = config ? await logTail(config.sessionDir, row.id, lines).catch(refused) : null
+    if (text === null) throw apiError(404, 'not_found')
+    return { text }
+  }
+  /** `GET /api/meetings/search`: an on-demand scan of every session's transcript, confidential ones included, never cached. */
+  async function meetingSearch(q) {
+    mtg()
+    const text = q.get('q') ?? ''
+    if (foldText(text.trim()).folded.length < 2) throw apiError(422, 'validation_failed', { fields: ['q'] })
+    const config = meetingConfig()
+    if (!config) return { hits: [], meetingCount: 0, partial: false }
+    let sessions = []
+    try { sessions = await listSessions(config.sessionDir, { now: now(), recordingId: recorderView().meetingId }) } catch {}
+    return searchTranscripts(sessions, text)
+  }
+  /** `POST /api/meetings/:id/pins`: only for the meeting being recorded; a pin within 2 s of another returns that one. */
+  function meetingPin(id, body) {
+    onlyKeys(body, bodyKeys.pins)
+    const view = recorderView()
+    if (view.state !== 'recording' || view.meetingId !== id) {
+      meetingRow(id)
+      throw apiError(409, 'not_recording')
+    }
+    if (body.t !== undefined && !(typeof body.t === 'number' && Number.isFinite(body.t) && body.t >= 0)) throw apiError(422, 'validation_failed', { fields: ['t'] })
+    const t = body.t ?? view.elapsedS
+    const ring = mtg().recorder.ring(id)
+    const line = ring.find(entry => entry.t0 === t) ?? ring.at(-1) ?? null
+    const result = addPin(store, id, { t, label: view.confidential ? null : line?.text ?? null, at: now() })
+    if (!result) throw apiError(404, 'not_found')
+    publishStored(result.events)
+    return { status: result.created ? 201 : 200, data: { pin: result.pin } }
+  }
+  /** `POST /api/ask` with `scope: 'meeting:<id>'`, the only scope in M4; the answer streams as ephemeral events. */
+  function meetingAsk(body) {
+    onlyKeys(body, bodyKeys.ask)
+    const fields = []
+    if (typeof body.text !== 'string' || !body.text.trim() || body.text.includes('\0')) fields.push('text')
+    const scope = typeof body.scope === 'string' ? /^meeting:(.+)$/s.exec(body.scope) : null
+    if (!scope) fields.push('scope')
+    if (body.threadId !== undefined && (typeof body.threadId !== 'string' || !body.threadId)) fields.push('threadId')
+    if (fields.length) throw apiError(422, 'validation_failed', { fields })
+    return { status: 202, data: mtg().ask.ask(scope[1], body.text) }
+  }
+  /** `POST /api/open` for the meeting kinds (08-security 4.9); without a readable config the kinds are not available. */
+  async function openMeeting({ kind, ref }) {
+    const config = meetings ? meetingConfig() : null
+    if (!config) throw apiError(422, 'validation_failed', { fields: ['kind'], reason: 'kind_not_available' })
+    const row = meetingRow(ref)
+    if (kind === 'postmeetLog') return services.open(await resolvePostmeetLog(config.sessionDir, row.id))
+    const notePath = config.vaultPath ? await notePathOf(config, row) : null
+    if (!notePath) throw apiError(404, 'not_found')
+    return services.open(await resolveMeetingNote({ vaultPath: config.vaultPath, notePath, vaultName: preferences().prefs.obsidianVaultName }))
   }
   /** The M3 services, or 404 for a server built without them. */
   function m3() {
@@ -246,6 +418,11 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         }
       }
       if (route === 'rules') return ok(await rulesBody(q))
+      if (route === 'meetings') return ok(await meetingList(q))
+      if (route === 'meetings/search') return ok(await meetingSearch(q))
+      if (s[1] === 'meetings' && s.length === 3) return ok(await meetingDetail(s[2]))
+      if (s[1] === 'meetings' && s.length === 4 && s[3] === 'transcript') return ok(await meetingTranscript(s[2]))
+      if (s[1] === 'meetings' && s.length === 4 && s[3] === 'log') return ok(await meetingLog(s[2], q))
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'disk') return ok(await services.disk(filePath(session(s[2]).cwd, 'cwd')))
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'scrollback') return launcher.scrollback(session(s[2]).id, integer(q, 'lines', SCROLLBACK_LINES, SCROLLBACK_LINES_MAX))
       if (route === 'requests') {
@@ -359,12 +536,29 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return { status: 204, data: undefined }
       }
       if (route === 'open') {
-        const { ref } = parseOpenRequest(body)
+        const request = parseOpenRequest(body)
+        if (request.kind !== 'runPlan') {
+          await openMeeting(request)
+          return { status: 202, data: {} }
+        }
+        const { ref } = request
         const run = (await runReader.list()).find(run => run.repoId === ref.repoId && run.runId === ref.runId)
         if (!run) throw apiError(404, 'not_found')
         await services.open(await resolveRunPlan(run, run.repoId))
         return { status: 202, data: {} }
       }
+      if (route === 'meetings/start') {
+        onlyKeys(body, bodyKeys.start)
+        return { status: 202, data: { recorder: recorderView(await mtg().recorder.start(body.tag)) } }
+      }
+      if (route === 'meetings/stop') return { status: 202, data: { recorder: recorderView(mtg().recorder.stop()) } }
+      if (s[1] === 'meetings' && s.length === 4 && s[3] === 'pins') return meetingPin(s[2], body)
+      if (s[1] === 'meetings' && s.length === 6 && s[3] === 'items' && s[5] === 'dismiss') {
+        const row = meetingRow(s[2])
+        if (!/^[0-9a-f]{40}$/.test(s[4]) || !dismissItem(store, row.id, s[4], now()).dismissed) throw apiError(404, 'not_found')
+        return { status: 204, data: undefined }
+      }
+      if (route === 'ask') return meetingAsk(body)
       if (route === 'sessions') {
         const unknown = Object.keys(body).filter(key => !['repoKey', 'task', 'mode'].includes(key))
         if (unknown.length || body.repoKey !== undefined && typeof body.repoKey !== 'string') throw apiError(422, 'validation_failed', { fields: unknown.length ? unknown : ['repoKey'] })
@@ -422,6 +616,18 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       }
     }
     if (method === 'DELETE') {
+      if (s[1] === 'meetings' && s.length === 5 && s[3] === 'pins') {
+        const row = meetingRow(s[2])
+        const { removed, events } = removePin(store, row.id, s[4], now())
+        if (!removed) throw apiError(404, 'not_found')
+        publishStored(events)
+        return { status: 204, data: undefined }
+      }
+      if (s[1] === 'meetings' && s.length === 6 && s[3] === 'items' && s[5] === 'dismiss') {
+        mtg()
+        undismissItem(store, s[2], s[4])
+        return { status: 204, data: undefined }
+      }
       if (s[1] === 'rules' && s.length === 4) {
         // `?undo=1` is the toast Undo after accepting a suggestion: rule_audit records `undo` instead of `revoked`.
         const undo = q.get('undo')

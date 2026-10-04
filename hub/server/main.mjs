@@ -31,6 +31,12 @@ import { createRules, offers as ruleOffers, recordAllow, ruleThreshold } from '.
 import { record as recordAudit } from './approvals/audit.mjs'
 import { countFor } from './approvals/confirm-count.mjs'
 import { classifyHook } from './machines/request.mjs'
+import { ScribedUnavailable, SOCKET_NAME, createScribedClient } from './adapters/scribed.mjs'
+import { createConfigWatcher, locateConfig, readConfig } from './meetings/config.mjs'
+import { createRecorder } from './meetings/recorder.mjs'
+import { createPostWatch } from './meetings/post-watch.mjs'
+import { createMeetingAsk } from './meetings/ask.mjs'
+import { startScribed } from './meetings/start-scribed.mjs'
 const builtSpa = fileURLToPath(new URL('../web/dist/', import.meta.url))
 const deckVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 // Consecutive envelopes at the current deckHookVersion that return an outdated hooks row to ok.
@@ -38,6 +44,44 @@ const currentHookRun = 3
 function runCommand(file, args, env) {
   try { return { status: 0, stdout: execFileSync(file, args, { encoding: 'utf8', timeout: 5000, env, stdio: ['ignore', 'pipe', 'pipe'] }), stderr: '' } }
   catch (error) { return { status: error.status ?? 1, stdout: '', stderr: '' } }
+}
+/**
+ * A scribed client for a server without `XDG_RUNTIME_DIR`: every call fails as unavailable, so nothing falls back to
+ * the process environment's socket (scribed.mjs `defaultSocketPath` reads `process.env`).
+ */
+function unavailableScribed() {
+  const fail = async () => { throw new ScribedUnavailable('XDG_RUNTIME_DIR is not set') }
+  return {
+    status: fail, start: fail, stop: fail, tail: fail, history: fail, ask: fail,
+    subscribe({ onClose = () => {} } = {}) {
+      let closed = false
+      const finish = error => { if (!closed) { closed = true
+        onClose(error) } }
+      queueMicrotask(() => finish(new ScribedUnavailable('XDG_RUNTIME_DIR is not set')))
+      return { close: () => finish(null) }
+    },
+    stats: () => ({ unknownTypes: 0 })
+  }
+}
+/**
+ * The recorder face of an injected `scribedStatus` stand-in (`{ start, stop, snapshot, isRecording }`, as
+ * answer-api.test.mjs passes it): quiet mode and the health row read it; it starts and stops nothing.
+ */
+function standInRecorder(status, now) {
+  const view = () => ({ state: status.isRecording() ? 'recording' : 'idle', meetingId: null, tag: null, confidential: false, elapsedS: 0, since: null,
+    startedAt: null, apps: [], quiet: status.isRecording(), slow: false, lost: false, lastError: null })
+  const health = () => ({ dep: 'scribed', state: status.snapshot()?.state ?? 'unknown', reason: null, since: now(), nextProbeAt: null, attempt: 0 })
+  return {
+    view, health, isRecording: () => status.isRecording(), ring: () => [],
+    start: async () => { throw apiError(503, 'scribed_unavailable') },
+    stop: () => { throw apiError(409, 'not_recording') },
+    probeNow: async () => health(),
+    close: () => status.stop?.()
+  }
+}
+const insideDir = (root, target) => target === root || target.startsWith(root.endsWith(path.sep) ? root : root + path.sep)
+const realOrResolved = file => {
+  try { return fs.realpathSync(file) } catch { return path.resolve(file) }
 }
 function privateDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -85,13 +129,13 @@ export async function createDeckServer(options = {}) {
   let api
   let stopped = false
   let notifications
-  let recording
+  let recorder
   let notificationWork = Promise.resolve()
   let retentionTimeout = null
   const timers = []
   let link
   let hooksState
-  const health = () => [link.health(), { ...hooksState }, ...['vault-mcp', 'scribed', 'notify', 'fleetmates'].map(dep => ({ dep, state: dep === 'scribed' ? recording?.snapshot().state ?? 'unknown' : 'unknown', reason: null, since: now(), nextProbeAt: null, attempt: 0 }))]
+  const health = () => [link.health(), { ...hooksState }, ...['vault-mcp', 'scribed', 'notify', 'fleetmates'].map(dep => dep === 'scribed' && recorder ? recorder.health() : { dep, state: 'unknown', reason: null, since: now(), nextProbeAt: null, attempt: 0 })]
   const subscribers = new Set()
   let archiveAfter
   let approvalsEvent = () => {}
@@ -224,12 +268,70 @@ export async function createDeckServer(options = {}) {
     if (event.type === 'request.opened' && event.data?.tier === 'destructive') fillLabel(event.data.id)
     if (event.type === 'request.closed' && event.data?.id) auditClosed(event.data)
     const prefs = event.type === 'prefs.changed' ? event.data?.prefs : null
+    // A changed TurbidAssist config path is located and read again; a different result syncs the meetings.
+    if (prefs) configWatcher.reload()
     if (prefs && Object.hasOwn(prefs, 'ruleSuggestAfter') && prefs.ruleSuggestAfter !== threshold) {
       threshold = prefs.ruleSuggestAfter
       rules.setThreshold(threshold)
     }
   }
-  const ingest = createIngestor({ now, onEvent: envelope => { projector.applyHooks([envelope])
+  // M4 meetings (docs/plans/2026-10-04-deck-m4.md, Task 11): the TurbidAssist config, the recorder (the 2 s scribed
+  // poll that quiet mode and the scribed health row read), the post-processing watch and the meeting ask.
+  const meetingsLog = options.meetingsLog ?? (() => {})
+  let syncReason = null
+  // The prefs, or null before the API exists or when reading them throws (an unreadable config.json), so the
+  // recorder's view and the config watcher's locate get null rather than the exception.
+  const currentPrefs = () => {
+    try { return api?.preferences().prefs ?? null } catch { return null }
+  }
+  const syncMeetings = () => {
+    if (stopped) return Promise.resolve()
+    const view = recorder.view()
+    return postWatch.sync({ recordingId: ['recording', 'stopping'].includes(view.state) ? view.meetingId : null }).then(result => {
+      const reason = result.ok ? null : result.reason
+      if (reason === syncReason) return
+      syncReason = reason
+      // Only the reason is logged: never a path, a tag or a title.
+      if (reason === 'session_dir') { try { process.stderr.write('deck: meetings.sync_failed session_dir\n') } catch {} }
+      meetingsLog({ event: 'meetings.sync', ok: result.ok, reason })
+    }, () => {})
+  }
+  let sessionRoot = null
+  const configWatcher = createConfigWatcher({
+    locate: () => locateConfig({ pref: currentPrefs()?.turbidassistConfig ?? config.turbidassistConfig ?? null, home: paths.home }),
+    read: file => readConfig(file, { home: paths.home }),
+    onChange: next => {
+      // The hook guard fails closed: a config that stops reading keeps the last good session_dir guarded, and only
+      // a later config that reads ok replaces it.
+      if (next?.ok) sessionRoot = realOrResolved(next.sessionDir)
+      void syncMeetings()
+    },
+    debounceMs: options.configDebounceMs ?? 1000
+  })
+  const meetingConfig = () => configWatcher.current()
+  if (meetingConfig()?.ok) sessionRoot = realOrResolved(meetingConfig().sessionDir)
+  const scribedClient = options.scribedClient ?? (env.XDG_RUNTIME_DIR
+    ? createScribedClient({ socketPath: path.join(env.XDG_RUNTIME_DIR, SOCKET_NAME), ...(options.scribedTimeouts ? { timeouts: options.scribedTimeouts } : {}) })
+    : unavailableScribed())
+  const postWatch = createPostWatch({ store, config: meetingConfig, publish, now })
+  recorder = options.scribedStatus ? standInRecorder(options.scribedStatus, now) : createRecorder({
+    client: scribedClient, store, config: meetingConfig, prefs: () => currentPrefs() ?? {}, publish, now, log: meetingsLog,
+    onStopped: id => postWatch.watch(id), ...(options.scribedPollMs ? { pollMs: options.scribedPollMs } : {})
+  })
+  const meetingAsk = createMeetingAsk({ client: scribedClient, recorder, publish, now, log: meetingsLog })
+  // 11-meetings section 6, second guard: a hook from a process running inside session_dir is dropped before the
+  // projector sees it, and only counted.
+  let meetingHookDrops = 0
+  const insideSessionDir = envelope => {
+    const cwd = envelope?.hook?.cwd
+    return sessionRoot !== null && typeof cwd === 'string' && cwd !== '' && !cwd.includes('\0') && insideDir(sessionRoot, realOrResolved(cwd))
+  }
+  const ingest = createIngestor({ now, onEvent: envelope => {
+    if (insideSessionDir(envelope)) {
+      meetingHookDrops++
+      return
+    }
+    projector.applyHooks([envelope])
     noteHookVersion(envelope)
     reapplyScreen(envelope) }, onRejected: row => store.run('INSERT INTO rejected_events(received_at,via,reason,raw) VALUES(?,?,?,?)', row.receivedAt, row.via, row.reason, '') })
   const scanRoot = () => {
@@ -312,13 +414,19 @@ export async function createDeckServer(options = {}) {
       finally { recheckHooks() }
     },
     async startDependency(dep) {
-      const result = dep === 'deckd' ? run('systemctl', ['--user', 'start', 'fleetmates-deckd.service']) : run(api.preferences().prefs.scribedCommand, ['start'])
+      if (dep === 'scribed') {
+        // OPS-O1: the decided systemd-run command, with the token-free environment, then an immediate probe.
+        await startScribed({ scribedCommand: api.preferences().prefs.scribedCommand, env: processEnv, probe: () => scribedClient.status(),
+          ...(options.scribedExecFile ? { execFile: options.scribedExecFile } : {}) })
+        return recorder.probeNow()
+      }
+      const result = run('systemctl', ['--user', 'start', 'fleetmates-deckd.service'])
       if (result.status !== 0) throw apiError(502, 'dependency_start_failed')
-      if (dep === 'deckd') return link.retry()
-      return { dep, state: 'checking', reason: null, since: now(), nextProbeAt: now(), attempt: 0 }
+      return link.retry()
     },
     async retryDependency(dep) {
       if (dep === 'deckd') return link.retry()
+      if (dep === 'scribed') return recorder.probeNow()
       return { dep, state: 'checking', reason: null, since: now(), nextProbeAt: now(), attempt: 0 }
     },
     async notify() {
@@ -364,7 +472,7 @@ export async function createDeckServer(options = {}) {
     },
     ...options.services
   }
-  api = createApi({ store, projector, paths, env, now, publish, services, link, runReader: reader, health, recorder: () => ({ state: recording?.isRecording() ? 'recording' : 'idle' }),
+  api = createApi({ store, projector, paths, env, now, publish, services, link, runReader: reader, health, meetings: { config: meetingConfig, recorder, ask: meetingAsk },
     approvals: { deliverer, rules, threshold: () => threshold, tiersStatus: () => tiersStore.status(),
       ruleOffers: () => ruleOffers(store, { threshold, tiers: tiersStore.current() }), ...(options.diff ? { diff: options.diff } : {}) } })
   function refreshToken() {
@@ -464,7 +572,10 @@ export async function createDeckServer(options = {}) {
     if (retentionTimeout !== null) retentionTimer.clear(retentionTimeout)
     retentionTimeout = null
     for (const timer of timers) clearInterval(timer)
-    recording?.stop()
+    meetingAsk.close()
+    recorder.close()
+    postWatch.close()
+    configWatcher.close()
     await notificationWork.catch(() => {})
     notifications?.close()
     await Promise.allSettled([...labelWork])
@@ -486,18 +597,16 @@ export async function createDeckServer(options = {}) {
     const sweep = setInterval(archiveSweep, options.archiveSweepMs ?? 600_000)
     sweep.unref()
     timers.push(sweep)
+    // The first probe settles the recorder before the history sync, so the session being recorded is listed as such.
+    if (options.scribedStatus) await options.scribedStatus.start?.()
+    await recorder.probeNow().catch(() => {})
+    await syncMeetings()
     if (options.notifications !== false) {
-      const [{ createNotifier }, { createNotificationMachine }, { createScribedStatus }] = await Promise.all([
-        import('./adapters/notify.mjs'), import('./machines/notification.mjs'), import('./adapters/scribed-status.mjs')
+      const [{ createNotifier }, { createNotificationMachine }] = await Promise.all([
+        import('./adapters/notify.mjs'), import('./machines/notification.mjs')
       ])
-      recording = options.scribedStatus ?? createScribedStatus({
-        socketPath: env.XDG_RUNTIME_DIR ? path.join(env.XDG_RUNTIME_DIR, 'turbidassist.sock') : null,
-        now, ...(options.scribedProbe ? { status: options.scribedProbe } : {}),
-        pollMs: options.scribedPollMs ?? 2000, timeoutMs: options.scribedTimeoutMs ?? 1000
-      })
       notifications = createNotificationMachine({ store, now, publish, onAction: popupAction,
-        notifier: options.notifier ?? createNotifier({ env: processEnv }), recording: () => recording.isRecording() })
-      await recording.start()
+        notifier: options.notifier ?? createNotifier({ env: processEnv }), recording: () => recorder.isRecording() })
     }
     spool = await startSpoolDrain({ dir: paths.spool, ingest })
     if (env.XDG_RUNTIME_DIR) hooks = await startHookSocket({ runtimeDir: env.XDG_RUNTIME_DIR, ingest })
@@ -553,7 +662,9 @@ export async function createDeckServer(options = {}) {
   } catch (error) { await close()
     throw error }
   return {
-    server, store, projector, ingest, epoch, publish, link, notifications, recording, snapshot: api.snapshot, preferences: api.preferences,
+    server, store, projector, ingest, epoch, publish, link, notifications, recording: recorder, recorder, snapshot: api.snapshot, preferences: api.preferences,
+    /** Hook envelopes dropped because their `cwd` is inside the configured `session_dir`. */
+    meetingHookDrops: () => meetingHookDrops,
     address: () => server.address(), close,
     /** Subscribe a notification consumer to committed events; return its removal function. */
     subscribe(callback) { subscribers.add(callback)
