@@ -91,8 +91,9 @@ test('a rule candidate comes only from a single plain Safe command with a rule (
   const s = sandbox()
   try {
     const cargo = s.bash('cargo test --release')
-    assert.equal(cargo.ruleCandidate, 'Bash(cargo test:*)')
-    assert.equal(cargo.ruleNote, 'anyFlags')
+    // D-102, D-103: no tiers entry carries a Bash prefix rule, so cargo test has none.
+    assert.equal(cargo.ruleCandidate, null)
+    assert.equal(cargo.ruleNote, null)
     const script = s.bash('npm run lint')
     assert.equal(script.ruleCandidate, 'Bash(npm run lint)')
     assert.equal(script.ruleNote, null)

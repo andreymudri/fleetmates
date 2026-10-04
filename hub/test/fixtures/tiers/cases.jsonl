@@ -1,4 +1,4 @@
-{"toolName":"Bash","toolInput":{"command":"cargo test --release combat::"},"cwd":"/home/you/repo","expected":"safe","rule":"Bash(cargo test:*)","ruleNote":"anyFlags"}
+{"toolName":"Bash","toolInput":{"command":"cargo test --release combat::"},"cwd":"/home/you/repo","expected":"safe","rule":null,"ruleNote":null}
 {"toolName":"Bash","toolInput":{"command":"RUST_LOG=debug cargo test"},"cwd":"/home/you/repo","expected":"caution","note":"D-87: an assignment is not plain (4.4 said Safe)"}
 {"toolName":"Bash","toolInput":{"command":"cargo test && git push --force origin ui/inventory"},"cwd":"/home/you/repo","expected":"destructive"}
 {"toolName":"Bash","toolInput":{"command":"npm test | tee out.log"},"cwd":"/home/you/repo","expected":"caution","note":"D-87: tee is not on PLAIN_COMMANDS (4.4 said Safe)"}
@@ -57,7 +57,7 @@
 {"toolName":"Bash","toolInput":{"command":"cargo test --config 'build.rustc-wrapper=\"/tmp/x\"'"},"cwd":"/home/you/repo","expected":"caution"}
 {"toolName":"Bash","toolInput":{"command":"cargo test --config 'target.x86_64-unknown-linux-gnu.runner=\"x\"'"},"cwd":"/home/you/repo","expected":"caution"}
 {"toolName":"Bash","toolInput":{"command":"cargo build --target-dir /tmp/t"},"cwd":"/home/you/repo","expected":"caution"}
-{"toolName":"Bash","toolInput":{"command":"cargo build --target-dir target2"},"cwd":"/home/you/repo","expected":"safe","rule":"Bash(cargo build:*)","ruleNote":"anyFlags"}
+{"toolName":"Bash","toolInput":{"command":"cargo build --target-dir target2"},"cwd":"/home/you/repo","expected":"safe","rule":null,"ruleNote":null}
 {"toolName":"Bash","toolInput":{"command":"pytest -p evil"},"cwd":"/home/you/repo","expected":"caution"}
 {"toolName":"Bash","toolInput":{"command":"pytest -c /tmp/x.ini"},"cwd":"/home/you/repo","expected":"caution"}
 {"toolName":"Bash","toolInput":{"command":"pytest --rootdir=/"},"cwd":"/home/you/repo","expected":"caution"}
@@ -793,7 +793,7 @@
 {"toolName":"Bash","toolInput":{"command":"pytest -q @src/args.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"reads more arguments from a file","note":"D-91 (2)"}
 {"toolName":"Bash","toolInput":{"command":"pytest src @src/args.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"reads more arguments from a file","note":"D-91 (2) sibling"}
 {"toolName":"Bash","toolInput":{"command":"mypy @src/args.txt"},"cwd":"/home/you/repo","expected":"caution","reason":"reads more arguments from a file","note":"D-91 (2): argparse fromfile_prefix_chars"}
-{"toolName":"Bash","toolInput":{"command":"pytest src"},"cwd":"/home/you/repo","expected":"safe","rule":"Bash(pytest:*)","ruleNote":"anyFlags"}
+{"toolName":"Bash","toolInput":{"command":"pytest src"},"cwd":"/home/you/repo","expected":"safe","rule":null,"ruleNote":null}
 {"toolName":"Write","toolInput":{"file_path":"tools/hooks/pre-commit","content":"x"},"cwd":"/home/you/linked","repoRoot":"/home/you/linked","expected":"caution","reason":"changes what a build, test or hook runs","note":"D-91 (3): round 6, the real target of .githooks"}
 {"toolName":"Edit","toolInput":{"file_path":"tools/hooks/pre-commit","old_string":"a","new_string":"b"},"cwd":"/home/you/linked","repoRoot":"/home/you/linked","expected":"caution","reason":"changes what a build, test or hook runs","note":"D-91 (3)"}
 {"toolName":"Write","toolInput":{"file_path":"tools/hooks/reference-transaction","content":"x"},"cwd":"/home/you/linked","repoRoot":"/home/you/linked","expected":"caution","reason":"changes what a build, test or hook runs","note":"D-91 (3) sibling: a new hook"}
