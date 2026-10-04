@@ -5472,7 +5472,7 @@ test('leadRunId reads --run only from the scripts/cli.mjs command segment', () =
 
 test('request open stores the M3 tier, reasons and rule candidate, and a notification-only request stays Caution', () => {
   const cases = [
-    ['cargo test --release', 'safe', 'Bash(cargo test:*)', 'safe.cargo.test'],
+    ['mypy src', 'safe', 'Bash(mypy:*)', 'safe.python.mypy'],
     ['npm install', 'caution', null, 'caution.npm.install'],
     ['git push --force origin main', 'destructive', null, 'destructive.git.push-force']
   ]
