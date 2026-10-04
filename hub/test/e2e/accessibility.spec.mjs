@@ -471,7 +471,26 @@ test('keyboard (M3): after Alt A answers the focused row and it leaves, focus st
   assert.equal(await page.evaluate(() => !!document.querySelector('.drawer')?.contains(document.activeElement)), true, `focus stays in the drawer, not on ${await page.evaluate(() => document.activeElement?.tagName)}`)
 })
 
-const running = page => page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running')
+// The refocus of T17-F2 acts only when focus fell to the page body. A denied row lingers with its follow-up field
+// and is no longer an answerable row, so a refocus that ignored where focus is would pull it off that field while
+// the user types, and a typed space would then press Close.
+test('keyboard (M3): typing in a denied row\'s follow-up field keeps focus there and the drawer open', async t => {
+  const h = await startUnblock(t, { web: web.dir })
+  const deny = await h.pty({ repo: 'discord-audit', script: 'deny-then-instruct', summary: 'npm run test' })
+  const page = await openDeck(browser, h)
+  await page.keyboard.press('Alt+KeyU')
+  const row = `.drawer-row[data-request="${deny.request.id}"]`
+  await page.waitForSelector(`${row} .answer-buttons button:not([disabled])`)
+  await page.click(`${row} .answer-buttons button:text-is("Deny")`)
+  await page.waitForSelector(`${row} .drawer-followup input`)
+  await page.focus(`${row} .drawer-followup input`)
+  await page.keyboard.type('use pnpm instead', { delay: 60 })
+  assert.equal(await page.evaluate(() => !!document.activeElement?.closest('.drawer-followup')), true, `focus stays in the follow-up field, not on ${await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 60))}`)
+  assert.equal(await page.inputValue(`${row} .drawer-followup input`), 'use pnpm instead')
+  assert.equal(await page.locator('.drawer').count(), 1, 'the drawer stays open')
+})
+
+const running = page =>page.evaluate(() => document.getAnimations().filter(animation => animation.playState === 'running')
   .map(animation => `${animation.animationName ?? animation.transitionProperty ?? animation.constructor.name} on ${animation.effect?.target?.getAttribute?.('class') ?? '?'}`))
 
 test('motion (qa 1.4): with reduced motion nothing animates on the Crew page, Home or Focus', async t => {

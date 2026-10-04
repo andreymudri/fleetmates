@@ -293,6 +293,7 @@ test('T17-F2: when the focused row leaves, focus moves to the next row, else the
   const panelOf = rows => ({ querySelectorAll: () => rows, querySelector: selector => selector === '.drawer-close' ? element('close') : null })
   assert.equal(refocusTarget(panelOf([fakeRow('a'), fakeRow('c')]), ['a', 'b', 'c'], 'b').name, 'allow-c', 'the next row first')
   assert.equal(refocusTarget(panelOf([fakeRow('a')]), ['a', 'c'], 'c').name, 'allow-a', 'the previous row when none follows')
+  assert.equal(refocusTarget(panelOf([fakeRow('a'), fakeRow('b')]), ['a', 'b', 'c'], 'c').name, 'allow-b', 'the nearest previous row, not the first')
   assert.equal(refocusTarget(panelOf([]), ['a'], 'a').name, 'close', 'Close when no row is left')
   assert.equal(refocusTarget(panelOf([fakeRow('a'), fakeRow('c', { leaving: true })]), ['a', 'b', 'c'], 'b').name, 'allow-a', 'a row that is itself leaving is skipped')
 })
