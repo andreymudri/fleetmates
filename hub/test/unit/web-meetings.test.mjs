@@ -151,6 +151,16 @@ test('ask.delta text accumulates in order on a meeting thread, then ask.done and
   assert.equal(vault.data.meetingAsk, state.data.meetingAsk, 'a thread outside a meeting scope is not a meeting ask')
 })
 
+test('a late delta from an earlier ask never lands in the meeting\'s newer ask', () => {
+  let state = loaded()
+  state = reduce(state, { type: 'meeting.ask', thread: { id: 'th1', scope: 'meeting:m1' }, userMessage: { text: 'q1' }, assistantMessageId: 'a1' })
+  state = reduce(state, { type: 'meeting.ask', thread: { id: 'th2', scope: 'meeting:m1' }, userMessage: { text: 'q2' }, assistantMessageId: 'a2' })
+  state = reduce(state, message({ t: 'ask.delta', data: { threadId: 'th1', messageId: 'a1', text: 'STALE', ephemeral: true } }))
+  assert.equal(state.data.meetingAsk.m1.threadId, 'th2')
+  assert.equal(state.data.meetingAsk.m1.text, '')
+  assert.equal(state.data.meetingAsk.m1.state, 'streaming')
+})
+
 test('Alt P is the pin action only while recording and never from inside a terminal', () => {
   const inside = { closest: selector => selector === '.terminal-view' ? {} : null }
   const outside = { closest: () => null }
