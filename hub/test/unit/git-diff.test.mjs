@@ -98,6 +98,32 @@ test('sessionDiff refuses paths that escape the repository with validation_faile
   assert.equal(await refused(sessionDiff(listed, 'a.txt\0x')), 'validation_failed')
 })
 
+test('sessionDiff serves an absolute changed path under its repository-relative path, as the relative form', async t => {
+  const repo = tempRepo(t, { 'a.txt': 'one\ntwo\nthree\n' })
+  const value = captureReviewBaseline(repo)
+  writeFileSync(path.join(repo, 'a.txt'), 'one\nTWO\nthree\n')
+  const listed = session(repo, value, ['a.txt'])
+  const relative = await sessionDiff(listed, 'a.txt')
+  const absolute = await sessionDiff(listed, path.join(repo, 'a.txt'))
+  assert.equal(absolute.path, 'a.txt')
+  assert.deepEqual(absolute, relative)
+})
+
+test('sessionDiff refuses an absolute path that is not a changed file, or lies outside the repository, with validation_failed', async t => {
+  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-outside-')))
+  t.after(() => rmSync(outside, { recursive: true, force: true }))
+  writeFileSync(path.join(outside, 'secret.txt'), 'secret\n')
+  const repo = tempRepo(t, { 'a.txt': 'a\n', 'b.txt': 'b\n' })
+  const value = captureReviewBaseline(repo)
+  writeFileSync(path.join(repo, 'b.txt'), 'B\n')
+  // b.txt is inside the repository and edited, but not one of the session's changed files.
+  assert.equal(await refused(sessionDiff(session(repo, value, ['a.txt']), path.join(repo, 'b.txt'))), 'validation_failed')
+  // The outside file is listed as changed, so only the work tree check can refuse it.
+  const listed = { cwd: repo, review_baseline: value, changed_files: JSON.stringify([{ path: path.join(outside, 'secret.txt') }, { path: path.join(repo, 'a.txt') }]) }
+  assert.equal(await refused(sessionDiff(listed, path.join(outside, 'secret.txt'))), 'validation_failed')
+  assert.equal(await refused(sessionDiff(listed, `${path.join(repo, 'a.txt')}\0x`)), 'validation_failed')
+})
+
 test('sessionDiff answers not_found for a path that is not in changedFiles', async t => {
   const repo = tempRepo(t, { 'a.txt': 'a\n', 'b.txt': 'b\n' })
   const value = captureReviewBaseline(repo)

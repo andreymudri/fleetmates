@@ -469,12 +469,11 @@ if (import.meta.main) {
     assert.deepEqual(page.errors, [])
   })
 
-  // Finding T17-F1 (S2, qa-checklist 0.4 "missing state"): the session's changed files carry the absolute path of the
-  // Edit hook (as the captured 2.1.285 hooks do), Focus sends that path to GET /api/sessions/:id/diff, and the
-  // server's diff reader refuses an absolute path (hub/server/adapters/git-diff.mjs), so every Changes diff shows
-  // "Could not read the diff: validation_failed". The same request with the repo-relative path returns the diff.
-  // A todo until the fix task this finding adds to the M3 plan lands; the test runs and reports either way.
-  spec('Focus Changes: the diff of a file the session edited, against the baseline of its SessionStart', { todo: 'T17-F1: Focus asks for the diff by absolute path and the server refuses it' }, async t => {
+  // Finding T17-F1 (S2, qa-checklist 0.4 "missing state"), fixed by Task 22: the session's changed files carry the
+  // absolute path of the Edit hook (as the captured 2.1.285 hooks do) and Focus sends that path to
+  // GET /api/sessions/:id/diff. The server's diff reader (hub/server/adapters/git-diff.mjs) accepts an absolute path
+  // only when it is exactly one of the session's changed files inside the work tree, and serves its diff.
+  spec('Focus Changes: the diff of a file the session edited, against the baseline of its SessionStart', async t => {
     const h = await deck(t)
     const repo = 'turbidassist'
     const dir = path.join(placed(control.scanRoot, h.home), repo)

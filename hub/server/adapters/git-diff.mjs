@@ -100,18 +100,26 @@ function cut(text) {
  * /api/sessions/:id/diff). The baseline side is the content the review baseline stored for the path,
  * else the blob at the baseline head, else empty; the current side is the working file, where a symlink
  * is read as its target text and never followed and any other non-regular file is reported by `kind`
- * without being read. Throws a DiffError `validation_failed` when `name` is absolute, holds NUL, escapes
- * the repository or resolves outside it, and `not_found` when it is not one of the session's
- * `changedFiles`.
+ * without being read. An absolute `name` (the path the Edit hook reported) is accepted only when it is
+ * exactly one of the session's `changedFiles` paths, and is then served under its repository-relative
+ * path. Throws a DiffError `validation_failed` when `name` holds NUL, is absolute and not a changed
+ * path, escapes the repository or resolves outside it, and `not_found` when a relative `name` is not
+ * one of the session's `changedFiles`.
  * @param {{ cwd: string, review_baseline?: string|null, changed_files?: string, changedFiles?: Array<{ path: string }> }} session
- * @param {string} name repository-relative path
+ * @param {string} name repository-relative path, or the absolute path of one of the session's changed files
  * @returns {Promise<{ path: string, baseline: string|null, diff: string, binary: boolean, truncated: boolean, kind: 'file'|'symlink'|'missing'|'special', size?: number }>}
  */
 export async function sessionDiff(session, name) {
-  if (typeof name !== 'string' || !name || name.includes('\0') || path.isAbsolute(name)) throw new DiffError('validation_failed')
-  const relative = path.posix.normalize(name.replaceAll('\\', '/'))
-  if (relative === '..' || relative.startsWith('../') || relative === '.' || relative.endsWith('/')) throw new DiffError('validation_failed')
+  if (typeof name !== 'string' || !name || name.includes('\0')) throw new DiffError('validation_failed')
   const root = workingRoot(session.cwd)
+  let requested = name
+  if (path.isAbsolute(name)) {
+    if (!changedPaths(session).includes(name)) throw new DiffError('validation_failed')
+    requested = path.relative(root, name)
+    if (!requested || path.isAbsolute(requested)) throw new DiffError('validation_failed')
+  }
+  const relative = path.posix.normalize(requested.replaceAll('\\', '/'))
+  if (relative === '..' || relative.startsWith('../') || relative === '.' || relative.endsWith('/')) throw new DiffError('validation_failed')
   const file = path.resolve(root, relative)
   if (!inside(root, file) || file === root || !resolvesInside(root, file)) throw new DiffError('validation_failed')
   if (!changedPaths(session).includes(file)) throw new DiffError('not_found')
