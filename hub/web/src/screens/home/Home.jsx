@@ -7,12 +7,13 @@ import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
 import { MetaLine, StatusPill, pillParams, shown, stateLabel, titleText, translate } from '../../components/StatusPill.jsx'
 import { linkHandler } from '../../shell/Rail.jsx'
-import { addRule, answerRequest, fetchArchived, nudgeSession, revokeRule, stopSession } from '../../state/actions.js'
+import { addRule, answerRequest, fetchArchived, fetchMeeting, fetchMeetings, nudgeSession, revokeRule, stopSession } from '../../state/actions.js'
+import { clockTime, dayLabel, durationText, meetingTitle } from '../meetings/MeetingDetail.jsx'
 import { archivedCount, readDensity, writeDensity } from '../../state/deck-store.js'
 import { NeedsYouDrawer, deckApi, needsLinkDetail, openOverlay, repoFor } from '../drawer/NeedsYouDrawer.jsx'
 import { Palette, openLaunch, orderSessions } from '../palette/Palette.jsx'
 
-/** English copy for Home (docs/deck/screens/home.md section 9): M1 plus the M2 header, compact and Stop keys. */
+/** English copy for Home (docs/deck/screens/home.md section 9): M1 plus the M2 header, compact and Stop keys, and the M4 Calm "Last meeting". */
 export const HOME_COPY = Object.freeze({
   'home.header.title': 'Sessions',
   'home.header.search': 'Search, ask or run',
@@ -40,6 +41,10 @@ export const HOME_COPY = Object.freeze({
   'home.calm.log.openLoops': 'Open loops before tomorrow',
   'home.calm.log.waitsForReview': '{repo} waits in port for review',
   'home.calm.log.review': 'Review',
+  'home.calm.meeting.title': 'Last meeting',
+  'home.calm.meeting.meta': '{day} {time} · {duration} · {n, plural, one {# action item} other {# action items}}',
+  'home.calm.meeting.launch': 'Launch as session',
+  'home.calm.meeting.empty': 'No meetings today.',
   'home.card.team.pill': '{needs} of {total} need you',
   'home.card.team.tile.lead': 'lead · {taskId}',
   'home.card.team.tile.needs': '{taskId} · needs you',
@@ -570,7 +575,99 @@ function ArchiveAllButton({ ids, t, onArchiveFinished }) {
   return <button type="button" className="button button--ghost button--xs home-archive-finished" onClick={() => onArchiveFinished()}>{translate(t, HOME_COPY, 'home.archive.finished')}</button>
 }
 
-function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archived = null }) {
+const sameLocalDay = (a, b) => {
+  const x = new Date(a)
+  const y = new Date(b)
+  return x.getFullYear() === y.getFullYear() && x.getMonth() === y.getMonth() && x.getDate() === y.getDate()
+}
+
+/**
+ * The meeting Calm's "Last meeting" shows (home.md 4.5): the newest `synthesized` meeting that started on the local
+ * day of `now`, or null.
+ * @param {object[] | null | undefined} meetings `GET /api/meetings` rows
+ * @param {number} now epoch ms
+ * @returns {object | null}
+ */
+export function lastMeetingOf(meetings, now) {
+  const today = (Array.isArray(meetings) ? meetings : [])
+    .filter(row => row?.state === 'synthesized' && Number.isFinite(row.startedAt) && sameLocalDay(row.startedAt, now))
+  today.sort((a, b) => b.startedAt - a.startedAt || String(b.id).localeCompare(String(a.id)))
+  return today[0] ?? null
+}
+
+/**
+ * Read the Calm "Last meeting": the list with `fetchMeetings` (served from disk, so it loads with scribed down),
+ * dispatching `meetings.fetched` when `dispatch` is given, then that meeting's note with `fetchMeeting` for its first
+ * action item that is not dismissed. A failed detail read leaves the item out.
+ * @param {{ get: Function }} api
+ * @param {number} now epoch ms
+ * @param {(action: object) => void} [dispatch]
+ * @returns {Promise<{ meeting: object | null, item: { key: string, text: string, owner?: string | null } | null }>}
+ */
+export async function loadLastMeeting(api, now, dispatch) {
+  const list = await fetchMeetings(api)
+  const rows = Array.isArray(list?.meetings) ? list.meetings : []
+  dispatch?.({ type: 'meetings.fetched', meetings: rows })
+  const meeting = lastMeetingOf(rows, now)
+  if (!meeting) return { meeting: null, item: null }
+  const detail = await fetchMeeting(api, meeting.id).catch(() => null)
+  const items = Array.isArray(detail?.note?.actionItems) ? detail.note.actionItems : []
+  return { meeting, item: items.find(item => item && !item.dismissed && typeof item.text === 'string') ?? null }
+}
+
+/**
+ * The Calm "Last meeting" CalmSection, pure: the meeting's title and the meta "{day} {time} · {duration} · {n} action
+ * items", its first open action item as an ActionItemCard row with "Launch as session" (the new-session form with
+ * the item text as the task), or "No meetings today.". Meeting content carries `lang="pt-BR"`.
+ * @param {{ meeting: object | null, item?: { text: string, owner?: string | null } | null, now: number, t?: Function, navigate: (to: string) => void, loading?: boolean }} props
+ */
+export function LastMeetingView({ meeting, item = null, now, t, navigate, loading = false }) {
+  const tr = (key, params) => translate(t, HOME_COPY, key, params)
+  let body = null
+  if (loading) body = null
+  else if (!meeting) body = <p className="setting-hint calm-meeting-empty">{tr('home.calm.meeting.empty')}</p>
+  else {
+    const meta = tr('home.calm.meeting.meta', {
+      day: dayLabel(meeting.startedAt, now, t), time: clockTime(meeting.startedAt), duration: durationText(meeting, t) ?? '',
+      n: Number.isFinite(meeting.actionItemCount) ? meeting.actionItemCount : 0
+    }).split(' · ').filter(part => part.trim()).join(' · ')
+    const href = `/meetings/${encodeURIComponent(meeting.id)}`
+    body = (
+      <>
+        <a className="calm-meeting-title" href={href} onClick={linkHandler(navigate, href)} lang="pt-BR">{meetingTitle(meeting, t)}</a>
+        <p className="meeting-meta calm-meeting-meta">{meta}</p>
+        {item ? (
+          <div className="calm-loop calm-meeting-item">
+            <p className="calm-loop-text" lang="pt-BR">{item.text}</p>
+            <button type="button" className="button button--ghost button--xs" onClick={() => navigate('/new?task=' + encodeURIComponent(item.text))}>{tr('home.calm.meeting.launch')}</button>
+          </div>
+        ) : null}
+      </>
+    )
+  }
+  return (
+    <section className="calm-section calm-meeting" aria-labelledby="calm-meeting-title" aria-busy={loading ? 'true' : undefined}>
+      <h2 className="calm-section-title" id="calm-meeting-title">{tr('home.calm.meeting.title')}</h2>
+      {body}
+    </section>
+  )
+}
+
+/**
+ * The Calm "Last meeting" with its data: {@link loadLastMeeting} once when it mounts, then {@link LastMeetingView}.
+ * @param {{ api: { get: Function }, now: number, t?: Function, navigate: (to: string) => void, dispatch?: (action: object) => void }} props
+ */
+export function LastMeetingSection({ api, now, t, navigate, dispatch }) {
+  const [data, setData] = useState(null)
+  useEffect(() => {
+    let current = true
+    loadLastMeeting(api, Date.now(), dispatch).then(value => { if (current) setData(value) }, () => { if (current) setData({ meeting: null, item: null }) })
+    return () => { current = false }
+  }, [])
+  return <LastMeetingView meeting={data?.meeting ?? null} item={data?.item ?? null} now={now} t={t} navigate={navigate} loading={data === null} />
+}
+
+function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archived = null, lastMeeting = null }) {
   const sessions = state.data.sessions.filter(row => row.state !== 'ended' && !isArchived(row))
   const recent = [...state.data.sessions].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0))
   const seen = new Set()
@@ -614,6 +711,7 @@ function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archiv
           </ul>
         ) : <EmptyState kind="openLoops" t={t} />}
       </section>
+      {lastMeeting}
       {archived}
     </section>
   )
@@ -631,15 +729,18 @@ function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archiv
  * zero, also on the calm Home. Cards answer inline (M3): `answers` and `onAnswer` drive the answer buttons of
  * comfortable and compact cards, `onReview` (by default the drawer on that request) backs "Review in Needs you",
  * "Review" and "Reply", and `onAcceptRule` the rule suggestion lines of `data.ruleOffers`; the cards get the deckd
- * outage from {@link deckdDownOf}. Pure apart from ArchivedSection, which holds the list's hooks.
+ * outage from {@link deckdDownOf}. The calm presentation places `lastMeeting` (the Calm "Last meeting" section,
+ * {@link LastMeetingSection} from {@link Home}) under the open loops. Pure apart from ArchivedSection, which holds the
+ * list's hooks.
  * @param {{ state: object, t?: (key: string, params?: object) => string, now?: number, navigate: (to: string) => void, layout?: ReturnType<typeof homeLayout>, onOverlay?: (overlay: 'palette'|'drawer', detail?: object) => void, onFocusCard?: (id: string) => void, onHold?: (kind: 'pointer'|'focus', held: boolean) => void, lang?: string,
  *   density?: 'comfortable' | 'compact', onDensity?: (value: string) => void, onLaunch?: () => void, steps?: Record<string, object[]>, onNudge?: (session: object) => void, onStop?: (session: object) => void,
  *   onArchive?: (session: object) => void, onArchiveFinished?: () => void, onUnarchive?: (id: string) => Promise<unknown>, api?: { get: Function }, storage?: Storage,
- *   answers?: Record<string, object>, onAnswer?: (request: object, body: object) => void, onReview?: (requestId: string) => void, onAcceptRule?: (offer: object) => void }} props
+ *   answers?: Record<string, object>, onAnswer?: (request: object, body: object) => void, onReview?: (requestId: string) => void, onAcceptRule?: (offer: object) => void,
+ *   lastMeeting?: React.ReactNode }} props
  */
 export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverlay = (overlay, detail) => openOverlay(overlay, undefined, detail), onFocusCard = focusCard, onHold = () => {}, lang = 'en',
   density = 'comfortable', onDensity = () => {}, onLaunch = () => openLaunch(navigate), steps = {}, onNudge, onStop, onArchive, onArchiveFinished, onUnarchive = () => Promise.resolve(), api, storage,
-  answers = {}, onAnswer = () => {}, onReview = id => onOverlay('drawer', { request: id }), onAcceptRule = () => {} }) {
+  answers = {}, onAnswer = () => {}, onReview = id => onOverlay('drawer', { request: id }), onAcceptRule = () => {}, lastMeeting = null }) {
   const { sessions, requests, repos, order, counts, runs } = state.data
   const shape = layout ?? homeLayout(sessions, { order, requests, now })
   const teams = teamCards(runs, sessions, requests)
@@ -648,7 +749,7 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
     ? <ArchivedSection count={archivedN} api={api} storage={storage} repos={repos} now={now} lang={lang} t={t} navigate={navigate} onUnarchive={onUnarchive} />
     : null
   const archiveAll = <ArchiveAllButton ids={finishedIds(sessions, requests)} t={t} onArchiveFinished={onArchiveFinished} />
-  if (shape.calm && !teams.length) return <Calm state={state} layout={shape} now={now} t={t} navigate={navigate} lang={lang} archiveAll={archiveAll} archived={archived} />
+  if (shape.calm && !teams.length) return <Calm state={state} layout={shape} now={now} t={t} navigate={navigate} lang={lang} archiveAll={archiveAll} archived={archived} lastMeeting={lastMeeting} />
   const leads = new Set(teams.map(team => team.lead?.id).filter(Boolean))
   const items = withTeams(shape.grid.filter(row => !leads.has(row.id)), teams)
   const inCard = target => !!target?.closest?.('.home article')
@@ -752,7 +853,8 @@ export function ObserveOverlays({ state, t, navigate, api, onArchive, onToast })
  * leaving compact and on unmount), loads the last hook steps of observed compact sessions, holds the Stop
  * dialog of {@link homeActions} in {@link HomeStopDialog}, and opens the Needs-you drawer once for a `?needs=` link
  * ({@link needsLinkDetail}). Card answers run through {@link homeAnswerActions}, with the answers in flight pruned by
- * {@link pruneAnswers} as requests close and the rule toast (with its Undo) held like the archive toast.
+ * {@link pruneAnswers} as requests close and the rule toast (with its Undo) held like the archive toast. The calm
+ * presentation gets {@link LastMeetingSection}, which reads the meetings when it mounts.
  * The effects are browser wiring the unit tests do not run; the static render,
  * {@link homeLayout}, {@link heldOrder}, {@link tailSubscription}, {@link homeActions}, {@link homeAnswerActions},
  * {@link pruneAnswers}, {@link HomeStopDialog} and {@link HomeView} are unit tested.
@@ -829,7 +931,8 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
       <HomeView state={{ ...state, data: { ...state.data, order: held.order } }} t={t} now={now} navigate={navigate} layout={layout} onHold={onHold}
         density={density} onDensity={value => pickDensity(storage, value, setDensity)} steps={steps} onNudge={actions.nudge} onStop={actions.openStop}
         onArchive={session => flow.archive(session.id)} onArchiveFinished={flow.archiveFinished} onUnarchive={flow.unarchive} api={http} storage={storage}
-        answers={answers} onAnswer={answering.answer} onReview={id => onOverlay('drawer', { request: id })} onAcceptRule={answering.acceptRule} />
+        answers={answers} onAnswer={answering.answer} onReview={id => onOverlay('drawer', { request: id })} onAcceptRule={answering.acceptRule}
+        lastMeeting={<LastMeetingSection api={http} now={now} t={t} navigate={navigate} dispatch={dispatch} />} />
       <HomeStopDialog stopping={stopping} repos={state.data.repos} actions={actions} t={t} />
       <ArchiveToast toast={archiveToast} t={t} onUndo={flow.undo} onDismiss={() => showArchiveToast(null)} />
       <ArchiveToast toast={ruleToast} t={t} onUndo={answering.undo} onDismiss={() => showRuleToast(null)} />

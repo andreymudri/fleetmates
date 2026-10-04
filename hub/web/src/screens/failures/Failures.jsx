@@ -9,6 +9,9 @@ import { Settings } from '../settings/Settings.jsx'
 import { NewSession } from '../new-session/NewSession.jsx'
 import { TeamRun } from '../team-run/TeamRun.jsx'
 import { CrewSheet } from '../crew/CrewSheet.jsx'
+import { Meetings } from '../meetings/Meetings.jsx'
+import { MeetingLive } from '../meetings/MeetingLive.jsx'
+import { retryScribed, startScribed } from '../../state/actions.js'
 
 /** English copy for the M1 failure patterns the screens place (docs/deck/screens/failures-and-loading.md section 9). */
 export const FAIL_COPY = Object.freeze({
@@ -115,13 +118,16 @@ export function FailureNotices({ model, repos = [], t, navigate, history = false
 
 /**
  * The shell's `screens` map: Home, Focus, First run and Settings from M1, and New session, Team run and the Crew sheet
- * from M2, each given the real authenticated `api` (so a 401 from any of them reaches the shell's fatal state through
+ * from M2, and the meeting screens from M4 (`meetings` and `meeting` render Meetings, the second with the selected id
+ * from its route; `meetingLive` renders MeetingLive), each given the real authenticated `api` (so a 401 from any of them reaches the shell's fatal state through
  * the api's `onFatal`). Home, Focus, Settings, Team run and the Crew sheet place the failure notices; First run is
  * full-bleed, and New session shows deckd down in its own form over the screen it renders beneath it. Home and Focus
  * get the terminal client (`terminals`) and the store's `dispatch` for their toasts, as do Team run and Settings (the
  * revoke toast); every observe overlay gets `onToast`, so the palette's "Allowed ..." toast shows from every screen
  * (M3 Task 16). New session gets this map itself.
- * Settings, the Crew sheet and New session render the observe overlays (palette, Needs-you drawer) here; the other
+ * The meeting screens place the failure notices and render the observe overlays like Settings; the scribed degraded
+ * card's "Start scribed" and "Retry" call `startScribed` and `retryScribed` on that api.
+ * Settings, the Crew sheet, the meeting screens and New session render the observe overlays (palette, Needs-you drawer) here; the other
  * screens render their own. New session renders them outside its inert background, which renders without them.
  * The route components are plain functions without hooks, so tests can call them.
  * @param {{ api: object, feed?: object, terminals?: object | null, dispatch?: (action: object) => void, now?: () => number }} options
@@ -168,6 +174,25 @@ export function deckScreens({ api, feed, terminals = null, dispatch, now = Date.
     welcome: function WelcomeScreen(props) {
       return <FirstRun state={props.state} t={props.t} navigate={props.navigate} api={api} feed={feed} />
     },
+    meetings: function MeetingsScreen(props) {
+      return (
+        <>
+          {notices(props, false)}
+          <Meetings route={props.route} search={props.search} state={props.state} t={props.t} navigate={props.navigate} api={api} dispatch={dispatch} now={now()}
+            onStartScribed={() => startScribed(api)} onRetryScribed={() => retryScribed(api)} />
+          <ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} />
+        </>
+      )
+    },
+    meetingLive: function MeetingLiveScreen(props) {
+      return (
+        <>
+          {notices(props, false)}
+          <MeetingLive state={props.state} t={props.t} api={api} dispatch={dispatch} now={now} />
+          <ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} />
+        </>
+      )
+    },
     settings: function SettingsScreen(props) {
       return (
         <>
@@ -178,5 +203,6 @@ export function deckScreens({ api, feed, terminals = null, dispatch, now = Date.
       )
     }
   }
+  screens.meeting = screens.meetings
   return screens
 }
