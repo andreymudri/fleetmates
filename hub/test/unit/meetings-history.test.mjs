@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, mkdir, symlink, writeFile, unlink, utimes, stat, realpath } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, symlink, writeFile, readFile, unlink, utimes, stat, realpath } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
@@ -236,6 +236,41 @@ test('search folds accents and case: "decisao" finds "decisão"', async t => {
   assert.equal(result.hits.length, 1)
   assert.equal(result.hits[0].meetingId, m.ids.roadmap)
   assert.equal(result.hits[0].snippet.slice(...result.hits[0].ranges[0]), 'decisão')
+})
+
+const TRANSCRIPT_FILES = ['transcript.json', 'transcript.md', 'transcript.jsonl']
+
+async function replaceInTranscripts(dir, from, to) {
+  for (const name of TRANSCRIPT_FILES) {
+    const file = path.join(dir, name)
+    await writeFile(file, (await readFile(file, 'utf8')).replaceAll(from, to))
+  }
+}
+
+test('search reads the disk on every call, confidential sessions included: a changed word and a deleted transcript show at once', async t => {
+  const m = await tree(t, { variants: ['confidential'] })
+  const list = await listSessions(m.sessionDir, { now: m.now })
+  const dir = path.join(m.sessionDir, m.ids.confidential)
+  const [word] = m.sentinels.confidential
+  assert.equal((await searchTranscripts(list, word)).hits.length, 1)
+  await replaceInTranscripts(dir, word, 'PALAVRA-NOVA')
+  assert.equal((await searchTranscripts(list, word)).hits.length, 0)
+  assert.deepEqual((await searchTranscripts(list, 'palavra-nova')).hits.map(h => h.meetingId), [m.ids.confidential])
+  assert.equal((await searchTranscripts(list, 'feature flag')).hits.length, 4)
+  for (const name of TRANSCRIPT_FILES) await unlink(path.join(dir, name))
+  assert.equal((await searchTranscripts(list, 'palavra-nova')).hits.length, 0)
+  assert.equal((await searchTranscripts(list, 'feature flag')).hits.length, 4)
+})
+
+test('readTranscript reads the disk on every call, confidential sessions included', async t => {
+  const m = await tree(t, { variants: ['confidential'] })
+  const dir = path.join(m.sessionDir, m.ids.confidential)
+  const [word] = m.sentinels.confidential
+  assert.match((await readTranscript(m.sessionDir, m.ids.confidential)).lines[0].text, new RegExp(word))
+  await replaceInTranscripts(dir, word, 'PALAVRA-NOVA')
+  assert.equal((await readTranscript(m.sessionDir, m.ids.confidential)).lines[0].text, 'O codinome do projeto é PALAVRA-NOVA.')
+  for (const name of TRANSCRIPT_FILES) await unlink(path.join(dir, name))
+  assert.equal(await readTranscript(m.sessionDir, m.ids.confidential), null)
 })
 
 test('search reaches the confidential variant (MEET-O7)', async t => {
