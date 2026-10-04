@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rename, rm, utimes, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -7,7 +7,7 @@ import { openDeckDb } from '../../server/db/index.mjs'
 import { readConfig } from '../../server/meetings/config.mjs'
 import { findNote } from '../../server/meetings/note.mjs'
 import { createPostWatch } from '../../server/meetings/post-watch.mjs'
-import { getMeeting, upsertMeeting } from '../../server/meetings/store.mjs'
+import { addPin, getMeeting, pins, upsertMeeting } from '../../server/meetings/store.mjs'
 import { writeMeetingsTree } from '../helpers/meetings-tree.mjs'
 
 const MINUTE = 60 * 1000
@@ -187,15 +187,85 @@ test('a session whose tag is not in the config is stored confidential', async ()
 test('sync watches the sessions not synthesized and not interrupted, with the derived flags', async () => withTree(async ({ store, tree, published, make }) => {
   // The interrupted variant has no manifest; give it a row the way the recorder would have made one.
   upsertMeeting(store, { id: tree.ids.interrupted, tag: 'client-b', confidential: true, state: 'recording', startedAt: 1, endedAt: null, sessionDir: null, notePath: null, at: 1 })
-  const w = make({ watch: noWatch, timers: manualTimers() })
+  const looked = []
+  const spy = async where => { looked.push(where.id); return findNote(where) }
+  const w = make({ watch: noWatch, timers: manualTimers(), findNote: spy })
   await w.sync()
+  assert.ok(looked.includes(tree.ids.planning), 'the note of a pessoal meeting is looked up')
+  assert.equal(looked.includes(tree.ids.weekly), false, 'the note of a confidential meeting is never looked up')
+  assert.equal(looked.includes(tree.ids.contract), false, 'the note of a client-b meeting is never looked up')
   assert.deepEqual(w.watching().sort(), [tree.ids.awaitingNames, tree.ids.stuck].sort())
   const interrupted = updates(published).find(e => e.entityId === tree.ids.interrupted)
   assert.equal(interrupted.data.state, 'stopping')
   assert.equal(interrupted.data.interrupted, true)
   assert.equal(getMeeting(store, tree.ids.planning).notePath, tree.notes.planning, 'sync finds the note of a synthesized meeting')
   assert.equal(getMeeting(store, tree.ids.weekly).notePath, null)
+  looked.length = 0
+  await w.sync()
+  assert.deepEqual(looked, [], 'a row that already holds its notePath is not looked up again')
 }, { variants: ['awaitingNames', 'stuck', 'interrupted'] }))
+
+test('a missing session_dir keeps every row and its pin, stops every watch and reports it', async () => withTree(async ({ store, tree, config, make }) => {
+  let current = config
+  const timers = manualTimers()
+  const w = make({ watch: noWatch, timers, config: () => current })
+  assert.equal((await w.sync()).ok, true)
+  assert.deepEqual(w.watching(), [tree.ids.awaitingNames])
+  const { pin } = addPin(store, tree.ids.retro, { t: 12, label: 'ligar o flag', at: 5 })
+  current = { ...config, sessionDir: path.join(tree.sessionDir, 'gone') }
+  const result = await w.sync()
+  for (const id of tree.ids.meetings) assert.ok(getMeeting(store, id), `row kept for ${id}`)
+  assert.deepEqual(pins(store, tree.ids.retro).map(p => p.id), [pin.id])
+  assert.deepEqual(result, { ok: false, reason: 'session_dir' })
+  assert.deepEqual(w.watching(), [])
+  assert.equal(timers.count(), 0)
+}, { variants: ['awaitingNames'] }))
+
+test('a session with neither a manifest nor a row is skipped and the others are stored', async () => withTree(async ({ store, tree, make }) => {
+  const w = make({ watch: noWatch, timers: manualTimers() })
+  assert.equal((await w.sync()).ok, true)
+  assert.equal(getMeeting(store, tree.ids.interrupted), null)
+  for (const id of tree.ids.meetings) assert.ok(getMeeting(store, id), `row for ${id}`)
+}, { variants: ['interrupted'] }))
+
+test('watch ignores an id that is not a session id and a second call for a watched id', async () => withTree(async ({ store, tree, make }) => {
+  const dirs = []
+  const spyWatch = dir => { dirs.push(dir); return noWatch() }
+  const timers = manualTimers()
+  const w = make({ watch: spyWatch, timers })
+  w.watch('../escape')
+  w.watch('not-a-session')
+  assert.deepEqual(dirs, [])
+  const id = tree.ids.planning
+  upsertMeeting(store, { id, tag: 'pessoal', confidential: false, state: 'awaiting_names', startedAt: 1, endedAt: null, sessionDir: null, notePath: null, at: 1 })
+  // Hold the manifest at a state that keeps the watch open.
+  await writeManifest(path.join(tree.sessionDir, id), id, 'awaiting_names')
+  w.watch(id)
+  w.watch(id)
+  assert.deepEqual(dirs, [path.join(tree.sessionDir, id)])
+  await until(() => timers.count() === 1, 'the poll to be armed')
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(timers.count(), 1, 'one poll per watched session')
+}))
+
+test('a config change that moves session_dir re-opens each watch on the new directory', async () => withTree(async ({ root, tree, config, make }) => {
+  const dirs = []
+  const closedDirs = []
+  const spyWatch = dir => { dirs.push(dir); return { close () { closedDirs.push(dir) }, on () {}, unref () {} } }
+  let current = config
+  const w = make({ watch: spyWatch, timers: manualTimers(), config: () => current })
+  await w.sync()
+  const id = tree.ids.awaitingNames
+  assert.deepEqual(dirs, [path.join(tree.sessionDir, id)])
+  const moved = path.join(root, 'moved')
+  await mkdir(moved, { mode: 0o700 })
+  await cp(path.join(tree.sessionDir, id), path.join(moved, id), { recursive: true })
+  current = { ...config, sessionDir: moved }
+  await w.sync()
+  assert.deepEqual(closedDirs, [path.join(tree.sessionDir, id)])
+  assert.deepEqual(dirs, [path.join(tree.sessionDir, id), path.join(moved, id)])
+  assert.deepEqual(w.watching(), [id])
+}, { variants: ['awaitingNames'] }))
 
 test('with config().ok false, sync keeps the rows and stops every watch; close stops every timer', async () => withTree(async ({ store, tree, config, make }) => {
   let current = config

@@ -25,7 +25,8 @@ const isConfidential = answer => typeof answer === 'boolean' ? answer : answer?.
  * a confidential meeting's note is never looked up.
  * `sync()` lists the sessions, upserts a row for each (confidential from `policy(tag)`), prunes the rows whose
  * directory is gone and watches every session that is not `synthesized`, not interrupted and not recording.
- * With `config().ok` false it keeps the rows and stops every watch.
+ * With `config().ok` false, or a `session_dir` that is missing or cannot be listed, it keeps the rows and stops
+ * every watch.
  * @param {{
  *   store: object,
  *   config: () => any,
@@ -37,7 +38,7 @@ const isConfidential = answer => typeof answer === 'boolean' ? answer : answer?.
  *   pollMs?: number,
  *   findNote?: typeof findNoteOnDisk
  * }} options `policy` defaults to `policyFor(config(), tag)`; `findNote` defaults to the vault reader of note.mjs
- * @returns {{ watch: (id: string) => void, unwatch: (id: string) => void, sync: (options?: { recordingId?: string|null }) => Promise<void>,
+ * @returns {{ watch: (id: string) => void, unwatch: (id: string) => void, sync: (options?: { recordingId?: string|null }) => Promise<{ ok: boolean, sessions?: number, reason?: string }>,
  *   watching: () => string[], close: () => void }}
  */
 export function createPostWatch ({
@@ -158,12 +159,25 @@ export function createPostWatch ({
 
   const stopAll = () => { for (const id of [...watchers.keys()]) unwatch(id) }
 
+  /** True when `dir` is a directory this process can list. */
+  async function listable (dir) {
+    if (typeof dir !== 'string' || dir === '') return false
+    try {
+      const handle = await fs.promises.opendir(dir)
+      await handle.close()
+      return true
+    } catch { return false }
+  }
+
   async function syncOnce ({ recordingId = null } = {}) {
-    if (closed) return
+    if (closed) return { ok: false, reason: 'closed' }
     const cfg = config()
-    if (!cfg?.ok) { stopAll(); return }
+    if (!cfg?.ok) { stopAll(); return { ok: false, reason: 'config' } }
+    // A missing or unreadable session_dir lists nothing; pruning on that would delete every row with its
+    // pins and dismissals, which exist only in the deck. Keep the rows, as for a config that does not read.
+    if (!await listable(cfg.sessionDir)) { stopAll(); return { ok: false, reason: 'session_dir' } }
     const sessions = await listSessions(cfg.sessionDir, { now: now(), recordingId })
-    if (closed) return
+    if (closed) return { ok: false, reason: 'closed' }
     const at = now()
     const follow = []
     for (const session of sessions) {
@@ -192,6 +206,7 @@ export function createPostWatch ({
     }
     for (const id of interrupted.keys()) if (!listed.includes(id)) interrupted.delete(id)
     for (const session of follow) watchSession(session.id)
+    return { ok: true, sessions: sessions.length }
   }
 
   return {
@@ -200,6 +215,8 @@ export function createPostWatch ({
     /**
      * Bring the rows in step with `session_dir` (server start and each config change). Calls run one at a time.
      * @param {{ recordingId?: string|null }} [options] the session scribed is recording, listed as `recording`
+     * @returns {Promise<{ ok: true, sessions: number } | { ok: false, reason: 'closed'|'config'|'session_dir' }>}
+     *   `session_dir` when the directory is missing or cannot be listed; the rows are then kept and every watch stopped
      */
     sync (options) {
       const run = syncing.then(() => syncOnce(options))
