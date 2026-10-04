@@ -2,7 +2,7 @@
 // items. Every write runs in one `store.tx` and returns the durable events it appended, so the
 // caller can publish them. No title, transcript, ask or note text is stored or put in an event
 // (06-storage 10.1), and no pin label is stored for a confidential meeting.
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 
 /**
  * @typedef {{ run: Function, get: Function, all: Function, appendEvent: Function, tx: Function }} Store
@@ -211,18 +211,8 @@ export function pins (store, id) {
 }
 
 /**
- * The dismissal key of an action item: the sha1 hex of its text after Unicode NFC, trimming,
- * collapsing whitespace and lower-casing. The text itself is never stored.
- * @param {string} text
- * @returns {string}
- */
-export function itemKey (text) {
-  const normalized = String(text).normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase()
-  return createHash('sha1').update(normalized).digest('hex')
-}
-
-/**
- * Dismiss an action item by its key (`itemKey`). A key that is not 40 lower-case hex characters
+ * Dismiss an action item by its key, the sha1 hex the meeting note reader gives each action item
+ * (the store never sees or computes from the item text). A key that is not 40 lower-case hex characters
  * throws, so item text can never land in `item_key`. `dismissed` is false when the meeting has no
  * row. Appends no event.
  * @param {Store} store

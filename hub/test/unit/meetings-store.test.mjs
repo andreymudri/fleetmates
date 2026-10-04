@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
@@ -6,7 +7,7 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { openDeckDb } from '../../server/db/index.mjs'
 import {
-  addPin, dismissItem, dismissed, getMeeting, itemKey, listMeetings, noteApps, pins, pruneMissing, removePin,
+  addPin, dismissItem, dismissed, getMeeting, listMeetings, noteApps, pins, pruneMissing, removePin,
   undismissItem, upsertMeeting
 } from '../../server/meetings/store.mjs'
 
@@ -16,6 +17,9 @@ async function withStore (fn) {
   const store = openDeckDb(file)
   try { await fn(store, file) } finally { store.close(); await rm(dir, { recursive: true, force: true }) }
 }
+
+// The store takes keys only; the meeting note reader computes them. A plain sha1 hex stands in here.
+const sha1 = text => createHash('sha1').update(text).digest('hex')
 
 const base = { tag: 'acme', state: 'recording', startedAt: 1000, endedAt: null, sessionDir: '/home/you/sessions/2026-09-08T14-00-12', notePath: null, at: 1000 }
 
@@ -119,9 +123,8 @@ test('noteApps keeps the union in first-seen order and appends meeting.updated o
 test('a dismissal stores only the 40-character sha1 key and the item text is absent from the database file bytes', async () => withStore((store, file) => {
   meeting(store, 'm1')
   const text = 'Send the quarterly numbers to the client before Friday'
-  const key = itemKey(text)
+  const key = sha1(text)
   assert.match(key, /^[0-9a-f]{40}$/)
-  assert.equal(itemKey(`  ${text.toUpperCase()}  `), key)
   assert.equal(dismissItem(store, 'm1', key, 2000).dismissed, true)
   assert.deepEqual(dismissed(store, 'm1'), [key])
   assert.deepEqual(store.all('SELECT item_key FROM meeting_item_dismissals').map(row => row.item_key), [key])
@@ -136,7 +139,7 @@ test('a dismissal stores only the 40-character sha1 key and the item text is abs
 
 test('undismissItem removes the dismissal', async () => withStore(store => {
   meeting(store, 'm1')
-  const key = itemKey('Book the room')
+  const key = sha1('Book the room')
   dismissItem(store, 'm1', key, 2000)
   assert.equal(undismissItem(store, 'm1', key).removed, true)
   assert.deepEqual(dismissed(store, 'm1'), [])
@@ -147,7 +150,7 @@ test('pruneMissing removes the row, its pins and dismissals', async () => withSt
   meeting(store, 'm1')
   meeting(store, 'm2')
   addPin(store, 'm1', { t: 1, label: 'a', at: 2000 })
-  dismissItem(store, 'm1', itemKey('Book the room'), 2000)
+  dismissItem(store, 'm1', sha1('Book the room'), 2000)
   assert.deepEqual(pruneMissing(store, ['m2'], 3000).removed, ['m1'])
   assert.equal(getMeeting(store, 'm1'), null)
   assert.ok(getMeeting(store, 'm2'))
