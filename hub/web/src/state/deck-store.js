@@ -71,10 +71,142 @@ function applyAsk(state, message) {
     if (record?.threadId !== threadId) return state
     return { ...state, data: { ...d, meetingAsk: { ...d.meetingAsk, [meetingId]: askStep(record, message.t, data) } } }
   }
+  // A vault thread the browser knows (from `memory.askStarted` or `memory.threadLoaded`) streams into Memory.
+  const memory = memoryOf(state)
+  if (memory.threads[threadId]) {
+    const next = memoryStep(memory, message.t, data)
+    return next === memory ? state : { ...state, memory: next }
+  }
   const pending = { ...d.askPending, [threadId]: askStep(d.askPending[threadId], message.t, data) }
   const keys = Object.keys(pending)
   for (const key of keys.slice(0, Math.max(0, keys.length - ASK_PENDING_CAP))) delete pending[key]
   return { ...state, data: { ...d, askPending: pending } }
+}
+
+/**
+ * The empty Memory state (M5): vault threads by id, each thread's messages in order, the active thread, the
+ * assistant message in flight per thread, the unresolved misses count and the vault-mcp health row. It lives
+ * beside `data`, so a snapshot keeps it, and it is never written to browser storage.
+ * @returns {{ threads: Record<string, object>, messages: Record<string, object[]>, activeThreadId: string | null, asking: Record<string, string>, missesUnresolved: number | null, vault: { state: string, reason: string | null, capabilities: string[] } }}
+ */
+export function emptyMemory() {
+  return { threads: {}, messages: {}, activeThreadId: null, asking: {}, missesUnresolved: null, vault: { state: 'unknown', reason: null, capabilities: [] } }
+}
+
+const memoryOf = state => state.memory ?? emptyMemory()
+
+// The Memory view of a `vault-mcp` health row.
+function vaultHealth(row) {
+  return { state: String(row?.state ?? 'unknown'), reason: row?.reason ?? null, capabilities: Array.isArray(row?.capabilities) ? row.capabilities.map(String) : [] }
+}
+
+// Replace the message with the same id, or append it.
+function putMessage(list, message) {
+  const index = list.findIndex(item => item.id === message.id)
+  if (index === -1) return [...list, message]
+  const next = list.slice()
+  next[index] = message
+  return next
+}
+
+// The assistant message an ask streams into, before the server stores it.
+const streamingMessage = (threadId, id, text = '') => ({ id, threadId, role: 'assistant', text, citations: [], generalKnowledge: null, isMiss: false, status: 'streaming', error: null })
+
+function withoutKey(record, key) {
+  const next = { ...record }
+  delete next[key]
+  return next
+}
+
+// One vault ask stream event on a thread the browser knows: a delta appends to its own streaming message, `ask.done`
+// replaces that message with the stored one (text and citations), `ask.error` marks it failed. Either ends the ask.
+function memoryStep(memory, type, data) {
+  const threadId = data.threadId
+  const list = memory.messages[threadId] ?? []
+  if (type === 'ask.delta') {
+    const id = data.messageId
+    if (typeof id !== 'string' || !id) return memory
+    const current = list.find(item => item.id === id)
+    if (current && current.status !== 'streaming') return memory
+    const message = current ? { ...current, text: current.text + String(data.text ?? '') } : streamingMessage(threadId, id, String(data.text ?? ''))
+    return { ...memory, messages: { ...memory.messages, [threadId]: putMessage(list, message) } }
+  }
+  if (type === 'ask.done') {
+    const stored = data.message
+    if (typeof stored?.id !== 'string' || !stored.id) return memory
+    const asking = memory.asking[threadId] === stored.id ? withoutKey(memory.asking, threadId) : memory.asking
+    return { ...memory, asking, messages: { ...memory.messages, [threadId]: putMessage(list, { ...stored, threadId }) } }
+  }
+  const id = data.messageId
+  if (typeof id !== 'string' || !id) return memory
+  const current = list.find(item => item.id === id) ?? streamingMessage(threadId, id)
+  const asking = memory.asking[threadId] === id ? withoutKey(memory.asking, threadId) : memory.asking
+  return { ...memory, asking, messages: { ...memory.messages, [threadId]: putMessage(list, { ...current, status: 'error', error: data.error ?? null }) } }
+}
+
+// Register the answer of POST /api/ask for a `vault` thread (`memory.askStarted`): the thread, the question and the
+// assistant message, folding in a stream that beat the answer to the browser (held in `askPending`, as M4 does).
+function startVaultAsk(state, action) {
+  const thread = action.thread
+  const id = action.assistantMessageId
+  if (thread?.scope !== 'vault' || typeof thread.id !== 'string' || !thread.id || typeof id !== 'string' || !id) return state
+  const memory = memoryOf(state)
+  const d = state.data
+  const pending = d.askPending?.[thread.id]
+  const early = pending && (pending.messageId === id || pending.messageId === null) ? pending : null
+  const list = memory.messages[thread.id] ?? []
+  let assistant = list.find(item => item.id === id) ?? streamingMessage(thread.id, id)
+  if (early?.state === 'done' && early.message) assistant = { ...early.message, threadId: thread.id }
+  else if (early) assistant = { ...assistant, text: assistant.text + early.text, ...(early.state === 'error' ? { status: 'error', error: early.error } : {}) }
+  let next = list.filter(item => item.id !== id)
+  const user = action.userMessage
+  if (typeof user?.id === 'string' && user.id) next = putMessage(next, { ...user, threadId: thread.id })
+  next = [...next, assistant]
+  const asking = assistant.status === 'streaming' ? { ...memory.asking, [thread.id]: id } : withoutKey(memory.asking, thread.id)
+  const askPending = pending ? withoutKey(d.askPending, thread.id) : d.askPending
+  return {
+    ...state,
+    data: askPending === d.askPending ? d : { ...d, askPending },
+    memory: { ...memory, threads: { ...memory.threads, [thread.id]: thread }, messages: { ...memory.messages, [thread.id]: next }, asking, activeThreadId: thread.id }
+  }
+}
+
+// `memory.threadLoaded` `{ thread, messages }` (GET /api/threads/:id): the stored messages, keeping the local copy
+// of the message still streaming.
+function loadThread(memory, action) {
+  const thread = action.thread
+  if (typeof thread?.id !== 'string' || !thread.id) return memory
+  const streaming = (memory.messages[thread.id] ?? []).find(item => item.status === 'streaming' && item.id === memory.asking[thread.id])
+  let list = (Array.isArray(action.messages) ? action.messages : []).map(item => ({ ...item, threadId: thread.id }))
+  if (streaming) list = putMessage(list, streaming)
+  return { ...memory, threads: { ...memory.threads, [thread.id]: thread }, messages: { ...memory.messages, [thread.id]: list } }
+}
+
+// The Memory actions of `reduce`; null for any other action type.
+function memoryAction(state, action) {
+  const memory = memoryOf(state)
+  switch (action.type) {
+    case 'memory.askStarted':
+      return startVaultAsk(state, action)
+    case 'memory.threadLoaded':
+      return { ...state, memory: loadThread(memory, action) }
+    case 'memory.threadsListed': {
+      const threads = { ...memory.threads }
+      for (const thread of Array.isArray(action.threads) ? action.threads : []) if (typeof thread?.id === 'string' && thread.id) threads[thread.id] = thread
+      return { ...state, memory: { ...memory, threads } }
+    }
+    case 'memory.threadDeleted': {
+      const id = action.id
+      if (typeof id !== 'string' || !memory.threads[id]) return state
+      return { ...state, memory: { ...memory, threads: withoutKey(memory.threads, id), messages: withoutKey(memory.messages, id), asking: withoutKey(memory.asking, id), activeThreadId: memory.activeThreadId === id ? null : memory.activeThreadId } }
+    }
+    case 'memory.activeThread':
+      return { ...state, memory: { ...memory, activeThreadId: typeof action.id === 'string' && action.id ? action.id : null } }
+    case 'memory.missesFetched':
+      return Number.isFinite(action.unresolved) ? { ...state, memory: { ...memory, missesUnresolved: action.unresolved } } : state
+    default:
+      return null
+  }
 }
 
 // Register the answer of POST /api/ask for a `meeting:<id>` thread; a stream that arrived first is folded in.
@@ -110,6 +242,7 @@ export function initialState() {
     deckdOutage: false,
     lastEventAt: null,
     data: emptyData(),
+    memory: emptyMemory(),
     view: { path: '/', overlay: null },
     episodes: {},
     toasts: [],
@@ -253,6 +386,7 @@ function applyEvent(state, message, live) {
     case 'health.changed':
       next.data = { ...d, health: upsert(d.health, data, row => row.dep === data.dep) }
       if (data.dep === 'deckd') next.deckdOutage = outageAfter(next.deckdOutage, data)
+      if (data.dep === 'vault-mcp') next.memory = { ...memoryOf(next), vault: vaultHealth(data) }
       return next
     case 'recap':
       next.data = { ...d, recap: data }
@@ -335,7 +469,9 @@ function receive(state, message) {
       const open = new Set(data.requests.map(row => row.id))
       const toasts = state.toasts.filter(toast => toast.requestId === undefined || open.has(toast.requestId))
       const deckdOutage = outageAfter(state.deckdOutage, data.health?.find(row => row.dep === 'deckd'))
-      return flush({ ...state, loaded: true, syncing: false, replaying: false, epoch: message.epoch, seq: message.seq, data, episodes, toasts, deckdOutage })
+      const vaultRow = Array.isArray(data.health) ? data.health.find(row => row.dep === 'vault-mcp') : undefined
+      const memory = vaultRow ? { ...memoryOf(state), vault: vaultHealth(vaultRow) } : memoryOf(state)
+      return flush({ ...state, loaded: true, syncing: false, replaying: false, epoch: message.epoch, seq: message.seq, data, memory, episodes, toasts, deckdOutage })
     }
     case 'replay.begin':
       return { ...state, replaying: true }
@@ -353,6 +489,11 @@ function receive(state, message) {
     case 'ask.done':
     case 'ask.error':
       return applyAsk(state, message)
+    case 'misses.changed': {
+      // Ephemeral (D-139): the unresolved misses count; a client that missed it reads the count from GET /api/misses.
+      const unresolved = Number(message.data?.unresolved)
+      return Number.isFinite(unresolved) ? { ...state, memory: { ...memoryOf(state), missesUnresolved: unresolved } } : state
+    }
     default:
       if (message.seq === undefined) return state
       if (!state.loaded || state.syncing && !state.replaying) return { ...state, buffer: [...state.buffer, message] }
@@ -383,11 +524,17 @@ export function archivedCount(state) {
  * Pure reducer for server messages and shell actions. Meeting actions: `meetings.fetched` `{ meetings }` merges
  * REST list rows (with their titles) into `data.meetings`; `meeting.ask` `{ thread, userMessage,
  * assistantMessageId }` (the POST /api/ask answer) ties a `meeting:<id>` thread to `data.meetingAsk[id]`.
+ * Memory actions (M5) update `state.memory`: `memory.askStarted` `{ thread, userMessage, assistantMessageId }` (the
+ * POST /api/ask answer for a `vault` thread), `memory.threadLoaded` `{ thread, messages }`, `memory.threadsListed`
+ * `{ threads }`, `memory.threadDeleted` `{ id }`, `memory.activeThread` `{ id }` and `memory.missesFetched`
+ * `{ unresolved }`. `ask.delta`, `ask.done` and `ask.error` reach Memory only for a vault thread it knows; a meeting
+ * thread keeps its M4 reducers.
  * @param {Record<string, any>} state
  * @param {{ type: string, [key: string]: any }} action
  * @returns {Record<string, any>}
  */
 export function reduce(state, action) {
+  if (String(action.type).startsWith('memory.')) return memoryAction(state, action) ?? state
   switch (action.type) {
     case 'message':
       return receive(state, action.message)
@@ -437,15 +584,46 @@ export function createDeckStore(initial = initialState()) {
   }
 }
 
+const MEMORY_VIEWS = new Set(['graph', 'browse', 'captures', 'misses'])
+
 /**
- * Match an SPA path against the route table in docs/deck/screens/rail-and-shell.md section 2.
+ * Read the Memory screen's query (screens/memory.md 1): `view` (`graph` by default, `browse`, `captures`, `misses`)
+ * and `thread` (`new`, a thread id, or null when absent).
+ * @param {string | null | undefined} search
+ * @returns {{ view: 'graph' | 'browse' | 'captures' | 'misses', thread: string | null }}
+ */
+export function memoryQuery(search) {
+  let query
+  try { query = new URLSearchParams(String(search ?? '')) } catch { query = new URLSearchParams() }
+  const view = query.get('view')
+  const thread = query.get('thread')
+  return { view: MEMORY_VIEWS.has(view) ? view : 'graph', thread: thread ? thread : null }
+}
+
+/**
+ * The cited line of a note route fragment (`#L13`), or null.
+ * @param {string | null | undefined} hash with or without the leading `#`
+ * @returns {number | null}
+ */
+export function noteLine(hash) {
+  const match = /^#?L([1-9]\d{0,8})$/.exec(String(hash ?? ''))
+  return match ? Number(match[1]) : null
+}
+
+/**
+ * Match an SPA path against the route table in docs/deck/screens/rail-and-shell.md section 2. A query or fragment in
+ * the string is read for `memory` (`view`, `thread`) and `memoryNote` (`line` from `#L<n>`, only when present).
  * @param {string} pathname
- * @returns {{ name: string, params: Record<string, string> }}
+ * @returns {{ name: string, params: Record<string, any> }}
  */
 export function matchRoute(pathname) {
   let parts
+  const text = String(pathname)
+  const hashAt = text.indexOf('#')
+  const hash = hashAt === -1 ? '' : text.slice(hashAt)
+  const [pathPart, search = ''] = (hashAt === -1 ? text : text.slice(0, hashAt)).split('?')
   try {
-    parts = String(pathname).split('?')[0].split('/').filter(Boolean).map(decodeURIComponent)
+    parts = pathPart.split('/').filter(Boolean).map(decodeURIComponent)
   } catch {
     return { name: 'notFound', params: {} }
   }
@@ -455,8 +633,11 @@ export function matchRoute(pathname) {
   if (head === 'new' && parts.length === 1) return route('new')
   if (head === 's' && parts.length === 2) return route('focus', { sessionId: second })
   if (head === 'runs' && parts.length >= 3) return route('team', { repoKey: second, runId: rest.join('/') })
-  if (head === 'memory' && parts.length === 1) return route('memory')
-  if (head === 'memory' && second === 'note' && rest.length) return route('memoryNote', { path: rest.join('/') })
+  if (head === 'memory' && parts.length === 1) return route('memory', memoryQuery(search))
+  if (head === 'memory' && second === 'note' && rest.length) {
+    const line = noteLine(hash)
+    return route('memoryNote', line === null ? { path: rest.join('/') } : { path: rest.join('/'), line })
+  }
   if (head === 'research' && parts.length === 2) return second === 'new' ? route('researchNew') : route('research', { id: second })
   if (head === 'meetings' && parts.length === 1) return route('meetings')
   if (head === 'meetings' && parts.length === 2) return second === 'live' ? route('meetingLive') : route('meeting', { id: second })

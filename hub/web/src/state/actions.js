@@ -1,6 +1,7 @@
 /**
- * REST helpers for the M2 session, crew and run actions, the M3 answer, rule and diff calls and the M4
- * meeting calls (docs/deck/05-api.md sections 2.3, 2.4, 2.5, 2.6, 2.8, 2.9 and 2.11).
+ * REST helpers for the M2 session, crew and run actions, the M3 answer, rule and diff calls, the M4
+ * meeting calls and the M5 memory calls (docs/deck/05-api.md sections 2.3, 2.4, 2.5, 2.6, 2.8, 2.9 and 2.11,
+ * and the routes of docs/plans/2026-10-04-deck-m5.md "Shapes").
  * Each takes the client from `createApiClient`, encodes every path segment with `encodeURIComponent`,
  * and returns the API's body or throws its `ApiError` unchanged.
  */
@@ -374,4 +375,161 @@ export function startScribed(api) {
  */
 export function retryScribed(api) {
   return api.post('/api/deps/scribed/retry')
+}
+
+// M5 Memory (the vault routes, the vault scope of 05-api 2.9, the thread and misses routes of D-145, and
+// `vaultNote` in POST /api/open). A note path travels as one encoded query value or as a body string.
+
+// A query string from the entries whose value is set; arrays join with commas. Empty when nothing is set.
+function queryOf(params) {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null) continue
+    const text = Array.isArray(value) ? value.map(String).join(',') : String(value)
+    if (text !== '') query.set(key, text)
+  }
+  const text = query.toString()
+  return text ? `?${text}` : ''
+}
+
+/**
+ * Read the vault graph (`GET /api/vault/graph`, the contract 1.11 `VaultGraph`).
+ * @param {{ get: Function }} api
+ * @param {{ tags?: string[] | string, status?: string, folder?: string, maxNodes?: number }} [filters]
+ * @returns {Promise<{ nodes: object[], edges: { source: string, target: string }[], broken?: object[], truncated: boolean, counts: { notes: number, edges: number, orphans: number, broken: number } }>}
+ */
+export function fetchGraph(api, { tags, status, folder, maxNodes } = {}) {
+  return api.get(`/api/vault/graph${queryOf({ tags, status, folder, maxNodes })}`)
+}
+
+/**
+ * List vault notes (`GET /api/vault/list`).
+ * @param {{ get: Function }} api
+ * @param {{ folder?: string, tags?: string[] | string, tipo?: string }} [filters]
+ * @returns {Promise<{ notes: { path: string, title: string, tipo: string | null, status: string | null, tags: string[], domain: string | null }[] }>}
+ */
+export function fetchVaultList(api, { folder, tags, tipo } = {}) {
+  return api.get(`/api/vault/list${queryOf({ folder, tags, tipo })}`)
+}
+
+/**
+ * Read one note with its backlinks, links out and deck usage (`GET /api/vault/note?path=`).
+ * @param {{ get: Function }} api
+ * @param {string} path vault-relative
+ * @returns {Promise<{ note: { path: string, title: string, frontmatter: object, body: string, truncated: boolean, total: number }, backlinks: object[], linksOut: object[], usage: { citedIn: object[], readBy: object[] } }>}
+ */
+export function fetchNote(api, path) {
+  return api.get(`/api/vault/note?path=${seg(path)}`)
+}
+
+/**
+ * Search the vault (`GET /api/vault/search?q=&limit=`); `limit` is left to the server default when omitted.
+ * @param {{ get: Function }} api
+ * @param {string} q
+ * @param {number} [limit]
+ * @returns {Promise<{ hits: { path: string, title: string, line: number, snippet: string, viaGraph: boolean }[] }>}
+ */
+export function searchVault(api, q, limit) {
+  return api.get(`/api/vault/search${queryOf({ q, limit })}`)
+}
+
+/**
+ * Read the captures of a day (`GET /api/vault/captures?day=YYYY-MM-DD`); the server's today when omitted.
+ * @param {{ get: Function }} api
+ * @param {string} [day]
+ * @returns {Promise<{ day: string, captures: { path: string, title: string, domain: string | null, capturedAt: number, via: 'vault_learn' | 'frontmatter', sessionId: string | null, repoId: string | null, repoName: string | null, opened: boolean }[] }>}
+ */
+export function fetchCaptures(api, day) {
+  return api.get(`/api/vault/captures${queryOf({ day })}`)
+}
+
+/**
+ * Read the misses log and the unresolved count (`GET /api/misses`).
+ * @param {{ get: Function }} api
+ * @returns {Promise<{ misses: { id: string, question: string, threadId: string | null, searchedTerms: string[], createdAt: number, resolvedBy: string | null }[], unresolved: number }>}
+ */
+export function fetchMisses(api) {
+  return api.get('/api/misses')
+}
+
+/**
+ * Resolve a miss (`POST /api/misses/:id/resolve`) as `dismissed`, or as `note:<path>` for "The vault has this".
+ * @param {{ post: Function }} api
+ * @param {string} id
+ * @param {string} resolvedBy `dismissed` or `note:<path>`
+ * @returns {Promise<{ miss: object }>}
+ */
+export function resolveMiss(api, id, resolvedBy) {
+  return api.post(`/api/misses/${seg(id)}/resolve`, { resolvedBy })
+}
+
+/**
+ * Ask the vault (`POST /api/ask` without `scope`, which the server reads as `vault`); without `threadId` the
+ * server starts a new thread.
+ * @param {{ post: Function }} api
+ * @param {{ threadId?: string | null, text: string }} ask
+ * @returns {Promise<{ thread: object, userMessage: object, assistantMessageId: string }>}
+ */
+export function askVault(api, { threadId, text }) {
+  return api.post('/api/ask', threadId === undefined || threadId === null ? { text } : { threadId, text })
+}
+
+/**
+ * Stop an ask in flight (`POST /api/ask/:messageId/cancel`).
+ * @param {{ post: Function }} api
+ * @param {string} messageId the assistant message id
+ * @returns {Promise<{ messageId: string }>}
+ */
+export function cancelAsk(api, messageId) {
+  return api.post(`/api/ask/${seg(messageId)}/cancel`)
+}
+
+/**
+ * List the vault ask threads, newest first (`GET /api/threads?limit=`); the server default when omitted.
+ * @param {{ get: Function }} api
+ * @param {{ limit?: number }} [page]
+ * @returns {Promise<{ threads: { id: string, title: string, scope: string, createdAt: number, updatedAt: number }[] }>}
+ */
+export function fetchThreads(api, { limit } = {}) {
+  return api.get(`/api/threads${queryOf({ limit })}`)
+}
+
+/**
+ * Read one thread with its messages (`GET /api/threads/:id`).
+ * @param {{ get: Function }} api
+ * @param {string} id
+ * @returns {Promise<{ thread: object, messages: object[] }>}
+ */
+export function fetchThread(api, id) {
+  return api.get(`/api/threads/${seg(id)}`)
+}
+
+/**
+ * Delete a thread (`DELETE /api/threads/:id`).
+ * @param {{ del: Function }} api
+ * @param {string} id
+ * @returns {Promise<{ deleted: true }>}
+ */
+export function deleteThread(api, id) {
+  return api.del(`/api/threads/${seg(id)}`)
+}
+
+/**
+ * Read a session's memory: related notes, the notes it read and the notes it learned (`GET /api/sessions/:id/memory`).
+ * @param {{ get: Function }} api
+ * @param {string} id
+ * @returns {Promise<{ related: { path: string, title: string, line: number, snippet: string }[] | null, relatedError: object | null, read: { path: string, at: number }[], learned: { path: string, title: string, at: number }[] }>}
+ */
+export function fetchSessionMemory(api, id) {
+  return api.get(session(id, 'memory'))
+}
+
+/**
+ * Open a vault note in Obsidian (`POST /api/open`, kind `vaultNote`, the vault-relative path as `ref`).
+ * @param {{ post: Function }} api
+ * @param {string} path vault-relative
+ * @returns {Promise<unknown>}
+ */
+export function openVaultNote(api, path) {
+  return api.post('/api/open', { kind: 'vaultNote', ref: path })
 }
