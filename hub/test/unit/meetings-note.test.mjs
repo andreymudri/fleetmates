@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, mkdir, writeFile, readFile, symlink, unlink } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, chmod, writeFile, readFile, symlink, unlink } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
@@ -51,6 +51,11 @@ test('findNote refuses a meetings folder that is the vault itself or outside it'
   assert.equal(await findNote({ ...base, meetingsFolder: outside }), null)
   assert.equal(await findNote({ ...base, meetingsFolder: '../outside-vault' }), null)
   assert.equal(await findNote(base), m.notes.weekly)
+  // An unlistable folder outside the vault: findNote must answer null without ever listing it, so no EACCES.
+  const locked = path.join(m.root, 'locked')
+  await mkdir(locked)
+  await chmod(locked, 0o311)
+  try { assert.equal(await findNote({ ...base, meetingsFolder: '../locked' }), null) } finally { await chmod(locked, 0o700) }
 })
 
 test('readNote reads a vault-relative note and refuses a symlink', async t => {
