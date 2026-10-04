@@ -505,7 +505,7 @@ if (import.meta.main) {
     await until(() => !h.session(vault.id).alive, { message: 'the session to end' })
   })
 
-  spec('Focus AC11 and AC12: Mark reviewed turns a done session Reviewed; Down in the changed files moves the selection and shows the M2 diff caption', async t => {
+  spec('Focus AC11 and AC12: Mark reviewed turns a done session Reviewed; Down in the changed files moves the selection and shows the diff caption of the selected file', async t => {
     const h = await deck(t, { team: false })
     const ids = await h.observed()
     const axios = ids.get('axios-like')
@@ -517,8 +517,9 @@ if (import.meta.main) {
     await page.keyboard.press('ArrowDown')
     assert.deepEqual(await page.$$eval('.focus-file', rows => rows.map(row => row.getAttribute('aria-selected'))), ['false', 'true'])
     assert.equal(await page.getAttribute('.focus-files', 'aria-activedescendant'), 'focus-file-1')
-    // FOC-O3 default for M2: the diff itself arrives with M3 approvals; the caption stands in for it.
-    assert.equal(await page.textContent('.focus-diff-caption'), 'Diffs arrive with approvals.')
+    // M3 shows the selected file's diff (DiffView), captioned with its path, where M2 had "Diffs arrive with approvals.".
+    const selectedPath = await page.textContent('.focus-file[aria-selected="true"] .focus-file-path')
+    assert.equal(await page.textContent('.diff-caption'), `${selectedPath} · unified (panel is narrow)`)
     // At Stop the deck re-reads the changes from git against the baseline taken at SessionStart, so the edits are real.
     const repo = path.join(placed(control.scanRoot, h.home), 'axios-like')
     await mkdir(path.join(repo, 'lib'), { recursive: true })
