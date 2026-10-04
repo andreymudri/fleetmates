@@ -41,9 +41,11 @@ export const MAX_RESULT_LINE = 4096
 /**
  * Read one vault-mcp result line (contract 1.6) without a backtracking regex, so the work is linear in the
  * line whatever an untrusted title holds:
- * - `- <path> <EM> <title>...` (vault_list, vault_backlinks) gives `{ path, line: null }`;
+ * - `- <path> <EM> <title>...` (vault_list, vault_backlinks) gives `{ path, line: null }`; the path ends at
+ *   the first `.md <EM> `, so a path that itself holds ` <EM> ` is kept whole;
  * - `<path>:<line> <EM> <trail> (score ...)`, or `<path>:<line> (score ...)` when the chunk has no heading
- *   trail (vault_search), gives `{ path, line }`.
+ *   trail (vault_search), gives `{ path, line }`; the path ends at the first `:<digits>` followed by
+ *   ` <EM> ` or ` (score `, so ` <EM> ` inside the path does not cut it.
  * Snippet lines (`> `), lines starting with white space and lines over MAX_RESULT_LINE give null.
  * @param {string} text
  * @returns {{ path: string, line: number | null } | null}
@@ -51,20 +53,22 @@ export const MAX_RESULT_LINE = 4096
 export function parseResultLine (text) {
   if (text.length > MAX_RESULT_LINE || !text || text[0] === '>' || /\s/.test(text[0])) return null
   if (text.startsWith('- ')) {
-    const end = text.indexOf(SEP, 2)
-    const p = end < 0 ? '' : text.slice(2, end)
-    return p.endsWith('.md') && p[0] !== '>' && !/\s/.test(p[0]) ? { path: p, line: null } : null
+    const end = text.indexOf(`.md${SEP}`, 2)
+    const p = end < 0 ? '' : text.slice(2, end + 3)
+    return p.length > 3 && p[0] !== '>' && !/\s/.test(p[0]) ? { path: p, line: null } : null
   }
   if (!text.endsWith(')')) return null
   const score = text.lastIndexOf(SCORE)
   if (score < 0 || text.indexOf(')', score + SCORE.length) !== text.length - 1) return null
-  const head = text.slice(0, score)
-  const trail = head.indexOf(SEP)
-  const loc = trail < 0 ? head : head.slice(0, trail)
-  const colon = loc.lastIndexOf(':')
-  const num = loc.slice(colon + 1)
-  if (colon <= 0 || !/^\d+$/.test(num)) return null
-  return { path: loc.slice(0, colon), line: Number(num) }
+  // Each character is read at most twice: once by indexOf, once as a digit after one colon.
+  for (let colon = text.indexOf(':'); colon > 0 && colon < score; colon = text.indexOf(':', colon + 1)) {
+    let end = colon + 1
+    while (end < score && text.charCodeAt(end) >= 48 && text.charCodeAt(end) <= 57) end++
+    if (end > colon + 1 && (end === score || text.startsWith(SEP, end))) {
+      return { path: text.slice(0, colon), line: Number(text.slice(colon + 1, end)) }
+    }
+  }
+  return null
 }
 
 const promptDir = path.dirname(fileURLToPath(import.meta.url))

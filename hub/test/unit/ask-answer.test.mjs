@@ -257,3 +257,28 @@ test('rule (a) keeps an earlier line of a hit path even past the bound', async (
     { toolPaths: [path], knownPaths: [], searchHits: [{ path, line: 13 }], lineBound: () => 10 })
   assert.deepEqual(r.kept.map(c => c.line), [12])
 })
+
+// A continuation page as T2's parseNote returns it: no frontmatter, a slice of the body.
+const CONT_TEXT = `02-wiki/nestjs/longa.md ${EM} Longa\n[slice starting at character 6000 of 9000]\n\nlinha a\nlinha b`
+const CONT = { path: '02-wiki/nestjs/longa.md', title: 'Longa', frontmatter: null, frontmatterCut: false, links: null, brokenLinks: null, body: 'linha a\nlinha b', offset: 6000, truncated: false, total: 9000, nextOffset: null, skipped: 0 }
+
+test('noteLineBound gives Infinity for a continuation page (offset > 0 or no frontmatter)', async () => {
+  assert.equal(noteLineBound(CONT), Infinity)
+  assert.equal(noteLineBound({ ...CONT, frontmatter: {} }), Infinity)
+  assert.equal(noteLineBound({ ...CONT, offset: 0 }), Infinity)
+  const r = await validateCitations([{ path: CONT.path, line: 150, viaGraph: false }],
+    { toolPaths: [CONT.path], knownPaths: [], lineBound: () => noteLineBound(CONT) })
+  assert.equal(r.kept.length, 1)
+})
+
+test('the literal continuation page matches T2 parseNote when vault-text.mjs is present', async (t) => {
+  /** @type {any} */
+  let mod
+  try {
+    mod = await import('../../server/adapters/vault-text.mjs')
+  } catch {
+    t.skip('hub/server/adapters/vault-text.mjs (Task 2) is not in this tree')
+    return
+  }
+  assert.deepEqual(mod.parseNote(CONT_TEXT), CONT)
+})

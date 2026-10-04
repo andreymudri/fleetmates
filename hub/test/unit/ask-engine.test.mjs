@@ -12,7 +12,7 @@ import {
   ASK_TOTAL_MS, ASK_IDLE_MS, readProcIdentity, resultPaths, resultCount, parseResultLine, MAX_RESULT_LINE
 } from '../../server/ask/engine.mjs'
 import { CLAUDE_SESSION_VARS } from '../../deckd/login-env.mjs'
-import { parseAnswer } from '../../server/ask/answer.mjs'
+import { parseAnswer, validateCitations } from '../../server/ask/answer.mjs'
 
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixtures = path.join(hubDir, 'test', 'fixtures', 'claude-p', 'synthetic')
@@ -531,4 +531,37 @@ test('crafted result lines that do not match cost linear work: 100 lines of abou
   const ms = performance.now() - start
   assert.ok(ms < 500, `took ${ms.toFixed(0)} ms`)
   assert.equal(r.paths.length, 50)
+})
+
+test('a path that itself holds " <EM> " stays whole in search, list and backlink lines, and its cited line is kept', async () => {
+  const search = [
+    '2 result(s) for "pauta".', '',
+    `notas/Reunião ${EMD} Acme.md:12 ${EMD} Pauta (score 0.91)`, '> item da pauta', '',
+    'notas/Plano ' + EMD + ' Q4.md:3 (score 0.5)', '> meta do trimestre'
+  ].join('\n')
+  const r = resultPaths('mcp__vault__vault_search', search)
+  assert.deepEqual(r.paths, [`notas/Reunião ${EMD} Acme.md`, `notas/Plano ${EMD} Q4.md`])
+  assert.deepEqual(r.hits, [{ path: `notas/Reunião ${EMD} Acme.md`, line: 12 }, { path: `notas/Plano ${EMD} Q4.md`, line: 3 }])
+  assert.equal(resultCount(search.split('\n').slice(2).join('\n')), 2)
+  const list = `1 note(s):\n- notas/Reunião ${EMD} Acme.md ${EMD} Reunião com Acme (tipo: reuniao, status: ${EMD}, tags: acme)`
+  assert.deepEqual(resultPaths('mcp__vault__vault_list', list).paths, [`notas/Reunião ${EMD} Acme.md`])
+  const back = `1 note(s) point to notas/x.md:\n- notas/Reunião ${EMD} Acme.md ${EMD} Reunião com Acme`
+  assert.deepEqual(resultPaths('mcp__vault__vault_backlinks', back).paths, [`notas/Reunião ${EMD} Acme.md`])
+  const kept = await validateCitations([{ path: `notas/Reunião ${EMD} Acme.md`, line: 12, viaGraph: false }],
+    { toolPaths: r.paths, knownPaths: [], searchHits: r.hits, lineBound: () => 5 })
+  assert.equal(kept.kept.length, 1)
+})
+
+test('askEnv drops every FLEETMATES_DECK_ variable and ANTHROPIC_AUTH_TOKEN, then sets FLEETMATES_DECK_ROLE=ask', () => {
+  const env = askEnv({
+    PATH: '/usr/bin', FLEETMATES_DECK_SOCKET: '/run/deck.sock', FLEETMATES_DECK_STATE_DIR: '/tmp/s',
+    FLEETMATES_DECK_ROLE: 'web', ANTHROPIC_AUTH_TOKEN: 'a'
+  })
+  assert.deepEqual(env, { PATH: '/usr/bin', FLEETMATES_DECK_ROLE: 'ask' })
+})
+
+test('the ask limits are 120 s total and 45 s idle, and the timeout message says 120 s (D-142)', () => {
+  assert.equal(ASK_TOTAL_MS, 120000)
+  assert.equal(ASK_IDLE_MS, 45000)
+  assert.equal(ASK_TIMEOUT_ERROR, 'timed out after 120 s')
 })

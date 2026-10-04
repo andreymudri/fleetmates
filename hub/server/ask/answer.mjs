@@ -159,18 +159,20 @@ const CONTAINER_SUMMARY_RE = /\{objeto com \d+ chave\(s\)\}|\[lista com \d+ item
  * is over-estimated as 2 fences, plus 2 lines per printed key (key line and a possible single list item or
  * wrapped value), plus 1 per further list item or escaped newline, plus FRONTMATTER_SLACK lines. The body
  * adds its own line count. A frontmatter deeper than that is still covered for the lines vault_search
- * reported, by rule (a) of validateCitations. A note cut short (`truncated`), longer than 200,000
+ * reported, by rule (a) of validateCitations. A continuation page (`offset > 0`, or `frontmatter` null,
+ * which parseNote gives only for one), whose body is a slice of the note, a note cut short (`truncated`), longer than 200,000
  * characters, or whose frontmatter vault-mcp cut or may have elided (`frontmatterCut`, 32 keys, a
  * 512-character value, a value holding a container summary such as `{objeto com 3 chave(s)}`) gives
  * `Infinity`.
  * @param {{
  *   frontmatter?: Record<string, unknown> | [string, unknown][] | null, frontmatterCut?: boolean,
- *   body?: string, truncated?: boolean, total?: number
+ *   body?: string, truncated?: boolean, total?: number, offset?: number
  * }} note
  * @returns {number}
  */
 export function noteLineBound (note) {
   if (!note || note.truncated || note.frontmatterCut) return Infinity
+  if ((typeof note.offset === 'number' && note.offset > 0) || note.frontmatter === null) return Infinity
   if (typeof note.total === 'number' && note.total > MAX_BOUND_CHARS) return Infinity
   const fm = note.frontmatter
   const entries = !fm ? [] : Array.isArray(fm) ? fm : Object.entries(fm)
