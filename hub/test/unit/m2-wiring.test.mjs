@@ -48,7 +48,7 @@ test('deckScreens registers new, team and crew and hands the same terminals and 
   const terminals = { attach: () => ({}) }
   const dispatch = () => {}
   const screens = deckScreens({ api, feed: { subscribe: () => () => {} }, terminals, dispatch })
-  assert.deepEqual(Object.keys(screens).sort(), ['crew', 'focus', 'home', 'new', 'settings', 'team', 'welcome'])
+  assert.deepEqual(Object.keys(screens).sort(), ['crew', 'focus', 'home', 'meeting', 'meetingLive', 'meetings', 'new', 'settings', 'team', 'welcome'])
   const live = props(loaded())
   const [home] = components(screens.home(live), ['Home'])
   const [focus] = components(screens.focus(live), ['Focus'])
