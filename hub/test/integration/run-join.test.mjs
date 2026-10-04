@@ -343,6 +343,56 @@ test('a late --run PreToolUse older than an applied --run does not move the sess
   assert.equal(h.deck.store.get('SELECT lead_session_id FROM runs WHERE repo_id=? AND run_id=?', h.repo, 'r1')?.lead_session_id ?? null, null)
 })
 
+// Sends `steps` from one Claude process at T plus each offset: a number with a command is a Bash PreToolUse, `ask`
+// a Bash PermissionRequest; a third element `'sub'` runs the hook from a subdirectory of the repo. Returns the
+// applied flag of each PreToolUse, keyed by its offset.
+async function ordered(t, steps) {
+  const h = await harness(t)
+  fs.mkdirSync(path.join(h.repo, 'sub'))
+  const at = h.lastTs() + 1000
+  const envelope = { ptyId: 'pty-lead', claudePid: 4242 }
+  h.send('lead-1', h.repo, { hook_event_name: 'SessionStart', source: 'startup', tool_name: undefined, tool_input: undefined }, at, envelope)
+  for (const [offset, command, where] of steps) {
+    const hook_event_name = command === 'ask' ? 'PermissionRequest' : 'PreToolUse'
+    h.send('lead-1', where === 'sub' ? path.join(h.repo, 'sub') : h.repo, { hook_event_name, tool_name: 'Bash', tool_input: { command: command === 'ask' ? 'npm test' : command } }, at + offset, envelope)
+  }
+  const applied = Object.fromEntries(h.deck.store.all("SELECT hook_ts, applied FROM hook_events WHERE event='PreToolUse'").map(row => [row.hook_ts - at, row.applied]))
+  return { h, applied, lead: h.sessionFor('lead-1') }
+}
+const run = id => `node scripts/cli.mjs dispatch --run ${id} --phase 1`
+
+test('two late --run commands ingested newest first leave the session lead of the newer run', async t => {
+  const { h, applied, lead } = await ordered(t, [[50, 'ask'], [30, run('r2')], [10, run('r1')]])
+  assert.deepEqual(applied, { 30: 0, 10: 0 })
+  assert.deepEqual([lead.role, lead.runRef?.runId], ['lead', 'r2'])
+  assert.equal(h.deck.store.get('SELECT lead_session_id FROM runs WHERE repo_id=? AND run_id=?', h.repo, 'r1')?.lead_session_id ?? null, null)
+})
+
+test('an applied --run older than a late --run does not stop the late one joining', async t => {
+  const { applied, lead } = await ordered(t, [[5, run('r1')], [30, 'ask'], [20, run('r2')]])
+  assert.deepEqual(applied, { 5: 1, 20: 0 })
+  assert.deepEqual([lead.role, lead.runRef?.runId], ['lead', 'r2'])
+})
+
+test('a newer applied Bash command without --run does not stop a late --run joining', async t => {
+  const { applied, lead } = await ordered(t, [[30, 'ls'], [10, run('r1')]])
+  assert.deepEqual(applied, { 30: 1, 10: 0 })
+  assert.deepEqual([lead.role, lead.runRef?.runId], ['lead', 'r1'])
+})
+
+test('a newer applied --run that joinLead refuses does not stop a late --run joining, as in-order delivery would', async t => {
+  for (const [label, refused] of [['invalid run name', [30, run('a..b')]], ['subdirectory cwd', [30, run('r2'), 'sub']]]) {
+    await t.test(label, async t => {
+      const inOrder = await ordered(t, [[10, run('r1')], refused])
+      assert.deepEqual(inOrder.applied, { 10: 1, 30: 1 })
+      assert.deepEqual([inOrder.lead.role, inOrder.lead.runRef?.runId], ['lead', 'r1'], 'in order, the refused command leaves r1')
+      const { applied, lead } = await ordered(t, [refused, [10, run('r1')]])
+      assert.deepEqual(applied, { 30: 1, 10: 0 })
+      assert.deepEqual([lead.role, lead.runRef?.runId], ['lead', 'r1'])
+    })
+  }
+})
+
 /** Await a condition the server reaches on its own; the deadline only turns a hang into a failure. */
 async function waitFor(fn) {
   const until = Date.now() + 5000
