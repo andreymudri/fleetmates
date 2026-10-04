@@ -240,3 +240,71 @@ body,
 .fatal-title { margin: 0; font: var(--type-page-title); color: var(--text-strong); }
 .fatal-body { margin: 0; color: var(--text-default); }
 .fatal .button { justify-self: center; }
+
+/* Recording bar (screens/meetings.md 3.2 and 4.3, rail-and-shell.md 4.2): above the Rail and main on every screen;
+   the Rail and main lose its height. */
+.shell--recording { flex-wrap: wrap; align-content: flex-start; }
+.shell--recording > .rail,
+.shell--recording > .shell-main { height: calc(100vh - var(--layout-rec-bar)); }
+.rec-bar {
+  flex: 0 0 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  height: var(--layout-rec-bar);
+  padding: 0 var(--space-16);
+  background: var(--state-crashed-bg);
+  color: var(--text-on-red-tint);
+  border-bottom: 1px solid var(--state-crashed-border);
+}
+.rec-bar--stopping { background: var(--bg-surface); color: var(--text-secondary); border-bottom-color: var(--border-subtle); }
+.rec-bar-dot {
+  flex: none;
+  width: var(--size-dot-md);
+  height: var(--size-dot-md);
+  border-radius: var(--radius-round);
+  background: var(--state-crashed-fg);
+}
+.rec-bar-label { font-weight: var(--font-weight-semibold); color: var(--text-strong); }
+.rec-bar-title { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.rec-bar-timer { font: var(--type-mono); font-variant-numeric: tabular-nums; }
+.rec-bar-quiet { color: var(--text-on-red-tint-secondary); }
+.rec-bar-quiet-info {
+  position: relative;
+  display: none;
+  place-items: center;
+  width: var(--space-16);
+  height: var(--space-16);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-round);
+  font-size: 11px;
+  cursor: default;
+}
+.rec-bar-quiet-tip {
+  position: absolute;
+  top: calc(100% + var(--space-6));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--z-tooltip);
+  padding: var(--space-4) var(--space-8);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-strong);
+  white-space: nowrap;
+  visibility: hidden;
+}
+.rec-bar-quiet-info:hover .rec-bar-quiet-tip,
+.rec-bar-quiet-info:focus-visible .rec-bar-quiet-tip { visibility: visible; }
+.rec-bar-actions { display: flex; gap: var(--space-8); margin-left: auto; }
+.rec-bar .button--ghost { color: var(--text-on-red-tint); }
+.rec-bar .button--danger-confirm {
+  background: var(--component-button-danger-bg);
+  color: var(--text-on-danger);
+  border-color: transparent;
+}
+.rec-bar .button--danger-confirm:hover { background: var(--component-button-danger-bg-hover); }
+/* At 1280 wide the quiet note moves behind an info icon with a tooltip (screens/meetings.md 3.2). */
+@media (max-width: 1439px) {
+  .rec-bar-quiet { display: none; }
+  .rec-bar-quiet-info { display: inline-grid; }
+}
