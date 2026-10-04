@@ -1,13 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'
-import { execFile } from 'node:child_process'
+import { execFile, spawn as spawnChild } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pty from 'node-pty'
 import { fakeBin } from '../helpers/fake-bin.mjs'
 import { testedVersion } from '../helpers/tested-version.mjs'
+import { askArgv } from '../../server/ask/engine.mjs'
 import {
   acceptTrust, captureSettings, CAPTURE_TEST, childEnv, CMD, createRedactor, LONG_CMD, option2Rule, PROMPTS,
   readAccount, redactTokens, REDACTIONS, STEP_ORDER
@@ -519,14 +520,142 @@ test('fake claude exits 97 when expectInput times out', async () => {
   }
 })
 
-test('fake claude exits 98 on -p', async () => {
+/**
+ * Run the fake `claude -p` by the wrapper's absolute path (no PATH lookup) with an isolated env, the prompt on
+ * stdin, and collect stdout, stderr and the exit code.
+ * @param {{ binDir: string, argv: string[], env: Record<string, string>, prompt?: string }} opts
+ * @returns {Promise<{ code: number|null, stdout: string, stderr: string }>}
+ */
+function runAsk ({ binDir, argv, env, prompt = 'Como o worker faz retry?' }) {
+  return new Promise((resolve, reject) => {
+    const child = spawnChild(path.join(binDir, 'claude'), argv, { env, stdio: ['pipe', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', d => { stdout += d })
+    child.stderr.on('data', d => { stderr += d })
+    child.on('error', reject)
+    child.on('close', code => resolve({ code, stdout, stderr }))
+    child.stdin.on('error', () => {})
+    child.stdin.end(prompt)
+  })
+}
+
+/**
+ * A temp dir with an isolated env for the fake's -p mode.
+ * @param {string} fixture
+ */
+async function askSetup (fixture) {
+  const t = await tempDir('deck-fake-p-')
   const bin = await fakeBin({})
+  const run = path.join(t.dir, 'run')
+  await mkdir(run, { mode: 0o700 })
+  const log = path.join(t.dir, 'log.jsonl')
+  const env = { PATH: '/usr/bin:/bin', HOME: t.dir, XDG_RUNTIME_DIR: run, FAKE_CLAUDE_P_FIXTURE: fixture, FAKE_CLAUDE_LOG: log }
+  const cleanup = async () => { await bin.cleanup(); await t.cleanup() }
+  return { binDir: bin.binDir, env, log, cleanup }
+}
+
+const askArgvOk = () => askArgv({ mcpCommand: ['npx', '-y', '@andreymudri/vault-mcp'], vaultPath: '/home/you/vault', lang: 'en', systemPrompt: 'PROMPT' })
+
+test('fake claude -p with the Ask argv replays the fixture and logs the prompt length, never the prompt', async () => {
+  const fixture = path.join(hubDir, 'test', 'fixtures', 'claude-p', 'synthetic', 'answer-cited.jsonl')
+  const s = await askSetup(fixture)
   try {
-    const run = runFake({ env: bin.env, args: ['-p', 'x'] })
-    assert.equal((await run.exited).exitCode, 98)
-    assert.match(run.output(), /no -p/)
+    const r = await runAsk({ binDir: s.binDir, argv: askArgvOk(), env: s.env })
+    assert.equal(r.code, 0, r.stderr)
+    assert.equal(r.stdout, await readFile(fixture, 'utf8'))
+    const log = await readLog(s.log)
+    assert.deepEqual(log.map(e => [e.mode, e.promptLength]), [['p', 'Como o worker faz retry?'.length]])
+    assert.doesNotMatch(JSON.stringify(log), /Como o worker/)
   } finally {
-    await bin.cleanup()
+    await s.cleanup()
+  }
+})
+
+test('fake claude -p exits 98 when --allowedTools is widened with mcp__vault__vault_learn', async () => {
+  const s = await askSetup('answer-cited')
+  try {
+    const argv = askArgvOk()
+    argv[argv.indexOf('--allowedTools') + 1] += ',mcp__vault__vault_learn'
+    const r = await runAsk({ binDir: s.binDir, argv, env: s.env })
+    assert.equal(r.code, 98)
+    assert.match(r.stderr, /--allowedTools/)
+    assert.equal(r.stdout, '')
+  } finally {
+    await s.cleanup()
+  }
+})
+
+test('fake claude -p exits 98 without --strict-mcp-config', async () => {
+  const s = await askSetup('answer-cited')
+  try {
+    const argv = askArgvOk().filter(a => a !== '--strict-mcp-config')
+    const r = await runAsk({ binDir: s.binDir, argv, env: s.env })
+    assert.equal(r.code, 98)
+    assert.match(r.stderr, /missing --strict-mcp-config/)
+    assert.equal(r.stdout, '')
+  } finally {
+    await s.cleanup()
+  }
+})
+
+test('fake claude -p exits 98 on --safe-mode and on a variadic flag that swallows the next one', async () => {
+  const s = await askSetup('answer-cited')
+  try {
+    const safe = await runAsk({ binDir: s.binDir, argv: [...askArgvOk(), '--safe-mode'], env: s.env })
+    assert.equal(safe.code, 98)
+    assert.match(safe.stderr, /--safe-mode/)
+    const argv = askArgvOk()
+    const at = argv.indexOf('--tools')
+    argv.splice(at, 2)
+    argv.push('--tools', '')
+    const late = await runAsk({ binDir: s.binDir, argv, env: s.env })
+    assert.equal(late.code, 98)
+    assert.match(late.stderr, /--tools is not followed by exactly one value/)
+  } finally {
+    await s.cleanup()
+  }
+})
+
+test('fake claude -p hangs on {"hang":true}, and passes FAKE_CLAUDE_P_STDERR and FAKE_CLAUDE_P_EXIT through', async () => {
+  const t = await tempDir('deck-fake-p-hang-')
+  const fixture = path.join(t.dir, 'hang.jsonl')
+  await writeFile(fixture, '{"type":"system","subtype":"init","mcp_servers":[{"name":"vault","status":"connected"}]}\n{"hang":true}\n')
+  const s = await askSetup(fixture)
+  try {
+    const child = spawnChild(path.join(s.binDir, 'claude'), askArgvOk(), { env: s.env, stdio: ['pipe', 'pipe', 'ignore'] })
+    let out = ''
+    child.stdout.on('data', d => { out += d })
+    child.stdin.end('x')
+    const closed = new Promise(resolve => child.on('close', resolve))
+    await waitFor(() => out.includes('"init"'))
+    await new Promise(resolve => setTimeout(resolve, 200))
+    assert.equal(child.exitCode, null, 'still running')
+    child.kill('SIGKILL')
+    await closed
+    const r = await runAsk({ binDir: s.binDir, argv: askArgvOk(), env: { ...s.env, FAKE_CLAUDE_P_FIXTURE: 'error', FAKE_CLAUDE_P_STDERR: 'over quota', FAKE_CLAUDE_P_EXIT: '3' } })
+    assert.equal(r.code, 3)
+    assert.equal(r.stderr, 'over quota')
+    assert.match(r.stdout, /"is_error":true/)
+  } finally {
+    await s.cleanup()
+    await t.cleanup()
+  }
+})
+
+test('the synthetic claude-p fixtures say they are not captured, and every line is JSON in the 2.5 shapes', async () => {
+  const dir = path.join(hubDir, 'test', 'fixtures', 'claude-p', 'synthetic')
+  const manifest = JSON.parse(await readFile(path.join(dir, 'MANIFEST.json'), 'utf8'))
+  assert.deepEqual(manifest, { captured: false, shape: '10-memory-and-research 2.5', claudeCode: '2.1.285' })
+  const names = (await readdir(dir)).filter(f => f.endsWith('.jsonl')).sort()
+  assert.deepEqual(names, ['answer-cited.jsonl', 'answer-miss.jsonl', 'error.jsonl', 'general-knowledge.jsonl', 'no-block.jsonl', 'vault-not-connected.jsonl'])
+  for (const name of names) {
+    const lines = (await readFile(path.join(dir, name), 'utf8')).split('\n').filter(Boolean).map(l => JSON.parse(l))
+    assert.equal(lines[0].type, 'system', name)
+    assert.equal(lines[0].subtype, 'init', name)
+    assert.equal(lines[0].mcp_servers[0].name, 'vault', name)
+    assert.equal(lines[0].mcp_servers[0].status, name === 'vault-not-connected.jsonl' ? 'failed' : 'connected', name)
+    assert.equal(lines.at(-1).type, 'result', name)
   }
 })
 

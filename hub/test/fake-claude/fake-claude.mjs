@@ -2,11 +2,12 @@
 // Fake `claude` for deck tests (docs/deck/09-testing.md section 3). It replays a JSON
 // script from FAKE_CLAUDE_SCRIPT and logs every input chunk, hook fired and resize as JSON
 // lines to FAKE_CLAUDE_LOG. v0 verbs: hook, frame, expectInput, expectKey, branch, sleep,
-// print, exit, hang, echo. Not implemented yet: newSession, subagent, `-p` (Ask mode).
+// print, exit, hang, echo. Not implemented yet: newSession, subagent. With `-p` it is the
+// Ask engine's `claude -p` instead (askMode below): no script, a stream-json fixture replayed.
 // FAKE_CLAUDE_FIXTURES overrides the fixture root (default hub/test/fixtures).
 //
-// Exit codes: 96 missing frame, 97 expectInput/expectKey timeout, 98 unsupported mode,
-// 2 bad script.
+// Exit codes: 96 missing frame, 97 expectInput/expectKey timeout, 98 an Ask argv that is not
+// the 10-memory 2.2 invocation, 2 bad script or fixture.
 
 import { appendFileSync, existsSync, readFileSync, readdirSync } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -58,12 +59,114 @@ function defaultVersion () {
   return pkg.fleetmatesDeck.testedClaudeCode
 }
 
+// `-p` (Ask engine) mode, 09-testing 3.6. The expected argv is written out here on its own rather than taken
+// from the server's askArgv, so a change that widens the Ask's tools in the server fails here.
+const ASK_READ_TOOLS = ['vault_search', 'vault_get_note', 'vault_list', 'vault_backlinks'].map(t => `mcp__vault__${t}`)
+const ASK_DENIED = ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch',
+  ...['vault_write_note', 'vault_edit_note', 'vault_learn', 'vault_move', 'vault_delete'].map(t => `mcp__vault__${t}`)]
+/** Flags that take one value, with the value they must have when it is fixed. */
+const ASK_VALUE_FLAGS = /** @type {Record<string, string|null>} */ ({
+  '--output-format': 'stream-json',
+  '--permission-prompts': 'none',
+  '--mcp-config': null,
+  '--tools': '',
+  '--allowedTools': null,
+  '--disallowedTools': null,
+  '--append-system-prompt': null
+})
+const ASK_SWITCHES = ['-p', '--verbose', '--include-partial-messages', '--no-session-persistence', '--restricted', '--strict-mcp-config']
+/** Variadic in the real CLI: each must be followed by exactly one value, then another `--` flag. */
+const ASK_VARIADIC = ['--mcp-config', '--tools', '--allowedTools', '--disallowedTools']
+
+/**
+ * Check an Ask argv against the invocation of 10-memory 2.2. Returns the first problem found, or null.
+ * @param {string[]} argv
+ * @returns {string | null}
+ */
+function askArgvProblem (argv) {
+  if (argv.includes('--safe-mode')) return '--safe-mode is not part of the Ask argv'
+  if (argv.includes('--model')) return '--model is not part of the Ask argv in M5'
+  for (const flag of ASK_SWITCHES) if (!argv.includes(flag)) return `missing ${flag}`
+  /** @type {Record<string, string>} */
+  const values = {}
+  for (const [flag, want] of Object.entries(ASK_VALUE_FLAGS)) {
+    const at = argv.indexOf(flag)
+    if (at < 0) return `missing ${flag}`
+    if (at + 1 >= argv.length) return `${flag} has no value`
+    const value = argv[at + 1]
+    if (want !== null && value !== want) return `${flag} is ${JSON.stringify(value)}, expected ${JSON.stringify(want)}`
+    if (ASK_VARIADIC.includes(flag) && !(argv[at + 2] ?? '').startsWith('--')) {
+      return `${flag} is not followed by exactly one value and then a -- flag`
+    }
+    values[flag] = value
+  }
+  const allowed = values['--allowedTools'].split(',')
+  if (allowed.length !== ASK_READ_TOOLS.length || !ASK_READ_TOOLS.every(t => allowed.includes(t))) {
+    return `--allowedTools is ${values['--allowedTools']}, expected exactly ${ASK_READ_TOOLS.join(',')}`
+  }
+  const denied = values['--disallowedTools'].split(',')
+  const missing = ASK_DENIED.filter(t => !denied.includes(t))
+  if (missing.length) return `--disallowedTools lacks ${missing.join(',')}`
+  let config
+  try {
+    config = JSON.parse(values['--mcp-config'])
+  } catch {
+    return '--mcp-config is not JSON'
+  }
+  const servers = Object.keys(config?.mcpServers ?? {})
+  if (servers.length !== 1 || servers[0] !== 'vault') return `--mcp-config servers are ${servers.join(',') || 'none'}, expected vault only`
+  const env = config.mcpServers.vault.env ?? {}
+  if ('VAULT_AUTO_PUSH' in env) return '--mcp-config passes VAULT_AUTO_PUSH'
+  return null
+}
+
+/**
+ * The Ask mode: validate argv, read the prompt from stdin to its end (only its length is logged), replay
+ * FAKE_CLAUDE_P_FIXTURE (a path, or a name under fixtures/claude-p/synthetic/) with FAKE_CLAUDE_P_DELAY_MS
+ * between lines, hang when its last line is {"hang":true}, then write FAKE_CLAUDE_P_STDERR and exit with
+ * FAKE_CLAUDE_P_EXIT (default 0).
+ * @param {string[]} argv
+ * @returns {Promise<never>}
+ */
+async function askMode (argv) {
+  const problem = askArgvProblem(argv)
+  if (problem) die(98, `fake claude -p: ${problem}`)
+  let promptLength = 0
+  for await (const chunk of process.stdin) promptLength += chunk.toString('utf8').length
+  log({ mode: 'p', promptLength, role: process.env.FLEETMATES_DECK_ROLE ?? null, cwd: process.cwd() })
+  const fixture = process.env.FAKE_CLAUDE_P_FIXTURE
+  if (!fixture) die(2, 'FAKE_CLAUDE_P_FIXTURE is not set')
+  const file = existsSync(fixture) ? fixture : path.join(fixturesDir, 'claude-p', 'synthetic', `${fixture}.jsonl`)
+  let lines
+  try {
+    lines = readFileSync(file, 'utf8').split('\n').filter(l => l.trim())
+  } catch (err) {
+    die(2, `cannot read fixture ${fixture}: ${/** @type {Error} */ (err).message}`)
+  }
+  let hang = false
+  try {
+    hang = lines.length > 0 && JSON.parse(lines[lines.length - 1]).hang === true
+  } catch {}
+  if (hang) lines.pop()
+  if (process.env.FAKE_CLAUDE_P_STDERR) process.stderr.write(process.env.FAKE_CLAUDE_P_STDERR)
+  const delay = Number(process.env.FAKE_CLAUDE_P_DELAY_MS ?? 0)
+  for (const line of lines) {
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
+    await new Promise(resolve => process.stdout.write(line + '\n', resolve))
+  }
+  if (hang) {
+    setInterval(() => {}, 1 << 30)
+    await new Promise(() => {})
+  }
+  process.exit(Number(process.env.FAKE_CLAUDE_P_EXIT ?? 0))
+}
+
 const args = process.argv.slice(2)
 if (args.includes('--version') || args.includes('-v')) {
   process.stdout.write(`${process.env.FAKE_CLAUDE_VERSION || defaultVersion()} (Claude Code)\n`)
   process.exit(0)
 }
-if (args.includes('-p') || args.includes('--print')) die(98, 'fake claude v0 has no -p (Ask engine) mode')
+if (args.includes('-p') || args.includes('--print')) await askMode(args)
 
 const scriptArg = process.env.FAKE_CLAUDE_SCRIPT
 if (!scriptArg) die(2, 'FAKE_CLAUDE_SCRIPT is not set')
