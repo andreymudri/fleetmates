@@ -49,7 +49,7 @@ async function waitFor(fn, ms = 5000) {
  * A deck server over a temporary HOME with the meetings5 tree (config at the MEET-O11 default path), the fake
  * scribed (unless `scribed: false`) and the injected opener and systemd-run runner.
  */
-async function harness(t, { variants = [], scribed = true, fake = {}, execFile: injectedExec } = {}) {
+async function harness(t, { variants = [], scribed = true, fake = {}, execFile: injectedExec, runtime = true, processRuntime = false } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'mapi-'))
   const tree = await writeMeetingsTree(home, meetings5, { variants })
   const rt = await makeRuntimeDir()
@@ -67,8 +67,11 @@ async function harness(t, { variants = [], scribed = true, fake = {}, execFile: 
     get fake() { return scribedFake },
     async startFake(options = {}) { scribedFake = await startFakeScribed({ dir: rt.dir, ...options }) }
   }
+  // `processRuntime` points this process's XDG_RUNTIME_DIR at the fake's directory while the server runs.
+  const savedRuntime = process.env.XDG_RUNTIME_DIR
+  if (processRuntime) process.env.XDG_RUNTIME_DIR = rt.dir
   const deck = await startDeckServer({
-    env: { HOME: home, XDG_RUNTIME_DIR: rt.dir, PATH: process.env.PATH, SHELL: '/bin/sh', DECK_TOKEN: 'not-for-children' },
+    env: { HOME: home, ...(runtime ? { XDG_RUNTIME_DIR: rt.dir } : {}), PATH: process.env.PATH, SHELL: '/bin/sh', DECK_TOKEN: 'not-for-children' },
     port: 0, staticDir, notifications: false, runPollMs: 3_600_000, configDebounceMs: 20,
     connectDeckd: async () => { throw Error('fake offline') },
     runCommand: (file, args) => { commands.push([file, args])
@@ -79,6 +82,10 @@ async function harness(t, { variants = [], scribed = true, fake = {}, execFile: 
   h.deck = deck
   t.after(async () => {
     await deck.close()
+    if (processRuntime) {
+      if (savedRuntime === undefined) delete process.env.XDG_RUNTIME_DIR
+      else process.env.XDG_RUNTIME_DIR = savedRuntime
+    }
     await scribedFake?.stop()
     await rt.cleanup()
     fs.rmSync(home, { recursive: true, force: true })
@@ -323,4 +330,96 @@ test('POST /api/deps/scribed/start runs the systemd-run shim with the decided ar
   const calls = shimCalls().slice(before)
   assert.deepEqual(calls, [{ command: 'systemd-run', args: ['--user', '--collect', '--unit=turbidassist-scribed', '--property=KillMode=process', '/bin/sh', '-l', '-c', 'exec scribed'], token: false }])
   assert.deepEqual(h.commands, [])
+})
+
+/** Send one hook envelope of `event` from `cwd` through the ingestor. */
+function sendHook(h, cwd, sessionId, event, extra = {}) {
+  h.deck.ingest.receive(JSON.stringify({ v: 1, hookTs: Date.now(), ptyId: null, claudePid: null, pidChain: [], truncated: false,
+    hook: { ...hookFixture, cwd, session_id: sessionId, hook_event_name: event, ...extra } }))
+  h.deck.ingest.flush()
+}
+
+test('the hook guard keeps the last good session_dir when config.yaml stops reading, so a prompt from inside it is never stored', async t => {
+  const h = await harness(t, { scribed: false })
+  const inside = path.join(h.tree.sessionDir, h.tree.ids.planning)
+  sendHook(h, inside, 'guard-before', 'SessionStart')
+  assert.equal(h.deck.projector.snapshot().sessions.length, 0)
+  fs.writeFileSync(h.tree.configPath, 'session_dir: ~/meetings\n\tbroken: tab\n')
+  await waitFor(async () => (await h.request('/api/meetings')).data.configError !== null)
+  sendHook(h, inside, 'guard-after', 'SessionStart')
+  sendHook(h, inside, 'guard-after', 'UserPromptSubmit', { prompt: 'SENTINEL-T11-PROMPT' })
+  assert.equal(h.deck.projector.snapshot().sessions.length, 0)
+  assert.equal(h.deck.meetingHookDrops(), 3)
+  const db = path.join(h.state, 'deck.db')
+  for (const name of [db, `${db}-wal`]) {
+    const bytes = fs.existsSync(name) ? fs.readFileSync(name) : Buffer.alloc(0)
+    assert.equal(bytes.includes('SENTINEL-T11-PROMPT'), false, path.basename(name))
+  }
+})
+
+test('a hook whose cwd is a symlink outside session_dir pointing into it is dropped', async t => {
+  const h = await harness(t, { scribed: false })
+  const link = path.join(h.home, 'looks-outside')
+  fs.symlinkSync(path.join(h.tree.sessionDir, h.tree.ids.planning), link)
+  sendHook(h, link, 'via-symlink', 'SessionStart')
+  assert.equal(h.deck.projector.snapshot().sessions.length, 0)
+  assert.equal(h.deck.meetingHookDrops(), 1)
+})
+
+test('without XDG_RUNTIME_DIR in its env the server never reaches the socket of the process environment', async t => {
+  const h = await harness(t, { runtime: false, processRuntime: true })
+  assert.equal(process.env.XDG_RUNTIME_DIR, h.rt.dir)
+  await sleep(300)
+  const list = await h.request('/api/meetings')
+  assert.equal(list.data.recorder.state, 'unavailable')
+  const start = await h.request('/api/meetings/start', { method: 'POST', body: { tag: 'pessoal' } })
+  assert.equal(start.status, 503)
+  assert.deepEqual(h.fake.received, [])
+})
+
+test('a turbidassistConfig pref change is located and read again: GET /api/meetings shows the new tags and configPath', async t => {
+  const h = await harness(t, { scribed: false })
+  const first = await h.request('/api/meetings')
+  assert.equal(first.data.configPath, h.tree.configPath)
+  assert.deepEqual(first.data.tags.map(tag => tag.tag), ['pessoal', 'client-a', 'client-b'])
+  const second = path.join(h.home, 'other', 'config.yaml')
+  fs.mkdirSync(path.dirname(second), { mode: 0o700 })
+  fs.writeFileSync(second, meetings5.config.replace('    client-b:\n', '    acme:\n'))
+  const patched = await h.request('/api/prefs', { method: 'PATCH', body: { turbidassistConfig: second } })
+  assert.equal(patched.status, 200)
+  const after = await waitFor(async () => {
+    const list = await h.request('/api/meetings')
+    return list.data.configPath === second ? list : null
+  }, 2000)
+  assert.deepEqual(after.data.tags.map(tag => tag.tag), ['pessoal', 'client-a', 'acme'])
+})
+
+test('meeting detail sends the distinct speaker names', async t => {
+  const h = await harness(t, { scribed: false })
+  const detail = await h.request(`/api/meetings/${h.tree.ids.planning}`)
+  assert.deepEqual(detail.data.speakers, ['Você', 'SPEAKER_00'])
+})
+
+test('open meetingNote refuses a stored note path that is not .md, and the log route bounds lines at 1000', async t => {
+  const h = await harness(t, { scribed: false })
+  const id = h.tree.ids.planning
+  fs.writeFileSync(path.join(h.tree.vaultPath, 'Meetings', 'planning.txt'), 'plain text\n')
+  h.deck.store.run('UPDATE meetings SET note_path=? WHERE id=?', 'Meetings/planning.txt', id)
+  const refused = await h.request('/api/open', { method: 'POST', body: { kind: 'meetingNote', ref: id } })
+  assert.equal(refused.status, 403)
+  assert.equal(refused.data.error.code, 'path_not_allowed')
+  assert.deepEqual(h.opened, [])
+  assert.equal((await h.request(`/api/meetings/${id}/log?lines=1000`)).status, 200)
+  const over = await h.request(`/api/meetings/${id}/log?lines=1001`)
+  assert.equal(over.status, 422)
+  assert.equal(over.data.error.code, 'validation_failed')
+})
+
+test('the recorder view in the API is confidential once the stored row is, even when the recorder still says otherwise', async t => {
+  const h = await harness(t)
+  const recorder = await h.start('pessoal')
+  assert.equal(recorder.confidential, false)
+  h.deck.store.run('UPDATE meetings SET confidential=1 WHERE id=?', recorder.meetingId)
+  assert.equal(h.deck.recorder.view().confidential, false)
+  assert.equal((await h.request('/api/meetings')).data.recorder.confidential, true)
 })

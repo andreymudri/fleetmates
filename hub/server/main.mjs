@@ -301,7 +301,9 @@ export async function createDeckServer(options = {}) {
     locate: () => locateConfig({ pref: currentPrefs()?.turbidassistConfig ?? config.turbidassistConfig ?? null, home: paths.home }),
     read: file => readConfig(file, { home: paths.home }),
     onChange: next => {
-      sessionRoot = next?.ok ? realOrResolved(next.sessionDir) : null
+      // The hook guard fails closed: a config that stops reading keeps the last good session_dir guarded, and only
+      // a later config that reads ok replaces it.
+      if (next?.ok) sessionRoot = realOrResolved(next.sessionDir)
       void syncMeetings()
     },
     debounceMs: options.configDebounceMs ?? 1000

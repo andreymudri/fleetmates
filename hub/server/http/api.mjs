@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { apiError } from './router.mjs'
 import { parseOpenRequest, readRunPlan, resolveMeetingNote, resolvePostmeetLog, resolveRunPlan } from './open.mjs'
-import { MeetingFileError, SESSION_ID, foldText, listSessions, logTail, postState, readTranscript, searchTranscripts, speakers as speakerCount } from '../meetings/history.mjs'
+import { MeetingFileError, SESSION_ID, foldText, listSessions, logTail, postState, readTranscript, searchTranscripts } from '../meetings/history.mjs'
 import { findNote, parseNote, readNote } from '../meetings/note.mjs'
 import { addPin, dismissItem, dismissed as dismissedKeys, getMeeting, listMeetings, pins as meetingPins, removePin, undismissItem } from '../meetings/store.mjs'
 import { persistSessionSummary } from '../machines/session.mjs'
@@ -232,9 +232,9 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       return { ...row, title: note?.title ?? null, actionItemCount, stuck: await stuckOf(config, row), interrupted: interrupted.get(row.id) === true }
     }))
     const configError = config ? null : { code: raw?.error?.code ?? 'not_found', line: raw?.error?.line ?? null, message: raw?.error?.message ?? 'no TurbidAssist config located', path: raw?.path ?? null }
-    return { meetings: items, recorder: view, tags: config ? config.tags : [], model: config?.batchModel ?? null, configError }
+    return { meetings: items, recorder: view, tags: config ? config.tags : [], model: config?.batchModel ?? null, configPath: raw?.path ?? null, configError }
   }
-  /** `GET /api/meetings/:id`: the meeting, its note with dismissals, pins, speakers and model, read per request. */
+  /** `GET /api/meetings/:id`: the meeting, its note with dismissals, pins, distinct speaker names and model, read per request. */
   async function meetingDetail(id) {
     const row = meetingRow(id)
     const config = meetingConfig()
@@ -245,7 +245,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     if (config) {
       try {
         const transcript = await readTranscript(config.sessionDir, row.id)
-        if (transcript) speakers = speakerCount(transcript.lines)
+        if (transcript) speakers = [...new Set(transcript.lines.map(line => line.speaker))]
       } catch {}
       try { logAt = fs.lstatSync(path.join(config.sessionDir, row.id, 'postmeet.log')).mtimeMs } catch {}
     }
