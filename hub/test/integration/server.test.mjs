@@ -348,11 +348,17 @@ process.stdout.write('42\\n')
 `, { mode: 0o700 })
   let recording = true
   let probes = 0
+  // The recorder (M4 Task 11) polls `status` and, while recording, holds a `subscribe` open; scribed only counts as
+  // recording with a session id, so the recording status names one.
+  const status = () => JSON.stringify({ type: 'status', recording, session_id: recording ? '2026-09-12T14-00-00' : null, tag: recording ? 'pessoal' : null, elapsed_s: 0, routed_apps: [] }) + '\n'
   const scribed = net.createServer(sock => {
+    sock.on('error', () => {})
     sock.on('data', raw => {
-      assert.deepEqual(JSON.parse(raw), { cmd: 'status' })
+      const { cmd } = JSON.parse(raw)
+      assert.ok(['status', 'subscribe'].includes(cmd), cmd)
+      if (cmd === 'subscribe') return sock.write(status())
       probes++
-      sock.end(JSON.stringify({ type: 'status', recording, session_id: null, tag: null, elapsed_s: 0, routed_apps: [] }) + '\n')
+      sock.end(status())
     })
   })
   await new Promise(resolve => scribed.listen(path.join(runtime, 'turbidassist.sock'), resolve))

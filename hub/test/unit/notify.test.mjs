@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createProjector } from '../../server/machines/projector.mjs'
-import net from 'node:net'
 
 async function moduleAt(name) {
   try { return await import(`../../server/${name}.mjs`) } catch (error) {
@@ -239,54 +238,6 @@ test('closed grace requests stay silent, delivery failure retries privately and 
   } finally { h.cleanup() }
 })
 
-test('scribed polls the M0 client every two seconds and unavailable status leaves recording quiet mode', async () => {
-  const { createScribedStatus } = await moduleAt('adapters/scribed-status')
-  assert.equal(typeof createScribedStatus, 'function')
-  const dir = mkdtempSync(path.join(tmpdir(), 'deck-sc-'))
-  const socketPath = path.join(dir, 'scribed.sock')
-  let recording = true
-  let count = 0
-  let at = 1000
-  const changes = []
-  const server = net.createServer(socket => {
-    socket.on('data', line => {
-      assert.deepEqual(JSON.parse(line.toString()), { cmd: 'status' })
-      count++
-      socket.end(JSON.stringify({ type: 'status', recording, session_id: null, tag: null, elapsed_s: 0, routed_apps: [] }) + '\n')
-    })
-  })
-  await new Promise(resolve => server.listen(socketPath, resolve))
-  const poller = createScribedStatus({ socketPath, now: () => at, onChange: value => changes.push(value) })
-  try {
-    assert.equal(poller.isRecording(), false)
-    assert.equal((await poller.poll()).recording, true)
-    assert.equal(poller.isRecording(), true)
-    assert.equal(count, 1)
-    at = 2999
-    recording = false
-    await poller.poll()
-    assert.equal(count, 1)
-    assert.equal(poller.isRecording(), true)
-    at = 3000
-    await Promise.all([poller.poll(), poller.poll()])
-    assert.equal(count, 2)
-    assert.equal(poller.isRecording(), false)
-    recording = true
-    at = 5000
-    await poller.poll()
-    assert.equal(poller.isRecording(), true)
-    await new Promise(resolve => server.close(resolve))
-    at = 7000
-    assert.equal((await poller.poll()).state, 'down')
-    assert.equal(poller.isRecording(), false)
-    assert.equal(JSON.stringify(changes).includes(socketPath), false)
-  } finally {
-    poller.stop()
-    if (server.listening) await new Promise(resolve => server.close(resolve))
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
 test('overlapping requests keep one bell episode when every previously notified request closes between ticks', async () => {
   const h = await harness()
   try {
@@ -351,48 +302,4 @@ test('terminal popup preferences can change live and never change test ping hist
     assert.deepEqual(await h.machine.testPing(), { ok: false })
     assert.equal(h.store.all('SELECT * FROM notification_history').length, 2)
   } finally { h.cleanup() }
-})
-
-test('scribed injected timers schedule polling and stop discards an in-flight result', async () => {
-  const { createScribedStatus } = await moduleAt('adapters/scribed-status')
-  assert.equal(typeof createScribedStatus, 'function')
-  let at = 1000
-  let calls = 0
-  let release
-  const jobs = []
-  const cleared = []
-  const changes = []
-  const poller = createScribedStatus({
-    now: () => at,
-    status: async () => {
-      calls++
-      if (calls === 2) await new Promise(resolve => { release = resolve })
-      return { type: 'status', recording: calls === 1 }
-    },
-    onChange: value => changes.push(value),
-    setTimer: (fn, delay) => { const job = { fn, delay }; jobs.push(job); return job },
-    clearTimer: job => cleared.push(job)
-  })
-  try {
-    await poller.start()
-    await poller.start()
-    assert.equal(calls, 1)
-    assert.equal(jobs.length, 1)
-    assert.equal(jobs[0].delay, 2000)
-    at = 3000
-    jobs[0].fn()
-    const pending = poller.poll()
-    assert.equal(calls, 2)
-    poller.stop()
-    release()
-    await pending
-    assert.equal(changes.length, 1)
-    assert.equal(poller.isRecording(), true)
-    assert.deepEqual(cleared, [jobs[0]])
-    assert.equal(jobs.length, 1)
-    at = 5000
-    await poller.start()
-    assert.equal(poller.isRecording(), false)
-    assert.equal(jobs.length, 2)
-  } finally { poller.stop() }
 })
