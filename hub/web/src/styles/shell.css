@@ -242,11 +242,13 @@ body,
 .fatal .button { justify-self: center; }
 
 /* Recording bar (screens/meetings.md 3.2 and 4.3, rail-and-shell.md 4.2): above the Rail and main on every screen;
-   the Rail and main lose its height. */
+   the Rail and main lose exactly its height. The Rail is content-box with vertical padding, so its height leaves
+   that padding out; the bar is border-box, so its bottom border sits inside --layout-rec-bar. */
 .shell--recording { flex-wrap: wrap; align-content: flex-start; }
-.shell--recording > .rail,
+.shell--recording > .rail { height: calc(100vh - var(--layout-rec-bar) - 2 * var(--space-12)); }
 .shell--recording > .shell-main { height: calc(100vh - var(--layout-rec-bar)); }
 .rec-bar {
+  box-sizing: border-box;
   flex: 0 0 100%;
   display: flex;
   align-items: center;

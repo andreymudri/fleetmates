@@ -558,7 +558,9 @@ test('motion (qa 1.4): the terminal caret does not blink with Settings "Always r
 //   hub/web/src/screens/meetings/Meetings.jsx) inside the shell's `main#main`, on the list, the detail, the Full
 //   transcript drawer, the tag menu and the degraded card states.
 // - M4-T17-F4 (S3, axe `region`, moderate): with the recording bar shown, Home reports the skip link
-//   (`.sr-only-focusable`) as content outside every landmark.
+//   (`.sr-only-focusable`) as content outside every landmark. Fixed by Task 19: while the bar shows, the skip link
+//   renders as the first child of the bar's labelled `region`, so it stays the first focusable element and sits
+//   inside a landmark. The `region` assertion below fails if the bar loses its role.
 // - No serious or critical axe finding on any M4 surface audited below. The live view had no axe finding at all.
 // - M4-T17-F1 (S2, layout) and M4-T17-F2 (S2, security) are not accessibility findings: meetings.spec.mjs and
 //   security.spec.mjs.
@@ -592,6 +594,7 @@ test('axe (M4): the Meetings list, the detail, the Full transcript drawer, the o
   await page.goto(`${h.base}/`)
   await page.waitForSelector('.rec-bar--recording')
   await audit.run(page, 'recording-bar-home')
+  assert.deepEqual(screens['recording-bar-home'].filter(row => row.id === 'region'), [], 'M4-T17-F4: with the recording bar shown, axe finds no content outside a landmark')
   const down = await startMeetings(t, { web: web.dir, scribed: false })
   const downPage = await openDeck(browser, down, '/meetings')
   await downPage.waitForSelector('.degraded-card')

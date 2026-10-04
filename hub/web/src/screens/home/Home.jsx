@@ -634,11 +634,12 @@ export function LastMeetingView({ meeting, item = null, now, t, navigate, loadin
     const href = `/meetings/${encodeURIComponent(meeting.id)}`
     body = (
       <>
-        <a className="calm-meeting-title" href={href} onClick={linkHandler(navigate, href)} lang="pt-BR">{meetingTitle(meeting, t)}</a>
+        <a className="calm-meeting-title" href={href} onClick={linkHandler(navigate, href)} lang="pt-BR"><bdi>{titleText(meetingTitle(meeting, t))}</bdi></a>
         <p className="meeting-meta calm-meeting-meta">{meta}</p>
         {item ? (
           <div className="calm-loop calm-meeting-item">
-            <p className="calm-loop-text" lang="pt-BR">{item.text}</p>
+            <p className="calm-loop-text" lang="pt-BR"><bdi>{titleText(item.text)}</bdi></p>
+            {/* The task stays the raw item text: it is data for the new-session form, not display. */}
             <button type="button" className="button button--ghost button--xs" onClick={() => navigate('/new?task=' + encodeURIComponent(item.text))}>{tr('home.calm.meeting.launch')}</button>
           </div>
         ) : null}

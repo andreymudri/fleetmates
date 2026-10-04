@@ -41,11 +41,46 @@ test('the recording bar shows Recording, the tag and start time as a link, and a
   const { RecBarView } = await load('shell/RecBar.jsx')
   const html = render(RecBarView, barProps(recorder('recording')))
   assert.match(html, />Recording</)
-  assert.match(html, /<a [^>]*href="\/meetings\/live"[^>]*>Client A · started 14:00<\/a>/)
+  assert.match(html, /<a [^>]*href="\/meetings\/live"[^>]*><bdi>Client A · started 14:00<\/bdi><\/a>/)
   assert.match(html, /<span class="rec-bar-timer" aria-hidden="true">19:14<\/span>/, 'the ticking timer is hidden from screen readers')
   assert.match(html, /<span class="sr-only">Recording, started 14:00<\/span>/, 'a static start time is exposed instead')
   assert.match(html, /Pin moment/)
   assert.match(html, /<kbd class="kbd[^"]*">Alt P<\/kbd>/)
+})
+
+test('the bar title neutralises U+202E, ESC and BEL in the tag inside bdi (M4-T17-F2, Task 19)', async () => {
+  const { RecBarView } = await load('shell/RecBar.jsx')
+  const html = render(RecBarView, barProps(recorder('recording', { tag: 'evil\u202Etxt \u001b[31mred \u0007' })))
+  assert.doesNotMatch(html, /[\u202E\u001b\u0007]/, 'no raw U+202E, ESC or BEL reaches the markup')
+  assert.match(html, /<a class="rec-bar-title"[^>]*><bdi>Evil&lt;U\+202E&gt;txt &lt;U\+001B&gt;\[31mred &lt;U\+0007&gt; · started 14:00<\/bdi><\/a>/)
+})
+
+// Task 19 (M4-T17-F4): the skip link stays the first focusable element of the shell, and while the bar shows it is
+// the first child of the bar's labelled region, so it sits inside a landmark.
+test('the skip link is the first focusable element, inside the bar region while recording and first without the bar', async () => {
+  const { App } = await load('shell/App.jsx')
+  const { reduce, initialState } = await load('state/deck-store.js')
+  const snapshot = rec => reduce(initialState(), {
+    type: 'message', message: {
+      t: 'snapshot', seq: 1, epoch: 'e1', data: {
+        sessions: [], requests: [], runs: [], repos: [], counts: null, order: [], recap: null, ruleOffers: [], research: [],
+        recorder: rec, health: [], prefs: { lang: 'en' }, setup: { firstRunCompletedAt: 1 }
+      }
+    }
+  })
+  const store = state => ({ subscribe: () => () => {}, getState: () => state, dispatch: () => {} })
+  const firstFocusable = html => html.match(/<(a|button|input|select|textarea)\b[^>]*>/)?.[0] ?? ''
+  const skip = /^<a class="sr-only-focusable sr-only skip-link" href="#main">$/
+  for (const state of ['recording', 'stopping']) {
+    const on = render(App, { store: store(snapshot(recorder(state))), path: '/', navigate: () => {}, onRetry: () => {}, now: STARTED })
+    assert.match(firstFocusable(on), skip, `${state}: the skip link is the first focusable element`)
+    assert.match(on, /^<div class="shell shell--recording"[^>]*><div class="rec-bar[^"]*" role="region" aria-label="Recording"><a class="sr-only-focusable sr-only skip-link" href="#main">Skip to main content<\/a>/,
+      `${state}: the skip link is the first child of the bar's labelled region`)
+    assert.equal(on.split('href="#main"').length, 2, `${state}: one skip link`)
+  }
+  const off = render(App, { store: store(snapshot(recorder('idle'))), path: '/', navigate: () => {}, onRetry: () => {}, now: STARTED })
+  assert.match(firstFocusable(off), skip, 'without the bar the skip link is still the first focusable element')
+  assert.match(off, /^<div class="shell"[^>]*><a class="sr-only-focusable sr-only skip-link" href="#main">Skip to main content<\/a>/, 'and the first child of the shell')
 })
 
 test('the quiet note shows only while quiet mode is on', async () => {

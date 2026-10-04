@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { linkHandler } from './Rail.jsx'
-import { translate } from '../components/StatusPill.jsx'
+import { titleText, translate } from '../components/StatusPill.jsx'
 import { formatOffset } from '../components/TranscriptLine.jsx'
 import { motionReduced } from '../components/TerminalView.jsx'
 
@@ -48,16 +48,19 @@ export function recBarShown(recorder) {
  * The recording bar without state (screens/meetings.md 4.3): the dot (static under reduced motion), "Recording",
  * the "{Tag} · started {time}" link to the live view, the aria-hidden timer with a static screen reader start
  * time, the quiet note (text, or an info icon with a tooltip at 1280 wide), "Pin moment" with Alt P and "Stop and
- * summarize". While stopping it shows only the neutral stopping text. Renders nothing otherwise.
- * @param {{ recorder: object, t?: Function, lang?: string, elapsedS: number, reduced?: boolean, navigate: Function, onPin: () => void, onStop: () => void }} props
+ * summarize". While stopping it shows only the neutral stopping text. Renders nothing otherwise. `skipLink`, when
+ * given, renders first inside the bar's labelled region, so the shell's skip link stays the first focusable element
+ * and sits inside a landmark while the bar shows.
+ * @param {{ recorder: object, t?: Function, lang?: string, elapsedS: number, reduced?: boolean, navigate: Function, onPin: () => void, onStop: () => void, skipLink?: import('react').ReactNode }} props
  */
-export function RecBarView({ recorder, t, lang = 'en', elapsedS, reduced = false, navigate, onPin, onStop }) {
+export function RecBarView({ recorder, t, lang = 'en', elapsedS, reduced = false, navigate, onPin, onStop, skipLink = null }) {
   if (!recBarShown(recorder)) return null
   const say = (key, params) => translate(t, REC_COPY, key, params)
   const label = say('meetings.live.recording')
   if (recorder.state === 'stopping') {
     return (
       <div className="rec-bar rec-bar--stopping" role="region" aria-label={label}>
+        {skipLink}
         <span className="rec-bar-text">{say(recorder.slow ? 'meetings.live.stillStopping' : 'meetings.live.stopping')}</span>
       </div>
     )
@@ -66,9 +69,10 @@ export function RecBarView({ recorder, t, lang = 'en', elapsedS, reduced = false
   const quiet = say('meetings.live.quiet')
   return (
     <div className="rec-bar rec-bar--recording" role="region" aria-label={label}>
+      {skipLink}
       <span className={reduced ? 'rec-bar-dot' : 'rec-bar-dot motion-rec-pulse'} aria-hidden="true" />
       <span className="rec-bar-label">{label}</span>
-      <a className="rec-bar-title" href="/meetings/live" onClick={linkHandler(navigate, '/meetings/live')}>{say('meetings.live.title', { tag: tagTitle(recorder.tag), time })}</a>
+      <a className="rec-bar-title" href="/meetings/live" onClick={linkHandler(navigate, '/meetings/live')}><bdi>{titleText(say('meetings.live.title', { tag: tagTitle(recorder.tag), time }))}</bdi></a>
       <span className="rec-bar-timer" aria-hidden="true">{formatOffset(elapsedS)}</span>
       <span className="sr-only">{say('meetings.live.static.a11y', { time })}</span>
       {recorder.quiet
@@ -96,9 +100,9 @@ export function RecBarView({ recorder, t, lang = 'en', elapsedS, reduced = false
  * The recording bar the shell renders first on every screen (rail-and-shell.md 4.2). The timer starts from the
  * recorder's `elapsedS` and ticks locally each second, because `meeting.status` is not resent when only
  * `elapsedS` changes. Reduced motion follows the OS query and Settings (`data-motion="reduce"`).
- * @param {{ recorder: object, t?: Function, lang?: string, navigate: Function, onPin: () => void, onStop: () => void }} props
+ * @param {{ recorder: object, t?: Function, lang?: string, navigate: Function, onPin: () => void, onStop: () => void, skipLink?: import('react').ReactNode }} props
  */
-export function RecBar({ recorder, t, lang, navigate, onPin, onStop }) {
+export function RecBar({ recorder, t, lang, navigate, onPin, onStop, skipLink }) {
   const recording = recorder?.state === 'recording'
   const base = useRef({ meetingId: null, elapsedS: 0, at: 0 })
   if (base.current.meetingId !== recorder?.meetingId || base.current.elapsedS !== recorder?.elapsedS) {
@@ -126,5 +130,5 @@ export function RecBar({ recorder, t, lang, navigate, onPin, onStop }) {
     }
   }, [recording])
   const elapsedS = base.current.elapsedS + Math.max(0, Math.floor((now - base.current.at) / 1000))
-  return <RecBarView recorder={recorder} t={t} lang={lang} elapsedS={elapsedS} reduced={reduced} navigate={navigate} onPin={onPin} onStop={onStop} />
+  return <RecBarView recorder={recorder} t={t} lang={lang} elapsedS={elapsedS} reduced={reduced} navigate={navigate} onPin={onPin} onStop={onStop} skipLink={skipLink} />
 }

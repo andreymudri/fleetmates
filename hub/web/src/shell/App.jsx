@@ -149,7 +149,8 @@ export function pinFromKey(api, state, dispatch) {
 }
 
 /**
- * The shell for one route: the recording bar, skip link, Rail, banners, main, toasts and the live region.
+ * The shell for one route: the skip link (inside the recording bar while the bar shows), Rail, banners, main, toasts
+ * and the live region.
  * Renders without a window so it can be tested with `renderToStaticMarkup`.
  * @param {{ store: object, path: string, search?: string, navigate: (to: string) => void, onRetry: (kind: string) => void, onReload?: () => void, announcement?: string, now?: number, screens?: Record<string, Function>, api?: { post: Function } }} props
  */
@@ -167,10 +168,11 @@ export function App({ store, path, search = '', navigate, onRetry, onReload = ()
   const recording = recBarShown(recorder)
   const toastError = error => store.dispatch({ type: 'toast.push', tone: 'error', title: String(error?.message ?? error) })
   const onStop = () => { if (api) stopMeeting(api).catch(toastError) }
+  const skipLink = <a className="sr-only-focusable sr-only skip-link" href="#main">{t('shell.skip')}</a>
   return (
     <div className={`shell${recording ? ' shell--recording' : ''}${stale ? ' shell--stale' : ''}`} lang={language.lang}>
-      {recording ? <RecBar recorder={recorder} t={t} lang={language.lang} navigate={navigate} onPin={() => pinFromKey(api, store.getState(), store.dispatch)} onStop={onStop} /> : null}
-      <a className="sr-only-focusable sr-only skip-link" href="#main">{t('shell.skip')}</a>
+      {/* While the bar shows, the skip link is its first child: still the first focusable element, inside a landmark. */}
+      {recording ? <RecBar recorder={recorder} t={t} lang={language.lang} navigate={navigate} onPin={() => pinFromKey(api, store.getState(), store.dispatch)} onStop={onStop} skipLink={skipLink} /> : skipLink}
       <Rail t={t} path={path} counts={state.loaded ? state.data.counts : null} recording={state.data.recorder?.state === 'recording'} navigate={navigate} />
       <main id="main" aria-busy={state.loaded ? undefined : 'true'} tabIndex={-1} className="shell-main">
         {banner ? <Banner banner={banner} t={t} lastEventAt={state.lastEventAt} lang={language.lang} onRetry={onRetry} /> : null}
