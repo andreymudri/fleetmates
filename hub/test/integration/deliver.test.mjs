@@ -362,9 +362,10 @@ test('question-options: an option and a free-text reply are typed from the parse
   const s = await scenario(t, 'question-options')
   const question = await until(() => s.store.get("SELECT * FROM requests WHERE kind = 'question' AND state = 'open' AND screen_match = 'on_screen'"), 'the question on screen')
   await refused(s.deliverer.answer(question.id, { choice: 'allow' }), 'validation_failed')
-  const { outcome } = await s.deliverer.answer(question.id, { choice: 'reply', text: 'neither\x1b[201~' })
+  // The fake's PostToolUse reports the free text "a typed reply", so the deck types that text.
+  const { outcome } = await s.deliverer.answer(question.id, { choice: 'reply', text: 'a typed reply\x1b[201~' })
   assert.equal(await outcome, 'answered')
-  assert.deepEqual(inputs(s.log).join(''), '3\x1b[200~neither\x1b[201~\r')
+  assert.deepEqual(inputs(s.log).join(''), '3\x1b[200~a typed reply\x1b[201~\r')
   assert.deepEqual(JSON.parse(s.row(question.id).answer), { via: 'browser', choice: 'reply' })
 })
 
@@ -655,4 +656,126 @@ test('a hook contradicting the deck inside the verify window settles closed, and
   await until(() => b.row(reqB.id).delivery === 'verifying', 'the batch write')
   await terminalKey(b, '2')
   assert.deepEqual(await results, [{ id: reqB.id, ok: false, error: 'request_closed' }])
+})
+
+test('a hook that closes the request before deckd answers the accepted write is settled once by the write', async t => {
+  // Agreeing hook: the deck's keys were accepted, so the deck answered, counted and audited once.
+  const ctx = {}
+  const accepted = link => linkWith(link, { writeGuarded: async (...args) => {
+    await ctx.press()
+    await until(() => ctx.s.row(ctx.id).state !== 'open', 'the hook to close it')
+    return { at: Date.now() }
+  } })
+  const a = await scenario(t, 'approve-safe', { claudePid: 4242, wrapLink: accepted })
+  Object.assign(ctx, { s: a, press: () => terminalKey(a, '1') })
+  ctx.id = (await a.request('npm run test')).id
+  const sentA = await a.deliverer.answer(ctx.id, { choice: 'allow' })
+  assert.equal(await sentA.outcome, 'answered')
+  assert.deepEqual(JSON.parse(a.row(ctx.id).answer), { via: 'browser', choice: 'allow' })
+  assert.equal(a.row(ctx.id).delivery, 'verifying')
+  assert.equal(a.store.get('SELECT count FROM rule_counters WHERE pattern = ?', 'Bash(npm run test)')?.count, 1)
+  assert.deepEqual(a.audits(ctx.id).filter(row => row.kind === 'answered').map(row => [row.via, row.choice]), [['browser', 'allow']])
+
+  // Contradicting hook (the owner denied): the hook's verdict wins even though the write was accepted.
+  const b = await scenario(t, 'approve-safe', { claudePid: 4242, wrapLink: accepted })
+  Object.assign(ctx, { s: b, press: () => terminalKey(b, '2') })
+  ctx.id = (await b.request('npm run test')).id
+  const sentB = await b.deliverer.answer(ctx.id, { choice: 'allow' })
+  assert.equal(await sentB.outcome, 'closed')
+  assert.deepEqual(JSON.parse(b.row(ctx.id).answer), { via: 'terminal', choice: 'deny' })
+  assert.equal(b.store.get('SELECT count(*) AS n FROM rule_counters').n, 0)
+  assert.deepEqual(b.audits(ctx.id).filter(row => row.kind === 'answered').map(row => [row.via, row.choice]), [['terminal', 'deny']])
+
+  // A confirmed Destructive deck allow whose hook lands first keeps its confirm label in the audit.
+  const d = await scenario(t, 'prompt-swap', { wrapLink: link => linkWith(link, { writeGuarded: async (...args) => {
+    const written = await link.writeGuarded(...args)
+    await until(() => ctx.s.row(ctx.id).state !== 'open', 'the hook to close it')
+    return written
+  } }) })
+  ctx.s = d
+  ctx.id = (await d.request('rm -rf build')).id
+  const sentD = await d.deliverer.answer(ctx.id, { choice: 'allow', confirm: true })
+  assert.equal(await sentD.outcome, 'answered')
+  assert.deepEqual(JSON.parse(d.row(ctx.id).answer), { via: 'browser', choice: 'allow' })
+  const audit = d.audits(ctx.id).filter(row => row.kind === 'answered')
+  assert.deepEqual(audit.map(row => [row.via, row.confirm_label]), [['browser', 'I checked what this command will change']])
+})
+
+test('a tier that rises during the screen read is checked before the keys are written', async t => {
+  const ctx = {}
+  const s = await scenario(t, 'approve-safe')
+  const raising = linkWith(s.link, {})
+  raising.request = async (op, fields) => {
+    const reply = await s.link.request(op, fields)
+    if (op === 'screen') s.store.run("UPDATE requests SET tier = 'destructive', rule_pattern = NULL WHERE id = ?", ctx.id)
+    return reply
+  }
+  const deliverer = createDeliverer({ store: s.store, link: raising })
+  t.after(() => deliverer.close())
+  ctx.id = (await s.request('npm run test')).id
+  await refused(deliverer.answer(ctx.id, { choice: 'allow' }, { via: 'popup' }), 'tier_forbids')
+  s.store.run("UPDATE requests SET tier = 'safe' WHERE id = ?", ctx.id)
+  await refused(deliverer.answer(ctx.id, { choice: 'allow' }), 'confirm_required')
+  await sleep(100)
+  assert.deepEqual(inputs(s.log), [])
+})
+
+test('a terminal answer while a Try again is in flight is audited once, via terminal, and counted', async t => {
+  let writes = 0
+  const ctx = {}
+  const s = await scenario(t, 'approve-safe', { claudePid: 4242, deliver: { verifyMs: 300 }, wrapLink: link => linkWith(link, { writeGuarded: async () => {
+    if (++writes === 1) return { at: Date.now() }
+    await terminalKey(ctx.s, '1')
+    await until(() => ctx.s.row(ctx.id).state !== 'open', 'the hook to close it')
+    // Long enough for the earlier attempt's late watch to poll the closed row before the refusal.
+    await sleep(600)
+    throw Object.assign(new Error('typing_in_terminal'), { code: 'typing_in_terminal' })
+  } }) })
+  ctx.s = s
+  ctx.id = (await s.request('npm run test')).id
+  const first = await s.deliverer.answer(ctx.id, { choice: 'allow' })
+  assert.equal(await first.outcome, 'did_not_land')
+  await refused(s.deliverer.answer(ctx.id, { choice: 'allow' }), 'typing_in_terminal')
+  await sleep(600)
+  assert.deepEqual(JSON.parse(s.row(ctx.id).answer), { via: 'terminal', choice: 'allow' })
+  assert.deepEqual(s.audits(ctx.id).filter(row => row.kind === 'answered').map(row => [row.via, row.choice]), [['terminal', 'allow']])
+  assert.equal(s.store.get('SELECT count FROM rule_counters WHERE pattern = ?', 'Bash(npm run test)')?.count, 1)
+})
+
+test('a deck free-text reply that did not land is a terminal answer when the owner picks an option', async t => {
+  const s = await scenario(t, 'question-options', { wrapLink: lossy, deliver: { verifyMs: 300 } })
+  const question = await until(() => s.store.get("SELECT * FROM requests WHERE kind = 'question' AND state = 'open' AND screen_match = 'on_screen'"), 'the question on screen')
+  // The deck's text equals the label the owner then picks, so only the option-label rule can tell them apart.
+  const { outcome } = await s.deliverer.answer(question.id, { choice: 'reply', text: 'B' })
+  assert.equal(await outcome, 'did_not_land')
+  await terminalKey(s, '2')
+  await until(() => s.row(question.id).state === 'answered', 'the PostToolUse to close it')
+  assert.deepEqual(JSON.parse(s.row(question.id).answer), { via: 'terminal', choice: 'allow' })
+  await until(() => s.audits(question.id).at(-1).kind === 'answered', 'the answered audit')
+  assert.equal(s.audits(question.id).at(-1).via, 'terminal')
+})
+
+test('a UserPromptSubmit after a deck option that did not land is a terminal deny', async t => {
+  const s = await scenario(t, 'question-options', { wrapLink: lossy, deliver: { verifyMs: 300 } })
+  const question = await until(() => s.store.get("SELECT * FROM requests WHERE kind = 'question' AND state = 'open' AND screen_match = 'on_screen'"), 'the question on screen')
+  const { outcome } = await s.deliverer.answer(question.id, { choice: 'option', optionKey: '1' })
+  assert.equal(await outcome, 'did_not_land')
+  s.pauseHooks()
+  captureHook(s, 'UserPromptSubmit')
+  assert.deepEqual(JSON.parse(s.row(question.id).answer), { via: 'terminal', choice: 'deny' })
+  await until(() => s.audits(question.id).at(-1).kind === 'answered', 'the answered audit')
+  assert.deepEqual([s.audits(question.id).at(-1).via, s.audits(question.id).at(-1).option_label], ['terminal', null])
+})
+
+test('a deck free-text reply that did not land is a terminal answer when the owner types other text', async t => {
+  // The fake reports the free text "a typed reply"; the deck's reply was different text.
+  const s = await scenario(t, 'question-options', { wrapLink: lossy, deliver: { verifyMs: 300 } })
+  const question = await until(() => s.store.get("SELECT * FROM requests WHERE kind = 'question' AND state = 'open' AND screen_match = 'on_screen'"), 'the question on screen')
+  const { outcome } = await s.deliverer.answer(question.id, { choice: 'reply', text: 'the deck text' })
+  assert.equal(await outcome, 'did_not_land')
+  await terminalKey(s, '3')
+  await terminalKey(s, '\x1b[200~a typed reply\x1b[201~\r')
+  await until(() => s.row(question.id).state === 'answered', 'the PostToolUse to close it')
+  assert.deepEqual(JSON.parse(s.row(question.id).answer), { via: 'terminal', choice: 'allow' })
+  assert.doesNotMatch(s.row(question.id).answer, /deck text/)
 })

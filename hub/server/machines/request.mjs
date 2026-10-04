@@ -896,13 +896,24 @@ function transcriptQuestion(location) {
 
 /**
  * `delivery` values that mean deckd accepted the deck's keys for the request (state-machines 2.7 rows
- * 12, 15, 16). `sending` is not one: approvals/deliver.mjs writes the deck's answer only once the
- * guarded write is accepted, so a hook while the write is in flight is a terminal answer.
+ * 12, 15, 16). While the guarded write is in flight (`sending`) neither side decides alone: see
+ * `closingAnswer`.
  */
 export const DECK_DELIVERIES = Object.freeze(['verifying', 'did_not_land'])
 
 /** Deck choices on a permission request that a hook's allow or deny verdict confirms or contradicts. */
 const VERDICT_CHOICES = Object.freeze(['allow', 'allow_always', 'deny'])
+
+/**
+ * A salted digest of a free-text reply, so the deck can tell its own reply from one the owner typed
+ * without storing the text. The salt is the request id.
+ * @param {string} requestId
+ * @param {string} text
+ * @returns {string}
+ */
+export function replyDigest(requestId, text) {
+  return createHash('sha256').update(`${requestId}\0${String(text).trim()}`).digest('hex')
+}
 
 /**
  * The answers a closing AskUserQuestion hook reports (`tool_response.answers`, else
@@ -918,27 +929,17 @@ function reportedAnswers(hook) {
 }
 
 /**
- * The `answer` a closing hook records. A request deckd accepted the deck's keys for (`delivery`
- * verifying or did_not_land) keeps the deck's `via` and choice from the `answer` approvals/deliver.mjs
- * wrote, while the hook arrives by that answer's `until` time and agrees with it. The hook wins
- * whenever its evidence differs: an allow (`PostToolUse`) against a deck deny, a deny against a deck
- * allow, and on an AskUserQuestion an answer the deck did not type (the hook's reported answer is not
- * the label of the deck's option, or is an option label when the deck typed a free-text reply). An
- * AskUserQuestion hook that reports no answer cannot show which option was chosen, so it is a terminal
- * answer too, and so is a hook after `until` (the deck stopped watching) and any request the deck sent
- * nothing for. Whether a permission allow was option 1 or option 2 ("don't ask again") is not in the
- * 2.1.285 hook payloads, so that difference cannot be checked.
- * @param {{ delivery?: string, answer?: string | null, kind?: string, tool_name?: string | null }} row
- * @param {string} choice the terminal choice the hook implies
- * @param {number} [at] the hook's time
- * @param {any} [hook] the closing hook's payload
+ * Who answered, judged against the deck's answer `sent`: the deck's via and choice when the hook
+ * agrees with it, else a terminal answer with the hook's choice.
+ * @param {any} row
+ * @param {any} sent
+ * @param {string} choice
+ * @param {number | undefined} at
+ * @param {any} hook
  * @returns {{ via: string, choice: string }}
  */
-export function closingAnswer(row, choice, at, hook) {
+function judge(row, sent, choice, at, hook) {
   const terminal = { via: 'terminal', choice }
-  if (!DECK_DELIVERIES.includes(row?.delivery)) return terminal
-  let sent = null
-  try { sent = JSON.parse(row.answer ?? 'null') } catch {}
   if (typeof sent?.choice !== 'string') return terminal
   if (Number.isFinite(sent.until) && Number.isFinite(at) && at > sent.until) return terminal
   if (['allow', 'deny'].includes(choice) && VERDICT_CHOICES.includes(sent.choice) && (choice === 'allow') !== (sent.choice !== 'deny')) return terminal
@@ -946,11 +947,44 @@ export function closingAnswer(row, choice, at, hook) {
     const reported = hook?.hook_event_name === 'PostToolUse' ? reportedAnswers(hook) : null
     if (!reported) return terminal
     const labels = (hook.tool_input?.questions ?? []).flatMap(q => Array.isArray(q?.options) ? q.options.map(o => o?.label) : [])
-    const agrees = sent.choice === 'option' ? typeof sent.label === 'string' && reported.includes(sent.label) : reported.every(value => !labels.includes(value))
+    const agrees = sent.choice === 'option'
+      ? typeof sent.label === 'string' && reported.includes(sent.label)
+      : reported.every(value => !labels.includes(value)) && (typeof sent.digest !== 'string' || reported.some(value => replyDigest(row.id, value) === sent.digest))
     if (!agrees) return terminal
   }
   const via = ['browser', 'popup', 'batch'].includes(sent.via) ? sent.via : 'browser'
   return { via, choice: sent.choice }
+}
+
+/**
+ * The `answer` a closing hook records. A request deckd accepted the deck's keys for (`delivery`
+ * verifying or did_not_land) keeps the deck's `via` and choice from the `answer` approvals/deliver.mjs
+ * wrote, while the hook arrives by that answer's `until` time and agrees with it. The hook wins
+ * whenever its evidence differs: an allow (`PostToolUse`) against a deck deny, a deny against a deck
+ * allow, and on an AskUserQuestion an answer the deck did not type (the hook's reported answer is not
+ * the label of the deck's option; or, for a deck free-text reply, it is an option label or its digest
+ * differs from the deck's `replyDigest`). An AskUserQuestion hook that reports no answer cannot show
+ * which option was chosen, so it is a terminal answer too, and so is a hook after `until` (the deck
+ * stopped watching) and any request the deck sent nothing for. Whether a permission allow was option 1
+ * or option 2 ("don't ask again") is not in the 2.1.285 hook payloads, so that difference cannot be
+ * checked.
+ *
+ * While the deck's guarded write is in flight (`delivery` sending) the hook alone cannot tell whether
+ * the deck's keys were typed: the answer is recorded as terminal with `pending` holding the verdict
+ * that applies if deckd accepts the write, and approvals/deliver.mjs settles it once the write settles
+ * (accepted: `pending`; refused: the terminal answer). A pending answer is not counted here.
+ * @param {{ id?: string, delivery?: string, answer?: string | null, kind?: string, tool_name?: string | null }} row
+ * @param {string} choice the terminal choice the hook implies
+ * @param {number} [at] the hook's time
+ * @param {any} [hook] the closing hook's payload
+ * @returns {{ via: string, choice: string, pending?: { via: string, choice: string } }}
+ */
+export function closingAnswer(row, choice, at, hook) {
+  let sent = null
+  try { sent = JSON.parse(row?.answer ?? 'null') } catch {}
+  if (row?.delivery === 'sending' && typeof sent?.choice === 'string') return { via: 'terminal', choice, pending: judge(row, sent, choice, at, hook) }
+  if (!DECK_DELIVERIES.includes(row?.delivery)) return { via: 'terminal', choice }
+  return judge(row, sent, choice, at, hook)
 }
 
 /**
@@ -1011,7 +1045,7 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
     // D-73: an allow in the terminal counts toward "Make it a rule?"; recordAllow checks the tier,
     // the pattern and that both hooks came from one Claude process (F16). Its failure never stops
     // the hook from applying. A request the deck sent keys for is counted by approvals/deliver.mjs.
-    if (event === 'PostToolUse' && row.kind === 'permission' && closing.via === 'terminal') {
+    if (event === 'PostToolUse' && row.kind === 'permission' && closing.via === 'terminal' && !closing.pending) {
       try { recordAllow(store, row, { via: 'terminal', at, threshold: ruleThreshold(store), closingPid: envelope.claudePid ?? null }) } catch {
         try { process.stderr.write('deck: rule.count-error\n') } catch {}
       }

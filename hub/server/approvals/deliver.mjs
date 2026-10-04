@@ -5,7 +5,7 @@
 // only through this module. Nothing here logs input bytes, reply text, prompt text or tool input.
 import { apiError } from '../http/router.mjs'
 import { requestView } from '../machines/projector.mjs'
-import { classifyHook } from '../machines/request.mjs'
+import { classifyHook, replyDigest } from '../machines/request.mjs'
 import { workingRoot } from '../machines/session.mjs'
 import { parseScreen } from '../screen/index.mjs'
 import * as auditLog from './audit.mjs'
@@ -292,6 +292,8 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
     busy.add(row.id)
     const previous = { delivery: row.delivery, answer: row.answer }
     let sending = false
+    /** @type {{ via: string, choice: string, label: string | null }} */
+    let sent = { via, choice: body.choice, label: null }
     try {
       for (let tries = 0; ; tries++) {
         const { rev, parsed } = await readScreen(session.pty_id)
@@ -305,13 +307,17 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
           if (row.screen_match !== 'on_screen') throw refuse(409, 'not_on_screen')
         }
         const keys = answerKeys(row, body, parsed.prompt)
-        if (row.kind === 'permission' && body.choice === 'option') tierChecks(row, { ...body, choice: keys.choice }, via)
-        if (!sending) {
-          // Only the delivery state: the deck's answer is written once deckd accepts the keys, so a hook
-          // while the write is in flight is a terminal answer (request.mjs closingAnswer).
-          update(row.id, { delivery: 'sending' })
-          sending = true
-        }
+        // The tier rules again, on the tier the request has now: it can rise during the screen read.
+        tierChecks(row, row.kind === 'permission' ? { ...body, choice: keys.choice } : body, via)
+        sent = { via, choice: keys.choice, label: keys.label }
+        // The attempt is recorded with delivery `sending`. It is not the deck's answer yet: a hook that
+        // closes the request while the write is in flight is recorded with a `pending` verdict, and
+        // `settleSending` applies it once the write settles (request.mjs closingAnswer).
+        // `until` bounds how long a closing hook still counts as the deck's answer.
+        const answer = JSON.stringify({ ...sent, until: now() + verifyMs + lateMs,
+          ...(body.choice === 'reply' && row.tool_name === 'AskUserQuestion' ? { digest: replyDigest(row.id, sanitizePaste(body.text)) } : {}) })
+        update(row.id, { delivery: 'sending', answer })
+        sending = true
         try {
           await link.writeGuarded(session.pty_id, keys.data, { rev, quietMs: QUIET_MS })
         } catch (error) {
@@ -324,28 +330,66 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
         // The keys are written: a late watch of an earlier did_not_land answer gives way to this one.
         // Until here it kept watching, so a refused Try again leaves it running.
         stopWatch(row.id)
-        // `until` bounds how long a closing hook still counts as the deck's answer (request.mjs closingAnswer).
-        const answer = JSON.stringify({ via, choice: keys.choice, label: keys.label, until: now() + verifyMs + lateMs })
-        row = updateOpen(row.id, { delivery: 'verifying', answer }) ?? getRow(row.id)
-        const outcome = verify(row.id, session.pty_id, row.source === 'stop_question' ? undefined : promptKey(parsed.prompt), { via, choice: keys.choice, label: keys.label })
+        const opened = updateOpen(row.id, { delivery: 'verifying', answer })
+        if (!opened) {
+          // A hook closed it while the write was in flight: the write is accepted, so its pending verdict applies.
+          const settled = settleSending(row.id, true, sent)
+          return { request: requestView(getRow(row.id)), outcome: Promise.resolve(settled === 'deck' ? 'answered' : 'closed') }
+        }
+        row = opened
+        const outcome = verify(row.id, session.pty_id, row.source === 'stop_question' ? undefined : promptKey(parsed.prompt), sent)
         return { request: requestView(row), outcome }
       }
     } catch (error) {
       if (sending) {
         const current = getRow(row.id)
-        if (current?.state === 'open') update(row.id, { delivery: previous.delivery === 'did_not_land' ? 'did_not_land' : 'idle' })
-        // A hook closed it while the keys were in flight: a terminal answer, audited here unless a late
-        // watch of an earlier attempt is still running and audits it.
-        else if (current?.state === 'answered' && !watches.has(row.id)) {
-          let answer = null
-          try { answer = JSON.parse(current.answer ?? 'null') } catch {}
-          note('answered', current, { via: 'terminal', choice: typeof answer?.choice === 'string' ? answer.choice : null })
-        }
+        if (current?.state === 'open') update(row.id, { delivery: previous.delivery === 'did_not_land' ? 'did_not_land' : 'idle', answer: previous.answer })
+        // A hook closed it while the write was in flight and the write was refused: a terminal answer.
+        else if (settleSending(row.id, false, sent)) stopWatch(row.id)
       }
       throw error
     } finally {
       busy.delete(requestId)
     }
+  }
+
+  /**
+   * Apply the `pending` verdict a hook left on a request it closed while the deck's write was in flight
+   * (request.mjs closingAnswer), exactly once. Accepted write: the verdict (the deck's answer when the
+   * hook agrees with it, proved as usual). Refused write: the terminal answer, with its audit row and
+   * the terminal Safe allow count (the hook's Claude process is checked, F16).
+   * @param {string} id
+   * @param {boolean} accepted
+   * @param {{ via: string, choice: string, label: string | null }} sent
+   * @returns {'deck' | 'terminal' | null} null when the request holds no pending verdict
+   */
+  function settleSending (id, accepted, sent) {
+    const row = getRow(id)
+    if (!row || row.state === 'open') return null
+    let answer = null
+    try { answer = JSON.parse(row.answer ?? 'null') } catch {}
+    if (!answer?.pending || typeof answer.choice !== 'string') return null
+    const final = accepted ? answer.pending : { via: 'terminal', choice: answer.choice }
+    // The closed row's delivery says what happened to the keys: typed (verifying) or not (idle).
+    const closed = update(id, { answer: JSON.stringify({ via: final.via, choice: final.choice }), delivery: accepted ? 'verifying' : 'idle' })
+    if (final.via !== 'terminal') {
+      proved(closed, sent)
+      return 'deck'
+    }
+    note('answered', closed, { via: 'terminal', choice: final.choice })
+    if (final.choice === 'allow' && closed.kind === 'permission') {
+      try {
+        commit(() => rules.recordAllow(store, closed, { via: 'terminal', at: closed.answered_at ?? now(), threshold: rules.ruleThreshold(store), choice: 'allow' }))
+      } catch {
+        try { process.stderr.write('deck: rule.count-error\n') } catch {}
+      }
+    }
+    return 'terminal'
+  }
+
+  /** @param {any} row */
+  function pendingVerdict (row) {
+    try { return !!JSON.parse(row.answer ?? 'null')?.pending } catch { return false }
   }
 
   /** @param {string} id */
@@ -424,6 +468,8 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
       const closedByHook = () => {
         const row = getRow(id)
         if (!row || row.state === 'open') return
+        // Closed while a later attempt's write is in flight: that attempt settles it (settleSending).
+        if (pendingVerdict(row)) return
         stop()
         settle(row.state === 'answered' && proved(row, sent) ? 'answered' : 'closed')
       }
