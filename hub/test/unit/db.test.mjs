@@ -17,7 +17,7 @@ async function withDatabase(fn) {
 test('opens strict M1 schema with private files, WAL, foreign keys and a stable epoch', async () => withDatabase(async file => {
   const store = openDeckDb(file)
   try {
-    assert.equal(store.get('PRAGMA user_version').user_version, 5)
+    assert.equal(store.get('PRAGMA user_version').user_version, 6)
     assert.equal(store.get('PRAGMA journal_mode').journal_mode, 'wal')
     assert.equal(store.get('PRAGMA foreign_keys').foreign_keys, 1)
     assert.equal(store.get('PRAGMA auto_vacuum').auto_vacuum, 2)
@@ -98,7 +98,7 @@ test('a version 1 database migrates to the latest version with a pre-0002 backup
   db.close()
   const store = openDeckDb(file)
   try {
-    assert.equal(store.get('PRAGMA user_version').user_version, 5)
+    assert.equal(store.get('PRAGMA user_version').user_version, 6)
     assert.ok(store.all('PRAGMA table_info(sessions)').some(column => column.name === 'launch_task'), 'sessions.launch_task exists')
   } finally { store.close() }
   const backups = (await readdir(path.dirname(file))).filter(name => name.includes('.pre-0002.bak'))
@@ -107,7 +107,7 @@ test('a version 1 database migrates to the latest version with a pre-0002 backup
   try { assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 1) } finally { backup.close() }
 }))
 
-test('a version 2 database migrates to 5 with a pre-0003 backup and gains sessions.archived_at and archived_by, request reasons and the approvals audit', async () => withDatabase(async file => {
+test('a version 2 database migrates to 6 with a pre-0003 backup and gains sessions.archived_at and archived_by, request reasons and the approvals audit', async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
   for (const name of ['0001-init.sql', '0002-launch.sql']) db.exec(await readFile(fileURLToPath(new URL(`../../server/db/migrations/${name}`, import.meta.url)), 'utf8'))
@@ -118,7 +118,7 @@ test('a version 2 database migrates to 5 with a pre-0003 backup and gains sessio
   db.close()
   const store = openDeckDb(file)
   try {
-    assert.equal(store.get('PRAGMA user_version').user_version, 5)
+    assert.equal(store.get('PRAGMA user_version').user_version, 6)
     assert.deepEqual({ ...store.get('SELECT reasons, confirm_label FROM requests WHERE id = ?', 'q1') }, { reasons: '[]', confirm_label: null })
     assert.throws(() => store.run("UPDATE requests SET reasons = 'not json' WHERE id = 'q1'"), /CHECK/)
     const columns = store.all('PRAGMA table_info(approval_audit)').map(column => column.name)
@@ -143,7 +143,7 @@ test('a version 2 database migrates to 5 with a pre-0003 backup and gains sessio
   } finally { backup.close() }
 }))
 
-test('a version 4 database migrates to 5 with a pre-0005 backup and gains the meetings tables, indexes and triggers', async () => withDatabase(async file => {
+test('a version 4 database migrates to 6 with a pre-0005 backup and gains the meetings tables, indexes and triggers', async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
   for (const name of ['0001-init.sql', '0002-launch.sql', '0003-archive.sql', '0004-approvals.sql']) db.exec(await readFile(fileURLToPath(new URL(`../../server/db/migrations/${name}`, import.meta.url)), 'utf8'))
@@ -151,7 +151,7 @@ test('a version 4 database migrates to 5 with a pre-0005 backup and gains the me
   db.close()
   const store = openDeckDb(file)
   try {
-    assert.equal(store.get('PRAGMA user_version').user_version, 5)
+    assert.equal(store.get('PRAGMA user_version').user_version, 6)
     const names = new Set(store.all('SELECT name FROM sqlite_schema').map(row => row.name))
     for (const name of ['meetings', 'meeting_pins', 'meeting_item_dismissals', 'meetings_started', 'meeting_pins_meeting', 'meeting_pins_no_label_ins', 'meeting_pins_no_label_upd', 'meetings_became_confidential']) assert.ok(names.has(name), name)
   } finally { store.close() }
@@ -161,7 +161,66 @@ test('a version 4 database migrates to 5 with a pre-0005 backup and gains the me
   try { assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 4) } finally { backup.close() }
 }))
 
-test('failed migration rolls back schema changes and preserves the backup', async () => withDatabase(async file => {
+async function versionFiveDatabase(file) {
+  await mkdir(path.dirname(file), { recursive: true })
+  const db = new DatabaseSync(file)
+  for (const name of ['0001-init.sql', '0002-launch.sql', '0003-archive.sql', '0004-approvals.sql', '0005-meetings.sql']) db.exec(await readFile(fileURLToPath(new URL(`../../server/db/migrations/${name}`, import.meta.url)), 'utf8'))
+  db.exec('PRAGMA user_version = 5')
+  return db
+}
+
+test('a version 5 database migrates to 6 with a pre-0006 backup, gains the memory schema, and a meeting that rises to confidential loses its ask threads', async () => withDatabase(async file => {
+  const db = await versionFiveDatabase(file)
+  db.exec("INSERT INTO meetings(id, tag, confidential, state, updated_at) VALUES('m1', 'acme', 0, 'recorded', 1), ('m2', 'acme', 0, 'recorded', 1)")
+  db.close()
+  const store = openDeckDb(file)
+  try {
+    assert.equal(store.get('PRAGMA user_version').user_version, 6)
+    const schema = new Map(store.all('SELECT name, type FROM sqlite_schema').map(row => [row.name, row.type]))
+    const expected = {
+      table: ['ask_threads', 'ask_messages', 'misses', 'captures', 'note_reads', 'vault_learn_calls'],
+      index: ['ask_threads_recent', 'ask_messages_thread', 'misses_unresolved', 'captures_day', 'note_reads_path', 'note_reads_session', 'vault_learn_calls_at'],
+      trigger: ['ask_threads_no_confidential', 'meetings_became_confidential']
+    }
+    for (const [type, names] of Object.entries(expected)) for (const name of names) assert.equal(schema.get(name), type, name)
+    for (const row of store.all('PRAGMA table_list').filter(row => row.schema === 'main' && !row.name.startsWith('sqlite_'))) assert.equal(row.strict, 1, row.name)
+    const messageColumns = store.all('PRAGMA table_info(ask_messages)').map(column => column.name)
+    for (const name of ['searches', 'unverified', 'duration_ms']) assert.ok(messageColumns.includes(name), `ask_messages.${name}`)
+    assert.ok(!store.all('PRAGMA table_info(captures)').some(column => column.name === 'research_id'), 'captures.research_id is left to M6')
+    assert.deepEqual(store.all('PRAGMA table_info(vault_learn_calls)').map(column => column.name), ['id', 'session_id', 'repo_id', 'slug', 'at'])
+
+    store.run("INSERT INTO ask_threads(id, title, scope, created_at, updated_at) VALUES('t1', 'q', 'meeting:m1', 1, 1), ('t2', 'q', 'meeting:m2', 1, 1), ('t3', 'q', 'vault', 1, 1)")
+    store.run("INSERT INTO ask_messages(id, thread_id, role, text, created_at) VALUES('a1', 't1', 'user', 'q', 1)")
+    store.run("UPDATE meetings SET confidential = 1 WHERE id = 'm1'")
+    assert.deepEqual(store.all('SELECT id FROM ask_threads ORDER BY id').map(row => row.id), ['t2', 't3'])
+    assert.equal(store.get("SELECT count(*) AS n FROM ask_messages WHERE id = 'a1'").n, 0)
+    assert.throws(() => store.run("INSERT INTO ask_threads(id, title, scope, created_at, updated_at) VALUES('t4', 'q', 'meeting:m1', 1, 1)"), /confidential meeting: ask not stored/)
+    assert.throws(() => store.run("INSERT INTO ask_threads(id, title, scope, created_at, updated_at) VALUES('t5', 'q', 'meeting:unknown', 1, 1)"), /confidential meeting: ask not stored/)
+    assert.throws(() => store.run("INSERT INTO ask_messages(id, thread_id, role, text, created_at, searches) VALUES('a2', 't3', 'assistant', '', 1, 'not json')"), /CHECK/)
+    assert.throws(() => store.run("INSERT INTO ask_messages(id, thread_id, role, text, created_at, unverified) VALUES('a3', 't3', 'assistant', '', 1, 2)"), /CHECK/)
+    store.run("INSERT INTO captures(path, day, captured_at, via) VALUES('02-wiki/x.md', '2026-10-04', 1, 'frontmatter')")
+    assert.throws(() => store.run("INSERT INTO captures(path, day, captured_at, via) VALUES('02-wiki/y.md', '2026-10-04', 1, 'research')"), /CHECK/)
+    assert.throws(() => store.run("INSERT INTO captures(path, day, captured_at, via) VALUES('02-wiki/x.md', '2026-10-04', 2, 'vault_learn')"), /UNIQUE/)
+  } finally { store.close() }
+  const backups = (await readdir(path.dirname(file))).filter(name => name.includes('.pre-0006.bak'))
+  assert.equal(backups.length, 1)
+  const backup = new DatabaseSync(path.join(path.dirname(file), backups[0]), { readOnly: true })
+  try { assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 5) } finally { backup.close() }
+}))
+
+test('misses.resolved_by accepts null, research, note and dismissed, and refuses anything else', async () => withDatabase(async file => {
+  const store = openDeckDb(file)
+  try {
+    const insert = 'INSERT INTO misses(id, question, created_at, resolved_by) VALUES(?, ?, 1, ?)'
+    store.run(insert, 'm0', 'q', null)
+    store.run(insert, 'm1', 'q', 'research:r1')
+    store.run(insert, 'm2', 'q', 'note:02-wiki/x.md')
+    store.run(insert, 'm3', 'q', 'dismissed')
+    assert.throws(() => store.run(insert, 'm4', 'q', 'other'), /CHECK/)
+  } finally { store.close() }
+}))
+
+test('failed migration rolls back schema changes and preserves the backup',async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
   db.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT')
@@ -198,7 +257,7 @@ test('write batches roll back together and event sequence never repeats', async 
 test('durable event writer refuses all ephemeral event types', async () => withDatabase(async file => {
   const store = openDeckDb(file)
   try {
-    for (const type of ['meeting.transcript', 'ask.delta', 'screen.tail', 'input.source', 'setup.check', 'ui.navigate', 'hb']) {
+    for (const type of ['meeting.transcript', 'ask.delta', 'misses.changed', 'screen.tail', 'input.source', 'setup.check', 'ui.navigate', 'hb']) {
       assert.throws(() => store.appendEvent({ type }), /ephemeral/)
     }
     const seq = store.appendEvent({ type: 'counts', data: { running: 1 } })
