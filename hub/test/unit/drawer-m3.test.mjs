@@ -278,8 +278,36 @@ test('the rule suggestion line, its any-flags line, accepting with a toast and U
   assert.ok(h.view().includes('Rule added to rustot: Bash(cargo test:*)'))
   find(h.tree(), node => node.type === 'button' && textOf(node) === 'Undo')[0].props.onClick()
   await h.settle()
-  assert.deepEqual(api.calls.at(-1), ['DELETE', '/api/rules/rustot/Bash(cargo%20test%3A*)'])
+  assert.deepEqual(api.calls.at(-1), ['DELETE', '/api/rules/rustot/Bash(cargo%20test%3A*)?undo=1'], 'the toast Undo revokes as an undo, like the Home toast')
   assert.doesNotMatch(h.view(), /Rule added to/, 'Undo dismisses the toast')
+})
+
+test('T17-F2: when the focused row leaves, focus moves to the next row, else the previous row, else Close', async () => {
+  const { refocusTarget } = await load()
+  const element = name => ({ name })
+  const fakeRow = (id, { leaving = false } = {}) => ({
+    getAttribute: () => id,
+    matches: selector => selector === '.drawer-row--leaving' && leaving,
+    querySelector: selector => selector === '.answer-buttons .button--primary:not([disabled])' ? element(`allow-${id}`) : null
+  })
+  const panelOf = rows => ({ querySelectorAll: () => rows, querySelector: selector => selector === '.drawer-close' ? element('close') : null })
+  assert.equal(refocusTarget(panelOf([fakeRow('a'), fakeRow('c')]), ['a', 'b', 'c'], 'b').name, 'allow-c', 'the next row first')
+  assert.equal(refocusTarget(panelOf([fakeRow('a')]), ['a', 'c'], 'c').name, 'allow-a', 'the previous row when none follows')
+  assert.equal(refocusTarget(panelOf([]), ['a'], 'a').name, 'close', 'Close when no row is left')
+  assert.equal(refocusTarget(panelOf([fakeRow('a'), fakeRow('c', { leaving: true })]), ['a', 'b', 'c'], 'b').name, 'allow-a', 'a row that is itself leaving is skipped')
+})
+
+test('T17-F3: each drawer section is named by its tier title and count, the text of its heading, so equal counts stay distinct', async () => {
+  const state = stateWith({ requests: [request('a', 's1', 'safe'), request('c', 's2', 'caution')] })
+  const h = await harness(state)
+  const html = h.view()
+  for (const [tier, name] of [['safe', 'Safe · 1'], ['caution', 'Caution · 1']]) {
+    const section = html.match(new RegExp(`<section class="drawer-section drawer-section--${tier}"([^>]*)>\\s*<h3[^>]*>([\\s\\S]*?)</h3>`))
+    assert.ok(section, `${tier}: a section with its heading`)
+    assert.doesNotMatch(section[1], /aria-labelledby/, `${tier}: named by its own label, not by the count span alone`)
+    assert.equal(/aria-label="([^"]*)"/.exec(section[1])?.[1], name, `${tier}: the accessible name`)
+    assert.equal(section[2].replace(/<[^>]+>/g, ''), name, `${tier}: the same text as its heading`)
+  }
 })
 
 test('after a verified Deny the row keeps "Tell Claude what to do instead" and Send for 30 s', async () => {
