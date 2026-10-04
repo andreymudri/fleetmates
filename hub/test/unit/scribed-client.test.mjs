@@ -78,6 +78,28 @@ test('a line of exactly 1 MiB is accepted and one byte more is a ProtocolError t
   })
 })
 
+test('more than 1 MiB with no newline is a ProtocolError long before the status timeout', async () => {
+  await withFake({}, async (fake) => {
+    const client = createScribedClient({ socketPath: fake.socketPath, timeouts: { status: 30000 } })
+    fake.on('status', () => 'x'.repeat(3 * MiB))
+    const t = Date.now()
+    await assert.rejects(client.status(), ProtocolError)
+    assert.ok(Date.now() - t < 1000, `took ${Date.now() - t} ms`)
+    const last = fake.connections.at(-1)
+    await waitFor(() => last?.closed === true)
+  })
+})
+
+test('more than 16 MiB with no newline is a ProtocolError long before the tail timeout', async () => {
+  await withFake({}, async (fake) => {
+    const client = createScribedClient({ socketPath: fake.socketPath, timeouts: { tail: 30000 } })
+    fake.on('tail', () => 'x'.repeat(17 * MiB))
+    const t = Date.now()
+    await assert.rejects(client.tail(5), ProtocolError)
+    assert.ok(Date.now() - t < 1000, `took ${Date.now() - t} ms`)
+  })
+})
+
 test('a 2 MiB tail answer is accepted', async () => {
   await withFake({}, async (fake) => {
     const text = 'x'.repeat(2 * MiB)
