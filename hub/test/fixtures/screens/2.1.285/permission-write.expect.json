@@ -15,7 +15,10 @@
         "key": "3",
         "label": "No"
       }
-    ]
+    ],
+    "title": "Create file",
+    "body": "capture-write.txt\n\n1 capture",
+    "truncated": false
   },
   "idle": false,
   "statusRows": []

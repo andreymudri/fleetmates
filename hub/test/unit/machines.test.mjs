@@ -4926,7 +4926,9 @@ test('public requests retain stored drawer matching delivery and notification fi
       options: JSON.parse(row.options), state: row.state, expiredReason: row.expired_reason,
       answer: row.answer ? JSON.parse(row.answer) : null, source: row.source, matchKey: row.match_key,
       delivery: row.delivery, screenMatch: row.screen_match, taskId: row.task_id, createdAt: row.created_at,
-      answeredAt: row.answered_at, notifiedAt: row.notified_at, renotifiedAt: row.renotified_at })
+      answeredAt: row.answered_at, notifiedAt: row.notified_at, renotifiedAt: row.renotified_at,
+      reasons: JSON.parse(row.reasons), rulePattern: row.rule_pattern, ruleNote: null,
+      description: JSON.parse(row.reasons).find(reason => reason.tier === row.tier)?.description ?? null, confirmLabel: row.confirm_label, allowAlways: false })
     const events = []
     const projector = createProjector({ store: h.store, publish: event => {
       assert.ok(reader.get('SELECT seq FROM events WHERE seq=?', event.seq))
@@ -5470,7 +5472,7 @@ test('leadRunId reads --run only from the scripts/cli.mjs command segment', () =
 
 test('request open stores the M3 tier, reasons and rule candidate, and a notification-only request stays Caution', () => {
   const cases = [
-    ['cargo test --release', 'safe', 'Bash(cargo test:*)', 'safe.cargo.test'],
+    ['npm run test', 'safe', 'Bash(npm run test)', 'safe.npm.run-script'],
     ['npm install', 'caution', null, 'caution.npm.install'],
     ['git push --force origin main', 'destructive', null, 'destructive.git.push-force']
   ]
