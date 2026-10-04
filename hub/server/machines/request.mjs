@@ -895,6 +895,114 @@ function transcriptQuestion(location) {
 }
 
 /**
+ * `delivery` values that mean deckd accepted the deck's keys for the request (state-machines 2.7 rows
+ * 12, 15, 16). While the guarded write is in flight (`sending`) neither side decides alone: see
+ * `closingAnswer`.
+ */
+export const DECK_DELIVERIES = Object.freeze(['verifying', 'did_not_land'])
+
+/** Deck choices on a permission request that a hook's allow or deny verdict confirms or contradicts. */
+const VERDICT_CHOICES = Object.freeze(['allow', 'allow_always', 'deny'])
+
+/**
+ * A salted digest of a free-text reply, so the deck can tell its own reply from one the owner typed
+ * without storing the text. The salt is the request id.
+ * @param {string} requestId
+ * @param {string} text
+ * @returns {string}
+ */
+export function replyDigest(requestId, text) {
+  return createHash('sha256').update(`${requestId}\0${String(text).trim()}`).digest('hex')
+}
+
+/**
+ * The answers a closing AskUserQuestion hook reports (`tool_response.answers`, else
+ * `tool_input.answers`, as in the 2.1.285 PostToolUse fixture), or null when it reports none.
+ * @param {any} hook
+ * @returns {string[] | null}
+ */
+function reportedAnswers(hook) {
+  const answers = hook?.tool_response?.answers ?? hook?.tool_input?.answers
+  if (!answers || typeof answers !== 'object') return null
+  const values = Object.values(answers).filter(value => typeof value === 'string')
+  return values.length ? values : null
+}
+
+/**
+ * Who answered, judged against the deck's answer `sent`: the deck's via and choice when the hook
+ * agrees with it, else a terminal answer with the hook's choice.
+ * @param {any} row
+ * @param {any} sent
+ * @param {string} choice
+ * @param {number | undefined} at
+ * @param {any} hook
+ * @returns {{ via: string, choice: string }}
+ */
+function judge(row, sent, choice, at, hook) {
+  const terminal = { via: 'terminal', choice }
+  if (typeof sent?.choice !== 'string') return terminal
+  if (Number.isFinite(sent.until) && Number.isFinite(at) && at > sent.until) return terminal
+  if (['allow', 'deny'].includes(choice) && VERDICT_CHOICES.includes(sent.choice) && (choice === 'allow') !== (sent.choice !== 'deny')) return terminal
+  // A deck reply to a question asked in the conversation (stop_question) is proved by the UserPromptSubmit
+  // that carries the same text, judged by its digest.
+  if (row.kind === 'question' && row.tool_name !== 'AskUserQuestion' && sent.choice === 'reply' && typeof sent.digest === 'string') {
+    const typed = hook?.hook_event_name === 'UserPromptSubmit' && typeof hook.prompt === 'string' && replyDigest(row.id, hook.prompt) === sent.digest
+    if (!typed) return terminal
+  }
+  if (row.kind === 'question' && row.tool_name === 'AskUserQuestion' && ['option', 'reply'].includes(sent.choice)) {
+    const reported = hook?.hook_event_name === 'PostToolUse' ? reportedAnswers(hook) : null
+    if (!reported) return terminal
+    const labels = (hook.tool_input?.questions ?? []).flatMap(q => Array.isArray(q?.options) ? q.options.map(o => o?.label) : [])
+    const agrees = sent.choice === 'option'
+      ? typeof sent.label === 'string' && reported.includes(sent.label)
+      : reported.every(value => !labels.includes(value)) && (typeof sent.digest !== 'string' || reported.some(value => replyDigest(row.id, value) === sent.digest))
+    if (!agrees) return terminal
+  }
+  const via = ['browser', 'popup', 'batch'].includes(sent.via) ? sent.via : 'browser'
+  return { via, choice: sent.choice }
+}
+
+/**
+ * The `answer` a closing hook records. A request deckd accepted the deck's keys for (`delivery`
+ * verifying or did_not_land) keeps the deck's `via` and choice from the `answer` approvals/deliver.mjs
+ * wrote, while the hook arrives by that answer's `until` time and agrees with it. The hook wins
+ * whenever its evidence differs: an allow (`PostToolUse`) against a deck deny, a deny against a deck
+ * allow, and on an AskUserQuestion an answer the deck did not type (the hook's reported answer is not
+ * the label of the deck's option; or, for a deck free-text reply, it is an option label or its digest
+ * differs from the deck's `replyDigest`). An AskUserQuestion hook that reports no answer cannot show
+ * which option was chosen, so it is a terminal answer too, and so is a hook after `until` (the deck
+ * stopped watching) and any request the deck sent nothing for. Whether a permission allow was option 1
+ * or option 2 ("don't ask again") is not in the 2.1.285 hook payloads, so that difference cannot be
+ * checked.
+ *
+ * While the deck's guarded write is in flight (`delivery` sending) the hook alone cannot tell whether
+ * the deck's keys were typed: the answer is recorded as terminal with `pending` holding the verdict
+ * that applies if deckd accepts the write and, for a Try again, `prior` holding the verdict against
+ * the earlier did_not_land answer (the attempt's `prior`). approvals/deliver.mjs settles it once the
+ * write settles (accepted: `pending`; refused: `prior`, else the terminal answer). A pending answer is
+ * not counted here. A free-text reply to a stop_question is the deck's only when the UserPromptSubmit
+ * `prompt` has the deck's `replyDigest`.
+ * @param {{ id?: string, delivery?: string, answer?: string | null, kind?: string, tool_name?: string | null }} row
+ * @param {string} choice the terminal choice the hook implies
+ * @param {number} [at] the hook's time
+ * @param {any} [hook] the closing hook's payload
+ * @returns {{ via: string, choice: string, pending?: { via: string, choice: string } }}
+ */
+export function closingAnswer(row, choice, at, hook) {
+  let sent = null
+  try { sent = JSON.parse(row?.answer ?? 'null') } catch {}
+  if (row?.delivery === 'sending' && typeof sent?.choice === 'string') {
+    // The verdict if deckd accepts the write, and (for a Try again) the verdict against the earlier
+    // did_not_land answer, which still owns the request if deckd refuses it (late proof, row 15).
+    const labelled = (/** @type {any} */ verdict, /** @type {any} */ by) => verdict.via === 'terminal' ? verdict : { ...verdict, label: typeof by?.label === 'string' ? by.label : null }
+    return { via: 'terminal', choice, pending: labelled(judge(row, sent, choice, at, hook), sent),
+      ...(sent.prior && typeof sent.prior === 'object' ? { prior: labelled(judge(row, sent.prior, choice, at, hook), sent.prior) } : {}) }
+  }
+  if (!DECK_DELIVERIES.includes(row?.delivery)) return { via: 'terminal', choice }
+  return judge(row, sent, choice, at, hook)
+}
+
+/**
  * Open, answer and expire observe-only requests inside the caller's transaction. A request it opens carries
  * `taskId` (the teammate task the hook is attributed to), which defaults to the session's `run_task_id`.
  */
@@ -904,7 +1012,13 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
   if (event === 'WorktreeCreate' || event === 'WorktreeRemove') worktrees.drop(session.repo_id)
   const at = envelope.hookTs
   const key = matchKey(hook)
-  const resumed = resumedActivityEvents.includes(event) && store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'observed' }), at, session.id, 'question', 'open', 'stop_question', 'elicitation', at).changes > 0
+  let resumed = false
+  if (resumedActivityEvents.includes(event)) {
+    for (const row of store.all('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source IN (?,?) AND created_at <= ?', session.id, 'question', 'open', 'stop_question', 'elicitation', at)) {
+      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'observed', at, hook)), at, row.id)
+      resumed = true
+    }
+  }
   if (late && !['PostToolUse', 'PostToolUseFailure', 'PermissionDenied', 'UserPromptSubmit'].includes(event)) return resumed
   let question = null
   if (event === 'Stop' && ['running', 'stale'].includes(session.state) && !session.subagents_active && !store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? LIMIT 1', session.id, 'open')) question = transcriptQuestion(hook.transcript_path ?? session.transcript_path)
@@ -937,31 +1051,38 @@ export function applyRequestHook(store, session, envelope, { late = false, taskI
   }
   if (['PostToolUse', 'PostToolUseFailure', 'PermissionDenied'].includes(event)) {
     const outcomeKind = event !== 'PermissionDenied' && hook.tool_name === 'AskUserQuestion' ? 'question' : 'permission'
-    const row = store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind, at)
-      ?? (outcomeKind === 'question' ? store.get('SELECT id, kind FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission', at) : null)
-      ?? store.all('SELECT id, kind, summary FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
+    const row = store.get('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, outcomeKind, at)
+      ?? (outcomeKind === 'question' ? store.get('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, 'permission', at) : null)
+      ?? store.all('SELECT id, kind, summary, delivery, answer FROM requests WHERE session_id = ? AND kind = ? AND state = ? AND source = ? AND created_at <= ? ORDER BY created_at', session.id, 'permission', 'open', 'notification', at).find(candidate => notificationToolName(candidate.summary) && notificationMatchesTool(candidate.summary, hook.tool_name, hook.tool_input))
     if (!row) return resumed
-    store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: event === 'PermissionDenied' ? 'deny' : 'allow' }), at, row.id)
+    const closing = closingAnswer(row, event === 'PermissionDenied' ? 'deny' : 'allow', at, hook)
+    store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closing), at, row.id)
     // D-73: an allow in the terminal counts toward "Make it a rule?"; recordAllow checks the tier,
     // the pattern and that both hooks came from one Claude process (F16). Its failure never stops
-    // the hook from applying.
-    if (event === 'PostToolUse' && row.kind === 'permission') {
+    // the hook from applying. A request the deck sent keys for is counted by approvals/deliver.mjs.
+    if (event === 'PostToolUse' && row.kind === 'permission' && closing.via === 'terminal' && !closing.pending) {
       try { recordAllow(store, row, { via: 'terminal', at, threshold: ruleThreshold(store), closingPid: envelope.claudePid ?? null }) } catch {
         try { process.stderr.write('deck: rule.count-error\n') } catch {}
       }
     }
     if (hook.tool_name === 'AskUserQuestion') {
       const relatedKind = row.kind === 'permission' ? 'question' : 'permission'
-      const related = store.get('SELECT id FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind, at)
+      const related = store.get('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND match_key = ? AND kind = ? AND created_at <= ? ORDER BY created_at LIMIT 1', session.id, 'open', key, relatedKind, at)
       if (related) {
         if (event === 'PermissionDenied') store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE id = ?', 'expired', 'interrupted', related.id)
-        else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'allow' }), at, related.id)
+        else store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(related, 'allow', at, hook)), at, related.id)
       }
     }
     return true
   }
   if (event === 'UserPromptSubmit') {
-    return store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE session_id = ? AND state = ? AND created_at <= ?', 'answered', JSON.stringify({ via: 'terminal', choice: 'deny' }), at, session.id, 'open', at).changes > 0 || resumed
+    let changed = false
+    for (const row of store.all('SELECT id, kind, tool_name, delivery, answer FROM requests WHERE session_id = ? AND state = ? AND created_at <= ?', session.id, 'open', at)) {
+      // closingAnswer decides whether the deck or the terminal answered (state-machines 2.7 rows 15 to 17).
+      store.run('UPDATE requests SET state = ?, answer = ?, answered_at = ? WHERE id = ?', 'answered', JSON.stringify(closingAnswer(row, 'deny', at, hook)), at, row.id)
+      changed = true
+    }
+    return changed || resumed
   }
   if (event === 'Notification' && hook.notification_type === 'idle_prompt') return store.run('UPDATE requests SET state = ?, expired_reason = ? WHERE session_id = ? AND state = ? AND source <> ?', 'expired', 'interrupted', session.id, 'open', 'stop_question').changes > 0
   return resumed
