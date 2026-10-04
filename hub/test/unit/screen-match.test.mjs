@@ -133,13 +133,15 @@ test('no prompt matches nothing, and a box the parser could not place matches no
 test('allowAlwaysFor is false for the Edit frame option 2, a Caution request and the permission-2 frame', async () => {
   const edit = await framePrompt('2.1.285', 'permission-edit')
   assert.match(edit.options[1].label, /^Yes, and switch to accept edits/)
-  const safeBash = row({ tier: 'safe', input: { command: 'node --test capture.test.mjs' }, rule: 'Bash(node --test:*)' })
+  // Synthetic row data: the exact `Bash(npm run test)` candidate the safe.npm.run-script template gives (D-103).
+  const safeBash = row({ tier: 'safe', input: { command: 'npm run test' }, rule: 'Bash(npm run test)' })
   assert.equal(allowAlwaysFor(row({ tool: 'Edit', input: hookInput('PermissionRequest.Edit.json') }), edit), false)
   assert.equal(allowAlwaysFor(safeBash, edit), false, 'a Safe Bash request paired with the Edit option 2 label')
   assert.equal(allowAlwaysFor(safeBash, await framePrompt('2.1.285', 'permission-2')), false, 'permission-2 has no option 2 of that form')
   // Synthetic, per D-95: no captured 2.1.285 Bash frame prints an option 2 that allows a rule.
-  const synthetic = { options: [{ key: '1', label: 'Yes' }, { key: '2', label: "Yes, and don't ask again for node --test:*" }, { key: '3', label: 'No' }] }
-  const caution = row({ tier: 'caution', input: { command: 'node --test capture.test.mjs' }, rule: 'Bash(node --test:*)' })
+  const synthetic = { options: [{ key: '1', label: 'Yes' }, { key: '2', label: "Yes, and don't ask again for npm run test" }, { key: '3', label: 'No' }] }
+  assert.equal(allowAlwaysFor(safeBash, synthetic), true, 'the same Safe request on the synthetic prompt, so the Caution case below fails on its tier alone')
+  const caution = row({ tier: 'caution', input: { command: 'npm run test' }, rule: 'Bash(npm run test)' })
   assert.equal(allowAlwaysFor(caution, synthetic), false, 'a Caution request')
 })
 
@@ -149,12 +151,18 @@ test('allowAlwaysFor is true only on the exact WebFetch-derived wording whose pa
   const options = (/** @type {string} */ label) => ({ options: [{ key: '1', label: 'Yes' }, { key: '2', label }, { key: '3', label: 'No' }] })
   const webfetch = await framePrompt('2.1.285', 'permission-webfetch')
   assert.equal(webfetch.options[1].label, "Yes, and don't ask again for example.com", 'the captured wording the synthetic prompt copies')
+  // Synthetic row data: no tiers entry carries a Bash prefix rule any more (D-103), so this `:*`
+  // candidate exists only here, to pin the 07-approvals 7.1 equivalence `allowAlwaysFor` applies.
   const safe = row({ tier: 'safe', input: { command: 'node --test capture.test.mjs' }, rule: 'Bash(node --test:*)' })
   assert.equal(allowAlwaysFor(safe, options("Yes, and don't ask again for node --test:*")), true)
   assert.equal(allowAlwaysFor(safe, options("Yes, and don't ask again for node --test *")), true, 'the 7.1 equivalence: `:*` and ` *`')
   assert.equal(allowAlwaysFor(safe, options("Yes, and don't ask again for Bash(node --test:*)")), true)
   assert.equal(allowAlwaysFor(safe, options("Yes, don't ask again for node --test:*")), false, 'other wording that also says "don\'t ask again"')
   assert.equal(allowAlwaysFor(safe, options("Yes, and don't ask again for node:*")), false, 'a wider pattern than the candidate')
+  // The exact template candidate the tiers file still gives (D-103), synthetic row data as above.
+  const exact = row({ tier: 'safe', input: { command: 'npm run test' }, rule: 'Bash(npm run test)' })
+  assert.equal(allowAlwaysFor(exact, options("Yes, and don't ask again for npm run test")), true)
+  assert.equal(allowAlwaysFor(exact, options("Yes, and don't ask again for npm run test:*")), false, 'a prefix wider than the exact candidate')
   assert.equal(allowAlwaysFor(row({ tool: 'WebFetch', input: hookInput('PermissionRequest.WebFetch.json'), rule: 'WebFetch(domain:example.com)' }), webfetch), false, 'never for WebFetch')
 })
 
@@ -198,7 +206,8 @@ test('applyScreen writes screen_match and the on-screen options and appends requ
 test('raiseTiers writes a tier only when the new one is higher and never lowers one', () => {
   const h = harness()
   try {
-    h.insert(row({ id: 'low', tier: 'safe', input: { command: 'npm test' }, rule: 'Bash(npm test:*)' }))
+    // Synthetic row data: the exact template candidate of safe.npm.run-script (D-103).
+    h.insert(row({ id: 'low', tier: 'safe', input: { command: 'npm run test' }, rule: 'Bash(npm run test)' }))
     h.insert(row({ id: 'high', tier: 'destructive', input: { command: 'rm -rf build' } }))
     h.insert(row({ id: 'ask', kind: 'question', tier: null, tool: 'AskUserQuestion', input: hookInput('PermissionRequest.AskUserQuestion.json') }))
     const reasons = [{ entryId: 'x', tier: 'caution', segment: '', description: 'changed by the new tiers' }]
@@ -239,17 +248,30 @@ test('fillConfirmLabel fills {n} from the counter and falls back when the counte
   }
 })
 
-test('requestView adds reasons, rulePattern, ruleNote, description, confirmLabel and allowAlways', () => {
-  const reasons = [{ entryId: 'safe.npm.test', tier: 'safe', segment: 'npm test', description: 'runs the test script' }]
-  const allow = [{ key: '1', label: 'Yes' }, { key: '2', label: "Yes, and don't ask again for npm test:*" }, { key: '3', label: 'No' }]
-  const view = requestView(row({ tier: 'safe', input: { command: 'npm test' }, rule: 'Bash(npm test:*)', reasons, options: allow }))
-  assert.deepEqual(view.reasons, reasons)
-  assert.equal(view.rulePattern, 'Bash(npm test:*)')
-  assert.equal(view.ruleNote, 'anyFlags')
-  assert.equal(view.description, 'runs the test script')
+test('requestView adds reasons, rulePattern, ruleNote, description, confirmLabel and allowAlways', async () => {
+  const { classify, DEFAULT_TIERS } = await import('../../server/approvals/tiers.mjs')
+  // Real data: the exact npm run template entry of tiers.default.json, the only kind of Bash rule left (D-103).
+  const entry = DEFAULT_TIERS.entries.find((/** @type {any} */ e) => e.id === 'safe.npm.run-script')
+  assert.equal(entry.rule, 'Bash(npm run {script})')
+  assert.equal(entry.ruleNote, undefined)
+  const input = { command: 'npm run test' }
+  const classified = classify({ toolName: 'Bash', toolInput: input, cwd: '/home/you/work', repoRoot: '/home/you/work' })
+  assert.equal(classified.tier, 'safe')
+  const allow = [{ key: '1', label: 'Yes' }, { key: '2', label: "Yes, and don't ask again for npm run test" }, { key: '3', label: 'No' }]
+  const stored = row({ tier: classified.tier, input, rule: classified.ruleCandidate, reasons: classified.reasons, options: allow })
+  const view = requestView(stored)
+  assert.deepEqual(view.reasons, classified.reasons)
+  assert.equal(view.rulePattern, 'Bash(npm run test)')
+  assert.equal(view.ruleNote, null)
+  assert.equal(view.description, entry.description)
   assert.equal(view.confirmLabel, null)
   assert.equal(view.allowAlways, true)
-  assert.equal(requestView(row({ tier: 'safe', input: { command: 'npm test' }, rule: 'Bash(npm test:*)', reasons, options: [] })).allowAlways, false)
+  assert.equal(requestView({ ...stored, options: '[]' }).allowAlways, false)
+  // Synthetic tiers table: no real entry carries a ruleNote after D-103, so the lookup of a note
+  // through the entry that gave the candidate is pinned on a hand-written entry.
+  const tiers = { entries: [{ ...entry, ruleNote: 'anyFlags' }] }
+  assert.equal(requestView(stored, { tiers }).ruleNote, 'anyFlags')
+  assert.equal(requestView({ ...stored, rule_pattern: null }, { tiers }).ruleNote, null, 'no candidate, no note')
 })
 
 test('requestView describes a Destructive rm by the reason classify headlines, not the floor.plain reason that comes first', async () => {
