@@ -5,6 +5,72 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
+## v0.3.0 (unreleased)
+
+M3, Unblock. Permission prompts and questions of sessions that run in deckd are answered from the
+browser, within tier rules the server enforces. Prepared, not tagged or published; the exit report is
+`docs/deck/m3-exit.md`.
+
+- Tested Claude Code: 2.1.285 (the 2.1.282 fixture set stays as the earlier regression set)
+- deckd changed: yes (the guarded write). Restart `fleetmates-deckd` only when no session you care
+  about runs (`fm ls`): restarting it ends every PTY session. Until then answering from the deck is
+  refused with `deckd_outdated`, and everything else keeps working with the old deckd.
+- Database migration: yes (`0003-archive` adds `sessions.archived_at` and `sessions.archived_by`;
+  `0004-approvals` adds `requests.reasons`, `requests.confirm_label` and the `approval_audit` table)
+
+### Added
+
+- Tier classifier: every permission request gets Safe, Caution or Destructive from
+  `hub/server/approvals/tiers.default.json` plus your `~/.config/fleetmates/deck/tiers.json`, with
+  floors no entry can lower. A Bash command is Safe only when it is plain (simple commands from a
+  fixed allowlist, literal words, plain relative paths inside the repo); anything else is at least
+  Caution, and unknown commands are Caution. Each request shows why ("reasons") and a one-line
+  description.
+- Answering: Allow, Deny, Reply and option picks from the Needs-you drawer, Home cards, the palette
+  (Enter allows Safe only) and the Focus PromptBar. The deck types the option key Claude Code printed
+  into the PTY only when the screen still shows that prompt and nobody typed in the last second, then
+  proves the answer by the prompt leaving the screen or a matching hook. No proof within 3 s shows
+  "did not land" with Try again; the deck never retries on its own.
+- Destructive requests are never answered without the confirm checkbox, never in a batch, never from
+  a popup and never by a keyboard shortcut. The checkbox label comes from the matched entry's
+  template ("I checked the 3 commits that will be overwritten"), else "I checked what this command
+  will change".
+- Safe batch ("Allow both Safe once", `Alt Shift A`), and a desktop popup "Allow once" for a single
+  Safe request whose whole command it shows. Team "Review N requests" answers only that run's rows.
+- After a Deny, "Tell Claude what to do instead" sends your text to the session for 30 s.
+- Rules: after the configured number of Safe approvals (5, 3 or Never) the deck offers "Make it a
+  rule?". Accepted, hand-added and revoked rules are written to `<repo>/.claude/settings.local.json`
+  keeping every other key and the order, with a backup of the previous file. Rules the deck did not
+  write show as "added by hand". Rules are suggested only for exact `npm run` and `pnpm run` script
+  names and the read-only vault tools; Bash prefix rules are refused.
+- Settings, Approval rules: the threshold, the rules of each repo with their source, Add a rule and
+  Revoke, the tier aside, and a banner when `tiers.json` has an error (the previous tiers stay in
+  force).
+- Focus Changes shows the diff of each changed file against the session's review baseline.
+- `fleetmates-deck audit [--repo <name>] [--since <YYYY-MM-DD>]` prints the approvals audit and the
+  rule audit, oldest first, with summaries redacted.
+- Session archive: Archive on a card, "Archive all finished", auto-archive of finished sessions
+  after a delay set in Settings, and "Archived (N)" on Home. An archived session that needs you comes
+  back by itself.
+
+### Changed
+
+- `GET /api/version` reports `build: 'm3'`. `apiVersion` stays 1; every API change is additive.
+- deckd `hello` lists `features: ['guardedWrite']`, and `write` takes a `guard` (screen revision and
+  quiet period). The protocol stays `proto` 2.
+- Ended and crashed sessions show their stored scrollback at the size it was captured.
+
+### Known limits
+
+- Observed sessions (plain `claude`) are still answered in your terminal; their popups offer "Open"
+  only.
+- AskUserQuestion prompts with several questions or multi-select options, and MCP elicitation
+  dialogs, are answered in the terminal.
+- "Allow always" (option 2) is offered only when Claude Code's label is exactly "Yes, and don't ask
+  again for <pattern>" and the pattern is the deck's own rule candidate. No captured 2.1.285 Bash
+  prompt shows that label, so for Bash it is not offered until a real prompt confirms the wording.
+- A running Claude Code session may keep an old rule until it restarts.
+
 ## v0.2.0 (unreleased)
 
 M2, Control. Every session started with `fm claude` or from the deck runs in a deckd PTY and is
