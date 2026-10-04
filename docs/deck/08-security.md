@@ -229,7 +229,7 @@ Refused always: symlinks that leave their root, non-regular files, files with an
 ### 4.10 Logs, redaction and telemetry (Proposed)
 
 - **No telemetry.** The deck makes no outbound network request of its own: no update check, no analytics, no crash reporting, no CDN, no remote fonts. The only network traffic on the machine comes from Claude Code, the agents and research runs, which the owner already approves. This is stated in SECURITY.md (section 6).
-- **What is logged** (journald, and `logs/` with `DECK_DEBUG=1`): event types, ids, timings, states, error codes. Never: full `tool_input`, prompts, transcript text, ask text, note bodies, the token, environment variables, `Authorization` headers.
+- **What is logged** (the server's stdout and stderr, which journald keeps; M4 builds no `DECK_DEBUG=1` debug log, D-121): event types, ids, timings, states, error codes. These are the logs the confidential-meeting scan checks (06-storage 10.1). Never: full `tool_input`, prompts, transcript text, ask text, note bodies, the token, environment variables, `Authorization` headers.
 - **Redaction** applied to every log line and to `summary` fields in the audit trail: URL userinfo (`scheme://user:pass@` becomes `scheme://***@`); `Authorization: Bearer …`, `Basic …`; `password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key` followed by `=` or `:` and a value; known token shapes (`ghp_…`, `github_pat_…`, `sk-…`, `sk-ant-…`, `xox[bp]-…`, `AKIA…`, `hf_…`, JWT-shaped values (`eyJ` followed by two dot-separated base64url parts)); long base64 or hex runs over 40 characters in command arguments. The request row in the UI shows the command as the agent wrote it (the owner needs to see what they approve), but anything persisted beyond the 30-day detail window uses the redacted form.
 - **Failed auth**: counted per remote address and logged once per minute with the count, so a local brute force is visible.
 
@@ -238,7 +238,7 @@ Refused always: symlinks that leave their root, non-regular files, files with an
 - Hook envelopes: size cap 1 MiB, JSON only, validated against the pinned fixture schemas; failures go to `rejected_events` (state-machines 1.11 case 13) and are never applied.
 - API bodies: schema-validated, unknown fields rejected; ids must match the ULID shape; repo ids must be under the scan root.
 - SQLite: parameterized statements only; no string-built SQL.
-- scribed messages: one JSON object per line, line cap 1 MiB, unknown types ignored and counted.
+- scribed messages: one JSON object per line, line cap 1 MiB, 16 MiB for a `tail` answer, unknown event types ignored and counted (D-110, [11-meetings.md](11-meetings.md) 3.2).
 
 ### 4.12 Confidential meetings (Proposed; rule from [04-integrations.md](04-integrations.md) section 4.2)
 
@@ -251,8 +251,8 @@ A meeting is confidential when its tag's `store_transcript` is `false` in Turbid
 | Pins | time only, no label (04-integrations 4.3) |
 | SQLite, logs, search index, audit | metadata only: id, tag, times, duration, state, source app. No text. Verified by the QA check "inspect DB" ([qa/qa-checklist.md](qa/qa-checklist.md)) |
 | Desktop notifications | never contain meeting text for any tag |
-| Summary after the meeting | read from the vault note `postmeet` wrote (TurbidAssist already omits the transcript for these tags) |
-| Transcript search | confidential meetings are excluded from the deck's transcript search |
+| Summary after the meeting | read from the vault note `postmeet` wrote (TurbidAssist already omits the transcript for these tags), from disk in M4 (D-114) |
+| Transcript search | confidential meetings are included, read from the session files on demand, never indexed, cached or persisted (MEET-O7, D-109) |
 
 The tag list is re-read when `config.yaml` changes; a meeting's confidentiality is fixed at start from the tag it was started with. If the deck cannot read `config.yaml`, every meeting is treated as confidential (fail closed).
 

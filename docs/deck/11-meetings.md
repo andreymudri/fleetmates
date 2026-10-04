@@ -4,7 +4,7 @@ Status labels as in [02-domain.md](02-domain.md). Decided here: meetings are in 
 
 This document covers behaviour, data flow and the changes needed in TurbidAssist. The screens are in [screens/meetings.md](screens/meetings.md); the recorder and post-processing state machines in [interaction/state-machines.md](interaction/state-machines.md) section 6; quiet mode in section 9.5. The wire facts come from [reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) Part 2 and from reading TurbidAssist at commit `d4ffb9d`. Paths below are relative to the TurbidAssist root.
 
-M4 does not start before M1 passes its one-week test (D-44).
+The owner waived the M1 one-week gate for M4 on 2026-10-04 (D-104, superseding that part of D-44): M4 starts after M3, and the M1 week is still pending. The owner's M4 decisions are D-104 to D-111 and the M4 plan's own decisions D-112 to D-124 ([14-decisions.md](14-decisions.md)); this doc states them where they apply.
 
 ## 1. Scope
 
@@ -14,30 +14,30 @@ M4 does not start before M1 passes its one-week test (D-44).
 | Start and stop recording | Decided (D-29) |
 | Live transcript and ask Claude during the meeting | Decided (D-29) |
 | Transcript search, pin moments, rec bar on every screen | Decided (canvas) |
-| Live ask using the vault | Open (MEET-O4): needs TurbidAssist change T3 (section 16) |
-| Action items: "Launch as session", "Research first", "Dismiss" | **Open** (MEET-O6, Q6): "Tasks from meetings" was not selected in the scope question, yet the canvas designs these buttons. See section 12 |
-| Save answer to meeting note | Open (MEET-O8): no button in v1 |
+| Live ask using the vault | **Decided** 2026-10-04 (MEET-O4, D-105): the live ask uses the transcript only, through scribed `ask`, with no citations. TurbidAssist change T3 is not taken and there is no deck-side engine (section 9) |
+| Action items: "Launch as session", "Research first", "Dismiss" | Default applied in M4, owner may revisit before exit (MEET-O6, Q6): "Launch as session" and "Dismiss" in M4 with deck-only state; "Research first" is not rendered until M6. See section 12 |
+| Save answer to meeting note | Default applied in M4, owner may revisit before exit (MEET-O8): no button |
 
 ## 2. What the deck reads and writes
 
 | Source | Access | Owner | Deck writes? |
 |---|---|---|---|
 | `$XDG_RUNTIME_DIR/turbidassist.sock` | Unix socket, JSON lines | scribed | commands only |
-| TurbidAssist `config.yaml` | read (YAML) for `session_dir`, `synthesis.tag_policies`, `synthesis.default_tag`, `vault.meetings_folder`, `batch.model`, `ask.*` | owner | never |
+| TurbidAssist `config.yaml` | read (the deck's YAML subset reader) for `session_dir`, `synthesis.tag_policies`, `synthesis.default_tag`, `vault.meetings_folder`, `batch.model`, `ask.*` | owner | never |
 | `<session_dir>/<id>/session.json`, `transcript.jsonl`, `transcript.md`, `transcript.json`, `asks.jsonl`, `postmeet.log`, `postmeet.lock` | read | scribed and postmeet | never |
-| Meeting note in the vault (`<vault.meetings_folder>/<date> <tag> <U+2014> <title>.md`) | via vault-mcp; disk fallback when vault-mcp is down (MTG-O1) | postmeet | never |
+| Meeting note in the vault (`<vault.meetings_folder>/<date> <tag> <U+2014> <title>.md`) | read from disk only in M4, read only (MTG-O1, D-114); vault-mcp is M5 | postmeet | never |
 | `Tasks/Inbox.md` (`vault.tasks_note`) | not read in v1 | postmeet | never |
-| Deck SQLite: Meeting rows, pins, action-item states | read and write | deck | yes, see section 6 for what is never stored |
+| Deck SQLite: Meeting rows, pins, action-item dismissals | read and write | deck | yes, see section 6 for what is never stored |
 
 The deck never writes the manifest, never runs `postmeet`, and never edits the meeting note (Proposed; state-machines 6.4).
 
-Config location: Settings, Connections "TurbidAssist config.yaml" (MEET-O11, default `~/dev/turbidassist/config.yaml` if present). Reading YAML adds one dependency to the hub, the pure-JS `yaml` package (Proposed; not in the dependency table of [03-architecture.md](03-architecture.md) 3 yet). The deck re-reads the file on change (fs.watch, 1 s debounce) and on "Re-run checklist".
+Config location (Decided 2026-10-04, MEET-O11, D-107): the Settings > Connections field "TurbidAssist config" (a path), whose default is `~/dev/turbidassist/config.yaml` when that file exists; `session_dir` is read from that file. A checkout elsewhere is set in the field. The deck reads `config.yaml` with its own subset reader for the keys above and adds no YAML dependency (D-112, replacing the earlier proposal of the `yaml` package). The deck re-reads the file on change (fs.watch, 1 s debounce) and on "Re-run checklist".
 
 ## 3. The scribed Node client
 
 ### 3.1 Module and surface (Proposed)
 
-`hub/server/adapters/scribed.mjs`, plain ESM with JSDoc, no dependencies beyond `node:net`, `node:string_decoder`, `node:child_process`.
+`hub/server/adapters/scribed.mjs`, plain ESM with JSDoc, no dependencies beyond `node:net` and `node:string_decoder`. The client has no `pin` (TurbidAssist change T1 is not taken; pins are deck-stored, section 10) and no `ensureDaemon`: starting scribed lives in `hub/server/meetings/start-scribed.mjs` (section 3.5).
 
 ```js
 /** @typedef {{ type: 'status', recording: boolean, session_id: string|null, tag: string|null, elapsed_s: number, routed_apps: string[], stopping?: boolean, protocol?: number }} ScribedStatus */
@@ -51,9 +51,7 @@ export function createScribedClient({ socketPath, log }) {
     tail,        // (minutes) => Promise<string>                         5 s timeout
     history,     // () => Promise<{ asks: AskRecord[] }>                 5 s timeout
     ask,         // (question, { onDelta, signal }) => Promise<void>     130 s ceiling
-    pin,         // (t, label) => Promise<void>   only with capability 'pin' (T1)
-    subscribe,   // ({ onStatus, onTranscript, onPin?, onClose }) => { close }
-    ensureDaemon // () => Promise<'running'|'started'>
+    subscribe    // ({ onStatus, onTranscript, onClose }) => { close }
   }
 }
 ```
@@ -66,9 +64,9 @@ Every method rejects with `ScribedUnavailable` (connect `ENOENT`, `ECONNREFUSED`
 |---|---|
 | Write `JSON.stringify(cmd) + '\n'` as UTF-8 | protocol: one JSON object per line (`realtime/scribe/protocol.py` 1 to 15) |
 | Decode with a `StringDecoder('utf8')` across chunks, split on `\n`, trim each line, skip empty ones | scribed sends raw UTF-8 (`ensure_ascii=False`), a multi-byte character can straddle two chunks |
-| Reject a line over 16 MiB and close the connection | a `tail` over a long meeting is large but bounded; anything bigger is a bug |
+| Reject a line over 1 MiB, or over 16 MiB for the answer to a `tail` request, and close the connection (D-110) | a `tail` over a long meeting is large but bounded; any other line is small, and anything bigger is a bug |
 | `JSON.parse`; a line that is not an object, or has no string `type`, is a protocol error: log it and close that connection (request connections) or reconnect (subscribe) | the reference client raises on bad lines |
-| Dispatch on `type` in the closed list `ok, error, status, tail, transcript, ask_delta, ask_done, history`, plus `pin` only on a subscribe that asked for it (T2) | scribed rejects unknown types on its side too (`protocol.py` 422 to 430) |
+| Dispatch on `type` in the closed list `ok, error, status, tail, transcript, ask_delta, ask_done, history`; an event of any other type is ignored and counted, not a protocol error (D-110) | forward compatible: a later TurbidAssist can add an event type without breaking the deck |
 | Read only the keys the deck needs; ignore unknown keys | matches scribed's parsers, which lets TurbidAssist add fields without breaking the deck |
 | Numbers: accept int or float, reject booleans | `protocol.py` `_get` rule |
 
@@ -80,7 +78,7 @@ Every method rejects with `ScribedUnavailable` (connect `ENOENT`, `ECONNREFUSED`
 
 | Command | Read timeout | Notes |
 |---|---|---|
-| `status`, `tail`, `history`, `pin` | 5 s (reference client default) | |
+| `status`, `tail`, `history` | 5 s (reference client default) | |
 | `start` | 20 s (`scribedStartTimeout`) | on timeout the next poll decides (state-machines 6.3 row 7) |
 | `stop` | no short timeout; 180 s ceiling | scribed joins up to 4 threads at 30 s each (`JOIN_TIMEOUT_S`, `realtime/scribe/daemon.py` 122) before writing the manifest; after the ceiling the call is abandoned and polling decides |
 | `ask` | 130 s | scribed kills `claude` after 120 s (`ask.py` `TIMEOUT_S`) and then sends `error` |
@@ -90,16 +88,16 @@ Every method rejects with `ScribedUnavailable` (connect `ENOENT`, `ECONNREFUSED`
 
 - Subscribe EOF or error: reconnect after 2 s (the Textual UI's `RECONNECT_S = 2.0`, `realtime/scribe/ui.py` 46), then 2, 4, 8 … 30 s while connects fail. The first message of a new subscription is a `status` snapshot; it is applied like a poll result.
 - Gap fill after reconnect while recording: read `<session_dir>/<id>/transcript.jsonl` from disk and append the events with `t1` newer than the last one the deck forwarded (exact events, same schema as the socket). Fallback when the file cannot be read: `tail` with `minutes` = gap rounded up, rendered as plain lines. This refines state-machines 6.3 row 16, which names `tail` only.
-- Request connections do not retry on their own except `status` (the poll simply runs again). `start`, `stop`, `pin` and `ask` are never retried automatically: they are not idempotent from the user's point of view.
+- Request connections do not retry on their own except `status` (the poll simply runs again). `start`, `stop` and `ask` are never retried automatically: they are not idempotent from the user's point of view.
 
-### 3.5 Ensure daemon ("Start scribed"; SM-O13, FAIL-O1, MEET-O10)
+### 3.5 Starting scribed ("Start scribed"; Decided 2026-10-04, D-106: SM-O13, FAIL-O1, MEET-O10, OPS-O1)
 
-TurbidAssist ships no systemd unit for `scribed`; its clients spawn it detached when the socket does not answer (`ScribeClient.ensure_daemon()`, `realtime/scribe/client.py` 219 to 247). The deck starts it itself (default in [04-integrations.md](04-integrations.md) 4.3), with two Linux details the Python client does not face:
+TurbidAssist ships no systemd unit for `scribed`; its clients spawn it detached when the socket does not answer (`ScribeClient.ensure_daemon()`, `realtime/scribe/client.py` 219 to 247). The deck starts it itself, in `hub/server/meetings/start-scribed.mjs` (not in the socket client), with two Linux details the Python client does not face:
 
-1. **Environment.** The deck web server is a systemd user service, whose environment lacks the owner's shell profile. scribed needs `HF_TOKEN` (or the variable named by `batch.hf_token_env`) when diarization is on, and refuses `start` without it (`daemon.py` 428 to 436). Proposed: spawn through the owner's login shell, `$SHELL -l -c 'exec scribed'`, which is the environment the owner gets when running `scribe` by hand.
-2. **cgroup.** A child spawned by `fleetmates-deck.service`, even with `setsid`, stays in that service's cgroup, and systemd kills the whole cgroup when the service stops or restarts, which would end a recording in the middle of a meeting. Proposed: spawn with `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, giving scribed its own transient unit; the fixed unit name makes a second start fail fast instead of launching a second daemon. `KillMode=process` also keeps the `postmeet run` that scribed spawns at `stop` alive if that unit is stopped.
+1. **Environment.** The deck web server is a systemd user service, whose environment lacks the owner's shell profile. scribed needs `HF_TOKEN` (or the variable named by `batch.hf_token_env`) when diarization is on, and refuses `start` without it (`daemon.py` 428 to 436). Decided: spawn through the owner's login shell, `$SHELL -l -c 'exec scribed'`, which is the environment the owner gets when running `scribe` by hand.
+2. **cgroup.** A child spawned by `fleetmates-deck.service`, even with `setsid`, stays in that service's cgroup, and systemd kills the whole cgroup when the service stops or restarts, which would end a recording in the middle of a meeting. Decided: spawn with `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, giving scribed its own transient unit; the fixed unit name makes a second start fail fast instead of launching a second daemon. `KillMode=process` also keeps the `postmeet run` that scribed spawns at `stop` alive if that unit is stopped.
 
-Then poll `status` every 100 ms for up to 10 s (the reference client's timeout). If a `scribed.service` unit exists (TurbidAssist change T4), "Start scribed" runs `systemctl --user start scribed.service` instead, which is what the canvas copy shows.
+The command is started as an argv array with a timeout and without the deck token in its environment (08-security 4.8). It runs exactly as above when the `scribedCommand` setting is the default `scribed`; a custom `scribedCommand` is passed as one argument, `$SHELL -l -c 'exec "$0"' <command>`, so no setting text reaches a shell parser (D-122). Then poll `status` every 100 ms for up to 10 s (the reference client's timeout). TurbidAssist change T4 (a `scribed.service` unit) is not taken (2026-10-04), so there is no `systemctl` branch.
 
 ### 3.6 Status polling (Proposed; direction Decided)
 
@@ -112,7 +110,7 @@ Then poll `status` every 100 ms for up to 10 s (the reference client's timeout).
 
 The poll runs in the web server, not in the browser, so its rate does not depend on which screen is visible. 2 s everywhere keeps quiet mode timely: a recording started from the Hyprland bind silences the bell within 2 s. [04-integrations.md](04-integrations.md) 4.2 says the same. A status call is one local socket round trip; the cost is negligible.
 
-When TurbidAssist change T2 lands (status push, detected by `status.protocol >= 2`), the deck subscribes with `events: ["transcript", "status", "pin"]` and drops the poll to every 30 s as a safety net.
+TurbidAssist change T2 is not taken (2026-10-04), so M4 polls (MTG-O2 default). If T2 lands later (status push, detected by `status.protocol >= 2`), the deck can subscribe with `events: ["transcript", "status", "pin"]` and drops the poll to every 30 s as a safety net.
 
 ## 4. Commands used per feature
 
@@ -123,13 +121,13 @@ When TurbidAssist change T2 lands (status push, detected by `status.protocol >= 
 | Stop and summarize | `stop` | |
 | Live transcript | `subscribe` (`transcript` events) | `transcript.jsonl` for gap fill and reload |
 | Live ask | `ask {question}` (`ask_delta`, `ask_done`, `error`), `history` when the live view opens | |
-| Pin moment | none today (deck-stored); `pin` after T1 | |
+| Pin moment | none (deck-stored; TurbidAssist change T1 is not taken) | |
 | Timer | `status.elapsed_s` + local ticking | |
 | Source label (Teams, Meet, Discord) | `status.routed_apps` while recording (MEET-O1) | |
 | Past meetings list | none | `session.json` files, meeting notes |
 | Post-processing states | none | `session.json` `state`, `postmeet.log`, `postmeet.lock` |
 | Full transcript, search | none | `transcript.md` (batch) or `transcript.jsonl` (live) |
-| Start scribed | none (ensure-daemon) | `systemd-run` or `systemctl --user` |
+| Start scribed | none (section 3.5) | `systemd-run --user` (D-106) |
 
 `tail` is used only as the gap-fill fallback. The deck never sends `subscribe` on a connection that is also used for other commands (scribed stops reading commands after `subscribe`, `daemon.py` `_dispatch`).
 
@@ -151,12 +149,12 @@ Decided: for a tag with `store_transcript: false` the deck must not persist tran
 | Transcript text in SQLite, logs, search index, browser storage | never | never |
 | Live ask questions and answers | never stored by the deck; shown from scribed `history` during the meeting and from `asks.jsonl` afterwards | never stored; `asks.jsonl` is read only while the meeting is live |
 | Pins | `{ t, label }` (label is at most 80 characters of a transcript line) | `{ t }` only, no label |
-| Action-item states (dismissed, launched) | stored with a hash of the item text, not the text | same |
+| Action-item dismissals | stored with a hash of the item text, not the text (section 12) | same |
 | Misses from meeting asks | not created | not created |
 
 Additional rules (Proposed):
 
-- Server logs never include transcript, ask or pin text; debug logs record lengths and ids only.
+- Server logs (the server's stdout and stderr) never include transcript, ask or pin text; they record event types, ids, lengths and error codes only. M4 builds no `DECK_DEBUG` debug log (D-121).
 - WebSocket frames carry text, but the browser keeps it in memory only (no `sessionStorage`, no service worker cache).
 - "Full transcript" for a confidential meeting is read from disk on each open, never cached (MEET-O7).
 - The deck's own hooks never see TurbidAssist's `claude -p` calls: both the live ask and the synthesis run with `--safe-mode` and `--restricted`, which disable hooks and ignore settings files (`batch/postmeet/synthesize.py`, `build_command` docstring). If TurbidAssist change T3 has to drop `--safe-mode`, `--restricted` still keeps user-level hooks out. The deck adds a second guard: ingest ignores hook events whose `cwd` is under `session_dir`.
@@ -200,7 +198,7 @@ Meetings started or stopped by another client (the `scribe` CLI, the Textual TUI
 
 ## 9. Live ask
 
-### 9.1 Today: transcript only (Decided by data; MEET-O4 default)
+### 9.1 Transcript only (Decided 2026-10-04, MEET-O4, D-105)
 
 scribed's `ask` sends `## Transcript recente` (the last `realtime.context_minutes`) plus the question to `claude -p` with **no tools and no MCP servers** (`realtime/scribe/ask.py` `build_command`: `--mcp-config '{"mcpServers": {}}'`, `--tools ""`). It cannot read the vault. The deck therefore:
 
@@ -210,29 +208,29 @@ scribed's `ask` sends `## Transcript recente` (the last `realtime.context_minute
 - "Stop" only stops displaying: scribed has no cancel, the `claude` child keeps running until it answers or hits its 120 s watchdog, and scribed records the answer in `asks.jsonl` if it completes. The UI says "Stopped here; the answer may still be saved to the meeting" (Proposed copy);
 - stores nothing (section 6).
 
-### 9.2 With the vault (requires TurbidAssist change T3)
+### 9.2 With the vault (TurbidAssist change T3, not taken)
 
-Once scribed's ask can call vault-mcp (section 16, T3), the deck detects it from `config.yaml` (`ask.vault_mcp` present), switches the eyebrow to "Ask · uses the transcript and your vault", and renders citations: tokens `path:line` in the answer that match a path from the deck's last `vault_list` become Citation chips; anything else stays text.
+The owner did not take T3 on 2026-10-04 (D-105), so M4 builds none of this paragraph; it records what T3 would enable. Once scribed's ask can call vault-mcp (section 16, T3), the deck detects it from `config.yaml` (`ask.vault_mcp` present), switches the eyebrow to "Ask · uses the transcript and your vault", and renders citations: tokens `path:line` in the answer that match a path from the deck's last `vault_list` become Citation chips; anything else stays text.
 
-Alternative considered: a deck-side engine that takes the transcript with `tail` and runs the deck's own Ask engine ([10-memory-and-research.md](10-memory-and-research.md) section 2) with the transcript in the prompt. It works without touching TurbidAssist, but the question and answer would not reach `asks.jsonl`, so they would be missing from the meeting note's "Perguntas ao vivo", and asks from the TUI and the deck would behave differently. Not recommended; kept as the fallback if T3 is declined.
+Alternative considered: a deck-side engine that takes the transcript with `tail` and runs the deck's own Ask engine ([10-memory-and-research.md](10-memory-and-research.md) section 2) with the transcript in the prompt. It works without touching TurbidAssist, but the question and answer would not reach `asks.jsonl`, so they would be missing from the meeting note's "Perguntas ao vivo", and asks from the TUI and the deck would behave differently. Rejected by D-105 (2026-10-04): the live ask is scribed's, transcript only.
 
 ## 10. Pins
 
-### 10.1 v1: deck-stored (MEET-O2 default)
+### 10.1 v1: deck-stored (MEET-O2 default, applied in M4)
 
-- `POST /api/meetings/:id/pins` with `{ t }` (from the button or `Alt P` with no terminal focused) or `{ t0 }` (click on a line). The server sets `t = elapsed_s` at the moment of the request when absent, and `label` = the newest line's text, first 80 characters (non-confidential only). Pins within 2 s merge (state-machines 6.3 row 17).
+- `POST /api/meetings/:id/pins` with `{ t? }` ([05-api.md](05-api.md) 2.11): the button and `Alt P` with no terminal focused send no `t`, and a click on a line sends that line's `t0` as `t` (D-119). The server sets `t = elapsed_s` at the moment of the request when absent, and `label` = the newest line's text, first 80 characters (non-confidential only). Pins within 2 s merge (state-machines 6.3 row 17).
 - Stored in SQLite `meeting_pins { meetingId, t, label | null, createdAt }` ([06-storage.md](06-storage.md)). Shown in the live Pins list and in the detail's "Pinned moments" with the transcript line found at that offset in `transcript.md` or `transcript.jsonl`.
 - Limit: postmeet does not know about them, so pins never reach the vault note, and pins made from the TUI do not exist.
 
-### 10.2 After TurbidAssist change T1
+### 10.2 After TurbidAssist change T1 (not taken)
 
-When `status.protocol >= 2` and the capability list includes `pin`, the deck sends `{"cmd":"pin","t":..,"label":..}` to scribed instead of storing its own row, reads pins back from `history` (`pins` key) and from `<session>/pins.jsonl` after the meeting, and receives `pin` events on subscribe. Existing deck-stored pins of past meetings stay in SQLite and are shown merged by time. For confidential tags the deck still sends no label (scribed stores its own session files in the 0700 session dir; postmeet decides what reaches the note, section 16 T1).
+The owner did not take T1 on 2026-10-04; M4 builds none of this. When `status.protocol >= 2` and the capability list includes `pin`, the deck sends `{"cmd":"pin","t":..,"label":..}` to scribed instead of storing its own row, reads pins back from `history` (`pins` key) and from `<session>/pins.jsonl` after the meeting, and receives `pin` events on subscribe. Existing deck-stored pins of past meetings stay in SQLite and are shown merged by time. For confidential tags the deck still sends no label (scribed stores its own session files in the 0700 session dir; postmeet decides what reaches the note, section 16 T1).
 
 ## 11. Post-meeting processing and reading notes
 
 ### 11.1 States (state-machines 6.4)
 
-The deck watches `<session_dir>/<id>/session.json` (fs.watch plus a 10 s poll) from `stop` until `synthesized`. It reads `state` only: `recorded`, `transcribed`, `awaiting_names`, `synthesized`; `stopping` is deck-derived. The `stuck` flag: `postmeet.log` has not grown for 10 minutes, no `postmeet.lock` is held, and the state is not `synthesized` (a failed synthesis leaves the manifest unchanged, contract 2.7). Sessions that never got a manifest (scribed killed hard) show "Recording interrupted" when their directory has a `transcript.jsonl` but no `session.json` and scribed is not recording them (Proposed).
+The deck watches `<session_dir>/<id>/session.json` (fs.watch plus a 10 s poll) from `stop` until `synthesized`. It reads `state` only: `recorded`, `transcribed`, `awaiting_names`, `synthesized`; `stopping` is deck-derived. The `stuck` flag: `postmeet.log` has not grown for 10 minutes, no `postmeet.lock` is held, and the state is not `synthesized` (a failed synthesis leaves the manifest unchanged, contract 2.7). `postmeet.lock` counts as held when its `dev:inode` appears in `/proc/locks`; where `/proc/locks` does not exist (macOS), when the lock file changed within the last 10 minutes (D-115). Sessions that never got a manifest (scribed killed hard) show "Recording interrupted" when their directory has a `transcript.jsonl` but no `session.json` and scribed is not recording them (Proposed).
 
 The list is built at start and on change by reading every `session.json` under `session_dir` (one directory per session, `YYYY-MM-DDTHH-MM-SS[-N]`). Rows without a manifest older than 1 hour and not recording are listed as interrupted, not hidden.
 
@@ -240,12 +238,14 @@ The list is built at start and on change by reading every `session.json` under `
 
 postmeet writes the note directly into the vault, not through vault-mcp: `<vault.path>/<vault.meetings_folder>/<YYYY-MM-DD> <tag> <U+2014> <title>.md`, with ` (<disambiguator>)` before `.md` on a name clash, and frontmatter `tags: [meeting, <tag>]`, `date`, `session_id` (`batch/postmeet/vault.py` 175 to 262).
 
-| Step | How (Proposed) |
+In M4 the deck reads notes from disk only, read only and limited to `vault.meetings_folder` (MTG-O1, D-114); the vault-mcp client is M5, which may then read through vault-mcp first.
+
+| Step | How (M4) |
 |---|---|
-| Candidates | `vault_list { folder: <meetings_folder> }`, keep paths whose file name starts with `<date> <tag> ` (date from the session id) |
-| Match | `vault_get_note` on each candidate; the `Frontmatter:` block's `session_id` must equal the meeting id |
-| Cache | `notePath` stored on the Meeting row; re-validated when the file is missing from a later `vault_list` |
-| vault-mcp down | read the same folder from disk, same matching rule, read only (MTG-O1) |
+| Candidates | list `<vault.path>/<vault.meetings_folder>` on disk, keep files whose name starts with `<date> <tag> ` (date from the session id) |
+| Match | read each candidate (its realpath inside the folder's realpath, `O_NOFOLLOW`, a regular file, a size cap); its frontmatter `session_id` must equal the meeting id |
+| Cache | `note_path` stored on the Meeting row for a non-confidential meeting only, because the file name embeds the synthesized title (D-116); re-validated when the file is missing. A confidential meeting's note is located again on each read |
+| vault-mcp | not used in M4 (M5) |
 | Parse | H1 `# <title>`; sections `## Resumo`, `## Decisões`, `## Action items` (the template in `prompts/meeting_summary.md`); placeholders "Nenhuma decisão registrada." and "Nenhum action item registrado." render as the empty lines; `## Transcript` and `## Perguntas ao vivo` callouts are skipped (the deck has its own transcript view) |
 | Action items | lines `- [ ] ` under `## Action items`; `owner` = text before the first `:` when that prefix is at most 40 characters and has no sentence punctuation, else none (screens/meetings.md 4.2) |
 
@@ -253,15 +253,15 @@ Everything read from the note is agent-written text and renders as text or sanit
 
 ## 12. Action items: Launch as session, Research first, Dismiss
 
-**Scope flag.** The owner did not select "Tasks from meetings" in the scope question, but the canvas (Meetings detail, Home calm) designs "Launch as session", "Research first" and "Dismiss" on action items. Whether this is in v1 is Open (MEET-O6, HOME-O8, Q6). The behaviour below is the default if the owner keeps it; if not, the buttons are removed and action items are read-only.
+**Scope flag.** The owner did not select "Tasks from meetings" in the scope question, but the canvas (Meetings detail, Home calm) designs "Launch as session", "Research first" and "Dismiss" on action items. M4 applies the default (MEET-O6, HOME-O8, Q6; the owner may revisit before exit): action items are in M4 as designed, with deck-only state.
 
-| Action | Behaviour (Proposed) | Stored |
+| Action | Behaviour (M4) | Stored |
 |---|---|---|
-| Launch as session | opens the new-session form with the item text as the task and the repo picker focused (an action item has no repo); nothing starts until the form is submitted | on submit: state `launched` with the new session id |
-| Research first | opens the research form with the item text as the topic ([10-memory-and-research.md](10-memory-and-research.md) 8) | on send: state `researched` with the run id |
-| Dismiss | hides the item, "Undo" for 6 s | state `dismissed` |
+| Launch as session | opens the new-session form (`/new?task=`) with the item text as the task and the repo picker focused (an action item has no repo); nothing starts until the form is submitted | nothing |
+| Research first | not rendered in M4: the research form is M6 ([10-memory-and-research.md](10-memory-and-research.md) 8) | nothing |
+| Dismiss | hides the item, "Undo" for 6 s | a dismissal row |
 
-State rows: `meeting_item_state { meetingId, itemHash, state, ref, at }`, keyed by a hash of the normalised item text (not its index) so a re-synthesized note keeps the states of unchanged items. The deck never edits the note or `Tasks/Inbox.md` (MTG-O4).
+Item state is dismissals only (D-113): `meeting_item_dismissals` ([06-storage.md](06-storage.md) 4.9), keyed by a hash of the normalised item text (not its index) so a re-synthesized note keeps the dismissals of unchanged items. There is no `meeting_item_state` table and no `launched` or `researched` state in M4. The deck never edits the note or `Tasks/Inbox.md` (MTG-O4).
 
 ## 13. Quiet mode
 
@@ -272,7 +272,7 @@ Decided: while TurbidAssist is recording, notifications still pop up and no soun
 
 ## 14. Search
 
-`GET /api/meetings/search?q=` (debounced 300 ms in the browser). Proposed implementation, which is also MEET-O7's default: no index, an on-demand scan of each session's `transcript.md` (batch, preferred) or `transcript.jsonl`, newest meetings first, case- and accent-insensitive, capped at 2 s of work per query and 200 hits; results stream to the browser in pages. Confidential meetings are included in results but nothing is cached. Hits carry `{ meetingId, offsetSeconds, speaker, textRange }` so the UI marks ranges with `mark` elements without injecting HTML.
+`GET /api/meetings/search?q=` (debounced 300 ms in the browser). Decided 2026-10-04 (MEET-O7, D-109): confidential meetings are included in search, read from the session files on demand and never indexed, cached or persisted. Implementation: no index, an on-demand scan of each session's `transcript.md` (batch, preferred) or `transcript.jsonl`, newest meetings first, case- and accent-insensitive, capped at 2 s of work per query and 200 hits; results stream to the browser in pages. Confidential meetings are included in results but nothing is cached. Hits carry `{ meetingId, offsetSeconds, speaker, textRange }` so the UI marks ranges with `mark` elements without injecting HTML.
 
 ## 15. Contract tests (Decided: against `protocol.py` fixtures)
 
@@ -280,15 +280,15 @@ Decided: while TurbidAssist is recording, notifications still pop up and no soun
 
 | Piece | Where | Status |
 |---|---|---|
-| Fixture exporter | TurbidAssist change T0 (section 16) writes `tests/fixtures/protocol/v<N>/{commands,events,invalid}.jsonl` from the dataclasses' `encode()` | Proposed |
-| Vendored copy | `hub/test/fixtures/scribed/<turbidassist-sha>/` with a `SOURCE` file naming the commit | Proposed |
-| Drift check | optional CI job when `TURBIDASSIST_PATH` is set: regenerate with the exporter and diff | Proposed |
-| Fake scribed | `hub/test/fakes/fake-scribed.mjs`: a Unix socket server that replays fixture lines and scripted scenarios | Proposed |
+| Fixture exporter | TurbidAssist change T0 (section 16): `scripts/export_protocol_fixtures.py` in TurbidAssist writes `{commands,events,invalid}.jsonl` from the dataclasses' `encode()` | Decided (TEST-O3, D-108); none exists yet (TurbidAssist at d4ffb9d has no exporter) |
+| Vendored copy | the exporter's output committed to `hub/test/fixtures/scribed/<turbidassist-sha>/` with a file naming the commit. Until an exporter exists, the contract tests run on the hand-copied `d4ffb9d` set (`MANIFEST.json` `"exporter": null`), with the tag placeholder `acme` (D-111) | Decided (D-108) |
+| Drift check | none: CI does not check out TurbidAssist (TEST-O3) | Decided (D-108) |
+| Fake scribed | `hub/test/fakes/fake-scribed.mjs`: a Unix socket server that replays fixture lines and scripted scenarios, run inside the test process | M4 |
 
 Test cases (Proposed, all with `node:test`):
 
 1. The client decodes every event fixture, including accents split across chunk boundaries and a line exactly at the size cap.
-2. Every command the client can send is byte-identical to the matching command fixture.
+2. Every command the client can send is JSON that parses equal to the matching command fixture, with raw UTF-8 (not byte-identical, because Python's separators differ; D-120).
 3. Invalid lines from `invalid.jsonl` are rejected by the deck parser the same way (not an object, missing `type`, unknown `type`, wrong number type).
 4. `error` messages are surfaced verbatim, including the known ones: "sessão já ativa; pare a atual antes", "não há sessão ativa", "tag desconhecida: …", "a sessão anterior ainda está encerrando …".
 5. `subscribe`: first `status` then `transcript`; EOF triggers reconnect and gap fill from a fixture `transcript.jsonl`.
@@ -296,22 +296,23 @@ Test cases (Proposed, all with `node:test`):
 7. `stop` taking 45 s: no timeout, recorder stays `stopping`, polls reporting `recording:false` are ignored.
 8. `ask` stream with deltas, with a single fallback delta, with `error` after deltas.
 9. Confidential tag end to end: after a recorded meeting, SQLite, logs and the search cache contain none of the fixture transcript strings.
-10. Capability detection: a `status` without `protocol` behaves as today; with `protocol: 2` the client subscribes with `events` and uses `pin`.
+10. Capability detection: a `status` without `protocol` behaves as today. T1 and T2 are not taken (2026-10-04), so the client has no `pin` and no `events` subscription; an event type outside the closed list is ignored and counted (D-110).
 
 ## 16. Proposed TurbidAssist changes
 
-Each is a small, independent PR in the owner's TurbidAssist repo. None is required for M4 to ship; each removes a deck workaround. Order of value: T0, T2, T1, T4, T3. Status: all Proposed; T1, T3 and T4 settle existing Open items (MEET-O2, MEET-O4, SM-O13).
+Each is a small, independent PR in the owner's TurbidAssist repo. None is required for M4 to ship; each removes a deck workaround. Order of value: T0, T2, T1, T4, T3. Status (2026-10-04, Q7): T0 is wanted (D-108) but not written, since TurbidAssist at d4ffb9d has no exporter; T1, T2, T3 and T4 are not taken, and the deck keeps its fallbacks (deck-stored pins, the 2 s `status` poll, the transcript-only ask of D-105, `systemd-run` of D-106). The fleet never edits TurbidAssist; any of these is the owner's.
 
-### T0 · Protocol fixtures for other clients
+### T0 · Protocol fixtures for other clients (wanted, not written)
 
 | | |
 |---|---|
 | Why | Decided contract tests need fixture lines produced by `protocol.py`, which is the single source of the wire format |
-| Files | new `realtime/scripts/export_protocol_fixtures.py`; new `tests/fixtures/protocol/v1/commands.jsonl`, `events.jsonl`, `invalid.jsonl`; new `tests/realtime/test_protocol_fixtures.py` |
-| Change | the script builds one instance of every `Command` and `Event` class in `COMMANDS` and `EVENTS` (with accented text and float and int numbers), writes `encode()` output line by line, and writes invalid lines with the expected `ProtocolError` message prefix. The test regenerates in memory and asserts equality with the committed files, so a wire change forces a fixture update in the same commit |
+| Status | Decided 2026-10-04 (TEST-O3, MTG-O3, D-108); none exists yet. Until it does, M4's contract tests run on the hand-copied `d4ffb9d` fixtures and M4 exit criterion 1 is owner-pending |
+| Files | new `scripts/export_protocol_fixtures.py` in TurbidAssist; its output (`commands.jsonl`, `events.jsonl`, `invalid.jsonl`) is committed to the deck's `hub/test/fixtures/scribed/<sha>/`; new `tests/realtime/test_protocol_fixtures.py` |
+| Change | the script builds one instance of every `Command` and `Event` class in `COMMANDS` and `EVENTS` (with accented text and float and int numbers), writes `encode()` output line by line, and writes invalid lines with the expected `ProtocolError` message prefix. The TurbidAssist test runs the exporter in memory and checks its output against the dataclasses, so a wire change shows up in TurbidAssist's own suite; CI on the deck side does not check out TurbidAssist |
 | Compatibility | no runtime change |
 
-### T1 · `pin` command
+### T1 · `pin` command (not taken, 2026-10-04)
 
 | | |
 |---|---|
@@ -322,7 +323,7 @@ Each is a small, independent PR in the owner's TurbidAssist repo. None is requir
 | `batch/postmeet/vault.py` | when `store_transcript` is true, render `## Momentos marcados` (offset `MM:SS`, label, the transcript line at that offset); when false, render offsets only and run the existing verbatim-leak check (`refuse_verbatim_leak`) over the section |
 | Tests | `tests/realtime/test_protocol.py` (round trip, rejection of wrong types), `tests/realtime/test_daemon_manifest.py` (pin while idle, file mode, manifest key), `tests/batch/test_vault_policy.py` (section present or offsets-only by policy) |
 
-### T2 · Status push on `subscribe` (opt-in)
+### T2 · Status push on `subscribe` (opt-in; not taken, 2026-10-04)
 
 | | |
 |---|---|
@@ -333,7 +334,7 @@ Each is a small, independent PR in the owner's TurbidAssist repo. None is requir
 | Tests | `tests/realtime/test_protocol.py` (new fields optional both ways), `tests/realtime/test_daemon_manifest.py` or a new `test_subscribe.py` (a subscriber with `status` sees start, stopping, stop; one without sees only transcript) |
 | Compatibility | an old daemon ignores `events` (unknown keys are ignored) and never sends `protocol`; the deck keeps polling in that case |
 
-### T3 · vault-mcp in the live ask (MEET-O4)
+### T3 · vault-mcp in the live ask (MEET-O4; not taken, D-105)
 
 | | |
 |---|---|
@@ -345,7 +346,7 @@ Each is a small, independent PR in the owner's TurbidAssist repo. None is requir
 | Tests | `tests/realtime/test_ask_prompt.py`: argv with and without `vault_mcp`, the variadic-order test still passing, write tools present in the deny list |
 | Confidentiality | unchanged: the transcript already goes to `claude` today; vault tools are read-only; `--no-session-persistence` stays |
 
-### T4 · Optional systemd user unit for scribed (SM-O13)
+### T4 · Optional systemd user unit for scribed (SM-O13; not taken, D-106)
 
 | | |
 |---|---|
@@ -378,24 +379,24 @@ WantedBy=default.target
 | `KillMode=process` | `stop` spawns `postmeet run` detached (`_spawn_batch`), which stays in the unit's cgroup; the default `control-group` would kill the summary job when the unit stops |
 | No sandboxing | unlike the gc unit: scribed needs PipeWire, network for `claude -p`, and the vault path for the batch |
 
-With the unit installed, the deck's "Start scribed" uses it (section 3.5), and the owner can enable it at login if wanted (not required: on-demand start keeps working).
+T4 is not taken (2026-10-04): "Start scribed" uses the `systemd-run` command of section 3.5 (D-106), and the deck has no `systemctl` branch for a unit.
 
 ## 17. Open items
 
 | ID | Question | Default until decided | Blocks milestone |
 |---|---|---|---|
-| MTG-O1 | Past meeting notes are read from disk when vault-mcp is down, an exception to "the deck reaches the vault only through vault-mcp". Accept? | Yes, read-only, limited to `vault.meetings_folder`, matched by frontmatter `session_id` | M4 |
-| MTG-O2 | Take TurbidAssist change T2 (status push, `stopping` visible, `protocol` field)? | Poll `status` every 2 s | none |
-| MTG-O3 | Take TurbidAssist change T0 (fixture exporter), or generate fixtures from the deck's test harness by importing `protocol.py` with Python in CI? | T0 in TurbidAssist; until it lands, fixtures hand-copied from `test_protocol.py` expectations and reviewed | M4 |
-| MTG-O4 | Should action-item states (dismissed, launched) stay deck-only, or also update `Tasks/Inbox.md`? | Deck-only; the vault is untouched | none |
-| MEET-O1 | Source label not persisted | See [screens/meetings.md](screens/meetings.md) 11 | none |
-| MEET-O2 | Pins not in TurbidAssist | See screens/meetings.md 11; T1 proposed | none |
-| MEET-O3 | Live meeting title | See screens/meetings.md 11 | none |
-| MEET-O4 | Live ask with vault access | See screens/meetings.md 11; T3 proposed | none |
-| MEET-O5 | Partial transcript lines | See screens/meetings.md 11 | none |
-| MEET-O6 | "Launch as session" and the other action-item buttons (scope, Q6) | See screens/meetings.md 11 and section 12 | M4 |
-| MEET-O7 | Transcript search without persisting text | See screens/meetings.md 11; section 14 | none |
-| MEET-O8 | "Save answer to meeting note" | See screens/meetings.md 11 | none |
-| MEET-O11 | Location of TurbidAssist `config.yaml` | See screens/meetings.md 11 | M4 |
-| SM-O13 | "Start scribed": unit or detached spawn | See [interaction/state-machines.md](interaction/state-machines.md) 13; section 3.5 and T4 | none |
-| SM-O14 | In-deck speaker naming for `awaiting_names` | See state-machines 13 | none |
+| MTG-O1 | Past meeting notes are read from disk when vault-mcp is down, an exception to "the deck reaches the vault only through vault-mcp". Accept? | Default applied in M4, owner may revisit before exit: yes, read-only, limited to `vault.meetings_folder`, matched by frontmatter `session_id`; M4 reads notes from disk only (D-114) | M4 before exit |
+| MTG-O2 | Take TurbidAssist change T2 (status push, `stopping` visible, `protocol` field)? | Default applied in M4: T2 is not taken (2026-10-04), so poll `status` every 2 s | none |
+| MTG-O3 | Take TurbidAssist change T0 (fixture exporter), or generate fixtures from the deck's test harness by importing `protocol.py` with Python in CI? | **Decided** 2026-10-04 with TEST-O3 (D-108): T0 in TurbidAssist (`scripts/export_protocol_fixtures.py`, output in `hub/test/fixtures/scribed/<sha>/`); none exists yet, so the contract tests run on the hand-copied `d4ffb9d` fixtures | M4 (decided) |
+| MTG-O4 | Should action-item states (dismissed, launched) stay deck-only, or also update `Tasks/Inbox.md`? | Default applied in M4, owner may revisit before exit: deck-only; the vault is untouched | none |
+| MEET-O1 | Source label not persisted | Default applied in M4 (see [screens/meetings.md](screens/meetings.md) 11) | M4 before exit |
+| MEET-O2 | Pins not in TurbidAssist | Default applied in M4: deck-stored pins; T1 not taken | M4 before exit |
+| MEET-O3 | Live meeting title | Default applied in M4 (see screens/meetings.md 11) | M4 before exit |
+| MEET-O4 | Live ask with vault access | **Decided** 2026-10-04 (D-105): transcript only; T3 not taken | M4 (decided) |
+| MEET-O5 | Partial transcript lines | Default applied in M4 (see screens/meetings.md 11) | M4 before exit |
+| MEET-O6 | "Launch as session" and the other action-item buttons (scope, Q6) | Default applied in M4 (see screens/meetings.md 11 and section 12) | M4 before exit |
+| MEET-O7 | Transcript search without persisting text | **Decided** 2026-10-04 (D-109): confidential meetings included, read on demand, never indexed, cached or persisted (section 14) | M4 (decided) |
+| MEET-O8 | "Save answer to meeting note" | Default applied in M4: no button (see screens/meetings.md 11) | M4 before exit |
+| MEET-O11 | Location of TurbidAssist `config.yaml` | **Decided** 2026-10-04 (D-107): the Settings field, section 2 | M4 (decided) |
+| SM-O13 | "Start scribed": unit or detached spawn | **Decided** 2026-10-04 (D-106): `systemd-run`, section 3.5; T4 not taken | M4 (decided) |
+| SM-O14 | In-deck speaker naming for `awaiting_names` | Default applied in M4: hint only (see state-machines 13) | M4 before exit |
