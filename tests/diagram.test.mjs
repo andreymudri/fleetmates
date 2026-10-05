@@ -24,13 +24,13 @@ test('diagram schema and validator accept JSON data and reject markup, unknown s
 })
 
 test('phase diagram emits bounded labels and dependencies with lifecycle states', () => {
-  const data = phaseDiagram({ tasks: [{ id: 'T1', title: 'arbitrary teammate prose', phase: 1, deps: [] }, { id: 'T2', phase: 2, deps: ['T1', 'T1', 'missing'] }] },
-    { tasks: [{ id: 'T1', state: 'done' }, { id: 'T2', state: 'constructor' }] })
-  assert.equal(data.nodes[0].label, 'T1')
+  const data = phaseDiagram({ tasks: [{ id: 'T0', title: 'arbitrary teammate prose', phase: 1, deps: [] }, { id: 'T2', phase: 2, deps: ['T0', 'T0', 'missing'] }] },
+    { tasks: [{ id: 'T0', state: 'done' }, { id: 'T2', state: 'constructor' }] })
+  assert.equal(data.nodes[0].label, 'T0')
   assert.equal(data.nodes[0].state, 'done')
   assert.equal(data.nodes[1].state, 'unknown')
   assert.equal(data.nodes[1].lane, 2)
-  assert.deepEqual(data.edges, [{ from: 'T1', to: 'T2', kind: 'depends' }])
+  assert.deepEqual(data.edges, [{ from: 'T0', to: 'T2', kind: 'depends' }])
 })
 
 test('diagram CLI emits the stored run phase view and refuses absent plans', async () => {
