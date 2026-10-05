@@ -10,13 +10,13 @@ export async function writeResearchDraft (repo, id, { draft = researchDraft(), b
   await fs.writeFile(path.join(dir, 'draft.json'), JSON.stringify(draft))
   await fs.writeFile(path.join(dir, 'draft.md'), body)
 }
-export async function seedResearch (h) {
+export async function seedResearch (h, { vault } = {}) {
   const repo = path.join(h.home, 'research-fixture')
   await fs.mkdir(path.join(repo, '.git'), { recursive: true })
   await fs.writeFile(path.join(repo, '.git/HEAD'), 'ref: refs/heads/main\n')
   h.deck.store.run('INSERT INTO repos(id,name,crew_seed,crew_slot,first_seen_at) VALUES(?,?,?,?,?)', repo, 'research-fixture', 'research-fixture', 0, 1)
   const launches = [], stopped = []
-  const service = createResearchService({ store: h.deck.store, preferences: () => ({ prefs: { lang: 'en' } }), publish: event => h.events.push(event),
+  const service = createResearchService({ store: h.deck.store, vault, preferences: () => ({ prefs: { lang: 'en' } }), publish: event => h.events.push(event),
     launcher: { async launch (root, body) {
       launches.push({ root, body })
       const session = h.deck.projector.create({ id: `research-lead-${launches.length}`, repo_id: root, cwd: root, task: body.task, launch_task: body.task, origin: 'launched', pty_id: `fake-${launches.length}`, process_key: `fake-${launches.length}` })

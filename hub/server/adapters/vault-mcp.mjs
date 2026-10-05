@@ -127,6 +127,7 @@ export function createVaultClient ({
   let version = null
   /** @type {string[]} */
   let capabilities = []
+  let toolSchemas = new Map()
   /** @type {import('node:child_process').ChildProcess | null} */
   let child = null
   let gen = 0
@@ -382,6 +383,7 @@ export function createVaultClient ({
         cursor = typeof page?.nextCursor === 'string' ? page.nextCursor : undefined
       } while (cursor)
       version = typeof init?.serverInfo?.version === 'string' ? init.serverInfo.version : null
+      toolSchemas = new Map(tools.map(tool => [tool.name, tool.inputSchema]))
       capabilities = capabilitiesOf(tools)
       attempt = 0
       slowStreak = 0
@@ -452,6 +454,7 @@ export function createVaultClient ({
   }
 
   return {
+    toolSchema: name => { const schema = toolSchemas.get(name); return schema ? structuredClone(schema) : null },
     health,
     probe,
     pid: () => child?.pid ?? null,

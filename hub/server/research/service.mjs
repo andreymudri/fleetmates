@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { createResearchApproval } from './approval.mjs'
+import { reviewedOutput, validateReview } from './review.mjs'
 import { apiError } from '../http/router.mjs'
 import { readResearchOutput, RESEARCH_ID } from './output.mjs'
 
@@ -19,18 +21,20 @@ ${JSON.stringify(request)}`
 }
 
 export function validateRequest (body) {
-  const keys = ['topic', 'preset', 'domain', 'sourceTypes', 'focusNotes', 'repoKey']
+  const keys = ['topic', 'preset', 'domain', 'sourceTypes', 'focusNotes', 'repoKey', 'missId', 'relatedNotes']
   if (Object.keys(body).some(key => !keys.includes(key))) throw apiError(422, 'validation_failed')
   const text = (value, max) => typeof value === 'string' && value.trim() && value.length <= max && !/[\u0000-\u001f]/u.test(value)
   if (!text(body.topic, 500) || body.topic.trim().length < 3 || !Object.hasOwn(PRESETS, body.preset ?? 'standard') ||
     !text(body.domain, 100) || !/^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u.test(body.domain) ||
     !Array.isArray(body.sourceTypes) || !body.sourceTypes.length || body.sourceTypes.length > 4 || body.sourceTypes.some(type => !['docs', 'repo', 'blog', 'paper'].includes(type)) ||
     body.focusNotes !== undefined && (typeof body.focusNotes !== 'string' || body.focusNotes.length > 3000 || /[\u0000-\u0008\u000b-\u001f]/u.test(body.focusNotes))) throw apiError(422, 'validation_failed')
-  return { topic: body.topic.trim(), preset: body.preset ?? 'standard', domain: body.domain, sourceTypes: [...new Set(body.sourceTypes)], focusNotes: body.focusNotes ?? '' }
+  if (body.missId !== undefined && (typeof body.missId !== 'string' || body.missId.length > 100)) throw apiError(422, 'validation_failed')
+  if (body.relatedNotes !== undefined && (!Array.isArray(body.relatedNotes) || body.relatedNotes.length > 20 || body.relatedNotes.some(note => !text(note, 150) || /[\[\]\\/]/.test(note)))) throw apiError(422, 'validation_failed')
+  return { ...(body.relatedNotes?.length ? { relatedNotes: [...new Set(body.relatedNotes)] } : {}), ...(body.missId ? { missId: body.missId } : {}), topic: body.topic.trim(), preset: body.preset ?? 'standard', domain: body.domain, sourceTypes: [...new Set(body.sourceTypes)], focusNotes: body.focusNotes ?? '' }
 }
 
-/** Research uses the existing launched-session path and runs registry. Save is capability-blocked. */
-export function createResearchService ({ store, launcher, projector, preferences, publish = () => {}, now = Date.now }) {
+/** Research uses the existing launched-session path and runs registry. Writes require an approved, current MCP preview. */
+export function createResearchService ({ store, launcher, projector, preferences, publish = () => {}, now = Date.now, vault = null }) {
   const row = id => {
     if (!RESEARCH_ID.test(id)) throw apiError(404, 'not_found')
     const result = store.get('SELECT * FROM research WHERE id=?', id)
@@ -41,11 +45,22 @@ export function createResearchService ({ store, launcher, projector, preferences
     const run = row(id)
     const session = store.get('SELECT state,alive FROM sessions WHERE id=?', run.lead_session_id)
     const request = JSON.parse(run.request)
-    const output = await readResearchOutput(run.repo_id, id, request.domain)
-    return { id, repoId: run.repo_id, leadSessionId: run.lead_session_id, createdAt: run.created_at, request, ...output,
+    const saved = run.saved && JSON.parse(run.saved)
+    let output = saved ? { state: 'saved', body: saved.body, draft: saved.draft, orphans: [], revision: saved.savedAt } : await readResearchOutput(run.repo_id, id, request.domain)
+    if (output.state === 'drafted') {
+      const review = run.review && JSON.parse(run.review)
+      const reviewConflict = !!review && review.baseRevision !== output.revision
+      const baseRevision = output.revision
+      if (request.relatedNotes?.length) output.draft.links = [...new Set([...output.draft.links, ...request.relatedNotes])]
+      output = { ...reviewedOutput(output, reviewConflict ? null : review), baseRevision, reviewConflict }
+    }
+    const current = { id, repoId: run.repo_id, leadSessionId: run.lead_session_id, createdAt: run.created_at, request, ...output,
       state: output.state === 'running' && !session?.alive ? 'interrupted' : output.state,
-      save: { available: false, reason: 'This vault-mcp version does not provide a verified preview. Nothing can be saved yet.' } }
+      orphans: output.orphans ?? [] }
+    const save = approval.availability(run, current)
+    return { ...current, state: run.save_state === 'saved' ? 'saved' : current.state, save }
   }
+  const approval = createResearchApproval({ store, detail, vault, now, publish })
   return {
     async launch (repo, body) {
       const request = { ...validateRequest(body), lang: preferences().prefs.lang }
@@ -84,12 +99,22 @@ export function createResearchService ({ store, launcher, projector, preferences
     detail,
     async list () {
       return Promise.all(store.all('SELECT id FROM research ORDER BY created_at DESC LIMIT 50').map(async run => {
-        try { const item = await detail(run.id); const { draft, body, ...summary } = item; return summary }
+        try { const item = await detail(run.id); const { id, repoId, leadSessionId, createdAt, request, state } = item; return { id, repoId, leadSessionId, createdAt, request: { topic: request.topic, preset: request.preset, domain: request.domain }, state } }
         catch { return { id: run.id, state: 'invalid_output', save: { available: false } } }
       }))
     },
     async stop (id) { return launcher.stop(row(id).lead_session_id) },
-    preview (id) { row(id); throw apiError(501, 'vault_tool_missing', { tool: 'vault_learn.preview' }) },
-    save (id) { row(id); throw apiError(409, 'preview_required') }
+    preview: (id, options) => { row(id); return approval.preview(id, options) },
+    save: (id, previewId) => { row(id); return approval.save(id, previewId) },
+    async edit (id, body) {
+      row(id)
+      return approval.withLock(id, async () => {
+        const current = await detail(id)
+        if (current.state !== 'drafted' || row(id).save_state !== 'unsaved') throw apiError(409, 'invalid_state')
+        const review = validateReview(body, current)
+        store.run('UPDATE research SET review=?,preview=NULL WHERE id=?', review ? JSON.stringify(review) : null, id)
+        return { data: { research: await detail(id) } }
+      })
+    }
   }
 }

@@ -3,6 +3,10 @@
 Prepared M6 migration 0007 adds a strict `research` registry: id, selected
 repo, lead session, authoritative JSON request and creation time. Draft files
 are read from the selected repository; no vault file is opened or written.
+Migration 0008 adds private review and preview JSON, immutable saved output
+and a save state (`unsaved`, `saving`, `saved`, `unknown`). Captures are rebuilt
+without losing M5 rows, adding `via=research` and a research foreign key. A save
+in flight at process restart becomes unknown and cannot be repeated blindly.
 The migration preserves the existing private pre-migration backup behavior.
 The package remains an M6 work in progress; see [m6-progress.md](m6-progress.md).
 

@@ -69,6 +69,7 @@ const missView = row => ({
 
 /** @param {any} row @returns {CaptureRow} */
 const captureView = row => ({
+  ...(row.research_id ? { researchId: row.research_id } : {}),
   path: row.path,
   day: row.day,
   capturedAt: row.captured_at,

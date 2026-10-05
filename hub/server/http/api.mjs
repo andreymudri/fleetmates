@@ -116,7 +116,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     return { prefs, sources }
   }
   const launcher = createLauncher({ store, projector, link, publish, now, preferences })
-  const research = createResearchService({ store, launcher, projector, preferences, publish, now })
+  const research = createResearchService({ store, launcher, projector, preferences, publish, now, vault: memory?.researchVault })
   function event(type, data, entityId = null) {
     const at = now()
     const seq = Number(store.appendEvent({ at, type, entityId, data }))
@@ -487,6 +487,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return ok({ path: run.planPath, ...(await readRunPlan(await resolveRunPlan(run, run.repoId))) })
       }
     }
+    if (method === 'PATCH' && s[1] === 'research' && s.length === 3) return research.edit(s[2], body)
     if (method === 'PATCH' && route === 'prefs') {
       const current = preferences()
       for (const [key, value] of Object.entries(body)) {
@@ -623,10 +624,11 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return research.launch(repoId, body)
       }
       if (s[1] === 'research' && s.length === 4 && ['stop', 'preview', 'save'].includes(s[3])) {
-        onlyKeys(body, [])
+        onlyKeys(body, s[3] === 'preview' ? ['confirmNewDomain'] : s[3] === 'save' ? ['previewId'] : [])
+        if (body.confirmNewDomain !== undefined && typeof body.confirmNewDomain !== 'boolean') throw apiError(422, 'validation_failed')
         if (s[3] === 'stop') return research.stop(s[2])
-        if (s[3] === 'preview') return research.preview(s[2])
-        if (s[3] === 'save') return research.save(s[2])
+        if (s[3] === 'preview') return research.preview(s[2], body)
+        if (s[3] === 'save') return research.save(s[2], body.previewId)
       }
       if (route === 'sessions') {
         const unknown = Object.keys(body).filter(key => !['repoKey', 'task', 'mode'].includes(key))

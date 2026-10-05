@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test, before, after } from 'node:test'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { build } from 'vite'
 import { chromium } from 'playwright-core'
@@ -75,8 +76,49 @@ test('research palette opens the shared form and hostile draft text cannot execu
   assert.equal(await page.locator('.research-body a[href^="javascript:"]').count(), 0)
   assert.equal(await page.evaluate(() => globalThis.researchInjected), undefined)
   await page.keyboard.press('Alt+k')
-  await page.getByRole('combobox').fill('> research queue locks')
+  await page.getByRole('combobox').fill('> research retry backoff')
   await page.getByRole('combobox').press('Enter')
   await page.getByRole('textbox', { name: 'Topic', exact: true }).waitFor()
-  assert.equal(await page.getByRole('textbox', { name: 'Topic', exact: true }).inputValue(), 'queue locks')
+  assert.equal(await page.getByRole('textbox', { name: 'Topic', exact: true }).inputValue(), 'retry backoff')
+  const related = page.getByRole('group', { name: 'Existing notes to link' }).getByRole('checkbox').first()
+  await related.click()
+  assert.equal(await related.isChecked(), true)
+})
+
+
+test('research owner edits citations, previews and saves through the real candidate MCP', { skip: !process.env.RESEARCH_VAULT_MCP }, async t => {
+  let vault
+  const git = (...args) => execFileSync('git', ['-C', vault, ...args], { encoding: 'utf8' }).trim()
+  const { h, page } = await pageFor(t, { vaultCommand: [process.execPath, process.env.RESEARCH_VAULT_MCP], prepareVault: async root => {
+    vault = root
+    await fs.mkdir(path.join(root, '_templates'))
+    await fs.writeFile(path.join(root, '_templates/wiki.md'), '# <% tp.file.title %>\n\n## Contexto\n')
+    git('init', '-b', 'main'); git('config', 'user.name', 'Synthetic fixture'); git('config', 'user.email', 'fixture@example.org'); git('config', 'commit.gpgsign', 'false'); git('config', 'gc.auto', '0'); git('add', '.'); git('commit', '-m', 'Initial fixture')
+  } })
+  const r = await seedResearch(h)
+  await writeResearchDraft(r.repo, r.id)
+  await page.goto(`${h.base}/research/${r.id}#token=${token}`)
+  await page.getByRole('heading', { name: 'Session locks', exact: true }).waitFor()
+  await page.getByRole('checkbox', { name: 'Keep source 1' }).click()
+  await page.locator('mark.research-orphan').waitFor()
+  assert.ok(await page.getByRole('button', { name: 'Prepare preview' }).isDisabled())
+  await page.getByRole('checkbox', { name: 'Keep source 1' }).click()
+  await page.waitForFunction(() => !document.querySelector('mark.research-orphan'))
+  await page.getByRole('button', { name: 'Edit first', exact: true }).click()
+  const editor = page.getByRole('textbox', { name: 'Draft markdown' })
+  await editor.fill((await editor.inputValue()) + '\nOwner approved evidence.')
+  await page.getByRole('button', { name: 'Done editing' }).click()
+  await page.getByRole('button', { name: 'Edit first', exact: true }).waitFor()
+  await page.getByRole('button', { name: 'Prepare preview' }).click()
+  await page.getByRole('button', { name: 'Confirm new domain' }).click()
+  await page.getByRole('region', { name: 'Save preview' }).waitFor()
+  assert.equal(git('rev-list', '--count', 'HEAD'), '1')
+  await axe(page)
+  await page.getByRole('button', { name: 'Save to vault', exact: true }).click()
+  await page.getByRole('status').filter({ hasText: 'Saved to vault' }).waitFor()
+  assert.equal(git('rev-list', '--count', 'HEAD'), '2')
+  await page.reload()
+  await page.getByRole('status').filter({ hasText: 'Saved to vault' }).waitFor()
+  assert.equal(await page.getByRole('button', { name: 'Edit first', exact: true }).count(), 0)
+  await axe(page)
 })

@@ -394,6 +394,12 @@ export async function createDeckServer(options = {}) {
   const dynamicVault = Object.fromEntries(['graph', 'list', 'readNote', 'note', 'search', 'lineBound', 'knownPaths', 'sessionMemory'].map(method => [method, (...args) => currentVault()[method](...args)]))
   const memory = {
     vault: dynamicVault, prefs: vaultPrefs,
+    researchVault: {
+      health: vaultHealth,
+      supportsApproval: () => { const props = vaultClient?.toolSchema('vault_learn')?.properties; return props?.preview?.type === 'boolean' && props?.force_new?.type === 'boolean' && props?.expected_revision?.type === 'string' && props?.preview_time?.type === 'string' },
+      identity: () => { const prefs = vaultPrefs(); return JSON.stringify({ vaultPath: prefs.vaultPath, command: prefs.vaultCommand, lang: prefs.lang, version: vaultHealth().version }) },
+      call: (...args) => { if (!vaultClient) throw apiError(503, 'vault_unavailable'); return vaultClient.call(...args) }
+    },
     ask: { ask: body => askService.ask(body), cancel: id => askService.cancel(id), isAsking: id => askService?.isAsking(id) ?? false },
     async captures(day) {
       await vaultWork

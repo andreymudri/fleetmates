@@ -196,7 +196,7 @@ test('tokens: every route in the router table answers 401 without the token and 
     'GET /api/misses', 'POST /api/misses/x/resolve', 'GET /api/threads', 'GET /api/threads/x', 'DELETE /api/threads/x',
     'POST /api/ask/x/cancel', 'GET /api/sessions/x/memory']
   assert.deepEqual(m5.filter(route => !listed.has(route)), [], 'the router table lists every M5 route')
-  const m6 = ['GET /api/research', 'GET /api/research/x', 'POST /api/research', 'POST /api/research/x/stop', 'POST /api/research/x/preview', 'POST /api/research/x/save']
+  const m6 = ['GET /api/research', 'GET /api/research/x', 'PATCH /api/research/x', 'POST /api/research', 'POST /api/research/x/stop', 'POST /api/research/x/preview', 'POST /api/research/x/save']
   assert.deepEqual(m6.filter(route => !listed.has(route)), [], 'the router table lists every M6 route')
   const origin = `http://127.0.0.1:${h.port}`
   for (const route of routes) {

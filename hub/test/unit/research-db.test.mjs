@@ -17,7 +17,7 @@ test('M6 migration backs up schema 6 privately and creates a strict research reg
   old.close()
   const db = openDeckDb(file)
   try {
-    assert.equal(db.get('PRAGMA user_version').user_version, 7)
+    assert.equal(db.get('PRAGMA user_version').user_version, 8)
     assert.equal(db.get("SELECT strict FROM pragma_table_list WHERE name='research'").strict, 1)
     assert.equal(db.get("SELECT count(*) AS n FROM sqlite_schema WHERE name='research_created'").n, 1)
     db.run("INSERT INTO repos(id,name,crew_seed,crew_slot,first_seen_at) VALUES('/fixture','fixture','fixture',0,1)")

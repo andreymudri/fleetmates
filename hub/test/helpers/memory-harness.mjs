@@ -12,7 +12,7 @@ import { makeRuntimeDir } from './runtime-dir.mjs'
 
 export const token = 'v'.repeat(43)
 const worker = '02-wiki/nestjs/bullmq-worker.md'
-export async function memoryHarness (t, mode = 'ok', { web, fixture = 'answer-cited', delay = '30', askTimers, scenario, pty = false, transformAsk = args => args } = {}) {
+export async function memoryHarness (t, mode = 'ok', { web, fixture = 'answer-cited', delay = '30', askTimers, scenario, vaultCommand, prepareVault, pty = false, transformAsk = args => args } = {}) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mem-api-'))
   const bin = await fakeBin()
   const state = path.join(home, '.local/state/fleetmates/deck')
@@ -21,9 +21,10 @@ export async function memoryHarness (t, mode = 'ok', { web, fixture = 'answer-ci
   await fs.mkdir(state, { recursive: true })
   await fs.mkdir(config, { recursive: true })
   await fs.mkdir(vault)
+  await prepareVault?.(vault)
   await fs.writeFile(path.join(state, 'token'), token, { mode: 0o600 })
   await fs.writeFile(path.join(config, 'config.json'), JSON.stringify({ vaultPath: vault,
-    vaultCommand: [process.execPath, fileURLToPath(new URL('../fakes/fake-vault-mcp.mjs', import.meta.url))],
+    vaultCommand: vaultCommand ?? [process.execPath, fileURLToPath(new URL('../fakes/fake-vault-mcp.mjs', import.meta.url))],
     claudeCommand: path.join(bin.binDir, 'claude'), lang: 'en', obsidianVaultName: 'Test vault' }))
   const scenarioFile = scenario ? path.join(home, 'scenario.json') : undefined
   if (scenario) await fs.writeFile(scenarioFile, JSON.stringify(scenario))
@@ -44,7 +45,7 @@ export async function memoryHarness (t, mode = 'ok', { web, fixture = 'answer-ci
     askSpawn: (file, args, options) => { const argv = transformAsk(args); askSpawns.push(argv); return spawn(file, argv, { ...options, env: { ...options.env,
       FAKE_CLAUDE_P_FIXTURE: typeof fixture === 'function' ? fixture() : fixture, FAKE_CLAUDE_P_DELAY_MS: delay } }) } })
   deck.subscribe(event => events.push(event))
-  await fs.chmod(vault, 0)
+  if (!prepareVault) await fs.chmod(vault, 0)
   t.after(async () => { await deck.close(); await daemon?.close(); await runtime?.cleanup(); await fs.chmod(vault, 0o700); await bin.cleanup(); await fs.rm(home, { recursive: true, force: true }) })
   const base = `http://127.0.0.1:${deck.address().port}`
   const request = async (route, method = 'GET', body) => {

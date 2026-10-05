@@ -1,65 +1,59 @@
 # M6 implementation progress
 
-Started on 2026-10-05 from `feat/deck`, after the M5 merge. The M1 history is
-included. M6 is not complete.
+Started on 2026-10-05 from `feat/deck` after the M5 merge, including M1 history.
+This is a tested release candidate, not a claim that the milestone exit passed.
 
-The pure validator follows 10-memory-and-research sections 8.6 and 8.7. It
-checks bounded text and collections, reciprocal claim/source references,
-source identity, HTTP URLs, citation completeness, no draft frontmatter,
-a Sources or Fontes section, and the form's target domain.
+Implemented: research form, Quick/Standard/Deep presets, palette and Memory
+entry points, existing-note lookup and selection, Home cards, existing PTY
+session launch, bounded scout/draft validators and confined output reader,
+persistent owner edits, source toggles, orphan citation highlighting, explicit
+new-domain confirmation, complete file previews and approved MCP save. Saves
+record a research capture and resolve the originating Memory miss. Saved output
+is immutable and read only. No research text is stored in browser storage or
+event notifications. Home summaries omit draft, source and preview content.
 
-The implementation now includes a bounded output reader, authenticated API,
-session launch orchestration, form, review screen, palette entry and Home
-cards. The lead receives a brief describing scout tasks, the dependent draft
-task and the JSON contracts. The deck uses its existing PTY session launcher;
-it does not invoke fleetmates write commands itself. A separate internal task
-label keeps the topic on session cards rather than the orchestration prompt.
+`templates/research.template.md` and the generated launch brief define scout,
+draft and Deep verification tasks. Outputs use `out/research-<uuid>/` in the
+selected registered repository, following the proposed output layout in
+10-memory-and-research section 8. The dedicated research workspace is not
+automatically initialized. No existing gate, plan or fleet run state was edited.
 
-Implementation defaults, still proposed for owner review: the form explicitly
-selects a registered repository; outputs are `out/research-<uuid>/draft.md`,
-`draft.json` and `scouts/TN.json` in that repository. This follows section 8's
-proposed `out/<runId>/` layout. The configured dedicated research workspace is
-not initialized automatically. No fleet gate or existing plan was changed.
+Migration 0007 stores the authoritative owner request, repository and session.
+Migration 0008 stores owner review, exact preview parameters/revision/identity,
+save state and immutable saved output, preserving existing capture rows.
+An edit, changed team draft, changed vault identity or mismatched preview ID
+blocks saving. The upstream revision catches changes to planned vault files
+or templates. A save with an uncertain transport outcome blocks retries;
+a process restart treats an in-flight save the same way.
 
-Migration 0007 stores the authoritative request, repository and lead session
-in a strict private `research` table. Agent edits to `request.json` cannot
-change the selected domain. The output reader refuses symlink parents and
-leaves, non-regular files and files larger than 256 KiB. A content hash changes
-when the draft changes; it is groundwork for future preview freshness.
-Missing draft files show Scouting while the lead is alive, or Interrupted
-after it ends. Polling reads only the run's main repository, never individual
-task worktrees. Drafts and requests are not persisted in browser storage.
+The upstream implementation is in `/workspace/vault-mcp` on
+`feat/research-preview`, prepared as 0.5.0. Preview plans the note, MOC, knowledge
+index and daily note without writing files, creating directories, committing
+or pushing. Approved save repeats the exact input and timestamp and checks the
+revision before writing. `force_new` preserves existing notes. The dependency
+commit `4b00691` is not published; the deck keeps published 0.4.0 preview/save blocked.
 
-The pinned published vault-mcp 0.4.0 tool schema has no `preview`, `force_new`
-or custom frontmatter parameter. Its write tool cannot currently satisfy the
-M6 preview-before-save requirement. Save must remain unavailable until the
-dependency ships and its no-write preview contract is tested. The deck must
-not emulate preview by writing and reverting.
+Validation includes synthetic Git vault snapshots covering every file and
+Git byte before/after preview; exactly one approved commit with precisely the
+previewed files and contents; stale templates; existing-note preservation;
+structured MCP stale errors; deck edit/revision/orphan/approval/error-state
+checks; and Chromium review/edit/source/preview/save/reload with axe checks.
+The full deck suite passed 1858 of 1861 tests. The three failures are the
+previous Chromium bootstrap policy and two Git 2.52 optional hooksPath cases;
+their tests remain enabled. The final research integration subset passed all
+eight tests. Three Research browser tests and the authenticated-route subset
+passed, including the new review PATCH route. The upstream compiled stdio smoke
+check also passed. The upstream full suite passed all 1242 tests.
+New deck tests have failing mutation evidence with source restoration. The
+upstream preview tests also detected writer, stale-token and schema mutations.
 
-The npm registry still reports 0.4.0 as latest on 2026-10-05. Preview requests
-answer 501 `vault_tool_missing`; Save answers 409 `preview_required`, and the
-review button is disabled with an explanation. No vault write is attempted.
+The upstream branch push could not authenticate for the second repository.
+A portable commit bundle and plain source patch are saved under
+`/workspace/setup/vault-mcp-preview.bundle` and `vault-mcp-preview.patch`.
 
-Validation: 75 targeted regression tests passed, followed by four new API and
-migration tests. Two Research browser tests passed with a real synthetic PTY
-session, review reload, source details, Home, palette, safe markdown and axe
-checks on the form and review. Each of the six new tests was checked with a
-failing source mutation and restored afterwards. The earlier two pure
-contract tests also have mutation evidence.
-
-Final combined Memory and Research browser run: 10 tests passed. The security
-route subset passed and lists all six Research routes. The full hub run had
-1857 tests, 1853 passing and four failures. One was Archive's old assertion
-that Home makes no reads while its archived list is closed: Home now reads
-research. The assertion was updated to expect that read while still checking
-that the archived list is not fetched; all 11 Archive tests then passed. The
-other three failures are the previously recorded Chromium bootstrap policy
-and two Git 2.52 optional hooksPath failures. They remain enabled. Root code
-was not changed in this increment; its preceding M5 run had zero failures.
-
-Remaining work: upstream no-write preview capability and its contract,
-preview freshness and approved save, review editing and source toggles,
-orphan highlighting during edits, existing-topic suggestions and related-note
-selection, richer running scout progress, resolving originating misses after
-save, and the three real preset runs. M6 is not complete and must not be
-merged as a finished milestone until those checks pass.
+Remaining exit work: owner publication of vault-mcp 0.5.0, switching the deck's
+pinned test dependency to that published release, and three owner-authorized
+real research runs, one per preset. Existing topics now support a new linked
+note; richer scout progress and Discard remain proposed UI follow-ups. The
+M1 one-week dogfood check remains separate. No real vault or real Claude
+session was used for these tests.
