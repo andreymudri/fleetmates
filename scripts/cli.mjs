@@ -5042,6 +5042,7 @@ export async function runCli(argv, io = { out: console.log }) {
     let spec
     try {
       spec = generateReviewDispatch({
+        planPath: typeof flags.plan === 'string' ? flags.plan : (typeof plan.planPath === 'string' ? plan.planPath : ''),
         runId,
         phaseName,
         checkName: check.name,

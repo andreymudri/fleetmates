@@ -320,6 +320,18 @@ const scopeRules = () => [
   '',
 ]
 
+const handoffRules = () => [
+  'EVIDENCE BEFORE DONE. In summary, include the exact command, worktree, exit status and relevant output',
+  'for the tests, build and complete checks you actually ran. Tie evidence to the final tested commit;',
+  're-run affected checks after later edits. Pending commands, cached PASS and claims alone do not prove done.',
+  'Keep output verbatim, redact secrets, and mark omitted output explicitly. If a check cannot run, report blocked.',
+  'Start summary with "Next: Y. Step N of M done: X." Use known step counts; mark unknown counts explicitly.',
+  'Keep the existing result JSON keys and status values. Put verification output after the report in summary.',
+  'GATE FAILURE. Use systematic-debugging: reproduce, isolate, state one hypothesis, probe it, fix the confirmed cause,',
+  'then re-run the same complete command. Respect its exit-code contract; do not widen ownership or weaken checks.',
+  '',
+]
+
 const full = ({ task, runId, planPath, baseBranch, constraints, fixRound }) => [
   'You are tm-implementer for task ' + task.id + ': ' + task.title + '.',
   '',
@@ -349,6 +361,7 @@ const full = ({ task, runId, planPath, baseBranch, constraints, fixRound }) => [
   ...constraints.map((c) => '- ' + c),
   '',
   ...verifyStep(task, runId, planPath, baseBranch),
+  ...handoffRules(),
   'Commit your work on ' + task.branch + ' and return the structured result.',
 ].filter((line) => line !== '').join('\n')
 
@@ -385,6 +398,7 @@ const terse = ({ task, runId, planPath, baseBranch, constraints, caveman, fixRou
   ...constraints.map((c) => '- ' + c),
   '',
   ...verifyStep(task, runId, planPath, baseBranch),
+  ...handoffRules(),
   'STYLE. Write summary and blockers caveman-terse: drop articles and filler, keep every',
   'technical term, file path and error string exact. If skill caveman:caveman is available,',
   'use it at level ' + caveman + '. If not available, apply the style directly — its absence',
