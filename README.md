@@ -554,3 +554,23 @@ MIT — see `LICENSE`.
 
 Some skills are adapted from [superpowers](https://github.com/obra/superpowers) (© Jesse Vincent,
 MIT). See `NOTICE.md` for what was adapted and `LICENSE-THIRD-PARTY` for the license text.
+# Event ledger and hook diagnostics
+
+`node scripts/cli.mjs digest --ledger --run <runId> --root <project>` reports each task's
+fixed event counts and result enums. Bash commands are represented by SHA-256 fingerprints;
+command output and handoff prose are never included. Events live in per-task JSONL files under
+`.fleetmates/<runId>/ledger/`. The reader rejects links, non-regular files, partial records,
+invalid events and files over 1 MiB. An unavailable ledger is reported explicitly. The ledger
+is writable observation data, not a substitute for the existing git-derived enforcement.
+
+SessionStart restores a registered teammate's own task and phase from its committed plan in
+`docs/plans/`. PreCompact emits a reminder; SessionStart on compact re-injects it afterward.
+PostToolUse records Bash outcomes when the harness supplies an exit code, otherwise unknown.
+Repeated stops without new successful command fingerprints or a passing gate trigger a fixed
+stall warning, capped at three blocks; active-stop retries are allowed to terminate as blocked.
+The headless driver already caps enforcement retries and records its gate and handoff events.
+
+`node scripts/cli.mjs doctor --hooks [--session <sessionId>]` checks callback receipts from the
+last 24 hours in the Claude config directory. It reports unverified callbacks honestly. Start a
+session, run Bash, compact, and stop a teammate in the installed Claude Code version to prove
+the callbacks fire. Synthetic tests validate the handlers, not a live Claude installation.

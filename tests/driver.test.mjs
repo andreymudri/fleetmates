@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, mkdir, readFile, writeFile, chmod, rm, link } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, chmod, rm, link, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,6 +9,7 @@ import {
   dispatchPhase, fixedRefusal, DriverLockError,
   killProcess, waitForExit, releaseLock, runPool, acquireLock, pidAlive,
 } from '../scripts/driver.mjs'
+import { readEvents, ledgerSummary, fingerprint } from '../scripts/event-ledger.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SUBAGENT_STOP = path.join(HERE, '..', 'scripts', 'subagent-stop.mjs')
@@ -102,7 +103,7 @@ function baseArgs(runDir, overrides = {}) {
 
 async function tmpRunDir(name) {
   const dir = await mkdtemp(path.join(os.tmpdir(), `driver-${name}-`))
-  return dir
+  return realpath(dir)
 }
 
 async function readSession(runDir, taskId) {
@@ -127,6 +128,10 @@ test('one task spawns, its done result is recorded, and no resume happens', asyn
   assert.equal(session.sessionId, 'sid-T1')
   assert.equal(session.state, 'done')
   assert.equal(session.result.status, 'done')
+  const ledger = ledgerSummary(await readEvents(path.join(runDir, 'ledger', `${fingerprint('T1')}.jsonl`)))
+  assert.equal(ledger.counts['task-started'], 1)
+  assert.equal(ledger.gate, 'pass')
+  assert.equal(ledger.handoff, 'done')
 })
 
 test('enforcement 3 then 0 resumes once with the fixed refusal and records done', async () => {
