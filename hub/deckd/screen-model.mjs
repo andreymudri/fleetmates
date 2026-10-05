@@ -1,23 +1,54 @@
 // Headless terminal model of one PTY: what is on screen right now, as plain
-// text rows, for the web server's screen parsers (docs/deck/05-api.md 5.4).
+// text rows, for the web server's screen parsers (docs/deck/05-api.md 5.4),
+// and its serialized history for replay at any size (5.2).
 import xtermHeadless from '@xterm/headless'
+import addonSerialize from '@xterm/addon-serialize'
 
 const { Terminal } = xtermHeadless
+const { SerializeAddon } = addonSerialize
+
+/** Scrollback lines the model keeps and `history()` serializes. */
+export const HISTORY_LINES = 1000
 
 /** Minimum gap between two `screen` emissions to one watcher: at most 4 per second. */
 export const SCREEN_THROTTLE_MS = 250
 
+/** What addon-serialize 0.14.0 writes before the alternate screen's rows. */
+const ALT_SWITCH = '\x1b[?1049h\x1b[H'
+
 /**
  * @typedef {{ rev: number, lines: string[], cursor: { x: number, y: number }, changedRows: number[] }} ScreenEvent
+ * @typedef {{ data: string, cols: number, rows: number }} History
  */
+
+/**
+ * Cut serialized history to at most `maxBytes` UTF-8 bytes by dropping whole
+ * leading lines: the result starts right after a `\r\n` of `data`, so it never
+ * starts inside an escape sequence or a multi-byte character. Returns '' when
+ * no line boundary leaves a short enough rest.
+ * @param {string} data
+ * @param {number} maxBytes
+ * @returns {string}
+ */
+export function capHistory (data, maxBytes) {
+  const buf = Buffer.from(data, 'utf8')
+  if (buf.length <= maxBytes) return data
+  const crlf = buf.indexOf('\r\n', Math.max(0, buf.length - maxBytes - 2))
+  if (crlf === -1) return ''
+  return buf.subarray(crlf + 2).toString('utf8')
+}
 
 export class ScreenModel {
   /**
    * @param {{ cols: number, rows: number }} size
    */
   constructor ({ cols, rows }) {
-    this.term = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true })
+    this.term = new Terminal({ cols, rows, scrollback: HISTORY_LINES, allowProposedApi: true })
+    this.serializer = new SerializeAddon()
+    this.term.loadAddon(this.serializer)
     this.rev = 0
+    /** Writes fed to the terminal whose parse callback has not run yet. */
+    this.unparsed = 0
     /** @type {Set<() => void>} */
     this.listeners = new Set()
     /** Unsubscribe functions of active watches. @type {Set<() => void>} */
@@ -32,7 +63,20 @@ export class ScreenModel {
    * @param {Buffer | Uint8Array | string} buf
    */
   write (buf) {
-    this.term.write(typeof buf === 'string' ? buf : new Uint8Array(buf), () => this.#changed())
+    this.unparsed++
+    this.term.write(typeof buf === 'string' ? buf : new Uint8Array(buf), () => {
+      this.unparsed--
+      this.#changed()
+    })
+  }
+
+  /**
+   * True while output written to the model is not parsed yet, so `rev` and
+   * `lines()` do not show it.
+   * @returns {boolean}
+   */
+  pending () {
+    return this.unparsed > 0
   }
 
   /**
@@ -65,6 +109,39 @@ export class ScreenModel {
       out.push(buf.getLine(buf.viewportY + y)?.translateToString(true) ?? '')
     }
     return out
+  }
+
+  /**
+   * The scrollback and the screen, serialized with colours and attributes,
+   * and the model's size now. Call after `flush()` to include every byte.
+   * `data` carries no terminal modes (mouse tracking, bracketed paste, focus
+   * reporting, application cursor keys) and never switches to the alternate
+   * buffer: on the alternate screen it is the normal buffer's scrollback and
+   * screen, then the alternate screen's rows, all for the normal buffer.
+   * @returns {History}
+   */
+  history () {
+    return { data: this.#serialize(), cols: this.term.cols, rows: this.term.rows }
+  }
+
+  /** @returns {string} */
+  #serialize () {
+    const opts = { excludeModes: true, excludeAltBuffer: true }
+    if (this.term.buffer.active.type !== 'alternate') {
+      return this.serializer.serialize({ ...opts, scrollback: HISTORY_LINES })
+    }
+    // The addon writes the alternate screen after ALT_SWITCH; take its rows
+    // from there, and the normal buffer by range, which leaves out the
+    // normal buffer's cursor restore so the alternate rows follow its last row.
+    const full = this.serializer.serialize({ excludeModes: true, scrollback: HISTORY_LINES })
+    const at = full.indexOf(ALT_SWITCH)
+    const alt = at === -1 ? '' : full.slice(at + ALT_SWITCH.length)
+    const len = this.term.buffer.normal.length
+    const normal = this.serializer.serialize({
+      ...opts,
+      range: { start: Math.max(0, len - HISTORY_LINES - this.term.rows), end: len - 1 }
+    })
+    return `${normal}\x1b[0m\r\n${alt}`
   }
 
   /**

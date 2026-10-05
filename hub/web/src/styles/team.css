@@ -1,0 +1,163 @@
+/* Team run page (team-run.md 3) and its read-only plan drawer (TEAM-O5).
+   Values are tokens from tokens.css. Loops come only from the named .motion-* classes, so nothing here
+   needs its own reduced-motion query. Imported once from main.jsx (Task 14). */
+
+.team {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+  min-height: 100%;
+  padding: 0 var(--space-28) var(--space-28);
+}
+.team-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-12) var(--space-16);
+  min-height: var(--layout-header-lg);
+}
+.team-back { color: var(--text-secondary); white-space: nowrap; }
+.team-heading { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; flex: 1 1 auto; }
+.team-title {
+  margin: 0;
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--font-letter-spacing-title);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.team-subtitle { font-family: var(--font-family-mono); font-size: var(--font-size-sm); color: var(--text-secondary); }
+.team-elapsed { font-size: var(--font-size-sm); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.team-actions { display: flex; align-items: center; gap: var(--space-8); }
+.team-stop-reason { font-size: var(--font-size-xs); color: var(--text-muted); }
+.button--amber { background: var(--component-button-amber-bg); color: var(--text-on-amber); }
+.button--amber:hover { background: var(--component-button-amber-bg-hover); }
+
+.team-banner { margin: 0; padding: var(--space-8) var(--space-12); border-radius: var(--radius-md); font-size: var(--font-size-sm); }
+.team-banner--error { background: var(--state-crashed-bg); color: var(--state-crashed-fg); }
+.team-banner--hint { background: var(--state-stale-bg); color: var(--state-stale-fg); }
+.team-banner--gate { background: var(--bg-raised); color: var(--text-secondary); margin-top: var(--space-12); }
+.team-asof { color: var(--text-muted); }
+.team-body { display: flex; flex-direction: column; gap: var(--space-16); min-height: 0; flex: 1 1 auto; }
+.team-body--dim { opacity: 0.6; }
+
+/* Phases timeline (4.2): phases and gate lanes on one line. */
+.team-phases { border-bottom: 1px solid var(--border-subtle); padding-bottom: var(--space-16); }
+.team-timeline { display: flex; align-items: stretch; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+.team-phase { flex: 1 1 0; display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.team-phase-name { font-weight: var(--font-weight-semibold); font-size: var(--font-size-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.team-phase-bar { height: var(--space-6); border-radius: var(--radius-pill); background: var(--bg-control); transition: background-color var(--motion-duration-normal) var(--motion-easing-standard); }
+.team-phase--done .team-phase-bar { background: var(--state-done-border); }
+.team-phase--active .team-phase-bar { background: var(--state-running-border); }
+.team-phase-sub { font-size: var(--font-size-xs); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.team-gate { flex: none; width: var(--layout-gate-lane); display: flex; flex-direction: column; align-items: center; gap: var(--space-4); }
+.team-gate-mark { width: var(--space-12); height: var(--space-12); transform: rotate(45deg); border: 2px solid var(--border-strong); background: var(--bg-surface); }
+.team-gate--passed .team-gate-mark { background: var(--state-done-fg); border-color: var(--state-done-fg); }
+.team-gate--failed .team-gate-mark { background: var(--state-crashed-fg); border-color: var(--state-crashed-fg); }
+.team-gate-name { font-size: var(--font-size-xs); color: var(--text-secondary); text-align: center; }
+.team-gate:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: var(--focus-ring-offset); }
+
+/* Tasks column (4.3) beside the crew grid (4.4). */
+.team-columns { display: flex; gap: var(--space-20); align-items: flex-start; min-height: 0; flex: 1 1 auto; }
+.team-tasks { flex: none; width: var(--layout-panel-md); max-height: 100%; overflow-y: auto; }
+.team-eyebrow { margin: 0 0 var(--space-8); font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); letter-spacing: var(--font-letter-spacing-eyebrow); text-transform: uppercase; color: var(--text-muted); }
+.team-task-list, .team-later-list, .team-crew-steps { margin: 0; padding: 0; list-style: none; }
+.team-task-button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  width: 100%;
+  padding: var(--space-8) var(--space-10);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.team-task-button:hover { background: var(--bg-hover); }
+.team-task-button:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: var(--focus-ring-offset); }
+.team-task-id { flex: none; font-family: var(--font-family-mono); color: var(--text-secondary); }
+.team-task-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.team-task-title, .team-task-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-task-sub { font-size: var(--font-size-xs); color: var(--text-muted); }
+.team-task-state { flex: none; }
+.team-task .status-pill { transition: color var(--motion-duration-fast) var(--motion-easing-standard); }
+.team-later { margin-top: var(--space-16); }
+.team-later-phase summary { cursor: pointer; color: var(--text-secondary); padding: var(--space-4) 0; }
+.team-later-row { display: flex; flex-direction: column; padding: var(--space-4) var(--space-10); }
+.team-later-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.team-later-sub { font-size: var(--font-size-xs); color: var(--text-muted); }
+.team-empty { color: var(--text-muted); margin: 0; }
+
+.team-crew-grid {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  grid-auto-rows: minmax(200px, auto);
+  gap: var(--space-12);
+  max-height: 100%;
+  overflow-y: auto;
+}
+.team-crew { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--bg-surface); }
+.team-crew:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: var(--focus-ring-offset); }
+.team-crew-head { padding: var(--space-8) var(--space-12); border-bottom: 1px solid var(--border-subtle); }
+.team-crew-link, .team-crew-head { display: flex; align-items: center; gap: var(--space-8); color: inherit; text-decoration: none; }
+.team-crew-link:hover .team-crew-who { text-decoration: underline; }
+.team-crew-who { flex: 1 1 auto; font-weight: var(--font-weight-semibold); }
+.team-crew-note { margin: 0; padding: var(--space-4) var(--space-12); font-size: var(--font-size-xs); color: var(--text-muted); }
+.team-crew-lines {
+  flex: 1 1 auto;
+  padding: var(--space-8) var(--space-12);
+  background: var(--component-terminal-background);
+  color: var(--component-terminal-foreground);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--font-line-height-code);
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  overflow: hidden;
+}
+.team-crew-line { display: flex; gap: var(--space-8); }
+.team-crew-line--tool { color: var(--component-log-tool); }
+.team-crew-line--waiting { color: var(--component-log-waiting); }
+.team-crew-line--error { color: var(--component-log-error); }
+.team-crew-time { flex: none; color: var(--text-muted); }
+.team-crew-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-crew-empty { margin: 0; color: var(--text-muted); }
+.team-crew-skeleton, .team-skeleton-row { height: var(--space-14); margin-bottom: var(--space-8); border-radius: var(--radius-sm); background: var(--bg-skeleton); }
+.team-skeleton-bar { height: var(--space-24); border-radius: var(--radius-md); background: var(--bg-skeleton); }
+
+/* 1280: crew panels stack in one column and the section scrolls (team-run.md 3, AC7). */
+@media (max-width: 1440px) {
+  .team-tasks { width: var(--layout-panel-sm); }
+}
+@media (max-width: 1280px) {
+  .team-crew-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Plan drawer (TEAM-O5 default): read-only markdown on the right edge. */
+.plan-backdrop { position: fixed; inset: 0; z-index: var(--z-drawer); background: var(--overlay-scrim); display: flex; justify-content: flex-end; }
+.plan-drawer {
+  width: min(var(--layout-readable), 100%);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-drawer);
+}
+.plan-header { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8) var(--space-12); padding: var(--space-16) var(--space-20); border-bottom: 1px solid var(--border-subtle); }
+.plan-title { margin: 0; font-size: var(--font-size-lg); }
+.plan-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: var(--font-size-sm); }
+.plan-actions { display: flex; gap: var(--space-8); }
+.plan-error { margin: var(--space-12) var(--space-20) 0; color: var(--state-crashed-fg); }
+.plan-body { flex: 1 1 auto; overflow-y: auto; padding: var(--space-16) var(--space-20); line-height: var(--font-line-height-prose); }
+.plan-body pre { overflow-x: auto; padding: var(--space-8) var(--space-12); border-radius: var(--radius-md); background: var(--bg-sunken); }
+.plan-body code { font-family: var(--font-family-mono); color: var(--text-code); }
+.plan-body table { border-collapse: collapse; }
+.plan-body th, .plan-body td { border: 1px solid var(--border-subtle); padding: var(--space-4) var(--space-8); }
+.plan-body a { color: var(--text-link); }
+.plan-truncated { color: var(--text-muted); font-style: italic; }
+.plan-skeleton { height: var(--space-14); margin-bottom: var(--space-8); border-radius: var(--radius-sm); background: var(--bg-skeleton); }

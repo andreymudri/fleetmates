@@ -98,9 +98,9 @@ Every string that comes from an agent, a transcript, a task, a command, a file p
 
 An agent runs as the owner's user. Once it runs code it chose (a test it wrote, a build script, a package script) it can do anything the owner can, including reading the token file, writing to `deckd.sock` and typing "1" into any prompt. The deck cannot prevent that; same-user isolation would need a sandbox the deck does not have. What the deck does (Proposed):
 
-- It never adds a new path from a capability that is not code execution to one that is. `GET` never changes state, so a fetch tool pointed at the deck cannot act. Reading the token, fetching from the deck port, touching the deck's sockets, state or config, and writing Claude Code settings or git hooks are classified Destructive by a floor that tiers.json cannot remove ([07-approvals.md](07-approvals.md) section 3.4). An agent that wants to approve itself has to ask the owner for exactly that, in red.
+- It never adds a new path from a capability that is not code execution to one that is. `GET` never changes state, so a fetch tool pointed at the deck cannot act. Reading the token, fetching from the deck port, touching the deck's sockets, state or config, and writing Claude Code settings or git hooks are classified Destructive by a floor that tiers.json cannot remove ([07-approvals.md](07-approvals.md) section 3.4). The floor does not need the literal path: globs in a command are expanded read-only against the file system before it is checked (`cat ~/.config/fleet*/deck/token`), and a recursive read (`grep -r`, `rg`, `find`, `tar c`, `cp -r`, `rsync`) rooted at a deck control or at any ancestor of one, such as the home directory, counts as naming it (F9, D-76). An agent that wants to approve itself has to ask the owner for exactly that, in red.
 - Forged hook events (T22) can mislead the display but cannot trigger an answer: keys are only written when deckd's own screen model shows the matching prompt.
-- The Safe tier is about intent and blast radius, not isolation: `cargo test` runs code the agent can edit. This is documented in the tier review ([07-approvals.md](07-approvals.md) section 12) and in the SECURITY.md section (section 6).
+- The Safe tier is about intent and blast radius, not isolation: `cargo test` runs code the agent can edit. This is documented in the tier review ([07-approvals.md](07-approvals.md) section 12, [reviews/2026-10-02-tier-oversight.md](reviews/2026-10-02-tier-oversight.md)) and in the SECURITY.md section (section 6). The review's F3 and F4 changes, adopted by the owner (D-76, D-78), keep the flags and config files that redirect what a runner executes out of Safe.
 
 ## 4. Controls
 
@@ -206,6 +206,8 @@ env: GIT_TERMINAL_PROMPT=0, GIT_OPTIONAL_LOCKS=0, GIT_CONFIG_NOSYSTEM=1, GIT_ASK
 
 All child processes (git, `notify-send`, `xdg-open`, `claude -p`, `scribed`, `pw-play`) are started with `execFile` or `spawn` and an argv array, never through a shell, with a timeout, and never with the deck token in their environment.
 
+As built in 0.4.0, "Start scribed" runs `systemd-run` (not scribed itself) with `execFile`, an argv array and a 5 s timeout, in the web server's environment minus every key whose name contains `TOKEN`, `SECRET`, `PASSWORD` or `AUTHORIZATION`. The login shell that the unit runs parses only the fixed string `exec scribed`, or `exec "$0"` with a custom `scribedCommand` as its own argument ([13-operations.md](13-operations.md) section 3.3, D-122).
+
 ### 4.9 notify-send and `POST /api/open` (Proposed)
 
 **notify-send** ([04-integrations.md](04-integrations.md) section 5):
@@ -220,16 +222,18 @@ All child processes (git, `notify-send`, `xdg-open`, `claude -p`, `scribed`, `pw
 | `kind` | `ref` | Server resolves and checks | Opens with |
 |---|---|---|---|
 | `vaultNote` | vault-relative path | realpath inside `VAULT_PATH`, regular file, `.md` | `obsidian://open?vault=<name>&file=<encoded path>` |
-| `meetingNote` | meeting id | note path from the deck's meeting row, then as `vaultNote` | same |
+| `meetingNote` | meeting id | note path from the deck's meeting row (as built in 0.4.0: for a confidential meeting, located again on disk, D-116), then as `vaultNote` | same |
 | `runPlan` | `{ repoId, runId }` | `plan.json` `planPath` resolved, realpath inside the repo scope, regular file, `.md` | `xdg-open <abs path>` |
 | `postmeetLog` | meeting id | `<session_dir>/<id>/postmeet.log`, realpath inside `session_dir`, regular file | `xdg-open <abs path>` |
 
 Refused always: symlinks that leave their root, non-regular files, files with any execute bit, `.desktop`, `.sh`, `.AppImage` and other extensions outside a small allowlist (`.md`, `.txt`, `.log`, `.json`). `xdg-open` gets one absolute path argument (it starts with `/`, so it cannot be read as an option) via `spawn` without a shell. External web URLs are never opened by the server (4.6).
 
+As built in 0.4.0, `meetingNote` and `postmeetLog` answer 422 `validation_failed` with `details.reason: 'kind_not_available'` while no `config.yaml` reads, and a `postmeet.log` symlinked out of `session_dir` is 403 `path_not_allowed` and opens nothing.
+
 ### 4.10 Logs, redaction and telemetry (Proposed)
 
 - **No telemetry.** The deck makes no outbound network request of its own: no update check, no analytics, no crash reporting, no CDN, no remote fonts. The only network traffic on the machine comes from Claude Code, the agents and research runs, which the owner already approves. This is stated in SECURITY.md (section 6).
-- **What is logged** (journald, and `logs/` with `DECK_DEBUG=1`): event types, ids, timings, states, error codes. Never: full `tool_input`, prompts, transcript text, ask text, note bodies, the token, environment variables, `Authorization` headers.
+- **What is logged** (the server's stdout and stderr, which journald keeps; M4 builds no `DECK_DEBUG=1` debug log, D-121): event types, ids, timings, states, error codes. These are the logs the confidential-meeting scan checks (06-storage 10.1). Never: full `tool_input`, prompts, transcript text, ask text, note bodies, the token, environment variables, `Authorization` headers.
 - **Redaction** applied to every log line and to `summary` fields in the audit trail: URL userinfo (`scheme://user:pass@` becomes `scheme://***@`); `Authorization: Bearer …`, `Basic …`; `password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key` followed by `=` or `:` and a value; known token shapes (`ghp_…`, `github_pat_…`, `sk-…`, `sk-ant-…`, `xox[bp]-…`, `AKIA…`, `hf_…`, JWT-shaped values (`eyJ` followed by two dot-separated base64url parts)); long base64 or hex runs over 40 characters in command arguments. The request row in the UI shows the command as the agent wrote it (the owner needs to see what they approve), but anything persisted beyond the 30-day detail window uses the redacted form.
 - **Failed auth**: counted per remote address and logged once per minute with the count, so a local brute force is visible.
 
@@ -238,7 +242,7 @@ Refused always: symlinks that leave their root, non-regular files, files with an
 - Hook envelopes: size cap 1 MiB, JSON only, validated against the pinned fixture schemas; failures go to `rejected_events` (state-machines 1.11 case 13) and are never applied.
 - API bodies: schema-validated, unknown fields rejected; ids must match the ULID shape; repo ids must be under the scan root.
 - SQLite: parameterized statements only; no string-built SQL.
-- scribed messages: one JSON object per line, line cap 1 MiB, unknown types ignored and counted.
+- scribed messages: one JSON object per line, line cap 1 MiB, 16 MiB for a `tail` answer, unknown event types ignored and counted (D-110, [11-meetings.md](11-meetings.md) 3.2).
 
 ### 4.12 Confidential meetings (Proposed; rule from [04-integrations.md](04-integrations.md) section 4.2)
 
@@ -251,10 +255,17 @@ A meeting is confidential when its tag's `store_transcript` is `false` in Turbid
 | Pins | time only, no label (04-integrations 4.3) |
 | SQLite, logs, search index, audit | metadata only: id, tag, times, duration, state, source app. No text. Verified by the QA check "inspect DB" ([qa/qa-checklist.md](qa/qa-checklist.md)) |
 | Desktop notifications | never contain meeting text for any tag |
-| Summary after the meeting | read from the vault note `postmeet` wrote (TurbidAssist already omits the transcript for these tags) |
-| Transcript search | confidential meetings are excluded from the deck's transcript search |
+| Summary after the meeting | read from the vault note `postmeet` wrote (TurbidAssist already omits the transcript for these tags), from disk in M4 (D-114) |
+| Transcript search | confidential meetings are included, read from the session files on demand, never indexed, cached or persisted (MEET-O7, D-109) |
 
 The tag list is re-read when `config.yaml` changes; a meeting's confidentiality is fixed at start from the tag it was started with. If the deck cannot read `config.yaml`, every meeting is treated as confidential (fail closed).
+
+As built in 0.4.0:
+
+- Confidentiality only rises. A stored row that is confidential makes the API's recorder view confidential even when the recorder still says otherwise, and a row that turns confidential has its pin labels, its note path and the matching event data scrubbed by the `meetings_became_confidential` trigger ([06-storage.md](06-storage.md) 4.9). The pre-migration backups are scrubbed too (Decided 2026-10-04, D-133; M5 builds it): when a meeting rises to confidential, the deck scrubs its data in every `deck.db.pre-*.bak*` beside the database and deletes a backup it cannot scrub, logging only the file name (06-storage 4.9).
+- `meeting.transcript`, `meeting.recovered`, `ask.delta`, `ask.done` and `ask.error` carry `ephemeral: true` for every tag, and the event store throws on any attempt to append them. M5 keeps that rule for vault asks and adds `misses.changed` (4.15).
+- The recorder and the meeting ask log through a sink that defaults to a no-op (`meetingsLog` in `hub/server/main.mjs`), so a default server writes no meeting log line at all. Whether M5 wants a real sink is open ([m4-exit.md](m4-exit.md)).
+- Meeting text is rendered as text: control and bidi characters in meeting titles, tags, summaries, decisions, action items, speakers, transcript lines, search hits, ask questions and answers, scribed error text, the recording bar title and Home "Last meeting" are shown, inside `<bdi>`, as visible `<U+XXXX>` tokens (`titleText` in `hub/web/src/components/StatusPill.jsx`; M4-T17-F2, fixed by M4 Tasks 19 and 20). The Open log drawer shows `postmeet.log` text without that step (an open finding in [m4-exit.md](m4-exit.md)).
 
 ### 4.13 Destructive gating (Decided)
 
@@ -271,6 +282,16 @@ Summarized from [07-approvals.md](07-approvals.md): never batched, never a rule,
 - GitHub Actions pinned by commit SHA; workflows get `permissions: contents: read` unless a job needs more.
 - The hub is published from CI with npm provenance (`npm publish --provenance`), not from a laptop.
 - Runtime: Node 24+ pinned to a tested minor in CI ([03-architecture.md](03-architecture.md) section 3).
+- M5 adds exactly one dependency, the devDependency `@andreymudri/vault-mcp` pinned to `0.3.0`, for the contract test (D-135). No MCP SDK (the vault-mcp client is hand-written, D-134), no graph or layout library (D-136), no markdown or YAML library beyond the existing `markdown-it`.
+
+### 4.15 Vault access and Ask privacy (M5; Decided rule, plan enforcement)
+
+- **Vault access** ([10-memory-and-research.md](10-memory-and-research.md) 1.1, Decided): no new server module opens, reads, lists or writes a file under the vault path. Everything goes through vault-mcp. `hub/server/vault/*.mjs` and `hub/server/ask/*.mjs` never import `node:fs` for the vault, and `hub/server/ask/engine.mjs` touches only `<state>/ask/`. The existing meeting-note reads (M4, MTG-O1) are unchanged. The deck calls no vault-mcp write tool in M5.
+- **Ask process** (D-132, D-142): `claude -p --restricted` with the four vault read tools only, every write tool disallowed by name, cwd `<state>/ask/` (0700, empty), the env marker `FLEETMATES_DECK_ROLE=ask` (deck-hook drops every event that carries it). The owner-run check script proves the restriction against the real CLI; no task and no test runs the real CLI.
+- **Ask privacy**: question and answer text, note bodies and snippets never reach a log line, a notification, the `events` table or browser storage (`localStorage`, `sessionStorage`, IndexedDB, Cache API), except the graph layout cache of D-136, which holds paths and coordinates only. `ask.delta`, `ask.done`, `ask.error` and `misses.changed` are ephemeral and the event store refuses to append them. Logs record event types, ids, lengths, durations, exit codes and error codes only. Meeting-scope asks stay transient (D-144).
+- **Hook observation** (D-138): note reads and learn calls are taken from `PreToolUse` `tool_input` only; tool responses are never read.
+- **Untrusted vault text**: note titles, paths, tags, frontmatter, bodies, snippets, answers, general knowledge, questions, vault-mcp error text and repo names are rendered as text, never as HTML (4.5). Markdown (answers, note excerpts) goes through the existing `markdown-it` renderer with `html: false`, and links rendered from markdown are not followed to `javascript:` or other non-http(s) schemes. Titles, paths and single-line text go through `titleText` inside `<bdi>`.
+- **Routes**: every new `/api/*` route of M5 ([05-api.md](05-api.md) 2.9) keeps the token, Host and Origin checks (4.1, 4.2), and is written in a shape that `routerTable()` in `hub/test/e2e/security.spec.mjs` reads (D-145).
 
 ## 5. Checklists
 
@@ -323,4 +344,16 @@ fleetmates has one `SECURITY.md` at the repo root covering the plugin (gate thre
 | SEC-O3 | Enable Trusted Types (`require-trusted-types-for 'script'`) once the build is verified against it | Off | none |
 | SEC-O4 | Does fleetmates' `createGit` disable repo-configured code (`core.fsmonitor`, hooks, pager, external diff)? Not recorded in the fleetmates contract | Deck's own git helper for all deck git calls; fleetmates derivation only on the slow timer | M1 |
 | SEC-O5 | One root SECURITY.md with a deck section, or `hub/SECURITY.md` linked from the root | One file, deck section | M1 |
-| APR-O1 | Design-oversight review of tiers before M3 ([07-approvals.md](07-approvals.md)) | See 07 | M3 |
+| APR-O1 | Design-oversight review of tiers before M3 ([07-approvals.md](07-approvals.md)) | **Decided** 2026-10-02 (D-75 to D-83): done and resolved by the owner | M3 (decided) |
+
+## Prepared M5 security evidence
+
+The child-server privacy test uses synthetic question and answer sentinels. Event history,
+stdout, stderr and spool contain neither; deleting the thread and checkpointing removes both
+from database and WAL bytes. Browser tests verify that saved threads do not persist their
+prose in localStorage, sessionStorage, IndexedDB or Cache API. Graph positions may be cached
+in sessionStorage; answers and questions are excluded. The fake CLI validates the strict
+MCP configuration and refuses write-tool allowlists. The real CLI proof remains owner-pending.
+
+Markdown is rendered through the existing token renderer with raw HTML disabled, and titles
+and paths expose bidi controls visibly. Every new HTTP route requires the existing token.

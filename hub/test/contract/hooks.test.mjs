@@ -12,14 +12,58 @@ import { makeEnvelope } from '../../hook/deck-hook.mjs'
 const fixtures = fileURLToPath(new URL('../fixtures/hooks/2.1.282/', import.meta.url))
 const executable = fileURLToPath(new URL('../../hook/deck-hook.mjs', import.meta.url))
 
-test('every committed Claude Code hook fixture validates in an envelope', async () => {
-  for (const name of (await readdir(fixtures)).filter(name => name.endsWith('.json') && name !== 'MANIFEST.json')) {
-    const hook = JSON.parse(await readFile(path.join(fixtures, name), 'utf8'))
-    const envelope = makeEnvelope(hook, { hookTs: 100, ptyId: null })
-    assert.equal(envelope.hook.session_id, hook.session_id, name)
-    assert.equal(envelope.hook.hook_event_name, hook.hook_event_name, name)
-    assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true, name)
+/** Captured hook fixture sets: the earlier 2.1.282 regression set and the tested 2.1.285 set. */
+const hookSets = ['2.1.282', '2.1.285'].map(v => fileURLToPath(new URL(`../fixtures/hooks/${v}/`, import.meta.url)))
+
+/** Files in a hook set that are not hook payloads: the manifest, and a settings excerpt. */
+const NOT_PAYLOADS = new Set(['MANIFEST.json', 'option2-rule.json'])
+
+/**
+ * Every hook payload in a captured set: each `.json` file except NOT_PAYLOADS, and each line
+ * of a `.jsonl` sequence (a `{ hookTs, payload }` record).
+ * @param {string} dir
+ * @returns {Promise<{ name: string, hook: any }[]>}
+ */
+async function hookPayloads (dir) {
+  const out = []
+  for (const name of (await readdir(dir)).sort()) {
+    if (NOT_PAYLOADS.has(name)) continue
+    const text = await readFile(path.join(dir, name), 'utf8')
+    if (name.endsWith('.json')) out.push({ name, hook: JSON.parse(text) })
+    if (name.endsWith('.jsonl')) {
+      text.split('\n').filter(Boolean).forEach((line, i) => out.push({ name: `${name}:${i + 1}`, hook: JSON.parse(line).payload }))
+    }
   }
+  return out
+}
+
+test('every committed Claude Code hook fixture validates in an envelope', async () => {
+  for (const dir of hookSets) {
+    const payloads = await hookPayloads(dir)
+    assert.ok(payloads.length > 0, dir)
+    for (const { name, hook } of payloads) {
+      const label = `${path.basename(dir)}/${name}`
+      assert.equal(typeof hook?.hook_event_name, 'string', label)
+      const envelope = makeEnvelope(hook, { hookTs: 100, ptyId: null })
+      assert.equal(envelope.hook.session_id, hook.session_id, label)
+      assert.equal(envelope.hook.hook_event_name, hook.hook_event_name, label)
+      assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true, label)
+    }
+  }
+})
+
+test('the 2.1.285 sequence is read line by line as payloads', async () => {
+  const lines = (await hookPayloads(hookSets[1])).filter(({ name }) => name.startsWith('sequence.approve-safe.jsonl:'))
+  assert.ok(lines.length > 1, 'the approve-safe sequence holds more than one payload')
+})
+
+test('option2-rule.json is a settings excerpt, not a hook payload, and is skipped', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-hook-set-'))
+  try {
+    await writeFile(path.join(dir, 'Stop.json'), await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
+    await writeFile(path.join(dir, 'option2-rule.json'), JSON.stringify({ allow: ['Bash(node --test:*)'] }))
+    assert.deepEqual((await hookPayloads(dir)).map(({ name }) => name), ['Stop.json'])
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
 test('hook without a socket spools privately and exits silently', async () => {
@@ -114,21 +158,44 @@ test('hook sends one complete line to the runtime socket without creating spool'
     await new Promise(resolve => server.listen(socketPath, resolve))
     await chmod(socketPath, 0o600)
     const hook = JSON.parse(await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
-    const started = Date.now()
-    const child = spawn(process.execPath, [executable], { env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: runtime }, stdio: ['pipe', 'pipe', 'pipe'] })
+    // The 200 ms budget is the hook script's own run, which its in-script timer bounds. Node's
+    // interpreter boot comes before the script and grows with machine load, so the clock is read
+    // inside the child: a preload writes performance.now() to fd 3 once before the hook module
+    // loads and once at process exit.
+    const clock = path.join(home, 'clock.mjs')
+    await writeFile(clock, "import { writeSync } from 'node:fs'\nwriteSync(3, `${performance.now()}\\n`)\nprocess.on('exit', () => { writeSync(3, `${performance.now()}\\n`) })\n")
+    const child = spawn(process.execPath, ['--import', clock, executable], { env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: runtime }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] })
     child.stdin.end(JSON.stringify(hook))
     const output = []
     child.stdout.on('data', chunk => output.push(chunk))
     child.stderr.on('data', chunk => output.push(chunk))
+    let clockText = ''
     let childTimer
+    let startTimer
     let exit
     try {
       exit = await Promise.race([
         new Promise(resolve => child.on('close', resolve)),
-        new Promise((_, reject) => { childTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook did not exit')) }, 500) }),
+        new Promise((_, reject) => {
+          // The 500 ms timer below is armed by the preload's first clock line, so a child that
+          // hangs before the preload writes would never meet it. This startup bound is generous
+          // because it covers Node's boot under load, which the 200 ms budget deliberately leaves out.
+          startTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook never started its clock')) }, 10_000)
+          child.stdio[3].setEncoding('utf8')
+          child.stdio[3].on('data', chunk => {
+            const first = !clockText.includes('\n')
+            clockText += chunk
+            if (first && clockText.includes('\n')) {
+              clearTimeout(startTimer)
+              childTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook did not exit')) }, 500)
+            }
+          })
+        }),
       ])
-    } finally { clearTimeout(childTimer) }
-    assert.ok(Date.now() - started < 200, 'socket hook exceeded its 200 ms budget')
+    } finally { clearTimeout(startTimer); clearTimeout(childTimer) }
+    const [scriptStart, scriptExit] = clockText.trim().split('\n').map(Number)
+    assert.ok(Number.isFinite(scriptStart) && Number.isFinite(scriptExit), 'socket hook clock did not report')
+    assert.ok(scriptExit - scriptStart < 200, 'socket hook exceeded its 200 ms budget')
     assert.equal(exit, 0)
     assert.equal(Buffer.concat(output).length, 0)
     let wireTimer

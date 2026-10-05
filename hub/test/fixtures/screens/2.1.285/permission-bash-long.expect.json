@@ -1,0 +1,21 @@
+{
+  "prompt": {
+    "kind": "permission",
+    "question": "Do you want to proceed?",
+    "options": [
+      {
+        "key": "1",
+        "label": "Yes"
+      },
+      {
+        "key": "2",
+        "label": "No"
+      }
+    ],
+    "title": "Bash command",
+    "body": "node --test\n--test-name-pattern=\"abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklm\nnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqr\"\ncapture.test.mjs\nRun capture tests filtered by a long name pattern\n\nPermission rule Bash requires confirmation for this command.\n/permissions to update rules",
+    "truncated": false
+  },
+  "idle": false,
+  "statusRows": []
+}

@@ -136,8 +136,8 @@ Teammate panels show tool steps only; assistant prose lines ("Ported 14 tests") 
 | "All ships" / `Alt Esc` | Home | route |
 | "Review 2 requests" | drawer filtered to the run, focus on its first request | UI (`?needs=run:<runId>`) |
 | Task row with a request | same, focused on that task's request | UI |
-| Task row otherwise | scrolls to and highlights its crew panel (Proposed; FOC-O1) | client |
-| Crew panel header | Focus on the lead session (teammates have no Focus, FOC-O1) | route |
+| Task row otherwise | scrolls to and highlights its crew panel (Proposed; D-69 sets where teammate links go) | client |
+| Crew panel header | Focus on the lead session (teammates have no Focus, D-69) | route |
 | "Open plan" | opens `plan.planPath` (TEAM-O5) | `POST /api/open { kind: 'runPlan', ref: { repoId, runId } }` (Proposed; D-57, kinds in [08-security.md](../08-security.md) 4.9) |
 | "Stop run…" | confirm Dialog "Stop the fleetmates run gate-cli?" body "Stops the lead session. Teammates stop with it. Worktrees and branches stay; fleetmates never deletes runs." | `U.Stop` on the lead |
 | Gate diamond focus or hover | Tooltip with recorded time and failed checks | client |
@@ -210,6 +210,33 @@ Teammate panels show tool steps only; assistant prose lines ("Ported 14 tests") 
 | `team.error.noStatus` | This run has no status.json yet. fleetmates init-run writes it. |
 | `team.error.derive` | Phase unknown: {error} |
 | `team.notFound` | This run is not on the deck. |
+| `team.plan.label` | Plan |
+| `team.plan.close` | Close |
+| `team.plan.openInEditor` | Open in editor |
+| `team.plan.loading` | Loading the plan |
+| `team.plan.truncated` | The plan is longer than 256 KiB; the rest is not shown. |
+| `team.plan.error` | Could not read the plan: {error} |
+| `team.plan.openFailed` | Could not open the plan: {error} |
+| `team.stop.deckdDown` | deckd is reconnecting |
+| `team.stop.failed` | Could not stop the run: {message} |
+| `team.subtitle.plan` | plan {path} |
+| `team.phases.label` | Phases |
+| `team.phase.short` | P{n} |
+| `team.phase.status.done` | done |
+| `team.phase.status.active` | active |
+| `team.phase.status.pending` | pending |
+| `team.phase.sr` | {name}, {status}: {detail} |
+| `team.gate.sr` | {label}, recorded {time} |
+| `team.tasks.label` | Current phase tasks |
+| `team.task.verified` | Claimed by the teammate; verified by Gate {n} |
+| `team.gateBanner.failed` | Gate {n} failed at {time}: failed: {checks}. |
+| `team.crew.label` | Crew activity |
+| `team.crew.empty` | No activity recorded yet. |
+| `team.crew.loading` | Loading activity |
+| `team.loading` | Loading the run |
+| `team.asOf` | as of {time} |
+| `team.error.plan` | plan.json could not be read: {error}. Retrying. |
+| `team.error.deriveDefault` | the run branch could not be compared with the task branches |
 
 ## 10. Acceptance criteria
 

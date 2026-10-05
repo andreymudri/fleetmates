@@ -1,9 +1,33 @@
-import { constants, watch as fsWatch } from 'node:fs'
+import fs, { constants, existsSync, readFileSync, watch as fsWatch } from 'node:fs'
 import { open, readdir, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { NAMES } from '../../../scripts/names.mjs'
-import { livenessRows, DEFAULT_STALE_MINUTES } from '../../../scripts/liveness.mjs'
-import { createGit, defaultGitExec } from '../../../scripts/git.mjs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+/**
+ * Where this adapter loads the fleetmates modules (names, liveness, git) from. Inside a fleetmates
+ * checkout (the hub's parent holds a package.json named `fleetmates` and scripts/names.mjs) it is
+ * that checkout's scripts/, so the root contract test and the deck read the same code and a stale
+ * vendored copy is never used. Otherwise, as in an installed package, it is vendor/fleetmates/,
+ * which `prepack` fills with bin/vendor-fleetmates.mjs.
+ * @param {string} [adapterDir] the directory holding this adapter
+ * @returns {string}
+ */
+export function fleetmatesScriptsDir(adapterDir = path.dirname(fileURLToPath(import.meta.url))) {
+  const repo = path.resolve(adapterDir, '../../..')
+  try {
+    if (JSON.parse(readFileSync(path.join(repo, 'package.json'), 'utf8')).name === 'fleetmates'
+      && existsSync(path.join(repo, 'scripts', 'names.mjs'))) return path.join(repo, 'scripts')
+  } catch {}
+  const vendored = path.resolve(adapterDir, '../../vendor/fleetmates')
+  if (existsSync(path.join(vendored, 'names.mjs'))) return vendored
+  throw new Error('fleetmates modules not found: run from a fleetmates checkout, or install a package packed with bin/vendor-fleetmates.mjs')
+}
+
+const scriptsDir = fleetmatesScriptsDir()
+const load = (name) => import(pathToFileURL(path.join(scriptsDir, name)).href)
+const [{ NAMES }, { livenessRows, DEFAULT_STALE_MINUTES }, { createGit, defaultGitExec }, { worktreeKey, indexDir, isLocalAbsolute }] = await Promise.all([
+  load('names.mjs'), load('liveness.mjs'), load('git.mjs'), load('state.mjs'),
+])
 
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_DISCOVERY_DEPTH = 16
@@ -227,6 +251,101 @@ async function projectRun(entry, planResult, statusResult, polled) {
   }
 }
 
+// Teammate lookup (04-integrations 1.3, state-machines 11). The record bound and the id rules below restate
+// scripts/state.mjs, which keeps them private; the parity test in test/unit/fleetmates-adapter.test.mjs
+// compares this lookup with `findTaskByWorktree` over a set of hostile ids.
+const MAX_RECORD_BYTES = 64 * 1024
+const MAX_RUN_ID_BYTES = 255
+const MAX_TASK_ID_BYTES = 128
+const ID_COMPONENT = /^[\p{L}\p{M}\p{N}._-]+$/u
+const INVISIBLE = /\p{Default_Ignorable_Code_Point}/u
+const RECORD_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)
+const TASK_CACHE_LIMIT = 1024
+
+function idInside(repoRoot, value, single) {
+  if (typeof value !== 'string' || value === '') return false
+  const base = path.resolve(repoRoot, NAMES.stateDir)
+  const rel = path.relative(base, path.resolve(base, value))
+  if (rel === '' || rel.startsWith('..') || path.isAbsolute(rel)) return false
+  return !single || !rel.includes(path.sep)
+}
+function idPath(value, maxBytes) {
+  if (typeof value !== 'string' || value === '' || Buffer.byteLength(value, 'utf8') > maxBytes) return false
+  if (value.normalize('NFC') !== value || value.includes('..')) return false
+  return value.split('/').every((part) => part !== '.' && part !== '..' && !part.startsWith('-') && ID_COMPONENT.test(part) && !INVISIBLE.test(part))
+}
+
+/**
+ * Whether `runId` passes the fleetmates run id rules (scripts/state.mjs): contained in the state directory,
+ * nesting allowed, an allowlisted NFC id of at most 255 bytes with no `..` and no component starting with `-`.
+ * @param {string} repoRoot absolute repository root
+ * @param {unknown} runId
+ * @returns {boolean}
+ */
+export function isRunName(repoRoot, runId) {
+  return idInside(repoRoot, runId, false) && idPath(runId, MAX_RUN_ID_BYTES)
+}
+const isTaskName = (repoRoot, taskId) => idInside(repoRoot, taskId, true) && idPath(taskId, MAX_TASK_ID_BYTES)
+
+function readTaskRecord(io, repoRoot, cwd) {
+  if (typeof repoRoot !== 'string' || !path.isAbsolute(repoRoot)) return null
+  const key = worktreeKey(cwd)
+  if (key === '') return null
+  let fd
+  try {
+    fd = io.openSync(path.join(indexDir(repoRoot), `${key}.json`), RECORD_FLAGS)
+    const info = io.fstatSync(fd)
+    if (!info.isFile() || info.size > MAX_RECORD_BYTES) return null
+    const buffer = Buffer.alloc(info.size)
+    const bytes = io.readSync(fd, buffer, 0, buffer.length, 0)
+    const record = JSON.parse(buffer.toString('utf8', 0, bytes))
+    if (!isRunName(repoRoot, record?.runId) || !isTaskName(repoRoot, record.taskId)) return null
+    if (!isLocalAbsolute(record.worktree) || worktreeKey(record.worktree) !== key) return null
+    return { runId: record.runId, taskId: record.taskId }
+  } catch {
+    return null
+  } finally {
+    if (fd !== undefined) try { io.closeSync(fd) } catch {}
+  }
+}
+
+/**
+ * Create a synchronous teammate lookup that reads one fleetmates index record per `cwd` and caches the
+ * answer for `ttlMs` when it finds a task; a miss is read again on the next call. It never writes under `.fleetmates/`.
+ * @param {{ clock?: () => number, ttlMs?: number, io?: Pick<typeof fs, 'openSync' | 'fstatSync' | 'readSync' | 'closeSync'> }} [options]
+ * @returns {{ taskForCwd: (repoRoot: string, cwd: string) => { runId: string, taskId: string } | null }}
+ */
+export function createTaskLocator({ clock = Date.now, ttlMs = 60_000, io = fs } = {}) {
+  const cache = new Map()
+  return {
+    taskForCwd(repoRoot, cwd) {
+      const key = `${repoRoot}\0${cwd}`
+      const now = clock()
+      const hit = cache.get(key)
+      if (hit && now - hit.at < ttlMs) return { ...hit.task }
+      cache.delete(key)
+      const task = readTaskRecord(io, repoRoot, cwd)
+      // A miss is not kept: a teammate's own `locate` hook looks its worktree up before the record exists.
+      if (!task) return null
+      if (cache.size >= TASK_CACHE_LIMIT) cache.delete(cache.keys().next().value)
+      cache.set(key, { at: now, task })
+      return { ...task }
+    },
+  }
+}
+
+const defaultLocator = createTaskLocator()
+/**
+ * The fleetmates task whose worktree is `cwd`, from `<repoRoot>/.fleetmates/index/<worktreeKey(cwd)>.json`,
+ * or null. Synchronous, a hit is cached per `cwd` for 60 s, a miss is not.
+ * @param {string} repoRoot absolute main repository root
+ * @param {string} cwd the directory a hook reported
+ * @returns {{ runId: string, taskId: string } | null}
+ */
+export function taskForCwd(repoRoot, cwd) {
+  return defaultLocator.taskForCwd(repoRoot, cwd)
+}
+
 /** Create a read-only fleetmates run reader with a bounded git poll interval. */
 export function createFleetmatesReader({ repoRoots = [], clock = Date.now, pollRun = defaultPollRun,
   pollIntervalMs = 60_000, retryDelayMs = 25, debounceMs = 250, watchFactory = fsWatch } = {}) {
@@ -235,11 +354,32 @@ export function createFleetmatesReader({ repoRoots = [], clock = Date.now, pollR
   const debounceTimers = new Map()
   let listener = null
   const keyFor = (repoRoot, runId) => `${repoRoot}\0${runId}`
+  const inodeOf = (dir) => {
+    try { return fs.statSync(dir).ino } catch { return null }
+  }
+  // Close and forget a run's watcher so the next list() attaches a fresh one to whatever
+  // directory now holds that run id.
+  const dropWatcher = (key) => {
+    const watcher = watchers.get(key)
+    if (!watcher) return
+    watchers.delete(key)
+    clearTimeout(debounceTimers.get(key))
+    debounceTimers.delete(key)
+    try { watcher.close() } catch {}
+    const item = cache.get(key)
+    if (item) item.dirty = true
+  }
   const attachWatcher = (entry) => {
     const key = keyFor(entry.repoRoot, entry.runId)
     if (!listener || watchers.has(key)) return
+    const inode = inodeOf(entry.dir)
     try {
-      const watcher = watchFactory(entry.dir, () => {
+      const watcher = watchFactory(entry.dir, (eventType) => {
+        if (eventType === 'rename' && watchers.get(key) === watcher && inodeOf(entry.dir) !== inode) {
+          dropWatcher(key)
+          listener?.(entry.repoRoot, entry.runId)
+          return
+        }
         clearTimeout(debounceTimers.get(key))
         debounceTimers.set(key, setTimeout(() => {
           debounceTimers.delete(key)
@@ -295,6 +435,8 @@ export function createFleetmatesReader({ repoRoots = [], clock = Date.now, pollR
         rows.push(run)
         attachWatcher(entry)
       }
+      const present = new Set(entries.map((entry) => keyFor(entry.repoRoot, entry.runId)))
+      for (const key of [...watchers.keys()]) if (!present.has(key)) dropWatcher(key)
       return rows
     },
     /** Mark a run's files for re-reading on the next list call. */

@@ -1,0 +1,15 @@
+{
+  "sessionId": "auto",
+  "steps": [
+    { "sleep": 1500 },
+    { "hook": "SessionStart", "with": { "source": "startup" } },
+    { "sleep": 1000 },
+    { "frame": "idle-input" },
+    { "expectInput": { "match": "^\u001b\\[200~fix the flaky combat test\u001b\\[201~\r", "timeoutMs": 10000 } },
+    { "hook": "UserPromptSubmit", "with": { "prompt": "$input" } },
+    { "frame": "spinner", "forMs": 300 },
+    { "hook": "Stop", "with": { "stop_hook_active": false } },
+    { "frame": "idle-input" },
+    { "hang": true }
+  ]
+}

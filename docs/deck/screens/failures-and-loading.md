@@ -150,7 +150,7 @@ Degraded cards replace only the part that depends on the service (Meetings keeps
 | "Retry now" (connection) | reconnect now | `U.RetryNow` (state-machines 4.1, 4.2) |
 | "Retry" (degraded card) | probe now | `U.Retry` (state-machines 5.2) |
 | "Fix in Settings" | Settings, Connections, vault section focused | route `/settings/connections#vault` |
-| "Start scribed" | start scribed with `systemd-run --user` running a login shell (`$SHELL -l -c 'exec scribed'`) (FAIL-O1), then probe | `POST /api/deps/scribed/start` |
+| "Start scribed" | start scribed with `systemd-run --user` in its own `turbidassist-scribed` unit, running a login shell (`$SHELL -l -c 'exec scribed'`) (FAIL-O1, Decided, D-106), then probe | `POST /api/deps/scribed/start` |
 | "Show disk usage" | read-only dialog | `GET /api/sessions/:id/disk` |
 | "Relaunch", "Relaunch after freeing space" | `claude --resume` in the same deck session | `U.Relaunch` |
 | "Dismiss" | leaves Failures; card becomes done (unreviewed changes) or disappears | `U.Dismiss` |
@@ -194,6 +194,12 @@ Degraded cards replace only the part that depends on the service (Meetings keeps
 | `fail.stale.openTool` | Still inside {tool}: {summary} |
 | `fail.deckd.banner` | Radio silence from deckd. Ships still sailing, re-establishing contact… (attempt {attempt}, next in {seconds}s) |
 | `fail.deckd.disabled` | deckd is reconnecting |
+| `fail.deckd.title` | deckd is unavailable |
+| `fail.deckd.works` | Sessions keep running and hooks keep reporting. Launching, answering and terminals wait for deckd. |
+| `fail.deckd.reason` | Last error: {reason} |
+| `fail.deckd.start` | Start deckd |
+| `fail.history.title` | Completed sessions |
+| `fail.history.empty` | No completed sessions yet. |
 | `fail.server.banner` | Lost the deck server. Your ships are unaffected, reconnecting… (attempt {attempt}, next in {seconds}s) |
 | `fail.server.asOf` | as of {time} |
 | `fail.retryNow` | Retry now |
@@ -215,6 +221,7 @@ Degraded cards replace only the part that depends on the service (Meetings keeps
 | `fail.notify.open` | Open settings |
 | `fail.hooks.drift` | {n, plural, one {# hook payload did not match the pinned fixtures} other {# hook payloads did not match the pinned fixtures}} |
 | `fail.loading` | Loading {thing} |
+| `fail.loading.sessions` | sessions |
 
 ## 10. Acceptance criteria
 
@@ -233,7 +240,7 @@ Degraded cards replace only the part that depends on the service (Meetings keeps
 
 | Id | Gap | Status |
 |---|---|---|
-| FAIL-O1 | "Start scribed" and the command well `systemctl --user start scribed`: TurbidAssist ships no scribed unit; scribed is spawned on demand (vault-mcp and scribed contract 2.1, 2.12). | **Open** (SM-O13). Default (Proposed): start it with `systemd-run --user` running a login shell (`$SHELL -l -c 'exec scribed'`), so it is outside the deck's cgroup and gets `HF_TOKEN` ([04-integrations.md](../04-integrations.md) 4.3, OPS-O1); TurbidAssist change T4 (a `scribed.service` unit) is the later clean fix. The command well shows `scribe daemon` (foreground, for manual start). |
+| FAIL-O1 | "Start scribed" and the command well `systemctl --user start scribed`: TurbidAssist ships no scribed unit; scribed is spawned on demand (vault-mcp and scribed contract 2.1, 2.12). | **Decided** 2026-10-04 with SM-O13 (D-106): start it with `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, so it is outside the deck's cgroup and gets `HF_TOKEN` ([04-integrations.md](../04-integrations.md) 4.3, OPS-O1); TurbidAssist change T4 (a `scribed.service` unit) is not taken. The command well shows `scribe daemon` (foreground, for manual start). |
 | FAIL-O2 | Connection banner wording (design-system 15.4). | **Open**. Default: canvas copy. |
 | FAIL-O3 | Should `stale` and `crashed` send desktop popups (SM-O4)? | Open (tracked as SM-O4). |
 | FAIL-O4 | "Show disk usage" content: which command and scope. | Proposed: `df -h` for the filesystem holding `cwd`, read-only, no shell for the user. |

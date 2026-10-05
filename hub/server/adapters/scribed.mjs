@@ -1,10 +1,12 @@
-// Minimal client for TurbidAssist's scribed daemon, written against
-// docs/deck/reference/vault-turbid-contract.md sections 2.2 to 2.5 and 2.14.
-// Only `status` and `subscribe` have client calls; encodeCommand and
-// decodeEvent cover the whole closed message list so the fixtures in
+// Client for TurbidAssist's scribed daemon, written against
+// docs/deck/reference/vault-turbid-contract.md sections 2.2 to 2.5 and 2.14
+// and docs/deck/11-meetings.md 3.1 to 3.4. encodeCommand and decodeEvent
+// cover the whole closed message list so the fixtures in
 // test/fixtures/scribed/ can be checked line by line. Error messages mirror
 // realtime/scribe/protocol.py at TurbidAssist d4ffb9d, except the JSON parse
-// error, whose tail is the JavaScript parser's own text.
+// error, whose tail is the JavaScript parser's own text. The standalone
+// `status` and `subscribe` are the M1 calls; createScribedClient is the full
+// client (one connection per request, its own connection per subscription).
 
 import net from 'node:net'
 import path from 'node:path'
@@ -39,10 +41,14 @@ const EVENTS = Object.keys(EVENT_CLASSES).sort()
 
 /** Error thrown for a line or command that is not a valid protocol message. */
 export class ProtocolError extends Error {
-  /** @param {string} message */
-  constructor (message) {
+  /**
+   * @param {string} message
+   * @param {string} [code] `unknown_type` for an event type outside the closed list
+   */
+  constructor (message, code) {
     super(message)
     this.name = 'ProtocolError'
+    if (code !== undefined) this.code = code
   }
 }
 
@@ -223,7 +229,8 @@ function commandFrom (raw) {
 function eventFrom (raw) {
   const name = raw.type
   if (typeof name !== 'string' || !Object.hasOwn(EVENT_CLASSES, name)) {
-    throw new ProtocolError(`type desconhecido: ${pyRepr(name)} (conhecidos: ${pyList(EVENTS)})`)
+    throw new ProtocolError(`type desconhecido: ${pyRepr(name)} (conhecidos: ${pyList(EVENTS)})`,
+      typeof name === 'string' ? 'unknown_type' : undefined)
   }
   switch (name) {
     case 'ok': {
@@ -235,8 +242,9 @@ function eventFrom (raw) {
     }
     case 'error':
       return { type: name, cmd: get(raw, 'cmd', 'string', 'error'), message: get(raw, 'message', 'string', 'error') }
-    case 'status':
-      return {
+    case 'status': {
+      /** @type {Record<string, unknown>} */
+      const out = {
         type: name,
         recording: get(raw, 'recording', 'boolean', 'status'),
         session_id: opt(raw, 'session_id', 'string', 'status'),
@@ -244,6 +252,11 @@ function eventFrom (raw) {
         elapsed_s: get(raw, 'elapsed_s', 'number', 'status'),
         routed_apps: strList(raw, 'routed_apps', 'status')
       }
+      // Optional keys a later scribed may add; kept only when type-correct.
+      if (typeof raw.stopping === 'boolean') out.stopping = raw.stopping
+      if (typeof raw.protocol === 'number') out.protocol = raw.protocol
+      return out
+    }
     case 'tail':
       return { type: name, text: get(raw, 'text', 'string', 'tail') }
     case 'transcript':
@@ -414,4 +427,369 @@ export function subscribe ({ socketPath = defaultSocketPath(), onEvent, onClose 
   socket.on('error', (err) => finish(new ScribedUnavailable(`subscribe: ${socketPath}: ${err.message}`, err)))
   socket.on('close', () => finish(null))
   return { close: () => finish(null) }
+}
+
+/** Longest line a connection accepts, newline excluded. */
+export const MAX_LINE_BYTES = 1024 * 1024
+/** Longest line accepted on a connection waiting for a `tail` answer. */
+export const MAX_TAIL_LINE_BYTES = 16 * 1024 * 1024
+
+/** Read timeouts in ms per command (11-meetings 3.3); `stop` is a ceiling. */
+export const CLIENT_TIMEOUTS = Object.freeze({
+  status: 5000,
+  tail: 5000,
+  history: 5000,
+  start: 20000,
+  stop: 180000,
+  ask: 130000
+})
+
+/**
+ * Split a byte stream on `\n` and hand each complete line over as bytes, so a
+ * multibyte character cut across chunks is decoded whole. A line longer than
+ * `maxBytes` (newline excluded) calls `onOverflow` once and stops the reader.
+ * Chunks are kept in a list, so a long line is copied once, not per chunk.
+ * @param {number} maxBytes
+ * @param {(line: Buffer) => void} onLine
+ * @param {(bytes: number) => void} onOverflow
+ * @returns {(chunk: Buffer) => void}
+ */
+function cappedLines (maxBytes, onLine, onOverflow) {
+  /** @type {Buffer[]} */
+  let parts = []
+  let size = 0
+  let dead = false
+  /** @param {number} bytes */
+  const overflow = (bytes) => {
+    dead = true
+    parts = []
+    onOverflow(bytes)
+  }
+  return (chunk) => {
+    let from = 0
+    while (!dead) {
+      const nl = chunk.indexOf(0x0a, from)
+      if (nl === -1) {
+        const rest = chunk.subarray(from)
+        size += rest.length
+        if (size > maxBytes) overflow(size)
+        else if (rest.length) parts.push(rest)
+        return
+      }
+      const piece = chunk.subarray(from, nl)
+      const length = size + piece.length
+      if (length > maxBytes) {
+        overflow(length)
+        return
+      }
+      const line = parts.length ? Buffer.concat([...parts, piece], length) : piece
+      parts = []
+      size = 0
+      from = nl + 1
+      if (line.length) onLine(line)
+    }
+  }
+}
+
+/**
+ * True when every byte is ASCII whitespace (the daemon strips lines).
+ * @param {Buffer} line
+ * @returns {boolean}
+ */
+function isBlank (line) {
+  for (const b of line) {
+    if (b !== 0x20 && b !== 0x09 && b !== 0x0d && b !== 0x0b && b !== 0x0c) return false
+  }
+  return true
+}
+
+/**
+ * @param {AbortSignal} signal
+ * @returns {unknown}
+ */
+function abortReason (signal) {
+  return signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+}
+
+/**
+ * @param {unknown} value
+ * @returns {string | null}
+ */
+function strOrNull (value) {
+  return typeof value === 'string' ? value : null
+}
+
+/**
+ * Map a `transcript` event body to a display line. `mic` is the owner
+ * ("Você"), `room` everyone else ("Sala").
+ * @param {unknown} event the `event` object of a `transcript` message
+ * @returns {{ t0: number, t1: number, speaker: 'Você' | 'Sala', text: string,
+ *   sessionId: string | null, lang: string | null, asrModel: string | null } | null}
+ *   null when `t0` or `t1` is not a number (booleans refused), `source` is not
+ *   `mic` or `room`, or `text` is not a string
+ */
+export function transcriptLine (event) {
+  if (!isObject(event)) return null
+  const { t0, t1, source, text } = event
+  if (typeof t0 !== 'number' || typeof t1 !== 'number') return null
+  if (source !== 'mic' && source !== 'room') return null
+  if (typeof text !== 'string') return null
+  return {
+    t0,
+    t1,
+    speaker: source === 'mic' ? 'Você' : 'Sala',
+    text,
+    sessionId: strOrNull(event.session_id),
+    lang: strOrNull(event.lang),
+    asrModel: strOrNull(event.asr_model)
+  }
+}
+
+/**
+ * @typedef {{ event: string, cmd?: string, bytes?: number }} ScribedLogEntry
+ *   what the client logs: event names, the command and byte counts, never text
+ */
+
+/**
+ * The full scribed client (11-meetings 3.1 to 3.3). Every request opens its
+ * own connection and closes it after the answer; `subscribe` has its own
+ * long-lived connection. Nothing is retried here.
+ * @param {{
+ *   socketPath?: string,
+ *   log?: (entry: ScribedLogEntry) => void,
+ *   timeouts?: Partial<Record<keyof typeof CLIENT_TIMEOUTS, number>>
+ * }} [opts] `socketPath` defaults to `defaultSocketPath()`, resolved per call
+ */
+export function createScribedClient ({ socketPath, log = () => {}, timeouts = {} } = {}) {
+  const limits = { ...CLIENT_TIMEOUTS, ...timeouts }
+  const counters = { unknownTypes: 0 }
+
+  /** @returns {string} */
+  const resolvePath = () => socketPath ?? defaultSocketPath()
+
+  /**
+   * Line handler shared by every connection: decode, skip unknown types.
+   * @param {string} cmd
+   * @param {(evt: Record<string, any>) => void} onEvent
+   * @param {(err: Error) => void} onError
+   * @returns {(line: Buffer) => void}
+   */
+  function decoder (cmd, onEvent, onError) {
+    return (line) => {
+      if (isBlank(line)) return
+      let evt
+      try {
+        evt = decodeEvent(line)
+      } catch (err) {
+        if (err instanceof ProtocolError && err.code === 'unknown_type') {
+          counters.unknownTypes++
+          log({ event: 'scribed.unknown_type', cmd, bytes: line.length })
+          return
+        }
+        log({ event: 'scribed.protocol_error', cmd, bytes: line.length })
+        onError(/** @type {Error} */ (err))
+        return
+      }
+      onEvent(evt)
+    }
+  }
+
+  /**
+   * Send one command on a fresh connection and read events until `onEvent`
+   * calls `finish`.
+   * @param {Record<string, unknown> & { cmd: string }} command
+   * @param {{
+   *   timeoutMs: number,
+   *   maxLine?: number,
+   *   signal?: AbortSignal,
+   *   onEvent: (evt: Record<string, any>, finish: (err: unknown, value?: any) => void) => void
+   * }} opts
+   * @returns {Promise<any>}
+   */
+  function exchange (command, { timeoutMs, maxLine = MAX_LINE_BYTES, signal, onEvent }) {
+    const cmd = command.cmd
+    return new Promise((resolve, reject) => {
+      let target
+      try {
+        target = resolvePath()
+      } catch (err) {
+        reject(new ScribedUnavailable(`${cmd}: ${/** @type {Error} */ (err).message}`, err))
+        return
+      }
+      const line = encodeCommand(command)
+      if (signal?.aborted) {
+        reject(abortReason(signal))
+        return
+      }
+      let settled = false
+      const socket = net.createConnection({ path: target })
+      /**
+       * @param {unknown} err
+       * @param {any} [value]
+       */
+      const finish = (err, value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', onAbort)
+        socket.destroy()
+        if (err) reject(err)
+        else resolve(value)
+      }
+      const onAbort = () => finish(abortReason(/** @type {AbortSignal} */ (signal)))
+      signal?.addEventListener('abort', onAbort, { once: true })
+      const timer = setTimeout(() => {
+        log({ event: 'scribed.timeout', cmd })
+        finish(new ScribedTimeout(`${cmd}: no answer from scribed in ${timeoutMs} ms`))
+      }, timeoutMs)
+      socket.on('connect', () => {
+        socket.write(line)
+        log({ event: 'scribed.request', cmd, bytes: Buffer.byteLength(line) })
+      })
+      socket.on('data', cappedLines(maxLine, decoder(cmd, (evt) => {
+        if (settled) return
+        try {
+          onEvent(evt, finish)
+        } catch (err) {
+          finish(err)
+        }
+      }, finish), (bytes) => {
+        log({ event: 'scribed.line_too_long', cmd, bytes })
+        finish(new ProtocolError(`${cmd}: line longer than ${maxLine} bytes`))
+      }))
+      socket.on('error', (err) => {
+        finish(new ScribedUnavailable(`${cmd}: cannot reach scribed: ${/** @type {NodeJS.ErrnoException} */ (err).code ?? err.message}`, err))
+      })
+      socket.on('close', () => finish(new ScribedUnavailable(`${cmd}: scribed closed the connection before answering`)))
+    })
+  }
+
+  /**
+   * One request, one answer of `type` (for `ok`, its `cmd` must match).
+   * @param {Record<string, unknown> & { cmd: string }} command
+   * @param {string} type
+   * @param {number} [maxLine]
+   * @returns {Promise<Record<string, any>>}
+   */
+  function request (command, type, maxLine) {
+    const cmd = command.cmd
+    return exchange(command, {
+      timeoutMs: limits[/** @type {keyof typeof CLIENT_TIMEOUTS} */ (cmd)],
+      maxLine,
+      onEvent: (evt, finish) => {
+        if (evt.type === 'error') finish(new ScribedError(evt.cmd, evt.message))
+        else if (evt.type !== type) finish(new ProtocolError(`${cmd}: unexpected event type ${evt.type}`))
+        else if (type === 'ok' && evt.cmd !== cmd) finish(new ProtocolError(`${cmd}: ok answers ${evt.cmd}`))
+        else finish(null, evt)
+      }
+    })
+  }
+
+  return {
+    /**
+     * @returns {Promise<Record<string, any>>} the decoded `status` event
+     */
+    status: () => request({ cmd: 'status' }, 'status'),
+
+    /**
+     * @param {string} tag
+     * @returns {Promise<{ session_id: string | null }>}
+     */
+    start: async (tag) => {
+      const evt = await request({ cmd: 'start', tag }, 'ok')
+      return { session_id: evt.session_id ?? null }
+    },
+
+    /** @returns {Promise<{ session_id: string | null }>} */
+    stop: async () => {
+      const evt = await request({ cmd: 'stop' }, 'ok')
+      return { session_id: evt.session_id ?? null }
+    },
+
+    /**
+     * @param {number} minutes
+     * @returns {Promise<string>} the plain `tail` text, `''` when idle
+     */
+    tail: async (minutes) => (await request({ cmd: 'tail', minutes }, 'tail', MAX_TAIL_LINE_BYTES)).text,
+
+    /** @returns {Promise<{ asks: Array<{ t: number, question: string, answer: string, context_minutes: number }> }>} */
+    history: async () => ({ asks: (await request({ cmd: 'history' }, 'history')).asks }),
+
+    /**
+     * Stream an answer: `onDelta` gets each `ask_delta` text in order; resolves
+     * on `ask_done`, rejects `ScribedError` on `error`. Aborting `signal`
+     * stops the deltas, closes the connection (scribed has no cancel) and
+     * rejects with the abort reason.
+     * @param {string} question
+     * @param {{ onDelta?: (text: string) => void, signal?: AbortSignal }} [opts]
+     * @returns {Promise<void>}
+     */
+    ask: (question, { onDelta = () => {}, signal } = {}) => exchange({ cmd: 'ask', question }, {
+      timeoutMs: limits.ask,
+      signal,
+      onEvent: (evt, finish) => {
+        if (evt.type === 'ask_delta') onDelta(evt.text)
+        else if (evt.type === 'ask_done') finish(null)
+        else if (evt.type === 'error') finish(new ScribedError(evt.cmd, evt.message))
+        else finish(new ProtocolError(`ask: unexpected event type ${evt.type}`))
+      }
+    }),
+
+    /**
+     * Open a subscription on its own connection: `onStatus` for each `status`
+     * (scribed sends one, first), `onTranscript` with each transcript event
+     * body, and `onClose(err | null)` once: null on EOF or `close()`.
+     * @param {{
+     *   onStatus?: (status: Record<string, any>) => void,
+     *   onTranscript?: (event: Record<string, any>) => void,
+     *   onClose?: (err: Error | null) => void
+     * }} [opts]
+     * @returns {{ close: () => void }}
+     */
+    subscribe: ({ onStatus = () => {}, onTranscript = () => {}, onClose = () => {} } = {}) => {
+      let closed = false
+      /** @type {net.Socket | null} */
+      let socket = null
+      /** @param {unknown} err */
+      const finish = (err) => {
+        if (closed) return
+        closed = true
+        socket?.destroy()
+        onClose(/** @type {Error | null} */ (err))
+      }
+      let target
+      try {
+        target = resolvePath()
+      } catch (err) {
+        const wrapped = new ScribedUnavailable(`subscribe: ${/** @type {Error} */ (err).message}`, err)
+        queueMicrotask(() => finish(wrapped))
+        return { close: () => finish(null) }
+      }
+      const sock = net.createConnection({ path: target })
+      socket = sock
+      sock.on('connect', () => sock.write(encodeCommand({ cmd: 'subscribe' })))
+      sock.on('data', cappedLines(MAX_LINE_BYTES, decoder('subscribe', (evt) => {
+        if (closed) return
+        try {
+          if (evt.type === 'status') onStatus(evt)
+          else if (evt.type === 'transcript') onTranscript(evt.event)
+          else if (evt.type === 'error') finish(new ScribedError(evt.cmd, evt.message))
+          else finish(new ProtocolError(`subscribe: unexpected event type ${evt.type}`))
+        } catch (err) {
+          finish(err)
+        }
+      }, finish), (bytes) => {
+        log({ event: 'scribed.line_too_long', cmd: 'subscribe', bytes })
+        finish(new ProtocolError(`subscribe: line longer than ${MAX_LINE_BYTES} bytes`))
+      }))
+      sock.on('error', (err) => {
+        finish(new ScribedUnavailable(`subscribe: cannot reach scribed: ${/** @type {NodeJS.ErrnoException} */ (err).code ?? err.message}`, err))
+      })
+      sock.on('close', () => finish(null))
+      return { close: () => finish(null) }
+    },
+
+    /** @returns {{ unknownTypes: number }} lines skipped for an unknown event type */
+    stats: () => ({ ...counters })
+  }
 }

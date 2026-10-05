@@ -493,6 +493,25 @@ To restore sonnet for `mid`, change the map on the dispatch side, not in configu
 `mid` tasks on sonnet and pass
 `--models '{"cheap":"haiku","mid":"sonnet","capable":"opus"}'` to `workflow`.
 
+## fleetmates deck
+
+A local web deck in `hub/` that watches your Claude Code sessions and tells you which one needs
+you. It is a separate package with its own dependencies, not yet published; the plugin above does
+not need it.
+
+![The deck's Home with three sessions waiting on you](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
+
+From a checkout, on Linux with systemd:
+
+    npm ci --prefix hub && npm --prefix hub run build
+    node scripts/cli.mjs deck init
+    node scripts/cli.mjs ui
+
+`node scripts/cli.mjs deck <init|doctor|status|open|uninstall-hooks>` forwards to the deck's own
+`fleetmates-deck` command, and `ui` is `deck open`; both refuse with the install command when
+`hub/node_modules` is missing. See [hub/README.md](hub/README.md) for requirements, security and
+uninstall, and [docs/deck/](docs/deck/) for the design.
+
 ## Layout
 
 - `skills/` — process and human interaction (entrypoint: `using-fleetmates`)

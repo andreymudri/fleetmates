@@ -54,7 +54,7 @@ fleetmates-deck open
 | 4. Token (Decided: random token in a 0600 file) | Creates `~/.local/state/fleetmates/deck/token` only if missing: 32 random bytes, base64url, mode 0600. An existing token is kept so open tabs stay valid. `--rotate-token` replaces it. |
 | 5. Config | Writes `~/.config/fleetmates/deck/config.json` with defaults (section 7) only if missing, and, only if missing, a stub `tiers.json` that `extends` the shipped defaults and holds no entries of its own ([07-approvals.md](07-approvals.md) section 4.1, APR-O5 default). `tiers.schema.json` is copied next to it on every run, so the stub's `$schema` resolves (07-approvals 4.2). Existing files are never overwritten. |
 | 6. systemd units | Renders the two unit templates from `hub/systemd/` into `~/.config/systemd/user/` with the absolute Node path (`process.execPath`) and hub path, then `systemctl --user daemon-reload` and `systemctl --user enable --now fleetmates-deckd.service fleetmates-deck.service`. If a unit file exists and differs, it is replaced and the change is reported. `init` never restarts a running `fleetmates-deckd` (that would end every session); it prints a notice when the running deckd is older than the installed one (section 9.2). |
-| 7. Checks | Runs the six First run checks in the terminal (same probes as [screens/first-run.md](screens/first-run.md)) and prints them. Exit code 0 when the hooks check passes (the only blocking check, Decided), 1 otherwise. |
+| 7. Checks | When deckd is active, first waits up to 3 s for its socket to accept a connection (deckd is `Type=simple`, so systemd reports it active a moment before it listens). Runs the six First run checks in the terminal (same probes as [screens/first-run.md](screens/first-run.md)) and prints them. Exit code 0 when the hooks check passes (the only blocking check, Decided), 1 otherwise. |
 | 8. Research workspace (M6) | Creates the research workspace at `researchWorkspace` (default `~/.local/share/fleetmates-deck/research/`, section 7.1; D-54) only if missing: `git init`, one initial commit with `fleetmates.gate.json`, `README.md` and `.gitignore`, and `.claude/settings.local.json` with the vault write denies ([10-memory-and-research.md](10-memory-and-research.md) section 8.2). Then asks in the terminal whether to allow `WebSearch` and `WebFetch` in that workspace (KB-O3); nothing is written without a yes, and a non-interactive terminal skips the question. An existing workspace is left untouched. Not part of the exit code. |
 
 The First run screen's "Install hooks" button runs step 3 through the web server (`POST /api/setup/hooks`); "Start deckd" runs `systemctl --user start fleetmates-deckd.service`.
@@ -130,7 +130,17 @@ Both start at login (`default.target` of the user manager). No lingering is need
 
 ### 3.3 Child processes and cgroups
 
-Anything the web server spawns lives in its cgroup and dies when the web server unit stops or restarts: `claude -p` Ask children (acceptable, the question is kept and the UI shows the error), the vault-mcp child (restarted with the server), `notify-send` processes waiting for an action (the popup's "Open" becomes a no-op). **scribed is the exception**: a scribed spawned as a plain detached child would stay in the web unit's cgroup, so a web server restart would kill it and any recording in progress. Proposed (OPS-O1, SM-O13, FAIL-O1): the deck starts it with `systemd-run --user` running a login shell (`$SHELL -l -c 'exec scribed'`), so it gets its own transient unit outside the deck's cgroup and the login environment (including `HF_TOKEN`). TurbidAssist change T4 (a `scribed.service` unit, [04-integrations.md](04-integrations.md) section 4.3) is the later clean fix.
+Anything the web server spawns lives in its cgroup and dies when the web server unit stops or restarts: `claude -p` Ask children (acceptable, the question is kept and the UI shows the error), the vault-mcp child (restarted with the server), `notify-send` processes waiting for an action (the popup's "Open" becomes a no-op). **scribed is the exception**: a scribed spawned as a plain detached child would stay in the web unit's cgroup, so a web server restart would kill it and any recording in progress. Decided 2026-10-04 (OPS-O1, SM-O13, FAIL-O1, D-106): the deck starts it with `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, so it gets its own transient unit outside the deck's cgroup and the login environment (including `HF_TOKEN`). TurbidAssist change T4 (a `scribed.service` unit, [04-integrations.md](04-integrations.md) section 4.3) is not taken.
+
+As built in 0.4.0 (`hub/server/meetings/start-scribed.mjs`): "Start scribed" (`POST /api/deps/scribed/start`) first asks scribed for `status`; when it answers, nothing is spawned. Otherwise it runs `systemd-run` with an argv array, a 5 s timeout and the web server's environment without any key whose name contains `TOKEN`, `SECRET`, `PASSWORD` or `AUTHORIZATION`, then probes every 100 ms for up to 10 s. When the Settings `scribedCommand` is the default `scribed` the argv is exactly the decided command above; any other value is passed as one argument after `-c 'exec "$0"'`, so the setting never reaches a shell parser. A non-zero `systemd-run` exit is 502 `dependency_start_failed` with `details.exitCode` and the last 2 KiB of its stderr (redacted); no answer within 10 s is the same code with `details.reason: 'no_socket'`. The server finds the socket only under its own `XDG_RUNTIME_DIR` and never falls back to another path.
+
+The `turbidassist-scribed` unit is transient: it exists while scribed runs, and with `--collect` systemd unloads it when scribed exits, failed or not (systemd-run(1)), so there is no unit file to edit or enable. To inspect it:
+
+    systemctl --user status turbidassist-scribed
+    journalctl --user -u turbidassist-scribed --since "1 hour ago"
+    ls -l "$XDG_RUNTIME_DIR/turbidassist.sock"
+
+Stop it with `systemctl --user stop turbidassist-scribed` only when no meeting records: stopping scribed during a recording ends that recording. Because the unit is outside the web server's cgroup, a web server restart is meant to leave it and its recording running; that is part of exit criterion 5 and has not been checked on a real recording yet ([m4-exit.md](m4-exit.md)).
 
 The environment of the systemd user manager is not the login shell's (no `PATH` additions from `.zshrc`, mise, nvm, no exported keys). Sessions started with `fm claude` get the terminal's environment (03-architecture 2.4). Sessions launched from the UI need the login environment (03-architecture 2.1); OPS-O2 covers how deckd obtains it.
 
@@ -138,7 +148,7 @@ The environment of the systemd user manager is not the login shell's (no `PATH` 
 
 | Task | Command |
 |---|---|
-| Open the UI | `fleetmates-deck open` (starts the web unit if needed, opens the tokenised URL with `xdg-open`) |
+| Open the UI | `fleetmates-deck open` (starts the web unit if needed, writes a 0600 bootstrap page holding the tokenised URL and opens it in the web browser: `$BROWSER`, then the `xdg-settings get default-web-browser` entry through `gtk-launch` or `gio launch`, then `xdg-open`; if none works it prints the bootstrap file path) |
 | Status of everything | `fleetmates-deck status` (units, sockets, hook install state, live PTYs, versions) |
 | Six checks in the terminal | `fleetmates-deck doctor` |
 | Restart the web server | `systemctl --user restart fleetmates-deck` |
@@ -172,11 +182,30 @@ This is the full `fleetmates-deck` command list; [03-architecture.md](03-archite
 | `fleetmates-deck backup <dir>` | Consistent copy of `deck.db` with `VACUUM INTO` | 11 |
 | `fleetmates-deck restore <file>` | Stops the web unit, moves the current database aside, copies the backup in, new `epoch`, starts the unit | 11 |
 | `fleetmates-deck reset [--keep-crew]` | Stops the web unit, renames `deck.db*` aside, starts on an empty database with a new `epoch` | 11 |
-| `fleetmates-deck audit [--repo <name>] [--since <date>]` (M3) | Prints the approvals audit: rule events and request events ([07-approvals.md](07-approvals.md) section 11) | |
+| `fleetmates-deck audit [--repo <name>] [--since <YYYY-MM-DD>]` (M3) | Prints the approvals audit: rule events and request events ([07-approvals.md](07-approvals.md) section 11). Output below | 4.3 |
 | `fleetmates-deck export-misses --kind retrieval` (M5) | Writes resolved retrieval misses as JSONL for vault-mcp golden queries ([10-memory-and-research.md](10-memory-and-research.md) section 3.3) | |
 | `fleetmates-deck research prune --older-than 90d` (Later) | Removes old research runs from the research workspace ([10-memory-and-research.md](10-memory-and-research.md) section 8.2) | |
 | `fleetmates-deck report --since <date>` | Summarises the dogfood metrics ([09-testing.md](09-testing.md) section 13.3) | |
 | `fm claude`, `fm attach`, `fm ls` | Wrapped sessions ([03-architecture.md](03-architecture.md) section 2.4) | 4 |
+
+### 4.3 `fleetmates-deck audit` output (M3, as built)
+
+`audit` opens `deck.db` read-only and prints the rows of `approval_audit` and `rule_audit` ([06-storage.md](06-storage.md) section 4.5) merged, oldest first, one per line. Each line starts with the ISO 8601 UTC time of the event:
+
+    <time> <kind> repo=<name> tier=<tier> via=<via> choice=<choice> summary="<summary>"
+    <time> rule_<action> repo=<name> pattern="<pattern>" actor=<actor>
+
+- `kind` is `answered`, `refused`, `did_not_land`, `expired`, `tiers_loaded` or `tiers_rejected`. For a refusal, `choice` holds the error code (`confirm_required`, `not_on_screen` and the rest). A missing value prints as `-`.
+- `action` is `added`, `revoked`, `undo`, `found` or `vanished`; `actor` is `suggestion`, `manual` or `external`.
+- `summary` and `pattern` are JSON strings, redacted again on output with the log redaction rules of [08-security.md](08-security.md) section 4.10, so a bearer token prints as `***`.
+- `--repo <name>` keeps the rows of that repo by its display name (rows without a repo, such as `tiers_loaded`, are left out). `--since <YYYY-MM-DD>` keeps rows from local midnight of that day. Any other argument, or a date that does not exist, prints the usage line and exits 1. With no database yet it says "no deck database yet; start the deck first".
+
+Example, from the fixture of `hub/test/unit/setup.test.mjs` (times shortened):
+
+    2026-10-01T... refused repo=api tier=destructive via=browser choice=confirm_required summary="rm -rf build"
+    2026-10-02T... tiers_loaded repo=- tier=- via=- choice=- summary=""
+    2026-10-02T... rule_added repo=web pattern="Bash(npm run test)" actor=suggestion
+    2026-10-03T... answered repo=web tier=safe via=browser choice=allow summary="curl -H \"Authorization: Bearer ***\" https://example.invalid"
 
 ## 5. Files and directories
 
@@ -329,7 +358,7 @@ Built from [screens/failures-and-loading.md](screens/failures-and-loading.md) an
 | Memory tab "The charts are out of reach · vault-mcp did not answer on stdio (...)"; First run "vault-mcp did not start" | `VAULT_PATH` unset or not a directory, `npx` cannot fetch the package offline, wrong Node | The real error is in the card; run the configured `vaultCommand` by hand with `VAULT_PATH=... ` (it waits on stdin; stop with `Ctrl C`) | Fix in Settings, Connections, or set `VAULT_PATH` in the web unit drop-in; "Retry" |
 | Memory graph tab says it needs vault-mcp 0.4; Research cannot save | vault-mcp older than the `vault_graph` and `preview` release ([04-integrations.md](04-integrations.md) 3.3) | `tools/list` in `doctor` output | Upgrade vault-mcp |
 | Meetings "No one on the radio · scribed is not running: no socket at $XDG_RUNTIME_DIR/turbidassist.sock" | scribed not started (TurbidAssist has no unit; it is spawned on demand), crashed with a config error (exit 2), or `XDG_RUNTIME_DIR` unset | `ls -l $XDG_RUNTIME_DIR/turbidassist.sock`; run `scribe daemon` in a terminal to see its error | "Start scribed" (OPS-O1, FAIL-O1), or start TurbidAssist yourself. Past meetings still load |
-| A recording stopped when the deck web server restarted | scribed was a child of the web server unit | `systemctl --user status fleetmates-deck` shows `scribed` in its cgroup | OPS-O1 default: start scribed through `systemd-run --user` running a login shell (`$SHELL -l -c 'exec scribed'`) |
+| A recording stopped when the deck web server restarted | scribed was a child of the web server unit | `systemctl --user status fleetmates-deck` shows `scribed` in its cgroup | OPS-O1, Decided (D-106): start scribed through `systemd-run --user` in its own `turbidassist-scribed` unit, running a login shell (`$SHELL -l -c 'exec scribed'`) |
 | No desktop popups; Settings "Desktop notifications are not working: notify-send exited 1" or the test ping fails | `notify-send` missing, mako not running, mako in a do-not-disturb mode, or the user manager lacks `DBUS_SESSION_BUS_ADDRESS` | `notify-send test` in a terminal; `makoctl mode`; `systemctl --user show-environment` (look for `DBUS_SESSION_BUS_ADDRESS`) | Install libnotify; start mako or leave its do-not-disturb mode; `systemctl --user import-environment DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY` then restart the web unit |
 | Popups show but no bell | Expected while TurbidAssist records (Decided quiet mode: popups, no sound); or the tab never got a click (browser autoplay policy) and `pw-play` is missing | Rec dot on the Rail; `which pw-play` | Click once in the deck tab after opening it; install PipeWire tools; check Settings "Quiet in meetings" |
 | Crash card "ran aground" with "The disk is full, so relaunching now would fail the same way." | ENOSPC in the session | "Show disk usage" (`df -h` of the session's filesystem) | Free space, then "Relaunch after freeing space". If the deck's own disk is full, SQLite writes fail too: `journalctl` shows `SQLITE_FULL` and hooks spool or drop; free space and restart the web unit |
@@ -387,7 +416,7 @@ Built from [screens/failures-and-loading.md](screens/failures-and-loading.md) an
 
 | ID | Question | Default until decided | Blocks milestone |
 |---|---|---|---|
-| OPS-O1 | A scribed spawned detached by the web server stays in the web unit's cgroup, so restarting or stopping the deck kills scribed and any recording. How should the deck start scribed? (Related: SM-O13, FAIL-O1, MEET-O10.) | Proposed (now the default in 04-integrations 4.3 and SM-O13): `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'` ([11-meetings.md](11-meetings.md) section 3.5), so scribed is outside the deck's cgroup and the login shell supplies `HF_TOKEN`. TurbidAssist change T4 (a `scribed.service` unit) is the later clean fix. | M1 (First run "Start scribed"), M4 |
+| OPS-O1 | A scribed spawned detached by the web server stays in the web unit's cgroup, so restarting or stopping the deck kills scribed and any recording. How should the deck start scribed? (Related: SM-O13, FAIL-O1, MEET-O10.) | **Decided** 2026-10-04 (D-106): `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'` ([11-meetings.md](11-meetings.md) section 3.5), so scribed is outside the deck's cgroup and the login shell supplies `HF_TOKEN`. TurbidAssist change T4 (a `scribed.service` unit) is not taken. | M4 (decided) |
 | OPS-O2 | The systemd user manager does not have the login shell's environment (`PATH` from shell profiles, mise or nvm, exported keys, `HF_TOKEN`). How do deckd (for UI launches) and the web server (for `claude -p` and scribed) get it? | deckd and the web server run `$SHELL -lc 'env -0'` once at start and use that environment for children; restarting deckd picks up profile changes. | M2 (launch from UI); M0 to verify |
 | OPS-O3 | Tag scheme and versioning for the hub package inside the fleetmates repo, whose `release.yml` publishes the plugin on every `v*` tag. | `deck-vX.Y.Z` tags, semver from `0.1.0` at M1, separate `deck-release.yml`. | M1 |
 | OPS-O4 | Public README language: English only, or English plus PT-BR like vault-mcp (EN plus PT-BR was once chosen for specs; the handoff is English only, D-45; the README was left open, Q10). | English only for M1; add PT-BR later if wanted. | M1 |
@@ -395,3 +424,18 @@ Built from [screens/failures-and-loading.md](screens/failures-and-loading.md) an
 | OPS-O6 | On uninstall, should the deck remove the permission rules it wrote into repos' `.claude/settings.local.json`? | No: rules belong to the repos and also apply to plain `claude` (Decided that they live there); uninstall lists them. | none |
 
 Referenced, not duplicated: package and command naming (03-architecture section 3, [15-open-questions.md](15-open-questions.md) Q1), SET-O1 and SET-O2 (settings storage and language row), SM-O13 / FAIL-O1 (scribed start), SM-O18 (incompatible Claude Code blocks or warns), FR-O3 (hook merge rules, Proposed default adopted in 2.3), MEM-O5, MEET-O11, NEW-O2, TEST-O4, TEST-O6.
+
+## Prepared M5 operations
+
+The web server manages vault-mcp and restricted Ask children. Vault preferences recreate the
+client; Retry probes it again. Read the `vault-mcp` health row for state, reason, version and
+capabilities. An absent vault path reports down with `VAULT_PATH is not set`.
+
+Ask state is under `<state>/ask/`, including a private child working directory and
+`running.json` process identities for restart recovery. Unfinished assistant messages become
+errors after restart. Closing the web server cancels its running asks.
+
+`fleetmates-deck export-misses --kind retrieval|all [--out <file>]` reads the database without
+migration or mutation. Output files use mode 0600. Review real golden queries locally before
+adding them to the vault-mcp evaluation suite. Restarting the dogfood web server and
+publishing or tagging 0.5.0 are owner actions, still pending.

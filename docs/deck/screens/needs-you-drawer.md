@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | Canvas board | `Approvals` (Needs you · approval drawer) over Home |
-| Route | none: overlay on any route; deep link `?needs=<requestId>` or `?needs=run:<runId>` (Proposed) |
+| Route | none: overlay on any route; deep link `?needs=<requestId>`, `?needs=request:<requestId>`, `?needs=run:<runId>` or `?needs=task:<runId>:<taskId>` (Proposed; the task filter is M2, D-69) |
 | Milestone | M1 read-only (lists every open request with "Open" and "Answer in your terminal"). M3 adds Allow, Deny, Reply, batch, confirm checkbox and rule suggestion. |
 | Status | Decided (sections, tier rules, copy), Proposed (states, per-milestone behaviour) |
 
@@ -22,7 +22,13 @@ Answers **"What exactly is waiting on me, and can I clear it safely in one place
 | Palette Enter on a Destructive or Question row | focused on that request |
 | Desktop popup "Open" for a Caution, Destructive or question request (state-machines 9.3) | the deck tab focuses and opens the drawer on that request (Proposed: when the session is not observed; observed opens Focus) |
 
-The drawer is an overlay: it does not replace the route. Opening pushes a history entry so Back closes it (Proposed). Deep link query `?needs=<requestId>` opens it on load.
+The drawer is an overlay: it does not replace the route. Opening pushes a history entry so Back closes it (Proposed). Deep link query `?needs=<requestId>` (or `?needs=request:<requestId>`) opens it on load focused on that request.
+
+### 2.1 Run and task filter (M2, D-69)
+
+`?needs=run:<runId>` and `?needs=task:<runId>:<taskId>` open the drawer filtered. The task id is the part after the last colon, so a run id may itself hold colons. A run filter keeps the open requests of sessions whose `runRef.runId` is that run, plus the run's lead session; a task filter also needs `request.taskId` to equal the task. A teammate link on the Team run page opens the lead's Focus with `?needs=task:<runId>:<taskId>`, so the drawer shows only that task's requests.
+
+While a filter is active the drawer header shows, under the subtitle, one line with "Requests for {taskId}" or "Requests for run {runId}" and a `ghost xs` button "Show all" that drops the filter. Section order, counts in section headers and row content are as in section 4, over the filtered rows; the subtitle keeps the unfiltered counts.
 
 ## 3. Layout
 
@@ -58,7 +64,7 @@ Width: 600px at 1920, 1440 and 1280 (design-system 8.3). At 1280 the drawer cove
 | Reply | Field TextInput `md` (sr-only label "Reply") + Button `amber` | | placeholder "Reply to discord-audit", "Reply" | |
 | Destructive header | TierBadge `md` destructive | | "Destructive", "Never batched, never a rule, never from a popup" | |
 | Destructive row | RequestRow `destructive` | `request.summary`, consequence | "git push --force origin ui/inventory" / "rustot-client · rewrites 3 commits on the remote" | |
-| Confirm | Checkbox `tone="danger"` | label from the tiers.json destructive entry (Proposed), with counts when the deck can compute them | "I checked the 3 commits that will be overwritten" | see DRW-O1 |
+| Confirm | Checkbox `tone="danger"` | label from the tiers.json destructive entry's `confirm` template, with `{n}` filled from its `count` when the deck can compute it (D-72) | "I checked the 3 commits that will be overwritten" | when the entry has no template or the count is unknown, the label is the fallback "I checked what this command will change" (D-72, [07-approvals.md](../07-approvals.md) section 8) |
 | Destructive actions | Button `danger sm` Deny, `danger-confirm sm` Allow once (disabled until checked) | | "Deny", "Allow once" | never default button |
 | Observed row actions | text + Button `ghost xs` | `session.origin = observed` | "Answer in your terminal", "Open" | replaces every answer button |
 | Footer | text | none | "Alt A allow focused · Alt D deny · Alt Shift A allow all Safe · rules live in each repo's .claude/settings.local.json" | M1 footer: "Answer in your terminal for now. Answering here arrives with approvals." (Proposed) |
@@ -168,6 +174,7 @@ Toasts of tone `needs` are suppressed while the drawer is open (components Toast
 | `drawer.safe.batch.toast` | Allowed {ok} of {n} |
 | `drawer.safe.batch.toastPartial` | Allowed {ok} of {n}: {failed} did not land |
 | `drawer.rule.suggest` | You allowed {command} in {repo} {n} times. Make it a rule? |
+| `drawer.rule.suggest.anyFlags` | It will allow {command} with any flags. |
 | `drawer.rule.added` | Rule added to {repo}: {pattern} |
 | `drawer.destructive.confirm` | {consequence} |
 | `drawer.empty.title` | Nothing needs you. |
@@ -176,6 +183,24 @@ Toasts of tone `needs` are suppressed while the drawer is open (components Toast
 | `drawer.footer.m1` | Answer in your terminal for now. Answering here arrives with approvals. |
 | `drawer.newRequest.announce` | New request from {repo} |
 | `drawer.reconnecting` | Reconnecting to the deck server… |
+| `drawer.row.source.plain` | {repo} · waiting {duration} |
+| `drawer.filter.task` | Requests for {taskId} |
+| `drawer.filter.run` | Requests for run {runId} |
+| `drawer.filter.showAll` | Show all |
+| `empty.drawer.title` | Nothing needs you. |
+| `empty.drawer.body` | New requests show up here and on the Sessions grid. |
+
+The empty drawer renders `EmptyState kind="drawer"`, which reads `empty.drawer.title` and
+`empty.drawer.body` from `EMPTY_COPY` (`hub/web/src/components/EmptyState.jsx`). The
+`drawer.empty.title` and `drawer.empty.body` rows above have the same English, and no code under
+`hub/web/src` reads those two keys.
+
+`drawer.rule.suggest.anyFlags` is shown on its own line after `drawer.rule.suggest` when the
+matched tiers.json entry has `ruleNote: 'anyFlags'`, the runner entries whose Safe match excludes
+code-loading flags that the suggested prefix rule cannot exclude (D-78,
+[07-approvals.md](../07-approvals.md) section 6).
+
+As built in M3: every string of `DRAWER_COPY` (`hub/web/src/screens/drawer/NeedsYouDrawer.jsx`) is in the table above. The shared answer controls (`hub/web/src/components/AnswerControls.jsx`) also show "Answer in the terminal" on a PTY permission row whose options the deck could not read (never guess). Each drawer section's accessible name is its title and count, for example "Needs you · 1", so two sections with equal counts are not confused (Task 23). When the focused row is answered and leaves the list, focus moves to the next row's primary action, else the previous row's, else the close button, so the drawer keys keep working (Task 23); so a repeated Enter or `Alt A` can then allow the next Safe or Caution row (phase 9 security review), which the exit report lists as a dogfood check ([m3-exit.md](../m3-exit.md)).
 
 ## 10. Acceptance criteria
 
@@ -195,10 +220,10 @@ Toasts of tone `needs` are suppressed while the drawer is open (components Toast
 
 | Id | Gap | Status |
 |---|---|---|
-| DRW-O1 | The Destructive confirm label "I checked the 3 commits that will be overwritten" needs a per-command consequence (commit count for `git push --force`). No source computes it. | **Open**. Default: tiers.json destructive entries carry a label template; when the deck cannot fill the count, the label reads "I checked what this command will change". |
+| DRW-O1 | The Destructive confirm label "I checked the 3 commits that will be overwritten" needs a per-command consequence (commit count for `git push --force`). No source computes it. | **Decided** 2026-10-02 (D-72). tiers.json destructive entries carry a label template; when the deck cannot fill the count, the label reads "I checked what this command will change". |
 | DRW-O2 | Caution row third line "adds a dependency" is a per-pattern description that tiers.json does not define yet. | Proposed: optional `description` per tiers.json pattern; else "waiting {duration}". |
 | DRW-O3 | Notification-only requests (state-machines 2.7 row 2) have no `tool_input`; their summary is the notification message, tier Caution. | Proposed: shown with the message text and a muted "(details not available)". |
-| DRW-O4 | Popup "Open" for Caution (SM-O9). | Open (tracked as SM-O9). |
+| DRW-O4 | Popup "Open" for Caution (SM-O9). | **Decided** 2026-10-02 with SM-O9 (D-71): the popup offers "Open" for Caution, never "Allow once". |
 
 ## 12. Changes from the canvas
 

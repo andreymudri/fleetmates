@@ -1,0 +1,142 @@
+/* Crew sheet (crew-sheet.md 3) and the Settings, Appearance radio groups (settings.md 4.3).
+   Values are tokens from tokens.css. Nothing here animates: the crew pixels never move (crew.md 10).
+   Imported once from main.jsx (Task 14). */
+
+.crew-sheet { max-width: none; }
+.crew-intro { margin: 0; max-width: 760px; color: var(--text-secondary); font: var(--type-body); }
+.crew-shared {
+  margin: 0;
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  color: var(--text-default);
+}
+.crew-layout { display: flex; flex-direction: column; gap: var(--space-32); }
+@media (min-width: 1700px) {
+  .crew-layout { flex-direction: row; align-items: flex-start; }
+  .crew-side { flex: 0 0 420px; }
+}
+.crew-side { display: flex; flex-direction: column; gap: var(--space-24); min-width: 0; }
+
+/* Pose grid: a table so screen readers get pose column headers and repo row headers. */
+.crew-grid-scroll { max-height: 70vh; overflow: auto; min-width: 0; }
+.crew-grid { border-collapse: separate; border-spacing: var(--space-8); }
+.crew-grid thead th { position: sticky; top: 0; background: var(--bg-canvas); }
+.crew-pose {
+  font: var(--type-eyebrow);
+  letter-spacing: var(--type-eyebrow-tracking);
+  text-transform: uppercase;
+  text-align: center;
+}
+.crew-pose--running { color: var(--state-running-fg); }
+.crew-pose--needs { color: var(--state-needs-approval-fg); }
+.crew-pose--idle { color: var(--state-idle-fg); }
+.crew-pose--done { color: var(--state-done-fg); }
+.crew-pose--crashed { color: var(--state-crashed-fg); }
+.crew-repo {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font: var(--type-mono);
+  color: var(--text-default);
+}
+.crew-cell {
+  display: grid;
+  place-items: center;
+  width: 88px;
+  height: 88px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+.crew-cell--skeleton { background: var(--bg-skeleton); }
+@media (max-width: 1360px) {
+  .crew-cell { width: 56px; height: 56px; }
+  .crew-cell .crew-avatar--xl { width: 45px; height: 45px; }
+}
+
+/* Team section and small-pose tiles. */
+.crew-team,
+.crew-tiles { display: flex; flex-wrap: wrap; gap: var(--space-12); margin: 0; padding: 0; list-style: none; }
+.crew-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-8) var(--space-12);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+.crew-tile-label { font: var(--type-meta); color: var(--text-secondary); }
+
+/* Customize card. */
+.crew-customize-column { display: flex; flex-direction: column; gap: var(--space-16); }
+.crew-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  padding: var(--space-20);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-3xl);
+  background: var(--bg-surface);
+}
+.crew-preview {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding: var(--space-12);
+  border-radius: var(--radius-xl);
+  background: var(--bg-sunken);
+}
+.crew-actions { display: flex; flex-wrap: wrap; gap: var(--space-8); }
+.crew-swatches { display: flex; flex-wrap: wrap; gap: var(--space-8); }
+.crew-swatch {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 2px solid var(--border-default);
+  border-radius: var(--radius-round);
+  cursor: pointer;
+}
+.crew-swatch[aria-checked='true'] { border-color: var(--text-strong); box-shadow: 0 0 0 2px var(--bg-surface) inset; }
+
+/* Radio groups of buttons: the hat group here and Density and Motion in Appearance. */
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-self: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border-field);
+  border-radius: var(--radius-md);
+  background: var(--bg-control);
+}
+.segmented-option {
+  padding: var(--space-4) var(--space-12);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font: var(--type-label);
+  cursor: pointer;
+}
+.segmented-option:hover { background: var(--bg-hover); }
+.segmented-option[aria-checked='true'] { background: var(--bg-selected); color: var(--text-strong); font-weight: 600; }
+.setting-value { margin: 0; color: var(--text-default); }
+.setting-shared { margin: 0; }
+.dep-outdated { margin: 0; }
+
+/* The page's own save toast, with Undo for 6 s. */
+.crew-toast {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+}
+.crew-toast--error { border-color: var(--state-crashed-border); }
+.crew-toast-text { flex: 1; margin: 0; }

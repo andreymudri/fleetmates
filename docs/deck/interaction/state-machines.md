@@ -204,7 +204,7 @@ Rows are evaluated top to bottom; the first match wins. "any live" = `starting`,
 
 | # | From | Event | Guard | To | Actions |
 |---|---|---|---|---|---|
-| 1 | (none) | `U.Launch(repo, task)` | repo resolved | `starting` | create row `origin=launched`; ask deckd to spawn `claude "<task>"` in the repo with `FLEETMATES_DECK_PTY`; same-repo warning if another plain session is active there (warn, never block; SM-O5) |
+| 1 | (none) | `U.Launch(repo, task)` | repo resolved | `starting` | create row `origin=launched`; ask deckd to spawn `claude "<task>"` in the repo with `FLEETMATES_DECK_PTY`; same-repo warning if another plain session is active there (warn, never block; D-68) |
 | 2 | (none) | `P.Spawned(ptyId, wrapped)` | | `starting` | create row `origin=wrapped` |
 | 3 | (none) | any `H.*` | unknown session and no alias match | per [1.4](#14-ingestion-rules-apply-before-the-transition-table) rule 4 | create row; card note "Joined mid-voyage" |
 | 4 | `starting` | `H.SessionStart(startup)` | `launchTaskPending` | `starting` | record `claudeSessionId`, `transcriptPath`, `branch`, start commit |
@@ -332,7 +332,7 @@ The diagram shows the main paths; the table is authoritative (for example every 
 9. **PTY exit codes.** 0: ended. Non-zero or signal after `U.Stop` or an announced `SessionEnd`: ended. Otherwise crashed. Known error mapping for the crash card (ENOSPC, EACCES, ENOMEM, "command not found") comes from the scrollback tail. Proposed.
 10. **Observed sessions.** No PTY, no exit code, no screen model: end comes from `SessionEnd.reason`, crash from `X.PidGone`, idle from `idle_prompt`. Everything is read-only: no Stop, no Nudge, no answers ("Answer in your terminal").
 11. **deckd down.** Hooks still arrive (they go to the web server), so pills stay correct; PTY-only signals (`P.*`, `S.*`) pause. Rows 30 and 43 cannot fire; on reconnect deckd's exit records are applied (rule 5).
-12. **Same repo, two plain sessions.** Both are tracked; `repoId` is shared, `changedFiles` overlap (both see the same working tree). The card notes "Shares the working tree with rustot · combat-tick". Proposed; SM-O5.
+12. **Same repo, two plain sessions.** Both are tracked; `repoId` is shared, `changedFiles` overlap (both see the same working tree). The card notes "Shares the working tree with rustot · combat-tick". Proposed; the same-repo policy is D-68.
 13. **Hook payload shape drift after a Claude Code update.** An envelope that fails validation is kept in a `rejected_events` table, counted on the FirstRun Claude Code check ("3 hook payloads did not match the pinned fixtures") and never applied. Proposed.
 
 ---
@@ -394,12 +394,12 @@ Decided rules (canvas Settings tier aside and Approvals drawer), with Proposed m
 
 | Tier | Where it can be answered | Batch | Popup | Rule | Mechanics |
 |---|---|---|---|---|---|
-| Safe | card, drawer, Focus bar, palette, popup | yes: "Allow both Safe once" / `Alt Shift A` (only Safe rows; never includes Caution or Destructive) | yes: popup action "Allow once" | suggested after 5 approvals | Allow once = option "1 Yes"; Focus bar also shows option 2 ("Yes, don't ask again for …") |
-| Caution | card, drawer, Focus bar, palette | no: one at a time | no (Proposed; SM-O9): popup offers "Open" only | only by hand in Settings | Allow once = "1 Yes"; option 2 is hidden in the Focus bar (Proposed), because it would create a rule the owner did not add by hand |
+| Safe | card, drawer, Focus bar, palette, popup | yes: "Allow both Safe once" / `Alt Shift A` (only Safe rows; never includes Caution or Destructive) | yes: popup action "Allow once", only for a single request whose whole summary the popup shows (9.3, F11) | suggested after 5 approvals | Allow once = option "1 Yes"; Focus bar shows option 2 only under D-77: its parsed label is "Yes, don't ask again for `<pattern>`", the pattern equals the deck's rule candidate, and the tool is not a file tool (the 2.1.282 Edit prompt's option 2 switches the session to accept edits); otherwise options 1 and 3 |
+| Caution | card, drawer, Focus bar, palette | no: one at a time | no (D-71): popup offers "Open" only | only by hand in Settings | Allow once = "1 Yes"; option 2 is hidden in the Focus bar (Proposed), because it would create a rule the owner did not add by hand |
 | Destructive | drawer and Focus bar only | never | never | never | Confirm checkbox ("I checked the 3 commits that will be overwritten") must be ticked by click or Space; no shortcut approves; Allow once is not the default button; option 2 hidden; checkbox resets when the drawer closes or the request's summary changes (Proposed) |
 | Question | card, drawer, Focus, palette | no | no (popup "Open") | no | AskUserQuestion: option buttons from `tool_input`, sent as the option number, plus "Other" free text; free-text questions: text then Enter |
 
-Deny = option "3 No, tell Claude what to do". After a deny from the deck, the row offers an optional "Tell Claude what to do instead" input for 30 s; text is typed into the PTY followed by Enter. Proposed.
+Deny = the option whose parsed label starts with "No" (the captured 2.1.282 Edit prompt shows "3. No"; [07-approvals.md](../07-approvals.md) section 5.1, F17). After a deny from the deck, the row offers an optional "Tell Claude what to do instead" input for 30 s; text is typed into the PTY followed by Enter. Proposed.
 
 Batch semantics (Safe): requests are answered in parallel across sessions and sequentially within one session (a session shows one prompt at a time). Each request runs its own sending and verifying; the drawer shows per-row results and one summary toast ("Allowed 2 of 2" or "Allowed 1 of 2: 1 did not land"). Proposed.
 
@@ -409,7 +409,7 @@ Batch semantics (Safe): requests are answered in parallel across sessions and se
 - **Observed sessions cannot be answered from the deck** (no PTY). Every surface shows "Answer in your terminal"; popups offer "Open" only. Decided (observed sessions are read-only).
 - **Guards before sending** (all must pass, else stay `waiting` with a message):
   1. `screenMatch = on_screen` for this request. If not: "The terminal is showing a different prompt. Open terminal." This is what prevents a queued "1" from approving the next (possibly Destructive) prompt.
-  2. No `I.TerminalBytes` for this PTY within `terminalTypingGuard` (1 s): "You are typing in the terminal. Answer there, or try again in a second."
+  2. No input for this PTY from either side within `terminalTypingGuard` (1 s): neither `I.TerminalBytes` from the `fm claude` terminal nor `I.BrowserBytes` from the browser Focus terminal (D-84). If either typed: "You are typing in the terminal. Answer there, or try again in a second."
   3. deckd connected ([4.2](#42-web-server-to-deckd)).
   4. Tier rules above (for example Destructive requires `confirming`).
 - **Keys**: the option's digit as printed on screen (the screen model parses "1 Yes", "2 Yes, don't ask again for …", "3 No, …"); free text is written as a bracketed paste followed by `\r`.
@@ -438,7 +438,7 @@ Batch semantics (Safe): requests are answered in parallel across sessions and se
 | 13 | `open.verifying` | `T.Verify` | | `open.did_not_land` | |
 | 14 | `open.did_not_land` | `U.TryAgain` | send guards pass | `open.sending` | |
 | 15 | `open.did_not_land` | late proof | | `answered(browser)` | the late proof still wins |
-| 16 | `open.*` | matching tool outcome (`PostToolUse`, `PostToolUseFailure`) | deck did not send keys | `answered(terminal, allow)` | rule counter +1 when Safe (Proposed; SM-O10) |
+| 16 | `open.*` | matching tool outcome (`PostToolUse`, `PostToolUseFailure`) | deck did not send keys | `answered(terminal, allow)` | rule counter +1 when Safe (D-73), and only when this request's `PermissionRequest` and the `PostToolUse` came from the same Claude process (F16) |
 | 17 | `open.*` | matching `PermissionDenied`, or `H.UserPromptSubmit` | deck did not send keys | `answered(terminal, deny)` | |
 | 18 | `open.*` (question) | `H.PostToolUse(AskUserQuestion)`, `H.UserPromptSubmit`, any activity (for `stop_question`) | deck did not send keys | `answered(terminal)` | |
 | 19 | `open.*` | `S.PromptGone` then `S.ScreenIdle`, or `H.Notification[idle_prompt]` | no outcome seen | `expired(interrupted)` | the user pressed Esc; not for `stop_question` |
@@ -470,7 +470,9 @@ stateDiagram-v2
 
 Decided: offered after 5 Safe approvals of the same command in the same repo; Settings offers 5 times, 3 times, Never suggest. Rules are written to `<repo>/.claude/settings.local.json` `permissions.allow` in Claude Code permission syntax; Destructive never becomes a rule; Caution only by hand.
 
-One machine per `(repoId, pattern)`. `pattern` is the Claude Code permission pattern derived from the matched tiers.json entry (for example `Bash(cargo test:*)`). Proposed; SM-O11 for requests that match no entry.
+One machine per `(repoId, pattern)`. `pattern` is the Claude Code permission pattern derived from the matched tiers.json entry (for example `Bash(cargo test:*)`). Proposed. A Safe request that matches no tiers.json entry has no pattern and gets no suggestion (D-74). npm and pnpm script entries give the exact script rule (`Bash(npm run test)`), never a prefix rule (D-86).
+
+What counts (D-73, F16): a request allowed from the browser or in the terminal counts. A terminal allow counts only when the request's `PermissionRequest` and its closing `PostToolUse` came from the same Claude process, so forged envelopes on `hooks.sock` cannot raise the counter on their own ([08-security.md](../08-security.md) T22).
 
 | From | Event | Guard | To | Actions |
 |---|---|---|---|---|
@@ -486,7 +488,7 @@ One machine per `(repoId, pattern)`. `pattern` is the Claude Code permission pat
 
 1. Two sessions ask the same Safe command: two requests, batch answers both, counter +2.
 2. The user answers in the terminal while the deck is `sending`: guard 2 usually stops it; if both land, the prompt closes once and the deck's extra digit reaches the input line as text. The verification sees `S.PromptGone` and records `answered(browser)`; the Focus view shows the stray character in the input line. Accepted risk, reduced by guard 2. Proposed.
-3. The screen prompt text differs from `tool_input` (Claude Code shortens long commands): `screenMatch` compares the parsed command prefix up to the screen's truncation point. Proposed.
+3. The screen prompt text differs from `tool_input` (Claude Code shortens long commands): `screenMatch` compares the parsed command prefix up to the screen's truncation point. When the visible prompt matches more than one open request of the session (two commands that share the visible prefix, one Safe and one Destructive), no request is `on_screen` and every answer is refused until only one matches, because a "1" could answer the wrong prompt (F12, D-76).
 4. deckd down: every PTY request becomes `screenMatch=unknown`, send guard 3 fails, surfaces show "deckd is reconnecting. Answer in your terminal for now."
 5. Notification-only request (row 2) has no `tool_input`: it cannot be matched by tool outcome; it closes on `S.PromptGone` + proof or on any later `PostToolUse` of the session. Proposed.
 6. A request stays open in an observed session for hours: shown with its waiting time; no auto-expiry (the process may genuinely be waiting). `X.PidGone` or `SessionEnd` expires it.
@@ -843,13 +845,13 @@ Answer questions from the vault with citations, via `claude -p` with vault-mcp a
 | `asking` | `C.Delta` | | `streaming` | |
 | `asking`, `streaming` | `C.Done(result)` | parsed `isMiss=false` | `answered` | save `AskMessage(assistant)` with citations and `generalKnowledge` |
 | `asking`, `streaming` | `C.Done(result)` | parsed `isMiss=true` | `miss` | insert `Miss{question, searchedTerms}` |
-| `asking`, `streaming` | `C.Done` | result block missing or invalid, text present | `answered` | show the text; note "Citations unavailable for this answer" (Proposed) |
+| `asking`, `streaming` | `C.Done` | result block missing or invalid, text present | `answered` | show the text with no citations; note "Citations unavailable for this answer"; store `unverified: true` (D-131) |
 | `asking`, `streaming` | `C.Exit(non-zero)`, `T.AskTimeout` | | `error` | kill the child process group |
 | `asking`, `streaming` | `U.StopAsk` | | `cancelled` | kill the child |
 | `answered`, `miss`, `error`, `cancelled` | `U.Ask` | | `asking` | follow-up in the same thread |
-| `miss` | `U.ResearchThis` | | `miss` | open the research form prefilled with the question; `Miss.resolvedBy` set when that research saves |
+| `miss` | `U.ResearchThis` | | `miss` | open the research form prefilled with the question (`/research/new?topic=<question>&miss=<id>`, the shell's pending placeholder until M6, D-140); `Miss.resolvedBy` set to `research:<id>` when that research saves |
 
-Output contract (Proposed, SM-O16): the system prompt asks `claude -p` to end with one fenced JSON block `{ "citations": [{ "path", "line", "viaGraph" }], "isMiss": bool, "generalKnowledge": string | null }`; the deck strips the block from the displayed text. A citation whose `path` does not exist in the vault is dropped and counted.
+Output contract (**Decided** 2026-10-04, SM-O16, D-131): the system prompt asks `claude -p` to end with one fenced JSON block, fence tag `deck-answer`, `{ "citations": [{ "path", "line", "viaGraph" }], "isMiss": bool, "generalKnowledge": string | null, "searched": string[] }` ([10-memory-and-research.md](../10-memory-and-research.md) 2.3); the deck strips the block from the displayed text. The deck validates every citation against the vault and drops invalid ones (D-141, plan decision): a citation is kept when its `path` was returned by a tool result of this ask or is in the deck client's latest `vault_list` or `vault_graph` answer, and its `line` is an integer from 1 to the note's line bound computed from `vault_get_note`; dropped citations are counted. A missing or broken block gives an answer with no citations, flagged "Citations unavailable for this answer".
 
 ---
 
@@ -877,7 +879,7 @@ Make sure a blocked session is noticed without nagging (Decided: desktop notific
 | `renotified` | popup again (replace id), no bell | final until closed (one renotify, Proposed; SM-O17) |
 | `cleared` | request answered or expired: dismiss the popup, drop from badge | final |
 
-Popup content: title "rustot needs you", body the request summary ("Wants to run cargo test --release combat::") with the tier word; actions: Safe "Allow once" and "Open"; Caution, Destructive and questions "Open" only (Destructive never from a popup, Decided; Caution SM-O9). Observed sessions: "Open" only, body ends with "Answer in your terminal". Coalescing: requests of one session opened within the grace window share one popup "rustot needs you (2 requests)". Proposed.
+Popup content: title "rustot needs you", body the request summary ("Wants to run cargo test --release combat::") with the tier word; actions: Safe "Allow once" and "Open"; Caution, Destructive and questions "Open" only (Destructive never from a popup, Decided; Caution D-71). A Safe popup offers "Allow once" only when it holds a single request and shows that request's whole summary; a clipped body or a coalesced popup offers "Open" only, because a clipped popup is a review the owner did not get (F11, D-76). Observed sessions: "Open" only, body ends with "Answer in your terminal". Coalescing: requests of one session opened within the grace window share one popup "rustot needs you (2 requests)". Proposed.
 
 If the deck tab is visible, focused and showing that session (Focus), the desktop popup is skipped; in-browser feedback still happens. Proposed.
 
@@ -923,7 +925,7 @@ Get a new install to a working deck, blocking only on what makes the deck useles
 
 ### 10.2 Check states
 
-`pending`, `checking`, `ok`, `failed`, `optional_skipped`. The canvas "warn" visual is `failed` on an optional check; "todo" is `pending` on a check that needs a user action (notifications).
+`pending`, `checking`, `ok`, `warn`, `failed`, `optional_skipped`. `warn` is only set by the Claude Code check, for a version newer than the tested one (SM-O18 default: warn only); it never blocks, and `fleetmates-deck doctor` prints it as `warn` so the terminal does not call version drift a failure. A missing or older Claude Code is `failed`. The canvas "warn" visual is `warn`, or `failed` on an optional check; "todo" is `pending` on a check that needs a user action (notifications).
 
 | Check | Probe | Blocking | Fix action | ok copy (canvas) | failed copy |
 |---|---|---|---|---|---|
@@ -1023,17 +1025,17 @@ Add `processKey` (ptyId or claude pid), `sinceTs`, `subagentsActive`, `activity`
 | SM-O2 | What does `Notification[agent_needs_input]` mean for the deck (a background agent waiting on the user)? Should it open a question request? | Log only |
 | SM-O3 | Should a `Stop` whose last assistant text ends with `?` count as `asked_you`? It catches "Should I paginate or truncate?" but may misfire on rhetorical endings | On, with the rule in 1.5; measure false positives in M1 |
 | SM-O4 | Should `stale` and `crashed` send desktop popups? The owner picked "sound when blocked" and "notify on done" only | Crash: popup, no bell. Stale: no popup |
-| SM-O5 | The owner's answer on a second plain session in a repo with an active one was never recorded (Q3) | Warn, never block, offer "Run as a fleetmates job" |
+| SM-O5 | Second plain session in a repo with an active one (Q3) | **Decided** (D-68): warn, never block, offer "Run as a fleetmates job" |
 | SM-O6 | Screen-idle detection (row 30) depends on reading Claude Code's TUI layout; confirm with the fake `claude` binary and the pinned version | On for PTY sessions |
 | SM-O7 | When `CwdChanged` moves a session into another repo, does its review baseline reset, and which crew member does the card show? | Reset baseline; card follows the new repo |
 | SM-O8 | Should `claude --resume <id>` of an ended conversation reopen the old deck session (row 49) or create a new one? | Reopen |
-| SM-O9 | Can Caution requests be approved from a popup? Tier copy only says Safe can and Destructive never | No: popup offers "Open" |
-| SM-O10 | Do terminal approvals (observed through `PostToolUse`) count toward "Make it a rule?" | Yes |
-| SM-O11 | Pattern for a Safe request that matches no tiers.json entry | No suggestion for it |
+| SM-O9 | Can Caution requests be approved from a popup? Tier copy only says Safe can and Destructive never | **Decided** 2026-10-02 (D-71): no, the popup offers "Open" |
+| SM-O10 | Do terminal approvals (observed through `PostToolUse`) count toward "Make it a rule?" | **Decided** 2026-10-02 (D-73): yes, with the same-process rule of 2.8 (F16) |
+| SM-O11 | Pattern for a Safe request that matches no tiers.json entry | **Decided** 2026-10-02 (D-74): no suggestion for it |
 | SM-O12 | PTY size when the terminal and the browser differ | Follow the most recent input source |
-| SM-O13 | "Start scribed" copy says `systemctl --user start scribed`, but TurbidAssist has no scribed unit (scribed is spawned on demand by `ScribeClient.ensure_daemon()`). Ship a unit, or spawn `scribed` detached like the reference client? | Proposed: the deck starts it with `systemd-run --user` running a login shell (`$SHELL -l -c 'exec scribed'`), so scribed is not in the deck's cgroup and gets `HF_TOKEN`; TurbidAssist change T4 (a `scribed.service` unit, [04-integrations.md](../04-integrations.md) section 4.3) is the later clean fix |
-| SM-O14 | In-deck speaker naming for `awaiting_names`, or only the `postmeet name` hint? | Hint only in v1 |
+| SM-O13 | "Start scribed" copy says `systemctl --user start scribed`, but TurbidAssist has no scribed unit (scribed is spawned on demand by `ScribeClient.ensure_daemon()`). Ship a unit, or spawn `scribed` detached like the reference client? | **Decided** 2026-10-04 (D-106): the deck starts it with `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, so scribed is not in the deck's cgroup and gets `HF_TOKEN`; TurbidAssist change T4 (a `scribed.service` unit, [04-integrations.md](../04-integrations.md) section 4.3) is not taken |
+| SM-O14 | In-deck speaker naming for `awaiting_names`, or only the `postmeet name` hint? | Default applied in M4, owner may revisit before exit: hint only (`postmeet name {session}` with Copy) |
 | SM-O15 | Research run output contract: where the lead writes the draft, sources and rejected sources (file names under `.fleetmates/<runId>/`), and which repo the research run lives in | To define with M6 |
-| SM-O16 | Ask output contract (final JSON block) and the prompt that produces it | As proposed in 8.3 |
+| SM-O16 | Ask output contract (final JSON block) and the prompt that produces it | **Decided** 2026-10-04 (D-131, validation D-141): as in 8.3 |
 | SM-O17 | Re-notify once or every 10 minutes while open? | Once |
 | SM-O18 | Should an incompatible Claude Code version block "Set sail"? The canvas blocks only on hooks | Warn only |

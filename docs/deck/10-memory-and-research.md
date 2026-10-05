@@ -24,7 +24,7 @@ The deck starts vault-mcp in three different ways. They never share a process.
 
 | Consumer | Process | Tools it may call | Writes | Section |
 |---|---|---|---|---|
-| Deck web server | one long-lived child over stdio, MCP SDK client | `vault_list`, `vault_get_note`, `vault_backlinks`, `vault_search` (existing-notes check), `vault_graph` (new), `vault_learn` with and without preview | research save only | 4 |
+| Deck web server | one long-lived child over stdio, the deck's hand-written MCP client (D-134) | `vault_list`, `vault_get_note`, `vault_backlinks`, `vault_search` (existing-notes check), `vault_graph` (new), `vault_learn` with and without preview | research save only | 4 |
 | Ask engine | one `claude -p` per question, which spawns its own vault-mcp child from `--mcp-config` | `vault_search`, `vault_get_note`, `vault_list`, `vault_backlinks` (read only) | never | 2 |
 | Research lead session and its teammates | the user's own vault-mcp registration, if any, inside a Claude Code session launched by deckd | read tools only; every write tool denied | never | 8.12 |
 
@@ -39,7 +39,7 @@ Consequence (from the contract, 1.12): writes from different vault-mcp processes
 
 ### 1.4 Capability detection (Proposed)
 
-The deck supports vault-mcp 0.3.0 and later. It never compares version strings to decide features. After `initialize` it reads `serverInfo.version` for display, then `tools/list`:
+The deck supports vault-mcp 0.3.0 and later. Its client is a small hand-written MCP client over stdio in `hub/server/adapters/vault-mcp.mjs`, not `@modelcontextprotocol/sdk` (D-134, section 4.1), and it starts vault-mcp with the `vaultCommand` setting, whose shipped default is `npx -y @andreymudri/vault-mcp` (D-143). It never compares version strings to decide features. After `initialize` it reads `serverInfo.version` for display, then `tools/list`:
 
 | Capability | Detected by | Without it |
 |---|---|---|
@@ -48,7 +48,7 @@ The deck supports vault-mcp 0.3.0 and later. It never compares version strings t
 | `structured` | a tool has an `outputSchema`, or a call returns `structuredContent` | text parsers (4.3) |
 | `forceNew`, `extraFrontmatter` | `vault_learn` schema has `force_new` / `frontmatter` (7.6) | the preview's own decision is shown (RES-O5); `source: research` rides as a tag (RES-O2) |
 
-Capabilities are re-read after every vault-mcp restart and pushed to the browser in the `health.changed` event.
+Capabilities are re-read after every vault-mcp restart and pushed to the browser in the `health.changed` event for `dep: 'vault-mcp'`, which carries `version` (string or null) and `capabilities` (a `string[]` from `graph`, `structured`, `preview`; [05-api.md](05-api.md) section 7).
 
 ## 2. Ask engine (M5)
 
@@ -88,7 +88,6 @@ claude -p
   --allowedTools mcp__vault__vault_search,mcp__vault__vault_get_note,mcp__vault__vault_list,mcp__vault__vault_backlinks
   --disallowedTools Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,mcp__vault__vault_write_note,mcp__vault__vault_edit_note,mcp__vault__vault_learn,mcp__vault__vault_move,mcp__vault__vault_delete
   --append-system-prompt <text of hub/server/ask/system-prompt.<lang>.md>
-  [--model <config ask.model>]
 ```
 
 | Flag | Why | Status |
@@ -102,8 +101,8 @@ claude -p
 | `--allowedTools` | the four read tools run without a prompt | Proposed |
 | `--disallowedTools` | belt and braces; includes every vault write tool by name | Proposed. TurbidAssist found that a name the binary does not know is dropped with a warning ("MultiEdit matches no known tool"), so the capture test asserts no such warning for these names |
 | `--permission-prompts none` | anything else that would prompt is denied | Proposed |
-| `--safe-mode` | would also disable CLAUDE.md, skills, plugins and hooks, but its help text lists "MCP servers" among what it disables | **Open (KB-O1)**: use it only if the pinned version still loads `--mcp-config` servers under it |
-| `--model` | optional setting; absent means the CLI default | Proposed |
+| `--safe-mode` | would also disable CLAUDE.md, skills, plugins and hooks, but its help text lists "MCP servers" among what it disables | **Not used** (KB-O1 Decided, D-132): `--restricted` only. The proof is a check script the owner runs against the real CLI (`hub/test/capture/ask-restricted-check.mjs`); it shows that Bash, Write, Edit and every vault write tool are refused and that the session's tools are exactly the four vault read tools. If the check fails, the owner decides again. No build task and no test runs the real CLI |
+| `--model` | not passed in M5; the CLI default model answers (D-142) | Decided for M5 (plan, D-142) |
 
 Order matters: `--mcp-config`, `--tools`, `--allowedTools` and `--disallowedTools` are variadic and consume everything up to the next `--` flag (TurbidAssist test `test_no_variadic_flag_swallows_the_argument_that_follows_it`). Each is followed by another flag in the argv above; the deck keeps a unit test for that.
 
@@ -112,24 +111,25 @@ MCP config (inline JSON string, Proposed):
 ```json
 { "mcpServers": { "vault": {
     "type": "stdio",
-    "command": "<config vault.command, default: vault-mcp>",
-    "args": [],
+    "command": "<first word of the vaultCommand setting, default: npx>",
+    "args": ["<the rest of vaultCommand, default: -y @andreymudri/vault-mcp>"],
     "env": { "VAULT_PATH": "<config vaultPath>", "VAULT_LANG": "<DECK_LANG>" } } } }
 ```
 
-The server name must be `vault` so the tools are `mcp__vault__<tool>`. `VAULT_AUTO_PUSH` is not passed (the Ask never writes).
+The server name must be `vault` so the tools are `mcp__vault__<tool>`. The command is the same `vaultCommand` the deck's own client uses (D-143). `VAULT_AUTO_PUSH` is not passed (the Ask never writes).
 
-Process details (Proposed):
+Process details (D-142, plan decision; owner may revisit before exit):
 
 | Item | Value |
 |---|---|
-| cwd | `~/.local/state/fleetmates/deck/ask/` (empty, 0700), so no project `CLAUDE.md` or `.claude/` applies |
+| cwd | `<state>/ask/` (empty, 0700; `<state>` is the deck state directory, by default `~/.local/state/fleetmates/deck`), so no project `CLAUDE.md` or `.claude/` applies |
 | env | the web server's env plus `FLEETMATES_DECK_ROLE=ask`. deck-hook drops any event whose envelope carries this marker, in case a future version stops honouring `--restricted` for hooks |
 | spawn | `detached: true` (own process group) so cancel can kill the group, which includes the vault-mcp grandchild |
 | stderr | always drained into a 2,000-byte ring (TurbidAssist lesson: an undrained stderr pipe stalls the child); the tail goes into the error message |
 | concurrency | one ask in flight per thread; at most 2 asks in flight overall; a third waits in a FIFO and the UI shows "Searching your vault…" meanwhile |
+| running asks | the pids of running asks are kept in `<state>/ask/running.json`; the next server start kills them (2.6) |
 
-### 2.3 Output contract (Proposed; SM-O16)
+### 2.3 Output contract (Decided: SM-O16, D-131; validation D-141)
 
 [04-integrations.md](04-integrations.md) 2.5 points here.
 
@@ -160,9 +160,9 @@ This is SM-O16's block plus `searched` (the queries the model ran), which fills 
 |---|---|
 | Find the block | the last fenced block tagged `deck-answer`; strip it and everything after it from the displayed text |
 | Parse | `JSON.parse`; unknown keys ignored; wrong types make the block invalid |
-| Validate citations | keep a citation only if `path` was returned by one of this ask's tool results (collected from the stream, 2.5) or exists in the deck's last `vault_list`; `line` must be an integer >= 1; count and log dropped citations |
+| Validate citations (D-141) | keep a citation only if its `path` was returned by one of this ask's tool results (collected from the stream, 2.5) or is in the deck client's latest `vault_list` or `vault_graph` answer, and its `line` is an integer from 1 to the note's line bound. The bound is computed from `vault_get_note` through the deck's own client (pages up to 200,000 characters): body lines, plus 2 for the frontmatter fences, plus one line per frontmatter key and one per list item. It must never reject a line that `vault_search` reports for that note; past 200,000 characters any line counts as in range. Dropped citations are counted in `dropped_citations` (`AskMessage.droppedCitations`) |
 | Miss | `isMiss = block.isMiss === true` (model-reported); also compute `retrievalEmpty` (3.1) |
-| Missing or invalid block, text present | show the text, note "Citations unavailable for this answer" (state-machines 8.3) |
+| Missing or invalid block, text present | show the text with no citations, flagged "Citations unavailable for this answer" (state-machines 8.3); the message is stored with `unverified: true` |
 | No text and no block | `error` |
 | `result.is_error` | `error` with the result text, else "claude ended with an error" |
 
@@ -170,10 +170,10 @@ Inline `path:line` tokens in the prose are rendered as Citation chips only when 
 
 ### 2.4 Thread context and storage (Proposed; schema owned by [06-storage.md](06-storage.md))
 
-- Entities `AskThread`, `AskMessage`, `Miss` as in [02-domain.md](02-domain.md) 2.7. Proposed additions to `AskMessage`: `searches: { query, resultCount }[]` (from the stream), `durationMs`, `exitCode`, `droppedCitations: int`, `state` (`answered` | `miss` | `error` | `cancelled`).
+- Entities `AskThread`, `AskMessage`, `Miss` as in [02-domain.md](02-domain.md) 2.7. The M5 API shape of `AskMessage` ([05-api.md](05-api.md) section 7) adds `status` (`complete` | `cancelled` | `error`; a miss is a `complete` message with `isMiss`), `error`, `unverified` (true when the answer had no valid `deck-answer` block) and `droppedCitations`. Still Proposed, not in the M5 shape: `searches: { query, resultCount }[]` (from the stream), `durationMs`, `exitCode`.
 - `--no-session-persistence` means no `--resume`. Follow-ups carry context in the prompt: the last 6 messages of the thread, newest last, each assistant message without its block, capped at 8,000 characters total (oldest dropped first), under a heading "Earlier in this thread". The new question comes last.
 - Scope `vault` threads are kept forever (they are small and they are the record the misses log points to). A "Delete thread" action in the History popover removes the thread and its messages; misses keep the question text (Proposed).
-- Meeting-scope threads (`scope = meeting:<id>`) follow [11-meetings.md](11-meetings.md) section 9; for confidential tags nothing is stored.
+- Meeting-scope threads (`scope = meeting:<id>`) follow [11-meetings.md](11-meetings.md) section 9; for confidential tags nothing is stored. Meeting asks stay transient in M5 (D-105, D-144): migration 0006 creates `ask_threads` with the `scope` check and trigger of [06-storage.md](06-storage.md) 4.10, but M5 stores only `scope = 'vault'` threads.
 
 ### 2.5 Streaming to the UI (Proposed)
 
@@ -190,19 +190,21 @@ The server reads stdout line by line (UTF-8 decoder across chunks) and handles:
 
 Line shapes other than `text_delta` and `result` are not documented contracts; they are pinned by capture fixtures per Claude Code version ([09-testing.md](09-testing.md)), like the hook payloads. If they change, the ask still works (text and block), only `searches` and citation cross-checks degrade.
 
-WebSocket events: `ask.delta {threadId, messageId, text}`, `ask.done {threadId, message}`, `ask.error {threadId, messageId, reason}`, `misses.changed {unresolved}`. Deltas are throttled to one frame per 50 ms per ask.
+WebSocket events: `ask.delta {threadId, messageId, text}`, `ask.done {threadId, message}`, `ask.error {threadId, messageId, error}`, `misses.changed {unresolved}`, each ephemeral (never stored in `events`; [05-api.md](05-api.md) 3.4). Deltas are throttled to one frame per 50 ms per ask.
 
-### 2.6 Timeouts, cancel, errors (Proposed)
+M5 synthetic fixtures (D-146): the stream-json lines above are written by hand under `hub/test/fixtures/claude-p/synthetic/` with `"captured": false` in their `MANIFEST.json`. Capturing real lines is part of the owner-run KB-O1 check (2.2), with the owner's authorization.
+
+### 2.6 Timeouts, cancel, errors (D-142, plan decision; owner may revisit before exit)
 
 | Case | Behaviour |
 |---|---|
-| `askTimeout` 120 s total (state-machines 0.3) | kill the process group; `error` "timed out after 120 s" |
-| No stdout line for 45 s while the process lives | same as timeout (a hung vault-mcp child) |
+| `askTimeout` 120 s total (state-machines 0.3) | kill the process group; `error` `timed out after 120 s` |
+| No stdout line for 45 s while the process lives | same as timeout (a hung vault-mcp child), with the same message `timed out after 120 s` |
 | `U.StopAsk` | SIGTERM to the group, SIGKILL after 2 s; keep partial text; state `cancelled` |
 | Browser disconnects mid-ask | the ask continues and is stored; the reconnecting tab gets it from the thread |
 | `claude` missing or not logged in | `error` with the stderr tail ("Invalid API key", "over quota" style messages are shown verbatim) |
 | vault-mcp health `down` (deck's own child) | the composer is disabled (state-machines 8.3) even though the ask would start its own child: the same `VAULT_PATH` problem almost always breaks both |
-| Web server restart mid-ask | the orphaned group is killed on start (pids recorded in a runtime file); the message is marked `error` "interrupted by a deck restart" |
+| Web server restart mid-ask | the orphaned group is killed on start (pids recorded in `<state>/ask/running.json`); the message is marked `error` `interrupted by a deck restart` |
 
 ### 2.7 Entry points
 
@@ -220,25 +222,25 @@ The owner accepted "Measure first": keep BM25 plus the one-hop wiki-link graph, 
 | `retrievalEmpty` | every `vault_search` in the ask returned `No results for` | `AskMessage.searches` |
 | disagreement | `isMiss` true while some search returned results, or false while all were empty | counted per week for the metrics in 3.4 |
 
-A `Miss` row is created when `isMiss` is true. Storage is the deck SQLite (MEM-O2 default, Open). Confidential meeting-scope asks never create misses.
+A `Miss` row is created when `isMiss` is true. Storage is the deck SQLite `misses` table of migration 0006 (MEM-O2 Decided, D-130), with question, time, thread and resolution; there is no vault-mcp tool for it. Its `resolved_by` is null while the miss is open, then one of the three values of 3.2 (D-140). Confidential meeting-scope asks never create misses.
 
-### 3.2 Triage in the Misses view (Proposed)
+### 3.2 Triage in the Misses view (D-140, plan decision; owner may revisit before exit)
 
 Each unresolved miss offers three outcomes, which feed different loops:
 
 | Outcome | Meaning | Action | `resolvedBy` |
 |---|---|---|---|
-| "Research this" | knowledge gap: the vault really lacks it | research form prefilled (section 8) | `research:<runId>` when that research saves |
+| "Research this" | knowledge gap: the vault really lacks it | routes to `/research/new?topic=<question>&miss=<id>`, the research form prefilled (section 8); until M6 that route shows the shell's pending placeholder | `research:<id>`, set by M6 when that research saves |
 | "The vault has this" + note picker | retrieval failure: BM25 did not find a note that answers it | becomes a golden-query candidate `{ query, expectedTopPath }` | `note:<path>` |
-| "Dismiss" | not a real question | hidden | `dismissed` (Proposed new value) |
+| "Dismiss" | not a real question | hidden | `dismissed` |
 
-Only retrieval failures argue for changing search. Knowledge gaps are answered by research, not by a better index.
+An open miss has `resolved_by` null. Only retrieval failures argue for changing search. Knowledge gaps are answered by research, not by a better index.
 
 ### 3.3 Golden queries loop into vault-mcp (Proposed)
 
 vault-mcp's `test/golden-queries.test.ts` pins ten queries against the fixture vault (`test/fixtures/vault/`), not the owner's real vault, so real misses cannot go into it verbatim (their notes are private). Two steps:
 
-1. `fleetmates-deck export-misses --kind retrieval` writes JSONL `{ "query", "expectedTopPath", "askedAt" }` for misses resolved as "The vault has this".
+1. `fleetmates-deck export-misses [--kind retrieval]` writes JSONL `{ "query", "expectedTopPath", "askedAt" }` for misses resolved `note:<path>` ("The vault has this"); `--kind all` adds open misses with `expectedTopPath: null` (D-148). Running vault-mcp's eval is the owner's.
 2. vault-mcp PR (small, separate): `npm run eval -- --vault <path> --queries <file.jsonl> [--k 3]` runs the real `Retriever` against a real vault and prints, per query, the rank of `expectedTopPath` and recall@k overall. It never writes. When a failure reveals a general scoring problem, the owner adds a sanitized equivalent (fixture note plus query) to `golden-queries.test.ts`, which keeps CI meaningful.
 
 ### 3.4 When to revisit hybrid search (Open: KB-O2)
@@ -249,10 +251,10 @@ Default until decided: review monthly; a candidate trigger to discuss is "retrie
 
 ## 4. vault-mcp client (long-lived)
 
-### 4.1 Process (Proposed; 04-integrations 3.2)
+### 4.1 Process (Proposed; 04-integrations 3.2; client D-134, command D-143)
 
-- `hub/server/adapters/vault-mcp.mjs`: `@modelcontextprotocol/sdk` `Client` + `StdioClientTransport`.
-- Command: config `vaultCommand` (default `vault-mcp` on `PATH`; alternative `node <clone>/dist/server/index.js`). `npx` is not the default (network on every restart). Env: `VAULT_PATH`, `VAULT_LANG=<DECK_LANG>`, and `VAULT_AUTO_PUSH` only if the owner sets it in deck config (research save is then pushed like any other `vault_learn`).
+- `hub/server/adapters/vault-mcp.mjs`: a small hand-written MCP client over stdio, newline-delimited JSON-RPC 2.0 with the methods `initialize`, `notifications/initialized`, `tools/list`, `tools/call` and `ping` (D-134). It does not use `@modelcontextprotocol/sdk`. It offers protocol version `2025-06-18` and accepts `2025-06-18`, `2025-03-26` or `2024-11-05` in the answer.
+- Command: the `vaultCommand` setting, whose shipped default `npx -y @andreymudri/vault-mcp` stays (D-143); an alternative is `node <clone>/dist/server/index.js`. The Ask's MCP config (2.2) uses the same command. Env: `VAULT_PATH`, `VAULT_LANG=<DECK_LANG>`, and `VAULT_AUTO_PUSH` only if the owner sets it in deck config (research save is then pushed like any other `vault_learn`).
 - stderr drained into a log ring; its tail feeds the degraded card ("spawn exited 1: VAULT_PATH is not a directory").
 - Restart on exit with backoff 2, 4, 8 … 60 s (state-machines 5.2). In-flight calls fail with `vault-mcp restarted`; a research save in flight is reported as "unknown outcome" and the deck re-previews before offering Save again (a preview after a successful commit shows `appended` to the new note, which tells the user it landed).
 - Health probe: MCP `ping` every 30 s plus the outcome of real calls, as in state-machines 5.3 (`vault_list` has no `limit` parameter in 0.3.0 and always lists the whole vault, so it is not used as a probe).
@@ -265,7 +267,7 @@ Default until decided: review monthly; a candidate trigger to discuss is "retrie
 | Browse by MOC, domains for the research form | `vault_list` | 10 s | cached until the next deck write or the 60 s refresh |
 | Note panel | `vault_get_note` (+ `offset` pages when the cited line is past 20,000 chars), `vault_backlinks` | 10 s | |
 | Research form existing-notes check | `vault_search` `limit` 5 | 5 s | threshold: show notes whose score is at least 50% of the top score and that are under `02-wiki/` (Proposed) |
-| Captures | `vault_get_note` on today's daily note | 10 s | 5 |
+| Captures | `vault_get_note` on notes whose `mtime_ms` is today (at most 50 per refresh) and on today's daily note | 10 s | 5.1 |
 | Research preview | `vault_learn` + `preview: true` | 30 s | 7 |
 | Research save | `vault_learn` | 120 s | git commit and optional push each have a 30 s timeout inside vault-mcp, plus its 60 s write slot |
 
@@ -286,13 +288,22 @@ The separator in those lines is the em dash character; the parsers match it by c
 
 ## 5. Captures and revert
 
-### 5.1 Captures (Decided feature: "Recent captures, what vault_learn wrote lately"; Proposed definition)
+### 5.1 Captures (Decided feature: "Recent captures, what vault_learn wrote lately"; definition Decided, MEM-O3; mechanism D-137)
+
+The owner decided MEM-O3 on 2026-10-04: a capture is a note whose frontmatter `criado` is today, or a `vault_learn` call the deck saw. The M5 rule (D-137, plan decision; owner may revisit before exit):
+
+- (a) A note whose frontmatter `criado` is today. The deck finds candidates in the notes whose `mtime_ms` is today (from `vault_graph`; without the tool, from the links of today's daily note) and reads them through `vault_get_note`, at most 50 reads per refresh.
+- (b) A `vault_learn` call the deck saw: a `PreToolUse` hook whose `tool_name` matches `^mcp__.+__vault_learn$` (D-138), matched to a line `- HH:mm [[<slug>]] ...` under `## Capturas` of today's daily note `04-daily/<YYYY-MM-DD>.md` whose slug equals the slug of the call's `titulo` and whose time is within 2 minutes after the call.
+- A capture found by (a) and matched by (b) carries the session and repo ("from {repo} · {time}"). Observed calls that match no line show nothing.
+- "New" in the graph is a capture of today not yet opened in the deck (`opened_at` null). Reading a note through `GET /api/vault/note` marks today's capture of that path opened (D-145).
+
+The paragraphs below are the earlier draft of this section, kept for the reasoning; where they disagree with the rule above, the rule above applies.
 
 `vault_learn` writes one line per capture under `## Capturas` of `04-daily/<YYYY-MM-DD>.md`: `- HH:mm [[<slug>]] (<kind>[, <projeto>])` (vault-mcp `src/write/propagate.ts`, contract 1.6 step 7). That line is written by every `vault_learn`, whoever called it (a Claude Code session or the deck), so it is the most complete capture log reachable through vault-mcp.
 
-Proposed definition for MEM-O3: a capture is a line under `## Capturas` of a daily note; "today" reads today's daily note, the date picker reads that day's. The capturing session ("from {repo} · {time}") is known only when the deck saw the `vault_learn` call: a `PreToolUse` hook with `tool_name` `mcp__vault__vault_learn` (or the deck's own save) within 2 minutes before the line's `HH:mm` whose `titulo` slug matches. "New" in the graph = captured today and not yet opened in the deck. This replaces MEM-O3's current default (`criado` today) with a cheaper and more exact one; the owner decides under MEM-O3.
+Proposed definition for MEM-O3: a capture is a line under `## Capturas` of a daily note; "today" reads today's daily note, the date picker reads that day's. The capturing session ("from {repo} · {time}") is known only when the deck saw the `vault_learn` call: a `PreToolUse` hook with `tool_name` `mcp__vault__vault_learn` (or the deck's own save) within 2 minutes before the line's `HH:mm` whose `titulo` slug matches. "New" in the graph = captured today and not yet opened in the deck. This draft proposed replacing the `criado` default with the daily-note lines; the owner kept `criado` plus observed calls (MEM-O3 Decided), and the daily-note lines serve only to match observed calls (D-137 (b)).
 
-### 5.2 Revert (Decided feature, D-60; mechanism Open: MEM-O4)
+### 5.2 Revert (Decided feature, D-60; MEM-O4 Decided: no Revert in v1)
 
 Revert needs git history, which the deck may not read directly (1.1). Proposed mechanism, as a follow-up vault-mcp PR (not needed for M5):
 
@@ -300,7 +311,7 @@ Revert needs git history, which the deck may not read directly (1.1). Proposed m
 - New tool `vault_revert_learn { commit, preview? }`: refuses unless the commit's subject starts with `docs(vault): ` and none of the files it touched changed in a later commit; otherwise runs `git revert --no-edit <commit>` (one new commit, which removes the note if it was created, or the appended section, and the MOC, index and daily lines). `preview` returns the diff, same pattern as section 7.
 - Captures by other sessions carry no sha in the daily note, so the deck can revert only captures whose result it saw (its own saves, or a `PostToolUse` of `vault_learn` if the hook payload exposes the tool response, which the deck does not rely on today).
 
-Default until MEM-O4 is decided: no Revert button in v1 (as in screens/memory.md).
+MEM-O4 was decided on 2026-10-04 (recorded with D-137): no Revert button in v1 (as in screens/memory.md). The mechanism above stays a later proposal.
 
 ## 6. Graph data and `vault_graph`
 
@@ -308,13 +319,15 @@ Default until MEM-O4 is decided: no Revert button in v1 (as in screens/memory.md
 
 The graph view needs every node and edge in one response. Building it from `vault_list` plus one `vault_get_note` per note means N+1 calls and parsing `Links:` lines, about 77 calls at 76 notes and thousands at the scale vault-mcp plans for. vault-mcp already holds the whole link graph in memory (`LinkGraph` in `src/graph/graph.ts`, rebuilt by `Retriever.sync` whenever the scanner reports changes); the tool only has to expose it. The need is Decided (D-41: the Memory tab is a graph of the connections); the shape below is Proposed (Q8).
 
-### 6.2 Schema (Proposed; full field list in the contract 1.11)
+### 6.2 Schema (Decided, D-129: the contract 1.11 shape as written)
+
+The owner accepted the contract 1.11 shape as written on 2026-10-04 (MEM-O1, D-129). vault-mcp 0.4.0 therefore has no `criado` or `revision` field: the additions proposed at the end of this section are not in 0.4.0. The deck fingerprints the graph from `counts.notes`, `counts.edges` and the largest `mtime_ms` (D-136), and finds `criado` through `vault_get_note` (5.1).
 
 Input: `folder`, `tipo`, `tags` (all, case-insensitive), `status`, `include_raw` (default false), `include_broken` (default false), `max_nodes` (1..5,000, default 2,000). Filters select nodes; an edge is returned only when both ends are selected, same filter semantics as `vault_list` (`inFolder`, `hasAllTags` reused).
 
 Output `structuredContent`: `nodes[] { id, title, tipo, status, tags, area, domain, in_degree, out_degree, mtime_ms }`, `edges[] { source, target }`, optional `broken[]`, `truncated`, `counts { notes, edges, orphans, broken }`. Text output: a summary line and `- source -> target` lines, so an agent can also use it.
 
-Additions proposed by this document on top of the contract:
+Additions this document proposed on top of the contract, not adopted for 0.4.0 (D-129):
 
 | Field | Why |
 |---|---|
@@ -328,19 +341,19 @@ Additions proposed by this document on top of the contract:
 |---|---|---|
 | Tags | `tags` | vault-mcp |
 | Status | `status` | vault-mcp |
-| Age (any, 7 days, 30 days, 1 year) | none | client, on `criado` (fallback `mtime_ms`) |
+| Age (any, 7 days, 30 days, 1 year) | none | client, on `mtime_ms` (0.4.0 has no `criado` field, D-129) |
 | Default map scope | `folder` unset, then the client drops `04-daily`, `01-raw`, `99-archive` (screens/memory.md 4.2.1) | client |
 | Local graph (2 hops) | none | client, from the full edge list |
 
 ### 6.4 Performance from 76 to 5,000 notes (Proposed; numbers are estimates to measure)
 
-| Notes | Scan and sync (vault-mcp, cached index) | Payload (JSON, estimate at about 250 bytes per node and 90 per edge, 5 links per note) | Deck layout (d3-force in a worker) | Plan |
+| Notes | Scan and sync (vault-mcp, cached index) | Payload (JSON, estimate at about 250 bytes per node and 90 per edge, 5 links per note) | Deck layout (estimate written for d3-force in a worker; replaced by D-136 below) | Plan |
 |---|---|---|---|---|
 | 76 (today) | under 50 ms cold (vault-mcp spec) | about 50 KB | instant | as specified |
 | 1,000 | stat of 1,000 files per call, well under the 500 ms budget in 03-architecture 7 | about 0.7 MB | about 1 s to settle | leaves unlabelled above 300 nodes (screens/memory.md) |
 | 5,000 | vault-mcp's own FTS5 migration trigger | about 3.5 MB, above what one stdio JSON-RPC answer should carry | several seconds | request with `folder: '02-wiki'` by default and `max_nodes` 2,000; show `truncated`; the "projects" cluster loads on demand; beyond this, a cluster-level summary tool (`vault_graph` with `group_by: 'domain'`) is a later vault-mcp change |
 
-Deck side: the layout runs in a Web Worker; positions are cached per `revision` in `sessionStorage` so a return to the tab does not re-simulate; the deck re-queries after its own writes and every 60 s while the tab is visible (screens/memory.md 7).
+Deck side (D-136, plan decision; owner may revisit before exit): the layout is a deterministic hand-written module, `hub/web/src/screens/memory/graph-layout.js`, not d3-force in a worker. Cluster centres sit on a ring, and each cluster's nodes on a phyllotaxis spiral ordered by degree then path; it uses no random numbers and no simulation library. Positions are cached in `sessionStorage` per graph fingerprint (`counts.notes`, `counts.edges` and the largest `mtime_ms`), with paths and coordinates only, and the cache access is wrapped in try/catch. The deck writes nothing to the vault in M5, so it re-queries every 60 s while the screen is visible (`document.visibilityState`, D-139); re-querying after its own writes starts with the research save in M6 (screens/memory.md 7). Over 300 notes, labels show only on clusters, MOCs and cited notes (D-128).
 
 ## 7. `vault_learn` preview: spec for a vault-mcp PR
 
@@ -666,36 +679,36 @@ Unchecking a source in review: the deck removes that line from the Sources secti
 | Repo | Change | Needed by | Status |
 |---|---|---|---|
 | vault-mcp | `vault_learn` `preview` + `structuredContent` (7) | M6 save | Decided need, Proposed design |
-| vault-mcp | `vault_graph` (6), including `criado` and `revision` | M5 graph | Decided need, Proposed design |
-| vault-mcp | `structuredContent` for `vault_get_note`, `vault_list` | removes deck parsers | Proposed |
+| vault-mcp | `vault_graph` (6), the contract 1.11 shape as written, without `criado` or `revision` (D-129) | M5 graph | Decided. It runs as its own plan in the vault-mcp repository, on a local branch the fleet never pushes, tags or publishes; the owner publishes 0.4.0 (D-126). The deck plan never edits vault-mcp |
+| vault-mcp | `structuredContent` for `vault_get_note`, `vault_list` | removes deck parsers | Proposed, not in the 0.4.0 plan |
 | vault-mcp | `force_new`, allow-listed `frontmatter` (7.6) | RES-O5, RES-O2 | Proposed |
 | vault-mcp | `npm run eval` over a real vault (3.3) | misses loop | Proposed |
 | vault-mcp | result `commit` sha, `vault_revert_learn` (5.2) | MEM-O4 | Proposed, later |
 | fleetmates (plugin) | none required; research uses existing skills and CLI. `hub/research/validate.mjs` and the plan template live in `hub/` | M6 | Proposed |
-| Claude Code | none; pinned version fixtures for stream-json lines (2.5) | M5 | Proposed |
+| Claude Code | none; M5 uses synthetic stream-json fixtures (2.5, D-146), and real ones are captured with the owner-run KB-O1 check | M5 | Decided for M5 (plan) |
 
 ## 10. Testing
 
 Owned by [09-testing.md](09-testing.md). Specific to this document (Proposed):
 
 - Fake `claude` binary scripts for the Ask: normal answer with block, miss, block missing, invalid JSON, `is_error`, hang (timeout), stderr flood, slow deltas; argv snapshot test including variadic-flag order.
-- Capture fixtures per Claude Code version of the stream-json lines listed in 2.5 (one real ask against the fixture vault).
-- Fake vault-mcp (an MCP server in-process) for: capability detection with 0.3.0 and 0.4.0 tool lists, preview and save flows, restart mid-call, "no non-dry `vault_learn` before Save".
-- Tool schema snapshot tests against a real vault-mcp build (04-integrations table).
+- Stream-json fixtures of the lines listed in 2.5: synthetic in M5 (D-146), under `hub/test/fixtures/claude-p/synthetic/` with `"captured": false`; real captures per Claude Code version come with the owner-run KB-O1 check (one real ask against the fixture vault).
+- Fake vault-mcp (`hub/test/fakes/fake-vault-mcp.mjs`, an MCP server started as a child by absolute path) for: capability detection with 0.3.0 and 0.4.0 tool lists, preview and save flows, restart mid-call, "no non-dry `vault_learn` before Save".
+- Tool schema snapshot tests against a real vault-mcp build (04-integrations table): the hub devDependency `@andreymudri/vault-mcp` pinned to `0.4.0`, against a generated temporary vault (D-135).
 - Research: validator unit tests over good and bad scout and draft files; an end-to-end run of the plan template with the fake claude driving a scripted lead.
 
 ## 11. Open items
 
 | ID | Question | Default until decided | Blocks milestone |
 |---|---|---|---|
-| KB-O1 | Ask engine: add `--safe-mode` (also disables CLAUDE.md, skills, plugins, hooks) if the pinned Claude Code still loads `--mcp-config` servers under it, or rely on `--restricted` only? | `--restricted` only, decided by a capture test in the M5 spike | M5 |
+| KB-O1 | Ask engine: add `--safe-mode` (also disables CLAUDE.md, skills, plugins, hooks) if the pinned Claude Code still loads `--mcp-config` servers under it, or rely on `--restricted` only? | **Decided** 2026-10-04 (D-132): `--restricted` only, no `--safe-mode`; proven by the owner-run check script of 2.2 | M5 (decided) |
 | KB-O2 | Threshold at which misses "pile up" and hybrid search is reconsidered (Q8) | Monthly manual review of the metrics in 3.4; no automatic trigger | none |
 | KB-O3 | Pre-allow `WebSearch` and `WebFetch` in the research workspace, confirmed by the owner during init, although Caution rules are normally hand-added in Settings? | Init asks in the terminal; nothing written without a yes | M6 |
 | KB-O4 | Language of research drafts (canvas English, vault Portuguese) | The vault's language (`VAULT_LANG`) | none |
-| MEM-O1 | `vault_graph` does not exist in vault-mcp 0.3.0 | See [screens/memory.md](screens/memory.md) 11 | M5 |
-| MEM-O2 | Misses log storage | See screens/memory.md 11 | none |
-| MEM-O3 | Definition of captures and "new" notes | See screens/memory.md 11; this document proposes the daily-note `## Capturas` definition (5.1) | none |
-| MEM-O4 | Revert for captures | See screens/memory.md 11; mechanism proposed in 5.2 | none |
+| MEM-O1 | `vault_graph` does not exist in vault-mcp 0.3.0 | **Decided** 2026-10-04 (D-129): the contract 1.11 shape as written, in vault-mcp 0.4.0 (D-126); see [screens/memory.md](screens/memory.md) 11 | M5 (decided) |
+| MEM-O2 | Misses log storage | **Decided** 2026-10-04 (D-130): the deck SQLite `misses` table | M5 (decided) |
+| MEM-O3 | Definition of captures and "new" notes | **Decided** 2026-10-04: `criado` today or an observed `vault_learn` call; mechanism D-137 (5.1) | M5 (decided) |
+| MEM-O4 | Revert for captures | **Decided** 2026-10-04: no Revert in v1; mechanism kept as a later proposal in 5.2 | M5 (decided) |
 | RES-O1 | Research progress beyond task states | See [screens/research.md](screens/research.md) 11; contracts proposed in 8.6, 8.7 | M6 |
 | RES-O2 | `status` / `source` frontmatter | See screens/research.md 11; `frontmatter` parameter proposed in 7.6 | none |
 | RES-O3 | `vault_learn` preview not in vault-mcp yet | See screens/research.md 11; PR spec in 7 | M6 |
@@ -703,5 +716,18 @@ Owned by [09-testing.md](09-testing.md). Specific to this document (Proposed):
 | RES-O5 | New linked note vs `vault_learn` append | See screens/research.md 11; `force_new` proposed in 7.6 | none |
 | RES-O6 | Which repo a research run lives in | See screens/research.md 11; deck-owned workspace proposed in 8.2 | M6 |
 | SM-O15 | Research run output contract | See [interaction/state-machines.md](interaction/state-machines.md) 13; proposed in 8.5 to 8.7 | M6 |
-| SM-O16 | Ask output contract | See state-machines 13; proposed in 2.3 | M5 |
+| SM-O16 | Ask output contract | **Decided** 2026-10-04 (D-131, D-141): 2.3 | M5 (decided) |
 | MTG-O1 | Meeting notes read from disk when vault-mcp is down (exception to 1.1) | See [11-meetings.md](11-meetings.md) | M4 |
+
+## Prepared M5 implementation notes
+
+Vault observations use PreToolUse `vault_get_note` paths and `vault_learn` titles only.
+Capture refresh reads MCP, not vault files, and considers at most 50 candidate notes.
+Search hits can validate a line beyond the conservative reconstructed note bound.
+Graph cache fingerprints include paths and edges rather than a server revision.
+
+The interface currently uses native Tags, Age and Status controls and a collapsible legend,
+without animated zoom interpolation. Note excerpt line offsets follow the block-YAML
+frontmatter convention of the fixtures when MCP does not supply a body offset. Different
+YAML formatting can make a preview section approximate; the validated citation and Obsidian
+link remain unchanged. These UI differences are recorded in the M5 exit report.

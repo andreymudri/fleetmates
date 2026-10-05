@@ -45,7 +45,7 @@ Set once, before the first table is created: `PRAGMA auto_vacuum = INCREMENTAL;`
 | fleetmates runs | `<repo>/.fleetmates/<runId>/` | fleetmates | read only; SQLite keeps only deck tags (4.8) |
 | Vault notes | the vault, through vault-mcp | vault-mcp | Decided; SQLite keeps paths only (captures, reads, misses) |
 | Meetings | TurbidAssist `session_dir` and the vault note | TurbidAssist | read only; SQLite keeps deck-only facts (pins, dismissals, source label) |
-| Ask threads, misses, research drafts | SQLite | deck | MEM-O2 default: misses in the deck DB |
+| Ask threads, misses, research drafts | SQLite | deck | MEM-O2 Decided (D-130): misses in the deck DB |
 | Hook spool | `~/.local/state/fleetmates/deck/spool/` | deck-hook | drained on start and every 60 s ([05-api.md](05-api.md) 6.3) |
 | Browser conveniences | `sessionStorage` (token, unsent form drafts), `localStorage` (density, Focus panel) | browser | never authoritative |
 
@@ -127,7 +127,9 @@ CREATE TABLE sessions (
   user_stop_requested INTEGER NOT NULL DEFAULT 0 CHECK (user_stop_requested IN (0,1)),
   end_announced       INTEGER NOT NULL DEFAULT 0 CHECK (end_announced IN (0,1)),
   end_reason          TEXT,                           -- SessionEnd.reason when known
-  review_baseline     TEXT,                           -- commit or tree sha; null outside git
+  review_baseline     TEXT,                           -- JSON {head, files, contents}: baseline commit sha, per-file fingerprints
+                                                      -- and base64 file contents; null outside git. Only `head` leaves the
+                                                      -- server, as the session view's `reviewBaseline` (05-api section 7)
   joined_mid_life     INTEGER NOT NULL DEFAULT 0 CHECK (joined_mid_life IN (0,1)),
   crash_kind          TEXT CHECK (crash_kind IN ('exit','signal','lost')),
   exit_signal         TEXT,
@@ -139,6 +141,14 @@ CREATE TABLE sessions (
   reviewed_at         INTEGER,
   started_at          INTEGER NOT NULL,
   ended_at            INTEGER,
+  launch_task         TEXT,                           -- migration 0002-launch (M2): the first prompt still to type into a
+                                                      -- launched session once its idle input box shows; NULL once typed,
+                                                      -- and for every row the launch flow did not create
+  archived_at         INTEGER,                        -- migration 0003-archive: when the session was archived (ms); NULL when
+                                                      -- not archived. Hidden from Home, the Focus ship list, the palette and
+                                                      -- the counts; cleared automatically when the session needs the owner
+  archived_by         TEXT CHECK (archived_by IS NULL OR archived_by IN ('owner','auto')),  -- migration 0003-archive:
+                                                      -- 'owner' (Archive, Archive all finished) or 'auto' (the sweep)
   CHECK (state <> 'starting' OR origin <> 'observed'),            -- state-machines 1.6 impossible states
   CHECK ((run_id IS NULL) = (run_repo_id IS NULL))
 ) STRICT;
@@ -150,6 +160,7 @@ CREATE UNIQUE INDEX sessions_process_live ON sessions(process_key)
   WHERE process_key IS NOT NULL AND alive = 1;                     -- "two deck sessions for one process key" is impossible
 CREATE INDEX sessions_run          ON sessions(run_repo_id, run_id) WHERE run_id IS NOT NULL;
 CREATE INDEX sessions_ended        ON sessions(ended_at) WHERE state = 'ended';
+CREATE INDEX sessions_archived     ON sessions(archived_at) WHERE archived_at IS NOT NULL;  -- migration 0003-archive
 
 -- earlier Claude session ids of a deck session (02-domain `session_aliases`, state-machines 1.2)
 CREATE TABLE session_aliases (
@@ -180,9 +191,34 @@ CREATE TABLE session_steps (
 CREATE TABLE session_scrollback (
   session_id  TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
   captured_at INTEGER NOT NULL,
-  text        TEXT NOT NULL,                          -- raw bytes as UTF-8, ANSI kept, capped at 2 MiB
+  text        TEXT NOT NULL,                          -- serialized history or raw tail as UTF-8, ANSI kept, capped at 2 MiB
   truncated   INTEGER NOT NULL CHECK (truncated IN (0,1))
 ) STRICT;
+-- `text` holds deckd's serialized history (`history.data` of the exit record, 05-api.md 5.2) when the exit
+-- the projector applies carries one, cut by whole leading lines; otherwise the raw `tail` bytes, cut keeping
+-- their end. A history row starts with a size header, `ESC [ 8 ; rows ; cols t` (the XTWINOPS resize
+-- sequence), naming `history.rows` and `history.cols` clamped to 5..200 rows and 20..500 columns; the 2 MiB
+-- cap counts the header. A row without the header is a raw tail or was written before sizes were stored.
+-- `GET /api/sessions/:id/scrollback` serves every stored row rendered through a headless terminal of the
+-- size its header names, or 120x40 when it names none. Serialized history comes out as the same screen; a
+-- raw row comes out as rows drawn at 120x40 (best effort, since its original size is unknown). The headless
+-- terminal runs in one worker thread (node:worker_threads), started on the first render and given one render
+-- at a time, so a costly render never blocks the server's event loop. The main thread only reads the size
+-- header and cuts the input, each in one hand-written pass over the text. One render writes only the newest
+-- 256 KiB of the row, cut at a line start; when no line start is in reach the cut moves past any escape
+-- sequence it would split. In the worker the first parameter of each sequence whose cost grows with it is
+-- clamped (line insert, delete and scroll counts to the screen height; character insert, delete and erase
+-- and tab counts to the width; repeat counts to a screenful), whatever parameters, controls or C1
+-- introducer the sequence carries, and a repeat that would print more than 16 x width x height code units
+-- is dropped. The scrollback is sized from the input (at most 5000 rows), and the serialized output keeps
+-- its newest whole lines within 4 MiB. A render that takes over 2 seconds, and a worker that does not start,
+-- fails or exits, ends that worker (a fresh one serves the next render) and answers a fallback: the input
+-- with every escape sequence and every control character but CR and LF removed, the newest 5000 lines. The
+-- worker has a 512 MiB heap limit and an empty environment. The response says truncated when the stored row
+-- was cut, when the render left input or output out (the 256 KiB input cut, a repeat count clamped to a
+-- screenful, a full scrollback, the 4 MiB output cap, or the fallback), or when `lines` cut it. The server keeps the 64 most recently read renders in
+-- memory, fallbacks included, keyed by session, capture time and text length, so a repeat read does not
+-- render again.
 
 -- the forever row (Decided D-19: repo, branch, task, outcome, duration, gate result)
 CREATE TABLE session_summaries (
@@ -238,6 +274,9 @@ CREATE TABLE requests (
   screen_match    TEXT NOT NULL DEFAULT 'unknown' CHECK (screen_match IN ('on_screen','queued','unknown')),
   task_id         TEXT,                               -- teammate attribution (state-machines 11)
   rule_pattern    TEXT,                               -- Claude Code pattern of the matched tiers.json entry (SM-O11)
+  reasons         TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(reasons)),  -- migration 0004-approvals (M3): the
+                                                      -- classifier's matched entries [{entryId, tier, segment, description}]
+  confirm_label   TEXT,                               -- migration 0004-approvals (M3): the Destructive checkbox label
   created_at      INTEGER NOT NULL,
   answered_at     INTEGER,
   notified_at     INTEGER,
@@ -253,6 +292,8 @@ CREATE INDEX requests_created ON requests(created_at);
 ```
 
 A text, reply or free-text answer stored in `answer.text` is what the user typed into the deck; it is kept with the request for the 30-day window.
+
+As built in M3, migration `0004-approvals` adds `reasons` and `confirm_label` with `ALTER TABLE ... ADD COLUMN`, so in a migrated database they come after `renotified_at`; the listing above places them by meaning. A deck answer is stored in `answer` as `{via, choice}`, while it is being sent with the pending fields the delivery needs (a reply carries a digest salted with the request id, not the text).
 
 ### 4.5 Rules: mirror, counters, audit
 
@@ -294,7 +335,30 @@ CREATE TABLE rule_audit (
   request_id       TEXT                               -- the approval that crossed the threshold, when suggested
 ) STRICT;
 CREATE INDEX rule_audit_repo ON rule_audit(repo_id, at DESC);
+
+-- migration 0004-approvals (M3): append-only audit of request decisions and tiers loads
+-- (07-approvals 11). Rule events go to rule_audit above.
+CREATE TABLE approval_audit (
+  id            INTEGER PRIMARY KEY,
+  at            INTEGER NOT NULL,
+  kind          TEXT NOT NULL CHECK (kind IN ('answered','refused','did_not_land','expired','rule_added','rule_revoked',
+                  'rule_found','tiers_loaded','tiers_rejected')),
+  request_id    TEXT,                                 -- no FK: the audit outlives request retention
+  session_id    TEXT,
+  repo_id       TEXT,
+  tier          TEXT CHECK (tier IS NULL OR tier IN ('safe','caution','destructive')),
+  reasons       TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(reasons)),   -- matched entry ids
+  via           TEXT CHECK (via IS NULL OR via IN ('browser','terminal','popup','batch','settings')),
+  choice        TEXT,                                 -- the answer, or the error code of a refusal
+  option_label  TEXT,
+  confirm_label TEXT,                                 -- the exact checkbox text shown for a Destructive allow
+  summary       TEXT,                                 -- redacted with the log redaction rules (08-security 4.10)
+  tiers_sha256  TEXT
+) STRICT;
+CREATE INDEX approval_audit_at ON approval_audit(at);
 ```
+
+The server writes the kinds `answered`, `refused`, `did_not_land`, `expired`, `tiers_loaded` and `tiers_rejected` to `approval_audit`. The `rule_*` kinds the CHECK allows are not written there: rule events stay in `rule_audit`. `fleetmates-deck audit` reads both tables read-only ([13-operations.md](13-operations.md) section 4.2).
 
 Counter rules: a request `answered` with an allow choice, tier `safe`, and a non-null `rule_pattern` increments its `(repo_id, rule_pattern)` counter in the same transaction (terminal approvals included, SM-O10 default). Reaching `prefs.ruleSuggestAfter` moves it to `offered` (5 by default, Decided). Dismiss sets `count = 0, state = 'counting'`; Never freezes counting; accept and revoke move `accepted` and back to `counting` at 0. Destructive and Caution never touch counters (Decided). Requests that match no tiers.json entry have `rule_pattern` null and are never counted (SM-O11 default).
 
@@ -377,6 +441,8 @@ Rows are kept while the run directory exists and dropped 30 days after it disapp
 
 The deck keeps only facts TurbidAssist does not have: the source label seen while polling (MEET-O1), pins (MEET-O2), dismissed action items, and a cached manifest state for list rendering. No transcript, title, summary or ask text is stored for any meeting (section 10).
 
+As built in 0.4.0: migration `hub/server/db/migrations/0005-meetings.sql` (`user_version` 5) creates the three tables, the two indexes `meetings_started` and `meeting_pins_meeting`, and the three triggers below, with the statements shown here except the `ask_threads` `DELETE`, which M5 adds. In the file the indexes follow the tables.
+
 ```sql
 CREATE TABLE meetings (
   id            TEXT PRIMARY KEY,                     -- TurbidAssist session_id, '2026-09-08T14-00-12'
@@ -386,7 +452,7 @@ CREATE TABLE meetings (
                   'awaiting_names','synthesized')),
   started_at    INTEGER,
   ended_at      INTEGER,
-  note_path     TEXT,                                 -- vault-relative, once synthesized
+  note_path     TEXT,                                 -- vault-relative, once synthesized; the meetings store writes null for a confidential row and meetings_became_confidential nulls it when a row turns confidential; a raw INSERT of an already-confidential row is not checked by the schema (D-116)
   apps          TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(apps)),  -- routed_apps labels seen while polling
   session_dir   TEXT,                                 -- absolute <session_dir>/<id>
   updated_at    INTEGER NOT NULL
@@ -425,13 +491,24 @@ CREATE TRIGGER meetings_became_confidential AFTER UPDATE OF confidential ON meet
 WHEN NEW.confidential = 1 AND OLD.confidential = 0
 BEGIN
   UPDATE meeting_pins SET label = NULL WHERE meeting_id = NEW.id;
-  DELETE FROM ask_threads WHERE scope = 'meeting:' || NEW.id;
+  UPDATE meetings SET note_path = NULL WHERE id = NEW.id AND note_path IS NOT NULL;
+  UPDATE events SET data = json_set(data, '$.label', NULL)
+   WHERE type = 'meeting.pin.added' AND (entity_id = NEW.id OR json_extract(data, '$.meetingId') = NEW.id);
+  UPDATE events SET data = json_set(data, '$.notePath', NULL)
+   WHERE type = 'meeting.updated' AND (entity_id = NEW.id OR json_extract(data, '$.id') = NEW.id);
+  DELETE FROM ask_threads WHERE scope = 'meeting:' || NEW.id;  -- added in M5 with the ask_threads table (4.10)
 END;
 ```
+
+When a meeting's `confidential` goes from 0 to 1, by any writer, the `meetings_became_confidential` trigger of migration `0005-meetings.sql` scrubs four things: the labels of the meeting's pins, its `note_path`, `data.label` of its earlier `meeting.pin.added` events and `data.notePath` of its earlier `meeting.updated` events (events matched on `entity_id` or on the meeting id inside `data`). When its own write turns a row confidential, `upsertMeeting` runs, after the commit, `PRAGMA wal_checkpoint(TRUNCATE)` so the scrubbed pages leave the WAL (`secure_delete` is on); a checkpoint that SQLite reports busy is not retried and leaves that to a later checkpoint. M4 creates these tables without `ask_threads`, which arrives in M5 (4.10; meeting asks are transient in M4), so the M4 trigger has no `ask_threads` `DELETE`; M5 adds that statement to the four above and keeps them. `note_path` is stored only for a non-confidential meeting, because the note file name embeds the synthesized title: the meetings store writes null for a confidential row, and the trigger nulls it when a row turns confidential. The schema does not check a raw `INSERT` of a row that is already confidential, so the store is the only guard on that path. A confidential meeting's note is located again on each read (D-116, [11-meetings.md](11-meetings.md) 11.2).
+
+Backup scrub (Decided 2026-10-04, D-133; M5 builds it): the pre-migration backups `deck.db.pre-NNNN.bak` (section 7) are copies taken before a migration, so the trigger above does not reach them. When a meeting rises to confidential, the deck also scrubs its data in every pre-migration backup `deck.db.pre-*.bak*` beside the database, after the commit and checkpoint that follow the rise: it opens each backup with `secure_delete` on and, when the backup holds that meeting as not confidential, sets it confidential so the backup's own `meetings_became_confidential` trigger scrubs what that schema version stored, then runs `VACUUM`. A backup without the meeting is left untouched; a backup the deck cannot scrub is deleted, and the log line names only the file. A scrub failure never fails the meeting write. Copies made with the proposed `fleetmates-deck backup` (section 9), which is not built yet, are not covered.
 
 A meeting row is created when the deck first sees the session (its own `start`, a poll showing a recording by another client, or a `session.json` found on disk). Rows stay as long as the TurbidAssist session directory exists; when it disappears the row, pins and dismissals are deleted (TurbidAssist retention removes audio, not directories, so this is rare).
 
 ### 4.10 Ask threads, answers, misses, captures, note reads
+
+Migration `hub/server/db/migrations/0006-memory.sql` (M5, `user_version` 6) will build this section as shown below, in one file applied by the existing runner. Compared with the first draft of this section it adds `ask_messages.searches`, `unverified` and `duration_ms`, lets `misses.resolved_by` be `dismissed` (D-140), limits `captures.via` to `vault_learn` and `frontmatter` and leaves out `captures.research_id` (M6 adds both for research saves), and adds the `vault_learn_calls` table of observed learn calls (D-137, D-138). The same migration rebuilds `meetings_became_confidential` with the `ask_threads` `DELETE` (4.9). M5 stores only `scope = 'vault'` threads; the meeting-scope check and trigger are created anyway (D-144). The misses log lives here, not in vault-mcp (MEM-O2, D-130).
 
 ```sql
 CREATE TABLE ask_threads (
@@ -459,7 +536,10 @@ CREATE TABLE ask_messages (
   is_miss            INTEGER NOT NULL DEFAULT 0 CHECK (is_miss IN (0,1)),
   status             TEXT NOT NULL DEFAULT 'complete' CHECK (status IN ('complete','cancelled','error')),
   error              TEXT,
-  dropped_citations  INTEGER NOT NULL DEFAULT 0,      -- citations to paths not in the vault (state-machines 8.3)
+  dropped_citations  INTEGER NOT NULL DEFAULT 0,      -- citations dropped by validation (state-machines 8.3, D-141)
+  searches           TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(searches)),   -- [{query, resultCount}] from the stream
+  unverified         INTEGER NOT NULL DEFAULT 0 CHECK (unverified IN (0,1)),    -- no valid deck-answer block (D-131)
+  duration_ms        INTEGER,
   created_at         INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX ask_messages_thread ON ask_messages(thread_id, created_at);
@@ -470,26 +550,36 @@ CREATE TABLE misses (
   thread_id       TEXT REFERENCES ask_threads(id) ON DELETE SET NULL,
   searched_terms  TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(searched_terms)),
   created_at      INTEGER NOT NULL,
-  resolved_by     TEXT CHECK (resolved_by IS NULL OR resolved_by LIKE 'research:%' OR resolved_by LIKE 'note:%')
+  -- null (open), research:<id> (M6), note:<path> (the vault has this), dismissed (D-140)
+  resolved_by     TEXT CHECK (resolved_by IS NULL OR resolved_by LIKE 'research:%' OR resolved_by LIKE 'note:%' OR resolved_by = 'dismissed')
 ) STRICT;
 CREATE INDEX misses_unresolved ON misses(created_at DESC) WHERE resolved_by IS NULL;
 
--- notes captured (MEM-O3 default: an observed vault_learn call, a research save, or criado = today)
+-- notes captured (MEM-O3 Decided, D-137: criado = today, or an observed vault_learn call matched to the daily note)
 CREATE TABLE captures (
   id           INTEGER PRIMARY KEY,
   path         TEXT NOT NULL,                         -- vault-relative
   day          TEXT NOT NULL,                         -- local YYYY-MM-DD
   captured_at  INTEGER NOT NULL,
-  via          TEXT NOT NULL CHECK (via IN ('vault_learn','research','frontmatter')),
+  via          TEXT NOT NULL CHECK (via IN ('vault_learn','frontmatter')),   -- 'research' and research_id arrive in M6
   session_id   TEXT REFERENCES sessions(id) ON DELETE SET NULL,
   repo_id      TEXT,                                  -- copied so "from {repo}" survives session retention
-  research_id  TEXT,
   opened_at    INTEGER,                               -- first open in the deck; "new" = captured today and opened_at null
   UNIQUE (path, day)
 ) STRICT;
 CREATE INDEX captures_day ON captures(day, captured_at DESC);
 
--- vault_get_note calls seen in hooks (memory.md "Recently used", focus.md Memory tab; MEM-O6)
+-- vault_learn calls seen in PreToolUse hooks (D-137, D-138); slug of the call's titulo
+CREATE TABLE vault_learn_calls (
+  id          INTEGER PRIMARY KEY,
+  session_id  TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+  repo_id     TEXT,
+  slug        TEXT NOT NULL,
+  at          INTEGER NOT NULL
+) STRICT;
+CREATE INDEX vault_learn_calls_at ON vault_learn_calls(at DESC);
+
+-- vault_get_note calls seen in hooks (memory.md "Recently used", focus.md Memory tab; MEM-O6, D-138)
 CREATE TABLE note_reads (
   session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   path        TEXT NOT NULL,
@@ -591,6 +681,8 @@ DELETE FROM session_scrollback WHERE captured_at < :cutoff;
 -- closed requests of long-lived sessions
 DELETE FROM requests  WHERE state <> 'open' AND created_at < :cutoff;
 DELETE FROM note_reads WHERE at < :cutoff;
+-- request rows of the approvals audit (M3; tiers rows are kept)
+DELETE FROM approval_audit WHERE at < :cutoff AND kind IN ('answered','refused','did_not_land','expired');
 -- research drafts after the job is finished (the saved note is in the vault)
 UPDATE research SET draft = NULL, preview = NULL
   WHERE state IN ('saved','discarded','failed') AND finished_at < :cutoff;
@@ -603,9 +695,12 @@ Then `PRAGMA incremental_vacuum;`, `PRAGMA wal_checkpoint(TRUNCATE);`, `meta.las
 | `session_summaries`, `rule_audit`, `rule_counters`, `rules`, `repos` (live) | forever | Decided (summaries), Proposed (others) |
 | `sessions` in `done` with `alive = 0`, or `crashed` not dismissed | until reviewed or dismissed; retention never deletes unreviewed work (02-domain 3) | Proposed |
 | `sessions` in `ended` and their detail | 30 days after `ended_at` (DB-O1) | Decided figure |
+| archived `sessions` | same as any session: archiving changes no retention rule, so an archived ended session is deleted 30 days after `ended_at` and an archived session with unreviewed work is kept | Decided (owner, 2026-10-02) |
 | `hook_events`, `events`, `rejected_events`, `session_scrollback`, closed `requests`, `note_reads` | 30 days | Decided figure |
+| `approval_audit` rows of kind `answered`, `refused`, `did_not_land`, `expired` | 30 days (APR-O8 default) | Proposed (M3, as built) |
+| `approval_audit` rows of kind `tiers_loaded`, `tiers_rejected` | forever (small) | Proposed (M3, as built) |
 | `session_steps` | newest 200 per session, then with the session | Proposed |
-| `ask_threads`, `ask_messages`, `misses`, `captures` | forever (small, user content the owner asked for: misses log, captures) | Proposed (DB-O3) |
+| `ask_threads`, `ask_messages`, `misses`, `captures`, `vault_learn_calls` | forever (small, user content the owner asked for: misses log, captures) | Default applied in M5, owner may revisit before exit (DB-O3) |
 | `research` row | forever; `draft` and `preview` 30 days after finishing | Proposed |
 | `meetings`, pins, dismissals | while the TurbidAssist session directory exists | Proposed |
 | `runs` | 30 days after the run directory disappears | Proposed |
@@ -618,6 +713,7 @@ Then `PRAGMA incremental_vacuum;`, `PRAGMA wal_checkpoint(TRUNCATE);`, `meta.las
 - Forward only. If `user_version` is **ahead** of the newest file (a downgrade), the server refuses to start: "deck.db was written by a newer deck (schema N). Upgrade, or restore deck.db.pre-*.bak." Never auto-downgrade.
 - SQLite cannot alter a `CHECK` or drop most constraints in place, so enum additions and column changes use the 12-step table rebuild (create new, copy, drop, rename, recreate indexes and triggers) inside the migration transaction with `PRAGMA foreign_keys = OFF` around it and `PRAGMA foreign_key_check` before commit.
 - A data-only fix (for example re-deriving `rule_pattern`) is a migration file too, never startup code.
+- Applied so far: `0001-init.sql` (section 4), `0002-launch.sql` (`sessions.launch_task`), `0003-archive.sql` (`sessions.archived_at`, `sessions.archived_by` and the partial index `sessions_archived`, section 4.3), `0004-approvals.sql` (M3: `requests.reasons`, `requests.confirm_label`, the `approval_audit` table and its index, sections 4.4 and 4.5), `0005-meetings.sql` (M4: the `meetings`, `meeting_pins` and `meeting_item_dismissals` tables with their indexes and triggers, section 4.9). Next, in M5: `0006-memory.sql` (`user_version` 6: the tables, indexes and triggers of section 4.10, and `meetings_became_confidential` rebuilt with the `ask_threads` `DELETE`, section 4.9). The session archive run owns 0003, so the M3 approvals migration is 0004; the runner skips every file at or below the database version, so both numbers are fixed.
 - Tests ([09-testing.md](09-testing.md)): apply all migrations to an empty database and compare `sqlite_schema` with a checked-in snapshot; apply the newest migration to a fixture database of each earlier version; the downgrade refusal.
 
 ## 8. What lives outside SQLite
@@ -631,7 +727,7 @@ Then `PRAGMA incremental_vacuum;`, `PRAGMA wal_checkpoint(TRUNCATE);`, `meta.las
 | `~/.local/state/fleetmates/deck/token` (0600) | browser token | server, `fleetmates-deck open` | `fleetmates-deck init` | Decided (0600 file), path Proposed |
 | `<repo>/.claude/settings.local.json` | rules in `permissions.allow` | Claude Code, server | server (merge, atomic write), Claude Code option 2, the user | Decided; SQLite holds only the mirror (4.5) |
 | `~/.claude/settings.json` | deck hooks next to fleetmates' | Claude Code | `fleetmates-deck init` (backup `settings.json.deck-backup-<ts>`) | Decided (user level) |
-| The vault | notes | vault-mcp; the deck only through vault-mcp (Decided). Exception by design: meeting notes written by `postmeet` are read from disk when vault-mcp is down ([screens/meetings.md](screens/meetings.md) 4.2.1) | vault-mcp (`vault_learn` from research save), `postmeet` | Decided |
+| The vault | notes | vault-mcp; the deck only through vault-mcp (Decided). Exception by design: meeting notes written by `postmeet` are read from disk, read only and limited to `vault.meetings_folder` (MTG-O1). In M4 that is the only way the deck reads them, because the vault-mcp client is M5 (D-114, [screens/meetings.md](screens/meetings.md) 4.2.1) | vault-mcp (`vault_learn` from research save), `postmeet` | Decided |
 | TurbidAssist | `config.yaml`, `<session_dir>/<id>/{session.json, transcript.jsonl, transcript.json, transcript.md, asks.jsonl, postmeet.log}` | server (read only, on demand) | scribed, postmeet | Decided (deck never writes them) |
 | fleetmates | `.fleetmates/<runId>/{plan.json, status.json}`, `.fleetmates/index/` | server (read only) | fleetmates | Decided |
 | Claude Code transcripts | `transcript_path` | server (tail for `why` and the first prompt) | Claude Code | Decided: linked, never copied |
@@ -670,13 +766,13 @@ A meeting is confidential when its tag's `synthesis.tag_policies.<tag>.store_tra
 
 Enforcement, in layers:
 
-1. **Nothing transcript-shaped is stored for any meeting.** The schema has no column for transcript lines, tail text, meeting titles, summaries, decisions or action item text. Live lines travel only as the ephemeral `meeting.transcript` WebSocket event, and the `events` writer refuses that type (4.6). Transcript search reads files on demand and keeps no index (MEET-O7 default). Full transcripts are read from disk per request and never cached. This goes beyond the Decided rule for non-confidential tags too; it costs nothing because TurbidAssist already keeps the files.
+1. **Nothing transcript-shaped is stored for any meeting.** The schema has no column for transcript lines, tail text, meeting titles, summaries, decisions or action item text. Live lines travel only as the ephemeral `meeting.transcript` WebSocket event, and the `events` writer refuses that type (4.6). Transcript search reads files on demand and keeps no index, and includes confidential meetings without caching them (MEET-O7, D-109). Full transcripts are read from disk per request and never cached. Meeting notes are read from disk in M4 (D-114), and their title and sections are never stored. This goes beyond the Decided rule for non-confidential tags too; it costs nothing because TurbidAssist already keeps the files.
 2. **Fail closed.** A tag not found in `config.yaml`, or an unreadable `config.yaml`, makes the meeting confidential (`confidential = 1`, DB-O2).
 3. **Triggers.** A pin label on a confidential meeting and a meeting-scoped ask thread for a confidential or unknown meeting abort the transaction (4.9, 4.10). A policy change to confidential nulls stored labels and deletes meeting-scoped threads.
 4. **Dismissals** store a sha1 of the action item text, never the text.
-5. **Logs.** Server and deckd logs record event types, ids and sizes, never scribed text, ask questions or answers, for any tag, including under `DECK_DEBUG=1`.
+5. **Logs.** Server and deckd logs record event types, ids and sizes, never scribed text, ask questions or answers, for any tag. The server's logs are its stdout and stderr (journald); M4 builds no `DECK_DEBUG=1` debug log (D-121).
 6. **Hygiene.** `secure_delete = ON` zeroes deleted content; the retention job checkpoints the WAL.
-7. **Test** (meetings.md acceptance 9): record the `recording` fixture (tag `client-a`), pin twice, ask once, stop; then scan the bytes of `deck.db`, `deck.db-wal` and the debug log for every fixture transcript line and ask text. Zero hits required. The same test runs with a non-confidential tag to prove the scan finds nothing there either, except pin labels.
+7. **Test** (meetings.md acceptance 9): record the `recording` fixture (tag `client-a`), pin twice, ask once, stop; then scan the bytes of `deck.db`, `deck.db-wal` and the server's captured stdout and stderr (D-121) for every fixture transcript line and ask text. Zero hits required. The same test runs with a non-confidential tag to prove the scan finds nothing there either, except pin labels.
 
 ### 10.2 Hook payloads
 
@@ -715,9 +811,13 @@ Everything below is used by this schema or by [05-api.md](05-api.md) and is not 
 | Session | `sessionAliases` as a table | 02-domain names `session_aliases` without a shape |
 | Session | `steps` (entity `Step`) | home.md `session.steps` ring buffer |
 | Session | `toolCalls` (derived) | home.md footer "31 tool calls" |
+| Session | `launch_task` (server-only column, migration `0002-launch`, M2) | the launch flow types the task only after the idle input box appears (03-architecture 4.1), so the text waits in the row until then; it is not part of the session view |
+| Session | `archivedAt`, `archivedBy` (columns `archived_at`, `archived_by`, migration `0003-archive`) | the owner hides sessions from Home without deleting them; any session can be archived, one that needs the owner is unarchived automatically, and finished sessions without unreviewed changes can be archived in bulk or by the auto-archive sweep |
 | Request | `screenMatch` | state-machines 12.5; now also in 02-domain 2.3 |
 | Request | `taskId` | teammate attribution (state-machines 11) |
 | Request | `rulePattern` | the Claude Code pattern of the matched tiers.json entry, key of the rule counter |
+| Request | `reasons`, `confirmLabel` (columns `reasons`, `confirm_label`, migration `0004-approvals`, M3) | the tier's matched entries for the "Why" line and the audit, and the Destructive checkbox label filled when the request opens (07-approvals 3.1 and 8) |
+| Request | `ruleNote`, `description`, `allowAlways` (derived in the request view, M3) | `ruleNote` from the tiers entry of `rulePattern`, `description` from the headline reason, `allowAlways` from the parsed options (D-77, D-95); not stored |
 | Request | `toolName` nullable | notification-only requests have no tool (state-machines 2.2) |
 | Rule | `createdAt` nullable, `seenAt` | rules found in the file have no date (SET-O5) |
 | RuleCounter, RuleAudit | new entities | 5-approval suggestion (Decided) and a history of rule changes |
@@ -740,5 +840,17 @@ Existing items referenced, not repeated: SET-O2 (prefs storage split), SET-O5, C
 |---|---|---|---|
 | DB-O1 | Is the 30-day window for session detail counted from `ended_at` (this doc) or from `started_at`? A session running for weeks would lose early events under the second reading. | From `ended_at`; hook and outbound events from their own timestamps | M1 |
 | DB-O2 | A meeting whose tag is not in `config.yaml` (renamed or removed tag, unreadable config): treat as confidential? | Yes, fail closed | M4 |
-| DB-O3 | Ask threads, misses and captures have no retention: keep forever, or 30 days like the event stream? | Forever | M5 |
+| DB-O3 | Ask threads, misses and captures have no retention: keep forever, or 30 days like the event stream? | Default applied in M5, owner may revisit before exit: forever | M5 before exit |
 | DB-O4 | Backup, restore and reset commands (`fleetmates-deck backup`, `restore`, `reset`, named as in [13-operations.md](13-operations.md) section 4.2): ship them, or document manual steps only? | Ship them under the hub bin; 03-architecture section 6 points to the full list in 13-operations | M1 |
+
+## Prepared M5 storage verification
+
+`0006-memory.sql` is the implemented migration for vault threads, messages, misses, captures,
+observed note reads and learn calls. The question and answer live only in thread tables;
+Ask events cannot be appended to `events`. Threads, captures and misses have no automatic
+retention in this milestone. Deleting a thread securely removes its prose.
+
+After a meeting rises to confidential, the store checkpoints and scrubs every matching
+`deck.db.pre-NNNN.bak` or numbered collision copy. The backup's own confidentiality trigger
+removes its sensitive fields, then VACUUM compacts it. Unrelated backups remain untouched.
+A corrupt backup is deleted and logged by basename only; it does not fail the meeting update.

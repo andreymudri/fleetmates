@@ -4,7 +4,7 @@
 |---|---|
 | Canvas boards | `Home` (busy, comfortable), `HomeCompact` (compact density), `HomeCalm` (calm seas, adaptive) |
 | Route | `/` |
-| Milestone | M1 (comfortable grid, quiet row, calm state, header counts). M2 adds compact density (needs deckd screen tails) and "Launch a ship". M3 adds inline answers on cards. |
+| Milestone | M1 (comfortable grid, quiet row, calm state, header counts). M2 adds compact density (needs deckd screen tails) and "Launch a ship". M3 adds inline answers on cards. M5 adds the Calm "Charts added" (captures of today) and "Unanswered questions" (unresolved misses) sections, the recap chart segment (`recap.chartsAdded`) and the "learned" chip (from the session's `learnedToday`). |
 | Status | Decided (canvas, reviewed three times) with Proposed states and rules marked inline |
 | Depends on | [02-domain.md](../02-domain.md) sections 2 and 3, [state-machines.md](../interaction/state-machines.md) sections 1, 2, 4, 9, [components.md](../design/components.md) |
 
@@ -73,7 +73,7 @@ Header at 1280: the search trigger drops its label and keeps icon + Kbd; count c
 | Element | Component | Data binding | Copy (EN) | Notes |
 |---|---|---|---|---|
 | Title | PageHeader h1 | none | "Sessions" | only h1 on the page |
-| Daily recap | PageHeader subtitle, MetaLine | `recap.voyages`, `recap.madePort`, `recap.chartsAdded` (5.8) | "Captain's log: 9 voyages · 3 made port · 1 chart added" | themed, subtitle only (Decided). Chart segment hidden until M5 (vault data). |
+| Daily recap | PageHeader subtitle, MetaLine | `recap.voyages`, `recap.madePort`, `recap.chartsAdded` (5.8) | "Captain's log: 9 voyages · 3 made port · 1 chart added" | themed, subtitle only (Decided). Chart segment hidden until M5 (vault data); M5 adds it from `recap.chartsAdded`. |
 | Needs you chip | StatePill `variant="count"` state `needs_approval` | `counts.needYouSessions` | "3 need you" | hidden at 0 (Proposed). Button: opens the Needs-you drawer |
 | Running chip | StatePill `count`, state `running` | `counts.running` = sessions in `starting`, `running` (disjoint from need you and to review, 02-domain 3) | "4 running" | fixture value is 2, see changes from canvas |
 | To review chip | StatePill `count`, state `done` | `counts.toReview` = sessions in `done` | "1 to review" | hidden at 0 (Proposed) |
@@ -118,7 +118,7 @@ Variant bodies:
 | question | Reply | Field TextInput (sr-only label) + Button `amber` | `request.id`; AskUserQuestion options render as `amber-outline xs` option buttons instead (state-machines 2.5) | label "Reply to discord-audit", button "Reply" |
 | solo-running, done | Changed files | Eyebrow + FileRow `chip` (max 2 rows then "+N more") | `session.changedFiles` | "Changed files", "Hero.tsx +38 −4" |
 | solo-running | Footer meta | MetaLine | `now - startedAt`, count of tool steps | "14m · 31 tool calls" |
-| solo-running | Learned chip | NoteChip "learned" variant | count of `vault_learn` tool calls by this session today (Proposed) | "learned 1 thing" |
+| solo-running | Learned chip | NoteChip "learned" variant | `session.learnedToday`: count of observed `vault_learn` calls of this session since local midnight (M5, D-138) | "learned 1 thing" |
 | done | Footer | MetaLine + Button `purple` | `stateSince` relative | "Finished 6 min ago", "Review changes" |
 | team | Crew tiles | CrewTile x (lead + teammates, max 5 then "+N") | `run.teammates[]`: `taskId`, `state`; lead from `run.leadSessionId` | "lead · T6", "T3 · done", "T4 · needs you" (canvas "task 4" corrected to task ids) |
 | team | Request box | TierBadge `sm outline` + mono line per open request attributed to a task, Button `amber` | open requests of the lead session grouped by task (state-machines 11) | "CAUTION task T4 · npm install commander@14", "Review 2" |
@@ -166,9 +166,9 @@ Compact "Reply" opens the drawer with the reply field focused (compact has no in
 | Launch | Button `primary` `size="hero"` `kbd="Alt N"` | | "Launch a ship" | Decided |
 | Captain's log card | CalmSection | `recap` | "Captain's log · today", "9 voyages · 3 made port · 1 chart added" | Decided |
 | Open loops | CalmSection link rows | sessions in `done` (row "{repo} waits in port for review" + "Review") | "Open loops before tomorrow" | done rows Proposed binding; git rows Open (HOME-O3) |
-| Charts added | CalmSection capture links | notes captured today (M5, see memory.md MEM-O3) | "Charts added to your vault", "Open Memory" | Decided layout |
-| Last meeting | CalmSection + ActionItemCard `row` | newest synthesized meeting today (M4) | "Last meeting", "Launch as session" | Decided layout; Launch as session Open (MEET-O6) |
-| Unanswered questions | row + Button `teal-outline xs` | unresolved `Miss` rows (M5) | "Unanswered questions", "Research this" | Decided |
+| Charts added | CalmSection capture links | notes captured today, `GET /api/vault/captures` (M5; MEM-O3 Decided, D-137) | "Charts added to your vault", "Open Memory" | Decided layout |
+| Last meeting | CalmSection + ActionItemCard `row` | newest synthesized meeting today (M4) | "Last meeting", "Launch as session" | Decided layout; Launch as session is the MEET-O6 default shipped in 0.4.0, still the owner's to revisit |
+| Unanswered questions | row + Button `teal-outline xs` | unresolved `Miss` rows, `GET /api/misses` (M5; "Research this" routes to `/research/new?topic=<question>&miss=<id>`, D-140) | "Unanswered questions", "Research this" | Decided |
 | Recent harbors | Button `secondary` chips with CrewAvatar sm pose none | 5 repos by latest session | "Recent harbors" | Decided |
 
 ## 5. States
@@ -252,7 +252,7 @@ Switching between grid and calm crossfades 160ms; never while focus is inside a 
 |---|---|
 | voyages | deck sessions with `startedAt` today (local), any origin |
 | made port | sessions that entered `done` today (counted once per session) |
-| charts added | notes created today by `vault_learn` (M5; see MEM-O3). Segment hidden before M5 or when 0 |
+| charts added | `recap.chartsAdded`: captures of today (M5; MEM-O3 Decided, D-137), null while vault-mcp is down. Segment hidden before M5, when 0 or when null |
 
 ### 5.9 Team "Next" line (Proposed)
 
@@ -378,6 +378,7 @@ API paths are Proposed; the state-machine event is the contract.
 | `home.card.request.guardTyping` | You are typing in the terminal. Answer there, or try again in a second. | |
 | `home.card.request.deckdDown` | deckd is reconnecting. Answer in your terminal for now. | |
 | `home.card.rule.short` | Allowed {n} times. Always allow in {repo}? | |
+| `home.card.rule.anyFlags` | Any flags. | after `home.card.rule.short` when the matched tiers.json entry has `ruleNote: 'anyFlags'` (D-78) |
 | `home.card.rule.added` | Rule added to {repo}: {pattern} | toast |
 | `home.card.rule.undo` | Undo | |
 | `home.card.question.reply.label` | Reply to {repo} | sr-only label and placeholder |
@@ -461,6 +462,29 @@ API paths are Proposed; the state-machine event is the contract.
 | `home.calm.harbors` | Recent harbors | |
 | `home.calm.launch` | Launch a ship | |
 | `home.calm.adrift.headline` | {n, plural, one {One ship adrift} other {# ships adrift}} | only if HOME-O1 picks the adrift variant |
+| `home.header.counts.label` | Session counts |  |
+| `empty.home.title` | Calm seas. No ships out. |  |
+| `empty.home.body` | No ships yet. Launch one, or start claude in a terminal and it shows up here. |  |
+| `home.card.untitled` | Untitled |  |
+| `home.card.crashed.title` | {repo} ran aground |  |
+| `home.card.crashed.exit` | The session exited with code {code}. |  |
+| `home.card.crashed.killed` | The process ran out of memory or was killed by the system. |  |
+| `home.card.crashed.signal` | The session was stopped by signal {signal}. |  |
+| `home.card.crashed.lost` | The deck lost track of this process. It may have been closed outside the deck. |  |
+| `home.card.activity.tool` | Using {tool} |  |
+| `home.quiet.deckdDown` | deckd is reconnecting |  |
+| `tier.safe` | Safe |  |
+| `tier.caution` | Caution |  |
+| `tier.destructive` | Destructive |  |
+| `tier.question` | Question |  |
+| `home.stop.failed` | Could not stop {repo}: {message} |  |
+| `home.quiet.strip.name` | {repo} · {task}, {state} |  |
+| `home.card.team.ask` | task {taskId} · {summary} |  |
+| `home.card.team.moreRequests` | +{n} more |  |
+
+As built in 0.4.0 (`hub/web/src/screens/home/Home.jsx`, M4 Task 15): the four `home.calm.meeting.*` strings of `HOME_COPY` are in the table above verbatim (checked for 0.4.0 with a script that reads `HOME_COPY` and looks for each string in this deck). "Last meeting" is the newest `synthesized` meeting that started on the local day, read from `GET /api/meetings` (from disk, so it loads with scribed down), with its first action item that is not dismissed; "Launch as session" opens `/new?task=` with the raw item text. The title and the item text render through `titleText` inside `<bdi>` with `lang="pt-BR"` (M4-T17-F2, fixed by M4 Task 19). Without a synthesized meeting today the section says "No meetings today.".
+
+As built in M3: every M3 string of `HOME_COPY`, `CARD_COPY` and `COMPACT_COPY` is in the table above; the session archive strings (`home.archive.*`, `home.archived.*`, `archive.toast.*`, `home.card.archive`) belong to the session archive ([archive.md](../archive.md)), which quotes some of them and is outside this copy deck. The rule-added toast's Undo revokes with `?undo=1`, so the server records it as an undo. After a Deny, a Home card does not offer the 30 s "Tell Claude what to do instead" field; the drawer does (the M3 plan did not ask for it on cards).
 
 ## 10. Acceptance criteria
 
@@ -515,3 +539,7 @@ Fixtures are defined in [README.md](README.md) section 4.
 11. Running pill background and every raw value follow tokens (design-system 14).
 12. Crowded mode (QuietStrip) is new; the canvas only drew the 9-session case.
 13. Research card intro sentence becomes a template with the topic; stats hidden until SM-O15.
+
+## Prepared 0.5.0 implementation
+
+Calm Home lists daily captures and unresolved misses. A positive recap chart count and learned session chips are shown; zero and unknown chart counts are omitted.

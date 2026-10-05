@@ -1,0 +1,135 @@
+/* Focus with the live terminal (docs/deck/screens/focus.md 3, 4.2, 4.3, M2). Builds on the read-only Focus
+   rules in observe.css. Imported once from main.jsx; screens never import CSS. */
+
+.focus--panel-hidden {
+  grid-template-columns: var(--layout-list) minmax(0, 1fr);
+}
+.focus--panel-hidden .focus-details { display: none; }
+
+.focus-list { overflow-y: auto; }
+.focus-launch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  margin-top: auto;
+}
+
+.focus-header { flex-wrap: wrap; }
+.focus-input {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-2) var(--space-10);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  font: var(--type-pill);
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  white-space: nowrap;
+}
+.focus-collision {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-2) var(--space-10);
+  border: 1px solid var(--state-stale-border);
+  border-radius: var(--radius-pill);
+  font: var(--type-pill);
+  color: var(--state-stale-fg);
+  background: var(--state-stale-bg);
+  white-space: nowrap;
+}
+.focus-leave-hint { font: var(--type-meta); color: var(--text-muted); }
+.focus-actions .kbd { margin-left: var(--space-6); }
+.focus-reason { margin: 0; font: var(--type-body-sm); color: var(--text-muted); }
+
+.focus-banner { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
+.focus-banner--error {
+  background: var(--state-crashed-bg);
+  border: 1px solid var(--state-crashed-border);
+  color: var(--state-crashed-fg);
+}
+.focus-banner-text { flex: 1; min-width: 0; }
+.focus-banner-actions { display: flex; gap: var(--space-8); }
+
+.focus-terminal {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.focus-main { min-height: 0; }
+
+.focus-files { max-height: 40%; overflow-y: auto; }
+.focus-files:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.focus-file { cursor: default; padding: var(--space-2) var(--space-6); border-radius: var(--radius-sm); }
+.focus-file[aria-selected="true"] { background: var(--bg-selected); color: var(--text-strong); }
+
+/* PromptBar (components.md 41, focus.md 4.3): the Banner `approval` mirror of the on-screen prompt. Buttons,
+   checkbox, reply field and delivery lines reuse the AnswerControls rules in answers.css. */
+.prompt-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-10) var(--space-24);
+  border-top: 1px solid var(--color-amber-750);
+  background: var(--color-amber-900);
+}
+.prompt-bar--destructive { border-top-color: var(--state-crashed-border); }
+.prompt-bar-head { display: flex; align-items: center; gap: var(--space-12); min-width: 0; }
+.prompt-bar-summary { flex: 1; min-width: 0; margin: 0; overflow-x: auto; white-space: pre; font: var(--type-mono); color: var(--text-strong); }
+p.prompt-bar-summary { white-space: normal; font: var(--type-body); }
+.prompt-bar-note { margin: 0; font: var(--type-meta); color: var(--text-muted); }
+.prompt-option { max-width: 100%; overflow-wrap: anywhere; text-align: start; }
+.prompt-digit { margin-inline-end: var(--space-2); }
+
+/* DiffView (components.md 40), unified: the panel is narrower than 720 px. */
+.diff-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  min-height: 0;
+  margin: var(--space-12) 0 0;
+  padding: var(--space-10) 0;
+  border-radius: var(--radius-md);
+  background: var(--bg-sunken);
+}
+.diff-caption { padding: 0 var(--space-12); font: var(--type-body-sm); color: var(--text-muted); overflow-wrap: anywhere; }
+.diff-lines { margin: 0; overflow-x: auto; font: var(--type-mono); }
+.diff-line { display: block; padding: 0 var(--space-12); white-space: pre; color: var(--text-default); }
+.diff-line--meta,
+.diff-line--hunk { color: var(--text-muted); }
+.diff-line--add { color: var(--text-diff-add); background: var(--tier-safe-bg); }
+.diff-line--del { color: var(--text-diff-del); background: var(--tier-destructive-bg); }
+.diff-note { margin: 0; padding: 0 var(--space-12); font: var(--type-body-sm); color: var(--text-muted); }
+.diff-note--error { color: var(--state-crashed-fg); }
+.diff-view--error .button { align-self: flex-start; margin: 0 var(--space-12); }
+.diff-skeleton { height: var(--space-14); margin: 0 var(--space-12); border-radius: var(--radius-sm); }
+
+/* 1280 px (design-system 8.3): the list is 72 px of avatars and Alt digits, names stay in aria-label, and the
+   details panel becomes an overlay drawer that Alt I opens. */
+@media (max-width: 1280px) {
+  .focus-screen,
+  .focus--panel-hidden {
+    grid-template-columns: var(--layout-rail-collapsed-list) minmax(0, 1fr);
+  }
+  .focus-list-text,
+  .focus-back .kbd,
+  .focus-launch-text { display: none; }
+  .focus-details { display: none; }
+  .focus--drawer-open .focus-details,
+  .focus--drawer-open.focus--panel-hidden .focus-details {
+    display: flex;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--layout-panel-sm);
+    max-width: 100%;
+    z-index: var(--z-drawer);
+    box-shadow: var(--shadow-drawer);
+  }
+}

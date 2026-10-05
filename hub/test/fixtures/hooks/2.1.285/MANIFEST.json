@@ -1,0 +1,147 @@
+{
+  "claudeVersion": "2.1.285 (Claude Code)",
+  "version": "2.1.285",
+  "capturedAt": "2026-10-02T22:15:16.052Z",
+  "scriptVersion": "0.2.0",
+  "os": "Linux 7.2.5-3-omarchy x64",
+  "node": "v26.7.0",
+  "size": {
+    "cols": 120,
+    "rows": 40
+  },
+  "redactions": [
+    "throwaway repo path -> /home/you/fixture-repo",
+    "$HOME -> /home/you",
+    "account email (~/.claude.json oauthAccount) -> you@example.com, any case",
+    "account display name -> You, any case",
+    "account organization name -> Example Org, any case",
+    "username -> you, any case",
+    "session ids -> fixed ULIDs",
+    "transcript_path -> /home/you/.claude/projects/fixture/<id>.jsonl",
+    "typed prompts -> \"fixture prompt: <step>\"",
+    "JWTs (eyJ...eyJ...sig) -> REDACTED",
+    "token-like runs (40+ base64, base64url or hex chars with a letter and a digit, / included, matched across escape sequences) -> REDACTED",
+    "by hand: PostCompact compact_summary and SubagentStop last_assistant_message replaced with a placeholder (they quoted the owner instruction files)",
+    "by hand: claude.ai session link id in idle-input.ansi -> REDACTED plus zeros, same length",
+    "by hand: subagent id -> a0000000000000000",
+    "by hand: prompt_id UUIDs (new in 2.1.285) -> fixed 01JQ ids",
+    "by hand: throwaway repo name in scratchpad_dir and the tool-output status line -> you-fixture-repo-0000000, same length"
+  ],
+  "steps": [
+    "startup",
+    "bash-1",
+    "bash-2",
+    "bash-3",
+    "edit",
+    "write",
+    "webfetch",
+    "bash-long",
+    "ask",
+    "question",
+    "compact",
+    "clear",
+    "exit"
+  ],
+  "skipped": [
+    {
+      "step": "bash-2",
+      "reason": "no PostToolUse(Bash)"
+    },
+    {
+      "step": "bash-3",
+      "reason": "no PreToolUse(Bash)"
+    }
+  ],
+  "hooks": [
+    "Notification.idle_prompt.json",
+    "Notification.permission_prompt.json",
+    "PermissionRequest.AskUserQuestion.json",
+    "PermissionRequest.Bash.json",
+    "PermissionRequest.Edit.json",
+    "PermissionRequest.WebFetch.json",
+    "PermissionRequest.Write.json",
+    "PostCompact.json",
+    "PostToolUse.AskUserQuestion.json",
+    "PostToolUse.Bash.json",
+    "PostToolUse.Edit.json",
+    "PostToolUse.Read.json",
+    "PostToolUse.WebFetch.json",
+    "PostToolUse.Write.json",
+    "PreCompact.json",
+    "PreToolUse.AskUserQuestion.json",
+    "PreToolUse.Bash.json",
+    "PreToolUse.Edit.json",
+    "PreToolUse.Read.json",
+    "PreToolUse.WebFetch.json",
+    "PreToolUse.Write.json",
+    "SessionEnd.clear.json",
+    "SessionEnd.prompt_input_exit.json",
+    "SessionStart.clear.json",
+    "SessionStart.compact.json",
+    "SessionStart.startup.json",
+    "Stop.json",
+    "SubagentStop.json",
+    "UserPromptSubmit.json",
+    "sequence.approve-safe.jsonl"
+  ],
+  "frames": {
+    "trust-folder": {
+      "bytes": 1927,
+      "placeholders": {}
+    },
+    "idle-input": {
+      "bytes": 2711,
+      "placeholders": {}
+    },
+    "spinner": {
+      "bytes": 3447,
+      "placeholders": {}
+    },
+    "permission-2": {
+      "bytes": 7404,
+      "placeholders": {
+        "cmd": 3
+      }
+    },
+    "tool-output": {
+      "bytes": 5706,
+      "placeholders": {}
+    },
+    "permission-edit": {
+      "bytes": 20671,
+      "placeholders": {}
+    },
+    "permission-write": {
+      "bytes": 7056,
+      "placeholders": {}
+    },
+    "permission-webfetch": {
+      "bytes": 8193,
+      "placeholders": {}
+    },
+    "permission-bash-long": {
+      "bytes": 11058,
+      "placeholders": {
+        "cmd": 0
+      }
+    },
+    "question-options": {
+      "bytes": 5341,
+      "placeholders": {}
+    },
+    "question-text": {
+      "bytes": 2164,
+      "placeholders": {
+        "question": 2
+      }
+    },
+    "compacting": {
+      "bytes": 5661,
+      "placeholders": {}
+    }
+  },
+  "notCopied": [
+    "PreToolUse.ToolSearch.json",
+    "PostToolUse.ToolSearch.json (not in the M3 Task 19 file list)"
+  ]
+}

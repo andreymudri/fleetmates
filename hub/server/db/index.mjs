@@ -3,12 +3,14 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import { listBackups } from './backups.mjs'
 
 const migrationsDir = fileURLToPath(new URL('./migrations/', import.meta.url))
 const migrations = readdirSync(migrationsDir).filter(name => /^\d{4}[-_].+\.sql$/.test(name)).sort()
 const latestVersion = Number(migrations.at(-1)?.slice(0, 4) ?? 0)
 const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
-const ephemeralEvents = new Set(['meeting.transcript', 'ask.delta', 'screen.tail', 'input.source', 'setup.check', 'ui.navigate', 'hb'])
+// Ephemeral events of 05-api 3.4: published without `seq` and never appended to `events`.
+const ephemeralEvents = new Set(['meeting.transcript', 'meeting.recovered', 'ask.delta', 'ask.done', 'ask.error', 'misses.changed', 'screen.tail', 'input.source', 'setup.check', 'ui.navigate', 'hb', 'error'])
 
 function newEpoch(now = Date.now()) {
   let time = BigInt(now)
@@ -36,11 +38,10 @@ function backupBeforeMigration(db, file, version) {
   const previousUmask = process.umask(0o077)
   try { db.prepare('VACUUM INTO ?').run(target) } finally { process.umask(previousUmask) }
   chmodSync(target, 0o600)
-  const backups = readdirSync(dir)
-    .filter(entry => entry.startsWith(`${path.basename(file)}.pre-`) && entry.includes('.bak'))
-    .map(entry => ({ entry, mtime: statSync(path.join(dir, entry)).mtimeMs }))
+  const backups = listBackups(file)
+    .map(file => ({ file, mtime: statSync(file).mtimeMs }))
     .sort((a, b) => b.mtime - a.mtime)
-  for (const old of backups.slice(3)) unlinkSync(path.join(dir, old.entry))
+  for (const old of backups.slice(3)) unlinkSync(old.file)
 }
 
 /** Open the deck database, applying forward migrations before returning a writer. */
@@ -80,6 +81,7 @@ export function openDeckDb(file) {
     db.prepare("INSERT OR IGNORE INTO meta(key,value) VALUES('created_at', ?)").run(String(Date.now()))
     privateFiles(file)
     return {
+      file,
       db,
       run(sql, ...params) { return db.prepare(sql).run(...params) },
       get(sql, ...params) { return db.prepare(sql).get(...params) },

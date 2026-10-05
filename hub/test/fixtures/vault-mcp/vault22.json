@@ -1,0 +1,308 @@
+{
+  "name": "vault22",
+  "description": "The canvas vault (docs/deck/screens/README.md fixture vault22): 22 invented notes and 34 resolved links across nestjs, docker, patterns, concorrencia and projects. Each note is written as a file with a block YAML frontmatter, keys in the order tipo, tags, status, criado, atualizado, one line per key and one per tag, so the body starts on line 3 + keys + tags. The string $TODAY is replaced by the local date of the day the fake runs; an mtime of $TODAY means a note edited today.",
+  "notes": [
+    {
+      "path": "00-index/index-knowledge.md",
+      "mtime": "2026-08-30",
+      "frontmatter": { "tipo": "moc", "tags": ["index"], "status": "ativo", "criado": "2026-06-01", "atualizado": "2026-08-30" },
+      "body": [
+        "# Índice do conhecimento",
+        "",
+        "## Domínios",
+        "",
+        "- [[../02-wiki/nestjs/nestjs-moc|nestjs]] - módulos, filas e guards no NestJS",
+        "- [[../02-wiki/docker/docker-moc|docker]] - imagens, volumes e healthchecks",
+        "- [[../02-wiki/patterns/patterns-moc|patterns]] - padrões de integração e resiliência",
+        "- [[../02-wiki/concorrencia/concorrencia-moc|concorrencia]] - locks, semáforos e timeouts"
+      ]
+    },
+    {
+      "path": "02-wiki/nestjs/nestjs-moc.md",
+      "mtime": "2026-08-26",
+      "frontmatter": { "tipo": "moc", "tags": ["nestjs"], "status": "ativo", "criado": "2026-06-01", "atualizado": "2026-08-26" },
+      "body": [
+        "# NestJS (MOC)",
+        "",
+        "## Notas",
+        "",
+        "- [[bullmq-worker]] - worker de filas com retry",
+        "- [[auth-guard]] - guard de autenticação por token",
+        "- [[e2e-tests]] - testes ponta a ponta com banco efêmero",
+        "- [[config-module]] - configuração validada no boot"
+      ]
+    },
+    {
+      "path": "02-wiki/nestjs/bullmq-worker.md",
+      "mtime": "2026-08-26",
+      "frontmatter": { "tipo": "wiki", "tags": ["nestjs", "filas"], "status": "ativo", "criado": "2026-08-20", "atualizado": "2026-08-26" },
+      "body": [
+        "# BullMQ worker",
+        "Worker que consome a fila de e-mails e valida cada job com [[auth-guard]].",
+        "",
+        "## Retry e backoff",
+        "",
+        "Falhas temporárias voltam para a fila com backoff exponencial de 2 s, 4 s e 8 s, como em [[retry-backoff]].",
+        "Depois de 5 tentativas o job vai para a fila morta e gera um alerta.",
+        "",
+        "## Concorrência",
+        "",
+        "O worker roda com concorrência 4; jobs do mesmo cliente seguram um lock curto."
+      ]
+    },
+    {
+      "path": "02-wiki/nestjs/auth-guard.md",
+      "mtime": "2026-08-12",
+      "frontmatter": { "tipo": "wiki", "tags": ["nestjs", "auth", "guards"], "status": "ativo", "criado": "2026-07-15", "atualizado": "2026-08-12" },
+      "body": [
+        "# Auth guard",
+        "Guard global que valida o token antes de qualquer handler, inclusive dos jobs reenfileirados.",
+        "",
+        "## Rotas públicas",
+        "",
+        "Rotas marcadas com o decorator Public pulam a validação."
+      ]
+    },
+    {
+      "path": "02-wiki/nestjs/e2e-tests.md",
+      "mtime": "2026-08-02",
+      "frontmatter": { "tipo": "wiki", "tags": ["nestjs", "testes"], "status": "ativo", "criado": "2026-07-28", "atualizado": "2026-08-02" },
+      "body": [
+        "# Testes e2e",
+        "Sobem a aplicação inteira com um banco efêmero e esvaziam a fila do [[bullmq-worker]] entre os casos.",
+        "",
+        "## Isolamento",
+        "",
+        "Cada arquivo de teste usa um schema próprio."
+      ]
+    },
+    {
+      "path": "02-wiki/nestjs/config-module.md",
+      "mtime": "2026-07-10",
+      "frontmatter": { "tipo": "wiki", "tags": ["nestjs", "config"], "status": "ativo", "criado": "2026-07-10", "atualizado": "2026-07-10" },
+      "body": [
+        "# Config module",
+        "Valida as variáveis de ambiente no boot e falha cedo quando falta alguma.",
+        "",
+        "## Esquema",
+        "",
+        "O esquema fica num arquivo só, compartilhado com os testes."
+      ]
+    },
+    {
+      "path": "02-wiki/docker/docker-moc.md",
+      "mtime": "2026-08-18",
+      "frontmatter": { "tipo": "moc", "tags": ["docker"], "status": "ativo", "criado": "2026-06-01", "atualizado": "2026-08-18" },
+      "body": [
+        "# Docker (MOC)",
+        "",
+        "## Notas",
+        "",
+        "- [[healthcheck-compose]] - healthcheck que espera a dependência de verdade",
+        "- [[multi-stage-build]] - imagem final sem ferramentas de build",
+        "- [[volumes-permissoes]] - dono dos arquivos em volumes montados"
+      ]
+    },
+    {
+      "path": "02-wiki/docker/healthcheck-compose.md",
+      "mtime": "$TODAY",
+      "frontmatter": { "tipo": "wiki", "tags": ["docker", "compose"], "status": "ativo", "criado": "$TODAY", "atualizado": "$TODAY" },
+      "body": [
+        "# Healthcheck no compose",
+        "O serviço só sobe depois que o banco responde ao healthcheck, não quando o contêiner inicia.",
+        "",
+        "## Condição de espera",
+        "",
+        "Use depends_on com condition service_healthy; a imagem vem do [[multi-stage-build]]."
+      ]
+    },
+    {
+      "path": "02-wiki/docker/multi-stage-build.md",
+      "mtime": "2026-07-22",
+      "frontmatter": { "tipo": "wiki", "tags": ["docker", "build"], "status": "ativo", "criado": "2026-07-22", "atualizado": "2026-07-22" },
+      "body": [
+        "# Multi-stage build",
+        "A primeira etapa compila, a segunda copia só o resultado para uma imagem enxuta.",
+        "",
+        "## Cache de dependências",
+        "",
+        "Copie o lockfile antes do código para reaproveitar a camada de dependências."
+      ]
+    },
+    {
+      "path": "02-wiki/docker/volumes-permissoes.md",
+      "mtime": "2026-07-30",
+      "frontmatter": { "tipo": "wiki", "tags": ["docker", "volumes"], "status": "rascunho", "criado": "2026-07-30", "atualizado": "2026-07-30" },
+      "body": [
+        "# Volumes e permissões",
+        "Arquivos criados pelo contêiner num volume montado ficam com o uid do processo do contêiner.",
+        "",
+        "## Correção",
+        "",
+        "Rode o processo com o mesmo uid do host ou ajuste o dono na entrada."
+      ]
+    },
+    {
+      "path": "02-wiki/patterns/patterns-moc.md",
+      "mtime": "2026-08-22",
+      "frontmatter": { "tipo": "moc", "tags": ["patterns"], "status": "ativo", "criado": "2026-06-01", "atualizado": "2026-08-22" },
+      "body": [
+        "# Patterns (MOC)",
+        "",
+        "## Notas",
+        "",
+        "- [[outbox]] - eventos gravados na mesma transação",
+        "- [[retry-backoff]] - novas tentativas com espera crescente",
+        "- [[idempotencia]] - repetir sem efeito duplicado"
+      ]
+    },
+    {
+      "path": "02-wiki/patterns/outbox.md",
+      "mtime": "2026-08-22",
+      "frontmatter": { "tipo": "wiki", "tags": ["patterns", "eventos"], "status": "ativo", "criado": "2026-08-01", "atualizado": "2026-08-22" },
+      "body": [
+        "# Outbox",
+        "O evento é gravado na mesma transação do dado e publicado depois pelo [[bullmq-worker]].",
+        "",
+        "## Entrega",
+        "",
+        "A entrega é pelo menos uma vez, então o consumidor precisa de [[idempotencia]]."
+      ]
+    },
+    {
+      "path": "02-wiki/patterns/retry-backoff.md",
+      "mtime": "$TODAY",
+      "frontmatter": { "tipo": "wiki", "tags": ["patterns", "resiliencia"], "status": "ativo", "criado": "2026-07-02", "atualizado": "$TODAY" },
+      "body": [
+        "# Retry e backoff",
+        "Repetir uma operação que falhou esperando cada vez mais entre as tentativas.",
+        "",
+        "## Jitter",
+        "",
+        "Some um atraso aleatório pequeno para que clientes não tentem todos ao mesmo tempo.",
+        "",
+        "## Limites",
+        "",
+        "Só repita operações com [[idempotencia]] e respeite o [[timeout-de-fila]]."
+      ]
+    },
+    {
+      "path": "02-wiki/patterns/idempotencia.md",
+      "mtime": "2026-08-05",
+      "frontmatter": { "tipo": "wiki", "tags": ["patterns"], "status": "ativo", "criado": "2026-08-05", "atualizado": "2026-08-05" },
+      "body": [
+        "# Idempotência",
+        "Processar a mesma mensagem duas vezes deixa o sistema no mesmo estado.",
+        "",
+        "## Chave de deduplicação",
+        "",
+        "Guarde a chave da mensagem com um lock curto, como em [[locks-redis]]."
+      ]
+    },
+    {
+      "path": "02-wiki/concorrencia/concorrencia-moc.md",
+      "mtime": "2026-08-14",
+      "frontmatter": { "tipo": "moc", "tags": ["concorrencia"], "status": "ativo", "criado": "2026-06-01", "atualizado": "2026-08-14" },
+      "body": [
+        "# Concorrência (MOC)",
+        "",
+        "## Notas",
+        "",
+        "- [[locks-redis]] - lock distribuído com expiração",
+        "- [[timeout-de-fila]] - quanto tempo um job pode segurar a fila",
+        "- [[semaforo]] - limite de execuções simultâneas"
+      ]
+    },
+    {
+      "path": "02-wiki/concorrencia/locks-redis.md",
+      "mtime": "2026-08-14",
+      "frontmatter": { "tipo": "wiki", "tags": ["concorrencia", "redis"], "status": "ativo", "criado": "2026-08-10", "atualizado": "2026-08-14" },
+      "body": [
+        "# Locks no Redis",
+        "SET com NX e PX cria um lock que expira sozinho se o dono morrer.",
+        "",
+        "## Liberação",
+        "",
+        "Libere só se o valor ainda for o seu; para limitar o total use um [[semaforo]]."
+      ]
+    },
+    {
+      "path": "02-wiki/concorrencia/timeout-de-fila.md",
+      "mtime": "2026-08-14",
+      "frontmatter": { "tipo": "wiki", "tags": ["concorrencia", "filas"], "status": "ativo", "criado": "2026-08-11", "atualizado": "2026-08-14" },
+      "body": [
+        "# Timeout de fila",
+        "Um job que passa do tempo limite é considerado travado e volta para a fila.",
+        "",
+        "## Relação com retry",
+        "",
+        "O timeout conta como falha e entra no [[retry-backoff]] como qualquer outra."
+      ]
+    },
+    {
+      "path": "02-wiki/concorrencia/semaforo.md",
+      "mtime": "2026-08-14",
+      "frontmatter": { "tipo": "wiki", "tags": ["concorrencia"], "status": "rascunho", "criado": "2026-08-14", "atualizado": "2026-08-14" },
+      "body": [
+        "# Semáforo",
+        "Limita quantas execuções rodam ao mesmo tempo; substitui o antigo [[mutex-antigo]].",
+        "",
+        "## Contador",
+        "",
+        "O contador vive no Redis e cada vaga tem expiração."
+      ]
+    },
+    {
+      "path": "03-projects/fila-emails/fila-emails.md",
+      "mtime": "2026-08-27",
+      "frontmatter": { "tipo": "projeto", "tags": ["projeto", "filas"], "status": "ativo", "criado": "2026-08-15", "atualizado": "2026-08-27" },
+      "body": [
+        "# Fila de e-mails",
+        "Projeto que tira o envio de e-mails do caminho da requisição.",
+        "",
+        "## Decisões técnicas",
+        "",
+        "Novas tentativas seguem [[retry-backoff]] e os eventos saem pelo [[outbox]]."
+      ]
+    },
+    {
+      "path": "03-projects/fila-emails/decisoes.md",
+      "mtime": "2026-08-27",
+      "frontmatter": { "tipo": "projeto", "tags": ["projeto", "decisao"], "status": "ativo", "criado": "2026-08-16", "atualizado": "2026-08-27" },
+      "body": [
+        "# Decisões da fila de e-mails",
+        "Registro das escolhas do projeto [[fila-emails]].",
+        "",
+        "## Provedor",
+        "",
+        "O provedor de envio fica atrás de uma interface para trocar sem mexer no worker."
+      ]
+    },
+    {
+      "path": "03-projects/painel-ops/painel-ops.md",
+      "mtime": "2026-08-08",
+      "frontmatter": { "tipo": "projeto", "tags": ["projeto", "ops"], "status": "pausado", "criado": "2026-08-08", "atualizado": "2026-08-08" },
+      "body": [
+        "# Painel de operações",
+        "Painel interno que mostra o estado dos contêineres e usa o [[healthcheck-compose]] como fonte.",
+        "",
+        "## Próximos passos",
+        "",
+        "Mostrar o tamanho das filas por serviço."
+      ]
+    },
+    {
+      "path": "04-daily/$TODAY.md",
+      "mtime": "$TODAY",
+      "frontmatter": { "tipo": "daily", "tags": ["daily"], "status": "ativo", "criado": "$TODAY", "atualizado": "$TODAY" },
+      "body": [
+        "# $TODAY",
+        "",
+        "## Capturas",
+        "",
+        "- 09:12 [[healthcheck-compose]] (aprendizado)",
+        "- 10:40 [[retry-backoff]] (pattern, fila-emails)"
+      ]
+    }
+  ]
+}

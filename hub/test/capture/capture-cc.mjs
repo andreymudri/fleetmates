@@ -14,25 +14,70 @@ import readline from 'node:readline/promises'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
-const SCRIPT_VERSION = '0.1.0'
+const SCRIPT_VERSION = '0.2.0'
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const captureHook = path.join(hubDir, 'test', 'capture', 'capture-hook.mjs')
 
 /** Events from docs/deck/04-integrations.md section 2.1. */
-const EVENTS = [
+export const EVENTS = [
   'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse',
   'PostToolUseFailure', 'PermissionRequest', 'PermissionDenied', 'Notification', 'Stop',
   'SubagentStart', 'SubagentStop', 'CwdChanged', 'PreCompact', 'PostCompact',
   'WorktreeCreate', 'WorktreeRemove'
 ]
 
-const CMD = 'echo capture-ok'
+/** The tools every capture step must prompt for, whatever the owner's settings allow. */
+export const ASK_TOOLS = ['Bash', 'Edit', 'Write', 'WebFetch']
+
+/**
+ * The throwaway repo's `.claude/settings.local.json`: the capture hook for every event, and an
+ * `ask` rule for each tool a step uses, so each step shows a permission prompt even when the
+ * command would otherwise be allowed. The bash-2 step restores exactly this text after option 2
+ * adds a rule.
+ * @param {string} hookCommand shell command that runs capture-hook.mjs
+ * @returns {string}
+ */
+export function captureSettings (hookCommand) {
+  return JSON.stringify({
+    permissions: { ask: [...ASK_TOOLS] },
+    hooks: Object.fromEntries(EVENTS.map(e => [e, [{ hooks: [{ type: 'command', command: hookCommand, timeout: 10 }] }]]))
+  }, null, 2) + '\n'
+}
+
+/** The one-test file committed in the throwaway repo, which the Bash steps run. */
+export const CAPTURE_TEST = `import { test } from 'node:test'\n\ntest('capture', () => {})\n`
+
+/** The Bash command of the bash steps; the deck has a Safe rule candidate for it, `Bash(node --test:*)`. */
+export const CMD = 'node --test capture.test.mjs'
+/** A Bash command longer than one 120-column row, to see how the prompt wraps or truncates it. */
+export const LONG_CMD = `node --test --test-name-pattern="${'abcdefghijklmnopqrstuvwxyz'.repeat(8).slice(0, 200)}" capture.test.mjs`
 const QUESTION = 'Should I paginate or truncate?'
-const PROMPTS = {
+export const PROMPTS = {
   bash: `Run this exact Bash command with the Bash tool and nothing else: ${CMD}`,
+  'bash-long': `Run this exact Bash command with the Bash tool and nothing else: ${LONG_CMD}`,
   edit: 'Use the Edit tool to append a line saying capture-edit to notes.txt. Do nothing else.',
+  write: 'Use the Write tool to create capture-write.txt containing capture. Do nothing else.',
+  webfetch: 'Use the WebFetch tool to fetch https://example.com and reply with its title only.',
   ask: 'Use the AskUserQuestion tool to ask me to pick A or B',
   question: `Do not use any tool. Reply with only this sentence: ${QUESTION}`
+}
+
+/** The capture steps, in the order main() runs them. */
+export const STEP_ORDER = [
+  'startup', 'bash-1', 'bash-2', 'bash-3', 'edit', 'write', 'webfetch', 'bash-long',
+  'ask', 'question', 'compact', 'clear', 'exit'
+]
+
+/**
+ * The `permissions` object of a settings file, redacted, as saved to `option2-rule.json`:
+ * the rule form that answering option 2 ("don't ask again") writes. Hooks and every other
+ * key are left out.
+ * @param {string} settingsText the settings file content
+ * @param {(v: any) => any} redactValue
+ * @returns {Record<string, any>}
+ */
+export function option2Rule (settingsText, redactValue) {
+  return redactValue(JSON.parse(settingsText).permissions ?? {})
 }
 
 // Redaction (docs/deck/09-testing.md section 4).
@@ -310,16 +355,15 @@ async function main () {
     const hooksLog = path.join(raw, 'hooks.jsonl')
     const shq = (/** @type {string} */ s) => `'${s.replaceAll("'", "'\\''")}'`
     const hookCommand = `CAPTURE_OUT=${shq(raw)} ${shq(process.execPath)} ${shq(captureHook)}`
-    const settingsLocal = JSON.stringify({
-      hooks: Object.fromEntries(EVENTS.map(e => [e, [{ hooks: [{ type: 'command', command: hookCommand, timeout: 10 }] }]]))
-    }, null, 2) + '\n'
+    const settingsLocal = captureSettings(hookCommand)
     await mkdir(path.join(repo, '.claude'))
     await writeFile(path.join(repo, '.claude', 'settings.local.json'), settingsLocal)
     await writeFile(path.join(repo, 'README.md'), '# capture fixture repo\n\nThrowaway repo for deck fixture capture.\n')
     await writeFile(path.join(repo, 'notes.txt'), 'first line\n')
+    await writeFile(path.join(repo, 'capture.test.mjs'), CAPTURE_TEST)
     const git = (/** @type {string[]} */ ...a) => execFileSync('git', ['-c', 'user.name=capture', '-c', 'user.email=capture@example.invalid', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', ...a], { cwd: repo, stdio: 'ignore' })
     git('init', '-q')
-    git('add', 'README.md', 'notes.txt')
+    git('add', 'README.md', 'notes.txt', 'capture.test.mjs')
     git('commit', '-qm', 'init')
 
     // Step 2: the real claude in node-pty at a fixed size, with a headless terminal attached.
@@ -398,7 +442,7 @@ async function main () {
       child.write('\r')
     }
 
-    const { redactText, redactPayload, ulidFor } = createRedactor({ repo, home: os.homedir(), user: os.userInfo().username, prompts: PROMPTS, account: await readAccount(os.homedir()) })
+    const { redactText, redactValue, redactPayload, ulidFor } = createRedactor({ repo, home: os.homedir(), user: os.userInfo().username, prompts: PROMPTS, account: await readAccount(os.homedir()) })
 
     // Frames.
     const screensDir = path.join(opts.out, 'screens', version)
@@ -482,13 +526,15 @@ async function main () {
     }
 
     /**
-     * Submit a prompt that runs `echo capture-ok` and answer the permission prompt with `key`.
-     * @param {string} key
+     * Submit a prompt that runs one Bash command and answer its permission prompt with `key`.
+     * Answered `3` (No), the step waits for PermissionDenied when `denied` is set, else for quiet.
+     * @param {{ key: string, cmd: string, prompt: string, frame?: string, denied?: boolean }} o
+     *   frame: the frame name to save, else permission-bash-3 or permission-2 by the option count
      */
-    async function bashStep (key) {
+    async function bashStep ({ key, cmd, prompt, frame, denied = false }) {
       const from = idleMark
       const h = (await readHooks()).length
-      await typePrompt(PROMPTS.bash)
+      await typePrompt(prompt)
       const pre = await waitHook(h, p => p.hook_event_name === 'PreToolUse' && p.tool_name === 'Bash')
       if (!pre) return 'no PreToolUse(Bash)'
       await saveFrame('spinner', from)
@@ -496,11 +542,13 @@ async function main () {
       if (!perm) return 'no PermissionRequest(Bash); was the command already allowed?'
       await waitQuiet(1000)
       const n = visibleOptions()
-      if (n === 3) await saveFrame('permission-bash-3', from, { cmd: CMD })
-      else if (n === 2) await saveFrame('permission-2', from, { cmd: CMD })
+      if (frame) await saveFrame(frame, from, { cmd })
+      else if (n === 3) await saveFrame('permission-bash-3', from, { cmd })
+      else if (n === 2) await saveFrame('permission-2', from, { cmd })
       const answerMark = mark()
       child.write(key)
       if (key === '3') {
+        if (denied && !await waitHook(h, p => p.hook_event_name === 'PermissionDenied' && p.tool_name === 'Bash')) return 'no PermissionDenied(Bash)'
         await waitQuiet(2000)
       } else {
         if (!await waitHook(h, p => p.hook_event_name === 'PostToolUse' && p.tool_name === 'Bash')) return 'no PostToolUse(Bash)'
@@ -513,8 +561,32 @@ async function main () {
       return true
     }
 
+    /**
+     * Submit a prompt that uses one tool, save its permission prompt as `frame`, answer `1`
+     * and wait for Stop.
+     * @param {string} prompt
+     * @param {RegExp} tool matches the PermissionRequest tool_name
+     * @param {string} frame
+     */
+    async function toolStep (prompt, tool, frame) {
+      const from = idleMark
+      const h = (await readHooks()).length
+      await typePrompt(prompt)
+      const perm = await waitHook(h, p => p.hook_event_name === 'PermissionRequest' && tool.test(p.tool_name))
+      if (!perm) return `no PermissionRequest(${tool.source})`
+      await waitQuiet(1000)
+      await saveFrame(frame, from)
+      child.write('1')
+      if (!await waitHook(h, p => p.hook_event_name === 'Stop')) return 'no Stop'
+      await waitQuiet(1500)
+      idleMark = mark()
+      return true
+    }
+
+    /** @type {Record<string, () => Promise<string | true>>} */
+    const runners = {}
     // Startup: trust dialog if any, then the idle input box.
-    await step('startup', async () => {
+    runners.startup = async () => {
       const h = (await readHooks()).length
       await waitQuiet(2000)
       if (/trust (this|the files in this) folder/i.test(screenText())) {
@@ -532,31 +604,28 @@ async function main () {
       await saveFrame('idle-input', idleMark)
       idleMark = mark()
       return true
-    })
-    await step('bash-1', () => bashStep('1'))
-    await step('bash-2', async () => {
-      const r = await bashStep('2')
-      // "Yes, and don't ask again" writes a rule; restore the hooks-only settings so bash-3 prompts.
-      await writeFile(path.join(repo, '.claude', 'settings.local.json'), settingsLocal)
+    }
+    runners['bash-1'] = () => bashStep({ key: '1', cmd: CMD, prompt: PROMPTS.bash })
+    runners['bash-2'] = async () => {
+      const r = await bashStep({ key: '2', cmd: CMD, prompt: PROMPTS.bash })
+      // "Yes, and don't ask again" writes a rule. Save the rule form it wrote, then restore the
+      // capture settings so the later Bash steps prompt again.
+      const settingsPath = path.join(repo, '.claude', 'settings.local.json')
+      if (r === true) {
+        await mkdir(hooksDir, { recursive: true })
+        await writeFile(path.join(hooksDir, 'option2-rule.json'), JSON.stringify(option2Rule(await readFile(settingsPath, 'utf8'), redactValue), null, 2) + '\n')
+        log('option 2 rule saved to option2-rule.json')
+      }
+      await writeFile(settingsPath, settingsLocal)
       await sleep(1000)
       return r
-    })
-    await step('bash-3', () => bashStep('3'))
-    await step('edit', async () => {
-      const from = idleMark
-      const h = (await readHooks()).length
-      await typePrompt(PROMPTS.edit)
-      const perm = await waitHook(h, p => p.hook_event_name === 'PermissionRequest' && /^(Edit|Write|MultiEdit)$/.test(p.tool_name))
-      if (!perm) return 'no PermissionRequest(Edit)'
-      await waitQuiet(1000)
-      await saveFrame('permission-edit', from)
-      child.write('1')
-      if (!await waitHook(h, p => p.hook_event_name === 'Stop')) return 'no Stop'
-      await waitQuiet(1500)
-      idleMark = mark()
-      return true
-    })
-    await step('ask', async () => {
+    }
+    runners['bash-3'] = () => bashStep({ key: '3', cmd: CMD, prompt: PROMPTS.bash, denied: true })
+    runners.edit = () => toolStep(PROMPTS.edit, /^(Edit|Write|MultiEdit)$/, 'permission-edit')
+    runners.write = () => toolStep(PROMPTS.write, /^Write$/, 'permission-write')
+    runners.webfetch = () => toolStep(PROMPTS.webfetch, /^WebFetch$/, 'permission-webfetch')
+    runners['bash-long'] = () => bashStep({ key: '3', cmd: LONG_CMD, prompt: PROMPTS['bash-long'], frame: 'permission-bash-long' })
+    runners.ask = async () => {
       const from = idleMark
       const h = (await readHooks()).length
       await typePrompt(PROMPTS.ask)
@@ -571,8 +640,8 @@ async function main () {
       await waitQuiet(1500)
       idleMark = mark()
       return true
-    })
-    await step('question', async () => {
+    }
+    runners.question = async () => {
       const from = idleMark
       const h = (await readHooks()).length
       await typePrompt(PROMPTS.question)
@@ -581,8 +650,8 @@ async function main () {
       await saveFrame('question-text', from, { question: QUESTION })
       idleMark = mark()
       return true
-    })
-    await step('compact', async () => {
+    }
+    runners.compact = async () => {
       const from = idleMark
       const h = (await readHooks()).length
       await typePrompt('/compact')
@@ -593,20 +662,23 @@ async function main () {
       await waitQuiet(2000)
       idleMark = mark()
       return true
-    })
-    await step('clear', async () => {
+    }
+    runners.clear = async () => {
       const h = (await readHooks()).length
       await typePrompt('/clear')
       if (!await waitHook(h, p => p.hook_event_name === 'SessionStart' && p.source === 'clear')) return 'no SessionStart(clear)'
       await waitQuiet(1500)
       idleMark = mark()
       return true
-    })
-    await step('exit', async () => {
+    }
+    runners.exit = async () => {
       await typePrompt('/exit')
       const done = await Promise.race([exitPromise.then(() => true), sleep(30000).then(() => false)])
       return done ? true : 'claude did not exit after /exit'
-    })
+    }
+    const unmatched = [...STEP_ORDER.filter(n => !runners[n]), ...Object.keys(runners).filter(n => !STEP_ORDER.includes(n))]
+    if (unmatched.length) throw new Error(`STEP_ORDER and the step runners disagree on: ${unmatched.join(', ')}`)
+    for (const name of STEP_ORDER) await step(name, runners[name])
     if (!exited) {
       child.kill('SIGTERM')
       await Promise.race([exitPromise, sleep(5000)])
@@ -648,6 +720,7 @@ async function main () {
         seq.map(h => JSON.stringify({ hookTs: h.receivedAt, payload: redactPayload(h.payload) })).join('\n') + (seq.length ? '\n' : ''))
       written.push('sequence.approve-safe.jsonl')
     }
+    if (existsSync(path.join(hooksDir, 'option2-rule.json'))) written.push('option2-rule.json')
     const manifest = {
       claudeVersion: versionOutput,
       version,
@@ -657,6 +730,7 @@ async function main () {
       node: process.version,
       size: { cols, rows },
       redactions: REDACTIONS,
+      steps: STEP_ORDER,
       skipped,
       hooks: written.sort(),
       frames

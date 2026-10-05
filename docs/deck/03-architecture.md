@@ -73,7 +73,7 @@ Purpose: sessions survive a crash or restart of the web server, and of the brows
 ### 2.3 deck-hook (hook command)
 
 - A tiny Node script installed by `fleetmates-deck init` (name pending Q1) as an **async** command hook for every event the deck uses (list in [04-integrations.md](04-integrations.md) section 2). Async hooks never block Claude Code (Decided intent: observation must never slow or alter a session).
-- Reads the JSON payload from stdin, adds an envelope (receive time, `FLEETMATES_DECK_PTY` if set, parent pid chain for observed sessions, hook script version), writes one JSON line to `hooks.sock`, exits 0. Hard budget: 200 ms. On any failure it appends the line to a spool file `~/.local/state/fleetmates/deck/spool/hooks-<yyyymmdd>.jsonl` and exits 0. The web server drains the spool on start.
+- Reads the JSON payload from stdin, adds an envelope (receive time, `FLEETMATES_DECK_PTY` if set, parent pid chain for observed sessions, hook script version), writes one JSON line to `hooks.sock`, exits 0. Hard budget: 200 ms for the hook's own run, from module load to exit; Node's interpreter boot before it is not counted (owner decision 2026-10-02, D-70), and `hub/test/contract/hooks.test.mjs` measures that span for a hook that finishes quickly. An in-script 200 ms exit timer bounds a hook that stalls; no test pins that timer at 200 ms yet (m2-exit section 11.2). On any failure it appends the line to a spool file `~/.local/state/fleetmates/deck/spool/hooks-<yyyymmdd>.jsonl` and exits 0. The web server drains the spool on start.
 - Must never print to stdout (for `SessionStart` and `UserPromptSubmit`, stdout is added to Claude's context).
 
 ### 2.4 fm CLI
@@ -81,7 +81,7 @@ Purpose: sessions survive a crash or restart of the web server, and of the brows
 - `fm claude [claude args...]`: asks deckd to spawn `claude` with those args in the current directory and environment, then attaches the current terminal to the PTY (raw mode, resize forwarding). Exit behaviour (Proposed): closing the terminal detaches; the session keeps running in deckd and remains controllable from the browser. `Ctrl ]` then `d` detaches explicitly (like telnet escape), `fm attach <id>` reattaches.
 - `fm ls`: list PTY sessions (id, repo, state, attached clients).
 - `fm attach <id|repo>`: attach to an existing PTY.
-- If deckd is not running, `fm claude` prints one line ("deckd is not running, starting plain claude; this session will be observed only") and execs plain `claude` so the user is never blocked. Whether unwrapped sessions may stay read-only and this fallback is acceptable is Q18 in [15-open-questions.md](15-open-questions.md) (default: yes to both).
+- If deckd is not running, `fm claude` prints one line ("deckd is not running, starting plain claude; this session will be observed only") and execs plain `claude` so the user is never blocked. Unwrapped sessions stay read-only and this fallback is **Decided** ([14-decisions.md](14-decisions.md) D-67).
 
 ### 2.5 Browser
 
@@ -199,7 +199,7 @@ deckd keeps running the PTYs. On start, the web server: opens SQLite, drains the
 | Command | Does |
 |---|---|
 | `fleetmates-deck init` (alias `node scripts/cli.mjs deck init`) | Installs hooks into `~/.claude/settings.json` (merging, idempotent, backup first), installs and enables the two systemd user units, creates dirs and the token, runs the first-run checks in the terminal. |
-| `fleetmates-deck open` (alias `node scripts/cli.mjs ui`) | Starts the web server unit if needed and opens `http://127.0.0.1:47800/#token=<token>` in the default browser with `xdg-open`. The SPA moves the token to `sessionStorage` and sends it as `Authorization: Bearer` on HTTP and as a WebSocket subprotocol ([08-security.md](08-security.md)). |
+| `fleetmates-deck open` (alias `node scripts/cli.mjs ui`) | Starts the web server unit if needed and opens `http://127.0.0.1:47800/#token=<token>` in the default web browser through a private bootstrap page (`$BROWSER`, then the `xdg-settings` default web browser, then `xdg-open`; the token stays out of argv). The SPA moves the token to `sessionStorage` and sends it as `Authorization: Bearer` on HTTP and as a WebSocket subprotocol ([08-security.md](08-security.md)). |
 | `fleetmates-deck status` | Services, sockets, hook install state, versions. |
 | `fleetmates-deck doctor` | Runs the same six checks as the First run screen and prints them. |
 | `fleetmates-deck uninstall-hooks` | Removes only the deck's hook entries. |

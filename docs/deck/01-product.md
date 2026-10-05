@@ -98,4 +98,4 @@ Details: [03-architecture.md](03-architecture.md). Every external boundary: [04-
 
 ## Open items
 
-None owned here. The product-level questions are Q1 to Q19 in [15-open-questions.md](15-open-questions.md). Q18 asks whether read-only for sessions started outside `fm claude` is acceptable (principle "Observe everything, control what you own").
+None owned here. The product-level questions are Q1 to Q19 in [15-open-questions.md](15-open-questions.md). Read-only for sessions started outside `fm claude` is **Decided** (D-67 in [14-decisions.md](14-decisions.md), principle "Observe everything, control what you own").

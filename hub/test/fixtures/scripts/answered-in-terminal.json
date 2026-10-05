@@ -1,0 +1,60 @@
+{
+  "comment": "A Safe Bash request on synthetic-permission-bash; the key comes from a terminal client and the fake closes the prompt with PostToolUse and tool-output.",
+  "version": "2.1.285",
+  "sessionId": "auto",
+  "steps": [
+    {
+      "hook": "SessionStart",
+      "with": {
+        "source": "startup"
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run test",
+          "description": "Run the tests"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "synthetic-permission-bash",
+      "vars": {
+        "cmd": "npm run test",
+        "description": "Run the tests"
+      }
+    },
+    {
+      "expectKey": {
+        "1": "yes",
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "hook": "PostToolUse",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run test",
+          "description": "Run the tests"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "tool-output"
+    },
+    {
+      "sleep": 600000
+    }
+  ]
+}

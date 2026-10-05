@@ -1,0 +1,117 @@
+{
+  "about": "UI fixture for the M2 Control end-to-end suites (hub/test/e2e/control.spec.mjs, accessibility.spec.mjs, security.spec.mjs). The harness materialises it under a temporary HOME: every path here uses the /home/you placeholder, which the harness replaces with that HOME. `repos` are git repositories created under ~/dev; the deck gives each one a crew colour slot the first time it sees it, so the eight of them take 8 of the 9 slots and leave slot 8 free (crew-sheet.md AC4). `team` is the canvas run of team-run.md section 10: 9 tasks in 4 phases, Gate 1 PASS recorded at 13:02 local time, phase 2 under way (`derivedPhase` 2 from git, while status.json still says phase 1), and the lead's two permission requests attributed to the T4 and T5 worktrees. `sessions` are the PTY sessions: `wrapped` ones are spawned through deckd as `fm claude` does, `launched` ones go through the New session form; `observed` ones are plain claude sessions fed through the hooks socket. Each `script` is a fake claude script (hub/test/fake-claude/fake-claude.mjs): a fixture name under hub/test/fixtures/scripts or inline steps.",
+  "claudeCodeVersion": "2.1.282",
+  "home": "/home/you",
+  "scanRoot": "/home/you/dev",
+  "repos": ["rustot", "fleetmates", "vault-mcp", "discord-audit", "portfolio-site", "turbidassist", "rustot-client", "axios-like"],
+  "crew": { "slotsTaken": 8, "freeSlot": 8, "target": "rustot" },
+  "team": {
+    "repo": "fleetmates",
+    "runId": "gate-cli",
+    "runBranch": "run/gate-cli",
+    "planPath": "docs/plans/2026-09-20-gate-cli.md",
+    "planMarkdown": "# Extract the phase gate into a CLI\n\nPhase 2 moves `verifyDelivery` into packages/gate.\n",
+    "totalPhases": 4,
+    "statusPhase": 1,
+    "gates": { "1": { "verdict": "PASS", "at": "13:02" } },
+    "tasks": [
+      { "id": "T1", "title": "Plan parser fixtures", "phase": 1, "state": "done", "files": ["a.mjs"] },
+      { "id": "T2", "title": "Gate result schema", "phase": 1, "state": "done", "files": ["b.mjs"] },
+      { "id": "T3", "title": "Move verifyDelivery into packages/gate", "phase": 2, "state": "done", "files": ["1", "2", "3", "4"] },
+      { "id": "T4", "title": "CLI entry: fleetmates-gate check", "phase": 2, "state": "running", "startedMinutesAgo": 30 },
+      { "id": "T5", "title": "Exit codes for the gate CLI", "phase": 2, "state": "running", "startedMinutesAgo": 20 },
+      { "id": "T6", "title": "Gate report formatting", "phase": 2, "state": "running", "startedMinutesAgo": 40 },
+      { "id": "T7", "title": "Wire the CLI into the plugin", "phase": 2, "state": "pending", "deps": ["T3"] },
+      { "id": "T8", "title": "end-to-end test of fleetmates-gate check", "phase": 3, "state": "pending" },
+      { "id": "T9", "title": "Release notes", "phase": 4, "state": "pending" }
+    ],
+    "worktrees": ["T4", "T5", "T6"],
+    "lead": {
+      "sessionId": "fx-control-team-lead",
+      "prompt": "Extract the phase gate into a CLI",
+      "command": "node scripts/cli.mjs dispatch --run gate-cli --phase 2"
+    },
+    "steps": {
+      "T4": [{ "tool_name": "Read", "tool_input": { "file_path": "/home/you/wt/T4/packages/gate/cli.mjs" } }],
+      "T5": [{ "tool_name": "Read", "tool_input": { "file_path": "/home/you/wt/T5/packages/gate/exit.mjs" } }],
+      "T6": [{ "tool_name": "Read", "tool_input": { "file_path": "/home/you/wt/T6/packages/gate/report.mjs" } }]
+    },
+    "requests": [
+      { "taskId": "T4", "command": "npm install commander@14 -w packages/gate" },
+      { "taskId": "T5", "command": "git push" }
+    ],
+    "teammateHook": { "taskId": "T5", "tool_name": "Grep", "tool_input": { "pattern": "exitCode", "path": "/home/you/wt/T5/packages/gate" } },
+    "expect": {
+      "phases": 4,
+      "gates": 3,
+      "gate1": "Gate 1 passed",
+      "gateBanner": "Gate 1 passed at 13:02.",
+      "heading": "Phase 2 · tasks 3 to 7",
+      "rows": [["T3", "Done"], ["T4", "Needs approval"], ["T5", "Needs approval"], ["T6", "Running"], ["T7", "Pending"]],
+      "pill": "2 of 4 need you",
+      "review": "Review 2 requests"
+    }
+  },
+  "sessions": {
+    "wrapped": [
+      { "repo": "vault-mcp", "script": "echo" },
+      { "repo": "discord-audit", "script": "echo" },
+      { "repo": "portfolio-site", "script": "echo" }
+    ],
+    "launched": [
+      { "repo": "rustot", "task": "fix the flaky combat test", "script": { "sessionId": "auto", "steps": [
+        { "sleep": 1500 },
+        { "hook": "SessionStart", "with": { "source": "startup" } },
+        { "sleep": 1000 },
+        { "frame": "idle-input" },
+        { "expectInput": { "match": "\u001b\\[200~fix the flaky combat test\u001b\\[201~\r", "timeoutMs": 10000 } },
+        { "hook": "UserPromptSubmit", "with": { "prompt": "$input" } },
+        { "frame": "spinner", "forMs": 300 },
+        { "hook": "Stop", "with": { "stop_hook_active": false } },
+        { "frame": "idle-input" },
+        { "echo": {} }
+      ] } }
+    ],
+    "idle": {
+      "sessionId": "auto",
+      "steps": [
+        { "hook": "SessionStart", "with": { "source": "startup" } },
+        { "sleep": 200 },
+        { "hook": "UserPromptSubmit", "with": { "prompt": "tidy the README" } },
+        { "sleep": 400 },
+        { "hook": "Stop", "with": { "stop_hook_active": false } },
+        { "frame": "idle-input" },
+        { "echo": {} }
+      ]
+    },
+    "emptyLaunch": {
+      "sessionId": "auto",
+      "steps": [
+        { "hook": "SessionStart", "with": { "source": "startup" } },
+        { "frame": "idle-input" },
+        { "echo": {} }
+      ]
+    },
+    "observed": [
+      { "key": "rustot", "repo": "rustot", "hooks": [
+        { "e": "SessionStart", "ago": 1500 },
+        { "e": "UserPromptSubmit", "ago": 1400, "prompt": "combat-tick" },
+        { "e": "PreToolUse", "ago": 720, "tool_name": "Bash", "tool_input": { "command": "cargo build" } },
+        { "e": "PostToolUse", "ago": 700, "tool_name": "Bash", "tool_input": { "command": "cargo build" } },
+        { "e": "PreToolUse", "ago": 200, "tool_name": "Bash", "tool_input": { "command": "cargo test --release combat::" } },
+        { "e": "PermissionRequest", "ago": 180, "tool_name": "Bash", "tool_input": { "command": "cargo test --release combat::" } }
+      ] },
+      { "key": "axios-like", "repo": "axios-like", "hooks": [
+        { "e": "SessionStart", "ago": 900 },
+        { "e": "UserPromptSubmit", "ago": 880, "prompt": "retry policy" },
+        { "e": "PreToolUse", "ago": 300, "tool_name": "Read", "tool_input": { "file_path": "/home/you/dev/axios-like/lib/retry.js" } },
+        { "e": "PostToolUse", "ago": 290, "tool_name": "Read", "tool_input": { "file_path": "/home/you/dev/axios-like/lib/retry.js" } },
+        { "e": "PreToolUse", "ago": 200, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/axios-like/lib/retry.js", "old_string": "a", "new_string": "b", "replace_all": false } },
+        { "e": "PostToolUse", "ago": 190, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/axios-like/lib/retry.js", "old_string": "a", "new_string": "b", "replace_all": false } },
+        { "e": "PreToolUse", "ago": 120, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/axios-like/lib/backoff.js", "old_string": "a", "new_string": "b", "replace_all": false } },
+        { "e": "PostToolUse", "ago": 110, "tool_name": "Edit", "tool_input": { "file_path": "/home/you/dev/axios-like/lib/backoff.js", "old_string": "a", "new_string": "b", "replace_all": false } },
+        { "e": "PreToolUse", "ago": 60, "tool_name": "Bash", "tool_input": { "command": "npm test" } }
+      ] }
+    ]
+  }
+}

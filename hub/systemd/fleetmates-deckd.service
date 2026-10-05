@@ -1,0 +1,14 @@
+[Unit]
+Description=fleetmates deck PTY daemon (deckd)
+
+[Service]
+Type=simple
+ExecStart=@NODE@ @ENTRY@
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+UMask=0077
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target

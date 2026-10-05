@@ -1,0 +1,8 @@
+{
+  "session_id": "01J00000000000000000000002",
+  "transcript_path": "/home/you/.claude/projects/fixture/01J00000000000000000000002.jsonl",
+  "cwd": "/home/you/fixture-repo",
+  "scratchpad_dir": "/tmp/claude-1000/-tmp-you-fixture-repo-0000000/01J00000000000000000000002/scratchpad",
+  "hook_event_name": "SessionStart",
+  "source": "clear"
+}

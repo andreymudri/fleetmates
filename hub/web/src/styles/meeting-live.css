@@ -1,0 +1,104 @@
+/* The live meeting view (screens/meetings.md 3.2) and the TranscriptLine base (components 34).
+   Values are tokens from tokens.css. Imported once from main.jsx. */
+
+.transcript-line {
+  display: flex;
+  gap: var(--space-14);
+  align-items: baseline;
+  width: 100%;
+  padding: var(--space-8) var(--space-12);
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-default);
+  text-align: left;
+  font: inherit;
+}
+button.transcript-line { cursor: pointer; }
+button.transcript-line:hover { background: var(--bg-raised); }
+.transcript-line-offset {
+  flex: 0 0 44px;
+  font: var(--type-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+.transcript-line-speaker {
+  flex: 0 0 44px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-link);
+}
+.transcript-line-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.transcript-line--live .transcript-line-text { font: var(--type-prose); }
+.transcript-line--pinned {
+  border-left-color: var(--brand-accent);
+  background: var(--brand-accent-tint);
+}
+
+/* The live view: transcript and the ask aside (600 wide, 440 below 1920). */
+.meeting-live {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--layout-panel-md);
+  height: 100%;
+  min-height: 0;
+  margin: calc(-1 * var(--space-24)) calc(-1 * var(--space-32));
+}
+@media (max-width: 1919px) {
+  .meeting-live { grid-template-columns: minmax(0, 1fr) var(--layout-panel-sm); }
+}
+.live-transcript {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--space-24) var(--space-40);
+}
+.live-transcript-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-12); }
+.live-transcript-head .page-title { margin: 0; }
+.live-meta { margin: 0; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.live-read-aloud { display: inline-flex; align-items: center; gap: var(--space-6); margin-left: auto; color: var(--text-secondary); }
+.live-lost {
+  margin: var(--space-12) 0 0;
+  padding: var(--space-8) var(--space-12);
+  border-radius: var(--radius-md);
+  background: var(--state-stale-bg);
+  color: var(--text-on-amber-tint);
+}
+.live-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin-top: var(--space-16); }
+.live-divider,
+.live-listening { margin: var(--space-8) var(--space-12); color: var(--text-muted); }
+.live-divider { border-top: 1px solid var(--border-subtle); padding-top: var(--space-8); }
+.live-jump { position: absolute; right: var(--space-40); bottom: var(--space-24); }
+
+.live-ask {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-24);
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border-subtle);
+}
+.live-ask-thread { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-16); }
+.live-ask-entry { display: flex; flex-direction: column; gap: var(--space-6); }
+.live-ask-question { margin: 0; color: var(--text-strong); font-weight: var(--font-weight-semibold); }
+.live-ask-answer { margin: 0; font: var(--type-prose); white-space: pre-wrap; overflow-wrap: anywhere; }
+.live-ask-status,
+.live-ask-error { display: flex; align-items: center; gap: var(--space-8); margin: 0; color: var(--text-secondary); }
+.live-ask-note,
+.live-ask-saved { margin: 0; color: var(--text-muted); }
+.live-ask-input {
+  width: 100%;
+  min-height: var(--size-control-md);
+  padding: 0 var(--space-12);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-control);
+  color: var(--text-strong);
+  font: inherit;
+}
+.live-pin-list { list-style: none; margin: var(--space-8) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-6); }
+.live-pin { display: flex; gap: var(--space-12); }
+.live-pin-time { font: var(--type-mono); font-variant-numeric: tabular-nums; color: var(--text-muted); }

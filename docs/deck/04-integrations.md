@@ -117,7 +117,10 @@ Proposed invocation, summarised; the full argv, flag reasons and process details
 - Runs on the owner's subscription, no API key (Decided).
 - Read-only vault tools only. The Ask never writes the vault; writing is research's job, behind review.
 - TurbidAssist already uses a close variant (`--restricted --safe-mode --strict-mcp-config --permission-prompts none`, `ask.py:168-225`), which is evidence these flags exist in the owner's installed version.
-- Output contract: see [10-memory-and-research.md](10-memory-and-research.md) section 2.3.
+- No `--safe-mode` (KB-O1 Decided, D-132): `--restricted` only. The proof is a check script the owner runs against the real CLI (`hub/test/capture/ask-restricted-check.mjs`), showing that Bash, Write, Edit and every vault write tool are refused and that the session's tools are exactly the four vault read tools; if it fails, the owner decides again. No build task and no test runs the real CLI.
+- The `--mcp-config` server runs the same `vaultCommand` as the deck's own client, default `npx -y @andreymudri/vault-mcp` (D-143). No `--model` in M5 (D-142).
+- Process rules (D-142): one ask in flight per thread, at most 2 overall, a third waits in a FIFO; 120 s total and 45 s without a stdout line both end it as `timed out after 120 s`; cancel is SIGTERM to the process group, then SIGKILL after 2 s; cwd `<state>/ask/`; running pids in `<state>/ask/running.json`, killed on the next start.
+- Output contract (Decided, SM-O16, D-131; validation D-141): see [10-memory-and-research.md](10-memory-and-research.md) section 2.3.
 
 ### 2.6 Transcript tail (Proposed)
 
@@ -148,8 +151,9 @@ Rules (every format detail below: verify against captured fixtures in M0):
 
 ### 3.2 How the deck uses it (Proposed)
 
-- One long-lived child process owned by the web server, via `@modelcontextprotocol/sdk` `Client` + `StdioClientTransport`, env `VAULT_PATH`, `VAULT_LANG=<DECK_LANG>`. Restart with backoff when it exits; health feeds the Memory tab.
-- Direct tool calls only for data the UI renders: `vault_graph`, `vault_get_note`, `vault_list`, `vault_backlinks`, `vault_learn` with `preview`. Text answers are parsed by small, tested parsers until structured output lands.
+- One long-lived child process owned by the web server, through the deck's own small hand-written MCP client over stdio (newline-delimited JSON-RPC 2.0: `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`) in `hub/server/adapters/vault-mcp.mjs`, not `@modelcontextprotocol/sdk` (D-134). It runs the `vaultCommand` setting, whose shipped default `npx -y @andreymudri/vault-mcp` stays (D-143), with env `VAULT_PATH`, `VAULT_LANG=<DECK_LANG>`. Restart with backoff when it exits; health feeds the Memory tab.
+- Direct tool calls only for data the UI renders: `vault_graph`, `vault_get_note`, `vault_list`, `vault_backlinks`, `vault_search`, and in M6 `vault_learn` with `preview`. The deck calls no vault-mcp write tool in M5. Text answers are parsed by small, tested parsers until structured output lands.
+- Hooks feed the Memory views (D-138): a `PreToolUse` whose `tool_name` matches `^mcp__.+__vault_get_note$` records a note read (`tool_input.path`), and one matching `^mcp__.+__vault_learn$` records a learn call, whatever server name the user registered. Tool responses are never read.
 - The Ask goes through `claude -p` with its own vault-mcp child (section 2.5), not through the deck's child.
 - Writes from the deck and from Claude sessions go through different vault-mcp processes; vault-mcp serializes writes per process only. Research save is the only deck write; it is rare and user-triggered.
 
@@ -162,6 +166,8 @@ Both are specified in detail, with schemas and code locations, in [reference/vau
 3. Optional, same PR: `structuredContent` for `vault_get_note` and `vault_list`, which removes the deck's text parsers.
 
 Ship these in vault-mcp before M5 (graph) and M6 (dry run). Until then the Memory graph tab shows "Graph needs vault-mcp 0.4" and research cannot save (no save without preview).
+
+For M5 (D-126, D-129): item 2 is built as the contract 1.11 shape, accepted as written, by its own plan run in the vault-mcp repository on a local branch; the fleet never pushes, tags or publishes, and the owner publishes 0.4.0. Item 3 is not in that plan. The deck's M5 plan never edits vault-mcp, depends only on the 1.11 shape, and degrades when the installed vault-mcp lacks `vault_graph`.
 
 ### 3.4 Research note conventions
 
@@ -181,20 +187,27 @@ Ship these in vault-mcp before M5 (graph) and M6 (dry run). Until then the Memor
 - Poll `status` every 2 s, always, while the deck runs (TurbidAssist's own TUI polls at 2 s). Quiet mode depends on it, so the poll does not slow down when Meetings is not visible.
 - `stop` can take tens of seconds (thread joins up to 30 s each); no short timeout; the UI shows "Stopping and summarizing" until `status.recording` is false and the manifest appears.
 - `stopping` is not visible in `status`; the deck tracks it from its own `stop` call.
-- History: read `<session_dir>/*/session.json` (manifest `state`: `recorded`, `transcribed`, `awaiting_names`, `synthesized`) and the synthesized note in the vault (`<meetings_folder>/<date> <tag> <title>.md`, sections Resumo, Decisões, Action items in Portuguese). `session_dir` and `vault.meetings_folder` come from TurbidAssist's `config.yaml` (MEET-O11: location Open).
+- History: read `<session_dir>/*/session.json` (manifest `state`: `recorded`, `transcribed`, `awaiting_names`, `synthesized`) and the synthesized note in the vault (`<meetings_folder>/<date> <tag> <title>.md`, sections Resumo, Decisões, Action items in Portuguese). In M4 both are read from disk, read only; the note is limited to `vault.meetings_folder` and matched by frontmatter `session_id` (MTG-O1, D-114), and the vault-mcp client is M5. `session_dir` and `vault.meetings_folder` come from TurbidAssist's `config.yaml`, found through the Settings field "TurbidAssist config" (MEET-O11, Decided 2026-10-04, D-107).
 - Tags: `start` requires a tag from `synthesis.tag_policies` in `config.yaml`. The Record button therefore needs a tag choice (default `synthesis.default_tag`). Not on the canvas; added in [screens/meetings.md](screens/meetings.md).
 - Confidential tags (`store_transcript: false`, for example `client-a`, `client-b`): the deck must not store transcript text, asks or pins text for those meetings in SQLite, logs or search indexes. It may show them live in memory only ([08-security.md](08-security.md)).
 
-### 4.3 Gaps between the canvas and TurbidAssist today (Open)
+As built in 0.4.0 (`hub/server/adapters/scribed.mjs` and `hub/server/meetings/`):
 
-| Canvas shows | Reality | Default until decided |
+- The server reaches the socket only as `$XDG_RUNTIME_DIR/turbidassist.sock` of its own environment; without `XDG_RUNTIME_DIR` it treats scribed as unavailable and never falls back to another path.
+- A hook envelope whose `cwd` is inside `session_dir` (after resolving symlinks) is dropped, so scribed's own `claude -p` children never show as sessions. When `config.yaml` stops reading, the hook guard keeps the last `session_dir` that read.
+- Without a readable `config.yaml`, `GET /api/meetings` still answers, with `configError` and no tags; a start is 422 `unknown_tag` before any command, the meeting kinds of `POST /api/open` answer `kind_not_available`, and the tag policy reads every tag as confidential (DB-O2, `policyFor` in `hub/server/meetings/config.mjs`).
+- The note of a non-confidential meeting is found once and its vault-relative path stored; a confidential meeting's note is located again on each read (D-116).
+
+### 4.3 Gaps between the canvas and TurbidAssist today
+
+| Canvas shows | Reality | Rule (Decided, or the default applied in M4) |
 |---|---|---|
-| "Start scribed" runs `systemctl --user start scribed` | No systemd unit for scribed exists; clients spawn it detached (`ScribeClient.ensure_daemon()`) | The canvas copy shows `systemctl --user start scribed`; the real command is `systemd-run --user` running a login shell (`$SHELL -l -c 'exec scribed'`), so scribed is not in the deck's cgroup and gets `HF_TOKEN` ([11-meetings.md](11-meetings.md) section 3.5, OPS-O1). TurbidAssist change T4 (a `scribed.service` unit) is the later clean fix |
-| Pin moment (Alt P), pinned moments list | No pin command, event or file | Deck stores pins `{meetingId, t, label}` in SQLite (not for confidential tags: time only, no label); optional later: a `pin` command in scribed so `postmeet` can include pins |
-| Live Ask "uses the transcript and your vault" | scribed `ask` runs `claude -p` with **no tools and no MCP** | Live Ask uses scribed `ask` (transcript only) and the copy says "uses the transcript"; vault access is a TurbidAssist change (add vault-mcp to the ask backend's `--mcp-config`) |
+| "Start scribed" runs `systemctl --user start scribed` | No systemd unit for scribed exists; clients spawn it detached (`ScribeClient.ensure_daemon()`) | **Decided** 2026-10-04 (D-106): the command is `systemd-run --user --collect --unit=turbidassist-scribed --property=KillMode=process $SHELL -l -c 'exec scribed'`, so scribed is not in the deck's cgroup and gets `HF_TOKEN` ([11-meetings.md](11-meetings.md) section 3.5, OPS-O1). TurbidAssist change T4 (a `scribed.service` unit) is not taken |
+| Pin moment (Alt P), pinned moments list | No pin command, event or file | Default shipped in 0.4.0 (MEET-O2): the deck stores pins `{meetingId, t, label}` in SQLite (not for confidential tags: time only, no label); a `pin` command in scribed (TurbidAssist change T1) is not taken |
+| Live Ask "uses the transcript and your vault" | scribed `ask` runs `claude -p` with **no tools and no MCP** | **Decided** 2026-10-04 (MEET-O4, D-105): Live Ask uses scribed `ask` (transcript only), the copy says "Ask · uses the transcript", and there are no citations. Vault access (TurbidAssist change T3) is not taken, and there is no deck-side engine |
 | Decisions / action items during and right after the meeting | Only in the post-meeting note written by `postmeet` | Show "Summary arrives after the meeting is processed" until the note exists |
-| Source label (Teams, Meet, Discord) | Not persisted; `status.routed_apps` shows it live | Deck records `routed_apps` while polling and stores the label |
-| "Save answer to meeting note" | Asks are already stored by scribed (`asks.jsonl`) and appear in the note's "Perguntas ao vivo" when `store_transcript` is true | No extra button in v1 |
+| Source label (Teams, Meet, Discord) | Not persisted; `status.routed_apps` shows it live | Default shipped in 0.4.0 (MEET-O1): the deck records `routed_apps` while polling and stores the label |
+| "Save answer to meeting note" | Asks are already stored by scribed (`asks.jsonl`) and appear in the note's "Perguntas ao vivo" when `store_transcript` is true | Default shipped in 0.4.0 (MEET-O8): no extra button |
 
 ## 5. Desktop notifications (Decided: notify-send / mako, in-browser badge and sound)
 
@@ -209,3 +222,12 @@ Ship these in vault-mcp before M5 (graph) and M6 (dry run). Until then the Memor
 - Branch: `git rev-parse --abbrev-ref HEAD` in the session `cwd`.
 - Changed files: `git diff --numstat <reviewBaseline>` plus untracked files, refreshed after edit tools, debounced 2 s.
 - Diff view: `git diff <reviewBaseline> -- <path>`. In session repos the deck never commits, pushes, checks out or stashes. The one exception is the deck-owned research workspace `~/.local/share/fleetmates-deck/research/` ([10-memory-and-research.md](10-memory-and-research.md) section 8.2), which `fleetmates-deck init` creates with `git init` and one initial commit.
+
+## Prepared M5 implementation
+
+The deck tests the published `@andreymudri/vault-mcp` 0.4.0 through an exact development
+dependency. `tools/list` is snapshotted under `hub/test/fixtures/vault-mcp/0.4.0`. The real
+server and the fake agree on the 22-note graph, including root-note area and broken links.
+The runtime client uses the user's `vaultCommand`; it discovers capabilities and reports
+missing graph support separately from an unavailable server. No vault filesystem access
+is used by HTTP note, graph, search, captures or Obsidian-open routes.

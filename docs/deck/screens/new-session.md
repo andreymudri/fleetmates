@@ -5,7 +5,7 @@
 | Canvas board | none: not on the canvas. Specified from D-17 ("new-session form asks only for a repo picked from a scan of ~/dev plus a task field"; same-repo warning) and state-machines 1.7 row 1. |
 | Route | `/new` (dialog over the previous route; query `repo=<repoKey>`, `task=<text>`) |
 | Milestone | M2 |
-| Status | **Proposed** as a whole. The two fields and "warn, never block" are Decided direction; everything else is this spec's recommendation. Same-repo behaviour is Open (SM-O5). |
+| Status | **Proposed** as a whole. The two fields and "warn, never block" are Decided direction; everything else is this spec's recommendation. Same-repo behaviour is Decided (D-68). |
 
 ## 1. Purpose
 
@@ -40,7 +40,7 @@ Dialog `variant="form"` (`--layout-dialog`, `--radius-3xl`), top 110px, scrim. S
 | Repo option | ListRow `option`: CrewAvatar sm pose none, name, mono path, trailing active count | `repo.name`, `repo.id` with `~`, current branch (git), active plain sessions count | "rustot", "~/dev/rustot · combat-tick", "1 active" | recent repos first (by latest session), then alphabetical |
 | Recent group | Eyebrow in the list | 5 most recent repos | "Recent harbors" | shown with an empty query |
 | Same-repo warning | Banner `hint` (warn, never block) | other sessions with the same `repoId`, `role = solo`, not `ended` | "rustot already has an active session: rustot · combat-tick (Needs approval). Two plain sessions share one working tree, so their changes mix." | lists up to 2 sessions, then "and {n} more" |
-| Warning action | Button `teal-outline sm` | | "Run as a fleetmates job" | behaviour Open (8, NEW-O1) |
+| Warning action | Button `teal-outline sm` | | "Run as a fleetmates job" | behaviour Decided (D-68) |
 | Warning link | link | the other session | "Open rustot · combat-tick" | |
 | Task | Field Textarea (rows 4), optional | `task` | label "Task", hint "optional", placeholder "What should Claude do? Leave empty to start at the prompt." | sent as the initial prompt (`claude "<task>"`, state-machines 1.6) |
 | Footer note | text muted | | "Runs claude in {path} · you can type in the terminal or here" | |
@@ -60,7 +60,8 @@ Dialog `variant="form"` (`--layout-dialog`, `--radius-3xl`), top 110px, scrim. S
 | Validation | submit without a repo: Field error "Pick a repo." |
 | Submitting | Launch `loading`; fields read-only |
 | deckd down | Launch disabled with visible reason "deckd is reconnecting. Launching needs deckd." (state-machines 4.2) |
-| Hooks not installed | Banner `hint`: "Observation hooks are not installed, so the deck will only see this session through its terminal." Launch allowed |
+| Hooks not installed (`hooks` row reason `hooks_missing` or `hook_script_missing`) | Banner `hint`: "Observation hooks are not installed, so the deck will only see this session through its terminal." Launch allowed |
+| Hooks outdated (`hooks` row state `warn`, reason `hooks_outdated`) | Banner `hint`: "Hooks are from an older deck release. Run fleetmates-deck init." Launch allowed |
 | Spawn failed | Banner `error` at the top of the form: "Could not start claude in rustot: {message}." inputs kept, focus on the banner |
 | Success | dialog closes; route `/s/:newId` with the terminal focused (Proposed); the new card fades in on Home |
 | Overflow | long repo paths middle-truncate; 200+ repos: the list virtualises (Proposed) |
@@ -72,7 +73,7 @@ Dialog `variant="form"` (`--layout-dialog`, `--radius-3xl`), top 110px, scrim. S
 | Type in Repo | filters options (name and path, substring + word prefix) | client |
 | Up / Down, Enter in the repo list | move and pick | combobox pattern |
 | Pick a repo | task field focused; conflict check | `GET /api/repos/:repoKey/sessions?active=1` |
-| "Run as a fleetmates job" | NEW-O1 default: launch the session with the task wrapped as a fleetmates request | `POST /api/sessions {repoKey, task, mode:'fleetmates'}` |
+| "Run as a fleetmates job" | D-68: launch the session with the task wrapped as a fleetmates request | `POST /api/sessions {repoKey, task, mode:'fleetmates'}` |
 | "Open rustot · combat-tick" | Focus on that session; form closes | route |
 | "Launch a ship", `Alt Enter` | validate, launch | `POST /api/sessions {repoKey, task}` = `U.Launch(repo, task)` (state-machines 1.7 row 1) |
 | Enter in Task | new line (Textarea); `Alt Enter` submits | |
@@ -119,6 +120,7 @@ Dialog `variant="form"` (`--layout-dialog`, `--radius-3xl`), top 110px, scrim. S
 | `newSession.launch` | Launch a ship |
 | `newSession.deckdDown` | deckd is reconnecting. Launching needs deckd. |
 | `newSession.noHooks` | Observation hooks are not installed, so the deck will only see this session through its terminal. |
+| `newSession.hooksOutdated` | Hooks are from an older deck release. Run fleetmates-deck init. |
 | `newSession.spawnError` | Could not start claude in {repo}: {message}. |
 
 ## 10. Acceptance criteria
@@ -137,8 +139,8 @@ Dialog `variant="form"` (`--layout-dialog`, `--radius-3xl`), top 110px, scrim. S
 
 | Id | Gap | Status |
 |---|---|---|
-| NEW-O1 | Same-repo second plain session: the owner's answer was never recorded (Q3, SM-O5). "Run as a fleetmates job" has no defined behaviour: a fleetmates run needs a plan. | **Open**. Default: warn, never block; the button launches a `launched` session whose initial prompt asks Claude to handle the task as a fleetmates run (fleetmates makes per-task worktrees, so changes do not mix). Flag for the owner. |
-| NEW-O2 | Scan depth and what counts as a repo under `~/dev` (direct children only, nested repos, submodules). | **Open**. Default: direct children of the scan root that are git roots, plus repos already known from hooks anywhere. |
+| NEW-O1 | Same-repo second plain session and the "Run as a fleetmates job" behaviour (Q3, SM-O5). | **Decided** (D-68): warn, never block; the button launches a `launched` session whose initial prompt asks Claude to handle the task as a fleetmates run (fleetmates makes per-task worktrees, so changes do not mix). |
+| NEW-O2 | Scan depth and what counts as a repo under `~/dev` (direct children only, nested repos, submodules). | **Decided** 2026-10-01. The scan registers git roots up to two levels below the scan root, where a directory holding `.git` stops the descent (as shipped in M1), plus repos known from hooks anywhere. |
 | NEW-O3 | Themed "Launch a ship" (design-system 15.1). | Open. |
 | NEW-O5 | After launch: go to Focus or stay on the current screen. | Proposed: Focus with the terminal focused. |
 

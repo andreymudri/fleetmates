@@ -338,6 +338,8 @@ Known limits to document in the tool description: a preview is a snapshot. The r
 
 ### 1.11 Proposal: `vault_graph`
 
+**Status:** Accepted 2026-10-04 (D-129); implemented by the vault-mcp plan, published by the owner as 0.4.0. The shape below is accepted as written, with no `criado` or `revision` fields. The fleet builds it on a local branch of the vault-mcp repository and never pushes, tags or publishes (D-126).
+
 **Input schema** (zod, same field names and rules as `vault_list` and `vault_search` so filters mean the same thing via `inFolder`/`hasAllTags`):
 
 ```ts
@@ -395,7 +397,7 @@ plus the diagnostics footer (`withDiagnostics`), since this tool also answers "w
 ### 1.12 How the deck should call vault-mcp
 
 - "Ask" through `claude -p`: Claude reads the text answers; nothing to parse on the deck side.
-- `vault_graph` and the learn preview are data for UI components. Going through `claude -p` would mean an LLM call per graph render and prose to parse. Suggested: the Node server holds one long-lived vault-mcp child over stdio with the MCP SDK client (`Client` + `StdioClientTransport`, `command: 'npx', args: ['@andreymudri/vault-mcp']` or `node <clone>/dist/server/index.js`, `env: { VAULT_PATH, VAULT_LANG }`) and calls these two tools directly, reading `structuredContent`. This is a suggestion, not something the repo does today.
+- `vault_graph` and the learn preview are data for UI components. Going through `claude -p` would mean an LLM call per graph render and prose to parse. Suggested: the Node server holds one long-lived vault-mcp child over stdio with the MCP SDK client (`Client` + `StdioClientTransport`, `command: 'npx', args: ['@andreymudri/vault-mcp']` or `node <clone>/dist/server/index.js`, `env: { VAULT_PATH, VAULT_LANG }`) and calls these two tools directly, reading `structuredContent`. This is a suggestion, not something the repo does today. The deck's M5 plan replaces the SDK with its own small hand-written stdio client (D-134) and keeps the shipped `vaultCommand` default `npx -y @andreymudri/vault-mcp` (D-143); see [10-memory-and-research.md](../10-memory-and-research.md) section 4.1.
 - Writes from the deck and from Claude sessions to the same vault from two vault-mcp processes are only serialized per process (`tools.ts:192-198`); across processes only the exclusive-create publish protects creations.
 
 ---

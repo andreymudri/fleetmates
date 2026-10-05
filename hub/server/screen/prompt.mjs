@@ -1,6 +1,7 @@
 // Permission, question and trust prompt boxes on a rendered Claude Code
 // screen (docs/deck/04-integrations.md 2.3). Written against the 2.1.282
-// frames in hub/test/fixtures/screens/2.1.282/.
+// frames in hub/test/fixtures/screens/2.1.282/ and checked against the
+// 2.1.285 frames in hub/test/fixtures/screens/2.1.285/.
 //
 // Known limit: a box whose top edge has scrolled off the screen parses as
 // no prompt (`null`). Whether real Claude Code ever draws such a box is
@@ -17,7 +18,7 @@ import { inputRow } from './status-region.mjs'
 
 /**
  * @typedef {{ key: string | null, label: string }} PromptOption
- * @typedef {{ kind: 'permission' | 'question' | 'trust', question: string, options: PromptOption[] }} Prompt
+ * @typedef {{ kind: 'permission' | 'question' | 'trust', question: string, options: PromptOption[], title: string | null, body: string | null, truncated: boolean }} Prompt
  */
 
 /** Top edge of a prompt box (and of the input box): a full row of `─`. */
@@ -28,17 +29,42 @@ const NUMBERED = /^(❯ *)?(\d+)\. +(\S.*)$/
 const SELECTED = /^❯ +(\S.*)$/
 /** Every complete 2.1.282 prompt box ends with a hint row naming Esc. */
 const FOOTER = /Esc to cancel/
+/**
+ * A deny option labelled with its Esc shortcut, "No, and tell Claude what to
+ * do differently (esc)". The 2.1.285 WebFetch frame ends on this option, the
+ * last of its box, with no footer row below it; it is the only captured frame
+ * whose box carries no footer. That the `(esc)` option is always the last
+ * one is an assumption read from the captured and hand-written boxes, not
+ * something Claude Code documents.
+ */
+const ESC_OPTION = /\(esc\)$/
 /** A row that separates paragraphs inside a box. */
 const SEPARATOR = /^[─╌]+$/
 /** The tab header of an AskUserQuestion box. */
 const QUESTION_TAB = /[☐☒]/
+/**
+ * The gutter the 2.1.285 `permission-bash-long` frame draws left of each row
+ * of a Bash command that wraps (`│ node --test`); the short command of
+ * `permission-2` has none.
+ */
+const GUTTER = /^│ ?/
+/**
+ * A row cut with an ellipsis. No captured frame shows a cut command (the
+ * long command of `permission-bash-long` wraps whole), so this marker is an
+ * assumption, chosen because it only widens matching to a prefix, which the
+ * F12 rule in approvals/screen-match.mjs then guards.
+ */
+const CUT = /…$/
 
 /**
  * Find the prompt box on screen. Returns `null` when there is none, or when
- * its footer is not visible (a box cut off at the bottom is never returned
- * as a partial option list), or when the cursor sits in an input box below
- * the footer (a real prompt box replaces the input box, so a box above a
- * live input box is transcript text).
+ * its end is not visible (a box cut off at the bottom is never returned as
+ * a partial option list), or when the cursor sits in an input box below
+ * that end (a real prompt box replaces the input box, so a box above a live
+ * input box is transcript text). The end is the footer row below the
+ * options, or else the last option itself when its label ends in `(esc)`
+ * (ESC_OPTION): a box drawn only part way down, before that option, still
+ * parses as `null`.
  * @param {string[]} lines rendered rows
  * @param {{ x: number, y: number }} [cursor]
  * @returns {Prompt | null}
@@ -50,17 +76,48 @@ export function parsePrompt (lines, cursor) {
   const { rows, options } = found
   const first = rows[0]
   const last = rows[rows.length - 1]
-  let footer = last + 1
-  while (footer < trimmed.length && !FOOTER.test(trimmed[footer])) footer++
-  if (footer === trimmed.length) return null
-  if (cursor && inputRow(lines, cursor) > footer) return null
+  let end = last + 1
+  while (end < trimmed.length && !FOOTER.test(trimmed[end])) end++
+  if (end === trimmed.length) {
+    if (!ESC_OPTION.test(options[options.length - 1].label)) return null
+    end = last
+  }
+  if (cursor && inputRow(lines, cursor) > end) return null
   // The box top is the nearest `─` rule above the FIRST option, so a rule
   // inside the box (AskUserQuestion draws one above "Chat about this") is
   // never mistaken for it.
   let top = first - 1
   while (top >= 0 && !BOX_TOP.test(trimmed[top])) top--
   if (top === -1) return null
-  return { kind: kindOf(trimmed, top, first, options), question: question(trimmed, top, first), options }
+  const asked = question(trimmed, top, first)
+  return { kind: kindOf(trimmed, top, first, options), question: asked.text, options, ...content(trimmed, top, asked.row) }
+}
+
+/**
+ * The box's title and body (state-machines 2.3 `screenMatch`). The title is
+ * the first non-empty row inside the box ("Bash command", "Edit file",
+ * "Create file", "Fetch", "☐ Choice" in the 2.1.285 frames). The body is
+ * every row between the title and the question paragraph, one visible row
+ * per line joined with `\n`, trimmed, with the wrap gutter removed and a
+ * separator row kept as an empty line. Wrapped rows are not re-joined: in
+ * `permission-bash-long` one break falls on a space and the next one inside
+ * a word, so the row text alone cannot tell which a break was. When the
+ * question paragraph starts on the first row inside the box, the box has no
+ * title the parser can place: `title` and `body` are null.
+ * @param {string[]} trimmed
+ * @param {number} top
+ * @param {number} questionRow first row of the question paragraph
+ * @returns {{ title: string | null, body: string | null, truncated: boolean }}
+ */
+function content (trimmed, top, questionRow) {
+  let titleRow = top + 1
+  while (titleRow < questionRow && trimmed[titleRow] === '') titleRow++
+  if (titleRow >= questionRow) return { title: null, body: null, truncated: false }
+  const rows = trimmed.slice(titleRow + 1, questionRow)
+    .map((l) => SEPARATOR.test(l) ? '' : l.replace(GUTTER, '').trim())
+  while (rows.length > 0 && rows[0] === '') rows.shift()
+  while (rows.length > 0 && rows[rows.length - 1] === '') rows.pop()
+  return { title: trimmed[titleRow], body: rows.join('\n'), truncated: rows.some((l) => CUT.test(l)) }
 }
 
 /**
@@ -133,28 +190,30 @@ function unnumberedOptions (lines, trimmed) {
 
 /**
  * The nearest paragraph above the options that asks something (holds a `?`),
- * else the nearest paragraph. Wrapped rows are joined with one space.
+ * else the nearest paragraph. Wrapped rows are joined with one space. `row`
+ * is the paragraph's first row (`first` when there is no paragraph).
  * @param {string[]} trimmed
  * @param {number} top
  * @param {number} first row of the first option
- * @returns {string}
+ * @returns {{ text: string, row: number }}
  */
 function question (trimmed, top, first) {
-  /** @type {string[]} */
+  /** @type {{ text: string, row: number }[]} */
   const paragraphs = []
   /** @type {string[]} */
   let cur = []
-  const flush = () => {
-    if (cur.length > 0) paragraphs.push(cur.reverse().join(' '))
+  /** @param {number} row */
+  const flush = (row) => {
+    if (cur.length > 0) paragraphs.push({ text: cur.reverse().join(' '), row })
     cur = []
   }
   for (let r = first - 1; r > top; r--) {
     const l = trimmed[r]
-    if (l === '' || SEPARATOR.test(l)) flush()
+    if (l === '' || SEPARATOR.test(l)) flush(r + 1)
     else cur.push(l)
   }
-  flush()
-  return paragraphs.find((p) => p.includes('?')) ?? paragraphs[0] ?? ''
+  flush(top + 1)
+  return paragraphs.find((p) => p.text.includes('?')) ?? paragraphs[0] ?? { text: '', row: first }
 }
 
 /**
