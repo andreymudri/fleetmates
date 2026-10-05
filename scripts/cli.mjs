@@ -3197,7 +3197,7 @@ export async function runCli(argv, io = { out: console.log }) {
       const { ledgerPath, readEvents, ledgerSummary } = await import('./event-ledger.mjs')
       const plan = await readState(root, runId, 'plan')
       const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
-      const ids = [...new Set(tasks.map(t => t?.id).filter(id => /^T[1-9]\d{0,8}$/.test(id)))].slice(0, 256)
+      const ids = [...new Set(tasks.map(t => t?.id).filter(id => /^T\d{1,127}$/.test(id)))].slice(0, 256)
       const rows = []
       for (const id of ids) {
         try { rows.push({ task: id, ...ledgerSummary(await readEvents(ledgerPath(root, runId, id))) }) }
