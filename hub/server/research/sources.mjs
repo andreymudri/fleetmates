@@ -13,9 +13,9 @@ export function publicAddress(address) {
       && !(a === 192 && (b === 168 || b === 0)) && !(a === 100 && b >= 64 && b <= 127) && !(a === 198 && (b === 18 || b === 19 || b === 51 && c === 100)) && !(a === 203 && b === 0 && c === 113)
   }
   if (isIP(address) === 6) {
-    const value = address.toLowerCase()
+    const value = new URL(`http://[${address}]/`).hostname.slice(1, -1)
     // Public unicast only. Reject mapped/compatible IPv4, link-local, loopback and unique-local.
-    return /^[23][0-9a-f]{3}:/.test(value) && !value.startsWith('2001:db8:') && !value.startsWith('2002:') && !value.startsWith('2001:0000:') && !value.startsWith('2001:0:')
+    return /^[23][0-9a-f]{3}:/.test(value) && !value.startsWith('2001:db8:') && !value.startsWith('2001::') && !value.startsWith('2002:') && !value.startsWith('2001:0000:') && !value.startsWith('2001:0:')
   }
   return false
 }

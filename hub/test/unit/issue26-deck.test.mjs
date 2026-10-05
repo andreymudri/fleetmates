@@ -97,7 +97,7 @@ test('source preflight tries llms.txt first, reports reachability and blocks pri
   assert.equal(visited[0], 'https://example.org/llms.txt')
   assert.equal(report.sources[0].page.state, 'reachable')
   assert.equal((await sourcePreflight([])).state, 'no-seed-sources')
-  for (const address of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '172.16.0.1', '192.168.0.1', '100.64.0.1', '::1', '::ffff:127.0.0.1', 'fc00::1', 'fe80::1', '2002:7f00:1::']) assert.equal(publicAddress(address), false, address)
+  for (const address of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '172.16.0.1', '192.168.0.1', '100.64.0.1', '::1', '::ffff:127.0.0.1', 'fc00::1', 'fe80::1', '2002:7f00:1::', '2001::1', '2001:0000::1', '2001:0db8::1']) assert.equal(publicAddress(address), false, address)
   assert.equal(publicAddress('93.184.216.34'), true)
   assert.equal(publicAddress('2606:4700:4700::1111'), true)
   let requests = 0
