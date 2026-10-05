@@ -1590,6 +1590,7 @@ test('no skill or agent claims a SubagentStop refusal hands back the check outpu
 const SUBAGENT_STOP_MECHANISM = /SubagentStop|stop[- ]time|the stop\b|\bhook\b/i
 
 const SUBAGENT_STOP_CORPUS = [
+  "fleet-supervision :: Unverified callbacks must be exercised in Claude Code; a configured hook alone is not evidence that it fired.",
   "fleet-supervision :: A teammate's stop runs the SubagentStop hook, which re-runs the cheap enforcement checks and can refuse the stop; a refusal appears in that teammate's transcript as one of two fixed messages — the branch the task is missing, named alongside a pointer to the teammate's brief for the step that creates it, or a direction to run its own verification command — never as the failing check's text, which is not forwarded.",
   "fleet-supervision :: But SubagentStop fires only when a teammate actually stops — a stalled or parked teammate never reaches it, so liveness remains the only thing that sees a teammate which never stops at all.",
   "fleet-supervision :: No stop-path hook fires for a parked agent.",
