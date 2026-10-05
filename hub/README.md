@@ -385,6 +385,36 @@ Each line has `query`, `expectedTopPath` and `askedAt`. Retrieval exports note-r
 misses; `all` also includes open misses. Dismissed and researched misses are excluded.
 The command opens SQLite read only; output files have mode 0600.
 
-M5 adds no vault writes, capture revert, embeddings or hybrid retrieval. Research links
-hand off to the future M6 screen. Publication and restarting the dogfood web server remain
-pending; see `docs/deck/m5-exit.md`.
+M5 adds no vault writes, capture revert, embeddings or hybrid retrieval. Research now launches
+scouts, validates drafts, supports source review, and saves only an owner-approved, current vault
+preview. Saving requires the prepared vault-mcp 0.5 approval contract; publication and live preset
+checks remain prerequisites for public use.
+
+## Structured fleet activity
+
+Fleetmates task ledgers feed a read-only session timeline in SQLite. Focus shows the current plan
+phase and labels unverified derivation explicitly. Events contain fixed kinds, result enums and
+command fingerprints, without command output or handoff prose. Imports deduplicate events; each
+read is capped at 1,000 events per run and 200 per task, with a partial-history notice. Stored
+timeline detail expires after 30 days. An event is an observation; the gate still decides completion.
+
+Team run renders the versioned architecture/phase JSON format as native SVG. Invalid graphs show
+an unavailable state. Session cards and approval prompts put the next action before progress,
+show recorded completed steps, and mark unknown step counts.
+
+Before approving a recognized skill, plugin or MCP install command, the Deck runs its own local
+instruction lint. Clean skill instructions map to Safe, hidden/confusable text and unverified
+source to Caution, and refusal overrides or model shell-outs to Destructive. Existing command
+tiers only rise. Plugins and MCP servers remain at least Caution because instruction heuristics
+do not audit all executable code. The scan never executes an extension or enables an external
+scanner. Remote packages with no local source are unverified. A fresh scan runs before keys are
+sent to the terminal, including retries. Ordinary calls to already-installed MCP tools retain
+their existing classifier.
+
+Research accepts up to 20 optional starting source URLs. Preflight is written before scout
+launch, checks public HTTP(S) reachability with bounded HEAD requests, and probes each site's
+`/llms.txt` first. Redirects are checked again; private addresses and URLs containing a username or password
+are rejected. Without starting URLs, the lead must discover and preflight candidates before
+dispatching scouts. Publication dates and engagement are optional, validated metadata. Scouts
+rank them before drafting while preserving unknown values and preferring primary evidence over
+popularity. The score does not establish that a source is correct.

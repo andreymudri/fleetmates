@@ -11,6 +11,7 @@ export function ResearchForm ({ repos = [], initialTopic = '', domains = [], dow
   const [preset, setPreset] = useState('standard')
   const [sourceTypes, setSources] = useState(['docs', 'repo'])
   const [focusNotes, setFocus] = useState('')
+  const [sourceUrls, setSourceUrls] = useState('')
   const [relatedNotes, setRelated] = useState([]), [hits, setHits] = useState([]), [lookupFailed, setLookupFailed] = useState(false)
   useEffect(() => {
     if (!api || topic.trim().length < 3 || down) { setHits([]); return }
@@ -20,8 +21,9 @@ export function ResearchForm ({ repos = [], initialTopic = '', domains = [], dow
   }, [api, topic, down])
   useEffect(() => { setDomain(old => old || domains[0] || '') }, [domains.join(',')])
   return <section className="research-form" aria-label="Research a topic"><h1>Send out scouts</h1><p>A fleetmates team researches; you review the draft before anything is saved.</p>
-    <form onSubmit={event => { event.preventDefault(); onSubmit?.({ topic, repoKey, domain, preset, sourceTypes, focusNotes, relatedNotes }) }}>
+    <form onSubmit={event => { event.preventDefault(); onSubmit?.({ topic, repoKey, domain, preset, sourceTypes, focusNotes, relatedNotes, sourceUrls: sourceUrls.split(/\r?\n/).map(value => value.trim()).filter(Boolean) }) }}>
       <label>Topic<input autoFocus value={topic} onChange={event => setTopic(event.target.value)} required minLength={3} maxLength={500} /></label>
+      <label>Starting sources (optional, one public URL per line)<textarea value={sourceUrls} onChange={event => setSourceUrls(event.target.value)} maxLength={20000} /></label>
       <label>Repository<select value={repoKey} onChange={event => setRepo(event.target.value)} required><option value="">Choose a repository</option>{repos.filter(repo => !repo.archivedAt).map(repo => <option key={repo.id} value={repo.name}>{titleText(repo.name)}</option>)}</select></label>
       <label>Target domain<input list="research-domains" value={domain} onChange={event => setDomain(event.target.value)} required maxLength={100} /></label>
       <datalist id="research-domains">{domains.map(name => <option key={name} value={name} />)}</datalist>

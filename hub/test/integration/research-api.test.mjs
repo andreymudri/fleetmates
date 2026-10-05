@@ -14,6 +14,9 @@ test('research launches through the session path, persists across service recrea
   assert.match(r.launches[0].body.task, /Use 3 scout task/)
   assert.match(r.launches[0].body.task, /Never write to the vault/)
   assert.equal(r.launches[0].body.mode, 'plain')
+  const preflight = JSON.parse(await fs.readFile(path.join(r.repo, 'out', r.id, 'preflight.json'), 'utf8'))
+  assert.equal(preflight.state, 'no-seed-sources')
+  assert.match(r.launches[0].body.task, /Before dispatching any scouts/)
   assert.equal(h.deck.store.get('SELECT role FROM sessions WHERE id=?', r.research.leadSessionId).role, 'research')
   await writeResearchDraft(r.repo, r.id)
   const detail = await h.request(`/api/research/${r.id}`)
@@ -72,4 +75,31 @@ test('research output reader refuses oversized files, symlink leaves, redirected
   await fs.writeFile(path.join(dir, 'scouts/T1.json'), JSON.stringify({ task: 'T2', question: 'Synthetic?', claims: [], sources: [], rejected: [] }))
   await assert.rejects(readScoutOutput(r.repo, r.id, 'T1'), error => error.code === 'research_output_invalid')
   await assert.rejects(readResearchOutput(r.repo, '../escape', 'concurrency'), error => error.code === 'validation_failed')
+})
+
+test('research persists seed preflight before launching and ranks validated scout metadata', async t => {
+  const h = await memoryHarness(t)
+  const r = await seedResearch(h)
+  let checked = false
+  const service = createResearchService({ store: h.deck.store, preferences: () => ({ prefs: { lang: 'en' } }),
+    preflight: async urls => { assert.deepEqual(urls, ['https://example.org/docs']); checked = true; return { v: 1, at: 1000, state: 'checked', sources: [{ url: urls[0], page: { state: 'reachable', status: 200 } }] } },
+    launcher: { async launch(root, body) {
+      assert.equal(checked, true)
+      const id = /out\/(research-[a-f0-9-]{36})\/preflight\.json/.exec(body.task)[1]
+      const report = JSON.parse(await fs.readFile(path.join(root, 'out', id, 'preflight.json'), 'utf8'))
+      assert.equal(report.sources[0].page.state, 'reachable')
+      const session = h.deck.projector.create({ id: 'preflight-lead', repo_id: root, cwd: root, origin: 'launched', pty_id: 'preflight-pty', process_key: 'preflight-process' })
+      return { data: { session } }
+    }, stop: async () => {} } })
+  const created = await service.launch(r.repo, { ...researchRequest(), sourceUrls: ['https://example.org/docs'] })
+  assert.equal(created.status, 201)
+  const scoutDir = path.join(r.repo, 'out', created.data.research.id, 'scouts')
+  await fs.mkdir(scoutDir)
+  await fs.writeFile(path.join(scoutDir, 'T1.json'), JSON.stringify({ task: 'T1', question: 'Caching?', claims: [{ id: 'T1-c1', text: 'Evidence', confidence: 'high', sources: ['T1-s1', 'T1-s2'] }], sources: [
+    { id: 'T1-s1', url: 'https://example.org/old', title: 'Old', why: 'Reference', type: 'docs', backs: ['T1-c1'], accessed: '2026-10-05', publishedAt: '2020-01-01', engagement: 1 },
+    { id: 'T1-s2', url: 'https://example.org/new', title: 'New', why: 'Reference', type: 'docs', backs: ['T1-c1'], accessed: '2026-10-05', publishedAt: '2026-10-01', engagement: 1000 },
+  ], rejected: [] }))
+  const ranked = await readScoutOutput(r.repo, created.data.research.id, 'T1')
+  assert.equal(ranked.sources[0].id, 'T1-s2')
+  assert.equal(ranked.sources[0].ranking.recencyKnown, true)
 })

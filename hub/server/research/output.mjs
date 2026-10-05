@@ -4,6 +4,7 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { validateDraft, validateScout } from './contract.mjs'
 import { apiError } from '../http/router.mjs'
+import { rankSources } from './sources.mjs'
 
 export const RESEARCH_ID = /^research-[a-f0-9-]{36}$/
 export const OUTPUT_MAX = 256 * 1024
@@ -58,6 +59,9 @@ export async function readScoutOutput (repo, id, task) {
   try {
     const result = validateScout(JSON.parse(await readOutputFile(repo, `out/${id}/scouts/${task}.json`)))
     if (result.task !== task) throw apiError(422, 'research_output_invalid')
+    if (result.sources.some(source => source.publishedAt !== undefined || source.engagement !== undefined)) {
+      result.sources = rankSources(result.sources, Math.max(...result.sources.map(source => Date.parse(source.accessed))))
+    }
     return result
   } catch { throw apiError(422, 'research_output_invalid') }
 }

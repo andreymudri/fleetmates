@@ -71,6 +71,11 @@ export function validateScout (value) {
     if (source.quote !== undefined) text(source.quote, 'source.quote', 300)
     const accessed = new Date(source.accessed)
     if (typeof source.accessed !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(source.accessed) || !Number.isFinite(accessed.getTime()) || accessed.toISOString().slice(0, 10) !== source.accessed) fail('source.accessed')
+    if (source.publishedAt !== undefined && source.publishedAt !== null) {
+      const date = new Date(source.publishedAt)
+      if (typeof source.publishedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(source.publishedAt) || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== source.publishedAt || date > accessed) fail('source.publishedAt')
+    }
+    if (source.engagement !== undefined && source.engagement !== null && (!Number.isSafeInteger(source.engagement) || source.engagement < 0 || source.engagement > 1000000000)) fail('source.engagement')
     if (!['docs', 'repo', 'blog', 'paper'].includes(source.type)) fail('source.type')
     list(source.backs, 'source.backs', 40, 1)
     unique(source.backs, 'source.backs')

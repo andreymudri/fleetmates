@@ -12,6 +12,7 @@ import * as auditLog from './audit.mjs'
 import { FALLBACK_CONFIRM_LABEL, applyScreen } from './request-updates.mjs'
 import { recordAllow, ruleThreshold } from './rules.mjs'
 import { allowAlwaysFor } from './screen-match.mjs'
+import { scanInstallRequest } from './extension-scan.mjs'
 
 /** Answer choices of `AnswerBody` (05-api 2.4). */
 export const CHOICES = Object.freeze(['allow', 'allow_always', 'deny', 'option', 'reply'])
@@ -156,7 +157,7 @@ export function recordAnswered (store, event, record = auditLog.record) {
  *   verifyMs?: number, followupMs?: number, lateMs?: number, pollMs?: number }} options
  */
 export function createDeliverer ({ store, link, publish = () => {}, now = Date.now, classify = defaultClassify,
-  rules = { recordAllow, ruleThreshold }, audit = auditLog, verifyMs = 3000, followupMs = 30000, lateMs = 600000, pollMs = 50 }) {
+  rules = { recordAllow, ruleThreshold }, audit = auditLog, verifyMs = 3000, followupMs = 30000, lateMs = 600000, pollMs = 50, scan = scanInstallRequest }) {
   /** Requests between their checks and the end of their write. */
   const busy = new Set()
   /** request id -> stop function of a running verification or late watch */
@@ -329,6 +330,20 @@ export function createDeliverer ({ store, link, publish = () => {}, now = Date.n
           commit(() => applyScreen(store, row.session_id, parsed.prompt, now()))
           row = getRow(row.id)
           if (row.screen_match !== 'on_screen') throw refuse(409, 'not_on_screen')
+        }
+        // Re-scan immediately before permission delivery, including retries after screen changes.
+        // Scan failures remain Caution, and an existing tier is never lowered.
+        if (row.kind === 'permission' && body.choice !== 'deny') {
+          let result
+          try { result = await scan(row, session) }
+          catch { result = { entryId: 'extension.scan', tier: 'caution', description: 'Extension scan unavailable.' } }
+          row = getRow(row.id)
+          if (row.state !== 'open') throw refuse(409, 'request_closed')
+          if (result) {
+            let reasons = []; try { reasons = JSON.parse(row.reasons ?? '[]') } catch {}
+            row = update(row.id, { tier: rank(result.tier) > rank(row.tier) ? result.tier : row.tier,
+              reasons: JSON.stringify([...(Array.isArray(reasons) ? reasons : []).filter(reason => reason.entryId !== 'extension.scan'), result]), rule_pattern: null })
+          }
         }
         const keys = answerKeys(row, body, parsed.prompt)
         // The tier rules again, on the tier the request has now: it can rise during the screen read.

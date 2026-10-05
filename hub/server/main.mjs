@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { execFileSync, spawn } from 'node:child_process'
 import { openDeckDb } from './db/index.mjs'
 import { runRetention } from './db/retention.mjs'
-import { createProjector } from './machines/projector.mjs'
+import { createProjector, requestView } from './machines/projector.mjs'
 import { autoArchiveCandidates } from './machines/archive.mjs'
 import { createIngestor, startHookSocket } from './ingest/socket.mjs'
 import { startSpoolDrain } from './ingest/spool.mjs'
@@ -17,6 +17,7 @@ import { checkHooks, deckHookCommand, readSettings, transformHooks, writeSetting
 import { scanRepos } from './adapters/repos.mjs'
 import { createDeckdLink } from './pty/link.mjs'
 import { createFleetmatesReader, taskForCwd } from './adapters/fleetmates.mjs'
+import { initializeLedgerTimeline, syncLedgerTimeline } from './ledger-timeline.mjs'
 import { createApi } from './http/api.mjs'
 import { createRouter, apiError } from './http/router.mjs'
 import { readToken } from './http/auth.mjs'
@@ -24,7 +25,8 @@ import { createWsHub } from './ws/hub.mjs'
 import { authorize } from './http/auth.mjs'
 import { openInBrowser } from './setup/browser.mjs'
 import { createTiersStore } from './approvals/tiers-store.mjs'
-import { setActiveTiers } from './approvals/tiers.mjs'
+import { setActiveTiers, maxTier } from './approvals/tiers.mjs'
+import { scanInstallRequest } from './approvals/extension-scan.mjs'
 import { applyScreen, fillConfirmLabel, raiseTiers } from './approvals/request-updates.mjs'
 import { createDeliverer, recordAnswered, recover as recoverDeliveries } from './approvals/deliver.mjs'
 import { createRules, offers as ruleOffers, recordAllow, ruleThreshold } from './approvals/rules.mjs'
@@ -257,6 +259,27 @@ export async function createDeckServer(options = {}) {
   const deliverer = createDeliverer({ store, link, publish, now, rules: { recordAllow, ruleThreshold: () => threshold }, ...options.deliver })
   // Confirm labels of Destructive requests, filled outside the hook transaction; close() waits for them.
   const labelWork = new Set()
+  const scanWork = new Set()
+  function preScanRequest(id) {
+    const work = Promise.resolve().then(async () => {
+      const row = store.get('SELECT * FROM requests WHERE id=?', id)
+      if (!row || row.state !== 'open') return
+      const session = store.get('SELECT * FROM sessions WHERE id=?', row.session_id)
+      const result = await scanInstallRequest(row, session)
+      if (!result || stopped) return
+      commit(() => {
+        const current = store.get('SELECT * FROM requests WHERE id=?', id)
+        if (!current || current.state !== 'open') return
+        let reasons = []; try { reasons = JSON.parse(current.reasons ?? '[]') } catch {}
+        store.run('UPDATE requests SET tier=?,reasons=?,rule_pattern=NULL WHERE id=?', maxTier(current.tier, result.tier),
+          JSON.stringify([...(Array.isArray(reasons) ? reasons : []).filter(reason => reason.entryId !== 'extension.scan'), result]), id)
+        const view = requestView(store.get('SELECT * FROM requests WHERE id=?', id))
+        store.appendEvent({ at: now(), type: 'request.updated', entityId: id, data: view })
+      })
+      if (store.get('SELECT tier FROM requests WHERE id=?', id)?.tier === 'destructive') fillLabel(id)
+    }).catch(() => {}).finally(() => scanWork.delete(work))
+    scanWork.add(work)
+  }
   const fillLabel = id => {
     const before = maxSeq()
     const work = fillConfirmLabel(store, id, { countFor, tiers: tiersStore.current(), at: now() })
@@ -279,6 +302,7 @@ export async function createDeckServer(options = {}) {
   }
   approvalsEvent = event => {
     if (stopped) return
+    if (event.type === 'request.opened' && event.data?.id) preScanRequest(event.data.id)
     if (event.type === 'request.opened' && event.data?.tier === 'destructive') fillLabel(event.data.id)
     if (event.type === 'request.closed' && event.data?.id) auditClosed(event.data)
     const prefs = event.type === 'prefs.changed' ? event.data?.prefs : null
@@ -665,7 +689,7 @@ export async function createDeckServer(options = {}) {
     configWatcher.close()
     await notificationWork.catch(() => {})
     notifications?.close()
-    await Promise.allSettled([...labelWork])
+    await Promise.allSettled([...labelWork, ...scanWork])
     spool?.close()
     ingest.close()
     reader.close?.()
@@ -726,6 +750,7 @@ export async function createDeckServer(options = {}) {
     // empty, so the next pass publishes every run once. Passes never overlap: a request during a pass (the
     // priming one included) reruns it once that pass ends, and the shared comparison means a watch event and
     // the poll never publish the same change twice.
+    initializeLedgerTimeline(store)
     const runJson = new Map()
     let runBusy = false
     let runAgain = false
@@ -738,6 +763,7 @@ export async function createDeckServer(options = {}) {
       Promise.resolve().then(() => reader.list()).then(api.withLeads).then(list => {
         if (stopped) return
         for (const row of list) {
+          syncLedgerTimeline(store, row, now())
           const key = JSON.stringify([row.repoId, row.runId])
           const text = JSON.stringify(row)
           if (runJson.get(key) === text) continue

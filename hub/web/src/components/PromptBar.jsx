@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import { format } from '../i18n/en.js'
 import { shown, titleText } from './StatusPill.jsx'
+import { FleetReport, ExtensionScanNotice } from './FleetProgress.mjs'
 
 /**
  * Default PromptBar copy, verbatim from the Focus copy deck (docs/deck/screens/focus.md section 9) and, for
@@ -123,7 +124,7 @@ export function PromptReply({ label, placeholder, send, disabled, onSend }) {
  *   busy?: object | null, guard?: 'typing' | null, badge?: any
  * }} props
  */
-export function PromptBar({ request, session, deckd, labels, confirmed = false, onConfirm = () => {}, onAnswer = () => {}, busy = null, guard = null, badge = null }) {
+export function PromptBar({ request, session, deckd, labels, confirmed = false, onConfirm = () => {}, onAnswer = () => {}, busy = null, guard = null, badge = null, lang = 'en' }) {
   const copy = { ...PROMPT_LABELS, ...labels }
   const repo = shown(repoOf(session))
   const question = request.kind === 'question'
@@ -181,6 +182,8 @@ export function PromptBar({ request, session, deckd, labels, confirmed = false, 
   }
   return (
     <div className={`prompt-bar prompt-bar--${tier}`} role="group" aria-label={name}>
+      <FleetReport session={{ state: question ? 'asked_you' : 'needs_approval' }} lang={lang} />
+      <ExtensionScanNotice request={request} lang={lang} />
       <div className="prompt-bar-head">
         {badge}
         {question ? <p className="prompt-bar-summary"><bdi>{name}</bdi></p> : <code className="prompt-bar-summary">{name}</code>}

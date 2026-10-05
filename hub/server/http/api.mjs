@@ -13,6 +13,7 @@ import { createLauncher, headBranch, SCROLLBACK_LINES, SCROLLBACK_LINES_MAX } fr
 import { createResearchService } from '../research/service.mjs'
 import { DiffError, sessionDiff } from '../adapters/git-diff.mjs'
 import { gitRead } from '../adapters/git-read.mjs'
+import { initializeLedgerTimeline, syncLedgerTimeline, sessionTimeline } from '../ledger-timeline.mjs'
 const deckVersion = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const defaults = {
   port: 47800, scanRoot: '~/dev', lang: 'en', staleMinutes: 20, claudeCommand: 'claude',
@@ -442,6 +443,15 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return ok({ session: row, requests: projector.snapshot().requests.filter(request => request.sessionId === row.id), steps: steps(row.id, q) })
       }
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'steps') return ok({ steps: steps(s[2], q) })
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'timeline') {
+        const row = session(s[2])
+        const run = row.runRef && (await runReader.list()).find(run => run.repoId === row.runRef.repoId && run.runId === row.runRef.runId)
+        initializeLedgerTimeline(store)
+        if (run) syncLedgerTimeline(store, run, now())
+        return ok({ events: sessionTimeline(store, row, integer(q, 'limit', 100, 200)), phase: run?.derivedPhase ?? null,
+          totalPhases: run?.totalPhases ?? null, phaseVerified: run?.phaseDerivation === 'verified',
+          truncated: !!run?.ledger?.truncated, unavailable: run?.ledger?.unavailable ?? [] })
+      }
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'diff') {
         const row = session(s[2])
         if (!q.has('path')) throw apiError(422, 'validation_failed', { fields: ['path'] })
