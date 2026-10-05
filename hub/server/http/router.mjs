@@ -23,7 +23,8 @@ export async function readBody(req) {
   if (Number(req.headers['content-length'] ?? 0) > max) throw apiError(413, 'payload_too_large')
   let size = 0
   const chunks = []
-  for await (const chunk of req) {
+  // Keep the socket alive when rejecting an oversized stream so the client receives the 413.
+  for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += chunk.length
     if (size > max) throw apiError(413, 'payload_too_large')
     chunks.push(chunk)
