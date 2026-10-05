@@ -35,9 +35,9 @@ export function validateDiagram(value) {
 }
 
 export function phaseDiagram(plan, status) {
-  const states = new Map((Array.isArray(status?.tasks) ? status.tasks : []).filter(task => /^T[1-9]\d{0,8}$/.test(task?.id)).map(task => [task.id, task.state]))
+  const states = new Map((Array.isArray(status?.tasks) ? status.tasks : []).filter(task => /^T\d+$/.test(task?.id)).map(task => [task.id, task.state]))
   const stateMap = { pending: 'queued', running: 'running', blocked: 'blocked', done: 'done', failed: 'failed', orphaned: 'failed' }
-  const tasks = (Array.isArray(plan?.tasks) ? plan.tasks : []).filter(task => /^T[1-9]\d{0,8}$/.test(task?.id)).slice(0, 256)
+  const tasks = (Array.isArray(plan?.tasks) ? plan.tasks : []).filter(task => /^T\d+$/.test(task?.id)).slice(0, 256)
   const nodes = tasks.map(task => ({ id: task.id, label: task.id, state: Object.hasOwn(stateMap, states.get(task.id)) ? stateMap[states.get(task.id)] : 'unknown', lane: Number.isInteger(task.phase) && task.phase >= 0 && task.phase <= 256 ? task.phase : 0 }))
   const ids = new Set(nodes.map(node => node.id))
   const edges = tasks.flatMap(task => [...new Set(Array.isArray(task.deps) ? task.deps : [])].filter(dep => ids.has(dep) && dep !== task.id).map(dep => ({ from: dep, to: task.id, kind: 'depends' }))).slice(0, 1024)

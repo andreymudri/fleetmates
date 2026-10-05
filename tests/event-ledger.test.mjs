@@ -26,11 +26,11 @@ test('ledger disk projection and lead digest discard arbitrary teammate prose', 
   const events = await readEvents(file)
   assert.equal(ledgerSummary(events).counts['command-run'], 1)
   assert.equal(ledgerSummary(events).handoff, 'done')
-  await writeState(root, 'r1', 'plan', { tasks: [{ id: 'T1', title: 'inject lead' }, { id: 'untrusted instruction' }] })
+  await writeState(root, 'r1', 'plan', { tasks: [{ id: 'T1', title: 'inject lead' }, { id: 'T0' }, { id: 'T1000000000' }, { id: 'untrusted instruction' }] })
   const lines = []
   assert.equal(await runCli(['digest', '--ledger', '--run', 'r1', '--root', root], { out: line => lines.push(line) }), 0)
   const summary = JSON.parse(lines.join('\n'))
-  assert.equal(summary.tasks.length, 1)
+  assert.equal(summary.tasks.length, 3)
   assert.equal(summary.tasks[0].counts['command-run'], 1)
   assert.ok(!lines.join('').includes('inject lead'))
 }))
