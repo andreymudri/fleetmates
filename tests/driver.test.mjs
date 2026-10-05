@@ -297,16 +297,26 @@ test('runPool tracks its cleanup promise so a throwing worker leaks no unhandled
 test('two concurrent dispatches on one run: exactly one proceeds, the other is refused', async () => {
   const runDir = await tmpRunDir('concurrent-lock')
   const stubs = [makeStubAdapter({ enforcementCodes: [0] }), makeStubAdapter({ enforcementCodes: [0] })]
-  const settled = await Promise.allSettled(stubs.map((s, i) => dispatchPhase(baseArgs(runDir, {
-    runId: 'rc', adapter: s.adapter, completeEnforcement: s.completeEnforcement, phaseTasks: [{ id: `T${i}` }],
-  }))))
-
-  const fulfilled = settled.filter((r) => r.status === 'fulfilled')
-  const rejected = settled.filter((r) => r.status === 'rejected')
-  assert.equal(fulfilled.length, 1)
-  assert.equal(rejected.length, 1)
-  assert.ok(rejected[0].reason instanceof DriverLockError)
-  assert.equal(rejected[0].reason.exitCode, 1)
+  let entered, release
+  const holding = new Promise((resolve) => { entered = resolve })
+  const finish = new Promise((resolve) => { release = resolve })
+  const first = dispatchPhase(baseArgs(runDir, {
+    runId: 'rc', adapter: stubs[0].adapter, phaseTasks: [{ id: 'T0' }],
+    completeEnforcement: async () => { entered(); await finish; return 0 },
+  }))
+  await holding
+  try {
+    // Hold the first dispatch inside enforcement. Scheduler load must not turn this
+    // into two sequential, valid dispatches with no actual lock contention.
+    await assert.rejects(dispatchPhase(baseArgs(runDir, {
+      runId: 'rc', adapter: stubs[1].adapter,
+      completeEnforcement: stubs[1].completeEnforcement, phaseTasks: [{ id: 'T1' }],
+    })), (err) => err instanceof DriverLockError && err.exitCode === 1)
+    assert.equal(stubs[1].calls.spawn.length, 0)
+  } finally {
+    release()
+    await first
+  }
 })
 
 test('killProcess signals the process group (negative pid), not the child directly', () => {
