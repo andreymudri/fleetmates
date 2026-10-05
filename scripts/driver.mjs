@@ -8,6 +8,7 @@
 // gate and `finish` are identical on both dispatch paths.
 import { mkdir, readFile, writeFile, rm, link, unlink } from 'node:fs/promises'
 import path from 'node:path'
+import { appendEvent, fingerprint } from './event-ledger.mjs'
 
 // A driver already holds this run's lock. Thrown by `dispatchPhase` so the CLI can translate it
 // into exit 1; `exitCode` carries that number without the CLI having to know the class.
@@ -293,6 +294,10 @@ export async function dispatchPhase({
 
   async function processTask(task) {
     const taskId = task.id
+    const observe = async (kind, result) => {
+      try { await appendEvent(path.join(runDir, 'ledger', `${fingerprint(taskId)}.jsonl`), { kind, result, at: Date.now() }) }
+      catch { /* Ledger availability never changes a git-derived enforcement verdict. */ }
+    }
     const branch = `fleetmates/${runId}/${taskId}`
     const sessionFile = path.join(sessionsDir, `${taskId}.json`)
     let record = (await readJson(sessionFile)) || {}
@@ -302,6 +307,7 @@ export async function dispatchPhase({
     if (record.result && typeof record.result === 'object' && typeof record.result.status === 'string') {
       return { kind: 'result', result: { taskId, ...record.result } }
     }
+    await observe('task-started')
 
     const resumePath = typeof record.sessionId === 'string' && record.sessionId.length > 0
     const sandbox = (resumePath && record.sandbox)
@@ -366,6 +372,7 @@ export async function dispatchPhase({
 
     await adapter.collect(git, { runRepo, sandbox, branch })
     let code = await completeEnforcement(taskId)
+    await observe('gate-result', code === 0 ? 'pass' : code === 3 ? 'fail' : 'unknown')
 
     if (code === 3) {
       // One enforcement resume with the fixed refusal, then re-check. A teammate that still fails
@@ -382,6 +389,7 @@ export async function dispatchPhase({
       if (reread != null) result = reread
       await adapter.collect(git, { runRepo, sandbox, branch })
       code = await completeEnforcement(taskId)
+      await observe('gate-result', code === 0 ? 'pass' : code === 3 ? 'fail' : 'unknown')
       if (code === 3) {
         const failed = {
           ...result,
@@ -393,6 +401,7 @@ export async function dispatchPhase({
           usage: await safeUsage(adapter, paths.streamPath),
         }
         await writeJson(sessionFile, record)
+        await observe('handoff', 'blocked')
         await finalize()
         return { kind: 'result', result: { taskId, ...failed } }
       }
@@ -403,6 +412,7 @@ export async function dispatchPhase({
       usage: await safeUsage(adapter, paths.streamPath),
     }
     await writeJson(sessionFile, record)
+    await observe('handoff', result.status === 'done' ? 'done' : 'blocked')
     await finalize()
     return { kind: 'result', result: { taskId, ...result } }
   }

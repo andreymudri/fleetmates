@@ -1316,16 +1316,18 @@ test('hooks.json wires update-check async and session-start sync', async () => {
   assert.equal(async.async, true)
 })
 
-test('hooks.json declares exactly one unmatched, synchronous SubagentStop hook', async () => {
+test('hooks.json declares unmatched synchronous enforcement and observation at SubagentStop', async () => {
   const cfg = JSON.parse(await readFile(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
   const stop = cfg.hooks.SubagentStop
   assert.equal(stop.length, 1, 'exactly one SubagentStop matcher group')
   assert.ok(!('matcher' in stop[0]), 'no matcher: SubagentStop must fire for every subagent, not a filtered subset')
   const entries = stop[0].hooks
-  assert.equal(entries.length, 1, 'exactly one command under the group')
+  assert.equal(entries.length, 2, 'enforcement and ledger observation under the group')
   // Synchronous, because the enforcement decision this hook makes must land before the
   // subagent is allowed to stop; an async hook could not block anything.
   assert.equal(entries[0].async, false)
+  assert.equal(entries[1].async, false)
+  assert.match(entries[1].command, /scripts\/context-hook\.mjs/)
 })
 
 test('the SubagentStop command names a script that actually exists on disk', async () => {
@@ -1347,8 +1349,8 @@ test('the SubagentStop command invokes node directly, not run-hook.cmd', async (
   // differ here, rather than SubagentStop simply having lost the wrapper by accident.
   const sessionStartCommands = cfg.hooks.SessionStart[0].hooks.map((h) => h.command)
   assert.ok(
-    sessionStartCommands.every((c) => c.includes('run-hook.cmd')),
-    'SessionStart hooks must still route through run-hook.cmd'
+    sessionStartCommands.every((c) => c.includes('run-hook.cmd') || /^node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/context-hook\.mjs"$/.test(c)),
+    'Shell SessionStart hooks use run-hook.cmd; the context hook uses node directly'
   )
 })
 
@@ -1421,7 +1423,7 @@ test('every executable a SessionStart hook invokes is committed executable', asy
 
   let indexModes = null
   try {
-    const out = execFileSync('git', ['ls-files', '-s', '--', 'hooks/'], {
+    const out = execFileSync('git', ['ls-files', '-s', '--', ...files], {
       cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']
     })
     indexModes = new Map(out.split('\n').filter(Boolean).map((line) => {

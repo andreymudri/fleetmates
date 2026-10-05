@@ -254,6 +254,37 @@ Reviews:
   findings path and scratch worktree already resolved
 - `collect-reviews --run <id>` — rebuild a `gate --results` file from the reviewers' findings drops
 
+Reviewer dispatches now check the tracked task specification and declared scope before their
+assigned quality lens. The recorded plan path is used by default; `review-dispatch --plan <path>`
+can name it explicitly. Unverifiable specifications use `unableToVerify`, which prevents a clean
+review result. Implementer summaries start with the next action and step progress, then include
+actual verification commands, worktrees, exit status and output tied to the final tested commit.
+These instructions do not replace Git-derived checks or prove that an agent ran a command.
+
+Instruction security lint runs in CI and inside the mandatory fileset check for committed skill
+and agent changes. It also checks declared instruction files of tasks already integrated, so
+merging before verification does not bypass the scan. It uses fixed diagnostics with file/line
+and rule identifiers, without forwarding instruction text to the lead or running that text.
+
+```sh
+node scripts/security-lint.mjs --root .
+node scripts/security-lint.mjs --root . --changed main --ref HEAD --json
+```
+
+The standalone command scans `skills/` and `agents/`; changed-commit mode also recognizes nested
+skill/agent directories and `AGENTS.md`. Refs are HEAD, full commit IDs, branch names or qualified
+refs. Committed scans read the immutable Git blobs, not worktree copies. Local scans reject
+observable links and non-regular files. Inputs are limited to 512 KiB per file, 256 instruction
+files and 5,000 filesystem entries; diagnostics cap each file at 100 findings plus a truncation
+marker. Exit 0 means no matching rule, 1 means findings, and 2 means the scan could not complete.
+
+Rules flag format/control characters except normal whitespace, mixed Latin/Greek/Cyrillic words
+and compatibility spellings, hidden comments or inline HTML/CSS, long whitespace padding,
+refusal overrides, unconditional skill triggers and recognizable provider shell-outs. The exact
+shipped startup description of `using-fleetmates` has an explicit entrypoint exception. Lint is
+heuristic: quoted examples can trigger findings, obfuscated attacks can evade it, and a clean
+result is not proof of safety. It does not install, execute or fetch scanned instructions.
+
 One lens carries a method of its own. `claims` reads the diff for sentences asserting a guarantee —
 a comment, a skill line, a spec line — then breaks what each one protects and runs the suite: a
 claim whose mutation leaves the suite green is a finding. It is bounded, not exhaustive. It probes a
@@ -542,3 +573,23 @@ MIT — see `LICENSE`.
 
 Some skills are adapted from [superpowers](https://github.com/obra/superpowers) (© Jesse Vincent,
 MIT). See `NOTICE.md` for what was adapted and `LICENSE-THIRD-PARTY` for the license text.
+# Event ledger and hook diagnostics
+
+`node scripts/cli.mjs digest --ledger --run <runId> --root <project>` reports each task's
+fixed event counts and result enums. Bash commands are represented by SHA-256 fingerprints;
+command output and handoff prose are never included. Events live in per-task JSONL files under
+`.fleetmates/<runId>/ledger/`. The reader rejects links, non-regular files, partial records,
+invalid events and files over 1 MiB. An unavailable ledger is reported explicitly. The ledger
+is writable observation data, not a substitute for the existing git-derived enforcement.
+
+SessionStart restores a registered teammate's own task and phase from its committed plan in
+`docs/plans/`. PreCompact emits a reminder; SessionStart on compact re-injects it afterward.
+PostToolUse records Bash outcomes when the harness supplies an exit code, otherwise unknown.
+Repeated stops without new successful command fingerprints or a passing gate trigger a fixed
+stall warning, capped at three blocks; active-stop retries are allowed to terminate as blocked.
+The headless driver already caps enforcement retries and records its gate and handoff events.
+
+`node scripts/cli.mjs doctor --hooks [--session <sessionId>]` checks callback receipts from the
+last 24 hours in the Claude config directory. It reports unverified callbacks honestly. Start a
+session, run Bash, compact, and stop a teammate in the installed Claude Code version to prove
+the callbacks fire. Synthetic tests validate the handlers, not a live Claude installation.
