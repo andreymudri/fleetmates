@@ -88,6 +88,23 @@ You implement exactly one task from a teammates run. You work inside your own gi
   start unrelated work. If a finding cannot be fixed inside your declared file set, return
   `status: "blocked"` naming the file you would have had to touch.
 
+## Evidence and handoff
+
+Before returning `done`, include the exact verification command, worktree, exit status and
+relevant output in `summary`, tied to the final tested commit. Re-run affected checks after
+later edits. Wait for commands to finish. Keep output verbatim, redact secrets and explicitly
+mark omitted output. Report `blocked` when required verification cannot run.
+
+Start `summary` with `Next: Y. Step N of M done: X.` N and M describe verified steps of your
+own task. Mark unknown counts explicitly. Follow with verification output; keep the existing
+JSON keys and status values. A blocked report names the next action needed to unblock it.
+
+For a failing task gate, use `systematic-debugging`: reproduce the same `complete` invocation,
+isolate the failing check, state one hypothesis, probe it, fix the confirmed cause, then
+re-run the same command. Distinguish a failing verdict from an invocation or infrastructure
+failure using the command's exit-code contract. Stay within the declared file set and
+escalate a blocker that requires changing ownership or gate policy.
+
 ## Return value
 
 Your final output is data, not a message to a human. Return exactly:
@@ -96,5 +113,5 @@ Your final output is data, not a message to a human. Return exactly:
 - `branch` — the branch you committed to
 - `filesChanged` — every path you created or modified, paths as written in the task's file set,
   repo-relative, never absolute worktree paths
-- `summary` — one paragraph on what you did and why
+- `summary` — action-first progress report followed by actual verification output
 - `blockers` — array of strings; empty when `status` is `done`

@@ -87,3 +87,20 @@ Use this loop for any bug, failing test, or unexpected behavior before proposing
 step 6, hand off to the `test-driven-development` skill for the RED/GREEN discipline on the
 regression test itself. Before claiming the bug is fixed, the `phase-gate` skill is where that
 claim is checked against a recorded PASS rather than taken on your word.
+
+
+## Gate failures
+
+1. **Reproduce.** Run the same complete command from the main worktree root with the original
+   run, task, plan and base arguments. Record the command, worktree, exit status and relevant
+   output. Interpret the command's documented exit codes: a rejected invocation or unavailable
+   measurement is different from a measured failing verdict.
+2. **Isolate.** Name the failing check and reduce its reproducer. Separate missing tooling,
+   dependencies, inaccessible previews and stale evidence from defects in the task's code.
+3. **Hypothesis.** State one explanation and an observable result that would disprove it.
+4. **Probe.** Test that prediction once. Discard it when the evidence contradicts it.
+5. **Fix.** Correct the confirmed cause within the declared files. If the fix needs another
+   owner's files or policy, report blocked; do not widen ownership or weaken checks.
+6. **Re-run.** Run the same complete command after the fix, wait for completion, then refresh
+   affected phase checks through the orchestrator before reporting done. Task-only enforcement
+   does not replace the full phase gate. Include actual output tied to the final tested commit.

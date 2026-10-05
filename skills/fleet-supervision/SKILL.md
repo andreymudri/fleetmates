@@ -24,6 +24,26 @@ worktree inside the repository, a branch that reached the base branch without th
 Run it after a teammate returns and before a gate. It decides nothing and records nothing: a
 teammate is `done` on the strength of this report and the gate, never on its own say-so.
 
+## Evidence and progress reports
+
+Start lead status and teammate handoff summaries with `Next: Y. Step N of M done: X.` Use
+known step counts from the task or phase; mark unknown counts explicitly. Name the next action
+needed for a blocked task. Preserve the digest block as-is after that line. Keep machine
+result keys and status values unchanged; place handoff progress and evidence in `summary`.
+
+Before accepting a done handoff, require the exact command, worktree, exit status and relevant output
+for completed verification, tied to the final tested commit. Later edits invalidate affected
+checks. Redact secrets and mark omitted output. Pending commands and cached PASS do not count;
+self-reported evidence is not a gate verdict. Run doctor and the gate independently as above.
+
+Handle spec-compliance findings before quality findings: return scope or acceptance failures
+to the owning teammate, repeat review after its fix, then proceed to the assigned quality
+lens. Review without a verifiable tracked spec is unableToVerify, not a clean result. Keep
+reviewers read-only and preserve severity/stamp checks and the recorded gate requirement.
+
+For gate failures, use systematic-debugging's gate loop. Diagnose invocation or environment
+failures before editing task code. Never broaden ownership or weaken checks to clear a failure.
+
 ## Event-driven, not polling
 
 Background teammates notify on completion — react to those notifications. The only timer is a

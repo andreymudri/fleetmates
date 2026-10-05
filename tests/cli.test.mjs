@@ -3556,6 +3556,11 @@ test('review-dispatch emits one unnamed reviewer per lens over the phase branche
     assert.equal(spec.reviewers[0].name, null)
     assert.match(spec.reviewers[0].findingsPath, /reviews\/1-correctness\.json$/)
     assert.match(spec.reviewers[0].prompt, /fleetmates\/r1\/T1/)
+    const recordedPlanPath = path.relative(root, planPath).split(path.sep).join('/')
+    for (const reviewer of spec.reviewers) {
+      assert.ok(reviewer.prompt.includes('plan path (JSON literal): ' + JSON.stringify(recordedPlanPath)))
+      assert.ok(reviewer.prompt.indexOf('Stage 1: spec compliance.') < reviewer.prompt.indexOf('Stage 2: assigned-lens quality.'))
+    }
   })
 })
 
