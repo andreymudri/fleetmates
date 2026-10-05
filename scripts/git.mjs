@@ -665,6 +665,13 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       }
       return (await run(['rev-parse', '--verify', '--end-of-options', `refs/heads/${name}`, '--'])).trim()
     },
+    async fileSizeAtCommit(sha, filePath) {
+      if (!isNonEmptyString(sha) || !isNonEmptyString(filePath)) throw new GitError('fileSizeAtCommit requires a non-empty sha and path')
+      const output = (await run(['cat-file', '-s', '--', `${sha}:${filePath}`])).trim()
+      const size = Number(output)
+      if (!/^\d+$/.test(output) || !Number.isSafeInteger(size)) throw new GitError('Git returned an invalid blob size')
+      return size
+    },
     async fileAtCommit(sha, filePath) {
       if (!isNonEmptyString(sha) || !isNonEmptyString(filePath)) {
         throw new GitError(`fileAtCommit requires a non-empty sha and path, got sha=${JSON.stringify(sha)} path=${JSON.stringify(filePath)}`)
