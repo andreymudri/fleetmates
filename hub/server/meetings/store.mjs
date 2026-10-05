@@ -3,6 +3,7 @@
 // caller can publish them. No title, transcript, ask or note text is stored or put in an event
 // (06-storage 10.1), and no pin label is stored for a confidential meeting.
 import { randomBytes } from 'node:crypto'
+import { scrubBackups } from '../db/backups.mjs'
 
 /**
  * @typedef {{ run: Function, get: Function, all: Function, appendEvent: Function, tx: Function }} Store
@@ -102,7 +103,10 @@ export function upsertMeeting (store, { id, tag, confidential, state, startedAt,
     if (JSON.stringify(meeting) !== JSON.stringify(before)) append({ at, type: 'meeting.updated', entityId: id, data: meeting })
     return { meeting, events }
   })
-  if (rose) store.get('PRAGMA wal_checkpoint(TRUNCATE)')
+  if (rose) {
+    store.get('PRAGMA wal_checkpoint(TRUNCATE)')
+    scrubBackups(store.file, id)
+  }
   return result
 }
 

@@ -12,12 +12,13 @@ import { doctor, status } from '../server/setup/doctor.mjs'
 import { initChecks } from '../server/setup/wait.mjs'
 import { openInBrowser } from '../server/setup/browser.mjs'
 import { redact } from '../server/approvals/audit.mjs'
+import { exportMisses } from '../server/ask/export-misses.mjs'
 
 const hub = fileURLToPath(new URL('..', import.meta.url))
 const paths = setupPaths()
 const command = deckHookCommand(process.execPath, paths.hook)
 const args = process.argv.slice(2)
-const USAGE = 'usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | uninstall-hooks | audit [--repo <name>] [--since <YYYY-MM-DD>]'
+const USAGE = 'usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | uninstall-hooks | audit [--repo <name>] [--since <YYYY-MM-DD>] | export-misses [--kind retrieval|all] [--out <file>]'
 // The user's tiers.json (07-approvals 4.1): created by init only when missing, with the schema copied beside it.
 const tiersFile = path.join(paths.config, 'tiers.json')
 const tiersSchema = path.join(paths.config, 'tiers.schema.json')
@@ -173,6 +174,25 @@ async function audit(rest) {
 
 async function main() {
   const [name, ...rest] = args
+  if (name === 'export-misses') {
+    let kind = 'retrieval', out = null
+    for (let i = 0; i < rest.length; i += 2) {
+      if (!rest[i + 1] || !['--kind', '--out'].includes(rest[i])) { process.stderr.write(`${USAGE}\n`); process.exitCode = 2; return }
+      if (rest[i] === '--kind') kind = rest[i + 1]
+      else out = rest[i + 1]
+    }
+    if (!['retrieval', 'all'].includes(kind)) { process.stderr.write(`${USAGE}\n`); process.exitCode = 2; return }
+    const { DatabaseSync } = await import('node:sqlite')
+    const db = new DatabaseSync(path.join(paths.state, 'deck.db'), { readOnly: true })
+    try {
+      const lines = exportMisses({ all: sql => db.prepare(sql).all() }, { kind })
+      if (out) {
+        const fd = fs.openSync(out, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o600)
+        try { fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, lines) } finally { fs.closeSync(fd) }
+      } else process.stdout.write(lines)
+    } finally { db.close() }
+    return
+  }
   if (name === 'audit') return audit(rest)
   if (name === 'init' && rest.every(arg => ['--dry-run', '--rotate-token'].includes(arg))) return init(rest.includes('--dry-run'), rest.includes('--rotate-token'))
   if (name === 'uninstall-hooks' && rest.length === 0) {

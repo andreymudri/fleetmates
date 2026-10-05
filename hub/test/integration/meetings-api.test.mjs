@@ -290,7 +290,8 @@ test('a meeting ask streams ask.delta and ask.done without seq, and no ask event
     assert.throws(() => h.deck.store.appendEvent({ type, data: {} }), TypeError, type)
   }
   const vault = await h.request('/api/ask', { method: 'POST', body: { text: 'oi', scope: 'vault' } })
-  assert.equal(vault.status, 422)
+  assert.equal(vault.status, 503)
+  assert.equal(vault.data.error.code, 'vault_unavailable')
 })
 
 test('with no scribed socket GET /api/meetings still lists the five past meetings, recorder unavailable', async t => {

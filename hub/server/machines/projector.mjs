@@ -1,4 +1,7 @@
 import { realpathSync } from 'node:fs'
+import { learnedToday } from '../ask/store.mjs'
+import { localDate } from '../vault/service.mjs'
+import { observeToolUse } from '../vault/observe.mjs'
 import { capHistory } from '../../deckd/screen-model.mjs'
 import { dedupeKey } from '../ingest/validate.mjs'
 import { historySize, sizeHeader } from '../screen/history.mjs'
@@ -30,7 +33,7 @@ function reviewBaselineHead(value) {
     return typeof head === 'string' && /^[0-9a-f]{40,64}$/.test(head) ? head : null
   } catch { return null }
 }
-function sessionView(row, store) {
+function sessionView(row, store, at = Date.now()) {
   return {
     id: row.id,
     claudeSessionId: row.claude_session_id,
@@ -64,7 +67,8 @@ function sessionView(row, store) {
     endedAt: row.ended_at,
     archivedAt: row.archived_at ?? null,
     archivedBy: row.archived_by ?? null,
-    toolCalls: store.get('SELECT COUNT(*) AS n FROM session_steps WHERE session_id=?', row.id).n
+    toolCalls: store.get('SELECT COUNT(*) AS n FROM session_steps WHERE session_id=?', row.id).n,
+    learnedToday: learnedToday(store, row.id, localDate(at).midnight)
   }
 }
 /**
@@ -197,7 +201,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
     return store.get('SELECT * FROM sessions WHERE id=?', session.id)
   }
   function snapshot() {
-    const sessions = store.all('SELECT * FROM sessions ORDER BY started_at, id').map(row => sessionView(row, store))
+    const sessions = store.all('SELECT * FROM sessions ORDER BY started_at, id').map(row => sessionView(row, store, now()))
     const requests = store.all('SELECT * FROM requests ORDER BY created_at, id').map(requestView)
     return { seq: Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq), sessions, requests, counts: projectCounts(store), home: projectHome(sessions, requests) }
   }
@@ -227,7 +231,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
       const unarchived = unarchiveNeedingOwner(store)
       if (unarchived.length) {
         const at = now()
-        for (const id of unarchived) store.appendEvent({ at, type: 'session.upserted', entityId: id, data: sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store) })
+        for (const id of unarchived) store.appendEvent({ at, type: 'session.upserted', entityId: id, data: sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store, now()) })
         store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
       }
       order = orderEvent(now())
@@ -288,7 +292,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
       result = change()
       if (!Array.isArray(result)) return
       const at = now()
-      for (const id of result) store.appendEvent({ at, type: 'session.upserted', entityId: id, data: sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store) })
+      for (const id of result) store.appendEvent({ at, type: 'session.upserted', entityId: id, data: sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store, now()) })
       store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
     })
     return result
@@ -358,10 +362,10 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
           store.run('INSERT INTO sessions(id,origin,pty_id,process_key,repo_id,cwd,branch,task,launch_task,state,state_since,since_ts,last_activity_at,alive,joined_mid_life,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
             id, row.origin, row.pty_id, row.process_key, row.repo_id, row.cwd, row.branch ?? null, row.task ?? 'Untitled', row.launch_task ?? null, 'starting', at, at, at, 1, 0, at)
         }
-        store.appendEvent({ at, type: 'session.upserted', entityId: id, data: sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store) })
+        store.appendEvent({ at, type: 'session.upserted', entityId: id, data: sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store, now()) })
         store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
       })
-      return sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store)
+      return sessionView(store.get('SELECT * FROM sessions WHERE id=?', id), store, now())
     },
     applyHooks(batch) {
       return commit(() => {
@@ -457,6 +461,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
             if (session?.alive && hook.hook_event_name === 'PreToolUse' && hook.tool_name === 'Bash') session = joinLead(session, hook, envelope.hookTs)
           }
           if (session && (!late || session.alive && sameKnownProcess(store, session, envelope))) recordToolStep(store, session, envelope, { taskId: taskIdFor(session, hook) })
+          const memoryChanged = session && observeToolUse(store, { session, hook, at: envelope.hookTs })
           store.run('INSERT INTO hook_events(dedupe_key,session_id,claude_session_id,event,hook_ts,received_at,via,pty_id,claude_pid,applied,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?)', key, session?.id ?? null, hook.session_id, hook.hook_event_name, envelope.hookTs, envelope.receivedAt ?? now(), envelope.via ?? 'socket', envelope.ptyId ?? null, envelope.claudePid ?? null, lifecycleEvent ? lifecycleAccepted ? 1 : 0 : openingApplied || !late ? 1 : 0, JSON.stringify(hook))
           if (session && (!late || requestChanged)) {
             for (const row of store.all('SELECT * FROM requests WHERE session_id = ?', session.id)) {
@@ -466,7 +471,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
             }
           }
           if (session) persistSessionSummary(store, session)
-          if (session && (!late || requestChanged || identityChanged || replacementChanged || lifecycleChanged || joinChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session, store) })
+          if (session && (!late || requestChanged || identityChanged || replacementChanged || lifecycleChanged || joinChanged || memoryChanged)) store.appendEvent({ at: envelope.hookTs, type: 'session.upserted', entityId: session.id, data: sessionView(session, store, now()) })
         }
         store.appendEvent({ at: now(), type: 'counts', data: projectCounts(store) })
       })
@@ -478,17 +483,17 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
           const state = JSON.parse(row.changed_files).length ? 'done' : 'ended'
           store.run('UPDATE sessions SET state = ?, state_since = ?, alive = 0, activity = NULL, ended_at = ?, since_ts = ? WHERE id = ?', state, state === row.state ? row.state_since : at, at, at, row.id)
           persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
-          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store, now()) })
         }
         for (const row of store.all('SELECT * FROM sessions WHERE state = ? AND (activity IS NULL OR activity <> ?) AND ? - last_activity_at >= ?', 'running', 'compacting', at, 1_200_000)) {
           store.run('UPDATE sessions SET state = ?, state_since = last_activity_at WHERE id = ?', 'stale', row.id)
-          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store, now()) })
         }
         for (const row of store.all('SELECT * FROM sessions WHERE origin = ? AND alive = 1 AND process_key IS NULL AND ? - last_activity_at >= ?', 'observed', at, 86_400_000)) {
           closeRequests(row.id, 'process_ended', at)
           store.run('UPDATE sessions SET state = ?, state_since = ?, alive = 0, activity = NULL, ended_at = ?, since_ts = ? WHERE id = ?', 'ended', row.state === 'ended' ? row.state_since : at, at, at, row.id)
           persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
-          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
+          store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store, now()) })
         }
         store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
       })
@@ -556,7 +561,7 @@ export function createProjector({ store, now = Date.now, publish = () => {}, loc
           store.run('UPDATE sessions SET state=?,reviewed_at=?,state_since=?,since_ts=?,changed_files=?,review_baseline=? WHERE id=?', row.alive ? 'reviewed' : 'ended', at, at, at, '[]', baseline ?? row.review_baseline, row.id)
         }
         persistSessionSummary(store, store.get('SELECT * FROM sessions WHERE id = ?', row.id))
-        store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store) })
+        store.appendEvent({ at, type: 'session.upserted', entityId: row.id, data: sessionView(store.get('SELECT * FROM sessions WHERE id = ?', row.id), store, now()) })
         store.appendEvent({ at, type: 'counts', data: projectCounts(store) })
       })
     }

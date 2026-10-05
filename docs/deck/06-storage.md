@@ -842,3 +842,15 @@ Existing items referenced, not repeated: SET-O2 (prefs storage split), SET-O5, C
 | DB-O2 | A meeting whose tag is not in `config.yaml` (renamed or removed tag, unreadable config): treat as confidential? | Yes, fail closed | M4 |
 | DB-O3 | Ask threads, misses and captures have no retention: keep forever, or 30 days like the event stream? | Default applied in M5, owner may revisit before exit: forever | M5 before exit |
 | DB-O4 | Backup, restore and reset commands (`fleetmates-deck backup`, `restore`, `reset`, named as in [13-operations.md](13-operations.md) section 4.2): ship them, or document manual steps only? | Ship them under the hub bin; 03-architecture section 6 points to the full list in 13-operations | M1 |
+
+## Prepared M5 storage verification
+
+`0006-memory.sql` is the implemented migration for vault threads, messages, misses, captures,
+observed note reads and learn calls. The question and answer live only in thread tables;
+Ask events cannot be appended to `events`. Threads, captures and misses have no automatic
+retention in this milestone. Deleting a thread securely removes its prose.
+
+After a meeting rises to confidential, the store checkpoints and scrubs every matching
+`deck.db.pre-NNNN.bak` or numbered collision copy. The backup's own confidentiality trigger
+removes its sensitive fields, then VACUUM compacts it. Unrelated backups remain untouched.
+A corrupt backup is deleted and logged by basename only; it does not fail the meeting update.

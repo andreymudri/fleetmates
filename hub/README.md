@@ -349,3 +349,42 @@ file names its own command.
 ## License
 
 MIT.
+
+## Memory (prepared 0.5.0)
+
+Memory includes a domain graph, a two-hop note preview, Browse by MOC, daily Captures,
+and unresolved Misses. Ask creates a saved thread with validated note and line citations.
+History restores threads; Stop cancels an answer. The palette accepts `?question`, Focus
+shows related, read and learned notes, and Calm Home shows captures and unanswered questions.
+
+Set `VAULT_PATH` or the `vaultPath` connection preference. The environment wins. The server
+starts `vaultCommand` on stdio with `VAULT_PATH` and `VAULT_LANG`; its default is
+`["npx", "-y", "@andreymudri/vault-mcp"]`. The graph needs vault-mcp 0.4.0. Older servers
+can still support Browse and Ask. A disconnected vault disables Ask while sessions and
+meetings remain available. Retry uses `/api/deps/vault-mcp/retry`.
+
+Ask runs `claude -p --restricted --strict-mcp-config --permission-prompts none`, with an empty
+built-in tool list and only `vault_search`, `vault_get_note`, `vault_list` and `vault_backlinks`
+allowed. Vault writes and web tools are denied. Each child has a private working directory
+and a sanitized environment. One answer per thread, two concurrent children, a FIFO queue,
+a 120-second total deadline and a 45-second idle deadline apply. The real Claude restricted
+mode check remains an owner task; automated checks use the fake CLI.
+
+Questions and answers stay in SQLite thread tables and ephemeral WebSocket messages. They
+do not enter event history, logs or browser storage. Deleting a thread uses SQLite secure
+deletion. A meeting becoming confidential also scrubs migration backups.
+
+Export reviewed retrieval failures with:
+
+```sh
+fleetmates-deck export-misses --kind retrieval --out queries.jsonl
+fleetmates-deck export-misses --kind all
+```
+
+Each line has `query`, `expectedTopPath` and `askedAt`. Retrieval exports note-resolved
+misses; `all` also includes open misses. Dismissed and researched misses are excluded.
+The command opens SQLite read only; output files have mode 0600.
+
+M5 adds no vault writes, capture revert, embeddings or hybrid retrieval. Research links
+hand off to the future M6 screen. Publication and restarting the dogfood web server remain
+pending; see `docs/deck/m5-exit.md`.

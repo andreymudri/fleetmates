@@ -3,7 +3,8 @@ import { CARD_COPY, isArchived } from '../../components/SessionCard.jsx'
 import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
 import { StatusPill, compactDuration, pillParams, shown, titleText, translate } from '../../components/StatusPill.jsx'
-import { answerRequest, archiveSession } from '../../state/actions.js'
+import { answerRequest, archiveSession, askVault, searchVault } from '../../state/actions.js'
+import { noteHref } from '../../components/NoteChip.jsx'
 import { matchRoute } from '../../state/deck-store.js'
 import { answerable, closeOverlay, deckApi, deckdDown, leaveOverlay, openOverlay, repoFor, tierOf, trapTab } from '../drawer/NeedsYouDrawer.jsx'
 
@@ -13,6 +14,8 @@ export const PALETTE_COPY = Object.freeze({
   'palette.group.needs': 'Needs you',
   'palette.group.sessions': 'Sessions',
   'palette.group.actions': 'Actions',
+  'palette.group.memory': 'Memory',
+  'palette.group.showAll.memory': 'notes',
   'palette.needs.title': '{repo} · {summary}',
   'palette.needs.waiting': 'waiting {duration}',
   'palette.needs.answerInTerminal': 'Answer in your terminal',
@@ -195,13 +198,18 @@ export function needsAction(request, session, down) {
  * @param {{ query?: string, now?: number, expanded?: string[], t?: (key: string, params?: object) => string }} [options]
  * @returns {{ groups: { id: string, label: string, rows: object[], total: number, more: object | null }[], rows: object[], active: number, message: string | null }}
  */
-export function paletteModel(state, { query = '', now = Date.now(), expanded = [], t } = {}) {
+export function paletteModel(state, { query = '', now = Date.now(), expanded = [], t, memory } = {}) {
   const { sessions = [], requests = [], repos = [], order = [] } = state.data
   const typed = String(query ?? '').trimStart()
   if (typed.startsWith('>')) {
     const command = commandRows(typed.slice(1), repos, t)
     return finish([['actions', command.rows]], expanded, t, command.message)
   }
+  const memoryRows = memory && typed.trim() ? memory.down ? [{ kind: 'memoryDown', key: 'memory-down', title: 'Memory is unavailable: vault-mcp is not answering.' }] : [
+    ...(typed.startsWith('?') ? [{ kind: 'askVault', key: 'ask-vault', text: typed.slice(1).trim(), title: `Ask your vault: "${titleText(typed.slice(1).trim())}"`, subtitle: 'Starts a thread in Memory' }] : []),
+    ...(memory.loading ? [{ kind: 'memoryLoading', key: 'memory-loading', title: 'Searching notes…' }] : (memory.hits ?? []).map(hit => ({ ...hit, kind: 'memoryNote', key: `memory-${hit.path}:${hit.line}`, title: titleText(hit.title ?? hit.path), subtitle: titleText(hit.path.split('/').slice(0, -1).join('/')) })))
+  ] : []
+  if (memory && typed.startsWith('?')) return finish([['memory', memoryRows]], expanded, t)
   const live = orderSessions(sessions.filter(row => row.state !== 'ended' && !isArchived(row)), order, requests)
   const position = new Map(live.map((row, index) => [row.id, index + 1]))
   const byId = new Map(sessions.map(row => [row.id, row]))
@@ -253,7 +261,7 @@ export function paletteModel(state, { query = '', now = Date.now(), expanded = [
     ? [{ kind: 'archive', group: 'actions', key: `archive-${focused.id}`, sessionId: focused.id, session: focused, repo: repoFor(repos, focused.repoId), title: archiveTitle }]
     : []
 
-  return finish([['needs', needs], ['sessions', sessionRows], ['actions', [...archives, ...launches, ...reviews]]], expanded, t)
+  return finish([['needs', needs], ['sessions', sessionRows], ['actions', [...archives, ...launches, ...reviews]], ['memory', memoryRows]], expanded, t)
 }
 
 /**
@@ -312,7 +320,14 @@ export function openLaunch(navigate, to = '/new', env = globalThis.window) {
  */
 export async function runRow(row, { navigate, leave, onClose, expand, api, win, archive = id => archiveSession(api, id),
   allow = item => answerRequest(api, item.requestId, { choice: 'allow' }), openDrawer = id => openOverlay('drawer', win ?? globalThis.window, { request: id }) }) {
-  if (row.kind === 'needs' && row.action === 'allow') {
+  if (row.kind === 'askVault') {
+    const result = await askVault(api, { text: row.text })
+    leave()
+    navigate(`/memory?thread=${encodeURIComponent(result.thread.id)}`)
+  } else if (row.kind === 'memoryNote') {
+    leave()
+    navigate(noteHref(row.path))
+  } else if (row.kind === 'needs' && row.action === 'allow') {
     await allow(row)
   } else if (row.kind === 'needs' && row.action === 'drawer') {
     leave()
@@ -400,7 +415,7 @@ function Option({ row, active, now, t, onRow, onHover, pending }) {
         : <span className="palette-glyph" aria-hidden="true">+</span>}
       <span className="palette-row-text">
         <span className="palette-row-title">{busy ? <span className="answer-spinner" aria-hidden="true" /> : null}{row.title}</span>
-        {row.subtitle && (row.kind === 'needs' || row.kind === 'launch') ? <span className="palette-row-sub">{row.subtitle}</span> : null}
+        {row.subtitle && ['needs', 'launch', 'askVault', 'memoryNote'].includes(row.kind) ? <span className="palette-row-sub">{row.subtitle}</span> : null}
         {row.kind === 'session' ? <span className="palette-row-sub"><StatusPill state={row.session.state} params={pillParams(row.session, now)} role={row.session.role} variant="text" t={t} /></span> : null}
       </span>
       {row.kbd ? <kbd className="kbd" aria-hidden="true">{row.kbd}</kbd> : null}
@@ -435,7 +450,7 @@ export function PaletteView({ model, query, active, now = Date.now(), t, onQuery
         </ul>
         {model.rows.length ? null : model.message ? <p className="palette-message" role="status">{model.message}</p> : <EmptyState kind="palette" t={t} />}
         {announce ? <p className="sr-only" role="status" aria-live="polite">{announce}</p> : null}
-        <p className="palette-footer">{['palette.footer.move', 'palette.footer.run', 'palette.footer.close'].map(key => translate(t, PALETTE_COPY, key)).join(' · ')}</p>
+        <p className="palette-footer">{query.trimStart().startsWith('?') ? 'Asking your vault' : '? ask · > run'} · {['palette.footer.move', 'palette.footer.run', 'palette.footer.close'].map(key => translate(t, PALETTE_COPY, key)).join(' · ')}</p>
       </div>
     </div>
   )
@@ -459,6 +474,16 @@ export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(
   const [expanded, setExpanded] = useState([])
   const [pending, setPending] = useState(null)
   const [announce, setAnnounce] = useState(null)
+  const [memoryHits, setMemoryHits] = useState([])
+  const [memoryLoading, setMemoryLoading] = useState(false)
+  const vaultDown = ['down', 'unknown'].includes(state.memory?.vault.state ?? 'unknown')
+  useEffect(() => {
+    const text = query.replace(/^\s*\?/, '').trim()
+    if (!api || !text || query.trimStart().startsWith('>') || vaultDown) { setMemoryHits([]); setMemoryLoading(false); return }
+    let active = true; setMemoryLoading(true)
+    const timer = setTimeout(() => { searchVault(api, text, 10).then(result => { if (active) setMemoryHits(result.hits) }, () => { if (active) setMemoryHits([]) }).finally(() => { if (active) setMemoryLoading(false) }) }, 150)
+    return () => { active = false; clearTimeout(timer) }
+  }, [api, query, vaultDown])
   const input = useRef(null)
   const panel = useRef(null)
   const now = Date.now()
@@ -467,7 +492,7 @@ export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(
     input.current?.focus()
     return () => opener?.focus?.()
   }, [])
-  const model = paletteModel(state, { query, now, expanded, t })
+  const model = paletteModel(state, { query, now, expanded, t, memory: { hits: memoryHits, loading: memoryLoading, down: vaultDown } })
   const current = Math.min(active, model.rows.length - 1)
   const env = { navigate, leave: onLeave, onClose, expand: group => setExpanded(list => [...list, group]), api: api ?? deckApi() }
   if (onArchive) env.archive = onArchive

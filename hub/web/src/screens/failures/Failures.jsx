@@ -11,6 +11,7 @@ import { TeamRun } from '../team-run/TeamRun.jsx'
 import { CrewSheet } from '../crew/CrewSheet.jsx'
 import { Meetings } from '../meetings/Meetings.jsx'
 import { MeetingLive } from '../meetings/MeetingLive.jsx'
+import { Memory } from '../memory/Memory.jsx'
 import { retryScribed, startScribed } from '../../state/actions.js'
 
 /** English copy for the M1 failure patterns the screens place (docs/deck/screens/failures-and-loading.md section 9). */
@@ -140,6 +141,8 @@ export function deckScreens({ api, feed, terminals = null, dispatch, now = Date.
       onStartDeckd={() => { api.post('/api/deps/deckd/start').catch(() => {}) }} />
   )
   const screens = {
+    memory: props => <><Memory {...props} api={api} feed={feed} dispatch={dispatch} now={now} /><ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} /></>,
+    memoryNote: props => <><Memory {...props} api={api} feed={feed} dispatch={dispatch} now={now} /><ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} /></>,
     home: function HomeScreen(props) {
       return <>{notices(props, true)}<Home state={props.state} t={props.t} navigate={props.navigate} api={api} terminals={terminals} dispatch={dispatch} /></>
     },

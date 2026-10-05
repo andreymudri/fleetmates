@@ -345,3 +345,15 @@ fleetmates has one `SECURITY.md` at the repo root covering the plugin (gate thre
 | SEC-O4 | Does fleetmates' `createGit` disable repo-configured code (`core.fsmonitor`, hooks, pager, external diff)? Not recorded in the fleetmates contract | Deck's own git helper for all deck git calls; fleetmates derivation only on the slow timer | M1 |
 | SEC-O5 | One root SECURITY.md with a deck section, or `hub/SECURITY.md` linked from the root | One file, deck section | M1 |
 | APR-O1 | Design-oversight review of tiers before M3 ([07-approvals.md](07-approvals.md)) | **Decided** 2026-10-02 (D-75 to D-83): done and resolved by the owner | M3 (decided) |
+
+## Prepared M5 security evidence
+
+The child-server privacy test uses synthetic question and answer sentinels. Event history,
+stdout, stderr and spool contain neither; deleting the thread and checkpointing removes both
+from database and WAL bytes. Browser tests verify that saved threads do not persist their
+prose in localStorage, sessionStorage, IndexedDB or Cache API. Graph positions may be cached
+in sessionStorage; answers and questions are excluded. The fake CLI validates the strict
+MCP configuration and refuses write-tool allowlists. The real CLI proof remains owner-pending.
+
+Markdown is rendered through the existing token renderer with raw HTML disabled, and titles
+and paths expose bidi controls visibly. Every new HTTP route requires the existing token.

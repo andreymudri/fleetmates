@@ -200,7 +200,7 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 **Exit criteria**:
 
-1. vault-mcp 0.4 published with `vault_graph`; the deck's tool schema snapshot test pins it. The owner publishes 0.4.0 (D-126); until then the contract test runs against the devDependency pinned to 0.3.0 (D-135), and bumping it and regenerating the `tools/list` snapshot is owner-pending.
+1. vault-mcp 0.4 published with `vault_graph`; the deck's tool schema snapshot test pins it. Published 0.4.0 is available and the prepared M5 implementation pins that exact devDependency with a regenerated `tools/list` snapshot; see [m5-exit.md](m5-exit.md).
 2. Memory acceptance criteria green with fixture `vault22`; Ask tests with fake `claude -p`: cited answer, miss logged with "Research this", general knowledge kept separate, argv check refuses any write tool.
 3. Graph budget met: under 500 ms at 1,000 notes.
 4. Golden queries: two weeks of real misses exported, reviewed, and the qualifying ones added to vault-mcp's suite.

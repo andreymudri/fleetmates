@@ -1,2 +1,7 @@
 /* The Memory lists: Browse by MOC, Captures and Misses (screens/memory.md 4.5), owned by M5 Task 11.
    Created empty by Task 8. Values are tokens from tokens.css. Imported once from main.jsx. */
+.memory-main ul { list-style: none; padding: 0; }
+.memory-main li { padding: 12px 0; border-bottom: 1px solid var(--border-default); }
+.memory-main li code { display: block; font-size: 11px; color: var(--text-muted); overflow-wrap: anywhere; }
+.memory-main li > span { display: block; margin-top: 6px; font-size: 12px; color: var(--text-secondary); }
+.memory-main button { margin-right: 6px; }

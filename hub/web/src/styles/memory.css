@@ -1,5 +1,17 @@
 /* The Memory screen (screens/memory.md), owned by M5 Task 13, and the Citation and NoteChip components
    (components 21 and 22), added by Task 8. Values are tokens from tokens.css. Imported once from main.jsx. */
+.memory-screen { padding: 24px; }
+.memory-screen .page-header, .memory-filters { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.memory-screen .page-header { justify-content: space-between; }
+.memory-screen [role="tablist"] { display: flex; gap: 8px; border-bottom: 1px solid var(--border-default); padding-bottom: 12px; }
+.memory-screen [role="tab"] { background: var(--bg-control); color: var(--text-default); padding: 8px 12px; border: 1px solid var(--border-default); border-radius: 4px; }
+.memory-screen [aria-selected="true"] { color: var(--color-teal-200); background: var(--color-teal-950); border-bottom: 2px solid var(--color-teal-400); }
+.memory-crumb { color: var(--text-secondary); font-size: 12px; }
+.memory-filters label { display: flex; align-items: center; gap: 8px; }
+.memory-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 440px; margin-top: 20px; border: 1px solid var(--border-default); border-radius: 10px; }
+.memory-main { padding: 20px; min-width: 0; }
+.memory-workspace > aside { border-left: 1px solid var(--border-default); }
+@media (max-width: 1000px) { .memory-workspace { grid-template-columns: 1fr; } .memory-workspace > aside { border-left: 0; border-top: 1px solid var(--border-default); } }
 
 .citation {
   display: inline-flex;

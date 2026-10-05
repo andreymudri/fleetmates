@@ -1,7 +1,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { apiError } from './router.mjs'
-import { parseOpenRequest, readRunPlan, resolveMeetingNote, resolvePostmeetLog, resolveRunPlan } from './open.mjs'
+import { parseOpenRequest, readRunPlan, resolveMeetingNote, resolvePostmeetLog, resolveRunPlan, resolveVaultNote, vaultNotePath } from './open.mjs'
+import { capturesOn, deleteThread, getThread, listMisses, listThreads, resolveMiss, unresolvedCount } from '../ask/store.mjs'
+import { localDate } from '../vault/service.mjs'
 import { MeetingFileError, SESSION_ID, foldText, listSessions, logTail, postState, readTranscript, searchTranscripts } from '../meetings/history.mjs'
 import { findNote, parseNote, readNote } from '../meetings/note.mjs'
 import { addPin, dismissItem, dismissed as dismissedKeys, getMeeting, listMeetings, pins as meetingPins, removePin, undismissItem } from '../meetings/store.mjs'
@@ -26,7 +28,7 @@ const camel = row => Object.fromEntries(Object.entries(row).map(([key, value]) =
 const postBodyRoutes = new Set(['open', 'sessions', 'requests/answer-batch', 'rules', 'rules/suggestions/dismiss', 'meetings/start', 'ask'])
 /** Whether a POST to these segments may carry a body: the routes above, the request answer and follow-up, and meeting pins. */
 const takesBody = (route, s) => postBodyRoutes.has(route) || (s[1] === 'requests' && s.length === 4 && ['answer', 'followup'].includes(s[3])) ||
-  (s[1] === 'meetings' && s.length === 4 && s[3] === 'pins')
+  (s[1] === 'meetings' && s.length === 4 && s[3] === 'pins') || (s[1] === 'misses' && s.length === 4 && s[3] === 'resolve')
 /** The keys each M3 body may hold (05-api 2.4 and 2.5); any other key is `validation_failed`. */
 const bodyKeys = {
   answer: ['choice', 'optionKey', 'text', 'confirm'],
@@ -36,7 +38,7 @@ const bodyKeys = {
   dismiss: ['repoKey', 'pattern'],
   start: ['tag'],
   pins: ['t'],
-  ask: ['text', 'scope', 'threadId']
+  ask: ['text', 'scope', 'threadId'], resolve: ['resolvedBy']
 }
 /**
  * HTTP statuses of the answer and rule codes, as 05-api section 4 lists them, with the answer refusals the
@@ -46,10 +48,11 @@ const codeStatus = {
   confirm_required: 409, tier_forbids: 409, batch_not_safe: 409, not_on_screen: 409, answer_in_flight: 409, request_closed: 409,
   read_only_session: 409, deckd_outdated: 409, typing_in_terminal: 409, followup_window_closed: 409, options_unreadable: 409,
   invalid_pattern: 422, destructive_rule: 422, rule_exists: 409, settings_changed: 409, settings_io_failed: 500,
-  unknown_tag: 422, scribed_refused: 409, scribed_unavailable: 503, not_recording: 409, ask_in_progress: 409, dependency_start_failed: 502
+  unknown_tag: 422, scribed_refused: 409, scribed_unavailable: 503, not_recording: 409, ask_in_progress: 409, dependency_start_failed: 502,
+  vault_unavailable: 503, vault_tool_missing: 501, vault_error: 502, invalid_state: 409, not_found: 404
 }
 /** Codes whose request may succeed unchanged later (05-api section 4 `retryable`). */
-const retryableCodes = new Set(['deckd_unavailable', 'typing_in_terminal', 'settings_changed', 'scribed_unavailable'])
+const retryableCodes = new Set(['deckd_unavailable', 'typing_in_terminal', 'settings_changed', 'scribed_unavailable', 'vault_unavailable'])
 function onlyKeys(body, keys) {
   const unknown = Object.keys(body).filter(key => !keys.includes(key))
   if (unknown.length) throw apiError(422, 'validation_failed', { fields: unknown })
@@ -90,7 +93,7 @@ function validatePref(key, value) {
  * Task 4 config result), `recorder` (meetings/recorder.mjs) and `ask` (meetings/ask.mjs); without it the meeting routes
  * answer 404 and the snapshot's recorder comes from `recorder()`.
  */
-export function createApi({ store, projector, paths, env = {}, now = Date.now, publish, services, link, runReader, health, recorder = () => ({ state: 'idle' }), approvals = null, meetings = null }) {
+export function createApi({ store, projector, paths, env = {}, now = Date.now, publish, services, link, runReader, health, recorder = () => ({ state: 'idle' }), approvals = null, meetings = null, memory = null }) {
   const configFile = path.join(paths.config, 'config.json')
   function preferences() {
     let config = {}
@@ -163,9 +166,23 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       seq: projection.seq,
       data: { sessions: projection.sessions.filter(row => row.state !== 'ended' || row.endedAt >= now() - 86_400_000), requests: projection.requests.filter(row => row.state === 'open'),
         runs: withLeads(await runReader.list()).filter(activeRun), repos: repos(), counts: projection.counts, order: projection.home.order,
-        recap: { reviewed: store.get('SELECT COUNT(*) AS n FROM sessions WHERE reviewed_at IS NOT NULL').n },
+        recap: { reviewed: store.get('SELECT COUNT(*) AS n FROM sessions WHERE reviewed_at IS NOT NULL').n,
+          chartsAdded: ['ok', 'degraded'].includes(health().find(row => row.dep === 'vault-mcp')?.state) ? capturesOn(store, localDate(now()).day).length : null },
         ruleOffers: approvals?.ruleOffers() ?? [], research: [], recorder: meetings ? recorderView() : recorder(), health: health(), prefs, setup: { firstRunCompletedAt: prefs.firstRunCompletedAt } }
     }
+  }
+  function mem() {
+    if (!memory) throw apiError(503, 'vault_unavailable')
+    return memory
+  }
+  function vaultFilters(q) {
+    return Object.fromEntries(['folder', 'tipo', 'status', 'tags'].filter(key => q.has(key)).map(key => [key, key === 'tags' ? q.get(key).split(',').filter(Boolean) : q.get(key)]))
+  }
+  function vaultDay(q) {
+    const day = q.get('day') ?? localDate(now()).day
+    const [y, m, d] = day.split('-').map(Number)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || localDate(new Date(y, m - 1, d).getTime()).day !== day) throw apiError(422, 'validation_failed', { fields: ['day'] })
+    return day
   }
   /** The M4 meeting services, or 404 for a server built without them. */
   function mtg() {
@@ -370,7 +387,19 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     const ok = data => ({ data })
     if (!['GET', 'PATCH', 'POST', 'DELETE'].includes(method)) throw apiError(404, 'not_found')
     if (method === 'GET') {
-      if (route === 'version') return ok({ apiVersion: 1, deckVersion, build: 'm4' })
+      if (route === 'vault/graph') return ok(await mem().vault.graph({ ...vaultFilters(q), maxNodes: integer(q, 'maxNodes', 2000, 5000) }))
+      if (route === 'vault/list') return ok({ notes: await mem().vault.list(vaultFilters(q)) })
+      if (route === 'vault/note') return ok(await mem().vault.note(vaultNotePath(q.get('path'))))
+      if (route === 'vault/search') {
+        if (!q.get('q')?.trim() || q.get('q').length > 4000) throw apiError(422, 'validation_failed', { fields: ['q'] })
+        return ok({ hits: await mem().vault.search(q.get('q'), integer(q, 'limit', 5, 20)) })
+      }
+      if (route === 'vault/captures') { const day = vaultDay(q); return ok({ day, captures: await mem().captures(day) }) }
+      if (route === 'misses') return ok({ misses: listMisses(store), unresolved: unresolvedCount(store) })
+      if (route === 'threads') return ok({ threads: listThreads(store, { limit: integer(q, 'limit', 30, 200) }) })
+      if (s[1] === 'threads' && s.length === 3) { const thread = getThread(store, s[2]); if (!thread || thread.thread.scope !== 'vault') throw apiError(404, 'not_found'); return ok(thread) }
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'memory') { const row = session(s[2]); return ok(await mem().vault.sessionMemory(row.id, row.task)) }
+      if (route === 'version') return ok({ apiVersion: 1, deckVersion, build: 'm5' })
       if (route === 'health') return ok({ deps: health() })
       if (route === 'prefs') return ok(preferences())
       if (route === 'repos') return ok({ repos: repos(q.get('archived') === '1') })
@@ -537,6 +566,10 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       }
       if (route === 'open') {
         const request = parseOpenRequest(body)
+        if (request.kind === 'vaultNote') {
+          await services.open(await resolveVaultNote(mem().vault, request.ref, mem().prefs()))
+          return { status: 202, data: {} }
+        }
         if (request.kind !== 'runPlan') {
           await openMeeting(request)
           return { status: 202, data: {} }
@@ -558,7 +591,27 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         if (!/^[0-9a-f]{40}$/.test(s[4]) || !dismissItem(store, row.id, s[4], now()).dismissed) throw apiError(404, 'not_found')
         return { status: 204, data: undefined }
       }
-      if (route === 'ask') return meetingAsk(body)
+      if (route === 'ask') {
+        onlyKeys(body, bodyKeys.ask)
+        if (body.scope === undefined || body.scope === 'vault') return { status: 202, data: mem().ask.ask(body) }
+        return meetingAsk(body)
+      }
+      if (s[1] === 'ask' && s.length === 4 && s[3] === 'cancel') {
+        const vaultMessage = store.get("SELECT m.id FROM ask_messages m JOIN ask_threads t ON t.id=m.thread_id WHERE m.id=? AND t.scope='vault'", s[2])
+        const result = vaultMessage ? mem().ask.cancel(s[2]) : (mtg().ask.stop(s[2]), { messageId: s[2] })
+        return { status: 202, data: result }
+      }
+      if (s[1] === 'misses' && s.length === 4 && s[3] === 'resolve') {
+        onlyKeys(body, bodyKeys.resolve)
+        if (body.resolvedBy !== 'dismissed') {
+          if (typeof body.resolvedBy !== 'string' || !body.resolvedBy.startsWith('note:')) throw apiError(422, 'validation_failed', { fields: ['resolvedBy'] })
+          vaultNotePath(body.resolvedBy.slice(5))
+        }
+        const miss = resolveMiss(store, s[2], body.resolvedBy)
+        if (!miss) throw apiError(404, 'not_found')
+        publish({ type: 'misses.changed', at: now(), data: { unresolved: unresolvedCount(store), ephemeral: true } })
+        return ok({ miss })
+      }
       if (route === 'sessions') {
         const unknown = Object.keys(body).filter(key => !['repoKey', 'task', 'mode'].includes(key))
         if (unknown.length || body.repoKey !== undefined && typeof body.repoKey !== 'string') throw apiError(422, 'validation_failed', { fields: unknown.length ? unknown : ['repoKey'] })
@@ -594,7 +647,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return { status: 202, data: await services.rescan() }
       }
       if (s[1] === 'deps' && s.length === 4 && ['start', 'retry'].includes(s[3])) {
-        const allowed = s[3] === 'start' ? ['deckd', 'scribed'] : ['deckd', 'vault-mcp', 'scribed', 'notify']
+        const allowed = s[3] === 'start' ? ['deckd', 'scribed', 'vault-mcp'] : ['deckd', 'vault-mcp', 'scribed', 'notify']
         if (!allowed.includes(s[2])) throw apiError(404, 'not_found')
         const dep = await services[s[3] === 'start' ? 'startDependency' : 'retryDependency'](s[2])
         event('health.changed', dep)
@@ -616,6 +669,11 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
       }
     }
     if (method === 'DELETE') {
+      if (s[1] === 'threads' && s.length === 3) {
+        if (mem().ask.isAsking(s[2])) throw apiError(409, 'ask_in_progress')
+        if (getThread(store, s[2])?.thread.scope !== 'vault' || !deleteThread(store, s[2])) throw apiError(404, 'not_found')
+        return ok({ deleted: true })
+      }
       if (s[1] === 'meetings' && s.length === 5 && s[3] === 'pins') {
         const row = meetingRow(s[2])
         const { removed, events } = removePin(store, row.id, s[4], now())
@@ -644,7 +702,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
   async function handle(request) {
     try { return await route(request) } catch (error) {
       const code = error?.code
-      if (!error?.status || typeof code !== 'string' || (!Object.hasOwn(codeStatus, code) && !(code === 'deckd_unavailable' && error.status === 503))) throw error
+      if (typeof code !== 'string' || (!Object.hasOwn(codeStatus, code) && !(code === 'deckd_unavailable' && error.status === 503))) throw error
       const details = error.details && Object.keys(error.details).length ? { details: error.details } : {}
       return { status: codeStatus[code] ?? error.status, data: { error: { code, message: code, retryable: retryableCodes.has(code), ...details } } }
     }

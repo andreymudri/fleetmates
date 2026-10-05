@@ -140,6 +140,7 @@ function CardHeader({ session, repo, title, t, now, navigate, size, pillVariant 
           <a className="card-link" href={href} title={shownTitle} onClick={navigate ? linkHandler(navigate, href) : undefined}><bdi>{shownTitle}</bdi></a>
         </h3>
         <MetaLine className="card-meta" items={[shown(repoLabel(repo, session)), session.branch ? shown(session.branch) : null]} />
+        {session.learnedToday > 0 ? <a className="note-chip note-chip--learned" href="/memory" onClick={navigate ? linkHandler(navigate, '/memory') : undefined}>learned {session.learnedToday} {session.learnedToday === 1 ? 'thing' : 'things'}</a> : null}
       </div>
       <StatusPill state={session.state} params={pillParams(session, now)} role={session.role} variant={pillVariant} t={t} />
     </header>

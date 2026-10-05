@@ -539,3 +539,7 @@ Fixtures are defined in [README.md](README.md) section 4.
 11. Running pill background and every raw value follow tokens (design-system 14).
 12. Crowded mode (QuietStrip) is new; the canvas only drew the 9-session case.
 13. Research card intro sentence becomes a template with the topic; stats hidden until SM-O15.
+
+## Prepared 0.5.0 implementation
+
+Calm Home lists daily captures and unresolved misses. A positive recap chart count and learned session chips are shown; zero and unknown chart counts are omitted.

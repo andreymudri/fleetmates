@@ -694,7 +694,7 @@ Owned by [09-testing.md](09-testing.md). Specific to this document (Proposed):
 - Fake `claude` binary scripts for the Ask: normal answer with block, miss, block missing, invalid JSON, `is_error`, hang (timeout), stderr flood, slow deltas; argv snapshot test including variadic-flag order.
 - Stream-json fixtures of the lines listed in 2.5: synthetic in M5 (D-146), under `hub/test/fixtures/claude-p/synthetic/` with `"captured": false`; real captures per Claude Code version come with the owner-run KB-O1 check (one real ask against the fixture vault).
 - Fake vault-mcp (`hub/test/fakes/fake-vault-mcp.mjs`, an MCP server started as a child by absolute path) for: capability detection with 0.3.0 and 0.4.0 tool lists, preview and save flows, restart mid-call, "no non-dry `vault_learn` before Save".
-- Tool schema snapshot tests against a real vault-mcp build (04-integrations table): the hub devDependency `@andreymudri/vault-mcp` pinned to `0.3.0`, against a generated temporary vault (D-135).
+- Tool schema snapshot tests against a real vault-mcp build (04-integrations table): the hub devDependency `@andreymudri/vault-mcp` pinned to `0.4.0`, against a generated temporary vault (D-135).
 - Research: validator unit tests over good and bad scout and draft files; an end-to-end run of the plan template with the fake claude driving a scripted lead.
 
 ## 11. Open items
@@ -718,3 +718,16 @@ Owned by [09-testing.md](09-testing.md). Specific to this document (Proposed):
 | SM-O15 | Research run output contract | See [interaction/state-machines.md](interaction/state-machines.md) 13; proposed in 8.5 to 8.7 | M6 |
 | SM-O16 | Ask output contract | **Decided** 2026-10-04 (D-131, D-141): 2.3 | M5 (decided) |
 | MTG-O1 | Meeting notes read from disk when vault-mcp is down (exception to 1.1) | See [11-meetings.md](11-meetings.md) | M4 |
+
+## Prepared M5 implementation notes
+
+Vault observations use PreToolUse `vault_get_note` paths and `vault_learn` titles only.
+Capture refresh reads MCP, not vault files, and considers at most 50 candidate notes.
+Search hits can validate a line beyond the conservative reconstructed note bound.
+Graph cache fingerprints include paths and edges rather than a server revision.
+
+The interface currently uses native Tags, Age and Status controls and a collapsible legend,
+without animated zoom interpolation. Note excerpt line offsets follow the block-YAML
+frontmatter convention of the fixtures when MCP does not supply a body offset. Different
+YAML formatting can make a preview section approximate; the validated citation and Obsidian
+link remain unchanged. These UI differences are recorded in the M5 exit report.

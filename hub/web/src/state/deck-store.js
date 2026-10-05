@@ -186,6 +186,8 @@ function loadThread(memory, action) {
 function memoryAction(state, action) {
   const memory = memoryOf(state)
   switch (action.type) {
+    case 'memory.prefill':
+      return { ...state, memory: { ...memory, prefill: typeof action.text === 'string' ? action.text : '' } }
     case 'memory.askStarted':
       return startVaultAsk(state, action)
     case 'memory.threadLoaded':

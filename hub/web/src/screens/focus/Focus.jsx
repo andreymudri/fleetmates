@@ -7,8 +7,10 @@ import { EmptyState } from '../../components/EmptyState.jsx'
 import { PromptBar, promptKeyBody } from '../../components/PromptBar.jsx'
 import { MetaLine, StatusPill, compactDuration, pillParams, shown, stateLabel, titleText, translate } from '../../components/StatusPill.jsx'
 import { TerminalView } from '../../components/TerminalView.jsx'
+import { Citation } from '../../components/Citation.jsx'
+import { NoteChip } from '../../components/NoteChip.jsx'
 import { linkHandler } from '../../shell/Rail.jsx'
-import { answerRequest, fetchDiff, fetchScrollback, nudgeSession, relaunchSession, stopSession } from '../../state/actions.js'
+import { answerRequest, fetchDiff, fetchScrollback, fetchSessionMemory, nudgeSession, relaunchSession, stopSession } from '../../state/actions.js'
 import { parseNeedsFilter } from '../../state/deck-store.js'
 import { ObserveOverlays, teamCards, useMinuteNow } from '../home/Home.jsx'
 import { deckApi, openOverlay, repoFor, tierOf } from '../drawer/NeedsYouDrawer.jsx'
@@ -117,7 +119,7 @@ export const FOCUS_COPY = Object.freeze({
 })
 
 const NEEDS = new Set(['needs_approval', 'asked_you'])
-const TABS = ['changes', 'facts']
+export const TABS = ['changes', 'facts', 'memory']
 const OUTAGE = new Set(['down', 'reconnecting'])
 const ENDED = new Set(['ended', 'crashed'])
 const START_HINT_MS = 30_000
@@ -463,11 +465,19 @@ function FileList({ files, selectedFile, onSelectFile, diff, onRetryDiff, t }) {
   )
 }
 
-function Details({ session, tab, onTab, now, t, lang, selectedFile, onSelectFile, diff, onRetryDiff }) {
+export function FocusMemory({ memory, down, navigate }) {
+  return <section aria-label="Related memory"><h3>Related memory</h3>
+    {down ? <p>Memory is unavailable: vault-mcp is not answering.</p> : !memory ? <p aria-busy="true">Searching your vault…</p> : memory.related?.length ? memory.related.slice(0, 3).map((hit, i) => <Citation key={i} {...hit} variant="callout" navigate={navigate} />) : <p>Nothing in your vault matches this task yet.</p>}
+    <h3>Read</h3>{memory?.read?.map((note, i) => <NoteChip key={i} {...note} navigate={navigate} />)}
+    <h3>Learned</h3>{memory?.learned?.map((note, i) => <NoteChip key={i} {...note} variant="learned" navigate={navigate} />)}
+  </section>
+}
+function Details({ session, tab, onTab, now, t, lang, selectedFile, onSelectFile, diff, onRetryDiff, memory, memoryDown, navigate }) {
   const files = session.changedFiles ?? []
   const labels = {
     changes: `${translate(t, FOCUS_COPY, 'focus.tabs.changes')}${files.length ? ` ${files.length}` : ''}`,
-    facts: translate(t, FOCUS_COPY, 'focus.tabs.facts')
+    facts: translate(t, FOCUS_COPY, 'focus.tabs.facts'),
+    memory: `Memory${memory?.related?.length ? ` ${memory.related.length}` : ''}`
   }
   const onKeyDown = event => {
     if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
@@ -483,7 +493,7 @@ function Details({ session, tab, onTab, now, t, lang, selectedFile, onSelectFile
         ))}
       </div>
       <div className="focus-panel" role="tabpanel" id="focus-panel" aria-labelledby={`focus-tab-${tab}`}>
-        {tab === 'facts' ? <Facts session={session} now={now} t={t} lang={lang} /> : files.length
+        {tab === 'memory' ? <FocusMemory memory={memory} down={memoryDown} navigate={navigate} /> : tab === 'facts' ? <Facts session={session} now={now} t={t} lang={lang} /> : files.length
           ? <FileList files={files} selectedFile={selectedFile} onSelectFile={onSelectFile} diff={diff} onRetryDiff={onRetryDiff} t={t} />
           : <EmptyState kind="focusChanges" t={t} />}
       </div>
@@ -545,7 +555,7 @@ export function FocusView({
   client = null, scrollback = null, terminalFocused = false, onTerminalFocus, collision, panelOpen = true, drawerOpen = false, onTogglePanel,
   confirming = false, onStop, onConfirmStop, onCancelStop, onNudge, onRelaunch, onDismiss, stopError = null, selectedFile = null, onSelectFile,
   confirmLink, confirmPaste, diff = null, onRetryDiff, answer = null, confirmed = false, onConfirm, onAnswer = () => {},
-  onArchive, onUnarchive, fallback = null
+  onArchive, onUnarchive, fallback = null, memory = null
 }) {
   const session = state.data.sessions.find(row => row.id === sessionId) ?? (fallback?.id === sessionId ? fallback : undefined)
   if (!session) {
@@ -654,7 +664,7 @@ export function FocusView({
             badge={<span className={`tier-badge tier-badge--${tierOf(request)}`}>{translate(t, CARD_COPY, `tier.${tierOf(request)}`)}</span>} />
         ) : <RequestBar key={request.id} request={request} t={t} />)}
       </section>
-      <Details session={session} tab={tab} onTab={onTab} now={now} t={t} lang={lang} selectedFile={selectedFile} onSelectFile={onSelectFile} diff={diff} onRetryDiff={onRetryDiff} />
+      <Details session={session} tab={tab} onTab={onTab} now={now} t={t} lang={lang} selectedFile={selectedFile} onSelectFile={onSelectFile} diff={diff} onRetryDiff={onRetryDiff} memory={memory} memoryDown={['down', 'unknown'].includes(state.memory?.vault.state)} navigate={navigate} />
       {confirming ? (
         <ConfirmDialog title={translate(t, FOCUS_COPY, 'focus.stop.title', { repo: shown(repo.name), task })} body={translate(t, FOCUS_COPY, 'focus.stop.body')}
           confirmLabel={translate(t, FOCUS_COPY, 'focus.stop.confirm')} cancelLabel={translate(t, FOCUS_COPY, 'focus.stop.cancel')} tone="danger"
@@ -702,8 +712,14 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
   const flow = archiveFlow({ api: http, show: showArchiveToast, t })
   const [steps, setSteps] = useState(null)
   const params = new URLSearchParams(search)
-  const wanted = params.get('tab') === 'facts' ? 'facts' : 'changes'
+  const wanted = TABS.includes(params.get('tab')) ? params.get('tab') : 'changes'
   const [tab, setTab] = useState(wanted)
+  const [memory, setMemory] = useState(null)
+  useEffect(() => {
+    let active = true; setMemory(null)
+    if (id && http && tab === 'memory') fetchSessionMemory(http, id).then(result => { if (active) setMemory(result) }, () => { if (active) setMemory({ related: [], read: [], learned: [] }) })
+    return () => { active = false }
+  }, [id, http, tab, session?.task, session?.learnedToday])
   const [selectedFile, setSelectedFile] = useState(() => params.get('file'))
   const [reviewing, setReviewing] = useState(false)
   const [reviewError, setReviewError] = useState(null)
@@ -851,7 +867,7 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
     setPasteAsk(null) }
   return (
     <>
-      <FocusView state={state} sessionId={id} t={t} now={now} navigate={navigate} steps={steps} tab={tab} onTab={setTab}
+      <FocusView state={state} sessionId={id} t={t} now={now} navigate={navigate} steps={steps} tab={tab} onTab={setTab} memory={memory}
         onMarkReviewed={onMarkReviewed} reviewing={reviewing} reviewError={reviewError} client={client} scrollback={scrollback}
         terminalFocused={terminalFocused} onTerminalFocus={setTerminalFocused} collision={collision} panelOpen={panelOpen} drawerOpen={drawerOpen}
         onTogglePanel={togglePanel} confirming={confirming} onStop={() => { setStopError(null)

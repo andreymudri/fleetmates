@@ -192,6 +192,10 @@ test('tokens: every route in the router table answers 401 without the token and 
     'POST /api/meetings/start', 'POST /api/meetings/stop', 'POST /api/meetings/x/pins', 'DELETE /api/meetings/x/pins/x',
     'POST /api/meetings/x/items/x/dismiss', 'DELETE /api/meetings/x/items/x/dismiss', 'POST /api/ask']
   assert.deepEqual(m4.filter(route => !listed.has(route)), [], 'the router table lists every M4 route')
+  const m5 = ['GET /api/vault/graph', 'GET /api/vault/list', 'GET /api/vault/note', 'GET /api/vault/search', 'GET /api/vault/captures',
+    'GET /api/misses', 'POST /api/misses/x/resolve', 'GET /api/threads', 'GET /api/threads/x', 'DELETE /api/threads/x',
+    'POST /api/ask/x/cancel', 'GET /api/sessions/x/memory']
+  assert.deepEqual(m5.filter(route => !listed.has(route)), [], 'the router table lists every M5 route')
   const origin = `http://127.0.0.1:${h.port}`
   for (const route of routes) {
     // GET and DELETE carry no body: Node's client does not chunk a DELETE body, so one sent without a length

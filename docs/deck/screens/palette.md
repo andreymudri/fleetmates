@@ -198,3 +198,7 @@ As built in M3: every M3 string of `PALETTE_COPY` is in the table above ("Archiv
 3. "Alt Enter open in focus" becomes "Alt Enter open in Focus" (screen name capitalised).
 4. Selected row background uses `bg.selected` (design-system 14: `#2b2f45` to the shared selected color).
 5. Empty, loading, no-results, degraded and overflow states are new.
+
+## Prepared 0.5.0 implementation
+
+The Memory group shows note folders. `?question` offers Ask and note search, debounced 150 ms.

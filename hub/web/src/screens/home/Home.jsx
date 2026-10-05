@@ -5,9 +5,10 @@ import { ConfirmDialog } from '../../components/ConfirmDialog.jsx'
 import { Counts } from '../../components/Counts.jsx'
 import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
+import { NoteChip } from '../../components/NoteChip.jsx'
 import { MetaLine, StatusPill, pillParams, shown, stateLabel, titleText, translate } from '../../components/StatusPill.jsx'
 import { linkHandler } from '../../shell/Rail.jsx'
-import { addRule, answerRequest, fetchArchived, fetchMeeting, fetchMeetings, nudgeSession, revokeRule, stopSession } from '../../state/actions.js'
+import { addRule, answerRequest, fetchArchived, fetchMeeting, fetchMeetings, fetchCaptures, fetchMisses, nudgeSession, revokeRule, stopSession } from '../../state/actions.js'
 import { clockTime, dayLabel, durationText, meetingTitle } from '../meetings/MeetingDetail.jsx'
 import { archivedCount, readDensity, writeDensity } from '../../state/deck-store.js'
 import { NeedsYouDrawer, deckApi, needsLinkDetail, openOverlay, repoFor } from '../drawer/NeedsYouDrawer.jsx'
@@ -668,7 +669,28 @@ export function LastMeetingSection({ api, now, t, navigate, dispatch }) {
   return <LastMeetingView meeting={data?.meeting ?? null} item={data?.item ?? null} now={now} t={t} navigate={navigate} loading={data === null} />
 }
 
-function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archived = null, lastMeeting = null }) {
+export function chartRecap(recap) {
+  const n = recap?.chartsAdded
+  return n > 0 ? `${n} chart${n === 1 ? '' : 's'} added` : null
+}
+export function HomeMemoryView({ captures = [], misses = [], down = false, navigate, onRetry }) {
+  return <><section className="calm-section"><h2>Charts added to your vault</h2>
+    {down ? <><p>Your vault is not reachable right now.</p><button onClick={onRetry}>Retry</button></> : captures.length ? <ul>{captures.map(row => <li key={row.path}><NoteChip {...row} navigate={navigate} /></li>)}</ul> : <p>Nothing new in your vault today.</p>}
+    <a href="/memory" onClick={navigate ? linkHandler(navigate, '/memory') : undefined}>Open Memory</a></section>
+    <section className="calm-section"><h2>Unanswered questions</h2><ul>{misses.filter(miss => !miss.resolvedBy).map(miss => <li key={miss.id}><bdi>{titleText(miss.question)}</bdi> <a href={`/research/new?topic=${encodeURIComponent(miss.question)}&miss=${encodeURIComponent(miss.id)}`}>Research this</a></li>)}</ul></section></>
+}
+function HomeMemorySection({ api, state, navigate }) {
+  const [captures, setCaptures] = useState([]), [misses, setMisses] = useState([])
+  const down = ['down', 'unknown'].includes(state.memory?.vault.state ?? 'unknown')
+  useEffect(() => {
+    let active = true
+    fetchMisses(api).then(result => { if (active) setMisses(result.misses) }, () => {})
+    if (!down) fetchCaptures(api).then(result => { if (active) setCaptures(result.captures) }, () => {})
+    return () => { active = false }
+  }, [api, down, state.memory?.missesUnresolved, state.data.recap?.chartsAdded])
+  return <HomeMemoryView captures={captures} misses={misses} down={down} navigate={navigate} onRetry={() => api.post('/api/deps/vault-mcp/retry').catch(() => {})} />
+}
+function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archived = null, lastMeeting = null, vaultSections = null }) {
   const sessions = state.data.sessions.filter(row => row.state !== 'ended' && !isArchived(row))
   const recent = [...state.data.sessions].sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0))
   const seen = new Set()
@@ -680,7 +702,7 @@ function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archiv
     crew.push({ seed: repo.crewSeed, slot: repo.crewSlot })
   }
   if (!sessions.length && !state.data.repos?.length) {
-    return <section className="home home--calm"><EmptyState kind="home" as="h1" t={t} crew={crew} />{archived}</section>
+    return <section className="home home--calm"><EmptyState kind="home" as="h1" t={t} crew={crew} />{vaultSections}{archived}</section>
   }
   const date = new Date(now)
   const day = translate(t, HOME_COPY, 'home.calm.subtitle.day', {
@@ -693,7 +715,7 @@ function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archiv
       <div className="calm-hero">
         {crew.length ? <div className="empty-crew">{crew.map(member => <CrewAvatar key={member.seed} seed={member.seed} slot={member.slot} pose="idle" size="xl" />)}</div> : null}
         <h1 className="calm-headline">{translate(t, HOME_COPY, 'home.calm.headline')}</h1>
-        <p className="calm-subtitle">{[day, translate(t, HOME_COPY, 'home.calm.subtitle.state'), translate(t, HOME_COPY, 'home.calm.subtitle.rest')].join(' · ')}</p>
+        <p className="calm-subtitle">{[day, translate(t, HOME_COPY, 'home.calm.subtitle.state'), chartRecap(state.data.recap), translate(t, HOME_COPY, 'home.calm.subtitle.rest')].filter(Boolean).join(' · ')}</p>
       </div>
       <section className="calm-section" aria-labelledby="calm-loops-title">
         <h2 className="calm-section-title" id="calm-loops-title">{translate(t, HOME_COPY, 'home.calm.log.openLoops')}</h2>
@@ -713,6 +735,7 @@ function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archiv
         ) : <EmptyState kind="openLoops" t={t} />}
       </section>
       {lastMeeting}
+      {vaultSections}
       {archived}
     </section>
   )
@@ -741,7 +764,7 @@ function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archiv
  */
 export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverlay = (overlay, detail) => openOverlay(overlay, undefined, detail), onFocusCard = focusCard, onHold = () => {}, lang = 'en',
   density = 'comfortable', onDensity = () => {}, onLaunch = () => openLaunch(navigate), steps = {}, onNudge, onStop, onArchive, onArchiveFinished, onUnarchive = () => Promise.resolve(), api, storage,
-  answers = {}, onAnswer = () => {}, onReview = id => onOverlay('drawer', { request: id }), onAcceptRule = () => {}, lastMeeting = null }) {
+  answers = {}, onAnswer = () => {}, onReview = id => onOverlay('drawer', { request: id }), onAcceptRule = () => {}, lastMeeting = null, vaultSections = null }) {
   const { sessions, requests, repos, order, counts, runs } = state.data
   const shape = layout ?? homeLayout(sessions, { order, requests, now })
   const teams = teamCards(runs, sessions, requests)
@@ -750,7 +773,7 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
     ? <ArchivedSection count={archivedN} api={api} storage={storage} repos={repos} now={now} lang={lang} t={t} navigate={navigate} onUnarchive={onUnarchive} />
     : null
   const archiveAll = <ArchiveAllButton ids={finishedIds(sessions, requests)} t={t} onArchiveFinished={onArchiveFinished} />
-  if (shape.calm && !teams.length) return <Calm state={state} layout={shape} now={now} t={t} navigate={navigate} lang={lang} archiveAll={archiveAll} archived={archived} lastMeeting={lastMeeting} />
+  if (shape.calm && !teams.length) return <Calm state={state} layout={shape} now={now} t={t} navigate={navigate} lang={lang} archiveAll={archiveAll} archived={archived} lastMeeting={lastMeeting} vaultSections={vaultSections} />
   const leads = new Set(teams.map(team => team.lead?.id).filter(Boolean))
   const items = withTeams(shape.grid.filter(row => !leads.has(row.id)), teams)
   const inCard = target => !!target?.closest?.('.home article')
@@ -933,7 +956,7 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
         density={density} onDensity={value => pickDensity(storage, value, setDensity)} steps={steps} onNudge={actions.nudge} onStop={actions.openStop}
         onArchive={session => flow.archive(session.id)} onArchiveFinished={flow.archiveFinished} onUnarchive={flow.unarchive} api={http} storage={storage}
         answers={answers} onAnswer={answering.answer} onReview={id => onOverlay('drawer', { request: id })} onAcceptRule={answering.acceptRule}
-        lastMeeting={<LastMeetingSection api={http} now={now} t={t} navigate={navigate} dispatch={dispatch} />} />
+        lastMeeting={<LastMeetingSection api={http} now={now} t={t} navigate={navigate} dispatch={dispatch} />} vaultSections={<HomeMemorySection api={http} state={state} navigate={navigate} />} />
       <HomeStopDialog stopping={stopping} repos={state.data.repos} actions={actions} t={t} />
       <ArchiveToast toast={archiveToast} t={t} onUndo={flow.undo} onDismiss={() => showArchiveToast(null)} />
       <ArchiveToast toast={ruleToast} t={t} onUndo={answering.undo} onDismiss={() => showRuleToast(null)} />

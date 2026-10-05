@@ -1,2 +1,25 @@
 /* The Memory knowledge graph and note panel (screens/memory.md 4.1, 4.2 and 4.4), owned by M5 Task 9.
    Created empty by Task 8. Values are tokens from tokens.css. Imported once from main.jsx. */
+.knowledge-graph { position: relative; min-height: 380px; }
+.knowledge-graph svg { width: 100%; min-height: 380px; touch-action: none; }
+.graph-tools { display: flex; gap: 8px; }
+.graph-edge { stroke: var(--component-graph-edge); stroke-width: 1; }
+.graph-edge--active { stroke: var(--component-graph-edge-lit); }
+.graph-node { fill: var(--color-teal-400); cursor: pointer; outline: none; }
+.graph-node--index { fill: var(--color-teal-200); }
+.graph-node--moc { fill: var(--color-purple-400); }
+.graph-node[data-domain="nestjs"] { fill: var(--domain-nestjs, var(--color-teal-400)); }
+.graph-node[data-domain="git"] { fill: var(--domain-git, var(--color-amber-400)); }
+.graph-node[data-domain="projects"] { fill: var(--domain-projects, var(--color-purple-400)); }
+.graph-node[data-domain="docker"] { fill: var(--domain-docker); }
+.graph-node[data-domain="patterns"] { fill: var(--domain-patterns); }
+.graph-node[data-domain="concorrencia"] { fill: var(--domain-concorrencia); }
+.graph-node[data-domain="index"] { fill: var(--domain-index); }
+.graph-node:focus circle { stroke: var(--text-strong); stroke-width: 3px; }
+.graph-node--cited circle { filter: drop-shadow(0 0 6px var(--color-teal-400)); }
+.graph-node text { fill: var(--text-default); font-size: 11px; }
+.graph-cluster { fill: var(--text-secondary); text-anchor: middle; font-size: 13px; }
+.memory-note { padding: 20px; overflow: auto; }
+.memory-note code { overflow-wrap: anywhere; }
+.note-meta { display: flex; gap: 8px; flex-wrap: wrap; }
+.note-excerpt { overflow-wrap: anywhere; line-height: 1.6; }

@@ -424,3 +424,18 @@ Built from [screens/failures-and-loading.md](screens/failures-and-loading.md) an
 | OPS-O6 | On uninstall, should the deck remove the permission rules it wrote into repos' `.claude/settings.local.json`? | No: rules belong to the repos and also apply to plain `claude` (Decided that they live there); uninstall lists them. | none |
 
 Referenced, not duplicated: package and command naming (03-architecture section 3, [15-open-questions.md](15-open-questions.md) Q1), SET-O1 and SET-O2 (settings storage and language row), SM-O13 / FAIL-O1 (scribed start), SM-O18 (incompatible Claude Code blocks or warns), FR-O3 (hook merge rules, Proposed default adopted in 2.3), MEM-O5, MEET-O11, NEW-O2, TEST-O4, TEST-O6.
+
+## Prepared M5 operations
+
+The web server manages vault-mcp and restricted Ask children. Vault preferences recreate the
+client; Retry probes it again. Read the `vault-mcp` health row for state, reason, version and
+capabilities. An absent vault path reports down with `VAULT_PATH is not set`.
+
+Ask state is under `<state>/ask/`, including a private child working directory and
+`running.json` process identities for restart recovery. Unfinished assistant messages become
+errors after restart. Closing the web server cancels its running asks.
+
+`fleetmates-deck export-misses --kind retrieval|all [--out <file>]` reads the database without
+migration or mutation. Output files use mode 0600. Review real golden queries locally before
+adding them to the vault-mcp evaluation suite. Restarting the dogfood web server and
+publishing or tagging 0.5.0 are owner actions, still pending.

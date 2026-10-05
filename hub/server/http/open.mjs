@@ -58,13 +58,11 @@ export async function readRunPlan(file) {
   } finally { await handle.close() }
 }
 
-const laterKinds = new Set(['vaultNote'])
 const meetingKinds = new Set(['meetingNote', 'postmeetLog'])
 
 /**
  * Validate a `POST /api/open` body. `runPlan` takes `{ repoId, runId }`; `meetingNote` and `postmeetLog` (M4) take a
- * meeting id string. `vaultNote` (M5) is refused with `details.reason: 'kind_not_available'`, and an unknown kind or
- * malformed ref is a plain 422.
+ * meeting id string. `vaultNote` takes a vault-relative Markdown path. Unknown kinds or malformed refs are 422.
  * @param {object} body the parsed request body
  * @returns {{ kind: 'runPlan', ref: { repoId: string, runId: string } } | { kind: 'meetingNote' | 'postmeetLog', ref: string }}
  */
@@ -72,8 +70,8 @@ export function parseOpenRequest(body) {
   const keys = Object.keys(body)
   if (keys.some(key => !['kind', 'ref'].includes(key))) throw apiError(422, 'validation_failed', { fields: keys.filter(key => !['kind', 'ref'].includes(key)) })
   const { kind, ref } = body
-  if (laterKinds.has(kind)) throw apiError(422, 'validation_failed', { fields: ['kind'], reason: 'kind_not_available' })
   const text = value => typeof value === 'string' && value.length > 0 && !value.includes('\0')
+  if (kind === 'vaultNote') return { kind, ref: vaultNotePath(ref) }
   if (meetingKinds.has(kind)) {
     if (!text(ref)) throw apiError(422, 'validation_failed', { fields: ['ref'] })
     return { kind, ref }
@@ -83,6 +81,20 @@ export function parseOpenRequest(body) {
     throw apiError(422, 'validation_failed', { fields: ['ref'] })
   }
   return { kind, ref: { repoId: ref.repoId, runId: ref.runId } }
+}
+
+/** Validate a vault-relative Markdown path before sending it to MCP. @param {unknown} ref */
+export function vaultNotePath(ref) {
+  if (typeof ref !== 'string' || !ref.endsWith('.md') || ref.length > 512 || ref.startsWith('/') || ref.includes('\\') || ref.includes('\0') || /^[a-z]:/i.test(ref) || ref.split('/').some(part => ['', '.', '..'].includes(part))) throw apiError(422, 'validation_failed', { fields: ['path'] })
+  return ref
+}
+
+/** Check existence through MCP and construct the decided Obsidian URL, without vault filesystem access. */
+export async function resolveVaultNote(service, ref, { vaultPath, obsidianVaultName }) {
+  const relative = vaultNotePath(ref)
+  await service.note(relative)
+  const vault = obsidianVaultName || path.basename(vaultPath)
+  return `obsidian://open?vault=${encodeURIComponent(vault)}&file=${encodeURIComponent(relative)}`
 }
 
 /**

@@ -261,3 +261,14 @@ Motion: graph Fit and zoom buttons 280ms; wheel and drag follow 1:1; new-node ar
 4. Eyebrow tracking and sizes unified (design-system 14).
 5. Browse by MOC, Captures and Misses views, loading, empty and error states are new.
 6. Legend collapses at 1280 (new).
+
+## Prepared 0.5.0 additional copy
+
+| Key | English |
+|---|---|
+| `memory.misses.hasNote` | The vault has this |
+| `memory.misses.dismiss` | Dismiss |
+| `memory.misses.pickNote` | Pick the note that answers it |
+
+The built filter bar uses native fields; the legend is collapsible at every viewport.
+Graph navigation, note preview, Ask, Browse, Captures and Misses are implemented.

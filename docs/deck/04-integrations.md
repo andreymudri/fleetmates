@@ -222,3 +222,12 @@ As built in 0.4.0 (`hub/server/adapters/scribed.mjs` and `hub/server/meetings/`)
 - Branch: `git rev-parse --abbrev-ref HEAD` in the session `cwd`.
 - Changed files: `git diff --numstat <reviewBaseline>` plus untracked files, refreshed after edit tools, debounced 2 s.
 - Diff view: `git diff <reviewBaseline> -- <path>`. In session repos the deck never commits, pushes, checks out or stashes. The one exception is the deck-owned research workspace `~/.local/share/fleetmates-deck/research/` ([10-memory-and-research.md](10-memory-and-research.md) section 8.2), which `fleetmates-deck init` creates with `git init` and one initial commit.
+
+## Prepared M5 implementation
+
+The deck tests the published `@andreymudri/vault-mcp` 0.4.0 through an exact development
+dependency. `tools/list` is snapshotted under `hub/test/fixtures/vault-mcp/0.4.0`. The real
+server and the fake agree on the 22-note graph, including root-note area and broken links.
+The runtime client uses the user's `vaultCommand`; it discovers capabilities and reports
+missing graph support separately from an unavailable server. No vault filesystem access
+is used by HTTP note, graph, search, captures or Obsidian-open routes.

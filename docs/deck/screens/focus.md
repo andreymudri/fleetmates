@@ -337,3 +337,7 @@ Deviation: the PromptBar shows `focus.prompt.answerInTerminal` ("Answer in the t
 6. PromptBar hides option 2 for Caution and shows a checkbox for Destructive (state-machines 2.5); the canvas drew only the Safe case.
 7. Stop confirm copy uses SIGTERM then SIGKILL after 5 s (state-machines row 50), not SIGINT (components Dialog example).
 8. Terminal dim color `#737aa2` collapses into `text.muted` (design-system 14).
+
+## Prepared 0.5.0 implementation
+
+The third tab is Memory. It fetches related notes when selected, while observed read and learned notes come from SQLite.

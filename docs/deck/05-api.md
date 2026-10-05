@@ -854,3 +854,23 @@ Closed: the former open item on which targets `POST /api/open` may open. Decided
 | API-O2 | `repoKey` (display name) in API paths changes when a later repo with the same basename appears (`api` becomes `work/api`). Keep it, or use a stable short repo id in URLs? | `repoKey` in paths, `?repoId=` accepted everywhere, the SPA redirects an unknown `repoKey` through `/api/repos` | M2 |
 | API-O4 | deckd wire format: JSON lines with base64 bytes, or a binary framing for output and input? | JSON lines + base64; switch only if the M0 spike misses the 50 ms echo budget | M0 |
 | API-O5 | Screen parsing in the web server (deckd sends rows) or in deckd (deckd sends `S.*` signals as state-machines 0.2 reads)? | Web server parses (section 5.4) | M0 |
+
+## Prepared M5 route verification
+
+The Memory routes are implemented in `hub/server/http/api.mjs`: GET `vault/graph` returns
+the graph; GET `vault/list` returns `{ notes }`; GET `vault/note?path=` returns the note,
+backlinks, outgoing links and usage; GET `vault/search?q=` returns `{ hits }`; GET
+`vault/captures?day=` returns `{ day, captures }`. GET `misses` returns `{ misses, unresolved }`,
+and POST `misses/:id/resolve` accepts `{ resolvedBy: "dismissed" | "note:<path>" }`.
+
+GET `threads` returns `{ threads }`; GET `threads/:id` returns `{ thread, messages }`;
+DELETE `threads/:id` returns `{ deleted: true }` and refuses an active ask. POST `ask`
+accepts the default vault scope or `scope: "vault"`; meeting scopes keep their M4 handler.
+It returns the thread, user message and assistant message id with status 202. POST
+`ask/:messageId/cancel` dispatches by scope. GET `sessions/:id/memory` returns related hits,
+read notes and learned notes. POST `open` accepts `vaultNote` and checks existence through MCP.
+
+Ask deltas, completion, errors and `misses.changed` are ephemeral and carry no sequence.
+Unavailable MCP returns retryable 503 `vault_unavailable`; missing graph returns 501
+`vault_tool_missing`; a tool error returns 502 `vault_error`. GET `version` reports build
+`m5` and package version 0.5.0. All M5 routes are included in the token rejection test.

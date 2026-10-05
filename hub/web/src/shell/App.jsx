@@ -193,7 +193,7 @@ export function App({ store, path, search = '', navigate, onRetry, onReload = ()
  * @param {{ store: object, connection: { retryNow: () => void, visible: () => void }, api?: { post: Function }, screens?: Record<string, Function> }} props
  */
 export function Shell({ store, connection, api, screens }) {
-  const [path, setPath] = useState(() => window.location.pathname)
+  const [path, setPath] = useState(() => window.location.pathname + window.location.hash)
   const [search, setSearch] = useState(() => window.location.search)
   const [announcement, setAnnouncement] = useState('')
   const [now, setNow] = useState(() => Date.now())
@@ -203,14 +203,14 @@ export function Shell({ store, connection, api, screens }) {
   const navigate = useCallback((to, { replace = false } = {}) => {
     if (replace) window.history.replaceState(null, '', to)
     else window.history.pushState(null, '', to)
-    setPath(window.location.pathname)
+    setPath(window.location.pathname + window.location.hash)
     setSearch(window.location.search)
   }, [])
 
   useEffect(() => {
     const onPop = event => {
       overlayRef.current = event.state?.overlay ?? null
-      setPath(window.location.pathname)
+      setPath(window.location.pathname + window.location.hash)
       setSearch(window.location.search)
       store.dispatch({ type: 'view', path: window.location.pathname, overlay: overlayRef.current })
     }

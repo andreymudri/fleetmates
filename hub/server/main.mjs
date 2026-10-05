@@ -37,6 +37,11 @@ import { createRecorder } from './meetings/recorder.mjs'
 import { createPostWatch } from './meetings/post-watch.mjs'
 import { createMeetingAsk } from './meetings/ask.mjs'
 import { startScribed } from './meetings/start-scribed.mjs'
+import { createVaultClient } from './adapters/vault-mcp.mjs'
+import { createVaultService, localDate } from './vault/service.mjs'
+import { refreshCaptures } from './vault/captures.mjs'
+import { createAskEngine } from './ask/engine.mjs'
+import { createAskService } from './ask/service.mjs'
 const builtSpa = fileURLToPath(new URL('../web/dist/', import.meta.url))
 const deckVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 // Consecutive envelopes at the current deckHookVersion that return an outdated hooks row to ok.
@@ -135,7 +140,16 @@ export async function createDeckServer(options = {}) {
   const timers = []
   let link
   let hooksState
-  const health = () => [link.health(), { ...hooksState }, ...['vault-mcp', 'scribed', 'notify', 'fleetmates'].map(dep => dep === 'scribed' && recorder ? recorder.health() : { dep, state: 'unknown', reason: null, since: now(), nextProbeAt: null, attempt: 0 })]
+  let vaultClient = null
+  let vaultService = null
+  let askService = null
+  let vaultKey = null
+  let vaultWork = Promise.resolve()
+  let captureWork = Promise.resolve()
+  let captureBusy = false
+  let vaultState = { dep: 'vault-mcp', state: 'down', reason: 'VAULT_PATH is not set', since: now(), nextProbeAt: null, attempt: 0, version: null, capabilities: [] }
+  const vaultHealth = () => vaultClient?.health() ?? { ...vaultState }
+  const health = () => [link.health(), { ...hooksState }, ...['vault-mcp', 'scribed', 'notify', 'fleetmates'].map(dep => dep === 'vault-mcp' ? vaultHealth() : dep === 'scribed' && recorder ? recorder.health() : { dep, state: 'unknown', reason: null, since: now(), nextProbeAt: null, attempt: 0 })]
   const subscribers = new Set()
   let archiveAfter
   let approvalsEvent = () => {}
@@ -269,7 +283,7 @@ export async function createDeckServer(options = {}) {
     if (event.type === 'request.closed' && event.data?.id) auditClosed(event.data)
     const prefs = event.type === 'prefs.changed' ? event.data?.prefs : null
     // A changed TurbidAssist config path is located and read again; a different result syncs the meetings.
-    if (prefs) configWatcher.reload()
+    if (prefs) { configWatcher.reload(); void queueVault().catch(() => {}) }
     if (prefs && Object.hasOwn(prefs, 'ruleSuggestAfter') && prefs.ruleSuggestAfter !== threshold) {
       threshold = prefs.ruleSuggestAfter
       rules.setThreshold(threshold)
@@ -367,6 +381,67 @@ export async function createDeckServer(options = {}) {
   }
   const processEnv = { ...env }
   for (const key of Object.keys(processEnv)) if (/TOKEN|SECRET|PASSWORD|AUTHORIZATION/i.test(key)) delete processEnv[key]
+  const vaultPrefs = () => {
+    const prefs = currentPrefs() ?? {}
+    const value = prefs.vaultPath
+    const vaultPath = typeof value === 'string' && value ? path.resolve(value === '~' ? paths.home : value.startsWith('~/') ? path.join(paths.home, value.slice(2)) : value) : null
+    return { ...prefs, vaultPath }
+  }
+  const currentVault = () => {
+    if (!vaultService) throw apiError(503, 'vault_unavailable')
+    return vaultService
+  }
+  const dynamicVault = Object.fromEntries(['graph', 'list', 'readNote', 'note', 'search', 'lineBound', 'knownPaths', 'sessionMemory'].map(method => [method, (...args) => currentVault()[method](...args)]))
+  const memory = {
+    vault: dynamicVault, prefs: vaultPrefs,
+    ask: { ask: body => askService.ask(body), cancel: id => askService.cancel(id), isAsking: id => askService?.isAsking(id) ?? false },
+    async captures(day) {
+      await vaultWork
+      // Explicit refreshes serialize with the timer, so two calls cannot race capture matching.
+      const work = captureWork.catch(() => {}).then(() => refreshCaptures({ service: currentVault(), store, day, now }))
+      captureWork = work
+      return work
+    }
+  }
+  function publishVault(next) {
+    if (stopped) return
+    if (next.state === vaultState.state && next.reason === vaultState.reason && JSON.stringify(next.capabilities) === JSON.stringify(vaultState.capabilities) && next.version === vaultState.version) return
+    vaultState = { ...next }
+    const at = now()
+    const seq = Number(store.appendEvent({ at, type: 'health.changed', data: next }))
+    publish({ seq, at, type: 'health.changed', data: next })
+  }
+  async function configureVault() {
+    if (stopped) return
+    const prefs = vaultPrefs()
+    const key = JSON.stringify([prefs.vaultPath, prefs.vaultCommand, prefs.claudeCommand, prefs.lang])
+    if (key === vaultKey) return
+    vaultKey = key
+    await captureWork.catch(() => {})
+    await askService?.close()
+    await vaultClient?.close()
+    vaultClient = null
+    vaultService = null
+    if (prefs.vaultPath) {
+      const client = createVaultClient({ command: prefs.vaultCommand, env: {
+        PATH: env.PATH, HOME: paths.home, XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR,
+        VAULT_PATH: prefs.vaultPath, VAULT_LANG: prefs.lang
+      }, now, ...(options.vaultSpawn ? { spawn: options.vaultSpawn } : {}), ...(options.vaultTimers ? { timers: options.vaultTimers } : {}), log: options.vaultLog ?? (() => {}) })
+      vaultClient = client
+      vaultService = createVaultService({ client, store, now, log: options.vaultLog ?? (() => {}) })
+      client.onHealth(next => { if (vaultClient === client) publishVault(next) })
+      await client.start()
+    } else publishVault({ dep: 'vault-mcp', state: 'down', reason: 'VAULT_PATH is not set', since: now(), nextProbeAt: null, attempt: 0, version: null, capabilities: [] })
+    if (stopped) { await vaultClient?.close(); return }
+    const engine = createAskEngine({ claudeCommand: prefs.claudeCommand, stateDir: paths.state, env, now,
+      ...(options.askSpawn ? { spawn: options.askSpawn } : {}), ...(options.askTimers ? { timers: options.askTimers } : {}), log: options.askLog ?? (() => {}) })
+    askService = createAskService({ store, engine, vault: dynamicVault, health: vaultHealth, publish, now, prefs: vaultPrefs, log: options.askLog ?? (() => {}) })
+    askService.reapOrphans()
+  }
+  function queueVault() {
+    vaultWork = vaultWork.catch(() => {}).then(configureVault)
+    return vaultWork
+  }
   const run = (file, args) => command(file, args, processEnv)
   const hookCommand = deckHookCommand(process.execPath, paths.hook)
   // The hooks health row (owner decision 2026-10-01): computed now, rechecked after every rescan and hook
@@ -414,6 +489,7 @@ export async function createDeckServer(options = {}) {
       finally { recheckHooks() }
     },
     async startDependency(dep) {
+      if (dep === 'vault-mcp') { await queueVault(); return vaultClient ? vaultClient.retry() : vaultHealth() }
       if (dep === 'scribed') {
         // OPS-O1: the decided systemd-run command, with the token-free environment, then an immediate probe.
         await startScribed({ scribedCommand: api.preferences().prefs.scribedCommand, env: processEnv, probe: () => scribedClient.status(),
@@ -425,6 +501,7 @@ export async function createDeckServer(options = {}) {
       return link.retry()
     },
     async retryDependency(dep) {
+      if (dep === 'vault-mcp') { await queueVault(); return vaultClient ? vaultClient.retry() : vaultHealth() }
       if (dep === 'deckd') return link.retry()
       if (dep === 'scribed') return recorder.probeNow()
       return { dep, state: 'checking', reason: null, since: now(), nextProbeAt: now(), attempt: 0 }
@@ -472,7 +549,7 @@ export async function createDeckServer(options = {}) {
     },
     ...options.services
   }
-  api = createApi({ store, projector, paths, env, now, publish, services, link, runReader: reader, health, meetings: { config: meetingConfig, recorder, ask: meetingAsk },
+  api = createApi({ store, projector, paths, env, now, publish, services, link, runReader: reader, health, memory, meetings: { config: meetingConfig, recorder, ask: meetingAsk },
     approvals: { deliverer, rules, threshold: () => threshold, tiersStatus: () => tiersStore.status(),
       ruleOffers: () => ruleOffers(store, { threshold, tiers: tiersStore.current() }), ...(options.diff ? { diff: options.diff } : {}) } })
   function refreshToken() {
@@ -572,6 +649,10 @@ export async function createDeckServer(options = {}) {
     if (retentionTimeout !== null) retentionTimer.clear(retentionTimeout)
     retentionTimeout = null
     for (const timer of timers) clearInterval(timer)
+    await vaultWork.catch(() => {})
+    await captureWork.catch(() => {})
+    await askService?.close()
+    await vaultClient?.close()
     meetingAsk.close()
     recorder.close()
     postWatch.close()
@@ -591,6 +672,15 @@ export async function createDeckServer(options = {}) {
   }
   try {
     privateDir(paths.spool)
+    await queueVault()
+    if (['ok', 'degraded'].includes(vaultHealth().state)) await memory.captures(localDate(now()).day).catch(() => {})
+    const captureTimer = setInterval(() => {
+      if (stopped || captureBusy || !['ok', 'degraded'].includes(vaultHealth().state)) return
+      captureBusy = true
+      memory.captures(localDate(now()).day).catch(() => {}).finally(() => { captureBusy = false })
+    }, options.captureRefreshMs ?? 60000)
+    captureTimer.unref()
+    timers.push(captureTimer)
     retention()
     scheduleRetention()
     archiveSweep()

@@ -5,6 +5,24 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
+## v0.5.0 (unreleased)
+
+M5, Memory. Prepared locally; tagging, publication and the dogfood restart are pending.
+See `docs/deck/m5-exit.md` for automated evidence and the owner checks.
+
+- Tested Claude Code: 2.1.285 (unchanged)
+- deckd changed: no. The PTY protocol is unchanged.
+- Database migration: yes (`0006-memory` adds vault threads, messages, misses, captures,
+  observed note reads and learn calls). Confidential meeting rises also scrub migration backups.
+- Restart the web server to pick M5 up. The dogfood restart is an owner action.
+- Added the domain graph, local note preview, cited Ask with History and cancellation, Browse,
+  Captures and Misses; Memory search in the palette and related notes in Focus and Calm Home.
+- Added `export-misses --kind retrieval|all [--out <file>]` with private output permissions.
+- Ask prose is confined to thread tables and ephemeral WebSocket events. It is excluded from
+  event history, logs and browser persistence; deleting a thread uses SQLite secure deletion.
+- Contract and performance tests pin development dependency `@andreymudri/vault-mcp` 0.4.0.
+- No vault writes, capture revert, embeddings or hybrid retrieval in M5.
+
 ## v0.4.0 (unreleased)
 
 M4, Meetings. TurbidAssist meetings are recorded, followed and read from the deck over scribed's

@@ -211,7 +211,7 @@ test('POST /api/open runPlan calls services.open with exactly one absolute path;
   assert.equal(opened.status, 202)
   assert.deepEqual(h.opened, [[path.join(h.place.repo, 'docs', 'plan.md')]])
   assert.ok(path.isAbsolute(h.opened[0][0]))
-  for (const kind of ['vaultNote', 'meetingNote', 'postmeetLog']) {
+  for (const kind of ['meetingNote', 'postmeetLog']) {
     const response = await h.json('/api/open', 'POST', { kind, ref: 'x' })
     assert.equal(response.status, 422, kind)
     assert.equal(response.data.error.code, 'validation_failed')

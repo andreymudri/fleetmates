@@ -441,3 +441,14 @@ Written by the server to the deck database and summarised by a `fleetmates-deck 
 | TEST-O4 | How are status-check pane opens logged during the dogfood week? | A dev-only palette action `> log pane check` enabled by `DECK_DOGFOOD=1` that stores time, session and a one-line reason. | M1 |
 | TEST-O5 | Run Playwright on Firefox in CI too, or keep Firefox manual (qa-checklist 1.10)? | Manual. | none |
 | TEST-O6 | Fixtures and screenshots must keep placeholders; add a CI grep that fails on a denylist of real client names kept outside the repo? | Yes, denylist in a local untracked file, CI check runs only when present | M1 |
+
+## Prepared M5 test inventory
+
+Contract: `vault-mcp.test.mjs` against pinned 0.4.0. Unit: `vault-service`, `vault-observe`,
+`vault-captures`, `ask-service`, `memory-graph`, `memory-panels`, `memory-surfaces`,
+`backup-scrub`, `export-misses` and `m5-release`. Integration: `memory-api`, `memory-exit`
+and `memory-privacy`. Browser: `memory.spec.mjs`; the security router table includes M5.
+`hub/test/perf/vault-graph.mjs` generates a synthetic vault and measures five warm calls.
+
+The exit report records results and environment limitations. Existing real-Claude capture
+checks remain owner tasks. Each new test was checked with a mutation and the source restored.
