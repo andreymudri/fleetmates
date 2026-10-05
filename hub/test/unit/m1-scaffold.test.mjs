@@ -124,6 +124,8 @@ test('deck CI declares pinned Node, build, and tests on Linux and macOS', async 
     "        run: node -e 'const fs = require(\"node:fs\"); fs.mkdirSync(process.env.TMPDIR, {recursive:true}); fs.appendFileSync(process.env.GITHUB_ENV, `TMPDIR=${fs.realpathSync(process.env.TMPDIR)}\\n`)'",
     '      - run: npm ci --prefix hub',
     '      - run: npm --prefix hub run build',
+    '      - name: Check platform regressions before the full suite',
+    "        run: node --test --test-name-pattern='null-device timestamps|JSON body type|oversized streamed|confirmed read stays|confirming read starts|renamed Node init' hub/test/unit/tiers.test.mjs hub/test/integration/security.test.mjs hub/test/unit/http-body-limit.test.mjs hub/test/unit/setup.test.mjs",
     '      - run: npm --prefix hub test',
   ].join('\n'))
   assert.doesNotMatch(hubJob, /^\s+(?:-\s+)?if:/m)

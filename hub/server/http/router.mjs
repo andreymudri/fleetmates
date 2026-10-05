@@ -81,9 +81,8 @@ export function createRouter({ api, staticDir, getToken, getPort }) {
       res.writeHead(200, { 'Content-Type': types[path.extname(file)] ?? 'application/octet-stream' })
       res.end(req.method === 'HEAD' ? undefined : content)
     } catch (error) {
-      // A body refused for its declared length is never read; without closing, the client's unsent body and
-      // the kept-alive socket end in ECONNRESET instead of the 413 (seen with a 300,000-byte Content-Length).
-      if (error.status === 413 && !res.headersSent) res.setHeader('Connection', 'close')
+      // Drain rejected uploads without buffering them. Closing during the upload can reset the
+      // connection before the client receives the error response.
       if (!res.headersSent) json(req, res, error.status ?? (error instanceof URIError ? 422 : error.code === 'ENOENT' ? 404 : 500), { error: { code: error.code && error.status ? error.code : error instanceof URIError ? 'validation_failed' : error.code === 'ENOENT' ? 'not_found' : 'internal', message: error.status ? error.code : 'Request failed', retryable: false, ...(error.details && Object.keys(error.details).length ? { details: error.details } : {}) } })
       else res.end()
       req.resume()

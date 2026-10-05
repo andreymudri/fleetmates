@@ -103,9 +103,13 @@ test('JSON body type, schema and 256 KiB streamed limit are enforced before writ
   for (const body of ['{', '[]', 'null', '{"textSize":99}', '{"unknown":true}', '{"constructor":"x"}', '{"__proto__":"x"}']) {
     assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json' }, 'PATCH', body)).status, 422)
   }
-  assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked' }, 'PATCH', '{"scanRoot":"' + 'x'.repeat(1024 * 1024) + '"}')).status, 413)
+  const streamed = await h.request('/api/prefs', { 'Content-Type': 'application/json', 'Transfer-Encoding': 'chunked' }, 'PATCH', '{"scanRoot":"' + 'x'.repeat(1024 * 1024) + '"}')
+  assert.equal(streamed.status, 413)
+  assert.notEqual(streamed.headers.connection, 'close', 'the upload must drain before closing its socket')
   const body = JSON.stringify({ scanRoot: 'x'.repeat(300_000) })
-  assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json' }, 'PATCH', body)).status, 413)
+  const declared = await h.request('/api/prefs', { 'Content-Type': 'application/json' }, 'PATCH', body)
+  assert.equal(declared.status, 413)
+  assert.notEqual(declared.headers.connection, 'close', 'a declared oversized upload also drains')
   const fits = JSON.stringify({ scanRoot: 'x'.repeat(200_000) })
   assert.equal((await h.request('/api/prefs', { 'Content-Type': 'application/json' }, 'PATCH', fits)).status, 200)
 })
