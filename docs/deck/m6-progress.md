@@ -26,34 +26,29 @@ blocks saving. The upstream revision catches changes to planned vault files
 or templates. A save with an uncertain transport outcome blocks retries;
 a process restart treats an in-flight save the same way.
 
-The upstream implementation is in `/workspace/vault-mcp` on
-`feat/research-preview`, prepared as 0.5.0. Preview plans the note, MOC, knowledge
-index and daily note without writing files, creating directories, committing
-or pushing. Approved save repeats the exact input and timestamp and checks the
-revision before writing. `force_new` preserves existing notes. The dependency
-commit `4b00691` is not published; the deck keeps published 0.4.0 preview/save blocked.
+The vault-mcp preview/save contract is published as 0.5.0, tagged v0.5.0 upstream,
+and pinned in the Deck's test dependency and lockfile. Preview plans the note,
+MOC, knowledge index and daily note without writing files, creating directories,
+committing or pushing. Approved save repeats the exact input and timestamp and
+checks the revision before writing. `force_new` preserves existing notes.
 
 Validation includes synthetic Git vault snapshots covering every file and
 Git byte before/after preview; exactly one approved commit with precisely the
 previewed files and contents; stale templates; existing-note preservation;
 structured MCP stale errors; deck edit/revision/orphan/approval/error-state
 checks; and Chromium review/edit/source/preview/save/reload with axe checks.
-The full deck suite passed 1858 of 1861 tests. The three failures are the
-previous Chromium bootstrap policy and two Git 2.52 optional hooksPath cases;
-their tests remain enabled. The final research integration subset passed all
-eight tests. Three Research browser tests and the authenticated-route subset
-passed, including the new review PATCH route. The upstream compiled stdio smoke
-check also passed. The upstream full suite passed all 1242 tests.
-New deck tests have failing mutation evidence with source restoration. The
-upstream preview tests also detected writer, stale-token and schema mutations.
+Contract checks now run against the published npm package by default. They
+verify the ten-tool schemas and preview capability, a no-write preview followed
+by exactly one approved synthetic vault commit, and the browser edit, citation,
+preview, save and reload flow. All nine published-package integration/browser
+checks passed. The full Deck suite passed all 1869 tests with the published
+release; the three research browser tests also passed. The optional file-URL
+bootstrap navigation used its existing override because local Chromium policy
+blocks it; other browser checks remained enabled. Capability removal and a wrong approved revision each produced
+failing tests, with source restored afterwards. No real vault or authenticated
+Claude session was used.
 
-The upstream branch push could not authenticate for the second repository.
-A portable commit bundle and plain source patch are saved under
-`/workspace/setup/vault-mcp-preview.bundle` and `vault-mcp-preview.patch`.
-
-Remaining exit work: owner publication of vault-mcp 0.5.0, switching the deck's
-pinned test dependency to that published release, and three owner-authorized
-real research runs, one per preset. Existing topics now support a new linked
-note; richer scout progress and Discard remain proposed UI follow-ups. The
+Remaining exit work: three owner-authorized real research runs, one per preset.
+Existing topics now support a new linked note; richer scout progress and Discard remain proposed UI follow-ups. The
 M1 one-week dogfood check remains separate. No real vault or real Claude
 session was used for these tests.

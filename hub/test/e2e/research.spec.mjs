@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module'
 import assert from 'node:assert/strict'
 import { test, before, after } from 'node:test'
 import fs from 'node:fs/promises'
@@ -86,14 +87,16 @@ test('research palette opens the shared form and hostile draft text cannot execu
 })
 
 
-test('research owner edits citations, previews and saves through the real candidate MCP', { skip: !process.env.RESEARCH_VAULT_MCP }, async t => {
+const realServer = process.env.RESEARCH_VAULT_MCP ?? createRequire(import.meta.url).resolve('@andreymudri/vault-mcp/dist/server/index.js')
+
+test('research owner edits citations, previews and saves through the published MCP', async t => {
   let vault
   const git = (...args) => execFileSync('git', ['-C', vault, ...args], { encoding: 'utf8' }).trim()
-  const { h, page } = await pageFor(t, { vaultCommand: [process.execPath, process.env.RESEARCH_VAULT_MCP], prepareVault: async root => {
+  const { h, page } = await pageFor(t, { vaultCommand: [process.execPath, realServer], prepareVault: async root => {
     vault = root
     await fs.mkdir(path.join(root, '_templates'))
     await fs.writeFile(path.join(root, '_templates/wiki.md'), '# <% tp.file.title %>\n\n## Contexto\n')
-    git('init', '-b', 'main'); git('config', 'user.name', 'Synthetic fixture'); git('config', 'user.email', 'fixture@example.org'); git('config', 'commit.gpgsign', 'false'); git('config', 'gc.auto', '0'); git('add', '.'); git('commit', '-m', 'Initial fixture')
+    git('init', '-b', 'main'); git('config', 'user.name', 'Test'); git('config', 'user.email', 'test@example.com'); git('config', 'commit.gpgsign', 'false'); git('config', 'gc.auto', '0'); git('add', '.'); git('commit', '-m', 'Initial fixture')
   } })
   const r = await seedResearch(h)
   await writeResearchDraft(r.repo, r.id)

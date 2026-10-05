@@ -7,8 +7,8 @@ into it.
 
 ![Home with nine sessions, three of them waiting on you](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
 
-**Status: 0.4.0, not published yet.** This is milestone M4, Meetings, on top of M3, Unblock, M2,
-Control, and M1, Observe. The package name
+**Status: 0.5.0 release candidate, private and not published.** Includes Memory and Research
+on top of Meetings, Unblock, Control, and Observe. The package name
 (`@andreymudri/fleetmates-deck`) and the command names (`fleetmates-deck`, `fm`) are still an open
 decision and may change before the first release.
 
@@ -387,8 +387,9 @@ The command opens SQLite read only; output files have mode 0600.
 
 M5 adds no vault writes, capture revert, embeddings or hybrid retrieval. Research now launches
 scouts, validates drafts, supports source review, and saves only an owner-approved, current vault
-preview. Saving requires the prepared vault-mcp 0.5 approval contract; publication and live preset
-checks remain prerequisites for public use.
+preview. Saving requires the published vault-mcp 0.5.0 approval contract. The Deck pins this
+release for its contract tests. Live research runs for all three presets and the remaining
+milestone exit checks are still prerequisites for public use.
 
 ## Structured fleet activity
 

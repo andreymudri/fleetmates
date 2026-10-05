@@ -12,7 +12,7 @@ import { makeVaultTree } from '../helpers/vault-tree.mjs'
 const require = createRequire(import.meta.url)
 const realServer = require.resolve('@andreymudri/vault-mcp/dist/server/index.js')
 const fakeServer = fileURLToPath(new URL('../fakes/fake-vault-mcp.mjs', import.meta.url))
-const snapshot = new URL('../fixtures/vault-mcp/0.4.0/tools-list.json', import.meta.url)
+const snapshot = new URL('../fixtures/vault-mcp/0.5.0/tools-list.json', import.meta.url)
 const worker = '02-wiki/nestjs/bullmq-worker.md'
 
 function sortedGraph (graph) {
@@ -58,13 +58,15 @@ async function withClients (fn) {
   }
 }
 
-test('vault-mcp 0.4.0 publishes the pinned ten-tool input and graph output schemas', async () => {
+test('vault-mcp 0.5.0 publishes the pinned ten-tool input and graph output schemas', async () => {
   await withClients(async ({ real, tools }) => {
-    assert.equal(real.health().version, '0.4.0')
-    assert.deepEqual(real.health().capabilities, ['graph', 'structured'])
+    assert.equal(real.health().version, '0.5.0')
+    assert.deepEqual(real.health().capabilities, ['graph', 'structured', 'preview'])
     const actual = tools.map(({ name, inputSchema, outputSchema }) => ({ name, inputSchema, ...(outputSchema ? { outputSchema } : {}) })).sort((a, b) => a.name.localeCompare(b.name))
     assert.equal(actual.length, 10)
     assert.ok(actual.find(tool => tool.name === 'vault_graph').outputSchema)
+    const learn = actual.find(tool => tool.name === 'vault_learn').inputSchema.properties
+    for (const key of ['preview', 'preview_time', 'expected_revision', 'force_new']) assert.ok(learn[key], `published learn schema must expose ${key}`)
     if (process.env.UPDATE_SNAPSHOT === '1') {
       await mkdir(new URL('.', snapshot), { recursive: true })
       await writeFile(snapshot, JSON.stringify(actual, null, 2) + '\n')
