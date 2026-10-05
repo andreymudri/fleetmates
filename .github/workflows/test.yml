@@ -27,6 +27,8 @@ jobs:
         run: |
           git config --global user.email "test@example.com"
           git config --global user.name "CI"
+      - name: Lint shipped instructions
+        run: node scripts/security-lint.mjs --root .
       - run: npm test
       # The hostile-TMPDIR sweep, which the normal suite deliberately does not carry: it runs the
       # whole suite a second time, and what it measures is the environment crossed with the code.
