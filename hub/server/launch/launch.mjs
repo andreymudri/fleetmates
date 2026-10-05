@@ -144,9 +144,10 @@ export function createLauncher({ store, projector, link, now = Date.now, prefere
      * `POST /api/sessions` for a resolved repo (state-machines row 1).
      * @param {string} repoId
      * @param {{ task?: unknown, mode?: unknown }} body
+     * @param {{ taskLabel?: string }} [options] internal display title, independent of the first prompt
      * @returns {Promise<{ status: 201, data: { session: object, warning?: { kind: 'repo_busy', sessionIds: string[] } } }>}
      */
-    async launch(repoId, body) {
+    async launch(repoId, body, { taskLabel } = {}) {
       const task = body.task ?? ''
       const mode = body.mode ?? 'plain'
       if (!['plain', 'fleetmates'].includes(mode)) throw apiError(422, 'validation_failed', { fields: ['mode'] })
@@ -159,7 +160,7 @@ export function createLauncher({ store, projector, link, now = Date.now, prefere
       const busy = store.all("SELECT id FROM sessions WHERE repo_id=? AND role='solo' AND alive=1 AND (pty_id IS NULL OR pty_id<>?) ORDER BY started_at,id", repoId, reply.ptyId).map(other => other.id)
       const launchTask = !task.trim() ? null : mode === 'fleetmates' ? `${FLEETMATES_JOB_PROMPT}\n\n${task}` : task
       const session = projector.create({ id: randomUUID(), origin: 'launched', pty_id: reply.ptyId, process_key: reply.ptyId, repo_id: repoId, cwd: repoId,
-        branch: headBranch(repoId), task: task.trim() ? task : 'Untitled', launch_task: launchTask }, now())
+        branch: headBranch(repoId), task: taskLabel ?? (task.trim() ? task : 'Untitled'), launch_task: launchTask }, now())
       return { status: 201, data: { session, ...(busy.length ? { warning: { kind: 'repo_busy', sessionIds: busy } } : {}) } }
     },
     /** `POST /api/sessions/:id/stop` (row 50; the exit that follows ends the session, row 42). */

@@ -11,6 +11,7 @@ import { TeamRun } from '../team-run/TeamRun.jsx'
 import { CrewSheet } from '../crew/CrewSheet.jsx'
 import { Meetings } from '../meetings/Meetings.jsx'
 import { MeetingLive } from '../meetings/MeetingLive.jsx'
+import { Research } from '../research/Research.jsx'
 import { Memory } from '../memory/Memory.jsx'
 import { retryScribed, startScribed } from '../../state/actions.js'
 
@@ -141,6 +142,8 @@ export function deckScreens({ api, feed, terminals = null, dispatch, now = Date.
       onStartDeckd={() => { api.post('/api/deps/deckd/start').catch(() => {}) }} />
   )
   const screens = {
+    research: props => <><Research {...props} api={api} /><ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} /></>,
+    researchNew: props => <><Research {...props} api={api} /><ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} /></>,
     memory: props => <><Memory {...props} api={api} feed={feed} dispatch={dispatch} now={now} /><ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} /></>,
     memoryNote: props => <><Memory {...props} api={api} feed={feed} dispatch={dispatch} now={now} /><ObserveOverlays state={props.state} t={props.t} navigate={props.navigate} api={api} onToast={toast} /></>,
     home: function HomeScreen(props) {

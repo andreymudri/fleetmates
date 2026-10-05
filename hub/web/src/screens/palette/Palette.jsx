@@ -142,7 +142,7 @@ export function commandRows(text, repos, t) {
   if (!lower) return { rows: [], message: null }
   const command = COMMANDS.find(word => word.startsWith(lower))
   if (!command) return { rows: [], message: translate(t, PALETTE_COPY, 'palette.command.unknown', { name: shown(name) }) }
-  if (command !== 'launch') return { rows: [], message: null }
+  if (command === 'research') return { rows: [{ kind: 'research', key: 'research-new', title: 'Research a topic', topic: rest.join(' ') }], message: null }
   const arg = rest.join(' ')
   const exact = repo => normalizeText(repo.name) === normalizeText(arg) ? 0 : 1
   const found = (repos ?? []).filter(repo => !repo.archivedAt && matchesQuery(arg, [repo.name]))
@@ -320,7 +320,10 @@ export function openLaunch(navigate, to = '/new', env = globalThis.window) {
  */
 export async function runRow(row, { navigate, leave, onClose, expand, api, win, archive = id => archiveSession(api, id),
   allow = item => answerRequest(api, item.requestId, { choice: 'allow' }), openDrawer = id => openOverlay('drawer', win ?? globalThis.window, { request: id }) }) {
-  if (row.kind === 'askVault') {
+  if (row.kind === 'research') {
+    leave()
+    navigate(`/research/new?topic=${encodeURIComponent(row.topic)}`)
+  } else if (row.kind === 'askVault') {
     const result = await askVault(api, { text: row.text })
     leave()
     navigate(`/memory?thread=${encodeURIComponent(result.thread.id)}`)

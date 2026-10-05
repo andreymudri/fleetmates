@@ -1,5 +1,11 @@
 # 06 · Storage
 
+Prepared M6 migration 0007 adds a strict `research` registry: id, selected
+repo, lead session, authoritative JSON request and creation time. Draft files
+are read from the selected repository; no vault file is opened or written.
+The migration preserves the existing private pre-migration backup behavior.
+The package remains an M6 work in progress; see [m6-progress.md](m6-progress.md).
+
 Status labels as in [02-domain.md](02-domain.md). Decided here: SQLite as the store, a summary row per session kept forever, the event stream and scrollback dropped after 30 days with a link to Claude Code's own transcript instead of a copy, rules living in each repo's `.claude/settings.local.json`, tier patterns in `~/.config/fleetmates/deck/tiers.json`, the token in a 0600 file, the vault reached only through vault-mcp, and no transcript text stored for confidential meeting tags. The engine pick (`node:sqlite`), every table and column, indexes, the retention job, migrations, backup and reset are **Proposed**.
 
 This document is the schema for the deck web server's database. The browser holds no durable state ([03-architecture.md](03-architecture.md) 2.5) and deckd holds only memory (2.1), so this is the only database in the system.

@@ -1,0 +1,4 @@
+.research-form,.research-review{max-width:960px;margin:24px auto;padding:24px;background:var(--bg-surface);color:var(--text-default)}
+.research-form form{display:grid;gap:18px}.research-form label{display:grid;gap:6px}.research-form fieldset{display:flex;gap:18px;flex-wrap:wrap;border:1px solid var(--border-default);padding:14px}.research-form fieldset label{display:flex;align-items:center}
+.research-form input:not([type=radio]):not([type=checkbox]),.research-form select,.research-form textarea{font:inherit;padding:8px;background:var(--bg-canvas);color:inherit;border:1px solid var(--border-default);border-radius:6px}
+.research-review button{margin:8px}.research-body{padding:20px 0;border-block:1px solid var(--border-default);margin:20px 0}.research-cards{padding:24px}.research-cards article{display:inline-block;margin:8px;padding:16px;border:1px dashed var(--border-default)}

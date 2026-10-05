@@ -383,7 +383,7 @@ test('the real Home route: Archived (N) fetches archived=1 on expand, Unarchive 
   const toggle = page.getByRole('button', { name: 'Archived (2)' })
   await toggle.waitFor({ timeout: 10_000 })
   const calls = () => page.evaluate(() => window.h.calls.splice(0))
-  assert.deepEqual(await calls(), [], 'nothing is fetched while the list is closed')
+  assert.deepEqual(await calls(), ['GET /api/research'], 'Home checks research while the closed archived list is not fetched')
   assert.equal(await toggle.getAttribute('aria-expanded'), 'false')
 
   await toggle.click()

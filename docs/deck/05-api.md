@@ -1,5 +1,13 @@
 # 05 · API
 
+Prepared M6 additions (work in progress): `GET /api/research` lists up to 50
+summaries; `GET /api/research/:id` reads the validated draft and its revision;
+`POST /api/research` takes `repoKey`, `topic`, `preset`, `domain`, `sourceTypes`
+and optional `focusNotes`, then launches a research session. `POST
+/api/research/:id/stop` stops that session through the existing launcher.
+Preview currently returns 501 and Save returns 409 because the published MCP
+dependency cannot provide a verified preview. See [m6-progress.md](m6-progress.md).
+
 Status labels as in [02-domain.md](02-domain.md). Decided here: the token on every HTTP request and WebSocket with Host and Origin checks, loopback only, hooks over a Unix socket with a spool fallback, deckd reachable only over its Unix socket, answers delivered as keystrokes into the PTY, and the resync by `seq` idea. Everything else in this document (paths, payload shapes, event names, the deckd wire protocol, the envelope fields, error codes, versioning) is **Proposed** unless a line says otherwise. Where a screen spec named an endpoint or event differently, this document wins (SHELL-O1) and section 2.1 lists every rename.
 
 Three contracts live here:
