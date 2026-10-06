@@ -41,7 +41,9 @@ async function observe(capability, harness, env, exec) {
   const output = result.output
   if (capability === 'harness') {
     if (/not logged in/i.test(output)) return observation(capability, 'unavailable', 'Harness is not authenticated')
-    if (/^Logged in\b/im.test(output)) return observation(capability, 'available', 'Authenticated harness status observed')
+    if (/^Logged in\b/im.test(output) || (harness === 'cursor' && /^✓ Logged in\b/im.test(output))) {
+      return observation(capability, 'available', 'Authenticated harness status observed')
+    }
     return observation(capability, 'unknown', 'Unrecognized harness authentication response')
   }
   if (capability === 'render') {

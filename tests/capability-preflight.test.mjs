@@ -52,6 +52,44 @@ test('Cursor uses its supported authentication status interface', async () => {
   assert.ok(!JSON.stringify(report).includes('PRIVATE_LOGIN'))
 })
 
+test('Cursor checkmark status authenticates without identity leakage', async () => {
+  const calls = []
+  const report = await request(['harness'], async (command, cwd, options) => {
+    calls.push(command)
+    assert.equal(command, 'cursor-agent')
+    assert.deepEqual(options, { argv: ['status'], env: {}, timeoutMs: 5000, graceMs: 250, maxOutputBytes: 65536, maxCaptureBytes: 65536 })
+    return success('✓ Logged in as PRIVATE_LOGIN\n')
+  }, { harness: 'cursor' })
+  assert.equal(report.ready, true)
+  assert.deepEqual(calls, ['cursor-agent'])
+  assert.deepEqual(report.observations, [{ capability: 'harness', state: 'available', reason: 'Authenticated harness status observed' }])
+  assert.deepEqual(report.blocked, [])
+  assert.ok(!JSON.stringify(report).includes('PRIVATE_LOGIN'))
+})
+
+test('Cursor checkmark recognition does not widen Codex status parsing', async () => {
+  const report = await request(['harness'], async () => success('✓ Logged in as PRIVATE_LOGIN\n'))
+  assert.equal(report.ready, false)
+  assert.equal(report.observations[0].state, 'unknown')
+  assert.ok(!JSON.stringify(report).includes('PRIVATE_LOGIN'))
+})
+
+test('Cursor checkmark status cannot override negative auth or execution failures', async () => {
+  for (const [receipt, state] of [
+    [success('✓ Logged in as PRIVATE_LOGIN\nNot logged in\n'), 'unavailable'],
+    [{ code: 1, output: '✓ Logged in as PRIVATE_LOGIN\n' }, 'unavailable'],
+    [{ ...success('✓ Logged in as PRIVATE_LOGIN\n'), timedOut: true }, 'unknown'],
+    [{ ...success('✓ Logged in as PRIVATE_LOGIN\n'), outputLimited: true }, 'unknown'],
+    [success('✓ Logged in as PRIVATE_LOGIN\n' + ' '.repeat(65536)), 'unknown'],
+  ]) {
+    const report = await request(['harness'], async () => receipt, { harness: 'cursor' })
+    assert.equal(report.ready, false)
+    assert.equal(report.observations[0].state, state)
+    assert.equal(report.blocked.length, 1)
+    assert.ok(!JSON.stringify(report).includes('PRIVATE_LOGIN'))
+  }
+})
+
 test('required malformed authentication blocks without reflecting output', async () => {
   const report = await request(['harness'], async () => success('PRIVATE_TOKEN PRIVATE_LOGIN'))
   assert.equal(report.ready, false)
