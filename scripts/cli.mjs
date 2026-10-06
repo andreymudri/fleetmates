@@ -4649,7 +4649,9 @@ export async function runCli(argv, io = { out: console.log }) {
         result = buildContextBundle(input)
       } else {
         const { summarizeAcceptance, reviewerMetrics } = await import('./workflow-evidence.mjs')
-        result = { acceptance: summarizeAcceptance(input), review: input.findings == null ? null : reviewerMetrics(input.findings, input.labeledDefects ?? null) }
+        const { summarizeReviewOutcomes } = await import('./review-outcomes.mjs')
+        result = { acceptance: summarizeAcceptance(input), review: input.findings == null ? null : reviewerMetrics(input.findings, input.labeledDefects ?? null),
+          reviewOutcomes: input.reviewOutcomes == null ? null : summarizeReviewOutcomes({ ...input.reviewOutcomes, inputs: input.inputs }) }
       }
       io.out(workflowJson(result))
       return command === 'workflow-report' && !result.acceptance.complete ? 4 : 0

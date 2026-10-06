@@ -614,3 +614,16 @@ The headless driver already caps enforcement retries and records its gate and ha
 last 24 hours in the Claude config directory. It reports unverified callbacks honestly. Start a
 session, run Bash, compact, and stop a teammate in the installed Claude Code version to prove
 the callbacks fire. Synthetic tests validate the handlers, not a live Claude installation.
+
+### Reviewer outcome reports
+
+`workflow-report --file <json>` can include `reviewOutcomes` with `findings`
+and optional independently established `labeledDefects`. Findings declare
+`id`, `identity` (the acceptance input hash), `outcome` (confirmed, refuted,
+duplicate, unreproduced or accepted), `rationale`, nonempty `evidence` log
+references, and `provenance` (`lens`, `category`, `model`, `source`). A duplicate
+also names `duplicateOf`. The report preserves each source observation in a
+canonical group and reports metrics by lens, category and model. Stale inputs,
+missing duplicate targets and cycles cannot silently become current evidence.
+References and outcomes are observations, not independent reproduction proof.
+This is reporting only; it does not change review policy or model selection.

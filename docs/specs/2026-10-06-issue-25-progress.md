@@ -12,7 +12,7 @@ close the parent roadmap or claim real-model evaluation outcomes.
 | W05 | Git-computed test-change policy with declared exceptions and honest temporal/coverage limits | Independent behavioral red/green execution and richer ordering evidence |
 | W06 | No implementation claim | Rendered targets, behavioral/accessibility evidence and project adapter |
 | W07 | Scoped human learning selection; no automatic knowledge writes | Owned learning commits, feedback-to-tasks and authoritative plan amendments |
-| W08 | Local outcome counts, precision excluding unresolved findings, recall requiring independent labels | Findings provenance/deduplication, calibrated real reviewer datasets and shadow selection |
+| W08 | Local outcome counts, precision excluding unresolved findings, recall requiring independent labels; provenance-preserving duplicate groups and per-lens/category/model reports tied to current inputs | Calibrated real reviewer datasets, independent reproduction, refutation quality and shadow selection |
 | W09-W13 | No implementation claim | Separate bounded specs, adapters, durable effects, preflight and role capabilities |
 | W14-W15 | Conditional later scope | Bottleneck evidence and an explicit release requirement |
 

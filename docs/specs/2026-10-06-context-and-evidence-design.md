@@ -33,3 +33,28 @@ improvements. W02 baseline trials, held-out evaluations and human outcome
 labels remain required before measured promotion. W03 acceptance/dependency context integration and real selection evaluation,
 W04 project verifier profiles and W07 authoritative plan amendment are
 separate implementation obligations, not established by a pure bundle test.
+
+## Provenance-preserving reviewer outcomes
+
+`workflow-report` accepts an optional `reviewOutcomes` object with `findings`
+and optional independent `labeledDefects`. Its input identity always comes
+from the enclosing acceptance report, never from a nested override. Each
+finding requires `id`, `identity`, `outcome`, a nonempty `rationale`, nonempty
+`evidence` references and `provenance` containing `lens`, `category`, `model`
+and `source`. Confirmed outcomes are declared observations; references do not
+prove reproduction and must be independently evaluated before promotion.
+
+A `duplicate` requires `duplicateOf` referencing another finding with the same
+input identity. Chains resolve to their canonical finding; missing targets,
+cycles, mixed-input links and duplicate IDs reject the report. Similar text
+alone never creates a duplicate. Canonical groups preserve every observation
+and its provenance, rationale and evidence references. Duplicates do not add
+confirmed outcomes or increase recall. Stale findings are listed separately
+and cannot contribute to current groups or metrics.
+
+Metrics also break down by declared lens, category and model. These are
+per-observation attribution summaries: a duplicate does not inherit the
+canonical finding's confirmed status in a different lens. Unknown precision
+and recall remain null. The mode is reporting only; no routing, mandatory
+review policy or effort selection changes. Calibrated datasets and real
+workflow evaluations remain outstanding.
