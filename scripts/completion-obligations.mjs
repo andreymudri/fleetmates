@@ -77,6 +77,11 @@ export function summarizeCompletionObligations({ inputs, requirements, receipts,
       obligation.reason = 'inconsistent-final-tree'
     }
   }
+  for (const kind of ['implementation', 'acceptance', 'integration']) {
+    if (!obligations.some(o => o.kind === kind && o.mandatory)) {
+      obligations.push({ id: `missing-${kind}`, kind, mandatory: true, scope: 'step', status: 'unresolved', receipts: [], stale: 0 })
+    }
+  }
   for (const kind of ['command', 'review']) {
     if (!obligations.some(o => o.kind === kind && o.scope === 'final' && o.mandatory)) {
       obligations.push({ id: `missing-final-${kind}`, kind, mandatory: true, scope: 'final', status: 'unresolved', receipts: [], stale: 0 })

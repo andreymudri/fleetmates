@@ -24,6 +24,32 @@ function fixture() {
 }
 const report = request => summarizeCompletionObligations(request)
 
+for (const kind of ['implementation', 'command', 'review', 'acceptance', 'integration']) {
+  test(`missing mandatory ${kind} category is enumerated as unresolved`, () => {
+    const request = fixture()
+    const result = report({ ...request, requirements: request.requirements.filter(r => r.kind !== kind),
+      receipts: request.receipts.filter(r => r.kind !== kind) })
+    assert.equal(result.verifiedComplete, false)
+    assert.equal(result.state, 'unresolved')
+    const missing = result.obligations.filter(o => o.kind === kind && o.mandatory)
+    assert.equal(missing.length, 1)
+    assert.equal(missing[0].status, 'unresolved')
+    assert.deepEqual(missing[0].receipts, [])
+    for (const requirement of request.requirements.filter(r => r.kind !== kind)) {
+      assert.equal(result.obligations.find(o => o.id === requirement.id).status, 'pass')
+    }
+  })
+
+  test(`optional ${kind} category cannot substitute for its mandatory obligation`, () => {
+    const request = fixture()
+    const result = report({ ...request, requirements: request.requirements.map(r => r.kind === kind ? { ...r, mandatory: false } : r) })
+    assert.equal(result.verifiedComplete, false)
+    assert.equal(result.state, 'unresolved')
+    assert.equal(result.obligations.find(o => o.id === kind).status, 'pass')
+    assert.ok(result.obligations.some(o => o.kind === kind && o.mandatory && o.status === 'unresolved'))
+  })
+}
+
 test('strict identity rejects legacy and malformed inputs and binds context', () => {
   for (const key of Object.keys(inputs)) {
     assert.notEqual(strictExecutionIdentity(inputs), strictExecutionIdentity({ ...inputs, [key]: key === 'commit' ? 'c'.repeat(40) : hash('changed') }), key)

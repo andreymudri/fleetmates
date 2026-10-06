@@ -177,7 +177,8 @@ test('lifecycle recomputes actual refs and distinguishes strict verdicts from pr
   const { root, binding } = await fixture(t), inputs = strictInputs(root)
   const tree = git(['rev-parse', 'HEAD^{tree}'], root), refs = { 'refs/heads/run': inputs.commit }
   const artifact = { version: 1, runId: 'r1', kind: 'log', sha256: 'a'.repeat(64), byteLength: 1 }
-  const requirements = ['command', 'review'].map(kind => ({ id: kind, kind, mandatory: true, scope: 'final', inputs, tree, refs }))
+  const requirements = ['implementation', 'command', 'review', 'acceptance', 'integration'].map(kind => ({ id: kind, kind,
+    mandatory: true, scope: ['command', 'review', 'acceptance'].includes(kind) ? 'final' : 'step', inputs, tree, refs }))
   const receipts = requirements.map(r => ({ id: r.id, requirement: r.id, version: 2, kind: r.kind, status: 'pass',
     executionBacked: true, requestIdentity: strictExecutionIdentity(inputs), identity: strictExecutionIdentity(inputs), tree, refs, artifact }))
   const evidence = { inputs, requirements, receipts, branches: refs, artifactObservations: [{ reference: artifact, verified: true }], lifecycle: { runId: 'r1', state: 'running' } }
