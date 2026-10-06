@@ -47,7 +47,7 @@ function jsLiteral(value, indent = '') {
 
 export async function generatePhaseWorkflow({
   runId, phase, tasks, maxParallel, tierModels,
-  planPath = '', baseBranch = '', constraints = [], caveman = false, effort = '', neighbours = {},
+  planPath = '', baseBranch = '', constraints = [], caveman = false, effort = '', neighbours = {}, contextBundles = {},
 }) {
   if (!tasks || tasks.length === 0) throw new Error(`no tasks for phase ${phase}`)
 
@@ -77,7 +77,7 @@ export async function generatePhaseWorkflow({
     // `cli.mjs brief`) can share one implementation.
     __BRIEFS__: () => JSON.stringify(
       Object.fromEntries(slim.map((task) => [task.id, composeBrief({
-        task, runId, planPath, baseBranch, constraints, caveman,
+        task, runId, planPath, baseBranch, constraints, caveman, contextBundle: contextBundles[task.id] ?? null,
       })])),
       null,
       2,

@@ -6,6 +6,7 @@ import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUT
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan, PlanParseError } from './plan-parser.mjs'
+import { readWorkflowInput } from './workflow-input.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { renderUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
@@ -145,6 +146,18 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
+  context-bundle --file <json> [--root <path>]
+  workflow-report --file <json> [--root <path>]
+  ci-status --file <json> [--root <path>]
+  feedback-draft --file <json> [--root <path>]
+  workflow-profile --file <json> [--root <path>]
+  execution-record --file <json> [--root <path>]
+  execution-status --run <id> --file <json> [--root <path>]
+  bind-session --run <id> --plan <path> --session <id> [--base <branch>] [--root <path>]
+  suspend --run <id> --plan <path> [--base <branch>] [--root <path>]
+  abandon --run <id> --plan <path> [--base <branch>] [--root <path>]
+  resume --run <id> [--root <path>]
+  run-status --run <id> [--root <path>]
   finish   --run <id> --plan <path> [--base <branch>] [--root <path>] [--results <path>] [--enforcement-only]
   prune-run --run <id> --plan <path> [--base <branch>] [--yes] [--root <path>] [--results <path>] [--enforcement-only]
   rebuild-state --run <id> --plan <path> [--base <branch>] [--force] [--root <path>]
@@ -153,7 +166,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   usage    [--session <id>] [--json] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
-  review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
+  review-dispatch --run <id> [--phase <name>] [--models <json>] [--plan <path>] [--base <branch>] [--root <path>]
   collect-reviews --run <id> [--phase <name>] [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
   digest   --run <id> [--root <path>]
@@ -288,6 +301,18 @@ export const REQUIRED = {
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
   'preview-check': [],
   'plan-drift': ['run', 'plan'],
+  'context-bundle': ['file'],
+  'workflow-report': ['file'],
+  'ci-status': ['file'],
+  'feedback-draft': ['file'],
+  'workflow-profile': ['file'],
+  'execution-record': ['file'],
+  'execution-status': ['run', 'file'],
+  'bind-session': ['run', 'plan', 'session'],
+  suspend: ['run', 'plan'],
+  resume: ['run'],
+  abandon: ['run', 'plan'],
+  'run-status': ['run'],
   finish: ['run', 'plan'],
   'prune-run': ['run', 'plan'],
   'rebuild-state': ['run', 'plan'],
@@ -340,7 +365,7 @@ export const UNIVERSAL_FLAGS = new Set(['root'])
 export const KNOWN_FLAGS = {
   'init-run': ['run'],
   gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
-  doctor: ['run', 'plan', 'base', 'run-branch', 'hooks', 'session'],
+  doctor: ['run', 'plan', 'base', 'run-branch', 'hooks', 'session', 'stop'],
   liveness: ['run', 'plan', 'stale'],
   digest: ['run', 'ledger'],
   diagram: ['run'],
@@ -357,10 +382,22 @@ export const KNOWN_FLAGS = {
   sessions: ['run'],
   fix: ['run', 'phase', 'verdict'],
   'record-fix-round': ['run', 'phase', 'task'],
-  'review-dispatch': ['run', 'phase', 'models'],
+  'review-dispatch': ['run', 'phase', 'models', 'plan', 'base'],
   'collect-reviews': ['run', 'phase'],
   'preview-check': [],
   'plan-drift': ['run', 'plan', 'base'],
+  'context-bundle': ['file'],
+  'workflow-report': ['file'],
+  'ci-status': ['file'],
+  'feedback-draft': ['file'],
+  'workflow-profile': ['file'],
+  'execution-record': ['file'],
+  'execution-status': ['run', 'file'],
+  'bind-session': ['run', 'plan', 'base', 'session'],
+  suspend: ['run', 'plan', 'base'],
+  resume: ['run'],
+  abandon: ['run', 'plan', 'base'],
+  'run-status': ['run'],
   finish: ['run', 'plan', 'base', 'results', 'enforcement-only'],
   'prune-run': ['run', 'plan', 'base', 'yes', 'results', 'enforcement-only'],
   'rebuild-state': ['run', 'plan', 'base', 'force'],
@@ -1026,7 +1063,7 @@ async function mainWorktreeRoot(root) {
 // the plan from two places is precisely the divergence above, and a copy is how it comes back.
 const PLAN_READ_REJECTED = Symbol('the plan could not be read at the run anchor')
 
-async function planAtAnchor(root, planPath, flags, io) {
+async function planAtAnchor(root, planPath, flags, io, contextAnchor = {}) {
   if (!planPath) return ''
   const git = createGit({ cwd: root })
   let anchorSha
@@ -1047,6 +1084,8 @@ async function planAtAnchor(root, planPath, flags, io) {
     const runSha = await git.resolveRef(head.ref)
     const baseSha = await git.resolveRef(`refs/heads/${baseBranch}`)
     anchorSha = await git.mergeBase(baseSha, runSha)
+    contextAnchor.git = git
+    contextAnchor.commit = anchorSha
     // `git show <sha>:<path>` takes a repo-relative path and rejects an absolute one, but
     // --plan is commonly given as absolute (every caller that builds it from a root does).
     // Normalising here keeps both spellings working; the brief still points at the path the
@@ -1054,6 +1093,7 @@ async function planAtAnchor(root, planPath, flags, io) {
     const relPath = path.isAbsolute(planPath)
       ? path.relative(root, planPath).split(path.sep).join('/')
       : planPath
+    contextAnchor.planPath = relPath
     return await git.fileAtCommit(anchorSha, relPath)
   } catch (err) {
     const where = anchorSha ? ` at anchor ${anchorSha}` : ''
@@ -2838,6 +2878,11 @@ export function forwardDeck(command, positional, flags, io) {
   return Number.isInteger(result.status) ? result.status : 1
 }
 
+function workflowJson(value) {
+  // Preserve valid JSON while keeping data from issuing terminal controls.
+  return JSON.stringify(value, null, 2).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'))
+}
+
 export async function runCli(argv, io = { out: console.log }) {
   // Two channels, not one. `io.out` carries the ANSWER a command was asked for — and for
   // `workflow` that answer is a JavaScript module a caller redirects into a file. Anything
@@ -2886,7 +2931,7 @@ export async function runCli(argv, io = { out: console.log }) {
   }
   if (command === 'doctor' && flags.hooks === true) {
     const { hookDoctor } = await import('./hook-doctor.mjs')
-    const report = await hookDoctor({ sessionId: typeof flags.session === 'string' ? flags.session : undefined })
+    const report = await hookDoctor({ sessionId: typeof flags.session === 'string' ? flags.session : undefined, includeStop: flags.stop === true })
     io.out(JSON.stringify(report, null, 2))
     return report.ok ? 0 : 1
   }
@@ -3005,6 +3050,17 @@ export async function runCli(argv, io = { out: console.log }) {
       if (!(err instanceof PlanParseError)) throw err
       io.out(`init-run: ${err.message}`)
       return 2
+    }
+
+    if (tasks.some(task => task.ui?.length)) {
+      try {
+        const { readUiTargets } = await import('./ui-targets.mjs')
+        const git = createGit({ cwd: root })
+        const head = await git.headBranch()
+        if (!head.ok) throw new Error('UI targets require a valid checked-out branch')
+        const commit = await git.resolveRef(head.ref)
+        await readUiTargets({ git, commit, tasks })
+      } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
     }
 
     // DEFENCE IN DEPTH, and stated as such rather than as a validation that earns its keep:
@@ -3210,6 +3266,9 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!status) { io.out(`no status for run ${runId}`); return 1 }
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
+    const { lifecycleStatus } = await import('./workflow-lifecycle.mjs')
+    const interruption = lifecycleStatus(root, runId)
+    if (interruption.state !== 'running') io.out(JSON.stringify(interruption))
     io.out(renderDigest(status, Date.now(), resolved.caveman))
     return 0
   }
@@ -3363,14 +3422,20 @@ export async function runCli(argv, io = { out: console.log }) {
     const task = (plan.tasks ?? []).find((t) => t.id === flags.task)
     if (!task) { io.out(`no task ${printable(flags.task)} in run ${runId}`); return 4 }
 
-    const planMarkdown = await planAtAnchor(root, planPath, flags, io)
+    const contextAnchor = {}
+    const planMarkdown = await planAtAnchor(root, planPath, flags, io, contextAnchor)
     if (planMarkdown === PLAN_READ_REJECTED) return 2
 
+    const { learningBundles } = await import('./learning-context.mjs')
+    let contextBundles
+    try { contextBundles = await learningBundles({ ...contextAnchor, tasks: [task] }) }
+    catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
     io.out(composeBrief({
       // `taskBranchName` is the single definition of `fleetmates/${runId}/${taskId}`, and the
       // gate resolves the branch through it. A brief restating the shape could name a ref
       // nothing looks for.
       task: { ...task, branch: taskBranchName(runId, task.id) },
+      contextBundle: contextBundles[task.id] ?? null,
       runId,
       planPath,
       baseBranch,
@@ -3404,7 +3469,8 @@ export async function runCli(argv, io = { out: console.log }) {
     const planPath = flags.plan === true ? '' : (flags.plan ?? '')
     const baseBranch = flags.base === true ? '' : (flags.base ?? '')
 
-    const planMarkdown = await planAtAnchor(root, planPath, flags, io)
+    const contextAnchor = {}
+    const planMarkdown = await planAtAnchor(root, planPath, flags, io, contextAnchor)
     if (planMarkdown === PLAN_READ_REJECTED) return 2
 
     // `init-run` already applied any configured implementer tier, so this normally changes
@@ -3480,7 +3546,12 @@ export async function runCli(argv, io = { out: console.log }) {
       io.err(`could not compute the blast radius (${err.message}); briefs will carry no coupling section`)
     }
 
+    const { learningBundles } = await import('./learning-context.mjs')
+    let contextBundles
+    try { contextBundles = await learningBundles({ ...contextAnchor, tasks: phaseTasks }) }
+    catch (error) { io.err(JSON.stringify({ error: error.message })); return 2 }
     const src = await generatePhaseWorkflow({
+      contextBundles,
       runId,
       phase,
       tasks: phaseTasks,
@@ -3542,11 +3613,17 @@ export async function runCli(argv, io = { out: console.log }) {
     const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
 
     const baseBranch = flags.base === true ? '' : (flags.base ?? '')
-    const planMarkdown = await planAtAnchor(root, planPath, flags, io)
+    const contextAnchor = {}
+    const planMarkdown = await planAtAnchor(root, planPath, flags, io, contextAnchor)
     if (planMarkdown === PLAN_READ_REJECTED) return 2
     const constraints = parseConstraints(planMarkdown)
+    const { learningBundles } = await import('./learning-context.mjs')
+    let contextBundles
+    try { contextBundles = await learningBundles({ ...contextAnchor, tasks: phaseTasks }) }
+    catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
     const composeBriefFor = (task) => composeBrief({
       task: { ...task, branch: taskBranchName(runId, task.id) },
+      contextBundle: contextBundles[task.id] ?? null,
       runId, planPath, baseBranch, constraints, caveman: resolved.caveman,
     })
 
@@ -3630,8 +3707,10 @@ export async function runCli(argv, io = { out: console.log }) {
     const captured = []
     const phaseArgs = flags.phase && flags.phase !== true ? ['--phase', flags.phase] : []
     const modelArgs = flags.models && flags.models !== true ? ['--models', flags.models] : []
+    const planArgs = typeof flags.plan === 'string' ? ['--plan', flags.plan] : []
+    const baseArgs = typeof flags.base === 'string' ? ['--base', flags.base] : []
     const code = await runCli(
-      ['review-dispatch', '--run', runId, ...phaseArgs, ...modelArgs, '--root', root],
+      ['review-dispatch', '--run', runId, ...phaseArgs, ...modelArgs, ...planArgs, ...baseArgs, '--root', root],
       { out: (t) => captured.push(t), err: (t) => io.err(t) },
     )
     if (code !== 0) { io.out(captured.join('\n')); return code }
@@ -3725,7 +3804,15 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
-    const persona = await personaFor('integrator')
+    let learningContext = ''
+    try {
+      const { learningBundles } = await import('./learning-context.mjs')
+      const { renderAdvisoryContext } = await import('./brief.mjs')
+      const contextTask = { id: `phase-${gateKey}`, members: derived.tasks.filter(t => String(t.phase) === gateKey).map(t => t.id), files: [...new Set(derived.tasks.filter(t => String(t.phase) === gateKey).flatMap(t => t.files))] }
+      const contextBundles = await learningBundles({ git: derived.git, commit: derived.anchorSha, planPath: path.isAbsolute(planPath) ? path.relative(root, planPath).split(path.sep).join('/') : planPath, tasks: [contextTask], role: 'integrator' })
+      if (contextBundles[contextTask.id]) learningContext = '\n' + renderAdvisoryContext(contextBundles[contextTask.id], { task: contextTask.id, role: 'integrator' })
+    } catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+    const persona = await personaFor('integrator') + learningContext
     const integratorSessionsDir = path.join(runDir(root, runId), 'sessions')
     await mkdir(integratorSessionsDir, { recursive: true })
     const base = path.join(integratorSessionsDir, 'integrator')
@@ -3926,6 +4013,9 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`doctor could not read the repository: ${err.message}`)
       return 2
     }
+    const { lifecycleStatus } = await import('./workflow-lifecycle.mjs')
+    const interruption = lifecycleStatus(root, runId)
+    if (interruption.state !== 'running') io.out(JSON.stringify({ ...interruption, limitation: 'Stop guard fails open on missing state, errors, timeouts and harness retry; refs are local observations.' }))
     io.out(renderDoctor(report))
     if (anchorNote) {
       io.out(
@@ -4578,7 +4668,116 @@ export async function runCli(argv, io = { out: console.log }) {
     return failed > 0 ? 1 : 0
   }
 
+  if (command === 'execution-record' || command === 'execution-status') {
+    try {
+      const input = await readWorkflowInput(flags.file)
+      const { discover } = await import('./workflow-lifecycle.mjs')
+      const { appendExecutionEvent, readExecutionEvents, reconcileExecution } = await import('./execution-journal.mjs')
+      const { common } = discover(root)
+      if (command === 'execution-record') {
+        io.out(workflowJson(await appendExecutionEvent(common, input)))
+        return 0
+      }
+      const events = await readExecutionEvents(common, runId)
+      const git = createGit({ cwd: root }), branches = {}
+      for (const ref of new Set(events.flatMap(event => Object.keys(event.branches)))) {
+        try { branches[ref] = await git.resolveRef(ref) } catch { branches[ref] = null }
+      }
+      const report = reconcileExecution(events, { inputs: input.inputs, branches })
+      io.out(workflowJson(report))
+      return report.unresolved || !events.length ? 4 : 0
+    } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
+  }
+
+  if (command === 'feedback-draft' || command === 'workflow-profile') {
+    try {
+      const input = await readWorkflowInput(flags.file)
+      const planPath = input.planPath
+      if (typeof planPath !== 'string' || !planPath.endsWith('.md') || path.posix.isAbsolute(planPath)
+          || /[\\:\p{C}]/u.test(planPath) || planPath.split('/').some(v => !v || v === '.' || v === '..')) throw new Error('Feedback plan path must be repository-relative Markdown')
+      const git = createGit({ cwd: root })
+      const head = await git.headBranch()
+      if (!head.ok) throw new Error('Feedback requires a checked-out branch')
+      const commit = await git.resolveRef(head.ref)
+      if (input.inputs?.commit !== commit) throw new Error('Feedback commit does not match current branch tip')
+      const mode = await git.fileModeAtCommit(commit, `:(literal)${planPath}`)
+      if (!['100644', '100755'].includes(mode) || await git.fileSizeAtCommit(commit, planPath) > 512 * 1024) throw new Error('Feedback plan must be a bounded committed regular file')
+      const markdown = await git.fileAtCommit(commit, planPath)
+      let draft
+      if (command === 'workflow-profile') {
+        const mode = await git.fileModeAtCommit(commit, `:(literal)${NAMES.gateFile}`)
+        if (!['100644', '100755'].includes(mode) || await git.fileSizeAtCommit(commit, NAMES.gateFile) > 512 * 1024) throw new Error('Workflow profile requires a bounded committed gate manifest')
+        if (typeof input.baseBranch !== 'string' || !await git.branchExists(input.baseBranch)) throw new Error('Workflow profile base must be a local branch')
+        const manifestText = await git.fileAtCommit(commit, NAMES.gateFile)
+        const { expandWorkflowProfile } = await import('./workflow-profile.mjs')
+        draft = expandWorkflowProfile({ ...input, markdown, manifestText })
+      } else {
+        const { prepareFeedbackDraft } = await import('./feedback-draft.mjs')
+        draft = prepareFeedbackDraft({ ...input, markdown })
+      }
+      if (await git.resolveRef(head.ref) !== commit) throw new Error('Branch tip changed while drafting feedback')
+      io.out(workflowJson({ ...draft, planPath }))
+      return 0
+    } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
+  }
+
+  if (command === 'ci-status') {
+    try {
+      const input = await readWorkflowInput(flags.file)
+      const { collectGitHubCi } = await import('./ci-evidence.mjs')
+      const report = await collectGitHubCi({ ...input, git: createGit({ cwd: root }) })
+      io.out(workflowJson(report))
+      return report.complete ? 0 : 4
+    } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
+  }
+
+  if (command === 'context-bundle' || command === 'workflow-report') {
+    try {
+      const input = await readWorkflowInput(flags.file)
+      let result
+      if (command === 'context-bundle') {
+        const { buildContextBundle } = await import('./context-bundle.mjs')
+        result = buildContextBundle(input)
+      } else {
+        const { summarizeAcceptance, reviewerMetrics } = await import('./workflow-evidence.mjs')
+        const { summarizeReviewOutcomes } = await import('./review-outcomes.mjs')
+        const { nodeVerifierProfile } = await import('./verifier-profile.mjs')
+        result = { acceptance: summarizeAcceptance(input), review: input.findings == null ? null : reviewerMetrics(input.findings, input.labeledDefects ?? null),
+          verifierProfile: input.verifierProfile == null ? null : nodeVerifierProfile(input.verifierProfile),
+          reviewOutcomes: input.reviewOutcomes == null ? null : summarizeReviewOutcomes({ ...input.reviewOutcomes, inputs: input.inputs }) }
+      }
+      io.out(workflowJson(result))
+      return command === 'workflow-report' && !result.acceptance.complete ? 4 : 0
+    } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
+  }
+
+  if (command === 'bind-session' || command === 'suspend' || command === 'resume' || command === 'abandon' || command === 'run-status') {
+    const { bindSession, transition, lifecycleStatus } = await import('./workflow-lifecycle.mjs')
+    try {
+      let result
+      if (command === 'run-status') result = lifecycleStatus(root, runId)
+      else if (command === 'resume') result = transition(root, runId, command)
+      else {
+        const ctx = await derive(root, runId, flags)
+        if (command === 'bind-session') result = await bindSession(root, flags.session, {
+          run: runId, branch: ctx.runBranchRef, base: ctx.baseBranch, plan: flags.plan, anchor: ctx.anchorSha,
+        })
+        else result = transition(root, runId, command, ctx.runBranchRef)
+      }
+      io.out(workflowJson(result))
+      return 0
+    } catch (error) { io.out(printable(error.message)); return 2 }
+  }
+
   if (command === 'finish') {
+    const { lifecycleStatus } = await import('./workflow-lifecycle.mjs')
+    try {
+      const interruption = lifecycleStatus(root, runId)
+      if (interruption.state !== 'running') {
+        io.out(workflowJson({ ...interruption, next: 'resume a suspended run, or use a new identity after abandonment' }))
+        return 4
+      }
+    } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
     const config = await resolveGateConfig(root, io)
     if (config === GATE_CONFIG_REJECTED) return 2
     if (!config) { io.out(`no ${GATE_FILE} — there is nothing to verify a phase against`); return 4 }
@@ -5149,7 +5348,14 @@ export async function runCli(argv, io = { out: console.log }) {
 
     let spec
     try {
+      const { learningBundles } = await import('./learning-context.mjs')
+      const baseBranch = await resolveBaseBranch(git, flags.base)
+      const commit = await git.mergeBase(await git.resolveRef(`refs/heads/${baseBranch}`), await git.resolveRef(head.ref))
+      const contextTask = { id: `phase-${phaseName}`, members: tasksOfPhase(plan, phaseName).map(t => t.id), files: [...new Set(tasksOfPhase(plan, phaseName).flatMap(t => t.files ?? []))] }
+      const contextPlanPath = typeof flags.plan === 'string' ? flags.plan : (typeof plan.planPath === 'string' ? plan.planPath : null)
+      const contextBundles = await learningBundles({ git, commit, planPath: contextPlanPath && path.isAbsolute(contextPlanPath) ? path.relative(root, contextPlanPath).split(path.sep).join('/') : contextPlanPath, tasks: [contextTask], role: 'reviewer' })
       spec = generateReviewDispatch({
+        contextBundle: contextBundles[contextTask.id] ?? null,
         planPath: typeof flags.plan === 'string' ? flags.plan : (typeof plan.planPath === 'string' ? plan.planPath : ''),
         runId,
         phaseName,

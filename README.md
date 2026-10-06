@@ -51,6 +51,27 @@ worktree location record and returns immediately when it finds none, which is th
 subagent outside a run, and any error is an allow. But it is a synchronous spawn on a hot path and
 it is machine-wide rather than scoped to this repository, so it is worth knowing before installing.
 
+The plugin also registers a synchronous main-session `Stop` guard. It enforces only an
+explicit session binding, never the newest run in the repository. Bind the orchestrating
+session on its run branch with:
+
+```sh
+node scripts/cli.mjs bind-session --run <id> --plan <path> --session <session-id> --base <base>
+```
+
+The guard recomputes `finish --enforcement-only`, blocks once on failed or unresolved
+checks, and displays skipped obligations. A cheap PASS does not establish delivery
+completion. Missing bindings, changed requirements, process errors, timeouts and the
+harness retry escape allow stopping. Process death is not prevented. The unbound path
+costs one Git discovery process. Verify live callback behavior with `doctor --hooks --stop --session <session-id>`
+in the installed harness. A receipt records that this handler fired, not that delivery passed.
+
+Use `suspend --run <id> --plan <path> --base <base>` to pause, `resume --run <id>` to
+continue, or `abandon --run <id> --plan <path> --base <base>` to end that run identity.
+`run-status --run <id>` reports their Git refs. Suspension and abandonment never mean
+verified completion. Marker refs are writable local observations, not authenticated
+operator identity or authorization. No transcript is stored in the session binding.
+
 ### Update notices
 
 Claude Code updates plugins in the background and says nothing, so a new version usually arrives
@@ -593,3 +614,95 @@ The headless driver already caps enforcement retries and records its gate and ha
 last 24 hours in the Claude config directory. It reports unverified callbacks honestly. Start a
 session, run Bash, compact, and stop a teammate in the installed Claude Code version to prove
 the callbacks fire. Synthetic tests validate the handlers, not a live Claude installation.
+
+### Reviewer outcome reports
+
+`workflow-report --file <json>` can include `reviewOutcomes` with `findings`
+and optional independently established `labeledDefects`. Findings declare
+`id`, `identity` (the acceptance input hash), `outcome` (confirmed, refuted,
+duplicate, unreproduced or accepted), `rationale`, nonempty `evidence` log
+references, and `provenance` (`lens`, `category`, `model`, `source`). A duplicate
+also names `duplicateOf`. The report preserves each source observation in a
+canonical group and reports metrics by lens, category and model. Stale inputs,
+missing duplicate targets and cycles cannot silently become current evidence.
+References and outcomes are observations, not independent reproduction proof.
+This is reporting only; it does not change review policy or model selection.
+
+A `workflow-report` input can also include `verifierProfile` with a `package`
+object, `platform` (`linux`, `darwin` or `win32`) and optional `required` npm
+script names (`test` by default; also `typecheck`, `lint`, `build`). It emits a
+versioned Node/TypeScript proposal using existing gate inference and required
+fileset, ownership and review checks. Missing scripts make it not ready. Review
+and track this proposal before using it; generating it runs no commands and
+satisfies no acceptance requirement. Command gate results distinguish actual
+timeouts from otherwise unclassified failures; inspect evidence before deciding
+whether a code change or retry is appropriate.
+
+For anchored context, a task may include an `**Acceptance:**` section in its
+tracked plan. Its entire task contract then enters the bounded bundle as
+mandatory context. Existing `**Depends:** T1` declarations also include the
+upstream task's contract. Implementation, review and integration use the plan
+anchor, with source lines and hashes; later edits do not silently replace it.
+Missing dependencies or mandatory budget overflow refuse dispatch. This does
+not infer dependencies from file history or treat learnings as tracked policy.
+
+Tasks may also declare `ui: design/settings.html, design/settings.md` using
+unique repository-relative Markdown, HTML or SVG files. Commit targets on the
+chosen base with the plan. `init-run` rejects missing or nonregular committed
+targets; dispatch reads their contents at the plan anchor into mandatory
+bounded context. An agent check can select `lens: ["ui"]`; that method requires
+rendered and behavioral evidence and reports unavailable verification explicitly.
+Renderer setup, artifact capture and a native `kind: "ui"` adapter remain
+unsupported. Source structure alone does not prove visual acceptance.
+
+`ci-status --file <json>` provides read-only GitHub CI reporting for the current
+committed branch tip. Input declares `repository` (`owner/repository`), `inputs`
+(`commit`, `plan`, `manifest`, `environment`, `verifier`) and nonempty `required`
+checks such as `[{"name":"test (ubuntu-latest)","app":"github-actions"}]`.
+It requires the installed/authenticated `gh` CLI. Current exact-commit required
+checks must all succeed; pending, skipped, missing and truncated results cannot
+pass. Exit codes are 0 for passed CI checks, 4 for unmet checks and 2 for an
+invalid/unavailable query. Other input fields are declared associations, not
+independently verified by GitHub metadata. Uncommitted changes are outside its
+scope. This command performs no repairs, publication, merge or deployment.
+
+`feedback-draft --file <json>` prepares reviewed feedback proposals without
+writing project files. Input has `runId`, `date` (ISO day), `inputs`, `planPath`
+and `findings`. inputs.commit must match the current branch tip and inputs.plan
+must be the SHA-256 of the committed plan. Each finding declares `id`, `title`,
+`type` (rule, decision, pitfall, defect), `description`, `scope` and `evidence`.
+Defects also declare exact `files` and `acceptance`; optional `dependsOnTasks`
+and `dependsOnFindings` make dependencies explicit. Proposed tasks follow all
+existing terminal tasks. Learnings stay proposed and owned by the repo.
+Review the draft and apply it through authoritative plan and ownership rules;
+this command does not amend the plan, write learnings or call Vault.
+Workflow JSON inputs are limited to opened regular files and an actual 1 MiB
+read budget.
+
+`workflow-profile --file <json>` expands a reusable profile in dry-run mode.
+Choose `bug-fix`, `feature`, `migration`, `ui` or `research`; provide `runId`,
+`planPath`, `baseBranch`, `harness` (`codex`/`cursor`), exact `inputs` hashes and
+capability declarations (`available`/`unavailable`/`unknown`). The proposal shows
+phases, required artifacts, existing CLI commands and side effects. Tracked
+checks and repair budgets remain mandatory. Migration parameters require
+`compatibility` and `rollback`; UI requires render capability; a profile with
+`parameters.requiresVault: true` requires Vault. The expansion is nonexecutable:
+a controller and actual verification remain necessary, and no agent or command
+runs during dry-run. Declared capabilities do not grant permissions.
+
+`execution-record --file <json>` stores immutable local execution observations
+in the main repository's common Git directory. Events declare `id`, `runId`,
+`step`, `attempt`, `kind`, `at` and `inputs`; kinds are `step-started`,
+`step-completed`, `step-failed`, `effect-started`, `effect-completed`,
+`effect-failed` or `effect-unknown`. Effects also declare `{id,kind,reference}`
+with kind `pr`, `vault` or `publication`. Optional `branches` map fully qualified
+refs/heads names to exact SHAs. Identical retries are idempotent; conflicting
+IDs refuse. No external effect is executed and prompt/command/output fields
+are excluded from persisted records.
+
+`execution-status --run <id> --file <json>` reads `{inputs}` and reconciles
+recorded branch tips with Git. Interrupted, stale and unknown-effect attempts
+stay unresolved. A completed observation still requires current gates and is
+never verified delivery. Use the main repository's root; disposable clones
+have separate metadata. Automatic driver recovery and external reconciliation
+adapters remain unsupported; these commands repeat no external action.

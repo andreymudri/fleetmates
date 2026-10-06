@@ -9,7 +9,7 @@ export const MAX_LEDGER_BYTES = 1024 * 1024
 export const MAX_STALL_BLOCKS = 3
 const KINDS = new Set(['task-started', 'command-run', 'gate-result', 'handoff', 'stop-requested', 'stall-block', 'hook-fired'])
 const RESULTS = new Set(['pass', 'fail', 'unknown', 'done', 'blocked', 'running'])
-const HOOKS = new Set(['SessionStart', 'PreCompact', 'PostToolUse', 'SubagentStop'])
+const HOOKS = new Set(['SessionStart', 'PreCompact', 'PostToolUse', 'SubagentStop', 'Stop'])
 export const fingerprint = (text) => createHash('sha256').update(String(text)).digest('hex')
 
 export function projectEvent(value) {
