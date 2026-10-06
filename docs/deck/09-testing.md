@@ -147,9 +147,20 @@ Step verbs:
 | `echo.json` | Echoes every input byte immediately | keystroke latency budget, shared input |
 | `long-output.json` | 20,000 lines | scrollback ring limits, memory |
 
+Scripts that exist in `hub/test/fixtures/scripts/` after M3: `answered-in-terminal.json`, `approve-always.json`, `approve-safe.json`, `deny-then-instruct.json`, `did-not-land.json`, `echo.json`, `idle.json`, `question-options.json`, `resize.json`, `slow-start.json` and `subagents-parallel.json` from the table, plus two that are not in it:
+
+| Script | Covers | Used by |
+|---|---|---|
+| `prompt-swap.json` | A Safe request (`npm run test`) is drawn, then a Destructive `PermissionRequest` (`rm -rf build`) replaces the frame before any answer; a `1` then allows the Destructive prompt | `hub/test/integration/deliver.test.mjs`, `answer-api.test.mjs` |
+| `two-sources.json` | Echoes every input byte | the fake `claude` of `hub/test/integration/fm.test.mjs` (`fm claude`, `fm attach`) |
+
+The M3 scripts (`approve-safe`, `approve-always`, `deny-then-instruct`, `answered-in-terminal`, `did-not-land`, `question-options`, `subagents-parallel`, `prompt-swap`) replay the 2.1.285 frames or the synthetic frames marked as synthetic (`synthetic-permission-bash`, `synthetic-permission-always`, D-95). The rest of the table (`question-stop`, `spinner-hang`, the three `crash-*` scripts, `stop-requested`, `clear`, `compact`, `out-of-order`, `long-output`) does not exist as a fake script; whether other tests cover those cases was not checked for this list.
+
 ### 3.6 Ask engine mode (`claude -p`)
 
 With `-p`, the fake validates its argv against the invocation in [04-integrations.md](04-integrations.md) section 2.5 (fails with exit 98 on an unexpected tool or a missing `--strict-mcp-config`, so a regression that widens the Ask's tools fails a test), then replays a stream-json fixture from `hub/test/fixtures/claude-p/<cc-version>/<name>.jsonl` (`answer-cited`, `answer-miss`, `general-knowledge`, `error`, `timeout` via `hang`). The fixtures are captured from the real `claude -p` by the capture script.
+
+M5 (D-146, plan decision; owner may revisit before exit): the fixtures are synthetic, written by hand in the stream-json line shapes of [10-memory-and-research.md](10-memory-and-research.md) 2.5, under `hub/test/fixtures/claude-p/synthetic/` (`answer-cited`, `answer-miss`, `general-knowledge`, `no-block`, `error`, `vault-not-connected`) with `"captured": false` in their `MANIFEST.json`. The fake validates the argv of 10-memory 2.2 (the four vault read tools after `--allowedTools`, every vault write tool after `--disallowedTools`, `--strict-mcp-config`, no `--safe-mode`). Tests run the fake by absolute path through an injected `spawn`, never a `claude` found on `PATH`, and never the real CLI. Capturing real streams is part of the owner-run KB-O1 check (`hub/test/capture/ask-restricted-check.mjs`, D-132), with the owner's authorization; no task or test runs that script.
 
 ## 4. Fixture layout under `hub/test/fixtures` (Proposed)
 
@@ -235,6 +246,8 @@ Script: `hub/test/capture/capture-cc.mjs`, run by the owner on his machine, on h
 
 The same script records option labels exactly as printed, which the PromptBar and drawer must mirror (Decided: same options, same numbers as the terminal).
 
+As run in M3 (Task 19, D-83 as applied): the installed Claude Code was 2.1.285, not the pinned 2.1.282, and the owner chose to recapture on 2.1.285. The one authorized capture ran on 2026-10-02, unattended, at 120x40, and wrote `hub/test/fixtures/hooks/2.1.285/` and `hub/test/fixtures/screens/2.1.285/` with a `MANIFEST.json` that lists the redactions and the skipped steps. The script set an `ask` rule for each tool a step uses, so every step prompted. Steps `bash-2` (no `PostToolUse(Bash)`) and `bash-3` (no `PreToolUse(Bash)`) were skipped: the Bash prompt under an `ask` rule shows only "1. Yes" and "2. No", so there is no Bash option 2 label and no `option2-rule.json`. Edit and Write option 2 is "Yes, and switch to accept edits ..."; WebFetch option 2 is "Yes, and don't ask again for example.com". `testedClaudeCode` in `hub/package.json` moved to 2.1.285, and the 2.1.282 set stays as the earlier regression set. Several redactions were done by hand before commit and are listed in the manifest (compact summary and subagent message text, a claude.ai session link, prompt ids, the throwaway repo name); `capture-cc.mjs` does not do them yet ([m3-exit.md](m3-exit.md), open findings).
+
 ### 5.3 Claude Code upgrade procedure (policy Proposed)
 
 1. Before upgrading, read the Claude Code changelog for hook and permission-prompt changes.
@@ -261,22 +274,24 @@ Run on the owner's machine with the pinned version, 15 minutes, before each mile
 
 ## 6. scribed contract tests (Decided; design Proposed)
 
-TurbidAssist has no JSON fixture files today; `realtime/scribe/protocol.py` is the single source of the wire format and is tested by its own pytest suite ([reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) sections 2.2 to 2.5, 2.13). The deck's fixtures are therefore **generated from `protocol.py`**, not hand-written.
+TurbidAssist has no JSON fixture files today; `realtime/scribe/protocol.py` is the single source of the wire format and is tested by its own pytest suite ([reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) sections 2.2 to 2.5, 2.13). The deck's fixtures are therefore meant to be **generated from `protocol.py`**, not hand-written.
 
-1. **Exporter** (TEST-O3 on where it lives; default in TurbidAssist as `scripts/export_protocol_fixtures.py`): imports `scribe.protocol`, builds every `Command` and `Event` dataclass with representative values (Portuguese text with accents, int and float numbers, optional keys present and absent, empty lists, idle `status`), and writes `Message.encode()` output line by line to `commands.jsonl` and `events.jsonl`. It also writes `invalid.jsonl`: lines that `decode_command` or `decode_event` reject, each with the exact `ProtocolError` message. `MANIFEST.json` records the TurbidAssist commit and a hash of `protocol.py`.
+**Until an exporter exists** (Decided 2026-10-04, D-108): TurbidAssist at d4ffb9d has no exporter, so the M4 contract tests run on the hand-copied set in `hub/test/fixtures/scribed/d4ffb9d/` (`MANIFEST.json` `"exporter": null`), whose tag is replaced with the placeholder `acme` (D-111). M4 exit criterion 1 stays owner-pending until the owner adds the exporter; the fleet never touches TurbidAssist.
+
+1. **Exporter** (Decided 2026-10-04, TEST-O3, D-108: in TurbidAssist as `scripts/export_protocol_fixtures.py`, output committed to `hub/test/fixtures/scribed/<sha>/`; none exists yet): imports `scribe.protocol`, builds every `Command` and `Event` dataclass with representative values (Portuguese text with accents, int and float numbers, optional keys present and absent, empty lists, idle `status`), and writes `Message.encode()` output line by line to `commands.jsonl` and `events.jsonl`. It also writes `invalid.jsonl`: lines that `decode_command` or `decode_event` reject, each with the exact `ProtocolError` message. `MANIFEST.json` records the TurbidAssist commit and a hash of `protocol.py`.
 2. **Scenarios**: the exporter also writes ordered exchanges the deck depends on: start then status recording then stop (with a long gap) then idle status; subscribe (one `status`, then `transcript` only); ask then `ask_delta` lines then `ask_done`; each command's `error` shape with Portuguese text.
 3. **Deck tests** (`hub/test/contract/scribed.test.mjs`):
    - the Node decoder parses every `events.jsonl` line into the expected object and rejects every `invalid.jsonl` event line;
-   - the Node encoder produces, for each command, JSON that parses equal to the fixture line and uses raw UTF-8 (no `\u` escapes for accents), one object per line;
-   - unknown keys in an event are ignored, unknown `type` is an error (mirrors `protocol.py`);
-   - a fake scribed server (`hub/test/fakes/fake-scribed.mjs`, a Unix socket replaying scenarios) drives the client through the meeting machine ([state-machines](interaction/state-machines.md) 6), including a `stop` that takes 30 s and a socket that disappears mid-recording.
-4. **Drift**: when `protocol.py` changes, the owner re-runs the exporter and commits the new directory; CI fails if the client no longer matches. A root-level check is not possible in CI unless the pipeline can check out TurbidAssist (TEST-O3).
+   - the Node encoder produces, for each command, JSON that parses equal to the fixture line and uses raw UTF-8 (no `\u` escapes for accents), one object per line; commands are not compared byte for byte, because Python's separators differ (D-120);
+   - unknown keys in an event are ignored, and an event of an unknown `type` is ignored and counted, not an error (forward compatible, D-110; `protocol.py` itself rejects it);
+   - a fake scribed server (`hub/test/fakes/fake-scribed.mjs`, a Unix socket replaying scenarios, run inside the test process) drives the client through the meeting machine ([state-machines](interaction/state-machines.md) 6), including a `stop` that takes 30 s and a socket that disappears mid-recording.
+4. **Drift**: when `protocol.py` changes, the owner re-runs the exporter and commits the new directory; CI fails if the client no longer matches. CI does not check out TurbidAssist (TEST-O3, D-108), so there is no CI job that regenerates the fixtures.
 
 ## 7. vault-mcp: golden queries and tool contracts
 
-- **Golden queries (Decided)**: the vault-mcp repo already has `test/golden-queries.test.ts` with 10 `{ query, expectedTopPath }` entries and an assertion that the list has exactly 10 (reference contract 1.9). Process (Proposed): at each milestone exit from M5 on, export the search-miss log (MEM-O2 default: deck SQLite `Miss` table), and for each miss where the vault does contain the answer, add a golden query with the expected note path to vault-mcp (updating the length assertion). A golden query that BM25 cannot satisfy stays in the suite as a `todo` and is the evidence the "measure first" decision (Decided) asks for before any hybrid search. Misses where the vault truly lacks the content are research candidates, not golden queries.
+- **Golden queries (Decided)**: the vault-mcp repo already has `test/golden-queries.test.ts` with 10 `{ query, expectedTopPath }` entries and an assertion that the list has exactly 10 (reference contract 1.9). Process (Proposed): at each milestone exit from M5 on, export the search-miss log (MEM-O2 Decided, D-130: the deck SQLite `misses` table; export with `fleetmates-deck export-misses`, D-148), and for each miss where the vault does contain the answer, add a golden query with the expected note path to vault-mcp (updating the length assertion). A golden query that BM25 cannot satisfy stays in the suite as a `todo` and is the evidence the "measure first" decision (Decided) asks for before any hybrid search. Misses where the vault truly lacks the content are research candidates, not golden queries.
 - **vault-mcp changes** (`vault_learn` `preview`, `vault_graph`, `structuredContent`) carry their own tests in the vault-mcp repo, already listed in [reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) sections 1.10 and 1.11 (dry run writes no byte, preview equals the real call, and so on).
-- **Deck side** (`hub/test/contract/vault-mcp.test.mjs`): spawn the vault-mcp version pinned as a hub dev dependency against `fixtures/vault/`, snapshot `tools/list` (tool names and input schemas) into `fixtures/vault-mcp/<version>/tools-list.json`, and run the deck's text parsers on real answers. A vault-mcp release that renames a tool or changes an answer format fails here.
+- **Deck side** (`hub/test/contract/vault-mcp.test.mjs`): spawn the vault-mcp version pinned as a hub dev dependency against `fixtures/vault/`, snapshot `tools/list` (tool names and input schemas) into `fixtures/vault-mcp/<version>/tools-list.json`, and run the deck's text parsers on real answers. A vault-mcp release that renames a tool or changes an answer format fails here. M5 (D-135, plan decision; owner may revisit before exit): the devDependency is `@andreymudri/vault-mcp` pinned to `0.3.0` exactly, the one dependency M5 adds. The test starts it by the absolute path of its `dist/server/index.js` under `hub/node_modules`, through the deck's own client (D-134), against a generated temporary vault, without `VAULT_AUTO_PUSH`, and calls read tools only; the snapshot is `fixtures/vault-mcp/0.3.0/tools-list.json`. Bumping it to 0.4.0 and regenerating the snapshot is an owner-pending exit step (12-milestones section 7, criterion 1). Every other test uses the in-repo fake `hub/test/fakes/fake-vault-mcp.mjs`, started by absolute path.
 - **Performance**: the graph budget (section 9) runs against a generated 1,000-note vault.
 
 ## 8. fleetmates run files
@@ -292,11 +307,11 @@ Budgets are the Proposed ones in [03-architecture.md](03-architecture.md) sectio
 | Budget (03 section 7) | Harness | Method | Pass |
 |---|---|---|---|
 | Hook to UI p95 under 300 ms | `hook-latency.mjs` + Playwright | Fire 500 envelopes by spawning the real `deck-hook` (as Claude Code does, one process each) at a mixed rate; a Playwright page records when each card's pill changes. Report the split: hook process start to socket, socket to WebSocket send (includes the 250 ms reorder window), WebSocket to DOM | p95 under budget; see TEST-O2 |
-| Keystroke echo p95 under 50 ms | `keystroke-echo.spec.mjs` | Fake `claude` in `echo.json` mode through deckd; Playwright types 200 characters into xterm and reads the xterm buffer on each render | p95 under budget |
-| Home first paint under 500 ms with 20 sessions | `home-paint.spec.mjs` | New fixture `perf20` (20 sessions in mixed states, 6 open requests); time from `deck:snapshot-received` to `deck:home-painted`, cold cache, 1920 x 1080 | under budget, median of 5 runs |
+| Keystroke echo p95 under 50 ms | `focus-echo.mjs` (run by `npm --prefix hub run perf`) | Fake `claude` in `echo.json` mode through deckd and the deck server; headless Chromium (through `playwright-core`) types 200 letters, 20 ms apart, into the Focus terminal and, on every DOM change of the xterm rows, counts the echoed letters, so each key is timed from its `keydown` to the first render that shows it. It also reports `wire` (the echo's output frame reaching the page, before xterm renders) and refuses to report unless the screen holds exactly the typed letters | p95 under budget |
+| Home first paint under 500 ms with 20 sessions | `home-paint.mjs` | New fixture `perf20` (20 sessions in mixed states, 6 open requests); time from `deck:snapshot-received` to `deck:home-painted`, cold cache, 1920 x 1080 | under budget, median of 5 runs |
 | Idle CPU under 2% of one core, deckd + server, 10 sessions | `idle-cpu.mjs` | 10 fake `claude` sessions sitting on `idle-input` (no spinner), browser connected, sample `/proc/<pid>/stat` for 60 s | under budget. Also report (not gate) the same with 10 spinning sessions |
 | fleetmates derive and liveness every 60 s per active run, never per request | unit test with mock timers | Count `derive` and `livenessRows` calls over 10 simulated minutes with 50 API requests | exactly 10 per run, zero added by requests |
-| vault-mcp graph under 500 ms at 1,000 notes | `vault-graph.mjs` (M5+) | Generated 1,000-note vault, 5 warm calls of `vault_graph` through the deck's client | p95 under budget |
+| vault-mcp graph under 500 ms at 1,000 notes | `vault-graph.mjs` (M5+) | `node hub/test/perf/vault-graph.mjs --vault-mcp '<json argv>' [--notes 1000]` runs against a given vault-mcp command: it generates a 1,000-note vault, starts that command through the deck's client, makes 5 warm calls of `vault_graph` and prints p50 and p95. It refuses with a clear message when the server has no `graph` capability, so against the 0.3.0 devDependency it reports that the budget waits for 0.4.0; the run against a 0.4.0 build is the orchestrator's or the owner's | p95 under budget |
 
 Runs: nightly on `main` and in the release workflow. A failure is re-run once; two failures fail the job. Numbers are uploaded as a CI artifact so trends are visible.
 
@@ -338,8 +353,20 @@ Rules:
 | deckd exposure | deckd has no TCP listener (inspect `/proc/<pid>/net/tcp` for its pid) |
 | Untrusted text (XSS) | qa-checklist 1.7 payloads (`<img onerror>`, `<script>`, `javascript:` links, U+202E, ANSI escapes) injected into every text field of every UI fixture: no new element, no dialog, no navigation, text visible literally. Server-side: ANSI stripped from crash tails; the markdown renderer runs with `html: false` |
 | Approval bypass | API tests: a Destructive request cannot be answered without `confirm: true`, never inside a batch, never from a notification action; no keyboard path approves it (qa 1.3) |
-| Confidential meetings | With a confidential tag fixture, grep the SQLite file, the WAL, the debug log and the spool for sentinel transcript strings: zero hits (qa 2.9) |
+| Confidential meetings | With a confidential tag fixture, grep the SQLite file, the WAL, the server's stdout and stderr (M4 has no debug log, D-121) and the spool for sentinel transcript strings: zero hits (qa 2.9) |
 | Static path traversal | `GET /../../etc/passwd` and encoded variants return 404 |
+
+The M4 security tests that exist in 0.4.0 (run for [m4-exit.md](m4-exit.md)):
+
+| Threat | Test |
+|---|---|
+| Confidential meetings | `hub/test/integration/meetings-confidential.test.mjs`: "client-a: a recorded, pinned, asked, searched, read and synthesized meeting and a spooled hook leave zero sentinel hits" and "pessoal: the same leaves zero sentinel hits except the pin labels in deck.db" (the database, its WAL, the server's stdout and stderr and the spool). `hub/test/e2e/meetings.spec.mjs` "meetings AC9" (the database after a confidential recording and a reload) and `hub/test/e2e/security.spec.mjs` "confidential live meeting (M4): browser storage and the Cache API hold no sentinel, and every meeting.transcript frame is ephemeral" |
+| Ephemeral meeting streams | `hub/test/integration/meetings-api.test.mjs` "a meeting ask streams ask.delta and ask.done without seq, and no ask event can reach the events table" |
+| Untrusted meeting text | `security.spec.mjs` "untrusted text (M4): qa 1.7 payloads in a tag, a title, note sections, action items, transcript lines, a search hit, live lines, ask text and scribed messages render literally" and "untrusted text (M4): escape, bell and bidi controls in meeting text never reach the DOM raw"; `meetings.spec.mjs` "meetings AC12" |
+| Files under `session_dir` | `meetings-api.test.mjs` "open postmeetLog of a log symlinked out of session_dir is 403 path_not_allowed and opens nothing", "a hook envelope whose cwd is inside session_dir creates no session, one outside does", "a hook whose cwd is a symlink outside session_dir pointing into it is dropped" and "the hook guard keeps the last good session_dir when config.yaml stops reading, so a prompt from inside it is never stored" |
+| Child processes | `meetings-api.test.mjs` "POST /api/deps/scribed/start runs the systemd-run shim with the decided argv and no token in its environment"; `meetings.spec.mjs` "host isolation: every host binary resolves to its shim, and no session bus, display, agent or token reaches a child" and ""Start scribed" from the degraded card runs the systemd-run shim with the decided argv, and the card recovers when scribed answers" |
+| scribed socket | `meetings-api.test.mjs` "without XDG_RUNTIME_DIR in its env the server never reaches the socket of the process environment" |
+| Missing or wrong token on the meeting routes | `security.spec.mjs` "tokens: every route in the router table answers 401 without the token and with a wrong one, and the WebSocket refuses both", whose `routerTable()` reads the meeting routes of `api.mjs`, including the `items/:itemKey/dismiss` shape |
 
 ### 11.2 Accessibility
 
@@ -410,7 +437,18 @@ Written by the server to the deck database and summarised by a `fleetmates-deck 
 |---|---|---|---|
 | TEST-O1 | Should CI run a live Claude Code canary with real credentials (an API key, since the subscription cannot log in on CI) to capture hook and screen fixtures automatically when Claude Code releases? It costs money and needs a secret. | No. Fixtures are captured by the owner locally (5.2); `cc-watch` only detects new versions. | none |
 | TEST-O2 | The hook-to-UI budget (p95 under 300 ms, 03-architecture 7) includes the 250 ms reorder window (state-machines 0.3) plus a Node process start per hook; the budget is likely unreachable as written. Which gives: a bigger budget, a smaller window, or flushing the buffer early when the expected next event arrives? | Measure in M0. Proposed: flush a session's buffer as soon as a `Stop`, `PermissionRequest` or `Notification` is the latest event, keep 250 ms otherwise, and keep the 300 ms budget for those events only. | M1 |
-| TEST-O3 | Where does the scribed fixture exporter live, and can CI check out TurbidAssist to verify the fixtures against `protocol.py` on every run? | Exporter in TurbidAssist (`scripts/export_protocol_fixtures.py`); output committed to `hub/test/fixtures/scribed/<sha>/`; CI does not check out TurbidAssist. | M4 (M0 uses a minimal client) |
+| TEST-O3 | Where does the scribed fixture exporter live, and can CI check out TurbidAssist to verify the fixtures against `protocol.py` on every run? | **Decided** 2026-10-04 (D-108): exporter in TurbidAssist (`scripts/export_protocol_fixtures.py`); output committed to `hub/test/fixtures/scribed/<sha>/`; CI does not check out TurbidAssist. None exists yet; M4 tests on the hand-copied `d4ffb9d` set (section 6). | M4 (decided) |
 | TEST-O4 | How are status-check pane opens logged during the dogfood week? | A dev-only palette action `> log pane check` enabled by `DECK_DOGFOOD=1` that stores time, session and a one-line reason. | M1 |
 | TEST-O5 | Run Playwright on Firefox in CI too, or keep Firefox manual (qa-checklist 1.10)? | Manual. | none |
 | TEST-O6 | Fixtures and screenshots must keep placeholders; add a CI grep that fails on a denylist of real client names kept outside the repo? | Yes, denylist in a local untracked file, CI check runs only when present | M1 |
+
+## Prepared M5 test inventory
+
+Contract: `vault-mcp.test.mjs` against pinned 0.4.0. Unit: `vault-service`, `vault-observe`,
+`vault-captures`, `ask-service`, `memory-graph`, `memory-panels`, `memory-surfaces`,
+`backup-scrub`, `export-misses` and `m5-release`. Integration: `memory-api`, `memory-exit`
+and `memory-privacy`. Browser: `memory.spec.mjs`; the security router table includes M5.
+`hub/test/perf/vault-graph.mjs` generates a synthetic vault and measures five warm calls.
+
+The exit report records results and environment limitations. Existing real-Claude capture
+checks remain owner tasks. Each new test was checked with a mutation and the source restored.

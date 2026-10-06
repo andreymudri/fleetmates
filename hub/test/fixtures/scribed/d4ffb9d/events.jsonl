@@ -1,7 +1,7 @@
 {"type": "ok", "cmd": "start", "session_id": "2026-09-08T14-00-12"}
 {"type": "ok", "cmd": "stop"}
 {"type": "error", "cmd": "start", "message": "sessão já ativa"}
-{"type": "status", "recording": true, "session_id": "2026-09-08T14-00-12", "tag": "optimas", "elapsed_s": 812, "routed_apps": ["Chromium"]}
+{"type": "status", "recording": true, "session_id": "2026-09-08T14-00-12", "tag": "acme", "elapsed_s": 812, "routed_apps": ["Chromium"]}
 {"type": "status", "recording": false, "session_id": null, "tag": null, "elapsed_s": 0, "routed_apps": []}
 {"type": "tail", "text": "[13:20] Sala: oi\n[13:21] Você: opa"}
 {"type": "transcript", "event": {"t0": 12.48, "t1": 15.9, "source": "mic", "text": "vou subir o fix"}}
@@ -10,7 +10,7 @@
 {"type": "history", "asks": []}
 {"type": "history", "asks": [{"t": 812.4, "question": "como resolvo esse erro de terraform?", "answer": "Esse erro ...", "context_minutes": 5.0}, {"t": 900.0, "question": "e o state lock?", "answer": "Rode ...", "context_minutes": 3.0}]}
 {"type": "ok", "cmd": "start", "session_id": "s1"}
-{"type": "status", "recording": true, "session_id": "s1", "tag": "optimas", "elapsed_s": 812, "routed_apps": ["Chromium"]}
+{"type": "status", "recording": true, "session_id": "s1", "tag": "acme", "elapsed_s": 812, "routed_apps": ["Chromium"]}
 {"type": "tail", "text": "x"}
 {"type": "transcript", "event": {"t0": 1.0}}
 {"type":"history","asks":[{"t":812.4,"question":"q","answer":"a","context_minutes":5.0}]}

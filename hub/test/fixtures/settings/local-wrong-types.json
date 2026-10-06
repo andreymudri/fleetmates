@@ -1,0 +1,8 @@
+{
+  "permissions": [
+    "Bash(cargo test:*)"
+  ],
+  "env": {
+    "RUST_LOG": "debug"
+  }
+}

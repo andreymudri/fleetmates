@@ -15,6 +15,11 @@ export function receiptPath(env = process.env) {
   return path.resolve(env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'fleetmates', 'hook-receipts.jsonl')
 }
 
+export function stopReceiptPath(env = process.env) {
+  // Keep new Stop events out of the receipt file read by older four-hook clients.
+  return path.join(path.dirname(receiptPath(env)), 'stop-hook-receipts.jsonl')
+}
+
 export async function resolveContext(cwd) {
   const dirs = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel'], { cwd, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n')
   const root = path.dirname(dirs[0]), top = dirs[1]

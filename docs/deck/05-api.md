@@ -1,5 +1,10 @@
 # 05 · API
 
+M6 candidate implementation adds authenticated launch, list, detail, review,
+preview, save and stop routes. Preview/save require the full upstream MCP
+approval schema; the published 0.4.0 dependency remains blocked. See
+[m6-progress.md](m6-progress.md) for validation and remaining release checks.
+
 Status labels as in [02-domain.md](02-domain.md). Decided here: the token on every HTTP request and WebSocket with Host and Origin checks, loopback only, hooks over a Unix socket with a spool fallback, deckd reachable only over its Unix socket, answers delivered as keystrokes into the PTY, and the resync by `seq` idea. Everything else in this document (paths, payload shapes, event names, the deckd wire protocol, the envelope fields, error codes, versioning) is **Proposed** unless a line says otherwise. Where a screen spec named an endpoint or event differently, this document wins (SHELL-O1) and section 2.1 lists every rename.
 
 Three contracts live here:
@@ -19,10 +24,11 @@ Type names in payloads (`Session`, `Request`, `Run`, ...) are the JSDoc typedefs
 | Token | Random token in a 0600 file, `~/.local/state/fleetmates/deck/token`. Required on every `/api/*` request and on the WebSocket upgrade. | Decided (random token, 0600 file, required everywhere); path Proposed |
 | HTTP token carrier | `Authorization: Bearer <token>` header. Never in a query string (it would land in logs and history). | Proposed (API-O1) |
 | WebSocket token carrier | Browsers cannot set headers on a WebSocket. The SPA opens `new WebSocket(url, ['deck.v1', 'deck.auth.' + token])` (the raw token: it is already base64url, so it is a valid subprotocol token as it is); the server checks the second subprotocol, answers with `Sec-WebSocket-Protocol: deck.v1` only, and rejects the upgrade with HTTP 401 when the token is missing or wrong. | Proposed (API-O1) |
-| Host check | `Host` must be `127.0.0.1:<port>` or `localhost:<port>`; anything else gets 403 `forbidden_host` (blocks DNS rebinding). | Decided (check), Proposed (allowed values) |
-| Origin check | Requests that carry `Origin` (all browser `fetch` with a body, all WebSocket upgrades) must have `Origin: http://127.0.0.1:<port>` or `http://localhost:<port>`; else 403 `forbidden_origin` (HTTP) or close 4403 (WebSocket). | Decided (check), Proposed (values) |
+| Host check | `Host` must be exactly `127.0.0.1:<port>`. `localhost:<port>` gets 421 `forbidden_host` with `Location: http://127.0.0.1:<port>/`; anything else gets 403 `forbidden_host` (blocks DNS rebinding). Same rule as [08-security.md](08-security.md) 4.1. | Decided (check; allowed values by the owner on 2026-10-01) |
+| Origin check | Every `/api/*` request other than `GET` and `HEAD`, every WebSocket upgrade, and any request that carries `Origin` must have `Origin: http://127.0.0.1:<port>`; else 403 `forbidden_origin` (HTTP) or a refused upgrade (WebSocket). An `/api/*` request whose `Sec-Fetch-Site` is present and neither `same-origin` nor `none`, and every `OPTIONS` request to `/api/*`, also gets 403 `forbidden_origin`. An `OPTIONS` request to a non-API path gets 404 `not_found` (only `GET` and `HEAD` are served there), unless it carries a foreign `Origin`, which gets 403 `forbidden_origin` by the rule above. | Decided (check; allowed value by the owner on 2026-10-01) |
 | Body type | Requests with a body must send `Content-Type: application/json` (else 415). Together with the Origin check this forces a CORS preflight for any cross-site attempt; the server answers no CORS headers, so preflights fail. | Proposed |
-| Body size | 1 MiB max (413 `payload_too_large`). | Proposed |
+| Body size | 256 KiB max, declared or streamed (413 `payload_too_large`, sent with `Connection: close` so a client still sending its body gets the 413 instead of a reset), as [08-security.md](08-security.md) 4.1 says. Terminal input and pastes travel over the WebSocket (section 3.5), not this path. | Decided (owner, 2026-10-01) |
+| POST bodies | Only `POST /api/sessions` and `POST /api/open` read a body. A `POST` with a non-empty JSON object to any other route gets 422 `validation_failed` before it is routed. | Proposed (M2) |
 | Caching | Every `/api/*` response carries `Cache-Control: no-store`. | Proposed |
 
 The details (token rotation, what a stale tab sees, CSP, why the WebSocket subprotocol and not a cookie) belong to [08-security.md](08-security.md). The WebSocket close codes the SPA reacts to are fixed by [interaction/state-machines.md](interaction/state-machines.md) 4.1: 4401 token invalid, 4403 origin rejected.
@@ -66,7 +72,7 @@ Columns: request body or query, success response, error codes (section 4), miles
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/version` | | `{ apiVersion, deckVersion, build }` | | M1 | shell (version skew, section 8) |
+| GET | `/api/version` | | `{ apiVersion, deckVersion, build }`: `deckVersion` is the `hub/package.json` version, `build` the milestone (`m4` in 0.4.0) | | M1 | shell (version skew, section 8) |
 | GET | `/api/setup/checks` | | `{ checks: SetupCheck[] }` with every automatic check in `checking`; each result then arrives as WS `setup.check` | | M1 | First run open and "Check again" (`U.CheckAgain`), Settings Connections |
 | POST | `/api/setup/hooks` | | `{ check: SetupCheck, backupPath }` after install and re-check | `settings_io_failed`, `validation_failed` (the file is not JSON; nothing written) | M1 | First run "Install hooks" (`U.Fix`), Settings |
 | POST | `/api/setup/complete` | | `{ firstRunCompletedAt }` | `precondition_failed` (hooks check not `ok`; Decided gate) | M1 | First run "Set sail" |
@@ -81,19 +87,22 @@ Columns: request body or query, success response, error codes (section 4), miles
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/sessions` | query `state` (comma list), `repoKey`, `active=1` (not `ended`), `limit` (default 100), `before` (ms, on `startedAt`) | `{ sessions: Session[], nextBefore }` | `not_found` (unknown repoKey) | M1 | new-session conflict check, palette, history lists (Home reads the snapshot) |
+| GET | `/api/sessions` | query `state` (comma list), `repoKey`, `active=1` (not `ended`), `archived` (`1`: only archived sessions of any age, ordered by `archivedAt` newest first, then by `id`; `nextBefore` is an opaque cursor string, today `<archivedAt>:<id>` of the last row, and passing it back as `before` returns the rows after that one in the same order, so sessions that one archive call stamped with the same `archivedAt` are each listed once across pages; a bare ms `before` still returns the sessions archived strictly before it; `0`: only sessions that are not archived; absent: every session), `limit` (default 100), `before` (ms, on `startedAt` unless `archived=1`) | `{ sessions: Session[], nextBefore }` | `not_found` (unknown repoKey), `validation_failed` (`archived` other than `0` or `1`; a `before` that is neither a positive ms nor a cursor) | M1 (`archived`: session archive) | new-session conflict check, palette, history lists, the Home "Archived (N)" list (`archived=1`; Home otherwise reads the snapshot) |
 | GET | `/api/sessions/:id` | | `{ session: Session, requests: Request[], steps: Step[] }` | `not_found` | M1 | Focus deep link, palette |
 | GET | `/api/sessions/:id/steps` | query `limit` (default 50, max 200), `taskId` | `{ steps: Step[] }` | `not_found` | M1 | Home tails after a gap, Team crew panels |
-| POST | `/api/sessions` | `{ repoKey, task, mode?: 'plain' \| 'fleetmates' }` | 201 `{ session: Session, warning?: { kind: 'repo_busy', sessionIds: string[] } }` | `not_found` (repo), `validation_failed` (empty task), `deckd_unavailable`, `spawn_failed` | M2 | New session "Launch a ship" (`U.Launch`), "Run as a fleetmates job" (`mode: 'fleetmates'`, NEW-O1); flow in 03-architecture 4.1 |
+| POST | `/api/sessions` | `{ repoKey, task?, mode?: 'plain' \| 'fleetmates' }` (no other keys) | 201 `{ session: Session, warning?: { kind: 'repo_busy', sessionIds: string[] } }` | `not_found` (repo), `validation_failed` (an empty or blank task in `fleetmates` mode only; a task over 10,000 characters or holding NUL; an unknown key or mode), `deckd_unavailable`, `spawn_failed` | M2 | New session "Launch a ship" (`U.Launch`), "Run as a fleetmates job" (`mode: 'fleetmates'`, D-68); flow in 03-architecture 4.1 |
 | POST | `/api/sessions/:id/stop` | | 202 `{ session }` | `not_found`, `read_only_session` (observed), `invalid_state` (`ended`, `crashed`), `deckd_unavailable` | M2 | Home, Focus, Failures "Stop…", Team "Stop run…" on the lead, research "Stop run…" (`U.Stop`, state-machines 1.7 row 50) |
 | POST | `/api/sessions/:id/nudge` | | 202 `{ session }` | `read_only_session`, `invalid_state` (not `stale` or `idle`), `deckd_unavailable` | M2 | Home quiet row, Failures adrift card (`U.Nudge`) |
 | POST | `/api/sessions/:id/mark-reviewed` | | `{ session }` | `invalid_state` (not `done`; state-machines 1.9 says 409) | M1 | Focus "Mark reviewed" (in the read-only Focus of M1, MS-O1), palette (`U.MarkReviewed`) |
 | POST | `/api/sessions/:id/relaunch` | | 202 `{ session }` | `invalid_state` (not `crashed`, or observed without `claudeSessionId`), `deckd_unavailable`, `spawn_failed` | M2 | Failures, Focus "Relaunch" (`U.Relaunch`, row 46) |
 | POST | `/api/sessions/:id/dismiss` | | `{ session }` | `invalid_state` (not `crashed`) | M1 | Failures, Focus "Dismiss" (`U.Dismiss`, row 47) |
+| POST | `/api/sessions/:id/archive` | | `{ session }` (`archivedBy: 'owner'`; a session already archived is answered unchanged) | `not_found`, `needs_you` (409: the session has an open request) | session archive | Home and Focus "Archive", palette |
+| POST | `/api/sessions/:id/unarchive` | | `{ session }` (`archivedAt` and `archivedBy` null; a session that is not archived is answered unchanged) | `not_found` | session archive | the Home "Archived (N)" list "Unarchive", the Undo of Archive |
+| POST | `/api/sessions/archive-finished` | | `{ ids: string[] }`: the sessions archived by the owner, every one finished (`alive` false, no open request), not archived and without unreviewed changes (empty `changedFiles`) | | session archive | Home "Archive all finished" |
 | GET | `/api/sessions/:id/diff` | query `path` (repo-relative) | `{ path, baseline, diff, binary, truncated }` (unified diff text, capped at 512 KiB) | `not_found` (path not in `changedFiles`), `validation_failed` (path escapes the repo) | M3 | Focus Changes tab |
 | GET | `/api/sessions/:id/disk` | | `{ cwd, mounts: [{ mount, sizeBytes, usedBytes, availBytes }] }` for the mount of `cwd` and of `$HOME` | `not_found` | M1 | Failures "Show disk usage" |
 | GET | `/api/sessions/:id/scrollback` | query `lines` (default 1000, max 5000) | `{ text, source: 'deckd' \| 'stored', truncated }` (ANSI kept; the SPA writes it into a read-only xterm) | `not_found` (no PTY and nothing stored) | M2 | Failures crash tail, "Ship's log" |
-| GET | `/api/sessions/:id/memory` | | `{ related: Citation[], read: NoteRef[], learned: NoteRef[] }` | `vault_unavailable` (`related` needs vault-mcp; `read` and `learned` come from the deck DB and still return) | M5 | Focus Memory tab |
+| GET | `/api/sessions/:id/memory` | | `{ related: [{ path, title, line, snippet }] \| null, relatedError: ApiError \| null, read: [{ path, at }], learned: [{ path, title, at }] }`. `related` is `vault_search` on the session task, top 3; while vault-mcp is down it is null and `relatedError` carries the error (for example `vault_unavailable`). `read` and `learned` come from the deck DB (hook observation, D-138) and still return while vault-mcp is down | | M5 | Focus Memory tab |
 | GET | `/api/history` | query `repoKey`, `limit`, `before` | `{ summaries: SessionSummary[], nextBefore }` | | M1 | history views, Calm "Recent harbors" (Proposed endpoint; no screen names it yet) |
 
 ### 2.4 Requests (approvals and questions)
@@ -101,8 +110,8 @@ Columns: request body or query, success response, error codes (section 4), miles
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
 | GET | `/api/requests` | query `state` (default `open`), `sessionId`, `runId` + `repoKey`, `taskId` | `{ requests: Request[] }` | | M1 (read-only) | Needs-you drawer, palette Needs group, Team filter `?needs=run:<runId>` |
-| POST | `/api/requests/:id/answer` | `AnswerBody` (below) | 202 `{ request }` with `delivery: 'sending'`; outcome via WS `request.updated` (`verifying`, `did_not_land`) and `request.closed` | `not_found`, `request_closed`, `read_only_session`, `not_on_screen`, `typing_in_terminal`, `confirm_required`, `tier_forbids`, `deckd_unavailable`, `answer_in_flight` | M3 | Home card, drawer, Focus PromptBar, palette, popup `N.Allow` path (server-internal) |
-| POST | `/api/requests/answer-batch` | `{ ids: string[], choice: 'allow' }` | 202 `{ results: [{ id, ok, error? }] }` | `batch_not_safe` (any id not Safe or not `permission`: whole batch refused, `details.ids`) | M3 | drawer "Allow both Safe once", `Alt Shift A` (`U.AllowAllSafe`) |
+| POST | `/api/requests/:id/answer` | `AnswerBody` (below) | 202 `{ request }` with `delivery: 'sending'`; outcome via WS `request.updated` (`verifying`, `did_not_land`) and `request.closed` | `not_found`, `validation_failed`, `request_closed`, `read_only_session`, `not_on_screen`, `typing_in_terminal`, `confirm_required`, `tier_forbids`, `options_unreadable`, `deckd_unavailable`, `deckd_outdated`, `answer_in_flight` | M3 | Home card, drawer, Focus PromptBar, palette, popup `N.Allow` path (server-internal) |
+| POST | `/api/requests/answer-batch` | `{ ids: string[], choice: 'allow' }` | 202 `{ results: [{ id, ok, error? }] }`; a per-id `error` is an answer code, or `skipped_not_safe` for an id that re-classified above Safe at send time (M3) | `batch_not_safe` (any id not Safe or not `permission`: whole batch refused, `details.ids`) | M3 | drawer "Allow both Safe once", `Alt Shift A` (`U.AllowAllSafe`) |
 | POST | `/api/requests/:id/followup` | `{ text }` | 202 | `followup_window_closed` (more than 30 s after a deck deny, state-machines 2.5), `read_only_session`, `deckd_unavailable` | M3 | "Tell Claude what to do instead" |
 
 `AnswerBody`:
@@ -117,23 +126,35 @@ Columns: request body or query, success response, error codes (section 4), miles
 Server rules, in this order (state-machines 2.5 and 2.6):
 
 1. Observed session: `read_only_session`.
-2. `allow_always` (Claude Code option 2) is accepted only for Safe (the Focus bar hides it for Caution and Destructive): else `tier_forbids`.
+2. `allow_always` (Claude Code option 2) is accepted only when the request's `allowAlways` is true (D-77, D-95: the parsed option 2 label is exactly "Yes, and don't ask again for <pattern>" and the pattern equals the deck's rule candidate, so the request is Safe): else `tier_forbids`.
 3. Destructive without `confirm: true`: `confirm_required`. Destructive is never accepted from `answer-batch` or from a popup.
 4. Send guards: `screenMatch` must be `on_screen` (`not_on_screen`), no terminal input within 1 s (`typing_in_terminal`, `retryable: true`), deckd connected (`deckd_unavailable`).
 5. A second answer while `sending` or `verifying`: `answer_in_flight`. A new answer while `did_not_land` is `U.TryAgain` and is accepted when the guards pass.
 
 The digit sent is the option key parsed from the screen (`request.options`), never a hard-coded number.
 
+As built in M3 (Tasks 10 and 16):
+
+- Statuses: every refusal of the rules above is 409, except `validation_failed` (422), `not_found` (404) and `deckd_unavailable` (503, `retryable: true`). `typing_in_terminal` is `retryable: true`. Section 4 lists the codes.
+- A `choice: 'option'` on a permission request is resolved against the parsed screen options: option 1 "Yes" counts as `allow`, an option whose label starts with "No" as `deny`, a "Yes, and don't ask again" option as `allow_always` (which then needs `allowAlways`); any other option is `tier_forbids`. A Destructive `deny` needs no `confirm`.
+- `options_unreadable` (409): the screen shows no option that fits the choice, the question needs a key sequence the deck does not have (AskUserQuestion with several questions or multi-select, APR-O6), or a `stop_question` got a choice other than `reply`.
+- `deckd_outdated` (409): deckd did not announce the `guardedWrite` feature in `hello` (section 5.2), so the deck never writes an answer through it. Restart deckd when no session you care about runs.
+- The keys go to deckd as a guarded `write` (section 5.2). When deckd refuses with `screen_changed`, the server reads the screen again and matches once more; if the prompt is still not this request's, the answer is `not_on_screen`.
+- A batch is answered in sequence within a session and in parallel across sessions. An id whose prompt is not on screen yet (queued behind another prompt of the session) is tried again until the 3 s verify timeout passes.
+- Open (carried to [m3-exit.md](m3-exit.md)): while `delivery` is `sending` or `did_not_land`, the `answer` field of the `Request` view holds the deck's pending answer, including the salted digest of a reply.
+
 ### 2.5 Rules
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/rules` | query `repoKey` (optional) | `{ threshold, repos: [{ repoKey, repoId, settingsPath, readError?, rules: RuleView[] }] }` | | M3 | Settings Approval rules |
+| GET | `/api/rules` | query `repoKey` (optional) | `{ threshold, tiersError, repos: [{ repoKey, repoId, settingsPath, readError?, rules: RuleView[] }] }`; `tiersError` is `{ line, message }` while the user `tiers.json` fails to parse or validate, else null (M3) | | M3 | Settings Approval rules |
 | POST | `/api/rules` | `{ repoKey, pattern, source: 'suggested' \| 'manual' }` | 201 `{ rule: RuleView }` | `invalid_pattern`, `destructive_rule` (pattern matches a Destructive tier entry), `rule_exists`, `settings_io_failed`, `settings_changed` (the file changed twice during the write; nothing written) | M3 | Home and drawer rule suggestion (`U.AcceptRule`), Settings "Add a rule…" |
-| DELETE | `/api/rules/:repoKey/:pattern` | pattern URL-encoded as one segment | `{ removed: true }` or `{ removed: false, reason: 'already_removed' }` | `settings_io_failed` | M3 | Settings "Revoke…" (`U.Revoke`), toast "Undo" after accepting a suggestion |
+| DELETE | `/api/rules/:repoKey/:pattern` | pattern URL-encoded as one segment; `?undo=1`, sent by a toast Undo, records the removal as `undo` in `rule_audit` instead of `revoked` (M3) | `{ removed: true }` or `{ removed: false, reason: 'already_removed' }` | `settings_io_failed` | M3 | Settings "Revoke…" (`U.Revoke`), toast "Undo" after accepting a suggestion |
 | POST | `/api/rules/suggestions/dismiss` | `{ repoKey, pattern }` | 204 | `not_found` (no offer) | M3 | `U.DismissRule` (state-machines 2.8) |
 
 Writes follow [04-integrations.md](04-integrations.md) 2.4 (re-read, merge, atomic write, retry once).
+
+As built in M3: `POST /api/rules` validates the pattern before it writes ([07-approvals.md](07-approvals.md) 7.3). A Bash prefix pattern (`:*` or ` *`) is refused with `destructive_rule` (D-101, D-103), and an npm or pnpm script prefix with `invalid_pattern` and the message "Script rules name one script exactly.". `GET /api/rules` re-reads each repo's settings file and refreshes the rule mirror, which can append `found` and `vanished` rows to `rule_audit` (07-approvals 7.4). So this GET writes deck state, against the "`GET` never changes state" line of [08-security.md](08-security.md) section 3.6. What it writes reflects the settings file, never the request's content. Open, recorded in [m3-exit.md](m3-exit.md).
 
 ### 2.6 Repos and crew
 
@@ -141,9 +162,9 @@ Writes follow [04-integrations.md](04-integrations.md) 2.4 (re-read, merge, atom
 |---|---|---|---|---|---|---|
 | GET | `/api/repos` | query `archived=1` to include archived | `{ repos: RepoView[] }` | | M1 (avatars), M2 (form) | New session repo combobox, Crew sheet, Settings |
 | POST | `/api/repos/rescan` | | 202 `{ found }`, then WS `repo.upserted` per new repo | `settings_io_failed` (scan root unreadable) | M1 | Settings "Rescan" |
-| PATCH | `/api/repos/:repoKey/crew` | `{ seed?, slot?, hat? }` | `{ repo: RepoView }` | `slot_taken`, `validation_failed` | M2 | Crew sheet Reroll, color, hat, Undo |
+| PATCH | `/api/repos/:repoKey/crew` | `{ seed?, slot?, slotShared?, hat? }` (at least one, no other keys) | `{ repo: RepoView }` | `slot_taken`, `validation_failed` | M2 | Crew sheet Reroll, color, hat, Undo |
 
-A slot change runs in one DB transaction ([design/crew.md](design/crew.md) 4.2).
+A slot change runs in one DB transaction ([design/crew.md](design/crew.md) 4.2). `slotShared` is an optional boolean; any other value is 422 `validation_failed` with `fields: ['slotShared']`. With `slot` and `slotShared: true` the server skips the `slot_taken` check and writes the slot as shared; without it, or with `false`, the slot is written exclusive and a slot another repo holds exclusively is 409 `slot_taken`. The Crew sheet's Undo sends the previous `slot` with its previous `slotShared`, so a repo moved off a shared slot gets it back shared.
 
 ### 2.7 Preferences
 
@@ -154,6 +175,8 @@ A slot change runs in one DB transaction ([design/crew.md](design/crew.md) 4.2).
 
 Which keys live in `config.json` and which in SQLite is [06-storage.md](06-storage.md) section 8; the API hides the split and reports the source per key.
 
+`autoArchiveAfter` (session archive) is stored in the SQLite `prefs` table, default 24. It is the number of hours after which a finished session (`alive` false, no open request) that is not archived and has no unreviewed changes is archived with `archivedBy: 'auto'`, measured from `endedAt`, or from `stateSince` when `endedAt` is null. PATCH accepts exactly 6, 12, 24, 72, 168 or null (Never). The server sweeps once at start, every 10 minutes, and once right after a `prefs.changed` that changes the value.
+
 ### 2.8 Runs (fleetmates, read only)
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
@@ -161,7 +184,7 @@ Which keys live in `config.json` and which in SQLite is [06-storage.md](06-stora
 | GET | `/api/runs` | query `repoKey`, `active=1` | `{ runs: Run[] }` | | M1 | Home team cards (also in the snapshot) |
 | GET | `/api/runs/:repoKey/:runId` | | `{ run: Run }` | `not_found`, `run_unreadable` (`details.file`, retrying) | M2 | Team run |
 | GET | `/api/runs/:repoKey/:runId/plan` | | `{ path, markdown, truncated }` (256 KiB cap) | `not_found` | M2 | Team "Open plan" (TEAM-O5 default: read-only drawer) |
-| POST | `/api/open` | `OpenRequest` `{ kind, ref }` | 202 | `validation_failed` (unknown `kind` or malformed `ref`), `path_not_allowed`, `not_found` | M2 | Team "Open plan" in an external app (`runPlan`); later "Open in Obsidian" (`vaultNote`, `meetingNote`) and "Open log" (`postmeetLog`) (Proposed) |
+| POST | `/api/open` | `OpenRequest` `{ kind, ref }` | 202 | `validation_failed` (unknown `kind` or malformed `ref`), `path_not_allowed`, `not_found`, `open_failed` (the opener could not be started) | M2 | Team "Open plan" in an external app (`runPlan`); later "Open in Obsidian" (`vaultNote`, `meetingNote`) and "Open log" (`postmeetLog`) (Proposed) |
 
 `/api/open` accepts only the named kinds in [08-security.md](08-security.md) section 4.9, never a raw path or URL: Decided by D-57 (Proposed). The server resolves `ref` to a target, runs the checks listed there, and opens it with `xdg-open` or an `obsidian://` URL.
 
@@ -171,49 +194,67 @@ The deck never writes under `.fleetmates/` (04-integrations 1.2), so there are n
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/vault/graph` | query `tags` (comma), `status`, `folder`, `maxNodes` | `VaultGraph` (vault-mcp `vault_graph` structured output, [reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) 1.11) | `vault_unavailable`, `vault_tool_missing` (MEM-O1) | M5 | Memory graph, filter popover |
-| GET | `/api/vault/note` | query `path` | `{ note: NoteView, backlinks: NoteRef[], linksOut: NoteRef[], usage: NoteUsage }` | `vault_unavailable`, `vault_error` (`note not found` text verbatim in `details.text`) | M5 | Memory note panel |
-| GET | `/api/vault/search` | query `q`, `limit` (default 5) | `{ hits: [{ path, title, line, snippet }] }` | `vault_unavailable` | M5 (palette), M6 (research existing notes) | Research form topic check, palette note rows |
-| GET | `/api/vault/list` | query `folder`, `tags`, `tipo` | `{ notes: NoteRef[] }` | `vault_unavailable` | M5 | Browse by MOC, research domain list |
-| GET | `/api/vault/captures` | query `day` (`YYYY-MM-DD`, default today) | `{ captures: Capture[] }` | | M5 | Memory Captures tab, Calm "Charts added", recap |
-| GET | `/api/misses` | query `resolved` (`0` default, `1`) | `{ misses: Miss[] }` | | M5 | Memory Misses tab, Calm "Unanswered questions" |
-| POST | `/api/ask` | `{ threadId?: string, text, scope?: 'vault' \| 'meeting:<id>' }` (no `threadId`: new thread) | 202 `{ thread: AskThread, userMessage: AskMessage, assistantMessageId }`; stream via WS `ask.delta`, `ask.done`, `ask.error` | `validation_failed`, `vault_unavailable` (vault scope), `scribed_unavailable` or `not_recording` (meeting scope), `ask_in_progress` (one ask per thread) | M5 (vault), M4 (meeting scope) | Memory composer, palette `?` (`U.Ask`), live meeting composer |
-| POST | `/api/ask/:messageId/cancel` | | 202 | `not_found`, `invalid_state` (already finished) | M5 | "Stop" (`U.StopAsk`) |
-| GET | `/api/ask/threads` | query `scope` (default `vault`), `limit` | `{ threads: AskThread[] }` | | M5 | Memory "History" |
-| GET | `/api/ask/threads/:id` | | `{ thread: AskThread, messages: AskMessage[] }` | `not_found` | M5 | Memory thread restore |
+| GET | `/api/vault/graph` | query `tags` (comma), `status`, `folder`, `maxNodes` | 200 `VaultGraph` (vault-mcp `vault_graph` structured output, [reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) 1.11: `nodes[] { id, title, tipo, status, tags, area, domain, in_degree, out_degree, mtime_ms }`, `edges[] { source, target }`, optional `broken[]`, `truncated`, `counts { notes, edges, orphans, broken }`) | 501 `vault_tool_missing` with `details.tool: 'vault_graph'` (the installed vault-mcp lacks the tool, MEM-O1); 503 `vault_unavailable`; 502 `vault_error` (`details.tool`, `details.text` verbatim) | M5 | Memory graph, filter popover |
+| GET | `/api/vault/note` | query `path` | `{ note: { path, title, frontmatter, body, truncated, total }, backlinks: NoteRef[], linksOut: NoteRef[], usage: { citedIn: [{ threadId, title, at }], readBy: [{ sessionId, repoId, repoName, at, tool }] } }`. Reading a note marks today's capture of that path opened (D-145) | `vault_unavailable`, `vault_error` (`note not found` text verbatim in `details.text`) | M5 | Memory note panel |
+| GET | `/api/vault/search` | query `q`, `limit` (default 5, max 20) | `{ hits: [{ path, title, line, snippet, viaGraph }] }` | `vault_unavailable` | M5 (palette, Focus), M6 (research existing notes) | Research form topic check, palette note rows, Focus Related memory |
+| GET | `/api/vault/list` | query `folder`, `tags`, `tipo` | `{ notes: NoteRef[] }` (`NoteRef = { path, title, tipo, status, tags, domain }`, `domain` = `<d>` for `02-wiki/<d>/...`, else null) | `vault_unavailable` | M5 | Browse by MOC, research domain list |
+| GET | `/api/vault/captures` | query `day` (`YYYY-MM-DD`, default today in local time) | `{ day, captures: Capture[] }` (D-137) | | M5 | Memory Captures view, Calm "Charts added", recap |
+| GET | `/api/misses` | | `{ misses: Miss[], unresolved }` | | M5 | Memory Misses view, Calm "Unanswered questions" |
+| POST | `/api/misses/:id/resolve` | `{ resolvedBy: 'dismissed' \| 'note:<path>' }` (`research:<id>` is set by M6, D-140) | `{ miss: Miss }` | `not_found`, `validation_failed` | M5 | Misses "The vault has this", "Dismiss" |
+| POST | `/api/ask` | `{ threadId?: string, text, scope?: 'vault' \| 'meeting:<id>' }` (no `threadId`: new thread; no `scope`: `vault`, D-145) | 202 `{ thread: AskThread, userMessage: AskMessage, assistantMessageId }`; stream via WS `ask.delta`, `ask.done`, `ask.error` | `validation_failed` (empty text, text over 4,000 characters, unknown key), `not_found` (unknown `threadId`), `vault_unavailable` (503, retryable; vault scope), `scribed_unavailable` or `not_recording` (meeting scope), `ask_in_progress` (409, one ask per thread) | M5 (vault), M4 (meeting scope) | Memory composer, palette `?` (`U.Ask`), Focus Memory tab, live meeting composer |
+| POST | `/api/ask/:messageId/cancel` | | 202 `{ messageId }` | `not_found`, `invalid_state` (already finished) | M5 (a meeting-scope message keeps its M4 behaviour) | "Stop" (`U.StopAsk`) |
+| GET | `/api/threads` | query `limit` (default 30) | `{ threads: AskThread[] }`, newest first, vault scope only | | M5 | Memory "History" |
+| GET | `/api/threads/:id` | | `{ thread: AskThread, messages: AskMessage[] }` | `not_found` | M5 | Memory thread restore |
+| DELETE | `/api/threads/:id` | | `{ deleted: true }` | | M5 | History "Delete thread" |
 
-A `meeting:<id>` ask uses the scribed `ask` engine by default (MEET-O4) and is never stored for a confidential tag ([06-storage.md](06-storage.md) section 10). For the scribed engine the thread and message objects in the response are transient (`persisted: false`).
+Paths (D-145, plan decision 2026-10-04; owner may revisit before exit): the thread routes are `/api/threads` and `/api/threads/:id`, not the `/api/ask/threads` of the first draft, because the `:id` form of that path fits none of the route shapes `routerTable()` in `hub/test/e2e/security.spec.mjs` reads. `/api/misses` and `/api/misses/:id/resolve` are additions. Every route keeps the token, Host and Origin checks. New error codes map in `codeStatus`: `vault_unavailable` 503 (retryable), `vault_tool_missing` 501, `vault_error` 502.
 
-### 2.10 Research (M6)
+A `meeting:<id>` ask uses the scribed `ask` engine, over the transcript only and with no citations (MEET-O4, Decided 2026-10-04, D-105), and the deck stores no meeting ask for any tag ([06-storage.md](06-storage.md) section 10; D-144). The thread and message objects in the response are transient (`persisted: false`). In M4, `POST /api/ask` accepted only `scope: 'meeting:<id>'` (D-123). For the vault scope D-123 is replaced by D-145 in M5: a missing scope means `vault`, and the vault scope is accepted.
 
-| Method | Path | Request | Response | Errors | Milestone | Used by |
-|---|---|---|---|---|---|---|
-| POST | `/api/research` | `{ topic, preset, domain, newDomain?: boolean, sourceTypes, focusNotes, missId? }` | 201 `{ research: Research }` | `validation_failed` (topic under 3 chars, no source type, empty new domain name), `vault_unavailable`, `deckd_unavailable`, `spawn_failed` | M6 | Research form "Send scouts" (`U.SendScouts`) |
-| GET | `/api/research/:id` | | `{ research: Research }` | `not_found` | M6 | Research review and running view |
-| POST | `/api/research/:id/preview` | `{ draft?: { body, keptSources: number[] }, confirmNewDomain?: boolean }` | 202 `{ previewId }`; result in WS `research.updated` (`preview` or `previewError`) | `invalid_state` (not `drafted`), `vault_unavailable`, `vault_tool_missing` (no `preview`, RES-O3) | M6 | `T.RePreview`, `U.ConfirmNewDomain` |
-| POST | `/api/research/:id/save` | `{ previewId }` | 202; WS `research.updated` with `state: 'saved'` (and `savedPath`, which may differ from the preview, row 20) | `preview_stale` (draft changed after `previewId`, or not the latest preview), `orphan_citations` (row 18, `details.sources`), `vault_unavailable`, `vault_error` | M6 | "Save to vault" (`U.Save`) |
-| POST | `/api/research/:id/discard` | | `{ research }` | `invalid_state` | M6 | "Discard" (`U.Discard`) |
-| POST | `/api/research/:id/stop` | | 202 `{ research }` | `invalid_state` (not `running`) | M6 | "Stop run…" (`U.StopRun`) |
+### 2.10 Research (M6 candidate implementation)
 
-Save uses exactly the parameters of the preview named by `previewId` without `preview` (Decided: no save without preview).
+| Method | Path | Request | Response |
+|---|---|---|---|
+| GET | `/api/research` | | `{ research }`, at most 50 summaries without draft or preview text |
+| POST | `/api/research` | `{ repoKey, topic, preset, domain, sourceTypes, focusNotes?, relatedNotes?, missId? }` | 201 `{ research }` |
+| GET | `/api/research/:id` | | `{ research }`, validated output, review revision and save availability |
+| PATCH | `/api/research/:id` | `{ revision, body, excludedSources }` or `{ revision, reset: true }` | `{ research }`; stale revision returns `research_changed` |
+| POST | `/api/research/:id/preview` | `{ confirmNewDomain?: boolean }` | `{ research }`, containing `save.preview.id`, files and diffs |
+| POST | `/api/research/:id/save` | `{ previewId }` | `{ research }`; approved parameters plus upstream `expected_revision` |
+| POST | `/api/research/:id/stop` | `{}` | existing session-stop response |
+
+Saving requires the exact current preview ID, draft/review revision, configured
+vault identity and complete MCP approval schema. No-preview saves return
+`preview_required`; unsupported preview returns `vault_tool_missing`. A safe
+upstream `preview_stale` response clears the preview and permits another review.
+An uncertain write outcome becomes `save_outcome_unknown` and prevents retries.
+Edits invalidate previews; excluded sources leave highlighted orphan citations
+until the owner removes the claim or restores its source. A saved draft is
+immutable in the deck even if the team later changes its output files.
+
+Research updates are ephemeral notifications containing only the research ID.
+Clients recover full details through authenticated REST polling. Proposed
+Discard and richer per-scout progress are not implemented in this candidate.
 
 ### 2.11 Meetings (M4)
 
 | Method | Path | Request | Response | Errors | Milestone | Used by |
 |---|---|---|---|---|---|---|
-| GET | `/api/meetings` | query `before`, `limit` (default 50) | `{ meetings: MeetingListItem[], recorder: Recorder, tags: MeetingTag[], configError? }` | | M4 | Meetings list, Calm "Last meeting" |
-| GET | `/api/meetings/:id` | | `{ meeting: Meeting, note: MeetingNote \| null, pins: Pin[] }` | `not_found` | M4 | Meeting detail |
-| GET | `/api/meetings/:id/transcript` | | `{ source: 'batch' \| 'live', lines: TranscriptLine[] }`, read from disk on every call, never cached (MEET-O7) | `not_found` | M4 | "Full transcript" drawer |
-| GET | `/api/meetings/:id/log` | query `lines` (default 200) | `{ text }` (tail of `postmeet.log`) | `not_found` | M4 | "Open log" |
-| GET | `/api/meetings/search` | query `q` (min 2 chars) | `{ hits: [{ meetingId, t0, speaker, snippet }], meetingCount }`, on-demand file scan, no index (MEET-O7) | `validation_failed` | M4 | Meetings search field |
-| POST | `/api/meetings/start` | `{ tag }` | 202 `{ recorder }` (`starting`); WS `meeting.status` | `unknown_tag`, `scribed_refused` (scribed message verbatim in `message`), `scribed_unavailable` | M4 | Tag menu (`U.StartWithTag`) |
-| POST | `/api/meetings/stop` | | 202 `{ recorder }` (`stopping`); the server does not hold the request for scribed's long `stop` | `not_recording`, `scribed_refused`, `scribed_unavailable` | M4 | "Stop and summarize" (`U.StopAndSummarize`) |
-| POST | `/api/meetings/:id/pins` | `{ t?: number }` (default: current `elapsed_s`) | 201 `{ pin: Pin }` or 200 with the existing pin when within 2 s of another | `not_recording`, `not_found` | M4 | "Pin moment", `Alt P`, transcript line click (`U.Pin`) |
+| GET | `/api/meetings` | query `before`, `limit` (default 50, at most 500) | `{ meetings: MeetingListItem[], recorder: Recorder, tags: MeetingTag[], model: string \| null, configPath: string \| null, configError: { code, line, message, path } \| null }` (as built in 0.4.0: `model` is the batch model of `config.yaml`, `configPath` the located file; `configError` is null when the config reads) | `validation_failed` (`limit`, `before`) | M4 | Meetings list, Calm "Last meeting" |
+| GET | `/api/meetings/:id` | | `{ meeting: Meeting & { title, logAt }, note: (MeetingNote & { title }) \| null, pins: Pin[], speakers: string[] \| null, model: string \| null, asks? }` (as built in 0.4.0: `speakers` is the distinct speaker names of the transcript, null without one; `logAt` the `postmeet.log` mtime or null; `asks`, scribed's ask history, only while this meeting records) | `not_found` | M4 | Meeting detail, live view |
+| GET | `/api/meetings/:id/transcript` | | `{ source: 'batch' \| 'live', lines: TranscriptLine[] }`: the recorder's ring (`live`) while this meeting records or stops, else read from disk on every call, never cached (MEET-O7) | `not_found`, `path_not_allowed` | M4 | "Full transcript" drawer |
+| GET | `/api/meetings/:id/log` | query `lines` (1 to 1000, default 200) | `{ text }` (tail of `postmeet.log`) | `not_found`, `validation_failed`, `path_not_allowed` | M4 | "Open log" |
+| GET | `/api/meetings/search` | query `q` (min 2 chars after case and accent folding) | `{ hits: [{ meetingId, t0, speaker, snippet, ranges }], meetingCount, partial }`, on-demand file scan, no index; confidential meetings included and never cached (MEET-O7, D-109). `snippet` is at most 160 characters around the match and `ranges` holds the `[start, end]` offsets of every match inside it; `partial` is true when the 2 s budget or the 200-hit cap stopped the scan | `validation_failed` | M4 | Meetings search field |
+| POST | `/api/meetings/start` | `{ tag }` | waits up to `scribedStartTimeout` (20 s) for scribed's answer (D-117): `ok` gives 202 `{ recorder }` with `recording`; as built in 0.4.0 a timeout gives 202 `{ recorder }` with `idle` (not `starting`), and the next poll decides (state-machines 6.3 row 7; the screen shows that scribed did not confirm); WS `meeting.status` | `unknown_tag` (before any command), `invalid_state` (409, `details.state`, while the recorder is `starting`, `recording` or `stopping`), `scribed_refused` (409, when scribed answers `error`; its message verbatim in `details.text`), `scribed_unavailable` (503, retryable) | M4 | Tag menu (`U.StartWithTag`) |
+| POST | `/api/meetings/stop` | | 202 `{ recorder }` with `stopping` at once (D-117); the server does not hold the request for scribed's long `stop`, and a later scribed `error` reaches the client as `lastError` on `meeting.status` | `not_recording` | M4 | "Stop and summarize" (`U.StopAndSummarize`) |
+| POST | `/api/meetings/:id/pins` | `{ t?: number }` (default: current `elapsed_s`); a clicked transcript line sends its `t0` as `t` (D-119) | 201 `{ pin: Pin }` or 200 with the existing pin when within 2 s of another | `not_recording`, `not_found` | M4 | "Pin moment", `Alt P`, transcript line click (`U.Pin`) |
 | DELETE | `/api/meetings/:id/pins/:pinId` | | 204 | `not_found` | M4 | transcript line click on a pinned line |
 | POST | `/api/meetings/:id/items/:itemKey/dismiss` | | 204 | `not_found` | M4 | action item "Dismiss" |
 | DELETE | `/api/meetings/:id/items/:itemKey/dismiss` | | 204 | | M4 | toast "Undo" |
 
-The pin label is computed by the server (newest transcript line, first 80 characters) and is `null` for a confidential tag (04-integrations 4.2).
+The pin label is computed by the server (newest transcript line, first 80 characters) and is `null` for a confidential tag (04-integrations 4.2). As built in 0.4.0 the server takes the ring line whose `t0` equals the sent `t` when there is one, else the newest line.
+
+As built in 0.4.0, the meeting kinds of `POST /api/open` (`meetingNote`, `postmeetLog`) answer 422 `validation_failed` with `details.reason: 'kind_not_available'` while no `config.yaml` reads, the same answer a server without the meeting services gives. `POST /api/ask/:messageId/cancel` stays M5: in M4 the live view's "Stop" freezes the answer on screen only, keeps the composer busy until scribed ends the answer, and says "Stopped here; the answer may still be saved to the meeting".
 
 ## 3. WebSocket
 
@@ -259,7 +300,7 @@ Close codes: 4400 bad or missing hello, 4401 token invalid, 4403 origin rejected
 
 ```
 { t: 'snapshot', seq, epoch, data: {
-    sessions: Session[],            // every session not 'ended', plus 'ended' of the last 24 h
+    sessions: Session[],            // every session not 'ended', plus 'ended' of the last 24 h, archived or not (archivedAt says which)
     requests: Request[],            // open requests
     runs: Run[],                    // runs with a live lead or active tasks
     repos: RepoView[],
@@ -282,7 +323,7 @@ Durable (carry `seq`):
 
 | Type | `data` | Emitted when | Consumers |
 |---|---|---|---|
-| `session.upserted` | `Session` (whole object) | any session field change: state, activity, files, branch, `lastInputFrom`, alive | Home, Focus, palette, Team, Rail |
+| `session.upserted` | `Session` (whole object) | any session field change: state, activity, files, branch, `lastInputFrom`, alive, `archivedAt` (archive, unarchive, the auto-archive sweep, and the automatic unarchive of an archived session that gets an open request, in the same transaction as that request) | Home, Focus, palette, Team, Rail |
 | `session.removed` | `{ id }` | a session row is deleted by retention (never for live sessions) | all lists |
 | `session.steps` | `{ sessionId, steps: Step[] }` (appended steps only) | tool step recorded | Home tails, Focus, Team crew panels |
 | `request.opened` | `Request` | request created | card, drawer, palette, toasts, bell |
@@ -290,7 +331,7 @@ Durable (carry `seq`):
 | `request.closed` | `{ id, sessionId, state: 'answered' \| 'expired', answer, expiredReason }` | request final | all |
 | `counts` | `Counts` | after any transaction that changes a count | header chips, Rail badge, drawer subtitle, document title, Team pill |
 | `order.changed` | `{ order: string[] }` | urgency order changed | Home grid, Focus list, palette, `Alt 1..9` |
-| `run.updated` | `Run` | `status.json` / `plan.json` re-read, teammate join changed | team card, Team |
+| `run.updated` | `Run` | `status.json` / `plan.json` re-read, teammate join changed. The server watches every run directory a run list has found and re-reads after a change (debounced, about 250 ms), with a 60 s poll as the fallback; it publishes only runs whose data changed. When it starts listening the server primes: it lists the runs, which arms the watchers, and records each run's data as the baseline without publishing; later reads publish only changed runs. If the priming list fails, the next successful read publishes every run once | team card, Team |
 | `run.derived` | `{ repoId, runId, derivedPhase, phases }` | slow git derive finished | Team phases |
 | `repo.upserted` | `RepoView` | new repo, crew change, archive | every avatar |
 | `rule.upserted` | `RuleView` | rule written or found in a settings file | Settings |
@@ -298,15 +339,14 @@ Durable (carry `seq`):
 | `rule.offered` | `RuleOffer` | a rule machine enters `offered` | card suggestion line, drawer |
 | `rule.withdrawn` | `{ repoId, pattern }` | offer accepted, dismissed or threshold set to Never | same |
 | `research.updated` | `Research` | state, stats, draft, `preview`, `previewError`, `savedPath` | research card, review |
-| `meeting.status` | `Recorder` | recorder state change (from the 2 s poll or the deck's own start/stop) | rec bar, Rail dot, quiet mode, Meetings |
-| `meeting.updated` | `MeetingListItem` | manifest `state`, `notePath`, `stuck`, `apps` changed | Meetings list and detail |
+| `meeting.status` | `Recorder` | recorder state change (from the 2 s poll or the deck's own start/stop); appended only when a field other than `elapsedS` changes (D-118) | rec bar, Rail dot, quiet mode, Meetings |
+| `meeting.updated` | `Meeting` (no `title` and no note text, because the event is durable and 06-storage 10.1 stores no title; the client keeps titles from its REST reads, D-116) | manifest `state`, `notePath`, `stuck`, `apps` changed | Meetings list and detail |
 | `meeting.pin.added` | `Pin & { meetingId }` | pin stored | live view, detail |
 | `meeting.pin.removed` | `{ meetingId, id }` | unpin | same |
 | `health.changed` | `Health` | dependency machine transition (state-machines 5) | banners, degraded cards, Settings |
 | `recap` | `Recap` | recap values change | Home subtitle, Calm |
-| `misses.changed` | `{ unresolved }` | miss inserted or resolved | Memory tab count |
 | `captures.changed` | `{ day, count }` | capture recorded | Memory tab count, recap |
-| `vault.changed` | `{ reason: 'deck_write' \| 'poll' }` | after a deck vault write or a changed graph on the 60 s poll | Memory refetches `/api/vault/graph` |
+| `vault.changed` | `{ reason: 'deck_write' \| 'poll' }` | after a deck vault write or a changed graph on the 60 s poll. No emitter until M6 (D-139): the deck writes nothing to the vault in M5, so the Memory screen refetches the graph every 60 s while it is visible (`document.visibilityState`); `vault.changed` arrives with the research save in M6 | Memory refetches `/api/vault/graph` |
 | `prefs.changed` | `{ prefs, sources }` | prefs saved (other tabs update) | Settings, appearance |
 | `notify.failed` | `{ stderr, exitCode }` | first failure per server run | toast |
 
@@ -318,19 +358,27 @@ Ephemeral (no `seq`):
 | `ask.delta` | `{ threadId, messageId, text }` | appended text |
 | `ask.done` | `{ threadId, message: AskMessage }` | final message with citations, `isMiss`, `generalKnowledge` |
 | `ask.error` | `{ threadId, messageId, error: ApiError }` | |
+| `misses.changed` | `{ unresolved, ephemeral: true }` | a miss inserted or resolved; ephemeral since M5 (D-139, in `ephemeralEvents`), so clients recover the count from `GET /api/misses`. Feeds the Memory tab count and Calm "Unanswered questions" |
 | `meeting.transcript` | `{ meetingId, line: TranscriptLine }` | live lines from scribed `subscribe`; never persisted, for any tag |
+| `meeting.recovered` | `{ meetingId, count, ephemeral: true }` | as built in 0.4.0: sent after a subscription gap was filled (from the live events file, else scribed `tail`) with `count` lines, which arrive before it as `meeting.transcript`; never persisted |
 | `screen.tail` | `{ sessionId, lines: string[] }` | compact card tails (M2), ANSI stripped, at most 1 per second per session, only while a Home compact view is subscribed (`sub.tails`, 3.6) |
-| `input.source` | `{ sessionId, state: 'quiet' \| 'terminal_active' \| 'browser_active' \| 'collision', from: 'terminal' \| 'browser', name: string \| null }` | shared input machine (state-machines 3); drives "Last typed from: terminal (kitty)" and the collision chip |
+| `input.source` | `{ sessionId, state: 'quiet' \| 'terminal_active' \| 'browser_active' \| 'collision', from: 'terminal' \| 'browser' \| null, name: string \| null, detached: boolean }` | shared input machine (state-machines 3); drives "Last typed from: terminal (kitty)" and the collision chip. `detached` is true once the last `fm` terminal client of the PTY has detached (M2) |
 | `ui.navigate` | `{ path }` | notification "Open" action (04-integrations 5); only the most recently focused tab obeys |
 | `hb` | `{ seq, at }` | heartbeat |
 | `error` | `ApiError` | a client message was invalid (unknown type, bad attach) |
+
+As built in 0.4.0, every meeting stream event (`meeting.transcript`, `meeting.recovered`, `ask.delta`, `ask.done`, `ask.error`) carries `ephemeral: true` inside `data`, and the event store refuses to append any of them to `events` (`ephemeralEvents` in `hub/server/db/index.mjs` throws). A meeting ask's `ask.done` message has `citations: []` and `persisted: false`.
+
+In M5 the vault ask events `ask.delta`, `ask.done` and `ask.error` carry `ephemeral: true` the same way, and so does `misses.changed`. Question and answer text never reach the `events` table, a log line or a notification ([08-security.md](08-security.md)). The existing `health.changed` for `dep: 'vault-mcp'` gains `version` and `capabilities` (section 7).
 
 `Counts` is produced by one query (02-domain 3):
 
 ```
 { needYouSessions, running, toReview, openRequests, requestSessions, oldestRequestAt,
-  perRun: [{ repoId, runId, needYou, total }] }
+  perRun: [{ repoId, runId, needYou, total }], archived }
 ```
+
+Archived sessions are left out of every count except `archived`, the number of archived sessions in any state (session archive).
 
 `openRequests` and `requestSessions` feed "4 requests from 3 ships"; `needYouSessions` feeds "3 need you". A team counts once in the three chips, under its most urgent state (02-domain 3).
 
@@ -347,7 +395,7 @@ Client to server (JSON):
 | `term.resize` | `{ sessionId, cols, rows }` | forwarded to deckd with `source: browser`; deckd applies the resize rule (SM-O12: follow the most recent input source, at most once per second) |
 | `sub.tails` | `{ sessionIds: string[] }` | subscribe compact tails (replaces the previous set) |
 
-Server to client (JSON): `term.attached { sessionId, ptyId, cols, rows }`, `term.exit { sessionId, code, signal }`, `term.error { sessionId, error }`.
+Server to client (JSON): `term.attached { sessionId, ptyId, cols, rows }`, `term.exit { sessionId, code, signal }`, `term.error { sessionId, error }`. `term.error` codes: `validation_failed`, `not_found`, `no_pty`, `deckd_unavailable`, `output_dropped`, and since M2 `not_attached` (an input frame or `term.resize` for a session this socket has not attached) and `payload_too_large` (an input frame over 64 KiB). A deckd rejection of an attach, input or resize maps as follows: deckd `not_found` becomes `no_pty`, a link that is down, closed or timed out becomes `deckd_unavailable`, and any other deckd error code becomes `internal` (`retryable: false`, no `details`).
 
 Binary frame layout (both directions):
 
@@ -357,6 +405,7 @@ byte 1      n = length of the session id in bytes (ULID: 26)
 bytes 2..   session id (ASCII), then the payload (raw PTY bytes, UTF-8 as the PTY produced it)
 ```
 
+- An input frame's payload is at most 64 KiB; a larger frame gets `term.error` `payload_too_large` and nothing is written. The server checks, in this order: the frame kind is input, the size, that this socket attached the session, that the session still has that PTY, and that deckd is connected.
 - Input frames are sent only while the xterm has focus (state-machines 3.4). The server forwards them to deckd `write` with `source: { kind: 'browser' }`. The resulting `input.source` event and the session's `lastInputFrom` update give the Focus header "Last typed from: browser" and, when the `fm claude` terminal typed last, "Last typed from: terminal (kitty)" (Decided indicator).
 - Paste over 4 KB is confirmed in the SPA before sending (state-machines 3.5); the server does not re-check.
 - The server never interprets input bytes; the approval guards apply only to deck-originated keystrokes (answers, Nudge, follow-ups, the launch task), which travel through REST.
@@ -384,15 +433,15 @@ One JSON shape for every non-2xx response and for `error`, `ask.error`, `term.er
 
 - `code` is stable and machine-read; the SPA maps it to copy in its i18n catalog. `message` is an English fallback for logs and for codes the SPA does not know.
 - Messages from scribed and vault-mcp are passed through verbatim in `details.text` (Portuguese for scribed; 04-integrations 4.1) and shown as the screens specify ("scribed refused: <message>").
-- `retryable: true` means the same request may succeed unchanged later.
+- `retryable: true` means the same request may succeed unchanged later. As built in M3 the answer and rule routes set it for `deckd_unavailable`, `typing_in_terminal` and `settings_changed` only; M4 adds `scribed_unavailable`, which the API sends with `retryable: true` (the `retryableCodes` set of `hub/server/http/api.mjs`; pinned for `POST /api/meetings/start` and for `ask.error`).
 
 | Code | HTTP | Meaning |
 |---|---|---|
 | `unauthorized` | 401 | token missing or wrong |
-| `forbidden_host` | 403 | Host header not loopback |
+| `forbidden_host` | 403, 421 | Host header not `127.0.0.1:<port>`; 421 with a `Location` to `127.0.0.1` when it is `localhost:<port>` |
 | `forbidden_origin` | 403 | Origin not the deck's own |
 | `not_found` | 404 | entity or route unknown (`details.entity`) |
-| `payload_too_large` | 413 | body over 1 MiB |
+| `payload_too_large` | 413 | body over 256 KiB; on the WebSocket, an input frame over 64 KiB |
 | `unsupported_media_type` | 415 | body without `application/json` |
 | `validation_failed` | 422 | body or query invalid (`details.fields`) |
 | `invalid_state` | 409 | action not allowed in the entity's current state (`details.state`) |
@@ -402,9 +451,12 @@ One JSON shape for every non-2xx response and for `error`, `ask.error`, `term.er
 | `answer_in_flight` | 409 | an answer is being sent or verified |
 | `not_on_screen` | 409 | screen shows another prompt or cannot be read |
 | `typing_in_terminal` | 409 | terminal input within the typing guard (retryable) |
-| `confirm_required` | 422 | Destructive answer without `confirm: true` |
-| `tier_forbids` | 403 | the tier does not allow this path (option 2 outside Safe) |
-| `batch_not_safe` | 422 | batch contains a non-Safe or non-permission request |
+| `confirm_required` | 409 | Destructive answer without `confirm: true` (as built in M3; this table said 422 before) |
+| `tier_forbids` | 409 | the tier does not allow this path: option 2 where `allowAlways` is false, a popup or batch answer for anything but a Safe permission, or a permission option that is not Yes, No or "don't ask again" (as built in M3; this table said 403 before) |
+| `batch_not_safe` | 409 | batch contains a non-Safe or non-permission request (as built in M3; this table said 422 before) |
+| `skipped_not_safe` | n/a | per-id result of `answer-batch`: the id re-classified above Safe at send time and was not answered (M3) |
+| `options_unreadable` | 409 | the screen shows no option that fits the answer, or the prompt needs a key sequence the deck does not have (M3) |
+| `deckd_outdated` | 409 | deckd did not announce `guardedWrite`, so no answer is written until deckd restarts (M3). Also a `Health` reason (section 7) |
 | `followup_window_closed` | 409 | follow-up more than 30 s after the deny |
 | `invalid_pattern` | 422 | not Claude Code permission syntax |
 | `destructive_rule` | 422 | Destructive commands can never become rules (Decided) |
@@ -426,16 +478,18 @@ One JSON shape for every non-2xx response and for `error`, `ask.error`, `term.er
 | `spawn_failed` | 502 | deckd could not spawn `claude` (`details.stderr`) |
 | `dependency_start_failed` | 502 | starting deckd or scribed failed |
 | `notify_failed` | 502 | `notify-send` missing or non-zero |
+| `open_failed` | 502 | `/api/open` could not start the opener (`xdg-open` missing or not executable) (M2) |
 | `preview_stale` | 409 | save with a preview that no longer matches the draft |
 | `orphan_citations` | 422 | a sentence cites an unchecked source |
 | `ask_in_progress` | 409 | the thread already has an ask running |
 | `no_pty` | 409 | terminal attach on an observed session (WebSocket only) |
 | `output_dropped` | n/a | terminal output dropped for backpressure (WebSocket only) |
-| `internal` | 500 | bug; logged with a request id in `details.requestId` |
+| `not_attached` | n/a | terminal input or resize for a session the socket has not attached (WebSocket only, M2) |
+| `internal` | 500 | bug; logged with a request id in `details.requestId`. Also a `term.error` code (section 3.5) for a deckd rejection the bridge does not map to `no_pty` or `deckd_unavailable` |
 
 ## 5. Web server to deckd protocol (Proposed)
 
-deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket 0600, [03-architecture.md](03-architecture.md) 2.1 and 5). Clients: the web server (one long-lived connection) and `fm` terminal clients. The file mode is the authentication; deckd also checks `SO_PEERCRED` uid equals its own.
+deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket 0600, [03-architecture.md](03-architecture.md) 2.1 and 5). Clients: the web server (one long-lived connection) and `fm` terminal clients. The file modes are the authentication: the 0700 directory and the 0600 socket are the control, and deckd refuses to start in a runtime directory with group or world permission bits. deckd does not check the peer's uid, because Node cannot read peer credentials (`SO_PEERCRED`) without a native addon (owner decision, 2026-10-01).
 
 ### 5.1 Framing
 
@@ -448,15 +502,15 @@ deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket
 
 | op | Request | Response | Notes |
 |---|---|---|---|
-| `hello` | `{ proto: 1, client: { kind: 'server' \| 'terminal', name?, pid } }` | `{ proto, deckdVersion, bootId }` | first message; deckd answers the highest `proto` both sides speak. `bootId` changes when deckd restarts (all PTYs lost) |
+| `hello` | `{ proto: 2, client: { kind: 'server' \| 'terminal', name?, pid } }` | `{ proto, deckdVersion, bootId }`, plus `loginEnvNames: string[]` and `features: string[]` at proto 2 | first message; deckd answers the lower of the asked `proto` and its own (2 since M2); a `proto` that is not an integer of at least 1 gets `unsupported_proto`. `bootId` changes when deckd restarts (all PTYs lost). `loginEnvNames` lists, sorted and at most 200, the names (never the values) of variables in the login environment that `launched` sessions start from which are new or differ from deckd's own service environment; `fleetmates-deck doctor` prints them. `features` (M3) lists the optional additions this deckd supports; M3 announces `guardedWrite`. A client treats a missing `features` as an empty list |
 | `spawn` | `{ cwd, argv, env, cols, rows, origin: 'wrapped' \| 'launched' }` | `{ ptyId, pid, startedAt }` | deckd adds `FLEETMATES_DECK_PTY=<ptyId>` to `env`. `argv` is `['claude', ...]`; deckd refuses any other executable name (`spawn_refused`) |
 | `list` | | `{ ptys: [{ ptyId, pid, origin, cwd, argv, cols, rows, startedAt, clients: [{ kind, name }], lastInputFrom, lastInputAt }] }` | reconciliation (state-machines 1.4 rule 5) |
-| `exits` | `{ since }` | `{ exits: [{ ptyId, code, signal, at }] }` | PTYs that exited while the server was away; kept 24 h in memory |
+| `exits` | `{ since }` | `{ exits: [{ ptyId, code, signal, at, tail, history }] }` | PTYs that exited while the server was away; kept 24 h in memory. `tail` (proto 2 only) is the base64 of the PTY's last 1,000 output lines, cut to at most 256 KiB at a line start; the server stores it in `session_scrollback` ([06-storage.md](06-storage.md)) for the ended session. `tail` remains the raw ring bytes for compatibility. `history` (proto 2 only) is `{ data, cols, rows }`: `data` is deckd's headless terminal serialized with `@xterm/addon-serialize` (up to 1,000 scrollback lines and the screen, colours and attributes kept, a UTF-8 string, not base64). It carries no terminal modes (no mouse tracking, bracketed paste, focus reporting or application cursor keys), so a read-only viewer keeps wheel scrolling and text selection, and it never switches to the alternate buffer (no `?1049h`, `?1047h` or `?47h`): when the PTY is on the alternate screen, `data` is the normal buffer's scrollback and screen followed by the alternate screen's rows, all written into the normal buffer. It is taken once every output byte is parsed and cut to at most 256 KiB by dropping whole leading lines after a `\r\n`; `cols` and `rows` are the terminal size at exit. Written into a terminal of another size it shows the rows as they looked (pinned for a 120x40 capture replayed at 96x30), which raw `tail` bytes do not. deckd stores the record before it sends the `exit` event |
 | `attach` | `{ ptyId, stream: boolean }` | `{ cols, rows }` | subscribe to `output` for this PTY. The server attaches once per PTY and fans out to browsers |
 | `detach` | `{ ptyId }` | `{}` | |
-| `screen` | `{ ptyId, scrollback: number }` | `{ rev, cols, rows, cursor: { x, y }, lines: string[], scrollback: string }` | `lines`: visible screen as plain text rows (for parsing); `scrollback`: raw bytes (base64) for xterm replay |
+| `screen` | `{ ptyId, scrollback: number, history?: boolean }` | `{ rev, cols, rows, cursor: { x, y }, lines: string[], scrollback: string, history? }` | `lines`: visible screen as plain text rows (for parsing); `scrollback`: raw bytes (base64) for xterm replay, kept for compatibility. With `history: true` a proto 2 connection also gets `history: { data, cols, rows }`, the same shape as on the `exits` record but not capped; a proto 1 connection never gets it |
 | `watchScreen` | `{ ptyId, on: boolean }` | `{}` | turn on `screen` events for parsing (section 5.4) |
-| `write` | `{ ptyId, data, source: { kind: 'browser' \| 'deck' \| 'terminal', name? } }` | `{ at }` | `deck` = keystrokes the server generated (answers, Nudge, launch task); counted as browser in the shared input machine (state-machines 3.2 `I.DeckKeys`) |
+| `write` | `{ ptyId, data, source: { kind: 'browser' \| 'deck' \| 'terminal', name? }, guard?: { rev, quietMs } }` | `{ at }` | `deck` = keystrokes the server generated (answers, Nudge, launch task); counted as browser in the shared input machine (state-machines 3.2 `I.DeckKeys`). `guard` (M3, feature `guardedWrite`) is accepted only with `source.kind: 'deck'`, with `rev` an integer and `quietMs` an integer from 0 to 5000, else `bad_request`. deckd writes the bytes only when its screen model is still at `rev` with no output left unparsed, else error `screen_changed`, and when no `terminal` or `browser` input reached that PTY in the last `quietMs` milliseconds, else error `typing_in_terminal` (D-84). The server sends answers with `quietMs` 1000 |
 | `resize` | `{ ptyId, cols, rows, source }` | `{ cols, rows }` | deckd applies SM-O12 |
 | `kill` | `{ ptyId, signal: 'SIGTERM', graceMs: 5000 }` | `{}` | SIGTERM to the process group, SIGKILL after `graceMs` (row 50) |
 | `ping` | | `{ at }` | heartbeat every 5 s; 3 missed = link down (state-machines 4.2) |
@@ -473,6 +527,8 @@ deckd listens on `$XDG_RUNTIME_DIR/fleetmates-deck/deckd.sock` (dir 0700, socket
 | `client` | `{ ptyId, change: 'attached' \| 'detached', client: { kind, name } }` | `I.ClientAttached`, `I.ClientDetached` |
 | `dropped` | `{ ptyId, bytes }` | the client must re-request `screen` |
 
+Guarded write (M3, as built). It replaces the `expectPrompt` field and the `E_PROMPT_CHANGED` error proposed in [07-approvals.md](07-approvals.md) section 5.1. deckd carries no prompt parser (section 5.4), so it cannot compare prompts; it compares the screen revision the server parsed, which changes whenever the screen does. The server matches the prompt to the request (`screenMatch`) before it sends, and deckd guarantees that the screen has not changed since. A deckd that does not announce `guardedWrite` is never sent an answer (`deckd_outdated`, section 4). The protocol stays `proto` 2: `features` and `guard` are additive.
+
 ### 5.4 Where screen parsing happens
 
 deckd keeps the headless terminal model (03-architecture 2.1) and sends `screen` events: the visible rows as plain text, throttled to at most 4 per second per PTY, only for PTYs with `watchScreen` on and only when rows changed. The **web server** runs the parsers (permission prompt with its numbered options, idle input box, status and spinner region; 04-integrations 2.3) and turns the results into `S.PromptVisible(options)`, `S.PromptGone`, `S.ScreenIdle` and counted `P.Output` activity (a change in `changedRows` outside the status region, state-machines 1.10).
@@ -482,6 +538,8 @@ Reason: the parsers are versioned with the Claude Code fixtures and change with 
 ### 5.5 Compatibility
 
 deckd is restarted rarely (it kills sessions), so a newer web server must speak the protocol of the deckd that is already running: the server supports `proto` N and N-1 and shows "deckd is older than the deck; restart it when no session is running" in Settings, Connections when they differ. `fm` clients use the same `hello` negotiation.
+
+As built in M2 (`proto` 2): the deckd `Health` row is `ok` with reason `deckd_outdated` when the agreed `proto` is lower than the server's (the link works, without exit tails), and `down` with reason `deckd_incompatible` when deckd answers `hello` with an error; a deckd that cannot be reached is `down` with `deckd_unavailable`. While connected the row also carries `deckdVersion`, the version deckd reported in `hello`.
 
 ## 6. deck-hook envelope and spool
 
@@ -509,7 +567,7 @@ Source: [03-architecture.md](03-architecture.md) 2.3 and 4.2, [04-integrations.m
 
 1. Connect to `$XDG_RUNTIME_DIR/fleetmates-deck/hooks.sock` with a 100 ms timeout, write the line, half-close, exit 0. No response is read.
 2. On any error (no socket, refused, timeout, `XDG_RUNTIME_DIR` unset) append the line to `~/.local/state/fleetmates/deck/spool/hooks-<yyyymmdd>.jsonl` (file 0600, dir 0700) with a single `write` on an `O_APPEND` descriptor, exit 0.
-3. Total budget 200 ms (03-architecture 2.3). Never print to stdout or stderr; always exit 0.
+3. Total budget 200 ms (03-architecture 2.3). The budget covers the hook's own run, from the moment its module starts loading to process exit, not Node's interpreter boot before it (owner decision 2026-10-02, D-70). `hub/test/contract/hooks.test.mjs` measures that span with an `--import` preload that writes a clock line before the hook module loads and another at exit, for a hook that finishes quickly. The script's own 200 ms exit timer bounds a hook that stalls; no test pins that timer at 200 ms yet (m2-exit section 11.2). Never print to stdout or stderr; always exit 0.
 
 No token: the socket and the spool are 0600 in 0700 directories, owned by the user; the browser never reaches them (03-architecture 2.2).
 
@@ -530,14 +588,15 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
 /**
  * @typedef {object} RepoView
  * @property {string} id            realpath of the repo root
+ * @property {string} repoId        same as id
  * @property {string} name          display name, disambiguated (`work/api`); used as repoKey
- * @property {number} crewSlot      0..8
- * @property {boolean} crewSlotShared  (Proposed field, design/crew.md 4.3)
- * @property {string} crewSeed
- * @property {'none'|'cap'|'bandana'} hat
+ * @property {string} repoKey       same as name
+ * @property {{slot: number, slotShared: boolean, seed: string, hat: 'none'|'cap'|'bandana'}} crew   slot 0..8; slotShared (Proposed field, design/crew.md 4.3)
  * @property {number} firstSeenAt
+ * @property {number|null} missingSince  (Proposed field)
  * @property {number|null} archivedAt  (Proposed field)
- * @property {number|null} lastSessionAt  derived
+ * @property {number|null} lastSessionAt  derived: newest session start in this repo (M2)
+ * @property {string|null} branch   current branch of the repo root, null when detached or unreadable (M2)
  */
 
 /**
@@ -560,7 +619,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {string|null} processKey
  * @property {string|null} activity        `compacting`, `tool:<name>`, `subagents:<n>`
  * @property {number} subagentsActive      (Proposed field, state-machines 12.6)
- * @property {string} reviewBaseline
+ * @property {string|null} reviewBaseline   the baseline commit sha (40 to 64 lowercase hex) of the review, null outside git or before one is taken; the stored `sessions.review_baseline` also holds file contents, which never leave the server (M2)
  * @property {boolean} joinedMidLife
  * @property {'exit'|'signal'|'lost'|null} crashKind
  * @property {string|null} exitSignal
@@ -572,7 +631,10 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {number|null} reviewedAt
  * @property {number} startedAt
  * @property {number|null} endedAt
+ * @property {number|null} archivedAt     ms when it was archived; null when it is not (session archive)
+ * @property {'owner'|'auto'|null} archivedBy   `owner`: Archive or "Archive all finished"; `auto`: the auto-archive sweep
  * @property {number} toolCalls            derived count of steps (home.md "31 tool calls")
+ * @property {number} learnedToday         count of observed `vault_learn` calls of this session since local midnight; feeds the "learned" chip (M5, D-138)
  */
 
 /**
@@ -610,6 +672,12 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {number|null} answeredAt
  * @property {number|null} notifiedAt
  * @property {number|null} renotifiedAt
+ * @property {{entryId: string, tier: Tier, segment: string, description: string}[]} reasons   every tiers entry or floor that matched (M3)
+ * @property {string|null} rulePattern      the Safe rule candidate, such as `Bash(npm run test)`; null when there is none (M3, D-74)
+ * @property {'anyFlags'|null} ruleNote      from the tiers entry that gave `rulePattern` (D-78); no shipped entry carries one since D-102
+ * @property {string|null} description      the classifier's headline reason, one line (DRW-O2, M3)
+ * @property {string|null} confirmLabel     the Destructive checkbox label, filled from the entry template (D-72, M3)
+ * @property {boolean} allowAlways          option 2 may be offered (D-77, D-95, M3)
  */
 
 /**
@@ -620,9 +688,12 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {number|null} approvalsBefore
  * @property {number|null} createdAt       null when found in the file and not written by the deck (SET-O5)
  * @property {Tier|null} tier              from the matching tiers.json entry
+ * @property {boolean} destructive         the pattern would be refused today as `destructive_rule`; Settings shows the Destructive line (07-approvals 7.4, M3)
+ * @property {boolean} tracked             the repo's settings file is tracked by git (07-approvals 7.2 step 9, M3)
+ * @property {'toolWide'|null} warning     `toolWide` for a tool-wide rule such as `WebFetch` (07-approvals 7.3, M3)
  */
 
-/** @typedef {{repoId: string, pattern: string, count: number, threshold: number}} RuleOffer */
+/** @typedef {{repoId: string, repoKey: string, pattern: string, count: number, threshold: number, ruleNote: 'anyFlags'|null}} RuleOffer   (`repoKey` and `ruleNote` M3) */
 
 /**
  * @typedef {object} Run
@@ -653,14 +724,35 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {string[]} apps
  * @property {boolean} stuck                deck-derived (state-machines 6.4)
  */
-/** @typedef {Meeting & {title: string, actionItemCount: number|null}} MeetingListItem */
+/**
+ * As built in 0.4.0: `title` is null until a note is found, `stuck` is read per request, and `interrupted` is true
+ * when the session directory has no `session.json`, holds `transcript.jsonl`, is not the meeting being recorded,
+ * and nothing in it was written for more than 1 h (a recording that ended without a stop).
+ * @typedef {Meeting & {title: string|null, actionItemCount: number|null, interrupted: boolean}} MeetingListItem
+ */
 /** @typedef {{summary: string, decisions: string[], actionItems: {key: string, text: string, owner: string|null, dismissed: boolean}[]}} MeetingNote */
 /** @typedef {{id: string, t: number, label: string|null, createdAt: number}} Pin */
-/** @typedef {{t0: number, t1: number, speaker: string, text: string}} TranscriptLine */
+/** @typedef {{t0: number, t1: number, speaker: string, text: string, asrModel?: string|null}} TranscriptLine   (`asrModel` on live lines, as built in 0.4.0) */
 /** @typedef {{tag: string, confidential: boolean, isDefault: boolean}} MeetingTag */
-/** @typedef {{state: 'unavailable'|'idle'|'starting'|'recording'|'stopping'|'error', meetingId: string|null, tag: string|null, elapsedS: number, apps: string[], quiet: boolean}} Recorder */
+/**
+ * The recorder view (D-118). There is no `error` state: a failed command sets `lastError`, which the client shows as
+ * the transient error toast of state-machines 6.2.
+ * @typedef {object} Recorder
+ * @property {'unavailable'|'idle'|'starting'|'recording'|'stopping'} state
+ * @property {string|null} meetingId
+ * @property {string|null} tag
+ * @property {boolean} confidential
+ * @property {number} elapsedS
+ * @property {number|null} since
+ * @property {number|null} startedAt       start of the meeting being recorded
+ * @property {string[]} apps
+ * @property {boolean} quiet               true only while `recording` with "quiet in meetings" on
+ * @property {boolean} slow                a `stop` still in flight after 60 s
+ * @property {boolean} lost                scribed went down while recording
+ * @property {{cmd: string, message: string, at: number}|null} lastError  scribed's message verbatim
+ */
 
-/** @typedef {{id: string, title: string, scope: string, createdAt: number, persisted?: boolean}} AskThread */
+/** @typedef {{id: string, title: string, scope: string, createdAt: number, updatedAt: number, persisted?: boolean}} AskThread   (`updatedAt` M5) */
 /** @typedef {{path: string, line: number, viaGraph: boolean}} Citation */
 /**
  * @typedef {object} AskMessage
@@ -668,17 +760,20 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {string} threadId
  * @property {'user'|'assistant'} role
  * @property {string} text
- * @property {Citation[]} citations
+ * @property {Citation[]} citations         only citations that passed validation (D-141)
  * @property {string|null} generalKnowledge
  * @property {boolean} isMiss
- * @property {'complete'|'cancelled'|'error'} status   (Proposed field)
+ * @property {'complete'|'cancelled'|'error'} status   (M5)
+ * @property {string|null} error            the error message when `status` is `error`, for example `timed out after 120 s` (M5)
+ * @property {boolean} unverified           true when the answer had no valid `deck-answer` block; the UI shows "Citations unavailable for this answer" (M5, D-131)
+ * @property {number} droppedCitations      citations removed by validation (M5, D-141)
  * @property {number} createdAt
  */
-/** @typedef {{id: string, question: string, threadId: string|null, searchedTerms: string[], createdAt: number, resolvedBy: string|null}} Miss */
-/** @typedef {{path: string, title: string, capturedAt: number, sessionId: string|null, repoId: string|null, via: 'vault_learn'|'research'|'frontmatter'}} Capture */
-/** @typedef {{path: string, title: string, tipo?: string|null, domain?: string|null, atualizado?: string|null}} NoteRef */
-/** @typedef {{path: string, title: string, frontmatter: object, body: string}} NoteView */
-/** @typedef {{citedIn: {threadId: string, title: string, at: number}[], readBy: {sessionId: string, repoId: string, at: number, tool: string}[]}} NoteUsage */
+/** @typedef {{id: string, question: string, threadId: string|null, searchedTerms: string[], createdAt: number, resolvedBy: string|null}} Miss   (`resolvedBy`: null (open), `research:<id>` (M6), `note:<path>` or `dismissed`, D-140) */
+/** @typedef {{path: string, title: string, domain: string|null, capturedAt: number, via: 'vault_learn'|'frontmatter', sessionId: string|null, repoId: string|null, repoName: string|null, opened: boolean}} Capture   (M5, D-137; `via: 'research'` arrives with M6) */
+/** @typedef {{path: string, title: string, tipo: string|null, status: string|null, tags: string[], domain: string|null}} NoteRef   (`domain` = `<d>` for `02-wiki/<d>/...`, else null) */
+/** @typedef {{path: string, title: string, frontmatter: object, body: string, truncated: boolean, total: number}} NoteView */
+/** @typedef {{citedIn: {threadId: string, title: string, at: number}[], readBy: {sessionId: string, repoId: string, repoName: string, at: number, tool: string}[]}} NoteUsage */
 
 /**
  * @typedef {object} Research
@@ -701,11 +796,11 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {number} createdAt
  */
 
-/** @typedef {{voyages: number, madePort: number, chartsAdded: number|null}} Recap */
+/** @typedef {{voyages: number, madePort: number, chartsAdded: number|null}} Recap   (`chartsAdded` M5: captures of today, null while vault-mcp is down) */
 /** @typedef {{kind: 'vaultNote', ref: string}|{kind: 'meetingNote', ref: string}|{kind: 'runPlan', ref: {repoId: string, runId: string}}|{kind: 'postmeetLog', ref: string}} OpenRequest   (vaultNote: vault-relative path; meetingNote and postmeetLog: meeting id) */
-/** @typedef {{needYouSessions: number, running: number, toReview: number, openRequests: number, requestSessions: number, oldestRequestAt: number|null, perRun: {repoId: string, runId: string, needYou: number, total: number}[]}} Counts */
-/** @typedef {{dep: 'deckd'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number}} Health */
-/** @typedef {{id: 'claude'|'hooks'|'deckd'|'vault'|'scribed'|'notify', state: 'pending'|'checking'|'ok'|'failed'|'optional_skipped', blocking: boolean, detail: string|null, error: string|null}} SetupCheck */
+/** @typedef {{needYouSessions: number, running: number, toReview: number, openRequests: number, requestSessions: number, oldestRequestAt: number|null, perRun: {repoId: string, runId: string, needYou: number, total: number}[], archived: number}} Counts */
+/** @typedef {{dep: 'deckd'|'hooks'|'vault-mcp'|'scribed'|'notify'|'fleetmates', state: 'unknown'|'checking'|'ok'|'warn'|'degraded'|'down', reason: string|null, since: number, nextProbeAt: number|null, attempt: number, deckdVersion?: string, version?: string|null, capabilities?: string[]}} Health   (`version` and `capabilities` on `dep: 'vault-mcp'`, M5: vault-mcp's `serverInfo.version` or null, and the detected capabilities from `graph`, `structured`, `preview`) */
+/** @typedef {{id: 'claude'|'hooks'|'deckd'|'vault'|'scribed'|'notify', state: 'pending'|'checking'|'ok'|'warn'|'failed'|'optional_skipped', blocking: boolean, detail: string|null, error: string|null}} SetupCheck */   (warn: Claude Code newer than the tested version, state-machines 10.2)
 
 /**
  * @typedef {object} Prefs
@@ -715,6 +810,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  * @property {boolean} terminalScreenReader
  * @property {boolean} bell
  * @property {5|10|20|null} renotifyAfter   minutes; null = Never
+ * @property {6|12|24|72|168|null} autoArchiveAfter   hours; null = Never; default 24 (session archive)
  * @property {boolean} notifyDone
  * @property {boolean} quietInMeetings
  * @property {boolean} notifyCrash
@@ -752,6 +848,8 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
  */
 ```
 
+`Health` reasons added in M2: for `deckd`, `deckd_outdated` (state `ok`), `deckd_incompatible` and `deckd_unavailable` (state `down`), with `deckdVersion` while connected (section 5.5); for `hooks`, `hooks_missing` (`~/.claude/settings.json` does not list the deck's hook command for every observed event, or cannot be read) and `hook_script_missing` (the hook script is not a readable regular file), both with state `down`. The server computes the `hooks` row at start and again after every repo rescan, and the New session form reads it. Also on `hooks`, `hooks_outdated` with state `warn` (M2): an accepted hook envelope whose `deckHookVersion` is older than the server's package version, or missing or not a semver string, sets it, published once as `health.changed`; the event itself is still accepted. It clears after 3 consecutive envelopes at the current version or newer, or after a successful `POST /api/setup/hooks`. `hooks_missing` and `hook_script_missing` take priority over it. `deck-hook.mjs` reads the version it stamps from the `package.json` one directory above it (`null` when that file cannot be read), and `fleetmates-deck init` writes a `package.json` holding only the hub version next to the installed hook's directory for that reason. Settings, Connections shows a hint for `hooks_outdated`.
+
 ## 8. Versioning (Proposed)
 
 - The SPA and the web server ship in one package and one build, so the REST and WebSocket API is **unversioned in the path** (`/api/...`). `apiVersion` is an integer served by `/api/version` and in `welcome`. It changes only on a breaking change to a shape the SPA reads.
@@ -763,7 +861,7 @@ For `hub/server/api/types.mjs`, imported by the server and (through a shared mod
 
 ## Open items
 
-Existing items referenced, not repeated: SHELL-O1, SM-O1, SM-O9, SM-O12, SM-O13, SM-O15, SM-O16, NEW-O1, TEAM-O5, FOC-O1, MEM-O1, MEET-O4, MEET-O7, RES-O3, RES-O6, SET-O1, SET-O2, FAIL-O1.
+Existing items referenced, not repeated: SHELL-O1, SM-O1, SM-O9, SM-O12, SM-O13, SM-O15, SM-O16, TEAM-O5, MEM-O1, MEET-O4, MEET-O7, RES-O3, RES-O6, SET-O1, SET-O2, FAIL-O1.
 
 Closed: the former open item on which targets `POST /api/open` may open. Decided by D-57 (Proposed); see section 2.8.
 
@@ -773,3 +871,23 @@ Closed: the former open item on which targets `POST /api/open` may open. Decided
 | API-O2 | `repoKey` (display name) in API paths changes when a later repo with the same basename appears (`api` becomes `work/api`). Keep it, or use a stable short repo id in URLs? | `repoKey` in paths, `?repoId=` accepted everywhere, the SPA redirects an unknown `repoKey` through `/api/repos` | M2 |
 | API-O4 | deckd wire format: JSON lines with base64 bytes, or a binary framing for output and input? | JSON lines + base64; switch only if the M0 spike misses the 50 ms echo budget | M0 |
 | API-O5 | Screen parsing in the web server (deckd sends rows) or in deckd (deckd sends `S.*` signals as state-machines 0.2 reads)? | Web server parses (section 5.4) | M0 |
+
+## Prepared M5 route verification
+
+The Memory routes are implemented in `hub/server/http/api.mjs`: GET `vault/graph` returns
+the graph; GET `vault/list` returns `{ notes }`; GET `vault/note?path=` returns the note,
+backlinks, outgoing links and usage; GET `vault/search?q=` returns `{ hits }`; GET
+`vault/captures?day=` returns `{ day, captures }`. GET `misses` returns `{ misses, unresolved }`,
+and POST `misses/:id/resolve` accepts `{ resolvedBy: "dismissed" | "note:<path>" }`.
+
+GET `threads` returns `{ threads }`; GET `threads/:id` returns `{ thread, messages }`;
+DELETE `threads/:id` returns `{ deleted: true }` and refuses an active ask. POST `ask`
+accepts the default vault scope or `scope: "vault"`; meeting scopes keep their M4 handler.
+It returns the thread, user message and assistant message id with status 202. POST
+`ask/:messageId/cancel` dispatches by scope. GET `sessions/:id/memory` returns related hits,
+read notes and learned notes. POST `open` accepts `vaultNote` and checks existence through MCP.
+
+Ask deltas, completion, errors and `misses.changed` are ephemeral and carry no sequence.
+Unavailable MCP returns retryable 503 `vault_unavailable`; missing graph returns 501
+`vault_tool_missing`; a tool error returns 502 `vault_error`. GET `version` reports build
+`m5` and package version 0.5.0. All M5 routes are included in the token rejection test.

@@ -1,0 +1,11 @@
+{
+  "description": "Synthetic M5 browser payloads; no real vault or Claude session data.",
+  "title": "Note <img src=x onerror=alert(1)> <script>alert(1)</script> \u202e title",
+  "body": "## Content\n<script>alert(1)</script>\n[unsafe](javascript:alert(1))\n<img src=x onerror=alert(1)>\nANSI \u001b[31m text",
+  "tag": "tag\u202econtrol",
+  "path": "02-wiki/nestjs/note\u202epath.md",
+  "answer": "<script>alert(1)</script> [unsafe](javascript:alert(1)) \u202e answer",
+  "generalKnowledge": "<img src=x onerror=alert(1)> \u202e general",
+  "question": "<script>alert(1)</script> \u202e question",
+  "error": "MCP <script>alert(1)</script> \u202e error"
+}

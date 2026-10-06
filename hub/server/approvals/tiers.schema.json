@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tiers.schema.json",
+  "title": "fleetmates deck tiers.json",
+  "description": "Risk tier patterns for the deck approvals classifier (docs/deck/07-approvals.md section 4.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "extends": { "enum": ["default", null] },
+    "disable": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "entries": { "type": "array", "items": { "$ref": "#/$defs/entry" } }
+  },
+  "$defs": {
+    "globs": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tier", "tool"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_:-]+)+$" },
+        "tier": { "enum": ["safe", "caution", "destructive"] },
+        "tool": { "type": "string", "minLength": 1 },
+        "cmd": { "type": "string", "minLength": 1 },
+        "anyArg": { "$ref": "#/$defs/globs" },
+        "noneArg": { "$ref": "#/$defs/globs" },
+        "allowOpts": { "$ref": "#/$defs/globs" },
+        "outputOpts": { "$ref": "#/$defs/globs" },
+        "longOpts": { "type": "array", "items": { "type": "string", "pattern": "^--[^=*]+$" } },
+        "pathOperands": { "enum": ["all", "none", "afterFirst"] },
+        "operandOpts": { "$ref": "#/$defs/globs" },
+        "forwardOpts": { "$ref": "#/$defs/globs" },
+        "script": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "sql": { "enum": ["read", "write"] },
+        "path": {
+          "oneOf": [
+            { "enum": ["inRepo", "outsideRepo"] },
+            { "$ref": "#/$defs/globs" }
+          ]
+        },
+        "domain": { "type": "string", "minLength": 1 },
+        "rule": { "type": ["string", "null"] },
+        "ruleNote": { "const": "anyFlags" },
+        "description": { "type": "string" },
+        "confirm": { "type": "string", "minLength": 1 },
+        "count": { "enum": ["push_overwritten", "reset_files", "clean_files", "rm_paths"] },
+        "floor": { "type": "boolean" }
+      },
+      "allOf": [
+        { "if": { "required": ["rule"], "properties": { "rule": { "type": "string" } } }, "then": { "properties": { "tier": { "const": "safe" } } } },
+        { "if": { "required": ["ruleNote"] }, "then": { "properties": { "tier": { "const": "safe" } } } },
+        { "if": { "required": ["confirm"] }, "then": { "properties": { "tier": { "const": "destructive" } } } },
+        { "if": { "required": ["count"] }, "then": { "required": ["confirm"], "properties": { "tier": { "const": "destructive" } } } },
+        { "if": { "required": ["cmd"] }, "then": { "properties": { "tool": { "const": "Bash" } } } },
+        { "if": { "required": ["script"] }, "then": { "required": ["cmd"] } },
+        { "if": { "required": ["sql"] }, "then": { "required": ["cmd"] } }
+      ]
+    }
+  }
+}

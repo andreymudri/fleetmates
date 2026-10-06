@@ -69,15 +69,15 @@ Grid: first column repo names (mono), then 5 pose columns (running, needs you, i
 | Trigger | Result | API or event |
 |---|---|---|
 | Repo Select | switches the Customize target | route `?repo=` |
-| "Reroll" | new seed, preview and every avatar of that repo update | `PUT /api/repos/:repoKey/crew {seed}` |
+| "Reroll" | new seed, preview and every avatar of that repo update | `PATCH /api/repos/:repoKey/crew {seed}` |
 | "Use the original shape" | seed = name | same |
-| Color swatch (arrow keys within the group) | move to that free slot; the old slot becomes free | `PUT … {slot}` (one DB transaction, crew.md 4.2) |
-| Hat option | hat changes | `PUT … {hat}` |
-| "Undo" in the toast | restores the previous seed, slot and hat | `PUT …` |
+| Color swatch (arrow keys within the group) | move to that free slot; the old slot becomes free | `PATCH … {slot}` (one DB transaction, crew.md 4.2) |
+| Hat option | hat changes | `PATCH … {hat}` |
+| "Undo" in the toast | restores the previous seed, slot and hat | `PATCH … {seed, hat}` with the previous values, plus the previous `slot` when the change moved the slot |
 
 ## 7. Real-time updates
 
-`repo.crew` events update every avatar of that repo on every open screen (Home cards, lists, palette rows) without a reload. No animation on the pixels (crew.md 10).
+`repo.upserted` events (05-api section 2.1 folds `repo.crew` into it) update every avatar of that repo on every open screen (Home cards, lists, palette rows) without a reload. No animation on the pixels (crew.md 10).
 
 ## 8. Accessibility
 
@@ -119,6 +119,8 @@ Grid: first column repo names (mono), then 5 pose columns (running, needs you, i
 | `crew.saved` | {repo}'s crew member updated |
 | `crew.saveError` | Could not save the crew change: {error} |
 | `crew.undo` | Undo |
+| `crew.grid.repo` | Repo |
+| `crew.dismiss` | Dismiss |
 
 ## 10. Acceptance criteria
 

@@ -1,0 +1,151 @@
+/* New session form (new-session.md 3 to 5): a 700px form dialog 110px from the top over a scrim, the Repo
+   combobox listbox (at most 8 rows, then it scrolls), the banners and the footer.
+   Values are tokens from tokens.css. Imported once from main.jsx (Task 14). */
+
+.launch-background { pointer-events: none; }
+
+.launch-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-dialog);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 110px;
+  background: var(--overlay-scrim);
+}
+
+/* Alt U on /new opens the Needs-you drawer over the form: while the launch scrim is in the page, the drawer scrim
+   (and the drawer inside it) sits one layer above it, so a click on the drawer never reaches the launch scrim. */
+:root:has(.launch-scrim) .drawer-scrim { z-index: calc(var(--z-dialog) + 1); }
+
+.launch-dialog {
+  --launch-row: 48px;
+  display: flex;
+  flex-direction: column;
+  width: var(--layout-dialog);
+  max-width: calc(100vw - var(--space-32));
+  max-height: calc(100vh - 110px - var(--space-24));
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-3xl);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-dialog);
+  overflow: hidden;
+}
+
+.launch-header { display: flex; flex-direction: column; gap: var(--space-6); padding: var(--space-24) var(--space-24) var(--space-12); }
+.launch-title { margin: 0; font: var(--type-panel-title); color: var(--text-strong); }
+.launch-subtitle { margin: 0; font: var(--type-body); color: var(--text-secondary); }
+
+/* Under 800px of height the body scrolls and the footer stays. */
+.launch-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-16);
+  min-height: 0;
+  padding: var(--space-12) var(--space-24) var(--space-20);
+  overflow-y: auto;
+}
+
+.launch-field { display: flex; flex-direction: column; gap: var(--space-6); min-width: 0; }
+.launch-label { font: var(--type-label); color: var(--text-default); }
+.launch-hint { font: var(--type-meta); color: var(--text-muted); }
+.launch-input,
+.launch-textarea {
+  min-height: var(--size-control-lg);
+  padding: var(--space-8) var(--space-12);
+  border: 1px solid var(--border-field);
+  border-radius: var(--radius-md);
+  background: var(--bg-control);
+  color: var(--text-strong);
+  font: var(--type-body);
+}
+.launch-textarea { resize: vertical; }
+.launch-input:focus,
+.launch-textarea:focus { border-color: var(--border-field-focus); outline: none; }
+.launch-input[readonly],
+.launch-textarea[readonly] { color: var(--text-muted); }
+.launch-input[aria-invalid='true'] { border-color: var(--state-crashed-border); }
+.launch-field-error { margin: 0; font: var(--type-meta); color: var(--text-on-red-tint); }
+
+.launch-list {
+  max-height: calc(8 * var(--launch-row));
+  margin: 0;
+  padding: var(--space-4) 0;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+.launch-group { list-style: none; }
+.launch-group-title { padding: var(--space-6) var(--space-12) var(--space-2); }
+.launch-group-rows { margin: 0; padding: 0; list-style: none; }
+.launch-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-10);
+  min-height: var(--launch-row);
+  padding: 0 var(--space-12);
+  cursor: pointer;
+}
+.launch-option[aria-selected='true'] { background: var(--bg-selected); box-shadow: inset 2px 0 0 var(--focus-ring); }
+.launch-option:hover { background: var(--bg-hover); }
+.launch-option--skeleton { cursor: default; }
+.launch-option--skeleton .skeleton-line {
+  display: block;
+  width: 60%;
+  height: var(--space-10);
+  border-radius: var(--radius-md);
+  background: var(--bg-skeleton);
+}
+.launch-option-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.launch-option-name { color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Long paths keep both ends visible (middle truncation). */
+.launch-option-path {
+  font: var(--type-mono);
+  color: var(--text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  unicode-bidi: plaintext;
+}
+.launch-option-active { flex: none; font: var(--type-meta); color: var(--state-running-fg); }
+.launch-list-empty { margin: 0; font: var(--type-meta); color: var(--text-muted); }
+
+.launch-banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-10) var(--space-12);
+  border: 1px solid var(--state-stale-border);
+  border-radius: var(--radius-md);
+  background: var(--state-stale-bg);
+  color: var(--text-on-amber-tint);
+}
+.launch-banner--error { border-color: var(--state-crashed-border); background: var(--state-crashed-bg); color: var(--text-on-red-tint); }
+.launch-banner:focus { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: var(--focus-ring-offset); }
+.launch-banner-text { margin: 0; overflow-wrap: anywhere; }
+.launch-banner-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-12); }
+.launch-banner-link { color: var(--text-link); }
+.launch-banner-link:hover { color: var(--text-link-hover); }
+
+.launch-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-12);
+  padding: var(--space-16) var(--space-24);
+  border-top: 1px solid var(--border-subtle);
+}
+.launch-note { flex: 1; min-width: 0; margin: 0; font: var(--type-meta); color: var(--text-muted); overflow-wrap: anywhere; }
+.launch-actions { display: flex; gap: var(--space-8); }
+.launch-reason { flex-basis: 100%; margin: 0; text-align: right; font: var(--type-meta); color: var(--text-on-amber-tint); }
+
+.launch-dialog .button--lg { min-height: var(--size-control-lg); padding: 0 var(--space-16); }
+.launch-dialog .button--sm { min-height: var(--size-control-sm); padding: 0 var(--space-12); }
+.launch-dialog .button--teal-outline { background: transparent; color: var(--text-link); border-color: var(--color-teal-700); }
+.launch-dialog .button[disabled] { opacity: 0.55; cursor: not-allowed; }
+.launch-dialog .button[aria-busy='true'] { cursor: progress; }

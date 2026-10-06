@@ -66,6 +66,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-stop.mjs\"",
+            "async": false,
+            "timeout": 20
+          }
+        ]
+      }
     ]
   }
 }

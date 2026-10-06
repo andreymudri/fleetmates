@@ -1,0 +1,86 @@
+{
+  "comment": "A Safe Bash request (npm run test) on synthetic-permission-bash, because the captured permission-2 box prints a fixed Caution command (D-95). 1 allows: PostToolUse and tool-output; 2 denies.",
+  "version": "2.1.285",
+  "sessionId": "auto",
+  "steps": [
+    {
+      "hook": "SessionStart",
+      "with": {
+        "source": "startup"
+      }
+    },
+    {
+      "hook": "PermissionRequest",
+      "variant": "Bash",
+      "with": {
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "npm run test",
+          "description": "Run the tests"
+        }
+      }
+    },
+    {
+      "print": "\u001b[2J\u001b[H"
+    },
+    {
+      "frame": "synthetic-permission-bash",
+      "vars": {
+        "cmd": "npm run test",
+        "description": "Run the tests"
+      }
+    },
+    {
+      "expectKey": {
+        "1": "yes",
+        "2": "no",
+        "timeoutMs": 120000
+      }
+    },
+    {
+      "branch": {
+        "yes": [
+          {
+            "hook": "PostToolUse",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "npm run test",
+                "description": "Run the tests"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "tool-output"
+          }
+        ],
+        "no": [
+          {
+            "hook": "PermissionDenied",
+            "variant": "Bash",
+            "with": {
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "npm run test",
+                "description": "Run the tests"
+              }
+            }
+          },
+          {
+            "print": "\u001b[2J\u001b[H"
+          },
+          {
+            "frame": "idle-input"
+          }
+        ]
+      }
+    },
+    {
+      "sleep": 600000
+    }
+  ]
+}

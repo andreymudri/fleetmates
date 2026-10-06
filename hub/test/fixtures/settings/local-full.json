@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push --force:*)",
+      "Read(./.env)"
+    ],
+    "allow": [
+      "Bash(cargo check:*)",
+      "WebFetch(domain:docs.rs)"
+    ],
+    "ask": [
+      "Bash(git commit:*)"
+    ],
+    "defaultMode": "default",
+    "additionalDirectories": [
+      "../shared-docs"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo edited",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "RUST_LOG": "debug",
+    "CARGO_TERM_COLOR": "always"
+  }
+}

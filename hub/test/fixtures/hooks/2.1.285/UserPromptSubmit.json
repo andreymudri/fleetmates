@@ -1,0 +1,10 @@
+{
+  "session_id": "01J00000000000000000000001",
+  "transcript_path": "/home/you/.claude/projects/fixture/01J00000000000000000000001.jsonl",
+  "cwd": "/home/you/fixture-repo",
+  "scratchpad_dir": "/tmp/claude-1000/-tmp-you-fixture-repo-0000000/01J00000000000000000000001/scratchpad",
+  "prompt_id": "01JQ0000000000000000000002",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "fixture prompt: bash"
+}

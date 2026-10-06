@@ -1,26 +1,67 @@
 {
   "name": "@andreymudri/fleetmates-deck",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.5.0",
+  "description": "fleetmates deck: a local web deck that observes Claude Code sessions",
+  "license": "MIT",
+  "homepage": "https://github.com/andreymudri/fleetmates/tree/master/hub#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andreymudri/fleetmates.git",
+    "directory": "hub"
+  },
+  "bugs": {
+    "url": "https://github.com/andreymudri/fleetmates/issues"
+  },
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=24.2.0"
   },
+  "bin": {
+    "fleetmates-deck": "bin/fleetmates-deck.mjs",
+    "fm": "bin/fm.mjs"
+  },
+  "files": [
+    "bin/",
+    "deckd/",
+    "server/",
+    "hook/",
+    "web/dist/",
+    "systemd/",
+    "vendor/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
   "fleetmatesDeck": {
-    "testedClaudeCode": "2.1.282"
+    "testedClaudeCode": "2.1.285"
   },
   "scripts": {
-    "test": "node --test \"test/**/*.test.mjs\"",
-    "perf": "node test/perf/keystroke-echo.spec.mjs"
+    "build": "vite build --config web/vite.config.mjs",
+    "prepack": "node bin/vendor-fleetmates.mjs && npm run build",
+    "postpack": "node bin/vendor-fleetmates.mjs --clean",
+    "test": "node --test --test-timeout=120000 --test-reporter=tap \"test/**/*.test.mjs\"",
+    "perf": "node test/perf/focus-echo.mjs",
+    "postinstall": "node bin/prepare-native.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-serialize": "0.14.0",
     "@xterm/headless": "6.0.0",
     "@xterm/xterm": "6.0.0",
+    "markdown-it": "15.0.2",
     "node-pty": "1.1.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "ws": "8.22.0"
   },
   "devDependencies": {
-    "playwright-core": "1.63.0"
+    "@andreymudri/vault-mcp": "0.5.0",
+    "axe-core": "4.13.0",
+    "playwright-core": "1.63.0",
+    "vite": "8.3.1"
+  },
+  "allowScripts": {
+    "node-pty": true,
+    "fsevents": true
   }
 }

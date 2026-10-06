@@ -1,3 +1,4 @@
+import { probeCommand } from './probe-command.mjs'
 // The only module in this repository that knows the Cursor CLI (`cursor-agent`), per
 // docs/specs/2026-09-16-headless-driver-cursor-design.md. Everything else talks to
 // `cursorAdapter` through the harness-neutral interface (`scripts/harnesses/index.mjs`).
@@ -309,22 +310,12 @@ export async function cleanup({ sandbox }) {
   }
 }
 
-function status(env) {
-  return new Promise((resolve) => {
-    let text = ''
-    const child = spawnProcess('cursor-agent', ['status'], { env })
-    child.stdout.on('data', (d) => { text += d })
-    child.stderr.on('data', (d) => { text += d })
-    child.on('error', (err) => resolve({ code: -1, text: '', errorCode: err.code }))
-    child.on('close', (code) => resolve({ code: code ?? 1, text }))
-  })
-}
-
 // Logged in, config home writable, and no global policy that widens every teammate (§4.5). Never
 // runs an agent turn.
 export async function probe({ env = process.env } = {}) {
   const home = env.CURSOR_CONFIG_DIR || path.join(os.homedir(), '.cursor')
-  const st = await status(env)
+  const st = await probeCommand('cursor-agent', ['status'], env)
+  if (st.timedOut || st.outputLimited) return { ok: false, reason: 'cursor-agent authentication probe exceeded its execution limits', fix: 'check the Cursor CLI and retry' }
   if (st.code === -1) {
     return { ok: false, reason: `cursor-agent could not be started (${st.errorCode})`, fix: 'install the Cursor CLI' }
   }

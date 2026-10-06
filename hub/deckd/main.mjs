@@ -6,18 +6,30 @@
 // cannot read SO_PEERCRED without a native addon, so deckd does not do it.
 import net from 'node:net'
 import path from 'node:path'
-import { mkdir, chmod, unlink, lstat, readFile } from 'node:fs/promises'
+import { mkdir, chmod, unlink, lstat, stat, readFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
-import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP } from './protocol.mjs'
+import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP, MAX_LINE } from './protocol.mjs'
 import { PtyHost, DeckdError } from './pty-host.mjs'
+import { captureLoginEnv, dropSessionVars, changedNames } from './login-env.mjs'
+import { capHistory } from './screen-model.mjs'
 
 /** How long `exits` keeps an exit record. */
 const EXIT_RETENTION_MS = 24 * 60 * 60 * 1000
+/** Lines and bytes of output an exit record keeps as its `tail`; `history.data` shares the byte cap. */
+const EXIT_TAIL_LINES = 1000
+const EXIT_TAIL_BYTES = 256 * 1024
+/** Most names the hello answer lists in `loginEnvNames`. */
+const LOGIN_ENV_NAMES_MAX = 200
 const SOURCE_KINDS = new Set(['browser', 'deck', 'terminal'])
+/** Optional features a proto 2 hello announces (docs/deck/05-api.md section 5). */
+const FEATURES = ['guardedWrite']
+/** Largest `guard.quietMs` a guarded write accepts. */
+const GUARD_QUIET_MAX_MS = 5000
 
 /**
- * @typedef {{ socket: net.Socket, client: { kind: string, name?: string, pid?: number } | null, dropped: Map<string, number> }} Conn
+ * @typedef {{ socket: net.Socket, client: { kind: string, name?: string, pid?: number } | null, proto: number, dropped: Map<string, number> }} Conn
+ * @typedef {{ ptyId: string, code: number, signal: string | null, at: number, tail: string, history?: import('./screen-model.mjs').History }} ExitRecord
  */
 
 /**
@@ -66,6 +78,24 @@ function checkSource (source) {
 }
 
 /**
+ * Validate a write `guard`: absent, or `{ rev, quietMs }` with an integer
+ * `rev` and an integer `quietMs` from 0 to GUARD_QUIET_MAX_MS, on a write
+ * whose source is `deck`.
+ * @param {any} guard
+ * @param {{ kind: string }} source
+ * @returns {{ rev: number, quietMs: number } | undefined}
+ */
+function checkGuard (guard, source) {
+  if (guard === undefined) return undefined
+  if (!guard || typeof guard !== 'object' || Array.isArray(guard) || !Number.isInteger(guard.rev) ||
+      !Number.isInteger(guard.quietMs) || guard.quietMs < 0 || guard.quietMs > GUARD_QUIET_MAX_MS) {
+    throw new DeckdError('bad_request', `guard must be { rev: integer, quietMs: integer from 0 to ${GUARD_QUIET_MAX_MS} }`)
+  }
+  if (source.kind !== 'deck') throw new DeckdError('bad_request', 'only a deck source may send a guarded write')
+  return { rev: guard.rev, quietMs: guard.quietMs }
+}
+
+/**
  * @param {any} n
  * @param {string} field
  * @returns {number}
@@ -76,11 +106,94 @@ function checkDim (n, field) {
 }
 
 /**
+ * Validate a spawn `env`: absent, or a plain object of string values.
+ * @param {any} env
+ * @returns {Record<string, string>}
+ */
+function checkEnv (env) {
+  if (env === undefined) return {}
+  if (!env || typeof env !== 'object' || Array.isArray(env) || Object.getPrototypeOf(env) !== Object.prototype ||
+      !Object.values(env).every((v) => typeof v === 'string')) {
+    throw new DeckdError('bad_request', 'env must be an object of string values')
+  }
+  return env
+}
+
+/**
+ * Validate a spawn `cwd`: absent, or an absolute path to an existing directory.
+ * @param {any} cwd
+ * @returns {Promise<string | undefined>}
+ */
+async function checkCwd (cwd) {
+  if (cwd === undefined) return undefined
+  if (typeof cwd !== 'string' || !path.isAbsolute(cwd)) throw new DeckdError('bad_request', 'cwd must be an absolute path')
+  const st = await stat(cwd).catch(() => null)
+  if (!st || !st.isDirectory()) throw new DeckdError('bad_request', 'cwd must be an existing directory')
+  return cwd
+}
+
+/**
+ * Refuse a runtime dir that another user owns or that has any group or
+ * world permission bit (docs/deck/08-security.md 4.3).
+ * @param {string} runtimeDir
+ */
+async function checkRuntimeDir (runtimeDir) {
+  const st = await stat(runtimeDir)
+  const mode = (st.mode & 0o777).toString(8).padStart(4, '0')
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+    throw new Error(`runtime dir ${runtimeDir} is owned by uid ${st.uid}, not by this user`)
+  }
+  if ((st.mode & 0o077) !== 0) throw new Error(`runtime dir ${runtimeDir} has mode ${mode}; it must allow no group or world access (0700)`)
+}
+
+/**
+ * The newest EXIT_TAIL_LINES lines of a ring, cut to its last
+ * EXIT_TAIL_BYTES from a line start, base64.
+ * @param {PtyHost} host
+ * @returns {string}
+ */
+function exitTail (host) {
+  let tail = host.ring.tail(EXIT_TAIL_LINES)
+  if (tail.length > EXIT_TAIL_BYTES) {
+    tail = tail.subarray(tail.length - EXIT_TAIL_BYTES)
+    const nl = tail.indexOf(0x0a)
+    if (nl !== -1 && nl + 1 < tail.length) tail = tail.subarray(nl + 1)
+  }
+  return tail.toString('base64')
+}
+
+/**
+ * The PTY's serialized history at exit, `data` cut to `maxBytes` by
+ * dropping whole leading lines. Undefined when serializing fails, so the exit
+ * is still recorded.
+ * @param {PtyHost} host
+ * @param {number} maxBytes
+ * @returns {Promise<import('./screen-model.mjs').History | undefined>}
+ */
+async function exitHistory (host, maxBytes) {
+  try {
+    await host.screen.flush()
+    const history = host.screen.history()
+    return { ...history, data: capHistory(history.data, maxBytes) }
+  } catch (err) {
+    console.error('deckd: could not serialize the history of', host.ptyId, /** @type {Error} */ (err).message)
+    return undefined
+  }
+}
+
+/**
  * Start deckd listening on `$runtimeDir/fleetmates-deck/deckd.sock`.
- * @param {{ runtimeDir: string, outputQueueCap?: number, version?: string }} opts
+ * `loginEnv` is the environment `launched` sessions start from; when absent
+ * it is this process's environment without Claude Code's session variables,
+ * so a caller that passes none never runs a shell.
+ * `historyCap` is the byte cap of an exit record's `history.data`
+ * (EXIT_TAIL_BYTES unless a test sets it).
+ * @param {{ runtimeDir: string, outputQueueCap?: number, version?: string, loginEnv?: Record<string, string>, historyCap?: number }} opts
  * @returns {Promise<{ socketPath: string, bootId: string, close: () => Promise<void> }>}
  */
-export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CAP, version = '0.0.0' }) {
+export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CAP, version = '0.0.0', loginEnv = dropSessionVars(process.env), historyCap = EXIT_TAIL_BYTES }) {
+  await checkRuntimeDir(runtimeDir)
+  const loginEnvNames = changedNames(loginEnv, process.env).slice(0, LOGIN_ENV_NAMES_MAX)
   const { dir, socketPath } = socketPaths(runtimeDir)
   await mkdir(dir, { recursive: true, mode: 0o700 })
   await chmod(dir, 0o700)
@@ -89,7 +202,7 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
   const bootId = randomBytes(8).toString('hex')
   /** @type {Map<string, PtyHost>} */
   const ptys = new Map()
-  /** @type {{ ptyId: string, code: number, signal: string | null, at: number }[]} */
+  /** @type {ExitRecord[]} */
   let exits = []
   /** @type {Set<Conn>} */
   const conns = new Set()
@@ -205,22 +318,36 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       conn.client = { kind: c.kind }
       if (typeof c.name === 'string') conn.client.name = c.name
       if (Number.isInteger(c.pid)) conn.client.pid = c.pid
-      return { proto: Math.min(req.proto, PROTO), deckdVersion: version, bootId }
+      conn.proto = Math.min(req.proto, PROTO)
+      return conn.proto >= 2
+        ? { proto: conn.proto, deckdVersion: version, bootId, loginEnvNames, features: FEATURES }
+        : { proto: conn.proto, deckdVersion: version, bootId }
     },
-    spawn: (_conn, req) => {
+    spawn: async (_conn, req) => {
+      const env = checkEnv(req.env)
+      const cwd = await checkCwd(req.cwd)
+      const origin = req.origin === 'wrapped' ? 'wrapped' : 'launched'
       const host = PtyHost.spawn({
-        cwd: typeof req.cwd === 'string' ? req.cwd : undefined,
+        cwd,
         argv: req.argv,
-        env: req.env && typeof req.env === 'object' ? req.env : undefined,
+        // `wrapped`: the terminal's own environment as fm sent it;
+        // `launched`: the login environment, then what the caller added.
+        baseEnv: origin === 'wrapped' ? {} : loginEnv,
+        env,
         cols: req.cols === undefined ? undefined : checkDim(req.cols, 'cols'),
         rows: req.rows === undefined ? undefined : checkDim(req.rows, 'rows'),
-        origin: req.origin === 'wrapped' ? 'wrapped' : 'launched'
+        origin
       }, {
         onOutput: (h, data) => {
           for (const [conn, { stream }] of h.clients) if (stream) sendOutput(conn, h.ptyId, data)
         },
-        onExit: (h, exit) => {
-          const rec = { ptyId: h.ptyId, ...exit }
+        onExit: async (h, exit) => {
+          const event = { ptyId: h.ptyId, ...exit }
+          // The record (with `history`, read once the screen model has parsed
+          // every byte) is stored before the `exit` event goes out, so a
+          // client that asks `exits` on that event finds it.
+          const history = await exitHistory(h, historyCap)
+          const rec = { ...event, tail: exitTail(h), ...(history ? { history } : {}) }
           const cutoff = Date.now() - EXIT_RETENTION_MS
           exits = exits.filter((e) => e.at >= cutoff)
           exits.push(rec)
@@ -231,7 +358,7 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
           h.unwatchScreen = null
           h.watchers.clear()
           h.dispose()
-          broadcast({ ev: 'exit', ...rec })
+          broadcast({ ev: 'exit', ...event })
         }
       })
       ptys.set(host.ptyId, host)
@@ -239,11 +366,13 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       return { ptyId: host.ptyId, pid: host.pid, startedAt: host.startedAt }
     },
     list: () => ({ ptys: [...ptys.values()].map(hostInfo) }),
-    exits: (_conn, req) => {
+    exits: (conn, req) => {
       const since = Number.isFinite(req.since) ? req.since : 0
       const cutoff = Date.now() - EXIT_RETENTION_MS
       exits = exits.filter((e) => e.at >= cutoff)
-      return { exits: exits.filter((e) => e.at >= since) }
+      const found = exits.filter((e) => e.at >= since)
+      // `tail` and `history` are proto 2 fields.
+      return { exits: conn.proto >= 2 ? found : found.map(({ tail, history, ...e }) => e) }
     },
     attach: (conn, req) => {
       const host = getHost(req.ptyId)
@@ -257,7 +386,7 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       detach(conn, getHost(req.ptyId))
       return {}
     },
-    screen: async (_conn, req) => {
+    screen: async (conn, req) => {
       const host = getHost(req.ptyId)
       await host.screen.flush()
       // `scrollback` is a line count: the newest N lines of raw output.
@@ -268,7 +397,9 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
         rows: host.rows,
         cursor: host.screen.cursor(),
         lines: host.screen.lines(),
-        scrollback: host.ring.tail(n).toString('base64')
+        scrollback: host.ring.tail(n).toString('base64'),
+        // `history` is a proto 2 field, sent only when asked for.
+        ...(req.history === true && conn.proto >= 2 ? { history: host.screen.history() } : {})
       }
     },
     watchScreen: (conn, req) => {
@@ -289,8 +420,9 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       const host = getHost(req.ptyId)
       const source = checkSource(req.source)
       if (typeof req.data !== 'string') throw new DeckdError('bad_request', 'data must be base64')
+      const guard = checkGuard(req.guard, source)
       const data = Buffer.from(req.data, 'base64')
-      const at = host.write(data, source)
+      const at = host.write(data, source, guard)
       broadcast({ ev: 'input', ptyId: host.ptyId, source, at, bytes: data.length })
       return { at }
     },
@@ -333,11 +465,12 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
 
   const server = net.createServer((socket) => {
     /** @type {Conn} */
-    const conn = { socket, client: null, dropped: new Map() }
+    const conn = { socket, client: null, proto: 0, dropped: new Map() }
     conns.add(conn)
     const decode = createLineDecoder(
       (msg) => { handle(conn, msg) },
-      (e) => send(conn, { ok: false, error: { code: e.code, message: 'line is not JSON' } })
+      (e) => send(conn, { ok: false, error: { code: e.code, message: e.code === 'line_too_long' ? `line is longer than ${MAX_LINE} bytes` : 'line is not JSON' } }),
+      { maxLine: MAX_LINE }
     )
     socket.on('data', decode)
     socket.on('error', () => {})
@@ -383,10 +516,23 @@ async function main () {
   }
   const cap = Number(process.env.DECKD_OUTPUT_QUEUE_CAP)
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  // DECKD_LOGIN_ENV=inherit skips the login-shell probe; nothing else does.
+  // Every test and perf harness that starts this file sets it.
+  const skipProbe = process.env.DECKD_LOGIN_ENV === 'inherit'
+  /** @type {string | null} */
+  let failed = null
+  const loginEnv = skipProbe
+    ? dropSessionVars(process.env)
+    : await captureLoginEnv({ onFallback: (reason) => { failed = reason } })
+  const added = changedNames(loginEnv, process.env)
+  if (skipProbe) console.error('deckd: login environment probe skipped (DECKD_LOGIN_ENV=inherit), using the service environment')
+  else if (failed) console.error(`deckd: login environment probe failed (${failed}), using the service environment`)
+  else console.error(`deckd: login environment adds ${added.length} names${added.length ? ': ' + added.join(', ') : ''}`)
   const deckd = await startDeckd({
     runtimeDir,
     outputQueueCap: Number.isInteger(cap) && cap > 0 ? cap : OUTPUT_QUEUE_CAP,
-    version: pkg.version
+    version: pkg.version,
+    loginEnv
   })
   console.error(`deckd listening on ${deckd.socketPath}`)
   let closing = false

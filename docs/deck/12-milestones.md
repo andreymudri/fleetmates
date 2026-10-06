@@ -1,6 +1,6 @@
 # 12 · Milestones and delivery plan
 
-Status labels as in [02-domain.md](02-domain.md). **Decided**: the milestone sequence M0 to M6 and its content in outline (D-44, with the order "observe first" chosen explicitly: M1 status and alerts, M2 launch and chat, M3 unblock), public release at M1, the M1 done criterion (3+ parallel sessions for a full work week without opening a pane to check status), capacity of 10+ hours a week, and the Later list. The rule "do not start M4 until M1 passes its one-week test" was proposed during design and not contested; this plan treats it as binding. **Proposed**: scope splits per screen, deliverables, exit criteria wording, task breakdowns, relative sizes, and the per-milestone assignment of Open items (no existing doc had a "Blocks milestone" column; the assignment here is this doc's).
+Status labels as in [02-domain.md](02-domain.md). **Decided**: the milestone sequence M0 to M6 and its content in outline (D-44, with the order "observe first" chosen explicitly: M1 status and alerts, M2 launch and chat, M3 unblock), public release at M1, the M1 done criterion (3+ parallel sessions for a full work week without opening a pane to check status), capacity of 10+ hours a week, and the Later list. The rule "do not start M4 until M1 passes its one-week test" was proposed during design and not contested; the owner waived it for M4 on 2026-10-04 (D-104), and the M1 week is still pending. **Proposed**: scope splits per screen, deliverables, exit criteria wording, task breakdowns, relative sizes, and the per-milestone assignment of Open items (no existing doc had a "Blocks milestone" column; the assignment here is this doc's).
 
 Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integrations.md), [09-testing.md](09-testing.md) (exit tests, dogfood week), [13-operations.md](13-operations.md) (release), [screens/README.md](screens/README.md) (screen index with milestones), [15-open-questions.md](15-open-questions.md).
 
@@ -27,7 +27,7 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 1. **Order**: M0, M1, M2, M3, then M4, M5, M6 (Decided sequence). Work inside a milestone may run in parallel as fleetmates team runs (section 10).
 2. **Public at M1** (Decided). The M1 release checklist is in [13-operations.md](13-operations.md) section 13.5.
-3. **Gate: do not start M4 until M1 passes its one-week test** ([09-testing.md](09-testing.md) section 13). Reason given during design: the scope doubled with memory, research and meetings; the core must prove itself first. MS-O2 asks how far the gate reaches (default: all deck work from M4 on, but not separate-repo PRs).
+3. **Gate: do not start M4 until M1 passes its one-week test** ([09-testing.md](09-testing.md) section 13). Reason given during design: the scope doubled with memory, research and meetings; the core must prove itself first. **Waived for M4** by the owner on 2026-10-04 (D-104, MS-O2 Decided): M4 starts after M3. **Waived for M5 and M6** by the owner on 2026-10-04 (D-125): neither waits for the week. The M1 dogfood week is still pending in [m1-exit.md](m1-exit.md), and neither M4 nor M5 claims it.
 4. **Open items**: each milestone lists the Open items that must be decided before it starts, and the ones whose default can ship but must be confirmed before it exits (section 9).
 5. **Exit is testable**: every exit criterion below names an automated test, a measured number or a manual protocol with a pass rule.
 
@@ -41,7 +41,7 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 | Repo | Deliverables |
 |---|---|
-| fleetmates `hub/` | `deckd/` skeleton; `bin/fm.mjs` (claude, attach); `test/capture/`; `test/fake-claude/`; `test/fixtures/hooks/<v>/`, `screens/<v>/`; `test/fixtures/scribed/` hand-copied from the expectations in TurbidAssist's `tests/realtime/test_protocol.py` and reviewed; `server/adapters/scribed.mjs` (minimal); spike page (deleted at M1) |
+| fleetmates `hub/` | `deckd/` skeleton; `bin/fm.mjs` (claude, attach); `test/capture/`; `test/fake-claude/`; `test/fixtures/hooks/<v>/`, `screens/<v>/`; `test/fixtures/scribed/` hand-copied from the expectations in TurbidAssist's `tests/realtime/test_protocol.py` and reviewed; `server/adapters/scribed.mjs` (minimal); spike page (deleted at M2) |
 | fleetmates root | none |
 | vault-mcp | none |
 | TurbidAssist | none required. The protocol fixture exporter (T0; TEST-O3, MTG-O3) is optional until M4 |
@@ -144,7 +144,7 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 3. Rules: suggestion after the configured count; write and revoke preserve every other key and the order in `settings.local.json` fixtures; external edits show as "added by hand".
 4. Manual: real Claude Code smoke answering all three options from the browser on the pinned version ([09-testing.md](09-testing.md) section 5.4).
 5. Manual: one working week answering permission prompts from the deck with zero answers delivered to a prompt other than the one shown.
-6. The design-oversight review of the tiers (Q4, APR-O1) is done and its findings are resolved before this milestone starts (section 9).
+6. The design-oversight review of the tiers (Q4, APR-O1) is done and its findings are resolved before this milestone starts (section 9). The review ran on 2026-10-02 ([reviews/2026-10-02-tier-oversight.md](reviews/2026-10-02-tier-oversight.md)) and the owner resolved it the same day (D-75 to D-83).
 
 **Dependencies**: M2 (PTY bridge, PromptBar host, screen model in production).
 
@@ -152,16 +152,16 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 **Goal.** Meetings in v1 (Decided): list past meetings with summaries, start and stop recording, live transcript and ask, through TurbidAssist's `scribed` socket.
 
-**Gate**: starts only after M1 passed its one-week test (section 1.2 rule 3).
+**Gate**: waived by the owner on 2026-10-04 (D-104): M4 starts after M3. The M1 one-week test (section 1.2 rule 3) is still pending in [m1-exit.md](m1-exit.md).
 
-**Scope in**: full scribed client (per-request connections, long-lived `subscribe`, 2 s status poll); meeting machine and post-states from `session.json` and vault notes; Record with a tag from `config.yaml`; rec bar on every screen; pins stored by the deck; confidential tag handling (no transcript text persisted); live ask per MEET-O4; "Start scribed" per OPS-O1; scribed degraded card; quiet mode wired to the full meeting machine.
+**Scope in**: full scribed client (per-request connections, long-lived `subscribe`, 2 s status poll); meeting machine and post-states from `session.json` and vault notes; Record with a tag from `config.yaml`; rec bar on every screen; pins stored by the deck; confidential tag handling (no transcript text persisted); live ask through scribed `ask`, transcript only (MEET-O4, D-105); "Start scribed" with `systemd-run` (OPS-O1, D-106); scribed degraded card; quiet mode wired to the full meeting machine.
 
 **Scope out**: in-deck speaker naming (SM-O14 default: hint only), live decisions and action items (not produced live, MEET-O9).
 
 | Repo | Deliverables |
 |---|---|
 | fleetmates `hub/` | `server/adapters/scribed.mjs` complete, meeting machine, history reader, pins; `web/` Meetings list, detail, search, live, rec bar |
-| TurbidAssist | Fixture exporter current with the protocol; optional, only if decided: a `scribed` user unit (SM-O13), a `pin` command (MEET-O2), vault access in `ask` (MEET-O4) |
+| TurbidAssist | None from the fleet. The fixture exporter (T0, D-108) is the owner's, and none exists at d4ffb9d. T1 (`pin`), T2 (status push), T3 (vault in `ask`) and T4 (`scribed.service`) are not taken (2026-10-04) |
 | vault-mcp | none |
 
 **Screens**: [meetings.md](screens/meetings.md), [rail-and-shell.md](screens/rail-and-shell.md) (rec bar, rec dot), [failures-and-loading.md](screens/failures-and-loading.md) (scribed degraded), [home.md](screens/home.md) (Calm "last meeting").
@@ -170,17 +170,19 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 **Exit criteria**:
 
-1. scribed contract tests green against fixtures exported from the current TurbidAssist commit.
+1. scribed contract tests green against fixtures exported from the current TurbidAssist commit. Until TurbidAssist has an exporter (D-108), the contract tests run on the hand-copied `d4ffb9d` fixtures (tag placeholder `acme`, D-111), and this criterion is owner-pending.
 2. With fake scribed: start, recording, a `stop` taking 30 s, post-states through `synthesized`; socket loss mid-recording; scribed down keeps past meetings listed.
 3. Confidential tag: zero sentinel transcript strings in the database, WAL, logs and spool (automated).
 4. Quiet mode: during a recording, requests produce popups and no bell (integration test with the notify and `pw-play` shims).
 5. Manual: three real meetings recorded end to end from the deck, at least one with a confidential tag; a web server restart during a recording does not stop it (OPS-O1).
 
-**Dependencies**: M1 passed its week (gate); M1 shell. Technically independent of M2 and M3.
+**Dependencies**: M1 shell (the M1 week gate is waived for M4, D-104). Technically independent of M2 and M3.
 
 ## 7. M5 · Memory ask
 
 **Goal.** Ask the Obsidian vault and see it as a second brain with its connections (Decided), through vault-mcp only (Decided), with answers citing `path:line` and every miss logged (Decided: measure first, no embeddings).
+
+**Gate**: waived by the owner on 2026-10-04 for M5 and M6 (D-125). The M1 one-week test (section 1.2 rule 3) is still pending in [m1-exit.md](m1-exit.md), and M5 does not claim it.
 
 **Scope in**: long-lived vault-mcp client and health; Ask engine (`claude -p` with vault-mcp as its only tool, Decided) with threads, citations, general-knowledge block, misses; Memory tab (Graph with clusters and local graph, Browse by MOC, Captures, Misses, note panel); palette `?` ask and Memory group; Focus Memory tab; golden query export process.
 
@@ -188,7 +190,7 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 | Repo | Deliverables |
 |---|---|
-| vault-mcp | `vault_graph` tool and `structuredContent` for `vault_get_note` and `vault_list` ([reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) 1.11), with tests; release 0.4 on npm |
+| vault-mcp | `vault_graph` tool ([reference/vault-turbid-contract.md](reference/vault-turbid-contract.md) 1.11, shape accepted as written, D-129), with tests. The fleet builds it from a separate vault-mcp plan on a local branch of the vault-mcp repository and never pushes, tags or publishes; the owner publishes 0.4.0 to npm (D-126). `structuredContent` for `vault_get_note` and `vault_list` is not in that plan, so the deck keeps its text parsers |
 | fleetmates `hub/` | `server/adapters/vault-mcp.mjs`, `server/ask/`, misses; `web/` Memory screens, palette ask, Focus Memory tab; golden query export command |
 | TurbidAssist | none |
 
@@ -198,13 +200,13 @@ Related: [03-architecture.md](03-architecture.md), [04-integrations.md](04-integ
 
 **Exit criteria**:
 
-1. vault-mcp 0.4 published with `vault_graph`; the deck's tool schema snapshot test pins it.
+1. vault-mcp 0.4 published with `vault_graph`; the deck's tool schema snapshot test pins it. Published 0.4.0 is available and the prepared M5 implementation pins that exact devDependency with a regenerated `tools/list` snapshot; see [m5-exit.md](m5-exit.md).
 2. Memory acceptance criteria green with fixture `vault22`; Ask tests with fake `claude -p`: cited answer, miss logged with "Research this", general knowledge kept separate, argv check refuses any write tool.
 3. Graph budget met: under 500 ms at 1,000 notes.
 4. Golden queries: two weeks of real misses exported, reviewed, and the qualifying ones added to vault-mcp's suite.
 5. Manual: 20 real questions about the owner's vault; each answer cites `path:line` or is logged as a miss.
 
-**Dependencies**: M1 shell; vault-mcp 0.4. Gate from section 1.2.
+**Dependencies**: M1 shell; vault-mcp 0.4.0 for the graph (the deck degrades when the installed vault-mcp lacks `vault_graph`, D-126). The section 1.2 gate is waived for M5 (D-125).
 
 ## 8. M6 · Deep research
 
@@ -256,29 +258,29 @@ Collected from every doc (IDs with `-O` numbers, plus design-system section 15 a
 
 | When | Items |
 |---|---|
-| Before start | Q18 in [15-open-questions.md](15-open-questions.md) (unwrapped sessions read-only; `fm claude` fallback when deckd is down); SM-O5 / NEW-O1 (second plain session in the same repo, "Run as a fleetmates job"); FOC-O1 (Focus for a teammate); OPS-O2 if M0 left it open |
+| Before start | Decided on 2026-10-01: Q18 (D-67, unwrapped sessions read-only and the `fm claude` fallback when deckd is down); SM-O5 / NEW-O1 (D-68, second plain session in the same repo, "Run as a fleetmates job"); FOC-O1 (D-69, Focus for a teammate). OPS-O2 was answered by the M0 spike |
 | Before exit | NEW-O2 (scan depth); NEW-O3 (themed "Launch a ship"); TEAM-O2 to TEAM-O6 (gate sentence, elapsed time, gate checking, Open plan, teammate terminals); design-system 15.6 (xterm screen reader mode default); keyboard.md section 5 (Alt chords vs Claude Code and Hyprland) |
 
 ### M3
 
 | When | Items |
 |---|---|
-| Before start | Design-oversight review of the tiers (Q4, APR-O1, not yet run); SM-O9 / DRW-O4 (Caution from a popup); DRW-O1 (Destructive confirm label); SM-O10 (terminal approvals count toward rules); SM-O11 (Safe request with no tiers.json pattern) |
-| Before exit | SET-O4 (threshold options 5 / 3 / Never, re-offer after dismissal) |
+| Before start | All decided. Design-oversight review of the tiers (Q4, APR-O1): done 2026-10-02 and resolved by the owner (D-75 to D-83), which also decides APR-O2, APR-O3 and APR-O4; SM-O9 / DRW-O4 (Caution from a popup): D-71; DRW-O1 (Destructive confirm label): D-72; SM-O10 (terminal approvals count toward rules): D-73; SM-O11 (Safe request with no tiers.json pattern): D-74; fixture recapture for the corpus (Q8, F17): D-83; typing guard on both input sides: D-84; npm and pnpm script rules: D-86 |
+| Before exit | SET-O4 (threshold options 5 / 3 / Never, re-offer after dismissal); PAL-O3 (palette Enter) decided by D-85 |
 
 ### M4
 
 | When | Items |
 |---|---|
-| Before start | Gate: M1 week passed; MS-O2 (gate scope); MEET-O4 (live ask engine and vault access); MEET-O11 (TurbidAssist config location); SM-O13 / MEET-O10 / OPS-O1 (how scribed is started); TEST-O3 (fixture exporter location) |
-| Before exit | MEET-O1 (source label); MEET-O2 (pins); MEET-O3 (live title); MEET-O5 (partial lines); MEET-O6 / HOME-O8 ("Launch as session" from action items, Q6); MEET-O7 (confidential search); MEET-O8 (save answer to note); SM-O14 (speaker naming) |
+| Before start | All decided on 2026-10-04. Gate (M1 week passed): waived for M4 by D-104, and the week is still pending; MS-O2 (gate scope): D-104; MEET-O4 (live ask engine and vault access): D-105; SM-O13 / MEET-O10 / OPS-O1 / FAIL-O1 / FR-O2 (how scribed is started): D-106; MEET-O11 (TurbidAssist config location): D-107; TEST-O3 / MTG-O3 (fixture exporter location): D-108; MEET-O7 (confidential search): D-109; scribed protocol limits: D-110; fixture placeholder tag: D-111. The M4 plan's own decisions are D-112 to D-124 |
+| Before exit | Defaults applied in M4, which the owner may revisit before exit: MEET-O1 (source label: the deck records the `routed_apps` it sees while polling into its meeting row; none shows no source item); MEET-O2 (pins stored and shown by the deck only); MEET-O3 (live title "{Tag} · started {time}"); MEET-O5 (no partial lines; "Listening…" after 5 s without a new line); MEET-O6 / HOME-O8 / Q6 (action items in M4, deck-only state; "Launch as session" opens the new-session form with the task and the repo picker focused; "Dismiss" with Undo for 6 s; "Research first" not rendered until M6); MEET-O8 (no "Save answer to meeting note" button); SM-O14 (speaker naming: the `postmeet name` hint only); MTG-O1 (notes read from disk, D-114); MTG-O2 (poll `status` every 2 s); MTG-O4 (action-item states deck-only); DB-O2 (an unknown tag, or any meeting while `config.yaml` is unreadable, is confidential); and the plan decisions D-112 to D-124 |
 
 ### M5
 
 | When | Items |
 |---|---|
-| Before start | MEM-O8 (Memory UI to be revisited with the owner: "we will talk more on the ui subject later", Q5); MEM-O1 (`vault_graph` API shape, Q8); MEM-O2 (misses log storage, Q8); SM-O16 / MEM-O7 (Ask output contract) |
-| Before exit | MEM-O3 (captures and new notes); MEM-O4 (revert captures); MEM-O5 (Obsidian vault name); PAL-O1 (link counts) |
+| Before start | All decided on 2026-10-04. Gate (M1 week passed): waived for M5 and M6 by D-125, and the week is still pending; MS-O2 (gate scope): D-125; vault-mcp work and release: D-126; MEM-O8 / Q5 (Memory UI): D-127; MEM-O1 / Q8 (`vault_graph` shape): D-129; MEM-O2 / Q8 (misses log storage): D-130; SM-O16 / MEM-O7 (Ask output contract): D-131; KB-O1 (`--restricted` only, proven by an owner-run check): D-132; backup scrub when a meeting rises to confidential: D-133. The M5 plan's own decisions are D-134 to D-148 |
+| Before exit | MEM-O5 (Obsidian vault name): decided, D-128; MEM-O3 (captures and new notes) and MEM-O4 (no Revert in v1): decided on 2026-10-04, built as D-137; PAL-O1 (link counts): default applied, the folder only. Defaults applied in M5, which the owner may revisit before exit: MEM-O6 / FOC-O4 (only `vault_get_note` reads are listed, D-138); DB-O3 (threads, misses and captures kept forever); and the plan decisions D-134 to D-148 |
 
 ### M6
 
@@ -303,7 +305,7 @@ Sized for fleetmates team runs: each task owns a disjoint file set so teammates 
 | T2 Capture script and fake `claude` v0 | `hub/test/capture/*`, `hub/test/fake-claude/*`, `hub/test/fixtures/hooks/<v>/*`, `hub/test/fixtures/screens/<v>/*`, `hub/test/fixtures/scripts/*` | none |
 | T3 Screen model and prompt parser | `hub/deckd/screen/*`, `hub/test/contract/screens.test.mjs` | T2 |
 | T4 `fm claude` and `fm attach` minimal | `hub/bin/fm.mjs`, `hub/deckd/client.mjs`, `hub/test/integration/fm.test.mjs` | T1 |
-| T5 Spike web page: xterm.js bridged to deckd over WebSocket | `hub/spike/*` (deleted at M1) | T1 |
+| T5 Spike web page: xterm.js bridged to deckd over WebSocket | `hub/spike/*` (deleted at M2) | T1 |
 | T6 scribed client minimal and fixtures | `hub/server/adapters/scribed.mjs`, `hub/test/contract/scribed.test.mjs`, `hub/test/fixtures/scribed/*`; TurbidAssist `scripts/export_protocol_fixtures.py` | none |
 | T7 Measurements and spike report | `hub/test/perf/keystroke-echo.spec.mjs`, `docs/deck/spikes/m0.md` | T3, T4, T5 |
 
@@ -356,23 +358,26 @@ Sized for fleetmates team runs: each task owns a disjoint file set so teammates 
 | Task | Owns | Depends |
 |---|---|---|
 | T1 scribed client complete and fake scribed | `hub/server/adapters/scribed.mjs`, `hub/test/fakes/fake-scribed.mjs`, `hub/test/contract/scribed.test.mjs` | none |
-| T2 Meeting machine, history reader, pins, confidential rules | `hub/server/meetings/*` | T1 |
+| T2 Meeting machine, history reader, pins, confidential rules | `hub/server/meetings/*.mjs` | T1 |
 | T3 Starting scribed (OPS-O1) | `hub/server/meetings/start-scribed.mjs` | T1 |
-| T4 Meetings list, detail, search | `hub/web/src/screens/meetings/*` | T2 |
-| T5 Meeting live, rec bar, quiet mode wiring | `hub/web/src/screens/meeting-live/*`, `hub/web/src/shell/rec-bar/*` | T2 |
+| T4 Meetings list, detail, search | `hub/web/src/screens/meetings/Meetings.jsx`, `hub/web/src/screens/meetings/MeetingDetail.jsx` | T2 |
+| T5 Meeting live, rec bar, quiet mode wiring | `hub/web/src/screens/meetings/MeetingLive.jsx`, `hub/web/src/shell/RecBar.jsx` (one file per screen, D-124) | T2 |
 | T6 "Launch as session" from action items (only if MEET-O6 says v1) | `hub/web/src/screens/meetings/actions/*` | T4 |
 
 ### 10.6 M5
 
 | Task | Owns | Depends |
 |---|---|---|
-| V1 (vault-mcp repo) `vault_graph` and `structuredContent`, release 0.4 | vault-mcp `src/server/tools.ts`, `src/graph/*`, tests | none |
-| T1 vault-mcp client, parsers, health | `hub/server/adapters/vault-mcp.mjs`, `hub/test/contract/vault-mcp.test.mjs` | V1 |
-| T2 Ask engine and misses | `hub/server/ask/*`, `hub/test/fixtures/claude-p/*` | none |
-| T3 Memory graph view | `hub/web/src/screens/memory/graph/*` | T1 |
-| T4 Browse by MOC, note panel, Captures, Misses | `hub/web/src/screens/memory/browse/*`, `.../note/*`, `.../captures/*`, `.../misses/*` | T1 |
-| T5 Ask thread UI, palette `?`, Focus Memory tab | `hub/web/src/screens/memory/ask/*`, `hub/web/src/screens/palette/ask/*`, `hub/web/src/screens/focus/memory/*` | T2 |
-| T6 Golden query export command | `hub/bin/fleetmates-deck.mjs` (export subcommand), `hub/server/ask/export-misses.mjs` | T2 |
+| V1 (vault-mcp repo, its own plan run there on a local branch; the owner publishes, D-126) `vault_graph`, release 0.4.0 | vault-mcp `src/server/tools.ts`, `src/graph/*`, tests | none |
+| T1 vault-mcp client, parsers, health (hand-written client, D-134) | `hub/server/adapters/vault-mcp.mjs`, `hub/server/adapters/vault-text.mjs`, `hub/test/fakes/fake-vault-mcp.mjs`, `hub/test/contract/vault-mcp.test.mjs` (D-135) | none (degrades without V1) |
+| T2 Ask engine and misses | `hub/server/ask/engine.mjs`, `answer.mjs`, `store.mjs`, `service.mjs`, `hub/test/fixtures/claude-p/synthetic/*` (D-146) | none |
+| T3 Vault service, captures, hook observation | `hub/server/vault/service.mjs`, `captures.mjs`, `observe.mjs` | T1 |
+| T4 Memory screen, graph view and layout | `hub/web/src/screens/memory/Memory.jsx`, `KnowledgeGraph.jsx`, `graph-layout.js` (D-136) | T3 |
+| T5 Browse by MOC, note panel, Captures, Misses | `hub/web/src/screens/memory/NotePanel.jsx`, `MemoryLists.jsx` | T3 |
+| T6 Ask thread UI, palette `?`, Focus Memory tab | `hub/web/src/screens/memory/AskPanel.jsx`, `hub/web/src/screens/palette/Palette.jsx`, `hub/web/src/screens/focus/Focus.jsx` | T2 |
+| T7 Golden query export command (D-148) | `hub/bin/fleetmates-deck.mjs` (export subcommand), `hub/server/ask/export-misses.mjs` | T2 |
+
+File names follow the one-file-per-screen convention (D-147), not the per-view directories of the first draft. The run plan ([docs/plans/2026-10-04-deck-m5.md](../plans/2026-10-04-deck-m5.md)) has the authoritative task list.
 
 ### 10.7 M6
 
@@ -402,5 +407,5 @@ Sized for fleetmates team runs: each task owns a disjoint file set so teammates 
 | ID | Question | Default until decided | Blocks milestone |
 |---|---|---|---|
 | MS-O1 | M1 includes "jump to session" (palette, `Alt 1..9`) but Focus is M2. What does a jump open in M1? | The read-only Focus layout already specified for observed sessions in [screens/focus.md](screens/focus.md) (header, activity log, requests with "Answer in your terminal", no terminal), pulled forward into M1. | M1 |
-| MS-O2 | How far does "do not start M4 until M1 passes its one-week test" reach: only M4, or every milestone after M3; and does it hold PRs in vault-mcp and TurbidAssist (`vault_graph`, `preview`, fixture exporter)? | Holds all deck work from M4 on; separate-repo PRs may proceed at any time. | M4 |
+| MS-O2 | How far does "do not start M4 until M1 passes its one-week test" reach: only M4, or every milestone after M3; and does it hold PRs in vault-mcp and TurbidAssist (`vault_graph`, `preview`, fixture exporter)? | **Decided** 2026-10-04 (D-104, D-125): the gate is waived for M4, which starts after M3, and for M5 and M6; the M1 week is still pending in [m1-exit.md](m1-exit.md). The vault-mcp work is done by the fleet on a local branch and the owner publishes (D-126). | M4, M5 and M6 (decided) |
 | MS-O3 | "Show rate-limit state instead of dollars" (D-09, Q16) has no screen and no milestone. | Later; not in any v1 milestone. | none |

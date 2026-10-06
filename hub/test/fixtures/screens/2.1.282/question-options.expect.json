@@ -7,7 +7,10 @@
       { "key": "2", "label": "B" },
       { "key": "3", "label": "Type something." },
       { "key": "4", "label": "Chat about this" }
-    ]
+    ],
+    "title": "☐ Choice",
+    "body": "",
+    "truncated": false
   },
   "idle": false,
   "statusRows": []

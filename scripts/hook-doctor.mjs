@@ -2,13 +2,14 @@
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
 import { readEvents } from './event-ledger.mjs'
-import { HOOK_NAMES, receiptPath } from './context-hook.mjs'
+import { HOOK_NAMES, receiptPath, stopReceiptPath } from './context-hook.mjs'
 
-export async function hookDoctor({ env = process.env, now = Date.now(), maxAgeMs = 24 * 60 * 60 * 1000, sessionId } = {}) {
+export async function hookDoctor({ env = process.env, now = Date.now(), maxAgeMs = 24 * 60 * 60 * 1000, sessionId, includeStop = false } = {}) {
   const { fingerprint } = await import('./event-ledger.mjs')
   const events = await readEvents(receiptPath(env))
+  if (includeStop) events.push(...await readEvents(stopReceiptPath(env)))
   const session = sessionId === undefined ? undefined : fingerprint(sessionId)
-  const hooks = HOOK_NAMES.map(hook => {
+  const hooks = [...HOOK_NAMES, ...(includeStop ? ['Stop'] : [])].map(hook => {
     const observed = events.filter(e => e.kind === 'hook-fired' && e.hook === hook && e.at <= now && now - e.at <= maxAgeMs && (session === undefined || e.fingerprint === session))
     return { hook, state: observed.length ? 'observed' : 'unverified', lastAt: observed.at(-1)?.at ?? null }
   })

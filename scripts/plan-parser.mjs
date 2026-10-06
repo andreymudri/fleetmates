@@ -2,6 +2,7 @@
 // agent-written file, and `doctor`, `liveness`, `plan-drift` and `init-run` all print this
 // message to stdout. Neutralised here once, so no print site can forget to.
 import { printable } from './reviews.mjs'
+import { validUiTarget } from './ui-targets.mjs'
 
 const TASK_HEADING = /^###\s+Task\s+(\d+)\s*:\s*(.+?)\s*$/
 const FILES_HEADING = /^\*\*Files:\*\*\s*$/
@@ -92,6 +93,17 @@ export function parsePlan(markdown) {
         .split(',')
         .map((d) => d.trim())
         .filter((d) => !NO_DEPS_SENTINELS.has(d.toLowerCase()))
+      inFiles = false
+      continue
+    }
+
+    const ui = /^ui:\s*(.*)$/.exec(line)
+    if (ui) {
+      const targets = ui[1].split(',').map(file => file.trim())
+      if (current.ui || targets.length > 20 || new Set(targets).size !== targets.length || targets.some(file => !validUiTarget(file))) {
+        throw new PlanParseError('UI targets require one nonempty declaration of unique repository-relative Markdown, HTML or SVG paths')
+      }
+      current.ui = targets
       inFiles = false
       continue
     }

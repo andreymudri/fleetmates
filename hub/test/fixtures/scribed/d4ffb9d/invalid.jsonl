@@ -6,7 +6,7 @@
 {"line": "[\"lista\"]", "side": "event", "message": "esperado objeto JSON, veio list"}
 {"line": "{\"sem\": \"discriminador\"}", "side": "command", "message": "mensagem sem discriminador: falta 'cmd' ou 'type'"}
 {"line": "{\"sem\": \"discriminador\"}", "side": "event", "message": "mensagem sem discriminador: falta 'cmd' ou 'type'"}
-{"line": "{\"cmd\": \"start\", \"tag\": \"optimas\"}", "side": "event", "message": "esperado Event, veio StartCmd"}
+{"line": "{\"cmd\": \"start\", \"tag\": \"acme\"}", "side": "event", "message": "esperado Event, veio StartCmd"}
 {"line": "{\"type\": \"ask_done\"}", "side": "command", "message": "esperado Command, veio AskDone"}
 {"line": "{\"cmd\": \"start\"}", "side": "command", "message": "start: chave 'tag' ausente"}
 {"line": "{\"cmd\": \"tail\", \"minutes\": \"cinco\"}", "side": "command", "message": "tail.minutes: esperado número, veio str"}

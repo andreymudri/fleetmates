@@ -69,7 +69,10 @@ test('a two-option prompt yields exactly two options, verbatim', () => {
     options: [
       { key: '1', label: 'Yes' },
       { key: '2', label: 'No, and tell Claude what to do differently (esc)' }
-    ]
+    ],
+    title: 'Edit file',
+    body: '1. read the file\n2. write it back',
+    truncated: false
   })
   assert.equal(idle, false)
   assert.deepEqual(statusRows, [])
@@ -156,7 +159,10 @@ test('the question box parses the same whichever option carries the ❯ cursor',
       { key: '2', label: 'B' },
       { key: '3', label: 'Type something.' },
       { key: '4', label: 'Chat about this' }
-    ]
+    ],
+    title: '☐ Choice',
+    body: '',
+    truncated: false
   }
   const row = (/** @type {string} */ key) => base.findIndex((l) => new RegExp(`^(❯| ) ${key}\\. `).test(l))
   assert.equal(base[row('1')], '❯ 1. A', 'the committed frame has the cursor on option 1')
@@ -181,7 +187,10 @@ test('a trust box without blank rows keeps the question out of the options', () 
     options: [
       { key: null, label: 'Yes, I trust this folder' },
       { key: null, label: 'No, exit' }
-    ]
+    ],
+    title: null,
+    body: null,
+    truncated: false
   })
 })
 
@@ -222,7 +231,11 @@ test('long near-miss rows for every screen pattern parse fast', async () => {
       ' '.repeat(W) + tail, // RIGHT_ALIGNED
       '✻ ' + a + tail, // SPINNER
       'Esc to cance'.repeat(W / 12) + tail, // FOOTER
-      'Yes, I trus'.repeat(W / 11) + tail // trust label
+      '❯ 1. ' + '(esc)'.repeat(W / 5) + tail, // ESC_OPTION
+      'Yes, I trus'.repeat(W / 11) + tail, // trust label
+      '│ ' + a + tail, // GUTTER
+      ' │' + ' '.repeat(W) + tail, // GUTTER after its space
+      a + '…'.repeat(W / 2) + tail // CUT
     )
   }
   /** @type {{ name: string, lines: string[], cursor: { x: number, y: number } }[]} */
@@ -294,7 +307,10 @@ test('a number in an option description does not break the option run', () => {
       { key: '2', label: 'Safe' },
       { key: '3', label: 'Type something.' },
       { key: '4', label: 'Chat about this' }
-    ]
+    ],
+    title: '☐ Plan',
+    body: '',
+    truncated: false
   })
 })
 
@@ -343,4 +359,140 @@ test('a box printed above a live input box is transcript, not a prompt', () => {
 
 test('known limit: a box whose top edge is off screen is not a prompt', () => {
   assert.equal(parseScreen([' Do you want?', ' ❯ 1. Yes', '   2. No', '', ' Esc to cancel'], { x: 1, y: 1 }).prompt, null)
+})
+
+test('a permission box that ends on its "(esc)" deny option parses without a footer', () => {
+  const box = [
+    '● Fetch(https://example.com)',
+    '',
+    RULE,
+    ' Fetch',
+    '',
+    ' Do you want to allow Claude to fetch this content?',
+    ' ❯ 1. Yes',
+    "   2. Yes, and don't ask again for example.com",
+    '   3. No, and tell Claude what to do differently (esc)'
+  ]
+  assert.deepEqual(parseScreen(box, { x: 1, y: 6 }).prompt?.options.map((o) => o.key), ['1', '2', '3'])
+  // Drawn only up to option 2: the "(esc)" option that closes the box is not visible yet.
+  assert.equal(parseScreen(box.slice(0, 8), { x: 1, y: 6 }).prompt, null)
+  // The same box above a live input box is transcript, not a prompt.
+  const above = [...box, '', RULE, '❯ ', RULE]
+  assert.equal(parseScreen(above, { x: 2, y: above.length - 2 }).prompt, null)
+})
+
+/** The 2.1.285 frames that part (a) of Task 19 captured, each with its .expect.json. */
+const FRAMES_2_1_285 = [
+  'compacting', 'idle-input', 'permission-2', 'permission-bash-long', 'permission-edit', 'permission-webfetch',
+  'permission-write', 'question-options', 'question-text', 'spinner', 'tool-output', 'trust-folder'
+]
+
+for (const name of FRAMES_2_1_285) {
+  test(`2.1.285 ${name}: prompt kind, option keys and labels, and the deny option match the expectation`, async () => {
+    const dir = path.join(fixturesDir, 'screens', '2.1.285')
+    const manifest = JSON.parse(readFileSync(path.join(fixturesDir, 'hooks', '2.1.285', 'MANIFEST.json'), 'utf8'))
+    const expected = JSON.parse(readFileSync(path.join(dir, `${name}.expect.json`), 'utf8')).prompt
+    const model = new ScreenModel(manifest.size)
+    let parsed
+    try {
+      model.write(readFileSync(path.join(dir, `${name}.ansi`)))
+      await model.flush()
+      parsed = parseScreen(model.lines(), model.cursor()).prompt
+    } finally {
+      model.dispose()
+    }
+    assert.equal(parsed?.kind ?? null, expected?.kind ?? null, 'prompt kind')
+    const pairs = (/** @type {any} */ p) => p?.options.map((/** @type {any} */ o) => [o.key, o.label]) ?? null
+    assert.deepEqual(pairs(parsed), pairs(expected), 'option keys and labels')
+    if (expected?.kind === 'permission') {
+      const deny = parsed?.options.filter((o) => /^No\b/.test(o.label)) ?? []
+      assert.deepEqual(deny.map((o) => o.key), [expected.options[expected.options.length - 1].key], 'one deny option, the last one, starting with "No"')
+    }
+  })
+}
+
+/**
+ * The frames whose .expect.json carries a prompt and the title, body and truncated fields
+ * Task 8 added (state-machines 2.3 `screenMatch`, F12).
+ */
+const PROMPT_FIELD_FRAMES = [
+  ['2.1.285', 'permission-2'], ['2.1.285', 'permission-bash-long'], ['2.1.285', 'permission-write'],
+  ['2.1.285', 'permission-webfetch'], ['2.1.285', 'permission-edit'], ['2.1.285', 'question-options'],
+  ['2.1.282', 'permission-edit'], ['2.1.282', 'question-options']
+]
+
+for (const [version, name] of PROMPT_FIELD_FRAMES) {
+  test(`${version} ${name}: the prompt title, body and truncated flag match the expectation`, async () => {
+    const manifest = JSON.parse(readFileSync(path.join(fixturesDir, 'hooks', version, 'MANIFEST.json'), 'utf8'))
+    const dir = path.join(fixturesDir, 'screens', version)
+    const expected = JSON.parse(readFileSync(path.join(dir, `${name}.expect.json`), 'utf8')).prompt
+    const model = new ScreenModel(manifest.size)
+    let parsed
+    try {
+      model.write(readFileSync(path.join(dir, `${name}.ansi`)))
+      await model.flush()
+      parsed = parseScreen(model.lines(), model.cursor()).prompt
+    } finally {
+      model.dispose()
+    }
+    assert.equal(typeof expected.title, 'string', 'the expectation names a title')
+    assert.equal(typeof expected.truncated, 'boolean', 'the expectation states truncated')
+    assert.equal(parsed?.title, expected.title, 'title')
+    assert.equal(parsed?.body, expected.body, 'body')
+    assert.equal(parsed?.truncated, expected.truncated, 'truncated')
+  })
+}
+
+test('the 2.1.285 long Bash command wraps inside a │ gutter, one visible row per body line, and is not cut', async () => {
+  const manifest = JSON.parse(readFileSync(path.join(fixturesDir, 'hooks', '2.1.285', 'MANIFEST.json'), 'utf8'))
+  const model = new ScreenModel(manifest.size)
+  let parsed
+  try {
+    model.write(readFileSync(path.join(fixturesDir, 'screens', '2.1.285', 'permission-bash-long.ansi')))
+    await model.flush()
+    parsed = parseScreen(model.lines(), model.cursor()).prompt
+  } finally {
+    model.dispose()
+  }
+  const rows = parsed?.body?.split('\n') ?? []
+  assert.equal(rows[0], 'node --test')
+  assert.ok(rows[1].startsWith('--test-name-pattern="abc'), 'the gutter is stripped from wrapped rows')
+  assert.equal(rows[3], 'capture.test.mjs')
+  assert.equal(rows[4], 'Run capture tests filtered by a long name pattern')
+  assert.equal(parsed?.truncated, false)
+})
+
+test('hand-written, no captured frame shows it: a command row cut with "…" marks the prompt truncated', () => {
+  const lines = screen([
+    RULE,
+    ' Bash command',
+    '',
+    '   npm test -- --grep "a very long name…',
+    '   Run the tests',
+    '',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    '',
+    ' Esc to cancel · Tab to amend'
+  ])
+  const prompt = parseScreen(lines, { x: 1, y: 7 }).prompt
+  assert.equal(prompt?.truncated, true)
+  assert.equal(prompt?.body, 'npm test -- --grep "a very long name…\nRun the tests')
+})
+
+test('a box with no row between its top and the question has no title and a null body', () => {
+  const lines = screen([
+    RULE,
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    '',
+    ' Esc to cancel'
+  ])
+  const prompt = parseScreen(lines, { x: 1, y: 2 }).prompt
+  assert.equal(prompt?.kind, 'permission')
+  assert.equal(prompt?.title, null)
+  assert.equal(prompt?.body, null)
+  assert.equal(prompt?.truncated, false)
 })

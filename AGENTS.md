@@ -16,12 +16,16 @@ Two separate things share this repo:
 
 ## Current state of the deck
 
-M0 (the spike) is done. Start from these files:
+All deck work lives on the `feat/deck` branch. Base new deck branches and fleet runs on it
+(`--base feat/deck`), not on `master`, and commit deck plans there.
+
+M0 (the spike) is done. M1 (Observe) is integrated on `feat/deck`; its remaining exit steps need
+the owner and are listed in `docs/deck/m1-exit.md`. Start from these files:
 
 - `docs/deck/spikes/m0.md`: what M0 built, its measurements, and the open questions it
   answered. Section 6 lists known defects and follow-ups with file:line. Section 7 lists what
   M1 inherits. Section 9 lists the checks only the owner can do.
-- `docs/deck/12-milestones.md`: the milestones. M1 is next.
+- `docs/deck/12-milestones.md`: the milestones. M2 follows M1's exit.
 - `docs/deck/README.md`: how the design docs are organized.
 - `docs/plans/2026-09-26-deck-m0.md`: the M0 plan, including its deviations from the handoff.
 
@@ -35,7 +39,6 @@ Parts of `hub/`:
 |---|---|
 | `hub/deckd/` | PTY daemon on a Unix socket. The protocol is in `docs/deck/05-api.md` section 5 |
 | `hub/bin/fm.mjs` | `fm claude` and `fm attach` |
-| `hub/spike/` | Spike web page, bound to 127.0.0.1, with a per-launch token |
 | `hub/server/screen/` | Screen parsers |
 | `hub/server/adapters/scribed.mjs` | scribed client |
 | `hub/test/fixtures/` | Captured Claude Code 2.1.282 hook and screen fixtures, already redacted |
@@ -50,16 +53,16 @@ Hub:
 
     npm ci --prefix hub
     mkdir -p /tmp/hx && TMPDIR=/tmp/hx npm --prefix hub test
-    TMPDIR=/tmp/hx npm --prefix hub run perf    # keystroke echo; headless /usr/bin/chromium, override with CHROMIUM_PATH
+    TMPDIR=/tmp/hx npm --prefix hub run perf    # keystroke echo through Focus; headless /usr/bin/chromium, override with CHROMIUM_PATH
 
 Use a short `TMPDIR` for hub tests. Unix socket paths are limited to about 108 bytes, and a long
 temp dir makes the socket tests fail with errors that look like real bugs. CI runs only the root
 suite. The hub suite is Linux and macOS only, and is not in CI yet.
 
-Before you finish, kill every deckd, spike server, fake claude and headless Chromium you started.
-This command must print nothing:
+Before you finish, kill every deckd, deck server, fake claude and headless Chromium you started.
+From the repository root this command must print nothing:
 
-    pgrep -af 'deckd/main\.mjs|spike/server\.mjs|fake-claude\.mjs'
+    pgrep -af "$PWD/hub/(deckd|server)/main\.mjs|fake-claude\.mjs"
 
 ## Rules
 

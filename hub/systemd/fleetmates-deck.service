@@ -1,0 +1,17 @@
+[Unit]
+Description=fleetmates deck web server (127.0.0.1)
+Wants=fleetmates-deckd.service
+After=fleetmates-deckd.service
+ConditionPathExists=@ENTRY_PATH@
+
+[Service]
+Type=simple
+ExecStart=@NODE@ @ENTRY@
+Restart=on-failure
+RestartSec=2
+UMask=0077
+Environment=NODE_ENV=production
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

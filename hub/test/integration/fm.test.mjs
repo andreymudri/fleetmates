@@ -18,6 +18,7 @@ const mainPath = path.join(hubDir, 'deckd', 'main.mjs')
 const fmPath = path.join(hubDir, 'bin', 'fm.mjs')
 const script = path.join(hubDir, 'test', 'fixtures', 'scripts', 'two-sources.json')
 const TERM_NAME = 'fm-test'
+const FALLBACK_LINE = 'deckd is not running, starting plain claude; this session will be observed only\n'
 
 /** @type {Awaited<ReturnType<typeof makeRuntimeDir>>} */
 let rt
@@ -148,7 +149,7 @@ before(async () => {
   logPath = path.join(tmp, 'fake.log')
   fb = await fakeBin({ script, log: logPath })
   env = { ...fb.env, XDG_RUNTIME_DIR: rt.dir, TERM_PROGRAM: TERM_NAME }
-  deckd = spawn(process.execPath, [mainPath], { env, stdio: ['ignore', 'ignore', 'pipe'] })
+  deckd = spawn(process.execPath, [mainPath], { env: { ...env, DECKD_LOGIN_ENV: 'inherit' }, stdio: ['ignore', 'ignore', 'pipe'] })
   let stderr = ''
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`deckd did not start: ${stderr}`)), 10000)
@@ -426,7 +427,9 @@ test('fm attach exits 1 when the deckd connection drops', async () => {
   }
 })
 
-test('fm claude and fm attach exit 2 when deckd is not running', async () => {
+test('fm claude falls back to plain claude and fm attach exits 2 when deckd is not running', async () => {
+  const exit0 = path.join(tmp, 'exit0.json')
+  await writeFile(exit0, JSON.stringify({ steps: [{ exit: { code: 0 } }] }))
   const empty = await makeRuntimeDir()
   // A socket file left by a deckd that died: connecting is refused.
   const stale = await makeRuntimeDir()
@@ -437,15 +440,16 @@ test('fm claude and fm attach exit 2 when deckd is not running', async () => {
   assert.ok((await stat(staleSock)).isSocket())
   try {
     for (const dir of [empty.dir, stale.dir]) {
-      for (const args of [['claude'], ['attach', 'pty_00000000']]) {
-        const r = await runPlain(args, { ...env, XDG_RUNTIME_DIR: dir })
-        assert.equal(r.code, 2, r.stderr)
-        assert.match(r.stderr, /deckd is not running/)
-      }
+      const c = await runPlain(['claude'], { ...env, XDG_RUNTIME_DIR: dir, FAKE_CLAUDE_SCRIPT: exit0 })
+      assert.equal(c.code, 0, c.stderr)
+      assert.equal(c.stderr, FALLBACK_LINE)
+      const r = await runPlain(['attach', 'pty_00000000'], { ...env, XDG_RUNTIME_DIR: dir })
+      assert.equal(r.code, 2, r.stderr)
+      assert.match(r.stderr, /deckd is not running/)
     }
-    const r = await runPlain(['claude'], { ...env, XDG_RUNTIME_DIR: '' })
-    assert.equal(r.code, 2, r.stderr)
-    assert.match(r.stderr, /deckd is not running/)
+    const r = await runPlain(['claude'], { ...env, XDG_RUNTIME_DIR: '', FAKE_CLAUDE_SCRIPT: exit0 })
+    assert.equal(r.code, 0, r.stderr)
+    assert.equal(r.stderr, FALLBACK_LINE)
   } finally {
     await empty.cleanup()
     await stale.cleanup()
@@ -489,3 +493,496 @@ function runPlain (args, e) {
     child.once('exit', (code) => { clearTimeout(timer); resolve({ code, stderr }) })
   })
 }
+
+/**
+ * Run fm without a TTY and collect its exit, stdout and stderr.
+ * @param {string[]} args
+ * @param {NodeJS.ProcessEnv} e
+ * @param {(child: import('node:child_process').ChildProcess) => void} [withChild]
+ * @returns {Promise<{ code: number | null, signal: NodeJS.Signals | null, stdout: string, stderr: string }>}
+ */
+function runFm (args, e, withChild) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [fmPath, ...args], { env: e, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.on('data', (d) => { stdout += d })
+    child.stderr?.on('data', (d) => { stderr += d })
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`fm ${args.join(' ')} did not exit: ${stderr}`)) }, 10000)
+    child.once('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal, stdout, stderr }) })
+    withChild?.(child)
+  })
+}
+
+/**
+ * A fake `claude` first on PATH that records whether FLEETMATES_DECK_PTY
+ * reached it, then runs the fake from fakeBin with `steps`. The runtime dir
+ * in its env has no deckd.
+ * @param {string} name
+ * @param {any[]} steps
+ */
+async function fallbackClaude (name, steps) {
+  const dir = path.join(tmp, name)
+  await mkdir(dir)
+  const scriptFile = path.join(dir, 'script.json')
+  await writeFile(scriptFile, JSON.stringify({ steps }))
+  const log = path.join(dir, 'fake.log')
+  const marker = path.join(dir, 'pty-var')
+  const pidFile = path.join(dir, 'pid')
+  const inner = await fakeBin({ script: scriptFile, log })
+  const binDir = path.join(dir, 'bin')
+  await mkdir(binDir)
+  // `exec` keeps the pid, so pidFile names the fake itself.
+  await writeFile(path.join(binDir, 'claude'), `#!/bin/sh\nprintf '%s' "\${FLEETMATES_DECK_PTY-unset}" > '${marker}'\nprintf '%s' "$$" > '${pidFile}'\nexec '${path.join(inner.binDir, 'claude')}' "$@"\n`, { mode: 0o755 })
+  const noDeckd = await makeRuntimeDir()
+  return {
+    log,
+    marker,
+    env: { ...inner.env, PATH: `${binDir}:${inner.env.PATH}`, XDG_RUNTIME_DIR: noDeckd.dir, FLEETMATES_DECK_PTY: 'pty_parent00' },
+    async cleanup () {
+      // A fake that outlived fm (fm did not pass a signal on) would hold
+      // this file's pipes open and keep the test process alive.
+      const pid = Number(await readFile(pidFile, 'utf8').catch(() => ''))
+      if (pid) try { process.kill(pid, 'SIGKILL') } catch {}
+      await inner.cleanup()
+      await noDeckd.cleanup()
+    }
+  }
+}
+
+test('fm claude without deckd runs plain claude with the same args, without FLEETMATES_DECK_PTY, and exits with its code', async () => {
+  const fake = await fallbackClaude('fallback-exit4', [{ exit: { code: 4 } }])
+  try {
+    const r = await runFm(['claude', '--foo'], fake.env)
+    assert.equal(r.stderr, FALLBACK_LINE)
+    assert.equal(r.code, 4)
+    const entries = (await readFile(fake.log, 'utf8')).split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    assert.deepEqual(entries.find((e) => e.ready).argv, ['--foo'])
+    assert.equal(await readFile(fake.marker, 'utf8'), 'unset')
+  } finally {
+    await fake.cleanup()
+  }
+})
+
+test('fm claude without deckd forwards SIGHUP, SIGTERM and SIGINT to plain claude and exits 128 plus the signal', async () => {
+  const fake = await fallbackClaude('fallback-hang', [{ hang: {} }])
+  try {
+    for (const sig of /** @type {const} */ (['SIGHUP', 'SIGTERM', 'SIGINT'])) {
+      await writeFile(fake.log, '')
+      const r = await runFm(['claude'], fake.env, (child) => {
+        until(async () => (await readFile(fake.log, 'utf8')).includes('"ready":true'), 'the fake to be ready')
+          .then(() => child.kill(sig), () => child.kill('SIGKILL'))
+      })
+      assert.equal(r.signal, null, `${sig}: fm itself died of the signal`)
+      assert.equal(r.code, 128 + os.constants.signals[sig], `${sig}: ${r.stderr}`)
+    }
+  } finally {
+    await fake.cleanup()
+  }
+})
+
+test('fm claude without deckd and without claude on PATH exits 127', async () => {
+  const noDeckd = await makeRuntimeDir()
+  const emptyBin = path.join(tmp, 'empty-bin')
+  await mkdir(emptyBin)
+  try {
+    const r = await runFm(['claude'], { ...env, PATH: emptyBin, XDG_RUNTIME_DIR: noDeckd.dir })
+    assert.equal(r.code, 127)
+    assert.equal(r.stderr, FALLBACK_LINE + 'fm: claude not found on PATH\n')
+  } finally {
+    await noDeckd.cleanup()
+  }
+})
+
+test('fm ls exits 2 when deckd is not running', async () => {
+  const noDeckd = await makeRuntimeDir()
+  try {
+    const r = await runFm(['ls'], { ...env, XDG_RUNTIME_DIR: noDeckd.dir })
+    assert.equal(r.code, 2)
+    assert.match(r.stderr, /deckd is not running/)
+  } finally {
+    await noDeckd.cleanup()
+  }
+})
+
+test('fm ls prints no sessions when deckd runs none', async () => {
+  const fake = await scriptedDeckd((req, sock) => sock.write(okLine(req.id, req.op === 'list' ? { ptys: [] } : {})))
+  try {
+    const r = await runFm(['ls'], fake.env)
+    assert.equal(r.code, 0, r.stderr)
+    assert.equal(r.stdout, 'No sessions in deckd.\n')
+  } finally {
+    await fake.close()
+  }
+})
+
+/**
+ * Spawn a fake claude in deckd at `cwd`, logging to its own file.
+ * @param {string} cwd
+ */
+async function spawnAt (cwd) {
+  const log = path.join(tmp, `fake-${path.basename(cwd)}-${Math.random().toString(16).slice(2)}.log`)
+  const res = await browser.request('spawn', { cwd, argv: ['claude'], cols: 80, rows: 24, origin: 'launched', env: { FAKE_CLAUDE_LOG: log } })
+  return { ptyId: /** @type {string} */ (res.ptyId), pid: /** @type {number} */ (res.pid), log }
+}
+
+/**
+ * Input the fake behind `log` received, concatenated.
+ * @param {string} log
+ */
+async function inputOf (log) {
+  const text = await readFile(log, 'utf8').catch(() => '')
+  return text.split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    .filter((e) => typeof e.input === 'string').map((e) => e.input).join('')
+}
+
+test('fm ls lists each PTY with its repo, pid, start and attached clients', async () => {
+  const repoA = path.join(tmp, 'ls-repo-a')
+  const repoB = path.join(tmp, 'ls-repo-b')
+  const plain = path.join(tmp, 'ls-plain')
+  await mkdir(path.join(repoA, '.git'), { recursive: true })
+  await mkdir(path.join(repoB, '.git'), { recursive: true })
+  await mkdir(path.join(repoB, 'sub', 'deeper'), { recursive: true })
+  await mkdir(plain)
+  const a = await spawnAt(repoA)
+  const b = await spawnAt(path.join(repoB, 'sub', 'deeper'))
+  const c = await spawnAt(plain)
+  try {
+    await browser.request('attach', { ptyId: a.ptyId, stream: false })
+    const r = await runFm(['ls'], { ...env, HOME: tmp })
+    assert.equal(r.code, 0, r.stderr)
+    const lines = r.stdout.trimEnd().split('\n')
+    assert.match(lines[0], /^PTY +REPO +PID +STARTED +CLIENTS$/)
+    /** @param {string} id */
+    const row = (id) => {
+      const line = lines.find((l) => l.startsWith(id + ' '))
+      assert.ok(line, `no row for ${id}: ${r.stdout}`)
+      return line.split(/ {2,}/)
+    }
+    const ra = row(a.ptyId)
+    assert.equal(ra.length, 5, ra.join('|'))
+    assert.equal(ra[1], 'ls-repo-a')
+    assert.equal(ra[2], String(a.pid))
+    assert.match(ra[3], /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
+    assert.equal(ra[4], 'server:fm-test-browser')
+    const rb = row(b.ptyId)
+    assert.equal(rb[1], 'ls-repo-b')
+    assert.equal(rb[4], '-')
+    assert.equal(row(c.ptyId)[1], '~/ls-plain')
+  } finally {
+    for (const p of [a, b, c]) await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+  }
+})
+
+test('fm attach by repo name attaches to the one match, and refuses several or none', async () => {
+  const one = path.join(tmp, 'by-repo-one')
+  const two = path.join(tmp, 'by-repo-two')
+  await mkdir(path.join(one, '.git'), { recursive: true })
+  await mkdir(path.join(two, '.git'), { recursive: true })
+  await mkdir(path.join(two, 'pkg'))
+  const a = await spawnAt(one)
+  const b1 = await spawnAt(two)
+  const b2 = await spawnAt(path.join(two, 'pkg'))
+  try {
+    const several = await runFm(['attach', 'by-repo-two'], env)
+    assert.equal(several.code, 1)
+    assert.match(several.stderr, new RegExp(b1.ptyId))
+    assert.match(several.stderr, new RegExp(b2.ptyId))
+    assert.equal((await listed(b1.ptyId)).clients.length, 0)
+    assert.equal((await listed(b2.ptyId)).clients.length, 0)
+    const none = await runFm(['attach', 'by-repo-none'], env)
+    assert.equal(none.code, 1)
+    assert.equal(none.stderr, 'fm: no session for by-repo-none\n')
+    const attach = runInPty(process.execPath, [fmPath, 'attach', 'by-repo-one'])
+    await until(async () => (await listed(a.ptyId))?.clients.some((/** @type {any} */ c) => c.kind === 'terminal'), 'fm attach by repo to attach')
+    await browser.request('kill', { ptyId: a.ptyId, signal: 'SIGKILL', graceMs: 0 })
+    await attach.exited()
+  } finally {
+    for (const p of [a, b1, b2]) await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+  }
+})
+
+test('the detach escape: Ctrl ] twice sends one Ctrl ], Ctrl ] then another byte sends both, Ctrl ] d detaches', async () => {
+  const p = await spawnAt(tmp)
+  try {
+    await until(async () => (await readFile(p.log, 'utf8').catch(() => '')).includes('"ready":true'), 'the fake to be ready')
+    const attach = runInPty(process.execPath, [fmPath, 'attach', p.ptyId])
+    await until(async () => (await listed(p.ptyId))?.clients.some((/** @type {any} */ c) => c.kind === 'terminal'), 'fm attach to attach')
+    attach.pty.write('A\x1d\x1dB')
+    await until(async () => (await inputOf(p.log)).includes('B'), 'B in the fake log')
+    attach.pty.write('C\x1dxD')
+    await until(async () => (await inputOf(p.log)).includes('D'), 'D in the fake log')
+    assert.equal(await inputOf(p.log), 'A\x1dBC\x1dxD')
+    let detached = false
+    const off = browser.on('client', (ev) => {
+      if (ev.ptyId === p.ptyId && ev.change === 'detached' && ev.client.kind === 'terminal') detached = true
+    })
+    attach.pty.write('\x1dd')
+    const exited = await attach.exited()
+    off()
+    assert.equal(exited.exitCode, 0)
+    assert.match(attach.out(), new RegExp(`fm: detached from ${p.ptyId}; reattach with fm attach ${p.ptyId}`))
+    assert.ok(detached, 'deckd reported the terminal detached')
+    const still = await listed(p.ptyId)
+    assert.ok(still, 'the PTY is still running')
+    assert.equal(still.clients.length, 0)
+    assert.equal(await inputOf(p.log), 'A\x1dBC\x1dxD')
+  } finally {
+    await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+  }
+})
+
+/**
+ * A Unix socket proxy on a fresh runtime dir in front of the test deckd. It
+ * logs every request fm sends and the close of fm's socket, in order, keeps
+ * deckd's answers by request id, and with `hold` set to an op holds deckd's
+ * answer to fm's first request of that op, and every line after it, until
+ * release().
+ * @param {{ hold?: 'spawn' | 'attach' }} [opts]
+ */
+async function deckdProxy ({ hold } = {}) {
+  const proxyRt = await makeRuntimeDir()
+  const dir = path.join(proxyRt.dir, 'fleetmates-deck')
+  await mkdir(dir, { mode: 0o700 })
+  /** fm's requests, and `{ closed: true }` when its socket closed. @type {any[]} */
+  const log = []
+  /** deckd's answers, by request id. @type {Map<number, any>} */
+  const answers = new Map()
+  /** @type {string[]} */
+  let held = []
+  let holding = false
+  /** @type {net.Socket[]} */
+  const socks = []
+  /** @type {net.Socket | null} */
+  let down = null
+  const server = net.createServer((sock) => {
+    const up = net.connect(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
+    socks.push(sock, up)
+    down = sock
+    sock.on('error', () => {})
+    up.on('error', () => {})
+    /** @type {number | null} */
+    let holdId = null
+    sock.on('data', createLineDecoder((req) => {
+      log.push(req)
+      if (hold && req.op === hold && holdId === null) holdId = req.id
+      up.write(encode(req))
+    }, () => {}))
+    up.on('data', createLineDecoder((msg) => {
+      if (msg.id !== undefined) answers.set(msg.id, msg)
+      if (holdId !== null && msg.id === holdId) holding = true
+      if (holding) held.push(encode(msg))
+      else sock.write(encode(msg))
+    }, () => {}))
+    sock.on('close', () => {
+      log.push({ closed: true })
+      up.destroy()
+    })
+    up.on('close', () => sock.destroy())
+  })
+  await new Promise((resolve) => server.listen(path.join(dir, 'deckd.sock'), () => resolve(undefined)))
+  return {
+    log,
+    answers,
+    env: { ...env, XDG_RUNTIME_DIR: proxyRt.dir },
+    /** Whether deckd's answer to the `hold` op is being held. */
+    holding: () => holding,
+    /** Pass on what was held, and everything after it. */
+    release () {
+      holding = false
+      for (const line of held) down?.write(line)
+      held = []
+    },
+    async close () {
+      for (const s of socks) s.destroy()
+      await new Promise((resolve) => server.close(() => resolve(undefined)))
+      await proxyRt.cleanup()
+    }
+  }
+}
+
+/**
+ * The proxy log as op and PTY id only, for failure messages: a `spawn`
+ * request carries fm's whole environment, which must not reach test output.
+ * @param {Awaited<ReturnType<typeof deckdProxy>>} proxy
+ */
+function opsOf (proxy) {
+  return proxy.log.map((r) => r.closed ? 'closed' : [r.op, r.ptyId].filter(Boolean).join(' ')).join(', ')
+}
+
+/**
+ * Where fm's `detach` request for `ptyId` and the close of its socket sit
+ * in a proxy log, and deckd's answer to that request.
+ * @param {Awaited<ReturnType<typeof deckdProxy>>} proxy
+ * @param {string} ptyId
+ */
+function detachSent (proxy, ptyId) {
+  const at = proxy.log.findIndex((r) => r.op === 'detach' && r.ptyId === ptyId)
+  const closedAt = proxy.log.findIndex((r) => r.closed)
+  return { at, closedAt, answer: at === -1 ? undefined : proxy.answers.get(proxy.log[at].id) }
+}
+
+test('SIGHUP to fm attach detaches without printing and leaves the PTY running', async () => {
+  const p = await spawnAt(tmp)
+  const proxy = await deckdProxy()
+  try {
+    const attach = runInPty(process.execPath, [fmPath, 'attach', p.ptyId], { env: proxy.env })
+    await until(async () => (await listed(p.ptyId))?.clients.some((/** @type {any} */ c) => c.kind === 'terminal'), 'fm attach to attach')
+    // deckd lists the client as soon as it handles `attach`, before fm has read the reply. fm
+    // writes PTY output only after it has read that reply, so the echo of this write reaching
+    // fm's terminal means this hangup arrives after the attach; the test below covers before.
+    await browser.request('write', { ptyId: p.ptyId, data: b64('hup1'), source: { kind: 'deck' } })
+    await until(() => attach.out().includes('hup1'), () => `the echo in fm attach: ${JSON.stringify(attach.out())}`)
+    let detached = false
+    const off = browser.on('client', (ev) => {
+      if (ev.ptyId === p.ptyId && ev.change === 'detached' && ev.client.kind === 'terminal') detached = true
+    })
+    attach.pty.kill('SIGHUP')
+    const exited = await attach.exited()
+    assert.equal(exited.exitCode, 0)
+    assert.ok(!exited.signal, `fm died of signal ${exited.signal}`)
+    assert.doesNotMatch(attach.out(), /detached from/)
+    // The event and fm's exit reach this process on different channels, so wait for the event.
+    await until(() => detached, 'deckd to report the terminal detached').finally(off)
+    // deckd also reports a detach when the socket closes, so check the request itself.
+    const sent = detachSent(proxy, p.ptyId)
+    assert.notEqual(sent.at, -1, `fm sent no detach: ${opsOf(proxy)}`)
+    assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
+    assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
+    assert.ok(await listed(p.ptyId), 'the PTY is still running')
+  } finally {
+    await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+    await proxy.close()
+  }
+})
+
+test('SIGHUP to fm attach before deckd answers attach detaches once it answers, without printing', async () => {
+  const p = await spawnAt(tmp)
+  const proxy = await deckdProxy({ hold: 'attach' })
+  try {
+    const attach = runInPty(process.execPath, [fmPath, 'attach', p.ptyId], { env: proxy.env })
+    /** @type {{ exitCode: number, signal?: number } | null} */
+    let early = null
+    attach.exited().then((e) => { early = e }, () => {})
+    // deckd lists the client once it handles `attach`; the proxy holds the answer from fm.
+    await until(async () => proxy.holding() && (await listed(p.ptyId))?.clients.some((/** @type {any} */ c) => c.kind === 'terminal'), 'deckd to answer attach, held by the proxy')
+    attach.pty.kill('SIGHUP')
+    // fm knows the PTY id, so it says `detach` at once, behind `attach`.
+    await until(() => early || detachSent(proxy, p.ptyId).at !== -1, 'fm to send detach')
+    assert.equal(early, null, `fm ended before deckd answered attach: ${JSON.stringify(early)}`)
+    proxy.release()
+    const exited = await attach.exited()
+    assert.equal(exited.exitCode, 0)
+    assert.ok(!exited.signal, `fm died of signal ${exited.signal}`)
+    assert.equal(attach.out(), '')
+    const sent = detachSent(proxy, p.ptyId)
+    assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
+    assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
+    assert.ok(await listed(p.ptyId), 'the PTY is still running')
+  } finally {
+    await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+    await proxy.close()
+  }
+})
+
+test('SIGHUP to fm claude before deckd answers spawn detaches from the spawned PTY once it answers, without printing', async () => {
+  const proxy = await deckdProxy({ hold: 'spawn' })
+  /** @type {string | undefined} */
+  let id
+  try {
+    const wrapped = runInPty(process.execPath, [fmPath, 'claude'], { env: proxy.env })
+    await until(() => proxy.holding(), 'deckd to answer spawn, held by the proxy')
+    id = proxy.answers.get(proxy.log.find((r) => r.op === 'spawn').id).ptyId
+    assert.ok(id, 'deckd spawned a PTY')
+    wrapped.pty.kill('SIGHUP')
+    // fm sends nothing for a hangup before it knows a PTY id, so no request shows it was
+    // handled; give it time to be, so the release below comes after it.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.deepEqual(proxy.log.map((r) => r.op), ['hello', 'spawn'], 'fm sent nothing before the spawn answer')
+    proxy.release()
+    const exited = await wrapped.exited()
+    assert.equal(exited.exitCode, 0)
+    assert.ok(!exited.signal, `fm died of signal ${exited.signal}`)
+    assert.equal(wrapped.out(), '')
+    const sent = detachSent(proxy, /** @type {string} */ (id))
+    assert.notEqual(sent.at, -1, `fm sent no detach: ${opsOf(proxy)}`)
+    assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
+    assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
+    assert.ok(await listed(/** @type {string} */ (id)), 'the PTY is still running')
+  } finally {
+    if (id) await browser.request('kill', { ptyId: id, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+    await proxy.close()
+  }
+})
+
+test('SIGHUP to fm attach <repo> before deckd answers the first attach detaches from the repo\'s PTY, without printing', async () => {
+  const repo = path.join(tmp, 'hup-repo')
+  await mkdir(path.join(repo, '.git'), { recursive: true })
+  const p = await spawnAt(repo)
+  const proxy = await deckdProxy({ hold: 'attach' })
+  try {
+    const attach = runInPty(process.execPath, [fmPath, 'attach', 'hup-repo'], { env: proxy.env })
+    await until(() => proxy.holding(), 'deckd to answer the first attach, held by the proxy')
+    const first = proxy.log.find((r) => r.op === 'attach')
+    assert.equal(first.ptyId, 'hup-repo')
+    assert.equal(proxy.answers.get(first.id).ok, false, 'the repo name is not a live PTY id')
+    attach.pty.kill('SIGHUP')
+    // fm says `detach` for the id it sent `attach` for, which shows it handled the hangup.
+    await until(() => detachSent(proxy, 'hup-repo').at !== -1, 'fm to send detach for the repo name')
+    proxy.release()
+    const exited = await attach.exited()
+    assert.equal(exited.exitCode, 0)
+    assert.ok(!exited.signal, `fm died of signal ${exited.signal}`)
+    assert.equal(attach.out(), '')
+    const sent = detachSent(proxy, p.ptyId)
+    assert.notEqual(sent.at, -1, `fm sent no detach for ${p.ptyId}: ${opsOf(proxy)}`)
+    assert.ok(sent.closedAt === -1 || sent.at < sent.closedAt, 'fm sent detach before closing its socket')
+    assert.equal(sent.answer?.ok, true, 'deckd answered the detach')
+    assert.ok(await listed(p.ptyId), 'the PTY is still running')
+  } finally {
+    await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+    await proxy.close()
+  }
+})
+
+test('a dropped event makes fm attach ask for the screen again and repaint it', async () => {
+  let screens = 0
+  const fake = await scriptedDeckd((req, sock) => {
+    if (req.op === 'screen') {
+      screens++
+      sock.write(okLine(req.id, { rev: screens, cols: 100, rows: 30, cursor: { x: 0, y: 0 }, lines: [], scrollback: b64(screens === 1 ? 'REPLAY' : 'AGAIN') }))
+    } else {
+      sock.write(okLine(req.id))
+    }
+  })
+  try {
+    const attach = runInPty(process.execPath, [fmPath, 'attach', 'pty_drop0001'], { env: fake.env })
+    await until(() => attach.out().includes('REPLAY'), 'the replay')
+    fake.conns[0].write(encode({ ev: 'dropped', ptyId: 'pty_drop0001', bytes: 100 }))
+    await until(() => attach.out().includes('AGAIN'), () => `the repaint: ${JSON.stringify(attach.out())}`)
+    assert.equal(fake.ops.filter((op) => op === 'screen').length, 2)
+    assert.equal(attach.out(), 'REPLAY\x1b[2J\x1b[HAGAIN')
+    fake.conns[0].write(encode({ ev: 'exit', ptyId: 'pty_drop0001', code: 0, signal: null, at: Date.now() }))
+    await attach.exited()
+  } finally {
+    await fake.close()
+  }
+})
+
+test('fm attach exits with the child code when the exit event shares a write with the screen reply', async () => {
+  const fake = await scriptedDeckd((req, sock) => {
+    if (req.op === 'screen') {
+      sock.write(okLine(req.id, { rev: 1, cols: 100, rows: 30, cursor: { x: 0, y: 0 }, lines: [], scrollback: b64('REPLAY') }) +
+        encode({ ev: 'exit', ptyId: 'pty_gone0000', code: 6, signal: null, at: Date.now() }))
+    } else {
+      sock.write(okLine(req.id))
+    }
+  })
+  try {
+    const attach = runInPty(process.execPath, [fmPath, 'attach', 'pty_gone0000'], { env: fake.env })
+    const exited = await attach.exited(5000)
+    assert.equal(exited.exitCode, 6)
+  } finally {
+    await fake.close()
+  }
+})
