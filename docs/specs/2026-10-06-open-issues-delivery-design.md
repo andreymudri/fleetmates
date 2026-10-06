@@ -1,0 +1,201 @@
+# Delivery of the remaining open issues
+
+## Scope and completion
+
+Complete issues 26 and 33-47 by implementing their remaining behavior and
+verifying their acceptance. Do not create replacement issues or close an
+implementation obligation merely because it has been documented. Each closure
+must link the integrated implementation, current checks and applicable real
+execution evidence. Required human judgments remain pending until supplied.
+
+Core remains dependency-free, local-first and based on subscription CLI
+authentication. Optional project adapters may use the dependencies of the
+project they verify. No automatic telemetry, model downloads, deployment,
+Vault writes or publication permission is introduced.
+
+This specification preserves C1-C4 and the adversarial review refinement in
+issue 25. Existing gate manifests and implementation plans are not rewritten
+to make a candidate pass. New implementation plans describe the work before
+dispatch. Deck implementation branches and plans use the feat/deck base.
+
+## Delivery sequence
+
+| Group | Issues | Result |
+| --- | --- | --- |
+| Execution prerequisites | 44, 45 | Reproducible environment identity, baseline execution, capability probes and supported role enforcement |
+| Execution and recovery | 42, 43, 33 | Executed bounded profiles, retained artifacts, reconciled attempts and current completion obligations |
+| Semantic verification | 36, 37, 38 | Execution-backed criterion evidence, independently observed red/green, rendered UI and behavior |
+| Context and learning | 35, 39 | Versioned retrieval, affected-evidence invalidation and reviewed authoritative amendments |
+| Reviews and outer loop | 40, 41 | Adversarial contract review, calibrated outcomes, exact-input CI and bounded repair |
+| Real evaluation | 34, 26 | Repeated baseline and candidate trials, skill-trigger observations and actual hook receipts |
+| Conditional decisions | 46, 47 | Measured scheduling decision and explicitly opt-in release evidence contract |
+
+Evaluation cases and rubrics are defined before candidate trials. Baseline
+measurements start once the existing harness and environment can execute them;
+evaluation is not postponed until every optional adapter has shipped. W08's
+offline quality measurements use the same versioned dataset as W02 while
+keeping operational review separate.
+
+## First group: environments and role capabilities
+
+Add focused environment and role-capability modules, then wire them into the
+existing adapters and dispatch path. Avoid a second driver or execution DSL.
+
+An environment recipe is a versioned project contract containing required
+runtime/toolchain declarations, relevant tracked lockfiles, setup and baseline
+commands, required optional services, and finite timeout/output bounds. Read
+it from a committed regular file and bind its hash and source commit to the
+observation. Recipes cannot add permissions. Executable commands are project
+code and run through the existing bounded command executor and preview adapter.
+
+Compute the environment identity from observed tool versions, recipe and
+lockfile hashes, platform and setup/baseline outcomes. Distinguish clean
+checkout, linked dependencies and operator configuration. A linked dependency
+tree is an explicit reproducibility limitation, not a hermetic environment.
+Unsupported platforms, missing tools, setup failure and incomplete output
+prevent the affected step from starting. Capture setup duration and raw log
+references independently of implementation outcomes.
+
+Probe harness authentication, browser/render, GitHub CI and optional Vault
+capabilities with explicit available, unavailable and unknown states. Probes
+have finite execution and response budgets, never invoke an implementation
+model, and do not accept a supplied available flag as proof. Optional services
+are only probed when the declared profile requires them. Failed authentication
+and missing infrastructure produce environment blockers, not code repairs.
+
+Represent read, write, execute, network, shared-ref and publication capabilities
+per role. Implementers receive their owned checkout and permitted execution;
+reviewers cannot mutate shared refs; integrators receive the existing reviewed
+integration authority. Translate these contracts through the existing Codex
+and Cursor sandbox adapters. Report unsupported enforcement explicitly and
+refuse a required capability that the adapter cannot enforce. Neither prompt
+text nor retrieved context can widen the host-approved role contract.
+
+Existing adapter defaults remain compatible for callers without a new required
+contract. New execution profiles require an explicit supported capability
+contract rather than silently taking that compatibility path. No claims about
+security isolation extend beyond the actual harness/sandbox mechanism.
+
+## Second group: bounded execution and recovery
+
+Execute the fixed profile fragments already generated by workflow-profile.
+Resolve the installed CLI path independently of the target project's cwd.
+Validate the expanded profile and its tracked input identity before executing
+any step. Commands come from known CLI fragments, never arbitrary text in a
+returned artifact. The controller captures stdout artifacts, validates result
+schemas and current review stamps, enforces total wall-time and repair budgets,
+and stops on unresolved mandatory acceptance.
+
+Record attempts in the existing immutable common-Git journal before dispatch,
+collection, integration and external effects. Persist stable execution identity
+separately from the harness invocation and disposable checkout. Records contain
+bounded metadata and hashes, not transcript bodies. Retained artifact storage
+is private, bounded and governed by an explicit local retention policy.
+
+Reconcile actual refs, checkout state, artifact hashes and complete step inputs
+before resuming. Do not trust the existing session result fast path as current
+evidence merely because it contains a status string. Implementation results
+remain observations; command/review gates run fresh before final completion.
+Unknown external effects require a read-only outcome query or explicit operator
+resolution before redispatch. Suspend and abandon never mean complete.
+
+Exercise a real driver process killed at documented boundaries, including
+before result persistence and after collection. Demonstrate preserved task
+branches, visible unknown effects, stale-input refusal and bounded recovery.
+Keep the accepted deckd terminal-loss boundary explicit; driver recovery does
+not imply PTY survival across daemon restart.
+
+## Verification, UI and authoritative feedback
+
+Map each criterion to independently executed deterministic checks, rendered or
+reviewed evidence, or explicit human judgment. Identity includes tested commit
+or tree, authoritative plan and manifest, relevant context, environment and
+verifier versions. Changes invalidate affected dependent obligations.
+
+Behavioral red/green runs the relevant regression in supported pre-fix and
+candidate checkouts with the same declared environment. Missing dependencies
+or syntax/setup failure cannot count as the intended red. Temporal ordering
+remains a separate, explicitly unmeasurable claim for squashed/files-mode work.
+
+The native UI check uses the existing preview/reviewer infrastructure and Deck
+rendering design. Store target/baseline identity, tested tree, viewport, theme,
+state, renderer configuration, screenshot/export and specified keyboard,
+accessibility and interaction checks. Missing required rendering stays
+unresolved. A structural diff is not a visual pass. Intentional baseline changes
+require review, and matching appearance cannot excuse broken behavior.
+
+Context retrieval reuses the existing BM25/graph/miss mechanisms, with immutable
+source provenance, explicit optional precedence and mandatory preservation.
+Evaluate selection by task outcome and exploration cost. Human learning and
+defect proposals retain run/date/scope/evidence/type. Apply approved amendments
+through existing plan anchors and ownership rather than direct unexplained
+run-branch edits. Draft stale/superseded knowledge repairs under one canonical
+owner; explicit approval precedes any Vault write.
+
+## Reviews, CI and evaluated decisions
+
+Add the adversarial lens to existing reviewers at tracked contract/failure/final
+integration triggers. Bound attempts and context. Findings carry the criterion
+or contract, tested inputs, evidence, severity and resolution condition. Keep
+read-only shared refs, refutation rationale and insufficient-evidence outcomes.
+
+Use a versioned dataset with repeated baseline, inline and candidate workflows,
+including real fixes, features, refactors, tests, documentation and cross-task
+negative cases. Independent executable or human outcomes label correctness;
+model self-reports do not establish ground truth. Retain held-out cases, rubric,
+model/effort/prompt/environment identity and resource observations locally.
+Missing tokens, tool calls and intervention measurements remain unknown.
+
+Report false positives, misses, severity accuracy, repair burden and resources
+per reviewer configuration. Preserve the default-off, CPU and size limits of
+the existing optional classifier. Quality promotion requires predeclared gates
+and human-calibrated judgment where the rubric requires it. Critical correctness
+or security regressions cannot be traded for efficiency.
+
+The CI loop uses exact-input receipts, task-specific reproducers and existing
+fix-round budgets plus wall-time/attempt bounds. Code failures may enter repair;
+infrastructure or rate-limit failures escalate. Reconcile authorized PR effects
+before retry and refresh affected checks/reviews. A code pass grants no merge,
+publication or deployment permission.
+
+## Existing validation obligations and conditional scope
+
+Issue 26's trigger evaluations remain outside the repository as requested.
+Evaluate actual invocation on positive and negative prompts against the shipped
+skill set; a model guessing a skill name is not observed tool invocation. Test
+SessionStart, PreCompact, PostToolUse, SubagentStop and the issue 33 Stop guard
+through the installed authenticated harness, inspecting actual doctor receipts.
+Synthetic calls to handlers cannot substitute for these callbacks. Every
+recapture of existing Claude hook/screen fixtures needs its separate owner
+authorization; live metadata-only validation does not rewrite those fixtures.
+
+Conditional Vault changes in issue 26 require logged retrieval misses. Inspect
+the available miss evidence before activating work in another repository.
+Do not invent miss data or claim live research presets were exercised by their
+fixture tests.
+
+Issue 46 first measures critical-path, idle/setup cost and available subscription
+capacity. If a material bottleneck exists, evaluate finer scheduling in shadow
+mode with explicit satisfied dependency contracts, ownership, backpressure and
+full final verification. If measurements do not justify a scheduler change,
+report that measured decision rather than fabricate an optimization.
+
+Issue 47 adds an opt-in, versioned release-evidence contract for projects that
+request release scope: released version, approved smoke commands, rollback and
+incident references, recovery owner and independently confirmed post-release
+defects. Validate this contract with an isolated evaluation project. Actual
+production deployment, publication and database writes require their own
+project policy and authorization.
+
+## Checks and closure records
+
+For new behavioral tests, demonstrate a targeted mutation failure and restore
+the code before running the complete affected suites. Run root and hub command
+checks, instruction lint and applicable build/render checks without changing
+gate policy. Review correctness, security, tests and claims, including stale,
+malformed, unavailable-capability, process-loss and conflicting-evidence cases.
+
+Record each issue's acceptance matrix against integrated inputs. Keep fixture,
+real harness/model/render, CI and human evidence distinguishable. Close an issue
+only when its applicable matrix is satisfied; missing owner evidence remains
+visible and does not become a substitute follow-up or a delivered checkbox.
