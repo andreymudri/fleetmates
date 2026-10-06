@@ -319,18 +319,17 @@ function installTeardown() {
 }
 
 // `graceMs` overrides KILL_GRACE_MS. It exists so a test can drive the SIGKILL path without
-// five seconds of wall clock; production callers pass neither it nor anything but `timeoutMs`
-// and `onSpawn`, and shortening it changes only when the second signal is sent, never which
-// path runs.
-export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS, env = null } = {}) {
+// five seconds of wall clock. Authentication probes also use a short grace, an argv array
+// to avoid the shell, and a byte budget. Existing gate commands retain their original defaults.
+export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS, env = null, argv = null, maxOutputBytes = Infinity } = {}) {
   return new Promise((resolve, reject) => {
     installTeardown()
-    const child = spawn(cmd, {
+    const child = spawn(cmd, argv ?? [], {
       cwd,
       // Merged over the gate's own environment: a report contract adds one variable, it does not
       // replace PATH and everything the suite needs.
       ...(env ? { env: { ...process.env, ...env } } : {}),
-      shell: true,
+      shell: argv === null,
       // Its own process group, which is the only thing that makes the kill above reach the
       // suite rather than just the shell.
       detached: process.platform !== 'win32',
@@ -339,6 +338,8 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     })
     let output = ''
     let timedOut = false
+    let outputLimited = false
+    let outputBytes = 0
     let timer = null
     let grace = null
     let settled = false
@@ -424,13 +425,14 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
       const notice = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`
       resolve({
         code: code || 1,
-        timedOut: true,
-        output: `${output}\n— timed out after ${notice}; its process group was killed`,
+        timedOut,
+        ...(outputLimited ? { outputLimited: true } : {}),
+        output: outputLimited ? `${output}\n— output exceeded ${maxOutputBytes} bytes; its process group was killed` : `${output}\n— timed out after ${notice}; its process group was killed`,
       })
     })
 
-    timer = setTimeout(() => {
-      timedOut = true
+    const interrupt = () => {
+      if (grace || settled) return
       signalGroup('SIGTERM')
       grace = setTimeout(() => {
         signalGroup('SIGKILL')
@@ -447,7 +449,8 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
         dropPipes()
         resolveTimedOut(null)
       }, graceMs)
-    }, timeoutMs)
+    }
+    timer = setTimeout(() => { timedOut = true; interrupt() }, timeoutMs)
 
     // ATTACHED BEFORE `onSpawn` RUNS. `onSpawn` writes the preview claim file and so can throw
     // on EACCES or ENOSPC; called first, its throw left no `close` or `error` listener attached
@@ -455,8 +458,14 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     // `liveGroups`, the pipes were never drained, and a later `error` event was an uncaught
     // exception. Measured on that shape: the promise rejected at 9ms and the process stayed
     // alive to 8016ms.
-    child.stdout.on('data', (d) => { output += d })
-    child.stderr.on('data', (d) => { output += d })
+    const capture = (d) => {
+      const remaining = maxOutputBytes - outputBytes
+      output += d.subarray(0, Math.max(0, remaining)).toString()
+      outputBytes += d.length
+      if (outputBytes > maxOutputBytes) { outputLimited = true; interrupt() }
+    }
+    child.stdout.on('data', capture)
+    child.stderr.on('data', capture)
     child.on('error', (err) => {
       settle(() => {
         signalGroup('SIGKILL')
@@ -488,7 +497,7 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
       retireIfGroupGone(child.pid)
     })
     child.on('close', (code) => {
-      if (timedOut) { resolveTimedOut(code); return }
+      if (timedOut || outputLimited) { resolveTimedOut(code); return }
       settle(() => resolve({ code: code ?? 1, output }))
     })
 

@@ -1,3 +1,4 @@
+import { probeCommand } from './probe-command.mjs'
 // The only module in this repository that knows Codex's CLI surface (spec §5, §7). Everything
 // else — the driver, the CLI — talks to `codexAdapter` through the harness-neutral interface
 // (`scripts/harnesses/index.mjs`).
@@ -245,16 +246,9 @@ export async function readUsage({ streamPath }) {
 // itself needed the sandbox would defeat the point of probing before building one.
 export async function probe({ env = process.env } = {}) {
   const home = env.CODEX_HOME || path.join(os.homedir(), '.codex')
-  const status = await new Promise((resolve) => {
-    let stdout = ''
-    let stderr = ''
-    const child = spawnProcess('codex', ['login', 'status'], { env })
-    child.stdout.on('data', (d) => { stdout += d })
-    child.stderr.on('data', (d) => { stderr += d })
-    child.on('error', (err) => resolve({ code: -1, stdout: '', stderr: err.message }))
-    child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }))
-  })
-  const text = `${status.stdout}\n${status.stderr}`
+  const status = await probeCommand('codex', ['login', 'status'], env)
+  const text = status.text
+  if (status.timedOut || status.outputLimited) return { ok: false, reason: 'codex authentication probe exceeded its execution limits', fix: 'check the Codex CLI and retry' }
   if (/not logged in/i.test(text)) {
     return { ok: false, reason: 'codex reports it is not logged in', fix: 'run: codex login' }
   }

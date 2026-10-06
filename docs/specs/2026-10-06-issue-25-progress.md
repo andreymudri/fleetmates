@@ -16,7 +16,7 @@ close the parent roadmap or claim real-model evaluation outcomes.
 | W09 | Bounded read-only GitHub CI adapter, exact SHA and explicit required app/check identities, latest attempt and unresolved status reporting | Full-input receipts, failure reproduction, bounded task repairs, publication idempotency and reconciliation |
 | W10 | Five versioned dry-run profiles on existing CLI fragments, phase/artifact contracts, explicit capability blockers, tracked repair-budget limits | Execution controller, stdout capture, review aggregation, actual capability probing/wall-time enforcement and real evaluation |
 | W11 | Immutable bounded local metadata journal in common Git storage, input/branch reconciliation, unknown-effect reporting and persisted-recorder crash fixture | Driver integration, checkout/artifact recovery, external outcome queries, resolution/resume adapters, retention and real driver/daemon trials |
-| W12-W13 | No implementation claim | Separate bounded specs, environment preflight and role capabilities |
+| W12-W13 | Codex/Cursor read-only authentication probes bounded to 5 seconds plus 250 ms cleanup and 64 KiB output; bounded workflow JSON reads | Broader environment preflight, separate capability contracts and role enforcement |
 | W14-W15 | Conditional later scope | Bottleneck evidence and an explicit release requirement |
 
 ## Local commands
@@ -61,3 +61,13 @@ free-form guidance is preserved as global advisory context. Mandatory budget
 overflow refuses dispatch and asks the owner to condense guidance. Optional
 omissions are recorded. The absence of a Vault is explicit. This selector
 has fixture-backed behavior, not a measured claim of improved model outcomes.
+
+## Bounded authentication preflight
+
+Codex login status and Cursor status run without a shell or model turn. Each
+probe allows five seconds and 64 KiB of combined output, followed by at most
+250 ms of process-group cleanup. Crossing either limit refuses dispatch, even
+if the command subsequently exits successfully. The existing gate runner owns
+process-group retirement and escalation. Windows retains the runner's existing
+limitation for descendants that outlive their direct parent. These checks do
+not establish role capabilities, sandbox isolation or external service health.
