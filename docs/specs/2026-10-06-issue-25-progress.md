@@ -15,7 +15,8 @@ close the parent roadmap or claim real-model evaluation outcomes.
 | W08 | Local outcome counts, precision excluding unresolved findings, recall requiring independent labels; provenance-preserving duplicate groups and per-lens/category/model reports tied to current inputs | Calibrated real reviewer datasets, independent reproduction, refutation quality and shadow selection |
 | W09 | Bounded read-only GitHub CI adapter, exact SHA and explicit required app/check identities, latest attempt and unresolved status reporting | Full-input receipts, failure reproduction, bounded task repairs, publication idempotency and reconciliation |
 | W10 | Five versioned dry-run profiles on existing CLI fragments, phase/artifact contracts, explicit capability blockers, tracked repair-budget limits | Execution controller, stdout capture, review aggregation, actual capability probing/wall-time enforcement and real evaluation |
-| W11-W13 | No implementation claim | Separate bounded specs, adapters, durable effects, preflight and role capabilities |
+| W11 | Immutable bounded local metadata journal in common Git storage, input/branch reconciliation, unknown-effect reporting and persisted-recorder crash fixture | Driver integration, checkout/artifact recovery, external outcome queries, resolution/resume adapters, retention and real driver/daemon trials |
+| W12-W13 | No implementation claim | Separate bounded specs, environment preflight and role capabilities |
 | W14-W15 | Conditional later scope | Bottleneck evidence and an explicit release requirement |
 
 ## Local commands

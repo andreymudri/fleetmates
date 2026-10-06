@@ -151,6 +151,8 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   ci-status --file <json> [--root <path>]
   feedback-draft --file <json> [--root <path>]
   workflow-profile --file <json> [--root <path>]
+  execution-record --file <json> [--root <path>]
+  execution-status --run <id> --file <json> [--root <path>]
   bind-session --run <id> --plan <path> --session <id> [--base <branch>] [--root <path>]
   suspend --run <id> --plan <path> [--base <branch>] [--root <path>]
   abandon --run <id> --plan <path> [--base <branch>] [--root <path>]
@@ -304,6 +306,8 @@ export const REQUIRED = {
   'ci-status': ['file'],
   'feedback-draft': ['file'],
   'workflow-profile': ['file'],
+  'execution-record': ['file'],
+  'execution-status': ['run', 'file'],
   'bind-session': ['run', 'plan', 'session'],
   suspend: ['run', 'plan'],
   resume: ['run'],
@@ -387,6 +391,8 @@ export const KNOWN_FLAGS = {
   'ci-status': ['file'],
   'feedback-draft': ['file'],
   'workflow-profile': ['file'],
+  'execution-record': ['file'],
+  'execution-status': ['run', 'file'],
   'bind-session': ['run', 'plan', 'base', 'session'],
   suspend: ['run', 'plan', 'base'],
   resume: ['run'],
@@ -4660,6 +4666,27 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
     return failed > 0 ? 1 : 0
+  }
+
+  if (command === 'execution-record' || command === 'execution-status') {
+    try {
+      const input = await readWorkflowInput(flags.file)
+      const { discover } = await import('./workflow-lifecycle.mjs')
+      const { appendExecutionEvent, readExecutionEvents, reconcileExecution } = await import('./execution-journal.mjs')
+      const { common } = discover(root)
+      if (command === 'execution-record') {
+        io.out(workflowJson(await appendExecutionEvent(common, input)))
+        return 0
+      }
+      const events = await readExecutionEvents(common, runId)
+      const git = createGit({ cwd: root }), branches = {}
+      for (const ref of new Set(events.flatMap(event => Object.keys(event.branches)))) {
+        try { branches[ref] = await git.resolveRef(ref) } catch { branches[ref] = null }
+      }
+      const report = reconcileExecution(events, { inputs: input.inputs, branches })
+      io.out(workflowJson(report))
+      return report.unresolved || !events.length ? 4 : 0
+    } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
   }
 
   if (command === 'feedback-draft' || command === 'workflow-profile') {

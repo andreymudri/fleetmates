@@ -223,3 +223,38 @@ for full completion, actual capability probing and wall-time enforcement remain
 outstanding. The dry-run declares these needs rather than claiming it executes
 or enforces them. Real W02 workflow evaluations remain required before profile
 promotion. This is a fixed set of fragments, not a general workflow language.
+
+## Local execution journal and recovery observations
+
+`execution-record --file <json>` persists a versioned metadata event in the
+main repository's common Git directory, under fleetmates-execution and a run
+hash. Invoke against the main repository or its shared worktrees: a disposable
+clone has its own common directory and cannot substitute for this store.
+Input declares stable id, runId, step, attempt, kind, at and the five-field
+inputs identity. Kinds are step-started/completed/failed and
+effect-started/completed/failed/unknown. Effect events declare an effect id,
+kind (pr, vault, publication) and optional opaque reference; branch observations
+use fully qualified refs/heads keys and exact SHAs. Prompt/command/output fields
+are not projected into records. No external action is performed.
+
+Each event is a private immutable file, published atomically by a hard link
+from a flushed temporary file. Retrying an identical event ID/data is
+idempotent; conflicting data is refused. Readers reject unsafe, incomplete,
+unsupported-version or mismatched records. Individual records are bounded to
+8 KiB and the journal to 1 MiB/1,000 events. Publication concurrency cannot
+silently overwrite an existing event. This protects process-loss boundaries,
+not authenticated history or whole-machine/power-loss durability.
+
+`execution-status --run <id> --file <json>` accepts current declared inputs,
+loads this journal and independently resolves recorded branch refs from Git.
+Changed identities/refs are stale; a start without an outcome is interrupted;
+an external effect start with no known outcome remains unknown-effect even if
+a step claims completion. A current completed observation still requires fresh
+gates before reuse and never yields verifiedComplete. Missing/ambiguous history
+or unresolved observations cannot become delivery success. No effect is retried.
+
+The crash fixture kills a recorder after two events are published and verifies
+that a fresh read preserves the unknown outcome. It does not kill a real driver,
+model session or Deck daemon. Driver integration, disposable checkout/artifact
+reconciliation, external outcome queries, explicit resolution/resume adapters,
+retention policy and independent recovery trials remain outstanding W11 work.

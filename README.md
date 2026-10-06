@@ -689,3 +689,20 @@ checks and repair budgets remain mandatory. Migration parameters require
 `parameters.requiresVault: true` requires Vault. The expansion is nonexecutable:
 a controller and actual verification remain necessary, and no agent or command
 runs during dry-run. Declared capabilities do not grant permissions.
+
+`execution-record --file <json>` stores immutable local execution observations
+in the main repository's common Git directory. Events declare `id`, `runId`,
+`step`, `attempt`, `kind`, `at` and `inputs`; kinds are `step-started`,
+`step-completed`, `step-failed`, `effect-started`, `effect-completed`,
+`effect-failed` or `effect-unknown`. Effects also declare `{id,kind,reference}`
+with kind `pr`, `vault` or `publication`. Optional `branches` map fully qualified
+refs/heads names to exact SHAs. Identical retries are idempotent; conflicting
+IDs refuse. No external effect is executed and prompt/command/output fields
+are excluded from persisted records.
+
+`execution-status --run <id> --file <json>` reads `{inputs}` and reconciles
+recorded branch tips with Git. Interrupted, stale and unknown-effect attempts
+stay unresolved. A completed observation still requires current gates and is
+never verified delivery. Use the main repository's root; disposable clones
+have separate metadata. Automatic driver recovery and external reconciliation
+adapters remain unsupported; these commands repeat no external action.
