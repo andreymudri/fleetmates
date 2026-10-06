@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -1030,6 +1032,36 @@ test('an include target is protected and keyed, so setting hooksPath through it 
 
 // D-92 round 2: with HEAD and every include target keyed, a confirmed read stays current however
 // long ago it ran, so an ordinary write under src/hooks (a React hooks directory) is Safe.
+test('null-device timestamps do not invalidate a confirmed hooks config, but real config changes do', async t => {
+  const originalStat = fs.statSync
+  let age = 0n
+  t.mock.method(fs, 'statSync', (location, options) => {
+    const stat = originalStat(location, options)
+    if (location === '/dev/null' && options?.bigint) return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { mtimeNs: stat.mtimeNs + age })
+    return stat
+  })
+  syncBuiltinESMExports()
+  try {
+    await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
+      const s = hooksSandbox()
+      try {
+        gitIn(s.repo, s.home, 'config', 'core.hooksPath', 'r1')
+        assert.deepEqual(await s.settle(), [s.at('r1')])
+        expectTier(s.write('src/a.txt'), 'safe', null, 'confirmed config')
+        age = 5_000_000_000n
+        expectTier(s.write('src/a.txt'), 'safe', null, 'null-device I/O changed only its timestamp')
+        gitIn(s.repo, s.home, 'config', 'core.hooksPath', 'r2')
+        expectTier(s.write('src/a.txt'), 'caution', 'file.execution-config', 'real config changed')
+        assert.deepEqual(await s.settle(), [s.at('r2')])
+        expectTier(s.write('r2/pre-commit'), 'caution', 'file.execution-config', 'new hook remains protected')
+      } finally { s.close() }
+    })
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+})
+
 test('a confirmed read stays current with time passed, so a write under src/hooks is Safe (D-92 (a))', async () => {
   await withEnv({ XDG_CONFIG_HOME: undefined }, async () => {
     const s = hooksSandbox()

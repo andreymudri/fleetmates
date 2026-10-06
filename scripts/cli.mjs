@@ -298,6 +298,7 @@ export const REQUIRED = {
   usage: [],
   'map-notes': ['run'],
   digest: ['run'],
+  diagram: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
   // Both paths are derived from where the command runs, so neither is required: the brief
@@ -339,9 +340,10 @@ export const UNIVERSAL_FLAGS = new Set(['root'])
 export const KNOWN_FLAGS = {
   'init-run': ['run'],
   gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
-  doctor: ['run', 'plan', 'base', 'run-branch'],
+  doctor: ['run', 'plan', 'base', 'run-branch', 'hooks', 'session'],
   liveness: ['run', 'plan', 'stale'],
-  digest: ['run'],
+  digest: ['run', 'ledger'],
+  diagram: ['run'],
   claim: ['run', 'task', 'by'],
   unclaim: ['run', 'task'],
   locate: ['run', 'task', 'worktree', 'branch'],
@@ -2882,6 +2884,12 @@ export async function runCli(argv, io = { out: console.log }) {
     io.out(USAGE)
     return 2
   }
+  if (command === 'doctor' && flags.hooks === true) {
+    const { hookDoctor } = await import('./hook-doctor.mjs')
+    const report = await hookDoctor({ sessionId: typeof flags.session === 'string' ? flags.session : undefined })
+    io.out(JSON.stringify(report, null, 2))
+    return report.ok ? 0 : 1
+  }
 
   if (REQUIRED[command]) {
     const missing = missingArgs(command, flags, positional)
@@ -3177,7 +3185,27 @@ export async function runCli(argv, io = { out: console.log }) {
     return 0
   }
 
+  if (command === 'diagram') {
+    const { phaseDiagram } = await import('./diagram.mjs')
+    const plan = await readState(root, runId, 'plan')
+    if (!plan) { io.out('no plan for diagram'); return 1 }
+    io.out(JSON.stringify(phaseDiagram(plan, await readState(root, runId, 'status')), null, 2))
+    return 0
+  }
   if (command === 'digest') {
+    if (flags.ledger === true) {
+      const { ledgerPath, readEvents, ledgerSummary } = await import('./event-ledger.mjs')
+      const plan = await readState(root, runId, 'plan')
+      const tasks = Array.isArray(plan?.tasks) ? plan.tasks : []
+      const ids = [...new Set(tasks.map(t => t?.id).filter(id => /^T\d{1,127}$/.test(id)))].slice(0, 256)
+      const rows = []
+      for (const id of ids) {
+        try { rows.push({ task: id, ...ledgerSummary(await readEvents(ledgerPath(root, runId, id))) }) }
+        catch { rows.push({ task: id, available: false, next: 'inspect-ledger' }) }
+      }
+      io.out(JSON.stringify({ v: 1, tasks: rows }, null, 2))
+      return plan ? 0 : 1
+    }
     const status = await readState(root, runId, 'status')
     if (!status) { io.out(`no status for run ${runId}`); return 1 }
     const resolved = await resolveConfig(root, io)
@@ -5122,6 +5150,7 @@ export async function runCli(argv, io = { out: console.log }) {
     let spec
     try {
       spec = generateReviewDispatch({
+        planPath: typeof flags.plan === 'string' ? flags.plan : (typeof plan.planPath === 'string' ? plan.planPath : ''),
         runId,
         phaseName,
         checkName: check.name,

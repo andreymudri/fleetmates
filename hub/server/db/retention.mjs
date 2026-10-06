@@ -11,6 +11,7 @@ export function runRetention(store, { now = Date.now() } = {}) {
     store.run(`DELETE FROM sessions WHERE ${expiredSessions}`, cutoff)
     store.run('DELETE FROM hook_events WHERE received_at < ?', cutoff)
     store.run('DELETE FROM events WHERE at < ?', cutoff)
+    if (store.get("SELECT name FROM sqlite_schema WHERE type='table' AND name='fleet_ledger_events'")) store.run('DELETE FROM fleet_ledger_events WHERE observed_at < ?', cutoff)
     store.run('DELETE FROM rejected_events WHERE received_at < ?', cutoff)
     store.run('DELETE FROM session_scrollback WHERE captured_at < ?', cutoff)
     store.run("DELETE FROM requests WHERE state <> 'open' AND created_at < ?", cutoff)

@@ -12,6 +12,7 @@ import { addRule, answerRequest, fetchArchived, fetchMeeting, fetchMeetings, fet
 import { clockTime, dayLabel, durationText, meetingTitle } from '../meetings/MeetingDetail.jsx'
 import { archivedCount, readDensity, writeDensity } from '../../state/deck-store.js'
 import { NeedsYouDrawer, deckApi, needsLinkDetail, openOverlay, repoFor } from '../drawer/NeedsYouDrawer.jsx'
+import { ResearchHome } from '../research/Research.jsx'
 import { Palette, openLaunch, orderSessions } from '../palette/Palette.jsx'
 
 /** English copy for Home (docs/deck/screens/home.md section 9): M1 plus the M2 header, compact and Stop keys, and the M4 Calm "Last meeting". */
@@ -957,6 +958,7 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
         onArchive={session => flow.archive(session.id)} onArchiveFinished={flow.archiveFinished} onUnarchive={flow.unarchive} api={http} storage={storage}
         answers={answers} onAnswer={answering.answer} onReview={id => onOverlay('drawer', { request: id })} onAcceptRule={answering.acceptRule}
         lastMeeting={<LastMeetingSection api={http} now={now} t={t} navigate={navigate} dispatch={dispatch} />} vaultSections={<HomeMemorySection api={http} state={state} navigate={navigate} />} />
+      <ResearchHome items={state.data.research} navigate={navigate} api={http} />
       <HomeStopDialog stopping={stopping} repos={state.data.repos} actions={actions} t={t} />
       <ArchiveToast toast={archiveToast} t={t} onUndo={flow.undo} onDismiss={() => showArchiveToast(null)} />
       <ArchiveToast toast={ruleToast} t={t} onUndo={answering.undo} onDismiss={() => showRuleToast(null)} />

@@ -1,5 +1,10 @@
 # 05 · API
 
+M6 candidate implementation adds authenticated launch, list, detail, review,
+preview, save and stop routes. Preview/save require the full upstream MCP
+approval schema; the published 0.4.0 dependency remains blocked. See
+[m6-progress.md](m6-progress.md) for validation and remaining release checks.
+
 Status labels as in [02-domain.md](02-domain.md). Decided here: the token on every HTTP request and WebSocket with Host and Origin checks, loopback only, hooks over a Unix socket with a spool fallback, deckd reachable only over its Unix socket, answers delivered as keystrokes into the PTY, and the resync by `seq` idea. Everything else in this document (paths, payload shapes, event names, the deckd wire protocol, the envelope fields, error codes, versioning) is **Proposed** unless a line says otherwise. Where a screen spec named an endpoint or event differently, this document wins (SHELL-O1) and section 2.1 lists every rename.
 
 Three contracts live here:
@@ -206,18 +211,30 @@ Paths (D-145, plan decision 2026-10-04; owner may revisit before exit): the thre
 
 A `meeting:<id>` ask uses the scribed `ask` engine, over the transcript only and with no citations (MEET-O4, Decided 2026-10-04, D-105), and the deck stores no meeting ask for any tag ([06-storage.md](06-storage.md) section 10; D-144). The thread and message objects in the response are transient (`persisted: false`). In M4, `POST /api/ask` accepted only `scope: 'meeting:<id>'` (D-123). For the vault scope D-123 is replaced by D-145 in M5: a missing scope means `vault`, and the vault scope is accepted.
 
-### 2.10 Research (M6)
+### 2.10 Research (M6 candidate implementation)
 
-| Method | Path | Request | Response | Errors | Milestone | Used by |
-|---|---|---|---|---|---|---|
-| POST | `/api/research` | `{ topic, preset, domain, newDomain?: boolean, sourceTypes, focusNotes, missId? }` | 201 `{ research: Research }` | `validation_failed` (topic under 3 chars, no source type, empty new domain name), `vault_unavailable`, `deckd_unavailable`, `spawn_failed` | M6 | Research form "Send scouts" (`U.SendScouts`) |
-| GET | `/api/research/:id` | | `{ research: Research }` | `not_found` | M6 | Research review and running view |
-| POST | `/api/research/:id/preview` | `{ draft?: { body, keptSources: number[] }, confirmNewDomain?: boolean }` | 202 `{ previewId }`; result in WS `research.updated` (`preview` or `previewError`) | `invalid_state` (not `drafted`), `vault_unavailable`, `vault_tool_missing` (no `preview`, RES-O3) | M6 | `T.RePreview`, `U.ConfirmNewDomain` |
-| POST | `/api/research/:id/save` | `{ previewId }` | 202; WS `research.updated` with `state: 'saved'` (and `savedPath`, which may differ from the preview, row 20) | `preview_stale` (draft changed after `previewId`, or not the latest preview), `orphan_citations` (row 18, `details.sources`), `vault_unavailable`, `vault_error` | M6 | "Save to vault" (`U.Save`) |
-| POST | `/api/research/:id/discard` | | `{ research }` | `invalid_state` | M6 | "Discard" (`U.Discard`) |
-| POST | `/api/research/:id/stop` | | 202 `{ research }` | `invalid_state` (not `running`) | M6 | "Stop run…" (`U.StopRun`) |
+| Method | Path | Request | Response |
+|---|---|---|---|
+| GET | `/api/research` | | `{ research }`, at most 50 summaries without draft or preview text |
+| POST | `/api/research` | `{ repoKey, topic, preset, domain, sourceTypes, focusNotes?, relatedNotes?, missId? }` | 201 `{ research }` |
+| GET | `/api/research/:id` | | `{ research }`, validated output, review revision and save availability |
+| PATCH | `/api/research/:id` | `{ revision, body, excludedSources }` or `{ revision, reset: true }` | `{ research }`; stale revision returns `research_changed` |
+| POST | `/api/research/:id/preview` | `{ confirmNewDomain?: boolean }` | `{ research }`, containing `save.preview.id`, files and diffs |
+| POST | `/api/research/:id/save` | `{ previewId }` | `{ research }`; approved parameters plus upstream `expected_revision` |
+| POST | `/api/research/:id/stop` | `{}` | existing session-stop response |
 
-Save uses exactly the parameters of the preview named by `previewId` without `preview` (Decided: no save without preview).
+Saving requires the exact current preview ID, draft/review revision, configured
+vault identity and complete MCP approval schema. No-preview saves return
+`preview_required`; unsupported preview returns `vault_tool_missing`. A safe
+upstream `preview_stale` response clears the preview and permits another review.
+An uncertain write outcome becomes `save_outcome_unknown` and prevents retries.
+Edits invalidate previews; excluded sources leave highlighted orphan citations
+until the owner removes the claim or restores its source. A saved draft is
+immutable in the deck even if the team later changes its output files.
+
+Research updates are ephemeral notifications containing only the research ID.
+Clients recover full details through authenticated REST polling. Proposed
+Discard and richer per-scout progress are not implemented in this candidate.
 
 ### 2.11 Meetings (M4)
 

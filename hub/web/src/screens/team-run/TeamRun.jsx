@@ -9,6 +9,7 @@ import { fetchRunPlan, stopSession } from '../../state/actions.js'
 import { ObserveOverlays, useMinuteNow } from '../home/Home.jsx'
 import { deckApi, openOverlay, repoFor, tierOf } from '../drawer/NeedsYouDrawer.jsx'
 import { PlanDrawer, planHeading } from './PlanDrawer.jsx'
+import { NativeDiagram } from '../../components/FleetProgress.mjs'
 
 /** English copy for the read-only Team run page (docs/deck/screens/team-run.md section 9). */
 export const TEAM_COPY = Object.freeze({
@@ -498,6 +499,7 @@ export function TeamRunView({
       {run.statusMissing === true ? <p className="team-banner team-banner--hint">{translate(t, TEAM_COPY, 'team.error.noStatus')}</p> : null}
       <div className={`team-body${readError ? ' team-body--dim' : ''}`}>
         <Phases run={run} views={views} phase={phase} t={t} lang={lang} />
+        {run.diagram ? <NativeDiagram diagram={run.diagram} lang={lang} /> : null}
         <div className="team-columns">
           <Tasks run={run} views={views} phase={phase} repo={repo} t={t} lang={lang} onReview={onReview} onScrollTo={onScrollTo} />
           <Crew run={run} lead={lead} views={views} workers={crewWorkers} repo={repo} crew={crew} t={t} lang={lang} now={now} navigate={navigate} />

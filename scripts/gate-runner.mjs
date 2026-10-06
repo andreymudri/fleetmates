@@ -8,6 +8,7 @@ import { readReport, compareInventories } from './test-report.mjs'
 import { reportPathParts } from './config.mjs'
 import { filesetViolations, ownershipViolations, baseExplainedNote, resolveTaskBranch, derivePhase, planHash, normalizePath } from './enforce.mjs'
 import { GitError } from './git.mjs'
+import { lintCommittedInstructions } from './security-lint.mjs'
 import { protectedPaths } from './gate-config.mjs'
 import { withMergePreview, conflictPairs, previewClaimPath } from './merge-preview.mjs'
 
@@ -1330,6 +1331,7 @@ export async function runFilesetCheck(check, ctx = {}) {
     // so a branch that moves after this verdict is issued is caught by verdictCoversTree
     // even though this path performs no diff of its own.
     const branchShas = {}
+    const instructionFindings = []
     try {
       // Scoped too: a task-scoped verdict must not claim to cover a sibling's branch, or a
       // sibling moving its branch would invalidate this task's verdict via verdictCoversTree.
@@ -1337,13 +1339,16 @@ export async function runFilesetCheck(check, ctx = {}) {
         const branch = resolveTaskBranch(task, runId)
         if (branch && await git.branchExists(branch)) {
           branchShas[branch] = await git.resolveRef(`refs/heads/${branch}`)
+          for (const hit of await lintCommittedInstructions(git, branchShas[branch], task.files ?? [])) {
+            instructionFindings.push(`${task.id}: instruction security lint — ${JSON.stringify(hit.path)}:${hit.line}: ${hit.rule}`)
+          }
         }
       }
     } catch (err) {
       if (!(err instanceof GitError)) throw err
       return checkResult(check, 'fail', err.message)
     }
-    return { ...checkResult(check, 'pass', 'every phase in the plan is integrated'), branchShas }
+    return { ...checkResult(check, instructionFindings.length ? 'fail' : 'pass', instructionFindings.length ? instructionFindings.join('\n') : 'every phase in the plan is integrated'), branchShas }
   }
 
   const phaseTasks = scopedPhaseTasks(ctx)
@@ -1472,7 +1477,15 @@ export async function runFilesetCheck(check, ctx = {}) {
         if (!landed) {
           problems.push(`${task.id}: branch ${branch} contributes no file changes past its fork point ${forkPoint} — the work is not on the conventional ref, and merging this task would be a no-op`)
         }
+        if (landed) {
+          for (const hit of await lintCommittedInstructions(git, sha, task.files ?? [])) {
+            problems.push(`${task.id}: instruction security lint — ${JSON.stringify(hit.path)}:${hit.line}: ${hit.rule}`)
+          }
+        }
         continue
+      }
+      for (const hit of await lintCommittedInstructions(git, sha, changed)) {
+        problems.push(`${task.id}: instruction security lint — ${JSON.stringify(hit.path)}:${hit.line}: ${hit.rule}`)
       }
       const violations = filesetViolations(changed, task.files)
       if (violations.length > 0) problems.push(`${task.id}: outside declared set — ${violations.join(', ')}`)

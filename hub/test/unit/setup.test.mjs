@@ -717,7 +717,7 @@ test('init updates an old deck hook in place', () => {
 
 test('renamed Node init is idempotent and uninstall preserves unrelated groups', t => {
   const s = sandbox('existing-hooks.json')
-  const executableDir = mkdtempSync(path.join('/var/tmp', 'deck-node-test-'))
+  const executableDir = fs.realpathSync(mkdtempSync(path.join('/var/tmp', 'deck-node-test-')))
   const executable = path.join(executableDir, 'deck-node-runtime')
   t.after(() => fs.rmSync(executableDir, { recursive: true, force: true }))
   try {

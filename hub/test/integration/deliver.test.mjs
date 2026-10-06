@@ -909,3 +909,17 @@ test('a request expired while the deck write is in flight keeps no attempt as it
   await refused(q.deliverer.answer('q-stop', { choice: 'reply', text: 'deck words' }), 'deckd_unavailable')
   assert.deepEqual([q.row().state, q.row().delivery, q.row().answer], ['expired', 'idle', null])
 })
+
+test('an extension scan raises the tier before any permission keys are delivered', async t => {
+  let scans = 0
+  const s = await scenario(t, 'approve-safe', { deliver: { scan: async () => { scans++; return { entryId: 'extension.scan', tier: 'destructive', description: 'Flagged instruction' } } } })
+  const req = await s.request('npm run test')
+  await refused(s.deliverer.answer(req.id, { choice: 'allow' }), 'confirm_required')
+  assert.equal(scans, 1)
+  assert.equal(s.row(req.id).tier, 'destructive')
+  assert.deepEqual(inputs(s.log), [])
+  const accepted = await s.deliverer.answer(req.id, { choice: 'allow', confirm: true })
+  assert.equal(await accepted.outcome, 'answered')
+  assert.equal(scans, 2)
+  assert.deepEqual(inputs(s.log), ['1'])
+})

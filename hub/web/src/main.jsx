@@ -1,3 +1,4 @@
+import './styles/research.css'
 import './styles/tokens.css'
 import './styles/shell.css'
 import './styles/components.css'

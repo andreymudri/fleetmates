@@ -305,3 +305,9 @@ h2.empty-title { font: var(--type-section-title); color: var(--text-strong); }
    its keyframes override this value; when reduced motion stops the pulse (tokens.css), this inset line is
    what shows, since it outranks the outset ring tokens.css gives `.motion-pulse` there. */
 .session-card.motion-pulse { box-shadow: inset 0 0 0 1px var(--color-amber-700); }
+.fleet-report, .extension-scan-notice { margin: var(--space-10) 0; line-height: 1.5; }
+.fleet-diagram { overflow: auto; padding: var(--space-8); max-width: 100%; }
+.fleet-node--done { color: var(--state-done-fg); }
+.fleet-node--blocked, .fleet-node--failed { color: var(--state-crashed-fg); }
+.fleet-ledger-timeline { padding: var(--space-16); border-top: 1px solid var(--border-default); }
+.fleet-ledger-timeline ol { padding-inline-start: 1.5rem; }

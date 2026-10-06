@@ -4,6 +4,7 @@ import { MetaLine, StatusPill, compactDuration, pillParams, shown, titleText, tr
 import { AnswerControls } from './AnswerControls.jsx'
 import { linkHandler } from '../shell/Rail.jsx'
 import { archiveFinished, archiveSession, unarchiveSession } from '../state/actions.js'
+import { FleetReport, ExtensionScanNotice } from './FleetProgress.mjs'
 
 /**
  * English copy for the cards: docs/deck/screens/home.md section 9 and failures-and-loading.md section 4,
@@ -187,7 +188,7 @@ export function withLocalDelivery(request, busy) {
   return busy && (request.delivery ?? 'idle') === 'idle' ? { ...request, delivery: 'sending' } : request
 }
 
-function RequestBox({ session, open, t, navigate, deckdDown, answers, onAnswer, onReview }) {
+function RequestBox({ session, open, t, navigate, deckdDown, answers, onAnswer, onReview, lang }) {
   const [request] = open
   const question = request.kind === 'question'
   const tier = question ? 'question' : request.tier ?? 'caution'
@@ -204,6 +205,7 @@ function RequestBox({ session, open, t, navigate, deckdDown, answers, onAnswer, 
       {question
         ? <p className="request-question"><bdi>{titleText(request.summary)}</bdi></p>
         : <code className="request-command">{shown(request.summary)}</code>}
+      <ExtensionScanNotice request={request} lang={lang} />
       {observed ? (
         <div className="request-actions">
           <span className="request-terminal">{translate(t, CARD_COPY, 'home.card.request.answerInTerminal')}</span>
@@ -307,9 +309,10 @@ export function SessionCard({ session, repo, requests = [], steps, now = Date.no
   return (
     <article className={classes.join(' ')} aria-labelledby={domId(session.id)}>
       <CardHeader session={session} repo={repo} title={title} t={t} now={now} navigate={navigate} size="md" pillVariant="pill" />
+      <FleetReport session={session} steps={steps} lang={lang} />
       <Steps steps={steps} />
       {now_ ? <p className="card-now">{now_}</p> : null}
-      {open.length && NEEDS.has(session.state) ? <RequestBox session={session} open={open} t={t} navigate={navigate} deckdDown={deckdDown} answers={answers} onAnswer={onAnswer} onReview={onReview} /> : null}
+      {open.length && NEEDS.has(session.state) ? <RequestBox session={session} open={open} t={t} navigate={navigate} deckdDown={deckdDown} answers={answers} onAnswer={onAnswer} onReview={onReview} lang={lang} /> : null}
       {variant === 'approval' && session.origin !== 'observed' ? <RuleLines session={session} repo={repo} offers={ruleOffers} t={t} onAcceptRule={onAcceptRule} /> : null}
       {variant === 'crashed' ? <p className="card-hint">{crashLine(session, t)}</p> : null}
       {variant === 'solo-running' || variant === 'done' ? <FileChips session={session} t={t} navigate={navigate} /> : null}

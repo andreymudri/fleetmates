@@ -14,6 +14,7 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { findTaskByWorktree, normaliseWorktree, readState } from './state.mjs'
+import { appendEvent, ledgerPath } from './event-ledger.mjs'
 
 // This handler's own exit statuses, which the harness reads.
 const ALLOW = 0
@@ -324,6 +325,11 @@ async function main() {
     '--root', root,
     '--enforcement-only',
   ], { encoding: 'utf8', timeout: 60_000 })
+  try {
+    await appendEvent(ledgerPath(root, found.runId, found.taskId), { kind: 'gate-result', at: Date.now(),
+      result: result.status === 0 ? 'pass' : result.status === REJECTED ? 'fail' : 'unknown' })
+    if (result.status === 0) await appendEvent(ledgerPath(root, found.runId, found.taskId), { kind: 'handoff', at: Date.now(), result: 'done' })
+  } catch { /* Observation does not decide enforcement. */ }
 
   if (result.status === REJECTED) {
     // FIXED FORM. `complete`'s stdout is NOT forwarded, and the reason is not verbosity: under

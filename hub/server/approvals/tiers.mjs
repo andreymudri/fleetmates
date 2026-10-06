@@ -563,7 +563,14 @@ function configVerdict(location, ctx, segment) {
 const LINKED_NAMES = Object.freeze([...EXECUTION_CONFIG.filter(name => !/[*/]/.test(name)), '.cargo', '.husky', '.githooks', '.github', '.github/workflows', '.claude', '.claude/commands', '.claude/agents', '.claude/skills', '.claude/hooks', '.mcp.json', '.git'])
 const LINKED_PATTERNS = Object.freeze([['', /^\.yarnrc/], ['.cargo', /^config/], ['.claude', /^settings.*\.json$/]])
 const isLink = location => { try { return lstatSync(location).isSymbolicLink() } catch { return false } }
-const statKey = location => { try { const stat = statSync(location, { bigint: true }); return `${stat.ino}:${stat.mtimeNs}:${stat.size}` } catch { return '-' } }
+const statKey = location => {
+  try {
+    const stat = statSync(location, { bigint: true })
+    // Darwin updates null-device timestamps on I/O; those writes never change its empty config.
+    if (location === '/dev/null' && stat.isCharacterDevice()) return `${stat.dev}:${stat.ino}:${stat.rdev}:${stat.mode}:null`
+    return `${stat.ino}:${stat.mtimeNs}:${stat.size}`
+  } catch { return '-' }
+}
 
 // The git work tree top level at or above `dir`, with its git dir and common dir.
 function gitDirs(dir) {

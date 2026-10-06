@@ -10,8 +10,10 @@ import { addPin, dismissItem, dismissed as dismissedKeys, getMeeting, listMeetin
 import { persistSessionSummary } from '../machines/session.mjs'
 import { projectCounts } from '../machines/counts.mjs'
 import { createLauncher, headBranch, SCROLLBACK_LINES, SCROLLBACK_LINES_MAX } from '../launch/launch.mjs'
+import { createResearchService } from '../research/service.mjs'
 import { DiffError, sessionDiff } from '../adapters/git-diff.mjs'
 import { gitRead } from '../adapters/git-read.mjs'
+import { initializeLedgerTimeline, syncLedgerTimeline, sessionTimeline } from '../ledger-timeline.mjs'
 const deckVersion = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version
 const defaults = {
   port: 47800, scanRoot: '~/dev', lang: 'en', staleMinutes: 20, claudeCommand: 'claude',
@@ -25,10 +27,10 @@ const configKeys = new Set(['port', 'scanRoot', 'lang', 'staleMinutes', 'claudeC
 const envKeys = { port: 'DECK_PORT', lang: 'DECK_LANG', vaultPath: 'VAULT_PATH' }
 const camel = row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()), value]))
 // POST routes that take a JSON body; every other POST with a body is refused before routing.
-const postBodyRoutes = new Set(['open', 'sessions', 'requests/answer-batch', 'rules', 'rules/suggestions/dismiss', 'meetings/start', 'ask'])
+const postBodyRoutes = new Set(['open', 'sessions', 'requests/answer-batch', 'rules', 'rules/suggestions/dismiss', 'meetings/start', 'ask', 'research'])
 /** Whether a POST to these segments may carry a body: the routes above, the request answer and follow-up, and meeting pins. */
 const takesBody = (route, s) => postBodyRoutes.has(route) || (s[1] === 'requests' && s.length === 4 && ['answer', 'followup'].includes(s[3])) ||
-  (s[1] === 'meetings' && s.length === 4 && s[3] === 'pins') || (s[1] === 'misses' && s.length === 4 && s[3] === 'resolve')
+  (s[1] === 'meetings' && s.length === 4 && s[3] === 'pins') || (s[1] === 'misses' && s.length === 4 && s[3] === 'resolve') || (s[1] === 'research' && s.length === 4 && ['preview', 'save'].includes(s[3]))
 /** The keys each M3 body may hold (05-api 2.4 and 2.5); any other key is `validation_failed`. */
 const bodyKeys = {
   answer: ['choice', 'optionKey', 'text', 'confirm'],
@@ -115,6 +117,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     return { prefs, sources }
   }
   const launcher = createLauncher({ store, projector, link, publish, now, preferences })
+  const research = createResearchService({ store, launcher, projector, preferences, publish, now, vault: memory?.researchVault })
   function event(type, data, entityId = null) {
     const at = now()
     const seq = Number(store.appendEvent({ at, type, entityId, data }))
@@ -168,7 +171,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         runs: withLeads(await runReader.list()).filter(activeRun), repos: repos(), counts: projection.counts, order: projection.home.order,
         recap: { reviewed: store.get('SELECT COUNT(*) AS n FROM sessions WHERE reviewed_at IS NOT NULL').n,
           chartsAdded: ['ok', 'degraded'].includes(health().find(row => row.dep === 'vault-mcp')?.state) ? capturesOn(store, localDate(now()).day).length : null },
-        ruleOffers: approvals?.ruleOffers() ?? [], research: [], recorder: meetings ? recorderView() : recorder(), health: health(), prefs, setup: { firstRunCompletedAt: prefs.firstRunCompletedAt } }
+        ruleOffers: approvals?.ruleOffers() ?? [], research: await research.list(), recorder: meetings ? recorderView() : recorder(), health: health(), prefs, setup: { firstRunCompletedAt: prefs.firstRunCompletedAt } }
     }
   }
   function mem() {
@@ -387,6 +390,8 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
     const ok = data => ({ data })
     if (!['GET', 'PATCH', 'POST', 'DELETE'].includes(method)) throw apiError(404, 'not_found')
     if (method === 'GET') {
+      if (route === 'research') return ok({ research: await research.list() })
+      if (s[1] === 'research' && s.length === 3) return ok({ research: await research.detail(s[2]) })
       if (route === 'vault/graph') return ok(await mem().vault.graph({ ...vaultFilters(q), maxNodes: integer(q, 'maxNodes', 2000, 5000) }))
       if (route === 'vault/list') return ok({ notes: await mem().vault.list(vaultFilters(q)) })
       if (route === 'vault/note') return ok(await mem().vault.note(vaultNotePath(q.get('path'))))
@@ -438,6 +443,15 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return ok({ session: row, requests: projector.snapshot().requests.filter(request => request.sessionId === row.id), steps: steps(row.id, q) })
       }
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'steps') return ok({ steps: steps(s[2], q) })
+      if (s[1] === 'sessions' && s.length === 4 && s[3] === 'timeline') {
+        const row = session(s[2])
+        const run = row.runRef && (await runReader.list()).find(run => run.repoId === row.runRef.repoId && run.runId === row.runRef.runId)
+        initializeLedgerTimeline(store)
+        if (run) syncLedgerTimeline(store, run, now())
+        return ok({ events: sessionTimeline(store, row, integer(q, 'limit', 100, 200)), phase: run?.derivedPhase ?? null,
+          totalPhases: run?.totalPhases ?? null, phaseVerified: run?.phaseDerivation === 'verified',
+          truncated: !!run?.ledger?.truncated, unavailable: run?.ledger?.unavailable ?? [] })
+      }
       if (s[1] === 'sessions' && s.length === 4 && s[3] === 'diff') {
         const row = session(s[2])
         if (!q.has('path')) throw apiError(422, 'validation_failed', { fields: ['path'] })
@@ -483,6 +497,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         return ok({ path: run.planPath, ...(await readRunPlan(await resolveRunPlan(run, run.repoId))) })
       }
     }
+    if (method === 'PATCH' && s[1] === 'research' && s.length === 3) return research.edit(s[2], body)
     if (method === 'PATCH' && route === 'prefs') {
       const current = preferences()
       for (const [key, value] of Object.entries(body)) {
@@ -611,6 +626,19 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
         if (!miss) throw apiError(404, 'not_found')
         publish({ type: 'misses.changed', at: now(), data: { unresolved: unresolvedCount(store), ephemeral: true } })
         return ok({ miss })
+      }
+      if (route === 'research') {
+        if (typeof body.repoKey !== 'string' || !body.repoKey.trim()) throw apiError(422, 'validation_failed', { fields: ['repoKey'] })
+        const repoId = resolveRepo(q, body.repoKey)
+        if (!repoId) throw apiError(422, 'validation_failed', { fields: ['repoKey'] })
+        return research.launch(repoId, body)
+      }
+      if (s[1] === 'research' && s.length === 4 && ['stop', 'preview', 'save'].includes(s[3])) {
+        onlyKeys(body, s[3] === 'preview' ? ['confirmNewDomain'] : s[3] === 'save' ? ['previewId'] : [])
+        if (body.confirmNewDomain !== undefined && typeof body.confirmNewDomain !== 'boolean') throw apiError(422, 'validation_failed')
+        if (s[3] === 'stop') return research.stop(s[2])
+        if (s[3] === 'preview') return research.preview(s[2], body)
+        if (s[3] === 'save') return research.save(s[2], body.previewId)
       }
       if (route === 'sessions') {
         const unknown = Object.keys(body).filter(key => !['repoKey', 'task', 'mode'].includes(key))

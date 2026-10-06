@@ -59,6 +59,21 @@ export function newPtyId () {
   return 'pty_' + randomBytes(4).toString('hex')
 }
 
+/** Signal the group first; macOS can refuse a dying group while its owned PID is still signalable. */
+export function signalProcessGroup (pid, signal, kill = process.kill) {
+  try {
+    kill(-pid, signal)
+  } catch (err) {
+    if (err.code === 'ESRCH') return
+    if (err.code !== 'EPERM') throw err
+    try {
+      kill(pid, signal)
+    } catch (pidError) {
+      if (pidError.code !== 'ESRCH') throw pidError
+    }
+  }
+}
+
 export class PtyHost {
   /**
    * Spawn `claude` in a new PTY. Refuses any argv[0] whose basename is not
@@ -284,12 +299,8 @@ export class PtyHost {
    */
   #signalGroup (signal) {
     if (this.exited) return
-    try {
-      // node-pty makes the child a session leader, so its pid is its process group id.
-      process.kill(-this.pid, signal)
-    } catch (err) {
-      if (/** @type {NodeJS.ErrnoException} */ (err).code !== 'ESRCH') throw err
-    }
+    // node-pty makes the child a session leader, so its pid is its process group id.
+    signalProcessGroup(this.pid, signal)
   }
 
   dispose () {

@@ -15,6 +15,7 @@ import { parseNeedsFilter } from '../../state/deck-store.js'
 import { ObserveOverlays, teamCards, useMinuteNow } from '../home/Home.jsx'
 import { deckApi, openOverlay, repoFor, tierOf } from '../drawer/NeedsYouDrawer.jsx'
 import { orderSessions } from '../palette/Palette.jsx'
+import { LedgerTimeline } from '../../components/FleetProgress.mjs'
 
 /**
  * English copy for Focus (docs/deck/screens/focus.md section 9): the M1 read-only layout (MS-O1), the M2
@@ -555,7 +556,7 @@ export function FocusView({
   client = null, scrollback = null, terminalFocused = false, onTerminalFocus, collision, panelOpen = true, drawerOpen = false, onTogglePanel,
   confirming = false, onStop, onConfirmStop, onCancelStop, onNudge, onRelaunch, onDismiss, stopError = null, selectedFile = null, onSelectFile,
   confirmLink, confirmPaste, diff = null, onRetryDiff, answer = null, confirmed = false, onConfirm, onAnswer = () => {},
-  onArchive, onUnarchive, fallback = null, memory = null
+  onArchive, onUnarchive, fallback = null, memory = null, timeline = null
 }) {
   const session = state.data.sessions.find(row => row.id === sessionId) ?? (fallback?.id === sessionId ? fallback : undefined)
   if (!session) {
@@ -659,12 +660,13 @@ export function FocusView({
           </div>
         )}
         {open.map(request => pty && !archived && request === prompt ? (
-          <PromptBar key={request.id} request={request} session={session} deckd={deckd} labels={promptLabels(t)} confirmed={confirmed} onConfirm={onConfirm}
+          <PromptBar key={request.id} request={request} session={session} deckd={deckd} labels={promptLabels(t)} confirmed={confirmed} onConfirm={onConfirm} lang={lang}
             onAnswer={body => onAnswer(request, body)} busy={answer?.requestId === request.id ? answer.busy : null} guard={answer?.requestId === request.id ? answer.guard : null}
             badge={<span className={`tier-badge tier-badge--${tierOf(request)}`}>{translate(t, CARD_COPY, `tier.${tierOf(request)}`)}</span>} />
         ) : <RequestBar key={request.id} request={request} t={t} />)}
       </section>
       <Details session={session} tab={tab} onTab={onTab} now={now} t={t} lang={lang} selectedFile={selectedFile} onSelectFile={onSelectFile} diff={diff} onRetryDiff={onRetryDiff} memory={memory} memoryDown={['down', 'unknown'].includes(state.memory?.vault.state)} navigate={navigate} />
+      {session.runRef ? <LedgerTimeline timeline={timeline} lang={lang} /> : null}
       {confirming ? (
         <ConfirmDialog title={translate(t, FOCUS_COPY, 'focus.stop.title', { repo: shown(repo.name), task })} body={translate(t, FOCUS_COPY, 'focus.stop.body')}
           confirmLabel={translate(t, FOCUS_COPY, 'focus.stop.confirm')} cancelLabel={translate(t, FOCUS_COPY, 'focus.stop.cancel')} tone="danger"
@@ -711,6 +713,13 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
   const [archiveToast, showArchiveToast] = useArchiveToast()
   const flow = archiveFlow({ api: http, show: showArchiveToast, t })
   const [steps, setSteps] = useState(null)
+  const [timeline, setTimeline] = useState(null)
+  const timelineRun = state.data.runs?.find(run => run.repoId === session?.runRef?.repoId && run.runId === session?.runRef?.runId)
+  useEffect(() => {
+    let active = true; setTimeline(null)
+    if (session?.runRef) http.get(`/api/sessions/${seg(id)}/timeline`).then(data => { if (active) setTimeline(data) }, () => { if (active) setTimeline({ events: [], unavailable: ['ledger'] }) })
+    return () => { active = false }
+  }, [id, http, session?.runRef?.runId, timelineRun])
   const params = new URLSearchParams(search)
   const wanted = TABS.includes(params.get('tab')) ? params.get('tab') : 'changes'
   const [tab, setTab] = useState(wanted)
@@ -867,7 +876,7 @@ export function Focus({ route, state, t, navigate, api, search = globalThis.loca
     setPasteAsk(null) }
   return (
     <>
-      <FocusView state={state} sessionId={id} t={t} now={now} navigate={navigate} steps={steps} tab={tab} onTab={setTab} memory={memory}
+      <FocusView state={state} sessionId={id} t={t} now={now} navigate={navigate} steps={steps} tab={tab} onTab={setTab} memory={memory} timeline={timeline}
         onMarkReviewed={onMarkReviewed} reviewing={reviewing} reviewError={reviewError} client={client} scrollback={scrollback}
         terminalFocused={terminalFocused} onTerminalFocus={setTerminalFocused} collision={collision} panelOpen={panelOpen} drawerOpen={drawerOpen}
         onTogglePanel={togglePanel} confirming={confirming} onStop={() => { setStopError(null)

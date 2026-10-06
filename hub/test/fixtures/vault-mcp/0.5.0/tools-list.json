@@ -1,0 +1,562 @@
+[
+  {
+    "name": "vault_backlinks",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Vault-relative path, with `.md`."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "vault_delete",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Vault-relative path, with `.md`."
+        },
+        "confirm": {
+          "type": "boolean",
+          "description": "Confirms deleting even with other notes pointing at this one; their links will break."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "vault_edit_note",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Vault-relative path, with `.md`."
+        },
+        "old_text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The exact passage to replace; it must be unique within the note."
+        },
+        "new_text": {
+          "type": "string",
+          "description": "The text that takes its place."
+        }
+      },
+      "required": [
+        "path",
+        "old_text",
+        "new_text"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "vault_get_note",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Vault-relative path, with `.md`."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "First character of the BODY to return, for reading a note that did not fit in one answer. Omit it on the first call; afterwards use the offset the cut marker announces."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "vault_graph",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "folder": {
+          "type": "string",
+          "description": "Vault folder, matched on a segment boundary, as in vault_list."
+        },
+        "tipo": {
+          "type": "string",
+          "description": "Frontmatter `tipo`: wiki, moc, projeto, daily."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Every one of these tags must be on the note; case does not matter."
+        },
+        "status": {
+          "type": "string",
+          "description": "Frontmatter `status`, e.g. ativo, pausado."
+        },
+        "include_raw": {
+          "type": "boolean",
+          "description": "Include `01-raw/` (unvetted capture), left out of the graph by default."
+        },
+        "include_broken": {
+          "type": "boolean",
+          "description": "Include the list of broken links (raw target) of the returned notes."
+        },
+        "max_nodes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000,
+          "description": "Maximum notes returned, in path order (default 2000, up to 5000); beyond that the answer is marked as truncated."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "tipo": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "area": {
+                "type": "string"
+              },
+              "domain": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "in_degree": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "out_degree": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "mtime_ms": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "tipo",
+              "status",
+              "tags",
+              "area",
+              "domain",
+              "in_degree",
+              "out_degree",
+              "mtime_ms"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "target"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "broken": {
+          "type": "array",
+          "items": {
+            "$ref": "#/properties/edges/items"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "counts": {
+          "type": "object",
+          "properties": {
+            "notes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "edges": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "orphans": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "broken": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "notes",
+            "edges",
+            "orphans",
+            "broken"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "nodes",
+        "edges",
+        "truncated",
+        "counts"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "vault_learn",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "preview": {
+          "type": "boolean",
+          "description": "Compute the exact diff without writing, committing or pushing."
+        },
+        "force_new": {
+          "type": "boolean",
+          "description": "Create a linked sibling note even when this topic already exists."
+        },
+        "preview_time": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Use the timestamp returned by the approved preview."
+        },
+        "expected_revision": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$",
+          "description": "Refuse a write if the approved preview is stale."
+        },
+        "titulo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Short title for the learning; it becomes the filename."
+        },
+        "insight": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The learning itself, in markdown."
+        },
+        "contexto": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where and why this came up."
+        },
+        "dominio": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Domain under `02-wiki/`, e.g. nestjs, docker, patterns. A new domain requires confirm_novo_dominio."
+        },
+        "projeto": {
+          "type": "string",
+          "description": "Name of the project under `03-projects/` this learning belongs to; it goes into the daily note's capture line."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags for the note's frontmatter."
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Related wiki-links, without the brackets."
+        },
+        "confirm_novo_dominio": {
+          "type": "boolean",
+          "description": "Confirms creating a domain that does not yet exist under `02-wiki/`."
+        }
+      },
+      "required": [
+        "titulo",
+        "insight",
+        "contexto",
+        "dominio"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "created",
+            "appended"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "diff": {
+          "type": "string"
+        },
+        "propagated": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "committed": {
+          "type": "boolean"
+        },
+        "pushed": {
+          "type": "boolean"
+        },
+        "warning": {
+          "type": "string"
+        },
+        "preview": {
+          "type": "boolean"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "previewTime": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "before": {
+                "type": "string"
+              },
+              "after": {
+                "type": "string"
+              },
+              "diff": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "before",
+              "after",
+              "diff"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "action",
+        "path",
+        "reason",
+        "diff",
+        "propagated",
+        "committed",
+        "previewTime"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "vault_list",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "tipo": {
+          "type": "string",
+          "description": "Frontmatter `tipo`: wiki, moc, projeto, daily."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Every one of these tags must be on the note."
+        },
+        "status": {
+          "type": "string",
+          "description": "Frontmatter `status`, e.g. ativo, pausado."
+        },
+        "folder": {
+          "type": "string",
+          "description": "Vault folder, matched on a segment boundary."
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "vault_move",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The note's current vault-relative path, with `.md`."
+        },
+        "to": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Full destination path, vault-relative, with `.md`. Moving, renaming and promoting are the same operation."
+        },
+        "confirm_novo_dominio": {
+          "type": "boolean",
+          "description": "Confirms creating the MOC of a destination domain that does not have one yet."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "vault_search",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Search terms in natural language."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum snippets returned (default 6)."
+        },
+        "tipo": {
+          "type": "string",
+          "description": "Filter by the frontmatter `tipo`: wiki, moc, projeto, daily."
+        },
+        "folder": {
+          "type": "string",
+          "description": "Restrict to a vault folder, e.g. `02-wiki/nestjs`."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Filters by frontmatter tags. A note must carry ALL of them; case does not matter."
+        },
+        "status": {
+          "type": "string",
+          "description": "Filters by the frontmatter `status`, e.g. `ativo`."
+        },
+        "include_raw": {
+          "type": "boolean",
+          "description": "Include `01-raw/` (unvetted capture), left out of results by default."
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  },
+  {
+    "name": "vault_write_note",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Vault-relative path, with `.md`."
+        },
+        "content": {
+          "type": "string",
+          "description": "The note's markdown body, without the frontmatter block."
+        },
+        "frontmatter": {
+          "type": "object",
+          "additionalProperties": {},
+          "description": "Frontmatter fields, e.g. `{ \"tipo\": \"wiki\", \"tags\": [\"jwt\"] }`."
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    }
+  }
+]

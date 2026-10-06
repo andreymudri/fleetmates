@@ -28,6 +28,8 @@ const load = (name) => import(pathToFileURL(path.join(scriptsDir, name)).href)
 const [{ NAMES }, { livenessRows, DEFAULT_STALE_MINUTES }, { createGit, defaultGitExec }, { worktreeKey, indexDir, isLocalAbsolute }] = await Promise.all([
   load('names.mjs'), load('liveness.mjs'), load('git.mjs'), load('state.mjs'),
 ])
+const { ledgerPath, readEvents, ledgerSummary } = await load('event-ledger.mjs')
+const { phaseDiagram } = await load('diagram.mjs')
 
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_DISCOVERY_DEPTH = 16
@@ -230,6 +232,20 @@ async function projectRun(entry, planResult, statusResult, polled) {
     }
   })
   const livenessById = new Map((polled?.liveness ?? []).map((row) => [row.taskId, row.state]))
+  const ledger = { v: 1, events: [], summaries: [], unavailable: [], truncated: false }
+  for (const task of tasks.slice(0, 256)) {
+    if (!/^T\d{1,127}$/.test(task.id)) continue
+    try {
+      const events = await readEvents(ledgerPath(await realpath(entry.repoRoot), entry.runId, task.id))
+      ledger.summaries.push({ task: task.id, ...ledgerSummary(events) })
+      if (events.length > 200) ledger.truncated = true
+      ledger.events.push(...events.slice(-200).map((event, index) => ({ task: task.id, index: Math.max(0, events.length - 200) + index, ...event })))
+    } catch { ledger.unavailable.push(task.id) }
+  }
+  ledger.events.sort((a, b) => a.at - b.at || a.task.localeCompare(b.task) || a.index - b.index)
+  if (ledger.events.length > 1000) { ledger.events = ledger.events.slice(-1000); ledger.truncated = true }
+  let diagram = null
+  try { diagram = phaseDiagram(plan, status) } catch { /* A malformed graph does not hide the run. */ }
   return {
     repoId: await realpath(entry.repoRoot),
     runId: safeText(entry.runId),
@@ -242,6 +258,8 @@ async function projectRun(entry, planResult, statusResult, polled) {
     planPath: plan.planPath == null ? null : safeText(plan.planPath),
     runBranch: plan.runBranch == null ? null : safeText(plan.runBranch),
     tasks,
+    ledger,
+    diagram,
     gates: gateRows(status.gates),
     teammates: tasks.map((task) => ({
       taskId: task.id, sessionId: null, state: task.state, liveness: livenessById.get(task.id) ?? null,

@@ -8,6 +8,19 @@ You review a diff through **exactly one lens**, named in your prompt (for exampl
 `correctness`, `security`, or `tests`). Ignore everything outside your lens — another
 reviewer owns it.
 
+## Two-stage review
+
+First check spec compliance: read the tracked task spec at each branch's fork point and
+compare the owned files, acceptance criteria and committed diff. If it fails, return only
+spec-compliance findings and stop before code-quality review. Reproduce findings and preserve
+the existing severity and stamp contract. If you cannot locate or verify the tracked spec,
+return no findings with `unableToVerify` naming the missing evidence; do not report clean.
+
+After spec compliance passes, review code quality through exactly the assigned lens. The
+spec precheck is shared by every lens; it does not authorize unrelated quality findings.
+Keep the existing findings JSON shape. The lead routes spec failures back to the owning task
+and repeats review after its fix before proceeding to quality notes.
+
 ## Rules
 
 - Report only defects you can tie to a concrete failure: specific input or state producing a
