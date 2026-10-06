@@ -1,3 +1,4 @@
+import { resolveRoleCapabilities } from '../role-capabilities.mjs'
 import { probeCommand } from './probe-command.mjs'
 // The only module in this repository that knows the Cursor CLI (`cursor-agent`), per
 // docs/specs/2026-09-16-headless-driver-cursor-design.md. Everything else talks to
@@ -33,20 +34,40 @@ export function assertSafeArgv(argv) {
   return argv
 }
 
+function requiredEnforcement(sandbox, enforcement, network) {
+  const value = enforcement !== undefined ? enforcement : sandbox.meta.enforcement
+  if (value === undefined) {
+    if (Object.hasOwn(sandbox.meta, 'prerequisites') && sandbox.meta.prerequisites?.rolePolicy !== null) {
+      throw new Error('Missing required enforcement for bound policy')
+    }
+    return undefined
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid required enforcement')
+  const fields = ['read', 'write', 'execute', 'network', 'sharedRefs', 'publication']
+  const policy = { version: 1, roles: { implementer: Object.fromEntries(fields.map(key => [key, value[key]])) } }
+  const resolved = resolveRoleCapabilities({ policy, role: 'implementer', harness: 'cursor', sandboxMode: sandbox.meta.mode, network: network === true })
+  if (value.kind !== 'required' || !resolved.ready
+    || Object.keys(value).length !== Object.keys(resolved.enforcement).length
+    || Object.entries(resolved.enforcement).some(([key, expected]) => value[key] !== expected)) throw new Error('Invalid required cursor enforcement')
+  return value
+}
+
+
 // With no `--model`, cursor-agent does not fall back to `auto`: it picks a named default, which a
 // free plan refuses at the first call ("Named models unavailable Free plans can only use Auto",
 // exit 1). An unmapped tier therefore asks for `auto` explicitly.
-function baseArgs({ sandbox, model }) {
+function baseArgs({ sandbox, model, enforcement, network }) {
+  const required = requiredEnforcement(sandbox, enforcement, network)
   return ['-p', '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled', '--workspace', sandbox.cwd,
-    '--model', model || 'auto']
+    '--model', model || 'auto', ...(required?.mode ? ['--mode', required.mode] : [])]
 }
 
-export function buildSpawnArgv({ sandbox, model }) {
-  return assertSafeArgv(baseArgs({ sandbox, model }))
+export function buildSpawnArgv({ sandbox, model, enforcement, network }) {
+  return assertSafeArgv(baseArgs({ sandbox, model, enforcement, network }))
 }
 
-export function buildResumeArgv({ sandbox, sessionId, model }) {
-  return assertSafeArgv([...baseArgs({ sandbox, model }), '--resume', sessionId])
+export function buildResumeArgv({ sandbox, sessionId, model, enforcement, network }) {
+  return assertSafeArgv([...baseArgs({ sandbox, model, enforcement, network }), '--resume', sessionId])
 }
 
 // Cursor has no output-schema flag (§4.4), so the contract travels in the prompt and `readResult`
@@ -143,15 +164,17 @@ function run(argv, { promptText, streamPath, errPath, cwd, append }) {
   return { child, sessionId, flushed }
 }
 
-export async function spawnCursor({ sandbox, prompt, model, network, streamPath, errPath }) {
-  await prepareWorkspace(sandbox, network)
-  const argv = buildSpawnArgv({ sandbox, model })
+export async function spawnCursor({ sandbox, prompt, model, network, enforcement, streamPath, errPath }) {
+  const argv = buildSpawnArgv({ sandbox, model, enforcement, network })
+  const required = requiredEnforcement(sandbox, enforcement, network)
+  await prepareWorkspace(sandbox, required ? required.network && network : network)
   return run(argv, { promptText: withInstruction(sandbox, prompt), streamPath, errPath, cwd: sandbox.cwd, append: false })
 }
 
-export async function resumeCursor({ sandbox, sessionId, message, model, network, streamPath, errPath }) {
-  await prepareWorkspace(sandbox, network)
-  const argv = buildResumeArgv({ sandbox, sessionId, model })
+export async function resumeCursor({ sandbox, sessionId, message, model, network, enforcement, streamPath, errPath }) {
+  const argv = buildResumeArgv({ sandbox, sessionId, model, enforcement, network })
+  const required = requiredEnforcement(sandbox, enforcement, network)
+  await prepareWorkspace(sandbox, required ? required.network && network : network)
   return run(argv, { promptText: withInstruction(sandbox, message), streamPath, errPath, cwd: sandbox.cwd, append: true })
 }
 
@@ -261,7 +284,7 @@ export async function enclosingGitRoot(dir) {
   }
 }
 
-export async function makeCursorSandbox(git, { runRepo, runBranch, runId, taskId, mode, env = process.env }) {
+export async function makeCursorSandbox(git, { runRepo, runBranch, runId, taskId, mode, env = process.env, requireFresh = false }) {
   if (mode !== 'files') throw new Error('Cursor runs git outside its sandbox; only "files" is supported')
   const checkoutRoot = cursorCheckoutRoot({ runRepo, runId, env })
   await mkdir(checkoutRoot, { recursive: true })
@@ -269,6 +292,12 @@ export async function makeCursorSandbox(git, { runRepo, runBranch, runId, taskId
   if (repo) {
     throw new Error(`Cursor checkouts must not live inside a git repository, but ${checkoutRoot} is inside ${repo}: `
       + 'Cursor runs that repository\'s .cursor/hooks.json outside its sandbox. Point XDG_CACHE_HOME outside it.')
+  }
+  if (requireFresh) {
+    try {
+      await lstat(path.join(checkoutRoot, taskId))
+      throw new Error('Refusing to overwrite an existing worker workspace')
+    } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   return makeFilesSandbox(git, { runRepo, runBranch, runId, taskId, checkoutRoot })
 }
@@ -367,8 +396,11 @@ export async function probe({ env = process.env } = {}) {
   }
 }
 
+export async function createVerificationExecutor() { throw new Error('Required Cursor non-model verification is unsupported') }
+
 export const cursorAdapter = {
   name: 'cursor',
+  createVerificationExecutor,
   defaultSandbox: 'files',
   supportsEffort: false,
   // Checkouts live outside the run repo, where nothing else ever removes them.

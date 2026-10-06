@@ -488,3 +488,58 @@ test('FILES_PREAMBLE cancels every git-bound step of the implementer persona by 
   }
   assert.match(FILES_PREAMBLE, /overrides/i)
 })
+
+test('required Cursor ask enforcement reaches spawn and resume and refuses unsupported execution', () => {
+  const sandbox = { cwd: '/fixture/repo', meta: { mode: 'files' } }
+  const enforcement = { kind: 'required', harness: 'cursor', sandboxMode: 'files', sandbox: 'enabled', mode: 'ask', read: true, write: false, execute: false, network: false, sharedRefs: false, publication: false, addWritableRoots: false }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) {
+    const args = build({ sandbox, enforcement, sessionId: 'fixture' })
+    assert.equal(args[args.indexOf('--mode') + 1], 'ask')
+    assert.ok(args.includes('enabled'))
+    assert.throws(() => build({ sandbox, enforcement: { ...enforcement, execute: true } }), /enforcement/i)
+  }
+})
+
+test('Cursor required enforcement cannot downgrade malformed contracts to legacy', () => {
+  const sandbox = { cwd: '/fixture/repo', meta: { mode: 'files' } }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) {
+    for (const enforcement of [null, {}, false, { kind: 'legacy' }]) assert.throws(() => build({ sandbox, enforcement }), /enforcement/i)
+  }
+})
+
+test('Cursor runtime spawn and resume carry required ask enforcement and deny host network widening', { skip: WIN32_FAKE_SKIP }, async () => {
+  const cwd = await freshDir('required')
+  const sessions = await freshDir('required-sessions')
+  const streamPath = path.join(sessions, 'stream')
+  const argvOut = path.join(sessions, 'argv')
+  const enforcement = { kind: 'required', harness: 'cursor', sandboxMode: 'files', sandbox: 'enabled', mode: 'ask', read: true, write: false, execute: false, network: false, sharedRefs: false, publication: false, addWritableRoots: false }
+  const sandbox = { cwd, meta: { mode: 'files' } }
+  await withEnv({ FAKE_CURSOR_ARGV_OUT: argvOut, FAKE_CURSOR_RESULT_TEXT: JSON.stringify(good) }, async () => {
+    for (const run of [spawnCursor, resumeCursor]) {
+      await runToExit(await run({ sandbox, enforcement, network: true, prompt: 'fixture', message: 'fixture', sessionId: 'fixture', streamPath }))
+      const args = JSON.parse(await readFile(argvOut, 'utf8')).argv
+      assert.equal(args[args.indexOf('--mode') + 1], 'ask')
+      assert.equal(JSON.parse(await readFile(path.join(cwd, '.cursor', 'sandbox.json'), 'utf8')).networkPolicy.default, 'deny')
+      assert.deepEqual(await readResult({ streamPath }), good)
+    }
+  })
+})
+
+test('Cursor required network access cannot exceed the host approval on spawn or resume', () => {
+  const sandbox = { cwd: '/fixture/repo', meta: { mode: 'files' } }
+  const enforcement = { kind: 'required', harness: 'cursor', sandboxMode: 'files', sandbox: 'enabled', mode: null, read: true, write: true, execute: true, network: true, sharedRefs: false, publication: false, addWritableRoots: false }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) assert.throws(() => build({ sandbox, enforcement, network: false }), /enforcement/i)
+})
+
+
+test('Cursor builders refuse a bound required policy with missing enforcement', () => {
+  const sandbox = { cwd: '/fixture/repo', meta: { mode: 'files', prerequisites: { version: 1, rolePolicy: 'policy.json' } } }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) {
+    assert.throws(() => build({ sandbox, sessionId: 'fixture' }), /enforcement/i)
+  }
+})
+
+test('Cursor refuses required non-model verification rather than claiming native confinement', async () => {
+  assert.equal(typeof cursorAdapter.createVerificationExecutor, 'function')
+  await assert.rejects(cursorAdapter.createVerificationExecutor({ sandbox: { cwd: '/fixture/worker', meta: { mode: 'files' } } }), /unsupported/i)
+})

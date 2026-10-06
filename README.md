@@ -714,6 +714,81 @@ checks and repair budgets remain mandatory. Migration parameters require
 a controller and actual verification remain necessary, and no agent or command
 runs during dry-run. Declared capabilities do not grant permissions.
 
+### Execution prerequisites (issues 44 and 45 remain open)
+
+`environment-check --file <json> [--execute] --root <project>` accepts
+`{"commit":"<exact-commit>","recipePath":"recipe.json","harness":"codex"}`.
+The request is a local input file; the recipe and declared lockfiles must be
+regular committed blobs at that exact commit. The recipe has these exact fields:
+
+```json
+{
+  "version": 1,
+  "toolchains": [{ "name": "node", "command": "node", "argv": ["--version"], "expected": "v26." }],
+  "lockfiles": ["package-lock.json"],
+  "setup": [{ "name": "install", "run": "npm ci --ignore-scripts --no-audit --no-fund", "timeoutMs": 60000 }],
+  "baseline": [{ "name": "test", "run": "npm test", "timeoutMs": 60000 }],
+  "required": ["harness", "render", "ci"],
+  "dependencies": "clean-checkout"
+}
+```
+
+This is the tested dependency-free fixture recipe on Node v26.7.0, not a
+universal project installation recipe. Core requires Node >= 24.2.0. Choose
+and commit the toolchain prefix, lockfiles and setup appropriate to the project.
+`dependencies` can instead be `linked`, which reports reproducibility limits.
+Arrays are bounded to 20 entries; baseline requires at least one check.
+Check timeouts range from 1 to 3,600,000 ms. Tool/service probes are bounded to
+5 seconds, 250 ms cleanup and 64 KiB output. Services are `harness`, `render`,
+`ci` and `vault`; unrequested services are omitted.
+
+In the clean fixture, this command returned 4 without `--execute`, 0 after
+setup/baseline and required probes passed, and 2 for an injected `ready` field.
+Inspect the receipt, not just the exit: setup/baseline include durations and
+private log references, completeness and hashes. Missing capabilities stay
+unavailable or unknown. Browser presence is not UI validation; GitHub login
+is not an executed workflow. The tested Vault probe reported unavailable.
+
+`dispatch`, `dispatch-reviews` and `dispatch-integrator` accept
+`--environment <recipe-path>` and `--role-policy <policy-path>`, both committed
+repository-relative paths. A policy has version 1 and explicitly declared roles;
+each entry must include all six boolean fields:
+
+```json
+{
+  "version": 1,
+  "roles": {
+    "implementer": { "read": true, "write": true, "execute": true, "network": false, "sharedRefs": false, "publication": false },
+    "reviewer": { "read": true, "write": false, "execute": true, "network": false, "sharedRefs": false, "publication": false },
+    "integrator": { "read": true, "write": true, "execute": true, "network": false, "sharedRefs": false, "publication": false }
+  }
+}
+```
+
+The tested resolver maps Codex clone/files reviewers to read-only and writable
+roles to workspace-write. Required `full` mode, `execute: false`, reviewer
+network, shared-ref authority and publication are unsupported. Host-approved
+network is required for a network request. Cursor files-mode resolution maps
+nonwriting/nonexecuting roles to ask and writable/executing roles to its enabled
+sandbox; executing read-only review and required non-model environment
+verification remain unsupported. Resolver readiness is not native readiness.
+These integrator entries grant no shared-ref or publication authority.
+Actual CLI trials with this policy returned 4 for Codex integrator dispatch
+and Cursor reviewer dispatch because their selected sandbox mode was
+unsupported; a missing committed policy returned 2. Thus a supported resolver
+row alone does not establish a supported dispatch path.
+
+Required native verification in the current isolated-clone trial refused with
+exit 4 because restrictions were not independently observed. There was no
+required-policy fallback. The standalone `environment-check` trial used the
+host command executor; its pass does not establish required sandbox enforcement.
+Legacy invocation remains a separately unverified compatibility path.
+Changed source HEAD invalidates a bound continuation even when contract bytes
+are equal. Recipes and retrieved text are not permission grants.
+
+See [current observations and consumer obligations](docs/specs/2026-10-06-execution-prerequisites-validation.md)
+for commands, evidence provenance, unresolved findings and evaluation limits.
+
 `execution-record --file <json>` stores immutable local execution observations
 in the main repository's common Git directory. Events declare `id`, `runId`,
 `step`, `attempt`, `kind`, `at` and `inputs`; kinds are `step-started`,

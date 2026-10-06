@@ -19,8 +19,8 @@ output evidence is delivered in commit `9f59f1dd`.
 | W09 | Bounded read-only GitHub CI adapter, exact SHA and explicit required app/check identities, latest attempt and unresolved status reporting | Full-input receipts, failure reproduction, bounded task repairs, publication idempotency and reconciliation | #41 |
 | W10 | Five versioned dry-run profiles on existing CLI fragments, phase/artifact contracts, explicit capability blockers, tracked repair-budget limits | Execution controller, stdout capture, review aggregation, actual capability probing/wall-time enforcement and real evaluation | #42 |
 | W11 | Immutable bounded local metadata journal in common Git storage, input/branch reconciliation, unknown-effect reporting and persisted-recorder crash fixture | Driver integration, checkout/artifact recovery, external outcome queries, resolution/resume adapters, retention and real driver/daemon trials | #43 |
-| W12 | Codex/Cursor read-only authentication probes bounded to 5 seconds plus 250 ms cleanup and 64 KiB output | Clean checkout baseline, toolchain/lockfile recipes and browser/CI/Vault capability preflight | #44 |
-| W13 | Bounded workflow JSON reads and authentication tool responses | Per-role read/write/execute/network/publication contracts, supported enforcement and measured response efficiency | #45 |
+| W12 | Anchored versioned recipes, toolchain/lockfile identity, bounded setup/baseline receipts and optional capability probes; local clean Node fixture and installed Codex/browser/CI probes observed | Full execution-controller consumers, broader clean-project evaluation, native stdout capture finding and unsupported Vault/platform behavior | #44 |
+| W13 | Versioned role resolver and dispatch contracts; Codex spawn/resume read-only argv observed; required native readiness refusal observed in the T5 clone | Full consumers and measured enforcement/efficiency; supported-success test gap; integrator shared-ref/publication and unsupported adapter behavior | #45 |
 | W14 | Conditional later scope; no scheduling change claimed | Measured bottleneck and shadow evaluation before finer scheduling | #46 |
 | W15 | Conditional later scope; no release implied by code PASS | Explicit project release request, smoke/rollback policy and versioned feedback | #47 |
 
@@ -109,3 +109,30 @@ if the command subsequently exits successfully. The existing gate runner owns
 process-group retirement and escalation. Windows retains the runner's existing
 limitation for descendants that outlive their direct parent. These checks do
 not establish role capabilities, sandbox isolation or external service health.
+
+## Execution prerequisite delivery, 2026-10-06
+
+The [validation report](2026-10-06-execution-prerequisites-validation.md)
+separates current T5 observations at integrated source `a11a6c1d` from
+host-reported predecessor evidence at T4 `dea1de78`. T5 observed a clean
+dependency-free Node fixture passing setup/baseline, authenticated installed
+Codex and GitHub CLI probes, and installed Chromium 152.0.7977.82. This is not
+rendered UI, CI workflow execution or a real workflow evaluation campaign.
+The required native executor refused in this isolated clone; standalone
+environment success does not establish sandbox enforcement here.
+
+The host reported completed correctness/security/tests/claims reviews and a
+full phase-2 PASS at T4. Two confirmed MEDIUM findings remain under #44/#45:
+native asynchronous Node console output can be lost despite code zero, and
+conditional native tests do not pin the supported-success factory path.
+Neither finding was repaired by this documentation task. The host's eight
+bounded claims mutations leave 46 claims explicitly unprobed; that PASS is
+the predecessor phase verdict, not issue closure or exhaustive acceptance.
+T5's reviews and independent full phase gate remain for the host to run.
+
+No issue closure is claimed. Full execution-controller consumers, real
+evaluation and unsupported integrator shared-ref/publication authority remain
+open. The host reports 16 open issues (#26 and #33-47), incomplete live Claude
+callbacks due to weekly capacity, and no W02 campaign execution. Fixtures are
+not live callback evidence. No capacity reset date is inferred. Vault writes,
+publication and production deployment require separately granted authority.
