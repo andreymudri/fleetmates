@@ -1,12 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, readFile, rm, mkdir, symlink, chmod } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, rm, mkdir, symlink, chmod, lstat } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { runCli } from '../scripts/cli.mjs'
 import * as cli from '../scripts/cli.mjs'
-import { buildSpawnArgv, buildResumeArgv } from '../scripts/harnesses/codex.mjs'
+import { codexAdapter, buildSpawnArgv, buildResumeArgv } from '../scripts/harnesses/codex.mjs'
+import { cursorAdapter } from '../scripts/harnesses/cursor.mjs'
 import { getAdapter } from '../scripts/harnesses/index.mjs'
 import { defaultExec } from '../scripts/gate-runner.mjs'
 import { createGit, defaultGitExec } from '../scripts/git.mjs'
@@ -404,3 +405,198 @@ for (const [name, envelope] of [
     await assert.rejects(readFile(findings), { code: 'ENOENT' })
   }))
 }
+
+
+const dependencySetup = 'node -e "require(\'fs\').mkdirSync(\'.deps\',{recursive:true});require(\'fs\').writeFileSync(\'.deps/ready\',\'ready\')"'
+const dependencyBaseline = 'node -e "process.exit(require(\'fs\').existsSync(\'.deps/ready\')?0:9)"'
+const workerModes = [[codexAdapter, 'clone'], [codexAdapter, 'files'], [cursorAdapter, 'files']]
+async function withWorker(adapter, mode, change, fn) {
+  return fixture(async ({ root, git, gitRun }) => {
+    await writeFile(path.join(root, '.gitignore'), '.deps/\n.fleetmates/\n')
+    const cache = await mkdtemp(path.join(tmpdir(), 'fm-worker-cache-'))
+    if (typeof change === 'function') change = change({ root, cache })
+    const workerRecipe = { ...recipe, setup: [{ name: 'deps', run: dependencySetup, timeoutMs: 5000 }], baseline: [{ name: 'deps-ready', run: dependencyBaseline, timeoutMs: 5000 }], ...change }
+    if (workerRecipe.dependencies === 'linked') {
+      const shared = path.join(cache, 'shared-deps')
+      await mkdir(shared)
+      await writeFile(path.join(shared, 'ready'), 'ready')
+      workerRecipe.setup[0].run = `node -e "require('fs').symlinkSync('${shared}', '.deps', 'dir')"`
+    }
+    await writeFile(path.join(root, 'recipe.json'), JSON.stringify(workerRecipe))
+    await gitRun(['add', '.'])
+    await gitRun(['commit', '-m', 'test: worker environment'])
+    const authExec = (command, cwd, options) => ['codex', 'cursor-agent'].includes(command) ? Promise.resolve({ code: 0, output: 'Logged in' }) : defaultExec(command, cwd, options)
+    const calls = []
+    const wrapped = { ...adapter, spawn: async () => calls.push('spawn'), resume: async () => calls.push('resume') }
+    let sandbox
+    try {
+      const prepared = await cli.prepareDispatchPrerequisites({ root, flags: { environment: 'recipe.json' }, adapter: wrapped, role: 'implementer', sandboxMode: mode, network: false, exec: authExec })
+      assert.equal(prepared.code, 0)
+      const options = { runRepo: root, runBranch: 'main', runId: 'worker', taskId: 'T1', mode, env: { XDG_CACHE_HOME: cache } }
+      const gitExec = (args, opts) => defaultGitExec(args, { cwd: root, ...opts })
+      const make = async () => { sandbox = await prepared.adapter.makeSandbox(gitExec, options); return sandbox }
+      await fn({ root, git, gitRun, prepared, make, options, gitExec, calls, workerRecipe })
+    } finally {
+      if (sandbox) await adapter.cleanup({ sandbox })
+      await rm(cache, { recursive: true, force: true })
+    }
+  })
+}
+for (const [adapter, mode] of workerModes) {
+  test(`${adapter.name} ${mode} prepares ignored dependencies in the actual fresh worker`, async () => withWorker(adapter, mode, {}, async ({ root, prepared, make }) => {
+    const sandbox = await make()
+    assert.equal(prepared.report.environment.baseline.status, 'pass')
+    assert.equal((await defaultExec(dependencyBaseline, sandbox.cwd, { timeoutMs: 5000 })).code, 0)
+    assert.notEqual(sandbox.cwd, root)
+    assert.ok(sandbox.meta.workerEnvironment)
+    assert.equal(sandbox.meta.workerEnvironment.ready, true)
+    assert.equal(sandbox.meta.workerEnvironment.cwd, sandbox.cwd)
+    assert.deepEqual(sandbox.meta.workerEnvironment.sources, prepared.report.environment.sources)
+    assert.equal(sandbox.meta.workerEnvironment.dependencies.layout, 'clean-checkout')
+    await prepared.adapter.spawn({ sandbox })
+    assert.equal(sandbox.meta.workerEnvironment.preparation.setup.status, 'pass')
+    assert.deepEqual(sandbox.meta.workerEnvironment.preparation.sources, prepared.report.environment.sources)
+  }))
+  for (const stage of ['setup', 'baseline']) {
+    test(`${adapter.name} ${mode} refuses a failed actual worker ${stage} before model effects`, async () => withWorker(adapter, mode, { [stage]: [{ name: stage, run: (stage === 'setup' ? dependencySetup + ' && ' : '') + 'node -e "process.exit(require(\'fs\').existsSync(\'.git\')?0:9)"', timeoutMs: 5000 }] }, async ({ make, calls }) => {
+      await assert.rejects(make(), /worker environment/i)
+      assert.deepEqual(calls, [])
+    }))
+  }
+}
+for (const [adapter, mode] of workerModes) {
+test(`${adapter.name} ${mode} worker resume independently checks dependencies without repeating setup or overwriting task work`, async () => withWorker(adapter, mode, {}, async ({ prepared, make, calls }) => {
+  const sandbox = await make()
+  await mkdir(path.join(sandbox.cwd, '.deps'), { recursive: true })
+  await writeFile(path.join(sandbox.cwd, '.deps', 'ready'), 'task edit')
+  await prepared.adapter.resume({ sandbox })
+  assert.equal(await readFile(path.join(sandbox.cwd, '.deps', 'ready'), 'utf8'), 'task edit')
+  await rm(path.join(sandbox.cwd, '.deps', 'ready'))
+  await assert.rejects(prepared.adapter.resume({ sandbox }), /worker environment/i)
+  assert.deepEqual(calls, ['resume'])
+}))
+}
+test('worker contract substitution refuses setup and model effects before running changed content', async () => withWorker(codexAdapter, 'files', {}, async ({ prepared, make, calls }) => {
+  const sandbox = await make()
+  await writeFile(path.join(sandbox.cwd, 'recipe.json'), '{}')
+  await rm(path.join(sandbox.cwd, '.deps', 'ready'), { force: true })
+  await assert.rejects(prepared.adapter.resume({ sandbox }), /changed/i)
+  assert.deepEqual(calls, [])
+  await assert.rejects(readFile(path.join(sandbox.cwd, '.deps', 'ready')))
+}))
+test('linked worker receipt retains its reproducibility limitation', { skip: process.platform === 'win32' }, async () => withWorker(codexAdapter, 'files', { dependencies: 'linked' }, async ({ prepared, make }) => {
+  const sandbox = await make()
+  assert.equal((await lstat(path.join(sandbox.cwd, '.deps'))).isSymbolicLink(), true)
+  assert.equal(sandbox.meta.workerEnvironment?.dependencies.layout, 'linked')
+  assert.equal(sandbox.meta.workerEnvironment.dependencies.reproducible, false)
+  assert.ok(sandbox.meta.workerEnvironment.dependencies.limitations.length)
+  await prepared.adapter.resume({ sandbox })
+  assert.equal(sandbox.meta.workerEnvironment.dependencies.reproducible, false)
+}))
+
+
+for (const [adapter, mode] of workerModes) {
+test(`${adapter.name} ${mode} pre-existing worker resume verifies its own dependencies without rerunning setup`, async () => withWorker(adapter, mode, {}, async ({ prepared, options, gitExec, calls }) => {
+  const sandbox = await adapter.makeSandbox(gitExec, options)
+  try {
+    await mkdir(path.join(sandbox.cwd, '.deps'))
+    await writeFile(path.join(sandbox.cwd, '.deps', 'ready'), 'existing task work')
+    await prepared.adapter.resume({ sandbox })
+    assert.equal(await readFile(path.join(sandbox.cwd, '.deps', 'ready'), 'utf8'), 'existing task work')
+    assert.equal(sandbox.meta.workerEnvironment.workspace, 'existing')
+    assert.equal(sandbox.meta.workerEnvironment.setup.status, 'not-rerun')
+    assert.equal(sandbox.meta.workerEnvironment.dependencies.reproducible, false)
+    assert.deepEqual(sandbox.meta.workerEnvironment.sources, prepared.report.environment.sources)
+    await rm(path.join(sandbox.cwd, '.deps', 'ready'))
+    await assert.rejects(prepared.adapter.resume({ sandbox }), /worker environment/i)
+    assert.deepEqual(calls, ['resume'])
+  } finally { await adapter.cleanup({ sandbox }) }
+}))
+
+}
+test('CLI message persists actual worker receipts and refuses a broken worker baseline', async () => withWorker(codexAdapter, 'clone', {}, async ({ root, make }) => {
+  const sandbox = await make()
+  const file = path.join(root, '.fleetmates', 'worker', 'sessions', 'T1.json')
+  await mkdir(path.dirname(file), { recursive: true })
+  await writeFile(file, JSON.stringify({ taskId: 'T1', sessionId: 'fixture', sandbox, prerequisites: sandbox.meta.prerequisites }))
+  await writeFile(path.join(root, 'fleetmates.local.json'), JSON.stringify({ harnesses: { codex: { sandbox: 'clone' } } }))
+  const adapter = getAdapter('codex')
+  const original = adapter.resume
+  const calls = []
+  adapter.resume = async args => {
+    calls.push(buildResumeArgv(args))
+    return { child: spawn(process.execPath, ['-e', 'setTimeout(() => {}, 50)'], { stdio: 'ignore' }), sessionId: Promise.resolve('fixture'), flushed: Promise.resolve() }
+  }
+  const message = () => command(root, ['message', '--run', 'worker', '--task', 'T1', '--text', 'continue', '--harness', 'codex'])
+  try {
+    await writeFile(path.join(sandbox.cwd, '.deps', 'ready'), 'task edit')
+    assert.equal((await message()).code, 0)
+    const stored = JSON.parse(await readFile(file, 'utf8')).sandbox.meta.workerEnvironment
+    assert.equal(stored.cwd, sandbox.cwd)
+    assert.equal(stored.baseline.status, 'pass')
+    assert.equal(stored.setup.status, 'not-rerun')
+    assert.equal(await readFile(path.join(sandbox.cwd, '.deps', 'ready'), 'utf8'), 'task edit')
+    await rm(path.join(sandbox.cwd, '.deps', 'ready'))
+    assert.equal((await message()).code, 4)
+    assert.equal(calls.length, 1)
+    const failed = JSON.parse(await readFile(file, 'utf8')).sandbox.meta.workerEnvironment
+    assert.equal(failed.ready, false)
+    assert.equal(failed.baseline.status, 'fail')
+  } finally { adapter.resume = original }
+}))
+
+test('existing worker toolchain is observed again before resume', async () => withWorker(codexAdapter, 'files', { toolchains: [{ name: 'fixture', command: 'node', argv: ['-e', "console.log(require('fs').existsSync('.deps/bad-version')?'v2':'v1')"], expected: 'v1' }] }, async ({ prepared, make, calls }) => {
+  const sandbox = await make()
+  await writeFile(path.join(sandbox.cwd, '.deps', 'bad-version'), 'changed')
+  await assert.rejects(prepared.adapter.resume({ sandbox }), /worker environment/i)
+  assert.deepEqual(calls, [])
+  assert.equal(sandbox.meta.workerEnvironment.toolchains[0].state, 'unavailable')
+  assert.equal(sandbox.meta.workerEnvironment.baseline.status, 'blocked')
+}))
+
+test('fresh worker source substitution is refused before setup execution', async () => {
+  const adapter = { ...codexAdapter, makeSandbox: async (...args) => {
+    const sandbox = await codexAdapter.makeSandbox(...args)
+    await writeFile(path.join(sandbox.cwd, 'recipe.json'), '{}')
+    return sandbox
+  } }
+  await withWorker(adapter, 'clone', {}, async ({ root, make, calls }) => {
+    await assert.rejects(make(), /changed/i)
+    assert.deepEqual(calls, [])
+    await assert.rejects(readFile(path.join(root, '.fleetmates', 'worker', 'clones', 'T1', '.deps', 'ready')))
+  })
+})
+
+
+for (const [adapter, mode] of workerModes) {
+  test(`${adapter.name} ${mode} environment preparation refuses to recreate an existing task workspace`, async () => withWorker(adapter, mode, {}, async ({ prepared, options, gitExec }) => {
+    const sandbox = await adapter.makeSandbox(gitExec, options)
+    try {
+      await mkdir(path.join(sandbox.cwd, '.deps'))
+      await writeFile(path.join(sandbox.cwd, '.deps', 'ready'), 'task work')
+      await assert.rejects(prepared.adapter.makeSandbox(gitExec, options))
+      assert.equal(await readFile(path.join(sandbox.cwd, '.deps', 'ready'), 'utf8'), 'task work')
+    } finally { await adapter.cleanup({ sandbox }) }
+  }))
+}
+
+
+test('worker receipt observes linked dependencies even when the recipe declares clean checkout', { skip: process.platform === 'win32' }, async () => withWorker(codexAdapter, 'files', ({ cache }) => ({ setup: [{ name: 'linked-deps', timeoutMs: 5000,
+  run: `node -e "const fs=require('fs');fs.mkdirSync('${cache}/external',{recursive:true});fs.writeFileSync('${cache}/external/ready','ready');fs.symlinkSync('${cache}/external','.deps','dir')"` }] }), async ({ make }) => {
+  const sandbox = await make()
+  assert.equal((await lstat(path.join(sandbox.cwd, '.deps'))).isSymbolicLink(), true)
+  assert.equal(sandbox.meta.workerEnvironment.dependencies.layout, 'linked')
+  assert.equal(sandbox.meta.workerEnvironment.dependencies.declaredLayout, 'clean-checkout')
+  assert.equal(sandbox.meta.workerEnvironment.dependencies.reproducible, false)
+  assert.ok(sandbox.meta.workerEnvironment.dependencies.limitations.length)
+}))
+
+
+test('worker link inspection has a finite bound and reports an unverified layout', async () => withWorker(codexAdapter, 'files', { setup: [{ name: 'many-deps', timeoutMs: 5000,
+  run: dependencySetup + ' && node -e "const fs=require(\'fs\');for(let i=0;i<4100;i++)fs.writeFileSync(\'.deps/entry-\'+i,\'fixture\')"' }] }, async ({ make }) => {
+  const sandbox = await make()
+  assert.equal(sandbox.meta.workerEnvironment.dependencies.layout, 'unverified')
+  assert.equal(sandbox.meta.workerEnvironment.dependencies.reproducible, false)
+  assert.ok(sandbox.meta.workerEnvironment.dependencies.limitations.length)
+  assert.equal(sandbox.meta.workerEnvironment.baseline.status, 'pass')
+}))

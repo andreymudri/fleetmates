@@ -284,7 +284,7 @@ export async function enclosingGitRoot(dir) {
   }
 }
 
-export async function makeCursorSandbox(git, { runRepo, runBranch, runId, taskId, mode, env = process.env }) {
+export async function makeCursorSandbox(git, { runRepo, runBranch, runId, taskId, mode, env = process.env, requireFresh = false }) {
   if (mode !== 'files') throw new Error('Cursor runs git outside its sandbox; only "files" is supported')
   const checkoutRoot = cursorCheckoutRoot({ runRepo, runId, env })
   await mkdir(checkoutRoot, { recursive: true })
@@ -292,6 +292,12 @@ export async function makeCursorSandbox(git, { runRepo, runBranch, runId, taskId
   if (repo) {
     throw new Error(`Cursor checkouts must not live inside a git repository, but ${checkoutRoot} is inside ${repo}: `
       + 'Cursor runs that repository\'s .cursor/hooks.json outside its sandbox. Point XDG_CACHE_HOME outside it.')
+  }
+  if (requireFresh) {
+    try {
+      await lstat(path.join(checkoutRoot, taskId))
+      throw new Error('Refusing to overwrite an existing worker workspace')
+    } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   return makeFilesSandbox(git, { runRepo, runBranch, runId, taskId, checkoutRoot })
 }

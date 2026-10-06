@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { migrate } from './migrate.mjs'
 import { NAMES } from './names.mjs'
-import { readFile, writeFile, mkdir, mkdtemp, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, mkdtemp, rename, lstat, readdir, opendir, readlink, unlink, open as openFile } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
@@ -28,7 +29,7 @@ import {
 import * as configModule from './config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
 import { decideFix } from './fix-loop.mjs'
-import { runChecks, aggregateVerdict } from './gate-runner.mjs'
+import { defaultExec, runCommandCheck, runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
 import { collectReviewResults, isUnsafePathComponent, printable, printableBlock, reviewFileName, reviewStamp, reviewStale } from './reviews.mjs'
@@ -3944,8 +3945,17 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!adapter) return 2
 
     const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
-    try { await validateSessionContinuation(root, adapter, network, record) }
-    catch (error) { io.out(JSON.stringify({ error: error.message })); return 4 }
+    try {
+      await validateSessionContinuation(root, adapter, network, record)
+      await verifyWorkerEnvironment(root, record.sandbox)
+      if (record.sandbox?.meta?.prerequisites?.environment) await writeFile(file, `${JSON.stringify(record, null, 2)}\n`)
+    }
+    catch (error) {
+      if (error.workerEnvironment && error.workerEnvironment === record.sandbox?.meta?.workerEnvironment) {
+        await writeFile(file, `${JSON.stringify(record, null, 2)}\n`)
+      }
+      io.out(JSON.stringify({ error: error.message })); return 4
+    }
 
     // SIGTERM the task's live process group first, if the record names one, so the resume never
     // races a still-running turn. The driver records a pid only while a child is in flight, so an
@@ -6569,6 +6579,7 @@ async function validateContinuation(root, adapter, network, sandbox) {
     for (const file of recipe.lockfiles) sources.push(await committedContract(git, binding.commit, file))
   }
   await unchangedContracts(root, git, binding.commit, sources)
+  if (binding.environment !== null) await unchangedContracts(sandbox.cwd, git, binding.commit, sources)
   const policy = binding.rolePolicy === null ? undefined
     : validateRolePolicy(JSON.parse(sources.find(source => source.file === binding.rolePolicy).bytes))
   const roles = resolveRoleCapabilities({ policy, role: binding.role, harness: adapter.name, sandboxMode: binding.sandboxMode, network })
@@ -6576,11 +6587,113 @@ async function validateContinuation(root, adapter, network, sandbox) {
   if (!roles.ready || !isDeepStrictEqual(enforcement, expected)) throw new Error('Required session enforcement is missing, changed or unsupported')
 }
 
+async function workerLinks(cwd) {
+  const pending = [{ directory: cwd, depth: 0 }]
+  let entries = 0
+  try {
+    while (pending.length) {
+      const { directory, depth } = pending.pop()
+      if (depth > 64) return 'unverified'
+      for await (const entry of await opendir(directory)) {
+        if (++entries > 4096) return 'unverified'
+        const file = path.join(directory, entry.name)
+        if (entry.isSymbolicLink()) {
+          const target = path.resolve(directory, await readlink(file))
+          const relative = path.relative(cwd, target)
+          if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return 'linked'
+        } else if (entry.isDirectory()) pending.push({ directory: file, depth: depth + 1 })
+      }
+    }
+    return 'clean-checkout'
+  } catch { return 'unverified' }
+}
+
+async function verifyWorkerEnvironment(root, sandbox, { fresh = false, exec = defaultExec } = {}) {
+  const binding = sandbox?.meta?.prerequisites
+  if (!binding || binding.environment === null) return
+  const git = createGit({ cwd: root })
+  const source = await committedContract(git, binding.commit, binding.environment)
+  const recipe = validateEnvironmentRecipe(JSON.parse(source.bytes))
+  const sources = [source]
+  if (binding.rolePolicy !== null) sources.push(await committedContract(git, binding.commit, binding.rolePolicy))
+  for (const file of recipe.lockfiles) sources.push(await committedContract(git, binding.commit, file))
+  const checkSources = async () => {
+    await unchangedContracts(root, git, binding.commit, sources)
+    await unchangedContracts(sandbox.cwd, git, binding.commit, sources)
+  }
+  await checkSources()
+  const guardedExec = async (...args) => {
+    await checkSources()
+    return exec(...args)
+  }
+  const workerStartedAt = Date.now()
+  const observation = await captureEnvironment({ git, commit: binding.commit, recipePath: binding.environment,
+    cwd: sandbox.cwd, execute: fresh || recipe.setup.length === 0, exec: guardedExec })
+  if (!fresh && recipe.setup.length > 0) {
+    observation.setup = { status: 'not-rerun', checks: [], durationMs: null }
+    observation.toolchains = []
+    for (const tool of recipe.toolchains) {
+      const result = await guardedExec(tool.command, sandbox.cwd, { argv: tool.argv, timeoutMs: 5000, graceMs: 250,
+        maxOutputBytes: 64 * 1024, maxCaptureBytes: 64 * 1024 })
+      const version = typeof result.output === 'string' ? result.output.trim() : ''
+      const available = result.code === 0 && !result.timedOut && !result.outputLimited
+        && version.length > 0 && Buffer.byteLength(version) <= 256 && !/[\u0000-\u001f\u007f]/.test(version) && version.startsWith(tool.expected)
+      observation.toolchains.push({ name: tool.name, expected: tool.expected, version: available ? version : null,
+        state: available ? 'available' : 'unavailable' })
+    }
+    observation.baseline = { status: 'blocked', checks: [], durationMs: null }
+    if (observation.toolchains.every(tool => tool.state === 'available')) {
+      observation.baseline.status = 'pass'
+      for (const check of recipe.baseline) {
+        const receipt = await runCommandCheck({ ...check, kind: 'command' }, { cwd: sandbox.cwd,
+          exec: (command, cwd, options) => guardedExec(command, cwd, { ...options, maxOutputBytes: 64 * 1024, graceMs: 250 }) })
+        observation.baseline.checks.push(receipt)
+        if (receipt.status !== 'pass' || receipt.log?.complete !== true) { observation.baseline.status = 'fail'; break }
+      }
+    }
+    observation.ready = observation.baseline.status === 'pass'
+    observation.blocked = observation.ready ? [] : ['Existing worker environment baseline or toolchain failed']
+  }
+  if (!fresh) {
+    observation.dependencies.reproducible = false
+    observation.dependencies.limitations.push('Setup was not rerun in the existing workspace; task edits and dependency contents are not captured.')
+  }
+  await checkSources()
+  observation.dependencies.declaredLayout = recipe.dependencies
+  const links = await workerLinks(sandbox.cwd)
+  if (links !== 'clean-checkout') {
+    observation.dependencies.layout = links
+    observation.dependencies.reproducible = false
+    observation.dependencies.limitations.push(links === 'linked'
+      ? 'Workspace symbolic links reach outside the checkout; their dependency contents are not captured.'
+      : 'Workspace link inspection exceeded its finite bound or could not be completed.')
+  }
+  await checkSources()
+  observation.preparation = fresh ? null : (sandbox.meta.workerEnvironment?.preparation
+    ?? (sandbox.meta.workerEnvironment?.workspace === 'fresh' ? sandbox.meta.workerEnvironment : null))
+  observation.startedAt = workerStartedAt
+  observation.durationMs = Date.now() - workerStartedAt
+  observation.cwd = sandbox.cwd
+  observation.workspace = fresh ? 'fresh' : 'existing'
+  observation.identity = createHash('sha256').update(JSON.stringify({ sources: observation.sources, cwd: observation.cwd,
+    dependencies: observation.dependencies, toolchains: observation.toolchains, setup: { status: observation.setup.status, checks: observation.setup.checks.map(check => ({ name: check.name, status: check.status, exitCode: check.exitCode, complete: check.log?.complete === true })) },
+    workspace: observation.workspace, platform: observation.platform,
+    baseline: observation.baseline.checks.map(check => ({ name: check.name, status: check.status,
+      exitCode: check.exitCode, complete: check.log?.complete === true })) })).digest('hex')
+  sandbox.meta.workerEnvironment = observation
+  if (!observation.ready) {
+    const error = new Error('Actual worker environment is not ready')
+    error.workerEnvironment = observation
+    throw error
+  }
+}
+
 function continuationAdapter(adapter, root, network) {
   const wrapped = { ...adapter }
   for (const method of ['spawn', 'resume', 'collect']) {
     wrapped[method] = async (...args) => {
       await validateContinuation(root, adapter, network, method === 'collect' ? args[1]?.sandbox : args[0]?.sandbox)
+      if (method === 'spawn' || method === 'resume') await verifyWorkerEnvironment(root, args[0].sandbox)
       return adapter[method](...args)
     }
   }
@@ -6623,6 +6736,7 @@ export async function prepareDispatchPrerequisites({ root, flags, adapter, role,
   for (const method of ['makeSandbox', 'spawn', 'resume', 'collect']) {
     wrapped[method] = async (...args) => {
       await unchangedContracts(root, git, commit, sources)
+      if (method === 'makeSandbox' && flags.environment !== undefined) args[1] = { ...args[1], requireFresh: true }
       if (method === 'makeSandbox' && args[1]?.runBranch
         && await git.resolveRef(`refs/heads/${args[1].runBranch}`) !== commit) throw new Error('Contract source differs from sandbox branch')
       if (method === 'spawn' || method === 'resume') {
@@ -6630,10 +6744,14 @@ export async function prepareDispatchPrerequisites({ root, flags, adapter, role,
         const previous = args[0].sandbox.meta?.prerequisites
         if (previous && !isDeepStrictEqual(previous, binding)) throw new Error('Required session contract cannot be replaced on continuation')
         bind(args[0].sandbox)
+        await verifyWorkerEnvironment(root, args[0].sandbox, { exec })
         if (enforcement) args[0] = { ...args[0], enforcement }
       }
       const value = await adapter[method](...args)
-      if (method === 'makeSandbox') bind(value)
+      if (method === 'makeSandbox') {
+        bind(value)
+        await verifyWorkerEnvironment(root, value, { fresh: true, exec })
+      }
       return value
     }
   }

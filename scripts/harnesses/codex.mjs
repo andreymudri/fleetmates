@@ -4,7 +4,7 @@ import { probeCommand } from './probe-command.mjs'
 // else — the driver, the CLI — talks to `codexAdapter` through the harness-neutral interface
 // (`scripts/harnesses/index.mjs`).
 import { spawn as spawnProcess } from 'node:child_process'
-import { writeFile, readFile, rm, mkdir, mkdtemp } from 'node:fs/promises'
+import { writeFile, readFile, rm, mkdir, lstat, mkdtemp } from 'node:fs/promises'
 import { createWriteStream } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -157,9 +157,16 @@ async function must(git, args, opts) {
 // walking into the teammate's git config (§2 items 7-9). `files` gives a plain, git-less
 // checkout of the branch's tree (§7, the fallback): `collect` computes and commits the diff
 // itself, so nothing here needs a gitdir at all.
-export async function makeCodexSandbox(git, { runRepo, runBranch, runId, taskId, mode }) {
+export async function makeCodexSandbox(git, { runRepo, runBranch, runId, taskId, mode, requireFresh = false }) {
   const base = path.join(runRepo, '.fleetmates', runId)
   const branch = `fleetmates/${runId}/${taskId}`
+  if (requireFresh) {
+    const target = path.join(base, mode === 'files' ? 'files' : 'clones', taskId)
+    try {
+      await lstat(target)
+      throw new Error('Refusing to overwrite an existing worker workspace')
+    } catch (error) { if (error.code !== 'ENOENT') throw error }
+  }
   if (mode === 'files') return makeFilesSandbox(git, { runRepo, runBranch, runId, taskId })
   const gitdir = path.join(base, 'gitdirs', taskId)
   const cwd = path.join(base, 'clones', taskId)
