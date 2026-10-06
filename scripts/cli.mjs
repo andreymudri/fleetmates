@@ -1,12 +1,18 @@
+import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { migrate } from './migrate.mjs'
 import { NAMES } from './names.mjs'
-import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, mkdtemp, rename, lstat, readdir, opendir, readlink, unlink, open as openFile } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan, PlanParseError } from './plan-parser.mjs'
 import { readWorkflowInput } from './workflow-input.mjs'
+import { validateResult } from './result-schema.mjs'
+import { captureEnvironment, validateEnvironmentRecipe } from './environment-preflight.mjs'
+import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
+import { probeCapabilities } from './capability-preflight.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { renderUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
@@ -23,10 +29,10 @@ import {
 import * as configModule from './config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
 import { decideFix } from './fix-loop.mjs'
-import { runChecks, aggregateVerdict } from './gate-runner.mjs'
+import { defaultExec, runCommandCheck, runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
-import { collectReviewResults, isUnsafePathComponent, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
+import { collectReviewResults, isUnsafePathComponent, printable, printableBlock, reviewFileName, reviewStamp, reviewStale } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
@@ -141,8 +147,9 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|ui|deck|config> [options]
 
+  environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
@@ -175,9 +182,9 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
   brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
-  dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--root <path>]
-  dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--root <path>]
-  dispatch-integrator --run <id> [--phase <name>] [--harness <name>] [--root <path>]
+  dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
+  dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
+  dispatch-integrator --run <id> [--phase <name>] [--harness <name>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   message  --run <id> --task <id> --text <s> [--harness <name>] [--root <path>]
   sessions --run <id> [--root <path>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>] [--enforcement-only]
@@ -301,6 +308,7 @@ export const REQUIRED = {
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
   'preview-check': [],
   'plan-drift': ['run', 'plan'],
+  'environment-check': ['file'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
   'ci-status': ['file'],
@@ -375,9 +383,9 @@ export const KNOWN_FLAGS = {
   brief: ['run', 'task', 'plan', 'base', 'fix-round'],
   complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
   workflow: ['run', 'phase', 'models', 'plan', 'base'],
-  dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models'],
-  'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models'],
-  'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models'],
+  dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
+  'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
+  'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
   message: ['run', 'task', 'harness', 'text'],
   sessions: ['run'],
   fix: ['run', 'phase', 'verdict'],
@@ -386,6 +394,7 @@ export const KNOWN_FLAGS = {
   'collect-reviews': ['run', 'phase'],
   'preview-check': [],
   'plan-drift': ['run', 'plan', 'base'],
+  'environment-check': ['file', 'execute'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
   'ci-status': ['file'],
@@ -3003,6 +3012,45 @@ export async function runCli(argv, io = { out: console.log }) {
     }
   }
 
+  if (command === 'environment-check') {
+    try {
+      const input = await readWorkflowInput(flags.file)
+      if (!input || typeof input !== 'object' || Array.isArray(input)
+        || Object.keys(input).some(key => !['commit', 'recipePath', 'harness'].includes(key))
+        || typeof input.commit !== 'string' || typeof input.recipePath !== 'string'
+        || (input.harness !== undefined && !HARNESS_NAMES.includes(input.harness))
+        || (flags.execute !== undefined && flags.execute !== true)) throw new Error('Malformed environment-check request')
+      const report = await captureEnvironment({ git: createGit({ cwd: root }), commit: input.commit,
+        recipePath: input.recipePath, cwd: root, execute: flags.execute === true })
+      if (flags.execute === true) {
+        const capabilities = await probeCapabilities({ required: report.required, harness: input.harness ?? 'codex', env: process.env })
+        report.capabilities = capabilities
+        report.ready = report.ready && capabilities.ready
+      }
+      io.out(JSON.stringify(report))
+      return report.ready ? 0 : 4
+    } catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+  }
+
+  let prerequisites
+  if (['dispatch', 'dispatch-reviews', 'dispatch-integrator'].includes(command)) {
+    if (flags.environment !== undefined || flags['role-policy'] !== undefined) {
+      const resolved = await resolveConfig(root, io)
+      if (!resolved) return 2
+      const adapter = resolveHarness(flags, io)
+      if (!adapter) return 2
+      const settings = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+      const role = command === 'dispatch' ? 'implementer' : command === 'dispatch-reviews' ? 'reviewer' : 'integrator'
+      const sandboxMode = role === 'implementer' ? settings.sandboxMode
+        : role === 'reviewer' && adapter.name === 'codex' ? 'clone' : 'full'
+      try {
+        prerequisites = await prepareDispatchPrerequisites({ root, flags, adapter, role, sandboxMode, network: settings.network })
+      } catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+      io.out(JSON.stringify(prerequisites.report))
+      if (prerequisites.code !== 0) return prerequisites.code
+    } else io.out('legacy prerequisites: environment and role capabilities are unverified')
+  }
+
   if (command === 'init-run') {
     // Before the plan is even read: an id the location record cannot hold must never reach
     // dispatch, because the failure it causes surfaces one agent later, in every teammate at
@@ -3603,7 +3651,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
 
-    const adapter = resolveHarness(flags, io)
+    let adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
 
     const probe = await adapter.probe({})
@@ -3611,6 +3659,20 @@ export async function runCli(argv, io = { out: console.log }) {
     if (probe.warning) io.out(`warning: ${probe.warning}`)
 
     const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+    try {
+      for (const task of phaseTasks) {
+        const file = path.join(runDir(root, runId), 'sessions', `${task.id}.json`)
+        let record
+        try { record = JSON.parse(await readFile(file, 'utf8')) }
+        catch (error) { if (error.code === 'ENOENT') continue; throw error }
+        if (record.sandboxRemoved === true && record.state === 'done'
+          && validateResult(record.result) && record.result.status === 'done' && record.result.blockers.length === 0
+          && record.result.branch === `fleetmates/${runId}/${task.id}`
+          && await createGit({ cwd: root }).resolveRef(`refs/heads/${record.result.branch}`)) continue
+        await validateSessionContinuation(root, adapter, network, record)
+      }
+    } catch (error) { io.out(JSON.stringify({ error: error.message })); return 4 }
+    adapter = continuationAdapter(adapter, root, network)
 
     const baseBranch = flags.base === true ? '' : (flags.base ?? '')
     const contextAnchor = {}
@@ -3665,14 +3727,14 @@ export async function runCli(argv, io = { out: console.log }) {
       completeEnforcement,
     })
 
-    // Each session record is stamped with the harness that produced it, so `sessions` can name a
-    // harness per row. The driver owns every other field; this only adds `harness`.
+    // Stamp the harness and prerequisite binding on the persisted session.
     const dispatchSessionsDir = path.join(runDir(root, runId), 'sessions')
     for (const task of phaseTasks) {
       const file = path.join(dispatchSessionsDir, `${task.id}.json`)
       try {
         const record = JSON.parse(await readFile(file, 'utf8'))
         record.harness = adapter.name
+        if (record.sandbox?.meta?.prerequisites) record.prerequisites = record.sandbox.meta.prerequisites
         await writeFile(file, `${JSON.stringify(record, null, 2)}\n`)
       } catch { /* a task that produced no record has nothing to stamp */ }
     }
@@ -3698,7 +3760,7 @@ export async function runCli(argv, io = { out: console.log }) {
   if (command === 'dispatch-reviews') {
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
-    const adapter = resolveHarness(flags, io)
+    const adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
 
     // The lenses and per-lens prompts come from `review-dispatch`, unchanged: this reuses that
@@ -3726,25 +3788,54 @@ export async function runCli(argv, io = { out: console.log }) {
     const reviewSessionsDir = path.join(runDir(root, runId), 'sessions')
     await mkdir(reviewSessionsDir, { recursive: true })
 
-    // One reviewer per lens, in parallel, cwd at the project root — read-only, each creating its
-    // own scratch worktree outside the repo. Nothing is written to status or results here;
-    // `collect-reviews` reads the findings files the reviewers write and is unchanged.
+    // Capture required read-only reviewers' returned findings after their child processes exit.
+    const hostCapture = prerequisites?.enforcement?.write === false
+    const artifactFailures = []
+    const captureInstruction = hostCapture ? '\nFor this required read-only invocation, do not write a findings file or mutate refs. Return the findings object as a JSON string in the summary field of the task result envelope, with status done, branch an empty string, filesChanged an empty array and blockers an empty array. The host captures the findings file. Preserve the exact supplied stamp and any unableToVerify or unprobed fields.\n' : ''
     await runPool(spec.reviewers, resolved.maxParallel, async (reviewer) => {
       const base = path.join(reviewSessionsDir, `review-${reviewer.lens}`)
+      const resultPath = hostCapture
+        ? path.join(await mkdtemp(path.join(reviewSessionsDir, 'review-output-')), 'result.json')
+        : `${base}.result.json`
       const handle = await adapter.spawn({
-        sandbox: { cwd: root, meta: { mode: 'full' } },
-        prompt: `${persona}\n\n${reviewer.prompt}`,
+        sandbox: { cwd: root, meta: { mode: prerequisites?.enforcement ? 'clone' : 'full' } },
+        prompt: `${persona}${captureInstruction}\n\n${reviewer.prompt}`,
         model: reviewer.model,
         effort: reviewer.effort,
         network,
         schemaPath: `${base}.schema.json`,
-        resultPath: `${base}.result.json`,
+        resultPath,
         streamPath: `${base}.stream.jsonl`,
         errPath: `${base}.stderr.log`,
       })
       await handle.sessionId
-      await waitForExit(handle.child, timeoutMs)
+      const exit = await waitForExit(handle.child, timeoutMs)
+      if (hostCapture) {
+        let temporary
+        try {
+          await handle.flushed
+          if (exit !== 'exit' || handle.child.exitCode !== 0) throw new Error('Review process did not complete')
+          const envelope = await readWorkflowInput(resultPath)
+          if (!validateResult(envelope) || envelope.status !== 'done' || envelope.branch !== ''
+            || envelope.filesChanged.length || envelope.blockers.length) throw new Error('Invalid review envelope')
+          const findings = JSON.parse(envelope.summary)
+          if (!Array.isArray(findings?.findings) || reviewStale(findings, reviewer.stamp)) throw new Error('Invalid or stale review findings')
+          const checked = collectReviewResults({ lenses: [reviewer.lens], files: [{ ...findings, lens: reviewer.lens }], expected: reviewer.stamp })
+          if (checked.malformed.length) throw new Error('Malformed review findings')
+          const destination = path.join(root, reviewer.findingsPath)
+          const dir = path.dirname(destination)
+          if (await plantedReviewsLink(root, dir)) throw new Error('Unsafe reviews directory')
+          await mkdir(dir, { recursive: true })
+          temporary = `${destination}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
+          await writeFile(temporary, `${JSON.stringify(findings)}\n`, { encoding: 'utf8', flag: 'wx' })
+          await rename(temporary, destination)
+        } catch {
+          if (temporary) await unlink(temporary).catch(() => {})
+          artifactFailures.push(reviewer.lens)
+        }
+      }
     })
+    if (artifactFailures.length) { io.out(`required review artifact unavailable or invalid for ${artifactFailures.length} reviewer(s)`); return 4 }
     io.out(`dispatched ${spec.reviewers.length} reviewer${spec.reviewers.length === 1 ? '' : 's'} for phase ${printable(spec.phase)}`)
     return 0
   }
@@ -3796,7 +3887,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
-    const adapter = resolveHarness(flags, io)
+    const adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
     const probe = await adapter.probe({})
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
@@ -3857,6 +3948,19 @@ export async function runCli(argv, io = { out: console.log }) {
     const adapter = resolveHarness(flags, io)
     if (!adapter) return 2
 
+    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+    try {
+      await validateSessionContinuation(root, adapter, network, record)
+      await verifyWorkerEnvironment(root, record.sandbox)
+      if (record.sandbox?.meta?.prerequisites?.environment) await writeFile(file, `${JSON.stringify(record, null, 2)}\n`)
+    }
+    catch (error) {
+      if (error.workerEnvironment && error.workerEnvironment === record.sandbox?.meta?.workerEnvironment) {
+        await writeFile(file, `${JSON.stringify(record, null, 2)}\n`)
+      }
+      io.out(JSON.stringify({ error: error.message })); return 4
+    }
+
     // SIGTERM the task's live process group first, if the record names one, so the resume never
     // races a still-running turn. The driver records a pid only while a child is in flight, so an
     // absent or dead pid means there is nothing to signal.
@@ -3864,7 +3968,6 @@ export async function runCli(argv, io = { out: console.log }) {
       killProcess({ pid: record.pid }, 'SIGTERM')
     }
 
-    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
     const base = path.join(messageSessionsDir, `${flags.task}`)
     const handle = await adapter.resume({
@@ -6412,6 +6515,293 @@ export async function runCli(argv, io = { out: console.log }) {
 export function isEntryPoint(main, argv1, moduleUrlPath) {
   if (main !== undefined) return main
   return argv1 === moduleUrlPath
+}
+
+async function committedContract(git, commit, file) {
+  if (typeof file !== 'string' || file.length === 0 || file.length > 1024
+    || /[\\\u0000-\u001f\u007f:*?\[\]]/.test(file)
+    || file.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Unsafe contract path')
+  const mode = await git.fileModeAtCommit(commit, file)
+  const size = await git.fileSizeAtCommit(commit, file)
+  if (!['100644', '100755'].includes(mode) || !Number.isSafeInteger(size) || size > 512 * 1024) throw new Error('Contract must be a bounded regular committed source')
+  const bytes = await git.fileAtCommit(commit, file)
+  if (typeof bytes !== 'string' || bytes.includes('\ufffd') || Buffer.byteLength(bytes) !== size) throw new Error('Contract source must be lossless UTF-8')
+  return { file, bytes, mode }
+}
+
+async function unchangedContracts(root, git, commit, sources) {
+  if (await git.headSha() !== commit) throw new Error('Contract source commit changed before dispatch')
+  for (const source of sources) {
+    let current = root
+    const parts = source.file.split('/')
+    for (let index = 0; index < parts.length; index++) {
+      current = path.join(current, parts[index])
+      const info = await lstat(current)
+      if (info.isSymbolicLink() || (index < parts.length - 1 ? !info.isDirectory() : !info.isFile())) throw new Error('Contract source path changed before dispatch')
+    }
+    const handle = await openFile(current, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0))
+    try {
+      const info = await handle.stat()
+      if (!info.isFile() || info.size > 512 * 1024) throw new Error('Contract source changed before dispatch')
+      const buffer = Buffer.alloc(512 * 1024 + 1)
+      let offset = 0
+      while (offset < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
+        if (!bytesRead) break
+        offset += bytesRead
+      }
+      if (!buffer.subarray(0, offset).equals(Buffer.from(source.bytes))) throw new Error('Contract source changed before dispatch')
+    } finally { await handle.close() }
+  }
+}
+
+async function validateSessionContinuation(root, adapter, network, record) {
+  if (!isDeepStrictEqual(record.prerequisites, record.sandbox?.meta?.prerequisites)) {
+    throw new Error('Required session prerequisite metadata is missing or changed')
+  }
+  await validateContinuation(root, adapter, network, record.sandbox)
+}
+
+async function validateContinuation(root, adapter, network, sandbox) {
+  const binding = sandbox?.meta?.prerequisites
+  const enforcement = sandbox?.meta?.enforcement
+  if (binding === undefined && enforcement === undefined) return
+  const keys = ['version', 'commit', 'environment', 'rolePolicy', 'role', 'harness', 'sandboxMode']
+  if (!binding || typeof binding !== 'object' || Array.isArray(binding)
+    || !isDeepStrictEqual(Object.keys(binding).sort(), [...keys].sort())
+    || binding.version !== 1 || !/^[a-f0-9]{40,64}$/.test(binding.commit)
+    || !ROLES.includes(binding.role) || binding.harness !== adapter.name
+    || binding.sandboxMode !== sandbox?.meta?.mode
+    || (binding.environment === null && binding.rolePolicy === null)) throw new Error('Required session prerequisite binding is missing or unsupported')
+  const git = createGit({ cwd: root })
+  const sources = []
+  for (const file of [binding.environment, binding.rolePolicy]) {
+    if (file !== null) sources.push(await committedContract(git, binding.commit, file))
+  }
+  if (binding.environment !== null) {
+    const recipe = validateEnvironmentRecipe(JSON.parse(sources.find(source => source.file === binding.environment).bytes))
+    for (const file of recipe.lockfiles) sources.push(await committedContract(git, binding.commit, file))
+  }
+  await unchangedContracts(root, git, binding.commit, sources)
+  if (binding.environment !== null) await unchangedContracts(sandbox.cwd, git, binding.commit, sources)
+  const policy = binding.rolePolicy === null ? undefined
+    : validateRolePolicy(JSON.parse(sources.find(source => source.file === binding.rolePolicy).bytes))
+  const roles = resolveRoleCapabilities({ policy, role: binding.role, harness: adapter.name, sandboxMode: binding.sandboxMode, network })
+  const expected = roles.enforcement?.kind === 'required' ? roles.enforcement : undefined
+  if (!roles.ready || !isDeepStrictEqual(enforcement, expected)) throw new Error('Required session enforcement is missing, changed or unsupported')
+}
+
+async function workerLinks(cwd) {
+  const pending = [{ directory: cwd, depth: 0 }]
+  let entries = 0
+  try {
+    while (pending.length) {
+      const { directory, depth } = pending.pop()
+      if (depth > 64) return 'unverified'
+      for await (const entry of await opendir(directory)) {
+        if (++entries > 4096) return 'unverified'
+        const file = path.join(directory, entry.name)
+        if (entry.isSymbolicLink()) {
+          const target = path.resolve(directory, await readlink(file))
+          const relative = path.relative(cwd, target)
+          if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return 'linked'
+        } else if (entry.isDirectory()) pending.push({ directory: file, depth: depth + 1 })
+      }
+    }
+    return 'clean-checkout'
+  } catch { return 'unverified' }
+}
+
+async function verifyWorkerEnvironment(root, sandbox, { fresh = false, exec = defaultExec } = {}) {
+  const binding = sandbox?.meta?.prerequisites
+  if (!binding || binding.environment === null) return
+  const git = createGit({ cwd: root })
+  const source = await committedContract(git, binding.commit, binding.environment)
+  const recipe = validateEnvironmentRecipe(JSON.parse(source.bytes))
+  const sources = [source]
+  if (binding.rolePolicy !== null) sources.push(await committedContract(git, binding.commit, binding.rolePolicy))
+  for (const file of recipe.lockfiles) sources.push(await committedContract(git, binding.commit, file))
+  const checkSources = async () => {
+    await unchangedContracts(root, git, binding.commit, sources)
+    await unchangedContracts(sandbox.cwd, git, binding.commit, sources)
+  }
+  await checkSources()
+  const required = sandbox.meta.enforcement?.kind === 'required'
+  const workerStartedAt = Date.now()
+  let broker
+  if (required) {
+    try {
+      const adapter = getAdapter(binding.harness)
+      if (!adapter?.createVerificationExecutor) throw new Error('Required non-model verification is unsupported')
+      broker = await adapter.createVerificationExecutor({ sandbox, root, enforcement: sandbox.meta.enforcement })
+      if (typeof broker?.exec !== 'function' || typeof broker?.close !== 'function' || broker.evidence?.observed !== true) {
+        throw new Error('Missing required native verification executor')
+      }
+    } catch (error) {
+      const observation = await captureEnvironment({ git, commit: binding.commit, recipePath: binding.environment,
+        cwd: sandbox.cwd, execute: false })
+      Object.assign(observation, { ready: false, blocked: [error.message], cwd: sandbox.cwd,
+        workspace: fresh ? 'fresh' : 'existing', startedAt: workerStartedAt, durationMs: Date.now() - workerStartedAt,
+        enforcement: { kind: 'required', verified: false } })
+      sandbox.meta.workerEnvironment = observation
+      error.workerEnvironment = observation
+      throw error
+    }
+  }
+  try {
+    const guardedExec = async (...args) => {
+      await checkSources()
+      return (required ? broker.exec : exec)(...args)
+    }
+    const observation = await captureEnvironment({ git, commit: binding.commit, recipePath: binding.environment,
+      cwd: sandbox.cwd, execute: fresh || recipe.setup.length === 0, exec: guardedExec })
+    if (!fresh && recipe.setup.length > 0) {
+      observation.setup = { status: 'not-rerun', checks: [], durationMs: null }
+      observation.toolchains = []
+      for (const tool of recipe.toolchains) {
+        const result = await guardedExec(tool.command, sandbox.cwd, { argv: tool.argv, timeoutMs: 5000, graceMs: 250,
+          maxOutputBytes: 64 * 1024, maxCaptureBytes: 64 * 1024 })
+        const version = typeof result.output === 'string' ? result.output.trim() : ''
+        const available = result.code === 0 && !result.timedOut && !result.outputLimited
+          && version.length > 0 && Buffer.byteLength(version) <= 256 && !/[\u0000-\u001f\u007f]/.test(version) && version.startsWith(tool.expected)
+        observation.toolchains.push({ name: tool.name, expected: tool.expected, version: available ? version : null,
+          state: available ? 'available' : 'unavailable' })
+      }
+      observation.baseline = { status: 'blocked', checks: [], durationMs: null }
+      if (observation.toolchains.every(tool => tool.state === 'available')) {
+        observation.baseline.status = 'pass'
+        for (const check of recipe.baseline) {
+          const receipt = await runCommandCheck({ ...check, kind: 'command' }, { cwd: sandbox.cwd,
+            exec: (command, cwd, options) => guardedExec(command, cwd, { ...options, maxOutputBytes: 64 * 1024, graceMs: 250 }) })
+          observation.baseline.checks.push(receipt)
+          if (receipt.status !== 'pass' || receipt.log?.complete !== true) { observation.baseline.status = 'fail'; break }
+        }
+      }
+      observation.ready = observation.baseline.status === 'pass'
+      observation.blocked = observation.ready ? [] : ['Existing worker environment baseline or toolchain failed']
+    }
+    if (!fresh) {
+      observation.dependencies.reproducible = false
+      observation.dependencies.limitations.push('Setup was not rerun in the existing workspace; task edits and dependency contents are not captured.')
+    }
+    await checkSources()
+    observation.enforcement = broker?.evidence ?? { kind: 'legacy', verified: false }
+    observation.dependencies.declaredLayout = recipe.dependencies
+    const links = await workerLinks(sandbox.cwd)
+    if (links !== 'clean-checkout') {
+      observation.dependencies.layout = links
+      observation.dependencies.reproducible = false
+      observation.dependencies.limitations.push(links === 'linked'
+        ? 'Workspace symbolic links reach outside the checkout; their dependency contents are not captured.'
+        : 'Workspace link inspection exceeded its finite bound or could not be completed.')
+    }
+    await checkSources()
+    observation.preparation = fresh ? null : (sandbox.meta.workerEnvironment?.preparation
+      ?? (sandbox.meta.workerEnvironment?.workspace === 'fresh' ? sandbox.meta.workerEnvironment : null))
+    observation.startedAt = workerStartedAt
+    observation.durationMs = Date.now() - workerStartedAt
+    observation.cwd = sandbox.cwd
+    observation.workspace = fresh ? 'fresh' : 'existing'
+    observation.identity = createHash('sha256').update(JSON.stringify({ sources: observation.sources, cwd: observation.cwd,
+      dependencies: observation.dependencies, toolchains: observation.toolchains, setup: { status: observation.setup.status, checks: observation.setup.checks.map(check => ({ name: check.name, status: check.status, exitCode: check.exitCode, complete: check.log?.complete === true })) },
+      workspace: observation.workspace, platform: observation.platform, enforcement: observation.enforcement,
+      baseline: observation.baseline.checks.map(check => ({ name: check.name, status: check.status,
+        exitCode: check.exitCode, complete: check.log?.complete === true })) })).digest('hex')
+    sandbox.meta.workerEnvironment = observation
+    if (!observation.ready) {
+      const error = new Error('Actual worker environment is not ready')
+      error.workerEnvironment = observation
+      throw error
+    }
+  } finally { if (typeof broker?.close === 'function') await broker.close() }
+}
+
+function continuationAdapter(adapter, root, network) {
+  const wrapped = { ...adapter }
+  for (const method of ['spawn', 'resume', 'collect']) {
+    wrapped[method] = async (...args) => {
+      await validateContinuation(root, adapter, network, method === 'collect' ? args[1]?.sandbox : args[0]?.sandbox)
+      if (method === 'spawn' || method === 'resume') await verifyWorkerEnvironment(root, args[0].sandbox)
+      return adapter[method](...args)
+    }
+  }
+  return wrapped
+}
+
+export async function prepareDispatchPrerequisites({ root, flags, adapter, role, sandboxMode, network, exec, env = process.env }) {
+  const git = createGit({ cwd: root })
+  const commit = await git.headSha()
+  const sources = []
+  for (const key of ['environment', 'role-policy']) {
+    if (flags[key] !== undefined) sources.push(await committedContract(git, commit, flags[key]))
+  }
+  if (flags.environment !== undefined) {
+    const recipe = validateEnvironmentRecipe(JSON.parse(sources.find(source => source.file === flags.environment).bytes))
+    for (const file of recipe.lockfiles) sources.push(await committedContract(git, commit, file))
+  }
+  await unchangedContracts(root, git, commit, sources)
+  const policySource = sources.find(source => source.file === flags['role-policy'])
+  const policy = policySource ? validateRolePolicy(JSON.parse(policySource.bytes)) : undefined
+  const roles = resolveRoleCapabilities({ policy, role, harness: adapter.name, sandboxMode, network })
+  const report = { version: 1, ready: false, roles, environment: null, capabilities: null }
+  if (!roles.ready) return { code: 4, report }
+  const enforcement = roles.enforcement.kind === 'required' ? roles.enforcement : undefined
+  if (flags.environment !== undefined) {
+    let broker
+    try {
+      if (enforcement) {
+        if (!adapter.createVerificationExecutor) throw new Error('Required non-model verification is unsupported')
+        broker = await adapter.createVerificationExecutor({ root, sandbox: { cwd: root, meta: { mode: sandboxMode, enforcement } }, enforcement })
+        if (typeof broker?.exec !== 'function' || typeof broker?.close !== 'function' || broker.evidence?.observed !== true) {
+          throw new Error('Missing required native verification executor')
+        }
+      }
+      report.environment = await captureEnvironment({ git, commit, recipePath: flags.environment, cwd: root,
+        execute: true, exec: async (...args) => {
+          await unchangedContracts(root, git, commit, sources)
+          return (enforcement ? broker.exec : exec ?? defaultExec)(...args)
+        } })
+      report.environment.enforcement = broker?.evidence ?? { kind: 'legacy', verified: false }
+      await unchangedContracts(root, git, commit, sources)
+    } catch (error) {
+      report.environment = { ready: false, blocked: [error.message], enforcement: { kind: enforcement ? 'required' : 'legacy', verified: false } }
+    } finally { if (typeof broker?.close === 'function') await broker.close() }
+    if (!report.environment.ready) return { code: 4, report }
+  }
+  report.capabilities = await probeCapabilities({ required: [...new Set(['harness', ...(report.environment?.required ?? [])])], harness: adapter.name, env, ...(exec ? { exec } : {}) })
+  if (!report.capabilities.ready) return { code: 4, report }
+  await unchangedContracts(root, git, commit, sources)
+  const binding = { version: 1, commit, environment: flags.environment ?? null, rolePolicy: flags['role-policy'] ?? null, role, harness: adapter.name, sandboxMode }
+  const bind = sandbox => {
+    sandbox.meta ??= {}
+    sandbox.meta.prerequisites = binding
+    if (enforcement) sandbox.meta.enforcement = enforcement
+  }
+  const wrapped = { ...adapter }
+  for (const method of ['makeSandbox', 'spawn', 'resume', 'collect']) {
+    wrapped[method] = async (...args) => {
+      await unchangedContracts(root, git, commit, sources)
+      if (method === 'makeSandbox' && flags.environment !== undefined) args[1] = { ...args[1], requireFresh: true }
+      if (method === 'makeSandbox' && args[1]?.runBranch
+        && await git.resolveRef(`refs/heads/${args[1].runBranch}`) !== commit) throw new Error('Contract source differs from sandbox branch')
+      if (method === 'spawn' || method === 'resume') {
+        await validateContinuation(root, adapter, network, args[0].sandbox)
+        const previous = args[0].sandbox.meta?.prerequisites
+        if (previous && !isDeepStrictEqual(previous, binding)) throw new Error('Required session contract cannot be replaced on continuation')
+        bind(args[0].sandbox)
+        await verifyWorkerEnvironment(root, args[0].sandbox, { exec })
+        if (enforcement) args[0] = { ...args[0], enforcement }
+      }
+      const value = await adapter[method](...args)
+      if (method === 'makeSandbox') {
+        bind(value)
+        await verifyWorkerEnvironment(root, value, { fresh: true, exec })
+      }
+      return value
+    }
+  }
+  report.ready = true
+  return { code: 0, report, adapter: wrapped, enforcement }
 }
 
 if (isEntryPoint(import.meta.main, process.argv[1], fileURLToPath(import.meta.url))) {
