@@ -1,23 +1,45 @@
 # Issue 25 implementation status
 
-This branch delivers independently testable local primitives. It does not
-close the parent roadmap or claim real-model evaluation outcomes.
+This report records the delivered local foundations and the explicit remaining
+work split from parent issue 25. Parent closure uses its documented split/defer
+exit criterion; it does not claim all workstreams or real-model evaluations
+are complete. Foundations were integrated through PR 32. Retained command
+output evidence is delivered in commit `9f59f1dd`.
 
-| Workstream | Implemented here | Remaining obligation |
-| --- | --- | --- |
-| W01 | Explicit session binding, bounded Stop guard, suspension/resume/abandon refs, finish refusal, digest/doctor interruption reporting | Live callback capture; broader completion identity and execution-state contracts |
-| W02 | Exact input identity and local acceptance/reviewer summaries | Curated dataset, repeated real workflows, independent outcomes, held-out baseline and resource metrics |
-| W03 | Versioned bounded bundles, anchored human learnings and explicit acceptance/dependency contracts in implementation/review/integration prompts, hashes, source lines and mandatory preservation | Vault selection, review evidence invalidation and observed selection quality |
-| W04 | Acceptance-to-current-evidence mapping; human-required and unresolved states; reviewable versioned Node/TypeScript profile; actual command timeout metadata with conservative unknown failure status; private retained output logs with content hashes, compact summaries and explicit incomplete capture | Further stack profiles, execution adapters, durable evidence retention and independent code/environment/infrastructure/flaky classification |
-| W05 | Git-computed test-change policy with declared exceptions and honest temporal/coverage limits | Independent behavioral red/green execution and richer ordering evidence |
-| W06 | Explicit ui target parsing, committed-target init preflight, anchored mandatory target bundles and ui reviewer method requiring rendering/behavioral evidence | Native ui manifest kind, project renderer/artifact adapter, independent rendered/behavioral/accessibility evidence |
-| W07 | Scoped human learning selection; no automatic knowledge writes; current-plan feedback drafts with explicit scoped evidence, typed learning proposals and bounded defect tasks/dependencies | Owned learning commits, reviewed application to authoritative plan anchors, knowledge refresh and stale/superseded repairs |
-| W08 | Local outcome counts, precision excluding unresolved findings, recall requiring independent labels; provenance-preserving duplicate groups and per-lens/category/model reports tied to current inputs | Calibrated real reviewer datasets, independent reproduction, refutation quality and shadow selection |
-| W09 | Bounded read-only GitHub CI adapter, exact SHA and explicit required app/check identities, latest attempt and unresolved status reporting | Full-input receipts, failure reproduction, bounded task repairs, publication idempotency and reconciliation |
-| W10 | Five versioned dry-run profiles on existing CLI fragments, phase/artifact contracts, explicit capability blockers, tracked repair-budget limits | Execution controller, stdout capture, review aggregation, actual capability probing/wall-time enforcement and real evaluation |
-| W11 | Immutable bounded local metadata journal in common Git storage, input/branch reconciliation, unknown-effect reporting and persisted-recorder crash fixture | Driver integration, checkout/artifact recovery, external outcome queries, resolution/resume adapters, retention and real driver/daemon trials |
-| W12-W13 | Codex/Cursor read-only authentication probes bounded to 5 seconds plus 250 ms cleanup and 64 KiB output; bounded workflow JSON reads | Broader environment preflight, separate capability contracts and role enforcement |
-| W14-W15 | Conditional later scope | Bottleneck evidence and an explicit release requirement |
+| Workstream | Implemented here | Remaining obligation | Follow-up |
+| --- | --- | --- | --- |
+| W01 | Explicit session binding, bounded Stop guard, suspension/resume/abandon refs, finish refusal, digest/doctor interruption reporting | Live callback capture; broader completion identity and execution-state contracts | #33 |
+| W02 | Exact input identity and local acceptance/reviewer summaries | Curated dataset, repeated real workflows, independent outcomes, held-out baseline and resource metrics | #34 |
+| W03 | Versioned bounded bundles, anchored human learnings and explicit acceptance/dependency contracts in implementation/review/integration prompts, hashes, source lines and mandatory preservation | Vault selection, review evidence invalidation and observed selection quality | #35 |
+| W04 | Acceptance-to-current-evidence mapping; human-required and unresolved states; reviewable versioned Node/TypeScript profile; actual command timeout metadata with conservative unknown failure status; private retained output logs with content hashes, compact summaries and explicit incomplete capture | Further stack profiles, execution adapters, durable evidence retention and independent code/environment/infrastructure/flaky classification | #36 |
+| W05 | Git-computed test-change policy with declared exceptions and honest temporal/coverage limits | Independent behavioral red/green execution and richer ordering evidence | #37 |
+| W06 | Explicit ui target parsing, committed-target init preflight, anchored mandatory target bundles and ui reviewer method requiring rendering/behavioral evidence | Native ui manifest kind, project renderer/artifact adapter, independent rendered/behavioral/accessibility evidence | #38 |
+| W07 | Scoped human learning selection; no automatic knowledge writes; current-plan feedback drafts with explicit scoped evidence, typed learning proposals and bounded defect tasks/dependencies | Owned learning commits, reviewed application to authoritative plan anchors, knowledge refresh and stale/superseded repairs | #39 |
+| W08 | Local outcome counts, precision excluding unresolved findings, recall requiring independent labels; provenance-preserving duplicate groups and per-lens/category/model reports tied to current inputs | Calibrated real reviewer datasets, independent reproduction, refutation quality and shadow selection | #40 |
+| W09 | Bounded read-only GitHub CI adapter, exact SHA and explicit required app/check identities, latest attempt and unresolved status reporting | Full-input receipts, failure reproduction, bounded task repairs, publication idempotency and reconciliation | #41 |
+| W10 | Five versioned dry-run profiles on existing CLI fragments, phase/artifact contracts, explicit capability blockers, tracked repair-budget limits | Execution controller, stdout capture, review aggregation, actual capability probing/wall-time enforcement and real evaluation | #42 |
+| W11 | Immutable bounded local metadata journal in common Git storage, input/branch reconciliation, unknown-effect reporting and persisted-recorder crash fixture | Driver integration, checkout/artifact recovery, external outcome queries, resolution/resume adapters, retention and real driver/daemon trials | #43 |
+| W12 | Codex/Cursor read-only authentication probes bounded to 5 seconds plus 250 ms cleanup and 64 KiB output | Clean checkout baseline, toolchain/lockfile recipes and browser/CI/Vault capability preflight | #44 |
+| W13 | Bounded workflow JSON reads and authentication tool responses | Per-role read/write/execute/network/publication contracts, supported enforcement and measured response efficiency | #45 |
+| W14 | Conditional later scope; no scheduling change claimed | Measured bottleneck and shadow evaluation before finer scheduling | #46 |
+| W15 | Conditional later scope; no release implied by code PASS | Explicit project release request, smoke/rollback policy and versioned feedback | #47 |
+
+## Split exit criterion
+
+Issues 33-47 retain every remaining W01-W15 obligation. Issues 34 and 40 also
+carry the independent real-workflow and adversarial-review calibration work;
+issues 35, 36, 40, 42 and 45 preserve the cross-task contract, typed-decision,
+verified-completion and capability refinements. Each follow-up names current
+behavior, remaining acceptance, starting points and verification/trust limits.
+The original parent checkboxes remain historical uncompleted proposals rather
+than being marked delivered by this split.
+
+Live callback capture requires separately authorized owner validation. Fixture
+passes do not establish real-model outcomes, rendered UI conformance, temporal
+TDD, live driver recovery or calibrated classifier quality. Issues 46 and 47
+are explicitly conditional and require their own triggering evidence or scope.
+No automatic promotion, knowledge write, deployment or gate relaxation follows
+from closing the parent roadmap.
 
 ## Local commands
 
