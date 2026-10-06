@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, readFile, rm, mkdir, chmod, cp, access, realpath } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, rm, mkdir, chmod, cp, access, realpath, symlink, lstat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -61,6 +61,40 @@ async function nativeAvailable(t, input) {
   return false
 }
 
+async function observeFixtureCreation(create, unavailableCodes) {
+  try {
+    await create()
+    return { available: true }
+  } catch (error) {
+    if (!unavailableCodes.includes(error.code)) throw error
+    return { available: false, reason: error.code }
+  }
+}
+
+async function probeReportFixture(kind, { platform = process.platform, env = process.env,
+  fifoCreate = (file, env) => execFileSync('mkfifo', [file], { env, stdio: ['ignore', 'pipe', 'pipe'] }) } = {}) {
+  if (platform === 'win32' && kind !== 'link') return { available: false, reason: 'unsupported-platform' }
+  const root = await mkdtemp(path.join(tmpdir(), 'ri-probe-'))
+  const file = path.join(root, 'entry')
+  try {
+    const target = path.join(root, 'target')
+    if (kind === 'link') await writeFile(target, 'dummy')
+    const capability = await observeFixtureCreation(async () => {
+      if (kind === 'link') {
+        await symlink(target, file, 'file')
+      } else if (kind === 'special') {
+        await fifoCreate(file, env)
+      } else {
+        execFileSync(process.execPath, ['-e', `require('net').createServer().listen(${JSON.stringify(file)},()=>process.exit(0))`], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+      }
+    }, kind === 'link' ? ['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP'] : kind === 'special' ? ['ENOENT'] : [])
+    if (!capability.available) return capability
+    const info = await lstat(file)
+    assert.equal(kind === 'link' ? info.isSymbolicLink() : kind === 'special' ? info.isFIFO() : info.isSocket(), true)
+    return capability
+  } finally { await rm(root, { recursive: true, force: true }) }
+}
+
 test('native availability classifies only missing runtime or unsupported platform before execution', async () => {
   for (const platform of ['darwin', 'win32']) {
     assert.equal(await knownNativeUnavailable({ platform }, async () => assert.fail('unsupported platform must not inspect runtime')), 'Required non-model verification platform is unsupported')
@@ -97,6 +131,27 @@ test('native test branch matches independently classified availability', async t
   const { input } = await fixture(t)
   const reason = await knownNativeUnavailable({ root: input.root })
   assert.equal(await nativeAvailable(t, input), reason === null)
+})
+
+test('fixture creation classifies known absence without swallowing arbitrary errors', async () => {
+  assert.deepEqual(await observeFixtureCreation(async () => {}, ['EPERM']), { available: true })
+  let unavailable
+  await assert.doesNotReject(async () => { unavailable = await observeFixtureCreation(async () => { throw Object.assign(new Error('permission fixture'), { code: 'EPERM' }) }, ['EPERM']) })
+  assert.deepEqual(unavailable, { available: false, reason: 'EPERM' })
+  await assert.rejects(observeFixtureCreation(async () => { throw Object.assign(new Error('unexpected fixture failure'), { code: 'EIO' }) }, ['EPERM']), { code: 'EIO' })
+})
+
+test('empty tool PATH reports FIFO fixture absence while unsupported platform probes do not execute', async () => {
+  let result
+  await assert.doesNotReject(async () => { result = await probeReportFixture('special', { platform: 'linux', env: { ...process.env, PATH: '' } }) })
+  assert.deepEqual(result, { available: false, reason: 'ENOENT' })
+  for (const kind of ['special', 'socket']) {
+    assert.deepEqual(await probeReportFixture(kind, { platform: 'win32' }), { available: false, reason: 'unsupported-platform' })
+  }
+})
+
+test('an injected successful FIFO creator with missing output is an error, not unavailable authority', async () => {
+  await assert.rejects(probeReportFixture('special', { platform: 'linux', fifoCreate: async () => {} }), { code: 'ENOENT' })
 })
 
 const policy = { version: 1, roles: { integrator: { read: true, write: true, execute: true,
@@ -477,16 +532,26 @@ test('actual native private report transfer preserves passing baseline inventory
 
 test('private report transfer rejects symbolic, special, oversized and excessive report entries', async t => {
   for (const [kind, body, expected] of [
-    ['link', 'fs.symlinkSync("/dev/null",dir+"/report.xml")', /symbolic link/],
+    ['link', 'fs.writeFileSync(dir+"/target","dummy");fs.symlinkSync(dir+"/target",dir+"/report.xml","file")', /symbolic link/],
     ['special', 'require("child_process").execFileSync("mkfifo",[dir+"/report.xml"])', /regular file/],
+    ['socket', 'require("net").createServer().listen(dir+"/report.xml",()=>process.exit(0))', /regular file/],
     ['bytes', 'const fd=fs.openSync(dir+"/report.xml","w");fs.ftruncateSync(fd,50*1024*1024+1);fs.closeSync(fd)', /byte bound/],
     ['count', 'for(let i=0;i<1001;i++)fs.writeFileSync(dir+"/"+i+".xml",\'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>\')', /count exceeded/],
     ['depth', 'let nested=dir;for(let i=0;i<9;i++){nested+="/d";fs.mkdirSync(nested)}fs.writeFileSync(nested+"/report.xml",\'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>\')', /directory is unsafe/]
   ]) {
     await t.test(kind, async t => {
+      if (['link', 'special', 'socket'].includes(kind)) {
+        const capability = await probeReportFixture(kind)
+        if (!capability.available) {
+          t.diagnostic(`Fixture creation unavailable: ${kind} (${capability.reason}); denial not observed for this fixture`)
+          t.skip(`fixture creation unavailable: ${capability.reason}`)
+          return
+        }
+      }
       const program = 'const fs=require("fs"),dir=process.env.FLEETMATES_REPORT_DIR;' + body
       const { gate } = await fixture(t, { command: nodeCommand(program), report: { dir: true } })
       await assert.rejects(gate(), expected)
+      if (['link', 'special', 'socket'].includes(kind)) t.diagnostic(`Observed report denial with created ${kind} fixture`)
     })
   }
 })
