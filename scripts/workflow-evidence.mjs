@@ -21,7 +21,9 @@ export function summarizeAcceptance({ inputs, requirements, evidence }) {
       : requirement.kind === 'human' ? 'human-required' : 'unresolved'
     return { ...requirement, status, logs: relevant.map(e => e.log), stale: evidence.filter(e => e.requirement === requirement.id && e.identity !== identity).length }
   })
-  return { version: 1, identity, complete: obligations.every(o => o.status === 'pass'), obligations }
+  return { version: 1, identity, complete: obligations.every(o => o.status === 'pass'), obligations,
+    mode: 'legacy-observations', verifiedComplete: false,
+    trust: 'Legacy acceptance observations are not strict execution-backed completion evidence.' }
 }
 export function reviewerMetrics(findings, labeledDefects = null) {
   if (!Array.isArray(findings)) throw new Error('Findings must be an array')

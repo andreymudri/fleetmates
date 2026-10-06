@@ -18,8 +18,9 @@ export async function handleOrchestratorStop(input, { err = () => {}, execute = 
     try { if (!lstatSync(path.join(repository.root, '.fleetmates', binding.run)).isDirectory()) return 0 }
     catch (error) { if (error.code === 'ENOENT') return 0; throw error }
     if (binding.root !== repository.root || git(['symbolic-ref', '--quiet', 'HEAD'], input.cwd) !== binding.branch) throw new Error('Session binding does not match this repository and branch')
-    const anchor = git(['merge-base', binding.branch, `refs/heads/${binding.base}`], input.cwd)
+    const anchor = binding.version === 2 ? binding.anchor : git(['merge-base', binding.branch, `refs/heads/${binding.base}`], input.cwd)
     if (planHash(input.cwd, anchor, binding.plan) !== binding.planHash) throw new Error('Bound plan requirements changed; rebind with a new session')
+    if (binding.version === 2 && planHash(input.cwd, binding.branch, binding.plan) !== binding.planHash) throw new Error('Current plan requirements changed; rebind with a new session')
     const status = lifecycleStatus(input.cwd, binding.run)
     if (status.state !== 'running') { err(`Run is ${status.state}; delivery is not verified complete`); return 0 }
     const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), 'cli.mjs')
@@ -33,7 +34,7 @@ export async function handleOrchestratorStop(input, { err = () => {}, execute = 
       return 2
     }
     if (result.status !== 0) throw new Error('Completion guard rejected its configuration')
-    err(`Enforcement-only stop check passed; skipped commands and reviews are not completion evidence.\n${output}`)
+    err(`Enforcement-only stop check passed; skipped commands and reviews are not completion evidence. This handler execution does not prove an actual graceful harness callback or full completion.\n${output}`)
     return 0
   } catch (error) { err(`Fleetmates Stop guard allowed stop: ${printable(error.message)}`); return 0 }
 }

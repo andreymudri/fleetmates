@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, open, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { constants } from 'node:fs'
+import { strictExecutionIdentity, summarizeCompletionObligations } from './completion-obligations.mjs'
 
 export function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 5000,
@@ -30,14 +31,28 @@ function resolve(ref, root) {
   try { return git(['rev-parse', '--verify', '--quiet', '--end-of-options', ref], root) }
   catch (error) { if (error.status === 1) return null; throw error }
 }
-export function lifecycleStatus(root, run) {
+export function lifecycleStatus(root, run, evidence = null) {
   // Legacy reporting accepts printable labels that Git cannot use in a ref.
   // New transitions still validate their identity before touching any marker.
   try { identity(run) } catch { return { state: 'running', abandoned: null, suspended: null, verifiedComplete: false, markerSupport: 'unsupported-run-identity' } }
   const abandoned = resolve(markerRef(run, 'abandoned'), root)
   const suspended = resolve(markerRef(run, 'suspended'), root)
+  if (evidence !== null) {
+    if (evidence.lifecycle?.runId !== run) throw new Error('Completion evidence run mismatch')
+    const validated = summarizeCompletionObligations(evidence)
+    const expectedRefs = new Set(validated.obligations.flatMap(requirement => Object.keys(requirement.refs ?? {})))
+    if (expectedRefs.size > 100) throw new Error('Completion lifecycle exceeds ref bound')
+    const branches = {}
+    for (const ref of expectedRefs) {
+      const tip = resolve(ref, root)
+      if (tip !== null) branches[ref] = tip
+    }
+    const completion = summarizeCompletionObligations({ ...evidence, branches,
+      lifecycle: { ...evidence.lifecycle, state: abandoned ? 'abandoned' : suspended ? 'suspended' : evidence.lifecycle.state } })
+    return { ...completion, abandoned, suspended }
+  }
   return { state: abandoned ? 'abandoned' : suspended ? 'suspended' : 'running', abandoned, suspended,
-    verifiedComplete: false }
+    verifiedComplete: false, mode: 'legacy-observations' }
 }
 export function transition(root, run, action, branch) {
   identity(run)
@@ -63,11 +78,19 @@ export function planHash(root, ref, plan) {
   const body = execFileSync('git', ['show', `${ref}:${plan}`], { cwd: root, encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] })
   return createHash('sha256').update(body).digest('hex')
 }
-export async function bindSession(root, session, { run, branch, base, plan, anchor }) {
+export async function bindSession(root, session, { run, branch, base, plan, anchor, inputs, executionId }) {
   identity(run)
   const { common, root: top } = discover(root)
   if (git(['symbolic-ref', '--quiet', 'HEAD'], root) !== branch) throw new Error('Run branch identity mismatch')
   const binding = { version: 1, root: top, run, branch, base, plan, planHash: planHash(root, anchor, plan) }
+  if (inputs !== undefined || executionId !== undefined) {
+    const strictIdentity = strictExecutionIdentity(inputs)
+    const anchoredCommit = git(['rev-parse', '--verify', '--end-of-options', `${anchor}^{commit}`], root)
+    if (inputs.commit !== anchoredCommit) throw new Error('Execution inputs do not match session anchor')
+    if (inputs.plan !== binding.planHash) throw new Error('Execution plan does not match bound plan')
+    if (typeof executionId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(executionId)) throw new Error('Invalid execution identity')
+    Object.assign(binding, { version: 2, inputs: { ...inputs }, identity: strictIdentity, anchor: anchoredCommit, executionId })
+  }
   const file = sessionFile(common, session)
   await mkdir(path.dirname(file), { recursive: true })
   try { await writeFile(file, JSON.stringify(binding) + '\n', { flag: 'wx', mode: 0o600 }) }
@@ -90,8 +113,11 @@ export async function readBinding(common, session) {
       body = buffer.subarray(0, bytesRead).toString('utf8')
     } finally { await fd.close() }
     const value = JSON.parse(body)
-    if (value.version !== 1 || typeof value.root !== 'string' || !value.branch?.startsWith('refs/heads/')
+    if (![1, 2].includes(value.version) || typeof value.root !== 'string' || !value.branch?.startsWith('refs/heads/')
         || typeof value.base !== 'string' || !/^[a-f0-9]{64}$/.test(value.planHash)) throw new Error('Malformed session binding')
+    if (value.version === 2 && (strictExecutionIdentity(value.inputs) !== value.identity || value.inputs.commit !== value.anchor
+        || value.inputs.plan !== value.planHash || typeof value.executionId !== 'string'
+        || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.executionId))) throw new Error('Malformed strict session binding')
     identity(value.run)
     return value
   } catch (error) { if (error.code === 'ENOENT') return null; throw error }
