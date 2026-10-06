@@ -1,6 +1,7 @@
 import { NAMES } from './names.mjs'
 import { commandOutcome } from './verifier-profile.mjs'
 import { runTestChangePolicy } from './test-change-policy.mjs'
+import { createCommandLog } from './command-log.mjs'
 import { spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import { mkdtemp, rm, lstat, realpath } from 'node:fs/promises'
@@ -321,7 +322,7 @@ function installTeardown() {
 // `graceMs` overrides KILL_GRACE_MS. It exists so a test can drive the SIGKILL path without
 // five seconds of wall clock. Authentication probes also use a short grace, an argv array
 // to avoid the shell, and a byte budget. Existing gate commands retain their original defaults.
-export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS, env = null, argv = null, maxOutputBytes = Infinity } = {}) {
+export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn = null, graceMs = KILL_GRACE_MS, env = null, argv = null, maxOutputBytes = Infinity, onOutput = null, maxCaptureBytes = Infinity } = {}) {
   return new Promise((resolve, reject) => {
     installTeardown()
     const child = spawn(cmd, argv ?? [], {
@@ -337,6 +338,7 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
       windowsHide: true,
     })
     let output = ''
+    let captured = Buffer.alloc(0)
     let timedOut = false
     let outputLimited = false
     let outputBytes = 0
@@ -459,8 +461,16 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
     // exception. Measured on that shape: the promise rejected at 9ms and the process stayed
     // alive to 8016ms.
     const capture = (d) => {
+      if (onOutput) onOutput(d)
       const remaining = maxOutputBytes - outputBytes
-      output += d.subarray(0, Math.max(0, remaining)).toString()
+      const selected = d.subarray(0, Math.max(0, remaining))
+      if (maxCaptureBytes === Infinity) output += selected.toString()
+      else {
+        const suffix = selected.subarray(-maxCaptureBytes)
+        const prefix = captured.subarray(Math.max(0, captured.length - Math.max(0, maxCaptureBytes - suffix.length)))
+        captured = Buffer.concat([prefix, suffix])
+        output = captured.toString()
+      }
       outputBytes += d.length
       if (outputBytes > maxOutputBytes) { outputLimited = true; interrupt() }
     }
@@ -527,7 +537,16 @@ function tail(text, n) {
   return lines.slice(Math.max(0, lines.length - n)).join('\n')
 }
 
-export async function runCommandCheck(check, { cwd = process.cwd(), previewDir = null, exec = defaultExec } = {}) {
+function commandSummary(output) {
+  const bytes = Buffer.from(tail(output, TAIL_LINES))
+  let start = Math.max(0, bytes.length - 64 * 1024)
+  // Re-encoding replacement characters can expand malformed output. Select a
+  // UTF-8 boundary in the normalized text so the diagnostic stays within budget.
+  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++
+  return bytes.subarray(start).toString()
+}
+
+export async function runCommandCheck(check, { cwd = process.cwd(), previewDir = null, exec = defaultExec, logMaxBytes } = {}) {
   // `runCheckList` refuses a faulty bound before reaching here, so this guards the EXPORTED
   // api — `runChecks` is called directly from cli.mjs and from tests, and a programmatic
   // caller can pass a shape the manifest path already rejected. Throwing lands as
@@ -570,26 +589,40 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
     }
   }
   const contract = check.report ? await prepareReport(check.report, cwd, previewDir) : null
+  let log = null
+  let streamed = false
   try {
-    const { code, output, timedOut = false } = await exec(check.run, cwd, {
+    log = await createCommandLog({ maxBytes: logMaxBytes })
+    const { code, output, timedOut = false, outputLimited = false } = await exec(check.run, cwd, {
       timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS,
       onSpawn,
+      onOutput: chunk => { streamed = true; log.write(chunk) },
+      maxCaptureBytes: 64 * 1024,
       ...(contract ? { env: contract.env } : {}),
     })
-    const passed = code === 0 && !timedOut
+    // Buffered custom executors remain supported. The default executor streams
+    // raw bytes before decoding or reducing the diagnostic tail.
+    if (!streamed && exec !== defaultExec) log.write(Buffer.from(output))
+    const evidence = log.finish({ complete: !timedOut && !outputLimited })
+    const passed = code === 0 && !timedOut && !outputLimited && evidence.complete
+    const summary = commandSummary(output)
     const result = {
       name: check.name,
       kind: 'command',
       status: passed ? 'pass' : 'fail',
       exitCode: code,
       outcome: commandOutcome({ code, timedOut }),
-      output: passed ? '' : tail(output, TAIL_LINES),
+      output: passed ? '' : summary + (evidence.complete ? '' : '\nCommand output evidence is incomplete; inspect the retained log.'),
+      log: evidence,
       optional: check.optional === true,
     }
     // Read whatever the exit code: a failing suite still has an inventory. Kept off `output`, which
     // is what a person reads; the inventory is what `runChecks` compares.
     if (contract) result.report = contract.refused ? { error: contract.refused } : await collectReport(contract, cwd)
     return result
+  } catch (error) {
+    if (log) error.commandLog = log.finish({ complete: false })
+    throw error
   } finally {
     if (contract?.cleanup) await contract.cleanup()
     // Released whatever happened, including a throw. A claim left behind by a check that
@@ -1957,7 +1990,7 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted, previewDir
     } catch (err) {
       // A throwing check previously propagated out of the CLI, so no verdict was recorded
       // and the previous phase's PASS stood.
-      results.push(checkResult(check, 'fail', `check threw: ${err.message}`))
+      results.push({ ...checkResult(check, 'fail', `check threw: ${err.message}`), ...(err.commandLog ? { log: err.commandLog } : {}) })
     }
   }
   return results
