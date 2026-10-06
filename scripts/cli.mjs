@@ -1,6 +1,6 @@
 import { migrate } from './migrate.mjs'
 import { NAMES } from './names.mjs'
-import { readFile, writeFile, mkdir, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, mkdtemp, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
@@ -3778,6 +3778,9 @@ export async function runCli(argv, io = { out: console.log }) {
     const captureInstruction = hostCapture ? '\nFor this required read-only invocation, do not write a findings file or mutate refs. Return the findings object as a JSON string in the summary field of the task result envelope, with status done, branch an empty string, filesChanged an empty array and blockers an empty array. The host captures the findings file. Preserve the exact supplied stamp and any unableToVerify or unprobed fields.\n' : ''
     await runPool(spec.reviewers, resolved.maxParallel, async (reviewer) => {
       const base = path.join(reviewSessionsDir, `review-${reviewer.lens}`)
+      const resultPath = hostCapture
+        ? path.join(await mkdtemp(path.join(reviewSessionsDir, 'review-output-')), 'result.json')
+        : `${base}.result.json`
       const handle = await adapter.spawn({
         sandbox: { cwd: root, meta: { mode: prerequisites?.enforcement ? 'clone' : 'full' } },
         prompt: `${persona}${captureInstruction}\n\n${reviewer.prompt}`,
@@ -3785,7 +3788,7 @@ export async function runCli(argv, io = { out: console.log }) {
         effort: reviewer.effort,
         network,
         schemaPath: `${base}.schema.json`,
-        resultPath: `${base}.result.json`,
+        resultPath,
         streamPath: `${base}.stream.jsonl`,
         errPath: `${base}.stderr.log`,
       })
@@ -3796,8 +3799,9 @@ export async function runCli(argv, io = { out: console.log }) {
         try {
           await handle.flushed
           if (exit !== 'exit' || handle.child.exitCode !== 0) throw new Error('Review process did not complete')
-          const envelope = await readWorkflowInput(`${base}.result.json`)
-          if (!validateResult(envelope) || envelope.status !== 'done' || envelope.filesChanged.length) throw new Error('Invalid review envelope')
+          const envelope = await readWorkflowInput(resultPath)
+          if (!validateResult(envelope) || envelope.status !== 'done' || envelope.branch !== ''
+            || envelope.filesChanged.length || envelope.blockers.length) throw new Error('Invalid review envelope')
           const findings = JSON.parse(envelope.summary)
           if (!Array.isArray(findings?.findings) || reviewStale(findings, reviewer.stamp)) throw new Error('Invalid or stale review findings')
           const checked = collectReviewResults({ lenses: [reviewer.lens], files: [{ ...findings, lens: reviewer.lens }], expected: reviewer.stamp })

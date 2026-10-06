@@ -199,56 +199,94 @@ test('CLI dispatch propagates required policy through driver spawn and recorded-
   } finally { Object.assign(adapter, originals); process.env.PATH = previousPath }
 }))
 
-test('required read-only reviewers return findings for host capture with current stamps', { skip: process.platform === 'win32' }, async () => fixture(async ({ root, gitRun, git }) => {
-  await writeFile(path.join(root, 'plan.md'), '### Task 1: fixture\n\n**Files:**\n- Create: `fixture.mjs`\n')
-  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\ncodex\n')
-  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness'], blockOn: ['high'] }] } } }))
-  await writeFile(path.join(root, 'policy.json'), JSON.stringify({ version: 1, roles: { reviewer: { ...policy.roles.implementer, write: false } } }))
-  await gitRun(['add', '.'])
-  await gitRun(['commit', '-m', 'test: review plan'])
-  await gitRun(['checkout', '-b', 'run'])
-  assert.equal((await command(root, ['init-run', 'plan.md', '--run', 'r1'])).code, 0)
-  await gitRun(['checkout', '-b', 'fleetmates/r1/T1'])
-  await writeFile(path.join(root, 'fixture.mjs'), 'export const fixture = true\n')
-  await gitRun(['add', 'fixture.mjs'])
-  await gitRun(['commit', '-m', 'test: task change'])
-  const taskSha = await git.headSha()
-  await gitRun(['checkout', 'run'])
-  await writeFile(path.join(root, 'codex'), '#!/usr/bin/env node\nconsole.log("Logged in")\n')
-  await chmod(path.join(root, 'codex'), 0o755)
-  const previousPath = process.env.PATH
-  process.env.PATH = `${root}${path.delimiter}${previousPath}`
-  const adapter = getAdapter('codex')
-  const originals = { probe: adapter.probe, spawn: adapter.spawn }
-  const findings = path.join(root, '.fleetmates', 'r1', 'reviews', 'default-correctness.json')
+async function withReadOnlyReviewer(fn) {
+  return fixture(async ({ root, gitRun, git }) => {
+    await writeFile(path.join(root, 'plan.md'), '### Task 1: fixture\n\n**Files:**\n- Create: `fixture.mjs`\n')
+    await writeFile(path.join(root, '.gitignore'), '.fleetmates/\ncodex\n')
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness'], blockOn: ['high'] }] } } }))
+    await writeFile(path.join(root, 'policy.json'), JSON.stringify({ version: 1, roles: { reviewer: { ...policy.roles.implementer, write: false } } }))
+    await gitRun(['add', '.'])
+    await gitRun(['commit', '-m', 'test: review plan'])
+    await gitRun(['checkout', '-b', 'run'])
+    assert.equal((await command(root, ['init-run', 'plan.md', '--run', 'r1'])).code, 0)
+    await gitRun(['checkout', '-b', 'fleetmates/r1/T1'])
+    await writeFile(path.join(root, 'fixture.mjs'), 'export const fixture = true\n')
+    await gitRun(['add', 'fixture.mjs'])
+    await gitRun(['commit', '-m', 'test: task change'])
+    const taskSha = await git.headSha()
+    await gitRun(['checkout', 'run'])
+    await writeFile(path.join(root, 'codex'), '#!/usr/bin/env node\nconsole.log("Logged in")\n')
+    await chmod(path.join(root, 'codex'), 0o755)
+    const previousPath = process.env.PATH
+    process.env.PATH = `${root}${path.delimiter}${previousPath}`
+    const adapter = getAdapter('codex')
+    const originals = { probe: adapter.probe, spawn: adapter.spawn }
+    const findings = path.join(root, '.fleetmates', 'r1', 'reviews', 'default-correctness.json')
+    const state = { stale: false, noOutput: false, envelope: {}, outputs: [], receipt: null }
+    adapter.probe = async () => ({ ok: true })
+    adapter.spawn = async args => {
+      assert.equal(args.enforcement?.sandbox, 'read-only')
+      assert.ok(args.prompt.includes('do not write a findings file or mutate refs'))
+      const stamp = JSON.parse(args.prompt.match(/^\s*(\{"phase".*\})$/m)[1])
+      assert.ok(stamp.branches.some(value => value.includes(taskSha)))
+      state.outputs.push(args.resultPath)
+      state.receipt = { stamp: state.stale ? { ...stamp, branches: [] } : stamp, findings: [] }
+      const result = { status: 'done', branch: '', filesChanged: [], summary: JSON.stringify(state.receipt), blockers: [], ...state.envelope }
+      const script = state.noOutput ? 'setTimeout(() => {}, 50)' : 'require("node:fs").writeFileSync(process.argv[1], process.argv[2])'
+      const child = spawn(process.execPath, ['-e', script, args.resultPath, JSON.stringify(result)], { stdio: 'ignore' })
+      return { child, sessionId: Promise.resolve('fixture-review'), flushed: Promise.resolve() }
+    }
+    try {
+      const args = ['dispatch-reviews', '--run', 'r1', '--base', 'main', '--role-policy', 'policy.json']
+      await fn({ root, state, findings, dispatch: () => command(root, args) })
+    } finally { Object.assign(adapter, originals); process.env.PATH = previousPath }
+  })
+}
+
+const REVIEW_SKIP = process.platform === 'win32'
+test('required read-only reviewers return findings for host capture with current stamps', { skip: REVIEW_SKIP }, async () => withReadOnlyReviewer(async ({ root, state, findings, dispatch }) => {
   const sentinel = path.join(root, 'capture-sentinel')
   await writeFile(sentinel, 'preserved\n')
   await mkdir(path.dirname(findings), { recursive: true })
   await symlink(sentinel, findings)
-  let stale = false
-  let receipt
-  adapter.probe = async () => ({ ok: true })
-  adapter.spawn = async args => {
-    assert.equal(args.enforcement?.sandbox, 'read-only')
-    assert.ok(args.prompt.includes('do not write a findings file or mutate refs'))
-    const stamp = JSON.parse(args.prompt.match(/^\s*(\{"phase".*\})$/m)[1])
-    assert.ok(stamp.branches.some(value => value.includes(taskSha)))
-    receipt = { stamp: stale ? { ...stamp, branches: [] } : stamp, findings: [] }
-    const result = { status: 'done', branch: '', filesChanged: [], summary: JSON.stringify(receipt), blockers: [] }
-    const child = spawn(process.execPath, ['-e', 'require("node:fs").writeFileSync(process.argv[1], process.argv[2])', args.resultPath, JSON.stringify(result)], { stdio: 'ignore' })
-    return { child, sessionId: Promise.resolve('fixture-review'), flushed: Promise.resolve() }
-  }
-  try {
-    const args = ['dispatch-reviews', '--run', 'r1', '--base', 'main', '--role-policy', 'policy.json']
-    const result = await command(root, args)
-    assert.equal(result.code, 0, result.output)
-    const captured = await readFile(findings, 'utf8').catch(() => null)
-    assert.notEqual(captured, null)
-    assert.equal(captured, `${JSON.stringify(receipt)}\n`)
-    assert.equal(await readFile(sentinel, 'utf8'), 'preserved\n')
-    await rm(findings)
-    stale = true
-    assert.equal((await command(root, args)).code, 4)
-    await assert.rejects(readFile(findings), { code: 'ENOENT' })
-  } finally { Object.assign(adapter, originals); process.env.PATH = previousPath }
+  const result = await dispatch()
+  assert.equal(result.code, 0, result.output)
+  const captured = await readFile(findings, 'utf8').catch(() => null)
+  assert.notEqual(captured, null)
+  assert.equal(captured, `${JSON.stringify(state.receipt)}\n`)
+  assert.equal(await readFile(sentinel, 'utf8'), 'preserved\n')
+  await rm(findings)
+  state.stale = true
+  assert.equal((await dispatch()).code, 4)
+  await assert.rejects(readFile(findings), { code: 'ENOENT' })
 }))
+
+test('required review capture refuses old same-stamp output on repeated silent invocations', { skip: REVIEW_SKIP }, async () => withReadOnlyReviewer(async ({ state, findings, dispatch }) => {
+  for (let round = 0; round < 2; round++) {
+    state.noOutput = false
+    assert.equal((await dispatch()).code, 0)
+    const previousOutput = state.outputs.at(-1)
+    const previousReceipt = await readFile(previousOutput, 'utf8')
+    await rm(findings)
+    state.noOutput = true
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assert.equal((await dispatch()).code, 4, 'A child without current output must not complete a review')
+      await assert.rejects(readFile(findings), { code: 'ENOENT' })
+    }
+    assert.equal(await readFile(previousOutput, 'utf8'), previousReceipt)
+  }
+}))
+
+for (const [name, envelope] of [
+  ['nonempty blockers', { blockers: ['unable to verify candidate'] }],
+  ['nonempty branch', { branch: 'fleetmates/r1/T1' }],
+  ['blocked status', { status: 'blocked' }],
+  ['failed status', { status: 'failed' }],
+  ['changed files', { filesChanged: ['fixture.mjs'] }],
+]) {
+  test(`required review capture rejects ${name} in a current-stamp envelope`, { skip: REVIEW_SKIP }, async () => withReadOnlyReviewer(async ({ state, findings, dispatch }) => {
+    state.envelope = envelope
+    assert.equal((await dispatch()).code, 4)
+    await assert.rejects(readFile(findings), { code: 'ENOENT' })
+  }))
+}

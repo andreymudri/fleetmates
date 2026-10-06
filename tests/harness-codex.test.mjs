@@ -714,7 +714,8 @@ test('required Codex read-only enforcement reaches spawn and resume without writ
   const enforcement = { kind: 'required', harness: 'codex', sandboxMode: 'clone', sandbox: 'read-only', mode: null, read: true, write: false, execute: true, network: false, sharedRefs: false, publication: false, addWritableRoots: false }
   for (const build of [buildSpawnArgv, buildResumeArgv]) {
     const args = build({ sandbox, enforcement, network: true, sessionId: 'fixture', schemaPath: '/fixture/schema', resultPath: '/fixture/result' })
-    assert.ok(args.includes('read-only') || args.includes('sandbox_mode="read-only"'))
+    if (build === buildSpawnArgv) assert.ok(hasPair(args, '-s', 'read-only'), 'spawn requires adjacent -s read-only')
+    else assert.ok(hasPair(args, '-c', 'sandbox_mode="read-only"'), 'resume requires adjacent -c sandbox_mode="read-only"')
     assert.ok(!args.includes('--add-dir'))
     assert.ok(!args.some(arg => arg.includes('writable_roots') || arg.includes('network_access=true')))
     assert.ok(args.includes('hooks'))
@@ -744,7 +745,8 @@ test('Codex runtime spawn and resume carry required read-only enforcement and re
       assert.equal((await closed)[0], 0)
       await handle.flushed
       const args = JSON.parse(await readFile(`${paths.resultPath}.argv.json`, 'utf8'))
-      assert.ok(args.includes('read-only') || args.includes('sandbox_mode="read-only"'))
+      if (run === spawnCodex) assert.ok(hasPair(args, '-s', 'read-only'), 'runtime spawn requires adjacent -s read-only')
+      else assert.ok(hasPair(args, '-c', 'sandbox_mode="read-only"'), 'runtime resume requires adjacent -c sandbox_mode="read-only"')
       assert.ok(!args.includes('--add-dir'))
       assert.ok(!args.some(arg => arg.includes('writable_roots') || arg.includes('network_access=true')))
       assert.equal((await readResult(paths)).status, 'done')
