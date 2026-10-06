@@ -1,4 +1,5 @@
 import { NAMES } from './names.mjs'
+import { runTestChangePolicy } from './test-change-policy.mjs'
 import { spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import { mkdtemp, rm, lstat, realpath } from 'node:fs/promises'
@@ -1881,6 +1882,7 @@ export async function runOwnershipCheck(check, ctx = {}) {
 // which blocks — an editable manifest must not be able to supply or suppress a computed check.
 const RUNNERS = Object.assign(Object.create(null), {
   command: runCommandCheck,
+  tdd: runTestChangePolicy,
   fileset: runFilesetCheck,
   ownership: runOwnershipCheck,
 })

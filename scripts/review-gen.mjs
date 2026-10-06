@@ -1,3 +1,4 @@
+import { renderAdvisoryContext } from './brief.mjs'
 import { NAMES } from './names.mjs'
 import { reviewFileName, reviewStamp } from './reviews.mjs'
 // A pure string check — no filesystem, no resolution — so importing it does not cost this module
@@ -200,6 +201,7 @@ export function generateReviewDispatch({
   linkPaths = [],
   branchShas = {},
   planPath = '',
+  contextBundle = null,
 }) {
   if (!Array.isArray(lenses) || lenses.length === 0) {
     throw new Error(`a review dispatch needs at least one lens, got ${JSON.stringify(lenses)}`)
@@ -265,7 +267,8 @@ export function generateReviewDispatch({
 
     const build = methodFor(LENS_METHODS, lens)
     const method = build ? build({ testCommand, testCommandName, mutationCap, linkPaths, scratchWorktree, runBranch, branches }) : ''
-    const prompt = method ? `${basePrompt}\n${method}` : basePrompt
+    let prompt = method ? `${basePrompt}\n${method}` : basePrompt
+    if (contextBundle) prompt += '\n' + renderAdvisoryContext(contextBundle, { task: `phase-${phaseName}`, role: 'reviewer' })
 
     const dispatch = {
       lens,

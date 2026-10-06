@@ -51,6 +51,27 @@ worktree location record and returns immediately when it finds none, which is th
 subagent outside a run, and any error is an allow. But it is a synchronous spawn on a hot path and
 it is machine-wide rather than scoped to this repository, so it is worth knowing before installing.
 
+The plugin also registers a synchronous main-session `Stop` guard. It enforces only an
+explicit session binding, never the newest run in the repository. Bind the orchestrating
+session on its run branch with:
+
+```sh
+node scripts/cli.mjs bind-session --run <id> --plan <path> --session <session-id> --base <base>
+```
+
+The guard recomputes `finish --enforcement-only`, blocks once on failed or unresolved
+checks, and displays skipped obligations. A cheap PASS does not establish delivery
+completion. Missing bindings, changed requirements, process errors, timeouts and the
+harness retry escape allow stopping. Process death is not prevented. The unbound path
+costs one Git discovery process. Verify live callback behavior with `doctor --hooks --stop --session <session-id>`
+in the installed harness. A receipt records that this handler fired, not that delivery passed.
+
+Use `suspend --run <id> --plan <path> --base <base>` to pause, `resume --run <id>` to
+continue, or `abandon --run <id> --plan <path> --base <base>` to end that run identity.
+`run-status --run <id>` reports their Git refs. Suspension and abandonment never mean
+verified completion. Marker refs are writable local observations, not authenticated
+operator identity or authorization. No transcript is stored in the session binding.
+
 ### Update notices
 
 Claude Code updates plugins in the background and says nothing, so a new version usually arrives

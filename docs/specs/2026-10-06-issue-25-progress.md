@@ -1,0 +1,60 @@
+# Issue 25 implementation status
+
+This branch delivers independently testable local primitives. It does not
+close the parent roadmap or claim real-model evaluation outcomes.
+
+| Workstream | Implemented here | Remaining obligation |
+| --- | --- | --- |
+| W01 | Explicit session binding, bounded Stop guard, suspension/resume/abandon refs, finish refusal, digest/doctor interruption reporting | Live callback capture; broader completion identity and execution-state contracts |
+| W02 | Exact input identity and local acceptance/reviewer summaries | Curated dataset, repeated real workflows, independent outcomes, held-out baseline and resource metrics |
+| W03 | Versioned bounded bundles, anchored human learnings in implementation/review/integration prompts, hashes, provenance and mandatory preservation | Acceptance/dependency bundles, Vault selection, review evidence invalidation and observed selection quality |
+| W04 | Acceptance-to-current-evidence mapping; human-required and unresolved states | Stack verifier profiles, execution adapters and failure classification |
+| W05 | Git-computed test-change policy with declared exceptions and honest temporal/coverage limits | Independent behavioral red/green execution and richer ordering evidence |
+| W06 | No implementation claim | Rendered targets, behavioral/accessibility evidence and project adapter |
+| W07 | Scoped human learning selection; no automatic knowledge writes | Owned learning commits, feedback-to-tasks and authoritative plan amendments |
+| W08 | Local outcome counts, precision excluding unresolved findings, recall requiring independent labels | Findings provenance/deduplication, calibrated real reviewer datasets and shadow selection |
+| W09-W13 | No implementation claim | Separate bounded specs, adapters, durable effects, preflight and role capabilities |
+| W14-W15 | Conditional later scope | Bottleneck evidence and an explicit release requirement |
+
+## Local commands
+
+`bind-session`, `suspend`, `resume`, `abandon` and `run-status` are described in
+README. Session bindings and lifecycle refs are local observations. They do
+not authenticate the operator and cannot turn skipped checks into completion.
+
+`context-bundle --file <json>` reads `task`, `role`, `commit`, `maxBytes`,
+`vault` and `items`. Each item declares `id`, `text`, `source`, `startLine`,
+`endLine`, `reason` and `mandatory`. Optional order is the declared selection
+priority. The budget measures text UTF-8 bytes, not tokenizer output or total
+serialized metadata. Mandatory overflow is a refusal. The Vault status is
+explicit; `required-missing` refuses the bundle. These are advisory data.
+
+`workflow-report --file <json>` reads `inputs`, `requirements`, `evidence`,
+optional `findings` and optional independently established `labeledDefects`.
+Inputs name commit, plan, manifest, environment and verifier versions/hashes.
+Requirements declare an id and deterministic/judgment/human evidence kind.
+Evidence carries requirement, kind, status, matching input identity and a
+full log path. Exit 4 means unmet acceptance; exit 2 means malformed input.
+A report supplied by an agent is an observation, not independent execution
+proof. Passing a build cannot satisfy an undeclared or human-only criterion.
+
+An optional manifest check `{ "name": "test-policy", "kind": "tdd" }`
+uses common Node test/spec globs. Projects can declare `tests.match` and
+exact-path exceptions with `reason` and `evidence`. Neither a test edit nor
+an exception proves coverage. Existing inventory and ownership checks remain
+required. Unmeasurable integrated task diffs stay pending.
+
+## Human learning selection
+
+Human-owned `fleetmates.learnings.md` is read from the same committed plan
+anchor as mandatory plan constraints. Implementation briefs, generated
+workflows, reviewer prompts and integrator prompts receive advisory JSON
+bundles when the file exists. No guidance file is created or rewritten.
+
+An entry header can be `## YYYY-MM-DD run: <id> scope: src/**,lib/**`.
+Omitting scope means global. Global entries and a file preface are preserved;
+scoped entries are selected against the task or phase's owned paths. Older
+free-form guidance is preserved as global advisory context. Mandatory budget
+overflow refuses dispatch and asks the owner to condense guidance. Optional
+omissions are recorded. The absence of a Vault is explicit. This selector
+has fixture-backed behavior, not a measured claim of improved model outcomes.
