@@ -18,7 +18,12 @@ export const SANDBOX_FLAG = { clone: 'workspace-write', files: 'workspace-write'
 
 function requiredEnforcement(sandbox, enforcement, network) {
   const value = enforcement !== undefined ? enforcement : sandbox.meta.enforcement
-  if (value === undefined) return undefined
+  if (value === undefined) {
+    if (Object.hasOwn(sandbox.meta, 'prerequisites') && sandbox.meta.prerequisites?.rolePolicy !== null) {
+      throw new Error('Missing required enforcement for bound policy')
+    }
+    return undefined
+  }
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid required enforcement')
   const fields = ['read', 'write', 'execute', 'network', 'sharedRefs', 'publication']
   const policy = { version: 1, roles: { implementer: Object.fromEntries(fields.map(key => [key, value[key]])) } }

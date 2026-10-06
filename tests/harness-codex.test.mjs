@@ -759,3 +759,11 @@ test('Codex required network access cannot exceed the host approval on spawn or 
   const enforcement = { kind: 'required', harness: 'codex', sandboxMode: 'clone', sandbox: 'workspace-write', mode: null, read: true, write: true, execute: true, network: true, sharedRefs: false, publication: false, addWritableRoots: true }
   for (const build of [buildSpawnArgv, buildResumeArgv]) assert.throws(() => build({ sandbox, enforcement, network: false }), /enforcement/i)
 })
+
+
+test('Codex builders refuse a bound required policy with missing enforcement', () => {
+  const sandbox = { cwd: '/fixture/repo', meta: { mode: 'clone', prerequisites: { version: 1, rolePolicy: 'policy.json' } } }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) {
+    assert.throws(() => build({ sandbox, sessionId: 'fixture' }), /enforcement/i)
+  }
+})

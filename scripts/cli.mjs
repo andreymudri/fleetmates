@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import { migrate } from './migrate.mjs'
 import { NAMES } from './names.mjs'
 import { readFile, writeFile, mkdir, mkdtemp, rename, lstat, readdir, unlink, open as openFile } from 'node:fs/promises'
@@ -3649,7 +3650,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
 
-    const adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
+    let adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
 
     const probe = await adapter.probe({})
@@ -3657,6 +3658,16 @@ export async function runCli(argv, io = { out: console.log }) {
     if (probe.warning) io.out(`warning: ${probe.warning}`)
 
     const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+    try {
+      for (const task of phaseTasks) {
+        const file = path.join(runDir(root, runId), 'sessions', `${task.id}.json`)
+        let record
+        try { record = JSON.parse(await readFile(file, 'utf8')) }
+        catch (error) { if (error.code === 'ENOENT') continue; throw error }
+        await validateSessionContinuation(root, adapter, network, record)
+      }
+    } catch (error) { io.out(JSON.stringify({ error: error.message })); return 4 }
+    adapter = continuationAdapter(adapter, root, network)
 
     const baseBranch = flags.base === true ? '' : (flags.base ?? '')
     const contextAnchor = {}
@@ -3711,14 +3722,14 @@ export async function runCli(argv, io = { out: console.log }) {
       completeEnforcement,
     })
 
-    // Each session record is stamped with the harness that produced it, so `sessions` can name a
-    // harness per row. The driver owns every other field; this only adds `harness`.
+    // Stamp the harness and prerequisite binding on the persisted session.
     const dispatchSessionsDir = path.join(runDir(root, runId), 'sessions')
     for (const task of phaseTasks) {
       const file = path.join(dispatchSessionsDir, `${task.id}.json`)
       try {
         const record = JSON.parse(await readFile(file, 'utf8'))
         record.harness = adapter.name
+        if (record.sandbox?.meta?.prerequisites) record.prerequisites = record.sandbox.meta.prerequisites
         await writeFile(file, `${JSON.stringify(record, null, 2)}\n`)
       } catch { /* a task that produced no record has nothing to stamp */ }
     }
@@ -3932,6 +3943,10 @@ export async function runCli(argv, io = { out: console.log }) {
     const adapter = resolveHarness(flags, io)
     if (!adapter) return 2
 
+    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+    try { await validateSessionContinuation(root, adapter, network, record) }
+    catch (error) { io.out(JSON.stringify({ error: error.message })); return 4 }
+
     // SIGTERM the task's live process group first, if the record names one, so the resume never
     // races a still-running turn. The driver records a pid only while a child is in flight, so an
     // absent or dead pid means there is nothing to signal.
@@ -3939,7 +3954,6 @@ export async function runCli(argv, io = { out: console.log }) {
       killProcess({ pid: record.pid }, 'SIGTERM')
     }
 
-    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
     const base = path.join(messageSessionsDir, `${flags.task}`)
     const handle = await adapter.resume({
@@ -6527,6 +6541,52 @@ async function unchangedContracts(root, git, commit, sources) {
   }
 }
 
+async function validateSessionContinuation(root, adapter, network, record) {
+  if (!isDeepStrictEqual(record.prerequisites, record.sandbox?.meta?.prerequisites)) {
+    throw new Error('Required session prerequisite metadata is missing or changed')
+  }
+  await validateContinuation(root, adapter, network, record.sandbox)
+}
+
+async function validateContinuation(root, adapter, network, sandbox) {
+  const binding = sandbox?.meta?.prerequisites
+  const enforcement = sandbox?.meta?.enforcement
+  if (binding === undefined && enforcement === undefined) return
+  const keys = ['version', 'commit', 'environment', 'rolePolicy', 'role', 'harness', 'sandboxMode']
+  if (!binding || typeof binding !== 'object' || Array.isArray(binding)
+    || !isDeepStrictEqual(Object.keys(binding).sort(), [...keys].sort())
+    || binding.version !== 1 || !/^[a-f0-9]{40,64}$/.test(binding.commit)
+    || !ROLES.includes(binding.role) || binding.harness !== adapter.name
+    || binding.sandboxMode !== sandbox?.meta?.mode
+    || (binding.environment === null && binding.rolePolicy === null)) throw new Error('Required session prerequisite binding is missing or unsupported')
+  const git = createGit({ cwd: root })
+  const sources = []
+  for (const file of [binding.environment, binding.rolePolicy]) {
+    if (file !== null) sources.push(await committedContract(git, binding.commit, file))
+  }
+  if (binding.environment !== null) {
+    const recipe = validateEnvironmentRecipe(JSON.parse(sources.find(source => source.file === binding.environment).bytes))
+    for (const file of recipe.lockfiles) sources.push(await committedContract(git, binding.commit, file))
+  }
+  await unchangedContracts(root, git, binding.commit, sources)
+  const policy = binding.rolePolicy === null ? undefined
+    : validateRolePolicy(JSON.parse(sources.find(source => source.file === binding.rolePolicy).bytes))
+  const roles = resolveRoleCapabilities({ policy, role: binding.role, harness: adapter.name, sandboxMode: binding.sandboxMode, network })
+  const expected = roles.enforcement?.kind === 'required' ? roles.enforcement : undefined
+  if (!roles.ready || !isDeepStrictEqual(enforcement, expected)) throw new Error('Required session enforcement is missing, changed or unsupported')
+}
+
+function continuationAdapter(adapter, root, network) {
+  const wrapped = { ...adapter }
+  for (const method of ['spawn', 'resume', 'collect']) {
+    wrapped[method] = async (...args) => {
+      await validateContinuation(root, adapter, network, method === 'collect' ? args[1]?.sandbox : args[0]?.sandbox)
+      return adapter[method](...args)
+    }
+  }
+  return wrapped
+}
+
 export async function prepareDispatchPrerequisites({ root, flags, adapter, role, sandboxMode, network, exec, env = process.env }) {
   const git = createGit({ cwd: root })
   const commit = await git.headSha()
@@ -6553,15 +6613,27 @@ export async function prepareDispatchPrerequisites({ root, flags, adapter, role,
   if (!report.capabilities.ready) return { code: 4, report }
   await unchangedContracts(root, git, commit, sources)
   const enforcement = roles.enforcement.kind === 'required' ? roles.enforcement : undefined
+  const binding = { version: 1, commit, environment: flags.environment ?? null, rolePolicy: flags['role-policy'] ?? null, role, harness: adapter.name, sandboxMode }
+  const bind = sandbox => {
+    sandbox.meta ??= {}
+    sandbox.meta.prerequisites = binding
+    if (enforcement) sandbox.meta.enforcement = enforcement
+  }
   const wrapped = { ...adapter }
   for (const method of ['makeSandbox', 'spawn', 'resume', 'collect']) {
     wrapped[method] = async (...args) => {
       await unchangedContracts(root, git, commit, sources)
       if (method === 'makeSandbox' && args[1]?.runBranch
         && await git.resolveRef(`refs/heads/${args[1].runBranch}`) !== commit) throw new Error('Contract source differs from sandbox branch')
-      if ((method === 'spawn' || method === 'resume') && enforcement) args[0] = { ...args[0], enforcement }
+      if (method === 'spawn' || method === 'resume') {
+        await validateContinuation(root, adapter, network, args[0].sandbox)
+        const previous = args[0].sandbox.meta?.prerequisites
+        if (previous && !isDeepStrictEqual(previous, binding)) throw new Error('Required session contract cannot be replaced on continuation')
+        bind(args[0].sandbox)
+        if (enforcement) args[0] = { ...args[0], enforcement }
+      }
       const value = await adapter[method](...args)
-      if (method === 'makeSandbox' && enforcement) value.meta.enforcement = enforcement
+      if (method === 'makeSandbox') bind(value)
       return value
     }
   }

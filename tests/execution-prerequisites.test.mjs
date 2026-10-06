@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { runCli } from '../scripts/cli.mjs'
 import * as cli from '../scripts/cli.mjs'
+import { buildSpawnArgv, buildResumeArgv } from '../scripts/harnesses/codex.mjs'
 import { getAdapter } from '../scripts/harnesses/index.mjs'
 import { defaultExec } from '../scripts/gate-runner.mjs'
 import { createGit, defaultGitExec } from '../scripts/git.mjs'
@@ -198,6 +199,119 @@ test('CLI dispatch propagates required policy through driver spawn and recorded-
     for (const [, enforcement] of calls) assert.equal(enforcement?.sandbox, 'workspace-write')
   } finally { Object.assign(adapter, originals); process.env.PATH = previousPath }
 }))
+
+async function withBoundSession(preexisting, fn) {
+  return fixture(async ({ root, gitRun }) => {
+    await writeFile(path.join(root, 'recipe.json'), JSON.stringify({ ...recipe, lockfiles: ['lock.json'] }))
+    await writeFile(path.join(root, 'lock.json'), '{}')
+    await writeFile(path.join(root, 'plan.md'), '### Task 1: fixture\n\n**Files:**\n- Create: `fixture.mjs`\n')
+    await writeFile(path.join(root, '.gitignore'), '.fleetmates/\ncodex\nfleetmates.local.json\n')
+    await writeFile(path.join(root, 'policy.json'), JSON.stringify({ version: 1, roles: { implementer: { ...policy.roles.implementer, write: false } } }))
+    await gitRun(['add', '.'])
+    await gitRun(['commit', '-m', 'test: bound session'])
+    await gitRun(['checkout', '-b', 'run'])
+    assert.equal((await command(root, ['init-run', 'plan.md', '--run', 'r1'])).code, 0)
+    await writeFile(path.join(root, 'fleetmates.local.json'), JSON.stringify({ harnesses: { codex: { sandbox: 'clone' } } }))
+    await writeFile(path.join(root, 'codex'), '#!/usr/bin/env node\nconsole.log("Logged in")\n')
+    await chmod(path.join(root, 'codex'), 0o755)
+    const previousPath = process.env.PATH
+    process.env.PATH = `${root}${path.delimiter}${previousPath}`
+    const file = path.join(root, '.fleetmates', 'r1', 'sessions', 'T1.json')
+    const sandbox = { cwd: root, meta: { mode: 'clone', gitdir: path.join(root, '.git') } }
+    if (preexisting) {
+      await mkdir(path.dirname(file), { recursive: true })
+      await writeFile(file, JSON.stringify({ taskId: 'T1', sessionId: 'fixture-session', sandbox, state: 'orphaned' }))
+    }
+    const calls = []
+    const adapter = getAdapter('codex')
+    const overrides = { probe: async () => ({ ok: true }), makeSandbox: async () => sandbox, readResult: async () => null, readUsage: async () => null }
+    for (const method of ['spawn', 'resume']) overrides[method] = async args => {
+      calls.push({ method, argv: (method === 'spawn' ? buildSpawnArgv : buildResumeArgv)(args) })
+      return { child: spawn(process.execPath, ['-e', 'setTimeout(() => {}, 50)'], { stdio: 'ignore' }), sessionId: Promise.resolve('fixture-session'), flushed: Promise.resolve() }
+    }
+    const originals = Object.fromEntries(Object.keys(overrides).map(key => [key, adapter[key]]))
+    Object.assign(adapter, overrides)
+    const dispatch = extra => command(root, ['dispatch', '--run', 'r1', '--phase', '1', '--base', 'main', ...extra])
+    const message = () => command(root, ['message', '--run', 'r1', '--task', 'T1', '--text', 'continue', '--harness', 'codex'])
+    try {
+      const result = await dispatch(['--role-policy', 'policy.json', '--environment', 'recipe.json'])
+      assert.equal(result.code, 0, result.output)
+      await fn({ root, gitRun, file, calls, dispatch, message })
+    } finally { Object.assign(adapter, originals); process.env.PATH = previousPath }
+  })
+}
+
+for (const preexisting of [false, true]) {
+  test(`required ${preexisting ? 'pre-existing' : 'new'} session persists enforcement through message and flagless dispatch`, { skip: process.platform === 'win32' }, async () => withBoundSession(preexisting, async ({ file, calls, message, dispatch }) => {
+    const record = JSON.parse(await readFile(file, 'utf8'))
+    assert.equal(record.sandbox.meta.enforcement?.sandbox, 'read-only')
+    assert.equal(record.sandbox.meta.prerequisites?.version, 1)
+    assert.deepEqual(record.prerequisites, record.sandbox.meta.prerequisites)
+    assert.equal((await message()).code, 0)
+    assert.equal((await dispatch([])).code, 0)
+    assert.equal(calls.length, 3)
+    for (const { method, argv } of calls) {
+      const flag = method === 'spawn' ? '-s' : '-c'
+      const value = method === 'spawn' ? 'read-only' : 'sandbox_mode="read-only"'
+      assert.ok(argv.some((arg, index) => arg === flag && argv[index + 1] === value), JSON.stringify(argv))
+      assert.ok(!argv.includes('--add-dir'))
+      assert.ok(!argv.some(arg => arg.startsWith('sandbox_workspace_write.writable_roots=')))
+      assert.ok(argv.some((arg, index) => arg === '-c' && argv[index + 1] === 'sandbox_workspace_write.network_access=false'))
+    }
+  }))
+}
+
+test('required session cannot drop its policy on environment-only redispatch', { skip: process.platform === 'win32' }, async () => withBoundSession(true, async ({ calls, dispatch }) => {
+  await dispatch(['--environment', 'recipe.json'])
+  assert.equal(calls.length, 1)
+}))
+
+test('required flagless redispatch refuses changed committed policy before adapter resume', { skip: process.platform === 'win32' }, async () => withBoundSession(true, async ({ root, calls, dispatch }) => {
+  await writeFile(path.join(root, 'policy.json'), '{}')
+  await dispatch([])
+  assert.equal(calls.length, 1)
+}))
+
+const continuationChanges = {
+  'missing all sandbox prerequisites': record => { delete record.sandbox.meta.prerequisites; delete record.sandbox.meta.enforcement },
+  'missing enforcement': record => { delete record.sandbox.meta.enforcement },
+  'unsupported enforcement': record => { record.sandbox.meta.enforcement.kind = 'legacy' },
+  'changed enforcement': record => { record.sandbox.meta.enforcement.write = true },
+  'missing binding': record => { delete record.sandbox.meta.prerequisites },
+  'unsupported binding': record => { record.sandbox.meta.prerequisites.version = 99 },
+  'wrong harness': record => { record.sandbox.meta.prerequisites.harness = 'cursor' },
+  'unsupported policy source': record => { record.sandbox.meta.prerequisites.rolePolicy = 'recipe.json' },
+  'unsupported environment source': record => { record.sandbox.meta.prerequisites.environment = 'policy.json' },
+  'missing committed source': record => { record.sandbox.meta.prerequisites.rolePolicy = 'missing.json' },
+  'unsafe bound source': record => { record.sandbox.meta.prerequisites.rolePolicy = '../policy.json' },
+  'undeclared bound role': record => { record.sandbox.meta.prerequisites.role = 'reviewer' },
+  'changed sandbox': record => { record.sandbox.meta.mode = 'full' },
+  'changed policy source': async (record, root) => writeFile(path.join(root, 'policy.json'), '{}'),
+  'missing policy source': async (record, root) => rm(path.join(root, 'policy.json')),
+  'changed lockfile source': async (record, root) => writeFile(path.join(root, 'lock.json'), '{"changed":true}'),
+  'missing lockfile source': async (record, root) => rm(path.join(root, 'lock.json')),
+  'changed environment source': async (record, root) => writeFile(path.join(root, 'recipe.json'), '{}'),
+  'missing environment source': async (record, root) => rm(path.join(root, 'recipe.json')),
+  'changed source commit': async (record, root, gitRun) => gitRun(['commit', '--allow-empty', '-m', 'test: changed source commit']),
+}
+for (const [name, change] of Object.entries(continuationChanges)) {
+  test(`required message refuses ${name} before process effects`, { skip: process.platform === 'win32' }, async () => withBoundSession(true, async ({ root, gitRun, file, calls, message }) => {
+    const record = JSON.parse(await readFile(file, 'utf8'))
+    const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore', detached: process.platform !== 'win32' })
+    try {
+      record.pid = live.pid
+      await change(record, root, gitRun)
+      if (!['missing all sandbox prerequisites', 'missing binding'].includes(name)) record.prerequisites = record.sandbox.meta.prerequisites
+      await writeFile(file, JSON.stringify(record))
+      const result = await message()
+      assert.equal(result.code, 4, result.output)
+      assert.equal(calls.length, 1)
+      await new Promise(resolve => setTimeout(resolve, 30))
+      assert.equal(live.signalCode, null)
+      assert.equal(live.exitCode, null)
+    } finally { if (live.exitCode === null && live.signalCode === null) { live.kill(); await new Promise(resolve => live.once('close', resolve)) } }
+  }))
+}
 
 async function withReadOnlyReviewer(fn) {
   return fixture(async ({ root, gitRun, git }) => {
