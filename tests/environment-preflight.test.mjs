@@ -88,11 +88,31 @@ test('actual clean Node fixture executes setup before baseline and retains compl
   assert.equal(report.platform.os, process.platform)
   assert.equal(report.platform.arch, process.arch)
   assert.equal(report.dependencies.layout, 'clean-checkout')
-  for (const group of [report.setup, report.baseline]) {
+  assert.ok(Number.isFinite(report.durationMs), 'capture duration must be finite')
+  assert.ok(report.durationMs >= 0)
+  for (const [name, group] of [['setup', report.setup], ['baseline', report.baseline]]) {
+    assert.ok(Number.isFinite(group.durationMs), `${name} duration must be finite`)
     assert.ok(group.durationMs >= 0)
-    assert.equal(group.checks[0].log.complete, true)
-    assert.ok(group.checks[0].durationMs >= 0)
-    assert.match(await readFile(group.checks[0].log.path, 'utf8'), /setup|baseline/)
+    assert.equal(group.checks.length, 1)
+    for (const check of group.checks) {
+      assert.equal(check.log.complete, true)
+      assert.ok(Number.isFinite(check.durationMs), `${name}/${check.name} command duration must be finite`)
+      assert.ok(check.durationMs >= 0)
+      assert.match(await readFile(check.log.path, 'utf8'), /setup|baseline/)
+    }
+  }
+})
+
+test('explicit unknown clock preserves null durations after successful actual execution', async t => {
+  const f = await fixture(t)
+  const report = await f.capture({ execute: true, now: () => NaN })
+  assert.equal(report.ready, true)
+  assert.equal(report.durationMs, null)
+  for (const group of [report.setup, report.baseline]) {
+    assert.equal(group.status, 'pass')
+    assert.equal(group.durationMs, null)
+    assert.equal(group.checks.length, 1)
+    for (const check of group.checks) assert.equal(check.durationMs, null)
   }
 })
 
