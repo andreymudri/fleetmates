@@ -39,6 +39,7 @@ test('workflow CLI emits bounded context and returns unresolved acceptance separ
   await writeFile(file, JSON.stringify({ inputs, requirements, evidence: [proof('build', 'deterministic')] }))
   assert.equal(await runCli(['workflow-report', '--file', file, '--root', root], io), 4)
   assert.equal(JSON.parse(output.at(-1)).acceptance.obligations[1].status, 'human-required')
+  assert.equal(JSON.parse(output.at(-1)).review, null, 'missing reviewer outcomes are unknown, not an observed empty review')
   await writeFile(file, JSON.stringify({ inputs, requirements, evidence: [proof('build', 'deterministic'), proof('interaction', 'human')] }))
   assert.equal(await runCli(['workflow-report', '--file', file, '--root', root], io), 0)
   await writeFile(file, JSON.stringify({ task: 'T1', role: 'reviewer', commit: 'a'.repeat(40), items: [{ id: 'rule', text: '\u009b\u202e data', source: 'guidance.md', startLine: 1, endLine: 1, reason: 'global', mandatory: true }] }))

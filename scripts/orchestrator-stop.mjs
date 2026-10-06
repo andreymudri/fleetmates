@@ -5,7 +5,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { discover, git, readBinding, planHash, lifecycleStatus } from './workflow-lifecycle.mjs'
 import { appendEvent, fingerprint } from './event-ledger.mjs'
-import { receiptPath } from './context-hook.mjs'
+import { stopReceiptPath } from './context-hook.mjs'
 import { printable } from './reviews.mjs'
 
 export async function handleOrchestratorStop(input, { err = () => {}, execute = spawnSync } = {}) {
@@ -41,7 +41,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   let input
   try { const body = readFileSync(0, 'utf8'); if (Buffer.byteLength(body) <= 1024 * 1024) input = JSON.parse(body) } catch { /* fail open */ }
   if (input && typeof input.session_id === 'string') {
-    try { await appendEvent(receiptPath(), { kind: 'hook-fired', hook: 'Stop', at: Date.now(), fingerprint: fingerprint(input.session_id) }) } catch { /* optional observation */ }
+    try { await appendEvent(stopReceiptPath(), { kind: 'hook-fired', hook: 'Stop', at: Date.now(), fingerprint: fingerprint(input.session_id) }) } catch { /* optional observation */ }
   }
   process.exitCode = await handleOrchestratorStop(input, { err: console.error })
 }
