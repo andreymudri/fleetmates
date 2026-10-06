@@ -708,3 +708,52 @@ test('spawnCodex and resumeCodex lead a files-mode prompt with FILES_PREAMBLE, a
     await rm(cwd, { recursive: true, force: true })
   }
 })
+
+test('required Codex read-only enforcement reaches spawn and resume without writable roots', () => {
+  const sandbox = { cwd: '/fixture/repo', meta: { mode: 'clone', gitdir: '/fixture/git' } }
+  const enforcement = { kind: 'required', harness: 'codex', sandboxMode: 'clone', sandbox: 'read-only', mode: null, read: true, write: false, execute: true, network: false, sharedRefs: false, publication: false, addWritableRoots: false }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) {
+    const args = build({ sandbox, enforcement, network: true, sessionId: 'fixture', schemaPath: '/fixture/schema', resultPath: '/fixture/result' })
+    assert.ok(args.includes('read-only') || args.includes('sandbox_mode="read-only"'))
+    assert.ok(!args.includes('--add-dir'))
+    assert.ok(!args.some(arg => arg.includes('writable_roots') || arg.includes('network_access=true')))
+    assert.ok(args.includes('hooks'))
+    assert.ok(args.includes('sandbox_workspace_write.network_access=false'))
+    assert.ok(args.includes('/fixture/result'))
+    assert.throws(() => build({ sandbox, enforcement: { ...enforcement, sharedRefs: true } }), /enforcement/i)
+  }
+})
+
+test('Codex required enforcement cannot downgrade malformed contracts to legacy', () => {
+  const sandbox = { cwd: '/fixture/repo', meta: { mode: 'clone' } }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) {
+    for (const enforcement of [null, {}, false, { kind: 'legacy' }]) assert.throws(() => build({ sandbox, enforcement }), /enforcement/i)
+  }
+})
+
+test('Codex runtime spawn and resume carry required read-only enforcement and retain host results', { skip: WIN32_FAKE_SKIP }, async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'fm-required-codex-'))
+  const enforcement = { kind: 'required', harness: 'codex', sandboxMode: 'clone', sandbox: 'read-only', mode: null, read: true, write: false, execute: true, network: false, sharedRefs: false, publication: false, addWritableRoots: false }
+  const sandbox = { cwd, meta: { mode: 'clone', gitdir: '/fixture/git' } }
+  const paths = { schemaPath: path.join(cwd, 'schema'), resultPath: path.join(cwd, 'result'), streamPath: path.join(cwd, 'stream') }
+  try {
+    for (const run of [spawnCodex, resumeCodex]) {
+      const handle = await run({ sandbox, enforcement, network: true, prompt: 'fixture', message: 'fixture', sessionId: 'fixture', ...paths })
+      const closed = once(handle.child, 'close')
+      await handle.sessionId
+      assert.equal((await closed)[0], 0)
+      await handle.flushed
+      const args = JSON.parse(await readFile(`${paths.resultPath}.argv.json`, 'utf8'))
+      assert.ok(args.includes('read-only') || args.includes('sandbox_mode="read-only"'))
+      assert.ok(!args.includes('--add-dir'))
+      assert.ok(!args.some(arg => arg.includes('writable_roots') || arg.includes('network_access=true')))
+      assert.equal((await readResult(paths)).status, 'done')
+    }
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('Codex required network access cannot exceed the host approval on spawn or resume', () => {
+  const sandbox = { cwd: '/fixture/repo', meta: { mode: 'clone', gitdir: '/fixture/git' } }
+  const enforcement = { kind: 'required', harness: 'codex', sandboxMode: 'clone', sandbox: 'workspace-write', mode: null, read: true, write: true, execute: true, network: true, sharedRefs: false, publication: false, addWritableRoots: true }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) assert.throws(() => build({ sandbox, enforcement, network: false }), /enforcement/i)
+})

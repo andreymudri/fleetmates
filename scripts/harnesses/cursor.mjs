@@ -1,3 +1,4 @@
+import { resolveRoleCapabilities } from '../role-capabilities.mjs'
 import { probeCommand } from './probe-command.mjs'
 // The only module in this repository that knows the Cursor CLI (`cursor-agent`), per
 // docs/specs/2026-09-16-headless-driver-cursor-design.md. Everything else talks to
@@ -33,20 +34,35 @@ export function assertSafeArgv(argv) {
   return argv
 }
 
+function requiredEnforcement(sandbox, enforcement, network) {
+  const value = enforcement !== undefined ? enforcement : sandbox.meta.enforcement
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid required enforcement')
+  const fields = ['read', 'write', 'execute', 'network', 'sharedRefs', 'publication']
+  const policy = { version: 1, roles: { implementer: Object.fromEntries(fields.map(key => [key, value[key]])) } }
+  const resolved = resolveRoleCapabilities({ policy, role: 'implementer', harness: 'cursor', sandboxMode: sandbox.meta.mode, network: network === true })
+  if (value.kind !== 'required' || !resolved.ready
+    || Object.keys(value).length !== Object.keys(resolved.enforcement).length
+    || Object.entries(resolved.enforcement).some(([key, expected]) => value[key] !== expected)) throw new Error('Invalid required cursor enforcement')
+  return value
+}
+
+
 // With no `--model`, cursor-agent does not fall back to `auto`: it picks a named default, which a
 // free plan refuses at the first call ("Named models unavailable Free plans can only use Auto",
 // exit 1). An unmapped tier therefore asks for `auto` explicitly.
-function baseArgs({ sandbox, model }) {
+function baseArgs({ sandbox, model, enforcement, network }) {
+  const required = requiredEnforcement(sandbox, enforcement, network)
   return ['-p', '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled', '--workspace', sandbox.cwd,
-    '--model', model || 'auto']
+    '--model', model || 'auto', ...(required?.mode ? ['--mode', required.mode] : [])]
 }
 
-export function buildSpawnArgv({ sandbox, model }) {
-  return assertSafeArgv(baseArgs({ sandbox, model }))
+export function buildSpawnArgv({ sandbox, model, enforcement, network }) {
+  return assertSafeArgv(baseArgs({ sandbox, model, enforcement, network }))
 }
 
-export function buildResumeArgv({ sandbox, sessionId, model }) {
-  return assertSafeArgv([...baseArgs({ sandbox, model }), '--resume', sessionId])
+export function buildResumeArgv({ sandbox, sessionId, model, enforcement, network }) {
+  return assertSafeArgv([...baseArgs({ sandbox, model, enforcement, network }), '--resume', sessionId])
 }
 
 // Cursor has no output-schema flag (§4.4), so the contract travels in the prompt and `readResult`
@@ -143,15 +159,17 @@ function run(argv, { promptText, streamPath, errPath, cwd, append }) {
   return { child, sessionId, flushed }
 }
 
-export async function spawnCursor({ sandbox, prompt, model, network, streamPath, errPath }) {
-  await prepareWorkspace(sandbox, network)
-  const argv = buildSpawnArgv({ sandbox, model })
+export async function spawnCursor({ sandbox, prompt, model, network, enforcement, streamPath, errPath }) {
+  const argv = buildSpawnArgv({ sandbox, model, enforcement, network })
+  const required = requiredEnforcement(sandbox, enforcement, network)
+  await prepareWorkspace(sandbox, required ? required.network && network : network)
   return run(argv, { promptText: withInstruction(sandbox, prompt), streamPath, errPath, cwd: sandbox.cwd, append: false })
 }
 
-export async function resumeCursor({ sandbox, sessionId, message, model, network, streamPath, errPath }) {
-  await prepareWorkspace(sandbox, network)
-  const argv = buildResumeArgv({ sandbox, sessionId, model })
+export async function resumeCursor({ sandbox, sessionId, message, model, network, enforcement, streamPath, errPath }) {
+  const argv = buildResumeArgv({ sandbox, sessionId, model, enforcement, network })
+  const required = requiredEnforcement(sandbox, enforcement, network)
+  await prepareWorkspace(sandbox, required ? required.network && network : network)
   return run(argv, { promptText: withInstruction(sandbox, message), streamPath, errPath, cwd: sandbox.cwd, append: true })
 }
 

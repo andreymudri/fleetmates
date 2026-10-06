@@ -1,3 +1,4 @@
+import { resolveRoleCapabilities } from '../role-capabilities.mjs'
 import { probeCommand } from './probe-command.mjs'
 // The only module in this repository that knows Codex's CLI surface (spec §5, §7). Everything
 // else — the driver, the CLI — talks to `codexAdapter` through the harness-neutral interface
@@ -15,6 +16,20 @@ import { makeFilesSandbox, commitFilesTree, FILES_PREAMBLE } from './files-sandb
 // (spec "Out of Scope"), only selectable through `harnesses.codex.sandbox = "full"`.
 export const SANDBOX_FLAG = { clone: 'workspace-write', files: 'workspace-write', full: 'danger-full-access' }
 
+function requiredEnforcement(sandbox, enforcement, network) {
+  const value = enforcement !== undefined ? enforcement : sandbox.meta.enforcement
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid required enforcement')
+  const fields = ['read', 'write', 'execute', 'network', 'sharedRefs', 'publication']
+  const policy = { version: 1, roles: { implementer: Object.fromEntries(fields.map(key => [key, value[key]])) } }
+  const resolved = resolveRoleCapabilities({ policy, role: 'implementer', harness: 'codex', sandboxMode: sandbox.meta.mode, network: network === true })
+  if (value.kind !== 'required' || !resolved.ready
+    || Object.keys(value).length !== Object.keys(resolved.enforcement).length
+    || Object.entries(resolved.enforcement).some(([key, expected]) => value[key] !== expected)) throw new Error('Invalid required codex enforcement')
+  return value
+}
+
+
 // Flags shared by a first spawn and a resume. `--disable hooks` is mandatory (§2 item 10:
 // Codex hooks run outside the sandbox) — every argv this module builds carries it, never
 // conditionally. `--skip-git-repo-check` because the clone layout's cwd carries no `.git`
@@ -22,14 +37,14 @@ export const SANDBOX_FLAG = { clone: 'workspace-write', files: 'workspace-write'
 // the driver runs headless and can never answer an interactive prompt. The two
 // `sandbox_workspace_write.exclude_*` keys stop /tmp and $TMPDIR from reading as
 // writable-by-default gaps in the sandbox.
-function baseArgs({ model, effort, network }) {
+function baseArgs({ model, effort, network, required }) {
   const args = [
     '--json', '--disable', 'hooks', '--skip-git-repo-check',
     '-c', 'approval_policy="never"',
     '-c', 'sandbox_workspace_write.exclude_slash_tmp=true',
     '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true',
   ]
-  if (network) args.push('-c', 'sandbox_workspace_write.network_access=true')
+  if (required || network) args.push('-c', `sandbox_workspace_write.network_access=${network === true}`)
   if (model) args.push('-m', model)
   if (effort) args.push('-c', `model_reasoning_effort=${effort}`)
   return args
@@ -45,10 +60,11 @@ function shellEnvSet(gitdir, cwd) {
 
 // The argv for a first spawn (spec §5). Exported as a pure function so its shape can be
 // asserted without actually spawning a process.
-export function buildSpawnArgv({ sandbox, model, effort, network, schemaPath, resultPath }) {
+export function buildSpawnArgv({ sandbox, model, effort, network, schemaPath, resultPath, enforcement }) {
   const { meta, cwd } = sandbox
-  const args = ['exec', ...baseArgs({ model, effort, network }), '-s', SANDBOX_FLAG[meta.mode], '-C', cwd]
-  if (meta.mode === 'clone') {
+  const required = requiredEnforcement(sandbox, enforcement, network)
+  const args = ['exec', ...baseArgs({ model, effort, network: required ? required.network : network, required }), '-s', required?.sandbox ?? SANDBOX_FLAG[meta.mode], '-C', cwd]
+  if (meta.mode === 'clone' && (!required || required.addWritableRoots)) {
     args.push('--add-dir', meta.gitdir, '-c', shellEnvSet(meta.gitdir, cwd))
   }
   args.push('--output-schema', schemaPath, '-o', resultPath)
@@ -57,10 +73,13 @@ export function buildSpawnArgv({ sandbox, model, effort, network, schemaPath, re
 
 // The argv for `exec resume` (spec §5). Takes no `-s`/`-C`/`--add-dir` — the sandbox is rebuilt
 // through `-c`, and cwd is set on the child process itself rather than with a flag (§2 item 12).
-export function buildResumeArgv({ sandbox, sessionId, model, effort, network, schemaPath, resultPath }) {
+export function buildResumeArgv({ sandbox, sessionId, model, effort, network, schemaPath, resultPath, enforcement }) {
   const { meta, cwd } = sandbox
-  const args = ['exec', 'resume', sessionId, ...baseArgs({ model, effort, network })]
-  if (meta.mode === 'clone') {
+  const required = requiredEnforcement(sandbox, enforcement, network)
+  const args = ['exec', 'resume', sessionId, ...baseArgs({ model, effort, network: required ? required.network : network, required })]
+  if (required?.sandbox === 'read-only') {
+    args.push('-c', 'sandbox_mode="read-only"')
+  } else if (meta.mode === 'clone') {
     args.push(
       '-c', 'sandbox_mode="workspace-write"',
       '-c', `sandbox_workspace_write.writable_roots=["${meta.gitdir}"]`,
@@ -182,17 +201,17 @@ function withPreamble(sandbox, text) {
 // Writes `RESULT_SCHEMA` once per task, before the first spawn (a resume reuses the file a
 // spawn already wrote).
 export async function spawnCodex({
-  sandbox, prompt, model, effort, network, schemaPath, resultPath, streamPath, errPath,
+  sandbox, prompt, model, effort, network, enforcement, schemaPath, resultPath, streamPath, errPath,
 }) {
+  const argv = buildSpawnArgv({ sandbox, model, effort, network, enforcement, schemaPath, resultPath })
   await writeFile(schemaPath, JSON.stringify(RESULT_SCHEMA))
-  const argv = buildSpawnArgv({ sandbox, model, effort, network, schemaPath, resultPath })
   return run(argv, { promptText: withPreamble(sandbox, prompt), streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd })
 }
 
 export async function resumeCodex({
-  sandbox, sessionId, message, model, effort, network, schemaPath, resultPath, streamPath, errPath,
+  sandbox, sessionId, message, model, effort, network, enforcement, schemaPath, resultPath, streamPath, errPath,
 }) {
-  const argv = buildResumeArgv({ sandbox, sessionId, model, effort, network, schemaPath, resultPath })
+  const argv = buildResumeArgv({ sandbox, sessionId, model, effort, network, enforcement, schemaPath, resultPath })
   return run(argv, { promptText: withPreamble(sandbox, message), streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd })
 }
 

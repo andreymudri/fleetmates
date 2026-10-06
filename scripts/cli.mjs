@@ -7,6 +7,10 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan, PlanParseError } from './plan-parser.mjs'
 import { readWorkflowInput } from './workflow-input.mjs'
+import { validateResult } from './result-schema.mjs'
+import { captureEnvironment, validateEnvironmentRecipe } from './environment-preflight.mjs'
+import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
+import { probeCapabilities } from './capability-preflight.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { renderUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
@@ -26,7 +30,7 @@ import { decideFix } from './fix-loop.mjs'
 import { runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
-import { collectReviewResults, isUnsafePathComponent, printable, printableBlock, reviewFileName, reviewStamp } from './reviews.mjs'
+import { collectReviewResults, isUnsafePathComponent, printable, printableBlock, reviewFileName, reviewStamp, reviewStale } from './reviews.mjs'
 import { generateReviewDispatch } from './review-gen.mjs'
 import { resolveTaskBranch, taskBranchName } from './enforce.mjs'
 import { tmpdir } from 'node:os'
@@ -141,8 +145,9 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|ui|deck|config> [options]
 
+  environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
@@ -175,9 +180,9 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
   brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
-  dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--root <path>]
-  dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--root <path>]
-  dispatch-integrator --run <id> [--phase <name>] [--harness <name>] [--root <path>]
+  dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
+  dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
+  dispatch-integrator --run <id> [--phase <name>] [--harness <name>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   message  --run <id> --task <id> --text <s> [--harness <name>] [--root <path>]
   sessions --run <id> [--root <path>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>] [--enforcement-only]
@@ -301,6 +306,7 @@ export const REQUIRED = {
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
   'preview-check': [],
   'plan-drift': ['run', 'plan'],
+  'environment-check': ['file'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
   'ci-status': ['file'],
@@ -375,9 +381,9 @@ export const KNOWN_FLAGS = {
   brief: ['run', 'task', 'plan', 'base', 'fix-round'],
   complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
   workflow: ['run', 'phase', 'models', 'plan', 'base'],
-  dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models'],
-  'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models'],
-  'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models'],
+  dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
+  'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
+  'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
   message: ['run', 'task', 'harness', 'text'],
   sessions: ['run'],
   fix: ['run', 'phase', 'verdict'],
@@ -386,6 +392,7 @@ export const KNOWN_FLAGS = {
   'collect-reviews': ['run', 'phase'],
   'preview-check': [],
   'plan-drift': ['run', 'plan', 'base'],
+  'environment-check': ['file', 'execute'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
   'ci-status': ['file'],
@@ -3003,6 +3010,45 @@ export async function runCli(argv, io = { out: console.log }) {
     }
   }
 
+  if (command === 'environment-check') {
+    try {
+      const input = await readWorkflowInput(flags.file)
+      if (!input || typeof input !== 'object' || Array.isArray(input)
+        || Object.keys(input).some(key => !['commit', 'recipePath', 'harness'].includes(key))
+        || typeof input.commit !== 'string' || typeof input.recipePath !== 'string'
+        || (input.harness !== undefined && !HARNESS_NAMES.includes(input.harness))
+        || (flags.execute !== undefined && flags.execute !== true)) throw new Error('Malformed environment-check request')
+      const report = await captureEnvironment({ git: createGit({ cwd: root }), commit: input.commit,
+        recipePath: input.recipePath, cwd: root, execute: flags.execute === true })
+      if (flags.execute === true) {
+        const capabilities = await probeCapabilities({ required: report.required, harness: input.harness ?? 'codex', env: process.env })
+        report.capabilities = capabilities
+        report.ready = report.ready && capabilities.ready
+      }
+      io.out(JSON.stringify(report))
+      return report.ready ? 0 : 4
+    } catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+  }
+
+  let prerequisites
+  if (['dispatch', 'dispatch-reviews', 'dispatch-integrator'].includes(command)) {
+    if (flags.environment !== undefined || flags['role-policy'] !== undefined) {
+      const resolved = await resolveConfig(root, io)
+      if (!resolved) return 2
+      const adapter = resolveHarness(flags, io)
+      if (!adapter) return 2
+      const settings = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+      const role = command === 'dispatch' ? 'implementer' : command === 'dispatch-reviews' ? 'reviewer' : 'integrator'
+      const sandboxMode = role === 'implementer' ? settings.sandboxMode
+        : role === 'reviewer' && adapter.name === 'codex' ? 'clone' : 'full'
+      try {
+        prerequisites = await prepareDispatchPrerequisites({ root, flags, adapter, role, sandboxMode, network: settings.network })
+      } catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+      io.out(JSON.stringify(prerequisites.report))
+      if (prerequisites.code !== 0) return prerequisites.code
+    } else io.out('legacy prerequisites: environment and role capabilities are unverified')
+  }
+
   if (command === 'init-run') {
     // Before the plan is even read: an id the location record cannot hold must never reach
     // dispatch, because the failure it causes surfaces one agent later, in every teammate at
@@ -3603,7 +3649,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
 
-    const adapter = resolveHarness(flags, io)
+    const adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
 
     const probe = await adapter.probe({})
@@ -3698,7 +3744,7 @@ export async function runCli(argv, io = { out: console.log }) {
   if (command === 'dispatch-reviews') {
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
-    const adapter = resolveHarness(flags, io)
+    const adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
 
     // The lenses and per-lens prompts come from `review-dispatch`, unchanged: this reuses that
@@ -3726,14 +3772,15 @@ export async function runCli(argv, io = { out: console.log }) {
     const reviewSessionsDir = path.join(runDir(root, runId), 'sessions')
     await mkdir(reviewSessionsDir, { recursive: true })
 
-    // One reviewer per lens, in parallel, cwd at the project root — read-only, each creating its
-    // own scratch worktree outside the repo. Nothing is written to status or results here;
-    // `collect-reviews` reads the findings files the reviewers write and is unchanged.
+    // Capture required read-only reviewers' returned findings after their child processes exit.
+    const hostCapture = prerequisites?.enforcement?.write === false
+    const artifactFailures = []
+    const captureInstruction = hostCapture ? '\nFor this required read-only invocation, do not write a findings file or mutate refs. Return the findings object as a JSON string in the summary field of the task result envelope, with status done, branch an empty string, filesChanged an empty array and blockers an empty array. The host captures the findings file. Preserve the exact supplied stamp and any unableToVerify or unprobed fields.\n' : ''
     await runPool(spec.reviewers, resolved.maxParallel, async (reviewer) => {
       const base = path.join(reviewSessionsDir, `review-${reviewer.lens}`)
       const handle = await adapter.spawn({
-        sandbox: { cwd: root, meta: { mode: 'full' } },
-        prompt: `${persona}\n\n${reviewer.prompt}`,
+        sandbox: { cwd: root, meta: { mode: prerequisites?.enforcement ? 'clone' : 'full' } },
+        prompt: `${persona}${captureInstruction}\n\n${reviewer.prompt}`,
         model: reviewer.model,
         effort: reviewer.effort,
         network,
@@ -3743,8 +3790,32 @@ export async function runCli(argv, io = { out: console.log }) {
         errPath: `${base}.stderr.log`,
       })
       await handle.sessionId
-      await waitForExit(handle.child, timeoutMs)
+      const exit = await waitForExit(handle.child, timeoutMs)
+      if (hostCapture) {
+        let temporary
+        try {
+          await handle.flushed
+          if (exit !== 'exit' || handle.child.exitCode !== 0) throw new Error('Review process did not complete')
+          const envelope = await readWorkflowInput(`${base}.result.json`)
+          if (!validateResult(envelope) || envelope.status !== 'done' || envelope.filesChanged.length) throw new Error('Invalid review envelope')
+          const findings = JSON.parse(envelope.summary)
+          if (!Array.isArray(findings?.findings) || reviewStale(findings, reviewer.stamp)) throw new Error('Invalid or stale review findings')
+          const checked = collectReviewResults({ lenses: [reviewer.lens], files: [{ ...findings, lens: reviewer.lens }], expected: reviewer.stamp })
+          if (checked.malformed.length) throw new Error('Malformed review findings')
+          const destination = path.join(root, reviewer.findingsPath)
+          const dir = path.dirname(destination)
+          if (await plantedReviewsLink(root, dir)) throw new Error('Unsafe reviews directory')
+          await mkdir(dir, { recursive: true })
+          temporary = `${destination}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
+          await writeFile(temporary, `${JSON.stringify(findings)}\n`, { encoding: 'utf8', flag: 'wx' })
+          await rename(temporary, destination)
+        } catch {
+          if (temporary) await unlink(temporary).catch(() => {})
+          artifactFailures.push(reviewer.lens)
+        }
+      }
     })
+    if (artifactFailures.length) { io.out(`required review artifact unavailable or invalid for ${artifactFailures.length} reviewer(s)`); return 4 }
     io.out(`dispatched ${spec.reviewers.length} reviewer${spec.reviewers.length === 1 ? '' : 's'} for phase ${printable(spec.phase)}`)
     return 0
   }
@@ -3796,7 +3867,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
-    const adapter = resolveHarness(flags, io)
+    const adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
     const probe = await adapter.probe({})
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
@@ -6412,6 +6483,86 @@ export async function runCli(argv, io = { out: console.log }) {
 export function isEntryPoint(main, argv1, moduleUrlPath) {
   if (main !== undefined) return main
   return argv1 === moduleUrlPath
+}
+
+async function committedContract(git, commit, file) {
+  if (typeof file !== 'string' || file.length === 0 || file.length > 1024
+    || /[\\\u0000-\u001f\u007f:*?\[\]]/.test(file)
+    || file.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Unsafe contract path')
+  const mode = await git.fileModeAtCommit(commit, file)
+  const size = await git.fileSizeAtCommit(commit, file)
+  if (!['100644', '100755'].includes(mode) || !Number.isSafeInteger(size) || size > 512 * 1024) throw new Error('Contract must be a bounded regular committed source')
+  const bytes = await git.fileAtCommit(commit, file)
+  if (typeof bytes !== 'string' || bytes.includes('\ufffd') || Buffer.byteLength(bytes) !== size) throw new Error('Contract source must be lossless UTF-8')
+  return { file, bytes, mode }
+}
+
+async function unchangedContracts(root, git, commit, sources) {
+  if (await git.headSha() !== commit) throw new Error('Contract source commit changed before dispatch')
+  for (const source of sources) {
+    let current = root
+    const parts = source.file.split('/')
+    for (let index = 0; index < parts.length; index++) {
+      current = path.join(current, parts[index])
+      const info = await lstat(current)
+      if (info.isSymbolicLink() || (index < parts.length - 1 ? !info.isDirectory() : !info.isFile())) throw new Error('Contract source path changed before dispatch')
+    }
+    const handle = await openFile(current, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0))
+    try {
+      const info = await handle.stat()
+      if (!info.isFile() || info.size > 512 * 1024) throw new Error('Contract source changed before dispatch')
+      const buffer = Buffer.alloc(512 * 1024 + 1)
+      let offset = 0
+      while (offset < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
+        if (!bytesRead) break
+        offset += bytesRead
+      }
+      if (!buffer.subarray(0, offset).equals(Buffer.from(source.bytes))) throw new Error('Contract source changed before dispatch')
+    } finally { await handle.close() }
+  }
+}
+
+export async function prepareDispatchPrerequisites({ root, flags, adapter, role, sandboxMode, network, exec, env = process.env }) {
+  const git = createGit({ cwd: root })
+  const commit = await git.headSha()
+  const sources = []
+  for (const key of ['environment', 'role-policy']) {
+    if (flags[key] !== undefined) sources.push(await committedContract(git, commit, flags[key]))
+  }
+  if (flags.environment !== undefined) {
+    const recipe = validateEnvironmentRecipe(JSON.parse(sources.find(source => source.file === flags.environment).bytes))
+    for (const file of recipe.lockfiles) sources.push(await committedContract(git, commit, file))
+  }
+  await unchangedContracts(root, git, commit, sources)
+  const policySource = sources.find(source => source.file === flags['role-policy'])
+  const policy = policySource ? validateRolePolicy(JSON.parse(policySource.bytes)) : undefined
+  const roles = resolveRoleCapabilities({ policy, role, harness: adapter.name, sandboxMode, network })
+  const report = { version: 1, ready: false, roles, environment: null, capabilities: null }
+  if (!roles.ready) return { code: 4, report }
+  if (flags.environment !== undefined) {
+    report.environment = await captureEnvironment({ git, commit, recipePath: flags.environment, cwd: root, execute: true, ...(exec ? { exec } : {}) })
+    await unchangedContracts(root, git, commit, sources)
+    if (!report.environment.ready) return { code: 4, report }
+  }
+  report.capabilities = await probeCapabilities({ required: [...new Set(['harness', ...(report.environment?.required ?? [])])], harness: adapter.name, env, ...(exec ? { exec } : {}) })
+  if (!report.capabilities.ready) return { code: 4, report }
+  await unchangedContracts(root, git, commit, sources)
+  const enforcement = roles.enforcement.kind === 'required' ? roles.enforcement : undefined
+  const wrapped = { ...adapter }
+  for (const method of ['makeSandbox', 'spawn', 'resume', 'collect']) {
+    wrapped[method] = async (...args) => {
+      await unchangedContracts(root, git, commit, sources)
+      if (method === 'makeSandbox' && args[1]?.runBranch
+        && await git.resolveRef(`refs/heads/${args[1].runBranch}`) !== commit) throw new Error('Contract source differs from sandbox branch')
+      if ((method === 'spawn' || method === 'resume') && enforcement) args[0] = { ...args[0], enforcement }
+      const value = await adapter[method](...args)
+      if (method === 'makeSandbox' && enforcement) value.meta.enforcement = enforcement
+      return value
+    }
+  }
+  report.ready = true
+  return { code: 0, report, adapter: wrapped, enforcement }
 }
 
 if (isEntryPoint(import.meta.main, process.argv[1], fileURLToPath(import.meta.url))) {
