@@ -79,8 +79,41 @@ interrupted. Other nonzero exits remain unclassified: arbitrary stderr cannot
 prove whether a failure is code, environment, infrastructure or flaky. The
 report directs inspection before code changes, with no automatic retry or
 relaxation of verification. These outcome hints never change mandatory gates.
-Full semantic acceptance, stack-specific execution adapters, independent flaky
-classification and retained full-log evidence remain separate obligations.
+Full semantic acceptance, stack-specific execution adapters and independent
+flaky classification remain separate obligations.
+
+## Retained command output evidence
+
+Command checks now preserve output outside the preview instead of discarding
+successful output and retaining only a failing tail. Each command creates a
+new private temporary directory and exclusive output file, 0700/0600 on POSIX.
+Windows relies on the existing temporary-directory access controls. Names are
+generated independently of check names and commands. The default executor
+streams raw stdout/stderr bytes in observed arrival order before decoding;
+custom buffered executors retain returned output. Commands and prompts are
+not separately copied into the receipt, but output itself is not redacted.
+
+The result's `log` contains its path, retained and observed byte counts, a
+16 MiB storage bound, SHA-256 of the retained prefix, completeness, truncation
+and a storage error code when applicable. The summary is at most 40 lines and
+64 KiB of normalized UTF-8 diagnostic text, plus a fixed incomplete-evidence
+notice. The default executor keeps only a 64 KiB raw diagnostic tail in memory
+for command checks; direct executor calls retain their existing defaults.
+Malformed UTF-8 cannot expand the summary beyond its decoded-byte budget.
+
+Creation failure refuses execution; write failures stop further log writes
+while draining command output. Storage truncation and write/close failures
+cannot produce a passing command check, including an exit-zero subprocess.
+Timeout/output-limit capture is explicitly incomplete. Executor exceptions
+retain available partial evidence and propagate through the existing failing
+check path. Inventory reports and process-group cleanup remain independent.
+
+Logs survive disposable-preview deletion, but temporary storage is not a
+durable execution journal. The operator or operating system can remove it;
+there is no automatic retention sweep, aggregate disk quota or power-loss
+guarantee. POSIX permissions do not isolate same-user project code. Receipts
+are observations and can be changed by the operator: hashes neither prove a
+command ran nor replace current checks, input identities or semantic acceptance.
 
 ## Anchored acceptance and dependency context
 

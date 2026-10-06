@@ -8,7 +8,7 @@ close the parent roadmap or claim real-model evaluation outcomes.
 | W01 | Explicit session binding, bounded Stop guard, suspension/resume/abandon refs, finish refusal, digest/doctor interruption reporting | Live callback capture; broader completion identity and execution-state contracts |
 | W02 | Exact input identity and local acceptance/reviewer summaries | Curated dataset, repeated real workflows, independent outcomes, held-out baseline and resource metrics |
 | W03 | Versioned bounded bundles, anchored human learnings and explicit acceptance/dependency contracts in implementation/review/integration prompts, hashes, source lines and mandatory preservation | Vault selection, review evidence invalidation and observed selection quality |
-| W04 | Acceptance-to-current-evidence mapping; human-required and unresolved states; reviewable versioned Node/TypeScript profile; actual command timeout metadata with conservative unknown failure status | Further stack profiles, execution adapters, retained full logs and independent code/environment/infrastructure/flaky classification |
+| W04 | Acceptance-to-current-evidence mapping; human-required and unresolved states; reviewable versioned Node/TypeScript profile; actual command timeout metadata with conservative unknown failure status; private retained output logs with content hashes, compact summaries and explicit incomplete capture | Further stack profiles, execution adapters, durable evidence retention and independent code/environment/infrastructure/flaky classification |
 | W05 | Git-computed test-change policy with declared exceptions and honest temporal/coverage limits | Independent behavioral red/green execution and richer ordering evidence |
 | W06 | Explicit ui target parsing, committed-target init preflight, anchored mandatory target bundles and ui reviewer method requiring rendering/behavioral evidence | Native ui manifest kind, project renderer/artifact adapter, independent rendered/behavioral/accessibility evidence |
 | W07 | Scoped human learning selection; no automatic knowledge writes; current-plan feedback drafts with explicit scoped evidence, typed learning proposals and bounded defect tasks/dependencies | Owned learning commits, reviewed application to authoritative plan anchors, knowledge refresh and stale/superseded repairs |
@@ -20,6 +20,22 @@ close the parent roadmap or claim real-model evaluation outcomes.
 | W14-W15 | Conditional later scope | Bottleneck evidence and an explicit release requirement |
 
 ## Local commands
+
+Command checks retain raw output in private temporary files outside previews,
+up to 16 MiB per command. Results reference the file and retained-content hash;
+successful summaries remain empty and failure tails stay bounded. Truncation,
+storage errors and timeout capture remain incomplete and cannot pass a check.
+These files may contain sensitive diagnostics and require operator cleanup.
+They are temporary local observations, not durable or full-input CI receipts.
+
+Local Linux verification covers eleven command-log tests, each observed failing
+under a targeted implementation mutation and passing after restoration. Cases
+include exact raw output and hashes, preview removal, buffered and streamed
+executors, truncation, timeout, executor exceptions, write/create/close failures,
+binary diagnostic bounds and executor output limits. The full root and hub
+command checks and instruction security lint passed. Inline correctness,
+security, tests and claims review found no blocking findings. This verification
+does not establish Windows behavior or independent real-model outcomes.
 
 `bind-session`, `suspend`, `resume`, `abandon` and `run-status` are described in
 README. Session bindings and lifecycle refs are local observations. They do

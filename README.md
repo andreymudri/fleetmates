@@ -638,6 +638,30 @@ satisfies no acceptance requirement. Command gate results distinguish actual
 timeouts from otherwise unclassified failures; inspect evidence before deciding
 whether a code change or retry is appropriate.
 
+Command gate results also include `log`: a private local `path`, retained
+`bytes`, `observedBytes`, `maxBytes`, a `sha256` of the retained bytes,
+`complete`, `truncated` and any storage `error` code. Successful commands keep
+their empty diagnostic summary while retaining output for inspection. The
+default executor captures raw combined stdout/stderr in arrival order;
+buffered custom executors retain their returned output instead. These are
+output observations, not authenticated execution or acceptance receipts.
+
+Each command gets a separate `fm-command-log-*/output.log` beneath the system
+temporary directory, outside its working tree. Directories/files use 0700/0600
+on POSIX; Windows uses the temporary directory's existing access controls.
+Logs survive preview removal until the operator or operating system removes
+them. Output is stored without redaction and may contain sensitive project
+diagnostics. Delete the containing directory when the evidence is no longer
+needed; there is no automatic retention sweep or durable recovery guarantee.
+
+Each log retains at most 16 MiB. Failure summaries carry at most 40 lines and
+64 KiB of decoded diagnostic text, plus an incompleteness notice when needed.
+Timeouts and output/storage limits leave `complete: false`. Incomplete capture
+cannot pass a command check even when the subprocess exits zero. The existing
+`outcome` describes the subprocess; `log` separately describes its output
+evidence. A content hash detects changed bytes only when compared with the
+receipt; it does not authenticate the operator or establish semantic success.
+
 For anchored context, a task may include an `**Acceptance:**` section in its
 tracked plan. Its entire task contract then enters the bounded bundle as
 mandatory context. Existing `**Depends:** T1` declarations also include the
