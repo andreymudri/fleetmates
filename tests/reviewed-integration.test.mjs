@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, readFile, rm, mkdir, chmod, cp } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, rm, mkdir, chmod, cp, access, realpath } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -13,14 +14,96 @@ import { defaultExec } from '../scripts/gate-runner.mjs'
 import { createVerificationExecutor } from '../scripts/harnesses/codex.mjs'
 import { resolveRoleCapabilities } from '../scripts/role-capabilities.mjs'
 
-const injectedExecutor = async () => ({ exec: defaultExec, close: async () => {} })
+function fixtureShell(command, platform = process.platform) {
+  if (platform !== 'win32' || !command.startsWith('export FLEETMATES_REPORT_DIR=')) return command
+  const end = command.indexOf(';\n')
+  const value = command.slice('export FLEETMATES_REPORT_DIR='.length, end).slice(1, -1).replaceAll("'\\''", "'")
+  return `set "FLEETMATES_REPORT_DIR=${value}" && ${command.slice(end + 2)}`
+}
+const fixtureExec = (command, cwd, options) => defaultExec(fixtureShell(command), cwd, options)
+const injectedExecutor = async () => ({ exec: fixtureExec, close: async () => {} })
 const executeReviewedPhaseGate = input => executeReviewedPhaseGateFixture(input, injectedExecutor)
+
+async function runtimeOnPath({ env = process.env, root = process.cwd() }) {
+  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+    if (!path.isAbsolute(dir)) continue
+    const outside = file => { const rel = path.relative(root, file); return rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel) }
+    if (!outside(dir)) continue
+    try {
+      const executable = await realpath(path.join(dir, 'codex'))
+      await access(executable, constants.X_OK)
+      if (outside(executable)) return true
+    } catch (error) {
+      if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error
+    }
+  }
+  return false
+}
+
+async function knownNativeUnavailable(options = {}, inspect = runtimeOnPath) {
+  if ((options.platform ?? process.platform) !== 'linux') return 'Required non-model verification platform is unsupported'
+  if (!await inspect(options)) return 'Required native verification runtime is unavailable'
+  return null
+}
+
+async function nativeAvailable(t, input) {
+  const reason = await knownNativeUnavailable({ root: input.root })
+  if (!reason) return true
+  await assert.rejects(executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }), error => {
+    assert.match(error.message, /gate rejected/)
+    assert.equal(error.results.find(result => result.kind === 'command').output, `check threw: ${reason}`)
+    assert.equal(error.verification.observedNative, false)
+    assert.equal(error.verification.observed, null)
+    return true
+  })
+  assert.equal(git(input.root, 'rev-parse', input.branch), input.expectedRunTip)
+  t.diagnostic(`Required native authority unavailable before execution: ${reason}; no native success observed`)
+  return false
+}
+
+test('native availability classifies only missing runtime or unsupported platform before execution', async () => {
+  for (const platform of ['darwin', 'win32']) {
+    assert.equal(await knownNativeUnavailable({ platform }, async () => assert.fail('unsupported platform must not inspect runtime')), 'Required non-model verification platform is unsupported')
+  }
+  assert.equal(await knownNativeUnavailable({ platform: 'linux' }, async () => false), 'Required native verification runtime is unavailable')
+  assert.equal(await knownNativeUnavailable({ platform: 'linux' }, async () => true), null)
+  await assert.rejects(knownNativeUnavailable({ platform: 'linux' }, async () => { throw new Error('arbitrary restriction failure') }), /arbitrary restriction failure/)
+})
+
+test('injected unavailable platform and empty PATH refuse required native authority without execution', async t => {
+  const { root } = await fixture(t)
+  const enforcement = resolveRoleCapabilities({ policy: { version: 1, roles: { implementer: {
+    read: true, write: true, execute: true, network: false, sharedRefs: false, publication: false
+  } } }, role: 'implementer', harness: 'codex', sandboxMode: 'clone', network: false }).enforcement
+  const options = { root, sandbox: { cwd: root, meta: { mode: 'clone', gitdir: path.join(root, '.git'), enforcement } }, enforcement,
+    run: async () => assert.fail('unavailable authority must not execute') }
+  for (const platform of ['darwin', 'win32']) {
+    await assert.rejects(createVerificationExecutor({ ...options, platform }), { message: 'Required non-model verification platform is unsupported' })
+  }
+  assert.equal(await knownNativeUnavailable({ root, platform: 'linux', env: { PATH: '' } }), 'Required native verification runtime is unavailable')
+  await assert.rejects(createVerificationExecutor({ ...options, platform: 'linux', env: { PATH: '' } }), { message: 'Required native verification runtime is unavailable' })
+  t.diagnostic('Injected platform/environment observations; no macOS or Windows native execution validated')
+})
+
+test('fixture shell binding adapts the private report environment for injected Windows commands', () => {
+  const command = "export FLEETMATES_REPORT_DIR='C:/fixture reports';\nnode -e 0"
+  assert.equal(fixtureShell(command, 'win32'), 'set "FLEETMATES_REPORT_DIR=C:/fixture reports" && node -e 0')
+  assert.equal(fixtureShell(command, 'linux'), command)
+  assert.equal(fixtureShell('node -e 0', 'win32'), 'node -e 0')
+  assert.equal(fixtureShell("export FLEETMATES_REPORT_DIR='/fixture/it'\\''s';\nnode -e 0", 'win32'), 'set "FLEETMATES_REPORT_DIR=/fixture/it\'s" && node -e 0')
+})
+
+test('native test branch matches independently classified availability', async t => {
+  const { input } = await fixture(t)
+  const reason = await knownNativeUnavailable({ root: input.root })
+  assert.equal(await nativeAvailable(t, input), reason === null)
+})
 
 const policy = { version: 1, roles: { integrator: { read: true, write: true, execute: true,
   sharedRefs: true, network: false, publication: false } } }
 const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
-const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
-async function fixture(t, { review = false, command = 'test -f a.txt && test -f b.txt', files = ['a.txt', 'b.txt'], report } = {}) {
+const nodeCommand = program => `"${process.execPath}" -e "eval(Buffer.from('${Buffer.from(program).toString('base64')}','base64').toString())"`
+async function fixture(t, { review = false, command = nodeCommand('const fs=require("fs");if(!fs.existsSync("a.txt")||!fs.existsSync("b.txt"))process.exit(1)'), files = ['a.txt', 'b.txt'], report } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'ri-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   if (typeof command === 'function') command = command(root)
@@ -243,7 +326,7 @@ test('rechecks all task tips before the next merge and after the last merge', as
 })
 
 test('a real directory/file merge conflict never produces executed gate authorization', async t => {
-  const { root, input, gate } = await fixture(t, { command: 'true', files: ['folder', 'folder/b.txt'] })
+  const { root, input, gate } = await fixture(t, { command: 'node -e 0', files: ['folder', 'folder/b.txt'] })
   await assert.rejects(gate(), /gate rejected merge conflict/)
   assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
   assert.equal(git(root, 'worktree', 'list', '--porcelain').split('\n').filter(line => line.startsWith('worktree ')).length, 1)
@@ -309,14 +392,16 @@ test('actual required verification denies outside-preview writes and private loo
   const { input } = await fixture(t, { command: root => {
     marker = root + '-outside-marker'
     const program = `const fs=require('fs'),net=require('net');try{fs.writeFileSync(${JSON.stringify(marker)},'dummy')}catch{}const s=net.connect({port:${server.address().port},host:'127.0.0.1'});s.on('connect',()=>s.end());s.on('error',()=>process.exit(2));`
-    return `${quote(process.execPath)} -e ${quote(program)}`
+    return nodeCommand(program)
   } })
   t.after(() => rm(marker, { force: true }))
+  if (!await nativeAvailable(t, input)) return
   let verification
   await assert.rejects(executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }), error => {
     assert.match(error.message, /verification|gate rejected/)
     verification = error.verification
     assert.equal(verification.kind, 'native-required')
+    assert.equal(verification.observedNative, true)
     return true
   })
   await assert.rejects(readFile(marker), { code: 'ENOENT' })
@@ -337,14 +422,14 @@ test('injected unit receipts cannot authorize production integration or be forge
 
 test('positive report inventories execute exactly one current and one baseline command', async t => {
   const program = `const fs=require("fs");fs.writeFileSync(process.env.FLEETMATES_REPORT_DIR+"/suite.xml",'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>');`
-  const { input } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
+  const { input } = await fixture(t, { command: nodeCommand(program), report: { dir: true } })
   const calls = []
   let gateReceipt
   await assert.doesNotReject(async () => { gateReceipt = await executeReviewedPhaseGateFixture({ ...input, baseBranch: 'main', planPath: 'plan.md' },
     async ({ sandbox }) => ({ exec: async (command, cwd, options) => {
       assert.equal(cwd, sandbox.cwd)
       calls.push({ cwd, hasTask: await readFile(path.join(cwd, 'a.txt')).then(() => true, () => false) })
-      return defaultExec(command, cwd, options)
+      return fixtureExec(command, cwd, options)
     }, close: async () => {} })) })
   assert.equal(calls.length, 2)
   assert.deepEqual(calls.map(call => call.hasTask), [true, false])
@@ -356,21 +441,8 @@ test('positive report inventories execute exactly one current and one baseline c
 })
 
 test('actual native positive gate integrates only after observed restrictions, otherwise reports unavailable authority', async t => {
-  const { root, input } = await fixture(t, { command: 'true' })
-  const enforcement = resolveRoleCapabilities({ policy: { version: 1, roles: { implementer: {
-    read: true, write: true, execute: true, network: false, sharedRefs: false, publication: false
-  } } }, role: 'implementer', harness: 'codex', sandboxMode: 'clone', network: false }).enforcement
-  let probe
-  try { probe = await createVerificationExecutor({ root, sandbox: { cwd: root, meta: { mode: 'clone', gitdir: path.join(root, '.git'), enforcement } }, enforcement }) }
-  catch (error) {
-    assert.match(error.message, /Required.*(verification|runtime|restrictions|platform)/)
-    await assert.rejects(executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }), /gate rejected verification/)
-    assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
-    t.diagnostic(`Actual native positive execution unavailable: ${error.message}`)
-    return
-  }
-  assert.equal(probe.evidence.observed, true)
-  await probe.close()
+  const { root, input } = await fixture(t, { command: 'node -e 0' })
+  if (!await nativeAvailable(t, input)) return
   let gateReceipt
   await assert.doesNotReject(async () => { gateReceipt = await executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }) })
   assert.equal(gateReceipt.verification.kind, 'native-required')
@@ -381,7 +453,7 @@ test('actual native positive gate integrates only after observed restrictions, o
 
 test('a required computed inventory rejects an unapproved dropped case', async t => {
   const program = `const fs=require("fs");const cases=fs.existsSync("a.txt")?["kept"]:["kept","deleted"];fs.writeFileSync(process.env.FLEETMATES_REPORT_DIR+"/suite.xml",'<testsuite name="suite">'+cases.map(name=>'<testcase file="test.mjs" name="'+name+'"/>').join("")+"</testsuite>");`
-  const { gate, input } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
+  const { gate, input } = await fixture(t, { command: nodeCommand(program), report: { dir: true } })
   const rejectedDrop = error => {
     assert.match(error.message, /gate rejected/)
     assert.equal(error.results.find(result => result.kind === 'inventory').status, 'fail')
@@ -389,13 +461,15 @@ test('a required computed inventory rejects an unapproved dropped case', async t
     return true
   }
   await assert.rejects(gate(), rejectedDrop)
-  await assert.rejects(executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }), rejectedDrop)
+  if (await nativeAvailable(t, input)) await assert.rejects(executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }), rejectedDrop)
 })
 
 test('actual native private report transfer preserves passing baseline inventory and exact integration', async t => {
   const program = `const fs=require("fs");fs.writeFileSync(process.env.FLEETMATES_REPORT_DIR+"/suite.xml",'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>');`
-  const { input } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
-  const gateReceipt = await executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' })
+  const { input } = await fixture(t, { command: nodeCommand(program), report: { dir: true } })
+  if (!await nativeAvailable(t, input)) return
+  let gateReceipt
+  await assert.doesNotReject(async () => { gateReceipt = await executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }) })
   assert.equal(gateReceipt.verification.observedNative, true)
   assert.equal(gateReceipt.results.find(result => result.kind === 'inventory').status, 'pass')
   assert.equal((await integrateActualPhase({ ...input, gateReceipt })).complete, true)
@@ -411,14 +485,14 @@ test('private report transfer rejects symbolic, special, oversized and excessive
   ]) {
     await t.test(kind, async t => {
       const program = 'const fs=require("fs"),dir=process.env.FLEETMATES_REPORT_DIR;' + body
-      const { gate } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
+      const { gate } = await fixture(t, { command: nodeCommand(program), report: { dir: true } })
       await assert.rejects(gate(), expected)
     })
   }
 })
 
 test('injected producer fixtures cannot substitute malformed restriction evidence', async t => {
-  const { root, input } = await fixture(t, { command: 'true' })
+  const { root, input } = await fixture(t, { command: 'node -e 0' })
   const installed = path.join(root, '.git', 'injected-producer')
   await cp(fileURLToPath(new URL('../scripts', import.meta.url)), installed, { recursive: true })
   const marker = path.join(root, '.git', 'unverified-command')
@@ -441,7 +515,7 @@ test('injected producer fixtures cannot substitute malformed restriction evidenc
 
 test('a skipped computed inventory cannot authorize even an injected unit receipt', async t => {
   const program = `const fs=require("fs");fs.writeFileSync(process.env.FLEETMATES_REPORT_DIR+"/suite.xml",'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>');`
-  const { root, input } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
+  const { root, input } = await fixture(t, { command: nodeCommand(program), report: { dir: true } })
   const installed = path.join(root, '.git', 'injected-inventory')
   await cp(fileURLToPath(new URL('../scripts', import.meta.url)), installed, { recursive: true })
   await writeFile(path.join(installed, 'injected-runner.mjs'), `export {deriveContext,aggregateVerdict} from './gate-runner.mjs';import {runChecks as actual} from './gate-runner.mjs';export async function runChecks(...args){const results=await actual(...args);results.find(result=>result.kind==='inventory').status='skip';return results}\n`)
