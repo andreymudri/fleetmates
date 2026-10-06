@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { git, discover, bindSession, readBinding, transition, lifecycleStatus, planHash } from '../scripts/workflow-lifecycle.mjs'
@@ -8,7 +8,8 @@ import { handleOrchestratorStop } from '../scripts/orchestrator-stop.mjs'
 import { runCli } from '../scripts/cli.mjs'
 
 async function fixture(t) {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'fm-workflow-'))
+  // Ledger storage rejects linked parents; macOS temporary paths can contain /var aliases.
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'fm-workflow-')))
   t.after(() => rm(root, { recursive: true, force: true }))
   git(['init', '-b', 'main'], root)
   git(['config', 'user.name', 'Test'], root); git(['config', 'user.email', 'test@example.com'], root)
