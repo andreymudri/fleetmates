@@ -308,23 +308,33 @@ const pipeRunner = `
 const fs=require('node:fs'),cp=require('node:child_process'),os=require('node:os');
 const r=JSON.parse(process.argv[1]);
 const child=cp.spawnSync(r.command,r.argv,{env:r.env,stdio:['ignore','inherit','inherit']});
-fs.writeSync(1,'\\n'+r.marker+JSON.stringify({
-  code:child.status??(child.signal?128+os.constants.signals[child.signal]:1),signal:child.signal
-})+'\\n');`
+const launchError=child.error?.code??null;
+fs.writeSync(3,JSON.stringify({
+  code:child.status??(child.signal?128+os.constants.signals[child.signal]:1),signal:child.signal,
+  completed:!child.error&&(Number.isInteger(child.status)||child.signal!==null),launchError
+})+'\\n');
+if(launchError)process.exitCode=1;`
 // The fixed shell pipeline supplies ordinary pipes; native console output is pinned by the
 // actual-native regression, separately from injected restriction-receipt validation.
 const trampoline = `
-const fs=require('node:fs'),cp=require('node:child_process');
+const fs=require('node:fs'),cp=require('node:child_process'),os=require('node:os');
 const r=JSON.parse(process.argv[1]);process.chdir(r.cwd);
 const child=cp.spawnSync('/bin/sh',[
-  '-c','"$@" 2>&1 | /bin/cat','fm-verification',process.execPath,'-e',${JSON.stringify(pipeRunner)},JSON.stringify(r)
-],{env:r.env,maxBuffer:r.maxOutputBytes+2048});
-const bytes=child.stdout||Buffer.alloc(0),separator=Buffer.from('\\n'+r.marker);
-const end=bytes.lastIndexOf(separator);let receipt;
-try{receipt=JSON.parse(bytes.subarray(end+separator.length).toString())}catch{}
-const limited=child.error?.code==='ENOBUFS',output=end>=0?bytes.subarray(0,end):bytes;
+  '-c','{ "$@"; status=$?; printf "%s\\n" "$status" >&4; } 2>&1 | /bin/cat',
+  'fm-verification',process.execPath,'-e',${JSON.stringify(pipeRunner)},JSON.stringify(r)
+],{env:r.env,maxBuffer:r.maxOutputBytes+2048,stdio:['ignore','pipe','pipe','pipe','pipe']});
+const output=Buffer.concat([child.output?.[1]||Buffer.alloc(0),child.output?.[2]||Buffer.alloc(0)]);
+const runnerStatus=(child.output?.[4]||Buffer.alloc(0)).toString();
+const runnerCode=/^\\d{1,3}\\n$/.test(runnerStatus)?Number(runnerStatus.trim()):null;
+let receipt;try{receipt=JSON.parse((child.output?.[3]||Buffer.alloc(0)).toString())}catch{}
+const completed=child.status===0&&child.signal===null&&!child.error&&runnerCode===0
+  &&receipt?.completed===true&&receipt.launchError===null;
+const limited=child.error?.code==='ENOBUFS';
 fs.writeSync(1,r.marker+JSON.stringify({
-  code:receipt?.code??1,signal:receipt?.signal??null,
+  code:completed?receipt.code:(child.signal?128+os.constants.signals[child.signal]:1),
+  signal:completed?receipt.signal:child.signal,completed,runnerCode,
+  pipelineCode:child.status,pipelineSignal:child.signal,
+  launchError:receipt?.launchError??null,runtimeError:child.error?.code??null,
   output:output.subarray(0,r.maxOutputBytes).toString('base64'),
   outputLimited:limited||output.length>r.maxOutputBytes
 })+'\\n');`
@@ -391,16 +401,20 @@ export async function createVerificationExecutor({ sandbox, root = sandbox.cwd, 
       try { receipt = JSON.parse(line.slice(marker.length)) } catch {}
       if (!receipt || !Number.isInteger(receipt.code) || receipt.code < 0 || receipt.code > 255
         || typeof receipt.output !== 'string' || typeof receipt.outputLimited !== 'boolean'
-        || (receipt.signal != null && (typeof receipt.signal !== 'string'
+        || (receipt.signal !== null && (typeof receipt.signal !== 'string'
           || receipt.code !== 128 + os.constants.signals[receipt.signal]))
       ) {
-        return { code: 1, output: 'Native verification command receipt is missing' }
+        return { code: 1, output: 'Native verification command receipt is missing', completed: false }
       }
       const output = Buffer.from(receipt.output, 'base64')
       if (output.length > maxOutputBytes || output.toString('base64') !== receipt.output) {
-        return { code: 1, output: 'Native verification command receipt is invalid' }
+        return { code: 1, output: 'Native verification command receipt is invalid', completed: false }
       }
-      return { code: receipt.code, output: output.toString(), outputLimited: receipt.outputLimited,
+      const completed = receipt.completed === true && receipt.runnerCode === 0 && receipt.pipelineCode === 0
+        && receipt.pipelineSignal === null && receipt.launchError === null && receipt.runtimeError === null
+      return { code: completed ? receipt.code : (receipt.code || 1), output: output.toString(), outputLimited: receipt.outputLimited,
+        completed, runnerCode: receipt.runnerCode ?? null, pipelineCode: receipt.pipelineCode ?? null,
+        pipelineSignal: receipt.pipelineSignal ?? null, launchError: receipt.launchError ?? null, runtimeError: receipt.runtimeError ?? null,
         ...(receipt.signal ? { signal: receipt.signal } : {}) }
     }
     const initial = buildVerificationInvocation({ executable, broker, home, worker, temp, write: required.write, command: 'true', env, protectedRoots })
