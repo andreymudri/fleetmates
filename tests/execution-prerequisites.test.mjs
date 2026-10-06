@@ -13,6 +13,7 @@ import { defaultExec } from '../scripts/gate-runner.mjs'
 import { createGit, defaultGitExec } from '../scripts/git.mjs'
 
 const recipe = { version: 1, toolchains: [], lockfiles: [], setup: [], baseline: [{ name: 'baseline', run: 'node -e "process.exit(0)"', timeoutMs: 5000 }], required: [], dependencies: 'clean-checkout' }
+const shellQuote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'"
 const policy = { version: 1, roles: { implementer: { read: true, write: true, execute: true, network: false, sharedRefs: false, publication: false } } }
 async function fixture(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'fm-prereq-'))
@@ -235,7 +236,7 @@ async function withBoundSession(preexisting, fn) {
     const dispatch = extra => command(root, ['dispatch', '--run', 'r1', '--phase', '1', '--base', 'main', ...extra])
     const message = () => command(root, ['message', '--run', 'r1', '--task', 'T1', '--text', 'continue', '--harness', 'codex'])
     try {
-      const result = await dispatch(['--role-policy', 'policy.json', '--environment', 'recipe.json'])
+      const result = await dispatch(['--role-policy', 'policy.json'])
       assert.equal(result.code, 0, result.output)
       await fn({ root, gitRun, file, calls, dispatch, message })
     } finally { Object.assign(adapter, originals); process.env.PATH = previousPath }
@@ -298,6 +299,8 @@ const continuationChanges = {
 for (const [name, change] of Object.entries(continuationChanges)) {
   test(`required message refuses ${name} before process effects`, { skip: process.platform === 'win32' }, async () => withBoundSession(true, async ({ root, gitRun, file, calls, message }) => {
     const record = JSON.parse(await readFile(file, 'utf8'))
+    record.sandbox.meta.prerequisites.environment = 'recipe.json'
+    record.prerequisites = record.sandbox.meta.prerequisites
     const live = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore', detached: process.platform !== 'win32' })
     try {
       record.pid = live.pid
@@ -420,7 +423,7 @@ async function withWorker(adapter, mode, change, fn) {
       const shared = path.join(cache, 'shared-deps')
       await mkdir(shared)
       await writeFile(path.join(shared, 'ready'), 'ready')
-      workerRecipe.setup[0].run = `node -e "require('fs').symlinkSync('${shared}', '.deps', 'dir')"`
+      workerRecipe.setup[0].run = `node -e ${shellQuote(`require('fs').symlinkSync(${JSON.stringify(shared)}, '.deps', 'dir')`)}`
     }
     await writeFile(path.join(root, 'recipe.json'), JSON.stringify(workerRecipe))
     await gitRun(['add', '.'])
@@ -446,6 +449,8 @@ for (const [adapter, mode] of workerModes) {
   test(`${adapter.name} ${mode} prepares ignored dependencies in the actual fresh worker`, async () => withWorker(adapter, mode, {}, async ({ root, prepared, make }) => {
     const sandbox = await make()
     assert.equal(prepared.report.environment.baseline.status, 'pass')
+    assert.deepEqual(prepared.report.environment.enforcement, { kind: 'legacy', verified: false })
+    assert.deepEqual(sandbox.meta.workerEnvironment.enforcement, { kind: 'legacy', verified: false })
     assert.equal((await defaultExec(dependencyBaseline, sandbox.cwd, { timeoutMs: 5000 })).code, 0)
     assert.notEqual(sandbox.cwd, root)
     assert.ok(sandbox.meta.workerEnvironment)
@@ -582,7 +587,7 @@ for (const [adapter, mode] of workerModes) {
 
 
 test('worker receipt observes linked dependencies even when the recipe declares clean checkout', { skip: process.platform === 'win32' }, async () => withWorker(codexAdapter, 'files', ({ cache }) => ({ setup: [{ name: 'linked-deps', timeoutMs: 5000,
-  run: `node -e "const fs=require('fs');fs.mkdirSync('${cache}/external',{recursive:true});fs.writeFileSync('${cache}/external/ready','ready');fs.symlinkSync('${cache}/external','.deps','dir')"` }] }), async ({ make }) => {
+  run: `node -e ${shellQuote(`const fs=require('fs');fs.mkdirSync(${JSON.stringify(cache + '/external')},{recursive:true});fs.writeFileSync(${JSON.stringify(cache + '/external/ready')},'ready');fs.symlinkSync(${JSON.stringify(cache + '/external')},'.deps','dir')`)}` }] }), async ({ make }) => {
   const sandbox = await make()
   assert.equal((await lstat(path.join(sandbox.cwd, '.deps'))).isSymbolicLink(), true)
   assert.equal(sandbox.meta.workerEnvironment.dependencies.layout, 'linked')
@@ -600,3 +605,138 @@ test('worker link inspection has a finite bound and reports an unverified layout
   assert.ok(sandbox.meta.workerEnvironment.dependencies.limitations.length)
   assert.equal(sandbox.meta.workerEnvironment.baseline.status, 'pass')
 }))
+
+for (const mode of ['files', 'clone']) test(`required ${mode} worker verification refuses unsupported runtime or confines a changed dummy script`, async () => fixture(async ({ root, gitRun }) => {
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n.deps/\n')
+  await writeFile(path.join(root, 'baseline.mjs'), `import fs from 'node:fs';process.exit(fs.existsSync('.deps/ready') ? 0 : 9)\n`)
+  await writeFile(path.join(root, 'recipe.json'), JSON.stringify({ ...recipe, setup: [{ name: 'deps', run: dependencySetup, timeoutMs: 5000 }], toolchains: [{ name: 'node', command: process.execPath, argv: ['--version'], expected: process.version }], baseline: [{ name: 'dummy', run: 'node baseline.mjs', timeoutMs: 5000 }] }))
+  await gitRun(['add', '.']); await gitRun(['commit', '-m', 'test: confined verification'])
+  const calls = []
+  const prepared = await cli.prepareDispatchPrerequisites({ root, flags: { environment: 'recipe.json', 'role-policy': 'policy.json' }, adapter: { ...codexAdapter, resume: async () => calls.push('resume') }, role: 'implementer', sandboxMode: mode, network: false,
+    exec: (command, cwd, options) => command === 'codex' ? Promise.resolve({ code: 0, output: 'Logged in' }) : defaultExec(command, cwd, options) })
+  const outside = path.join(root, 'outside-marker')
+  if (prepared.code !== 0) {
+    assert.equal(prepared.code, 4)
+    assert.equal(prepared.report.ready, false)
+  } else {
+    const sandbox = await prepared.adapter.makeSandbox((args, opts) => defaultGitExec(args, { cwd: root, ...opts }), { runRepo: root, runBranch: 'main', runId: 'confined', taskId: 'T1', mode })
+    await mkdir(path.join(sandbox.cwd, '.codex'))
+    await writeFile(path.join(sandbox.cwd, '.codex/config.toml'), 'sandbox_mode="danger-full-access"\n')
+    await writeFile(path.join(sandbox.cwd, 'baseline.mjs'), `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(outside)}, 'dummy');\n`)
+    await assert.rejects(prepared.adapter.resume({ sandbox }), /worker environment|verification/i)
+    assert.equal(sandbox.meta.workerEnvironment.enforcement.observed, true)
+    assert.equal(sandbox.meta.workerEnvironment.toolchains[0].state, 'available')
+    assert.equal(await readFile(path.join(sandbox.cwd, '.deps/ready'), 'utf8'), 'ready')
+  }
+  await assert.rejects(readFile(outside), { code: 'ENOENT' })
+  assert.deepEqual(calls, [])
+}))
+
+test('linked setup reaches layout assertions under apostrophe TMPDIR', async () => {
+  const temp = await mkdtemp(path.join(tmpdir(), "fm-quote'"))
+  try {
+    const result = await defaultExec('/usr/bin/env', process.cwd(), { argv: ['-u', 'NODE_TEST_CONTEXT', process.execPath, '--test', '--test-name-pattern=linked worker receipt|worker receipt observes linked', path.join(process.cwd(), 'tests/execution-prerequisites.test.mjs')], env: { TMPDIR: temp, NODE_TEST_CONTEXT: '' }, timeoutMs: 30000, maxOutputBytes: 64 * 1024 })
+    assert.equal(result.code, 0, result.output)
+    assert.match(result.output, /pass 2/)
+  } finally { await rm(temp, { recursive: true, force: true }) }
+})
+
+
+test('flagless Cursor redispatch preserves a completed contribution after disposable checkout cleanup', async () => fixture(async ({ root, gitRun }) => {
+  await writeFile(path.join(root, 'plan.md'), '### Task 1: fixture\n\n**Files:**\n- Create: `fixture.mjs`\n')
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\nfleetmates.local.json\n')
+  await gitRun(['add', '.']); await gitRun(['commit', '-m', 'test: completed contribution'])
+  await gitRun(['checkout', '-b', 'run'])
+  assert.equal((await command(root, ['init-run', 'plan.md', '--run', 'r1'])).code, 0)
+  await writeFile(path.join(root, 'fleetmates.local.json'), JSON.stringify({ harnesses: { cursor: { sandbox: 'files' } } }))
+  const cache = await mkdtemp(path.join(tmpdir(), 'fm-completed-'))
+  const adapter = getAdapter('cursor'), originals = { probe: adapter.probe, spawn: adapter.spawn, resume: adapter.resume }
+  let effects = 0
+  Object.assign(adapter, { probe: async () => ({ ok: true }), spawn: async () => { effects++; throw new Error('unexpected model spawn') }, resume: async () => { effects++; throw new Error('unexpected model resume') } })
+  try {
+    const prepared = await cli.prepareDispatchPrerequisites({ root, flags: { environment: 'recipe.json' }, adapter, role: 'implementer', sandboxMode: 'files', network: false, exec: async (cmd, cwd, opts) => cmd === 'cursor-agent' ? { code: 0, output: 'Logged in' } : defaultExec(cmd, cwd, opts) })
+    assert.equal(prepared.code, 0)
+    const git = (args, opts) => defaultGitExec(args, { cwd: root, ...opts })
+    const sandbox = await prepared.adapter.makeSandbox(git, { runRepo: root, runBranch: 'run', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: cache } })
+    await writeFile(path.join(sandbox.cwd, 'fixture.mjs'), 'export const fixture = true\n')
+    const branch = 'fleetmates/r1/T1'
+    await prepared.adapter.collect(git, { runRepo: root, sandbox, branch })
+    const contribution = (await gitRun(['rev-parse', branch])).stdout.trim()
+    await adapter.cleanup({ sandbox })
+    const file = path.join(root, '.fleetmates/r1/sessions/T1.json')
+    await mkdir(path.dirname(file), { recursive: true })
+    const record = { taskId: 'T1', state: 'done', sandboxRemoved: true, sandbox, prerequisites: sandbox.meta.prerequisites,
+      result: { status: 'done', branch, filesChanged: ['fixture.mjs'], summary: 'fixture', blockers: [] } }
+    await writeFile(file, JSON.stringify(record))
+    const statusFile = path.join(root, '.fleetmates/r1/status.json')
+    const completedStatus = JSON.parse(await readFile(statusFile, 'utf8'))
+    completedStatus.tasks[0].state = 'done'
+    await writeFile(statusFile, JSON.stringify(completedStatus, null, 2) + '\n')
+    const before = await readFile(statusFile, 'utf8')
+    for (let i = 0; i < 2; i++) {
+      const dispatched = await command(root, ['dispatch', '--run', 'r1', '--phase', '1', '--base', 'main', '--harness', 'cursor'])
+      assert.equal(dispatched.code, 0, dispatched.output)
+    }
+    assert.equal(effects, 0)
+    assert.equal((await gitRun(['rev-parse', branch])).stdout.trim(), contribution)
+    assert.equal(await readFile(path.join(root, '.fleetmates/r1/status.json'), 'utf8'), before)
+    await assert.rejects(lstat(sandbox.cwd), { code: 'ENOENT' })
+    for (const change of [
+      value => { value.result.blockers = ['unable to verify'] },
+      value => { value.result.branch = 'run' },
+      value => { value.result.filesChanged = [7] },
+      value => { value.state = 'orphaned' },
+    ]) {
+      const invalid = structuredClone(record)
+      change(invalid)
+      await writeFile(file, JSON.stringify(invalid))
+      assert.equal((await command(root, ['dispatch', '--run', 'r1', '--phase', '1', '--base', 'main', '--harness', 'cursor'])).code, 4)
+      assert.equal(effects, 0)
+    }
+  } finally { Object.assign(adapter, originals); await rm(cache, { recursive: true, force: true }) }
+}))
+
+test('required host preflight confines project setup before authentication or model effects', async () => fixture(async ({ root, gitRun }) => {
+  const outside = path.join(path.dirname(root), path.basename(root) + '-dummy-outside')
+  await writeFile(path.join(root, 'setup.mjs'), `import {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(outside)},'dummy');\n`)
+  await writeFile(path.join(root, 'recipe.json'), JSON.stringify({ ...recipe, setup: [{ name: 'dummy', run: 'node setup.mjs', timeoutMs: 5000 }] }))
+  await gitRun(['add', '.']); await gitRun(['commit', '-m', 'test: confined host setup'])
+  let authentication = 0
+  try {
+    const prepared = await cli.prepareDispatchPrerequisites({ root, flags: { environment: 'recipe.json', 'role-policy': 'policy.json' }, adapter: codexAdapter, role: 'implementer', sandboxMode: 'files', network: false,
+      exec: async (command, cwd, options) => { if (command === 'codex') { authentication++; return { code: 0, output: 'Logged in' } } return defaultExec(command, cwd, options) } })
+    assert.equal(prepared.code, 4)
+    assert.equal(prepared.report.environment.ready, false)
+    assert.equal(prepared.report.environment.enforcement.kind, 'required')
+    assert.equal(authentication, 0)
+    await assert.rejects(readFile(outside), { code: 'ENOENT' })
+  } finally { await rm(outside, { force: true }) }
+}))
+
+for (const missing of [false, true]) {
+  test(`required message refuses ${missing ? 'missing' : 'unavailable'} native verifier without retaining an old ready receipt`, async () => withBoundSession(true, async ({ file, calls, message }) => {
+    const record = JSON.parse(await readFile(file, 'utf8'))
+    record.sandbox.meta.prerequisites.environment = 'recipe.json'
+    record.prerequisites = record.sandbox.meta.prerequisites
+    record.sandbox.meta.workerEnvironment = { ready: true, identity: 'old-receipt' }
+    await writeFile(file, JSON.stringify(record))
+    const adapter = getAdapter('codex'), original = adapter.createVerificationExecutor
+    let attempts = 0
+    adapter.createVerificationExecutor = async () => {
+      attempts++
+      if (missing) return undefined
+      throw new Error('Required native verification runtime is unavailable')
+    }
+    try {
+      const result = await message()
+      assert.equal(result.code, 4, result.output)
+      assert.equal(attempts, 1)
+      assert.equal(calls.length, 1)
+      const updated = JSON.parse(await readFile(file, 'utf8')).sandbox.meta.workerEnvironment
+      assert.equal(updated.ready, false)
+      assert.notEqual(updated.identity, 'old-receipt')
+      assert.equal(updated.baseline.status, 'not-executed')
+      assert.deepEqual(updated.enforcement, { kind: 'required', verified: false })
+    } finally { adapter.createVerificationExecutor = original }
+  }))
+}

@@ -396,8 +396,11 @@ export async function probe({ env = process.env } = {}) {
   }
 }
 
+export async function createVerificationExecutor() { throw new Error('Required Cursor non-model verification is unsupported') }
+
 export const cursorAdapter = {
   name: 'cursor',
+  createVerificationExecutor,
   defaultSandbox: 'files',
   supportsEffort: false,
   // Checkouts live outside the run repo, where nothing else ever removes them.

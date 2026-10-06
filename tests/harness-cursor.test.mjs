@@ -538,3 +538,8 @@ test('Cursor builders refuse a bound required policy with missing enforcement', 
     assert.throws(() => build({ sandbox, sessionId: 'fixture' }), /enforcement/i)
   }
 })
+
+test('Cursor refuses required non-model verification rather than claiming native confinement', async () => {
+  assert.equal(typeof cursorAdapter.createVerificationExecutor, 'function')
+  await assert.rejects(cursorAdapter.createVerificationExecutor({ sandbox: { cwd: '/fixture/worker', meta: { mode: 'files' } } }), /unsupported/i)
+})

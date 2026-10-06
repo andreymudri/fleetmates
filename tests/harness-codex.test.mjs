@@ -767,3 +767,100 @@ test('Codex builders refuse a bound required policy with missing enforcement', (
     assert.throws(() => build({ sandbox, sessionId: 'fixture' }), /enforcement/i)
   }
 })
+
+test('verification broker construction uses host configuration, structured argv and a filtered environment', async () => {
+  const module = await import('../scripts/harnesses/codex.mjs')
+  assert.equal(typeof module.buildVerificationInvocation, 'function')
+  const request = module.buildVerificationInvocation({ executable: '/fixture/codex', broker: '/fixture/broker', home: '/fixture/config', worker: '/fixture/worker', temp: '/fixture/worker/temp', write: true,
+    command: 'node', argv: ['-e', 'console.log("fixture")'], env: { PATH: '/usr/bin:/fixture/worker/bin', SECRET: 'dummy', NODE_OPTIONS: '--inspect', GIT_DIR: '/fixture/shared' } })
+  assert.equal(request.command, '/usr/bin/env')
+  assert.equal(request.cwd, '/fixture/broker')
+  assert.ok(request.argv.includes('-i'))
+  assert.ok(hasPair(request.argv, '-P', 'worker'))
+  assert.ok(hasPair(request.argv, '-C', '/fixture/broker'))
+  assert.ok(!request.argv.join('\n').includes('SECRET='))
+  assert.ok(!request.argv.join('\n').includes('NODE_OPTIONS='))
+  assert.ok(!request.argv.join('\n').includes('GIT_DIR='))
+  const payload = JSON.parse(request.argv.at(-1))
+  assert.equal(payload.cwd, '/fixture/worker')
+  assert.equal(payload.env.TMPDIR, '/fixture/worker/temp')
+  assert.equal(payload.env.PATH, '/usr/bin')
+  assert.equal(payload.env.HOME, '/fixture/config')
+  assert.equal(payload.env.CODEX_HOME, '/fixture/config')
+  for (const key of ['SECRET', 'NODE_OPTIONS', 'GIT_DIR']) assert.equal(payload.env[key], undefined)
+  assert.deepEqual(payload.argv, ['-e', 'console.log("fixture")'])
+  assert.match(request.config, /default_permissions="worker"/)
+  assert.match(request.config, /extends=":read-only"/)
+  assert.match(request.config, /"\/fixture\/worker"="write"/)
+  assert.match(request.config, /":tmpdir"="read"/)
+  assert.match(request.config, /":slash_tmp"="read"/)
+  assert.match(request.config, /"\/fixture\/broker"="read"/)
+  assert.match(request.config, /"\/fixture\/worker\/\.git"="read"/)
+  assert.match(request.config, /enabled=false/)
+  const readonly = module.buildVerificationInvocation({ executable: '/fixture/codex', broker: '/fixture/broker', home: '/fixture/config', worker: '/fixture/worker', temp: '/fixture/worker/temp', write: false, command: 'true' })
+  assert.match(readonly.config, /"\/fixture\/worker"="read"/)
+  assert.match(readonly.config, /"\/fixture\/worker"=false/)
+
+})
+
+test('required verification refuses unsupported platforms and network authority', async () => {
+  const module = await import('../scripts/harnesses/codex.mjs')
+  assert.equal(typeof module.createVerificationExecutor, 'function')
+  const sandbox = { cwd: '/fixture/worker', meta: { mode: 'files' } }
+  const enforcement = { kind: 'required', harness: 'codex', sandboxMode: 'files', sandbox: 'workspace-write', mode: null, read: true, write: true, execute: true, network: false, sharedRefs: false, publication: false, addWritableRoots: false }
+  await assert.rejects(module.createVerificationExecutor({ sandbox, enforcement, platform: 'unsupported' }), /unsupported/i)
+  await assert.rejects(module.createVerificationExecutor({ sandbox, enforcement: { ...enforcement, network: true }, platform: 'linux' }), /unsupported|enforcement/i)
+})
+
+test('required verification rejects a runtime without independent restriction receipts and cleans private files', async () => {
+  const { createVerificationExecutor } = await import('../scripts/harnesses/codex.mjs')
+  const { mkdir, readdir } = await import('node:fs/promises')
+  const root = await mkdtemp(path.join(tmpdir(), 'fm-runtime-refusal-'))
+  const worker = path.join(root, 'worker'), bin = path.join(root, 'bin')
+  await mkdir(worker); await mkdir(bin)
+  await writeFile(path.join(bin, 'codex'), 'dummy'); await chmod(path.join(bin, 'codex'), 0o755)
+  const enforcement = { kind: 'required', harness: 'codex', sandboxMode: 'files', sandbox: 'workspace-write', mode: null, read: true, write: true, execute: true, network: false, sharedRefs: false, publication: false, addWritableRoots: false }
+  let requests = 0, home
+  try {
+    await assert.rejects(createVerificationExecutor({ sandbox: { cwd: worker, meta: { mode: 'files' } }, enforcement, platform: 'linux', env: { PATH: bin, SECRET: 'dummy' }, run: async (command, cwd, options) => {
+      requests++
+      assert.equal(command, '/usr/bin/env')
+      assert.ok(!cwd.startsWith(worker + path.sep))
+      assert.ok(hasPair(options.argv, '-P', 'worker'))
+      assert.equal(options.timeoutMs, 5000)
+      assert.equal(options.maxOutputBytes, 65536)
+      assert.equal(options.maxCaptureBytes, 65536)
+      home = options.argv.find(arg => arg.startsWith('CODEX_HOME=')).slice(11)
+      assert.match(await readFile(path.join(home, 'config.toml'), 'utf8'), /extends=":read-only"/)
+      assert.equal(JSON.parse(options.argv.at(-1)).env.SECRET, undefined)
+      return { code: 0, output: 'unsupported native command; no receipt' }
+    } }), /not independently observed/)
+    assert.equal(requests, 1)
+    assert.deepEqual(await readdir(worker), [])
+    await assert.rejects(stat(home), { code: 'ENOENT' })
+    await assert.rejects(createVerificationExecutor({ sandbox: { cwd: worker, meta: { mode: 'files' } }, enforcement, platform: 'linux', env: { PATH: worker } }), /unavailable/)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+test('verification trampoline preserves child exits and bounded output without claiming confinement', async () => {
+  const { buildVerificationInvocation } = await import('../scripts/harnesses/codex.mjs')
+  const { defaultExec } = await import('../scripts/gate-runner.mjs')
+  const root = await mkdtemp(path.join(tmpdir(), 'fm-trampoline-'))
+  try {
+    const invoke = async source => {
+      const request = buildVerificationInvocation({ executable: '/fixture/codex', broker: root, home: root, worker: root, temp: root, write: false,
+        command: process.execPath, argv: ['-e', source], env: { PATH: process.env.PATH }, marker: 'fixture-receipt ', maxOutputBytes: 32 })
+      const result = await defaultExec(process.execPath, root, { argv: request.argv.slice(-3), timeoutMs: 5000, maxOutputBytes: 4096 })
+      assert.equal(result.code, 0)
+      assert.ok(result.output.startsWith('fixture-receipt '), result.output)
+      return JSON.parse(result.output.slice('fixture-receipt '.length))
+    }
+    const failed = await invoke('require("node:fs").writeSync(1,"fixture");process.exit(9)')
+    assert.equal(failed.code, 9)
+    assert.equal(Buffer.from(failed.output, 'base64').toString(), 'fixture')
+    assert.equal(failed.outputLimited, false)
+    const limited = await invoke('require("node:fs").writeSync(1,"x".repeat(100))')
+    assert.equal(limited.outputLimited, true)
+    assert.ok(Buffer.from(limited.output, 'base64').length <= 32)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})

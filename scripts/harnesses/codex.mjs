@@ -1,10 +1,14 @@
+import { randomBytes } from 'node:crypto'
+import { createServer } from 'node:net'
+import { constants } from 'node:fs'
+import { defaultExec } from '../gate-runner.mjs'
 import { resolveRoleCapabilities } from '../role-capabilities.mjs'
 import { probeCommand } from './probe-command.mjs'
 // The only module in this repository that knows Codex's CLI surface (spec §5, §7). Everything
 // else — the driver, the CLI — talks to `codexAdapter` through the harness-neutral interface
 // (`scripts/harnesses/index.mjs`).
 import { spawn as spawnProcess } from 'node:child_process'
-import { writeFile, readFile, rm, mkdir, lstat, mkdtemp } from 'node:fs/promises'
+import { writeFile, readFile, rm, mkdir, lstat, mkdtemp, realpath, access } from 'node:fs/promises'
 import { createWriteStream } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -299,8 +303,99 @@ export async function probe({ env = process.env } = {}) {
   return { ok: true }
 }
 
+const inside = (root, file) => { const rel = path.relative(root, file); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)) }
+const trampoline = `const fs=require('node:fs'),cp=require('node:child_process');const r=JSON.parse(process.argv[1]);process.chdir(r.cwd);const child=cp.spawnSync(r.command,r.argv,{env:r.env,maxBuffer:r.maxOutputBytes});const output=Buffer.concat([child.stdout||Buffer.alloc(0),child.stderr||Buffer.alloc(0)]);fs.writeSync(1,r.marker+JSON.stringify({code:child.status===null?1:child.status,output:output.subarray(0,r.maxOutputBytes).toString('base64'),outputLimited:output.length>r.maxOutputBytes||child.error?.code==='ENOBUFS'})+'\\n');`
+
+
+export function buildVerificationInvocation({ executable, broker, home, worker, temp, write, command, argv = null, env = process.env, protectedRoots = [], marker = 'FM_COMMAND', maxOutputBytes = 32768 }) {
+  const safePath = (env.PATH ?? '').split(path.delimiter).filter(dir => path.isAbsolute(dir) && !inside(worker, dir)).join(path.delimiter)
+  const clean = { PATH: safePath, HOME: home, CODEX_HOME: home, LC_ALL: 'C.UTF-8', TMPDIR: temp,
+    XDG_CACHE_HOME: temp, NPM_CONFIG_CACHE: path.join(temp, 'npm'), GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: path.join(home, 'gitconfig'), GIT_TERMINAL_PROMPT: '0' }
+  const filesystem = [...new Set([broker, home, path.join(worker, '.git'), path.join(worker, '.fleetmates'), ...protectedRoots])]
+  const config = `default_permissions="worker"\n[permissions.worker]\nextends=":read-only"\n[permissions.worker.workspace_roots]\n${JSON.stringify(worker)}=${write}\n[permissions.worker.filesystem]\n${JSON.stringify(worker)}=${JSON.stringify(write ? 'write' : 'read')}\n":tmpdir"="read"\n":slash_tmp"="read"\n`
+    + filesystem.map(file => `${JSON.stringify(file)}="read"\n`).join('') + '[permissions.worker.network]\nenabled=false\n'
+  const payload = { cwd: worker, command: argv === null ? '/bin/sh' : command,
+    argv: argv === null ? ['-c', command] : argv, env: clean, marker, maxOutputBytes }
+  return { command: '/usr/bin/env', cwd: broker, config, argv: ['-i', `PATH=${safePath}`, `HOME=${home}`, `CODEX_HOME=${home}`, 'TMPDIR=/tmp', 'LC_ALL=C.UTF-8',
+    executable, 'sandbox', '-P', 'worker', '-C', broker, '--', process.execPath, '-e', trampoline, JSON.stringify(payload)] }
+}
+
+export async function createVerificationExecutor({ sandbox, root = sandbox.cwd, enforcement, platform = process.platform, env = process.env, run = defaultExec }) {
+  if (platform !== 'linux') throw new Error('Required non-model verification platform is unsupported')
+  const required = requiredEnforcement(sandbox, enforcement, false)
+  if (!required || required.network || !required.execute) throw new Error('Required non-model verification authority is unsupported')
+  const worker = await realpath(sandbox.cwd)
+  let executable
+  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+    if (!path.isAbsolute(dir) || inside(worker, dir)) continue
+    try { const candidate = await realpath(path.join(dir, 'codex')); await access(candidate, constants.X_OK); if (!inside(worker, candidate)) { executable = candidate; break } } catch {}
+  }
+  if (!executable) throw new Error('Required native verification runtime is unavailable')
+  const privateRoot = await mkdtemp(path.join(os.tmpdir(), 'fm-verification-'))
+  let temp
+  let server
+  let deniedTemporary
+  const close = async () => {
+    if (server?.listening) await new Promise(resolve => server.close(resolve))
+    if (deniedTemporary) await rm(deniedTemporary, { force: true })
+    if (temp) await rm(temp, { recursive: true, force: true })
+    await rm(privateRoot, { recursive: true, force: true })
+  }
+  try {
+    if (inside(worker, privateRoot)) throw new Error('Verification configuration must be outside the worker')
+    const broker = path.join(privateRoot, 'broker'), home = path.join(privateRoot, 'config')
+    await mkdir(broker); await mkdir(home)
+    temp = await mkdtemp(path.join(worker, '.fm-verification-'))
+    const protectedDir = path.join(temp, 'protected'); await mkdir(protectedDir)
+    const protectedRoots = [path.join(root, '.git'), path.join(root, '.fleetmates'), ...(sandbox.meta.gitdir ? [sandbox.meta.gitdir] : []), protectedDir]
+    const invoke = async (command, cwd, options = {}) => {
+      if (await realpath(cwd) !== worker) throw new Error('Verification cwd changed')
+      const marker = `FM_COMMAND_${randomBytes(16).toString('hex')} `
+      const request = buildVerificationInvocation({ executable, broker, home, worker, temp, write: required.write, command, argv: options.argv ?? null, env, protectedRoots, marker, maxOutputBytes: Math.min(options.maxOutputBytes ?? 32768, 32768) })
+      const result = await run(request.command, request.cwd, { ...options, onOutput: null, env: null, argv: request.argv,
+        timeoutMs: Math.min(options.timeoutMs ?? 5000, 3600000), graceMs: 250,
+        maxOutputBytes: 65536, maxCaptureBytes: 65536 })
+      if (result.code !== 0 || result.timedOut || result.outputLimited) return result
+      const line = result.output?.split('\n').find(line => line.startsWith(marker))
+      let receipt
+      try { receipt = JSON.parse(line.slice(marker.length)) } catch {}
+      if (!receipt || !Number.isInteger(receipt.code) || typeof receipt.output !== 'string' || typeof receipt.outputLimited !== 'boolean') {
+        return { code: 1, output: 'Native verification command receipt is missing' }
+      }
+      return { code: receipt.code, output: Buffer.from(receipt.output, 'base64').toString(), outputLimited: receipt.outputLimited }
+    }
+    const initial = buildVerificationInvocation({ executable, broker, home, worker, temp, write: required.write, command: 'true', env, protectedRoots })
+    await writeFile(path.join(home, 'config.toml'), initial.config, { mode: 0o600 })
+    await writeFile(path.join(home, 'gitconfig'), '', { mode: 0o600 })
+    const nonce = randomBytes(16).toString('hex')
+    let connections = 0
+    server = createServer(socket => { connections++; socket.destroy() })
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
+    const paths = { inside: path.join(temp, 'allowed'), outside: path.join(privateRoot, 'outside'), broker: path.join(broker, 'outside'), git: path.join(protectedDir, 'ref'), temporary: path.join('/tmp', `fm-denied-${nonce}`) }
+    deniedTemporary = paths.temporary
+    const program = `const fs=require('node:fs'),net=require('node:net');const result={};for(const[key,file]of Object.entries(${JSON.stringify(paths)})){try{fs.writeFileSync(file,'dummy');result[key]=true}catch{result[key]=false}}const socket=net.connect({host:'127.0.0.1',port:${server.address().port}});socket.on('connect',()=>{result.network='allowed';socket.destroy();finish()});socket.on('error',error=>{result.network=error.code;finish()});function finish(){fs.writeSync(1,${JSON.stringify('FM_VERIFY_'+nonce+' ')}+JSON.stringify(result)+'\\n')}setTimeout(()=>process.exit(7),2000).unref();`
+    const result = await invoke(process.execPath, worker, { argv: ['-e', program], timeoutMs: 5000 })
+    const line = result.output?.split('\n').find(line => line.startsWith(`FM_VERIFY_${nonce} `))
+    let observed
+    try { observed = JSON.parse(line.slice(nonce.length + 11)) } catch {}
+    const exists = async file => { try { await lstat(file); return true } catch (error) { if (error.code === 'ENOENT') return false; throw error } }
+    if (result.code !== 0 || result.timedOut || result.outputLimited || !observed
+      || observed.inside !== required.write || await exists(paths.inside) !== required.write
+      || ['outside', 'broker', 'git', 'temporary'].some(key => observed[key] !== false)
+      || !['EPERM', 'EACCES'].includes(observed.network) || connections !== 0
+      || await exists(paths.outside) || await exists(paths.broker) || await exists(paths.git) || await exists(paths.temporary)) {
+      throw new Error('Required native verification restrictions were not independently observed')
+    }
+    await new Promise(resolve => server.close(resolve))
+    return { exec: invoke, close, evidence: { kind: 'required', runtime: 'codex-sandbox', platform, write: required.write,
+      network: false, sharedRefs: false, publication: false, temporaryFiles: 'private-worker-directory', observed: true } }
+  } catch (error) { await close(); throw error }
+}
+
 export const codexAdapter = {
   name: 'codex',
+  createVerificationExecutor,
   probe,
   makeSandbox: makeCodexSandbox,
   collect: collectCodex,

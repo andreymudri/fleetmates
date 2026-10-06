@@ -3665,6 +3665,10 @@ export async function runCli(argv, io = { out: console.log }) {
         let record
         try { record = JSON.parse(await readFile(file, 'utf8')) }
         catch (error) { if (error.code === 'ENOENT') continue; throw error }
+        if (record.sandboxRemoved === true && record.state === 'done'
+          && validateResult(record.result) && record.result.status === 'done' && record.result.blockers.length === 0
+          && record.result.branch === `fleetmates/${runId}/${task.id}`
+          && await createGit({ cwd: root }).resolveRef(`refs/heads/${record.result.branch}`)) continue
         await validateSessionContinuation(root, adapter, network, record)
       }
     } catch (error) { io.out(JSON.stringify({ error: error.message })); return 4 }
@@ -6622,70 +6626,94 @@ async function verifyWorkerEnvironment(root, sandbox, { fresh = false, exec = de
     await unchangedContracts(sandbox.cwd, git, binding.commit, sources)
   }
   await checkSources()
-  const guardedExec = async (...args) => {
-    await checkSources()
-    return exec(...args)
-  }
+  const required = sandbox.meta.enforcement?.kind === 'required'
   const workerStartedAt = Date.now()
-  const observation = await captureEnvironment({ git, commit: binding.commit, recipePath: binding.environment,
-    cwd: sandbox.cwd, execute: fresh || recipe.setup.length === 0, exec: guardedExec })
-  if (!fresh && recipe.setup.length > 0) {
-    observation.setup = { status: 'not-rerun', checks: [], durationMs: null }
-    observation.toolchains = []
-    for (const tool of recipe.toolchains) {
-      const result = await guardedExec(tool.command, sandbox.cwd, { argv: tool.argv, timeoutMs: 5000, graceMs: 250,
-        maxOutputBytes: 64 * 1024, maxCaptureBytes: 64 * 1024 })
-      const version = typeof result.output === 'string' ? result.output.trim() : ''
-      const available = result.code === 0 && !result.timedOut && !result.outputLimited
-        && version.length > 0 && Buffer.byteLength(version) <= 256 && !/[\u0000-\u001f\u007f]/.test(version) && version.startsWith(tool.expected)
-      observation.toolchains.push({ name: tool.name, expected: tool.expected, version: available ? version : null,
-        state: available ? 'available' : 'unavailable' })
-    }
-    observation.baseline = { status: 'blocked', checks: [], durationMs: null }
-    if (observation.toolchains.every(tool => tool.state === 'available')) {
-      observation.baseline.status = 'pass'
-      for (const check of recipe.baseline) {
-        const receipt = await runCommandCheck({ ...check, kind: 'command' }, { cwd: sandbox.cwd,
-          exec: (command, cwd, options) => guardedExec(command, cwd, { ...options, maxOutputBytes: 64 * 1024, graceMs: 250 }) })
-        observation.baseline.checks.push(receipt)
-        if (receipt.status !== 'pass' || receipt.log?.complete !== true) { observation.baseline.status = 'fail'; break }
+  let broker
+  if (required) {
+    try {
+      const adapter = getAdapter(binding.harness)
+      if (!adapter?.createVerificationExecutor) throw new Error('Required non-model verification is unsupported')
+      broker = await adapter.createVerificationExecutor({ sandbox, root, enforcement: sandbox.meta.enforcement })
+      if (typeof broker?.exec !== 'function' || typeof broker?.close !== 'function' || broker.evidence?.observed !== true) {
+        throw new Error('Missing required native verification executor')
       }
+    } catch (error) {
+      const observation = await captureEnvironment({ git, commit: binding.commit, recipePath: binding.environment,
+        cwd: sandbox.cwd, execute: false })
+      Object.assign(observation, { ready: false, blocked: [error.message], cwd: sandbox.cwd,
+        workspace: fresh ? 'fresh' : 'existing', startedAt: workerStartedAt, durationMs: Date.now() - workerStartedAt,
+        enforcement: { kind: 'required', verified: false } })
+      sandbox.meta.workerEnvironment = observation
+      error.workerEnvironment = observation
+      throw error
     }
-    observation.ready = observation.baseline.status === 'pass'
-    observation.blocked = observation.ready ? [] : ['Existing worker environment baseline or toolchain failed']
   }
-  if (!fresh) {
-    observation.dependencies.reproducible = false
-    observation.dependencies.limitations.push('Setup was not rerun in the existing workspace; task edits and dependency contents are not captured.')
-  }
-  await checkSources()
-  observation.dependencies.declaredLayout = recipe.dependencies
-  const links = await workerLinks(sandbox.cwd)
-  if (links !== 'clean-checkout') {
-    observation.dependencies.layout = links
-    observation.dependencies.reproducible = false
-    observation.dependencies.limitations.push(links === 'linked'
-      ? 'Workspace symbolic links reach outside the checkout; their dependency contents are not captured.'
-      : 'Workspace link inspection exceeded its finite bound or could not be completed.')
-  }
-  await checkSources()
-  observation.preparation = fresh ? null : (sandbox.meta.workerEnvironment?.preparation
-    ?? (sandbox.meta.workerEnvironment?.workspace === 'fresh' ? sandbox.meta.workerEnvironment : null))
-  observation.startedAt = workerStartedAt
-  observation.durationMs = Date.now() - workerStartedAt
-  observation.cwd = sandbox.cwd
-  observation.workspace = fresh ? 'fresh' : 'existing'
-  observation.identity = createHash('sha256').update(JSON.stringify({ sources: observation.sources, cwd: observation.cwd,
-    dependencies: observation.dependencies, toolchains: observation.toolchains, setup: { status: observation.setup.status, checks: observation.setup.checks.map(check => ({ name: check.name, status: check.status, exitCode: check.exitCode, complete: check.log?.complete === true })) },
-    workspace: observation.workspace, platform: observation.platform,
-    baseline: observation.baseline.checks.map(check => ({ name: check.name, status: check.status,
-      exitCode: check.exitCode, complete: check.log?.complete === true })) })).digest('hex')
-  sandbox.meta.workerEnvironment = observation
-  if (!observation.ready) {
-    const error = new Error('Actual worker environment is not ready')
-    error.workerEnvironment = observation
-    throw error
-  }
+  try {
+    const guardedExec = async (...args) => {
+      await checkSources()
+      return (required ? broker.exec : exec)(...args)
+    }
+    const observation = await captureEnvironment({ git, commit: binding.commit, recipePath: binding.environment,
+      cwd: sandbox.cwd, execute: fresh || recipe.setup.length === 0, exec: guardedExec })
+    if (!fresh && recipe.setup.length > 0) {
+      observation.setup = { status: 'not-rerun', checks: [], durationMs: null }
+      observation.toolchains = []
+      for (const tool of recipe.toolchains) {
+        const result = await guardedExec(tool.command, sandbox.cwd, { argv: tool.argv, timeoutMs: 5000, graceMs: 250,
+          maxOutputBytes: 64 * 1024, maxCaptureBytes: 64 * 1024 })
+        const version = typeof result.output === 'string' ? result.output.trim() : ''
+        const available = result.code === 0 && !result.timedOut && !result.outputLimited
+          && version.length > 0 && Buffer.byteLength(version) <= 256 && !/[\u0000-\u001f\u007f]/.test(version) && version.startsWith(tool.expected)
+        observation.toolchains.push({ name: tool.name, expected: tool.expected, version: available ? version : null,
+          state: available ? 'available' : 'unavailable' })
+      }
+      observation.baseline = { status: 'blocked', checks: [], durationMs: null }
+      if (observation.toolchains.every(tool => tool.state === 'available')) {
+        observation.baseline.status = 'pass'
+        for (const check of recipe.baseline) {
+          const receipt = await runCommandCheck({ ...check, kind: 'command' }, { cwd: sandbox.cwd,
+            exec: (command, cwd, options) => guardedExec(command, cwd, { ...options, maxOutputBytes: 64 * 1024, graceMs: 250 }) })
+          observation.baseline.checks.push(receipt)
+          if (receipt.status !== 'pass' || receipt.log?.complete !== true) { observation.baseline.status = 'fail'; break }
+        }
+      }
+      observation.ready = observation.baseline.status === 'pass'
+      observation.blocked = observation.ready ? [] : ['Existing worker environment baseline or toolchain failed']
+    }
+    if (!fresh) {
+      observation.dependencies.reproducible = false
+      observation.dependencies.limitations.push('Setup was not rerun in the existing workspace; task edits and dependency contents are not captured.')
+    }
+    await checkSources()
+    observation.enforcement = broker?.evidence ?? { kind: 'legacy', verified: false }
+    observation.dependencies.declaredLayout = recipe.dependencies
+    const links = await workerLinks(sandbox.cwd)
+    if (links !== 'clean-checkout') {
+      observation.dependencies.layout = links
+      observation.dependencies.reproducible = false
+      observation.dependencies.limitations.push(links === 'linked'
+        ? 'Workspace symbolic links reach outside the checkout; their dependency contents are not captured.'
+        : 'Workspace link inspection exceeded its finite bound or could not be completed.')
+    }
+    await checkSources()
+    observation.preparation = fresh ? null : (sandbox.meta.workerEnvironment?.preparation
+      ?? (sandbox.meta.workerEnvironment?.workspace === 'fresh' ? sandbox.meta.workerEnvironment : null))
+    observation.startedAt = workerStartedAt
+    observation.durationMs = Date.now() - workerStartedAt
+    observation.cwd = sandbox.cwd
+    observation.workspace = fresh ? 'fresh' : 'existing'
+    observation.identity = createHash('sha256').update(JSON.stringify({ sources: observation.sources, cwd: observation.cwd,
+      dependencies: observation.dependencies, toolchains: observation.toolchains, setup: { status: observation.setup.status, checks: observation.setup.checks.map(check => ({ name: check.name, status: check.status, exitCode: check.exitCode, complete: check.log?.complete === true })) },
+      workspace: observation.workspace, platform: observation.platform, enforcement: observation.enforcement,
+      baseline: observation.baseline.checks.map(check => ({ name: check.name, status: check.status,
+        exitCode: check.exitCode, complete: check.log?.complete === true })) })).digest('hex')
+    sandbox.meta.workerEnvironment = observation
+    if (!observation.ready) {
+      const error = new Error('Actual worker environment is not ready')
+      error.workerEnvironment = observation
+      throw error
+    }
+  } finally { if (typeof broker?.close === 'function') await broker.close() }
 }
 
 function continuationAdapter(adapter, root, network) {
@@ -6717,15 +6745,32 @@ export async function prepareDispatchPrerequisites({ root, flags, adapter, role,
   const roles = resolveRoleCapabilities({ policy, role, harness: adapter.name, sandboxMode, network })
   const report = { version: 1, ready: false, roles, environment: null, capabilities: null }
   if (!roles.ready) return { code: 4, report }
+  const enforcement = roles.enforcement.kind === 'required' ? roles.enforcement : undefined
   if (flags.environment !== undefined) {
-    report.environment = await captureEnvironment({ git, commit, recipePath: flags.environment, cwd: root, execute: true, ...(exec ? { exec } : {}) })
-    await unchangedContracts(root, git, commit, sources)
+    let broker
+    try {
+      if (enforcement) {
+        if (!adapter.createVerificationExecutor) throw new Error('Required non-model verification is unsupported')
+        broker = await adapter.createVerificationExecutor({ root, sandbox: { cwd: root, meta: { mode: sandboxMode, enforcement } }, enforcement })
+        if (typeof broker?.exec !== 'function' || typeof broker?.close !== 'function' || broker.evidence?.observed !== true) {
+          throw new Error('Missing required native verification executor')
+        }
+      }
+      report.environment = await captureEnvironment({ git, commit, recipePath: flags.environment, cwd: root,
+        execute: true, exec: async (...args) => {
+          await unchangedContracts(root, git, commit, sources)
+          return (enforcement ? broker.exec : exec ?? defaultExec)(...args)
+        } })
+      report.environment.enforcement = broker?.evidence ?? { kind: 'legacy', verified: false }
+      await unchangedContracts(root, git, commit, sources)
+    } catch (error) {
+      report.environment = { ready: false, blocked: [error.message], enforcement: { kind: enforcement ? 'required' : 'legacy', verified: false } }
+    } finally { if (typeof broker?.close === 'function') await broker.close() }
     if (!report.environment.ready) return { code: 4, report }
   }
   report.capabilities = await probeCapabilities({ required: [...new Set(['harness', ...(report.environment?.required ?? [])])], harness: adapter.name, env, ...(exec ? { exec } : {}) })
   if (!report.capabilities.ready) return { code: 4, report }
   await unchangedContracts(root, git, commit, sources)
-  const enforcement = roles.enforcement.kind === 'required' ? roles.enforcement : undefined
   const binding = { version: 1, commit, environment: flags.environment ?? null, rolePolicy: flags['role-policy'] ?? null, role, harness: adapter.name, sandboxMode }
   const bind = sandbox => {
     sandbox.meta ??= {}
