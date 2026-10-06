@@ -13,7 +13,8 @@ close the parent roadmap or claim real-model evaluation outcomes.
 | W06 | Explicit ui target parsing, committed-target init preflight, anchored mandatory target bundles and ui reviewer method requiring rendering/behavioral evidence | Native ui manifest kind, project renderer/artifact adapter, independent rendered/behavioral/accessibility evidence |
 | W07 | Scoped human learning selection; no automatic knowledge writes | Owned learning commits, feedback-to-tasks and authoritative plan amendments |
 | W08 | Local outcome counts, precision excluding unresolved findings, recall requiring independent labels; provenance-preserving duplicate groups and per-lens/category/model reports tied to current inputs | Calibrated real reviewer datasets, independent reproduction, refutation quality and shadow selection |
-| W09-W13 | No implementation claim | Separate bounded specs, adapters, durable effects, preflight and role capabilities |
+| W09 | Bounded read-only GitHub CI adapter, exact SHA and explicit required app/check identities, latest attempt and unresolved status reporting | Full-input receipts, failure reproduction, bounded task repairs, publication idempotency and reconciliation |
+| W10-W13 | No implementation claim | Separate bounded specs, adapters, durable effects, preflight and role capabilities |
 | W14-W15 | Conditional later scope | Bottleneck evidence and an explicit release requirement |
 
 ## Local commands

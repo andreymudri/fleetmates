@@ -654,3 +654,14 @@ bounded context. An agent check can select `lens: ["ui"]`; that method requires
 rendered and behavioral evidence and reports unavailable verification explicitly.
 Renderer setup, artifact capture and a native `kind: "ui"` adapter remain
 unsupported. Source structure alone does not prove visual acceptance.
+
+`ci-status --file <json>` provides read-only GitHub CI reporting for the current
+committed branch tip. Input declares `repository` (`owner/repository`), `inputs`
+(`commit`, `plan`, `manifest`, `environment`, `verifier`) and nonempty `required`
+checks such as `[{"name":"test (ubuntu-latest)","app":"github-actions"}]`.
+It requires the installed/authenticated `gh` CLI. Current exact-commit required
+checks must all succeed; pending, skipped, missing and truncated results cannot
+pass. Exit codes are 0 for passed CI checks, 4 for unmet checks and 2 for an
+invalid/unavailable query. Other input fields are declared associations, not
+independently verified by GitHub metadata. Uncommitted changes are outside its
+scope. This command performs no repairs, publication, merge or deployment.

@@ -132,3 +132,29 @@ This delivery prepares and validates inputs. A native manifest `kind: ui`,
 a project renderer adapter, artifact capture and independent visual/behavioral
 trials remain outstanding. No actual rendering or model judgment is claimed
 by the fixture tests, and no visual baseline is updated automatically.
+
+## Exact-commit GitHub CI reporting
+
+`ci-status --file <json>` reads `repository`, the existing five-field `inputs`
+identity, and a nonempty `required` list of `{name, app}` check identities.
+An optional task label remains declared attribution, not inferred ownership.
+The adapter requires inputs.commit to match the current branch SHA, queries
+GitHub check-runs using the installed/authenticated `gh` CLI with a 15-second
+and 1 MiB response bound, and rechecks the branch tip after the query.
+Repository/required identities are validated before network activity.
+
+Only exact-commit checks from the named app count. The latest check ID for a
+name/app is the current attempt; earlier attempts remain listed. Success
+passes, active checks remain pending, failure/timeout/action-required fail,
+and skipped/neutral/cancelled or absent results remain unresolved or missing.
+A snapshot truncated beyond the API page cannot complete. Exit 0 means all
+explicit required checks passed for that committed SHA; exit 4 means unmet
+CI checks; exit 2 means invalid or unavailable input/capability.
+
+The scope is the committed branch tip, not uncommitted workspace contents.
+Plan, manifest, environment and verifier values are declared association only:
+GitHub check metadata does not independently prove those input values. The
+report exposes that limitation for each field. It does not turn a CI PASS into
+semantic acceptance, independently classify a failure, repair code, publish,
+merge or deploy. Full-input CI receipts, task repair budgets, log reproduction
+and effect reconciliation remain outstanding W09 work.

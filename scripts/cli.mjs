@@ -147,6 +147,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
   context-bundle --file <json> [--root <path>]
   workflow-report --file <json> [--root <path>]
+  ci-status --file <json> [--root <path>]
   bind-session --run <id> --plan <path> --session <id> [--base <branch>] [--root <path>]
   suspend --run <id> --plan <path> [--base <branch>] [--root <path>]
   abandon --run <id> --plan <path> [--base <branch>] [--root <path>]
@@ -297,6 +298,7 @@ export const REQUIRED = {
   'plan-drift': ['run', 'plan'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
+  'ci-status': ['file'],
   'bind-session': ['run', 'plan', 'session'],
   suspend: ['run', 'plan'],
   resume: ['run'],
@@ -377,6 +379,7 @@ export const KNOWN_FLAGS = {
   'plan-drift': ['run', 'plan', 'base'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
+  'ci-status': ['file'],
   'bind-session': ['run', 'plan', 'base', 'session'],
   suspend: ['run', 'plan', 'base'],
   resume: ['run'],
@@ -4648,6 +4651,17 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
     return failed > 0 ? 1 : 0
+  }
+
+  if (command === 'ci-status') {
+    try {
+      const body = await readFile(flags.file, 'utf8')
+      if (Buffer.byteLength(body) > 1024 * 1024) throw new Error('CI input exceeds 1 MiB')
+      const { collectGitHubCi } = await import('./ci-evidence.mjs')
+      const report = await collectGitHubCi({ ...JSON.parse(body), git: createGit({ cwd: root }) })
+      io.out(workflowJson(report))
+      return report.complete ? 0 : 4
+    } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
   }
 
   if (command === 'context-bundle' || command === 'workflow-report') {
