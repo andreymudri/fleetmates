@@ -14,7 +14,8 @@ close the parent roadmap or claim real-model evaluation outcomes.
 | W07 | Scoped human learning selection; no automatic knowledge writes; current-plan feedback drafts with explicit scoped evidence, typed learning proposals and bounded defect tasks/dependencies | Owned learning commits, reviewed application to authoritative plan anchors, knowledge refresh and stale/superseded repairs |
 | W08 | Local outcome counts, precision excluding unresolved findings, recall requiring independent labels; provenance-preserving duplicate groups and per-lens/category/model reports tied to current inputs | Calibrated real reviewer datasets, independent reproduction, refutation quality and shadow selection |
 | W09 | Bounded read-only GitHub CI adapter, exact SHA and explicit required app/check identities, latest attempt and unresolved status reporting | Full-input receipts, failure reproduction, bounded task repairs, publication idempotency and reconciliation |
-| W10-W13 | No implementation claim | Separate bounded specs, adapters, durable effects, preflight and role capabilities |
+| W10 | Five versioned dry-run profiles on existing CLI fragments, phase/artifact contracts, explicit capability blockers, tracked repair-budget limits | Execution controller, stdout capture, review aggregation, actual capability probing/wall-time enforcement and real evaluation |
+| W11-W13 | No implementation claim | Separate bounded specs, adapters, durable effects, preflight and role capabilities |
 | W14-W15 | Conditional later scope | Bottleneck evidence and an explicit release requirement |
 
 ## Local commands

@@ -150,6 +150,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   workflow-report --file <json> [--root <path>]
   ci-status --file <json> [--root <path>]
   feedback-draft --file <json> [--root <path>]
+  workflow-profile --file <json> [--root <path>]
   bind-session --run <id> --plan <path> --session <id> [--base <branch>] [--root <path>]
   suspend --run <id> --plan <path> [--base <branch>] [--root <path>]
   abandon --run <id> --plan <path> [--base <branch>] [--root <path>]
@@ -302,6 +303,7 @@ export const REQUIRED = {
   'workflow-report': ['file'],
   'ci-status': ['file'],
   'feedback-draft': ['file'],
+  'workflow-profile': ['file'],
   'bind-session': ['run', 'plan', 'session'],
   suspend: ['run', 'plan'],
   resume: ['run'],
@@ -384,6 +386,7 @@ export const KNOWN_FLAGS = {
   'workflow-report': ['file'],
   'ci-status': ['file'],
   'feedback-draft': ['file'],
+  'workflow-profile': ['file'],
   'bind-session': ['run', 'plan', 'base', 'session'],
   suspend: ['run', 'plan', 'base'],
   resume: ['run'],
@@ -4659,7 +4662,7 @@ export async function runCli(argv, io = { out: console.log }) {
     return failed > 0 ? 1 : 0
   }
 
-  if (command === 'feedback-draft') {
+  if (command === 'feedback-draft' || command === 'workflow-profile') {
     try {
       const input = await readWorkflowInput(flags.file)
       const planPath = input.planPath
@@ -4673,8 +4676,18 @@ export async function runCli(argv, io = { out: console.log }) {
       const mode = await git.fileModeAtCommit(commit, `:(literal)${planPath}`)
       if (!['100644', '100755'].includes(mode) || await git.fileSizeAtCommit(commit, planPath) > 512 * 1024) throw new Error('Feedback plan must be a bounded committed regular file')
       const markdown = await git.fileAtCommit(commit, planPath)
-      const { prepareFeedbackDraft } = await import('./feedback-draft.mjs')
-      const draft = prepareFeedbackDraft({ ...input, markdown })
+      let draft
+      if (command === 'workflow-profile') {
+        const mode = await git.fileModeAtCommit(commit, `:(literal)${NAMES.gateFile}`)
+        if (!['100644', '100755'].includes(mode) || await git.fileSizeAtCommit(commit, NAMES.gateFile) > 512 * 1024) throw new Error('Workflow profile requires a bounded committed gate manifest')
+        if (typeof input.baseBranch !== 'string' || !await git.branchExists(input.baseBranch)) throw new Error('Workflow profile base must be a local branch')
+        const manifestText = await git.fileAtCommit(commit, NAMES.gateFile)
+        const { expandWorkflowProfile } = await import('./workflow-profile.mjs')
+        draft = expandWorkflowProfile({ ...input, markdown, manifestText })
+      } else {
+        const { prepareFeedbackDraft } = await import('./feedback-draft.mjs')
+        draft = prepareFeedbackDraft({ ...input, markdown })
+      }
       if (await git.resolveRef(head.ref) !== commit) throw new Error('Branch tip changed while drafting feedback')
       io.out(workflowJson({ ...draft, planPath }))
       return 0

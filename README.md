@@ -678,3 +678,14 @@ Review the draft and apply it through authoritative plan and ownership rules;
 this command does not amend the plan, write learnings or call Vault.
 Workflow JSON inputs are limited to opened regular files and an actual 1 MiB
 read budget.
+
+`workflow-profile --file <json>` expands a reusable profile in dry-run mode.
+Choose `bug-fix`, `feature`, `migration`, `ui` or `research`; provide `runId`,
+`planPath`, `baseBranch`, `harness` (`codex`/`cursor`), exact `inputs` hashes and
+capability declarations (`available`/`unavailable`/`unknown`). The proposal shows
+phases, required artifacts, existing CLI commands and side effects. Tracked
+checks and repair budgets remain mandatory. Migration parameters require
+`compatibility` and `rollback`; UI requires render capability; a profile with
+`parameters.requiresVault: true` requires Vault. The expansion is nonexecutable:
+a controller and actual verification remain necessary, and no agent or command
+runs during dry-run. Declared capabilities do not grant permissions.

@@ -190,3 +190,36 @@ All workflow JSON file inputs now use a fixed 1 MiB read bound on an opened
 regular file. Available no-follow/nonblocking flags reject links and FIFOs;
 size is checked both before and during the bounded read. Oversized or growing
 input cannot make the parser drain unbounded data.
+
+## Reusable workflow profile dry-runs
+
+`workflow-profile --file <json>` expands bug-fix, feature, migration, ui or
+research profiles against the current committed plan and gate manifest. Input
+declares profile, runId, planPath, baseBranch, harness (codex or cursor), inputs,
+capabilities and optional parameters/repair/time limits. The exact plan and
+manifest hashes must match; the base must be a local branch. Capabilities are
+available/unavailable/unknown declarations, not permission grants or proof of
+adapter support. Missing harness/render/required Vault prerequisites are
+explicit blockers. Migration requires compatibility and rollback contracts.
+
+Expansion reuses current phase planning, checksForPhase enforcement injection,
+fix-round budgets and the existing structured task result schema. Every phase
+shows implementation, review, collection, actual gate and integration commands,
+owned files/dependencies, named artifact contracts and expected side effects.
+Later phases require prior integrated-ref artifacts. The profile can lower a
+repair budget but cannot raise the tracked manifest's limit. A free-text done
+is not a task result, and a structured done remains only a candidate requiring
+actual gates and acceptance evidence.
+
+The output is dry-run only, explicitly nonexecutable. No agent, command,
+publication or policy write runs during expansion. Required profile acceptance
+includes regression/reproducer, functional, migration compatibility/rollback,
+UI rendering/interaction/accessibility or research source/claim/uncertainty
+evidence as applicable. The step list contains no publication or deployment.
+Malformed inputs and expanded output above 1 MiB fail before any dispatch.
+
+An execution controller, stdout artifact capture, current review aggregation
+for full completion, actual capability probing and wall-time enforcement remain
+outstanding. The dry-run declares these needs rather than claiming it executes
+or enforces them. Real W02 workflow evaluations remain required before profile
+promotion. This is a fixed set of fragments, not a general workflow language.
