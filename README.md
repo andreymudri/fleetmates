@@ -645,3 +645,12 @@ upstream task's contract. Implementation, review and integration use the plan
 anchor, with source lines and hashes; later edits do not silently replace it.
 Missing dependencies or mandatory budget overflow refuse dispatch. This does
 not infer dependencies from file history or treat learnings as tracked policy.
+
+Tasks may also declare `ui: design/settings.html, design/settings.md` using
+unique repository-relative Markdown, HTML or SVG files. Commit targets on the
+chosen base with the plan. `init-run` rejects missing or nonregular committed
+targets; dispatch reads their contents at the plan anchor into mandatory
+bounded context. An agent check can select `lens: ["ui"]`; that method requires
+rendered and behavioral evidence and reports unavailable verification explicitly.
+Renderer setup, artifact capture and a native `kind: "ui"` adapter remain
+unsupported. Source structure alone does not prove visual acceptance.

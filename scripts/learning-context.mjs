@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { buildContextBundle } from './context-bundle.mjs'
 import { selectPlanContracts } from './plan-context.mjs'
+import { parsePlan } from './plan-parser.mjs'
+import { readUiTargets } from './ui-targets.mjs'
 
 export function selectLearnings(markdown, files) {
   if (typeof markdown !== 'string' || !Array.isArray(files) || files.some(f => typeof f !== 'string')) throw new Error('Invalid learning context inputs')
@@ -43,10 +45,13 @@ export async function learningBundles({ git, commit, tasks, role = 'implementer'
   if (planPath != null && (typeof planPath !== 'string' || !planPath || path.posix.isAbsolute(planPath)
       || planPath.includes('\\') || planPath.split('/').some(part => !part || part === '..' || part === '.'))) throw new Error('Context plan path must be repository-relative')
   const planMarkdown = planPath ? await readTracked(planPath, true) : null
+  const planTasks = planMarkdown === null ? [] : parsePlan(planMarkdown)
   const bundles = {}
   for (const task of tasks) {
     const contracts = planMarkdown === null ? [] : selectPlanContracts(planMarkdown, planPath, task)
-    const items = [...contracts, ...selectLearnings(markdown, task.files)]
+    const members = task.members ?? [task.id]
+    const targets = await readUiTargets({ git, commit, tasks: planTasks.filter(t => members.includes(t.id)) })
+    const items = [...contracts, ...targets, ...selectLearnings(markdown, task.files)]
     if (items.length) bundles[task.id] = buildContextBundle({ task: task.id, role, commit, items, maxBytes, vault: 'unavailable' })
   }
   return bundles

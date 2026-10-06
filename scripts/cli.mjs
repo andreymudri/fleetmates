@@ -3036,6 +3036,17 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
 
+    if (tasks.some(task => task.ui?.length)) {
+      try {
+        const { readUiTargets } = await import('./ui-targets.mjs')
+        const git = createGit({ cwd: root })
+        const head = await git.headBranch()
+        if (!head.ok) throw new Error('UI targets require a valid checked-out branch')
+        const commit = await git.resolveRef(head.ref)
+        await readUiTargets({ git, commit, tasks })
+      } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
+    }
+
     // DEFENCE IN DEPTH, and stated as such rather than as a validation that earns its keep:
     // `plan-parser.mjs` builds every id as `T${digits}` from `/^###\s+Task\s+(\d+)\s*:/`, so no
     // plan can currently produce an id this rejects. It stays because the ids are recorded and

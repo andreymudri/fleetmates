@@ -103,3 +103,32 @@ acceptance criteria. Files must be tracked regular blobs, at most 512 KiB;
 local or later run-branch edits do not replace the anchored source. Anchor
 changes generate new bundle identities. Learnings remain separately advisory;
 this feature cannot grant permissions or amend an authoritative plan.
+
+## Explicit UI targets and reviewer preparation
+
+A plan task can declare `ui: design/settings.html, design/settings.md`.
+Targets are unique repository-relative Markdown, HTML or SVG paths, at most
+20 per task. Empty declarations, traversal, absolute paths, controls and
+unsupported types are refused. Fenced examples do not declare targets.
+`init-run` requires every target to be a committed regular file in the current
+branch before writing run state. Dispatch reads targets from the committed
+plan anchor, never local or later run-branch edits. The project must commit its
+plan and targets on its chosen base before dispatch as with existing plans.
+
+Targets become mandatory bounded context with source paths, line ranges and
+content hashes, along with their owning task contract. Required overflow or
+missing anchor targets refuses dispatch. This does not grant permission to
+execute HTML/SVG scripts or commands embedded in target text.
+
+Projects can select the existing agent review lens `ui`. Its method requires
+rendered evidence at the declared viewport/theme/state plus applicable
+interaction, keyboard and accessibility evidence. Missing evidence must be
+reported with `unableToVerify`, which existing collection keeps unresolved.
+A source-level comparison or green build is not rendered verification. The
+reviewer remains read-only on shared refs and uses only project-authorized
+commands in a scratch worktree.
+
+This delivery prepares and validates inputs. A native manifest `kind: ui`,
+a project renderer adapter, artifact capture and independent visual/behavioral
+trials remain outstanding. No actual rendering or model judgment is claimed
+by the fixture tests, and no visual baseline is updated automatically.

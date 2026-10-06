@@ -29,7 +29,7 @@ export function selectPlanContracts(markdown, source, task) {
     if (!owner) continue // Legacy synthetic task records have no contract to select.
     // Opt in with a tracked acceptance heading; preserve the entire task so adjacent
     // constraints and verification commands cannot disappear during extraction.
-    if (/^\*\*Acceptance:\*\*/m.test(owner.brief)) selected.set(id, 'tracked acceptance and task contract')
+    if (owner.ui?.length || /^\*\*Acceptance:\*\*/m.test(owner.brief)) selected.set(id, 'tracked acceptance and task contract')
     for (const dependency of owner.deps) {
       if (!byId.has(dependency)) throw new Error(`Declared dependency ${dependency} is absent from anchored plan`)
       if (!selected.has(dependency)) selected.set(dependency, `declared dependency contract for ${id}`)
