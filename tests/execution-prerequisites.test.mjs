@@ -15,6 +15,33 @@ import { createGit, defaultGitExec } from '../scripts/git.mjs'
 const recipe = { version: 1, toolchains: [], lockfiles: [], setup: [], baseline: [{ name: 'baseline', run: 'node -e "process.exit(0)"', timeoutMs: 5000 }], required: [], dependencies: 'clean-checkout' }
 const shellQuote = value => "'" + value.replaceAll("'", "'\"'\"'") + "'"
 const policy = { version: 1, roles: { implementer: { read: true, write: true, execute: true, network: false, sharedRefs: false, publication: false } } }
+
+test('actual native console version probes retain stdout and stderr like synchronous writes', { skip: process.platform !== 'linux' }, async t => {
+  const { createVerificationExecutor } = await import('../scripts/harnesses/codex.mjs')
+  const { resolveRoleCapabilities } = await import('../scripts/role-capabilities.mjs')
+  const { captureEnvironment } = await import('../scripts/environment-preflight.mjs')
+  const worker = await mkdtemp(path.join(tmpdir(), 'fm-native-output-'))
+  let executor
+  try {
+    const enforcement = resolveRoleCapabilities({ policy, role: 'implementer', harness: 'codex', sandboxMode: 'files', network: false }).enforcement
+    const env = { ...process.env, PATH: process.env.FLEETMATES_REAL_CODEX ? path.dirname(process.env.FLEETMATES_REAL_CODEX) + path.delimiter + process.env.PATH : process.env.PATH }
+    try { executor = await createVerificationExecutor({ sandbox: { cwd: worker, meta: { mode: 'files' } }, enforcement, env }) }
+    catch (error) { t.skip(`Native restriction preflight unavailable: ${error.message}`); return }
+    const asynchronous = await executor.exec(process.execPath, worker, { argv: ['-e', "console.log('v1');console.error('stderr')"] })
+    const synchronous = await executor.exec(process.execPath, worker, { argv: ['-e', "require('fs').writeSync(1,'v1\\n');require('fs').writeSync(2,'stderr\\n')"] })
+    assert.equal(asynchronous.code, 0)
+    assert.equal(synchronous.output, 'v1\nstderr\n')
+    assert.equal(asynchronous.output, synchronous.output)
+    const pipes = await executor.exec(process.execPath, worker, { argv: ['-e', "const fs=require('fs');fs.writeSync(1,JSON.stringify([fs.fstatSync(1).isFIFO(),fs.fstatSync(2).isFIFO()]))"] })
+    assert.equal(pipes.output, '[true,true]')
+    const bytes = JSON.stringify({ ...recipe, toolchains: [{ name: 'console-version', command: process.execPath, argv: ['-e', "console.log('v1')"], expected: 'v1' }], baseline: [{ name: 'baseline', run: 'true', timeoutMs: 5000 }] })
+    const git = { fileModeAtCommit: async () => '100644', fileSizeAtCommit: async () => Buffer.byteLength(bytes), fileAtCommit: async () => bytes }
+    const report = await captureEnvironment({ git, commit: 'a'.repeat(40), recipePath: 'recipe.json', cwd: worker, execute: true, exec: executor.exec })
+    assert.equal(report.ready, true)
+    assert.equal(report.toolchains[0].version, 'v1')
+    assert.equal(executor.evidence.observed, true)
+  } finally { await executor?.close(); await rm(worker, { recursive: true, force: true }) }
+})
 async function fixture(fn) {
   const root = await mkdtemp(path.join(tmpdir(), 'fm-prereq-'))
   const gitRun = args => defaultGitExec(args, root)

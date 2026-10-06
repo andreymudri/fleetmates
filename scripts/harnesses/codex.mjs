@@ -304,7 +304,30 @@ export async function probe({ env = process.env } = {}) {
 }
 
 const inside = (root, file) => { const rel = path.relative(root, file); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)) }
-const trampoline = `const fs=require('node:fs'),cp=require('node:child_process');const r=JSON.parse(process.argv[1]);process.chdir(r.cwd);const child=cp.spawnSync(r.command,r.argv,{env:r.env,maxBuffer:r.maxOutputBytes});const output=Buffer.concat([child.stdout||Buffer.alloc(0),child.stderr||Buffer.alloc(0)]);fs.writeSync(1,r.marker+JSON.stringify({code:child.status===null?1:child.status,output:output.subarray(0,r.maxOutputBytes).toString('base64'),outputLimited:output.length>r.maxOutputBytes||child.error?.code==='ENOBUFS'})+'\\n');`
+const pipeRunner = `
+const fs=require('node:fs'),cp=require('node:child_process'),os=require('node:os');
+const r=JSON.parse(process.argv[1]);
+const child=cp.spawnSync(r.command,r.argv,{env:r.env,stdio:['ignore','inherit','inherit']});
+fs.writeSync(1,'\\n'+r.marker+JSON.stringify({
+  code:child.status??(child.signal?128+os.constants.signals[child.signal]:1),signal:child.signal
+})+'\\n');`
+// The fixed shell pipeline supplies ordinary pipes; native console output is pinned by the
+// actual-native regression, separately from injected restriction-receipt validation.
+const trampoline = `
+const fs=require('node:fs'),cp=require('node:child_process');
+const r=JSON.parse(process.argv[1]);process.chdir(r.cwd);
+const child=cp.spawnSync('/bin/sh',[
+  '-c','"$@" 2>&1 | /bin/cat','fm-verification',process.execPath,'-e',${JSON.stringify(pipeRunner)},JSON.stringify(r)
+],{env:r.env,maxBuffer:r.maxOutputBytes+2048});
+const bytes=child.stdout||Buffer.alloc(0),separator=Buffer.from('\\n'+r.marker);
+const end=bytes.lastIndexOf(separator);let receipt;
+try{receipt=JSON.parse(bytes.subarray(end+separator.length).toString())}catch{}
+const limited=child.error?.code==='ENOBUFS',output=end>=0?bytes.subarray(0,end):bytes;
+fs.writeSync(1,r.marker+JSON.stringify({
+  code:receipt?.code??1,signal:receipt?.signal??null,
+  output:output.subarray(0,r.maxOutputBytes).toString('base64'),
+  outputLimited:limited||output.length>r.maxOutputBytes
+})+'\\n');`
 
 
 export function buildVerificationInvocation({ executable, broker, home, worker, temp, write, command, argv = null, env = process.env, protectedRoots = [], marker = 'FM_COMMAND', maxOutputBytes = 32768 }) {
@@ -351,19 +374,34 @@ export async function createVerificationExecutor({ sandbox, root = sandbox.cwd, 
     const protectedRoots = [path.join(root, '.git'), path.join(root, '.fleetmates'), ...(sandbox.meta.gitdir ? [sandbox.meta.gitdir] : []), protectedDir]
     const invoke = async (command, cwd, options = {}) => {
       if (await realpath(cwd) !== worker) throw new Error('Verification cwd changed')
+      const timeoutMs = options.timeoutMs ?? 5000
+      const requestedBytes = options.maxOutputBytes ?? 32768
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || !Number.isSafeInteger(requestedBytes) || requestedBytes < 1) {
+        throw new Error('Invalid verification limits')
+      }
+      const maxOutputBytes = Math.min(requestedBytes, 32768)
       const marker = `FM_COMMAND_${randomBytes(16).toString('hex')} `
-      const request = buildVerificationInvocation({ executable, broker, home, worker, temp, write: required.write, command, argv: options.argv ?? null, env, protectedRoots, marker, maxOutputBytes: Math.min(options.maxOutputBytes ?? 32768, 32768) })
+      const request = buildVerificationInvocation({ executable, broker, home, worker, temp, write: required.write, command, argv: options.argv ?? null, env, protectedRoots, marker, maxOutputBytes })
       const result = await run(request.command, request.cwd, { ...options, onOutput: null, env: null, argv: request.argv,
-        timeoutMs: Math.min(options.timeoutMs ?? 5000, 3600000), graceMs: 250,
+        timeoutMs: Math.min(timeoutMs, 3600000), graceMs: 250,
         maxOutputBytes: 65536, maxCaptureBytes: 65536 })
       if (result.code !== 0 || result.timedOut || result.outputLimited) return result
       const line = result.output?.split('\n').find(line => line.startsWith(marker))
       let receipt
       try { receipt = JSON.parse(line.slice(marker.length)) } catch {}
-      if (!receipt || !Number.isInteger(receipt.code) || typeof receipt.output !== 'string' || typeof receipt.outputLimited !== 'boolean') {
+      if (!receipt || !Number.isInteger(receipt.code) || receipt.code < 0 || receipt.code > 255
+        || typeof receipt.output !== 'string' || typeof receipt.outputLimited !== 'boolean'
+        || (receipt.signal != null && (typeof receipt.signal !== 'string'
+          || receipt.code !== 128 + os.constants.signals[receipt.signal]))
+      ) {
         return { code: 1, output: 'Native verification command receipt is missing' }
       }
-      return { code: receipt.code, output: Buffer.from(receipt.output, 'base64').toString(), outputLimited: receipt.outputLimited }
+      const output = Buffer.from(receipt.output, 'base64')
+      if (output.length > maxOutputBytes || output.toString('base64') !== receipt.output) {
+        return { code: 1, output: 'Native verification command receipt is invalid' }
+      }
+      return { code: receipt.code, output: output.toString(), outputLimited: receipt.outputLimited,
+        ...(receipt.signal ? { signal: receipt.signal } : {}) }
     }
     const initial = buildVerificationInvocation({ executable, broker, home, worker, temp, write: required.write, command: 'true', env, protectedRoots })
     await writeFile(path.join(home, 'config.toml'), initial.config, { mode: 0o600 })

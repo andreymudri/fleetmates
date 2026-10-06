@@ -842,15 +842,110 @@ test('required verification rejects a runtime without independent restriction re
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-test('verification trampoline preserves child exits and bounded output without claiming confinement', async () => {
+async function injectedVerification(fn, alter = () => {}) {
+  const { createVerificationExecutor } = await import('../scripts/harnesses/codex.mjs')
+  const { mkdir } = await import('node:fs/promises')
+  const root = await mkdtemp(path.join(tmpdir(), 'fm-injected-receipt-'))
+  const worker = path.join(root, 'worker'), bin = path.join(root, 'bin')
+  await mkdir(worker); await mkdir(bin)
+  await writeFile(path.join(bin, 'codex'), 'dummy', { mode: 0o700 })
+  const enforcement = { kind: 'required', harness: 'codex', sandboxMode: 'files', sandbox: 'workspace-write', mode: null, read: true, write: true, execute: true, network: false, sharedRefs: false, publication: false, addWritableRoots: false }
+  let executor
+  let alterCommand = () => {}
+  const factory = () => createVerificationExecutor({ sandbox: { cwd: worker, meta: { mode: 'files' } }, enforcement, platform: 'linux', env: { PATH: bin }, run: async (_command, _cwd, options) => {
+    const payload = JSON.parse(options.argv.at(-1))
+    const program = payload.argv[1]
+    if (!program?.includes('Object.entries(')) {
+      const receipt = { code: 0, output: '', outputLimited: false }
+      alterCommand(receipt)
+      return { code: 0, output: payload.marker + JSON.stringify(receipt) + '\n' }
+    }
+    const paths = JSON.parse(program.match(/Object.entries\((\{.*?\})\)/)[1])
+    const marker = program.match(/FM_VERIFY_[a-f0-9]+ /)[0]
+    await writeFile(paths.inside, 'dummy')
+    const observed = { inside: true, outside: false, broker: false, git: false, temporary: false, network: 'EPERM' }
+    const receipt = { code: 0, output: Buffer.from(marker + JSON.stringify(observed) + '\n').toString('base64'), outputLimited: false }
+    const result = { code: 0, output: '' }
+    const originalOutput = receipt.output
+    await alter({ paths, observed, receipt, result, payload, options })
+    if (receipt.output === originalOutput) receipt.output = Buffer.from(marker + JSON.stringify(observed) + '\n').toString('base64')
+    result.output ||= payload.marker + JSON.stringify(receipt) + '\n'
+    return result
+  } })
+  try { await fn(async () => { executor = await factory(); return executor }, worker, change => { alterCommand = change }) }
+  finally { await executor?.close(); await rm(root, { recursive: true, force: true }) }
+}
+
+test('injected valid independently checked restriction receipt requires a successful executor', async () => {
+  await injectedVerification(async create => {
+    const executor = await create()
+    assert.equal(executor.evidence.observed, true)
+    assert.equal(typeof executor.exec, 'function')
+    assert.equal(typeof executor.close, 'function')
+  })
+})
+
+test('injected executor rejects invalid finite limits before running a command', async () => {
+  await injectedVerification(async (create, worker) => {
+    const executor = await create()
+    for (const key of ['timeoutMs', 'maxOutputBytes']) {
+      for (const value of [0, -1, NaN, Infinity, 1.5]) {
+        await assert.rejects(executor.exec(process.execPath, worker, { argv: ['-e', ''], [key]: value }), /Invalid verification limits/)
+      }
+    }
+  })
+})
+
+test('injected command receipts reject malformed exit, signal and output observations', async () => {
+  await injectedVerification(async (create, worker, change) => {
+    const executor = await create()
+    for (const alter of [
+      receipt => { receipt.code = -1 }, receipt => { receipt.code = 256 }, receipt => { receipt.code = 1.5 },
+      receipt => { receipt.output = null }, receipt => { receipt.outputLimited = null },
+      receipt => { receipt.signal = 'invented' }, receipt => { receipt.signal = 'SIGTERM'; receipt.code = 0 },
+      receipt => { receipt.signal = ['SIGTERM']; receipt.code = 143 },
+      receipt => { receipt.output = Buffer.from('x'.repeat(33)).toString('base64') },
+      receipt => { receipt.output = Buffer.from('x'.repeat(34)).toString('base64') },
+    ]) {
+      change(alter)
+      const result = await executor.exec(process.execPath, worker, { argv: ['-e', ''], maxOutputBytes: 32 })
+      assert.equal(result.code, 1)
+      assert.match(result.output, /receipt is (missing|invalid)/)
+    }
+    change(receipt => { receipt.output = Buffer.from('x'.repeat(32)).toString('base64') })
+    assert.equal((await executor.exec(process.execPath, worker, { argv: ['-e', ''], maxOutputBytes: 32 })).output.length, 32)
+    change(receipt => { receipt.output = Buffer.from('x'.repeat(32769)).toString('base64') })
+    assert.equal((await executor.exec(process.execPath, worker, { argv: ['-e', ''], maxOutputBytes: 65536 })).code, 1)
+  })
+})
+
+for (const [name, alter] of [
+  ['missing command receipt', ({ result }) => { result.output = 'no receipt' }],
+  ['malformed command receipt', ({ result, payload }) => { result.output = payload.marker + '{' }],
+  ['incomplete command receipt', ({ receipt }) => { delete receipt.code }],
+  ['limited command receipt', ({ receipt }) => { receipt.outputLimited = true }],
+  ['failed command receipt', ({ receipt }) => { receipt.code = 9 }],
+  ['noncanonical output encoding', ({ receipt }) => { receipt.output += '!' }],
+  ['oversized receipt output', ({ receipt }) => { receipt.output = Buffer.concat([Buffer.from(receipt.output, 'base64'), Buffer.alloc(32768, 32)]).toString('base64') }],
+  ['missing inside file', async ({ paths }) => { await rm(paths.inside) }],
+  ['observed inside denial', ({ observed }) => { observed.inside = false }],
+  ...['outside', 'broker', 'git', 'temporary'].map(key => [`observed ${key} write`, ({ observed }) => { observed[key] = true }]),
+  ...['outside', 'broker', 'git', 'temporary'].map(key => [`actual ${key} write`, async ({ paths }) => { await writeFile(paths[key], 'dummy') }]),
+  ['network allowed', ({ observed }) => { observed.network = 'allowed' }],
+]) test(`injected restriction fixture rejects ${name}`, async () => {
+  await injectedVerification(async create => { await assert.rejects(create(), /not independently observed/) }, alter)
+})
+
+test('verification trampoline preserves child exits and bounded output without claiming confinement', { skip: process.platform === 'win32' }, async () => {
   const { buildVerificationInvocation } = await import('../scripts/harnesses/codex.mjs')
   const { defaultExec } = await import('../scripts/gate-runner.mjs')
   const root = await mkdtemp(path.join(tmpdir(), 'fm-trampoline-'))
   try {
-    const invoke = async source => {
+    const invoke = async (source, options = {}) => {
       const request = buildVerificationInvocation({ executable: '/fixture/codex', broker: root, home: root, worker: root, temp: root, write: false,
         command: process.execPath, argv: ['-e', source], env: { PATH: process.env.PATH }, marker: 'fixture-receipt ', maxOutputBytes: 32 })
-      const result = await defaultExec(process.execPath, root, { argv: request.argv.slice(-3), timeoutMs: 5000, maxOutputBytes: 4096 })
+      const result = await defaultExec(process.execPath, root, { argv: request.argv.slice(-3), timeoutMs: 5000, maxOutputBytes: 4096, ...options })
+      if (options.timeoutMs) return result
       assert.equal(result.code, 0)
       assert.ok(result.output.startsWith('fixture-receipt '), result.output)
       return JSON.parse(result.output.slice('fixture-receipt '.length))
@@ -859,8 +954,24 @@ test('verification trampoline preserves child exits and bounded output without c
     assert.equal(failed.code, 9)
     assert.equal(Buffer.from(failed.output, 'base64').toString(), 'fixture')
     assert.equal(failed.outputLimited, false)
+    const consoleOutput = await invoke('console.log("stdout");console.error("stderr")')
+    assert.equal(Buffer.from(consoleOutput.output, 'base64').toString(), 'stdout\nstderr\n')
+    const boundary = await invoke('process.stdout.write("x".repeat(32))')
+    assert.equal(Buffer.from(boundary.output, 'base64').length, 32)
+    assert.equal(boundary.outputLimited, false)
     const limited = await invoke('require("node:fs").writeSync(1,"x".repeat(100))')
     assert.equal(limited.outputLimited, true)
     assert.ok(Buffer.from(limited.output, 'base64').length <= 32)
+    const overflow = await invoke('require("node:fs").writeSync(1,"x".repeat(100000))')
+    assert.equal(overflow.outputLimited, true)
+    assert.ok(Buffer.from(overflow.output, 'base64').length <= 32)
+    if (process.platform !== 'win32') {
+      const signalled = await invoke('process.kill(process.pid,"SIGTERM")')
+      assert.equal(signalled.code, 143)
+      assert.equal(signalled.signal, 'SIGTERM')
+    }
+    const timedOut = await invoke('setInterval(()=>{},1000)', { timeoutMs: 200 })
+    assert.equal(timedOut.timedOut, true)
+    assert.notEqual(timedOut.code, 0)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
