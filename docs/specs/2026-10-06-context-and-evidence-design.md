@@ -58,3 +58,26 @@ canonical finding's confirmed status in a different lens. Unknown precision
 and recall remain null. The mode is reporting only; no routing, mandatory
 review policy or effort selection changes. Calibrated datasets and real
 workflow evaluations remain outstanding.
+
+## Node/TypeScript verifier profile and command outcomes
+
+An optional `verifierProfile` in `workflow-report` declares `package`,
+`platform` (linux, darwin or win32) and `required` script names (test by default).
+The versioned Node/TypeScript profile reuses existing gate inference, including
+runner-specific test inventory and focus guards, fileset/ownership checks and
+agent review. It emits a proposed phase configuration and acceptance mappings,
+never modifies a tracked manifest or runs a package command. Unsupported or
+empty declarations fail early; missing required scripts make the profile not
+ready. Script order and identity are reproducible independently of host CPU
+scheduling hints. Project owners must review and track the proposal through
+existing ownership rules. Profile readiness does not satisfy acceptance.
+
+Actual command checks now attach a compact structured outcome. Exit zero is
+success only when no timeout occurred. A timer expiration from the process
+runner is explicitly timeout, including a process that exits zero while being
+interrupted. Other nonzero exits remain unclassified: arbitrary stderr cannot
+prove whether a failure is code, environment, infrastructure or flaky. The
+report directs inspection before code changes, with no automatic retry or
+relaxation of verification. These outcome hints never change mandatory gates.
+Full semantic acceptance, stack-specific execution adapters, independent flaky
+classification and retained full-log evidence remain separate obligations.

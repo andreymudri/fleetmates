@@ -1,4 +1,5 @@
 import { NAMES } from './names.mjs'
+import { commandOutcome } from './verifier-profile.mjs'
 import { runTestChangePolicy } from './test-change-policy.mjs'
 import { spawn } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
@@ -423,6 +424,7 @@ export function defaultExec(cmd, cwd, { timeoutMs = COMMAND_TIMEOUT_MS, onSpawn 
       const notice = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`
       resolve({
         code: code || 1,
+        timedOut: true,
         output: `${output}\n— timed out after ${notice}; its process group was killed`,
       })
     })
@@ -560,17 +562,18 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
   }
   const contract = check.report ? await prepareReport(check.report, cwd, previewDir) : null
   try {
-    const { code, output } = await exec(check.run, cwd, {
+    const { code, output, timedOut = false } = await exec(check.run, cwd, {
       timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS,
       onSpawn,
       ...(contract ? { env: contract.env } : {}),
     })
-    const passed = code === 0
+    const passed = code === 0 && !timedOut
     const result = {
       name: check.name,
       kind: 'command',
       status: passed ? 'pass' : 'fail',
       exitCode: code,
+      outcome: commandOutcome({ code, timedOut }),
       output: passed ? '' : tail(output, TAIL_LINES),
       optional: check.optional === true,
     }

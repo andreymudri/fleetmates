@@ -8,7 +8,7 @@ close the parent roadmap or claim real-model evaluation outcomes.
 | W01 | Explicit session binding, bounded Stop guard, suspension/resume/abandon refs, finish refusal, digest/doctor interruption reporting | Live callback capture; broader completion identity and execution-state contracts |
 | W02 | Exact input identity and local acceptance/reviewer summaries | Curated dataset, repeated real workflows, independent outcomes, held-out baseline and resource metrics |
 | W03 | Versioned bounded bundles, anchored human learnings in implementation/review/integration prompts, hashes, provenance and mandatory preservation | Acceptance/dependency bundles, Vault selection, review evidence invalidation and observed selection quality |
-| W04 | Acceptance-to-current-evidence mapping; human-required and unresolved states | Stack verifier profiles, execution adapters and failure classification |
+| W04 | Acceptance-to-current-evidence mapping; human-required and unresolved states; reviewable versioned Node/TypeScript profile; actual command timeout metadata with conservative unknown failure status | Further stack profiles, execution adapters, retained full logs and independent code/environment/infrastructure/flaky classification |
 | W05 | Git-computed test-change policy with declared exceptions and honest temporal/coverage limits | Independent behavioral red/green execution and richer ordering evidence |
 | W06 | No implementation claim | Rendered targets, behavioral/accessibility evidence and project adapter |
 | W07 | Scoped human learning selection; no automatic knowledge writes | Owned learning commits, feedback-to-tasks and authoritative plan amendments |

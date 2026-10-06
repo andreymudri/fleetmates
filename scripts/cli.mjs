@@ -4650,7 +4650,9 @@ export async function runCli(argv, io = { out: console.log }) {
       } else {
         const { summarizeAcceptance, reviewerMetrics } = await import('./workflow-evidence.mjs')
         const { summarizeReviewOutcomes } = await import('./review-outcomes.mjs')
+        const { nodeVerifierProfile } = await import('./verifier-profile.mjs')
         result = { acceptance: summarizeAcceptance(input), review: input.findings == null ? null : reviewerMetrics(input.findings, input.labeledDefects ?? null),
+          verifierProfile: input.verifierProfile == null ? null : nodeVerifierProfile(input.verifierProfile),
           reviewOutcomes: input.reviewOutcomes == null ? null : summarizeReviewOutcomes({ ...input.reviewOutcomes, inputs: input.inputs }) }
       }
       io.out(workflowJson(result))

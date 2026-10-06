@@ -627,3 +627,13 @@ canonical group and reports metrics by lens, category and model. Stale inputs,
 missing duplicate targets and cycles cannot silently become current evidence.
 References and outcomes are observations, not independent reproduction proof.
 This is reporting only; it does not change review policy or model selection.
+
+A `workflow-report` input can also include `verifierProfile` with a `package`
+object, `platform` (`linux`, `darwin` or `win32`) and optional `required` npm
+script names (`test` by default; also `typecheck`, `lint`, `build`). It emits a
+versioned Node/TypeScript proposal using existing gate inference and required
+fileset, ownership and review checks. Missing scripts make it not ready. Review
+and track this proposal before using it; generating it runs no commands and
+satisfies no acceptance requirement. Command gate results distinguish actual
+timeouts from otherwise unclassified failures; inspect evidence before deciding
+whether a code change or retry is appropriate.
