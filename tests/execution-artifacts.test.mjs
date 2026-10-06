@@ -1,7 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, readdir, writeFile, stat, chmod, symlink, link, mkdir, open, readFile } from 'node:fs/promises'
-import { execFileSync } from 'node:child_process'
+import { mkdtemp, rm, readdir, writeFile, stat, lstat, chmod, symlink, link, mkdir, open, readFile, rename } from 'node:fs/promises'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -19,6 +20,25 @@ async function repository(t) {
 const directory = request => path.join(request.common, 'fleetmates-artifacts', hash(request.runId))
 const artifactFile = (request, reference) => path.join(directory(request), hash(JSON.stringify(reference)) + '.bin')
 const retain = (request, bytes, extra = {}) => retainExecutionArtifact({ ...request, kind: 'stdout', bytes, ...extra })
+
+async function createFifo(file, execute = spawnSync) {
+  const result = execute('mkfifo', [file], { encoding: 'utf8', timeout: 1000, maxBuffer: 4096 })
+  if (result.error?.code === 'ENOENT' && result.error.path === 'mkfifo' && result.error.syscall === 'spawnSync mkfifo'
+      && result.pid === 0 && result.status === null && result.signal === null && result.output === null
+      && result.stdout === undefined && result.stderr === undefined) {
+    await assert.rejects(lstat(file), { code: 'ENOENT' })
+    return false
+  }
+  assert.equal(result.error, undefined, 'mkfifo failed to execute')
+  assert.equal(result.status, 0, 'mkfifo failed')
+  assert.equal(result.signal, null, 'mkfifo was interrupted')
+  assert.ok(Number.isSafeInteger(result.pid) && result.pid > 0, 'mkfifo must report a spawned process')
+  assert.equal(result.stdout, '', 'mkfifo produced unexpected stdout')
+  assert.equal(result.stderr, '', 'mkfifo produced unexpected stderr')
+  assert.deepEqual(result.output, [null, '', ''], 'mkfifo output fields are inconsistent')
+  assert.ok((await lstat(file)).isFIFO(), 'mkfifo did not create a FIFO')
+  return true
+}
 
 test('retains exact bytes in common Git storage and rejects altered or missing bytes', async t => {
   const request = await repository(t), original = Buffer.from([0, 255, 128, 10])
@@ -142,11 +162,58 @@ test('rejects symlink, hardlink and directory artifact substitutions', async t =
 test('nonblocking reads reject FIFO artifacts as non-regular', { skip: process.platform === 'win32', timeout: 5000 }, async t => {
   const request = await repository(t), { reference } = await retain(request, Buffer.alloc(0)), file = artifactFile(request, reference)
   await rm(file)
-  execFileSync('mkfifo', [file], { timeout: 1000 })
+  if (!await createFifo(file)) { t.skip('mkfifo is unavailable; FIFO denial was not exercised'); return }
   await chmod(file, 0o600)
   const module = new URL('../scripts/execution-artifacts.mjs', import.meta.url).href
   const code = `import { readExecutionArtifact } from ${JSON.stringify(module)}; import assert from 'node:assert/strict'; await assert.rejects(readExecutionArtifact(${JSON.stringify({ ...request, reference })}), /regular/)`
   assert.equal(execFileSync(process.execPath, ['--input-type=module', '-e', code], { timeout: 2000 }).length, 0)
+})
+
+test('FIFO capability handling rejects command failures, inconsistent output and false success', async t => {
+  const request = await repository(t), file = path.join(request.common, 'fifo-capability')
+  const absent = () => ({ error: Object.assign(new Error('missing command'), { code: 'ENOENT', path: 'mkfifo', syscall: 'spawnSync mkfifo' }),
+    pid: 0, status: null, signal: null, output: null, stdout: undefined, stderr: undefined })
+  const success = () => ({ pid: 1, status: 0, signal: null, output: [null, '', ''], stdout: '', stderr: '' })
+  assert.equal(await createFifo(file, () => absent()), false)
+  const invalid = [
+    { ...absent(), error: Object.assign(new Error('permission denied'), { code: 'EACCES' }) },
+    { ...absent(), error: Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }) },
+    { ...absent(), status: 1 }, { ...absent(), pid: 1 }, { ...absent(), signal: 'SIGTERM' },
+    { ...absent(), stdout: 'unexpected' }, { ...absent(), stderr: 'unexpected' }, { ...absent(), output: [null, '', ''] },
+    { ...absent(), error: Object.assign(new Error('other command'), { code: 'ENOENT', path: 'other', syscall: 'spawnSync other' }) },
+    { ...success(), error: Object.assign(new Error('execution failed'), { code: 'EACCES' }) },
+    { ...success(), status: 1 }, { ...success(), signal: 'SIGTERM' }, { ...success(), pid: 0 },
+    { ...success(), stdout: 'unexpected', output: [null, 'unexpected', ''] },
+    { ...success(), stderr: 'unexpected', output: [null, '', 'unexpected'] },
+    { ...success(), output: [null, 'inconsistent', ''] }, { ...success(), output: null },
+  ]
+  for (const result of invalid) await assert.rejects(createFifo(file, () => result), { code: 'ERR_ASSERTION' })
+  await writeFile(file, 'not a FIFO')
+  await assert.rejects(createFifo(file, () => absent()))
+  await assert.rejects(createFifo(file, () => success()), /FIFO/)
+  await rm(file)
+  await assert.rejects(createFifo(file, () => success()), { code: 'ENOENT' })
+})
+
+test('Node builtin Unix socket artifacts receive an explicit non-regular file denial', { skip: process.platform === 'win32', timeout: 5000 }, async t => {
+  const request = await repository(t), { reference } = await retain(request, Buffer.alloc(0))
+  const file = artifactFile(request, reference), socket = path.join(path.dirname(request.common), 'probe.sock')
+  const server = createServer()
+  t.after(() => new Promise(resolve => server.close(() => resolve())))
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(socket, () => { server.off('error', reject); resolve() })
+    })
+  } catch (error) {
+    if (['EAFNOSUPPORT', 'EPROTONOSUPPORT', 'ENOTSUP'].includes(error.code)) { t.skip(`Unix socket fixture unavailable: ${error.code}`); return }
+    throw error
+  }
+  assert.ok((await lstat(socket)).isSocket())
+  await chmod(socket, 0o600)
+  await rm(file); await rename(socket, file)
+  assert.ok((await lstat(file)).isSocket())
+  await assert.rejects(readExecutionArtifact({ ...request, reference }), /regular/)
 })
 
 test('rejects linked or public storage directories and public artifact modes', async t => {

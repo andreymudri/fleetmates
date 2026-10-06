@@ -62,6 +62,7 @@ function regular(info) {
 }
 async function readBytes(file, reference, retention, sync = false) {
   if (reference.byteLength > retention.maxArtifactBytes) throw new Error('Artifact byte bound exceeded')
+  regular(await lstat(file))
   const handle = await open(file, readFlags())
   try {
     const before = await handle.stat()
