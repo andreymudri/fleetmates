@@ -91,19 +91,27 @@ external links and bounded scans cannot establish hermetic reproducibility.
 ## Actual service and native verification observations
 
 `probeCapabilities({required: ['harness','render','ci','vault'], harness: 'codex'})`
-used the real default executor and installed tools, with no model turn:
+used the real default executor and installed tools. These probe commands
+started no implementation/review model turns:
 
 | Probe | Actual observation | Limit |
 | --- | --- | --- |
-| `codex login status` | available, authenticated status observed | No implementation/review model was started by T5 |
+| `codex login status` | available, authenticated status observed | This authentication probe started no implementation/review model turn |
 | `chromium --version` | available, 152.0.7977.82 | No page rendered or interaction/accessibility check performed |
 | `gh auth status --active --hostname github.com --json hosts` | available, authenticated active account observed | No workflow dispatch or exact-input CI acceptance receipt |
 | Vault | unavailable, no supported read-only adapter installed | No installation, download, permission or write |
 
 Including Vault made aggregate readiness false. With `required: []`, the
 actual producer returned ready and an empty observations list. The CLI fixture
-required only harness/render/ci and reported their availability. Tokens and
-USD are null; T5 made zero model calls. No paid API fallback was used.
+required only harness/render/ci and reported their availability. The local
+validation/preflight commands described in this section started zero
+implementation/review model turns; their model-token and USD fields are null.
+Documentation-agent resources are separate evidence: the T5 documentation
+teammate was an actual Codex model turn, and these command metrics do not
+measure its resources or total delivery costs. The host's authenticated
+predecessor reviewer trial also used a real model and is reported separately
+below. Neither observation is campaign calibration. These local commands
+used no paid API fallback.
 
 Required-policy readiness is a separate observation. Actual
 `createVerificationExecutor` for a Codex clone-mode read-only reviewer threw
@@ -160,7 +168,8 @@ The first two returned 4 with `unsupported sandbox enforcement for required
 role policy`; environment/capabilities were null. The missing policy returned
 2. These refusals preceded run startup. Supported resolver rows do not imply
 that every dispatch command selects a supported mode, including integrator
-and Cursor reviewer dispatch. No model or shared-ref effect was attempted.
+and Cursor reviewer dispatch. These refusal commands attempted no
+implementation/review model turn or shared-ref effect.
 
 Dispatch, dispatch-reviews and dispatch-integrator contract regression tests
 were run as part of the affected suite. Their committed flags are
@@ -251,8 +260,9 @@ exact-input CI, independently measured real workflows, calibrated reviews and
 rendered UI/behavior evidence. Authentication and bounded local fixture passes
 are not those deliverables. W02's draft 36 trials were not run; five private
 graders remain drafts. A discarded grader setup model invocation is excluded
-from campaign evidence; the host reports the corrected refusing-binary setup
-made zero model calls.
+from campaign evidence; the host reports that the corrected refusing-binary
+grader setup commands started zero implementation/review model turns. That
+setup observation does not measure documentation-agent or total delivery costs.
 
 Real Claude callback validation remains incomplete. The host reports only
 SessionStart receipts; weekly capacity blocked other real callback/model
