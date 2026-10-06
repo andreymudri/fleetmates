@@ -81,3 +81,25 @@ report directs inspection before code changes, with no automatic retry or
 relaxation of verification. These outcome hints never change mandatory gates.
 Full semantic acceptance, stack-specific execution adapters, independent flaky
 classification and retained full-log evidence remain separate obligations.
+
+## Anchored acceptance and dependency context
+
+Implementation briefs, workflows, reviewer prompts and integrator prompts now
+select task contracts from the same committed plan anchor as global constraints.
+A task opts into an acceptance contract with `**Acceptance:**` in its body.
+The whole task section is mandatory context, preserving adjacent constraints,
+filesets and verification commands rather than selecting an isolated sentence.
+Explicit `**Depends:** T1` declarations select the dependency task's whole
+contract. Cached task dependency fields and co-change history cannot add or
+remove these anchored dependencies. Phase roles select the contracts for their
+member task IDs. Unrelated tasks and plans with no acceptance/dependency
+contracts retain the previous behavior.
+
+Each item records the repository-relative plan path, exact source lines,
+content hash and selection reason. Fenced headings do not create extra tasks
+or terminate a contract. A missing declared dependency refuses generation.
+Mandatory contract overflow also refuses dispatch; it cannot silently drop
+acceptance criteria. Files must be tracked regular blobs, at most 512 KiB;
+local or later run-branch edits do not replace the anchored source. Anchor
+changes generate new bundle identities. Learnings remain separately advisory;
+this feature cannot grant permissions or amend an authoritative plan.

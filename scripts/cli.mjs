@@ -1077,6 +1077,7 @@ async function planAtAnchor(root, planPath, flags, io, contextAnchor = {}) {
     const relPath = path.isAbsolute(planPath)
       ? path.relative(root, planPath).split(path.sep).join('/')
       : planPath
+    contextAnchor.planPath = relPath
     return await git.fileAtCommit(anchorSha, relPath)
   } catch (err) {
     const where = anchorSha ? ` at anchor ${anchorSha}` : ''
@@ -3778,8 +3779,8 @@ export async function runCli(argv, io = { out: console.log }) {
     try {
       const { learningBundles } = await import('./learning-context.mjs')
       const { renderAdvisoryContext } = await import('./brief.mjs')
-      const contextTask = { id: `phase-${gateKey}`, files: [...new Set(derived.tasks.filter(t => String(t.phase) === gateKey).flatMap(t => t.files))] }
-      const contextBundles = await learningBundles({ git: derived.git, commit: derived.anchorSha, tasks: [contextTask], role: 'integrator' })
+      const contextTask = { id: `phase-${gateKey}`, members: derived.tasks.filter(t => String(t.phase) === gateKey).map(t => t.id), files: [...new Set(derived.tasks.filter(t => String(t.phase) === gateKey).flatMap(t => t.files))] }
+      const contextBundles = await learningBundles({ git: derived.git, commit: derived.anchorSha, planPath: path.isAbsolute(planPath) ? path.relative(root, planPath).split(path.sep).join('/') : planPath, tasks: [contextTask], role: 'integrator' })
       if (contextBundles[contextTask.id]) learningContext = '\n' + renderAdvisoryContext(contextBundles[contextTask.id], { task: contextTask.id, role: 'integrator' })
     } catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
     const persona = await personaFor('integrator') + learningContext
@@ -5260,8 +5261,9 @@ export async function runCli(argv, io = { out: console.log }) {
       const { learningBundles } = await import('./learning-context.mjs')
       const baseBranch = await resolveBaseBranch(git, flags.base)
       const commit = await git.mergeBase(await git.resolveRef(`refs/heads/${baseBranch}`), await git.resolveRef(head.ref))
-      const contextTask = { id: `phase-${phaseName}`, files: [...new Set(tasksOfPhase(plan, phaseName).flatMap(t => t.files ?? []))] }
-      const contextBundles = await learningBundles({ git, commit, tasks: [contextTask], role: 'reviewer' })
+      const contextTask = { id: `phase-${phaseName}`, members: tasksOfPhase(plan, phaseName).map(t => t.id), files: [...new Set(tasksOfPhase(plan, phaseName).flatMap(t => t.files ?? []))] }
+      const contextPlanPath = typeof flags.plan === 'string' ? flags.plan : (typeof plan.planPath === 'string' ? plan.planPath : null)
+      const contextBundles = await learningBundles({ git, commit, planPath: contextPlanPath && path.isAbsolute(contextPlanPath) ? path.relative(root, contextPlanPath).split(path.sep).join('/') : contextPlanPath, tasks: [contextTask], role: 'reviewer' })
       spec = generateReviewDispatch({
         contextBundle: contextBundles[contextTask.id] ?? null,
         planPath: typeof flags.plan === 'string' ? flags.plan : (typeof plan.planPath === 'string' ? plan.planPath : ''),

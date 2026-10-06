@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { buildContextBundle } from './context-bundle.mjs'
+import { selectPlanContracts } from './plan-context.mjs'
 
 export function selectLearnings(markdown, files) {
   if (typeof markdown !== 'string' || !Array.isArray(files) || files.some(f => typeof f !== 'string')) throw new Error('Invalid learning context inputs')
@@ -29,17 +30,23 @@ export function selectLearnings(markdown, files) {
   return selected
 }
 
-export async function learningBundles({ git, commit, tasks, role = 'implementer', maxBytes = 24000 }) {
+export async function learningBundles({ git, commit, tasks, role = 'implementer', maxBytes = 24000, planPath = null }) {
   if (!git || !commit) return {}
-  const file = 'fleetmates.learnings.md'
-  const mode = await git.fileModeAtCommit(commit, `:(literal)${file}`)
-  if (!mode) return {}
-  if (!['100644', '100755'].includes(mode)) throw new Error('Learning guidance must be a tracked regular file')
-  if (await git.fileSizeAtCommit(commit, file) > 512 * 1024) throw new Error('Learning guidance exceeds 512 KiB; owner must condense it')
-  const markdown = await git.fileAtCommit(commit, file)
+  const readTracked = async (file, required) => {
+    const mode = await git.fileModeAtCommit(commit, `:(literal)${file}`)
+    if (!mode && !required) return ''
+    if (!['100644', '100755'].includes(mode)) throw new Error('Context guidance must be a tracked regular file')
+    if (await git.fileSizeAtCommit(commit, file) > 512 * 1024) throw new Error('Context guidance exceeds 512 KiB; owner must condense it')
+    return git.fileAtCommit(commit, file)
+  }
+  const markdown = await readTracked('fleetmates.learnings.md', false)
+  if (planPath != null && (typeof planPath !== 'string' || !planPath || path.posix.isAbsolute(planPath)
+      || planPath.includes('\\') || planPath.split('/').some(part => !part || part === '..' || part === '.'))) throw new Error('Context plan path must be repository-relative')
+  const planMarkdown = planPath ? await readTracked(planPath, true) : null
   const bundles = {}
   for (const task of tasks) {
-    const items = selectLearnings(markdown, task.files)
+    const contracts = planMarkdown === null ? [] : selectPlanContracts(planMarkdown, planPath, task)
+    const items = [...contracts, ...selectLearnings(markdown, task.files)]
     if (items.length) bundles[task.id] = buildContextBundle({ task: task.id, role, commit, items, maxBytes, vault: 'unavailable' })
   }
   return bundles

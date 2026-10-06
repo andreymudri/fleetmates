@@ -637,3 +637,11 @@ and track this proposal before using it; generating it runs no commands and
 satisfies no acceptance requirement. Command gate results distinguish actual
 timeouts from otherwise unclassified failures; inspect evidence before deciding
 whether a code change or retry is appropriate.
+
+For anchored context, a task may include an `**Acceptance:**` section in its
+tracked plan. Its entire task contract then enters the bounded bundle as
+mandatory context. Existing `**Depends:** T1` declarations also include the
+upstream task's contract. Implementation, review and integration use the plan
+anchor, with source lines and hashes; later edits do not silently replace it.
+Missing dependencies or mandatory budget overflow refuse dispatch. This does
+not infer dependencies from file history or treat learnings as tracked policy.
