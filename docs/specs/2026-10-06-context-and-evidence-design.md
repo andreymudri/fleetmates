@@ -158,3 +158,35 @@ report exposes that limitation for each field. It does not turn a CI PASS into
 semantic acceptance, independently classify a failure, repair code, publish,
 merge or deploy. Full-input CI receipts, task repair budgets, log reproduction
 and effect reconciliation remain outstanding W09 work.
+
+## Reviewable feedback drafts
+
+`feedback-draft --file <json>` prepares proposals from a committed plan at the
+current branch tip. Input declares `runId`, ISO `date`, the five-field `inputs`
+identity, `planPath` and nonempty `findings`. The plan content hash must match
+inputs.plan; branch movement refuses the draft. Findings require unique `id`,
+a single-line `title`, `type` (rule, decision, pitfall or defect), `description`,
+nonempty affected `scope` and source `evidence` references. References remain
+observations, not authenticated human approval or independent reproduction.
+
+Defects also require explicit `files` and nonempty `acceptance` criteria.
+Optional `dependsOnTasks` names existing task IDs and `dependsOnFindings`
+names other proposed defects. No fileset is inferred from vague prose. New
+IDs follow existing numeric task IDs; dependencies on all terminal existing
+tasks place proposals after the existing plan. File overlap and explicit defect
+dependencies use the current phase planner; cycles or unknown IDs refuse the
+draft. Paths cannot name Git internals, run state, traversal or broad globs.
+Description, evidence and acceptance strings are quoted JSON data so embedded
+Markdown cannot introduce additional tasks or erase dependencies.
+
+Learnings retain run/date/scope/type/source evidence with canonical owner
+repo-learning and state proposed. The output is draft-only and requires review.
+No plan, learning file, run state or Vault is written. Applying defects to the
+authoritative anchor and committing reviewed learnings through ownership rules
+remain explicit obligations, as do stale/superseded knowledge repair and Vault
+approval. A generated proposal cannot claim amendment or completion.
+
+All workflow JSON file inputs now use a fixed 1 MiB read bound on an opened
+regular file. Available no-follow/nonblocking flags reject links and FIFOs;
+size is checked both before and during the bounded read. Oversized or growing
+input cannot make the parser drain unbounded data.

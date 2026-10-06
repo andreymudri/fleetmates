@@ -665,3 +665,16 @@ pass. Exit codes are 0 for passed CI checks, 4 for unmet checks and 2 for an
 invalid/unavailable query. Other input fields are declared associations, not
 independently verified by GitHub metadata. Uncommitted changes are outside its
 scope. This command performs no repairs, publication, merge or deployment.
+
+`feedback-draft --file <json>` prepares reviewed feedback proposals without
+writing project files. Input has `runId`, `date` (ISO day), `inputs`, `planPath`
+and `findings`. inputs.commit must match the current branch tip and inputs.plan
+must be the SHA-256 of the committed plan. Each finding declares `id`, `title`,
+`type` (rule, decision, pitfall, defect), `description`, `scope` and `evidence`.
+Defects also declare exact `files` and `acceptance`; optional `dependsOnTasks`
+and `dependsOnFindings` make dependencies explicit. Proposed tasks follow all
+existing terminal tasks. Learnings stay proposed and owned by the repo.
+Review the draft and apply it through authoritative plan and ownership rules;
+this command does not amend the plan, write learnings or call Vault.
+Workflow JSON inputs are limited to opened regular files and an actual 1 MiB
+read budget.

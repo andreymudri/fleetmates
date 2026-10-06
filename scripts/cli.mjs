@@ -6,6 +6,7 @@ import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUT
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan, PlanParseError } from './plan-parser.mjs'
+import { readWorkflowInput } from './workflow-input.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { renderUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
@@ -148,6 +149,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   context-bundle --file <json> [--root <path>]
   workflow-report --file <json> [--root <path>]
   ci-status --file <json> [--root <path>]
+  feedback-draft --file <json> [--root <path>]
   bind-session --run <id> --plan <path> --session <id> [--base <branch>] [--root <path>]
   suspend --run <id> --plan <path> [--base <branch>] [--root <path>]
   abandon --run <id> --plan <path> [--base <branch>] [--root <path>]
@@ -299,6 +301,7 @@ export const REQUIRED = {
   'context-bundle': ['file'],
   'workflow-report': ['file'],
   'ci-status': ['file'],
+  'feedback-draft': ['file'],
   'bind-session': ['run', 'plan', 'session'],
   suspend: ['run', 'plan'],
   resume: ['run'],
@@ -380,6 +383,7 @@ export const KNOWN_FLAGS = {
   'context-bundle': ['file'],
   'workflow-report': ['file'],
   'ci-status': ['file'],
+  'feedback-draft': ['file'],
   'bind-session': ['run', 'plan', 'base', 'session'],
   suspend: ['run', 'plan', 'base'],
   resume: ['run'],
@@ -4653,12 +4657,33 @@ export async function runCli(argv, io = { out: console.log }) {
     return failed > 0 ? 1 : 0
   }
 
+  if (command === 'feedback-draft') {
+    try {
+      const input = await readWorkflowInput(flags.file)
+      const planPath = input.planPath
+      if (typeof planPath !== 'string' || !planPath.endsWith('.md') || path.posix.isAbsolute(planPath)
+          || /[\\:\p{C}]/u.test(planPath) || planPath.split('/').some(v => !v || v === '.' || v === '..')) throw new Error('Feedback plan path must be repository-relative Markdown')
+      const git = createGit({ cwd: root })
+      const head = await git.headBranch()
+      if (!head.ok) throw new Error('Feedback requires a checked-out branch')
+      const commit = await git.resolveRef(head.ref)
+      if (input.inputs?.commit !== commit) throw new Error('Feedback commit does not match current branch tip')
+      const mode = await git.fileModeAtCommit(commit, `:(literal)${planPath}`)
+      if (!['100644', '100755'].includes(mode) || await git.fileSizeAtCommit(commit, planPath) > 512 * 1024) throw new Error('Feedback plan must be a bounded committed regular file')
+      const markdown = await git.fileAtCommit(commit, planPath)
+      const { prepareFeedbackDraft } = await import('./feedback-draft.mjs')
+      const draft = prepareFeedbackDraft({ ...input, markdown })
+      if (await git.resolveRef(head.ref) !== commit) throw new Error('Branch tip changed while drafting feedback')
+      io.out(workflowJson({ ...draft, planPath }))
+      return 0
+    } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
+  }
+
   if (command === 'ci-status') {
     try {
-      const body = await readFile(flags.file, 'utf8')
-      if (Buffer.byteLength(body) > 1024 * 1024) throw new Error('CI input exceeds 1 MiB')
+      const input = await readWorkflowInput(flags.file)
       const { collectGitHubCi } = await import('./ci-evidence.mjs')
-      const report = await collectGitHubCi({ ...JSON.parse(body), git: createGit({ cwd: root }) })
+      const report = await collectGitHubCi({ ...input, git: createGit({ cwd: root }) })
       io.out(workflowJson(report))
       return report.complete ? 0 : 4
     } catch (error) { io.out(workflowJson({ error: error.message })); return 2 }
@@ -4666,9 +4691,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
   if (command === 'context-bundle' || command === 'workflow-report') {
     try {
-      const body = await readFile(flags.file, 'utf8')
-      if (Buffer.byteLength(body) > 1024 * 1024) throw new Error('Workflow input exceeds 1 MiB')
-      const input = JSON.parse(body)
+      const input = await readWorkflowInput(flags.file)
       let result
       if (command === 'context-bundle') {
         const { buildContextBundle } = await import('./context-bundle.mjs')
