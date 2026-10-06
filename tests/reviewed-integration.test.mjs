@@ -5,19 +5,31 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { executeReviewedPhaseGate, integrateReviewedPhase, boundedIntegrationGit } from '../scripts/reviewed-integration.mjs'
+import { createServer } from 'node:net'
+import { executeReviewedPhaseGate as executeActualGate, integrateReviewedPhase as integrateActualPhase,
+  executeReviewedPhaseGateFixture, integrateReviewedPhaseFixture as integrateReviewedPhase,
+  boundedIntegrationGit } from '../scripts/reviewed-integration.mjs'
+import { defaultExec } from '../scripts/gate-runner.mjs'
+import { createVerificationExecutor } from '../scripts/harnesses/codex.mjs'
+import { resolveRoleCapabilities } from '../scripts/role-capabilities.mjs'
+
+const injectedExecutor = async () => ({ exec: defaultExec, close: async () => {} })
+const executeReviewedPhaseGate = input => executeReviewedPhaseGateFixture(input, injectedExecutor)
 
 const policy = { version: 1, roles: { integrator: { read: true, write: true, execute: true,
   sharedRefs: true, network: false, publication: false } } }
 const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
-async function fixture(t, { review = false, command = 'test -f a.txt && test -f b.txt', files = ['a.txt', 'b.txt'] } = {}) {
+const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
+async function fixture(t, { review = false, command = 'test -f a.txt && test -f b.txt', files = ['a.txt', 'b.txt'], report } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'ri-'))
   t.after(() => rm(root, { recursive: true, force: true }))
+  if (typeof command === 'function') command = command(root)
   git(root, 'init', '-b', 'main')
   git(root, 'config', 'user.name', 'Example')
   git(root, 'config', 'user.email', 'example@example.invalid')
   await writeFile(path.join(root, 'plan.md'), files.map((file, i) => `### Task ${i + 1}: task\n\n**Files:**\n- Create: \`${file}\`\n`).join('\n'))
   const checks = [{ name: 'behavior', kind: 'command', run: command }]
+  if (report) checks[0].report = report
   if (review) checks.push({ name: 'review', kind: 'agent', agent: 'tm-reviewer' })
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks } } }))
   git(root, 'add', '.')
@@ -48,6 +60,9 @@ test('exact reviewed merges retain author, ancestors and unrelated refs', async 
   await assert.doesNotReject(async () => { receipt = await integrateReviewedPhase({ ...input, gateReceipt }) })
   assert.equal(receipt.mode, 'host-bounded')
   assert.equal(receipt.complete, true)
+  assert.deepEqual(receipt.verification, gateReceipt.verification)
+  assert.equal(receipt.verification.kind, 'injected-unit-fixture')
+  assert.equal(receipt.verification.observedNative, false)
   assert.equal(receipt.merges.length, 2)
   for (const tip of Object.values(input.taskTips)) git(root, 'merge-base', '--is-ancestor', tip, receipt.after)
   assert.equal(git(root, 'rev-parse', 'main'), anchor)
@@ -153,9 +168,9 @@ test('verifier changes and expired executed evidence refuse integration', async 
   await cp(fileURLToPath(new URL('../scripts', import.meta.url)), installed, { recursive: true })
   const module = await import(pathToFileURL(path.join(installed, 'reviewed-integration.mjs')))
   const gateInput = { ...input, baseBranch: 'main', planPath: 'plan.md' }
-  const gateReceipt = await module.executeReviewedPhaseGate(gateInput)
+  const gateReceipt = await module.executeReviewedPhaseGateFixture(gateInput, injectedExecutor)
   await writeFile(path.join(installed, 'gate-config.mjs'), '\n', { flag: 'a' })
-  await assert.rejects(module.integrateReviewedPhase({ ...input, gateReceipt }), /identity moved/)
+  await assert.rejects(module.integrateReviewedPhaseFixture({ ...input, gateReceipt }), /identity moved/)
   const fresh = await executeReviewedPhaseGate(gateInput)
   const now = Date.now
   Date.now = () => now() + 300_001
@@ -283,4 +298,161 @@ test('hidden index edits added after gating are refused', async t => {
     await assert.rejects(integrateReviewedPhase({ ...input, gateReceipt }), /index configuration/)
     assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
   }
+})
+
+test('actual required verification denies outside-preview writes and private loopback access', async t => {
+  let connections = 0
+  const server = createServer(socket => { connections++; socket.end() })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  let marker
+  const { input } = await fixture(t, { command: root => {
+    marker = root + '-outside-marker'
+    const program = `const fs=require('fs'),net=require('net');try{fs.writeFileSync(${JSON.stringify(marker)},'dummy')}catch{}const s=net.connect({port:${server.address().port},host:'127.0.0.1'});s.on('connect',()=>s.end());s.on('error',()=>process.exit(2));`
+    return `${quote(process.execPath)} -e ${quote(program)}`
+  } })
+  t.after(() => rm(marker, { force: true }))
+  let verification
+  await assert.rejects(executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }), error => {
+    assert.match(error.message, /verification|gate rejected/)
+    verification = error.verification
+    assert.equal(verification.kind, 'native-required')
+    return true
+  })
+  await assert.rejects(readFile(marker), { code: 'ENOENT' })
+  assert.equal(connections, 0)
+  t.diagnostic(JSON.stringify({ kind: 'actual-native-denial-or-safe-refusal', observedNative: verification.observedNative,
+    outsidePreviewMarkerCreated: false, privateLoopbackConnections: connections }))
+})
+
+test('injected unit receipts cannot authorize production integration or be forged as native JSON', async t => {
+  const { input, gate } = await fixture(t)
+  const gateReceipt = await gate()
+  assert.equal(gateReceipt.verification.observedNative, false)
+  await assert.rejects(integrateActualPhase({ ...input, gateReceipt }), /matching verification authority/)
+  await assert.rejects(integrateActualPhase({ ...input, gateReceipt: {
+    ...JSON.parse(JSON.stringify(gateReceipt)), verification: { kind: 'native-required', observedNative: true }
+  } }), /executed gate/)
+})
+
+test('positive report inventories execute exactly one current and one baseline command', async t => {
+  const program = `const fs=require("fs");fs.writeFileSync(process.env.FLEETMATES_REPORT_DIR+"/suite.xml",'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>');`
+  const { input } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
+  const calls = []
+  let gateReceipt
+  await assert.doesNotReject(async () => { gateReceipt = await executeReviewedPhaseGateFixture({ ...input, baseBranch: 'main', planPath: 'plan.md' },
+    async ({ sandbox }) => ({ exec: async (command, cwd, options) => {
+      assert.equal(cwd, sandbox.cwd)
+      calls.push({ cwd, hasTask: await readFile(path.join(cwd, 'a.txt')).then(() => true, () => false) })
+      return defaultExec(command, cwd, options)
+    }, close: async () => {} })) })
+  assert.equal(calls.length, 2)
+  assert.deepEqual(calls.map(call => call.hasTask), [true, false])
+  assert.notEqual(calls[0].cwd, calls[1].cwd)
+  assert.equal(gateReceipt.results.find(result => result.kind === 'inventory').status, 'pass')
+  assert.equal(gateReceipt.results.find(result => result.kind === 'fileset').status, 'pass')
+  assert.equal(gateReceipt.results.find(result => result.kind === 'ownership').status, 'pass')
+  assert.equal((await integrateReviewedPhase({ ...input, gateReceipt })).complete, true)
+})
+
+test('actual native positive gate integrates only after observed restrictions, otherwise reports unavailable authority', async t => {
+  const { root, input } = await fixture(t, { command: 'true' })
+  const enforcement = resolveRoleCapabilities({ policy: { version: 1, roles: { implementer: {
+    read: true, write: true, execute: true, network: false, sharedRefs: false, publication: false
+  } } }, role: 'implementer', harness: 'codex', sandboxMode: 'clone', network: false }).enforcement
+  let probe
+  try { probe = await createVerificationExecutor({ root, sandbox: { cwd: root, meta: { mode: 'clone', gitdir: path.join(root, '.git'), enforcement } }, enforcement }) }
+  catch (error) {
+    assert.match(error.message, /Required.*(verification|runtime|restrictions|platform)/)
+    await assert.rejects(executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }), /gate rejected verification/)
+    assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
+    t.diagnostic(`Actual native positive execution unavailable: ${error.message}`)
+    return
+  }
+  assert.equal(probe.evidence.observed, true)
+  await probe.close()
+  let gateReceipt
+  await assert.doesNotReject(async () => { gateReceipt = await executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }) })
+  assert.equal(gateReceipt.verification.kind, 'native-required')
+  assert.equal(gateReceipt.verification.observedNative, true)
+  assert.equal((await integrateActualPhase({ ...input, gateReceipt })).complete, true)
+  t.diagnostic('Actual native positive gate and exact integration observed')
+})
+
+test('a required computed inventory rejects an unapproved dropped case', async t => {
+  const program = `const fs=require("fs");const cases=fs.existsSync("a.txt")?["kept"]:["kept","deleted"];fs.writeFileSync(process.env.FLEETMATES_REPORT_DIR+"/suite.xml",'<testsuite name="suite">'+cases.map(name=>'<testcase file="test.mjs" name="'+name+'"/>').join("")+"</testsuite>");`
+  const { gate, input } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
+  const rejectedDrop = error => {
+    assert.match(error.message, /gate rejected/)
+    assert.equal(error.results.find(result => result.kind === 'inventory').status, 'fail')
+    assert.match(error.results.find(result => result.kind === 'inventory').output, /drop:.*deleted/)
+    return true
+  }
+  await assert.rejects(gate(), rejectedDrop)
+  await assert.rejects(executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }), rejectedDrop)
+})
+
+test('actual native private report transfer preserves passing baseline inventory and exact integration', async t => {
+  const program = `const fs=require("fs");fs.writeFileSync(process.env.FLEETMATES_REPORT_DIR+"/suite.xml",'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>');`
+  const { input } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
+  const gateReceipt = await executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' })
+  assert.equal(gateReceipt.verification.observedNative, true)
+  assert.equal(gateReceipt.results.find(result => result.kind === 'inventory').status, 'pass')
+  assert.equal((await integrateActualPhase({ ...input, gateReceipt })).complete, true)
+})
+
+test('private report transfer rejects symbolic, special, oversized and excessive report entries', async t => {
+  for (const [kind, body, expected] of [
+    ['link', 'fs.symlinkSync("/dev/null",dir+"/report.xml")', /symbolic link/],
+    ['special', 'require("child_process").execFileSync("mkfifo",[dir+"/report.xml"])', /regular file/],
+    ['bytes', 'const fd=fs.openSync(dir+"/report.xml","w");fs.ftruncateSync(fd,50*1024*1024+1);fs.closeSync(fd)', /byte bound/],
+    ['count', 'for(let i=0;i<1001;i++)fs.writeFileSync(dir+"/"+i+".xml",\'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>\')', /count exceeded/],
+    ['depth', 'let nested=dir;for(let i=0;i<9;i++){nested+="/d";fs.mkdirSync(nested)}fs.writeFileSync(nested+"/report.xml",\'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>\')', /directory is unsafe/]
+  ]) {
+    await t.test(kind, async t => {
+      const program = 'const fs=require("fs"),dir=process.env.FLEETMATES_REPORT_DIR;' + body
+      const { gate } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
+      await assert.rejects(gate(), expected)
+    })
+  }
+})
+
+test('injected producer fixtures cannot substitute malformed restriction evidence', async t => {
+  const { root, input } = await fixture(t, { command: 'true' })
+  const installed = path.join(root, '.git', 'injected-producer')
+  await cp(fileURLToPath(new URL('../scripts', import.meta.url)), installed, { recursive: true })
+  const marker = path.join(root, '.git', 'unverified-command')
+  for (const [index, change] of [
+    { observed: false }, { observed: 'true' }, { kind: 'legacy' }, { runtime: 'invented' }, { network: true },
+    { sharedRefs: true }, { publication: true }, { write: false }
+  ].entries()) {
+    const nativeSource = path.join(installed, 'harnesses', `codex-${index}.mjs`)
+    const evidence = { kind: 'required', runtime: 'codex-sandbox', observed: true,
+      write: true, network: false, sharedRefs: false, publication: false, ...change }
+    await writeFile(nativeSource, `import {writeFile} from 'node:fs/promises';\nexport async function createVerificationExecutor(){return{evidence:${JSON.stringify(evidence)},close:async()=>{},exec:async()=>{await writeFile(${JSON.stringify(marker)},'dummy');return{code:0,output:''}}}}\n`)
+    const copiedModule = path.join(installed, `reviewed-integration-${index}.mjs`)
+    const source = await readFile(fileURLToPath(new URL('../scripts/reviewed-integration.mjs', import.meta.url)), 'utf8')
+    await writeFile(copiedModule, source.replace("from './harnesses/codex.mjs'", `from './harnesses/codex-${index}.mjs'`))
+    const module = await import(pathToFileURL(copiedModule))
+    await assert.rejects(module.executeReviewedPhaseGate({ ...input, baseBranch: 'main', planPath: 'plan.md' }), /restrictions were not independently observed/)
+    await assert.rejects(readFile(marker), { code: 'ENOENT' })
+  }
+})
+
+test('a skipped computed inventory cannot authorize even an injected unit receipt', async t => {
+  const program = `const fs=require("fs");fs.writeFileSync(process.env.FLEETMATES_REPORT_DIR+"/suite.xml",'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>');`
+  const { root, input } = await fixture(t, { command: `${quote(process.execPath)} -e ${quote(program)}`, report: { dir: true } })
+  const installed = path.join(root, '.git', 'injected-inventory')
+  await cp(fileURLToPath(new URL('../scripts', import.meta.url)), installed, { recursive: true })
+  await writeFile(path.join(installed, 'injected-runner.mjs'), `export {deriveContext,aggregateVerdict} from './gate-runner.mjs';import {runChecks as actual} from './gate-runner.mjs';export async function runChecks(...args){const results=await actual(...args);results.find(result=>result.kind==='inventory').status='skip';return results}\n`)
+  const source = await readFile(fileURLToPath(new URL('../scripts/reviewed-integration.mjs', import.meta.url)), 'utf8')
+  const target = path.join(installed, 'skip-inventory.mjs')
+  await writeFile(target, source.replace("from './gate-runner.mjs'", "from './injected-runner.mjs'"))
+  const module = await import(pathToFileURL(target))
+  await assert.rejects(module.executeReviewedPhaseGateFixture({ ...input, baseBranch: 'main', planPath: 'plan.md' }, injectedExecutor), error => {
+    assert.match(error.message, /gate rejected/)
+    assert.equal(error.results.find(result => result.kind === 'inventory').status, 'skip')
+    return true
+  })
+  assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
 })
