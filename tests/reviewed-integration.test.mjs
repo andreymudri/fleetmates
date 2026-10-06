@@ -190,6 +190,155 @@ async function fixture(t, { review = false, command = nodeCommand('const fs=requ
   return { root, anchor, input, gate }
 }
 
+async function outsideCheckout(t, root) {
+  const outside = await mkdtemp(path.join(tmpdir(), 'ri-outside-'))
+  t.after(() => rm(outside, { recursive: true, force: true }))
+  for (const file of ['plan.md', 'fleetmates.gate.json']) await writeFile(path.join(outside, file), await readFile(path.join(root, file)))
+  return outside
+}
+
+test('actual native receipt refuses core.worktree redirection before checkout or merge', async t => {
+  const { root, input } = await fixture(t)
+  if (!await nativeAvailable(t, input)) return
+  const gateReceipt = await executeActualGate({ ...input, baseBranch: 'main', planPath: 'plan.md' })
+  assert.equal(gateReceipt.verification.observedNative, true)
+  const outside = await outsideCheckout(t, root)
+  git(root, 'config', 'core.worktree', outside)
+  let failure, result, operations = 0
+  try {
+    result = await integrateActualPhase({ ...input, gateReceipt, git: async (args, cwd, env) => {
+      if (args.includes('checkout') || args.includes('merge')) operations++
+      return boundedIntegrationGit(args, cwd, env)
+    } })
+  } catch (error) { failure = error }
+  t.diagnostic(JSON.stringify({ kind: 'actual-native-gate-and-Git-root-redirection', observedNative: true,
+    integratedComplete: result?.complete ?? false, checkoutOrMergeOperations: operations,
+    outsideTaskPresent: await access(path.join(outside, 'a.txt')).then(() => true, () => false),
+    suppliedRootTaskPresent: await access(path.join(root, 'a.txt')).then(() => true, () => false) }))
+  assert.ok(failure, 'redirected worktree must be refused')
+  assert.match(failure.message, /worktree|configuration/)
+  assert.equal(failure.receipt.complete, false)
+  assert.equal(failure.receipt.merges.length, 0)
+  assert.equal(operations, 0)
+  assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
+  for (const dir of [root, outside]) for (const file of ['a.txt', 'b.txt']) await assert.rejects(readFile(path.join(dir, file)), { code: 'ENOENT' })
+})
+
+test('an already redirected core.worktree and a supplied subdirectory cannot authorize a gate', async t => {
+  for (const kind of ['redirect', 'subdirectory']) await t.test(kind, async t => {
+    const { root, input } = await fixture(t)
+    if (kind === 'redirect') git(root, 'config', 'core.worktree', await outsideCheckout(t, root))
+    else { input.root = path.join(root, 'subdirectory'); await mkdir(input.root) }
+    let mutations = 0
+    await assert.rejects(executeReviewedPhaseGate({ ...input, baseBranch: 'main', planPath: 'plan.md', git: async (args, cwd, env) => {
+      if (args.includes('merge') || args.includes('checkout') || (args.includes('worktree') && args.includes('add'))) mutations++
+      return boundedIntegrationGit(args, cwd, env)
+    } }), /worktree|configuration/)
+    assert.equal(mutations, 0)
+    assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
+  })
+})
+
+test('failed or malformed Git worktree observations cannot authorize project verification', async t => {
+  for (const kind of ['root-exit', 'root-signal', 'root-missing', 'dirs-exit', 'dirs-signal', 'dirs-shape', 'config-exit', 'config-signal']) await t.test(kind, async t => {
+    const { root, input } = await fixture(t)
+    let projects = 0, mutations = 0
+    await assert.rejects(executeReviewedPhaseGateFixture({ ...input, baseBranch: 'main', planPath: 'plan.md', git: async (args, cwd, env) => {
+      if (args.includes('merge') || args.includes('checkout') || (args.includes('worktree') && args.includes('add'))) mutations++
+      const result = await boundedIntegrationGit(args, cwd, env)
+      const observation = args.includes('--show-toplevel') ? 'root' : args.includes('--absolute-git-dir') ? 'dirs'
+        : args.includes('--get-all') && args.includes('core.worktree') ? 'config' : null
+      if (kind.startsWith(`${observation}-`)) {
+        if (kind.endsWith('-exit')) return { ...result, code: 2 }
+        if (kind.endsWith('-signal')) return { ...result, signal: 'SIGTERM' }
+        if (kind === 'root-missing') return { ...result, stdout: path.join(root, 'missing') + '\n' }
+        if (kind === 'dirs-shape') return { ...result, stdout: result.stdout + root + '\n' }
+      }
+      return result
+    } }, async () => { projects++; return injectedExecutor() }), /worktree/)
+    assert.equal(projects, 0)
+    assert.equal(mutations, 0)
+  })
+})
+
+test('core.worktree identity changes after a gate fail even when its effective root is unchanged', async t => {
+  const { root, input, gate } = await fixture(t)
+  const gateReceipt = await gate()
+  git(root, 'config', 'core.worktree', root)
+  let mutations = 0
+  await assert.rejects(integrateReviewedPhase({ ...input, gateReceipt, git: async (args, cwd, env) => {
+    if (args.includes('merge') || args.includes('checkout')) mutations++
+    return boundedIntegrationGit(args, cwd, env)
+  } }), /identity|worktree|configuration/)
+  assert.equal(mutations, 0)
+  assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
+})
+
+test('worktree configuration is rechecked between checkout and each merge', async t => {
+  const { root, input, gate } = await fixture(t)
+  const gateReceipt = await gate()
+  let merges = 0
+  await assert.rejects(integrateReviewedPhase({ ...input, gateReceipt, git: async (args, cwd, env) => {
+    const result = await boundedIntegrationGit(args, cwd, env)
+    if (args.includes('checkout')) git(root, 'config', 'core.worktree', root)
+    if (args.includes('merge')) merges++
+    return result
+  } }), error => {
+    assert.match(error.message, /worktree|configuration|identity/)
+    assert.equal(error.receipt.merges.length, 0)
+    return true
+  })
+  assert.equal(merges, 0)
+  assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
+})
+
+test('pinned Git writes stay in the authorized root and retain partial progress after a host-seam config change', async t => {
+  const { root, input, gate } = await fixture(t)
+  const gateReceipt = await gate()
+  const outside = await outsideCheckout(t, root)
+  let merges = 0, failure
+  await assert.rejects(integrateReviewedPhase({ ...input, gateReceipt, git: async (args, cwd, env) => {
+    if (args.includes('merge') && ++merges === 1) git(root, 'config', 'core.worktree', outside)
+    return boundedIntegrationGit(args, cwd, env)
+  } }), error => { failure = error; return true })
+  assert.match(failure.message, /worktree|configuration/)
+  assert.equal(failure.receipt.complete, false)
+  assert.equal(failure.receipt.state, 'partial')
+  assert.equal(failure.receipt.merges.length, 1)
+  assert.equal(merges, 1)
+  assert.equal(failure.receipt.after, git(root, 'rev-parse', input.branch))
+  for (const file of ['a.txt', 'b.txt']) await assert.rejects(readFile(path.join(outside, file)), { code: 'ENOENT' })
+  assert.equal(await readFile(path.join(root, 'a.txt'), 'utf8'), 'T1')
+  await assert.rejects(readFile(path.join(root, 'b.txt')), { code: 'ENOENT' })
+  t.diagnostic('Injected trusted host Git seam; actual local Git writes and partial receipt observed, fixture receipt is not native authorization')
+})
+
+test('legitimate linked worktrees and separate Git directories integrate in their effective canonical root', async t => {
+  for (const kind of ['linked', 'separate']) await t.test(kind, async t => {
+    const { root, input } = await fixture(t)
+    const extra = await mkdtemp(path.join(tmpdir(), 'ri-layout-'))
+    t.after(() => rm(extra, { recursive: true, force: true }))
+    if (kind === 'linked') {
+      git(root, 'config', 'core.worktree', root)
+      input.root = path.join(extra, 'linked')
+      git(root, 'worktree', 'add', '--detach', input.root, input.expectedRunTip)
+    } else {
+      const gitdir = path.join(extra, 'gitdir')
+      git(root, 'init', '--separate-git-dir', gitdir)
+      git(root, 'config', 'core.worktree', path.relative(gitdir, root))
+    }
+    let receipt
+    await assert.doesNotReject(async () => {
+      const gateReceipt = await executeReviewedPhaseGate({ ...input, baseBranch: 'main', planPath: 'plan.md' })
+      receipt = await integrateReviewedPhase({ ...input, gateReceipt })
+    })
+    assert.equal(receipt.complete, true)
+    assert.equal(await realpath(git(input.root, 'rev-parse', '--show-toplevel')), await realpath(input.root))
+    for (const [file, content] of [['a.txt', 'T1'], ['b.txt', 'T2']]) assert.equal(await readFile(path.join(input.root, file), 'utf8'), content)
+    if (kind === 'linked') for (const file of ['a.txt', 'b.txt']) await assert.rejects(readFile(path.join(root, file)), { code: 'ENOENT' })
+  })
+})
+
 test('exact reviewed merges retain author, ancestors and unrelated refs', async t => {
   const { root, anchor, input, gate } = await fixture(t)
   git(root, 'tag', 'fleetmates/r1/T1', anchor)

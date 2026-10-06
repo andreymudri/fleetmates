@@ -49,18 +49,47 @@ export async function boundedIntegrationGit(args, cwd, env) {
 
 function scopedGit(root, executor = boundedIntegrationGit) {
   if (typeof executor !== 'function') throw new TypeError('Git executor must be trusted host code')
-  const exec = async (args, cwd = root) => {
-    if (cwd && typeof cwd === 'object') cwd = cwd.cwd ?? root
+  const bindings = new Map()
+  const raw = async (args, cwd = root) => {
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')))
     Object.assign(env, { GIT_TERMINAL_PROMPT: '0', GIT_MERGE_AUTOEDIT: 'no', GIT_NO_REPLACE_OBJECTS: '1' })
     return executor([...scopedConfig.flatMap(value => ['-c', value]), ...args], cwd, env)
+  }
+  const binding = async (cwd = root) => {
+    cwd = await realpath(cwd)
+    const observed = await raw(['rev-parse', '--show-toplevel'], cwd)
+    if (observed.code !== 0 || observed.signal) throw new Error('unsupported Git worktree root')
+    let effective
+    try { effective = await realpath(observed.stdout.replace(/\r?\n$/, '')) }
+    catch { throw new Error('unsupported Git worktree root') }
+    if (effective !== cwd) throw new Error('unsupported Git worktree root')
+    const dirs = await raw(['rev-parse', '--path-format=absolute', '--absolute-git-dir', '--git-common-dir'], cwd)
+    const config = await raw(['config', '--get-all', 'core.worktree'], cwd)
+    if (dirs.code !== 0 || dirs.signal || config.signal || ![0, 1].includes(config.code)) throw new Error('unsupported Git worktree configuration')
+    const paths = dirs.stdout.replace(/\r?\n$/, '').split(/\r?\n/)
+    if (paths.length !== 2) throw new Error('unsupported Git worktree configuration')
+    const identity = hash(JSON.stringify([cwd, ...await Promise.all(paths.map(dir => realpath(dir))), config.stdout]))
+    if (bindings.has(cwd) && bindings.get(cwd) !== identity) throw new Error('Git worktree configuration changed')
+    bindings.set(cwd, identity)
+    return identity
+  }
+  const exec = async (args, cwd = root) => {
+    if (cwd && typeof cwd === 'object') cwd = cwd.cwd ?? root
+    args = [...args]
+    while (args[0] === '-C') {
+      cwd = path.resolve(cwd, args[1])
+      args.splice(0, 2)
+    }
+    cwd = await realpath(cwd)
+    if (['checkout', 'merge'].includes(args[0]) || (args[0] === 'worktree' && args[1] === 'add')) await binding(cwd)
+    return raw([`--work-tree=${cwd}`, ...args], cwd)
   }
   const run = async (args, cwd) => {
     const result = await exec(args, cwd)
     if (result.code !== 0 || result.signal) throw new Error('scoped Git operation failed')
     return result.stdout.trim()
   }
-  return { exec, run, git: createGit({ cwd: root, exec }) }
+  return { exec, run, binding, git: createGit({ cwd: root, exec }) }
 }
 
 async function verifierIdentity() {
@@ -87,6 +116,7 @@ async function configuration(scope) {
     throw new Error('unsupported Git configuration')
   }
   if (await scope.run(['for-each-ref', '--format=%(refname)', 'refs/replace/'])) throw new Error('unsupported replacement configuration')
+  return scope.binding()
 }
 
 async function clean(scope) {
@@ -117,7 +147,7 @@ async function snapshot(input, scope, runTip = input.expectedRunTip) {
     throw new Error('base branch must differ from the run branch')
   }
   await scope.run(['check-ref-format', '--branch', baseBranch])
-  await configuration(scope)
+  const worktreeBinding = await configuration(scope)
   await clean(scope)
   if (await scope.git.resolveRef(`refs/heads/${branch}`) !== runTip) throw new Error('run tip moved')
   const ctx = await deriveContext({ git: scope.git, runId, runBranch: branch, baseBranch, planPath })
@@ -138,7 +168,7 @@ async function snapshot(input, scope, runTip = input.expectedRunTip) {
   const plan = await tracked(scope, ctx.anchorSha, planPath)
   const manifest = await tracked(scope, runTip, 'fleetmates.gate.json')
   const identity = { runId, phase, branch, expectedRunTip: input.expectedRunTip, baseBranch, planPath,
-    anchor: ctx.anchorSha, plan: hash(plan), manifest: hash(manifest), verifier: await verifierIdentity(), taskTips: tips }
+    anchor: ctx.anchorSha, plan: hash(plan), manifest: hash(manifest), verifier: await verifierIdentity(), taskTips: tips, worktreeBinding }
   return { identity, ctx, tasks, config: JSON.parse(manifest) }
 }
 
