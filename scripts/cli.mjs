@@ -163,7 +163,7 @@ const USAGE = `usage: cli.mjs <init-run|gate|doctor|liveness|digest|claim|unclai
   usage    [--session <id>] [--json] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
-  review-dispatch --run <id> [--phase <name>] [--models <json>] [--root <path>]
+  review-dispatch --run <id> [--phase <name>] [--models <json>] [--plan <path>] [--base <branch>] [--root <path>]
   collect-reviews --run <id> [--phase <name>] [--root <path>]
   gate     --run <id> --plan <path> [--base <branch>] [--root <path>] [--phase <name>] [--no-fleet] [--results <path>]
   digest   --run <id> [--root <path>]
@@ -376,7 +376,7 @@ export const KNOWN_FLAGS = {
   sessions: ['run'],
   fix: ['run', 'phase', 'verdict'],
   'record-fix-round': ['run', 'phase', 'task'],
-  'review-dispatch': ['run', 'phase', 'models'],
+  'review-dispatch': ['run', 'phase', 'models', 'plan', 'base'],
   'collect-reviews': ['run', 'phase'],
   'preview-check': [],
   'plan-drift': ['run', 'plan', 'base'],
@@ -3698,8 +3698,10 @@ export async function runCli(argv, io = { out: console.log }) {
     const captured = []
     const phaseArgs = flags.phase && flags.phase !== true ? ['--phase', flags.phase] : []
     const modelArgs = flags.models && flags.models !== true ? ['--models', flags.models] : []
+    const planArgs = typeof flags.plan === 'string' ? ['--plan', flags.plan] : []
+    const baseArgs = typeof flags.base === 'string' ? ['--base', flags.base] : []
     const code = await runCli(
-      ['review-dispatch', '--run', runId, ...phaseArgs, ...modelArgs, '--root', root],
+      ['review-dispatch', '--run', runId, ...phaseArgs, ...modelArgs, ...planArgs, ...baseArgs, '--root', root],
       { out: (t) => captured.push(t), err: (t) => io.err(t) },
     )
     if (code !== 0) { io.out(captured.join('\n')); return code }
