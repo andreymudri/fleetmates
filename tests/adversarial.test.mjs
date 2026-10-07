@@ -308,7 +308,7 @@ test('gate reports the ambiguity, not a silent guess, when both main and master 
   await withRepo(async (root) => {
     git(root, ['branch', 'master', 'main'])
     const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
-    assert.equal(code, 1)
+    assert.equal(code, 5)
     assert.match(out, /ambiguous base branch/)
   })
 })

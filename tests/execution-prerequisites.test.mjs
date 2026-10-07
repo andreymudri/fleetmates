@@ -318,7 +318,7 @@ for (const preexisting of [false, true]) {
     assert.equal(record.sandbox.meta.enforcement?.sandbox, 'read-only')
     assert.equal(record.sandbox.meta.prerequisites?.version, 1)
     assert.deepEqual(record.prerequisites, record.sandbox.meta.prerequisites)
-    assert.equal((await message()).code, 0)
+    assert.equal((await message()).code, 4)
     assert.equal((await dispatch([])).code, 0)
     assert.equal(calls.length, 3)
     for (const { method, argv } of calls) {
@@ -604,7 +604,7 @@ test('CLI message persists actual worker receipts and refuses a broken worker ba
   const message = () => command(root, ['message', '--run', 'worker', '--task', 'T1', '--text', 'continue', '--harness', 'codex'])
   try {
     await writeFile(path.join(sandbox.cwd, '.deps', 'ready'), 'task edit')
-    assert.equal((await message()).code, 0)
+    assert.equal((await message()).code, 4)
     const stored = JSON.parse(await readFile(file, 'utf8')).sandbox.meta.workerEnvironment
     assert.equal(stored.cwd, sandbox.cwd)
     assert.equal(stored.baseline.status, 'pass')
