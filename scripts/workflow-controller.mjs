@@ -390,11 +390,15 @@ async function repairDecision(ctx, failedStep, phase, failure, round) {
     return { blocker: blocker('infrastructure', step.id, 'fix decision names no valid task of this phase') }
   }
   const contract = ctx.expanded.phaseContracts.find(c => c.phase === phase)
-  const allowed = Math.min(ctx.request.limits.maxRepairRounds, contract.repair.maxRounds)
+  // Under a strict driver journal every dispatch of the phase shares one driver executionId, whose
+  // harness invocations per task are capped at DRIVER_ATTEMPTS: the first dispatch plus each round
+  // uses at least one, so at most DRIVER_ATTEMPTS - 1 rounds fit.
+  const journal = driverJournal(ctx.request)
+  const allowed = Math.min(ctx.request.limits.maxRepairRounds, contract.repair.maxRounds, journal ? DRIVER_ATTEMPTS - 1 : Infinity)
   if (round >= allowed || decision.tasks.some(task => task.round > allowed)) {
-    return { blocker: blocker('code', failedStep.id, `budget-exhausted: maxRepairRounds ${ctx.request.limits.maxRepairRounds}, phase repair limit ${contract.repair.maxRounds}, ${round} round(s) delivered`) }
+    return { blocker: blocker('code', failedStep.id, `budget-exhausted: maxRepairRounds ${ctx.request.limits.maxRepairRounds}, phase repair limit ${contract.repair.maxRounds}, ${round} round(s) delivered${journal ? `, driver round limit ${DRIVER_ATTEMPTS - 1}` : ''}`) }
   }
-  return { tasks }
+  return { tasks, rounds: Object.fromEntries(decision.tasks.map(task => [task.taskId, task.round])) }
 }
 function repairTasksValid(ctx, phase, tasks) {
   const ids = phaseTasks(ctx, phase).map(task => task.id)
@@ -406,12 +410,15 @@ function repairTasksValid(ctx, phase, tasks) {
 // the phase's review, collect, gate and integration fragments again under round-suffixed ids.
 // Round-suffixed ids keep each round its own journal history: the journal refuses a second start
 // of an agent step whose dispatch effect completed, unless that effect is resolved not-started.
-function repairSteps(ctx, phase, round, tasks) {
-  if (!repairTasksValid(ctx, phase, tasks)) return null
+// Each record step carries the round the fix decision named for its task, so a round already
+// recorded is never recorded again (see `recordLanded`).
+function repairSteps(ctx, phase, round, plan) {
+  const tasks = plan?.tasks
+  if (!repairTasksValid(ctx, phase, tasks) || tasks.some(id => !Number.isSafeInteger(plan.rounds?.[id]) || plan.rounds[id] < 1)) return null
   const base = name => ctx.expanded.steps.find(s => s.id === `${name}-${phase}`)
   const suffix = `.r${round}`
   return [
-    ...tasks.map(id => ({ id: `record-${phase}${suffix}.${id}`, name: 'record', kind: 'deterministic',
+    ...tasks.map(id => ({ id: `record-${phase}${suffix}.${id}`, name: 'record', kind: 'deterministic', task: id, round: plan.rounds[id],
       argv: ['node', 'scripts/cli.mjs', 'record-fix-round', '--run', ctx.request.runId, '--phase', String(phase), '--task', id] })),
     { ...base('implement'), id: `repair-${phase}${suffix}`, name: 'repair', tasks: [...tasks],
       argv: [...base('implement').argv, '--fix-round', ...tasks.flatMap(id => ['--task', id])] },
@@ -497,11 +504,13 @@ async function guarded(ctx, step, action, { counts = true } = {}) {
 // deadline is the step's own timeout from now, which never exceeds the remaining wall budget.
 // Strict driver execution refuses files sandboxes, so no contract is written for them.
 const driverJournal = request => request.harness !== 'cursor' && request.sandboxMode !== 'files'
+// The driver's own upper bound on a required execution's maxAttempts (driver.mjs requiredExecution).
+const DRIVER_ATTEMPTS = 10
 async function executionContract(ctx, attempt, phase, timeoutMs) {
   const relative = `${NAMES.stateDir}/${ctx.request.runId}/execution/dispatch-${attempt}.json`
   const contract = { version: 1, common: ctx.common, runId: ctx.request.runId, executionId: `${ctx.executionId}-p${phase}`,
     inputs: { ...ctx.inputs, commit: refTip(ctx.root, `refs/heads/${ctx.request.runBranch}`) }, retention: { ...ctx.retention },
-    maxAttempts: Math.min(10, ctx.request.limits.maxAttempts), deadlineAt: Date.now() + timeoutMs }
+    maxAttempts: DRIVER_ATTEMPTS, deadlineAt: Date.now() + timeoutMs }
   strictExecutionIdentity(contract.inputs)
   await writeInside(ctx.root, relative, JSON.stringify(contract))
   return path.join(ctx.root, relative)
@@ -663,7 +672,10 @@ const REUSE = {
   prepare: ctx => validatePrepare(ctx),
   baseline: async () => ({ ok: true }),
   implement: (ctx, phase) => validateImplement(ctx, phase),
-  repair: (ctx, phase) => validateImplement(ctx, phase),
+  // A repair round is reused only if each named task still advances from the tip its attempt
+  // started at, the same check a fresh round must pass.
+  repair: (ctx, phase, group, step) => validateRepair(ctx, phase, step.tasks,
+    Object.fromEntries(step.tasks.map(id => [id, group.start.branches[`refs/heads/${taskBranchName(ctx.request.runId, id)}`] ?? null]))),
   record: async () => ({ ok: true }),
   review: (ctx, phase) => reviewsCurrent(ctx, phase),
   integrate: integrationStillCurrent,
@@ -690,7 +702,7 @@ async function completedDecision(ctx, step, phase, group) {
   const reconciled = ctx.reconciled.find(a => a.step === step.id && a.attempt === group.start.attempt)
   if (!reconciled || ['stale', 'missing-artifact', 'retention-exceeded', 'unknown-effect'].includes(reconciled.state)) return { action: 'run' }
   for (const reference of group.end.artifacts) if (!await observe(ctx, reference)) return { action: 'run' }
-  const validation = await reuse(ctx, phase, group)
+  const validation = await reuse(ctx, phase, group, step)
   if (!validation.ok) return { action: 'run' }
   ctx.report.steps.push({ id: step.id, attempt: group.start.attempt, status: 'reused', exitCode: null, durationMs: null, artifacts: group.end.artifacts })
   return { action: 'reuse' }
@@ -729,7 +741,7 @@ async function agentDecision(ctx, step, phase, group) {
 async function revalidated(ctx, step, phase, group, resolved) {
   const reuse = REUSE[nameOf(step)]
   let validation = { ok: false, reason: 'no reusable output' }
-  try { if (reuse) validation = await reuse(ctx, phase, group) } catch (error) { validation = { ok: false, reason: error.message } }
+  try { if (reuse) validation = await reuse(ctx, phase, group, step) } catch (error) { validation = { ok: false, reason: error.message } }
   if (!validation.ok) {
     return { action: 'block', blocker: blocker('missing-artifact', step.id, `agent dispatch ${resolved ? 'resolved' : 'recorded'} completed but its outputs do not validate${validation.reason ? ` (${validation.reason})` : ''}; resolve its agent-dispatch effect not-started to redispatch`) }
   }
@@ -759,7 +771,8 @@ async function priorRepairTasks(ctx, phase, round) {
   if (!reference) return null
   try {
     const decision = parseJson(await readArtifact(ctx, reference))
-    return decision?.decision === 'retry' && Array.isArray(decision.tasks) ? decision.tasks.map(task => task?.taskId) : null
+    return decision?.decision === 'retry' && Array.isArray(decision.tasks)
+      ? { tasks: decision.tasks.map(task => task?.taskId), rounds: Object.fromEntries(decision.tasks.map(task => [task?.taskId, task?.round])) } : null
   } catch { return null }
 }
 
@@ -876,24 +889,52 @@ async function executeSteps(ctx) {
   return finalize(ctx, lifecycle !== 'running' ? lifecycle : verified ? 'verified-complete' : 'unresolved', { obligations: summary, verifiedComplete: verified })
 }
 
+// A round's record-fix-round has landed when the CLI-recorded count for the task, read where the
+// command writes it (`fixRounds[phase][task]` in the run's status.json), already reaches the round
+// the fix decision named. Recording it again would spend budget with no second dispatch.
+async function recordLanded(ctx, phase, step) {
+  const bytes = await readInside(ctx.root, `${NAMES.stateDir}/${ctx.request.runId}/status.json`)
+  const rounds = bytes && parseJson(bytes)?.fixRounds?.[String(phase)]
+  const count = plainObject(rounds) && Object.hasOwn(rounds, step.task) ? rounds[step.task] : 0
+  return Number.isSafeInteger(count) && count >= step.round
+}
+// Every dispatch of a phase shares one driver executionId, and the strict driver refuses records
+// bound to another input identity. A dispatch this phase already handed to a driver under other
+// inputs (for example before the installed verifier changed) therefore stops a new dispatch here,
+// explicitly, instead of orphaning every task inside the driver.
+function driverIdentityDrift(ctx, phase, step) {
+  if (!driverJournal(ctx.request)) return null
+  const identity = strictExecutionIdentity(ctx.inputs)
+  const pattern = new RegExp(`^(?:implement-${phase}|repair-${phase}\\.r\\d+)$`)
+  const drifted = ctx.priorGroups.some(g => pattern.test(g.start.step) && g.start.identity !== identity
+    && g.effects.some(e => e.start.effect.kind === 'agent-dispatch' && e.resolution?.resolution.outcome !== 'not-started'))
+  return drifted ? { blocker: blocker('changed-input', step.id, `phase ${phase} was dispatched to the strict driver under other inputs; the driver refuses records bound to them, so no further dispatch runs`) } : null
+}
+
 // One phase: implement, review, collect, gate and integrate, then on a code failure the fix
 // decision and, while it retries within budget, repair rounds until the phase integrates.
 // Returns null once the phase is integrated, or the stop (a result or decision with a blocker).
 async function runPhase(ctx, phase) {
   let round = ctx.resume ? priorRound(ctx, phase) : 0
-  let tasks = round ? await priorRepairTasks(ctx, phase, round) : null
+  let plan = round ? await priorRepairTasks(ctx, phase, round) : null
   for (;;) {
-    const steps = round ? repairSteps(ctx, phase, round, tasks)
+    const steps = round ? repairSteps(ctx, phase, round, plan)
       : ['implement', 'review', 'collect', 'gate', 'integrate'].map(name => ctx.expanded.steps.find(s => s.id === `${name}-${phase}`))
     if (!steps) return { blocker: blocker('missing-artifact', `repair-${phase}.r${round}`, 'the retained fix decision for this repair round is missing or names no task of this phase') }
     let failure = null
     for (const step of steps) {
+      if (nameOf(step) === 'record' && await recordLanded(ctx, phase, step)) {
+        ctx.report.steps.push({ id: step.id, attempt: null, status: 'reused', exitCode: null, durationMs: null, artifacts: [], recorded: 'already-landed' })
+        continue
+      }
       const decision = ctx.resume ? await priorDecision(ctx, step, phase) : { action: 'run' }
       if (decision.action === 'block') return decision
       if (decision.action === 'reuse') continue
+      const drift = ['implement', 'record', 'repair'].includes(nameOf(step)) ? driverIdentityDrift(ctx, phase, step) : null
+      if (drift) return drift
       const result = nameOf(step) === 'integrate' ? await runIntegration(ctx, step, phase) : await runCli(ctx, step, phase)
       if (result.ok) {
-        if (nameOf(step) === 'repair') ctx.repairRounds.push({ phase, round, tasks: [...tasks] })
+        if (nameOf(step) === 'repair') ctx.repairRounds.push({ phase, round, tasks: [...plan.tasks] })
         continue
       }
       if (result.category !== 'code') return result
@@ -907,7 +948,7 @@ async function runPhase(ctx, phase) {
     const next = await repairDecision(ctx, failure.step, phase, failure.result, round)
     if (next.blocker) return next
     round += 1
-    tasks = next.tasks
+    plan = next
   }
 }
 

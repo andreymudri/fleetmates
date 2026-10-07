@@ -437,7 +437,11 @@ export async function dispatchPhase({
     try { hostTip = await checkedGit(guardedGit, ['show-ref', '--verify', '--hash', ref], runRepo); branches[ref] = hostTip } catch {}
     const report = await bounded(() => reconcileExecutionAttempt({ common, runId, inputs: contract.inputs, branches,
       retention: contract.retention, checkouts: record?.sandbox ? { [taskId]: record.sandbox.cwd } : {} }))
-    if (report.attempts.some(a => a.state === 'historical-observation' || a.effects.some(e => e.outcome === 'unknown'))) {
+    // An `agent-dispatch` effect is a controller's record of launching a dispatch, this one included:
+    // the controller persists it, still open, before it spawns the dispatch that runs this driver.
+    // The model effects behind it are this driver's own harness attempts, reconciled below, so an
+    // open agent-dispatch never refuses here. Any other unknown external effect still does.
+    if (report.attempts.some(a => a.state === 'historical-observation' || a.effects.some(e => e.outcome === 'unknown' && e.kind !== 'agent-dispatch'))) {
       throw new Error('Historical or unknown-effect evidence refuses execution')
     }
     const relevant = report.attempts.filter(a => a.executionId === contract.executionId && a.task === taskId)

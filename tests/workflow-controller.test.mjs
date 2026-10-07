@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readFile, rm, mkdir, realpath } from 'node:fs/promi
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execFile } from 'node:child_process'
 import { executeWorkflowProfile, resumeWorkflowProfile, validateWorkflowExpansion } from '../scripts/workflow-controller.mjs'
 import { expandWorkflowProfile } from '../scripts/workflow-profile.mjs'
 import { createHash } from 'node:crypto'
@@ -13,6 +13,7 @@ import { retainExecutionArtifact } from '../scripts/execution-artifacts.mjs'
 import { readExecutionEvents } from '../scripts/execution-journal.mjs'
 import { resolveExecutionEffect } from '../scripts/execution-recovery.mjs'
 import { dispatchPhase } from '../scripts/driver.mjs'
+import { strictExecutionIdentity } from '../scripts/completion-obligations.mjs'
 
 // The child CLI is a real Node process started through the bounded executor. It stands in for the
 // installed fleetmates CLI: it records every invocation, writes only the artifacts the real
@@ -100,11 +101,13 @@ if (command === 'init-run') {
     else console.log('dispatched')
   }
 } else if (command === 'record-fix-round') {
-  const phase = Number(flag('phase')), task = flag('task'), file = path.join(bin, 'rounds.json')
+  // As the real command does (state.mjs recordFixRound): status.json fixRounds[phase][task] += 1.
+  const phase = Number(flag('phase')), task = flag('task'), file = path.join(dir, 'status.json')
   if (!tasks.some(t => t.id === task && t.phase === phase)) { console.log('no task ' + task + ' in phase ' + phase); process.exit(1) }
-  const rounds = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+  const status = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+  const rounds = { ...(status.fixRounds?.[String(phase)] ?? {}) }
   rounds[task] = (rounds[task] ?? 0) + 1
-  writeFileSync(file, JSON.stringify(rounds))
+  writeFileSync(file, JSON.stringify({ ...status, fixRounds: { ...(status.fixRounds ?? {}), [String(phase)]: rounds } }))
   console.log(task + ' phase ' + phase + ' round ' + rounds[task])
 } else if (command === 'dispatch-reviews') {
   if (mode.includes('reviews-exit-2')) { console.log('unsupported flag spelling'); process.exit(2) }
@@ -137,6 +140,8 @@ if (command === 'init-run') {
   }
 } else if (command === 'gate') {
   if (mode.includes('gate-infra-once') && once('gate-infra')) { console.log('cannot verify'); process.exit(4) }
+  // gate-infra-on-2: the second gate call of the fixture cannot verify.
+  if (mode.includes('gate-infra-on-2') && !once('gate-call-1') && once('gate-call-2')) { console.log('cannot verify'); process.exit(4) }
   // T5 contract: exit 5 when the only failed entries are derive and/or run-state.
   if (mode.includes('gate-state')) {
     console.log(JSON.stringify({ verdict: 'FAIL', failed: ['run-state'], error: 'could not read run state' }, null, 2))
@@ -154,7 +159,8 @@ if (command === 'init-run') {
   const verdict = JSON.parse(readFileSync(flag('verdict'), 'utf8'))
   writeFileSync(path.join(bin, 'verdict-seen.json'), JSON.stringify(verdict))
   // The budget rule of decideFix: a task whose recorded rounds reach the manifest fixRounds escalates.
-  const file = path.join(bin, 'rounds.json'), rounds = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+  const file = path.join(dir, 'status.json')
+  const rounds = (existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}).fixRounds?.[flag('phase')] ?? {}
   const budget = JSON.parse(readFileSync(path.join(root, 'fleetmates.gate.json'), 'utf8')).phases.default.fixRounds
   const retried = tasks.filter(t => t.phase === Number(flag('phase')) && (process.env.FAKE_RETRY ?? t.id).split(',').includes(t.id))
   const over = retried.find(t => (rounds[t.id] ?? 0) >= budget)
@@ -368,6 +374,8 @@ test('a committed input that changes between steps blocks before the next spawn'
 
 const firstPass = ['init-run', 'preview-check', 'dispatch', 'dispatch-reviews', 'collect-reviews', 'gate']
 const repairRound = ['fix', 'record-fix-round', 'dispatch', 'dispatch-reviews', 'collect-reviews', 'gate']
+// The phase-1 fix rounds record-fix-round wrote, read where the real command writes them.
+const recorded = async fixture => JSON.parse(await readFile(path.join(fixture.root, '.fleetmates', 'r1', 'status.json'), 'utf8')).fixRounds['1']
 
 test('gate exit 5 is an infrastructure stop and never reaches the fix decision; exit 1 is a code failure', async t => {
   const fixture = await project(t)
@@ -404,7 +412,7 @@ test('a retry decision records each round, redispatches only the named tasks wit
   }
   assert.equal(git(fixture.root, 'show', 'refs/heads/fleetmates/run/r1:a.txt'), 'T1 fixed')
   assert.equal(git(fixture.root, 'show', 'refs/heads/fleetmates/run/r1:b.txt'), 'T2')
-  assert.deepEqual(JSON.parse(await readFile(path.join(fixture.bin, 'rounds.json'), 'utf8')), { T1: 1 })
+  assert.deepEqual(await recorded(fixture), { T1: 1 })
 })
 
 test('a repair round that does not build on the reviewed task tip stops before review', async t => {
@@ -414,6 +422,21 @@ test('a repair round that does not build on the reviewed task tip stops before r
   assert.deepEqual(commands(await fixture.invocations()), [...firstPass, 'fix', 'record-fix-round', 'dispatch'])
   assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['changed-input', 'repair-1.r1']])
   assert.match(report.blockers[0].reason, /did not advance from the reviewed tip/)
+})
+
+test('a refused repair round is never reused on resume: its non-descending tip does not reach the run branch', async t => {
+  const fixture = await project(t)
+  fixture.env.mode = 'gate-fails fix-resets'
+  const first = await fixture.run()
+  assert.deepEqual(first.blockers.map(b => [b.category, b.step]), [['changed-input', 'repair-1.r1']])
+  const runTip = git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1')
+  const seen = (await fixture.invocations()).length
+  fixture.env.mode = 'gate-until-fixed'
+  const resumed = await fixture.resume()
+  assert.deepEqual(commands(await fixture.invocations()).slice(seen), [], 'nothing is dispatched, reviewed or gated')
+  assert.deepEqual(resumed.blockers.map(b => [b.category, b.step]), [['missing-artifact', 'repair-1.r1']])
+  assert.match(resumed.blockers[0].reason, /did not advance from the reviewed tip/)
+  assert.equal(git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1'), runTip, 'nothing merged')
 })
 
 test('escalation and exhausted repair budgets stop failed with the existing reasons', async t => {
@@ -456,7 +479,8 @@ test('escalation and exhausted repair budgets stop failed with the existing reas
   // Rounds recorded before this execution count too: a decision whose round exceeds the bound stops.
   const earlier = await project(t, { fixRounds: 3 })
   earlier.env.mode = 'gate-fails'
-  await writeFile(path.join(earlier.bin, 'rounds.json'), JSON.stringify({ T1: 1 }))
+  await mkdir(path.join(earlier.root, '.fleetmates', 'r1'), { recursive: true })
+  await writeFile(path.join(earlier.root, '.fleetmates', 'r1', 'status.json'), JSON.stringify({ fixRounds: { 1: { T1: 1 } } }))
   const spentBefore = await earlier.run({ request: { ...earlier.request, limits: { ...earlier.request.limits, maxRepairRounds: 1 } } })
   assert.deepEqual(commands(await earlier.invocations()), [...firstPass, 'fix'])
   assert.deepEqual(spentBefore.blockers.map(b => [b.category, b.step]), [['code', 'gate-1']])
@@ -504,8 +528,51 @@ test('resume continues in the recorded repair round: its record and dispatch are
   assert.deepEqual(resumed.steps.filter(step => step.status === 'reused').map(step => step.id),
     ['prepare', 'baseline', 'record-1.r1.T1', 'repair-1.r1', 'review-1.r1'])
   assert.deepEqual(resumed.steps.filter(step => step.status === 'completed').map(step => step.id), ['collect-1.r1', 'gate-1.r1', 'integrate-1.r1'])
-  assert.deepEqual(JSON.parse(await readFile(path.join(fixture.bin, 'rounds.json'), 'utf8')), { T1: 1 })
+  assert.deepEqual(await recorded(fixture), { T1: 1 })
   assert.equal(git(fixture.root, 'show', 'refs/heads/fleetmates/run/r1:a.txt'), 'T1 fixed')
+})
+
+test('a round whose record already landed is not recorded again when resume reruns deterministic steps', async t => {
+  const fixture = await project(t, { fixRounds: 3 })
+  fixture.env.mode = 'gate-fails'
+  const limits = { ...fixture.request.limits, maxRepairRounds: 1 }
+  await fixture.run({ request: { ...fixture.request, limits } })
+  assert.deepEqual(await recorded(fixture), { T1: 1 })
+  // A changed verifier makes every prior deterministic observation stale, record-1.r1.T1 included.
+  await writeFile(fixture.cliPath, (await readFile(fixture.cliPath, 'utf8')) + '\n// upgraded installed CLI\n')
+  const seen = (await fixture.invocations()).length
+  fixture.env.mode = 'gate-until-fixed'
+  const resumed = await fixture.resume()
+  assert.deepEqual(commands(await fixture.invocations()).slice(seen), ['init-run', 'preview-check', 'collect-reviews', 'gate'], 'record-fix-round is not run again')
+  assert.deepEqual(resumed.steps.find(step => step.id === 'record-1.r1.T1'), { id: 'record-1.r1.T1', attempt: null, status: 'reused', exitCode: null, durationMs: null, artifacts: [], recorded: 'already-landed' })
+  assert.deepEqual(await recorded(fixture), { T1: 1 }, 'one round delivered, one round recorded')
+  assert.equal(resumed.state, 'human-required', resumed.blockers.map(b => b.reason).join('; '))
+})
+
+test('a phase dispatched under other inputs stops before its next round is recorded or dispatched', async t => {
+  const fixture = await project(t, { fixRounds: 3 })
+  fixture.env.mode = 'gate-fails gate-infra-on-2'
+  const first = await fixture.run()
+  assert.deepEqual(first.blockers.map(b => [b.category, b.step]), [['infrastructure', 'gate-1.r1']])
+  await writeFile(fixture.cliPath, (await readFile(fixture.cliPath, 'utf8')) + '\n// upgraded installed CLI\n')
+  const seen = (await fixture.invocations()).length
+  fixture.env.mode = 'gate-fails'
+  const resumed = await fixture.resume()
+  assert.deepEqual(commands(await fixture.invocations()).slice(seen), ['init-run', 'preview-check', 'collect-reviews', 'gate', 'fix'], 'no record-fix-round and no dispatch')
+  assert.deepEqual(resumed.blockers.map(b => [b.category, b.step]), [['changed-input', 'record-1.r2.T1']])
+  assert.match(resumed.blockers[0].reason, /dispatched to the strict driver under other inputs/)
+  assert.deepEqual(await recorded(fixture), { T1: 1 })
+})
+
+test('under the driver journal the repair rounds stop at the driver attempt limit, and the reason says so', async t => {
+  const fixture = await project(t, { fixRounds: 10 })
+  fixture.env.mode = 'gate-fails'
+  const report = await fixture.run({ request: { ...fixture.request, limits: { ...fixture.request.limits, maxRepairRounds: 10, maxAttempts: 200 } } })
+  assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['code', 'gate-1.r9']])
+  assert.match(report.blockers[0].reason, /^budget-exhausted: maxRepairRounds 10, phase repair limit 10, 9 round\(s\) delivered, driver round limit 9$/)
+  assert.deepEqual(await recorded(fixture), { T1: 9 })
+  const dispatches = commands(await fixture.invocations()).filter(command => command === 'dispatch').length
+  assert.equal(dispatches, 10, 'one implement and nine repair dispatches share the driver attempt cap of 10')
 })
 
 test('budgets stop before spawning', async t => {
@@ -807,6 +874,48 @@ test('every dispatch argv ends with --execution naming the contract file the con
     /Invalid required execution contract/)
 })
 
+test('the real driver accepts the journal exactly as the controller leaves it when it spawns dispatch', async t => {
+  const fixture = await project(t)
+  const runDir = await mkdtemp(path.join(tmpdir(), 'wfc-driver-'))
+  t.after(() => rm(runDir, { recursive: true, force: true }))
+  const reached = []
+  fixture.env.hook = async (command, options) => {
+    if (options.argv?.[1] !== 'dispatch') return
+    // The controller's own open step-started and agent-dispatch effect-started are in the journal now.
+    const events = await readExecutionEvents(fixture.common, 'r1')
+    assert.ok(events.some(e => e.step === 'implement-1' && e.kind === 'effect-started' && e.effect.kind === 'agent-dispatch'))
+    assert.ok(!events.some(e => e.step === 'implement-1' && e.kind === 'effect-completed'))
+    const contract = JSON.parse(await readFile(options.argv[options.argv.indexOf('--execution') + 1], 'utf8'))
+    const adapter = { name: 'stub', supportsEffort: true, async makeSandbox() { reached.push('sandbox'); throw new Error('stub adapter stops after the journal checks') } }
+    const realGit = (args, opts = {}) => new Promise(resolve => execFile('git', args, { cwd: opts.cwd ?? fixture.root, encoding: 'utf8' },
+      (error, stdout, stderr) => resolve({ code: error ? (error.code ?? 1) : 0, stdout, stderr })))
+    const out = await dispatchPhase({ adapter, git: realGit, runRepo: fixture.root, runId: 'r1', runBranch: 'fleetmates/run/r1',
+      phaseTasks: [{ id: 'T1', title: 'T1', files: ['a.txt'] }], maxParallel: 1, sandboxMode: 'clone', network: false, timeoutMinutes: 1,
+      composeBriefFor: () => 'brief', personaFor: () => 'persona', runDir, completeEnforcement: async () => 0, execution: contract })
+    assert.deepEqual(out, { results: [], orphaned: ['T1'] })
+    reached.push(JSON.parse(await readFile(path.join(runDir, 'sessions', 'T1.json'), 'utf8')).exitReason)
+    // A session record the driver bound to this executionId and these inputs is accepted again; the
+    // same executionId under other inputs (one input hash changed, as a verifier change would) is
+    // refused: the reason the controller stops such a phase before dispatching it.
+    await writeFile(path.join(runDir, 'sessions', 'T1.json'), JSON.stringify({ taskId: 'T1',
+      execution: { version: 1, executionId: contract.executionId, identity: strictExecutionIdentity(contract.inputs), attempt: 'a1' } }))
+    const key = Object.keys(contract.inputs).find(name => name !== 'commit')
+    const drifted = { ...contract, inputs: { ...contract.inputs, [key]: contract.inputs[key].replace(/^./, c => c === 'a' ? 'b' : 'a') } }
+    for (const execution of [contract, drifted]) {
+      const again = await dispatchPhase({ adapter, git: realGit, runRepo: fixture.root, runId: 'r1', runBranch: 'fleetmates/run/r1',
+        phaseTasks: [{ id: 'T1', title: 'T1', files: ['a.txt'] }], maxParallel: 1, sandboxMode: 'clone', network: false, timeoutMinutes: 1,
+        composeBriefFor: () => 'brief', personaFor: () => 'persona', runDir, completeEnforcement: async () => 0, execution })
+      assert.deepEqual(again, { results: [], orphaned: ['T1'] })
+      reached.push(JSON.parse(await readFile(path.join(runDir, 'sessions', 'T1.json'), 'utf8')).exitReason)
+    }
+  }
+  const report = await fixture.run()
+  assert.deepEqual(reached, ['sandbox', 'stub adapter stops after the journal checks', 'sandbox', 'stub adapter stops after the journal checks',
+    'Legacy or changed session evidence is unverified; reconciliation required'],
+    'the driver got past its journal reconciliation to the sandbox, and refuses the same execution under other inputs')
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+})
+
 test('a files sandbox gets no --execution and reports the driver journal as unavailable', async t => {
   const fixture = await project(t)
   const report = await fixture.run({ request: { ...fixture.request, sandboxMode: 'files' } })
@@ -865,6 +974,22 @@ test('a run suspended or abandoned before completion is reported in that state a
     assert.equal(done.verifiedComplete, false)
     assert.equal(done.obligations.verifiedComplete, false, `a ${marker} lifecycle never verifies the obligations`)
     assert.equal(done.obligations.state, marker)
+  }
+})
+
+test('a run suspended or abandoned with acceptance still missing reports its lifecycle state, not human-required', async t => {
+  for (const marker of ['suspended', 'abandoned']) {
+    const fixture = await project(t)
+    // The marker lands while the host gate closes its verification, after the last spawned command.
+    const verificationFactory = async (...args) => {
+      const handle = await factory(...args)
+      return { ...handle, close: async () => { git(fixture.root, 'update-ref', `refs/fleetmates/r1/${marker}`, 'HEAD'); await handle.close() } }
+    }
+    const report = await fixture.run({ verificationFactory })
+    assert.ok(report.acceptance.missing.length > 0)
+    assert.equal(report.state, marker)
+    assert.equal(report.obligations.state, marker)
+    assert.equal(report.verifiedComplete, false)
   }
 })
 

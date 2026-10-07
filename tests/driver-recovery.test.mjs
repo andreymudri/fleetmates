@@ -302,6 +302,19 @@ test('unknown external effect remains unresolved without query or duplicate mode
   await assertRefusal(config,t,/unknown-effect/)
 })
 
+test('an open agent-dispatch effect of the launching controller does not refuse the strict driver it launched',async t=>{
+  const config=await setup(t)
+  const {appendExecutionEvent}=await import('../scripts/execution-journal.mjs')
+  const parent={version:2,runId:'r',executionId:'wf-parent',task:'profile',step:'implement-1',attempt:'implement-1.1',inputs:config.execution.inputs,
+    branches:{'refs/heads/run/r':config.execution.inputs.commit},checkout:'root',artifacts:[]}
+  const at=Date.now()-1000
+  await appendExecutionEvent(config.execution.common,{...parent,id:'parent-start',kind:'step-started',at},{requireFreshStart:true})
+  await appendExecutionEvent(config.execution.common,{...parent,id:'parent-effect',kind:'effect-started',at:at+1,effect:{id:'agent.implement-1.1',kind:'agent-dispatch',reference:null}})
+  const out=await outcome(config,t)
+  assert.deepEqual(out.orphaned,[]);assert.equal(out.results[0]?.status,'done')
+  assert.equal((await names(config)).filter(n=>n.startsWith('spawn-count-')).length,1)
+})
+
 test('strict initial preparation must exist and pass before spawn',async t=>{
   for(const preparation of ['missing','failed']) {
     const config=await setup(t)
