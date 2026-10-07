@@ -14,8 +14,8 @@ const PROFILES = Object.freeze({
   ui: ['rendered-output', 'interaction-check', 'accessibility-check'],
   research: ['sources', 'claim-evidence', 'uncertainty-review'],
 })
-// Inclusive bounds on the expansion's numeric parameters. The workflow controller derives its own
-// maxRepairRounds and maxWallMs bounds from these, so a request it accepts always expands.
+// Inclusive bounds on the expansion's numeric parameters. The workflow controller derives its
+// request bounds for maxRepairRounds and the maxWallMs ceiling from these, so the two cannot drift.
 export const PROFILE_LIMITS = Object.freeze({ maxRepairRounds: Object.freeze([0, 10]), maxWallMinutes: Object.freeze([1, 1440]) })
 const within = (value, [low, high]) => Number.isSafeInteger(value) && value >= low && value <= high
 const hash = value => createHash('sha256').update(value).digest('hex')

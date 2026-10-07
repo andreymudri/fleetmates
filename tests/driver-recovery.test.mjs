@@ -33,6 +33,7 @@ const late = () => new Promise(resolve=>setTimeout(resolve,Math.max(1,config.exe
 const mark = async name => { await writeFile(path.join(config.root, name), 'yes'); };
 const worker = async opts => {
  await mark('spawn-count-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+ await writeFile(path.join(config.root, 'prompt-last.txt'), String(opts.prompt ?? opts.message ?? ''));
  const freshness = {};
  for(const [key,file] of Object.entries({result:opts.resultPath,stream:opts.streamPath,stderr:opts.errPath})) { try { await access(file); freshness[key]=false } catch { freshness[key]=true } }
  await writeFile(path.join(config.root,'fresh-inputs-'+(opts.resumed?'resume':'spawn')+'.json'),JSON.stringify(freshness));
@@ -87,7 +88,7 @@ const adapter = {
   }
   if(config.virtualResult) return {status:'done',branch,filesChanged:[],summary:'virtual',blockers:[]}; try { return JSON.parse(await readFile(config.streamResult?streamPath:resultPath,'utf8')); } catch { return null; } },
  async readUsage() { if(config.hangStage==='usage') await hang(); return null; },
- async collect(_git, {sandbox,branch}) { if(config.hangStage==='collection') await hang(); if(config.lateCollection) await late(); const events=await readExecutionEvents(config.execution.common,'r');await writeFile(path.join(config.root,'collection-order.json'),JSON.stringify(events.some(e=>e.step==='collection'&&e.kind==='step-started'))); const r = await _git(['fetch','--no-tags',sandbox.meta.gitdir,(config.forceCollect?'+':'')+'refs/heads/'+branch+':refs/heads/'+branch]); if(r.code) throw Error(r.stderr); await mark('collected'); },
+ async collect(_git, {sandbox,branch}) { if(config.hangStage==='collection') await hang(); if(config.lateCollection) await late(); const events=await readExecutionEvents(config.execution.common,'r');await writeFile(path.join(config.root,'collection-order.json'),JSON.stringify(events.some(e=>e.step==='collection'&&e.kind==='step-started'))); await writeFile(path.join(config.root,'collect-base.txt'),String(sandbox.meta.runBranch)); const r = await _git(['fetch','--no-tags',sandbox.meta.gitdir,(config.forceCollect?'+':'')+'refs/heads/'+branch+':refs/heads/'+branch]); if(r.code) throw Error(r.stderr); await mark('collected'); },
 };
 const args = { adapter, git, runRepo: config.root, runId:'r',runBranch:'run/r',phaseTasks:(config.tasks??['T1']).map(id=>({id,title:'fixture',files:['work.txt'],model:config.model})),maxParallel:config.maxParallel??1,fixRound:config.fixRound,sandboxMode:'clone',network:false,timeoutMinutes:1,tierModels:{},effortFor:()=> config.effort ?? 'high',personaFor:()=> config.persona ?? 'fixture persona',composeBriefFor:t=>composeBrief({task:{...t,branch:'fleetmates/r/'+t.id},runId:'r',planPath:'plan.md',baseBranch:'old-base',fixRound:config.fixRound===true}),runDir:path.join(config.root,'state'),completeEnforcement:async()=>{
  await mark('verified-'+Date.now());
@@ -643,6 +644,19 @@ test('a legacy fix round whose sandbox is gone is cut from the task branch, neve
   git(config.root, '--git-dir=' + path.join(config.root, 'clone-git'), 'merge-base', '--is-ancestor', prior, 'HEAD')
 })
 
+test('a legacy fix round in a files checkout is briefed and collected on the prior task tip', async t => {
+  const config = await setup(t)
+  await outcome({ ...config, legacy: true, mode: 'files' }, t)
+  const prior = git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/T1')
+  assert.notEqual(prior, config.execution.inputs.commit)
+  const fixed = await outcome({ ...config, legacy: true, mode: 'files', fixRound: true, fixCommit: true }, t)
+  assert.equal(fixed.results[0]?.status, 'done')
+  assert.equal(await readFile(path.join(config.root, 'collect-base.txt'), 'utf8'), 'fleetmates/r/T1', 'a files collection commits on the task branch')
+  const prompt = await readFile(path.join(config.root, 'prompt-last.txt'), 'utf8')
+  assert.ok(prompt.includes(prior), 'the brief names the prior task tip')
+  assert.ok(!prompt.includes(config.execution.inputs.commit), 'the brief never names the run branch tip')
+})
+
 test('a legacy fix round that moves the task branch off its prior tip is refused and the tip is restored', async t => {
   const config = await setup(t)
   await outcome({ ...config, legacy: true }, t)
@@ -657,7 +671,8 @@ test('a legacy fix round that moves the task branch off its prior tip is refused
 test('a strict fix round invokes a new journaled harness attempt over a collected done result and keeps its commits', async t => {
   const config = await setup(t)
   assert.equal((await outcome(config, t)).results[0]?.status, 'done')
-  const fixed = await outcome({ ...config, fixRound: true, fixCommit: true }, t)
+  // The fix round's own prompt differs from the collected attempt's; only a reuse would compare them.
+  const fixed = await outcome({ ...config, fixRound: true, fixCommit: true, persona: 'fix-round persona' }, t)
   assert.equal(fixed.results[0]?.status, 'done')
   assert.equal(await spawnCount(config), 2)
   const tips = await retainedTips(config)

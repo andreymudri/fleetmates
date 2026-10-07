@@ -151,9 +151,12 @@ if (command === 'init-run') {
   const budget = JSON.parse(readFileSync(path.join(root, 'fleetmates.gate.json'), 'utf8')).phases.default.fixRounds
   const retried = tasks.filter(t => t.phase === Number(flag('phase')) && (process.env.FAKE_RETRY ?? t.id).split(',').includes(t.id))
   const over = retried.find(t => (rounds[t.id] ?? 0) >= budget)
+  // fix-foreign-task names a task outside the phase; fix-round-one reports round 1 whatever was recorded.
+  const named = mode.includes('fix-foreign-task') ? [{ id: 'T9' }] : retried
   console.log(JSON.stringify(mode.includes('fix-escalate') ? { decision: 'escalate', tasks: [], reason: 'process-violation', check: 'fileset' }
     : over ? { decision: 'escalate', tasks: [], reason: 'budget-exhausted', taskId: over.id }
-    : { decision: 'retry', tasks: retried.map(t => ({ taskId: t.id, tier: 'mid', round: (rounds[t.id] ?? 0) + 1, checks: verdict.results.filter(r => r.status === 'fail').map(r => r.name) })), reason: null }, null, 2))
+    : { decision: 'retry', tasks: named.map(t => ({ taskId: t.id, tier: 'mid', round: mode.includes('fix-round-one') ? 1 : (rounds[t.id] ?? 0) + 1,
+      checks: verdict.results.filter(r => r.status === 'fail').map(r => r.name) })), reason: null }, null, 2))
 } else if (command === 'finish') {
   const supplied = flag('results') ? JSON.parse(readFileSync(flag('results'), 'utf8')) : null
   const pending = [...new Set(tasks.map(t => t.phase))].filter(phase => !supplied?.phases?.[String(phase)]?.results?.some(r => r.name === 'review' && r.status === 'pass'))
@@ -444,16 +447,26 @@ test('escalation and exhausted repair budgets stop failed with the existing reas
   const spentBefore = await earlier.run({ request: { ...earlier.request, limits: { ...earlier.request.limits, maxRepairRounds: 1 } } })
   assert.deepEqual(commands(await earlier.invocations()), [...firstPass, 'fix'])
   assert.deepEqual(spentBefore.blockers.map(b => [b.category, b.step]), [['code', 'gate-1']])
-  assert.match(spentBefore.blockers[0].reason, /^budget-exhausted: maxRepairRounds 1, fix budget 1, 0 round/)
+  assert.match(spentBefore.blockers[0].reason, /^budget-exhausted: maxRepairRounds 1, phase repair limit 1, 0 round/)
 
-  // A retry that names no task of the failing phase is not dispatched at all.
-  const unnamed = await project(t)
-  unnamed.env.mode = 'gate-fails'
-  unnamed.env.retry = 'T9'
-  const nobody = await unnamed.run()
-  assert.deepEqual(commands(await unnamed.invocations()), [...firstPass, 'fix'])
-  assert.deepEqual(nobody.blockers.map(b => [b.category, b.step]), [['infrastructure', 'fix-1']])
-  assert.match(nobody.blockers[0].reason, /names no valid task/)
+  // The rounds this execution delivered count even when the decision reports a lower round number.
+  const lagging = await project(t, { fixRounds: 3 })
+  lagging.env.mode = 'gate-fails fix-round-one'
+  const lagged = await lagging.run({ request: { ...lagging.request, limits: { ...lagging.request.limits, maxRepairRounds: 1 } } })
+  assert.deepEqual(commands(await lagging.invocations()), [...firstPass, ...repairRound, 'fix'])
+  assert.deepEqual(lagged.blockers.map(b => [b.category, b.step]), [['code', 'gate-1.r1']])
+  assert.match(lagged.blockers[0].reason, /^budget-exhausted: maxRepairRounds 1, phase repair limit 1, 1 round/)
+
+  // A retry that names no task, or a task outside the failing phase, is not dispatched at all.
+  for (const [mode, retry] of [['gate-fails', 'T9'], ['gate-fails fix-foreign-task', undefined]]) {
+    const unnamed = await project(t)
+    unnamed.env.mode = mode
+    unnamed.env.retry = retry
+    const nobody = await unnamed.run()
+    assert.deepEqual(commands(await unnamed.invocations()), [...firstPass, 'fix'], mode)
+    assert.deepEqual(nobody.blockers.map(b => [b.category, b.step]), [['infrastructure', 'fix-1']], mode)
+    assert.match(nobody.blockers[0].reason, /names no valid task/, mode)
+  }
 
   // A rejected host gate is a code failure too: it gets the same round, and nothing merges.
   const hostGate = await project(t, { required: ['missing.txt'] })

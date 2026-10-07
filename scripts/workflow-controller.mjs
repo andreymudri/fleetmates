@@ -392,7 +392,7 @@ async function repairDecision(ctx, failedStep, phase, failure, round) {
   const contract = ctx.expanded.phaseContracts.find(c => c.phase === phase)
   const allowed = Math.min(ctx.request.limits.maxRepairRounds, contract.repair.maxRounds)
   if (round >= allowed || decision.tasks.some(task => task.round > allowed)) {
-    return { blocker: blocker('code', failedStep.id, `budget-exhausted: maxRepairRounds ${ctx.request.limits.maxRepairRounds}, fix budget ${contract.repair.maxRounds}, ${round} round(s) delivered`) }
+    return { blocker: blocker('code', failedStep.id, `budget-exhausted: maxRepairRounds ${ctx.request.limits.maxRepairRounds}, phase repair limit ${contract.repair.maxRounds}, ${round} round(s) delivered`) }
   }
   return { tasks }
 }
@@ -404,8 +404,8 @@ function repairTasksValid(ctx, phase, tasks) {
 // One repair round as steps: record-fix-round for each named task, then dispatch --fix-round for
 // exactly those tasks (the validated implement fragment plus `--fix-round --task <id>...`), then
 // the phase's review, collect, gate and integration fragments again under round-suffixed ids.
-// Round-suffixed ids keep each round its own journal history: an agent step whose dispatch effect
-// completed can never start again under the same id.
+// Round-suffixed ids keep each round its own journal history: the journal refuses a second start
+// of an agent step whose dispatch effect completed, unless that effect is resolved not-started.
 function repairSteps(ctx, phase, round, tasks) {
   if (!repairTasksValid(ctx, phase, tasks)) return null
   const base = name => ctx.expanded.steps.find(s => s.id === `${name}-${phase}`)

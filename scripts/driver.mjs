@@ -364,11 +364,12 @@ export async function releaseLock(lockPath) {
 // to `completeEnforcement`, and the gate still decides landability.
 //
 // `fixRound: true` is the mode `dispatch --fix-round` uses: every task in `phaseTasks` is
-// respawned, or resumed in its recorded sandbox, even when a done result is recorded. Its work
-// starts from the task branch's current tip, never from the run branch, and a collected tip that
-// does not descend from that prior tip is refused and the prior tip put back. Without a required
-// execution contract the attempt is journaled in the task's session record under `fixRounds`;
-// with one it is a new journaled harness attempt whose binding carries `fixRound: true`.
+// respawned, or resumed in its recorded sandbox, even when a done result is recorded, and its work
+// starts from the task branch's current tip, not from the run branch. Without a required execution
+// contract the attempt is journaled in the task's session record under `fixRounds`, and a collected
+// tip that does not descend from the prior tip is refused and the prior tip put back. With one, a
+// fix round over a collected result is a new journaled harness attempt whose binding carries
+// `fixRound: true`, collected under the contract's existing ref checks.
 export async function dispatchPhase({
   adapter, git, runRepo, runId, runBranch, phaseTasks,
   maxParallel, sandboxMode, network, timeoutMinutes, tierModels, effortFor,
@@ -690,8 +691,9 @@ export async function dispatchPhase({
       : (resumePath && record.sandbox)
         ? record.sandbox
         : await adapter.makeSandbox(git, { runRepo, runBranch, runId, taskId, mode: sandboxMode })
-    // A files checkout is committed on top of `meta.runBranch` at collection; in a fix round that
-    // base is the task branch, so the collected commit descends from the prior task tip.
+    // The files adapters' collection commits a files checkout on top of `meta.runBranch` (as read
+    // in scripts/harnesses/files-sandbox.mjs `commitFilesTree`); in a fix round that base is the
+    // task branch, so the collected commit builds on the prior task tip.
     if (fixRound && sandbox.meta?.mode === 'files') sandbox = { ...sandbox, meta: { ...sandbox.meta, runBranch: branch } }
     if (fixRound) record = { ...record, sandboxRemoved: false }
 
