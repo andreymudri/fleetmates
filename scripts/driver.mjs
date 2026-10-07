@@ -44,11 +44,16 @@ async function sandboxTip(git, sandbox, branch) {
   if (!sha(tip)) throw new Error('Worker tip is unavailable')
   return tip
 }
-async function driverRuntime(git, sandbox, runRepo, branch, continuation, fallbackTip) {
-  const tip = sandbox.meta?.mode === 'files' ? fallbackTip : await sandboxTip(git, sandbox, branch)
+async function driverRuntime(git, sandbox, runRepo, branch, continuation, fallbackTip, allowUnverified = false) {
+  let tip, verified = true
+  try { tip = sandbox.meta?.mode === 'files' ? fallbackTip : await sandboxTip(git, sandbox, branch) }
+  catch (error) {
+    if (!allowUnverified || !sha(fallbackTip)) throw error
+    tip = fallbackTip; verified = false
+  }
   if (!sha(tip)) throw new Error('Current task source is unavailable')
   return { version: 1, root: runRepo, cwd: sandbox.cwd, gitdir: sandbox.meta?.gitdir ?? null,
-    branch, tip, continuation, mode: sandbox.meta?.mode ?? 'full' }
+    branch, tip, continuation, mode: sandbox.meta?.mode ?? 'full', verified }
 }
 
 async function outputBytes(file, limit) {
@@ -612,7 +617,7 @@ export async function dispatchPhase({
       : await adapter.makeSandbox(git, { runRepo, runBranch, runId, taskId, mode: sandboxMode })
 
     const role = task.role || 'implementer'
-    const runtime = await driverRuntime(git, sandbox, runRepo, branch, resumePath, await checkedGit(git, ['rev-parse', runBranch], runRepo))
+    const runtime = await driverRuntime(git, sandbox, runRepo, branch, resumePath, await checkedGit(git, ['rev-parse', runBranch], runRepo), true)
     const prompt = `${personaFor(role)}\n\n${composeBriefFor(runtime ? { ...task, runtime } : task)}`
     const model = resolveModel(task)
     // A harness with no effort control (Cursor bakes effort into the model id) gets none, and the

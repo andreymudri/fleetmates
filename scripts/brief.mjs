@@ -60,7 +60,14 @@ const fixRoundSteps = (task) => [
 ]
 
 const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'"
-const runtimeSteps = task => [
+const runtimeSteps = task => task.runtime.verified === false ? [
+  'MANDATORY FIRST STEP. Worker Git identity is UNVERIFIED.',
+  'Observed host source anchor: ' + task.runtime.tip + '.',
+  'Do not reset this checkout or create a branch from the original base.',
+  'Report the missing worker Git identity in your result; the host must reconcile it.',
+  'This legacy invocation does not establish verified execution.',
+  'Host owns collection and completion verification in the main repository.',
+] : [
   'MANDATORY FIRST STEP. The host prepared this task checkout at the current tip.',
   'Preserve all prior work. Do not reset this branch to the original base.',
   'Expected branch: ' + task.runtime.branch + '. Expected tip: ' + task.runtime.tip + '.',
@@ -438,6 +445,7 @@ export function composeBrief({ task, runId = '', planPath = '', baseBranch = '',
       || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(runtime.tip)
       || !['clone', 'files', 'full'].includes(runtime.mode)
       || typeof runtime.continuation !== 'boolean'
+      || runtime.verified !== undefined && typeof runtime.verified !== 'boolean'
       || ![runtime.root, runtime.cwd].every(value => typeof value === 'string' && path.isAbsolute(value) && !/[\u0000-\u001f\u007f]/.test(value))
       || runtime.gitdir !== null && (typeof runtime.gitdir !== 'string' || !path.isAbsolute(runtime.gitdir) || /[\u0000-\u001f\u007f]/.test(runtime.gitdir))) {
       throw new Error('composeBrief: invalid trusted driver runtime context')

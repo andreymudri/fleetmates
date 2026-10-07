@@ -640,3 +640,16 @@ test('legacy state-only reuse remains explicitly unverified', async () => {
   assert.equal(out.results[0].verifiedComplete,false)
   assert.equal(out.results[0].evidence,'legacy-unverified')
 })
+
+test('legacy adapter with observed host source and unverified worker identity never receives base reset instructions', async () => {
+  const runDir=await tmpRunDir('legacy-worker-unverified')
+  const {adapter,calls,completeEnforcement}=makeStubAdapter()
+  const {composeBrief}=await import('../scripts/brief.mjs')
+  const out=await dispatchPhase(baseArgs(runDir,{adapter,completeEnforcement,
+    git:async argv=>({code:0,stderr:'',stdout:argv.includes('symbolic-ref')?'run/r':'a'.repeat(40)}),
+    composeBriefFor:task=>composeBrief({task:{...task,branch:'fleetmates/r/T1',files:['a']},runId:'r',planPath:'plan.md',baseBranch:'old-base'})}))
+  assert.equal(calls.spawn.length,1)
+  assert.equal(out.results[0]?.verifiedComplete,false)
+  assert.match(calls.spawn[0].prompt,/UNVERIFIED/)
+  assert.ok(!/^\s*git checkout -B/m.test(calls.spawn[0].prompt))
+})

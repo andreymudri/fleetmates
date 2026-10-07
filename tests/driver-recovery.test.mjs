@@ -41,6 +41,7 @@ const adapter = {
   try { await access(cwd); } catch {
    let r = await git(['clone','--shared','--separate-git-dir='+gitdir, config.root, cwd]); if(r.code) throw Error(r.stderr);
    r = await git(['checkout','-b',branch,'origin/run/r'], {cwd}); if(r.code) throw Error(r.stderr);
+   if(config.workerWrongRef) { r=await git(['checkout','-b','wrong'],{cwd});if(r.code) throw Error(r.stderr); }
   }
   return { cwd, meta: { mode: config.mode ?? 'clone', gitdir, branch, workerEnvironment: config.preparation === 'missing' ? null : { ready:config.preparation!=='failed', workspace:'fresh', setup:{status:'pass',durationMs:7,checks:[{log:{complete:!config.incompleteSetup,output:'setup log'}}]},baseline:{status:'pass',durationMs:9,checks:[{log:{complete:true,output:'baseline log'}}]},durationMs:16 } } };
  },
@@ -326,5 +327,11 @@ test('adapter-only result without retained native bytes remains unverified',asyn
 
 test('incomplete initial setup logs cannot satisfy strict preparation',async t=>{
   const config=await setup(t);const out=await outcome({...config,incompleteSetup:true},t)
+  assert.deepEqual(out.orphaned,['T1']);assert.ok(!(await names(config)).some(n=>n.startsWith('spawn-count-')))
+})
+
+
+test('required execution never uses the unverified legacy worker fallback',async t=>{
+  const config=await setup(t);const out=await outcome({...config,workerWrongRef:true},t)
   assert.deepEqual(out.orphaned,['T1']);assert.ok(!(await names(config)).some(n=>n.startsWith('spawn-count-')))
 })
