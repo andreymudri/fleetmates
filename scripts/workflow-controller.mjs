@@ -487,12 +487,23 @@ async function guarded(ctx, step, action, { counts = true } = {}) {
     : { ok: false, category: outcome.category ?? 'missing-artifact', verdict: outcome.verdict ?? null, blocker: blocker(outcome.category ?? 'missing-artifact', step.id, outcome.reason ?? 'validation failed') }
 }
 
-// The dispatch execution contract (audit plan, T5 -> T4): one JSON file per dispatch attempt,
-// `{ version: 1, runId, attemptPrefix, journalRoot }`, where attemptPrefix is this controller's
-// attempt id for the step and journalRoot the canonical Git common directory holding the journal.
-async function executionContract(ctx, attempt) {
+// The dispatch execution contract (audit plan, amended T5 -> T4): one JSON file per dispatch
+// attempt holding exactly the object `dispatchPhase` validates as its required execution:
+// `{ version: 1, common, runId, executionId, inputs, retention, maxAttempts, deadlineAt }`.
+// `executionId` is derived from this controller's execution and the phase rather than from each
+// attempt id: the driver refuses a session record or retained attempt bound to another executionId,
+// so a repair round or a redispatch of the same phase must reuse it. `inputs` is the controller's
+// strict identity with the commit the run branch is at now, which the driver requires. The
+// deadline is the step's own timeout from now, which never exceeds the remaining wall budget.
+// Strict driver execution refuses files sandboxes, so no contract is written for them.
+const driverJournal = request => request.harness !== 'cursor' && request.sandboxMode !== 'files'
+async function executionContract(ctx, attempt, phase, timeoutMs) {
   const relative = `${NAMES.stateDir}/${ctx.request.runId}/execution/dispatch-${attempt}.json`
-  await writeInside(ctx.root, relative, JSON.stringify({ version: 1, runId: ctx.request.runId, attemptPrefix: attempt, journalRoot: ctx.common }))
+  const contract = { version: 1, common: ctx.common, runId: ctx.request.runId, executionId: `${ctx.executionId}-p${phase}`,
+    inputs: { ...ctx.inputs, commit: refTip(ctx.root, `refs/heads/${ctx.request.runBranch}`) }, retention: { ...ctx.retention },
+    maxAttempts: Math.min(10, ctx.request.limits.maxAttempts), deadlineAt: Date.now() + timeoutMs }
+  strictExecutionIdentity(contract.inputs)
+  await writeInside(ctx.root, relative, JSON.stringify(contract))
   return path.join(ctx.root, relative)
 }
 
@@ -502,8 +513,8 @@ async function runCli(ctx, step, phase) {
     const command = argv[0], name = nameOf(step)
     // validateWorkflowExpansion refused any fragment already carrying a controller flag, so this is
     // the only `--execution` on the argv.
-    if (command === 'dispatch') {
-      try { argv = [...argv, '--execution', await executionContract(ctx, attempt)] }
+    if (command === 'dispatch' && driverJournal(ctx.request)) {
+      try { argv = [...argv, '--execution', await executionContract(ctx, attempt, phase, timeoutMs)] }
       catch (error) { return { ok: false, category: 'infrastructure', reason: `execution contract not written: ${error.message}`, artifacts: [] } }
     }
     if (step.argv[2] === 'gate') {
@@ -904,6 +915,7 @@ function baseReport(ctx) {
   return { version: 1, mode: 'executed', runId: ctx.request.runId, executionId: ctx.executionId, profile: ctx.request.profile,
     profileHash: null, identity: null, inputs: null, state: 'unresolved', blockers: [], steps: [], acceptance: null,
     verification: typeof ctx.verificationFactory === 'function' ? 'injected-unit-fixture' : 'native-required',
+    driverJournal: driverJournal(ctx.request) ? 'required-execution' : 'unavailable: strict driver execution refuses files sandboxes',
     obligations: null, verifiedComplete: false, publication: 'absent', trust: [...TRUST] }
 }
 

@@ -961,6 +961,23 @@ test('driver brief commands preserve later-phase and fix commits in a separate-g
   }
 })
 
+test('a fix-round brief with driver runtime keeps the fix-round instructions and never resets the task branch', () => {
+  for (const mode of ['clone', 'files']) {
+    const runtime = { version: 1, root: '/project', cwd: '/project/clone', gitdir: mode === 'clone' ? '/project/gitdirs/T4' : null, branch: TASK.branch,
+      tip: 'b'.repeat(40), continuation: true, mode }
+    for (const caveman of [false, true]) {
+      const brief = composeBrief({ ...FULL, caveman, fixRound: true, task: { ...TASK, runtime } })
+      assert.ok(!brief.includes(`checkout -B ${TASK.branch} ${FULL.baseBranch}`), `${mode} caveman=${caveman}`)
+      assert.ok(!runnableReset.test(brief), `${mode} caveman=${caveman}`)
+      assert.ok(brief.includes('This is a FIX ROUND'), `${mode} caveman=${caveman}`)
+      assert.ok(brief.includes(`The work you are fixing is ALREADY on ${TASK.branch}`), `${mode} caveman=${caveman}`)
+      assert.ok(brief.includes(runtime.tip), `${mode} caveman=${caveman}`)
+      const plain = composeBrief({ ...FULL, caveman, task: { ...TASK, runtime } })
+      assert.ok(!plain.includes('FIX ROUND'), 'a first-round brief carries no fix-round instructions')
+    }
+  }
+})
+
 test('malformed trusted runtime refuses composition instead of legacy fallback',()=>{
   const runtime={version:1,root:'/project',cwd:'/project/clone',gitdir:'/project/git',branch:TASK.branch,tip:'a'.repeat(40),continuation:false,mode:'clone'}
   for(const changed of [{tip:'missing'},{root:'relative'},{gitdir:'relative'},{branch:'wrong'},{mode:'unsupported'},{cwd:'/project/\nclone'}]) {

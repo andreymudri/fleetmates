@@ -85,7 +85,14 @@ const runtimeSteps = task => task.runtime.verified === false ? [
   "Do not run locate or infer a main root from this checkout's Git storage.",
 ]
 
-const checkoutSteps = (task, baseBranch, fixRound = false) => (task.runtime ? runtimeSteps(task) : fixRound ? fixRoundSteps(task) : baseBranch ? [
+// A fix round dispatched by the driver: the host already prepared the checkout at the task tip, so
+// the runtime steps stand and the fix-round warning is added to them. The checkout command of
+// `fixRoundSteps` is left out because the host owns Git operations in that checkout.
+const runtimeFixRoundSteps = task => [
+  'This is a FIX ROUND. The work you are fixing is ALREADY on ' + task.branch + ' at the expected tip,',
+  'and resetting that branch would destroy it. Do not reset it and do not create it again from a base.',
+]
+const checkoutSteps = (task, baseBranch, fixRound = false) => (task.runtime ? [...runtimeSteps(task), ...(fixRound ? runtimeFixRoundSteps(task) : [])] : fixRound ? fixRoundSteps(task) : baseBranch ? [
   'MANDATORY FIRST STEP. Your worktree does not start on this run\'s base. Run exactly:',
   '',
   '    git checkout -B ' + task.branch + ' ' + baseBranch,

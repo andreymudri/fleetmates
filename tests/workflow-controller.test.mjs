@@ -12,6 +12,7 @@ import { defaultExec } from '../scripts/gate-runner.mjs'
 import { retainExecutionArtifact } from '../scripts/execution-artifacts.mjs'
 import { readExecutionEvents } from '../scripts/execution-journal.mjs'
 import { resolveExecutionEffect } from '../scripts/execution-recovery.mjs'
+import { dispatchPhase } from '../scripts/driver.mjs'
 
 // The child CLI is a real Node process started through the bounded executor. It stands in for the
 // installed fleetmates CLI: it records every invocation, writes only the artifacts the real
@@ -60,14 +61,20 @@ if (command === 'init-run') {
   console.error('preview ok on stderr')
   console.log('preview ok')
 } else if (command === 'dispatch') {
-  // T5 contract: --execution names an absolute JSON file { version: 1, runId, attemptPrefix, journalRoot };
-  // a relative path, a missing file or an unknown task exits 2 before anything is dispatched.
+  // T5 contract (amended): --execution names an absolute JSON file holding exactly driver.mjs
+  // requiredExecution's object { version: 1, common, runId, executionId, inputs, retention,
+  // maxAttempts, deadlineAt }; a relative path, a missing file or an unknown task exits 2 before
+  // anything is dispatched.
   const execution = flag('execution')
   if (execution !== undefined) {
     let contract = null
     try { contract = path.isAbsolute(execution) ? JSON.parse(readFileSync(execution, 'utf8')) : null } catch { contract = null }
-    if (!contract || Object.keys(contract).sort().join() !== 'attemptPrefix,journalRoot,runId,version' || contract.version !== 1 || contract.runId !== run
-        || typeof contract.attemptPrefix !== 'string' || typeof contract.journalRoot !== 'string' || !path.isAbsolute(contract.journalRoot)) { console.log('invalid --execution'); process.exit(2) }
+    const keys = value => value && typeof value === 'object' ? Object.keys(value).sort().join() : ''
+    if (!contract || keys(contract) !== 'common,deadlineAt,executionId,inputs,maxAttempts,retention,runId,version' || contract.version !== 1 || contract.runId !== run
+        || typeof contract.common !== 'string' || !path.isAbsolute(contract.common) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(contract.executionId ?? '')
+        || keys(contract.inputs) !== 'commit,context,environment,manifest,plan,verifier' || keys(contract.retention) !== 'maxAgeMs,maxArtifactBytes,maxRunBytes'
+        || !Number.isSafeInteger(contract.maxAttempts) || contract.maxAttempts < 1 || contract.maxAttempts > 10
+        || !(contract.deadlineAt > Date.now()) || contract.deadlineAt - Date.now() > 24 * 60 * 60 * 1000) { console.log('invalid --execution'); process.exit(2) }
     appendFileSync(path.join(bin, 'executions.jsonl'), JSON.stringify({ path: execution, contract }) + '\n')
   }
   const phase = Number(flag('phase')), fixRound = args.includes('--fix-round')
@@ -276,6 +283,12 @@ test('two independent profiles execute fixed CLI fragments with absolute entrypo
       tip = first
     }
     assert.equal(tip, git(fixture.root, 'rev-parse', 'refs/heads/main'))
+    // Each dispatch's execution contract binds the run branch tip at that dispatch: the base for
+    // phase 1, the phase-1 merge for phase 2.
+    const executions = (await readFile(path.join(fixture.bin, 'executions.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line).contract)
+    assert.deepEqual(executions.map(c => c.inputs.commit), phases.map(phase => phase === 1 ? git(fixture.root, 'rev-parse', 'refs/heads/main')
+      : git(fixture.root, 'rev-parse', `refs/heads/fleetmates/run/r1~${phases.length - phase + 1}`)))
+    assert.deepEqual(executions.map(c => c.executionId), phases.map(phase => `${report.executionId}-p${phase}`))
     for (const phase of phases) {
       const integration = report.steps.find(step => step.id === `integrate-${phase}`)
       assert.equal(integration.status, 'completed')
@@ -762,20 +775,46 @@ test('every dispatch argv ends with --execution naming the contract file the con
   const seen = await fixture.invocations()
   const dispatches = seen.filter(e => e.command === 'dispatch')
   assert.equal(dispatches.length, 2)
-  const prefixes = []
+  const files = []
   for (const entry of dispatches) {
     assert.equal(entry.args.filter(arg => arg === '--execution').length, 1)
     assert.deepEqual(entry.args.slice(-4, -3), ['--execution'])
     const file = entry.args.at(-3)
     assert.ok(path.isAbsolute(file) && file.startsWith(path.join(fixture.root, '.fleetmates', 'r1') + path.sep), file)
     const contract = JSON.parse(await readFile(file, 'utf8'))
-    assert.deepEqual(Object.keys(contract).sort(), ['attemptPrefix', 'journalRoot', 'runId', 'version'])
+    assert.deepEqual(Object.keys(contract).sort(), ['common', 'deadlineAt', 'executionId', 'inputs', 'maxAttempts', 'retention', 'runId', 'version'])
     assert.equal(contract.version, 1); assert.equal(contract.runId, 'r1')
-    assert.equal(contract.journalRoot, await realpath(fixture.common))
-    prefixes.push(contract.attemptPrefix)
+    assert.equal(contract.common, await realpath(fixture.common))
+    assert.equal(contract.executionId, `${report.executionId}-p1`, 'one executionId per phase, so a repair round reuses the driver records')
+    assert.deepEqual(contract.inputs, { ...report.inputs, commit: git(fixture.root, 'rev-parse', 'refs/heads/main') }, 'the run branch tip at dispatch')
+    assert.deepEqual(contract.retention, retention)
+    assert.equal(contract.maxAttempts, 10)
+    assert.ok(contract.deadlineAt > Date.now() - 60000 && contract.deadlineAt <= Date.now() + fixture.request.limits.stepTimeoutMs)
+    files.push(path.basename(file))
   }
-  assert.deepEqual(prefixes, ['implement-1.1', 'repair-1.r1.1'])
+  assert.deepEqual(files, ['dispatch-implement-1.1.json', 'dispatch-repair-1.r1.1.json'])
   assert.ok(seen.filter(e => e.command !== 'dispatch').every(e => !e.args.includes('--execution')))
+  assert.equal(report.driverJournal, 'required-execution')
+
+  // The written object is the one dispatchPhase validates as its required execution: the real driver
+  // accepts it (with no tasks, nothing is spawned).
+  const contract = JSON.parse(await readFile(dispatches.at(-1).args.at(-3), 'utf8'))
+  const runDir = await mkdtemp(path.join(tmpdir(), 'wfc-driver-'))
+  t.after(() => rm(runDir, { recursive: true, force: true }))
+  assert.deepEqual(await dispatchPhase({ adapter: {}, git: async () => ({ code: 0, stdout: '' }), runRepo: fixture.root, runId: 'r1', runBranch: 'fleetmates/run/r1',
+    phaseTasks: [], maxParallel: 1, runDir, completeEnforcement: async () => 0, execution: contract }), { results: [], orphaned: [] })
+  await assert.rejects(dispatchPhase({ adapter: {}, runRepo: fixture.root, runId: 'r1', phaseTasks: [], maxParallel: 1, runDir, execution: { ...contract, maxAttempts: 11 } }),
+    /Invalid required execution contract/)
+})
+
+test('a files sandbox gets no --execution and reports the driver journal as unavailable', async t => {
+  const fixture = await project(t)
+  const report = await fixture.run({ request: { ...fixture.request, sandboxMode: 'files' } })
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+  assert.match(report.driverJournal, /^unavailable/)
+  const dispatch = (await fixture.invocations()).find(e => e.command === 'dispatch')
+  assert.ok(!dispatch.args.includes('--execution'))
+  assert.deepEqual(dispatch.args.slice(-2), ['--root', fixture.root])
 })
 
 test('an interrupted agent dispatch resolved not-started is redispatched on resume', async t => {
