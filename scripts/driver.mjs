@@ -13,7 +13,7 @@ import { appendEvent, fingerprint } from './event-ledger.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { validateResult } from './result-schema.mjs'
 import { strictExecutionIdentity } from './completion-obligations.mjs'
-import { retainExecutionArtifact, readExecutionArtifact } from './execution-artifacts.mjs'
+import { retainExecutionArtifact, readExecutionArtifact, RETENTION_LIMITS } from './execution-artifacts.mjs'
 import { appendExecutionEvent, readExecutionEvents, strictExecutionAttempts } from './execution-journal.mjs'
 import { reconcileExecutionAttempt } from './execution-recovery.mjs'
 
@@ -87,7 +87,7 @@ function requiredExecution(execution, runId) {
     || !Number.isSafeInteger(execution.deadlineAt) || execution.deadlineAt <= Date.now()
     || execution.deadlineAt - Date.now() > 24 * 60 * 60 * 1000) throw new Error('Invalid required execution contract')
   strictExecutionIdentity(execution.inputs)
-  const upper = { maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 * 1024 * 1024, maxAgeMs: 365 * 86400000 }
+  const upper = RETENTION_LIMITS
   if (!execution.retention || Object.keys(execution.retention).sort().join() !== Object.keys(upper).sort().join()
     || Object.entries(upper).some(([key, bound]) => !Number.isSafeInteger(execution.retention[key]) || execution.retention[key] <= 0 || execution.retention[key] > bound)) throw new Error('Invalid required execution retention')
   return execution
@@ -362,11 +362,19 @@ export async function releaseLock(lockPath) {
 // entries (the teammate's own result fields), `orphaned` is the ids of tasks that produced no
 // usable result. Never writes `done` itself — a recorded status is the teammate's claim subjected
 // to `completeEnforcement`, and the gate still decides landability.
+//
+// `fixRound: true` is the mode `dispatch --fix-round` uses: every task in `phaseTasks` is
+// respawned, or resumed in its recorded sandbox, even when a done result is recorded. Its work
+// starts from the task branch's current tip, never from the run branch, and a collected tip that
+// does not descend from that prior tip is refused and the prior tip put back. Without a required
+// execution contract the attempt is journaled in the task's session record under `fixRounds`;
+// with one it is a new journaled harness attempt whose binding carries `fixRound: true`.
 export async function dispatchPhase({
   adapter, git, runRepo, runId, runBranch, phaseTasks,
   maxParallel, sandboxMode, network, timeoutMinutes, tierModels, effortFor,
-  composeBriefFor, personaFor, runDir, completeEnforcement, execution, executionBoundary,
+  composeBriefFor, personaFor, runDir, completeEnforcement, execution, executionBoundary, fixRound = false,
 }) {
+  if (typeof fixRound !== 'boolean') throw new Error('fixRound must be a boolean')
   const contract = execution === undefined ? null : requiredExecution(execution, runId)
   const sessionsDir = path.join(runDir, 'sessions')
   const lockPath = path.join(runDir, 'driver.lock')
@@ -462,6 +470,9 @@ export async function dispatchPhase({
       return tip
     }
     let result, resultRef, sourceTip, attempt, binding, usage = null
+    // A fix round over a result that was already collected starts a new harness attempt from the
+    // collected tip; any other retained result is reused and collected as before.
+    let fixOverCollected = false
     const harnesses = current.filter(g => g.start.step === 'harness')
     const latest = harnesses.at(-1)
     let invocations = harnesses.length
@@ -489,13 +500,14 @@ export async function dispatchPhase({
         branch, tip: binding.sourceTip, continuation: binding.continuation, mode: sandbox.meta?.mode ?? 'full' }
       const expectedPrompt = binding.refusal ? fixedRefusal(taskId, runId)
         : `${personaFor(task.role || 'implementer')}\n\n${composeBriefFor({ ...task, runtime })}`
-      if (binding.promptSha256 !== digest(expectedPrompt)) throw new Error('Current prompt identity changed')
+      fixOverCollected = fixRound && completedCollection != null && hostTip === sourceTip
+      if (!fixOverCollected && binding.promptSha256 !== digest(expectedPrompt)) throw new Error('Current prompt identity changed')
     } else {
       if (record?.result) throw new Error('Result without journal evidence is unverified')
       if (hostTip) throw new Error('Existing task ref needs explicit retained reconciliation')
     }
 
-    async function invoke(message) {
+    async function invoke(message, fix = false) {
       checkDeadline()
       if (invocations >= contract.maxAttempts) throw new Error('Required attempt bound exceeded')
       const runtime = await driverRuntime(guardedGit, sandbox, runRepo, branch, !!record?.sessionId, runTip)
@@ -507,7 +519,7 @@ export async function dispatchPhase({
       attempt = randomUUID(); invocations++
       binding = { version: 1, executionId: contract.executionId, task: taskId, identity, adapter: adapter.name,
         model, effort, effortIgnored: adapter.supportsEffort === false && effortRaw !== undefined,
-        network, promptSha256: digest(prompt), hostTip, sourceTip: runtime.tip, continuation: runtime.continuation, refusal: message != null }
+        network, promptSha256: digest(prompt), hostTip, sourceTip: runtime.tip, continuation: runtime.continuation, refusal: message != null, fixRound: fix }
       const bindingRef = await retain('driver-invocation', binding)
       await event('harness', attempt, 'step-started', [bindingRef, ...(initialRef ? [initialRef] : [])])
       record = { ...record, taskId, sandbox, prerequisites: sandbox.meta?.prerequisites,
@@ -619,7 +631,7 @@ export async function dispatchPhase({
       return code
     }
 
-    if (!latest) await invoke()
+    if (!latest || fixOverCollected) await invoke(undefined, fixOverCollected)
     let code = await collectAndVerify()
     if (code === 3) {
       await invoke(fixedRefusal(taskId, runId))
@@ -649,19 +661,43 @@ export async function dispatchPhase({
     let record = (await readJson(sessionFile)) || {}
 
     // Idempotent resume of a whole run: a recorded, well-formed result is final — re-record it
-    // and never respawn the task.
-    if (validateResult(record.result)) {
+    // and never respawn the task. A fix round is the one caller that respawns it anyway.
+    if (validateResult(record.result) && !fixRound) {
       return { kind: 'result', result: { taskId, ...record.result, ...unverified } }
+    }
+
+    // A fix round builds on the task branch as it stands: its tip is read before anything runs,
+    // a task with no branch has nothing to repair, and the attempt is recorded before the spawn.
+    let priorTip = null, fixEntry = null
+    if (fixRound) {
+      priorTip = await checkedGit(git, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${branch}^{commit}`], runRepo)
+      fixEntry = { attempt: randomUUID(), startedAt: Date.now(), priorTip, tip: null, outcome: null }
+      const previous = Array.isArray(record.fixRounds) ? record.fixRounds.slice(-19) : []
+      record = { ...record, result: null, state: 'fix-round', fixRounds: [...previous, fixEntry] }
+      await writeJson(sessionFile, record)
     }
     await observe('task-started')
 
-    const resumePath = typeof record.sessionId === 'string' && record.sessionId.length > 0
-    const sandbox = (resumePath && record.sandbox)
-      ? record.sandbox
-      : await adapter.makeSandbox(git, { runRepo, runBranch, runId, taskId, mode: sandboxMode })
+    // A fix round reuses the recorded sandbox only while it still exists; otherwise a new one is
+    // cut from the task branch, so the round never starts over from the run branch.
+    let recorded = null
+    if (fixRound && record.sandbox && record.sandboxRemoved !== true) {
+      try { await lstat(record.sandbox.cwd); recorded = record.sandbox } catch { recorded = null }
+    }
+    const resumePath = typeof record.sessionId === 'string' && record.sessionId.length > 0 && (!fixRound || recorded !== null)
+    let sandbox = fixRound
+      ? recorded ?? await adapter.makeSandbox(git, { runRepo, runBranch: branch, runId, taskId, mode: sandboxMode })
+      : (resumePath && record.sandbox)
+        ? record.sandbox
+        : await adapter.makeSandbox(git, { runRepo, runBranch, runId, taskId, mode: sandboxMode })
+    // A files checkout is committed on top of `meta.runBranch` at collection; in a fix round that
+    // base is the task branch, so the collected commit descends from the prior task tip.
+    if (fixRound && sandbox.meta?.mode === 'files') sandbox = { ...sandbox, meta: { ...sandbox.meta, runBranch: branch } }
+    if (fixRound) record = { ...record, sandboxRemoved: false }
 
     const role = task.role || 'implementer'
-    const runtime = await driverRuntime(git, sandbox, runRepo, branch, resumePath, await checkedGit(git, ['rev-parse', runBranch], runRepo), true)
+    const runtime = await driverRuntime(git, sandbox, runRepo, branch, resumePath,
+      fixRound ? priorTip : await checkedGit(git, ['rev-parse', runBranch], runRepo), true)
     const prompt = `${personaFor(role)}\n\n${composeBriefFor(runtime ? { ...task, runtime } : task)}`
     const model = resolveModel(task)
     // A harness with no effort control (Cursor bakes effort into the model id) gets none, and the
@@ -705,10 +741,33 @@ export async function dispatchPhase({
       await writeJson(sessionFile, record)
     }
 
+    const closeFix = (outcome, tip) => {
+      if (!fixEntry) return
+      Object.assign(fixEntry, { outcome, tip, endedAt: Date.now() })
+    }
     const orphan = async (exitReason) => {
+      closeFix('orphaned', null)
       record = { ...record, state: 'orphaned', exitReason, usage: await safeUsage(adapter, paths.streamPath) }
       await writeJson(sessionFile, record)
       return { kind: 'orphaned' }
+    }
+    // After a fix-round collection the task tip must equal or descend from the tip the round
+    // started from. A tip that does not is put back (only if it is still the one observed) and
+    // the round is recorded as failed. Returns the refused result, or null when the tip is sound.
+    const refuseResetTip = async (current) => {
+      if (!fixRound) return null
+      let tip = null
+      try { tip = await checkedGit(git, ['rev-parse', '--verify', '--end-of-options', `refs/heads/${branch}^{commit}`], runRepo) } catch { tip = null }
+      if (tip === priorTip) return null
+      if (tip !== null && (await git(['merge-base', '--is-ancestor', '--end-of-options', priorTip, tip], { cwd: runRepo })).code === 0) return null
+      if (tip !== null) await checkedGit(git, ['update-ref', `refs/heads/${branch}`, priorTip, tip], runRepo)
+      const failed = { ...current, status: 'failed',
+        blockers: appendBlocker(current.blockers, 'the fix round moved the task branch off its prior task tip; the prior tip was restored') }
+      closeFix('reset-refused', tip)
+      record = { ...record, state: 'failed', exitReason: 'fix-round-reset', result: failed, usage: await safeUsage(adapter, paths.streamPath) }
+      await writeJson(sessionFile, record)
+      await observe('handoff', 'blocked')
+      return { kind: 'result', result: { taskId, ...failed, ...unverified } }
     }
 
     const reason = await exited
@@ -720,6 +779,8 @@ export async function dispatchPhase({
     if (!validateResult(result)) return orphan((await stderrTail(paths.errPath)) || 'no result')
 
     await adapter.collect(git, { runRepo, sandbox, branch })
+    const reset = await refuseResetTip(result)
+    if (reset) return reset
     let code = await completeEnforcement(taskId)
     await observe('gate-result', code === 0 ? 'pass' : code === 3 ? 'fail' : 'unknown')
 
@@ -739,6 +800,8 @@ export async function dispatchPhase({
       if (!validateResult(reread)) return orphan('no current valid result after resume')
       result = reread
       await adapter.collect(git, { runRepo, sandbox, branch })
+      const resetAgain = await refuseResetTip(result)
+      if (resetAgain) return resetAgain
       code = await completeEnforcement(taskId)
       await observe('gate-result', code === 0 ? 'pass' : code === 3 ? 'fail' : 'unknown')
       if (code === 3) {
@@ -747,6 +810,7 @@ export async function dispatchPhase({
           status: 'failed',
           blockers: appendBlocker(result.blockers, 'enforcement checks rejected the task twice'),
         }
+        closeFix('failed', await checkedGit(git, ['rev-parse', '--verify', `refs/heads/${branch}`], runRepo).catch(() => null))
         record = {
           ...record, state: 'failed', exitReason: 'enforcement', result: failed,
           usage: await safeUsage(adapter, paths.streamPath),
@@ -758,6 +822,7 @@ export async function dispatchPhase({
       }
     }
 
+    closeFix(result.status, await checkedGit(git, ['rev-parse', '--verify', `refs/heads/${branch}`], runRepo).catch(() => null))
     record = {
       ...record, state: result.status, exitReason: 'exit', result,
       usage: await safeUsage(adapter, paths.streamPath),

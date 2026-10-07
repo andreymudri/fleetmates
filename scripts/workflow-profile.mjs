@@ -14,6 +14,10 @@ const PROFILES = Object.freeze({
   ui: ['rendered-output', 'interaction-check', 'accessibility-check'],
   research: ['sources', 'claim-evidence', 'uncertainty-review'],
 })
+// Inclusive bounds on the expansion's numeric parameters. The workflow controller derives its own
+// maxRepairRounds and maxWallMs bounds from these, so a request it accepts always expands.
+export const PROFILE_LIMITS = Object.freeze({ maxRepairRounds: Object.freeze([0, 10]), maxWallMinutes: Object.freeze([1, 1440]) })
+const within = (value, [low, high]) => Number.isSafeInteger(value) && value >= low && value <= high
 const hash = value => createHash('sha256').update(value).digest('hex')
 const plain = value => typeof value === 'string' && value.length > 0 && value.length <= 1024 && !/[\p{C}\p{Zl}\p{Zp}]/u.test(value)
 const repoPath = value => plain(value) && !value.startsWith('/') && !value.startsWith('-') && !value.includes('\\')
@@ -26,8 +30,7 @@ export function expandWorkflowProfile({ profile, runId, planPath, baseBranch, ha
       || runId.split('/').some(v => !v || v === '.' || v === '..')
       || !plain(planPath) || planPath.startsWith('/') || planPath.includes('\\') || planPath.split('/').some(v => !v || v === '.' || v === '..')
       || !plain(baseBranch) || !['codex', 'cursor'].includes(harness)
-      || !Number.isSafeInteger(maxRepairRounds) || maxRepairRounds < 0 || maxRepairRounds > 10
-      || !Number.isSafeInteger(maxWallMinutes) || maxWallMinutes < 1 || maxWallMinutes > 1440) throw new Error('Invalid workflow profile parameters')
+      || !within(maxRepairRounds, PROFILE_LIMITS.maxRepairRounds) || !within(maxWallMinutes, PROFILE_LIMITS.maxWallMinutes)) throw new Error('Invalid workflow profile parameters')
   if (typeof markdown !== 'string' || typeof manifestText !== 'string'
       || inputs.plan !== hash(markdown) || inputs.manifest !== hash(manifestText)) throw new Error('Profile tracked inputs do not match their identities')
   if (!['legacy', 'host-bounded'].includes(integration)) throw new Error('Invalid profile integration mode')

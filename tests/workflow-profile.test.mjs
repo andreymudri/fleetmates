@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { expandWorkflowProfile, profileTaskResultAccepted } from '../scripts/workflow-profile.mjs'
+import { expandWorkflowProfile, profileTaskResultAccepted, PROFILE_LIMITS } from '../scripts/workflow-profile.mjs'
 const markdown = '### Task 1: First\n\n**Files:**\n- Modify: `src/first.mjs`\n\n**Acceptance:**\nRegression covered.\n'
 const manifestText = JSON.stringify({ phases: { default: { fixRounds: 1, checks: [{ name: 'test', kind: 'command', run: 'npm test' }, { name: 'review', kind: 'agent', blockOn: ['high'] }] } } })
 const hash = value => createHash('sha256').update(value).digest('hex')
@@ -18,6 +18,16 @@ test('reusable workflow expansion preserves mandatory checks, actual CLI steps a
   const twoPhasePlan = markdown + '\n### Task 2: Next\n\n**Depends:** T1\n**Files:**\n- Modify: `src/next.mjs`\n'
   const two = expandWorkflowProfile({ ...input, markdown: twoPhasePlan, inputs: { ...input.inputs, plan: hash(twoPhasePlan) } })
   assert.ok(two.steps.find(s => s.id === 'implement-2').inputs.includes('integrated-refs-1'))
+})
+test('repair-round and wall-time bounds are pinned at both edges: n accepted, n+1 refused', () => {
+  assert.deepEqual(PROFILE_LIMITS, { maxRepairRounds: [0, 10], maxWallMinutes: [1, 1440] })
+  for (const [key, accepted, refused] of [['maxRepairRounds', 10, 11], ['maxRepairRounds', 0, -1], ['maxWallMinutes', 1440, 1441], ['maxWallMinutes', 1, 0]]) {
+    assert.equal(expandWorkflowProfile({ ...input, [key]: accepted }).ready, true, `${key} ${accepted}`)
+    assert.throws(() => expandWorkflowProfile({ ...input, [key]: refused }), /Invalid workflow profile parameters/, `${key} ${refused}`)
+  }
+  const profile = expandWorkflowProfile({ ...input, maxRepairRounds: 10 })
+  assert.equal(profile.phaseContracts[0].repair.maxRounds, 1, 'the manifest fix budget still caps the request bound')
+  assert.equal(expandWorkflowProfile({ ...input, maxRepairRounds: 0 }).phaseContracts[0].repair.maxRounds, 0)
 })
 test('profile-specific missing prerequisites are explicit and cannot silently skip required UI or Vault steps', () => {
   assert.equal(expandWorkflowProfile({ ...input, profile: 'ui' }).ready, false)

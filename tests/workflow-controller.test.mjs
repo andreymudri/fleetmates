@@ -10,11 +10,16 @@ import { expandWorkflowProfile } from '../scripts/workflow-profile.mjs'
 import { createHash } from 'node:crypto'
 import { defaultExec } from '../scripts/gate-runner.mjs'
 import { retainExecutionArtifact } from '../scripts/execution-artifacts.mjs'
+import { readExecutionEvents } from '../scripts/execution-journal.mjs'
+import { resolveExecutionEffect } from '../scripts/execution-recovery.mjs'
 
 // The child CLI is a real Node process started through the bounded executor. It stands in for the
 // installed fleetmates CLI: it records every invocation, writes only the artifacts the real
 // commands write, at the paths they write them, and follows their exit contracts: gate exits 1 on
 // FAIL after printing its verdict block, and finish exits 4 while an agent check has no supplied result.
+// It also implements the CLI contracts the audit plan assigns to T5 exactly as written there: gate
+// exits 5 when only derive/run-state failed, dispatch takes `--execution <abs>` and
+// `--fix-round --task <id>...`, and record-fix-round keeps its interface.
 const FAKE_CLI = String.raw`
 import { appendFileSync, writeFileSync, mkdirSync, existsSync, rmSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
@@ -55,20 +60,45 @@ if (command === 'init-run') {
   console.error('preview ok on stderr')
   console.log('preview ok')
 } else if (command === 'dispatch') {
+  // T5 contract: --execution names an absolute JSON file { version: 1, runId, attemptPrefix, journalRoot };
+  // a relative path, a missing file or an unknown task exits 2 before anything is dispatched.
+  const execution = flag('execution')
+  if (execution !== undefined) {
+    let contract = null
+    try { contract = path.isAbsolute(execution) ? JSON.parse(readFileSync(execution, 'utf8')) : null } catch { contract = null }
+    if (!contract || Object.keys(contract).sort().join() !== 'attemptPrefix,journalRoot,runId,version' || contract.version !== 1 || contract.runId !== run
+        || typeof contract.attemptPrefix !== 'string' || typeof contract.journalRoot !== 'string' || !path.isAbsolute(contract.journalRoot)) { console.log('invalid --execution'); process.exit(2) }
+    appendFileSync(path.join(bin, 'executions.jsonl'), JSON.stringify({ path: execution, contract }) + '\n')
+  }
+  const phase = Number(flag('phase')), fixRound = args.includes('--fix-round')
+  const named = args.flatMap((arg, i) => arg === '--task' ? [args[i + 1]] : [])
+  const phaseTasks = tasks.filter(t => t.phase === phase)
+  if (fixRound && (!named.length || named.some(id => !phaseTasks.some(t => t.id === id)))) { console.log('unknown task'); process.exit(2) }
   if (mode.includes('hang-dispatch')) { writeFileSync(path.join(bin, 'hang.pid'), String(process.pid)); setInterval(() => {}, 1000) }
   else {
-    const phase = Number(flag('phase')), runTip = git(['rev-parse', 'refs/heads/' + process.env.FAKE_RUN_BRANCH])
+    const runTip = git(['rev-parse', 'refs/heads/' + process.env.FAKE_RUN_BRANCH])
     mkdirSync(path.join(dir, 'sessions'), { recursive: true })
-    for (const t of tasks.filter(t => t.phase === phase)) {
+    // --fix-round dispatches only the named tasks, on top of their current tips, even over a done result.
+    for (const t of fixRound ? phaseTasks.filter(t => named.includes(t.id)) : phaseTasks) {
       const branch = 'fleetmates/' + run + '/' + t.id
-      let tip = mode.includes('empty-branch') ? runTip : commit(runTip, t.file, t.id + '\n', 'feat: ' + t.id)
+      let tip
+      if (fixRound) tip = commit(mode.includes('fix-resets') ? runTip : git(['rev-parse', 'refs/heads/' + branch]), t.file, t.id + ' fixed\n', 'fix: ' + t.id)
+      else tip = mode.includes('empty-branch') ? runTip : commit(runTip, t.file, t.id + '\n', 'feat: ' + t.id)
       if (mode.includes('extra-file')) tip = commit(tip, 'undeclared.txt', 'outside\n', 'feat: outside the declared set')
       git(['update-ref', 'refs/heads/' + branch, tip])
       if (!mode.includes('no-result')) writeFileSync(path.join(dir, 'sessions', t.id + '.result.json'),
         JSON.stringify({ status: 'done', branch: mode.includes('wrong-branch') ? 'fleetmates/' + run + '/other' : branch, filesChanged: [t.file], summary: 'fixture', blockers: [] }))
     }
-    console.log('dispatched')
+    if (mode.includes('hang-after-dispatch') && !fixRound) { writeFileSync(path.join(bin, 'hang.pid'), String(process.pid)); setInterval(() => {}, 1000) }
+    else console.log('dispatched')
   }
+} else if (command === 'record-fix-round') {
+  const phase = Number(flag('phase')), task = flag('task'), file = path.join(bin, 'rounds.json')
+  if (!tasks.some(t => t.id === task && t.phase === phase)) { console.log('no task ' + task + ' in phase ' + phase); process.exit(1) }
+  const rounds = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+  rounds[task] = (rounds[task] ?? 0) + 1
+  writeFileSync(file, JSON.stringify(rounds))
+  console.log(task + ' phase ' + phase + ' round ' + rounds[task])
 } else if (command === 'dispatch-reviews') {
   if (mode.includes('reviews-exit-2')) { console.log('unsupported flag spelling'); process.exit(2) }
   const phase = Number(flag('phase'))
@@ -100,7 +130,14 @@ if (command === 'init-run') {
   }
 } else if (command === 'gate') {
   if (mode.includes('gate-infra-once') && once('gate-infra')) { console.log('cannot verify'); process.exit(4) }
-  if (mode.includes('gate-fails')) {
+  // T5 contract: exit 5 when the only failed entries are derive and/or run-state.
+  if (mode.includes('gate-state')) {
+    console.log(JSON.stringify({ verdict: 'FAIL', failed: ['run-state'], error: 'could not read run state' }, null, 2))
+    process.exit(5)
+  }
+  const unfixed = mode.includes('gate-until-fixed')
+    && tasks.filter(t => t.phase === Number(flag('phase')) && (process.env.FAKE_RETRY ?? t.id).split(',').includes(t.id)).some(t => !git(['show', 'refs/heads/fleetmates/' + run + '/' + t.id + ':' + t.file]).includes('fixed'))
+  if (mode.includes('gate-fails') || unfixed) {
     console.log('gate: running 1 command check')
     console.log(JSON.stringify({ verdict: 'FAIL', failed: ['behavior'], phase: Number(flag('phase')), results: [{ name: 'behavior', kind: 'command', status: 'fail' }] }, null, 2))
     process.exit(1)
@@ -109,8 +146,14 @@ if (command === 'init-run') {
 } else if (command === 'fix') {
   const verdict = JSON.parse(readFileSync(flag('verdict'), 'utf8'))
   writeFileSync(path.join(bin, 'verdict-seen.json'), JSON.stringify(verdict))
-  console.log(JSON.stringify(mode.includes('fix-escalate') ? { decision: 'escalate', tasks: [], reason: 'budget-exhausted', taskId: 'T1' }
-    : { decision: 'retry', tasks: [{ taskId: 'T1', tier: 'mid', round: 1, checks: verdict.results.filter(r => r.status === 'fail').map(r => r.name) }], reason: null }, null, 2))
+  // The budget rule of decideFix: a task whose recorded rounds reach the manifest fixRounds escalates.
+  const file = path.join(bin, 'rounds.json'), rounds = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+  const budget = JSON.parse(readFileSync(path.join(root, 'fleetmates.gate.json'), 'utf8')).phases.default.fixRounds
+  const retried = tasks.filter(t => t.phase === Number(flag('phase')) && (process.env.FAKE_RETRY ?? t.id).split(',').includes(t.id))
+  const over = retried.find(t => (rounds[t.id] ?? 0) >= budget)
+  console.log(JSON.stringify(mode.includes('fix-escalate') ? { decision: 'escalate', tasks: [], reason: 'process-violation', check: 'fileset' }
+    : over ? { decision: 'escalate', tasks: [], reason: 'budget-exhausted', taskId: over.id }
+    : { decision: 'retry', tasks: retried.map(t => ({ taskId: t.id, tier: 'mid', round: (rounds[t.id] ?? 0) + 1, checks: verdict.results.filter(r => r.status === 'fail').map(r => r.name) })), reason: null }, null, 2))
 } else if (command === 'finish') {
   const supplied = flag('results') ? JSON.parse(readFileSync(flag('results'), 'utf8')) : null
   const pending = [...new Set(tasks.map(t => t.phase))].filter(phase => !supplied?.phases?.[String(phase)]?.results?.some(r => r.name === 'review' && r.status === 'pass'))
@@ -153,10 +196,11 @@ async function project(t, { tasks = [{ id: 'T1', phase: 1, file: 'a.txt' }], rol
   await writeFile(cliPath, FAKE_CLI); await writeFile(codex, FAKE_CODEX)
   const calls = []
   const env = { mode: '', auth: 'ok' }
-  const executor = (command, cwd, options = {}) => {
+  const executor = async (command, cwd, options = {}) => {
     calls.push({ command, argv: options.argv ?? null })
-    env.hook?.(command, options)
-    const fixtureEnv = { FAKE_LOG: log, FAKE_MODE: env.mode, FAKE_AUTH: env.auth, FAKE_TASKS: JSON.stringify(tasks), FAKE_RUN_BRANCH: 'fleetmates/run/r1' }
+    await env.hook?.(command, options)
+    const fixtureEnv = { FAKE_LOG: log, FAKE_MODE: env.mode, FAKE_AUTH: env.auth, FAKE_TASKS: JSON.stringify(tasks), FAKE_RUN_BRANCH: 'fleetmates/run/r1',
+      ...(env.retry ? { FAKE_RETRY: env.retry } : {}) }
     if (command === 'codex') return defaultExec(process.execPath, cwd, { ...options, argv: [codex, ...options.argv], env: fixtureEnv })
     return defaultExec(command, cwd, { ...options, env: { ...options.env, ...fixtureEnv } })
   }
@@ -214,7 +258,9 @@ test('two independent profiles execute fixed CLI fragments with absolute entrypo
       assert.deepEqual(entry.args.slice(-2), ['--root', fixture.root])
       assert.equal(entry.cwd, fixture.root)
     }
-    assert.deepEqual(seen.find(e => e.command === 'dispatch').args.slice(-6, -2), ['--environment', 'env.json', '--role-policy', 'roles.json'])
+    assert.deepEqual(seen.find(e => e.command === 'dispatch').args.slice(-8, -4), ['--environment', 'env.json', '--role-policy', 'roles.json'])
+    assert.equal(seen.find(e => e.command === 'dispatch').args.at(-4), '--execution')
+    assert.deepEqual(seen.find(e => e.command === 'dispatch-reviews').args.slice(-6, -2), ['--environment', 'env.json', '--role-policy', 'roles.json'])
     assert.deepEqual(seen.filter(e => e.command === 'gate').map(e => e.args.slice(-4, -2)),
       phases.map(phase => ['--results', path.join(fixture.root, `.fleetmates/r1/reviews/results-${phase}.json`)]))
     assert.equal(report.state, 'human-required', 'acceptance evidence is mandatory and never skipped')
@@ -304,32 +350,139 @@ test('a committed input that changes between steps blocks before the next spawn'
   assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['changed-input', 'implement-1']])
 })
 
-test('code failures go to the existing fix decision and stop without a fake re-dispatch; budgets stop before spawning', async t => {
+const firstPass = ['init-run', 'preview-check', 'dispatch', 'dispatch-reviews', 'collect-reviews', 'gate']
+const repairRound = ['fix', 'record-fix-round', 'dispatch', 'dispatch-reviews', 'collect-reviews', 'gate']
+
+test('gate exit 5 is an infrastructure stop and never reaches the fix decision; exit 1 is a code failure', async t => {
   const fixture = await project(t)
-  fixture.env.mode = 'gate-fails'
+  fixture.env.mode = 'gate-state'
+  const report = await fixture.run()
+  assert.deepEqual(commands(await fixture.invocations()), firstPass)
+  assert.equal(report.state, 'blocked')
+  assert.deepEqual(report.blockers.map(b => [b.category, b.step, b.reason]), [['infrastructure', 'gate-1', 'exit 5']])
+  assert.equal(report.repair, undefined)
+
+  const failing = await project(t)
+  failing.env.mode = 'gate-fails fix-escalate'
+  const code = await failing.run()
+  assert.deepEqual(code.blockers.map(b => [b.category, b.step]), [['code', 'gate-1']])
+})
+
+test('a retry decision records each round, redispatches only the named tasks with --fix-round and reruns review, collect and gate to a pass', async t => {
+  const fixture = await project(t, { tasks: [{ id: 'T1', phase: 1, file: 'a.txt' }, { id: 'T2', phase: 1, file: 'b.txt' }] })
+  fixture.env.mode = 'gate-until-fixed'
+  fixture.env.retry = 'T1'
   const report = await fixture.run()
   const seen = await fixture.invocations()
-  assert.deepEqual(commands(seen), ['init-run', 'preview-check', 'dispatch', 'dispatch-reviews', 'collect-reviews', 'gate', 'fix'])
-  assert.deepEqual(seen.at(-1).args.slice(0, 7), ['fix', '--run', 'r1', '--phase', '1', '--verdict', path.join(fixture.root, '.fleetmates/r1/profile-verdict-1.json')])
-  assert.deepEqual(JSON.parse(await readFile(path.join(fixture.bin, 'verdict-seen.json'), 'utf8')).results, [{ name: 'behavior', kind: 'command', status: 'fail' }],
-    'the verdict block printed by gate exit 1 reached fix')
-  assert.equal(report.state, 'failed')
-  assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['code', 'gate-1']])
-  assert.match(report.blockers[0].reason, /^repair-round-required/)
-  assert.equal(report.repair.decision.decision, 'retry')
+  assert.deepEqual(commands(seen), [...firstPass, ...repairRound])
+  assert.deepEqual(seen.find(e => e.command === 'record-fix-round').args, ['record-fix-round', '--run', 'r1', '--phase', '1', '--task', 'T1', '--root', fixture.root])
+  const repair = seen.filter(e => e.command === 'dispatch')[1].args
+  assert.deepEqual(repair.slice(0, 5), ['dispatch', '--run', 'r1', '--phase', '1'])
+  assert.deepEqual(repair.slice(repair.indexOf('--fix-round'), repair.indexOf('--fix-round') + 3), ['--fix-round', '--task', 'T1'])
+  assert.equal(repair.filter(arg => arg === '--task').length, 1, 'only the task the fix decision named is redispatched')
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+  assert.deepEqual(report.blockers, [])
+  assert.deepEqual(report.repair.rounds, [{ phase: 1, round: 1, tasks: ['T1'] }])
+  for (const id of ['repair-1.r1', 'review-1.r1', 'collect-1.r1', 'gate-1.r1', 'integrate-1.r1']) {
+    assert.equal(report.steps.find(step => step.id === id)?.status, 'completed', id)
+  }
+  assert.equal(git(fixture.root, 'show', 'refs/heads/fleetmates/run/r1:a.txt'), 'T1 fixed')
+  assert.equal(git(fixture.root, 'show', 'refs/heads/fleetmates/run/r1:b.txt'), 'T2')
+  assert.deepEqual(JSON.parse(await readFile(path.join(fixture.bin, 'rounds.json'), 'utf8')), { T1: 1 })
+})
 
+test('a repair round that does not build on the reviewed task tip stops before review', async t => {
+  const fixture = await project(t)
+  fixture.env.mode = 'gate-fails fix-resets'
+  const report = await fixture.run()
+  assert.deepEqual(commands(await fixture.invocations()), [...firstPass, 'fix', 'record-fix-round', 'dispatch'])
+  assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['changed-input', 'repair-1.r1']])
+  assert.match(report.blockers[0].reason, /did not advance from the reviewed tip/)
+})
+
+test('escalation and exhausted repair budgets stop failed with the existing reasons', async t => {
   const escalated = await project(t)
   escalated.env.mode = 'gate-fails fix-escalate'
-  const exhausted = await escalated.run()
-  assert.deepEqual(exhausted.blockers.map(b => [b.category, b.step, b.reason]), [['code', 'gate-1', 'fix-escalated: budget-exhausted']])
+  const stopped = await escalated.run()
+  const seen = await escalated.invocations()
+  assert.deepEqual(commands(seen), [...firstPass, 'fix'])
+  assert.deepEqual(seen.at(-1).args.slice(0, 7), ['fix', '--run', 'r1', '--phase', '1', '--verdict', path.join(escalated.root, '.fleetmates/r1/profile-verdict-1.json')])
+  assert.deepEqual(JSON.parse(await readFile(path.join(escalated.bin, 'verdict-seen.json'), 'utf8')).results, [{ name: 'behavior', kind: 'command', status: 'fail' }],
+    'the verdict block printed by gate exit 1 reached fix')
+  assert.equal(stopped.state, 'failed')
+  assert.deepEqual(stopped.blockers.map(b => [b.category, b.step, b.reason]), [['code', 'gate-1', 'fix-escalated: process-violation']])
+  assert.equal(stopped.repair.decision.decision, 'escalate')
 
+  // The fix budget (manifest fixRounds 1) allows one round; the second failure escalates.
+  const exhausted = await project(t)
+  exhausted.env.mode = 'gate-fails'
+  const spent = await exhausted.run()
+  assert.deepEqual(commands(await exhausted.invocations()), [...firstPass, ...repairRound, 'fix'])
+  assert.equal(spent.state, 'failed')
+  assert.deepEqual(spent.blockers.map(b => [b.category, b.step, b.reason]), [['code', 'gate-1.r1', 'fix-escalated: budget-exhausted']])
+
+  // The request bound is the other half of the minimum: maxRepairRounds 0 delivers no round at all,
+  // and maxRepairRounds 1 under a fix budget of 3 stops after one round although fix would retry.
+  const none = await project(t, { fixRounds: 3 })
+  none.env.mode = 'gate-fails'
+  const zero = await none.run({ request: { ...none.request, limits: { ...none.request.limits, maxRepairRounds: 0 } } })
+  assert.deepEqual(commands(await none.invocations()), [...firstPass, 'fix'])
+  assert.deepEqual(zero.blockers.map(b => [b.category, b.step]), [['code', 'gate-1']])
+  assert.match(zero.blockers[0].reason, /^budget-exhausted: maxRepairRounds 0/)
+  assert.equal(zero.state, 'failed')
+  const one = await project(t, { fixRounds: 3 })
+  one.env.mode = 'gate-fails'
+  const limited = await one.run({ request: { ...one.request, limits: { ...one.request.limits, maxRepairRounds: 1 } } })
+  assert.deepEqual(commands(await one.invocations()), [...firstPass, ...repairRound, 'fix'])
+  assert.deepEqual(limited.blockers.map(b => [b.category, b.step]), [['code', 'gate-1.r1']])
+  assert.match(limited.blockers[0].reason, /^budget-exhausted: maxRepairRounds 1/)
+  assert.equal(limited.repair.decision.decision, 'retry')
+  // Rounds recorded before this execution count too: a decision whose round exceeds the bound stops.
+  const earlier = await project(t, { fixRounds: 3 })
+  earlier.env.mode = 'gate-fails'
+  await writeFile(path.join(earlier.bin, 'rounds.json'), JSON.stringify({ T1: 1 }))
+  const spentBefore = await earlier.run({ request: { ...earlier.request, limits: { ...earlier.request.limits, maxRepairRounds: 1 } } })
+  assert.deepEqual(commands(await earlier.invocations()), [...firstPass, 'fix'])
+  assert.deepEqual(spentBefore.blockers.map(b => [b.category, b.step]), [['code', 'gate-1']])
+  assert.match(spentBefore.blockers[0].reason, /^budget-exhausted: maxRepairRounds 1, fix budget 1, 0 round/)
+
+  // A retry that names no task of the failing phase is not dispatched at all.
+  const unnamed = await project(t)
+  unnamed.env.mode = 'gate-fails'
+  unnamed.env.retry = 'T9'
+  const nobody = await unnamed.run()
+  assert.deepEqual(commands(await unnamed.invocations()), [...firstPass, 'fix'])
+  assert.deepEqual(nobody.blockers.map(b => [b.category, b.step]), [['infrastructure', 'fix-1']])
+  assert.match(nobody.blockers[0].reason, /names no valid task/)
+
+  // A rejected host gate is a code failure too: it gets the same round, and nothing merges.
   const hostGate = await project(t, { required: ['missing.txt'] })
   const rejected = await hostGate.run()
-  assert.deepEqual(commands(await hostGate.invocations()), ['init-run', 'preview-check', 'dispatch', 'dispatch-reviews', 'collect-reviews', 'gate', 'fix'])
-  assert.deepEqual(rejected.blockers.map(b => [b.category, b.step]), [['code', 'integrate-1']])
+  assert.deepEqual(commands(await hostGate.invocations()), [...firstPass, ...repairRound, 'fix'])
+  assert.deepEqual(rejected.blockers.map(b => [b.category, b.step, b.reason]), [['code', 'integrate-1.r1', 'fix-escalated: budget-exhausted']])
   assert.ok(JSON.parse(await readFile(path.join(hostGate.bin, 'verdict-seen.json'), 'utf8')).results.some(r => r.name === 'behavior' && r.status === 'fail'))
   assert.equal(git(hostGate.root, 'rev-parse', 'refs/heads/fleetmates/run/r1'), git(hostGate.root, 'rev-parse', 'refs/heads/main'), 'a rejected host gate merges nothing')
+})
 
+test('resume continues in the recorded repair round: its record and dispatch are reused and only the verdicts rerun', async t => {
+  const fixture = await project(t, { fixRounds: 3 })
+  fixture.env.mode = 'gate-fails'
+  const limits = { ...fixture.request.limits, maxRepairRounds: 1 }
+  const first = await fixture.run({ request: { ...fixture.request, limits } })
+  assert.deepEqual(first.blockers.map(b => [b.category, b.step]), [['code', 'gate-1.r1']])
+  const seen = (await fixture.invocations()).length
+  fixture.env.mode = 'gate-until-fixed'
+  const resumed = await fixture.resume()
+  assert.deepEqual(commands(await fixture.invocations()).slice(seen), ['collect-reviews', 'gate'], 'no second record-fix-round and no second dispatch')
+  assert.equal(resumed.state, 'human-required', resumed.blockers.map(b => b.reason).join('; '))
+  assert.deepEqual(resumed.steps.filter(step => step.status === 'reused').map(step => step.id),
+    ['prepare', 'baseline', 'record-1.r1.T1', 'repair-1.r1', 'review-1.r1'])
+  assert.deepEqual(resumed.steps.filter(step => step.status === 'completed').map(step => step.id), ['collect-1.r1', 'gate-1.r1', 'integrate-1.r1'])
+  assert.deepEqual(JSON.parse(await readFile(path.join(fixture.bin, 'rounds.json'), 'utf8')), { T1: 1 })
+  assert.equal(git(fixture.root, 'show', 'refs/heads/fleetmates/run/r1:a.txt'), 'T1 fixed')
+})
+
+test('budgets stop before spawning', async t => {
   const attempts = await project(t)
   const limited = await attempts.run({ request: { ...attempts.request, limits: { ...attempts.request.limits, maxAttempts: 2 } } })
   assert.deepEqual(commands(await attempts.invocations()), ['init-run', 'preview-check'])
@@ -388,6 +541,13 @@ test('expansion validation accepts only the fixed CLI fragment set bound to the 
     tamper(p => { p.steps.splice(p.steps.findIndex(s => s.id === 'acceptance'), 1) }),
     tamper(p => { p.integration = 'legacy' }),
     { ...expanded, steps: expanded.steps.slice(1) },
+    // The controller appends --execution, --fix-round and --task itself; a committed fragment cannot
+    // carry them, and no other flag outside a command's fixed set is accepted.
+    tamper(p => { p.steps.find(s => s.id === 'implement-1').argv.push('--execution', '/elsewhere/contract.json') }),
+    tamper(p => { p.steps.find(s => s.id === 'implement-1').argv.push('--fix-round') }),
+    tamper(p => { p.steps.find(s => s.id === 'implement-1').argv.push('--task', 'T1') }),
+    tamper(p => { p.steps.find(s => s.id === 'review-1').argv.push('--execution', '/elsewhere/contract.json') }),
+    tamper(p => { p.steps.find(s => s.id === 'gate-1').argv.push('--yes') }),
   ]
   for (const [index, value] of refusals.entries()) assert.throws(() => validateWorkflowExpansion(value, { inputs, request }), undefined, `refusal ${index}`)
   assert.throws(() => validateWorkflowExpansion(expanded, { inputs: { ...inputs, plan: 'b'.repeat(64) }, request }), /identity/)
@@ -477,7 +637,7 @@ test('resume counts prior attempts and prior wall time against the run budgets',
   assert.ok(resumed.wallMs.used >= 2400000 - 1000, 'the recorded 30 minutes count toward the 40-minute total')
 })
 
-test('resume refuses stale acceptance evidence and reruns everything after the installed verifier changes', async t => {
+test('resume refuses stale acceptance evidence, reruns every deterministic step after the installed verifier changes and revalidates completed dispatches', async t => {
   const fixture = await project(t)
   const report = await fixture.run()
   assert.equal(report.state, 'human-required')
@@ -496,8 +656,12 @@ test('resume refuses stale acceptance evidence and reruns everything after the i
   await changed.run()
   await writeFile(changed.cliPath, (await readFile(changed.cliPath, 'utf8')) + '\n// upgraded installed CLI\n')
   const rerun = await changed.resume()
-  assert.deepEqual(commands(await changed.invocations()), [...upTo.collect, 'gate', ...upTo.collect, 'gate'], 'a changed verifier identity invalidates every prior observation')
-  assert.deepEqual(rerun.steps.filter(step => step.status === 'reused'), [])
+  // A changed verifier identity invalidates every prior deterministic observation, so those rerun.
+  // The two dispatches recorded completed agent-dispatch effects, which the journal will not start
+  // again under the same step: their outputs are revalidated against the current tree and reused.
+  assert.deepEqual(commands(await changed.invocations()), [...upTo.collect, 'gate', 'init-run', 'preview-check', 'collect-reviews', 'gate'])
+  assert.deepEqual(rerun.steps.filter(step => step.status === 'reused').map(step => [step.id, step.revalidated]), [['implement-1', 'completed'], ['review-1', 'completed']])
+  assert.equal(rerun.state, 'human-required', rerun.blockers.map(b => b.reason).join('; '))
 })
 
 test('a controller killed during an agent step leaves an outcome-less attempt that resume will not redispatch', async t => {
@@ -526,4 +690,156 @@ await executeWorkflowProfile({ root: ${JSON.stringify(fixture.root)}, cliPath: $
   assert.deepEqual(commands(await fixture.invocations()), upTo.implement, 'the interrupted dispatch is not started again')
   assert.deepEqual(resumed.blockers.map(b => [b.category, b.step]), [['unknown-effect', 'implement-1']])
   assert.match(resumed.blockers[0].reason, /no recorded outcome/)
+})
+
+// Starts the controller in its own process with the fake CLI in `mode`, waits until the dispatch
+// child is hanging, then kills the controller and that child: the dispatch has no recorded outcome.
+async function killDuringDispatch(fixture, mode) {
+  const { spawn } = await import('node:child_process')
+  const runner = path.join(fixture.bin, 'runner.mjs')
+  await writeFile(runner, `
+import { executeWorkflowProfile } from ${JSON.stringify(new URL('../scripts/workflow-controller.mjs', import.meta.url).href)}
+import { defaultExec } from ${JSON.stringify(new URL('../scripts/gate-runner.mjs', import.meta.url).href)}
+const env = { FAKE_LOG: ${JSON.stringify(fixture.log)}, FAKE_MODE: ${JSON.stringify(mode)}, FAKE_AUTH: 'ok', FAKE_TASKS: ${JSON.stringify(JSON.stringify(fixture.tasks))}, FAKE_RUN_BRANCH: 'fleetmates/run/r1' }
+const executor = (command, cwd, options = {}) => command === 'codex'
+  ? defaultExec(process.execPath, cwd, { ...options, argv: [${JSON.stringify(path.join(fixture.bin, 'codex.mjs'))}, ...options.argv], env })
+  : defaultExec(command, cwd, { ...options, env: { ...options.env, ...env } })
+await executeWorkflowProfile({ root: ${JSON.stringify(fixture.root)}, cliPath: ${JSON.stringify(fixture.cliPath)}, request: ${JSON.stringify(fixture.request)},
+  environment: 'env.json', rolePolicy: 'roles.json', retention: ${JSON.stringify(retention)}, executor, verificationFactory: async () => ({ exec: defaultExec, close: async () => {} }) })
+`)
+  const child = spawn(process.execPath, [runner], { stdio: 'ignore' })
+  const pidFile = path.join(fixture.bin, 'hang.pid')
+  const deadline = Date.now() + 30000
+  while (!existsSync(pidFile) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50))
+  const hung = Number(await readFile(pidFile, 'utf8'))
+  child.kill('SIGKILL')
+  await new Promise(resolve => child.once('exit', resolve))
+  try { process.kill(-hung, 'SIGKILL') } catch { process.kill(hung, 'SIGKILL') }
+  await rm(pidFile)
+  const events = await readExecutionEvents(fixture.common, 'r1')
+  const effect = events.find(e => e.step === 'implement-1' && e.kind === 'effect-started')
+  assert.ok(effect, 'the agent-dispatch effect start was persisted before the dispatch was spawned')
+  assert.ok(!events.some(e => e.step === 'implement-1' && ['effect-completed', 'effect-failed', 'effect-unknown', 'step-completed', 'step-failed'].includes(e.kind)))
+  return effect.effect.id
+}
+
+test('agent steps are journaled as agent-dispatch effects: the start persists before the spawn and the outcome after', async t => {
+  const fixture = await project(t)
+  const atSpawn = []
+  fixture.env.hook = async (command, options) => {
+    if (!['dispatch', 'dispatch-reviews'].includes(options.argv?.[1])) return
+    const effects = (await readExecutionEvents(fixture.common, 'r1')).filter(e => e.effect)
+    atSpawn.push(effects.map(e => [e.step, e.kind, e.effect.kind]).at(-1))
+  }
+  const report = await fixture.run()
+  assert.equal(report.state, 'human-required')
+  assert.deepEqual(atSpawn, [['implement-1', 'effect-started', 'agent-dispatch'], ['review-1', 'effect-started', 'agent-dispatch']])
+  const events = await readExecutionEvents(fixture.common, 'r1')
+  for (const step of ['implement-1', 'review-1']) {
+    assert.deepEqual(events.filter(e => e.step === step).map(e => e.kind), ['step-started', 'effect-started', 'effect-completed', 'step-completed'], step)
+  }
+  for (const step of ['prepare', 'baseline', 'collect-1', 'gate-1', 'integrate-1']) assert.ok(events.filter(e => e.step === step).every(e => !e.effect), step)
+})
+
+test('every dispatch argv ends with --execution naming the contract file the controller wrote; no other command gets it', async t => {
+  const fixture = await project(t)
+  fixture.env.mode = 'gate-until-fixed'
+  const report = await fixture.run()
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+  const seen = await fixture.invocations()
+  const dispatches = seen.filter(e => e.command === 'dispatch')
+  assert.equal(dispatches.length, 2)
+  const prefixes = []
+  for (const entry of dispatches) {
+    assert.equal(entry.args.filter(arg => arg === '--execution').length, 1)
+    assert.deepEqual(entry.args.slice(-4, -3), ['--execution'])
+    const file = entry.args.at(-3)
+    assert.ok(path.isAbsolute(file) && file.startsWith(path.join(fixture.root, '.fleetmates', 'r1') + path.sep), file)
+    const contract = JSON.parse(await readFile(file, 'utf8'))
+    assert.deepEqual(Object.keys(contract).sort(), ['attemptPrefix', 'journalRoot', 'runId', 'version'])
+    assert.equal(contract.version, 1); assert.equal(contract.runId, 'r1')
+    assert.equal(contract.journalRoot, await realpath(fixture.common))
+    prefixes.push(contract.attemptPrefix)
+  }
+  assert.deepEqual(prefixes, ['implement-1.1', 'repair-1.r1.1'])
+  assert.ok(seen.filter(e => e.command !== 'dispatch').every(e => !e.args.includes('--execution')))
+})
+
+test('an interrupted agent dispatch resolved not-started is redispatched on resume', async t => {
+  const fixture = await project(t)
+  const effectId = await killDuringDispatch(fixture, 'hang-dispatch')
+  await resolveExecutionEffect({ common: fixture.common, runId: 'r1', effectId, resolution: 'not-started', reason: 'operator-saw-no-session' })
+  const resumed = await fixture.resume()
+  assert.deepEqual(commands(await fixture.invocations()), [...upTo.implement, 'dispatch', 'dispatch-reviews', 'collect-reviews', 'gate'])
+  assert.equal(resumed.state, 'human-required', resumed.blockers.map(b => b.reason).join('; '))
+  assert.equal(resumed.steps.find(step => step.id === 'implement-1').status, 'completed')
+})
+
+test('an interrupted agent dispatch resolved completed is validated and reused, and refused when its outputs do not validate', async t => {
+  const fixture = await project(t)
+  const effectId = await killDuringDispatch(fixture, 'hang-after-dispatch')
+  await resolveExecutionEffect({ common: fixture.common, runId: 'r1', effectId, resolution: 'completed', reason: 'operator-saw-results' })
+  const resumed = await fixture.resume()
+  assert.deepEqual(commands(await fixture.invocations()), [...upTo.implement, 'dispatch-reviews', 'collect-reviews', 'gate'], 'the completed dispatch is not started again')
+  assert.equal(resumed.state, 'human-required', resumed.blockers.map(b => b.reason).join('; '))
+  const reused = resumed.steps.find(step => step.id === 'implement-1')
+  assert.equal(reused.status, 'reused')
+  assert.ok(reused.artifacts.some(a => a.kind === 'task-result'))
+  assert.ok((await readExecutionEvents(fixture.common, 'r1')).some(e => e.step === 'implement-1' && e.kind === 'step-completed'), 'the interrupted attempt is closed with its validated outputs')
+
+  const empty = await project(t)
+  const noWork = await killDuringDispatch(empty, 'hang-dispatch')
+  await resolveExecutionEffect({ common: empty.common, runId: 'r1', effectId: noWork, resolution: 'completed', reason: 'operator-mistake' })
+  const refused = await empty.resume()
+  assert.deepEqual(commands(await empty.invocations()), upTo.implement)
+  assert.deepEqual(refused.blockers.map(b => [b.category, b.step]), [['missing-artifact', 'implement-1']])
+  assert.match(refused.blockers[0].reason, /resolved completed/)
+})
+
+test('a run suspended or abandoned before completion is reported in that state and never as complete', async t => {
+  for (const marker of ['suspended', 'abandoned']) {
+    const fixture = await project(t)
+    const report = await fixture.run()
+    assert.equal(report.state, 'human-required')
+    const acceptance = []
+    for (const criterion of report.acceptance.required) {
+      const bytes = Buffer.from(JSON.stringify({ version: 1, criterion, tree: report.acceptance.tree, status: 'pass' }))
+      acceptance.push({ criterion, reference: (await retainExecutionArtifact({ common: fixture.common, runId: 'r1', kind: 'acceptance-evidence', bytes, retention })).reference })
+    }
+    fixture.env.hook = (command, options) => { if (options.argv?.[1] === 'finish') git(fixture.root, 'update-ref', `refs/fleetmates/r1/${marker}`, 'HEAD') }
+    const done = await fixture.resume({ acceptance })
+    assert.equal(commands(await fixture.invocations()).at(-1), 'finish')
+    assert.equal(done.state, marker)
+    assert.equal(done.verifiedComplete, false)
+    assert.equal(done.obligations.verifiedComplete, false, `a ${marker} lifecycle never verifies the obligations`)
+    assert.equal(done.obligations.state, marker)
+  }
+})
+
+test('request bounds are pinned at both edges: n is accepted and n+1 is refused before any executor call', async t => {
+  const fixture = await project(t)
+  fixture.env.auth = 'none'
+  let n = 0
+  const attempt = request => fixture.run({ request: { ...fixture.request, runId: `b${n++}`, ...request } })
+  const limits = fixture.request.limits
+  const pad = bytes => ({ pad: 'x'.repeat(bytes - Buffer.byteLength(JSON.stringify({ pad: '' }))) })
+  const edges = [
+    ['maxAttempts', { limits: { ...limits, maxAttempts: 500 } }, { limits: { ...limits, maxAttempts: 501 } }],
+    ['maxAttempts low', { limits: { ...limits, maxAttempts: 1 } }, { limits: { ...limits, maxAttempts: 0 } }],
+    ['maxWallMs', { limits: { ...limits, maxWallMs: 86_400_000 } }, { limits: { ...limits, maxWallMs: 86_400_001 } }],
+    ['maxWallMs low', { limits: { ...limits, maxWallMs: 1000 } }, { limits: { ...limits, maxWallMs: 999 } }],
+    ['stepTimeoutMs', { limits: { ...limits, stepTimeoutMs: 21_600_000 } }, { limits: { ...limits, stepTimeoutMs: 21_600_001 } }],
+    ['stepTimeoutMs low', { limits: { ...limits, stepTimeoutMs: 1000 } }, { limits: { ...limits, stepTimeoutMs: 999 } }],
+    ['maxRepairRounds', { limits: { ...limits, maxRepairRounds: 10 } }, { limits: { ...limits, maxRepairRounds: 11 } }],
+    ['maxRepairRounds low', { limits: { ...limits, maxRepairRounds: 0 } }, { limits: { ...limits, maxRepairRounds: -1 } }],
+    ['parameters', { parameters: pad(4096) }, { parameters: pad(4097) }],
+  ]
+  for (const [label, accepted, refused] of edges) {
+    fixture.calls.length = 0
+    await assert.rejects(attempt(refused), /Invalid workflow request/, label)
+    assert.deepEqual(fixture.calls, [], label)
+    const report = await attempt(accepted)
+    assert.deepEqual(report.blockers.map(b => b.category), ['capability'], label)
+  }
+  assert.equal(Buffer.byteLength(JSON.stringify(pad(4096))), 4096)
 })
