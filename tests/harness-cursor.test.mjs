@@ -299,6 +299,22 @@ test('collectCursor commits a clean checkout, keeping the driver-written sandbox
   assert.doesNotMatch(tree.stdout, /\.cursor/)
 })
 
+// Cursor has no clone path (the test above): the host commits its checkout through the run repo,
+// so the task branch carries the run repo's identity and not the host global one.
+test('collectCursor commits the checkout as the run repo\'s identity, not the host global one', { timeout: 10000 }, async () => {
+  const runRepo = await freshDir('run')
+  const globalConfig = path.join(await freshDir('host'), 'gitconfig')
+  await writeFile(globalConfig, '[user]\n\tname = Host Global\n\temail = host@example.invalid\n')
+  await withEnv({ GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: '1' }, async () => {
+    await initRepo(runRepo)
+    const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: await freshDir('cache') } })
+    await writeFile(path.join(sandbox.cwd, 'a.txt'), 'a\n')
+    await collectCursor(defaultGitExec, { runRepo, sandbox, branch: 'fleetmates/r1/T1' })
+    const author = await defaultGitExec(['log', '-1', '--format=%an <%ae>|%cn <%ce>', 'fleetmates/r1/T1'], runRepo)
+    assert.equal(author.stdout.trim(), 'test <test@example.com>|test <test@example.com>')
+  })
+})
+
 test('collectCursor refuses a modified sandbox.json or a planted control file and creates no branch', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
   for (const plant of [
     async (cwd) => writeFile(path.join(cwd, '.cursor', 'sandbox.json'), '{"additionalReadwritePaths":["/"]}'),

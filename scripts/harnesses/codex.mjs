@@ -253,6 +253,13 @@ export async function makeCodexSandbox(git, { runRepo, runBranch, runId, taskId,
   await must(git, ['clone', '--shared', `--separate-git-dir=${gitdir}`, '--end-of-options', runRepo, cwd])
   await must(git, ['checkout', '-b', branch, `origin/${runBranch}`], { cwd })
     .catch(() => must(git, ['checkout', '-b', branch], { cwd }))
+  // The clone's own config carries the identity the run repo resolves, so a commit made in the
+  // clone is authored as the project, not as whatever the host's global config names. An identity
+  // the run repo cannot resolve is left unset rather than invented.
+  for (const key of ['user.name', 'user.email']) {
+    const value = (await git(['config', '--get', key], { cwd: runRepo })).stdout?.trim()
+    if (value) await must(git, ['--git-dir', gitdir, 'config', '--end-of-options', key, value])
+  }
   // No `.git` pointer: keeps the harness's own git off the teammate's config (§7). Only for
   // `clone` — `full` mode keeps it, since `danger-full-access` removes the reason to hide it.
   if (mode === 'clone') await rm(path.join(cwd, '.git'), { recursive: true, force: true })
@@ -383,6 +390,13 @@ fs.writeSync(3,JSON.stringify({
 if(launchError)process.exitCode=1;`
 // The fixed shell pipeline supplies ordinary pipes; native console output is pinned by the
 // actual-native regression, separately from injected restriction-receipt validation.
+//
+// The command's shell runs `detached`, in a process group of its own, so a signal that ends the
+// trampoline (an outer timeout's SIGTERM, a SIGINT or SIGHUP) would otherwise leave that whole
+// group running. The trampoline handles SIGTERM, SIGINT and SIGHUP by SIGKILLing the group, then
+// exits 128+signal. SIGKILL of the trampoline cannot be trapped: a trampoline SIGKILLed without
+// a SIGTERM first still leaves the group running. `defaultExec`'s timeout sends SIGTERM before its
+// SIGKILL, so that path is covered.
 const trampoline = `
 const fs=require('node:fs'),cp=require('node:child_process'),os=require('node:os');
 const r=JSON.parse(process.argv[1]);process.chdir(r.cwd);
@@ -390,6 +404,7 @@ const child=cp.spawn('/bin/sh',[
   '-c','{ "$@"; status=$?; printf "%s\\n" "$status" >&4; } 2>&1 | /bin/cat',
   'fm-verification',process.execPath,'-e',${JSON.stringify(pipeRunner)},JSON.stringify(r)
 ],{env:r.env,detached:true,stdio:['ignore','pipe','pipe','pipe','pipe']});
+for(const signal of ['SIGTERM','SIGINT','SIGHUP'])process.once(signal,()=>{try{process.kill(-child.pid,'SIGKILL')}catch{}process.exit(128+os.constants.signals[signal])});
 let output=Buffer.alloc(0),outputBytes=0,runnerStatus='',observation='',timedOut=false,limited=false,runtimeError=null,finished=false,cleanup;
 const stop=()=>{try{process.kill(-child.pid,'SIGKILL')}catch(error){if(error.code!=='ESRCH')runtimeError=error.code}cleanup??=setTimeout(finish,250)};
 const timer=setTimeout(()=>{timedOut=true;runtimeError='ETIMEDOUT';stop()},r.timeoutMs);
