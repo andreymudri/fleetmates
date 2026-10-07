@@ -68,3 +68,106 @@ test('execution CLI stores metadata in common Git storage and refuses to turn un
   await assert.rejects(access(path.join(root, '.fleetmates')))
   assert.equal((await readExecutionEvents(path.join(root, '.git'), 'r1')).length, 2)
 })
+
+const strictInputs = { commit: 'a'.repeat(40), ...Object.fromEntries(['plan', 'manifest', 'context', 'environment', 'verifier'].map(k => [k, 'b'.repeat(64)])) }
+const strictEvent = (id, kind, extra = {}) => ({ version: 2, id, kind, at: Date.now(), runId: 'strict-run', executionId: 'execution-1',
+  task: 'T1', step: 'command', attempt: 'attempt-1', inputs: strictInputs, branches: { 'refs/heads/main': strictInputs.commit },
+  checkout: 'worker-1', artifacts: [], effect: null, resolution: null, ...extra })
+test('version 2 records bind strict context and stable execution metadata', async t => {
+  const { executionEvent } = await import('../scripts/execution-journal.mjs')
+  const { strictExecutionIdentity } = await import('../scripts/completion-obligations.mjs')
+  const observed = executionEvent(strictEvent('start', 'step-started'))
+  assert.equal(observed.version, 2)
+  assert.equal(observed.identity, strictExecutionIdentity(strictInputs))
+  assert.equal(observed.executionId, 'execution-1')
+  assert.throws(() => executionEvent(strictEvent('bad', 'step-started', { command: 'unsafe' })), /fields/)
+  assert.throws(() => executionEvent(strictEvent('bad', 'step-started', { inputs: { ...strictInputs, context: 'legacy' } })), /strict/)
+  assert.throws(() => executionEvent(strictEvent('bad', 'step-started', { branches: { 'refs/heads/../bad': strictInputs.commit } })), /branch/)
+  assert.throws(() => executionEvent(strictEvent('bad', 'step-completed')), /artifact/)
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'strict-journal-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const start = strictEvent('start', 'step-started')
+  await appendExecutionEvent(common, start)
+  await appendExecutionEvent(common, start)
+  assert.equal((await readExecutionEvents(common, start.runId)).length, 1)
+  await assert.rejects(appendExecutionEvent(common, strictEvent('second-start', 'step-started')), /start/)
+  await assert.rejects(appendExecutionEvent(common, strictEvent('end', 'step-failed', { at: start.at - 1 })), /ordered/)
+  await assert.rejects(appendExecutionEvent(common, strictEvent('changed', 'step-failed', { inputs: { ...strictInputs, context: 'c'.repeat(64) } })), /identity/)
+})
+test('required start persistence and bounded retention precede the action', async t => {
+  const journal = await import('../scripts/execution-journal.mjs')
+  const start = journal.runAfterExecutionStart
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'strict-persist-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  let called = false
+  await assert.rejects(start({ common, event: strictEvent('start', 'step-started'),
+    retention: { maxEvents: 1, maxBytes: 1, maxAgeMs: 1000 }, action: () => { called = true } }), /budget/)
+  assert.equal(called, false)
+  const event = strictEvent('start', 'step-started')
+  await start({ common, event, action: async () => {
+    assert.equal((await readExecutionEvents(common, event.runId))[0].kind, 'step-started')
+    called = true
+  } })
+  assert.equal(called, true)
+  await assert.rejects(appendExecutionEvent(common, strictEvent('end', 'step-failed'), { retention: { maxEvents: 1, maxBytes: 8192, maxAgeMs: 1000 } }), /budget/)
+  await assert.rejects(appendExecutionEvent(common, strictEvent('end', 'step-failed'), { now: event.at + 2000, retention: { maxEvents: 10, maxBytes: 8192, maxAgeMs: 1000 } }), /retention/)
+})
+
+test('persisted required start cannot authorize a second action', async t => {
+  const { runAfterExecutionStart } = await import('../scripts/execution-journal.mjs')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'strict-once-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const event = strictEvent('start', 'step-started')
+  let actions = 0
+  const request = { common, event, action: () => { actions++ } }
+  await runAfterExecutionStart(request)
+  await assert.rejects(runAfterExecutionStart(request), /already persisted/)
+  assert.equal(actions, 1)
+})
+
+test('unknown external effects block a new non-idempotent attempt at persistence', async t => {
+  const { resolveExecutionEffect } = await import('../scripts/execution-recovery.mjs')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'strict-retry-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const start = strictEvent('start', 'step-started')
+  await appendExecutionEvent(common, start)
+  await appendExecutionEvent(common, strictEvent('effect', 'effect-started', { at: start.at + 1, effect: { id: 'external-1', kind: 'publication', reference: null } }))
+  const retry = strictEvent('retry', 'step-started', { attempt: 'attempt-2', at: start.at + 2 })
+  await assert.rejects(appendExecutionEvent(common, retry), /effect.*retry/)
+  await resolveExecutionEffect({ common, runId: start.runId, effectId: 'external-1', resolution: 'unknown', reason: 'inspected' })
+  await assert.rejects(appendExecutionEvent(common, retry), /effect.*retry/)
+  await resolveExecutionEffect({ common, runId: start.runId, effectId: 'external-1', resolution: 'failed', reason: 'inspected' })
+  await appendExecutionEvent(common, retry)
+  assert.equal((await readExecutionEvents(common, start.runId)).filter(e => e.kind === 'step-started').length, 2)
+})
+test('strict journal rejects duplicate attempts, effect ordering and forged operator authority', async () => {
+  const { executionEvent, strictExecutionAttempts } = await import('../scripts/execution-journal.mjs')
+  const start = strictEvent('start', 'step-started'), external = { id: 'external-1', kind: 'pr', reference: 'example/project#12' }
+  assert.throws(() => strictExecutionAttempts([start, strictEvent('other', 'step-started', { step: 'review' })]), /Duplicate.*attempt/)
+  assert.throws(() => strictExecutionAttempts([start, strictEvent('effect-end', 'effect-completed', { effect: external })]), /ambiguous/)
+  assert.throws(() => strictExecutionAttempts([start, strictEvent('effect-start', 'effect-started', { at: start.at + 2, effect: external }),
+    strictEvent('effect-end', 'effect-completed', { at: start.at + 1, effect: external })]), /ordered/)
+  assert.throws(() => executionEvent(strictEvent('forged', 'effect-resolved', { effect: external,
+    resolution: { outcome: 'completed', reason: 'inspected', trust: 'authenticated', authenticatedAuthorization: true } })), /resolution/)
+  assert.throws(() => executionEvent(strictEvent('url', 'effect-started', { effect: { ...external, reference: 'https://invalid/pr/12' } })), /effect/)
+  assert.throws(() => executionEvent(strictEvent('artifact', 'step-completed', { artifacts: [{ version: 1, runId: 'other', kind: 'stdout', sha256: 'b'.repeat(64), byteLength: 0 }] })), /artifact/)
+})
+test('unsafe or busy storage never permits the required action', async t => {
+  const { runAfterExecutionStart, executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const { mkdir, symlink, writeFile } = await import('node:fs/promises')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'strict-storage-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const event = strictEvent('start', 'step-started'), directory = await executionDirectory(common, event.runId)
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  await mkdir(path.join(directory, '.lock'))
+  let actions = 0
+  const request = { common, event, action: () => { actions++ } }
+  await assert.rejects(runAfterExecutionStart(request), /busy/)
+  await rm(path.join(directory, '.lock'), { recursive: true })
+  await writeFile(path.join(directory, 'unexpected'), 'partial')
+  await assert.rejects(runAfterExecutionStart(request), /Incomplete/)
+  await rm(directory, { recursive: true })
+  const target = path.join(common, 'target'); await mkdir(target, { mode: 0o700 }); await symlink(target, directory)
+  await assert.rejects(runAfterExecutionStart(request), /Unsafe/)
+  assert.equal(actions, 0)
+})
