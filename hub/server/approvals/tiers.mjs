@@ -483,11 +483,30 @@ function followsSymlinks(name, words) {
   return false
 }
 
-// Whether `dir` lies in a git work tree: an ancestor holds `.git`, and `dir` is not inside one.
+// Whether the `.git` directory `marker` holds HEAD as a file or a symlink (dangling or not).
+function headMarks(marker) {
+  try {
+    const head = lstatSync(path.join(marker, 'HEAD'))
+    return head.isFile() || head.isSymbolicLink()
+  } catch { return false }
+}
+
+// Whether `dir` holds a repository marker: a `.git` directory with a `HEAD` file or symlink, or a `.git`
+// file that starts with `gitdir:`. An empty `.git` directory (one a sandbox mounts, say) is not one.
+function hasGitMarker(dir) {
+  const marker = path.join(dir, '.git')
+  try {
+    const stat = statSync(marker)
+    if (stat.isDirectory()) return headMarks(marker)
+    return stat.isFile() && stat.size <= 4096 && readFileSync(marker, 'utf8').startsWith('gitdir:')
+  } catch { return false }
+}
+
+// Whether `dir` lies in a git work tree: an ancestor holds a repository marker, and `dir` is not inside `.git`.
 function inGitWorkTree(dir) {
   if (typeof dir !== 'string' || isGitInternal(dir)) return false
   for (let current = dir; ; current = path.dirname(current)) {
-    if (lexists(path.join(current, '.git'))) return true
+    if (hasGitMarker(current)) return true
     if (path.dirname(current) === current) return false
   }
 }
@@ -572,13 +591,14 @@ const statKey = location => {
   } catch { return '-' }
 }
 
-// The git work tree top level at or above `dir`, with its git dir and common dir.
+// The git work tree top level at or above `dir`, with its git dir and common dir. A `.git`
+// directory counts only when it holds `HEAD`, as in hasGitMarker.
 function gitDirs(dir) {
   for (let current = dir; ; current = path.dirname(current)) {
     const dotgit = path.join(current, '.git')
     let gitdir = null
     try {
-      if (statSync(dotgit).isDirectory()) gitdir = dotgit
+      if (statSync(dotgit).isDirectory()) { if (headMarks(dotgit)) gitdir = dotgit }
       else {
         const match = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotgit, 'utf8'))
         if (match) gitdir = path.resolve(current, match[1])

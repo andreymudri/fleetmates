@@ -3,7 +3,7 @@ import { execFileSync as executeFile } from 'node:child_process'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { test } from 'node:test'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
@@ -15,7 +15,7 @@ const settleHooks = (...roots) => Promise.all(roots.map(root => hooksPathCache.l
 import { openDeckDb } from '../../server/db/index.mjs'
 import { runRetention } from '../../server/db/retention.mjs'
 import { createProjector, PROMPT_GONE_REASON, SCROLLBACK_CAP } from '../../server/machines/projector.mjs'
-import { applySessionHook, captureReviewBaseline, leadRunId } from '../../server/machines/session.mjs'
+import { applySessionHook, captureReviewBaseline, leadRunId, workingRoot } from '../../server/machines/session.mjs'
 import { projectHome } from '../../server/machines/counts.mjs'
 import { applyRequestHook, classifyHook, expireRequests, permissionTier } from '../../server/machines/request.mjs'
 import { classify, hooksPathCache, worktrees } from '../../server/approvals/tiers.mjs'
@@ -909,6 +909,7 @@ test('sessions in sibling directories share the canonical Git repository root', 
   try {
     const root = path.join(dir, 'repo')
     for (const sub of ['.git', 'a', 'b']) mkdirSync(path.join(root, sub), { recursive: true })
+    writeFileSync(path.join(root, '.git', 'HEAD'), 'ref: refs/heads/main\n')
     for (const [index, sub] of ['a', 'b'].entries()) {
       const start = fixture('SessionStart.startup.json', { session_id: `repo-${index}`, cwd: path.join(root, sub) })
       start.claudePid = 100 + index
@@ -925,6 +926,39 @@ test('sessions in sibling directories share the canonical Git repository root', 
     start.hookTs = 1002
     h.projector.applyHooks([start])
     assert.equal(h.projector.snapshot().sessions.find(row => row.claudeSessionId === 'worktree').repoId, worktree)
+  } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('an ancestor with an empty .git directory, or a .git file without gitdir:, is not the session repository root', () => {
+  const h = harness()
+  const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-empty-git-')))
+  try {
+    mkdirSync(path.join(dir, '.git'))
+    const plain = path.join(dir, 'plain', 'src')
+    const real = path.join(dir, 'real')
+    const bogus = path.join(dir, 'bogus')
+    mkdirSync(plain, { recursive: true })
+    mkdirSync(path.join(real, '.git', 'objects'), { recursive: true })
+    writeFileSync(path.join(real, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    mkdirSync(path.join(real, 'src'))
+    mkdirSync(path.join(bogus, 'src'), { recursive: true })
+    writeFileSync(path.join(bogus, '.git'), 'not a pointer\n')
+    // A HEAD that is a dangling symlink still marks a repository.
+    const dangling = path.join(dir, 'dangling')
+    mkdirSync(path.join(dangling, '.git'), { recursive: true })
+    mkdirSync(path.join(dangling, 'src'))
+    symlinkSync('refs/heads/unborn', path.join(dangling, '.git', 'HEAD'))
+    const cwds = [plain, path.join(real, 'src'), path.join(bogus, 'src'), path.join(dangling, 'src')]
+    for (const [index, cwd] of cwds.entries()) {
+      const start = fixture('SessionStart.startup.json', { session_id: `empty-git-${index}`, cwd })
+      start.claudePid = 200 + index
+      start.hookTs = 2000 + index
+      h.projector.applyHooks([start])
+    }
+    const repoOf = id => h.projector.snapshot().sessions.find(row => row.claudeSessionId === id).repoId
+    const expected = [plain, real, path.join(bogus, 'src'), dangling]
+    assert.deepEqual(cwds.map((_, index) => repoOf(`empty-git-${index}`)), expected)
+    assert.deepEqual(cwds.map(cwd => workingRoot(cwd)), expected)
   } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 

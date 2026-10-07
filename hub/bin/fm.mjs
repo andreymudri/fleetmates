@@ -92,16 +92,36 @@ function plainClaude (args) {
 }
 
 /**
+ * Whether `dir` holds a repository marker: a `.git` directory with a `HEAD`
+ * file or symlink (dangling or not), or a `.git` file that starts with `gitdir:`. An empty `.git`
+ * directory, such as one a sandbox mounts, is not one.
+ * @param {string} dir
+ * @returns {boolean}
+ */
+function hasGitMarker (dir) {
+  const marker = path.join(dir, '.git')
+  try {
+    const stat = fs.statSync(marker)
+    if (stat.isDirectory()) {
+      // HEAD may be a symlink, dangling while its branch is unborn.
+      const head = fs.lstatSync(path.join(marker, 'HEAD'))
+      return head.isFile() || head.isSymbolicLink()
+    }
+    return stat.isFile() && stat.size <= 4096 && fs.readFileSync(marker, 'utf8').startsWith('gitdir:')
+  } catch { return false }
+}
+
+/**
  * What `fm ls` shows as a PTY's repo: the basename of the nearest ancestor
- * of `cwd` (itself included) that holds `.git`, else `cwd` with the home
- * directory shown as `~`.
+ * of `cwd` (itself included) that holds a repository marker (see
+ * `hasGitMarker`), else `cwd` with the home directory shown as `~`.
  * @param {string} cwd
  * @param {string} home
  * @returns {string}
  */
 function repoOf (cwd, home) {
   for (let dir = cwd; ; dir = path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, '.git'))) return path.basename(dir)
+    if (hasGitMarker(dir)) return path.basename(dir)
     if (path.dirname(dir) === dir) break
   }
   if (home && (cwd === home || cwd.startsWith(home.endsWith('/') ? home : home + '/'))) return '~' + cwd.slice(home.replace(/\/$/, '').length)
