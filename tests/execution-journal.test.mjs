@@ -273,3 +273,72 @@ test('absent journal history is empty only beneath safe storage', async t => {
   await symlink(path.join(common, 'missing'), directory)
   await assert.rejects(readExecutionEvents(common, 'r1'), /Unsafe execution directory/)
 })
+
+for (const outcome of ['interrupted', 'unknown', 'completed', 'resolved-unknown', 'resolved-completed', 'failed', 'resolved-failed']) {
+  test('overlapping attempt checks prior ' + outcome + ' effect before persistence or action', async t => {
+    const journal = await import('../scripts/execution-journal.mjs')
+    const common = await realpath(await mkdtemp(path.join(tmpdir(), 'overlapping-attempt-')))
+    t.after(() => rm(common, { recursive: true, force: true }))
+    const first = strictEvent('first', 'step-started')
+    await journal.appendExecutionEvent(common, first)
+    await journal.appendExecutionEvent(common, strictEvent('second', 'step-started', { attempt: 'attempt-2', at: first.at + 1 }))
+    const effect = { id: 'external-1', kind: 'publication', reference: null }
+    await journal.appendExecutionEvent(common, strictEvent('external-first', 'effect-started', { effect, at: first.at + 2 }))
+    if (outcome.startsWith('resolved-')) {
+      await journal.appendExecutionEvent(common, strictEvent('resolution-first', 'effect-resolved', { effect, at: first.at + 3,
+        resolution: { outcome: outcome.slice(9), reason: 'inspected', trust: 'local-operator-observation', authenticatedAuthorization: false } }))
+    } else if (outcome !== 'interrupted') {
+      await journal.appendExecutionEvent(common, strictEvent('end-first', 'effect-' + outcome, { effect, at: first.at + 3 }))
+    }
+    const before = await journal.readExecutionEvents(common, first.runId)
+    const next = strictEvent('external-second', 'effect-started', { attempt: 'attempt-2', at: first.at + 4,
+      effect: { id: 'external-2', kind: 'publication', reference: null } })
+    let actions = 0
+    const rejection = await journal.runAfterExecutionStart({ common, event: next, action: () => { actions++ } })
+      .then(() => null, error => error)
+    const after = await journal.readExecutionEvents(common, first.runId)
+    const allowed = outcome === 'failed' || outcome === 'resolved-failed'
+    assert.equal(actions, allowed ? 1 : 0)
+    assert.equal(after.some(event => event.id === next.id), allowed)
+    assert.deepEqual(after.filter(event => event.id !== next.id), before)
+    if (allowed) assert.equal(rejection, null)
+    else {
+      assert.ok(rejection instanceof Error)
+      assert.match(rejection.message, /External effect outcome refuses non-idempotent retry/)
+      assert.deepEqual(after, before)
+    }
+  })
+}
+
+for (const outcome of ['interrupted', 'unknown', 'completed', 'resolved-completed']) {
+  test('same attempt permits subsequent effects and outcomes after its own ' + outcome + ' effect', async t => {
+    const journal = await import('../scripts/execution-journal.mjs')
+    const common = await realpath(await mkdtemp(path.join(tmpdir(), 'same-attempt-')))
+    t.after(() => rm(common, { recursive: true, force: true }))
+    const start = strictEvent('start', 'step-started')
+    const first = { id: 'external-1', kind: 'publication', reference: null }
+    const second = { id: 'external-2', kind: 'publication', reference: null }
+    await journal.appendExecutionEvent(common, start)
+    await journal.appendExecutionEvent(common, strictEvent('first-effect', 'effect-started', { effect: first, at: start.at + 1 }))
+    if (outcome === 'resolved-completed') {
+      await journal.appendExecutionEvent(common, strictEvent('first-resolution', 'effect-resolved', { effect: first, at: start.at + 2,
+        resolution: { outcome: 'completed', reason: 'inspected', trust: 'local-operator-observation', authenticatedAuthorization: false } }))
+    } else if (outcome !== 'interrupted') {
+      await journal.appendExecutionEvent(common, strictEvent('first-end', 'effect-' + outcome, { effect: first, at: start.at + 2 }))
+    }
+    let actions = 0
+    const next = strictEvent('second-effect', 'effect-started', { effect: second, at: start.at + 3 })
+    const rejection = await journal.runAfterExecutionStart({ common, event: next, action: () => { actions++ } })
+      .then(() => null, error => error)
+    assert.equal(rejection, null)
+    assert.equal(actions, 1)
+    const records = await journal.readExecutionEvents(common, start.runId)
+    assert.ok(records.some(record => record.id === next.id))
+    await journal.appendExecutionEvent(common, strictEvent('second-end', 'effect-completed', { effect: second, at: start.at + 4 }))
+    await journal.appendExecutionEvent(common, strictEvent('later-resolution', 'effect-resolved', { effect: first, at: start.at + 5,
+      resolution: { outcome: 'unknown', reason: 'inspected', trust: 'local-operator-observation', authenticatedAuthorization: false } }))
+    await journal.appendExecutionEvent(common, strictEvent('step-end', 'step-failed', { at: start.at + 6 }))
+    const after = await journal.readExecutionEvents(common, start.runId)
+    assert.deepEqual(after.filter(record => record.at > next.at).map(record => record.kind), ['effect-completed', 'effect-resolved', 'step-failed'])
+  })
+}

@@ -198,8 +198,9 @@ export async function appendExecutionEvent(common, raw, { retention, now = Date.
     if (existing.length >= policy.maxEvents || existing.reduce((sum, e) => sum + Buffer.byteLength(JSON.stringify(e)) + 1, 0) + Buffer.byteLength(text) > policy.maxBytes) throw new Error('Execution journal exceeds budget')
     if (event.version === 2 && [...existing, event].some(e => now - e.at > policy.maxAgeMs)) throw new Error('Execution journal retention exceeded; unresolved evidence is retained')
     const previous = strictExecutionAttempts(existing)
-    if (event.version === 2 && event.kind === 'step-started' && previous.some(group =>
+    if (event.version === 2 && ['step-started', 'effect-started'].includes(event.kind) && previous.some(group =>
       group.start.executionId === event.executionId && group.start.task === event.task && group.start.step === event.step
+      && (event.kind === 'step-started' || group.start.attempt !== event.attempt)
       && group.effects.some(effect => effect.resolution ? effect.resolution.resolution.outcome !== 'failed' : effect.end?.kind !== 'effect-failed'))) {
       throw new Error('External effect outcome refuses non-idempotent retry')
     }
