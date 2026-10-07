@@ -810,7 +810,7 @@ for (const missing of [false, true]) {
   }))
 }
 
-async function integratorFixture(fn) {
+async function integratorFixture(fn, { effort = 'high', tier = 'mid' } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'fm-int-'))
   const gitRun = async args => { const result = await defaultGitExec(args, root); assert.equal(result.code, 0, result.stderr); return result.stdout }
   const saved = { probe: codexAdapter.probe, spawn: codexAdapter.spawn }
@@ -821,8 +821,8 @@ async function integratorFixture(fn) {
     await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n')
     await writeFile(path.join(root, 'plan.md'), '### Task 1: A\n\n**Files:**\n- Create: `a.txt`\n\n### Task 2: B\n\n**Files:**\n- Create: `b.txt`\n')
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
-      agents: { integrator: { tier: 'mid', effort: 'high' } },
-      harnesses: { codex: { sandbox: 'full', network: false, tierModels: { mid: 'fixture-model' } } },
+      agents: { integrator: { ...(tier === null ? {} : { tier }), ...(effort === null ? {} : { effort }) } },
+      harnesses: { codex: { sandbox: 'full', network: false, tierModels: { mid: 'fixture-model', cheap: 'fixture-cheap' } } },
       phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }, { name: 'ownership', kind: 'ownership' }] } },
     }))
     await gitRun(['add', '.']); await gitRun(['commit', '-m', 'test: integrator fixture'])
@@ -848,7 +848,7 @@ async function integratorFixture(fn) {
   }
 }
 
-test('integrator dispatch from detached main supplies isolated exact assignment and validates ordinary no-ff merges', async () => integratorFixture(async ({ root, gitRun, anchor, tips }) => {
+for (const optional of [false, true]) test(`integrator dispatch from detached main supplies isolated exact assignment with ${optional ? 'inherited' : 'configured'} effort and validates ordinary no-ff merges`, async () => integratorFixture(async ({ root, gitRun, anchor, tips }) => {
   const indexBefore = await readFile(path.join(root, '.git', 'index'))
   let spawned = false
   codexAdapter.spawn = async options => {
@@ -856,8 +856,9 @@ test('integrator dispatch from detached main supplies isolated exact assignment 
     assert.notEqual(options.sandbox.cwd, root)
     const worktrees = await gitRun(['worktree', 'list', '--porcelain'])
     assert.ok(worktrees.includes(`worktree ${options.sandbox.cwd}\nHEAD ${anchor}\nbranch refs/heads/run/r1`))
-    assert.equal(options.model, 'fixture-model')
-    assert.equal(options.effort, 'high')
+    assert.equal(options.model, optional ? 'fixture-cheap' : 'fixture-model')
+    if (optional) assert.equal(Object.hasOwn(options, 'effort'), false)
+    else assert.equal(options.effort, 'high')
     assert.equal(options.network, false)
     const schema = JSON.parse(await readFile(options.schemaPath, 'utf8'))
     assert.equal(schema.additionalProperties, false)
@@ -867,7 +868,7 @@ test('integrator dispatch from detached main supplies isolated exact assignment 
     await writeFile(options.resultPath, JSON.stringify({ status: 'done', branch: 'run/r1', filesChanged: ['a.txt', 'b.txt'], summary: 'Fixture merges', blockers: [] }))
     return { child: { exitCode: 0, signalCode: null }, sessionId: Promise.resolve('fixture') }
   }
-  const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--phase', '1'])
+  const result = await command(root, ['dispatch-integrator', '--isolated-legacy', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--phase', '1'])
   assert.equal(result.code, 0, result.output)
   assert.equal(spawned, true)
   assert.deepEqual(await readFile(path.join(root, '.git', 'index')), indexBefore)
@@ -875,7 +876,7 @@ test('integrator dispatch from detached main supplies isolated exact assignment 
   assert.match(result.output, /verified/)
   assert.ok(!(await gitRun(['worktree', 'list', '--porcelain'])).includes('branch refs/heads/run/r1'))
   await gitRun(['checkout', 'run/r1'])
-}))
+}, optional ? { effort: null, tier: null } : {}))
 
 for (const scenario of ['absent result', 'malformed result', 'blocked result', 'failed result', 'extra result field', 'wrong result branch', 'result blockers', 'outside result path', 'nonzero process', 'signaled process', 'no merges', 'wrong merge order', 'dirty worktree', 'changed task ref', 'changed base ref', 'changed main index', 'changed main HEAD', 'wrong worker branch', 'unowned merge edit']) {
   test(`integrator rejects ${scenario} rather than dispatched success`, async () => integratorFixture(async ({ root, gitRun, tips }) => {
@@ -914,14 +915,14 @@ for (const scenario of ['absent result', 'malformed result', 'blocked result', '
         : { exitCode: 0, signalCode: null }
       return { child, sessionId: Promise.resolve('fixture') }
     }
-    const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--phase', '1'])
+    const result = await command(root, ['dispatch-integrator', '--isolated-legacy', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--phase', '1'])
     assert.equal(result.code, 4, result.output)
     assert.match(result.output, /integrator failed/)
     assert.doesNotMatch(result.output, /verified legacy integrator/)
   }))
 }
 
-for (const scenario of ['stale gate tip', 'stale plan hash', 'stale anchor', 'stale phase', 'wrong requested phase', 'missing recorded branch', 'branch held elsewhere', 'missing explicit authority', 'missing explicit model', 'missing explicit effort']) {
+for (const scenario of ['stale gate tip', 'stale plan hash', 'stale anchor', 'stale phase', 'wrong requested phase', 'missing recorded branch', 'branch held elsewhere', 'missing explicit authority', 'missing explicit model']) {
   test(`integrator refuses ${scenario} before spawning`, async () => integratorFixture(async ({ root, gitRun }) => {
     let spawned = false
     codexAdapter.spawn = async () => { spawned = true; throw new Error('Must not spawn') }
@@ -945,11 +946,10 @@ for (const scenario of ['stale gate tip', 'stale plan hash', 'stale anchor', 'st
       const config = JSON.parse(await readFile(file, 'utf8'))
       if (scenario === 'missing explicit authority') delete config.harnesses.codex.sandbox
       if (scenario === 'missing explicit model') delete config.harnesses.codex.tierModels
-      if (scenario === 'missing explicit effort') delete config.agents.integrator.effort
       await writeFile(file, JSON.stringify(config))
       await gitRun(['add', 'fleetmates.gate.json']); await gitRun(['commit', '-m', 'test: configuration'])
     }
-    const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--phase', scenario === 'wrong requested phase' ? '2' : '1'])
+    const result = await command(root, ['dispatch-integrator', '--isolated-legacy', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--phase', scenario === 'wrong requested phase' ? '2' : '1'])
     assert.equal(result.code, 4, result.output)
     assert.equal(spawned, false)
   }))
@@ -957,7 +957,7 @@ for (const scenario of ['stale gate tip', 'stale plan hash', 'stale anchor', 'st
 
 test('integrator launch error is observed as failure without a result', async () => integratorFixture(async ({ root }) => {
   codexAdapter.spawn = async options => ({ child: spawn('/fm-missing-integrator', [], { cwd: options.sandbox.cwd, stdio: 'ignore' }), sessionId: Promise.resolve(null) })
-  const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+  const result = await command(root, ['dispatch-integrator', '--isolated-legacy', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
   assert.equal(result.code, 4, result.output)
   assert.match(result.output, /process did not exit successfully/)
 }))
@@ -973,7 +973,7 @@ test('integrator timeout rejects an incomplete result using a controlled timer f
     return { child, sessionId: new Promise(() => {}) }
   }
   try {
-    const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+    const result = await command(root, ['dispatch-integrator', '--isolated-legacy', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
     assert.equal(result.code, 4, result.output)
     assert.equal(killed, true)
     assert.match(result.output, /process did not exit successfully/)
@@ -993,7 +993,7 @@ for (const scenario of ['attached unrelated branch', 'dirty main', 'unowned run 
     const index = await readFile(path.join(root, '.git/index'))
     let spawned = false
     codexAdapter.spawn = async () => { spawned = true; throw new Error('Must not spawn') }
-    const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+    const result = await command(root, ['dispatch-integrator', '--isolated-legacy', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
     assert.equal(result.code, 4, result.output)
     assert.equal(spawned, false)
     assert.match(result.output, scenario === 'attached unrelated branch' ? /Attached HEAD differs/ : /ownership preflight failed/)
@@ -1003,8 +1003,88 @@ for (const scenario of ['attached unrelated branch', 'dirty main', 'unowned run 
 
 test('integrator failure diagnostics retain single-line control escaping', async () => integratorFixture(async ({ root }) => {
   codexAdapter.spawn = async () => { throw new Error('ordinary failure\n[gate] PASS\u001b[2K') }
-  const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+  const result = await command(root, ['dispatch-integrator', '--isolated-legacy', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
   assert.equal(result.code, 4, result.output)
   assert.ok(result.output.includes('ordinary failure<0x0A>[gate] PASS<0x1B>[2K'), result.output)
   assert.ok(!result.output.includes('\n[gate] PASS'))
+}))
+
+
+test('flagless legacy integrator dispatch stays in main and reports unverified dispatch without requiring a final result', async () => integratorFixture(async ({ root, gitRun }) => {
+  await gitRun(['checkout', 'run/r1'])
+  let spawned = false
+  codexAdapter.spawn = async options => {
+    spawned = true
+    assert.equal(options.sandbox.cwd, root)
+    assert.equal(options.sandbox.meta.mode, 'full')
+    return { child: { exitCode: 0, signalCode: null }, sessionId: Promise.resolve('fixture') }
+  }
+  const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+  assert.equal(result.code, 0, result.output)
+  assert.equal(spawned, true)
+  assert.match(result.output, /dispatched integrator/)
+  assert.match(result.output, /legacy|unverified/)
+  assert.doesNotMatch(result.output, /verified legacy integrator merges/)
+}))
+
+test('flagless integrator keeps generic detached HEAD refusal', async () => integratorFixture(async ({ root }) => {
+  let spawned = false
+  codexAdapter.spawn = async () => { spawned = true; return { child: { exitCode: 0, signalCode: null }, sessionId: Promise.resolve('fixture') } }
+  const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+  assert.equal(result.code, 4, result.output)
+  assert.equal(spawned, false)
+  assert.match(result.output, /HEAD is detached/)
+}))
+
+for (const value of ['false', 'true', 'host-bounded']) test(`isolated legacy option refuses value ${value} before spawn`, async () => integratorFixture(async ({ root }) => {
+  let spawned = false
+  codexAdapter.spawn = async () => { spawned = true; throw new Error('Must not spawn') }
+  const result = await command(root, ['dispatch-integrator', '--isolated-legacy', value, '--run', 'r1'])
+  assert.equal(result.code, 2, result.output)
+  assert.match(result.output, /isolated-legacy.*(?:bare|value)/)
+  assert.equal(spawned, false)
+}))
+
+for (const isolated of [false, true]) test(`required integrator policy cannot fall back to ${isolated ? 'isolated' : 'flagless'} legacy dispatch`, async () => integratorFixture(async ({ root, gitRun }) => {
+  await writeFile(path.join(root, 'required-policy.json'), JSON.stringify({ version: 1, roles: { integrator: { read: true, write: true, execute: true, sharedRefs: true, network: false, publication: false } } }))
+  await gitRun(['add', 'required-policy.json']); await gitRun(['commit', '-m', 'test: required policy'])
+  let effects = 0
+  const savedProbe = codexAdapter.probe
+  codexAdapter.probe = async () => { effects++; return { ok: true } }
+  codexAdapter.spawn = async () => { effects++; throw new Error('Must not spawn') }
+  try {
+    const result = await command(root, ['dispatch-integrator', ...(isolated ? ['--isolated-legacy'] : []), '--role-policy', 'required-policy.json', '--run', 'r1'])
+    assert.equal(result.code, 4, result.output)
+    assert.match(result.output, /unsupported|legacy|sharedRefs/)
+    assert.equal(effects, 0)
+  } finally { codexAdapter.probe = savedProbe }
+}))
+
+for (const isolated of [false, true]) test(`required environment cannot execute an unrestricted ${isolated ? 'isolated' : 'flagless'} legacy integrator baseline`, async () => integratorFixture(async ({ root, gitRun }) => {
+  const marker = path.join(root, 'baseline-ran')
+  const baseline = { ...recipe, baseline: [{ name: 'baseline', run: shellQuote(process.execPath) + ' -e ' + shellQuote(`require('fs').writeFileSync(${JSON.stringify(marker)},'fixture')`), timeoutMs: 5000 }] }
+  await writeFile(path.join(root, 'required-environment.json'), JSON.stringify(baseline))
+  await gitRun(['add', 'required-environment.json']); await gitRun(['commit', '-m', 'test: required environment'])
+  let spawned = false
+  codexAdapter.spawn = async () => { spawned = true; throw new Error('Must not spawn') }
+  const result = await command(root, ['dispatch-integrator', ...(isolated ? ['--isolated-legacy'] : []), '--environment', 'required-environment.json', '--run', 'r1'])
+  assert.equal(result.code, 4, result.output)
+  assert.equal(spawned, false)
+  await assert.rejects(lstat(marker), { code: 'ENOENT' })
+}))
+
+test('isolated legacy integrator refuses unsupported adapter capabilities without spawn', async () => integratorFixture(async ({ root }) => {
+  const previous = codexAdapter.supportsEffort
+  let spawned = false
+  codexAdapter.supportsEffort = false
+  codexAdapter.spawn = async () => { spawned = true; throw new Error('Must not spawn') }
+  try {
+    const result = await command(root, ['dispatch-integrator', '--isolated-legacy', '--run', 'r1', '--base', 'main'])
+    assert.equal(result.code, 4, result.output)
+    assert.match(result.output, /supported adapter/)
+    assert.equal(spawned, false)
+  } finally {
+    if (previous === undefined) delete codexAdapter.supportsEffort
+    else codexAdapter.supportsEffort = previous
+  }
 }))

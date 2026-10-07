@@ -184,7 +184,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|d
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
   dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
-  dispatch-integrator --run <id> [--phase <name>] [--harness <name>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
+  dispatch-integrator --run <id> [--isolated-legacy] [--phase <name>] [--harness <name>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   message  --run <id> --task <id> --text <s> [--harness <name>] [--root <path>]
   sessions --run <id> [--root <path>]
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>] [--enforcement-only]
@@ -385,7 +385,7 @@ export const KNOWN_FLAGS = {
   workflow: ['run', 'phase', 'models', 'plan', 'base'],
   dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
   'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
-  'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
+  'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy', 'isolated-legacy'],
   message: ['run', 'task', 'harness', 'text'],
   sessions: ['run'],
   fix: ['run', 'phase', 'verdict'],
@@ -3081,6 +3081,11 @@ export async function runCli(argv, io = { out: console.log }) {
     } catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
   }
 
+  if (command === 'dispatch-integrator' && flags['isolated-legacy'] !== undefined && flags['isolated-legacy'] !== true) {
+    io.out('--isolated-legacy is a bare option and does not take a value')
+    return 2
+  }
+
   let prerequisites
   if (['dispatch', 'dispatch-reviews', 'dispatch-integrator'].includes(command)) {
     if (flags.environment !== undefined || flags['role-policy'] !== undefined) {
@@ -3898,10 +3903,11 @@ export async function runCli(argv, io = { out: console.log }) {
       : (typeof planState?.planPath === 'string' ? planState.planPath : '')
     let derived
     try {
-      derived = await deriveIntegrator(root, runId, { ...flags, plan: planPath }, planState)
+      derived = flags['isolated-legacy']
+        ? await deriveIntegrator(root, runId, { ...flags, plan: planPath }, planState)
+        : await derive(root, runId, { ...flags, plan: planPath })
     } catch (err) {
-      io.out(`cannot verify which phase to integrate for run ${printable(runId)}: ${printable(err.message)}`)
-      return 4
+      return integratorFailure(io, `cannot verify which phase to integrate for run ${runId}: ${err.message}`)
     }
     const gateKey = String(derived.currentPhase ?? phaseName)
     const gates = status && typeof status.gates === 'object' && status.gates !== null ? status.gates : {}
@@ -3922,13 +3928,41 @@ export async function runCli(argv, io = { out: console.log }) {
     const settings = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     const { network, timeoutMinutes } = settings
     const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
+    if (!flags['isolated-legacy']) {
+      let learningContext = ''
+      try {
+        const { learningBundles } = await import('./learning-context.mjs')
+        const { renderAdvisoryContext } = await import('./brief.mjs')
+        const contextTask = { id: `phase-${gateKey}`, members: derived.tasks.filter(t => String(t.phase) === gateKey).map(t => t.id), files: [...new Set(derived.tasks.filter(t => String(t.phase) === gateKey).flatMap(t => t.files))] }
+        const contextBundles = await learningBundles({ git: derived.git, commit: derived.anchorSha, planPath: path.isAbsolute(planPath) ? path.relative(root, planPath).split(path.sep).join('/') : planPath, tasks: [contextTask], role: 'integrator' })
+        if (contextBundles[contextTask.id]) learningContext = '\n' + renderAdvisoryContext(contextBundles[contextTask.id], { task: contextTask.id, role: 'integrator' })
+      } catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+      const persona = await personaFor('integrator') + learningContext
+      const integratorSessionsDir = path.join(runDir(root, runId), 'sessions')
+      await mkdir(integratorSessionsDir, { recursive: true })
+      const base = path.join(integratorSessionsDir, 'integrator')
+      const handle = await adapter.spawn({
+        sandbox: { cwd: root, meta: { mode: 'full' } },
+        prompt: persona,
+        network,
+        schemaPath: `${base}.schema.json`,
+        resultPath: `${base}.result.json`,
+        streamPath: `${base}.stream.jsonl`,
+        errPath: `${base}.stderr.log`,
+      })
+      await handle.sessionId
+      await waitForExit(handle.child, timeoutMs)
+      io.out('legacy integrator dispatch only; completion is unverified')
+      io.out(`dispatched integrator for phase ${printable(phaseName)}`)
+      return 0
+    }
     const tierModels = parseTierModels(flags, io)
     if (tierModels === TIER_MODELS_REJECTED) return 2
     const role = resolved.agents.integrator
     const model = (tierModels ?? settings.tierModels)[role.tier ?? 'cheap']
     const effort = role.effort
-    if (settings.sandboxMode !== 'full' || adapter.supportsEffort === false || !model || !effort) {
-      io.out('Legacy integrator requires explicitly configured full authority, role model and effort; required policy has no unrestricted fallback')
+    if (settings.sandboxMode !== 'full' || adapter.supportsEffort === false || !model) {
+      io.out('Isolated legacy integrator requires a supported adapter, explicitly configured full authority and role model; required policy has no unrestricted fallback')
       return 4
     }
     let snapshot, phaseTasks
@@ -3974,7 +4008,7 @@ export async function runCli(argv, io = { out: console.log }) {
       const prompt = `${persona}\nConcrete assignment for phase ${gateKey}:\n${JSON.stringify(assignment)}\n`
         + 'This is explicitly configured legacy full authority; filesystem, network and publication restrictions are instructions, not required-policy confinement. No remote actions or publication. Work only in this registered worktree. Verify exact refs and tips before every merge. Merge only the supplied tips, in task order, with git merge --no-ff --no-edit <tip>. Keep the worktree clean between merges. On any conflict stop and escalate with owning task ids and both hunks; never resolve conflicts, force refs, update-ref, reset, rebase or commit extra edits. Do not touch the main worktree or its index. Return only the supplied task result schema: status done only after all merges, branch the run branch name, filesChanged repo-relative paths, summary observed merges, blockers empty. Otherwise return blocked or failed with concrete blockers. This schema supersedes the persona return example.\n'
       const handle = await adapter.spawn({
-        sandbox: { cwd: worktree, meta: { mode: 'full' } }, prompt, model, effort, network,
+        sandbox: { cwd: worktree, meta: { mode: 'full' } }, prompt, model, ...(effort === undefined ? {} : { effort }), network,
         schemaPath: `${base}.schema.json`, resultPath: `${base}.result.json`,
         streamPath: `${base}.stream.jsonl`, errPath: `${base}.stderr.log`,
       })
@@ -6832,6 +6866,10 @@ export async function prepareDispatchPrerequisites({ root, flags, adapter, role,
   const roles = resolveRoleCapabilities({ policy, role, harness: adapter.name, sandboxMode, network })
   const report = { version: 1, ready: false, roles, environment: null, capabilities: null }
   if (!roles.ready) return { code: 4, report }
+  if (role === 'integrator' && sandboxMode === 'full') {
+    report.blocked = ['Required execution/policy inputs cannot use unrestricted legacy integrator dispatch']
+    return { code: 4, report }
+  }
   const enforcement = roles.enforcement.kind === 'required' ? roles.enforcement : undefined
   if (flags.environment !== undefined) {
     let broker
