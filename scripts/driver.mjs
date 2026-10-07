@@ -6,7 +6,7 @@
 // phase gate recomputes) before it is recorded. Returns `{ results, orphaned }` in the shape the
 // Workflow template returns (`templates/phase-workflow.js`), so the CLI post-processing, the
 // gate and `finish` are identical on both dispatch paths.
-import { mkdir, readFile, writeFile, rm, link, unlink, rename, realpath, lstat, open } from 'node:fs/promises'
+import { mkdir, readFile, writeFile, rm, link, unlink, rename, realpath, lstat, open, mkdtemp } from 'node:fs/promises'
 import path from 'node:path'
 import { constants } from 'node:fs'
 import { appendEvent, fingerprint } from './event-ledger.mjs'
@@ -382,18 +382,42 @@ export async function dispatchPhase({
   }
 
   async function processStrictTask(task) {
+    let expired = false, activeChild = null
+    const checkDeadline = () => {
+      if (expired || Date.now() >= contract.deadlineAt) {
+        expired = true
+        activeChild?.kill('SIGKILL')
+        throw new Error('Required execution deadline exceeded')
+      }
+    }
+    const bounded = async action => {
+      checkDeadline()
+      let timer
+      try {
+        const value = await Promise.race([
+          Promise.resolve().then(action),
+          new Promise((_, reject) => { timer = setTimeout(() => {
+            expired = true; activeChild?.kill('SIGKILL')
+            reject(new Error('Required execution deadline exceeded'))
+          }, Math.max(1, contract.deadlineAt - Date.now())) }),
+        ])
+        checkDeadline()
+        return value
+      } finally { clearTimeout(timer) }
+    }
+    const guardedGit = (...args) => bounded(() => git(...args))
     if (!label(task.id)) throw new Error('Invalid strict task identity')
     const taskId = task.id, branch = `fleetmates/${runId}/${taskId}`
     const ref = 'refs/heads/' + branch, runRef = 'refs/heads/' + runBranch
-    const common = await realpath(contract.common)
-    const actualCommon = await checkedGit(git, ['rev-parse', '--path-format=absolute', '--git-common-dir'], runRepo)
-    if (await realpath(actualCommon) !== common) throw new Error('Required common Git storage mismatch')
-    const runTip = await checkedGit(git, ['rev-parse', '--verify', runRef], runRepo)
+    const common = await bounded(() => realpath(contract.common))
+    const actualCommon = await checkedGit(guardedGit, ['rev-parse', '--path-format=absolute', '--git-common-dir'], runRepo)
+    if (await bounded(() => realpath(actualCommon)) !== common) throw new Error('Required common Git storage mismatch')
+    const runTip = await checkedGit(guardedGit, ['rev-parse', '--verify', runRef], runRepo)
     if (runTip !== contract.inputs.commit) throw new Error('Required source commit changed')
     const identity = strictExecutionIdentity(contract.inputs)
     const sessionFile = path.join(sessionsDir, `${taskId}.json`)
-    let record = await readJson(sessionFile)
-    const events = await readExecutionEvents(common, runId)
+    let record = await bounded(() => readJson(sessionFile))
+    const events = await bounded(() => readExecutionEvents(common, runId))
     const groups = strictExecutionAttempts(events)
     const current = groups.filter(g => g.start.executionId === contract.executionId && g.start.task === taskId)
     if (record && (!record.execution || record.execution.identity !== identity || record.execution.executionId !== contract.executionId)) {
@@ -401,9 +425,9 @@ export async function dispatchPhase({
     }
     const branches = { [runRef]: runTip }
     let hostTip = null
-    try { hostTip = await checkedGit(git, ['show-ref', '--verify', '--hash', ref], runRepo); branches[ref] = hostTip } catch {}
-    const report = await reconcileExecutionAttempt({ common, runId, inputs: contract.inputs, branches,
-      retention: contract.retention, checkouts: record?.sandbox ? { [taskId]: record.sandbox.cwd } : {} })
+    try { hostTip = await checkedGit(guardedGit, ['show-ref', '--verify', '--hash', ref], runRepo); branches[ref] = hostTip } catch {}
+    const report = await bounded(() => reconcileExecutionAttempt({ common, runId, inputs: contract.inputs, branches,
+      retention: contract.retention, checkouts: record?.sandbox ? { [taskId]: record.sandbox.cwd } : {} }))
     if (report.attempts.some(a => a.state === 'historical-observation' || a.effects.some(e => e.outcome === 'unknown'))) {
       throw new Error('Historical or unknown-effect evidence refuses execution')
     }
@@ -411,7 +435,7 @@ export async function dispatchPhase({
     if (relevant.some(a => ['stale','missing-artifact','retention-exceeded'].includes(a.state))) throw new Error('Required retained execution evidence is stale or unavailable')
     if (current.some(g => g.start.identity !== identity)) throw new Error('Attempt input identity changed')
     if (current.length && !record?.sandbox) throw new Error('Required checkout identity record is missing')
-    const sandbox = record?.sandbox ?? await adapter.makeSandbox(git, { runRepo, runBranch, runId, taskId, mode: sandboxMode })
+    const sandbox = record?.sandbox ?? await bounded(() => adapter.makeSandbox(guardedGit, { runRepo, runBranch, runId, taskId, mode: sandboxMode }))
     if (!['clone','full'].includes(sandbox.meta?.mode)) throw new Error('Required recovery needs a Git checkout with observable task refs')
     const model = resolveModel(task) ?? null
     const effortRaw = effortFor ? effortFor(task) : undefined
@@ -421,24 +445,23 @@ export async function dispatchPhase({
       streamPath: path.join(sessionsDir, `${taskId}.stream.jsonl`), errPath: path.join(sessionsDir, `${taskId}.stderr.log`),
     }
     const storage = { common, runId, retention: contract.retention }
-    const retain = async (kind, value) => (await retainExecutionArtifact({ ...storage, kind, bytes: Buffer.from(JSON.stringify(value)) })).reference
-    const read = async reference => JSON.parse(await readExecutionArtifact({ ...storage, reference }))
+    const retain = async (kind, value) => (await bounded(() => retainExecutionArtifact({ ...storage, kind, bytes: Buffer.from(JSON.stringify(value)) }))).reference
+    const read = async reference => JSON.parse(await bounded(() => readExecutionArtifact({ ...storage, reference })))
     let clock = Math.max(Date.now(), ...events.map(e => e.at + 1))
     const event = async (step, attempt, kind, artifacts, observed = branches) => {
-      const value = await appendExecutionEvent(common, { version: 2, id: randomUUID(), runId, executionId: contract.executionId,
+      const value = await bounded(() => appendExecutionEvent(common, { version: 2, id: randomUUID(), runId, executionId: contract.executionId,
         task: taskId, step, attempt, kind, at: clock++, inputs: contract.inputs, branches: observed,
-        checkout: taskId, artifacts }, { requireFreshStart: kind === 'step-started' })
+        checkout: taskId, artifacts }, { requireFreshStart: kind === 'step-started' }))
       return value
     }
-    const boundary = async name => { if (executionBoundary) await executionBoundary(name, { taskId, executionId: contract.executionId }) }
-    const persist = async () => { await writeJson(sessionFile, record) }
-    const checkDeadline = () => { if (Date.now() >= contract.deadlineAt) throw new Error('Required execution deadline exceeded') }
+    const boundary = async name => { if (executionBoundary) await bounded(() => executionBoundary(name, { taskId, executionId: contract.executionId })) }
+    const persist = async () => { await bounded(() => writeJson(sessionFile, record)) }
     const observedHost = async () => {
-      const tip = await checkedGit(git, ['rev-parse', '--verify', ref], runRepo)
+      const tip = await checkedGit(guardedGit, ['rev-parse', '--verify', ref], runRepo)
       if (!sha(tip)) throw new Error('Collected task ref unavailable')
       return tip
     }
-    let result, resultRef, sourceTip, attempt, binding
+    let result, resultRef, sourceTip, attempt, binding, usage = null
     const harnesses = current.filter(g => g.start.step === 'harness')
     const latest = harnesses.at(-1)
     let invocations = harnesses.length
@@ -454,11 +477,11 @@ export async function dispatchPhase({
         || binding.adapter !== adapter.name || retained.invocation !== bindingRef.sha256
         || retained.identity !== identity || retained.branch !== branch || !sha(retained.sourceTip)
         || !validateResult(retained.result) || retained.result.branch !== branch) throw new Error('Retained result binding changed')
-      sourceTip = retained.sourceTip; result = retained.result; attempt = latest.start.attempt
-      const completedCollection = current.filter(g => g.start.step === 'collection' && g.end?.kind === 'step-completed').at(-1)
+      sourceTip = retained.sourceTip; result = retained.result; usage = retained.usage ?? null; attempt = latest.start.attempt
+      const completedCollection = current.filter(g => g.start.step === 'collection' && g.end?.kind === 'step-completed' && g.start.artifacts.some(a => a.kind === resultRef.kind && a.sha256 === resultRef.sha256)).at(-1)
       if (completedCollection && hostTip !== sourceTip) throw new Error('Collected task ref changed')
       let available = false
-      try { available = (await sandboxTip(git, sandbox, branch)) === sourceTip } catch {}
+      try { available = (await sandboxTip(guardedGit, sandbox, branch)) === sourceTip } catch {}
       if (!available && hostTip !== sourceTip) throw new Error('Worker checkout/ref is lost or changed; model retry refused')
       const collections = current.filter(g => g.start.step === 'collection' && g.start.artifacts.some(a => a.sha256 === resultRef.sha256))
       if (hostTip !== binding.hostTip && !(collections.length && hostTip === sourceTip)) throw new Error('Host task ref changed before reconciliation')
@@ -475,7 +498,7 @@ export async function dispatchPhase({
     async function invoke(message) {
       checkDeadline()
       if (invocations >= contract.maxAttempts) throw new Error('Required attempt bound exceeded')
-      const runtime = await driverRuntime(git, sandbox, runRepo, branch, !!record?.sessionId, runTip)
+      const runtime = await driverRuntime(guardedGit, sandbox, runRepo, branch, !!record?.sessionId, runTip)
       const prompt = message ?? `${personaFor(task.role || 'implementer')}\n\n${composeBriefFor({ ...task, runtime })}`
       const initial = workerObservation(sandbox.meta?.workerEnvironment)
       if (!initial || !completeLogs(initial) || initial.ready !== true || initial.baseline?.status !== 'pass'
@@ -491,19 +514,24 @@ export async function dispatchPhase({
         initialWorkerEnvironment: record?.initialWorkerEnvironment ?? initial,
         execution: { version: 1, executionId: contract.executionId, identity, attempt }, state: 'starting', result: null }
       await persist()
-      await Promise.all([paths.resultPath, paths.streamPath, paths.errPath].map(file => rm(file, { force: true })))
+      await bounded(() => Promise.all([paths.resultPath, paths.streamPath, paths.errPath].map(file => rm(file, { force: true }))))
       checkDeadline()
       const options = { sandbox, model: model ?? undefined, effort: effort ?? undefined, network, ...paths }
-      const handle = record.sessionId
-        ? await adapter.resume({ ...options, sessionId: record.sessionId, message: prompt })
-        : await adapter.spawn({ ...options, prompt })
+      const handle = await bounded(async () => {
+        const value = record.sessionId
+          ? await adapter.resume({ ...options, sessionId: record.sessionId, message: prompt })
+          : await adapter.spawn({ ...options, prompt })
+        activeChild = value.child
+        if (expired) activeChild?.kill('SIGKILL')
+        return value
+      })
       if (!Number.isSafeInteger(handle.child?.pid) || handle.child.pid <= 0) throw new Error('Required actual child process is missing')
       const closed = new Promise(resolve => {
         if (handle.child.exitCode != null && handle.child.stdio?.every(stream => !stream || stream.destroyed)) resolve()
         else handle.child.once('close', resolve)
       })
       const exited = waitForExit(handle.child, Math.max(1, Math.min(timeoutMs, contract.deadlineAt - Date.now())))
-      record.sessionId = (await handle.sessionId) ?? record.sessionId ?? null
+      record.sessionId = (await bounded(() => handle.sessionId)) ?? record.sessionId ?? null
       record.state = 'running'; await persist()
       await boundary('spawned')
       const reason = await exited
@@ -512,24 +540,39 @@ export async function dispatchPhase({
         try { await Promise.race([closed, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Child close deadline exceeded')), Math.max(1, contract.deadlineAt - Date.now())) })]) }
         finally { clearTimeout(timer) }
       }
-      await handle.flushed
+      await bounded(() => handle.flushed)
       if (reason !== 'exit' || handle.child?.exitCode != null && handle.child.exitCode !== 0 || handle.child?.signalCode != null) {
         await event('harness', attempt, 'step-failed', [])
         throw new Error('Harness did not complete successfully')
       }
-      result = await adapter.readResult({ resultPath: paths.resultPath, streamPath: paths.streamPath })
-      if (!validateResult(result) || result.branch !== branch) {
-        await event('harness', attempt, 'step-failed', [])
-        throw new Error('No current schema-valid task result')
-      }
       const outputs = []
       for (const [kind, file] of [['harness-result', paths.resultPath], ['harness-stream', paths.streamPath], ['harness-stderr', paths.errPath]]) {
-        const bytes = await outputBytes(file, contract.retention.maxArtifactBytes)
-        if (bytes !== null) outputs.push((await retainExecutionArtifact({ ...storage, kind, bytes })).reference)
+        const bytes = await bounded(() => outputBytes(file, contract.retention.maxArtifactBytes))
+        if (bytes !== null) outputs.push((await bounded(() => retainExecutionArtifact({ ...storage, kind, bytes }))).reference)
       }
-      if (!outputs.some(reference => ['harness-result','harness-stream'].includes(reference.kind))) throw new Error('Required native result artifact missing')
-      sourceTip = await sandboxTip(git, sandbox, branch)
-      resultRef = await retain('driver-result', { version: 1, identity, branch, sourceTip, invocation: bindingRef.sha256, result })
+      if (!outputs.some(reference => ['harness-result','harness-stream'].includes(reference.kind))) {
+        await event('harness', attempt, 'step-failed', [])
+        throw new Error('Required native result artifact missing')
+      }
+      const snapshot = await bounded(() => mkdtemp(path.join(common, 'fleetmates-driver-parse-')))
+      const parserPaths = { resultPath: path.join(snapshot, 'result.json'), streamPath: path.join(snapshot, 'stream.jsonl') }
+      try {
+        for (const [kind, file] of [['harness-result', parserPaths.resultPath], ['harness-stream', parserPaths.streamPath]]) {
+          const reference = outputs.find(a => a.kind === kind)
+          if (reference) {
+            const bytes = await bounded(() => readExecutionArtifact({ ...storage, reference }))
+            await bounded(() => writeFile(file, bytes, { flag: 'wx', mode: 0o400 }))
+          }
+        }
+        result = await bounded(() => adapter.readResult(parserPaths))
+        if (!validateResult(result) || result.branch !== branch) {
+          await event('harness', attempt, 'step-failed', [])
+          throw new Error('No current schema-valid task result')
+        }
+        usage = await bounded(() => safeUsage(adapter, parserPaths.streamPath))
+      } finally { await rm(snapshot, { recursive: true, force: true }) }
+      sourceTip = await sandboxTip(guardedGit, sandbox, branch)
+      resultRef = await retain('driver-result', { version: 1, identity, branch, sourceTip, invocation: bindingRef.sha256, result, usage })
       const continuation = workerObservation(sandbox.meta?.workerEnvironment)
       const continuationRef = continuation ? await retain('worker-continuation', continuation) : null
       if (!continuation || !completeLogs(continuation) || continuation.ready !== true || continuation.baseline?.status !== 'pass') {
@@ -543,9 +586,9 @@ export async function dispatchPhase({
 
     async function collectAndVerify() {
       checkDeadline()
-      const history = strictExecutionAttempts(await readExecutionEvents(common, runId))
+      const history = strictExecutionAttempts(await bounded(() => readExecutionEvents(common, runId)))
         .filter(g => g.start.executionId === contract.executionId && g.start.task === taskId && g.start.step === 'collection')
-      const pending = history.find(g => !g.end)
+      const pending = history.find(g => !g.end && g.start.artifacts.some(a => a.kind === resultRef.kind && a.sha256 === resultRef.sha256))
       const collectionAttempt = pending?.start.attempt ?? randomUUID()
       if (!pending && history.length >= contract.maxAttempts) throw new Error('Required collection attempt bound exceeded')
       if (!pending) await event('collection', collectionAttempt, 'step-started', [resultRef])
@@ -554,9 +597,9 @@ export async function dispatchPhase({
       try { tip = await observedHost() } catch {}
       if (tip !== null && tip !== sourceTip && tip !== hostTip) throw new Error('Host ref changed before collection')
       if (tip !== sourceTip) {
-        const before = await sandboxTip(git, sandbox, branch)
+        const before = await sandboxTip(guardedGit, sandbox, branch)
         if (before !== sourceTip) throw new Error('Worker ref changed before collection')
-        await adapter.collect(git, { runRepo, sandbox, branch })
+        await bounded(() => adapter.collect(guardedGit, { runRepo, sandbox, branch }))
         tip = await observedHost()
       }
       if (tip !== sourceTip) throw new Error('Collection produced an unexpected ref')
@@ -569,8 +612,8 @@ export async function dispatchPhase({
       const verificationAttempt = randomUUID()
       await event('verification', verificationAttempt, 'step-started', [collectedRef], { [runRef]: runTip, [ref]: tip })
       checkDeadline()
-      const code = await completeEnforcement(taskId)
-      if (await observedHost() !== tip || await checkedGit(git, ['rev-parse', runRef], runRepo) !== runTip) throw new Error('Refs changed during mandatory verification')
+      const code = await bounded(() => completeEnforcement(taskId))
+      if (await observedHost() !== tip || await checkedGit(guardedGit, ['rev-parse', runRef], runRepo) !== runTip) throw new Error('Refs changed during mandatory verification')
       const receipt = await retain('driver-verification', { version: 1, identity, branch, tip, code, scope: 'enforcement-only', verifiedComplete: false })
       await event('verification', verificationAttempt, code === 0 ? 'step-completed' : 'step-failed', [receipt], { [runRef]: runTip, [ref]: tip })
       return code
@@ -583,13 +626,14 @@ export async function dispatchPhase({
       code = await collectAndVerify()
     }
     if (code !== 0) throw new Error('Fresh mandatory enforcement did not pass')
-    record = { ...record, state: result.status, result, exitReason: 'exit', usage: await safeUsage(adapter, paths.streamPath),
+    record = { ...record, state: result.status, result, exitReason: 'exit', usage,
       verifiedComplete: false, evidence: 'strict-execution-enforcement-only' }
     await persist()
     if (adapter.cleanupOnResult && result.status === 'done') {
-      await adapter.cleanup({ sandbox })
+      await bounded(() => adapter.cleanup({ sandbox }))
       record.sandboxRemoved = true; await persist()
     }
+    checkDeadline()
     return { kind: 'result', result: { taskId, ...result, verifiedComplete: false, evidence: 'strict-execution-enforcement-only' } }
   }
 

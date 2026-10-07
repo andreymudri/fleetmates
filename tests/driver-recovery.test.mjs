@@ -15,7 +15,7 @@ import { dispatchPhase } from ${JSON.stringify(new URL('../scripts/driver.mjs', 
 import { composeBrief } from ${JSON.stringify(new URL('../scripts/brief.mjs', import.meta.url).href)};
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, writeFile, access, rm, symlink } from 'node:fs/promises';
+import { readFile, writeFile, access, rm, symlink, stat } from 'node:fs/promises';
 import path from 'node:path';
 const config = JSON.parse(process.env.FIXTURE);
 const exec = promisify(execFile);
@@ -23,21 +23,34 @@ const git = async (args, opts = {}) => { try { const r = await exec('git', args,
 const branch = 'fleetmates/r/T1';
 const cwd = path.join(config.root, 'clone');
 const gitdir = path.join(config.root, 'clone-git');
+let enforcementCalls = 0; const boundaries = {};
+const hang = () => new Promise(()=>{});
+const late = () => new Promise(resolve=>setTimeout(resolve,Math.max(1,config.execution.deadlineAt-Date.now()+20)));
 const mark = async name => { await writeFile(path.join(config.root, name), 'yes'); };
 const worker = async opts => {
  await mark('spawn-count-' + Date.now());
+ const freshness = {};
+ for(const [key,file] of Object.entries({result:opts.resultPath,stream:opts.streamPath,stderr:opts.errPath})) { try { await access(file); freshness[key]=false } catch { freshness[key]=true } }
+ await writeFile(path.join(config.root,'fresh-inputs-'+(opts.resumed?'resume':'spawn')+'.json'),JSON.stringify(freshness));
  if (config.noOutput || opts.noOutput) return { child: spawn(process.execPath, ['-e', 'process.exit(0)']), sessionId: Promise.resolve('sid') };
  const code = \`const { execFileSync } = require('node:child_process'); const fs = require('node:fs');
  const cwd = process.env.WORKER_CWD, gd = process.env.WORKER_GIT;
  const g = (...a) => execFileSync('git', ['--git-dir='+gd, '--work-tree='+cwd,...a], {cwd});
  if (!fs.existsSync(cwd+'/work.txt')) { fs.writeFileSync(cwd+'/work.txt','preserved'); g('add','work.txt'); g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fix: fixture work'); }
- fs.writeFileSync(process.env.RESULT, JSON.stringify({status:'done',branch:'fleetmates/r/T1',filesChanged:['work.txt'],summary:'fixture',blockers:[]}));\n if (process.env.MALFORMED === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done'}));\n if (process.env.WRONG_BRANCH === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done',branch:'wrong',filesChanged:[],summary:'bad',blockers:[]}));\n process.exit(Number(process.env.EXIT_CODE ?? 0));\`;
- const child = spawn(process.execPath, ['-e', code], { env: { ...process.env, WORKER_CWD: cwd, WORKER_GIT: gitdir, RESULT: opts.resultPath, MALFORMED: String(config.malformed), WRONG_BRANCH: String(config.wrongBranch), EXIT_CODE: String(config.exitCode??0) }, stdio: 'ignore' });
- return { child, sessionId: Promise.resolve('sid'), flushed: Promise.resolve() };
+ if (process.env.FIX_COMMIT === 'true') { fs.writeFileSync(cwd+'/fix.txt','second commit');g('add','fix.txt');g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fix: fixture continuation'); }
+ fs.writeFileSync(process.env.RESULT, JSON.stringify({status:'done',branch:'fleetmates/r/T1',filesChanged:['work.txt'],summary:'fixture',blockers:[]}));\n if (process.env.MALFORMED === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done'}));\n if (process.env.WRONG_BRANCH === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done',branch:'wrong',filesChanged:[],summary:'bad',blockers:[]}));\n const invalid=process.env.INVALID_OUTPUT; const target=invalid?.endsWith('stream')?process.env.STREAM:process.env.RESULT;
+ if(invalid) { fs.rmSync(target,{force:true}); if(invalid.startsWith('fifo')) execFileSync('mkfifo',[target]); else if(invalid.startsWith('directory')) fs.mkdirSync(target); else fs.writeFileSync(target,'x'.repeat(Number(process.env.BYTE_LIMIT)+1)); }
+ if(process.env.STREAM_RESULT==='true') { fs.copyFileSync(process.env.RESULT,process.env.STREAM);fs.unlinkSync(process.env.RESULT); }
+ fs.writeFileSync(process.env.WORKER_EXIT,'success');
+ process.exit(Number(process.env.EXIT_CODE ?? 0));\`;
+ const child = spawn(process.execPath, ['-e', code], { env: { ...process.env, WORKER_CWD: cwd, WORKER_GIT: gitdir, RESULT: opts.resultPath, MALFORMED: String(config.malformed), WRONG_BRANCH: String(config.wrongBranch), EXIT_CODE: String(config.exitCode??0), FIX_COMMIT:String(opts.resumed&&config.fixCommit), INVALID_OUTPUT:config.invalidOutput??'', STREAM:opts.streamPath, BYTE_LIMIT:String(config.execution.retention.maxArtifactBytes), STREAM_RESULT:String(config.streamResult), WORKER_EXIT:path.join(config.root,'worker-exit-success') }, stdio: 'ignore' });
+ await writeFile(path.join(config.root,'worker.pid'),String(child.pid));
+ return { child, sessionId: config.hangStage==='session'?hang():Promise.resolve('sid'), flushed: config.hangStage==='flush'?hang():Promise.resolve() };
 };
 const adapter = {
  name: 'fixture', supportsEffort: true,
  async makeSandbox(_git, opts) {
+  if(config.hangStage==='setup') await hang();
   try { await access(cwd); } catch {
    let r = await git(['clone','--shared','--separate-git-dir='+gitdir, config.root, cwd]); if(r.code) throw Error(r.stderr);
    r = await git(['checkout','-b',branch,'origin/run/r'], {cwd}); if(r.code) throw Error(r.stderr);
@@ -51,16 +64,30 @@ const adapter = {
   await writeFile(path.join(config.root,'spawn-order.json'),JSON.stringify(events.some(e=>e.step==='harness'&&e.kind==='step-started'&&e.artifacts.some(a=>a.kind==='worker-setup'))));
   if(config.largeOutput) await writeFile(opts.streamPath,'x'.repeat(config.execution.retention.maxArtifactBytes+1));
   opts.sandbox.meta.workerEnvironment = { ready:!config.continuationFailed, workspace:'existing', setup:{status:'not-rerun',durationMs:null,checks:[]}, baseline:{status:'pass',checks:[]},durationMs:3 };
-  return worker(opts);
+  const handle=await worker(opts); if(config.hangStage==='spawn') await hang(); return handle;
  },
- async resume(opts) { return worker({...opts,noOutput:config.resumeNoOutput}); },
- async readResult({resultPath}) { if(config.virtualResult) return {status:'done',branch,filesChanged:[],summary:'virtual',blockers:[]}; try { return JSON.parse(await readFile(resultPath,'utf8')); } catch { return null; } },
- async readUsage() { return null; },
- async collect(_git, {sandbox,branch}) { const events=await readExecutionEvents(config.execution.common,'r');await writeFile(path.join(config.root,'collection-order.json'),JSON.stringify(events.some(e=>e.step==='collection'&&e.kind==='step-started'))); const r = await git(['fetch','--no-tags',sandbox.meta.gitdir,'refs/heads/'+branch+':refs/heads/'+branch]); if(r.code) throw Error(r.stderr); await mark('collected'); },
+ async resume(opts) { return worker({...opts,resumed:true,noOutput:config.resumeNoOutput}); },
+ async readResult({resultPath,streamPath}) {
+  await mark('parser-called');
+  await writeFile(path.join(config.root,'parser-paths.json'),JSON.stringify({resultPath,streamPath,resultMode:((await stat(resultPath).catch(()=>null))?.mode??0)&0o777,dirMode:(await stat(path.dirname(resultPath))).mode&0o777}));
+  if(config.hangStage==='parser') await hang();
+  if(config.swapOriginal) {
+   const original=path.join(config.root,'state','sessions','T1.result.json');await rm(original,{force:true});
+   if(config.swapOriginal==='fifo') await exec('mkfifo',[original]); else await writeFile(original,JSON.stringify({status:'done',branch,filesChanged:[],summary:'forged',blockers:[]}));
+  }
+  if(config.virtualResult) return {status:'done',branch,filesChanged:[],summary:'virtual',blockers:[]}; try { return JSON.parse(await readFile(config.streamResult?streamPath:resultPath,'utf8')); } catch { return null; } },
+ async readUsage() { if(config.hangStage==='usage') await hang(); return null; },
+ async collect(_git, {sandbox,branch}) { if(config.hangStage==='collection') await hang(); if(config.lateCollection) await late(); const events=await readExecutionEvents(config.execution.common,'r');await writeFile(path.join(config.root,'collection-order.json'),JSON.stringify(events.some(e=>e.step==='collection'&&e.kind==='step-started'))); const r = await _git(['fetch','--no-tags',sandbox.meta.gitdir,'refs/heads/'+branch+':refs/heads/'+branch]); if(r.code) throw Error(r.stderr); await mark('collected'); },
 };
-const args = { adapter, git, runRepo: config.root, runId:'r',runBranch:'run/r',phaseTasks:[{id:'T1',title:'fixture',files:['work.txt'],model:config.model}],maxParallel:1,sandboxMode:'clone',network:false,timeoutMinutes:1,tierModels:{},effortFor:()=> config.effort ?? 'high',personaFor:()=> config.persona ?? 'fixture persona',composeBriefFor:t=>composeBrief({task:{...t,branch},runId:'r',planPath:'plan.md',baseBranch:'old-base'}),runDir:path.join(config.root,'state'),completeEnforcement:async()=>{ await mark('verified-'+Date.now()); return config.enforcement ?? 0; },
+const args = { adapter, git, runRepo: config.root, runId:'r',runBranch:'run/r',phaseTasks:[{id:'T1',title:'fixture',files:['work.txt'],model:config.model}],maxParallel:1,sandboxMode:'clone',network:false,timeoutMinutes:1,tierModels:{},effortFor:()=> config.effort ?? 'high',personaFor:()=> config.persona ?? 'fixture persona',composeBriefFor:t=>composeBrief({task:{...t,branch},runId:'r',planPath:'plan.md',baseBranch:'old-base'}),runDir:path.join(config.root,'state'),completeEnforcement:async()=>{
+ await mark('verified-'+Date.now());
+ if(config.hangStage==='verification') await hang(); if(config.slowEnforcement) await late();
+ const code=config.enforcementCodes?.[enforcementCalls++]??config.enforcement??0;
+ if(config.seedBeforeResume && code===3) for(const suffix of ['stream.jsonl','stderr.log']) await writeFile(path.join(config.root,'state','sessions','T1.'+suffix),'x'.repeat(config.execution.retention.maxArtifactBytes+1));
+ return code;
+ },
  execution: config.legacy ? undefined : config.execution,
- executionBoundary: async name => { if(config.expireAtResult && name==='result-retained') await new Promise(resolve=>setTimeout(resolve,Math.max(1,config.execution.deadlineAt-Date.now()+5))); if(name === config.barrier) { await mark('barrier'); await new Promise(()=>{setInterval(()=>{},1000)}); } },
+ executionBoundary: async name => { boundaries[name]=(boundaries[name]??0)+1; if(config.expireAtResult && name==='result-retained') await new Promise(resolve=>setTimeout(resolve,Math.max(1,config.execution.deadlineAt-Date.now()+5))); if(name === config.barrier && boundaries[name]===(config.barrierOccurrence??1)) { await mark('barrier'); await new Promise(()=>{setInterval(()=>{},1000)}); } },
 };
 const out = await dispatchPhase(args);
 await writeFile(path.join(config.root,'out.json'),JSON.stringify(out));
@@ -334,4 +361,134 @@ test('incomplete initial setup logs cannot satisfy strict preparation',async t=>
 test('required execution never uses the unverified legacy worker fallback',async t=>{
   const config=await setup(t);const out=await outcome({...config,workerWrongRef:true},t)
   assert.deepEqual(out.orphaned,['T1']);assert.ok(!(await names(config)).some(n=>n.startsWith('spawn-count-')))
+})
+
+async function boundedOutcome(config,t,waitMs=4500) {
+  const handle=await run(config,t);let timer
+  let finished
+  try { finished=await Promise.race([handle.ended,new Promise(resolve=>{timer=setTimeout(()=>resolve(null),waitMs)})]) }
+  finally { clearTimeout(timer) }
+  assert.notEqual(finished,null,'driver remained alive beyond the bounded outcome deadline')
+  assert.equal(finished.code,0,finished.err)
+  const out=JSON.parse(await readFile(path.join(config.root,'out.json'),'utf8'))
+  await assert.rejects(access(path.join(config.root,'state','driver.lock')),/ENOENT/)
+  return out
+}
+
+async function retainedTips(config) {
+  const events=await readExecutionEvents(config.execution.common,'r'),tips=[]
+  for(const event of events.filter(e=>e.step==='harness'&&e.kind==='step-completed')) {
+    const reference=event.artifacts.find(a=>a.kind==='driver-result')
+    tips.push(JSON.parse(await readExecutionArtifact({common:config.execution.common,runId:'r',reference,retention})).sourceTip)
+  }
+  return tips
+}
+
+test('enforcement-fix control preserves two actual commits and verifies their collected tip',async t=>{
+  const config=await setup(t)
+  const out=await outcome({...config,fixCommit:true,enforcementCodes:[3,0]},t)
+  assert.equal(out.results[0]?.status,'done')
+  const tips=await retainedTips(config);assert.equal(tips.length,2);assert.notEqual(tips[0],tips[1])
+  assert.equal(git(config.root,'rev-parse','refs/heads/fleetmates/r/T1'),tips[1])
+  git(config.root,'merge-base','--is-ancestor',tips[0],tips[1])
+  assert.equal((await names(config)).filter(n=>n.startsWith('spawn-count-')).length,2)
+})
+
+for(const barrier of ['result-retained','collection-started','collection-applied']) {
+ test('second enforcement-fix loss at '+barrier+' collects retained fix without another model execution',async t=>{
+  const config=await setup(t)
+  await pause({...config,fixCommit:true,enforcementCodes:[3,0],barrierOccurrence:2},t,barrier)
+  const tips=await retainedTips(config);assert.equal(tips.length,2);assert.notEqual(tips[0],tips[1])
+  const hostTip=git(config.root,'rev-parse','refs/heads/fleetmates/r/T1')
+  assert.equal(hostTip,barrier==='collection-applied'?tips[1]:tips[0])
+  assert.equal(git(config.root,'--git-dir='+path.join(config.root,'clone-git'),'rev-parse','HEAD'),tips[1])
+  const verifications=(await names(config)).filter(n=>n.startsWith('verified-')).length
+  const out=await outcome(config,t)
+  assert.equal(out.results[0]?.status,'done')
+  assert.equal(git(config.root,'rev-parse','refs/heads/fleetmates/r/T1'),tips[1])
+  git(config.root,'merge-base','--is-ancestor',tips[0],tips[1])
+  assert.equal((await names(config)).filter(n=>n.startsWith('spawn-count-')).length,2)
+  assert.equal((await names(config)).filter(n=>n.startsWith('verified-')).length,verifications+1)
+  assert.equal(out.results[0].verifiedComplete,false)
+ })
+}
+
+for(const invalidOutput of ['fifo-result','fifo-stream','directory-result','directory-stream','oversized-result','oversized-stream']) {
+ test('bounded native '+invalidOutput+' refuses parsing and collection after a successful child exit',async t=>{
+  const config=await setup(t);config.execution.deadlineAt=Date.now()+2500
+  const out=await boundedOutcome({...config,invalidOutput},t)
+  assert.deepEqual(out.orphaned,['T1']);assert.deepEqual(out.results,[])
+  assert.equal(await readFile(path.join(config.root,'worker-exit-success'),'utf8'),'success')
+  const files=await names(config);assert.ok(!files.includes('parser-called'));assert.ok(!files.includes('collected'))
+ })
+}
+
+for(const swapOriginal of ['forged','fifo']) {
+ test('parser uses exact retained bytes when original output is swapped to '+swapOriginal,async t=>{
+  const config=await setup(t);config.execution.deadlineAt=Date.now()+2500
+  const out=await boundedOutcome({...config,swapOriginal},t)
+  assert.equal(out.results[0]?.status,'done');assert.equal(out.results[0].summary,'fixture')
+  const parserPaths=JSON.parse(await readFile(path.join(config.root,'parser-paths.json'),'utf8'))
+  assert.notEqual(parserPaths.resultPath,path.join(config.root,'state','sessions','T1.result.json'))
+  assert.equal(parserPaths.resultMode,0o400);assert.equal(parserPaths.dirMode,0o700)
+  await assert.rejects(access(parserPaths.resultPath),/ENOENT/)
+  const {readdir}=await import('node:fs/promises')
+  assert.ok(!(await readdir(config.execution.common)).some(n=>n.startsWith('fleetmates-driver-parse-')))
+ })
+}
+
+for(const streamResult of [false,true]) {
+ test('fresh successful '+(streamResult?'stream':'result')+' worker clears oversized stale stream and stderr before spawn and resume',async t=>{
+  const config=await setup(t);const {mkdir}=await import('node:fs/promises')
+  await mkdir(path.join(config.root,'state','sessions'),{recursive:true})
+  for(const suffix of ['stream.jsonl','stderr.log']) await writeFile(path.join(config.root,'state','sessions','T1.'+suffix),'x'.repeat(retention.maxArtifactBytes+1))
+  const out=await outcome({...config,streamResult,fixCommit:true,enforcementCodes:[3,0],seedBeforeResume:true},t)
+  assert.equal(out.results[0]?.status,'done')
+  for(const stage of ['spawn','resume']) assert.deepEqual(JSON.parse(await readFile(path.join(config.root,'fresh-inputs-'+stage+'.json'),'utf8')),{result:true,stream:true,stderr:true})
+ })
+}
+
+test('late mandatory verification cannot record completion after the required deadline',async t=>{
+  const config=await setup(t);config.execution.deadlineAt=Date.now()+1600
+  const out=await boundedOutcome({...config,slowEnforcement:true},t)
+  assert.deepEqual(out.orphaned,['T1']);assert.deepEqual(out.results,[])
+  const events=await readExecutionEvents(config.execution.common,'r')
+  assert.ok(events.some(e=>e.step==='verification'&&e.kind==='step-started'))
+  assert.ok(!events.some(e=>e.step==='verification'&&e.kind==='step-completed'))
+  const tips=await retainedTips(config);assert.equal(git(config.root,'rev-parse','refs/heads/fleetmates/r/T1'),tips[0])
+})
+
+for(const hangStage of ['setup','spawn','session','flush','parser','collection','verification','usage']) {
+ test('required '+hangStage+' wait is bounded and releases the driver lock',async t=>{
+  const config=await setup(t);config.execution.deadlineAt=Date.now()+1600
+  const out=await boundedOutcome({...config,hangStage},t)
+  assert.deepEqual(out.orphaned,['T1']);assert.deepEqual(out.results,[])
+  const files=await names(config)
+  if(['setup','spawn','session','flush','parser','usage','collection'].includes(hangStage)) assert.ok(!files.some(n=>n.startsWith('verified-')))
+ })
+}
+
+test('collection delayed beyond the deadline cannot invoke Git or verification',async t=>{
+  const config=await setup(t);config.execution.deadlineAt=Date.now()+1600
+  const out=await boundedOutcome({...config,lateCollection:true},t)
+  assert.deepEqual(out.orphaned,['T1']);assert.ok(!(await names(config)).includes('collected'))
+  assert.throws(()=>git(config.root,'rev-parse','refs/heads/fleetmates/r/T1'))
+})
+
+test('pending collection for an earlier result cannot close as the retained fix collection',async t=>{
+  const config=await setup(t);config.execution.maxAttempts=4
+  await pause({...config,fixCommit:true,enforcementCodes:[3,0],barrierOccurrence:2},t,'result-retained')
+  const {appendExecutionEvent}=await import('../scripts/execution-journal.mjs')
+  const events=await readExecutionEvents(config.execution.common,'r')
+  const old=events.find(e=>e.step==='collection'&&e.kind==='step-started')
+  await appendExecutionEvent(config.execution.common,{...old,id:'earlier-pending',attempt:'earlier-pending',at:Math.max(...events.map(e=>e.at))+1})
+  const out=await outcome(config,t);assert.equal(out.results[0]?.status,'done')
+  const after=await readExecutionEvents(config.execution.common,'r')
+  assert.ok(!after.some(e=>e.attempt==='earlier-pending'&&e.kind==='step-completed'))
+  const ends=after.filter(e=>e.step==='collection'&&e.kind==='step-completed')
+  for(const end of ends) {
+    const start=after.find(e=>e.attempt===end.attempt&&e.kind==='step-started')
+    const collection=JSON.parse(await readExecutionArtifact({common:config.execution.common,runId:'r',retention,reference:end.artifacts[0]}))
+    assert.deepEqual(start.artifacts[0],collection.result)
+  }
 })
