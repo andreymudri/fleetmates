@@ -177,6 +177,25 @@ export async function readExecutionEvents(common, runId) {
   await privateExecutionDirectories(directory)
   return events.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
 }
+function historicalEffectsBlockStrictAction(records, event) {
+  const report = reconcileExecution(records, { inputs: event.inputs, branches: event.branches })
+  const groups = new Map()
+  for (const record of records) {
+    const key = JSON.stringify([record.step, record.attempt, record.identity])
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(record)
+  }
+  for (const history of groups.values()) {
+    const start = history.find(record => record.kind === 'step-started')
+    const end = history.find(record => ['step-completed', 'step-failed'].includes(record.kind))
+    if (history.some(record => record.at < start.at || end && record.at > end.at)) throw new Error('Historical execution requires ordered start and outcomes')
+    const starts = new Map(history.filter(record => record.kind === 'effect-started')
+      .map(record => [JSON.stringify([record.effect.kind, record.effect.id]), record]))
+    if (history.some(record => record.effect && JSON.stringify(record.effect) !==
+      JSON.stringify(starts.get(JSON.stringify([record.effect.kind, record.effect.id])).effect))) throw new Error('Historical effect requires matching identity')
+  }
+  return report.attempts.some(attempt => attempt.effects.some(effect => effect.state !== 'failed-observation'))
+}
 export async function appendExecutionEvent(common, raw, { retention, now = Date.now(), requireFreshStart = false } = {}) {
   const event = executionEvent(raw), text = JSON.stringify(event) + '\n', policy = journalPolicy(retention)
   if (!Number.isSafeInteger(now) || now < 0) throw new Error('Invalid journal time')
@@ -197,6 +216,11 @@ export async function appendExecutionEvent(common, raw, { retention, now = Date.
     }
     if (existing.length >= policy.maxEvents || existing.reduce((sum, e) => sum + Buffer.byteLength(JSON.stringify(e)) + 1, 0) + Buffer.byteLength(text) > policy.maxBytes) throw new Error('Execution journal exceeds budget')
     if (event.version === 2 && [...existing, event].some(e => now - e.at > policy.maxAgeMs)) throw new Error('Execution journal retention exceeded; unresolved evidence is retained')
+    const historical = existing.filter(record => record.version === 1)
+    if (event.version === 2 && ['step-started', 'effect-started'].includes(event.kind) && historical.length
+        && historicalEffectsBlockStrictAction(historical, event)) {
+      throw new Error('Historical external effect outcome refuses strict action')
+    }
     const previous = strictExecutionAttempts(existing)
     if (event.version === 2 && ['step-started', 'effect-started'].includes(event.kind) && previous.some(group =>
       group.start.executionId === event.executionId && group.start.task === event.task && group.start.step === event.step
