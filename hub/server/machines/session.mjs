@@ -432,6 +432,12 @@ export function refreshSessionChanges(store, session) {
   return { ...session, changed_files: changedFiles, review_baseline: boundary }
 }
 
+/** Whether the `.git` directory `marker` holds HEAD as a file or a symlink (dangling or not). */
+function headMarks(marker) {
+  const head = lstatSync(path.join(marker, 'HEAD'))
+  return head.isFile() || head.isSymbolicLink()
+}
+
 /** Resolve the bounded canonical working tree used for filesystem observations. */
 export function workingRoot(cwd) {
   let root = cwd || '/unknown'
@@ -441,8 +447,9 @@ export function workingRoot(cwd) {
     const marker = path.join(current, '.git')
     try {
       const stat = statSync(marker)
-      // An empty .git directory (one a sandbox mounts, say) is not a repository: require HEAD.
-      if (stat.isDirectory() ? statSync(path.join(marker, 'HEAD')).isFile() : stat.isFile() && stat.size <= 4096 && readFileSync(marker, 'utf8').startsWith('gitdir:')) return current
+      // An empty .git directory (one a sandbox mounts, say) is not a repository: require HEAD, a
+      // file or a symlink (dangling or not).
+      if (stat.isDirectory() ? headMarks(marker) : stat.isFile() && stat.size <= 4096 && readFileSync(marker, 'utf8').startsWith('gitdir:')) return current
     } catch {}
     const parent = path.dirname(current)
     if (parent === current) break

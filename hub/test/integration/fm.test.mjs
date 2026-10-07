@@ -4,7 +4,7 @@ import path from 'node:path'
 import net from 'node:net'
 import os from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
-import { readFile, writeFile, mkdtemp, mkdir, rm, stat } from 'node:fs/promises'
+import { readFile, writeFile, mkdtemp, mkdir, rm, stat, symlink } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import nodePty from 'node-pty'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
@@ -690,7 +690,11 @@ test('fm ls does not take an ancestor with an empty .git directory, or a .git fi
   await writeFile(path.join(linked, '.git'), 'gitdir: /elsewhere/.git/worktrees/linked\n')
   await mkdir(bogus)
   await writeFile(path.join(bogus, '.git'), 'not a pointer\n')
-  const sessions = [await spawnAt(work), await spawnAt(real), await spawnAt(linked), await spawnAt(bogus)]
+  // A HEAD that is a dangling symlink still marks a repository.
+  const dangling = path.join(ancestor, 'dangling')
+  await mkdir(path.join(dangling, '.git'), { recursive: true })
+  await symlink('refs/heads/unborn', path.join(dangling, '.git', 'HEAD'))
+  const sessions = [await spawnAt(work), await spawnAt(real), await spawnAt(linked), await spawnAt(bogus), await spawnAt(dangling)]
   try {
     const r = await runFm(['ls'], { ...env, HOME: tmp })
     assert.equal(r.code, 0, r.stderr)
@@ -701,7 +705,7 @@ test('fm ls does not take an ancestor with an empty .git directory, or a .git fi
       assert.ok(line, `no row for ${id}: ${r.stdout}`)
       return line.split(/ {2,}/)[1]
     }
-    assert.deepEqual(sessions.map((s) => repo(s.ptyId)), ['~/ls-empty-ancestor/work', 'real', 'linked', '~/ls-empty-ancestor/bogus'])
+    assert.deepEqual(sessions.map((s) => repo(s.ptyId)), ['~/ls-empty-ancestor/work', 'real', 'linked', '~/ls-empty-ancestor/bogus', 'dangling'])
   } finally {
     for (const p of sessions) await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
   }

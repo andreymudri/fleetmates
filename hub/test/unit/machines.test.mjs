@@ -941,9 +941,14 @@ test('an ancestor with an empty .git directory, or a .git file without gitdir:, 
     mkdirSync(path.join(real, '.git', 'objects'), { recursive: true })
     writeFileSync(path.join(real, '.git', 'HEAD'), 'ref: refs/heads/main\n')
     mkdirSync(path.join(real, 'src'))
-    mkdirSync(bogus)
+    mkdirSync(path.join(bogus, 'src'), { recursive: true })
     writeFileSync(path.join(bogus, '.git'), 'not a pointer\n')
-    const cwds = [plain, path.join(real, 'src'), bogus]
+    // A HEAD that is a dangling symlink still marks a repository.
+    const dangling = path.join(dir, 'dangling')
+    mkdirSync(path.join(dangling, '.git'), { recursive: true })
+    mkdirSync(path.join(dangling, 'src'))
+    symlinkSync('refs/heads/unborn', path.join(dangling, '.git', 'HEAD'))
+    const cwds = [plain, path.join(real, 'src'), path.join(bogus, 'src'), path.join(dangling, 'src')]
     for (const [index, cwd] of cwds.entries()) {
       const start = fixture('SessionStart.startup.json', { session_id: `empty-git-${index}`, cwd })
       start.claudePid = 200 + index
@@ -951,8 +956,9 @@ test('an ancestor with an empty .git directory, or a .git file without gitdir:, 
       h.projector.applyHooks([start])
     }
     const repoOf = id => h.projector.snapshot().sessions.find(row => row.claudeSessionId === id).repoId
-    assert.deepEqual(cwds.map((_, index) => repoOf(`empty-git-${index}`)), [plain, real, bogus])
-    assert.deepEqual(cwds.map(cwd => workingRoot(cwd)), [plain, real, bogus])
+    const expected = [plain, real, path.join(bogus, 'src'), dangling]
+    assert.deepEqual(cwds.map((_, index) => repoOf(`empty-git-${index}`)), expected)
+    assert.deepEqual(cwds.map(cwd => workingRoot(cwd)), expected)
   } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 

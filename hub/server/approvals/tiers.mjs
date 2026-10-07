@@ -483,13 +483,21 @@ function followsSymlinks(name, words) {
   return false
 }
 
-// Whether `dir` holds a repository marker: a `.git` directory with a `HEAD` file, or a `.git`
+// Whether the `.git` directory `marker` holds HEAD as a file or a symlink (dangling or not).
+function headMarks(marker) {
+  try {
+    const head = lstatSync(path.join(marker, 'HEAD'))
+    return head.isFile() || head.isSymbolicLink()
+  } catch { return false }
+}
+
+// Whether `dir` holds a repository marker: a `.git` directory with a `HEAD` file or symlink, or a `.git`
 // file that starts with `gitdir:`. An empty `.git` directory (one a sandbox mounts, say) is not one.
 function hasGitMarker(dir) {
   const marker = path.join(dir, '.git')
   try {
     const stat = statSync(marker)
-    if (stat.isDirectory()) return statSync(path.join(marker, 'HEAD')).isFile()
+    if (stat.isDirectory()) return headMarks(marker)
     return stat.isFile() && stat.size <= 4096 && readFileSync(marker, 'utf8').startsWith('gitdir:')
   } catch { return false }
 }
@@ -590,7 +598,7 @@ function gitDirs(dir) {
     const dotgit = path.join(current, '.git')
     let gitdir = null
     try {
-      if (statSync(dotgit).isDirectory()) { if (statSync(path.join(dotgit, 'HEAD')).isFile()) gitdir = dotgit }
+      if (statSync(dotgit).isDirectory()) { if (headMarks(dotgit)) gitdir = dotgit }
       else {
         const match = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(dotgit, 'utf8'))
         if (match) gitdir = path.resolve(current, match[1])

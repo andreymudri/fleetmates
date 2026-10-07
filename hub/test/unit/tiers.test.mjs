@@ -347,6 +347,11 @@ test('an ancestor with an empty .git directory, or a .git file without gitdir:, 
     assert.equal(noWorkTree('git diff'), false, 'a .git file with gitdir: is a linked work tree')
     rmSync(path.join(s.repo, '.git'))
     mkdirSync(path.join(s.repo, '.git'))
+    // A HEAD that is a dangling symlink still marks a repository, whose hooksPath read is then due.
+    symlinkSync('refs/heads/unborn', path.join(s.repo, '.git', 'HEAD'))
+    assert.equal(noWorkTree('git diff'), false, 'a .git directory whose HEAD is a dangling symlink is a repository')
+    assert.equal(s.run('Write', { file_path: path.join(s.repo, 'notes.txt'), content: 'x' }).tier, 'caution', 'its hooksPath read has not landed')
+    rmSync(path.join(s.repo, '.git', 'HEAD'))
     writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
     await s.settle()
     assert.equal(s.bash('git diff').tier, 'safe', 'a .git directory holding HEAD is a repository')

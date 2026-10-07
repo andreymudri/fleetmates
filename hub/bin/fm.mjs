@@ -93,7 +93,7 @@ function plainClaude (args) {
 
 /**
  * Whether `dir` holds a repository marker: a `.git` directory with a `HEAD`
- * file, or a `.git` file that starts with `gitdir:`. An empty `.git`
+ * file or symlink (dangling or not), or a `.git` file that starts with `gitdir:`. An empty `.git`
  * directory, such as one a sandbox mounts, is not one.
  * @param {string} dir
  * @returns {boolean}
@@ -102,7 +102,11 @@ function hasGitMarker (dir) {
   const marker = path.join(dir, '.git')
   try {
     const stat = fs.statSync(marker)
-    if (stat.isDirectory()) return fs.statSync(path.join(marker, 'HEAD')).isFile()
+    if (stat.isDirectory()) {
+      // HEAD may be a symlink, dangling while its branch is unborn.
+      const head = fs.lstatSync(path.join(marker, 'HEAD'))
+      return head.isFile() || head.isSymbolicLink()
+    }
     return stat.isFile() && stat.size <= 4096 && fs.readFileSync(marker, 'utf8').startsWith('gitdir:')
   } catch { return false }
 }
