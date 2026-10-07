@@ -432,7 +432,7 @@ export async function dispatchPhase({
       throw new Error('Historical or unknown-effect evidence refuses execution')
     }
     const relevant = report.attempts.filter(a => a.executionId === contract.executionId && a.task === taskId)
-    if (relevant.some(a => ['stale','missing-artifact','retention-exceeded'].includes(a.state))) throw new Error('Required retained execution evidence is stale or unavailable')
+    if (relevant.some(a => a.missingArtifacts.length > 0 || ['stale','missing-artifact','retention-exceeded'].includes(a.state))) throw new Error('Required retained execution evidence is stale or unavailable')
     if (current.some(g => g.start.identity !== identity)) throw new Error('Attempt input identity changed')
     if (current.length && !record?.sandbox) throw new Error('Required checkout identity record is missing')
     const sandbox = record?.sandbox ?? await bounded(() => adapter.makeSandbox(guardedGit, { runRepo, runBranch, runId, taskId, mode: sandboxMode }))

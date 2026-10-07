@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { reconcileExecutionAttempt } from '../scripts/execution-recovery.mjs'
 import { mkdtemp, readFile, writeFile, rm, access } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
@@ -38,12 +40,12 @@ const worker = async opts => {
  const g = (...a) => execFileSync('git', ['--git-dir='+gd, '--work-tree='+cwd,...a], {cwd});
  if (!fs.existsSync(cwd+'/work.txt')) { fs.writeFileSync(cwd+'/work.txt','preserved'); g('add','work.txt'); g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fix: fixture work'); }
  if (process.env.FIX_COMMIT === 'true') { fs.writeFileSync(cwd+'/fix.txt','second commit');g('add','fix.txt');g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fix: fixture continuation'); }
- fs.writeFileSync(process.env.RESULT, JSON.stringify({status:'done',branch:'fleetmates/r/T1',filesChanged:['work.txt'],summary:'fixture',blockers:[]}));\n if (process.env.MALFORMED === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done'}));\n if (process.env.WRONG_BRANCH === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done',branch:'wrong',filesChanged:[],summary:'bad',blockers:[]}));\n const invalid=process.env.INVALID_OUTPUT; const target=invalid?.endsWith('stream')?process.env.STREAM:process.env.RESULT;
+ fs.writeFileSync(process.env.RESULT, JSON.stringify({status:'done',branch:'fleetmates/r/T1',filesChanged:['work.txt'],summary:process.env.DISTINCT_FIX==='true'?'fixture fix':'fixture',blockers:[]}));\n if (process.env.MALFORMED === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done'}));\n if (process.env.WRONG_BRANCH === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done',branch:'wrong',filesChanged:[],summary:'bad',blockers:[]}));\n const invalid=process.env.INVALID_OUTPUT; const target=invalid?.endsWith('stream')?process.env.STREAM:process.env.RESULT;
  if(invalid) { fs.rmSync(target,{force:true}); if(invalid.startsWith('fifo')) execFileSync('mkfifo',[target]); else if(invalid.startsWith('directory')) fs.mkdirSync(target); else fs.writeFileSync(target,'x'.repeat(Number(process.env.BYTE_LIMIT)+1)); }
  if(process.env.STREAM_RESULT==='true') { fs.copyFileSync(process.env.RESULT,process.env.STREAM);fs.unlinkSync(process.env.RESULT); }
  fs.writeFileSync(process.env.WORKER_EXIT,'success');
  process.exit(Number(process.env.EXIT_CODE ?? 0));\`;
- const child = spawn(process.execPath, ['-e', code], { env: { ...process.env, WORKER_CWD: cwd, WORKER_GIT: gitdir, RESULT: opts.resultPath, MALFORMED: String(config.malformed), WRONG_BRANCH: String(config.wrongBranch), EXIT_CODE: String(config.exitCode??0), FIX_COMMIT:String(opts.resumed&&config.fixCommit), INVALID_OUTPUT:config.invalidOutput??'', STREAM:opts.streamPath, BYTE_LIMIT:String(config.execution.retention.maxArtifactBytes), STREAM_RESULT:String(config.streamResult), WORKER_EXIT:path.join(config.root,'worker-exit-success') }, stdio: 'ignore' });
+ const child = spawn(process.execPath, ['-e', code], { env: { ...process.env, WORKER_CWD: cwd, WORKER_GIT: gitdir, RESULT: opts.resultPath, MALFORMED: String(config.malformed), WRONG_BRANCH: String(config.wrongBranch), EXIT_CODE: String(config.exitCode??0), FIX_COMMIT:String(opts.resumed&&config.fixCommit), DISTINCT_FIX:String(opts.resumed&&config.distinctFixEvidence), INVALID_OUTPUT:config.invalidOutput??'', STREAM:opts.streamPath, BYTE_LIMIT:String(config.execution.retention.maxArtifactBytes), STREAM_RESULT:String(config.streamResult), WORKER_EXIT:path.join(config.root,'worker-exit-success') }, stdio: 'ignore' });
  await writeFile(path.join(config.root,'worker.pid'),String(child.pid));
  return { child, sessionId: config.hangStage==='session'?hang():Promise.resolve('sid'), flushed: config.hangStage==='flush'?hang():Promise.resolve() };
 };
@@ -66,7 +68,10 @@ const adapter = {
   opts.sandbox.meta.workerEnvironment = { ready:!config.continuationFailed, workspace:'existing', setup:{status:'not-rerun',durationMs:null,checks:[]}, baseline:{status:'pass',checks:[]},durationMs:3 };
   const handle=await worker(opts); if(config.hangStage==='spawn') await hang(); return handle;
  },
- async resume(opts) { return worker({...opts,resumed:true,noOutput:config.resumeNoOutput}); },
+ async resume(opts) {
+  if(config.distinctFixEvidence) opts.sandbox.meta.workerEnvironment = {ready:true,workspace:'existing',setup:{status:'not-rerun',durationMs:null,checks:[]},baseline:{status:'pass',durationMs:null,checks:[{log:{complete:true,output:'fix baseline'}}]},durationMs:null};
+  return worker({...opts,resumed:true,noOutput:config.resumeNoOutput});
+ },
  async readResult({resultPath,streamPath}) {
   await mark('parser-called');
   await writeFile(path.join(config.root,'parser-paths.json'),JSON.stringify({resultPath,streamPath,resultMode:((await stat(resultPath).catch(()=>null))?.mode??0)&0o777,dirMode:(await stat(path.dirname(resultPath))).mode&0o777}));
@@ -492,3 +497,91 @@ test('pending collection for an earlier result cannot close as the retained fix 
     assert.deepEqual(start.artifacts[0],collection.result)
   }
 })
+
+async function retainedFix(t) {
+  const config=await setup(t);config.execution.maxAttempts=5
+  await pause(config,t,'collection-applied')
+  await rm(path.join(config.root,'barrier'))
+  await pause({...config,fixCommit:true,distinctFixEvidence:true,enforcementCodes:[3,0],barrierOccurrence:2},t,'collection-applied')
+  const tips=await retainedTips(config)
+  assert.equal(tips.length,2);assert.notEqual(tips[0],tips[1])
+  git(config.root,'merge-base','--is-ancestor',tips[0],tips[1])
+  assert.equal(git(config.root,'rev-parse','refs/heads/fleetmates/r/T1'),tips[1])
+  assert.equal(git(config.root,'--git-dir='+path.join(config.root,'clone-git'),'rev-parse','refs/heads/fleetmates/r/T1'),tips[1])
+  assert.equal((await names(config)).filter(n=>n.startsWith('spawn-count-')).length,2)
+  return config
+}
+
+async function deleteRetainedArtifact(config,reference) {
+  const hash=value=>createHash('sha256').update(value).digest('hex')
+  await rm(path.join(config.execution.common,'fleetmates-artifacts',hash('r'),hash(JSON.stringify(reference))+'.bin'))
+  await assert.rejects(readExecutionArtifact({common:config.execution.common,runId:'r',reference,retention}),/ENOENT/)
+}
+
+async function reconciledArtifacts(config) {
+  return reconcileExecutionAttempt({common:config.execution.common,runId:'r',inputs:config.execution.inputs,retention,
+    branches:{'refs/heads/run/r':config.execution.inputs.commit,'refs/heads/fleetmates/r/T1':git(config.root,'rev-parse','refs/heads/fleetmates/r/T1')},
+    checkouts:{T1:path.join(config.root,'clone')}})
+}
+
+async function assertPreservedFix(config,t,missing) {
+  const before=await names(config),tips=await retainedTips(config)
+  const verifications=before.filter(n=>n.startsWith('verified-')).length
+  const out=await outcome(config,t)
+  assert.equal((await names(config)).filter(n=>n.startsWith('spawn-count-')).length,2)
+  assert.equal(git(config.root,'rev-parse','refs/heads/fleetmates/r/T1'),tips[1])
+  assert.equal(git(config.root,'--git-dir='+path.join(config.root,'clone-git'),'rev-parse','refs/heads/fleetmates/r/T1'),tips[1])
+  git(config.root,'merge-base','--is-ancestor',tips[0],tips[1])
+  if(missing) {
+    assert.deepEqual(out.orphaned,['T1']);assert.deepEqual(out.results,[])
+    assert.equal((await names(config)).filter(n=>n.startsWith('verified-')).length,verifications)
+  } else {
+    assert.deepEqual(out.orphaned,[]);assert.equal(out.results[0]?.status,'done');assert.equal(out.results[0].summary,'fixture fix')
+    assert.equal(out.results[0].verifiedComplete,false)
+    assert.equal((await names(config)).filter(n=>n.startsWith('verified-')).length,verifications+1)
+    const event=(await readExecutionEvents(config.execution.common,'r')).filter(e=>e.step==='verification'&&e.kind==='step-completed').at(-1)
+    const receipt=JSON.parse(await readExecutionArtifact({common:config.execution.common,runId:'r',reference:event.artifacts[0],retention}))
+    assert.equal(receipt.tip,tips[1]);assert.equal(receipt.code,0);assert.equal(receipt.scope,'enforcement-only');assert.equal(receipt.verifiedComplete,false)
+  }
+}
+
+test('artifact reconciliation with intact fix evidence preserves commits and runs fresh enforcement',async t=>{
+  const config=await retainedFix(t),report=await reconciledArtifacts(config)
+  assert.ok(report.attempts.some(a=>a.state==='branch-changed'))
+  assert.ok(report.attempts.every(a=>a.missingArtifacts.length===0))
+  await assertPreservedFix(config,t,false)
+})
+
+for(const kind of ['worker-setup','harness-result','worker-continuation','driver-collection']) {
+  test('artifact reconciliation refuses missing '+kind+' independently of moved fix refs',async t=>{
+    const config=await retainedFix(t),events=await readExecutionEvents(config.execution.common,'r')
+    const harnesses=events.filter(e=>e.step==='harness'&&e.kind==='step-completed')
+    const source=kind==='driver-collection'?events.find(e=>e.step==='collection'&&e.kind==='step-completed')
+      :kind==='worker-setup'?events.filter(e=>e.step==='harness'&&e.kind==='step-started').at(-1):harnesses.at(-1)
+    const reference=source.artifacts.find(a=>a.kind===kind);assert.ok(reference)
+    if(['harness-result','worker-continuation'].includes(kind)) assert.notEqual(reference.sha256,harnesses[0].artifacts.find(a=>a.kind===kind).sha256)
+    const originalSetup=events.find(e=>e.step==='harness'&&e.kind==='step-started').artifacts.find(a=>a.kind==='worker-setup')
+    assert.notEqual(reference.sha256,originalSetup.sha256)
+    await deleteRetainedArtifact(config,reference)
+    assert.equal(JSON.parse(await readExecutionArtifact({common:config.execution.common,runId:'r',reference:originalSetup,retention})).setup.status,'pass')
+    const attempt=(await reconciledArtifacts(config)).attempts.find(a=>a.attempt===source.attempt)
+    assert.equal(attempt.state,'branch-changed');assert.ok(attempt.missingArtifacts.some(a=>a.sha256===reference.sha256&&a.kind===kind))
+    await assertPreservedFix(config,t,true)
+  })
+}
+
+for(const kind of ['worker-setup','harness-result','worker-continuation']) {
+  test('artifact reconciliation without a fix ref move still refuses missing '+kind,async t=>{
+    const config=await setup(t);await pause(config,t,'collection-applied')
+    const events=await readExecutionEvents(config.execution.common,'r')
+    const source=events.find(e=>e.step==='harness'&&e.kind===(kind==='worker-setup'?'step-started':'step-completed'))
+    const reference=source.artifacts.find(a=>a.kind===kind)
+    await deleteRetainedArtifact(config,reference)
+    const attempt=(await reconciledArtifacts(config)).attempts.find(a=>a.attempt===source.attempt)
+    assert.equal(attempt.state,'missing-artifact')
+    const tip=git(config.root,'rev-parse','refs/heads/fleetmates/r/T1')
+    await assertRefusal(config,t,/unavailable/)
+    assert.equal(git(config.root,'rev-parse','refs/heads/fleetmates/r/T1'),tip)
+    assert.ok(!(await names(config)).some(n=>n.startsWith('verified-')))
+  })
+}
