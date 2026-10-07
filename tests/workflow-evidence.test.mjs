@@ -4,6 +4,12 @@ import { evidenceIdentity, summarizeAcceptance, reviewerMetrics } from '../scrip
 const inputs = { commit: 'sha', plan: 'plan-hash', manifest: 'manifest-hash', environment: 'node24', verifier: 'v1' }
 const requirements = [{ id: 'build', kind: 'deterministic' }, { id: 'interaction', kind: 'human' }]
 const proof = (requirement, kind, status = 'pass') => ({ requirement, kind, status, identity: evidenceIdentity(inputs), log: 'logs/check.txt' })
+test('compatible acceptance success is explicitly legacy and cannot satisfy strict completion', () => {
+  const report = summarizeAcceptance({ inputs, requirements, evidence: [proof('build', 'deterministic'), proof('interaction', 'human')] })
+  assert.equal(report.complete, true)
+  assert.equal(report.verifiedComplete, false)
+  assert.equal(report.mode, 'legacy-observations')
+})
 test('acceptance completion requires current evidence for every criterion and the declared evidence kind', () => {
   const complete = [proof('build', 'deterministic'), proof('interaction', 'human')]
   assert.equal(summarizeAcceptance({ inputs, requirements, evidence: complete }).complete, true)

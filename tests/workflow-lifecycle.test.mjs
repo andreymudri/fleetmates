@@ -6,6 +6,8 @@ import os from 'node:os'
 import { git, discover, bindSession, readBinding, transition, lifecycleStatus, planHash } from '../scripts/workflow-lifecycle.mjs'
 import { handleOrchestratorStop } from '../scripts/orchestrator-stop.mjs'
 import { runCli } from '../scripts/cli.mjs'
+import { strictExecutionIdentity } from '../scripts/completion-obligations.mjs'
+import { createHash } from 'node:crypto'
 
 async function fixture(t) {
   // Ledger storage rejects linked parents; macOS temporary paths can contain /var aliases.
@@ -134,4 +136,75 @@ test('unbound real Stop entry point costs one Git process and produces a session
   assert.deepEqual(await readEvents(receiptPath(env)), [], 'new Stop receipts must not change the legacy four-hook receipt stream')
   const other = await hookDoctor({ env, includeStop: true, sessionId: 'other-session' })
   assert.equal(other.hooks.find(h => h.hook === 'Stop').state, 'unverified')
+})
+
+function strictInputs(root) {
+  const hash = value => createHash('sha256').update(value).digest('hex')
+  return { commit: git(['rev-parse', 'HEAD'], root), plan: planHash(root, 'HEAD', 'plan.md'),
+    manifest: planHash(root, 'HEAD', 'fleetmates.gate.json'), context: hash('context'), environment: hash('environment'), verifier: hash('verifier') }
+}
+
+test('strict sessions bind anchored inputs and stable execution explicitly without upgrading existing sessions', async t => {
+  const { root, binding, input } = await fixture(t), inputs = strictInputs(root)
+  const strict = await bindSession(root, 'strict', { ...binding, inputs, executionId: 'execution-1' })
+  assert.equal(strict.version, 2)
+  assert.equal(strict.identity, strictExecutionIdentity(inputs))
+  assert.equal(strict.anchor, inputs.commit)
+  assert.equal(strict.executionId, 'execution-1')
+  assert.equal((await readBinding(discover(root).common, 'strict')).identity, strict.identity)
+  await assert.rejects(bindSession(root, 'session', { ...binding, inputs, executionId: 'execution-1' }), /already bound/)
+  await assert.rejects(bindSession(root, 'wrong', { ...binding, inputs: { ...inputs, commit: 'f'.repeat(40) }, executionId: 'execution-1' }), /anchor/i)
+  await assert.rejects(bindSession(root, 'wrong', { ...binding, inputs: { ...inputs, plan: 'f'.repeat(64) }, executionId: 'execution-1' }), /plan/i)
+  const messages = []
+  assert.equal(await handleOrchestratorStop({ ...input, session_id: 'strict' }, { err: s => messages.push(s), execute: () => ({ status: 0 }) }), 0)
+  assert.match(messages.join('\n'), /handler execution.*graceful harness callback/i)
+  git(['branch', '-D', 'main'], root)
+  let calls = 0
+  const execute = () => { calls++; return { status: 0 } }
+  assert.equal(await handleOrchestratorStop({ ...input, session_id: 'strict' }, { execute }), 0)
+  assert.equal(calls, 1, 'strict binding keeps its explicit anchor without inferring a replacement base')
+  await writeFile(path.join(root, 'plan.md'), '# changed requirements\n')
+  git(['commit', '-am', 'requirements'], root)
+  assert.equal(await handleOrchestratorStop({ ...input, session_id: 'strict' }, { execute }), 0)
+  assert.equal(calls, 1, 'changed current plan fails open without enforcing obsolete requirements')
+  const { common } = discover(root)
+  const file = path.join(common, 'fleetmates-sessions', createHash('sha256').update('strict').digest('hex') + '.json')
+  await writeFile(file, JSON.stringify({ ...strict, inputs: { ...strict.inputs, context: 'f'.repeat(64) } }))
+  await assert.rejects(readBinding(common, 'strict'), /strict session/i)
+})
+
+test('lifecycle recomputes actual refs and distinguishes strict verdicts from process disappearance', async t => {
+  const { root, binding } = await fixture(t), inputs = strictInputs(root)
+  const tree = git(['rev-parse', 'HEAD^{tree}'], root), refs = { 'refs/heads/run': inputs.commit }
+  const artifact = { version: 1, runId: 'r1', kind: 'log', sha256: 'a'.repeat(64), byteLength: 1 }
+  const requirements = ['implementation', 'command', 'review', 'acceptance', 'integration'].map(kind => ({ id: kind, kind,
+    mandatory: true, scope: ['command', 'review', 'acceptance'].includes(kind) ? 'final' : 'step', inputs, tree, refs }))
+  const receipts = requirements.map(r => ({ id: r.id, requirement: r.id, version: 2, kind: r.kind, status: 'pass',
+    executionBacked: true, requestIdentity: strictExecutionIdentity(inputs), identity: strictExecutionIdentity(inputs), tree, refs, artifact }))
+  const evidence = { inputs, requirements, receipts, branches: refs, artifactObservations: [{ reference: artifact, verified: true }], lifecycle: { runId: 'r1', state: 'running' } }
+  assert.equal(lifecycleStatus(root, 'r1', evidence).state, 'verified-complete')
+  const manyRequirements = Array.from({ length: 101 }, (_, index) => ({ ...requirements[0], id: `check-${index}`,
+    refs: { [`refs/heads/task-${index}`]: inputs.commit } }))
+  assert.throws(() => lifecycleStatus(root, 'r1', { ...evidence, requirements: manyRequirements, receipts: [], branches: {} }), /ref bound/i)
+  for (const state of ['blocked', 'failed']) {
+    assert.equal(lifecycleStatus(root, 'r1', { ...evidence, lifecycle: { runId: 'r1', state } }).state, state)
+  }
+  const { spawn } = await import('node:child_process')
+  const { once } = await import('node:events')
+  const child = spawn(process.execPath, ['-e', 'process.stdout.write("started");setInterval(()=>{},1000)'], { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] })
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL') })
+  await once(child.stdout, 'data')
+  const exit = once(child, 'exit'); child.kill('SIGKILL'); const [, signal] = await exit
+  assert.equal(signal, 'SIGKILL')
+  const interrupted = lifecycleStatus(root, 'r1', { ...evidence, lifecycle: { runId: 'r1', state: 'interrupted' } })
+  assert.equal(interrupted.state, 'unresolved'); assert.equal(interrupted.verifiedComplete, false)
+  transition(root, 'r1', 'suspend', binding.branch)
+  assert.equal(lifecycleStatus(root, 'r1', evidence).state, 'suspended')
+  transition(root, 'r1', 'resume')
+  await writeFile(path.join(root, 'new-code'), 'changed'); git(['add', '.'], root); git(['commit', '-m', 'changed'], root)
+  assert.equal(lifecycleStatus(root, 'r1', evidence).verifiedComplete, false, 'caller supplied old refs cannot override current Git refs')
+  await assert.rejects(bindSession(root, 'ambiguous', { ...binding, inputs, executionId: '' }), /execution/i)
+  git(['switch', 'main'], root); git(['branch', '-D', 'run'], root)
+  assert.equal(lifecycleStatus(root, 'r1', evidence).verifiedComplete, false, 'deleted refs remain unresolved')
+  assert.throws(() => lifecycleStatus(root, 'other', evidence), /run/i)
 })
