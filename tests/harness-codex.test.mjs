@@ -1,9 +1,11 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile, readFile, chmod, stat, symlink } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { tmpdir, constants as osConstants } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
+import { spawn, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { defaultGitExec } from '../scripts/git.mjs'
 import {
   buildSpawnArgv, buildResumeArgv, spawnCodex, resumeCodex,
@@ -471,6 +473,31 @@ test('makeCodexSandbox (clone mode) leaves no .git under the clone and builds a 
     await rm(runRepo, { recursive: true, force: true })
   }
 })
+
+for (const mode of ['clone', 'full']) {
+  test(`makeCodexSandbox (${mode} mode) writes the run repo's identity into the clone, so a commit there carries it and not the host global one`, async () => {
+    const runRepo = await mkdtemp(path.join(tmpdir(), 'tm-codex-run-'))
+    const hostDir = await mkdtemp(path.join(tmpdir(), 'tm-codex-host-'))
+    try {
+      const globalConfig = path.join(hostDir, 'gitconfig')
+      await writeFile(globalConfig, '[user]\n\tname = Host Global\n\temail = host@example.invalid\n', 'utf8')
+      await withEnv({ GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: '1' }, async () => {
+        await initRepo(runRepo)
+        const sandbox = await makeCodexSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T5', mode })
+        const g = (args) => defaultGitExec(['--git-dir', sandbox.meta.gitdir, '--work-tree', sandbox.cwd, ...args], sandbox.cwd)
+        await writeFile(path.join(sandbox.cwd, 'work.txt'), 'work\n', 'utf8')
+        assert.equal((await g(['add', 'work.txt'])).code, 0)
+        const committed = await g(['commit', '-m', 'work'])
+        assert.equal(committed.code, 0, committed.stderr)
+        const author = await g(['log', '-1', '--format=%an <%ae>|%cn <%ce>'])
+        assert.equal(author.stdout.trim(), 'test <test@example.com>|test <test@example.com>')
+      })
+    } finally {
+      await rm(runRepo, { recursive: true, force: true })
+      await rm(hostDir, { recursive: true, force: true })
+    }
+  })
+}
 
 test('makeCodexSandbox (files mode) produces a git-less checkout of the branch tree', async () => {
   const runRepo = await mkdtemp(path.join(tmpdir(), 'tm-codex-run-'))
@@ -968,11 +995,10 @@ test('verification trampoline preserves child exits and bounded output without c
   const { defaultExec } = await import('../scripts/gate-runner.mjs')
   const root = await mkdtemp(path.join(tmpdir(), 'fm-trampoline-'))
   try {
-    const invoke = async (source, options = {}) => {
+    const invoke = async (source, { innerTimeoutMs = 5000 } = {}) => {
       const request = buildVerificationInvocation({ executable: '/fixture/codex', broker: root, home: root, worker: root, temp: root, write: false,
-        command: process.execPath, argv: ['-e', source], env: { PATH: process.env.PATH }, marker: 'fixture-receipt ', maxOutputBytes: 32 })
-      const result = await defaultExec(process.execPath, root, { argv: request.argv.slice(-3), timeoutMs: 5000, maxOutputBytes: 4096, ...options })
-      if (options.timeoutMs) return result
+        command: process.execPath, argv: ['-e', source], env: { PATH: process.env.PATH }, marker: 'fixture-receipt ', maxOutputBytes: 32, timeoutMs: innerTimeoutMs })
+      const result = await defaultExec(process.execPath, root, { argv: request.argv.slice(-3), timeoutMs: innerTimeoutMs + 5000, maxOutputBytes: 4096 })
       assert.equal(result.code, 0)
       assert.ok(result.output.startsWith('fixture-receipt '), result.output)
       return JSON.parse(result.output.slice('fixture-receipt '.length))
@@ -997,10 +1023,102 @@ test('verification trampoline preserves child exits and bounded output without c
       assert.equal(signalled.code, 143)
       assert.equal(signalled.signal, 'SIGTERM')
     }
-    const timedOut = await invoke('setInterval(()=>{},1000)', { timeoutMs: 200 })
+    // The INNER bound (the trampoline's own timer) is the one under test, so the outer bound stays
+    // larger: an outer kill reaches only the trampoline, never the detached command group.
+    const token = leakToken()
+    const timedOut = await invoke(`setInterval(()=>{},1000)//${token}`, { innerTimeoutMs: 200 })
     assert.equal(timedOut.timedOut, true)
+    assert.equal(timedOut.completed, false)
     assert.notEqual(timedOut.code, 0)
-  } finally { await rm(root, { recursive: true, force: true }) }
+    assert.deepEqual(await survivorsAfter(() => processesWith(token)), [])
+  } finally { await rm(root, { recursive: true, force: true }); reapToken(leakTokens) }
+})
+
+// --- verification trampoline termination from outside (execution recovery audit T2) ------------
+
+// Every fixture command carries a unique token in its own argv, so `pgrep -f` finds the command,
+// its runner and its shells, and nothing any other test or run started.
+const leakTokens = []
+function leakToken() { const token = `fm-leak-${randomBytes(8).toString('hex')}`; leakTokens.push(token); return token }
+function pgrep(args) { return spawnSync('pgrep', args, { encoding: 'utf8' }).stdout.split('\n').filter(Boolean) }
+function processesWith(token) { return pgrep(['-f', token]) }
+// Waits up to `ms` for `list` to come back empty (a SIGKILL is delivered, not instant), then returns it.
+async function survivorsAfter(list, ms = 3000) {
+  const deadline = Date.now() + ms
+  for (;;) {
+    const left = list()
+    if (left.length === 0 || Date.now() > deadline) return left
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+}
+// Cleanup for a failing run, so a red test does not leave its own leak behind for the next one.
+function reapToken(tokens) { for (const token of tokens.splice(0)) spawnSync('pkill', ['-KILL', '-f', token]) }
+
+async function startedTrampoline(root, { innerTimeoutMs = 30000 } = {}) {
+  const { buildVerificationInvocation } = await import('../scripts/harnesses/codex.mjs')
+  const token = leakToken()
+  const ready = path.join(root, 'ready')
+  const source = `require('fs').writeFileSync(${JSON.stringify(ready)},String(process.pid));setInterval(()=>{},1000)//${token}`
+  const request = buildVerificationInvocation({ executable: '/fixture/codex', broker: root, home: root, worker: root, temp: root, write: true,
+    command: process.execPath, argv: ['-e', source], env: { PATH: process.env.PATH }, marker: 'fixture-outside ', timeoutMs: innerTimeoutMs })
+  return { token, ready, argv: request.argv.slice(-3) }
+}
+
+async function commandGroup(ready) {
+  let pid = ''
+  const deadline = Date.now() + 5000
+  while (!pid && Date.now() < deadline) {
+    pid = await readFile(ready, 'utf8').catch(() => '')
+    if (!pid) await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  assert.ok(pid, 'the fixture command never started')
+  const pgid = spawnSync('ps', ['-o', 'pgid=', '-p', pid], { encoding: 'utf8' }).stdout.trim()
+  assert.match(pgid, /^\d+$/)
+  return pgid
+}
+
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  test(`verification trampoline terminated by ${signal} from outside leaves no process of its command group`, { skip: process.platform === 'win32' }, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'fm-outside-'))
+    let pgid
+    try {
+      const { token, ready, argv } = await startedTrampoline(root)
+      const trampoline = spawn(process.execPath, argv, { cwd: root, stdio: 'ignore' })
+      const exited = once(trampoline, 'exit')
+      pgid = await commandGroup(ready)
+      // The command runs in its own group, so a signal to the trampoline alone never reaches it.
+      assert.notEqual(pgid, String(trampoline.pid))
+      assert.ok(pgrep(['-g', pgid]).length > 0)
+      trampoline.kill(signal)
+      // The handler exits with 128+signal itself, so the exit is a code, not a signal death.
+      assert.deepEqual(await exited, [128 + osConstants.signals[signal], null])
+      assert.deepEqual(await survivorsAfter(() => pgrep(['-g', pgid])), [])
+      assert.deepEqual(await survivorsAfter(() => processesWith(token)), [])
+    } finally {
+      if (pgid) spawnSync('kill', ['-KILL', '--', `-${pgid}`])
+      reapToken(leakTokens)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+}
+
+test('an outer timeout shorter than the trampoline\'s own leaves no process of the command group', { skip: process.platform === 'win32' }, async () => {
+  const { defaultExec } = await import('../scripts/gate-runner.mjs')
+  const root = await mkdtemp(path.join(tmpdir(), 'fm-outer-timeout-'))
+  let pgid
+  try {
+    const { token, ready, argv } = await startedTrampoline(root, { innerTimeoutMs: 5000 })
+    const pending = defaultExec(process.execPath, root, { argv, timeoutMs: 1000, graceMs: 500, maxOutputBytes: 4096 })
+    pgid = await commandGroup(ready)
+    const result = await pending
+    assert.equal(result.timedOut, true)
+    assert.deepEqual(await survivorsAfter(() => pgrep(['-g', pgid])), [])
+    assert.deepEqual(await survivorsAfter(() => processesWith(token)), [])
+  } finally {
+    if (pgid) spawnSync('kill', ['-KILL', '--', `-${pgid}`])
+    reapToken(leakTokens)
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 async function completionFixture({ timeoutMs = 5000, command = process.execPath, source = '', runnerSource = null, missingSink = false,

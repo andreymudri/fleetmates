@@ -333,14 +333,25 @@ export function cursorCheckoutRoot({ runRepo, runId, env = process.env }) {
   return path.join(cache, 'fleetmates', 'cursor', repoKey, runId)
 }
 
-// The nearest ancestor of `dir` holding a `.git` entry, or null. Plain filesystem checks: no git
-// command ever runs against a checkout.
+// Whether `dir/.git` marks a repository: a `.git` directory only when it holds a `HEAD` that is
+// not a directory (read with lstat, so a symlinked HEAD counts even when it dangles), a `.git`
+// file only when it starts with `gitdir:`. Anything else, such as the empty `.git` a sandbox can
+// mount in `/tmp` for the length of a command, is not a repository and does not stop the walk.
+async function gitMarker(dir) {
+  const marker = path.join(dir, '.git')
+  try {
+    const st = await lstat(marker)
+    if (st.isDirectory()) return !(await lstat(path.join(marker, 'HEAD'))).isDirectory()
+    if (st.isFile() && st.size <= 4096) return (await readFile(marker, 'utf8')).startsWith('gitdir:')
+  } catch { /* absent or unreadable: not a marker */ }
+  return false
+}
+
+// The nearest ancestor of `dir` holding a `.git` repository marker, or null. Plain filesystem
+// checks: no git command ever runs against a checkout.
 export async function enclosingGitRoot(dir) {
   for (let cur = path.resolve(dir); ; cur = path.dirname(cur)) {
-    try {
-      await lstat(path.join(cur, '.git'))
-      return cur
-    } catch { /* keep walking */ }
+    if (await gitMarker(cur)) return cur
     if (path.dirname(cur) === cur) return null
   }
 }

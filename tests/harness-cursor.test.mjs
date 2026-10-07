@@ -299,6 +299,22 @@ test('collectCursor commits a clean checkout, keeping the driver-written sandbox
   assert.doesNotMatch(tree.stdout, /\.cursor/)
 })
 
+// Cursor has no clone path (the test above): the host commits its checkout through the run repo,
+// so the task branch carries the run repo's identity and not the host global one.
+test('collectCursor commits the checkout as the run repo\'s identity, not the host global one', { timeout: 10000 }, async () => {
+  const runRepo = await freshDir('run')
+  const globalConfig = path.join(await freshDir('host'), 'gitconfig')
+  await writeFile(globalConfig, '[user]\n\tname = Host Global\n\temail = host@example.invalid\n')
+  await withEnv({ GIT_CONFIG_GLOBAL: globalConfig, GIT_CONFIG_NOSYSTEM: '1' }, async () => {
+    await initRepo(runRepo)
+    const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: await freshDir('cache') } })
+    await writeFile(path.join(sandbox.cwd, 'a.txt'), 'a\n')
+    await collectCursor(defaultGitExec, { runRepo, sandbox, branch: 'fleetmates/r1/T1' })
+    const author = await defaultGitExec(['log', '-1', '--format=%an <%ae>|%cn <%ce>', 'fleetmates/r1/T1'], runRepo)
+    assert.equal(author.stdout.trim(), 'test <test@example.com>|test <test@example.com>')
+  })
+})
+
 test('collectCursor refuses a modified sandbox.json or a planted control file and creates no branch', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
   for (const plant of [
     async (cwd) => writeFile(path.join(cwd, '.cursor', 'sandbox.json'), '{"additionalReadwritePaths":["/"]}'),
@@ -420,6 +436,52 @@ test('makeCursorSandbox puts the checkout outside the run repo and outside any g
   assert.ok(!sandbox.cwd.startsWith(runRepo))
   assert.equal(await enclosingGitRoot(sandbox.cwd), null)
   assert.equal(await readFile(path.join(sandbox.cwd, 'base.txt'), 'utf8'), 'base\n')
+})
+
+// A sandbox (Codex's bwrap, for one) can mount an EMPTY `.git` in an ancestor such as `/tmp` for
+// the length of a command. That is not a repository: a `.git` directory counts only with a `HEAD`
+// inside, and a `.git` file only when it starts with `gitdir:`. The fixture plants its markers in
+// a private temp ancestor, never in `/tmp` itself.
+test('an empty .git directory or a non-pointer .git file in an ancestor is not a repository, and does not refuse the cache', { timeout: 10000 }, async () => {
+  const runRepo = await freshDir('run')
+  await initRepo(runRepo)
+  const ancestor = await mkdtemp(path.join(tmpdir(), 'fm-cgit-'))
+  try {
+    await mkdir(path.join(ancestor, '.git'))
+    const cache = path.join(ancestor, 't', 'cache')
+    await mkdir(cache, { recursive: true })
+    assert.equal(await enclosingGitRoot(cache), null)
+    const sandbox = await makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: cache } })
+    assert.equal(await readFile(path.join(sandbox.cwd, 'base.txt'), 'utf8'), 'base\n')
+    const fileMarker = path.join(ancestor, 'f')
+    await mkdir(path.join(fileMarker, 'cache'), { recursive: true })
+    await writeFile(path.join(fileMarker, '.git'), 'not a pointer\n')
+    assert.equal(await enclosingGitRoot(path.join(fileMarker, 'cache')), null)
+  } finally { await rm(ancestor, { recursive: true, force: true }) }
+})
+
+test('a .git directory holding HEAD, or a gitdir: pointer file, in an ancestor still refuses the cache', { timeout: 10000 }, async () => {
+  const runRepo = await freshDir('run')
+  await initRepo(runRepo)
+  const ancestor = await mkdtemp(path.join(tmpdir(), 'fm-cgit-'))
+  try {
+    for (const [name, plant] of [
+      ['dir', async dir => { await mkdir(path.join(dir, '.git')); await writeFile(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n') }],
+      ['pointer', async dir => { await writeFile(path.join(dir, '.git'), 'gitdir: /home/you/elsewhere/.git/worktrees/x\n') }],
+      // A HEAD that is a dangling symlink is still a repository's HEAD: read with lstat, not stat.
+      ['dangling', async dir => { await mkdir(path.join(dir, '.git')); await symlink(path.join(dir, 'missing-head-target'), path.join(dir, '.git', 'HEAD')) }],
+    ]) {
+      const repo = path.join(ancestor, name)
+      const cache = path.join(repo, 't', 'cache')
+      await mkdir(cache, { recursive: true })
+      await plant(repo)
+      assert.equal(await enclosingGitRoot(cache), repo)
+      await assert.rejects(
+        makeCursorSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'files', env: { XDG_CACHE_HOME: cache } }),
+        (err) => err.message.includes('must not live inside a git repository') && err.message.includes(repo),
+      )
+    }
+  } finally { await rm(ancestor, { recursive: true, force: true }) }
 })
 
 test('makeCursorSandbox refuses a cache inside a git repository, naming it', { timeout: 10000 }, async () => {
