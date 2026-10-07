@@ -332,6 +332,27 @@ test('git diff of a directory or outside a git work tree is Caution, and so are 
   } finally { s.close() }
 })
 
+test('an ancestor with an empty .git directory, or a .git file without gitdir:, is not a git work tree for git diff', async () => {
+  const s = sandbox()
+  try {
+    mkdirSync(path.join(s.root, '.git'))
+    const noWorkTree = command => s.bash(command).reasons.some(item => item.entryId === 'git.no-work-tree')
+    assert.equal(s.bash('git diff').tier, 'caution', 'an empty .git directory above the repo is not a repository')
+    assert.ok(noWorkTree('git diff'))
+    // Nor does it hold a core.hooksPath read that has not landed, which would make every write Caution.
+    assert.equal(s.run('Write', { file_path: path.join(s.repo, 'notes.txt'), content: 'x' }).tier, 'safe')
+    writeFileSync(path.join(s.repo, '.git'), 'not a pointer\n')
+    assert.ok(noWorkTree('git diff'), 'a .git file without gitdir: is not a repository')
+    writeFileSync(path.join(s.repo, '.git'), 'gitdir: /elsewhere/.git/worktrees/repo\n')
+    assert.equal(noWorkTree('git diff'), false, 'a .git file with gitdir: is a linked work tree')
+    rmSync(path.join(s.repo, '.git'))
+    mkdirSync(path.join(s.repo, '.git'))
+    writeFileSync(path.join(s.repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    await s.settle()
+    assert.equal(s.bash('git diff').tier, 'safe', 'a .git directory holding HEAD is a repository')
+  } finally { s.close() }
+})
+
 test('jq filters that read the environment or a module file are Caution', () => {
   const s = sandbox()
   try {

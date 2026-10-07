@@ -641,7 +641,9 @@ test('fm ls lists each PTY with its repo, pid, start and attached clients', asyn
   const repoB = path.join(tmp, 'ls-repo-b')
   const plain = path.join(tmp, 'ls-plain')
   await mkdir(path.join(repoA, '.git'), { recursive: true })
+  await writeFile(path.join(repoA, '.git', 'HEAD'), 'ref: refs/heads/main\n')
   await mkdir(path.join(repoB, '.git'), { recursive: true })
+  await writeFile(path.join(repoB, '.git', 'HEAD'), 'ref: refs/heads/main\n')
   await mkdir(path.join(repoB, 'sub', 'deeper'), { recursive: true })
   await mkdir(plain)
   const a = await spawnAt(repoA)
@@ -674,11 +676,44 @@ test('fm ls lists each PTY with its repo, pid, start and attached clients', asyn
   }
 })
 
+test('fm ls does not take an ancestor with an empty .git directory, or a .git file without gitdir:, for a repo', async () => {
+  const ancestor = path.join(tmp, 'ls-empty-ancestor')
+  const work = path.join(ancestor, 'work')
+  const real = path.join(ancestor, 'real')
+  const linked = path.join(ancestor, 'linked')
+  const bogus = path.join(ancestor, 'bogus')
+  await mkdir(path.join(ancestor, '.git'), { recursive: true })
+  await mkdir(work)
+  await mkdir(path.join(real, '.git'), { recursive: true })
+  await writeFile(path.join(real, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+  await mkdir(linked)
+  await writeFile(path.join(linked, '.git'), 'gitdir: /elsewhere/.git/worktrees/linked\n')
+  await mkdir(bogus)
+  await writeFile(path.join(bogus, '.git'), 'not a pointer\n')
+  const sessions = [await spawnAt(work), await spawnAt(real), await spawnAt(linked), await spawnAt(bogus)]
+  try {
+    const r = await runFm(['ls'], { ...env, HOME: tmp })
+    assert.equal(r.code, 0, r.stderr)
+    const lines = r.stdout.trimEnd().split('\n')
+    /** @param {string} id */
+    const repo = (id) => {
+      const line = lines.find((l) => l.startsWith(id + ' '))
+      assert.ok(line, `no row for ${id}: ${r.stdout}`)
+      return line.split(/ {2,}/)[1]
+    }
+    assert.deepEqual(sessions.map((s) => repo(s.ptyId)), ['~/ls-empty-ancestor/work', 'real', 'linked', '~/ls-empty-ancestor/bogus'])
+  } finally {
+    for (const p of sessions) await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
+  }
+})
+
 test('fm attach by repo name attaches to the one match, and refuses several or none', async () => {
   const one = path.join(tmp, 'by-repo-one')
   const two = path.join(tmp, 'by-repo-two')
   await mkdir(path.join(one, '.git'), { recursive: true })
+  await writeFile(path.join(one, '.git', 'HEAD'), 'ref: refs/heads/main\n')
   await mkdir(path.join(two, '.git'), { recursive: true })
+  await writeFile(path.join(two, '.git', 'HEAD'), 'ref: refs/heads/main\n')
   await mkdir(path.join(two, 'pkg'))
   const a = await spawnAt(one)
   const b1 = await spawnAt(two)
@@ -918,6 +953,7 @@ test('SIGHUP to fm claude before deckd answers spawn detaches from the spawned P
 test('SIGHUP to fm attach <repo> before deckd answers the first attach detaches from the repo\'s PTY, without printing', async () => {
   const repo = path.join(tmp, 'hup-repo')
   await mkdir(path.join(repo, '.git'), { recursive: true })
+  await writeFile(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
   const p = await spawnAt(repo)
   const proxy = await deckdProxy({ hold: 'attach' })
   try {

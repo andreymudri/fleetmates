@@ -441,7 +441,8 @@ export function workingRoot(cwd) {
     const marker = path.join(current, '.git')
     try {
       const stat = statSync(marker)
-      if (stat.isDirectory() || stat.isFile() && stat.size <= 4096 && readFileSync(marker, 'utf8').startsWith('gitdir:')) return current
+      // An empty .git directory (one a sandbox mounts, say) is not a repository: require HEAD.
+      if (stat.isDirectory() ? statSync(path.join(marker, 'HEAD')).isFile() : stat.isFile() && stat.size <= 4096 && readFileSync(marker, 'utf8').startsWith('gitdir:')) return current
     } catch {}
     const parent = path.dirname(current)
     if (parent === current) break
