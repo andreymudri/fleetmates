@@ -2198,7 +2198,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 113, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
+const CENSUS_EXPECTED = { 'cli.mjs': 114, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2398,10 +2398,16 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **132 lines: 113 in `cli.mjs`, 6 in
+// can no longer drift away from the code unnoticed. It came to **133 lines: 114 in `cli.mjs`, 6 in
 // `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **1 site in `finish.mjs`**: `renderRunSummary`'s standing-skips line,
+// The most recent move was **1 site in `cli.mjs`**: `dispatch --fix-round`'s unknown-task refusal,
+// which wraps the `--phase` and `--run` argv values and each `--task` value it names, like the
+// T7 headless-dispatch group below. Not row-driven; its exit 2 is driven by
+// `tests/execution-controller-cli.test.mjs` ("dispatch refuses an unusable --fix-round or
+// --execution with exit 2 before any probe or spawn").
+//
+// The move before that was **1 site in `finish.mjs`**: `renderRunSummary`'s standing-skips line,
 // which wraps each test unit — a value parsed out of a JUnit report the suite (teammate code)
 // wrote. Driven by `tests/finish.test.mjs` ("renderRunSummary names the standing skips of the last
 // phase, printable, units once each").
@@ -5784,7 +5790,9 @@ test('gate --no-fleet runs neither enforcement check and says so on stdout', asy
   })
 })
 
-test('gate with a plan path absent at the anchor exits 1 with a derive error rather than passing', async () => {
+// Exit 5, not 1: a gate that cannot derive run state has no verdict about the code, so a caller
+// that reads exit 1 as a code failure (the workflow controller) must not start a repair round.
+test('gate with a plan path absent at the anchor exits 5 with a derive error rather than passing', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     lines.length = 0
@@ -5792,7 +5800,7 @@ test('gate with a plan path absent at the anchor exits 1 with a derive error rat
     // missing-plan.md exists nowhere, not even in the working tree, so it is certainly
     // absent at the anchor commit — deriveContext must fail, not silently pass.
     const code = await runCli(['gate', '--run', 'r1', '--plan', 'missing-plan.md', '--root', root], io)
-    assert.equal(code, 1)
+    assert.equal(code, 5)
     const parsed = JSON.parse(lines.join('\n'))
     assert.equal(parsed.verdict, 'FAIL')
     assert.deepEqual(parsed.failed, ['derive'])
@@ -6267,9 +6275,11 @@ test('gate refuses to guess the base branch when both main and master exist and 
     lines.length = 0
     await writeEnforcementManifest(root)
     const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
-    assert.equal(code, 1)
+    // A derive failure: the state-failure exit 5, still non-zero, never a PASS.
+    assert.equal(code, 5)
     const parsed = JSON.parse(lines.join('\n'))
     assert.equal(parsed.verdict, 'FAIL')
+    assert.deepEqual(parsed.failed, ['derive'])
     assert.match(parsed.error, /ambiguous/i)
     assert.match(parsed.error, /--base/)
   })
@@ -6335,9 +6345,11 @@ test('gate fails when the current branch is the base branch itself', async () =>
     lines.length = 0
     await writeEnforcementManifest(root)
     const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
-    assert.equal(code, 1)
+    // A derive failure: the state-failure exit 5, still non-zero, never a vacuous PASS.
+    assert.equal(code, 5)
     const parsed = JSON.parse(lines.join('\n'))
     assert.equal(parsed.verdict, 'FAIL')
+    assert.deepEqual(parsed.failed, ['derive'])
     assert.match(parsed.error, /run branch/i)
     assert.match(parsed.error, /base branch/i)
   })
@@ -6653,7 +6665,7 @@ test('gate reports an actionable message, not raw git stderr, when the plan is a
     lines.length = 0
     await writeEnforcementManifest(root)
     const code = await runCli(['gate', '--run', 'r1', '--plan', 'missing-plan.md', '--root', root], io)
-    assert.equal(code, 1)
+    assert.equal(code, 5)
     const parsed = JSON.parse(lines.join('\n'))
     assert.match(parsed.error, /anchor/i)
     assert.match(parsed.error, /--plan/)
@@ -7530,7 +7542,7 @@ test('a valueless --results before another flag is still reported as missing', a
   })
 })
 
-test('gate exits 1 with a message when status.json is unreadable rather than throwing', async () => {
+test('gate exits 5 with a message when status.json is unreadable rather than throwing', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     const config = { phases: { default: { checks: [{ name: 'noop', kind: 'command', run: 'node -e ""' }] } } }
@@ -7540,7 +7552,7 @@ test('gate exits 1 with a message when status.json is unreadable rather than thr
     await writeFile(path.join(root, '.fleetmates', 'r1', 'status.json'), '{ not json', 'utf8')
     lines.length = 0
     const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root], io)
-    assert.equal(code, 1)
+    assert.equal(code, 5)
     assert.match(lines.join('\n'), /could not read run state/)
   })
 })
@@ -7559,9 +7571,11 @@ test('a corrupt status.json produces parseable JSON whose verdict is FAIL, not P
     // A derived run, so nothing else is on stdout: `--no-fleet` prints its own notice line,
     // which would mask whether the verdict document itself is the whole output.
     const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--root', root], io)
-    assert.equal(code, 1)
-
     const out = lines.join('\n')
+    // Exit 1, not the state-failure exit 5: on a derived run the injected fileset and ownership
+    // checks fail too (this plan's tasks have no branches), so run-state is not the only failure.
+    assert.equal(code, 1, out)
+
     assert.doesNotMatch(out, /"verdict": "PASS"/)
     // The whole of stdout parses as JSON: no error line trailing the verdict document.
     const parsed = JSON.parse(out)
@@ -7570,6 +7584,23 @@ test('a corrupt status.json produces parseable JSON whose verdict is FAIL, not P
     assert.match(parsed.error, /could not read run state/)
     // The computed check results are still carried, so the failure is attributable.
     assert.ok(parsed.results.some((r) => r.name === 'noop' && r.status === 'pass'))
+  })
+})
+
+// Exit 5 is only for a verdict whose every failed entry is a state failure. A real check that
+// failed alongside unreadable run state is still a code failure: exit 1, not 5.
+test('a corrupt status.json beside a failing check exits 1, not the state-failure exit 5', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const config = { phases: { default: { checks: [{ name: 'boom', kind: 'command', run: 'node -e "process.exit(3)"' }] } } }
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
+    await writeFile(path.join(root, '.fleetmates', 'r1', 'status.json'), '{ not json', 'utf8')
+    lines.length = 0
+    // --no-fleet, so the failing command check is the only failure beside run-state.
+    const code = await runCli(['gate', '--run', 'r1', '--plan', 'plan.md', '--no-fleet', '--root', root], io)
+    const parsed = JSON.parse(lines.slice(lines.findIndex((line) => line.startsWith('{'))).join('\n'))
+    assert.deepEqual(parsed.failed, ['boom', 'run-state'])
+    assert.equal(code, 1)
   })
 })
 
@@ -15432,7 +15463,7 @@ test('message SIGTERMs a live recorded process before resuming', {
 test('message signals nothing when the record names no process', {
   skip: process.platform === 'win32' ? 'no POSIX process groups on win32' : false,
 }, async () => {
-  await withRepo(async ({ root, io }) => {
+  await withRepo(async ({ root, io, lines }) => {
     const sessionsDir = path.join(root, '.fleetmates', 'r1', 'sessions')
     await mkdir(sessionsDir, { recursive: true })
     await writeFile(path.join(sessionsDir, 'T1.json'), JSON.stringify({
@@ -15444,7 +15475,11 @@ test('message signals nothing when the record names no process', {
     try {
       process.env.PATH = emptyBin
       const code = await runCli(['message', '--run', 'r1', '--task', 'T1', '--text', 'hi', '--root', root], io)
-      assert.equal(code, 0)
+      // The resume could not spawn (PATH holds no codex): Node reports a negative exit code for a
+      // spawn failure, which is no resumed turn at all, so message exits 4, not 0.
+      const outcome = JSON.parse(lines.find((line) => line.startsWith('{')))
+      assert.ok(outcome.exitCode < 0, JSON.stringify(outcome))
+      assert.equal(code, 4)
       // The unrelated live process is still running: message signalled nothing.
       assert.doesNotThrow(() => process.kill(sentinel.pid, 0))
     } finally {

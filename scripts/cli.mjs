@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { migrate } from './migrate.mjs'
 import { NAMES } from './names.mjs'
@@ -164,6 +164,8 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|d
   workflow-resume --run <id> --root <absolute-path>
   workflow-status --run <id> --root <absolute-path>
   workflow-resolve --file <resolution-json> --root <absolute-path>
+  workflow-accept --file <absolute-acceptance-json> --root <absolute-path>
+  workflow-prune --run <id> --root <absolute-path>
   bind-session --run <id> --plan <path> --session <id> [--base <branch>] [--root <path>]
   suspend --run <id> --plan <path> [--base <branch>] [--root <path>]
   abandon --run <id> --plan <path> [--base <branch>] [--root <path>]
@@ -186,7 +188,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|d
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
   brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
-  dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
+  dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>] [--fix-round --task <id>...] [--execution <absolute-json-path>]
   dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   dispatch-integrator --run <id> [--isolated-legacy] [--phase <name>] [--harness <name>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   message  --run <id> --task <id> --text <s> [--harness <name>] [--root <path>]
@@ -224,9 +226,14 @@ function spellingAdvice(name) {
   return `write \`--${name} <value>\``
 }
 
+// Flags whose every occurrence is kept, in order, beside the last-wins value in `flags`:
+// `dispatch --fix-round --task <id> --task <id>` names each task of a repair round.
+const REPEATABLE_FLAGS = new Set(['task'])
+
 function parseFlags(argv) {
   const flags = {}
   const positional = []
+  const repeated = {}
   // Rejected spellings, reported by the caller before any command runs — never dropped, or the
   // flag would go missing exactly as it did before.
   const rejected = []
@@ -272,11 +279,12 @@ function parseFlags(argv) {
         flags[name] = next
         i += 1
       }
+      if (REPEATABLE_FLAGS.has(name)) (repeated[name] ??= []).push(flags[name])
     } else {
       positional.push(argv[i])
     }
   }
-  return { flags, positional, rejected }
+  return { flags, positional, rejected, repeated }
 }
 
 // `null`, not `{}`, when there is no package.json: `inferGateConfig` distinguishes "a Node
@@ -326,6 +334,8 @@ export const REQUIRED = {
   'workflow-resume': ['run', 'root'],
   'workflow-status': ['run', 'root'],
   'workflow-resolve': ['file', 'root'],
+  'workflow-accept': ['file', 'root'],
+  'workflow-prune': ['run', 'root'],
   'bind-session': ['run', 'plan', 'session'],
   suspend: ['run', 'plan'],
   resume: ['run'],
@@ -393,7 +403,7 @@ export const KNOWN_FLAGS = {
   brief: ['run', 'task', 'plan', 'base', 'fix-round'],
   complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
   workflow: ['run', 'phase', 'models', 'plan', 'base'],
-  dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models', 'model', 'effort', 'environment', 'role-policy'],
+  dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models', 'model', 'effort', 'environment', 'role-policy', 'fix-round', 'task', 'execution'],
   'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'model', 'effort', 'environment', 'role-policy'],
   'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy', 'isolated-legacy'],
   message: ['run', 'task', 'harness', 'text'],
@@ -416,6 +426,8 @@ export const KNOWN_FLAGS = {
   'workflow-resume': ['run'],
   'workflow-status': ['run'],
   'workflow-resolve': ['file'],
+  'workflow-accept': ['file'],
+  'workflow-prune': ['run'],
   'bind-session': ['run', 'plan', 'base', 'session'],
   suspend: ['run', 'plan', 'base'],
   resume: ['run'],
@@ -453,6 +465,12 @@ const NAMED_PHASE_REFUSAL = '__named_phase__'
 
 const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round', 'dispatch'])
 
+// `gate`'s exit when the only failed entries of its FAIL verdict are `derive` (no anchor or plan
+// state) and/or `run-state` (unreadable status.json or plan.json): no verdict about the code exists,
+// so a caller that reads exit 1 as a code failure must not start a repair round on it. A verdict
+// with any other failed check keeps exit 1.
+const GATE_STATE_FAILURE = 5
+
 // Every command that writes to the repository's git dir. Each fails fast through the
 // `gitDirWritable` preflight below when this shell cannot write the common dir, so a sandboxed
 // orchestrator gets one fixable message instead of a failure deep inside a worktree add, a clone,
@@ -461,7 +479,7 @@ const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round', '
 // named them.
 const GIT_WRITING_COMMANDS = new Set([
   'dispatch', 'dispatch-reviews', 'dispatch-integrator', 'finish', 'prune-run', 'init-run', 'gate',
-  'workflow-execute', 'workflow-resume', 'workflow-resolve',
+  'workflow-execute', 'workflow-resume', 'workflow-resolve', 'workflow-accept', 'workflow-prune',
 ])
 
 // Every command that accepts caller-supplied check results. `gate` takes a flat list for the one
@@ -2960,40 +2978,58 @@ function compactJson(value) {
   return JSON.stringify(value).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'))
 }
 
-// `message` judges a resumed turn by its result file: its digest before the resume, then whether
-// the file afterwards is absent, unchanged, invalid or a new valid result. Read bounded (1 MiB,
-// no symlink), so an oversized or planted file is `invalid-result`, never a large read.
-async function messageResultDigest(file) {
-  try { return createHash('sha256').update(await readWorkflowInput(file).then(value => JSON.stringify(value))).digest('hex') }
-  catch (error) { return error?.code === 'ENOENT' ? null : 'unreadable' }
-}
-async function messageOutcome(file, before) {
-  let value
-  try { value = await readWorkflowInput(file) } catch (error) {
-    return { result: error?.code === 'ENOENT' ? 'no-result' : 'invalid-result' }
+// `message` judges a resumed turn by its result: its digest before the resume, then whether the
+// result afterwards is absent, unchanged, invalid or a new valid result. The result file is read
+// bounded (1 MiB, no symlink), so an oversized or planted file is `invalid-result`, never a large
+// read. Only when no result file exists at all is the adapter's own `readResult` asked, with the
+// stream path: cursor writes its answer into the stream file and never into <task>.result.json.
+const digestOf = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+async function messageResult(adapter, paths) {
+  try { return { value: await readWorkflowInput(paths.resultPath) } } catch (error) {
+    if (error?.code !== 'ENOENT') return { invalid: true }
   }
-  if (!validateResult(value)) return { result: 'invalid-result' }
-  const digest = createHash('sha256').update(JSON.stringify(value)).digest('hex')
-  return digest === before ? { result: 'unchanged-result', status: value.status } : { result: 'new-result', status: value.status }
+  if (typeof adapter.readResult !== 'function') return { value: null }
+  try { return { value: (await adapter.readResult({ resultPath: paths.resultPath, streamPath: paths.streamPath })) ?? null } }
+  catch { return { invalid: true } }
+}
+async function messageResultDigest(adapter, paths) {
+  const read = await messageResult(adapter, paths)
+  return read.invalid ? 'unreadable' : read.value === null ? null : digestOf(read.value)
+}
+async function messageOutcome(adapter, paths, before) {
+  const read = await messageResult(adapter, paths)
+  if (read.invalid) return { result: 'invalid-result' }
+  if (read.value === null) return { result: 'no-result' }
+  if (!validateResult(read.value)) return { result: 'invalid-result' }
+  return digestOf(read.value) === before ? { result: 'unchanged-result', status: read.value.status } : { result: 'new-result', status: read.value.status }
 }
 
 // ---- bounded workflow execution through versioned CLI contracts ----
 //
-// workflow-execute, workflow-resume, workflow-status and workflow-resolve route the fixed-profile
-// controller (scripts/workflow-controller.mjs), the journal reconciliation and the local effect
-// resolution through one explicit absolute project root. The installed CLI entrypoint and the
-// executor are the trusted host's, never the request's: `runCli` always passes the host below, and
-// only the exported `workflowCommand` accepts another one, which this suite uses to run a fake CLI.
+// workflow-execute, workflow-resume, workflow-status, workflow-resolve, workflow-accept and
+// workflow-prune route the fixed-profile controller (scripts/workflow-controller.mjs), the journal
+// reconciliation, the local effect resolution, the acceptance evidence and the artifact pruning
+// through one explicit absolute project root. The installed CLI entrypoint and the executor are the
+// trusted host's, never the request's: `runCli` always passes the host below, and only the exported
+// `workflowCommand` accepts another one, which this suite uses to run a fake CLI.
 // Exit codes: 2 for a malformed or refused request; 4 for every execute/resume report that is not
-// verified complete and for a status with any unresolved attempt; 0 for a recorded resolution and
-// for a status whose attempts all reconcile (which still reports verifiedComplete false). An
-// execute/resume exit 0 requires a verified-complete report, which needs native verification and
-// acceptance evidence; no fixture in this repository produces one, so that path is unexercised.
-const WORKFLOW_COMMANDS = new Set(['workflow-execute', 'workflow-resume', 'workflow-status', 'workflow-resolve'])
+// verified complete and for a status with any unresolved attempt; 0 for a recorded resolution, for
+// recorded acceptance evidence, for a completed prune and for a status whose attempts all reconcile
+// (which still reports verifiedComplete false). An execute/resume exit 0 requires a
+// verified-complete report, which needs native verification as well as acceptance evidence; the
+// suites here inject a verification fixture, so that exit is not exercised by them.
+const WORKFLOW_COMMANDS = new Set(['workflow-execute', 'workflow-resume', 'workflow-status', 'workflow-resolve', 'workflow-accept', 'workflow-prune'])
 const WORKFLOW_EXECUTE_KEYS = ['version', 'profile', 'runId', 'planPath', 'baseBranch', 'baseCommit', 'runBranch', 'harness', 'sandboxMode',
   'parameters', 'limits', 'environment', 'rolePolicy', 'retention', 'model', 'effort']
 const WORKFLOW_RESOLVE_KEYS = ['version', 'runId', 'effectId', 'outcome', 'reason']
-const WORKFLOW_RETENTION_UPPER = { maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 * 1024 * 1024, maxAgeMs: 365 * 24 * 60 * 60 * 1000 }
+const WORKFLOW_ACCEPT_KEYS = ['version', 'runId', 'tree', 'criteria']
+const WORKFLOW_CRITERION_KEYS = ['criterion', 'status', 'note']
+// One token, as the journal's labels and the effect resolution's reason are.
+const WORKFLOW_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+// The controller takes at most 20 acceptance entries (workflow-controller.mjs validateAcceptance).
+const MAX_ACCEPTANCE_CRITERIA = 20
+// The journal step that records acceptance evidence; the controller does not count it as an attempt.
+const ACCEPTANCE_STEP = 'acceptance'
 // One argv token for a harness model flag: a leading dash would read as a flag of its own.
 const DISPATCH_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@+[\]-]{0,127}$/
 const WORKFLOW_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/
@@ -3002,9 +3038,9 @@ const WORKFLOW_LIMITATIONS = [
   'workflow-status reads the local journal only: it never establishes completion, which needs fresh final gates through workflow-resume.',
   'A Stop or SubagentStop handler run by a synthetic call is not a graceful harness callback; live callback validation is pending.',
   'Standing skips are approved in the tracked manifest and never fail a gate; they remain unverified behavior.',
-  'An interrupted agent step stays an unknown effect: workflow-resolve resolves only recorded external effects, and no command clears an interrupted dispatch.',
-  'A code failure stops at the existing fix decision: no command delivers a repair round for a profile run, so maxRepairRounds is validated and recorded but not consumed.',
-  'No command produces acceptance evidence, so a profile run ends human-required until acceptance artifacts exist.',
+  'An interrupted agent step stays an unknown effect until a local operator resolves it with workflow-resolve: not-started lets resume redispatch it, completed lets resume validate and reuse its outputs. The resolution is a local observation, not authenticated authorization.',
+  'A code failure is repaired only when the fix decision retries, and at most min(maxRepairRounds, the phase fix budget) rounds per phase; host.repairRounds.delivered counts the rounds the controller ran.',
+  'Acceptance evidence is a local operator observation recorded with workflow-accept for the current integrated run-branch tree; until every required criterion has passing evidence, a profile run ends human-required.',
 ]
 const WORKFLOW_HOST_TRUST = 'Model and effort are added by the trusted host only to dispatch and dispatch-reviews, from the validated request; no request field supplies a command, argv, installed CLI path or executable.'
 
@@ -3081,43 +3117,19 @@ async function retainedWorkflowBundle(common, runId) {
   if (requests.length !== 1) return null
   const reference = requests[0].end.artifacts.find(a => a.kind === 'workflow-request')
   if (!reference) return null
-  const bytes = await readExecutionArtifact({ common, runId, reference, retention: WORKFLOW_RETENTION_UPPER })
+  const { RETENTION_LIMITS } = await import('./execution-artifacts.mjs')
+  const bytes = await readExecutionArtifact({ common, runId, reference, retention: RETENTION_LIMITS })
   const bundle = JSON.parse(bytes.toString('utf8'))
   return bundle && typeof bundle === 'object' && bundle.request?.runId === runId ? bundle : null
 }
 
-// The real gate exits 1 for a FAIL verdict AND when it cannot derive run state; the controller reads
-// every gate exit 1 as a code failure. The trusted host reads the retained gate output back, and a
-// verdict naming `derive` (no anchor/plan state) or `run-state` (unreadable run state) reports the
-// stop as blocked infrastructure instead: it is not something a repair round can fix.
-async function reclassifyGateStateFailure(report, { common, runId, retention }) {
-  const last = report.blockers?.at(-1)
-  if (!last || last.category !== 'code' || !/^gate-\d+$/.test(last.step)) return null
-  const step = report.steps.filter(s => s.id === last.step && s.status === 'failed').at(-1)
-  const reference = step?.artifacts.find(a => a.kind === 'step-output' || a.kind === 'step-stdout')
-  if (!reference) return null
-  const { readExecutionArtifact } = await import('./execution-artifacts.mjs')
-  let verdict = null
-  try {
-    const lines = (await readExecutionArtifact({ common, runId, reference, retention })).toString('utf8').split(/\r?\n/)
-    const start = lines.indexOf('{')
-    verdict = start < 0 ? null : JSON.parse(lines.slice(start).join('\n'))
-  } catch { return null }
-  const failed = Array.isArray(verdict?.failed) ? verdict.failed : []
-  const state = verdict?.verdict === 'FAIL' && ((failed.length === 1 && failed[0] === 'derive' && verdict.results === undefined)
-    || (failed.includes('run-state') && typeof verdict.error === 'string' && verdict.error.startsWith('could not read run state')))
-  if (!state) return null
-  last.category = 'infrastructure'
-  last.reason = `gate could not establish run state (${failed.includes('derive') ? 'derive' : 'run-state'}); not a code failure`.slice(0, 512)
-  if (report.state === 'failed') report.state = 'blocked'
-  return { step: last.step, from: 'code', to: 'infrastructure', evidence: `gate verdict failed: ${failed.includes('derive') ? 'derive' : 'run-state'}` }
-}
-
-async function finishWorkflowReport(command, report, { selection, request, common, retention }, io) {
-  const reclassified = await reclassifyGateStateFailure(report, { common, runId: request.runId, retention })
+// The gate's state failures (`derive`, `run-state`) are its exit 5, which the controller itself
+// classifies as infrastructure, so the host reports the controller's classification unchanged.
+async function finishWorkflowReport(command, report, { selection, request }, io) {
+  const rounds = Array.isArray(report.repair?.rounds) ? report.repair.rounds : []
   report.host = { version: 1, command, dispatch: selection,
-    repairRounds: { max: request.limits.maxRepairRounds, delivered: 0, decision: report.repair?.decision?.decision ?? null },
-    ...(reclassified ? { reclassified } : {}), limitations: WORKFLOW_LIMITATIONS, trust: WORKFLOW_HOST_TRUST }
+    repairRounds: { max: request.limits.maxRepairRounds, delivered: rounds.length, decision: report.repair?.decision?.decision ?? null },
+    limitations: WORKFLOW_LIMITATIONS, trust: WORKFLOW_HOST_TRUST }
   io.out(workflowJson(report))
   return report.state === 'verified-complete' && report.verifiedComplete === true ? 0 : 4
 }
@@ -3147,7 +3159,7 @@ async function workflowExecute(root, flags, io, host) {
   const { executeWorkflowProfile } = await import('./workflow-controller.mjs')
   const report = await executeWorkflowProfile({ root, cliPath, request, environment: input.environment, rolePolicy: input.rolePolicy,
     retention: input.retention, executor: workflowExecutor(host, cliPath, selection), now: host.now, verificationFactory: host.verificationFactory })
-  return finishWorkflowReport('workflow-execute', report, { selection, request, common: await workflowCommon(root), retention: input.retention }, io)
+  return finishWorkflowReport('workflow-execute', report, { selection, request }, io)
 }
 
 async function workflowResume(root, flags, io, host) {
@@ -3158,18 +3170,60 @@ async function workflowResume(root, flags, io, host) {
   const dispatch = bundle.request?.parameters?.dispatch
   if (dispatch === undefined) throw new Error('The retained request names no explicit model and effort; it was not started through workflow-execute and has no unrestricted fallback')
   const selection = dispatchSelection(dispatch, bundle.request.harness)
+  const acceptance = await retainedAcceptance(common, flags.run, bundle.retention)
   const cliPath = await realpath(host.cliPath)
   const { resumeWorkflowProfile } = await import('./workflow-controller.mjs')
   const report = await resumeWorkflowProfile({ root, cliPath, runId: flags.run, executor: workflowExecutor(host, cliPath, selection),
-    now: host.now, verificationFactory: host.verificationFactory })
-  return finishWorkflowReport('workflow-resume', report, { selection, request: bundle.request, common, retention: bundle.retention }, io)
+    now: host.now, verificationFactory: host.verificationFactory, ...(acceptance.length ? { acceptance } : {}) })
+  return finishWorkflowReport('workflow-resume', report, { selection, request: bundle.request }, io)
+}
+
+// The acceptance evidence workflow-accept recorded for this run: the `acceptance-evidence`
+// references of its completed `acceptance` journal steps, the latest one per criterion, because the
+// controller accepts exactly one entry per criterion.
+async function retainedAcceptance(common, runId, retention) {
+  const { readExecutionEvents, strictExecutionAttempts } = await import('./execution-journal.mjs')
+  const { readExecutionArtifact } = await import('./execution-artifacts.mjs')
+  const groups = strictExecutionAttempts(await readExecutionEvents(common, runId))
+    .filter(g => g.start.step === ACCEPTANCE_STEP && g.end?.kind === 'step-completed')
+    .sort((a, b) => a.end.at - b.end.at)
+  const latest = new Map()
+  for (const group of groups) {
+    for (const reference of group.end.artifacts.filter(a => a.kind === 'acceptance-evidence')) {
+      let evidence
+      try { evidence = JSON.parse((await readExecutionArtifact({ common, runId, reference, retention })).toString('utf8')) } catch { continue }
+      if (typeof evidence?.criterion === 'string') { latest.delete(evidence.criterion); latest.set(evidence.criterion, reference) }
+    }
+  }
+  return [...latest].slice(-MAX_ACCEPTANCE_CRITERIA).map(([criterion, reference]) => ({ criterion, reference }))
+}
+
+// The run-branch tips the completed integration steps recorded as their `after`, read from their
+// retained integration receipts, in journal order. A step that recorded the run branch before an
+// integration moved it is then reported `superseded` by reconciliation rather than `branch-changed`.
+async function integratedAdvances(common, runId, groups, runBranch, retention) {
+  if (typeof runBranch !== 'string') return []
+  const { readExecutionArtifact } = await import('./execution-artifacts.mjs')
+  const advances = []
+  const integrations = groups.filter(g => /^integrate-\d+(?:\.|$)/.test(g.start.step) && g.end?.kind === 'step-completed')
+    .sort((a, b) => a.end.at - b.end.at)
+  for (const group of integrations) {
+    const reference = group.end.artifacts.find(a => a.kind === 'integration-receipt')
+    if (!reference) continue
+    try {
+      const receipt = JSON.parse((await readExecutionArtifact({ common, runId, reference, retention })).toString('utf8'))
+      if (typeof receipt?.after === 'string' && COMMIT_ID.test(receipt.after)) advances.push({ ref: `refs/heads/${runBranch}`, to: receipt.after })
+    } catch { /* an unreadable receipt names no advance */ }
+  }
+  return advances.slice(-100)
 }
 
 // Read-only: the journal, retained artifacts, current refs and the root checkout are observed and
 // nothing is written. Shared by workflow-status and doctor. `null` when the run has no journal.
 async function workflowRecovery(root, runId) {
   const { readExecutionEvents, strictExecutionAttempts } = await import('./execution-journal.mjs')
-  const { reconcileExecutionAttempt } = await import('./execution-recovery.mjs')
+  const { reconcileExecution } = await import('./execution-recovery.mjs')
+  const { RETENTION_LIMITS } = await import('./execution-artifacts.mjs')
   const { lifecycleStatus } = await import('./workflow-lifecycle.mjs')
   const common = await workflowCommon(root)
   const events = await readExecutionEvents(common, runId)
@@ -3184,9 +3238,10 @@ async function workflowRecovery(root, runId) {
   if (bundle) for (const branch of [bundle.request.baseBranch, bundle.request.runBranch]) if (typeof branch === 'string') refs.add(`refs/heads/${branch}`)
   const branches = {}
   for (const ref of refs) { try { branches[ref] = await git.resolveRef(ref) } catch { /* absent ref */ } }
-  const retention = bundle?.retention ?? WORKFLOW_RETENTION_UPPER
+  const retention = bundle?.retention ?? RETENTION_LIMITS
+  const expectedAdvances = await integratedAdvances(common, runId, groups, bundle?.request.runBranch, retention)
   const reconciled = latest
-    ? await reconcileExecutionAttempt({ common, runId, inputs: latest.inputs, branches, retention, checkouts: { root: await realpath(root) } })
+    ? await reconcileExecution({ common, runId, inputs: latest.inputs, branches, retention, checkouts: { root: await realpath(root) }, expectedAdvances })
     : { attempts: [], trust: [] }
   const ends = new Map(groups.map(g => [JSON.stringify([g.start.executionId, g.start.step, g.start.attempt]), g.end?.kind ?? null]))
   const attempts = reconciled.attempts.map(a => {
@@ -3196,8 +3251,9 @@ async function workflowRecovery(root, runId) {
       missingArtifacts: a.missingArtifacts?.length ?? 0, changedBranches: a.changedBranches ?? [], effects: a.effects ?? [] }
   })
   // The request record is a retained input, not a step output: its identity predates the observed
-  // environment, so it is listed but never counted as an unresolved step.
-  const unresolved = attempts.filter(a => a.step !== 'request' && !a.reuse)
+  // environment, so it is listed but never counted as an unresolved step. A superseded attempt is
+  // one a later integration moved past, which is not unresolved either.
+  const unresolved = attempts.filter(a => a.step !== 'request' && !a.reuse && a.state !== 'superseded')
   const unknownEffects = attempts.flatMap(a => a.effects.filter(e => e.outcome === 'unknown').map(e => ({ step: a.step, attempt: a.attempt, id: e.id, kind: e.kind })))
   let standingSkips = null, inputsChanged = null
   if (bundle && typeof bundle.request.baseBranch === 'string') {
@@ -3231,10 +3287,92 @@ async function workflowResolve(root, flags, io) {
   const input = await readWorkflowInput(flags.file)
   workflowFields(input, WORKFLOW_RESOLVE_KEYS, 'workflow-resolve resolution')
   if (input.version !== 1 || typeof input.runId !== 'string' || !WORKFLOW_RUN_ID.test(input.runId)) throw new Error('workflow-resolve resolution must be version 1 for a valid run')
+  if (typeof input.reason !== 'string' || !WORKFLOW_TOKEN.test(input.reason)) {
+    throw new Error('reason must be one token: a letter or digit, then up to 127 letters, digits, dots, underscores or dashes, with no spaces')
+  }
   const { resolveExecutionEffect } = await import('./execution-recovery.mjs')
   const result = await resolveExecutionEffect({ common: await workflowCommon(root), runId: input.runId, effectId: input.effectId, resolution: input.outcome, reason: input.reason })
   io.out(workflowJson({ version: 1, recorded: true, runId: input.runId, effectId: input.effectId, outcome: input.outcome, reason: input.reason,
     trust: result.trust, authenticatedAuthorization: false, externalEffect: 'none-performed' }))
+  return 0
+}
+
+// workflow-accept: acceptance evidence for the current integrated run-branch tree, one retained
+// `acceptance-evidence` artifact per criterion holding exactly { version: 1, criterion, tree, status },
+// recorded as a completed `acceptance` step in the run's journal so workflow-resume can pass every
+// reference to the controller and workflow-prune keeps them live. The tree must be the run branch's
+// current tree, and the run branch must still be at the tip its last completed integration recorded.
+async function workflowAccept(root, flags, io) {
+  if (typeof flags.file !== 'string' || !path.isAbsolute(flags.file)) throw new Error('workflow-accept requires an absolute --file')
+  const input = await readWorkflowInput(flags.file)
+  workflowFields(input, WORKFLOW_ACCEPT_KEYS, 'workflow-accept evidence')
+  if (input.version !== 1 || typeof input.runId !== 'string' || !WORKFLOW_RUN_ID.test(input.runId)) throw new Error('workflow-accept evidence must be version 1 for a valid run')
+  if (typeof input.tree !== 'string' || !COMMIT_ID.test(input.tree)) throw new Error('tree must be an exact tree id')
+  if (!Array.isArray(input.criteria) || input.criteria.length < 1 || input.criteria.length > MAX_ACCEPTANCE_CRITERIA) {
+    throw new Error(`criteria must list 1 to ${MAX_ACCEPTANCE_CRITERIA} entries`)
+  }
+  const named = new Set()
+  for (const entry of input.criteria) {
+    workflowFields(entry, WORKFLOW_CRITERION_KEYS, 'acceptance criterion')
+    if (typeof entry.criterion !== 'string' || !WORKFLOW_TOKEN.test(entry.criterion)) throw new Error('criterion must be one token')
+    if (entry.status !== 'pass' && entry.status !== 'fail') throw new Error('criterion status must be pass or fail')
+    if (typeof entry.note !== 'string' || entry.note.length > 1024) throw new Error('note must be a string of at most 1024 characters')
+    if (named.has(entry.criterion)) throw new Error(`criterion ${entry.criterion} is named more than once`)
+    named.add(entry.criterion)
+  }
+  const common = await workflowCommon(root)
+  const { readExecutionEvents, strictExecutionAttempts, appendExecutionEvent } = await import('./execution-journal.mjs')
+  const { retainExecutionArtifact } = await import('./execution-artifacts.mjs')
+  const bundle = await retainedWorkflowBundle(common, input.runId)
+  if (!bundle) throw new Error('Run has no single retained workflow request to accept evidence for')
+  const runRef = `refs/heads/${bundle.request.runBranch}`
+  let tip = null
+  try { tip = await createGit({ cwd: root }).resolveRef(runRef) } catch { tip = null }
+  if (!tip) throw new Error('The run branch does not exist')
+  const events = await readExecutionEvents(common, input.runId)
+  const groups = strictExecutionAttempts(events)
+  const integrated = (await integratedAdvances(common, input.runId, groups, bundle.request.runBranch, bundle.retention)).at(-1)
+  if (!integrated || integrated.to !== tip) throw new Error('The run branch is not at the tip its last completed integration recorded')
+  const treeRead = await defaultGitExec(['rev-parse', '--verify', '--end-of-options', `${tip}^{tree}`], root)
+  if (treeRead.code !== 0 || input.tree !== treeRead.stdout.trim()) throw new Error('tree is not the current integrated run-branch tree')
+  const prior = new Set((await retainedAcceptance(common, input.runId, bundle.retention)).map(entry => entry.criterion))
+  if (new Set([...prior, ...named]).size > MAX_ACCEPTANCE_CRITERIA) throw new Error(`a run takes at most ${MAX_ACCEPTANCE_CRITERIA} acceptance criteria`)
+  const executionId = groups.find(g => g.start.step === 'request').start.executionId
+  const latest = events.filter(e => e.version === 2 && e.executionId === executionId).at(-1)
+  const retained = []
+  for (const entry of input.criteria) {
+    const bytes = Buffer.from(JSON.stringify({ version: 1, criterion: entry.criterion, tree: input.tree, status: entry.status }))
+    const { reference } = await retainExecutionArtifact({ common, runId: input.runId, kind: 'acceptance-evidence', bytes, retention: bundle.retention })
+    retained.push({ criterion: entry.criterion, status: entry.status, reference })
+  }
+  const attempt = `${ACCEPTANCE_STEP}.${groups.filter(g => g.start.executionId === executionId && g.start.step === ACCEPTANCE_STEP).length + 1}`
+  const at = Math.max(Date.now(), ...events.map(e => e.at + 1))
+  const base = { version: 2, runId: input.runId, executionId, task: 'profile', step: ACCEPTANCE_STEP, attempt,
+    inputs: latest.inputs, branches: { [runRef]: tip }, checkout: 'root' }
+  await appendExecutionEvent(common, { ...base, id: randomUUID(), kind: 'step-started', at, artifacts: [] }, { requireFreshStart: true })
+  await appendExecutionEvent(common, { ...base, id: randomUUID(), kind: 'step-completed', at: at + 1, artifacts: retained.map(entry => entry.reference) })
+  io.out(workflowJson({ version: 1, recorded: true, runId: input.runId, tree: input.tree, attempt, retained,
+    trust: 'local-operator-observation', authenticatedAuthorization: false }))
+  return 0
+}
+
+// workflow-prune: removes retained artifacts no journal record references, under the run's
+// retention; every referenced artifact is live and kept. An empty live set removes everything, so
+// it is passed only when the journal records no artifact reference at all.
+async function workflowPrune(root, flags, io) {
+  if (typeof flags.run !== 'string' || !WORKFLOW_RUN_ID.test(flags.run)) throw new Error('Invalid run identity')
+  const common = await workflowCommon(root)
+  const { readExecutionEvents } = await import('./execution-journal.mjs')
+  const { pruneExecutionArtifacts, RETENTION_LIMITS } = await import('./execution-artifacts.mjs')
+  const events = await readExecutionEvents(common, flags.run)
+  const live = new Map()
+  for (const event of events) for (const reference of event.artifacts ?? []) live.set(JSON.stringify(reference), reference)
+  let bundle = null
+  try { bundle = await retainedWorkflowBundle(common, flags.run) } catch { bundle = null }
+  const result = await pruneExecutionArtifacts({ common, runId: flags.run, retention: bundle?.retention ?? RETENTION_LIMITS, liveReferences: [...live.values()] })
+  io.out(workflowJson({ version: 1, runId: flags.run, journalEvents: events.length, liveReferences: live.size, removed: result.removed, kept: result.kept,
+    bytes: result.bytes, unresolvedReferences: result.unresolvedReferences, reconciled: result.reconciled, limitsSatisfied: result.limitsSatisfied,
+    retentionExceeded: result.retentionExceeded }))
   return 0
 }
 
@@ -3246,6 +3384,8 @@ export async function workflowCommand(command, flags, io, host = trustedWorkflow
     if (command === 'workflow-resume') return await workflowResume(root, flags, io, host)
     if (command === 'workflow-status') return await workflowStatus(root, flags, io)
     if (command === 'workflow-resolve') return await workflowResolve(root, flags, io)
+    if (command === 'workflow-accept') return await workflowAccept(root, flags, io)
+    if (command === 'workflow-prune') return await workflowPrune(root, flags, io)
     throw new Error(`unknown workflow command ${command}`)
   } catch (error) {
     io.out(workflowJson({ error: String(error?.message ?? error).slice(0, 2048) }))
@@ -3271,7 +3411,7 @@ export async function runCli(argv, io = { out: console.log }) {
   // keeps working: `err` defaults to console.error, exactly as `out` defaults to console.log.
   io = { err: console.error, ...io }
   const [command, ...rest] = argv
-  const { flags, positional, rejected } = parseFlags(rest)
+  const { flags, positional, rejected, repeated } = parseFlags(rest)
   // Refused before EVERYTHING else — before the required-argument check, before any command
   // body. A rejected spelling must not be able to reach a guard that tests the flag it was
   // meant to set: `gate --no-fleet=false` has to exit here, not after `missingArgs` has
@@ -3411,6 +3551,37 @@ export async function runCli(argv, io = { out: console.log }) {
   if (command === 'dispatch-integrator' && flags['isolated-legacy'] !== undefined && flags['isolated-legacy'] !== true) {
     io.out('--isolated-legacy is a bare option and does not take a value')
     return 2
+  }
+
+  // `dispatch --fix-round --task <id>...` and `dispatch --execution <absolute path>` (the workflow
+  // controller's repair round and dispatch execution contract): an unknown task, a `--task` outside
+  // a fix round, a relative, missing or unreadable contract file all exit 2 here, before the
+  // prerequisites, the harness probe or any spawn. The contract object is passed to the driver
+  // unchanged; `dispatchPhase` validates its shape.
+  let fixRoundTasks = null, dispatchExecution
+  if (command === 'dispatch') {
+    const named = repeated.task ?? []
+    const fixRound = flags['fix-round'] === true
+    if (named.length > 0 && !fixRound) { io.out('--task names the tasks of a repair round; pass it with --fix-round'); return 2 }
+    if (fixRound) {
+      if (named.length === 0 || named.some((id) => typeof id !== 'string')) { io.out('--fix-round needs --task <id> for each task to redispatch'); return 2 }
+      let plan = null
+      try { plan = await readState(root, runId, 'plan') } catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+      const phaseIds = new Set((plan?.tasks ?? []).filter((t) => t.phase === Number(flags.phase)).map((t) => t.id))
+      const unknown = named.filter((id) => !phaseIds.has(id))
+      if (unknown.length > 0) {
+        io.out(`--task names no task of phase ${printable(flags.phase)} in run ${printable(runId)}: ${unknown.map(printable).join(', ')}`)
+        return 2
+      }
+      fixRoundTasks = new Set(named)
+    }
+    if (flags.execution !== undefined) {
+      if (typeof flags.execution !== 'string' || !path.isAbsolute(flags.execution)) { io.out('--execution needs the absolute path of an execution contract JSON file'); return 2 }
+      try { dispatchExecution = await readWorkflowInput(flags.execution) } catch (error) {
+        io.out(JSON.stringify({ error: `--execution: ${error?.code === 'ENOENT' ? 'no such file' : String(error?.message ?? error)}`.slice(0, 512) }))
+        return 2
+      }
+    }
   }
 
   let prerequisites
@@ -4001,7 +4172,8 @@ export async function runCli(argv, io = { out: console.log }) {
     const plan = await readState(root, runId, 'plan')
     if (!plan) { io.out(`no plan for run ${runId} — run init-run first`); return 4 }
     const phase = Number(flags.phase)
-    const phaseTasks = (plan.tasks ?? []).filter((t) => t.phase === phase)
+    // A fix round redispatches only the tasks it names (validated against this phase above).
+    const phaseTasks = (plan.tasks ?? []).filter((t) => t.phase === phase && (fixRoundTasks === null || fixRoundTasks.has(t.id)))
     if (phaseTasks.length === 0) { io.out(`no tasks for phase ${printable(flags.phase)} in run ${runId}`); return 4 }
 
     // The run branch every sandbox is cut from — recorded by `init-run`. Absent means no branch
@@ -4069,7 +4241,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const composeBriefFor = (task) => composeBrief({
       task: { ...task, branch: taskBranchName(runId, task.id) },
       contextBundle: contextBundles[task.id] ?? null,
-      runId, planPath, baseBranch, constraints, caveman: resolved.caveman,
+      runId, planPath, baseBranch, constraints, caveman: resolved.caveman, fixRound: fixRoundTasks !== null,
     })
 
     // Runs the existing `complete --enforcement-only` code path in `root` and returns its exit
@@ -4109,6 +4281,8 @@ export async function runCli(argv, io = { out: console.log }) {
       personaFor: (role) => personaBodies[role],
       runDir: runDir(root, runId),
       completeEnforcement,
+      fixRound: fixRoundTasks !== null,
+      ...(dispatchExecution === undefined ? {} : { execution: dispatchExecution }),
     })
 
     // Stamp the harness and prerequisite binding on the persisted session.
@@ -4425,7 +4599,8 @@ export async function runCli(argv, io = { out: console.log }) {
     const base = path.join(messageSessionsDir, `${flags.task}`)
     // What the resume left behind is judged against what was there before it: a result file that
     // is absent, unchanged or invalid afterwards is not a new structured result.
-    const resultBefore = await messageResultDigest(`${base}.result.json`)
+    const resultPaths = { resultPath: `${base}.result.json`, streamPath: `${base}.stream.jsonl` }
+    const resultBefore = await messageResultDigest(adapter, resultPaths)
     const handle = await adapter.resume({
       sandbox: record.sandbox,
       sessionId: record.sessionId,
@@ -4439,13 +4614,14 @@ export async function runCli(argv, io = { out: console.log }) {
     await handle.sessionId
     const exit = await waitForExit(handle.child, timeoutMs)
     if (exit !== 'timeout') await handle.flushed
-    const outcome = await messageOutcome(`${base}.result.json`, resultBefore)
+    const outcome = await messageOutcome(adapter, resultPaths, resultBefore)
     const exitCode = Number.isInteger(handle.child?.exitCode) ? handle.child.exitCode : null
     const signal = typeof handle.child?.signalCode === 'string' ? handle.child.signalCode : null
-    // A timeout, an exhausted capture bound, or a process that started and then failed is
-    // unresolved: exit 4. An exit 0 says only that the resumed turn ended; the outcome line names
-    // whether it left a new structured result, and completion is never established here.
-    const failed = exit === 'timeout' || handle.outputLimited === true || signal !== null || (exitCode !== null && exitCode > 0)
+    // Exit 0 only for a resumed turn that ended with exit code 0 and left a new valid result. A
+    // timeout, an exhausted capture bound, a signal, any other exit code (a negative one is a spawn
+    // failure) and a clean exit with no new result are unresolved: exit 4. Completion is never
+    // established here, so the outcome line says it is unverified either way.
+    const failed = exit === 'timeout' || handle.outputLimited === true || signal !== null || exitCode !== 0 || outcome.result !== 'new-result'
     io.out(`${failed ? 'resume unresolved for' : 'resumed'} ${printable(flags.task)}`)
     io.out(compactJson({ task: flags.task, exit, exitCode, signal, outputLimited: handle.outputLimited === true, result: outcome.result,
       ...(outcome.status ? { status: outcome.status } : {}), completion: 'unverified' }))
@@ -5251,9 +5427,7 @@ export async function runCli(argv, io = { out: console.log }) {
     return failed > 0 ? 1 : 0
   }
 
-  if (command === 'workflow-execute' || command === 'workflow-resume' || command === 'workflow-status' || command === 'workflow-resolve') {
-    return workflowCommand(command, flags, io)
-  }
+  if (WORKFLOW_COMMANDS.has(command)) return workflowCommand(command, flags, io)
 
   if (command === 'execution-record' || command === 'execution-status') {
     try {
@@ -6533,7 +6707,7 @@ export async function runCli(argv, io = { out: console.log }) {
         ctx = { cwd: root, previewLink: previewLinks(config), ...(await derive(root, runId, flags)) }
       } catch (err) {
         io.out(printableBlock(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: err.message }, null, 2)))
-        return 1
+        return GATE_STATE_FAILURE
       }
       // The gate runs on the run branch, once per phase, for the life of the run — so this is the
       // repair that makes the stop-time guard's input right even when `init-run` could not know it.
@@ -6601,8 +6775,10 @@ export async function runCli(argv, io = { out: console.log }) {
         failed: [...verdict.failed, 'run-state'],
         error: `could not read run state: ${stateError}`,
       }
+      // Exit 5 only when run state is the whole failure; a check that also failed keeps exit 1.
+      const exit = verdict.failed.length === 0 ? GATE_STATE_FAILURE : 1
       io.out(printableBlock(JSON.stringify({ ...bound, results }, null, 2)))
-      return 1
+      return exit
     }
     io.out(printableBlock(JSON.stringify({ ...bound, results }, null, 2)))
 

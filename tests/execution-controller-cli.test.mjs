@@ -25,7 +25,8 @@ const GATE_RUNNER_FILE = fileURLToPath(new URL('../scripts/gate-runner.mjs', imp
 
 // Stands in for the installed fleetmates CLI: records each invocation, writes only what the real
 // commands write, where they write it, and follows their exit contracts. `gate-derive` prints the
-// document the real gate prints when it cannot derive run state, and exits 1 as the real one does.
+// document the real gate prints when it cannot derive run state, and exits 5 as the real one does
+// (pinned against the real gate in tests/cli.test.mjs).
 const FAKE_CLI = String.raw`
 import { appendFileSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
@@ -89,7 +90,7 @@ if (command === 'init-run') {
   }
   if (mode.includes('gate-derive')) {
     console.log(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: 'plan.md is not present at the anchor commit' }, null, 2))
-    process.exit(1)
+    process.exit(5)
   }
   if (mode.includes('gate-fails')) {
     console.log(JSON.stringify({ verdict: 'FAIL', failed: ['behavior'], phase: Number(flag('phase')), results: [{ name: 'behavior', kind: 'command', status: 'fail' }] }, null, 2))
@@ -101,6 +102,8 @@ if (command === 'init-run') {
   console.log(JSON.stringify({ decision: 'retry', tasks: [{ taskId: 'T1', tier: 'mid', round: 1, checks: verdict.results.filter(r => r.status === 'fail').map(r => r.name) }], reason: null }, null, 2))
 } else if (command === 'record-fix-round') {
   console.log(flag('task') + ' phase ' + flag('phase') + ' round 1')
+} else if (command === 'finish') {
+  console.log('PASS')
 } else process.exit(2)
 `
 const FAKE_CODEX = String.raw`
@@ -287,11 +290,18 @@ test('workflow-status reconciles the journal read-only and never claims completi
   assert.ok(status.attempts.some(a => a.step === 'implement-1'))
   // The retained request is listed but is an input record, never an unresolved step.
   assert.ok(status.attempts.some(a => a.step === 'request' && !a.reuse), JSON.stringify(status.attempts.map(a => [a.step, a.state])))
-  assert.equal(status.unresolvedAttempts, status.attempts.filter(a => a.step !== 'request' && !a.reuse).length)
+  assert.equal(status.unresolvedAttempts, status.attempts.filter(a => a.step !== 'request' && !a.reuse && a.state !== 'superseded').length)
   assert.ok(status.attempts.every(a => typeof a.state === 'string'))
   assert.deepEqual(status.standingSkips, [{ file: 'tests/slow.test.mjs', reason: 'fixture standing skip' }])
   assert.ok(status.limitations.some(line => /callback/i.test(line)), 'callback limitations are reported')
-  assert.equal(result.code, status.unresolvedAttempts > 0 ? 4 : 0)
+  // A normally finished run: the integration moved the run branch every earlier step recorded, to
+  // the after-ref its receipt names, so those steps are superseded rather than branch-changed,
+  // nothing is unresolved and status exits 0.
+  assert.ok(status.attempts.some(a => a.state === 'superseded'), JSON.stringify(status.attempts.map(a => [a.step, a.state])))
+  assert.ok(!status.attempts.some(a => a.state === 'branch-changed'), JSON.stringify(status.attempts.map(a => [a.step, a.state])))
+  assert.equal(status.unresolvedAttempts, 0)
+  assert.equal(status.state, 'reconciled')
+  assert.equal(result.code, 0, result.output)
   assert.equal((await fixture.events()).length, before.events, 'status appended nothing')
   assert.equal(git(fixture.root, 'for-each-ref', '--format=%(refname) %(objectname)'), before.refs, 'status moved no ref')
   const absent = await fixture.cli(['workflow-status', '--run', 'other'])
@@ -323,20 +333,125 @@ test('workflow-status exits 0 for a reconciled journal and still never claims co
   assert.equal((await fixture.cli(['workflow-status', '--run', 'r1'])).code, 4)
 })
 
+test('workflow-accept retains evidence for the integrated tree only, and workflow-resume passes it so finish runs', async t => {
+  const fixture = await project(t)
+  const first = json((await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request()) })).output)
+  assert.equal(first.state, 'human-required')
+  const tree = first.acceptance.tree
+  assert.equal(tree, git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1^{tree}'))
+  const criteria = first.acceptance.required.map(criterion => ({ criterion, status: 'pass', note: 'observed by the fixture' }))
+  const accept = async value => fixture.cli(['workflow-accept', '--file', await fixture.requestFile(value)])
+  const before = (await fixture.events()).length
+  const variants = {
+    'a tree that is not the integrated run-branch tree': { version: 1, runId: 'r1', tree: git(fixture.root, 'rev-parse', 'refs/heads/main^{tree}'), criteria },
+    'an unsupported version': { version: 2, runId: 'r1', tree, criteria },
+    'an unknown field': { version: 1, runId: 'r1', tree, criteria, extra: true },
+    'a status that is neither pass nor fail': { version: 1, runId: 'r1', tree, criteria: [{ ...criteria[0], status: 'maybe' }] },
+    'a criterion named twice': { version: 1, runId: 'r1', tree, criteria: [criteria[0], criteria[0]] },
+    'a run with no journal': { version: 1, runId: 'other', tree, criteria },
+  }
+  for (const [name, value] of Object.entries(variants)) {
+    const refused = await accept(value)
+    assert.equal(refused.code, 2, `${name}: ${refused.output}`)
+    assert.ok(json(refused.output).error, name)
+  }
+  const relative = await fixture.cli(['workflow-accept', '--file', 'acceptance.json'])
+  assert.equal(relative.code, 2, relative.output)
+  assert.equal((await fixture.events()).length, before, 'no refused acceptance was recorded')
+
+  const accepted = await accept({ version: 1, runId: 'r1', tree, criteria })
+  assert.equal(accepted.code, 0, accepted.output)
+  const answer = json(accepted.output)
+  assert.deepEqual(answer.retained.map(entry => [entry.criterion, entry.reference.kind]), criteria.map(c => [c.criterion, 'acceptance-evidence']))
+  const { readExecutionArtifact } = await import('../scripts/execution-artifacts.mjs')
+  const evidence = JSON.parse(await readExecutionArtifact({ common: fixture.common, runId: 'r1', reference: answer.retained[0].reference, retention }))
+  assert.deepEqual(evidence, { version: 1, criterion: criteria[0].criterion, tree, status: 'pass' })
+
+  const resumed = await fixture.command('workflow-resume', { run: 'r1' })
+  const report = json(resumed.output)
+  assert.deepEqual(report.acceptance.missing, [], 'the retained evidence reached the controller')
+  assert.equal(commands(await fixture.invocations()).at(-1), 'finish')
+  assert.equal(report.obligations.verifiedComplete, true)
+  // This suite injects its verification fixture, which the controller never counts as completion;
+  // only native verification can make the report verified-complete and the exit 0.
+  assert.equal(report.verification, 'injected-unit-fixture')
+  assert.equal(report.state, 'unresolved')
+  assert.equal(resumed.code, 4)
+
+  // A commit on the run branch after its integration keeps the same tree, but the branch is no
+  // longer at the tip its last integration recorded: refused, nothing recorded.
+  git(fixture.root, 'commit', '-q', '--allow-empty', '-m', 'test: move the run branch past its integration')
+  assert.equal(git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1^{tree}'), tree)
+  const after = (await fixture.events()).length
+  const moved = await accept({ version: 1, runId: 'r1', tree, criteria })
+  assert.equal(moved.code, 2, moved.output)
+  assert.match(json(moved.output).error, /last completed integration/)
+  assert.equal((await fixture.events()).length, after)
+})
+
+test('workflow-prune keeps every artifact the journal references and removes non-live content past its bounds', async t => {
+  const fixture = await project(t)
+  await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request()) })
+  await gitOnlyPath(t)
+  const { retainExecutionArtifact, readExecutionArtifact } = await import('../scripts/execution-artifacts.mjs')
+  const aged = await retainExecutionArtifact({ common: fixture.common, runId: 'r1', kind: 'step-outcome', bytes: Buffer.from('{"aged":true}'), retention,
+    now: Date.now() - retention.maxAgeMs - 60_000 })
+  const fresh = await retainExecutionArtifact({ common: fixture.common, runId: 'r1', kind: 'step-outcome', bytes: Buffer.from('{"fresh":true}'), retention })
+  const referenced = (await fixture.events()).flatMap(e => e.artifacts ?? [])
+  assert.ok(referenced.length > 0)
+  const result = await fixture.cli(['workflow-prune', '--run', 'r1'])
+  assert.equal(result.code, 0, result.output)
+  const pruned = json(result.output)
+  assert.equal(pruned.removed.length, 1, result.output)
+  assert.ok(pruned.kept.length > 0)
+  assert.equal(pruned.liveReferences, new Set(referenced.map(r => JSON.stringify(r))).size)
+  for (const reference of referenced) await readExecutionArtifact({ common: fixture.common, runId: 'r1', reference, retention })
+  await assert.rejects(readExecutionArtifact({ common: fixture.common, runId: 'r1', reference: aged.reference, retention }))
+  // Non-live but inside every bound: kept, so a later step can still retain beside it.
+  await readExecutionArtifact({ common: fixture.common, runId: 'r1', reference: fresh.reference, retention })
+  assert.equal(await runCli(['workflow-prune', '--run', 'r1', '--root', 'relative'], { out: () => {}, err: () => {} }), 2)
+})
+
+test('the run-id and request numeric bounds accept n and refuse n+1', async t => {
+  const fixture = await project(t)
+  const { RETENTION_LIMITS } = await import('../scripts/execution-artifacts.mjs')
+  const { PROFILE_LIMITS } = await import('../scripts/workflow-profile.mjs')
+  for (const command of ['workflow-status', 'workflow-prune']) {
+    const accepted = await fixture.command(command, { run: 'a'.repeat(80) })
+    assert.notEqual(accepted.code, 2, `${command} with an 80-character run id: ${accepted.output}`)
+    const refused = await fixture.command(command, { run: 'a'.repeat(81) })
+    assert.equal(refused.code, 2, `${command} with an 81-character run id`)
+    assert.match(json(refused.output).error, /run identity/)
+  }
+  const upper = { maxWallMs: PROFILE_LIMITS.maxWallMinutes[1] * 60_000, maxAttempts: 500, maxRepairRounds: PROFILE_LIMITS.maxRepairRounds[1], stepTimeoutMs: 21_600_000 }
+  for (const [key, bound] of Object.entries(RETENTION_LIMITS)) {
+    const refused = await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request({ retention: { ...retention, [key]: bound + 1 } })) })
+    assert.equal(refused.code, 2, `retention.${key} ${bound + 1}: ${refused.output}`)
+  }
+  for (const [key, bound] of Object.entries(upper)) {
+    const refused = await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request({ limits: { ...limits, [key]: bound + 1 } })) })
+    assert.equal(refused.code, 2, `limits.${key} ${bound + 1}: ${refused.output}`)
+  }
+  assert.deepEqual(fixture.calls, [], 'no n+1 request reached the executor')
+  assert.deepEqual(await fixture.events(), [])
+  const accepted = await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request({ retention: { ...RETENTION_LIMITS }, limits: upper })) })
+  assert.equal(accepted.code, 4, accepted.output)
+  assert.equal(json(accepted.output).state, 'human-required', 'every bound at n runs the profile')
+})
+
 test('a gate that cannot derive run state is reported as blocked infrastructure, not a code repair', async t => {
+  // Both state failures are gate exit 5, which the controller itself classifies as infrastructure:
+  // no fix decision, no repair round, and nothing for the host to reclassify.
   const fixture = await project(t)
   fixture.env.mode = 'gate-derive'
   const result = await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request()) })
   assert.equal(result.code, 4)
   const report = json(result.output)
   assert.equal(report.state, 'blocked')
-  assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['infrastructure', 'gate-1']])
-  assert.equal(report.host.reclassified.from, 'code')
-  assert.equal(report.host.reclassified.evidence, 'gate verdict failed: derive')
-  assert.ok(!commands(await fixture.invocations()).includes('fix'), 'no repair decision for a state failure')
+  assert.deepEqual(report.blockers.map(b => [b.category, b.step, b.reason]), [['infrastructure', 'gate-1', 'exit 5']])
+  assert.equal(report.host.reclassified, undefined)
+  assert.ok(!commands(await fixture.invocations()).some(c => c === 'fix' || c === 'record-fix-round'), 'no repair decision for a state failure')
 
-  // Unreadable run state is gate exit 5, which the controller itself classifies as infrastructure:
-  // no fix decision, no repair round, and nothing for the host to reclassify.
   const unreadable = await project(t)
   unreadable.env.mode = 'gate-run-state'
   const second = json((await unreadable.command('workflow-execute', { file: await unreadable.requestFile(unreadable.request()) })).output)
@@ -361,6 +476,8 @@ test('a failing gate gets one repair round within its budget, then stops failed 
   assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['code', 'gate-1.r1']])
   assert.match(report.blockers[0].reason, /^budget-exhausted/)
   assert.equal(report.host.repairRounds.max, 2)
+  assert.equal(report.host.repairRounds.delivered, 1, 'the host reports the rounds the controller delivered')
+  assert.ok(!report.host.limitations.some(line => /no command delivers a repair round/.test(line)), 'the stale repair limitation is gone')
   assert.equal(git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1'), runTip, 'no merge after a failing gate')
   assert.equal(report.host.reclassified, undefined)
 })
@@ -432,6 +549,22 @@ await workflowCommand('workflow-execute', { file: cfg.file, root: cfg.root }, { 
   assert.equal(resumed.code, 4, resumed.output)
   assert.deepEqual(json(resumed.output).blockers.map(b => [b.category, b.step]), [['unknown-effect', 'implement-1']])
   assert.equal(commands(await fixture.invocations()).filter(name => name === 'dispatch').length, before, 'no blind redispatch')
+
+  // The operator resolves the interrupted agent-dispatch effect through workflow-resolve: a reason
+  // that is not one token is refused with a message saying so, and `not-started` is recorded.
+  const effect = dispatch.effects.find(e => e.kind === 'agent-dispatch')
+  assert.ok(effect, JSON.stringify(dispatch.effects))
+  const resolution = { version: 1, runId: 'r1', effectId: effect.id, outcome: 'not-started', reason: 'operator checked' }
+  const refused = await fixture.cli(['workflow-resolve', '--file', await fixture.requestFile(resolution)])
+  assert.equal(refused.code, 2, refused.output)
+  assert.match(json(refused.output).error, /reason must be one token/)
+  const recorded = await fixture.cli(['workflow-resolve', '--file', await fixture.requestFile({ ...resolution, reason: 'operator-checked' })])
+  assert.equal(recorded.code, 0, recorded.output)
+  const resolved = json((await fixture.cli(['workflow-status', '--run', 'r1'])).output).attempts.find(a => a.step === 'implement-1').effects[0]
+  assert.deepEqual([resolved.kind, resolved.outcome, resolved.source], ['agent-dispatch', 'not-started', 'local-operator-observation'])
+  // Resolved not-started, the dispatch runs again on resume.
+  await fixture.command('workflow-resume', { run: 'r1' })
+  assert.equal(commands(await fixture.invocations()).filter(name => name === 'dispatch').length, before + 1, 'redispatched after the resolution')
 })
 
 test('resume refuses a retained request that carries no explicit model and effort', async t => {
@@ -555,6 +688,120 @@ test('dispatch passes an explicit model and effort to the adapter, and cursor re
   assert.equal(spawned.length, 1, 'refused before any spawn')
 })
 
+// Two phase-1 tasks, each with a task branch carrying its work and a recorded done result whose
+// sandbox was already removed: the state a fix round starts from.
+async function fixRoundRepo(t) {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'wfx-fix-')))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  git(root, 'init', '-b', 'main')
+  git(root, 'config', 'user.name', 'Example'); git(root, 'config', 'user.email', 'example@example.invalid')
+  await writeFile(path.join(root, 'plan.md'), '### Task 1: first\n\n**Files:**\n- Create: `a.mjs`\n\n### Task 2: second\n\n**Files:**\n- Create: `b.mjs`\n')
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n')
+  git(root, 'add', '.'); git(root, 'commit', '-m', 'test: fix-round plan')
+  git(root, 'checkout', '-b', 'run')
+  const run = async (argv) => {
+    const lines = []
+    const code = await runCli([...argv, '--root', root], { out: s => lines.push(s), err: s => lines.push(s) })
+    return { code, output: lines.join('\n') }
+  }
+  assert.equal((await run(['init-run', 'plan.md', '--run', 'r1'])).code, 0)
+  const sessions = path.join(root, '.fleetmates', 'r1', 'sessions')
+  await mkdir(sessions, { recursive: true })
+  for (const [id, file] of [['T1', 'a.mjs'], ['T2', 'b.mjs']]) {
+    git(root, 'checkout', '-q', '-b', `fleetmates/r1/${id}`, 'run')
+    await writeFile(path.join(root, file), `export const id = '${id}'\n`)
+    git(root, 'add', file); git(root, 'commit', '-q', '-m', `feat: ${id}`)
+    await writeFile(path.join(sessions, `${id}.json`), JSON.stringify({ taskId: id, state: 'done', sandboxRemoved: true,
+      result: { status: 'done', branch: `fleetmates/r1/${id}`, filesChanged: [file], summary: 'fixture', blockers: [] } }))
+  }
+  git(root, 'checkout', '-q', 'run')
+  return { root, run }
+}
+function recordingCodex(t, root) {
+  const seen = { probed: 0, spawned: [] }
+  const fakeChild = () => spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20)'], { stdio: 'ignore' })
+  stubAdapter(t, 'codex', {
+    probe: async () => { seen.probed++; return { ok: true } }, readResult: async () => null, readUsage: async () => null,
+    makeSandbox: async () => ({ cwd: root, meta: { mode: 'clone', gitdir: '/fixture/git' } }),
+    spawn: async args => { seen.spawned.push({ task: path.basename(args.resultPath, '.result.json'), prompt: args.prompt }); return { child: fakeChild(), sessionId: Promise.resolve('s1'), flushed: Promise.resolve() } },
+    // A fix round over a recorded session resumes it: recorded as a dispatch too, never the real binary.
+    resume: async args => { seen.spawned.push({ task: path.basename(args.resultPath, '.result.json'), prompt: args.message, resumed: true }); return { child: fakeChild(), sessionId: Promise.resolve('s1'), flushed: Promise.resolve() } },
+  })
+  return seen
+}
+
+test('dispatch --fix-round redispatches only the named tasks with the fix-round brief, even with a done result recorded', { skip: process.platform === 'win32' }, async t => {
+  const { root, run } = await fixRoundRepo(t)
+  await gitOnlyPath(t)
+  const seen = recordingCodex(t, root)
+  const plain = await run(['dispatch', '--run', 'r1', '--phase', '1', '--harness', 'codex'])
+  assert.equal(plain.code, 0, plain.output)
+  assert.deepEqual(seen.spawned, [], 'a plain dispatch never respawns a task whose done result is recorded')
+  const tips = ['T1', 'T2'].map(id => git(root, 'rev-parse', `refs/heads/fleetmates/r1/${id}`))
+  const fixed = await run(['dispatch', '--run', 'r1', '--phase', '1', '--harness', 'codex', '--fix-round', '--task', 'T1'])
+  assert.equal(fixed.code, 0, fixed.output)
+  assert.deepEqual(seen.spawned.map(s => s.task), ['T1'])
+  assert.match(seen.spawned[0].prompt, /FIX ROUND/)
+  assert.doesNotMatch(seen.spawned[0].prompt, /checkout -B fleetmates\/r1\/T1/)
+  assert.deepEqual(['T1', 'T2'].map(id => git(root, 'rev-parse', `refs/heads/fleetmates/r1/${id}`)), tips, 'no task branch was reset')
+  seen.spawned.length = 0
+  const both = await run(['dispatch', '--run', 'r1', '--phase', '1', '--harness', 'codex', '--fix-round', '--task', 'T1', '--task', 'T2'])
+  assert.equal(both.code, 0, both.output)
+  assert.deepEqual(seen.spawned.map(s => s.task).sort(), ['T1', 'T2'], 'a repeated --task names every task')
+})
+
+test('dispatch refuses an unusable --fix-round or --execution with exit 2 before any probe or spawn', { skip: process.platform === 'win32' }, async t => {
+  const { root, run } = await fixRoundRepo(t)
+  await gitOnlyPath(t)
+  const seen = recordingCodex(t, root)
+  const missing = path.join(root, 'no-such-execution.json')
+  const variants = {
+    'an unknown task': ['--fix-round', '--task', 'T9'],
+    'a known and an unknown task': ['--fix-round', '--task', 'T1', '--task', 'T9'],
+    '--task without --fix-round': ['--task', 'T1'],
+    '--fix-round without --task': ['--fix-round'],
+    'a relative execution path': ['--execution', 'execution.json'],
+    'a missing execution file': ['--execution', missing],
+    'a bare --execution': ['--execution'],
+  }
+  // The relative path names a readable file from the cwd, so only the absolute-path guard refuses it.
+  await writeFile(path.join(root, 'execution.json'), '{}')
+  const cwd = process.cwd()
+  t.after(() => process.chdir(cwd))
+  process.chdir(root)
+  for (const [name, extra] of Object.entries(variants)) {
+    const refused = await run(['dispatch', '--run', 'r1', '--phase', '1', '--harness', 'codex', ...extra])
+    assert.equal(refused.code, 2, `${name}: ${refused.output}`)
+  }
+  const malformed = path.join(root, 'malformed.json')
+  await writeFile(malformed, '{not json')
+  assert.equal((await run(['dispatch', '--run', 'r1', '--phase', '1', '--harness', 'codex', '--execution', malformed])).code, 2)
+  assert.equal(seen.probed, 0, 'refused before the harness probe')
+  assert.deepEqual(seen.spawned, [])
+})
+
+// The driver's strict execution reads the contract's `inputs.commit` and refuses a run branch that is
+// not at it before any sandbox or spawn; the legacy path (no contract) spawns. So a contract naming
+// another commit is observable as that refusal, which only the contract file can have caused.
+test('dispatch --execution hands the contract file to the driver unchanged as its required execution', { skip: process.platform === 'win32' }, async t => {
+  const { root, run } = await dispatchRepo(t)
+  await gitOnlyPath(t)
+  const seen = recordingCodex(t, root)
+  const common = git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+  const sha = n => n.repeat(64)
+  const contract = { version: 1, common, runId: 'r1', executionId: 'cli-fixture-p1',
+    inputs: { commit: 'a'.repeat(40), plan: sha('1'), manifest: sha('2'), context: sha('3'), environment: sha('4'), verifier: sha('5') },
+    retention, maxAttempts: 2, deadlineAt: Date.now() + 600_000 }
+  const file = path.join(root, '.fleetmates', 'r1', 'execution.json')
+  await writeFile(file, JSON.stringify(contract))
+  const result = await run(['dispatch', '--run', 'r1', '--phase', '1', '--harness', 'codex', '--execution', file])
+  assert.equal(result.code, 0, result.output)
+  const record = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'sessions', 'T1.json'), 'utf8'))
+  assert.equal(record.exitReason, 'Required source commit changed', JSON.stringify(record))
+  assert.deepEqual(seen.spawned, [], 'strict execution refused before any spawn')
+  assert.deepEqual(await readExecutionEvents(common, 'r1'), [])
+})
+
 async function messageRepo(t, { result = undefined } = {}) {
   const { root, run } = await dispatchRepo(t)
   const sessions = path.join(root, '.fleetmates', 'r1', 'sessions')
@@ -603,7 +850,7 @@ test('message reports a timeout and a failed process as unresolved, never as res
   assert.equal(outcomeOf(failed.output).result, 'unchanged-result', 'the old result is not a new structured result')
 })
 
-test('message names whether a new structured result exists, and its exit 0 states completion is unverified', { skip: process.platform === 'win32' }, async t => {
+test('message exits 0 only for a new valid result, names the outcome, and states completion is unverified', { skip: process.platform === 'win32' }, async t => {
   const { run, resultPath } = await messageRepo(t, { result: done })
   let write = null
   stubAdapter(t, 'codex', { resume: async args => {
@@ -612,16 +859,21 @@ test('message names whether a new structured result exists, and its exit 0 state
       : `require('fs').writeFileSync(${JSON.stringify(resultPath)}, ${JSON.stringify(write)})`
     return { child: spawn(process.execPath, ['-e', script], { stdio: 'ignore' }), sessionId: Promise.resolve('sid'), flushed: Promise.resolve() }
   } })
+  // A clean exit that left the old result in place produced no new result: unresolved, exit 4.
   const unchanged = await run(messageArgv)
-  assert.equal(unchanged.code, 0, unchanged.output)
+  assert.equal(unchanged.code, 4, unchanged.output)
   assert.equal(outcomeOf(unchanged.output).result, 'unchanged-result')
   assert.equal(outcomeOf(unchanged.output).completion, 'unverified')
   write = JSON.stringify({ ...done, summary: 'second turn' })
   const fresh = await run(messageArgv)
+  assert.equal(fresh.code, 0, fresh.output)
   assert.equal(outcomeOf(fresh.output).result, 'new-result')
   assert.equal(outcomeOf(fresh.output).status, 'done')
+  assert.equal(outcomeOf(fresh.output).completion, 'unverified')
   write = '{"status": "done"'
-  assert.equal(outcomeOf((await run(messageArgv)).output).result, 'invalid-result')
+  const invalid = await run(messageArgv)
+  assert.equal(outcomeOf(invalid.output).result, 'invalid-result')
+  assert.equal(invalid.code, 4)
   // Read bounded and without following a link: an oversized or linked result is not a result.
   write = { script: `require('fs').writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ ...${JSON.stringify(done)}, summary: 'x'.repeat(1024 * 1024) }))` }
   assert.equal(outcomeOf((await run(messageArgv)).output).result, 'invalid-result')
@@ -641,6 +893,43 @@ test('message reports an exhausted capture bound as unresolved', { skip: process
   assert.equal(limited.code, 4, limited.output)
   assert.equal(outcomeOf(limited.output).outputLimited, true)
   assert.match(limited.output, /resume unresolved for T1/)
+})
+
+test('message exits 4 for a failed process even when it wrote a new result', { skip: process.platform === 'win32' }, async t => {
+  const { run, resultPath } = await messageRepo(t, { result: done })
+  const script = `require('fs').writeFileSync(${JSON.stringify(resultPath)}, ${JSON.stringify(JSON.stringify({ ...done, summary: 'then failed' }))}); process.exit(1)`
+  stubAdapter(t, 'codex', { resume: async () => ({ child: spawn(process.execPath, ['-e', script], { stdio: 'ignore' }), sessionId: Promise.resolve('sid'), flushed: Promise.resolve() }) })
+  const failed = await run(messageArgv)
+  assert.equal(outcomeOf(failed.output).result, 'new-result')
+  assert.equal(outcomeOf(failed.output).exitCode, 1)
+  assert.equal(failed.code, 4, failed.output)
+})
+
+// Cursor writes its answer into the stream file, never into <task>.result.json, so message reads
+// the outcome through the adapter's readResult with the stream path.
+test('message counts a cursor result written into the stream file as a new result', { skip: process.platform === 'win32' }, async t => {
+  const { run, resultPath } = await messageRepo(t)
+  await gitOnlyPath(t)
+  const streamPath = resultPath.replace(/\.result\.json$/, '.stream.jsonl')
+  const turn = (summary) => [{ type: 'user' }, { type: 'assistant', message: { content: [{ type: 'text', text: JSON.stringify({ ...done, summary }) }] } },
+    { type: 'result', is_error: false, result: JSON.stringify({ ...done, summary }) }].map(line => JSON.stringify(line)).join('\n') + '\n'
+  await writeFile(streamPath, turn('first turn'))
+  let append = null
+  const never = async () => { throw new Error('cursor must not be spawned') }
+  stubAdapter(t, 'cursor', { makeSandbox: never, spawn: never, resume: async args => {
+    assert.equal(args.streamPath, streamPath)
+    const script = append === null ? '0' : `require('fs').appendFileSync(${JSON.stringify(streamPath)}, ${JSON.stringify(append)})`
+    return { child: spawn(process.execPath, ['-e', script], { stdio: 'ignore' }), sessionId: Promise.resolve('sid'), flushed: Promise.resolve() }
+  } })
+  const argv = ['message', '--run', 'r1', '--task', 'T1', '--text', 'continue', '--harness', 'cursor']
+  const same = await run(argv)
+  assert.equal(outcomeOf(same.output).result, 'unchanged-result', same.output)
+  assert.equal(same.code, 4)
+  append = turn('second turn')
+  const fresh = await run(argv)
+  assert.equal(outcomeOf(fresh.output).result, 'new-result', fresh.output)
+  assert.equal(outcomeOf(fresh.output).status, 'done')
+  assert.equal(fresh.code, 0, fresh.output)
 })
 
 test('the isolated legacy integrator assignment carries per-task subjects from the anchored plan titles', { skip: process.platform === 'win32' }, async t => {
