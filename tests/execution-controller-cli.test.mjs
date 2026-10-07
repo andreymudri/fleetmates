@@ -1,7 +1,7 @@
 import { test, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, readFile, rm, mkdir, realpath, symlink, chmod, access } from 'node:fs/promises'
-import { existsSync, constants } from 'node:fs'
+import { existsSync, readFileSync, constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
@@ -394,13 +394,21 @@ await workflowCommand('workflow-execute', { file: cfg.file, root: cfg.root }, { 
   const config = { log: fixture.log, codex: fixture.codex, cliPath: fixture.cliPath, root: fixture.root, tasks, file: await fixture.requestFile(fixture.request()) }
   const proc = spawn(process.execPath, [child], { env: { ...process.env, LOSS_CONFIG: JSON.stringify(config) }, stdio: 'ignore' })
   const pidFile = path.join(fixture.bin, 'hang.pid')
-  t.after(() => { try { process.kill(-Number(execFileSync('cat', [pidFile], { encoding: 'utf8' })), 'SIGKILL') } catch { /* gone */ } })
+  // A safety net if an assertion stops the test early: both processes are known by pid here,
+  // independent of the order in which the temporary directory is removed.
+  let hangPid = null
+  t.after(() => {
+    for (const pid of [hangPid && -hangPid, proc.exitCode === null && proc.signalCode === null ? proc.pid : null]) {
+      if (pid) try { process.kill(pid, 'SIGKILL') } catch { /* gone */ }
+    }
+  })
   for (let i = 0; i < 400 && !existsSync(pidFile); i++) await new Promise(resolve => setTimeout(resolve, 50))
   assert.ok(existsSync(pidFile), 'the dispatch step started')
+  hangPid = Number(readFileSync(pidFile, 'utf8'))
   const exited = once(proc, 'exit')
   proc.kill('SIGKILL')
   await exited
-  process.kill(-Number(await readFile(pidFile, 'utf8')), 'SIGKILL')
+  process.kill(-hangPid, 'SIGKILL')
 
   const status = await fixture.cli(['workflow-status', '--run', 'r1'])
   assert.equal(status.code, 4)
@@ -552,13 +560,21 @@ test('message reports a timeout and a failed process as unresolved, never as res
   // A child that never exits: the handler's own timeout must end the wait, and it must say so.
   const hung = new EventEmitter()
   hung.exitCode = null; hung.signalCode = null; hung.kill = () => true
-  stubAdapter(t, 'codex', { resume: async () => ({ child: hung, sessionId: Promise.resolve('sid'), flushed: Promise.resolve() }) })
+  // Whatever happens below, the hung child ends with the test, so no wait outlives it.
+  t.after(() => hung.emit('exit'))
+  let resumed = false
+  stubAdapter(t, 'codex', { resume: async () => { resumed = true; return { child: hung, sessionId: Promise.resolve('sid'), flushed: Promise.resolve() } } })
   mock.timers.enable({ apis: ['setTimeout'] })
   t.after(() => mock.timers.reset())
   const pending = run(messageArgv)
   let settled = null
   pending.then(value => { settled = value })
-  for (let i = 0; i < 200 && settled === null; i++) {
+  // Wall-clock bounded (Date is not mocked): first until the handler reaches the resume, then
+  // ticking the mocked clock past the handler's timeout until it answers.
+  const deadline = Date.now() + 30_000
+  while (!resumed && Date.now() < deadline) await new Promise(resolve => setImmediate(resolve))
+  assert.ok(resumed, 'message never reached the resume')
+  while (settled === null && Date.now() < deadline) {
     await new Promise(resolve => setImmediate(resolve))
     mock.timers.tick(31 * 60_000)
   }
