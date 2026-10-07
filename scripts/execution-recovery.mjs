@@ -6,8 +6,9 @@ import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { strictExecutionIdentity } from './completion-obligations.mjs'
-import { readExecutionArtifact } from './execution-artifacts.mjs'
-import { readExecutionEvents, appendExecutionEvent, strictExecutionAttempts, executionBranches, authorizedPrReference, reconcileExecution } from './execution-journal.mjs'
+import { readExecutionArtifact, RETENTION_LIMITS } from './execution-artifacts.mjs'
+import { readExecutionEvents, appendExecutionEvent, strictExecutionAttempts, executionBranches, authorizedPrReference, reconcileExecution as reconcileHistorical,
+  EFFECT_RESOLUTIONS } from './execution-journal.mjs'
 import { git, discover } from './workflow-lifecycle.mjs'
 
 const execute = promisify(execFile)
@@ -135,11 +136,32 @@ function recordedBranches(records) {
   }
   return { expected, conflicts: [...conflicts].sort() }
 }
-export async function reconcileExecutionAttempt({ common, runId, inputs, branches, retention, checkouts = {}, effectQueries }) {
+const MAX_EXPECTED_ADVANCES = 100
+function advancesContract(raw) {
+  if (raw === undefined) return new Map()
+  if (!Array.isArray(raw) || raw.length > MAX_EXPECTED_ADVANCES) throw new Error('Invalid bounded expected advances')
+  const advances = new Map()
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).length !== 2 || typeof entry.ref !== 'string') throw new Error('Invalid bounded expected advances')
+    try { executionBranches({ [entry.ref]: entry.to }) } catch { throw new Error('Invalid bounded expected advances') }
+    advances.set(entry.ref, [...(advances.get(entry.ref) ?? []), entry.to])
+  }
+  return advances
+}
+function reachedAdvance(canonical, advances, ref, tip) {
+  return typeof tip === 'string' && (advances.get(ref) ?? []).some(to => {
+    if (to === tip) return true
+    try { git(['--git-dir=' + canonical, 'merge-base', '--is-ancestor', to, tip], canonical); return true } catch { return false }
+  })
+}
+// `expectedAdvances: [{ ref, to }]` names refs a later step was expected to move. An attempt whose
+// only mismatch is such a ref now at `to`, or at a descendant of `to`, is `superseded`: neither
+// reusable nor retryable, and not counted as unresolved.
+export async function reconcileExecutionAttempt({ common, runId, inputs, branches, retention, checkouts = {}, effectQueries, expectedAdvances }) {
   const identity = strictExecutionIdentity(inputs), currentBranches = executionBranches(branches)
   if (!checkouts || typeof checkouts !== 'object' || Array.isArray(checkouts) || Object.keys(checkouts).length > 1000) throw new Error('Invalid bounded checkout observations')
-  const bounds = { maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 * 1024 * 1024, maxAgeMs: 365 * 86400000 }
-  if (!retention || Object.keys(retention).length !== 3 || Object.entries(bounds).some(([key, upper]) =>
+  const advances = advancesContract(expectedAdvances)
+  if (!retention || Object.keys(retention).length !== 3 || Object.entries(RETENTION_LIMITS).some(([key, upper]) =>
     !Number.isSafeInteger(retention[key]) || retention[key] <= 0 || retention[key] > upper)) throw new Error('Invalid recovery retention contract')
   queryContract(effectQueries)
   const canonical = await realpath(common), events = await readExecutionEvents(canonical, runId)
@@ -178,31 +200,40 @@ export async function reconcileExecutionAttempt({ common, runId, inputs, branche
         observation = await queryPr(effect.start.effect, effectQueries, sourceRefs[0][1])
         if (observation) { outcome = 'completed'; source = 'read-only-query' }
       }
-      effects.push({ ...effect.start.effect, outcome, source, observation, retryAllowed: outcome === 'failed', authenticatedAuthorization: false })
+      effects.push({ ...effect.start.effect, outcome, source, observation, retryAllowed: outcome === 'failed' || outcome === 'not-started', authenticatedAuthorization: false })
     }
-    const available = await checkoutAvailable(canonical, checkouts, start.checkout, expectedBranches)
+    // The checkout follows the advanced ref, so it is only compared when nothing was superseded.
+    const advanced = changedBranches.length > 0 && changedBranches.every(ref => !conflictingBranches.includes(ref)
+      && currentBranches[ref] === observedBranches[ref] && reachedAdvance(canonical, advances, ref, observedBranches[ref]))
+    const available = advanced || await checkoutAvailable(canonical, checkouts, start.checkout, expectedBranches)
     const unknownEffects = effects.some(e => e.outcome === 'unknown')
-    const state = Date.now() - start.at > retention.maxAgeMs ? 'retention-exceeded' : start.identity !== identity ? 'stale' : changedBranches.length ? 'branch-changed'
+    let state = Date.now() - start.at > retention.maxAgeMs ? 'retention-exceeded' : start.identity !== identity ? 'stale' : changedBranches.length && !advanced ? 'branch-changed'
       : missingArtifacts.length ? 'missing-artifact' : !available ? 'checkout-unavailable'
       : unknownEffects ? 'unknown-effect' : effects.some(e => e.outcome === 'failed') ? 'failed-observation' : !end ? 'interrupted' : end.kind === 'step-failed' ? 'failed-observation' : 'ready'
+    if (state === 'ready' && advanced) state = 'superseded'
     attempts.push({ executionId: start.executionId, task: start.task, step: start.step, attempt: start.attempt, state,
       reuse: state === 'ready', retryAllowed: ['interrupted', 'failed-observation'].includes(state) && effects.every(e => e.retryAllowed),
       requiresCurrentGates: true, changedBranches, conflictingBranches, artifacts, missingArtifacts, effects })
   }
   const historical = events.filter(e => e.version === 1)
   if (historical.length) {
-    const report = reconcileExecution(historical, { inputs, branches: currentBranches })
+    const report = reconcileHistorical(historical, { inputs, branches: currentBranches })
     attempts.push(...report.attempts.map(a => ({ ...a, state: 'historical-observation', historicalState: a.state, reuse: false, retryAllowed: false })))
   }
-  return { version: 2, identity, attempts, verifiedComplete: false, unresolved: attempts.some(a => !a.reuse),
+  return { version: 2, identity, attempts, verifiedComplete: false, unresolved: attempts.some(a => !a.reuse && a.state !== 'superseded'),
     liveReferences: [...liveReferences.values()], queriesUsed, trust: TRUST }
 }
+// The plan's contracts name this `reconcileExecution`; it is the same function.
+export const reconcileExecution = reconcileExecutionAttempt
 export async function resolveExecutionEffect({ common, runId, effectId, resolution, reason }) {
-  if (!['completed', 'failed', 'unknown'].includes(resolution) || typeof reason !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(reason)) throw new Error('Invalid bounded local operator resolution')
+  const outcomes = new Set(Object.values(EFFECT_RESOLUTIONS).flat())
+  if (!outcomes.has(resolution) || typeof reason !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(reason)) throw new Error('Invalid bounded local operator resolution')
   const events = await readExecutionEvents(common, runId), groups = strictExecutionAttempts(events)
   const effects = groups.flatMap(group => group.effects).filter(effect => effect.start.effect.id === effectId)
   if (effects.length !== 1) throw new Error('Resolution needs one strict recorded external effect')
   const effect = effects[0]
+  // Outcomes are per effect kind: agent-dispatch takes not-started or completed only.
+  if (!Object.hasOwn(EFFECT_RESOLUTIONS, effect.start.effect.kind) || !EFFECT_RESOLUTIONS[effect.start.effect.kind].includes(resolution)) throw new Error('Invalid bounded local operator resolution for this effect kind')
   const at = Math.max(Date.now(), ...events.map(e => e.at + 1))
   const event = await appendExecutionEvent(common, { ...effect.start, id: randomUUID(), kind: 'effect-resolved', at,
     artifacts: [], resolution: { outcome: resolution, reason, trust: 'local-operator-observation', authenticatedAuthorization: false } })

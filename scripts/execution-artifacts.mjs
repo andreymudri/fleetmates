@@ -1,11 +1,12 @@
 import { constants } from 'node:fs'
-import { mkdir, open, lstat, realpath, opendir, link, unlink, rmdir } from 'node:fs/promises'
+import { mkdir, open, lstat, realpath, opendir, link, unlink, rmdir, rename, rm } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { markerRef } from './workflow-lifecycle.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
-const UPPER = { maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 * 1024 * 1024, maxAgeMs: 365 * 24 * 60 * 60 * 1000 }
+export const RETENTION_LIMITS = Object.freeze({ maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 * 1024 * 1024, maxAgeMs: 365 * 24 * 60 * 60 * 1000 })
+const UPPER = RETENTION_LIMITS
 const MAX_FILES = 4096
 const TRUST = 'Private modes and no-follow checks do not isolate hostile processes with the same UID. Live recovery references must be independently reconciled by the caller.'
 
@@ -98,12 +99,90 @@ async function inventory(dir) {
   }
   return files.sort((a, b) => a.at - b.at || a.name.localeCompare(b.name))
 }
-async function locked(dir, action) {
-  const lock = path.join(dir, '.lock')
-  try { await mkdir(lock, { mode: 0o700 }) }
-  catch (error) { if (error.code === 'EEXIST') throw new Error('Artifact storage is busy or an interrupted write requires reconciliation'); throw error }
-  try { return await action() } finally { await rmdir(lock) }
+// Interrupted-write reconciliation shared with the execution journal. A storage lock is a private
+// directory `<dir>/.lock` holding `pid`, the decimal pid of the process that created it.
+export const LOCK_WAIT_MS = 5000, STALE_TEMPORARY_MS = 60000
+const LOCK_BACKOFF_MS = { first: 10, max: 250 }
+const TEMPORARY = /^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/
+const REMOVED_LOCK = /^\.lock\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.stale$/
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+function alive(pid) {
+  try { process.kill(pid, 0); return true } catch (error) { return error.code === 'EPERM' }
 }
+async function lockHolder(lock) {
+  let info
+  try { info = await lstat(lock) } catch (error) { if (error.code === 'ENOENT') return null; throw error }
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe storage lock')
+  let pid = null, handle
+  try {
+    handle = await open(path.join(lock, 'pid'), readFlags())
+    const buffer = Buffer.alloc(16), { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    const text = buffer.subarray(0, bytesRead).toString('latin1')
+    if (/^[1-9][0-9]{0,9}\n$/.test(text)) pid = Number(text.trim())
+  } catch (error) { if (!['ENOENT', 'ELOOP', 'EISDIR'].includes(error.code)) throw error }
+  finally { if (handle) await handle.close() }
+  return { pid, at: info.mtimeMs }
+}
+// A holder whose pid is not alive is dead. A lock without a readable pid is a creator that has not
+// written it yet, so it is treated as held until it is older than STALE_TEMPORARY_MS.
+function abandoned(holder) {
+  if (holder.pid !== null) return alive(holder.pid) ? null : 'dead-lock-holder'
+  return Date.now() - holder.at > STALE_TEMPORARY_MS ? 'abandoned-lock-without-pid' : null
+}
+async function removeAbandonedLock(dir, lock, holder) {
+  const moved = path.join(dir, `.lock.${randomUUID()}.stale`)
+  try { await rename(lock, moved) } catch (error) { if (error.code === 'ENOENT') return false; throw error }
+  const current = await lockHolder(moved)
+  if (current.pid !== holder.pid) { // another writer replaced the lock in between; hand it back
+    await rename(moved, lock).catch(() => {})
+    return false
+  }
+  await rm(moved, { recursive: true, force: true })
+  return true
+}
+export async function withStorageLock(dir, busy, action) {
+  const lock = path.join(dir, '.lock'), reconciled = [], deadline = Date.now() + LOCK_WAIT_MS
+  for (let delay = LOCK_BACKOFF_MS.first; ;) {
+    try {
+      await mkdir(lock, { mode: 0o700 })
+      try {
+        const handle = await open(path.join(lock, 'pid'), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+        try { await handle.writeFile(`${process.pid}\n`) } finally { await handle.close() }
+      } catch (error) { await rm(lock, { recursive: true, force: true }); throw error }
+      break
+    } catch (error) { if (error.code !== 'EEXIST') throw error }
+    const holder = await lockHolder(lock)
+    if (holder) {
+      const reason = abandoned(holder)
+      if (reason && await removeAbandonedLock(dir, lock, holder)) { reconciled.push({ path: '.lock', reason }); continue }
+      if (!reason) {
+        const left = deadline - Date.now()
+        if (left <= 0) throw new Error(busy)
+        await sleep(Math.min(delay, left))
+        delay = Math.min(delay * 2, LOCK_BACKOFF_MS.max)
+      }
+    }
+  }
+  try { return await action(reconciled) }
+  finally { await unlink(path.join(lock, 'pid')); await rmdir(lock) }
+}
+// Called while holding the storage lock, so no live writer owns a temporary file; the age
+// threshold still leaves young ones in place for the caller's storage check to refuse.
+export async function reconcileTemporaries(dir, reconciled) {
+  const found = []
+  for await (const entry of await opendir(dir)) if (TEMPORARY.test(entry.name) || REMOVED_LOCK.test(entry.name)) found.push(entry.name)
+  for (const entry of found.sort()) {
+    const file = path.join(dir, entry), info = await lstat(file)
+    if (REMOVED_LOCK.test(entry)) {
+      if (!info.isDirectory()) continue
+      await rm(file, { recursive: true, force: true }); reconciled.push({ path: entry, reason: 'interrupted-lock-removal' })
+    } else if (info.isFile() && Date.now() - info.mtimeMs > STALE_TEMPORARY_MS) {
+      await unlink(file); reconciled.push({ path: entry, reason: 'stale-temporary' })
+    }
+  }
+  return reconciled
+}
+const BUSY = 'Artifact storage is busy or an interrupted write requires reconciliation'
 async function syncDirectory(dir) {
   let handle
   try {
@@ -115,8 +194,8 @@ async function syncDirectory(dir) {
     throw error
   } finally { if (handle) await handle.close() }
 }
-async function retained(dir, reference) {
-  return { reference, durability: { fileSynced: true, directorySynced: await syncDirectory(dir), powerLossGuaranteed: false,
+async function retained(dir, reference, reconciled) {
+  return { reference, reconciled, durability: { fileSynced: true, directorySynced: await syncDirectory(dir), powerLossGuaranteed: false,
     limitation: 'Completed fsync calls do not guarantee recovery after power loss on every filesystem, storage device or platform.' }, trust: TRUST }
 }
 
@@ -129,14 +208,15 @@ export async function retainExecutionArtifact({ common, runId, kind, bytes, rete
   const content = Buffer.from(bytes)
   const reference = referenceIdentity({ version: 1, runId, kind, sha256: hash(content), byteLength: content.length }, runId)
   const dir = await storage(common, runId, true)
-  return locked(dir, async () => {
+  // Only the new content is measured against the bounds: old or oversized content already stored
+  // is pruneExecutionArtifacts' concern, which needs the caller's live references.
+  if (content.length > retention.maxRunBytes) throw new Error('Artifact run byte bound exceeded')
+  return withStorageLock(dir, BUSY, async reconciled => {
+    await reconcileTemporaries(dir, reconciled)
     const files = await inventory(dir), existing = files.find(file => file.name === name(reference))
-    if (files.some(file => at - file.at > retention.maxAgeMs)) throw new Error('Artifact age bound exceeded; reconcile live references and prune explicitly')
-    if (files.some(file => file.size > retention.maxArtifactBytes)) throw new Error('Artifact byte bound exceeded in storage')
-    if (files.reduce((sum, file) => sum + file.size, 0) + (existing ? 0 : content.length) > retention.maxRunBytes) throw new Error('Artifact run byte bound exceeded')
     if (existing) {
       await readBytes(existing.file, reference, retention, true)
-      return retained(dir, reference)
+      return retained(dir, reference, reconciled)
     }
     if (files.length >= MAX_FILES) throw new Error('Artifact count bound exceeded')
     const temporary = path.join(dir, '.' + randomUUID() + '.tmp')
@@ -146,7 +226,7 @@ export async function retainExecutionArtifact({ common, runId, kind, bytes, rete
       finally { await handle.close() }
       await link(temporary, path.join(dir, name(reference)))
     } finally { await unlink(temporary) }
-    return retained(dir, reference)
+    return retained(dir, reference, reconciled)
   })
 }
 
@@ -164,25 +244,28 @@ export async function pruneExecutionArtifacts({ common, runId, retention: raw, l
   for (const rawReference of liveReferences) { const reference = referenceIdentity(rawReference, runId); live.set(name(reference), reference) }
   const dir = await storage(common, runId, false, true)
   if (!dir) {
-    return { removed: 0, retained: 0, bytes: 0, unresolvedReferences: [...live.values()], limitsSatisfied: true,
+    return { removed: [], kept: [], bytes: 0, reconciled: [], unresolvedReferences: [...live.values()], limitsSatisfied: true,
       retentionExceeded: { artifactBytes: false, runBytes: false, age: false } }
   }
-  return locked(dir, async () => {
+  return withStorageLock(dir, BUSY, async reconciled => {
+    await reconcileTemporaries(dir, reconciled)
     const files = await inventory(dir), unresolvedReferences = []
     for (const [fileName, reference] of live) {
       try { await readBytes(path.join(dir, fileName), reference, retention) }
       catch { unresolvedReferences.push(reference) }
     }
-    let bytes = files.reduce((sum, file) => sum + file.size, 0), removed = 0
-    const remaining = []
+    let bytes = files.reduce((sum, file) => sum + file.size, 0)
+    const remaining = [], removed = []
+    // Oldest first: non-live content goes when it is past the age or artifact bound, or while the
+    // run is over its byte bound. Live content is never removed.
     for (const file of files) {
       if (!live.has(file.name) && (at - file.at > retention.maxAgeMs || file.size > retention.maxArtifactBytes || bytes > retention.maxRunBytes)) {
-        await unlink(file.file); bytes -= file.size; removed++
+        await unlink(file.file); bytes -= file.size; removed.push({ name: file.name, bytes: file.size })
       } else remaining.push(file)
     }
-    if (removed) await syncDirectory(dir)
+    if (removed.length) await syncDirectory(dir)
     const retentionExceeded = { artifactBytes: remaining.some(file => file.size > retention.maxArtifactBytes), runBytes: bytes > retention.maxRunBytes,
       age: remaining.some(file => at - file.at > retention.maxAgeMs) }
-    return { removed, retained: remaining.length, bytes, unresolvedReferences, limitsSatisfied: !Object.values(retentionExceeded).some(Boolean), retentionExceeded }
+    return { removed, kept: remaining.map(file => ({ name: file.name, bytes: file.size, live: live.has(file.name) })), bytes, reconciled, unresolvedReferences, limitsSatisfied: !Object.values(retentionExceeded).some(Boolean), retentionExceeded }
   })
 }

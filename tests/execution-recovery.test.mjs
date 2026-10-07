@@ -553,3 +553,69 @@ test('missing effect source snapshot is rejected before a PR query', async t => 
   } }), /branch observations/)
   assert.equal(calls, 0)
 })
+
+async function advance(root, label) {
+  await writeFile(path.join(root, 'file'), label)
+  git(['add', '.'], root); git(['commit', '-q', '-m', label], root)
+  return git(['rev-parse', 'HEAD'], root)
+}
+test('an attempt whose only mismatch is a ref advanced to or past an expected advance is superseded, not unresolved', async t => {
+  const f = await fixture(t)
+  const integrated = await advance(f.root, 'integrated'), later = await advance(f.root, 'later')
+  const current = { ...f.request, branches: { 'refs/heads/main': later } }
+  const main = to => [{ ref: 'refs/heads/main', to }]
+  assert.equal((await attempt(current)).state, 'branch-changed')
+  for (const to of [later, integrated]) {
+    const report = await recovery.reconcileExecutionAttempt({ ...current, expectedAdvances: main(to) })
+    assert.equal(report.attempts[0].state, 'superseded')
+    assert.equal(report.attempts[0].reuse, false)
+    assert.equal(report.attempts[0].retryAllowed, false)
+    assert.deepEqual(report.attempts[0].changedBranches, ['refs/heads/main'])
+    assert.equal(report.unresolved, false)
+  }
+  git(['checkout', '-q', '-b', 'side', f.request.inputs.commit], f.root)
+  const side = await advance(f.root, 'side')
+  git(['checkout', '-q', 'main'], f.root)
+  const sideways = await recovery.reconcileExecutionAttempt({ ...current, expectedAdvances: main(side) })
+  assert.equal(sideways.attempts[0].state, 'branch-changed')
+  assert.equal(sideways.unresolved, true)
+  assert.equal((await attempt({ ...current, expectedAdvances: [{ ref: 'refs/heads/side', to: side }] })).state, 'branch-changed')
+  assert.equal((await attempt({ ...f.request, branches: { 'refs/heads/main': integrated }, expectedAdvances: main(integrated) })).state, 'branch-changed')
+  await rm(f.artifactFile)
+  assert.equal((await attempt({ ...current, expectedAdvances: main(integrated) })).state, 'missing-artifact')
+  for (const expectedAdvances of ['refs/heads/main', [{ ref: 'main', to: later }], [{ ref: 'refs/heads/main', to: 'abc' }],
+    [{ ref: 'refs/heads/main', to: later, extra: 1 }], Array(101).fill({ ref: 'refs/heads/main', to: later })]) {
+    await assert.rejects(recovery.reconcileExecutionAttempt({ ...current, expectedAdvances }), /expected advances/)
+  }
+})
+test('an interrupted agent dispatch resolved not-started may be redispatched and one resolved completed may not', async t => {
+  for (const [outcome, retry] of [['not-started', true], ['completed', false]]) {
+    const f = await fixture(t, { complete: false, effect: { id: 'dispatch-1', kind: 'agent-dispatch', reference: null } })
+    const request = { common: f.request.common, runId: 'r1', effectId: 'dispatch-1', reason: 'operator-inspected' }
+    const before = await attempt(f.request)
+    assert.equal(before.state, 'unknown-effect')
+    assert.equal(before.retryAllowed, false)
+    for (const resolution of ['failed', 'unknown', 'bogus']) await assert.rejects(recovery.resolveExecutionEffect({ ...request, resolution }), /bounded local operator resolution/)
+    const resolved = await recovery.resolveExecutionEffect({ ...request, resolution: outcome })
+    assert.equal(resolved.event.resolution.outcome, outcome)
+    const after = await attempt(f.request)
+    assert.equal(after.effects[0].outcome, outcome)
+    assert.equal(after.state, 'interrupted')
+    assert.equal(after.retryAllowed, retry)
+  }
+  const vault = await fixture(t, { complete: false, effect: { id: 'effect-1', kind: 'vault', reference: null } })
+  await assert.rejects(recovery.resolveExecutionEffect({ common: vault.request.common, runId: 'r1', effectId: 'effect-1', resolution: 'not-started', reason: 'inspected' }), /bounded local operator resolution/)
+  const shell = await fixture(t, { complete: false, effect: { id: 'effect-1', kind: 'agent-dispatch', reference: null } })
+  const dir = await executionDirectory(shell.request.common, 'r1'), planted = shell.records.find(record => record.id === 'effect')
+  await writeFile(path.join(dir, hash(planted.id) + '.json'), JSON.stringify({ ...planted, effect: { ...planted.effect, kind: 'shell' } }) + '\n')
+  await assert.rejects(recovery.resolveExecutionEffect({ common: shell.request.common, runId: 'r1', effectId: 'effect-1', resolution: 'not-started', reason: 'inspected' }), /effect/)
+})
+test('recovery exposes reconcileExecution and bounds retention by RETENTION_LIMITS', async t => {
+  const { RETENTION_LIMITS } = await import('../scripts/execution-artifacts.mjs')
+  assert.equal(recovery.reconcileExecution, recovery.reconcileExecutionAttempt)
+  const f = await fixture(t)
+  assert.equal((await attempt({ ...f.request, retention: { ...RETENTION_LIMITS } })).state, 'ready')
+  for (const key of Object.keys(RETENTION_LIMITS)) {
+    await assert.rejects(recovery.reconcileExecutionAttempt({ ...f.request, retention: { ...RETENTION_LIMITS, [key]: RETENTION_LIMITS[key] + 1 } }), /retention/)
+  }
+})
