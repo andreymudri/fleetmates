@@ -166,15 +166,16 @@ export async function reconcileExecutionAttempt({ common, runId, inputs, branche
     }
     const effects = []
     for (const effect of group.effects) {
+      const sourceRefs = Object.entries(effect.start.branches)
       let outcome = effect.end?.kind === 'effect-completed' ? 'completed' : effect.end?.kind === 'effect-failed' ? 'failed' : 'unknown'
       let source = 'journal-observation', observation = null
       if (effect.resolution) {
         outcome = effect.resolution.resolution.outcome
         source = 'local-operator-observation'
-      } else if (outcome === 'unknown' && queriesUsed < MAX_QUERIES && effect.start.effect.kind === 'pr'
+      } else if (outcome === 'unknown' && sourceRefs.length === 1 && queriesUsed < MAX_QUERIES && effect.start.effect.kind === 'pr'
           && effectQueries?.authorizedPrReferences.includes(effect.start.effect.reference)) {
         queriesUsed++
-        observation = await queryPr(effect.start.effect, effectQueries, effect.start.inputs.commit)
+        observation = await queryPr(effect.start.effect, effectQueries, sourceRefs[0][1])
         if (observation) { outcome = 'completed'; source = 'read-only-query' }
       }
       effects.push({ ...effect.start.effect, outcome, source, observation, retryAllowed: outcome === 'failed', authenticatedAuthorization: false })

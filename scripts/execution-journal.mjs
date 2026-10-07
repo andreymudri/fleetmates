@@ -150,11 +150,19 @@ async function readRecord(file) {
     return { event: executionEvent(JSON.parse(text)), bytes: bytesRead }
   } finally { await handle.close() }
 }
+async function privateExecutionDirectories(directory, allowMissing = false) {
+  for (const dir of [path.dirname(directory), directory]) {
+    let info
+    try { info = await lstat(dir) }
+    catch (error) { if (allowMissing && error.code === 'ENOENT') return false; throw error }
+    if (!info.isDirectory() || info.mode & 0o077 || await realpath(dir) !== dir) throw new Error('Unsafe execution directory')
+  }
+  return true
+}
 export async function readExecutionEvents(common, runId) {
   const directory = await executionDirectory(common, runId)
-  let dir
-  try { dir = await opendir(directory) } catch (error) { if (error.code === 'ENOENT') return []; throw error }
-  if (await realpath(directory) !== directory) { await dir.close(); throw new Error('Execution directory is a link') }
+  if (!await privateExecutionDirectories(directory, true)) return []
+  const dir = await opendir(directory)
   const events = [], ids = new Set()
   let bytes = 0
   for await (const entry of dir) {
@@ -166,6 +174,7 @@ export async function readExecutionEvents(common, runId) {
     if (event.runId !== runId || entry.name !== digest(event.id) + '.json' || ids.has(event.id)) throw new Error('Execution record identity mismatch')
     ids.add(event.id); events.push(event)
   }
+  await privateExecutionDirectories(directory)
   return events.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id))
 }
 export async function appendExecutionEvent(common, raw, { retention, now = Date.now(), requireFreshStart = false } = {}) {
@@ -174,10 +183,7 @@ export async function appendExecutionEvent(common, raw, { retention, now = Date.
   if (Buffer.byteLength(text) > RECORD_LIMIT) throw new Error('Execution record exceeds budget')
   const directory = await executionDirectory(common, event.runId)
   await mkdir(directory, { recursive: true, mode: 0o700 })
-  for (const dir of [path.dirname(directory), directory]) {
-    const info = await lstat(dir)
-    if (!info.isDirectory() || info.mode & 0o077 || await realpath(dir) !== dir) throw new Error('Unsafe execution directory')
-  }
+  await privateExecutionDirectories(directory)
   const lock = path.join(directory, '.lock')
   try { await mkdir(lock, { mode: 0o700 }) }
   catch (error) { if (error.code === 'EEXIST') throw new Error('Execution journal busy; required start not persisted'); throw error }

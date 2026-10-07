@@ -235,6 +235,7 @@ async function assertPrivateDirectoryRequired(t, scope) {
   await assert.rejects(journal.runAfterExecutionStart({ common, event: start,
     action: () => { actions++ } }), /Unsafe execution directory/)
   assert.equal(actions, 0)
+  await chmod(scope === 'parent' ? path.dirname(directory) : directory, 0o700)
   assert.equal((await journal.readExecutionEvents(common, start.runId)).some(e => e.id === start.id), false)
 }
 test('non-private journal parent refuses start persistence and action', async t => {
@@ -242,4 +243,33 @@ test('non-private journal parent refuses start persistence and action', async t 
 })
 test('non-private run journal refuses start persistence and action', async t => {
   await assertPrivateDirectoryRequired(t, 'run')
+})
+
+for (const scope of ['parent', 'run']) {
+  test('journal reader rejects writable ' + scope + ' storage before trusting history', async t => {
+    const { chmod } = await import('node:fs/promises')
+    const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+    const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-read-')))
+    t.after(() => rm(common, { recursive: true, force: true }))
+    await appendExecutionEvent(common, event('start', 'step-started'))
+    assert.equal((await readExecutionEvents(common, 'r1'))[0].version, 1)
+    const directory = await executionDirectory(common, 'r1')
+    await chmod(scope === 'parent' ? path.dirname(directory) : directory, 0o777)
+    await assert.rejects(readExecutionEvents(common, 'r1'), /Unsafe execution directory/)
+  })
+}
+test('absent journal history is empty only beneath safe storage', async t => {
+  const { mkdir, chmod, symlink } = await import('node:fs/promises')
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-absent-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const directory = await executionDirectory(common, 'r1'), parent = path.dirname(directory)
+  assert.deepEqual(await readExecutionEvents(common, 'r1'), [])
+  await mkdir(parent, { mode: 0o700 })
+  assert.deepEqual(await readExecutionEvents(common, 'r1'), [])
+  await chmod(parent, 0o777)
+  await assert.rejects(readExecutionEvents(common, 'r1'), /Unsafe execution directory/)
+  await chmod(parent, 0o700)
+  await symlink(path.join(common, 'missing'), directory)
+  await assert.rejects(readExecutionEvents(common, 'r1'), /Unsafe execution directory/)
 })

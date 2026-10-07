@@ -455,3 +455,101 @@ test('checkout verification refuses unsupported gitlink evidence', async t => {
   await writeFile(path.join(dir, hash(end.id) + '.json'), JSON.stringify(updated) + '\n')
   assert.equal((await attempt({ ...f.request, branches: updated.branches })).state, 'checkout-unavailable')
 })
+
+async function implementationPrFixture(t, { later = false, ambiguous = false, equalTips = false } = {}) {
+  const f = await fixture(t, { complete: false })
+  const { appendExecutionEvent, readExecutionEvents } = await import('../scripts/execution-journal.mjs')
+  const start = f.records[0], anchored = f.request.inputs.commit
+  await writeFile(path.join(f.root, 'file'), 'implementation')
+  git(['add', 'file'], f.root); git(['commit', '-m', 'implementation'], f.root)
+  const source = git(['rev-parse', 'HEAD'], f.root)
+  const branches = { 'refs/heads/main': source }
+  if (ambiguous) {
+    git(['branch', 'other-source', equalTips ? source : anchored], f.root)
+    branches['refs/heads/other-source'] = equalTips ? source : anchored
+  }
+  await appendExecutionEvent(f.request.common, { ...start, id: 'pr-start', kind: 'effect-started', at: start.at + 1,
+    branches, effect: { id: 'pr-1', kind: 'pr', reference: 'example/project#12' } })
+  if (later) {
+    await writeFile(path.join(f.root, 'file'), 'later change')
+    git(['add', 'file'], f.root); git(['commit', '-m', 'later change'], f.root)
+  }
+  const current = git(['rev-parse', 'HEAD'], f.root)
+  await appendExecutionEvent(f.request.common, { ...start, id: 'end', kind: 'step-completed', at: start.at + 2,
+    branches: { 'refs/heads/main': current }, artifacts: [f.reference] })
+  const records = await readExecutionEvents(f.request.common, 'r1')
+  assert.ok(records.every(record => record.inputs.commit === anchored && record.identity === start.identity))
+  return { ...f, anchored, source, current, request: { ...f.request, branches: { ...branches, 'refs/heads/main': current } } }
+}
+const simulatedPr = headRefOid => ({ authorizedPrReferences: ['example/project#12'],
+  queryPr: async () => ({ stdout: JSON.stringify({ number: 12, state: 'OPEN', headRefOid }) }) })
+test('PR query matches the recorded implementation source while preserving anchored inputs', async t => {
+  const f = await implementationPrFixture(t)
+  assert.notEqual(f.anchored, f.source)
+  const observed = await attempt({ ...f.request, effectQueries: simulatedPr(f.source) })
+  assert.equal(observed.state, 'ready')
+  assert.equal(observed.reuse, true)
+  assert.equal(observed.effects[0].observation.headRefOid, f.source)
+  assert.equal(observed.effects[0].retryAllowed, false)
+})
+test('obsolete anchored PR head cannot substitute for the recorded implementation source', async t => {
+  const f = await implementationPrFixture(t)
+  const observed = await attempt({ ...f.request, effectQueries: simulatedPr(f.anchored) })
+  assert.equal(observed.state, 'unknown-effect')
+  assert.equal(observed.reuse, false)
+  assert.equal(observed.retryAllowed, false)
+  assert.equal(observed.effects[0].observation, null)
+})
+test('PR source snapshot belongs to effect start rather than a later end ref', async t => {
+  const f = await implementationPrFixture(t, { later: true })
+  assert.notEqual(f.source, f.current)
+  assert.equal((await attempt({ ...f.request, effectQueries: simulatedPr(f.source) })).reuse, true)
+  assert.equal((await attempt({ ...f.request, effectQueries: simulatedPr(f.current) })).state, 'unknown-effect')
+})
+for (const equalTips of [false, true]) {
+  test('multiple effect-start refs remain unresolved with ' + (equalTips ? 'equal' : 'different') + ' tips', async t => {
+    const f = await implementationPrFixture(t, { ambiguous: true, equalTips })
+    let calls = 0
+    const report = await recovery.reconcileExecutionAttempt({ ...f.request, effectQueries: {
+      authorizedPrReferences: ['example/project#12'], queryPr: async () => {
+        calls++; return { stdout: JSON.stringify({ number: 12, state: 'OPEN', headRefOid: f.anchored }) }
+      } } })
+    assert.equal(calls, 0)
+    assert.equal(report.queriesUsed, 0)
+    assert.equal(report.attempts[0].state, 'unknown-effect')
+    assert.equal(report.attempts[0].reuse, false)
+    assert.equal(report.attempts[0].retryAllowed, false)
+  })
+}
+for (const scope of ['parent', 'run']) {
+  test('recovery rejects deleted unknown-effect evidence in writable ' + scope + ' storage', async t => {
+    const { chmod, unlink } = await import('node:fs/promises')
+    const f = await fixture(t, { effect: { id: 'effect-1', kind: 'publication', reference: null } })
+    assert.equal((await attempt(f.request)).state, 'unknown-effect')
+    const directory = await executionDirectory(f.request.common, 'r1')
+    await chmod(scope === 'parent' ? path.dirname(directory) : directory, 0o777)
+    await unlink(path.join(directory, hash('effect') + '.json'))
+    await assert.rejects(recovery.reconcileExecutionAttempt(f.request), /Unsafe execution directory/)
+  })
+  test('operator resolution rejects writable ' + scope + ' journal storage before trusting history', async t => {
+    const { chmod, readdir } = await import('node:fs/promises')
+    const f = await fixture(t, { effect: { id: 'effect-1', kind: 'publication', reference: null } })
+    const directory = await executionDirectory(f.request.common, 'r1'), before = await readdir(directory)
+    await chmod(scope === 'parent' ? path.dirname(directory) : directory, 0o777)
+    await assert.rejects(recovery.resolveExecutionEffect({ common: f.request.common, runId: 'r1', effectId: 'missing',
+      resolution: 'completed', reason: 'inspected' }), /Unsafe execution directory/)
+    assert.deepEqual(await readdir(directory), before)
+  })
+}
+test('missing effect source snapshot is rejected before a PR query', async t => {
+  const f = await implementationPrFixture(t)
+  const { readExecutionEvents } = await import('../scripts/execution-journal.mjs')
+  const record = (await readExecutionEvents(f.request.common, 'r1')).find(e => e.id === 'pr-start')
+  const directory = await executionDirectory(f.request.common, 'r1')
+  await writeFile(path.join(directory, hash(record.id) + '.json'), JSON.stringify({ ...record, branches: {} }) + '\n')
+  let calls = 0
+  await assert.rejects(recovery.reconcileExecutionAttempt({ ...f.request, effectQueries: {
+    authorizedPrReferences: ['example/project#12'], queryPr: async () => { calls++ }
+  } }), /branch observations/)
+  assert.equal(calls, 0)
+})
