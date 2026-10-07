@@ -1,13 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, readdir, writeFile, stat, lstat, chmod, symlink, link, mkdir, open, readFile, rename } from 'node:fs/promises'
+import { mkdtemp, rm, readdir, writeFile, stat, lstat, chmod, symlink, link, mkdir, open, readFile, rename, utimes } from 'node:fs/promises'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { discover, git } from '../scripts/workflow-lifecycle.mjs'
-import { retainExecutionArtifact, readExecutionArtifact, pruneExecutionArtifacts } from '../scripts/execution-artifacts.mjs'
+import { retainExecutionArtifact, readExecutionArtifact, pruneExecutionArtifacts, RETENTION_LIMITS } from '../scripts/execution-artifacts.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const retention = { maxArtifactBytes: 64, maxRunBytes: 128, maxAgeMs: 1000 }
@@ -128,20 +128,21 @@ test('enforces both byte budgets including stricter reads and equal-content dedu
   await assert.rejects(retain(request, Buffer.alloc(5)), /artifact.*bound/i)
   const { reference } = await retain(request, Buffer.from('abcd'))
   await retain(request, Buffer.from('abcd'))
-  await assert.rejects(retain(request, Buffer.from('xyz')), /run.*bound/i)
-  await retain(request, Buffer.from('xy'))
+  // Old content over the run bound does not refuse new content; only content that alone cannot fit does.
+  await retain(request, Buffer.from('xyz'))
+  await assert.rejects(retain({ ...request, retention: { ...request.retention, maxArtifactBytes: 8 } }, Buffer.alloc(7)), /run.*bound/i)
+  await retain({ ...request, retention: { ...request.retention, maxArtifactBytes: 8 } }, Buffer.alloc(6))
   await assert.rejects(readExecutionArtifact({ ...request, retention: { ...request.retention, maxArtifactBytes: 3 }, reference }))
   await writeFile(artifactFile(request, reference), Buffer.alloc(5))
   await assert.rejects(readExecutionArtifact({ ...request, reference }), /artifact.*bound/i)
 })
 
-test('serializes competing writers instead of exceeding the total run bound', async t => {
-  const request = { ...await repository(t), retention: { ...retention, maxRunBytes: 4 } }
-  const results = await Promise.allSettled([retain(request, Buffer.from('aaaa')), retain(request, Buffer.from('bbbb'))])
-  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1)
-  const result = results.find(result => result.status === 'fulfilled').value
-  assert.equal((await readdir(directory(request))).length, 1)
-  assert.equal((await readExecutionArtifact({ ...request, reference: result.reference })).length, 4)
+test('eight concurrent writers on one store all succeed by waiting for the lock', async t => {
+  const request = await repository(t)
+  const results = await Promise.allSettled(Array.from({ length: 8 }, (_, i) => retain(request, Buffer.from('body-' + i))))
+  assert.deepEqual(results.map(result => result.status), Array(8).fill('fulfilled'))
+  assert.equal((await readdir(directory(request))).length, 8)
+  for (const [i, result] of results.entries()) assert.deepEqual(await readExecutionArtifact({ ...request, reference: result.value.reference }), Buffer.from('body-' + i))
 })
 
 test('rejects symlink, hardlink and directory artifact substitutions', async t => {
@@ -265,9 +266,11 @@ test('age cleanup removes expired unreferenced artifacts and preserves other run
   const old = await retain(request, Buffer.from('old'), { now: 10000 })
   const fresh = await retain(request, Buffer.from('new'), { now: 10500 })
   const separate = await retain(other, Buffer.from('other'), { now: 10000 })
-  const report = await pruneExecutionArtifacts({ ...request, liveReferences: [], now: 11001 })
-  assert.equal(report.removed, 1)
-  assert.equal(report.retained, 1)
+  const anchor = await retain(request, Buffer.alloc(0), { now: 10500 })
+  const report = await pruneExecutionArtifacts({ ...request, liveReferences: [anchor.reference], now: 11001 })
+  assert.equal(report.removed.length, 1)
+  assert.deepEqual(report.kept.find(entry => !entry.live), { name: path.basename(artifactFile(request, fresh.reference)), bytes: 3, live: false })
+  assert.equal(report.kept.length, 2)
   assert.equal(report.bytes, 3)
   assert.equal(report.limitsSatisfied, true)
   assert.deepEqual(report.unresolvedReferences, [])
@@ -284,14 +287,14 @@ test('requires an explicit recovery set and protects live evidence when byte or 
   await assert.rejects(pruneExecutionArtifacts({ ...request, liveReferences: [ { ...live.reference, runId: 'other' } ], now: 12000 }))
   const tight = { ...request, retention: { ...retention, maxRunBytes: 3, maxArtifactBytes: 3 } }
   const report = await pruneExecutionArtifacts({ ...tight, liveReferences: new Set([live.reference]), now: 12000 })
-  assert.equal(report.removed, 1)
-  assert.equal(report.retained, 1)
+  assert.equal(report.removed.length, 1)
+  assert.equal(report.kept.length, 1)
   assert.equal(report.bytes, 4)
   assert.equal(report.limitsSatisfied, false)
-  assert.deepEqual(report.retentionExceeded, { artifactBytes: true, runBytes: true, age: true })
+  assert.deepEqual(report.retentionExceeded, { artifactBytes: true, runBytes: true, age: true, count: false })
   assert.deepEqual(report.unresolvedReferences, [live.reference])
   assert.deepEqual(await readExecutionArtifact({ ...request, reference: live.reference }), Buffer.from('live'))
-  await assert.rejects(retain(request, Buffer.from('new'), { now: 12000 }), /age.*bound/i)
+  await retain(request, Buffer.from('new'), { now: 12000 })
 })
 
 test('cleanup returns missing and corrupt recovery references without deleting their evidence or exposing bodies', async t => {
@@ -300,13 +303,13 @@ test('cleanup returns missing and corrupt recovery references without deleting t
   await writeFile(artifactFile(request, corrupt.reference), Buffer.from('broken'))
   await rm(artifactFile(request, missing.reference))
   const report = await pruneExecutionArtifacts({ ...request, liveReferences: [corrupt.reference, missing.reference], now: 12000 })
-  assert.equal(report.removed, 0)
+  assert.deepEqual(report.removed, [])
   assert.deepEqual(report.unresolvedReferences, [corrupt.reference, missing.reference])
   assert.deepEqual(await readFile(artifactFile(request, corrupt.reference)), Buffer.from('broken'))
   assert.ok(!JSON.stringify(report).includes('broken'))
   assert.ok(!JSON.stringify(report).includes(request.common))
   const absent = await pruneExecutionArtifacts({ ...request, runId: 'absent-run', liveReferences: [], now: 12000 })
-  assert.equal(absent.retained, 0)
+  assert.deepEqual(absent.kept, [])
   const absentReference = { ...missing.reference, runId: 'absent-run' }
   const absentLive = await pruneExecutionArtifacts({ ...request, runId: 'absent-run', liveReferences: [absentReference], now: 12000 })
   assert.deepEqual(absentLive.unresolvedReferences, [absentReference])
@@ -316,8 +319,9 @@ test('cleanup evicts oldest unreferenced bytes to meet a lowered total budget', 
   const request = await repository(t)
   const first = await retain(request, Buffer.from('aaaa'), { now: 10000 })
   const second = await retain(request, Buffer.from('bbbb'), { now: 10500 })
-  const report = await pruneExecutionArtifacts({ ...request, retention: { ...retention, maxRunBytes: 4 }, liveReferences: [], now: 10500 })
-  assert.equal(report.removed, 1)
+  const anchor = await retain(request, Buffer.alloc(0), { now: 10500 })
+  const report = await pruneExecutionArtifacts({ ...request, retention: { ...retention, maxRunBytes: 4 }, liveReferences: [anchor.reference], now: 10500 })
+  assert.deepEqual(report.removed, [{ name: path.basename(artifactFile(request, first.reference)), bytes: 4 }])
   assert.equal(report.bytes, 4)
   assert.equal(report.limitsSatisfied, true)
   await assert.rejects(readExecutionArtifact({ ...request, reference: first.reference }))
@@ -328,8 +332,9 @@ test('cleanup applies a lowered per-artifact bound without expiring fresh smalle
   const request = await repository(t)
   const large = await retain(request, Buffer.from('aaaa'), { now: 10000 })
   const small = await retain(request, Buffer.from('bb'), { now: 10000 })
-  const report = await pruneExecutionArtifacts({ ...request, retention: { ...retention, maxArtifactBytes: 3 }, liveReferences: [], now: 10000 })
-  assert.equal(report.removed, 1)
+  const anchor = await retain(request, Buffer.alloc(0), { now: 10000 })
+  const report = await pruneExecutionArtifacts({ ...request, retention: { ...retention, maxArtifactBytes: 3 }, liveReferences: [anchor.reference], now: 10000 })
+  assert.deepEqual(report.removed, [{ name: path.basename(artifactFile(request, large.reference)), bytes: 4 }])
   assert.equal(report.bytes, 2)
   await assert.rejects(readExecutionArtifact({ ...request, reference: large.reference }))
   assert.deepEqual(await readExecutionArtifact({ ...request, reference: small.reference }), Buffer.from('bb'))
@@ -398,4 +403,221 @@ test('bounds storage entry counts before cleanup or further retention', async t 
   await assert.rejects(pruneExecutionArtifacts({ ...request, liveReferences: [] }), /count bound/)
   await assert.rejects(retain(request, Buffer.from('x')), /count bound/)
   assert.equal((await readdir(directory(request))).length, 4097)
+})
+
+// A pid that named a real process which has already exited and been reaped.
+function deadPid() {
+  const result = spawnSync(process.execPath, ['-e', ''], { timeout: 5000 })
+  assert.equal(result.status, 0)
+  assert.throws(() => process.kill(result.pid, 0), { code: 'ESRCH' })
+  return result.pid
+}
+async function plantLock(dir, pid) {
+  await mkdir(path.join(dir, '.lock'), { mode: 0o700 })
+  await writeFile(path.join(dir, '.lock', 'pid'), `${pid}\n`, { mode: 0o600 })
+}
+async function plantTemporary(dir, ageMs) {
+  const name = '.' + randomUUID() + '.tmp', file = path.join(dir, name), at = (Date.now() - ageMs) / 1000
+  await writeFile(file, 'partial', { mode: 0o600 })
+  await utimes(file, at, at)
+  return name
+}
+
+test('artifacts older than maxAgeMs never block a later retain, while new content that alone exceeds a bound still refuses', async t => {
+  const request = await repository(t)
+  const old = await retain(request, Buffer.from('old'), { now: 10000 })
+  const later = await retain(request, Buffer.from('later'), { now: 20000 })
+  assert.deepEqual(await readExecutionArtifact({ ...request, reference: old.reference }), Buffer.from('old'))
+  assert.deepEqual(await readExecutionArtifact({ ...request, reference: later.reference }), Buffer.from('later'))
+  await assert.rejects(retain(request, Buffer.alloc(65), { now: 20000 }), /artifact byte bound/i)
+  await assert.rejects(retain({ ...request, retention: { maxArtifactBytes: 64, maxRunBytes: 10, maxAgeMs: 1000 } }, Buffer.alloc(11), { now: 20000 }), /run byte bound/i)
+  await retain({ ...request, retention: { maxArtifactBytes: 64, maxRunBytes: 10, maxAgeMs: 1000 } }, Buffer.alloc(10), { now: 20000 })
+})
+
+test('prune removes only content outside the live references and reports what it removed and kept', async t => {
+  const request = await repository(t)
+  const live = await retain(request, Buffer.from('live'), { now: 10000 })
+  const dead = await retain(request, Buffer.from('dead'), { now: 10000 })
+  const fresh = await retain(request, Buffer.from('fresh'), { now: 11500 })
+  const name = reference => path.basename(artifactFile(request, reference))
+  const report = await pruneExecutionArtifacts({ ...request, liveReferences: [live.reference], now: 12000 })
+  assert.deepEqual(report.removed, [{ name: name(dead.reference), bytes: 4 }])
+  assert.deepEqual(report.kept, [{ name: name(live.reference), bytes: 4, live: true }, { name: name(fresh.reference), bytes: 5, live: false }])
+  assert.equal(report.bytes, 9)
+  assert.deepEqual(report.reconciled, [])
+  assert.deepEqual((await readdir(directory(request))).sort(), [name(live.reference), name(fresh.reference)].sort())
+})
+
+test('a dead-pid lock and a stale temporary file are reconciled by the next retain and reported', async t => {
+  const request = await repository(t)
+  const first = await retain(request, Buffer.from('first'))
+  assert.deepEqual(first.reconciled, [])
+  const dir = directory(request), stale = await plantTemporary(dir, 61000)
+  await plantLock(dir, deadPid())
+  const second = await retain(request, Buffer.from('second'))
+  assert.deepEqual(second.reconciled, [{ path: '.lock', reason: 'dead-lock-holder' }, { path: stale, reason: 'stale-temporary' }])
+  assert.ok(!JSON.stringify(second).includes(request.common))
+  const names = [first, second].map(result => path.basename(artifactFile(request, result.reference)))
+  assert.deepEqual((await readdir(dir)).sort(), names.sort())
+  const young = await plantTemporary(dir, 59000)
+  await assert.rejects(retain(request, Buffer.from('third')), /incomplete/i)
+  await assert.rejects(pruneExecutionArtifacts({ ...request, liveReferences: [] }), /incomplete/i)
+  assert.ok((await readdir(dir)).includes(young))
+})
+
+test('a lock held by a live process is waited on with bounded backoff, then refused as busy', { timeout: 30000 }, async t => {
+  const request = await repository(t)
+  await retain(request, Buffer.from('first'))
+  const dir = directory(request)
+  await plantLock(dir, process.pid)
+  let started = Date.now()
+  await assert.rejects(retain(request, Buffer.from('second')), /busy/)
+  const waited = Date.now() - started
+  assert.ok(waited >= 4500 && waited <= 6500, `waited ${waited} ms`)
+  assert.equal(await readFile(path.join(dir, '.lock', 'pid'), 'utf8'), `${process.pid}\n`)
+  started = Date.now()
+  const release = new Promise(resolve => setTimeout(resolve, 300)).then(() => rm(path.join(dir, '.lock'), { recursive: true }))
+  const result = await retain(request, Buffer.from('second'))
+  await release
+  assert.ok(Date.now() - started >= 250)
+  assert.deepEqual(result.reconciled, [])
+  assert.deepEqual(await readExecutionArtifact({ ...request, reference: result.reference }), Buffer.from('second'))
+})
+
+test('RETENTION_LIMITS is the exported upper bound: each limit is accepted and one past it is refused', async t => {
+  assert.ok(Object.isFrozen(RETENTION_LIMITS))
+  assert.deepEqual({ ...RETENTION_LIMITS }, { maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 * 1024 * 1024, maxAgeMs: 365 * 24 * 60 * 60 * 1000 })
+  const request = await repository(t)
+  await retain({ ...request, retention: { ...RETENTION_LIMITS } }, Buffer.from('x'))
+  for (const key of Object.keys(RETENTION_LIMITS)) {
+    await assert.rejects(retain({ ...request, retention: { ...RETENTION_LIMITS, [key]: RETENTION_LIMITS[key] + 1 } }, Buffer.from('x')), /retention/)
+  }
+})
+
+test('reclaiming a dead lock keeps mutual exclusion across processes and leaves nothing behind', { timeout: 240000 }, async t => {
+  const { spawn } = await import('node:child_process')
+  const { once } = await import('node:events')
+  const base = await mkdtemp(path.join(tmpdir(), 'lock-stress-'))
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const children = new Set()
+  t.after(() => { for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL') })
+  const module = new URL('../scripts/execution-artifacts.mjs', import.meta.url).href
+  const totals = { ok: 0, overlap: 0, errors: [], leftovers: [] }
+  for (let trial = 0; trial < 20; trial++) {
+    const dir = path.join(base, 'trial-' + trial)
+    await mkdir(dir, { mode: 0o700 })
+    await plantLock(dir, deadPid())
+    const source = `import { withStorageLock } from ${JSON.stringify(module)}
+import { open, unlink } from 'node:fs/promises'
+const dir = ${JSON.stringify(dir)}, sentinel = dir + '/inside', out = { ok: 0, overlap: 0, errors: [] }
+await Promise.all(Array.from({ length: 4 }, async () => {
+  try {
+    await withStorageLock(dir, 'busy', async () => {
+      let handle
+      try { handle = await open(sentinel, 'wx') } catch (error) { if (error.code === 'EEXIST') { out.overlap++; return } throw error }
+      await handle.close(); await new Promise(resolve => setTimeout(resolve, 3)); await unlink(sentinel)
+    })
+    out.ok++
+  } catch (error) { out.errors.push(error.code ?? error.message) }
+}))
+process.stdout.write(JSON.stringify(out))`
+    const runs = Array.from({ length: 6 }, async () => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['ignore', 'pipe', 'pipe'] })
+      children.add(child)
+      let stdout = '', stderr = ''
+      child.stdout.on('data', chunk => { stdout += chunk })
+      child.stderr.on('data', chunk => { stderr += chunk })
+      const [code] = await once(child, 'exit')
+      children.delete(child)
+      assert.equal(code, 0, stderr)
+      return JSON.parse(stdout)
+    })
+    for (const result of await Promise.all(runs)) {
+      totals.ok += result.ok; totals.overlap += result.overlap; totals.errors.push(...result.errors)
+    }
+    totals.leftovers.push(...(await readdir(dir)).filter(name => name.startsWith('.lock')))
+  }
+  assert.deepEqual(totals, { ok: 20 * 6 * 4, overlap: 0, errors: [], leftovers: [] })
+})
+
+test('prune with an empty live set removes every stored artifact as non-live', async t => {
+  const request = await repository(t)
+  const names = []
+  for (const body of ['one', 'two', 'three']) names.push(path.basename(artifactFile(request, (await retain(request, Buffer.from(body), { now: 10000 })).reference)))
+  const report = await pruneExecutionArtifacts({ ...request, liveReferences: [], now: 10000 })
+  assert.deepEqual(report.removed.map(entry => entry.name).sort(), names.sort())
+  assert.deepEqual(report.kept, [])
+  assert.equal(report.bytes, 0)
+  assert.deepEqual(await readdir(directory(request)), [])
+})
+
+test('prune makes room under the count bound by evicting non-live content, so the next retain is not refused', { timeout: 60000 }, async t => {
+  const request = await repository(t), live = await retain(request, Buffer.from('live'), { now: 10000 })
+  for (let base = 0; base < 4095; base += 64) {
+    await Promise.all(Array.from({ length: Math.min(64, 4095 - base) }, (_, offset) => writeFile(path.join(directory(request), (base + offset).toString(16).padStart(64, '0') + '.bin'), 'planted', { mode: 0o600, flag: 'wx' })))
+  }
+  await assert.rejects(retain(request, Buffer.from('new')), /count bound/)
+  const report = await pruneExecutionArtifacts({ ...request, retention: { ...retention, maxRunBytes: 1024 * 1024, maxAgeMs: 86400000 }, liveReferences: [live.reference] })
+  assert.equal(report.removed.length, 1)
+  assert.equal(report.kept.length, 4095)
+  assert.ok(report.kept.some(entry => entry.live))
+  assert.equal(report.retentionExceeded.count, false)
+  await retain(request, Buffer.from('new'))
+  assert.deepEqual(await readExecutionArtifact({ ...request, reference: live.reference }), Buffer.from('live'))
+})
+
+test('a pid-less lock older than 60 s is reconciled by the next retain', async t => {
+  const request = await repository(t)
+  await retain(request, Buffer.from('first'))
+  const lock = path.join(directory(request), '.lock'), at = (Date.now() - 61000) / 1000
+  await mkdir(lock, { mode: 0o700 }); await utimes(lock, at, at)
+  const result = await retain(request, Buffer.from('second'))
+  assert.deepEqual(result.reconciled, [{ path: '.lock', reason: 'abandoned-lock-without-pid' }])
+  await assert.rejects(lstat(lock), { code: 'ENOENT' })
+})
+
+test('leftover lock entries of a dead process are reconciled, and a live process keeps its own', async t => {
+  const request = await repository(t)
+  await retain(request, Buffer.from('first'))
+  const dir = directory(request), dead = deadPid()
+  const removing = `.lock.${dead}.${randomUUID()}.stale`, creating = `.lock.${dead}.${randomUUID()}.new`, owned = `.lock.${process.pid}.${randomUUID()}.stale`
+  for (const name of [removing, creating, owned]) {
+    await mkdir(path.join(dir, name), { mode: 0o700 })
+    await writeFile(path.join(dir, name, 'pid'), `${dead}\n`, { mode: 0o600 })
+  }
+  const result = await retain(request, Buffer.from('second'))
+  assert.deepEqual(result.reconciled.sort((a, b) => a.path.localeCompare(b.path)),
+    [{ path: removing, reason: 'interrupted-lock-removal' }, { path: creating, reason: 'interrupted-lock-creation' }].sort((a, b) => a.path.localeCompare(b.path)))
+  const left = await readdir(dir)
+  assert.ok(left.includes(owned))
+  assert.ok(!left.includes(removing) && !left.includes(creating))
+  await pruneExecutionArtifacts({ ...request, liveReferences: [result.reference] })
+})
+
+test('a waiter polls at least every 250 ms, so it acquires soon after a late release', { timeout: 30000 }, async t => {
+  const request = await repository(t)
+  await retain(request, Buffer.from('first'))
+  const dir = directory(request)
+  await plantLock(dir, process.pid)
+  const started = Date.now()
+  // Polls with a 250 ms ceiling fall near 3060 and 3310 ms; with a 500 ms ceiling near 3130 and 3630 ms.
+  const release = new Promise(resolve => setTimeout(resolve, 3200)).then(() => rm(path.join(dir, '.lock'), { recursive: true }))
+  await retain(request, Buffer.from('second'))
+  const waited = Date.now() - started
+  await release
+  assert.ok(waited >= 3200 && waited <= 3560, `waited ${waited} ms`)
+})
+
+test('a dead lock whose reclaim token names a dead reclaimer is still reclaimed, but a live reclaimer is waited on', { timeout: 30000 }, async t => {
+  const request = await repository(t)
+  await retain(request, Buffer.from('first'))
+  const dir = directory(request), dead = deadPid(), lock = path.join(dir, '.lock')
+  await plantLock(dir, dead)
+  await writeFile(path.join(lock, `reclaim.${dead}`), `${deadPid()}\n`, { mode: 0o600 })
+  const reclaimed = await retain(request, Buffer.from('second'))
+  assert.deepEqual(reclaimed.reconciled, [{ path: '.lock', reason: 'dead-lock-holder' }])
+  await plantLock(dir, dead)
+  await writeFile(path.join(lock, `reclaim.${dead}`), `${process.pid}\n`, { mode: 0o600 })
+  await assert.rejects(retain(request, Buffer.from('third')), /busy/)
+  assert.equal(await readFile(path.join(lock, 'pid'), 'utf8'), `${dead}\n`)
 })

@@ -613,3 +613,200 @@ for (const observation of ['effect-completed', 'effect-failed', 'effect-unknown'
     assert.equal(after.length, before.length + 2)
   })
 }
+
+// A pid that named a real process which has already exited and been reaped.
+async function deadPid() {
+  const { spawnSync } = await import('node:child_process')
+  const result = spawnSync(process.execPath, ['-e', ''], { timeout: 5000 })
+  assert.equal(result.status, 0)
+  assert.throws(() => process.kill(result.pid, 0), { code: 'ESRCH' })
+  return result.pid
+}
+async function plantLock(directory, pid) {
+  const { mkdir, writeFile } = await import('node:fs/promises')
+  await mkdir(path.join(directory, '.lock'), { mode: 0o700 })
+  await writeFile(path.join(directory, '.lock', 'pid'), `${pid}\n`, { mode: 0o600 })
+}
+async function plantTemporary(directory, ageMs) {
+  const { writeFile, utimes } = await import('node:fs/promises')
+  const { randomUUID } = await import('node:crypto')
+  const name = '.' + randomUUID() + '.tmp', file = path.join(directory, name), at = (Date.now() - ageMs) / 1000
+  await writeFile(file, 'partial', { mode: 0o600 })
+  await utimes(file, at, at)
+  return name
+}
+test('a dead-pid lock and a stale temporary record are reconciled by the next append and reported', async t => {
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const { readdir } = await import('node:fs/promises')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-reconcile-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const start = strictEvent('start', 'step-started'), directory = await executionDirectory(common, start.runId)
+  const first = await appendExecutionEvent(common, start)
+  assert.deepEqual(first.reconciled, [])
+  const stale = await plantTemporary(directory, 61000)
+  await plantLock(directory, await deadPid())
+  const end = await appendExecutionEvent(common, strictEvent('end', 'step-failed', { at: start.at + 1 }))
+  assert.deepEqual(end.reconciled, [{ path: '.lock', reason: 'dead-lock-holder' }, { path: stale, reason: 'stale-temporary' }])
+  assert.equal(JSON.stringify(end).includes('reconciled'), false)
+  assert.equal((await readExecutionEvents(common, start.runId)).length, 2)
+  const { mkdir } = await import('node:fs/promises')
+  const { randomUUID } = await import('node:crypto')
+  const owned = `.lock.${process.pid}.${randomUUID()}.stale`
+  await mkdir(path.join(directory, owned), { mode: 0o700 })
+  assert.equal((await readExecutionEvents(common, start.runId)).length, 2)
+  assert.deepEqual((await appendExecutionEvent(common, strictEvent('third', 'step-started', { attempt: 'attempt-3', at: start.at + 2 }))).reconciled, [])
+  assert.ok((await readdir(directory)).includes(owned))
+  await rm(path.join(directory, owned), { recursive: true })
+  const young = await plantTemporary(directory, 59000)
+  await assert.rejects(appendExecutionEvent(common, strictEvent('other', 'step-started', { attempt: 'attempt-2', at: start.at + 2 })), /Incomplete/)
+  assert.ok((await readdir(directory)).includes(young))
+})
+test('a journal lock held by a live process is waited on with bounded backoff, then refused as busy', { timeout: 30000 }, async t => {
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-live-lock-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const start = strictEvent('start', 'step-started'), directory = await executionDirectory(common, start.runId)
+  await appendExecutionEvent(common, start)
+  await plantLock(directory, process.pid)
+  let began = Date.now()
+  await assert.rejects(appendExecutionEvent(common, strictEvent('end', 'step-failed', { at: start.at + 1 })), /busy/)
+  const waited = Date.now() - began
+  assert.ok(waited >= 4500 && waited <= 6500, `waited ${waited} ms`)
+  began = Date.now()
+  const release = new Promise(resolve => setTimeout(resolve, 300)).then(() => rm(path.join(directory, '.lock'), { recursive: true }))
+  const end = await appendExecutionEvent(common, strictEvent('end', 'step-failed', { at: start.at + 1 }))
+  await release
+  assert.ok(Date.now() - began >= 250)
+  assert.deepEqual(end.reconciled, [])
+})
+
+async function plantRecords(common, runId, count, sizeOf = () => null) {
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const { mkdir, writeFile } = await import('node:fs/promises')
+  const { createHash } = await import('node:crypto')
+  const directory = await executionDirectory(common, runId)
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  for (let base = 0; base < count; base += 100) {
+    await Promise.all(Array.from({ length: Math.min(100, count - base) }, (_, offset) => {
+      const i = base + offset, record = event('planted-' + i, 'step-started', i + 1, { runId, step: 'step-' + i })
+      const json = JSON.stringify(record), size = sizeOf(i)
+      const text = size === null ? json + '\n' : json + ' '.repeat(size - Buffer.byteLength(json) - 1) + '\n'
+      return writeFile(path.join(directory, createHash('sha256').update(record.id).digest('hex') + '.json'), text, { mode: 0o600, flag: 'wx' })
+    }))
+  }
+  return directory
+}
+test('the journal accepts exactly 1000 events and refuses the 1001st on read and on append', { timeout: 60000 }, async t => {
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-count-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  await plantRecords(common, 'r1', 1000)
+  assert.equal((await readExecutionEvents(common, 'r1')).length, 1000)
+  await plantRecords(common, 'r2', 999)
+  await appendExecutionEvent(common, event('appended-999', 'step-started', 5000, { runId: 'r2', step: 'last' }))
+  assert.equal((await readExecutionEvents(common, 'r2')).length, 1000)
+  await assert.rejects(appendExecutionEvent(common, event('appended-1000', 'step-started', 5001, { runId: 'r2', step: 'over' })), /Execution journal exceeds budget/)
+  const { writeFile } = await import('node:fs/promises')
+  const { createHash } = await import('node:crypto')
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const extra = event('planted-extra', 'step-started', 9999, { runId: 'r1', step: 'extra' })
+  await writeFile(path.join(await executionDirectory(common, 'r1'), createHash('sha256').update(extra.id).digest('hex') + '.json'), JSON.stringify(extra) + '\n', { mode: 0o600 })
+  await assert.rejects(readExecutionEvents(common, 'r1'), /Execution journal exceeds budget/)
+})
+test('the journal read bound accepts exactly 1 MiB of records and refuses one byte more', { timeout: 60000 }, async t => {
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-bytes-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  // 128 records of 8128 bytes and one of 8192 bytes total exactly 1048576 bytes.
+  await plantRecords(common, 'r1', 129, i => i === 128 ? 8192 : 8128)
+  assert.equal((await readExecutionEvents(common, 'r1')).length, 129)
+  await plantRecords(common, 'r2', 129, i => i === 128 ? 8192 : i === 0 ? 8129 : 8128)
+  await assert.rejects(readExecutionEvents(common, 'r2'), /^Error: Execution journal exceeds budget$/)
+})
+
+test('agent-dispatch is a strict effect kind whose resolutions are not-started or completed, and unknown kinds stay refused', async t => {
+  const { executionEvent } = await import('../scripts/execution-journal.mjs')
+  const { resolveExecutionEffect } = await import('../scripts/execution-recovery.mjs')
+  const dispatch = { id: 'dispatch-1', kind: 'agent-dispatch', reference: null }
+  const resolution = outcome => ({ outcome, reason: 'inspected', trust: 'local-operator-observation', authenticatedAuthorization: false })
+  assert.equal(executionEvent(strictEvent('d', 'effect-started', { effect: dispatch })).effect.kind, 'agent-dispatch')
+  for (const kind of ['shell', 'agent', 'Agent-dispatch']) assert.throws(() => executionEvent(strictEvent('d', 'effect-started', { effect: { ...dispatch, kind } })), /effect/)
+  assert.throws(() => executionEvent(strictEvent('d', 'effect-started', { effect: { ...dispatch, reference: 'example/project#12' } })), /effect/)
+  for (const outcome of ['not-started', 'completed']) assert.equal(executionEvent(strictEvent('r', 'effect-resolved', { effect: dispatch, resolution: resolution(outcome) })).resolution.outcome, outcome)
+  for (const outcome of ['failed', 'unknown', 'started']) assert.throws(() => executionEvent(strictEvent('r', 'effect-resolved', { effect: dispatch, resolution: resolution(outcome) })), /resolution/)
+  assert.throws(() => executionEvent(strictEvent('r', 'effect-resolved', { effect: { id: 'v', kind: 'vault', reference: null }, resolution: resolution('not-started') })), /resolution/)
+  for (const [outcome, retry] of [['completed', false], ['not-started', true]]) {
+    const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-dispatch-')))
+    t.after(() => rm(common, { recursive: true, force: true }))
+    const start = strictEvent('start', 'step-started')
+    await appendExecutionEvent(common, start)
+    await appendExecutionEvent(common, strictEvent('dispatch', 'effect-started', { at: start.at + 1, effect: dispatch }))
+    const again = strictEvent('again', 'step-started', { attempt: 'attempt-2', at: start.at + 2 })
+    await assert.rejects(appendExecutionEvent(common, again), /effect.*retry/)
+    await resolveExecutionEffect({ common, runId: start.runId, effectId: 'dispatch-1', resolution: outcome, reason: 'inspected' })
+    if (retry) await appendExecutionEvent(common, { ...again, at: Date.now() + 10 })
+    else await assert.rejects(appendExecutionEvent(common, { ...again, at: Date.now() + 10 }), /effect.*retry/)
+  }
+})
+test('strict artifact references accept RETENTION_LIMITS.maxArtifactBytes and refuse one byte more', async () => {
+  const { executionEvent } = await import('../scripts/execution-journal.mjs')
+  const { RETENTION_LIMITS } = await import('../scripts/execution-artifacts.mjs')
+  const reference = byteLength => ({ version: 1, runId: 'strict-run', kind: 'stdout', sha256: 'c'.repeat(64), byteLength })
+  assert.equal(executionEvent(strictEvent('end', 'step-completed', { artifacts: [reference(16 * 1024 * 1024)] })).artifacts[0].byteLength, RETENTION_LIMITS.maxArtifactBytes)
+  assert.throws(() => executionEvent(strictEvent('end', 'step-completed', { artifacts: [reference(16 * 1024 * 1024 + 1)] })), /artifact identity/)
+})
+
+test('custom journal budgets may reach but not pass 1000 events, 1 MiB and one year', async t => {
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-policy-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const upper = { maxEvents: 1000, maxBytes: 1024 * 1024, maxAgeMs: 365 * 86400000 }
+  await appendExecutionEvent(common, strictEvent('start', 'step-started'), { retention: upper })
+  for (const key of Object.keys(upper)) {
+    await assert.rejects(appendExecutionEvent(common, strictEvent('next-' + key, 'step-failed'), { retention: { ...upper, [key]: upper[key] + 1 } }), /Invalid execution journal retention budget/)
+  }
+})
+test('the append-side byte budget accepts a journal of exactly maxBytes and refuses one byte more', async t => {
+  const { executionEvent } = await import('../scripts/execution-journal.mjs')
+  const start = strictEvent('start', 'step-started'), end = strictEvent('end', 'step-failed', { at: start.at + 1 })
+  const bytes = raw => Buffer.byteLength(JSON.stringify(executionEvent(raw))) + 1
+  const total = bytes(start) + bytes(end)
+  for (const [maxBytes, accepted] of [[total, true], [total - 1, false]]) {
+    const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-append-bytes-')))
+    t.after(() => rm(common, { recursive: true, force: true }))
+    const retention = { maxEvents: 10, maxBytes, maxAgeMs: 86400000 }
+    await appendExecutionEvent(common, start, { retention })
+    const append = appendExecutionEvent(common, end, { retention })
+    if (accepted) await append
+    else await assert.rejects(append, /^Error: Execution journal exceeds budget$/)
+  }
+})
+function eventOfSize(executionEvent, id, target) {
+  const branches = {}, sha = 'b'.repeat(40)
+  const record = () => event(id, 'step-started', 1, { branches })
+  const size = () => Buffer.byteLength(JSON.stringify(executionEvent(record()))) + 1
+  for (let i = 0; size() + 230 < target; i++) branches[`refs/heads/p${String(i).padStart(3, '0')}-${'x'.repeat(100)}`] = sha
+  branches['refs/heads/zz-'] = sha
+  const pad = target - size()
+  delete branches['refs/heads/zz-']
+  branches['refs/heads/zz-' + 'y'.repeat(pad)] = sha
+  assert.equal(size(), target)
+  return record()
+}
+test('an execution record of exactly 8192 bytes is accepted and one of 8193 bytes is refused', async t => {
+  const { executionEvent, executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const { writeFile } = await import('node:fs/promises')
+  const { createHash } = await import('node:crypto')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-record-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  await appendExecutionEvent(common, eventOfSize(executionEvent, 'fits', 8192))
+  assert.equal((await readExecutionEvents(common, 'r1')).length, 1)
+  await assert.rejects(appendExecutionEvent(common, eventOfSize(executionEvent, 'over', 8193)), /^Error: Execution record exceeds budget$/)
+  const over = eventOfSize(executionEvent, 'planted', 8193)
+  await writeFile(path.join(await executionDirectory(common, 'r1'), createHash('sha256').update(over.id).digest('hex') + '.json'), JSON.stringify(executionEvent(over)) + '\n', { mode: 0o600 })
+  await assert.rejects(readExecutionEvents(common, 'r1'), /Unsafe execution record/)
+})
+test('EFFECT_RESOLUTIONS lists the exact outcomes for every strict effect kind', async () => {
+  const { EFFECT_RESOLUTIONS, executionEvent } = await import('../scripts/execution-journal.mjs')
+  const shared = ['completed', 'failed', 'unknown']
+  assert.deepEqual(JSON.parse(JSON.stringify(EFFECT_RESOLUTIONS)), { pr: shared, vault: shared, publication: shared, 'agent-dispatch': ['not-started', 'completed'] })
+  const resolution = { outcome: 'unknown', reason: 'inspected', trust: 'local-operator-observation', authenticatedAuthorization: false }
+  assert.equal(executionEvent(strictEvent('r', 'effect-resolved', { effect: { id: 'pr-1', kind: 'pr', reference: 'example/project#12' }, resolution })).resolution.outcome, 'unknown')
+})

@@ -1,10 +1,11 @@
 import { constants } from 'node:fs'
-import { mkdir, open, realpath, link, unlink, opendir, lstat, rmdir } from 'node:fs/promises'
+import { mkdir, open, realpath, link, unlink, opendir, lstat } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { evidenceIdentity } from './workflow-evidence.mjs'
 import { strictExecutionIdentity } from './completion-obligations.mjs'
 import { markerRef } from './workflow-lifecycle.mjs'
+import { RETENTION_LIMITS, withStorageLock, reconcileTemporaries, lockEntry } from './execution-artifacts.mjs'
 const digest = value => createHash('sha256').update(value).digest('hex')
 const LIMIT = 1024 * 1024, RECORD_LIMIT = 8192
 const plain = value => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= 256 && !/[\p{C}\p{Zl}\p{Zp}]/u.test(value)
@@ -45,6 +46,15 @@ export function executionBranches(branches) {
     || ref.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock')) || !sha(tip))) throw new Error('Invalid execution branch observations')
   return Object.fromEntries(Object.entries(branches).sort(([a], [b]) => a.localeCompare(b)))
 }
+// Strict external effect kinds and the outcomes a local operator may record for each. An
+// agent-dispatch resolved `not-started` permits redispatch; `completed` permits reuse after validation.
+export const EFFECT_RESOLUTIONS = Object.freeze({
+  pr: Object.freeze(['completed', 'failed', 'unknown']),
+  vault: Object.freeze(['completed', 'failed', 'unknown']),
+  publication: Object.freeze(['completed', 'failed', 'unknown']),
+  'agent-dispatch': Object.freeze(['not-started', 'completed'])
+})
+const strictEffectKind = kind => typeof kind === 'string' && Object.hasOwn(EFFECT_RESOLUTIONS, kind)
 export function authorizedPrReference(value) {
   return typeof value === 'string' && value.length <= 200
     && /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9][A-Za-z0-9._-]{0,99}#[1-9][0-9]{0,8}$/.test(value)
@@ -63,20 +73,20 @@ function strictEvent(raw) {
     fields(reference, ['version', 'runId', 'kind', 'sha256', 'byteLength'])
     if (Object.keys(reference).length !== 5 || reference.version !== 1 || reference.runId !== raw.runId
         || !/^[a-z][a-z0-9._-]{0,63}$/.test(reference.kind) || !hash(reference.sha256)
-        || !Number.isSafeInteger(reference.byteLength) || reference.byteLength < 0 || reference.byteLength > 16 * 1024 * 1024) throw new Error('Invalid artifact identity')
+        || !Number.isSafeInteger(reference.byteLength) || reference.byteLength < 0 || reference.byteLength > RETENTION_LIMITS.maxArtifactBytes) throw new Error('Invalid artifact identity')
     return { version: 1, runId: reference.runId, kind: reference.kind, sha256: reference.sha256, byteLength: reference.byteLength }
   })
   if (raw.kind === 'step-completed' && !artifacts.length) throw new Error('Completed step needs retained artifact references')
   let effect = null, resolution = null
   if (raw.kind.startsWith('effect-')) {
     fields(raw.effect, ['id', 'kind', 'reference'])
-    if (!label(raw.effect.id) || !['pr', 'vault', 'publication'].includes(raw.effect.kind)
+    if (!label(raw.effect.id) || !strictEffectKind(raw.effect.kind)
         || raw.effect.reference !== null && !(raw.effect.kind === 'pr' && authorizedPrReference(raw.effect.reference))) throw new Error('Invalid strict external effect')
     effect = { id: raw.effect.id, kind: raw.effect.kind, reference: raw.effect.reference }
   } else if (raw.effect != null) throw new Error('Step event cannot declare an external effect')
   if (raw.kind === 'effect-resolved') {
     fields(raw.resolution, ['outcome', 'reason', 'trust', 'authenticatedAuthorization'])
-    if (!['completed', 'failed', 'unknown'].includes(raw.resolution.outcome) || !label(raw.resolution.reason)
+    if (!EFFECT_RESOLUTIONS[effect.kind].includes(raw.resolution.outcome) || !label(raw.resolution.reason)
         || raw.resolution.trust !== 'local-operator-observation' || raw.resolution.authenticatedAuthorization !== false) throw new Error('Invalid local effect resolution')
     resolution = { outcome: raw.resolution.outcome, reason: raw.resolution.reason, trust: 'local-operator-observation', authenticatedAuthorization: false }
   } else if (raw.resolution != null) throw new Error('Unexpected effect resolution')
@@ -166,7 +176,7 @@ export async function readExecutionEvents(common, runId) {
   const events = [], ids = new Set()
   let bytes = 0
   for await (const entry of dir) {
-    if (entry.name === '.lock') continue
+    if (lockEntry(entry.name)) continue
     if (!/^[a-f0-9]{64}\.json$/.test(entry.name)) throw new Error('Incomplete execution journal storage')
     const { event, bytes: size } = await readRecord(path.join(directory, entry.name))
     bytes += size
@@ -203,16 +213,19 @@ export async function appendExecutionEvent(common, raw, { retention, now = Date.
   const directory = await executionDirectory(common, event.runId)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   await privateExecutionDirectories(directory)
-  const lock = path.join(directory, '.lock')
-  try { await mkdir(lock, { mode: 0o700 }) }
-  catch (error) { if (error.code === 'EEXIST') throw new Error('Execution journal busy; required start not persisted'); throw error }
-  try {
+  // The returned event carries the reconciliation report as a non-enumerable `reconciled`, so the
+  // persisted and printed record keeps its exact shape.
+  const result = value => Object.defineProperty(value, 'reconciled', { value: reconciled, enumerable: false })
+  let reconciled
+  return withStorageLock(directory, 'Execution journal busy; required start not persisted', async found => {
+    reconciled = found
+    await reconcileTemporaries(directory, reconciled)
     const existing = await readExecutionEvents(common, event.runId)
     const duplicate = existing.find(e => e.id === event.id)
     if (duplicate) {
       if (requireFreshStart) throw new Error('Execution start already persisted; reconcile before action')
       if (JSON.stringify(duplicate) !== JSON.stringify(event)) throw new Error('Execution event ID already records different data')
-      return duplicate
+      return result(duplicate)
     }
     if (existing.length >= policy.maxEvents || existing.reduce((sum, e) => sum + Buffer.byteLength(JSON.stringify(e)) + 1, 0) + Buffer.byteLength(text) > policy.maxBytes) throw new Error('Execution journal exceeds budget')
     if (event.version === 2 && [...existing, event].some(e => now - e.at > policy.maxAgeMs)) throw new Error('Execution journal retention exceeded; unresolved evidence is retained')
@@ -230,7 +243,7 @@ export async function appendExecutionEvent(common, raw, { retention, now = Date.
     if (event.version === 2 && ['step-started', 'effect-started'].includes(event.kind) && previous.some(group =>
       group.start.executionId === event.executionId && group.start.task === event.task && group.start.step === event.step
       && (event.kind === 'step-started' || group.start.attempt !== event.attempt)
-      && group.effects.some(effect => effect.resolution ? effect.resolution.resolution.outcome !== 'failed' : effect.end?.kind !== 'effect-failed'))) {
+      && group.effects.some(effect => effect.resolution ? !['failed', 'not-started'].includes(effect.resolution.resolution.outcome) : effect.end?.kind !== 'effect-failed'))) {
       throw new Error('External effect outcome refuses non-idempotent retry')
     }
     strictExecutionAttempts([...existing, event])
@@ -242,8 +255,8 @@ export async function appendExecutionEvent(common, raw, { retention, now = Date.
     } finally { await unlink(temporary).catch(() => {}) }
     const dirHandle = await open(directory, constants.O_RDONLY | constants.O_NOFOLLOW)
     try { await dirHandle.sync() } finally { await dirHandle.close() }
-    return event
-  } finally { await rmdir(lock) }
+    return result(event)
+  })
 }
 export function reconcileExecution(events, { inputs, branches = {} }) {
   const identity = evidenceIdentity(inputs), groups = new Map()
