@@ -47,7 +47,20 @@ export function resolveRoleCapabilities(input) {
   const result = (blocked, enforcement = null) => freeze({ version: 1,
     ready: blocked.length === 0, blocked, requested, enforcement })
   try {
-    object(input, ['policy', 'role', 'harness', 'sandboxMode', 'network'], [], 'role request')
+    object(input, ['policy', 'role', 'harness', 'sandboxMode', 'network', 'mode'], [], 'role request')
+    if (input.mode !== undefined && input.mode !== 'host-bounded') return result(['unsupported integration mode'])
+    if (input.mode === 'host-bounded') {
+      if (input.policy === undefined) return result(['host-bounded integration requires explicit authority'])
+      const policy = validateRolePolicy(input.policy)
+      requested = policy.roles.integrator ?? null
+      if (input.role !== 'integrator' || input.harness !== 'host' || input.network !== false
+        || input.sandboxMode !== undefined || !requested
+        || FIELDS.some(key => requested[key] !== !['network', 'publication'].includes(key))) {
+        return result(['unsupported host-bounded integration authority'])
+      }
+      return result([], { kind: 'required', mode: 'host-bounded', harness: 'host', ...requested,
+        trust: 'Trusted local host Git operations; no hostile same-UID isolation or model execution authority.' })
+    }
     if (input.policy === undefined) return result([], { kind: 'legacy', verified: false })
     const policy = validateRolePolicy(input.policy)
     const { role, harness, sandboxMode, network } = input

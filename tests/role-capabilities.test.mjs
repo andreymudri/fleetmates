@@ -170,3 +170,22 @@ test('legacy is identifiable only when no required policy is supplied', () => {
     blocked(request({ policy: value }), /policy/)
   }
 })
+
+test('host-bounded authority is explicit, immutable and integrator-only', () => {
+  const input = { mode: 'host-bounded', harness: 'host', role: 'integrator', network: false,
+    policy: policy('integrator', { write: true, sharedRefs: true }) }
+  const report = resolveRoleCapabilities(input)
+  assert.equal(report.ready, true)
+  assert.equal(report.enforcement.mode, 'host-bounded')
+  assert.equal(report.enforcement.sharedRefs, true)
+  assert.equal(report.enforcement.network, false)
+  assert.equal(Object.isFrozen(report.enforcement), true)
+  for (const field of Object.keys(authority())) {
+    blocked({ ...input, policy: policy('integrator', {
+      write: true, sharedRefs: true, [field]: !report.requested[field] }) }, /host-bounded/)
+  }
+  for (const change of [{ policy: undefined }, { role: 'implementer' }, { harness: 'codex' },
+    { network: true }, { sandboxMode: 'clone' }, { mode: 'invented' }]) {
+    blocked({ ...input, ...change }, /host-bounded|mode/)
+  }
+})
