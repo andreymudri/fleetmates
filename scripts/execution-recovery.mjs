@@ -52,6 +52,25 @@ async function checkoutAvailable(common, checkouts, id, branches) {
     return git(['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', 'status', '--porcelain', '--untracked-files=no'], root) === ''
   } catch { return false }
 }
+function recordedBranches(records) {
+  const expected = {}, conflicts = new Set(), concurrent = new Map()
+  const rank = event => event.kind === 'step-started' ? 0 : event.kind === 'effect-started' ? 1
+    : event.kind.startsWith('effect-') ? 2 : 3
+  const before = (a, b) => a.kind === 'step-started' || ['step-completed', 'step-failed'].includes(b.kind)
+    || a.kind === 'effect-started' && a.effect.id === b.effect?.id
+  const observations = records.filter(event => event.kind !== 'effect-resolved')
+    .sort((a, b) => a.at - b.at || rank(a) - rank(b) || a.id.localeCompare(b.id))
+  for (const event of observations) {
+    for (const [ref, tip] of Object.entries(event.branches)) {
+      const previous = concurrent.get(ref) ?? []
+      const sameTime = previous.filter(other => other.at === event.at)
+      if (sameTime.some(other => other.branches[ref] !== tip && !before(other, event) && !before(event, other))) conflicts.add(ref)
+      concurrent.set(ref, [...sameTime, event])
+      expected[ref] = tip
+    }
+  }
+  return { expected, conflicts: [...conflicts].sort() }
+}
 export async function reconcileExecutionAttempt({ common, runId, inputs, branches, retention, checkouts = {}, effectQueries }) {
   const identity = strictExecutionIdentity(inputs), currentBranches = executionBranches(branches)
   if (!checkouts || typeof checkouts !== 'object' || Array.isArray(checkouts) || Object.keys(checkouts).length > 1000) throw new Error('Invalid bounded checkout observations')
@@ -69,8 +88,9 @@ export async function reconcileExecutionAttempt({ common, runId, inputs, branche
   let queriesUsed = 0
   for (const group of groups) {
     const { start, end, records } = group
-    const expectedBranches = { ...start.branches, ...(end?.branches ?? {}) }
-    const changedBranches = Object.keys(expectedBranches).filter(ref => expectedBranches[ref] !== currentBranches[ref] || expectedBranches[ref] !== observedBranches[ref])
+    const { expected: expectedBranches, conflicts: conflictingBranches } = recordedBranches(records)
+    const changedBranches = Object.keys(expectedBranches).filter(ref => conflictingBranches.includes(ref)
+      || expectedBranches[ref] !== currentBranches[ref] || expectedBranches[ref] !== observedBranches[ref])
     const artifacts = [], missingArtifacts = []
     for (const reference of records.flatMap(e => e.artifacts)) {
       const key = JSON.stringify(reference)
@@ -102,7 +122,7 @@ export async function reconcileExecutionAttempt({ common, runId, inputs, branche
       : unknownEffects ? 'unknown-effect' : effects.some(e => e.outcome === 'failed') ? 'failed-observation' : !end ? 'interrupted' : end.kind === 'step-failed' ? 'failed-observation' : 'ready'
     attempts.push({ executionId: start.executionId, task: start.task, step: start.step, attempt: start.attempt, state,
       reuse: state === 'ready', retryAllowed: ['interrupted', 'failed-observation'].includes(state) && effects.every(e => e.retryAllowed),
-      requiresCurrentGates: true, changedBranches, artifacts, missingArtifacts, effects })
+      requiresCurrentGates: true, changedBranches, conflictingBranches, artifacts, missingArtifacts, effects })
   }
   const historical = events.filter(e => e.version === 1)
   if (historical.length) {

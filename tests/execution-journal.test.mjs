@@ -171,3 +171,18 @@ test('unsafe or busy storage never permits the required action', async t => {
   await assert.rejects(runAfterExecutionStart(request), /Unsafe/)
   assert.equal(actions, 0)
 })
+
+test('operator resolution independently rejects authenticatedAuthorization while retaining valid local observations', async () => {
+  const { executionEvent } = await import('../scripts/execution-journal.mjs')
+  const resolution = { outcome: 'completed', reason: 'inspected', trust: 'local-operator-observation', authenticatedAuthorization: false }
+  const event = strictEvent('resolution', 'effect-resolved', { effect: { id: 'effect-1', kind: 'vault', reference: null }, resolution })
+  assert.deepEqual(executionEvent(event).resolution, resolution)
+  assert.throws(() => executionEvent({ ...event, resolution: { ...resolution, authenticatedAuthorization: true } }), /Invalid local effect resolution/)
+})
+test('operator resolution independently rejects foreign trust while retaining valid local observations', async () => {
+  const { executionEvent } = await import('../scripts/execution-journal.mjs')
+  const resolution = { outcome: 'completed', reason: 'inspected', trust: 'local-operator-observation', authenticatedAuthorization: false }
+  const event = strictEvent('resolution', 'effect-resolved', { effect: { id: 'effect-1', kind: 'vault', reference: null }, resolution })
+  assert.deepEqual(executionEvent(event).resolution, resolution)
+  assert.throws(() => executionEvent({ ...event, resolution: { ...resolution, trust: 'authenticated' } }), /Invalid local effect resolution/)
+})

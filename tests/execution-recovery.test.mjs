@@ -238,3 +238,90 @@ test('abrupt disappearance after a strict persisted effect start leaves a non-re
   assert.equal(observed.state, 'unknown-effect')
   assert.equal(observed.retryAllowed, false)
 })
+
+async function effectRefFixture(t, { transition = false, sameTime = false, conflict = false, stepTransition = false } = {}) {
+  const { appendExecutionEvent } = await import('../scripts/execution-journal.mjs')
+  const f = await fixture(t, { complete: false }), start = f.records[0]
+  const ref = 'refs/heads/effect-source', original = f.request.inputs.commit
+  git(['branch', 'effect-source'], f.root)
+  const external = { id: 'effect-1', kind: 'pr', reference: 'example/project#12' }
+  const branches = { ...start.branches, [ref]: original }
+  await appendExecutionEvent(f.request.common, { ...start, id: 'effect-start', kind: 'effect-started',
+    at: start.at + (sameTime ? 0 : 1), branches, effect: external })
+  let tip = original
+  if (transition || conflict) {
+    git(['checkout', 'effect-source'], f.root)
+    await writeFile(path.join(f.root, 'file'), 'effect source changed')
+    git(['add', '.'], f.root); git(['commit', '-m', 'effect source changed'], f.root)
+    tip = git(['rev-parse', 'HEAD'], f.root)
+    git(['checkout', 'main'], f.root)
+  }
+  await appendExecutionEvent(f.request.common, { ...start, id: 'effect-end', kind: 'effect-completed',
+    at: start.at + (sameTime ? 0 : 2), branches: { ...branches, [ref]: conflict ? original : tip }, effect: external, artifacts: [f.reference] })
+  if (conflict) {
+    const other = { ...external, id: 'effect-2' }
+    await appendExecutionEvent(f.request.common, { ...start, id: 'other-start', kind: 'effect-started',
+      at: start.at + 1, branches, effect: other })
+    await appendExecutionEvent(f.request.common, { ...start, id: 'other-end', kind: 'effect-completed',
+      at: start.at + 2, branches: { ...branches, [ref]: tip }, effect: other, artifacts: [f.reference] })
+  }
+  let finalMain = original
+  if (stepTransition) {
+    await writeFile(path.join(f.root, 'file'), 'recorded step result')
+    git(['add', '.'], f.root); git(['commit', '-m', 'recorded step result'], f.root)
+    finalMain = git(['rev-parse', 'HEAD'], f.root)
+  }
+  await appendExecutionEvent(f.request.common, { ...start, id: 'end', kind: 'step-completed',
+    at: start.at + (sameTime ? 0 : 3), branches: { 'refs/heads/main': finalMain }, artifacts: [f.reference] })
+  return { ...f, ref, tip, request: { ...f.request, branches: { ...branches, [ref]: tip, 'refs/heads/main': finalMain } } }
+}
+test('deleted effect-only Git refs block reuse and remain visible as changed refs', async t => {
+  const f = await effectRefFixture(t)
+  assert.equal((await attempt(f.request)).reuse, true)
+  git(['branch', '-D', 'effect-source'], f.root)
+  const result = await attempt(f.request)
+  assert.equal(result.state, 'branch-changed')
+  assert.equal(result.reuse, false)
+  assert.deepEqual(result.changedBranches, [f.ref])
+})
+test('moved effect-only Git refs block reuse even when caller observations follow the movement', async t => {
+  const f = await effectRefFixture(t)
+  git(['checkout', 'effect-source'], f.root)
+  await writeFile(path.join(f.root, 'file'), 'unrecorded movement')
+  git(['add', '.'], f.root); git(['commit', '-m', 'unrecorded movement'], f.root)
+  const moved = git(['rev-parse', 'HEAD'], f.root)
+  git(['checkout', 'main'], f.root)
+  for (const branches of [f.request.branches, { ...f.request.branches, [f.ref]: moved }]) {
+    const result = await attempt({ ...f.request, branches })
+    assert.equal(result.state, 'branch-changed')
+    assert.equal(result.reuse, false)
+    assert.deepEqual(result.changedBranches, [f.ref])
+  }
+})
+test('unordered conflicting effect ref observations block reuse instead of choosing an event id', async t => {
+  const f = await effectRefFixture(t, { conflict: true })
+  const result = await attempt(f.request)
+  assert.equal(result.state, 'branch-changed')
+  assert.equal(result.reuse, false)
+  assert.deepEqual(result.changedBranches, [f.ref])
+  assert.deepEqual(result.conflictingBranches, [f.ref])
+})
+test('recorded effect ref transitions and causal same-time outcomes retain their latest observed tips', async t => {
+  for (const options of [{ transition: true }, { transition: true, sameTime: true }, { stepTransition: true }]) {
+    const f = await effectRefFixture(t, options)
+    assert.equal((await attempt(f.request)).state, 'ready')
+    await recovery.resolveExecutionEffect({ common: f.request.common, runId: 'r1', effectId: 'effect-1', resolution: 'completed', reason: 'inspected' })
+    const result = await attempt(f.request)
+    assert.equal(result.reuse, true)
+    assert.deepEqual(result.changedBranches, [])
+  }
+})
+test('dirty tracked checkout content blocks reuse of otherwise current evidence', async t => {
+  const f = await fixture(t)
+  assert.equal((await attempt(f.request)).reuse, true)
+  await writeFile(path.join(f.root, 'file'), 'uncommitted replacement')
+  assert.equal(git(['status', '--porcelain'], f.root), 'M file')
+  const result = await attempt(f.request)
+  assert.equal(result.state, 'checkout-unavailable')
+  assert.equal(result.reuse, false)
+})
