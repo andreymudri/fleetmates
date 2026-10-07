@@ -72,7 +72,7 @@ export function expandWorkflowProfile({ profile, runId, planPath, baseBranch, ha
       repair: { maxRounds: Math.min(maxRepairRounds, fixRoundsForPhase(manifest, String(phase))), decision: 'existing-fix-contract', stop: ['process-violation', 'budget-exhausted', 'unknown-environment-failure'] } }
   })
   steps.push({ id: 'acceptance', kind: 'judgment-or-human', inputs: [...PROFILES[profile], `integrated-refs-${phases.at(-1)}`], outputs: ['acceptance-evidence'], effects: [] },
-    { id: 'finish', kind: 'deterministic', argv: cli('finish', ...common, ...planArgs), inputs: ['acceptance-evidence', 'current-review-evidence-for-all-phases'], outputs: ['completion-report'], effects: ['complete-project-verifier-execution'] })
+    { id: 'finish', kind: 'deterministic', argv: cli('finish', ...common, ...planArgs, ...(integration === 'host-bounded' ? ['--results', `${NAMES.stateDir}/${runId}/reviews/finish-results.json`] : [])), inputs: ['acceptance-evidence', 'current-review-evidence-for-all-phases'], outputs: ['completion-report'], effects: ['complete-project-verifier-execution'] })
   const result = { version: 1, profile, mode: 'dry-run', executable: false, ready: blocked.length === 0, blocked, identity,
     parameters, capabilities, maxWallMinutes, integration, contracts, phaseContracts, steps,
     outputContracts: { taskResult: RESULT_SCHEMA, gate: ['verdict', 'anchorSha', 'planHash', 'branchShas'], dependencyRule: 'validated artifacts and actual gates; free-text done is not delivery evidence' },

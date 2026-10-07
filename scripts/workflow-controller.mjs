@@ -3,7 +3,7 @@
 // releases a dependent step only after the artifacts its predecessor names were read back and
 // validated. No command, path or authority is taken from an artifact or from model text.
 import { createHash, randomUUID } from 'node:crypto'
-import { realpath, lstat, open } from 'node:fs/promises'
+import { realpath, lstat, open, mkdir, rename } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import path from 'node:path'
 import { createGit } from './git.mjs'
@@ -34,10 +34,11 @@ const RETENTION_UPPER = { maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 *
 const OUTPUT_BYTES = 4 * 1024 * 1024, FILE_BYTES = 1024 * 1024, SOURCE_BYTES = 512 * 1024, CLI_BYTES = 8 * 1024 * 1024
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const WRITE_LINE = /^results written to (.+) — pass that path to gate --results$/
-const TRUST = ['Commands come only from the fixed workflow-profile fragments, run as the absolute installed CLI with an explicit project root.',
+const TRUST = ['Commands come only from the fixed workflow-profile fragments and the fixed fix-decision call, run as the absolute installed CLI with an explicit project root.',
   'Executor, capability and environment observations are local same-UID observations, not hostile-process isolation.',
   'An injected verification fixture never establishes completion; publication and remote effects are absent.',
-  'An agent step that was interrupted or timed out is an unknown effect and is not redispatched automatically.']
+  'An agent step that was interrupted or timed out is an unknown effect and is not redispatched automatically.',
+  'A code failure stops with the existing fix decision; the controller dispatches no repair round.']
 
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value))
@@ -169,7 +170,11 @@ export function validateWorkflowExpansion(expanded, { inputs, request }) {
     if (!Array.isArray(argv) || argv.length > 32 || argv[0] !== 'node' || argv[1] !== 'scripts/cli.mjs' || argv[2] !== STEP_COMMAND[kind]
         || !COMMANDS.has(argv[2]) || argv.some(arg => !text(arg)) || argv.includes('--root')
         || (kind === 'baseline' ? argv.length !== 3 : argv.indexOf('--run') < 0 || argv[argv.indexOf('--run') + 1] !== request.runId)) throw new Error(`Step ${step.id} is not a whitelisted CLI fragment`)
-    if (kind === 'collect' && step.resultsPath !== `${NAMES.stateDir}/${request.runId}/reviews/results-${step.id.slice(8)}.json`) throw new Error('Unexpected review results path')
+    const phaseResults = `${NAMES.stateDir}/${request.runId}/reviews/results-${step.id.replace(/^\D+-/, '')}.json`
+    if (kind === 'collect' && step.resultsPath !== phaseResults) throw new Error('Unexpected review results path')
+    // The controller hands gate the path collect-reviews named, so the fragment must name that same file.
+    if (kind === 'gate' && (argv.indexOf('--results') < 0 || argv[argv.indexOf('--results') + 1] !== phaseResults)) throw new Error('gate must read the collected review results')
+    if (kind === 'finish' && argv[argv.indexOf('--results') + 1] !== `${NAMES.stateDir}/${request.runId}/reviews/finish-results.json`) throw new Error('finish must receive the collected review results')
   }
   return phases
 }
@@ -284,8 +289,11 @@ async function validateCollect(ctx, phase, step, output) {
   if (result.length !== 1 || !['pass', 'fail'].includes(result[0].status)) return { ok: false, reason: 'review results file is missing or malformed' }
   const reviews = await reviewsCurrent(ctx, phase)
   if (!reviews.ok) return reviews
-  ctx.reviewResults[phase] = { path: expected, sha256: hash(bytes), status: result[0].status, check: check.name }
-  if (result[0].status !== 'pass') return { ok: false, category: 'code', reason: 'mandatory review blocked', artifacts: [{ kind: 'review-results', bytes }] }
+  ctx.reviewResults[phase] = { path: expected, sha256: hash(bytes), status: result[0].status, check: check.name, results: parsed.results }
+  if (result[0].status !== 'pass') {
+    return { ok: false, category: 'code', reason: 'mandatory review blocked', verdict: { verdict: 'FAIL', phase, results: parsed.results },
+      artifacts: [{ kind: 'review-results', bytes }] }
+  }
   return { ok: true, artifacts: [{ kind: 'review-results', bytes }] }
 }
 async function gateInputsCurrent(ctx, phase) {
@@ -296,13 +304,60 @@ async function gateInputsCurrent(ctx, phase) {
   return { ok: true, artifacts: [{ kind: 'gate-input', bytes: JSON.stringify({ version: 1, phase, results: collected.sha256, taskTips: ctx.taskTips[phase] }) }] }
 }
 
+// Exit codes as read from the handlers in scripts/cli.mjs, not observed from a live run here: gate and
+// finish return 1 for a FAIL verdict (the only code failures); gate returns 3 after inferring a manifest.
+const EXIT_CONTRACT = {
+  'init-run': { 1: 'policy', 2: 'policy' },
+  'preview-check': { 1: 'policy', 2: 'policy', 4: 'infrastructure' },
+  dispatch: { 2: 'policy', 4: 'infrastructure' },
+  'dispatch-reviews': { 2: 'policy', 4: 'infrastructure' },
+  'collect-reviews': { 2: 'policy', 4: 'missing-artifact' },
+  gate: { 1: 'code', 2: 'policy', 3: 'policy', 4: 'infrastructure' },
+  finish: { 1: 'code', 2: 'policy', 4: 'infrastructure' },
+  fix: { 1: 'infrastructure', 2: 'policy' },
+}
 function classifyExit(step, result) {
   const agent = step.kind === 'agent'
   if (result.timedOut || result.outputLimited) return agent ? 'unknown-effect' : 'infrastructure'
-  if (result.code === 3) return 'code'
-  if (result.code === 2) return 'policy'
-  if (result.code === 4) return 'infrastructure'
-  return agent ? 'unknown-effect' : 'unknown'
+  return EXIT_CONTRACT[step.argv[2]]?.[result.code] ?? (agent ? 'unknown-effect' : 'unknown')
+}
+// As read from cli.mjs, gate prints its verdict with JSON.stringify(value, null, 2), so the block starts
+// at a line that is exactly "{". Only the fix decision reads it; an unreadable block leaves it undecided.
+function gateVerdict(output) {
+  const lines = output.split(/\r?\n/), start = lines.indexOf('{')
+  if (start < 0) return null
+  const verdict = parseJson(Buffer.from(lines.slice(start).join('\n')))
+  return plainObject(verdict) && verdict.verdict === 'FAIL' && Array.isArray(verdict.results) ? verdict : null
+}
+
+async function writeInside(root, relative, text) {
+  const file = path.join(root, relative), dir = path.dirname(file)
+  if (!file.startsWith(root + path.sep)) throw new Error('State file escapes the project root')
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  if (await realpath(dir) !== dir) throw new Error('State directory contains a link')
+  const temporary = path.join(dir, `.${randomUUID()}.tmp`)
+  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+  try { await handle.writeFile(text) } finally { await handle.close() }
+  await rename(temporary, file)
+}
+
+// A code failure is handed to the existing fix contract (`fix --verdict`) for its budget and
+// escalation decision. No fixed CLI fragment performs the repair itself: `dispatch` treats a
+// recorded done result as final and does not respawn the task, so the controller stops with the
+// decision instead of re-running dispatch as if that repaired anything.
+async function repairDecision(ctx, failedStep, phase, failure) {
+  if (!failure.verdict) return { blocker: blocker('code', failedStep.id, `${failure.blocker.reason}; no readable verdict for the fix decision`) }
+  const relative = `${NAMES.stateDir}/${ctx.request.runId}/profile-verdict-${phase}.json`
+  try { await writeInside(ctx.root, relative, JSON.stringify(failure.verdict)) }
+  catch (error) { return { blocker: blocker('infrastructure', failedStep.id, `verdict not written: ${error.message}`) } }
+  const step = { id: `fix-${phase}`, kind: 'deterministic', argv: ['node', 'scripts/cli.mjs', 'fix', '--run', ctx.request.runId, '--phase', String(phase), '--verdict', relative] }
+  const result = await runCli(ctx, step, phase)
+  if (!result.ok) return result
+  const decision = result.outcome.decision
+  ctx.report.repair = { phase, step: failedStep.id, decision }
+  const reason = decision.decision === 'retry' ? 'repair-round-required: fix decided retry; no fixed CLI fragment respawns a recorded done task'
+    : decision.decision === 'escalate' ? `fix-escalated: ${decision.reason}` : 'fix-decision-none-for-a-failed-verdict'
+  return { blocker: blocker('code', failedStep.id, reason) }
 }
 
 function budget(ctx, stepId) {
@@ -358,7 +413,7 @@ async function guarded(ctx, step, action, { counts = true } = {}) {
   ctx.report.steps.push({ id: step.id, attempt, status: outcome.ok ? 'completed' : 'failed', exitCode: summary.exitCode, durationMs,
     artifacts: references, ...(outcome.mode ? { mode: outcome.mode } : {}) })
   return outcome.ok ? { ok: true, references, outcome }
-    : { ok: false, category: outcome.category ?? 'missing-artifact', blocker: blocker(outcome.category ?? 'missing-artifact', step.id, outcome.reason ?? 'validation failed') }
+    : { ok: false, category: outcome.category ?? 'missing-artifact', verdict: outcome.verdict ?? null, blocker: blocker(outcome.category ?? 'missing-artifact', step.id, outcome.reason ?? 'validation failed') }
 }
 
 async function runCli(ctx, step, phase) {
@@ -366,11 +421,25 @@ async function runCli(ctx, step, phase) {
     let argv = step.argv.slice(2)
     if (step.argv[2] === 'gate') {
       const index = argv.indexOf('--results'), collected = ctx.reviewResults[phase]
-      const named = ctx.expanded.steps.find(s => s.id === `collect-${phase}`).resultsPath
-      if (index < 0 || argv[index + 1] !== named || !collected || collected.path !== path.join(ctx.root, named)) throw new Error('gate results input is not the collected path')
       argv = [...argv.slice(0, index + 1), collected.path, ...argv.slice(index + 2)]
       const current = await gateInputsCurrent(ctx, phase)
       if (!current.ok) return { ...current, category: 'changed-input', artifacts: [] }
+    }
+    const extra = []
+    if (step.argv[2] === 'finish') {
+      // finish recomputes every phase and leaves an agent check pending unless its results are
+      // supplied, so it receives the reviews collected in this invocation for every phase.
+      const index = argv.indexOf('--results'), named = `${NAMES.stateDir}/${ctx.request.runId}/reviews/finish-results.json`
+      if (index < 0 || argv[index + 1] !== named) throw new Error('finish results input is not the controller-written path')
+      if (ctx.phases.some(p => ctx.reviewResults[p]?.status !== 'pass')) return { ok: false, category: 'missing-artifact', reason: 'review results are not current for every phase', artifacts: [] }
+      const document = JSON.stringify({ phases: Object.fromEntries(ctx.phases.map(p => [String(p), { results: ctx.reviewResults[p].results }])) })
+      await writeInside(ctx.root, named, document)
+      argv = [...argv.slice(0, index + 1), path.join(ctx.root, named), ...argv.slice(index + 2)]
+      extra.push({ kind: 'finish-input', bytes: document })
+    }
+    if (step.argv[2] === 'fix') {
+      const index = argv.indexOf('--verdict')
+      argv = [...argv.slice(0, index + 1), path.join(ctx.root, argv[index + 1]), ...argv.slice(index + 2)]
     }
     let result
     try {
@@ -382,12 +451,21 @@ async function runCli(ctx, step, phase) {
       return { ok: false, category: 'infrastructure', reason: 'malformed executor receipt', artifacts: [] }
     }
     const output = typeof result.output === 'string' ? result.output : `${result.stdout}${result.stderr}`
-    const artifacts = streams ? [{ kind: 'step-stdout', bytes: result.stdout }, { kind: 'step-stderr', bytes: result.stderr }] : [{ kind: 'step-output', bytes: output }]
+    const artifacts = [...(streams ? [{ kind: 'step-stdout', bytes: result.stdout }, { kind: 'step-stderr', bytes: result.stderr }] : [{ kind: 'step-output', bytes: output }]), ...extra]
     const observed = { exitCode: result.code, timedOut: result.timedOut === true }
     if (result.code !== 0 || result.timedOut || result.outputLimited) {
-      return { ok: false, ...observed, category: classifyExit(step, result), reason: result.timedOut ? 'timed out' : `exit ${result.code}`, artifacts }
+      const category = classifyExit(step, result)
+      return { ok: false, ...observed, category, reason: result.timedOut ? 'timed out' : result.outputLimited ? 'output limit exceeded' : `exit ${result.code}`, artifacts,
+        ...(category === 'code' && step.argv[2] === 'gate' ? { verdict: gateVerdict(streams ? result.stdout : output) } : {}) }
     }
     const kind = step.id.replace(/-\d+$/, '')
+    if (kind === 'fix') {
+      const decision = parseJson(Buffer.from(streams ? result.stdout : output))
+      if (!plainObject(decision) || !['none', 'retry', 'escalate'].includes(decision.decision) || !Array.isArray(decision.tasks)) {
+        return { ok: false, ...observed, category: 'infrastructure', reason: 'fix decision is malformed', artifacts }
+      }
+      return { ok: true, ...observed, decision, artifacts: [...artifacts, { kind: 'fix-decision', bytes: JSON.stringify(decision) }] }
+    }
     const validation = kind === 'prepare' ? await validatePrepare(ctx)
       : kind === 'implement' ? await validateImplement(ctx, phase)
       : kind === 'review' ? await reviewsCurrent(ctx, phase)
@@ -419,7 +497,8 @@ async function runIntegration(ctx, step, phase) {
     } catch (error) {
       const category = /required checks|merge conflict/.test(error.message) ? 'code' : /verification/.test(error.message) ? 'infrastructure'
         : /moved|mismatch|dirty/.test(error.message) ? 'changed-input' : 'policy'
-      return { ok: false, category, reason: `host gate: ${error.message}`, artifacts: [] }
+      return { ok: false, category, reason: `host gate: ${error.message}`, artifacts: [],
+        ...(category === 'code' && Array.isArray(error.results) ? { verdict: { verdict: 'FAIL', phase, results: error.results } } : {}) }
     }
     let receipt
     try {
@@ -487,7 +566,6 @@ async function priorDecision(ctx, step, phase) {
   if (!reuse) return { action: 'run' }
   const reconciled = ctx.reconciled.find(a => a.step === step.id && a.attempt === group.start.attempt)
   if (!reconciled || ['stale', 'missing-artifact', 'retention-exceeded', 'unknown-effect'].includes(reconciled.state)) return { action: 'run' }
-  if (group.start.identity !== strictExecutionIdentity(ctx.inputs)) return { action: 'run' }
   for (const reference of group.end.artifacts) if (!await observe(ctx, reference)) return { action: 'run' }
   const validation = await reuse(ctx, phase, group)
   if (!validation.ok) return { action: 'run' }
@@ -566,7 +644,6 @@ function finalize(ctx, state, extra = {}) {
   report.state = state
   report.attempts = { used: ctx.attemptsUsed, max: ctx.request.limits.maxAttempts }
   report.wallMs = { used: ctx.wallUsed + Math.max(0, ctx.now() - ctx.invocationStart), max: ctx.request.limits.maxWallMs }
-  report.repairs = { ...ctx.repairs }
   Object.assign(report, extra)
   return report
 }
@@ -586,26 +663,15 @@ async function executeSteps(ctx) {
   }
   for (const contract of ctx.expanded.phaseContracts) {
     const phase = contract.phase
-    let fresh = false
-    phaseLoop: while (true) {
-      for (const name of ['implement', 'review', 'collect', 'gate', 'integrate']) {
-        const step = ctx.expanded.steps.find(s => s.id === `${name}-${phase}`)
-        const decision = ctx.resume && !fresh ? await priorDecision(ctx, step, phase) : { action: 'run' }
-        if (decision.action === 'block') return stop(ctx, decision)
-        if (decision.action === 'reuse') continue
-        const result = name === 'integrate' ? await runIntegration(ctx, step, phase) : await runCli(ctx, step, phase)
-        if (result.ok) continue
-        if (result.category === 'code') {
-          if ((ctx.repairs[phase] ?? 0) < contract.repair.maxRounds) {
-            ctx.repairs[phase] = (ctx.repairs[phase] ?? 0) + 1
-            fresh = true
-            continue phaseLoop
-          }
-          result.blocker = blocker('code', step.id, 'repair-budget-exhausted')
-        }
-        return stop(ctx, result)
-      }
-      break
+    for (const name of ['implement', 'review', 'collect', 'gate', 'integrate']) {
+      const step = ctx.expanded.steps.find(s => s.id === `${name}-${phase}`)
+      const decision = ctx.resume ? await priorDecision(ctx, step, phase) : { action: 'run' }
+      if (decision.action === 'block') return stop(ctx, decision)
+      if (decision.action === 'reuse') continue
+      const result = name === 'integrate' ? await runIntegration(ctx, step, phase) : await runCli(ctx, step, phase)
+      if (result.ok) continue
+      if (result.category === 'code') return stop(ctx, await repairDecision(ctx, step, phase, result))
+      return stop(ctx, result)
     }
   }
   const acceptance = await acceptanceEvidence(ctx)
@@ -657,7 +723,7 @@ async function controller({ root, cliPath, request: rawRequest, environment, rol
   let last = 0
   const ctx = { root: host.root, cliPath: host.cliPath, common: host.common, request, retention, executor, verificationFactory,
     acceptance: validateAcceptance(acceptance), resume, executionId, now: () => { const at = now(); if (!Number.isSafeInteger(at) || at < 0) throw new Error('Invalid clock'); return at },
-    observations: new Map(), taskTips: {}, reviewResults: {}, integrated: {}, repairs: {},
+    observations: new Map(), taskTips: {}, reviewResults: {}, integrated: {},
     attemptCounts: new Map(), attemptsUsed: 0, wallUsed: 0, priorGroups: [], reconciled: [], manifest: JSON.parse(manifestText) }
   ctx.tick = () => { last = Math.max(ctx.now(), last + 1); return last }
   ctx.invocationStart = ctx.now()
@@ -721,11 +787,6 @@ async function controller({ root, cliPath, request: rawRequest, environment, rol
     const reconciled = await reconcileExecutionAttempt({ common: host.common, runId: request.runId, inputs: ctx.inputs, branches, retention,
       checkouts: { root: host.root } })
     ctx.reconciled = reconciled.attempts.filter(a => a.executionId === executionId)
-    // Implementation repairs already spent before this resume count against the existing budget.
-    for (const phase of ctx.phases) {
-      const completed = ctx.priorGroups.filter(g => g.start.step === `implement-${phase}` && g.end?.kind === 'step-completed').length
-      if (completed > 1) ctx.repairs[phase] = completed - 1
-    }
   }
   return executeSteps(ctx)
 }

@@ -74,6 +74,8 @@ test('host-bounded expansion replaces generative integration, names the collect-
   assert.equal(collect.resultsPath, '.fleetmates/r1/reviews/results-1.json'); assert.equal(collect.resultsFrom, 'success-write-line')
   assert.equal(collect.stdoutArtifact, undefined)
   assert.deepEqual(gate.argv.slice(-2), ['--results', collect.resultsPath])
+  assert.deepEqual(profile.steps.find(s => s.id === 'finish').argv.slice(-2), ['--results', '.fleetmates/r1/reviews/finish-results.json'], 'finish needs the collected reviews or it leaves the agent check pending')
+  assert.ok(!legacy.steps.find(s => s.id === 'finish').argv.includes('--results'))
   assert.notEqual(profile.profileHash, legacy.profileHash)
   assert.throws(() => expandWorkflowProfile({ ...input, integration: 'generative' }), /integration mode/)
   for (const contracts of [{ environment: '/abs/env.json', rolePolicy: 'roles.json' }, { environment: 'env.json' }, { environment: '../env.json', rolePolicy: 'roles.json' }, { environment: 'env.json', rolePolicy: '--exec' }]) {
