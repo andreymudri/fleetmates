@@ -1696,6 +1696,46 @@ test('defaultGitExec surfaces a signal field on an ordinary successful call', as
   }
 })
 
+// A path or subject with a multi-byte character must survive a pipe chunk boundary. Every byte of
+// this blob belongs to a 3-byte `€`, so any chunk size that is not a multiple of 3 (a 64 KiB pipe
+// buffer is not) splits a code point; decoding each chunk on its own turns the halves into U+FFFD,
+// and a path read back that way no longer matches the file set it is checked against.
+test('defaultGitExec keeps multi-byte characters intact across stdout chunk boundaries', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  try {
+    await defaultGitExec(['init', '--initial-branch=main'], root)
+    const content = '€'.repeat(400_000)
+    await writeFile(path.join(root, 'euro.txt'), content, 'utf8')
+    const { code, stdout } = await defaultGitExec(['hash-object', '-w', 'euro.txt'], root)
+    assert.equal(code, 0)
+    const result = await defaultGitExec(['cat-file', '-p', stdout.trim()], root)
+    assert.equal(result.code, 0)
+    assert.equal(result.stdout.includes('�'), false, 'a split code point was decoded per chunk')
+    assert.equal(result.stdout, content)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+// The same for stderr, which feeds every GitError message. git caps `die()` text at 4 KiB, so the
+// long stderr comes from GIT_TRACE echoing argv; the trace prefix length is git's, so the argument
+// is padded by 0, 1 and 2 bytes to put a chunk boundary inside a `€` whatever that prefix is.
+test('defaultGitExec keeps multi-byte characters intact across stderr chunk boundaries', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
+  try {
+    await defaultGitExec(['init', '--initial-branch=main'], root)
+    const euros = '€'.repeat(40_000)
+    for (const pad of ['', 'x', 'xx']) {
+      const { stderr } = await defaultGitExec(
+        ['rev-parse', '--verify', '--quiet', pad + euros], { cwd: root, env: { GIT_TRACE: '2' } })
+      assert.equal(stderr.includes('�'), false, `a split code point was decoded per chunk (pad ${pad.length})`)
+      assert.ok(stderr.includes(pad + euros), `trace output must carry the argument intact (pad ${pad.length})`)
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 // A killed `ls-files --error-unmatch` must not read as "untracked": `preview-check` treats false
 // as permission to link the path into a preview worktree.
 test('tracks throws rather than answering false when the process was killed', async () => {
