@@ -50,8 +50,16 @@ written; a task that consumes one relies on nothing beyond it.
   `derive` and/or `run-state`. A verdict with any other failed check keeps exit 1. Exit 0/2/3
   are unchanged.
 - **Dispatch execution contract (T5 -> T4):** `cli.mjs dispatch` accepts `--execution <abs path>`
-  naming a JSON file `{ version: 1, runId, attemptPrefix, journalRoot }` and passes it to
-  `dispatchPhase` as its `execution` option, so the T6 per-attempt journal is used.
+  naming a JSON file whose content is exactly the object `dispatchPhase` already validates as its
+  required execution (`scripts/driver.mjs` `requiredExecution`): `{ version: 1, common, runId,
+  executionId, inputs, retention, maxAttempts, deadlineAt }`, and passes it unchanged as the
+  `execution` option, so the T6 per-attempt journal is used. The controller builds it: `common` is
+  the canonical git common dir, `executionId` a label derived from the controller attempt,
+  `inputs` a strict execution identity, `retention` the request's retention, `maxAttempts` <= 10,
+  `deadlineAt` no later than the request deadline and within 24 h. Strict execution refuses files
+  sandboxes, so the controller appends `--execution` only for harnesses whose sandbox mode is not
+  `files` (not cursor) and reports the journal as unavailable otherwise.
+  (Amended 2026-10-07: the original four-field shape did not match `requiredExecution`.)
 - **Fix-round dispatch (T5 -> T4):** `cli.mjs dispatch` accepts `--fix-round --task <id>` (repeatable).
   It dispatches only the named tasks with the fix-round brief (no branch reset) and respawns them
   even when a `done` result is recorded. `record-fix-round` keeps its current interface.
@@ -143,6 +151,9 @@ written; a task that consumes one relies on nothing beyond it.
 - Test: `tests/workflow-controller.test.mjs`
 - Test: `tests/workflow-profile.test.mjs`
 - Test: `tests/driver-recovery.test.mjs`
+- Modify: `scripts/brief.mjs`
+- Test: `tests/brief.test.mjs`
+- Test: `tests/execution-controller-cli.test.mjs`
 
 **Depends:** T1
 
@@ -155,6 +166,8 @@ written; a task that consumes one relies on nothing beyond it.
 - The controller reads the lifecycle with `lifecycleStatus(root, runId)` instead of assuming `running`; a suspended or abandoned run never reports `verified-complete`.
 - Retention bounds are imported from `RETENTION_LIMITS`; boundary tests pin `maxAttempts`, `maxWallMs`, `stepTimeoutMs`, `maxRepairRounds` and the 4096-byte parameter bound (n accepted, n+1 refused).
 - A two-task phase with `maxParallel: 2` and an execution contract completes without a "busy" storage error.
+- `scripts/brief.mjs`: a fix-round brief never resets the task branch, including when the task carries `runtime` (today `checkoutSteps` returns the runtime steps first and ignores `fixRound`); a test composes a fix-round brief with runtime and asserts no `checkout -B <branch> <base>` and the fix-round instructions present.
+- `tests/execution-controller-cli.test.mjs` (amended into this task 2026-10-07): only the existing tests this task's behavior change invalidates are updated ("a failing gate stops with no merge and reports the repair budget as undelivered" and the gate-run-state case of "a gate that cannot derive run state is reported as blocked infrastructure"), so the merged tree stays green; the fake CLI there gains `record-fix-round`. T5 rewrites this file further for its own contracts.
 
 - [ ] Step 1: Write failing tests: gate exit 5 classification, a full repair round to PASS within budget, budget exhaustion, escalate, the execution argv, an interrupted agent dispatch resolved both ways, suspended lifecycle, the numeric bounds, and the two-task parallel run.
 - [ ] Step 2: Observe each fail for the intended reason.
