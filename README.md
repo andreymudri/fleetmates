@@ -778,9 +778,12 @@ and Cursor reviewer dispatch because their selected sandbox mode was
 unsupported; a missing committed policy returned 2. Thus a supported resolver
 row alone does not establish a supported dispatch path.
 
-Required native verification in the current isolated-clone trial refused with
-exit 4 because restrictions were not independently observed. There was no
-required-policy fallback. The standalone `environment-check` trial used the
+Required native verification in the 2026-10-06 isolated-clone trial refused
+with exit 4 because restrictions were not independently observed. There was no
+required-policy fallback. In the 2026-10-07 execution-recovery trials on a
+Linux host, the same contracts reported `enforcement.kind: "required"` with
+`observed: true` for both implementer and reviewer dispatch; readiness depends
+on the host's native sandbox runtime. The standalone `environment-check` trial used the
 host command executor; its pass does not establish required sandbox enforcement.
 Legacy invocation remains a separately unverified compatibility path.
 Changed source HEAD invalidates a bound continuation even when contract bytes
@@ -805,3 +808,93 @@ stay unresolved. A completed observation still requires current gates and is
 never verified delivery. Use the main repository's root; disposable clones
 have separate metadata. Automatic driver recovery and external reconciliation
 adapters remain unsupported; these commands repeat no external action.
+
+### Bounded workflow execution (issues 42, 43 and 33 remain open)
+
+Four commands run and recover a fixed workflow profile. Each requires an
+absolute `--root`; a missing or relative root exits 2 before anything is read.
+
+```sh
+node scripts/cli.mjs workflow-execute --file <request.json> --root <absolute-project-root>
+node scripts/cli.mjs workflow-resume  --run <id>            --root <absolute-project-root>
+node scripts/cli.mjs workflow-status  --run <id>            --root <absolute-project-root>
+node scripts/cli.mjs workflow-resolve --file <resolution.json> --root <absolute-project-root>
+```
+
+A version 1 request has exactly these fields. There are no defaults: a
+missing field, an unknown field, an executable or argv field all exit 2.
+
+```json
+{"version":1,"profile":"bug-fix","runId":"p1b","planPath":"plan.md","baseBranch":"main",
+ "baseCommit":"<exact commit at the tip of baseBranch>","runBranch":"run/p1b","harness":"codex","sandboxMode":"clone",
+ "parameters":{},"limits":{"maxWallMs":2400000,"maxAttempts":40,"maxRepairRounds":1,"stepTimeoutMs":1500000},
+ "environment":"env.json","rolePolicy":"roles.json",
+ "retention":{"maxArtifactBytes":4194304,"maxRunBytes":67108864,"maxAgeMs":2592000000},
+ "model":"<model>","effort":"low"}
+```
+
+- `profile` is `bug-fix`, `feature`, `migration`, `ui` or `research`; `harness`
+  is `codex` or `cursor`; `sandboxMode` is `clone` or `files`.
+- `runId` matches `^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`. `runBranch` must differ
+  from `baseBranch`, exist, and be checked out at the root.
+- `baseCommit` must be the current tip of `baseBranch`; a moved base is
+  reported as a `changed-input` blocker with exit 4 before any journal write.
+- `planPath`, `environment` and `rolePolicy` are repository-relative paths read
+  from the committed base. The recipe and policy shapes are the ones in the
+  execution prerequisites section. The controller resolves the integrator in
+  the host-bounded mode, whose contract is read, write, execute and sharedRefs
+  true with network and publication false; the trials used such a policy.
+- `parameters` is an object of at most 4,096 JSON bytes. `migration` needs
+  `compatibility` and `rollback`; `requiresVault` is a boolean; `dispatch` is
+  reserved.
+- `limits`: `maxWallMs` 1,000 to 86,400,000; `maxAttempts` 1 to 500;
+  `maxRepairRounds` 0 to 10; `stepTimeoutMs` 1,000 to 21,600,000.
+- `retention`: positive integers up to 16 MiB per artifact, 256 MiB per run
+  and 365 days.
+- `model` is one bounded token not starting with a dash. `effort` is `low`,
+  `medium`, `high`, `xhigh`, `max` or null; Cursor requires null. The trusted
+  host adds them only to `dispatch` and `dispatch-reviews`.
+
+The controller runs `init-run`, `preview-check`, then per phase `dispatch`,
+`dispatch-reviews`, `collect-reviews`, `gate` and a host-bounded no-ff merge,
+then acceptance and `finish`. The CLI it runs is the installed one, never a
+path from the request. Each step's start is journaled before it runs, and its
+outputs are retained and read back before the next step is released.
+
+Exit codes. `workflow-execute` and `workflow-resume` exit 0 only for a
+`verified-complete` report and 4 for every other report. Nothing currently
+produces acceptance evidence, so real runs end `human-required` with exit 4,
+and the exit 0 path has not run against a real project. `workflow-status`
+reads only, exits 0 when every attempt reconciles and 4 otherwise, including
+an absent run and a finished run whose earlier attempts read `branch-changed`
+after integration moved the run branch. `workflow-resolve` takes
+`{"version":1,"runId":"<id>","effectId":"<id>","outcome":"completed|failed|unknown","reason":"<token>"}`,
+where `reason` matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. It records only a
+local observation of an effect already in the journal, performs no external
+action, and exits 2 for an effect the journal never recorded.
+
+Resume rereads the retained request and the committed contracts, reuses prior
+outputs only after revalidating them, and always reruns `collect-reviews` and
+`gate`. In the 2026-10-07 trial a controller killed during the gate was
+resumed without redispatching any model or repeating the merge. An agent step
+that ends without an outcome stays an unknown effect and is not redispatched;
+no command clears it. `doctor` reports the same journal summary.
+
+Storage is private and local: the journal is under
+`<git-common-dir>/fleetmates-execution/<sha256 of run id>/` (at most 1,000
+events and 1 MiB) and artifacts under
+`<git-common-dir>/fleetmates-artifacts/<sha256 of run id>/<sha256>.bin`, with
+0700 directories and 0600 files. Artifacts can contain task summaries, private
+log paths and command output. No command prunes them; delete a run's two
+directories by hand when the evidence is no longer needed.
+
+Limits: a code failure stops at the existing `fix` decision and no repair
+round is dispatched, so `maxRepairRounds` is recorded but not consumed.
+`dispatch` is called without the driver's execution contract, so per-attempt
+driver records and prompt identities are not journaled on this path. The
+read-only PR outcome query has no CLI entry point; Vault and publication
+effects have no adapter. Observations are same-UID local evidence, not
+isolation from a hostile process. Driver recovery does not keep Deck terminals
+alive across a deckd restart. See the
+[execution and recovery validation](docs/specs/2026-10-06-execution-recovery-validation.md)
+for the real trials, findings and issue matrices.
