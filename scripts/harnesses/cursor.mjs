@@ -333,7 +333,8 @@ export function cursorCheckoutRoot({ runRepo, runId, env = process.env }) {
   return path.join(cache, 'fleetmates', 'cursor', repoKey, runId)
 }
 
-// Whether `dir/.git` marks a repository: a `.git` directory only when it holds `HEAD`, a `.git`
+// Whether `dir/.git` marks a repository: a `.git` directory only when it holds a `HEAD` that is
+// not a directory (read with lstat, so a symlinked HEAD counts even when it dangles), a `.git`
 // file only when it starts with `gitdir:`. Anything else, such as the empty `.git` a sandbox can
 // mount in `/tmp` for the length of a command, is not a repository and does not stop the walk.
 async function gitMarker(dir) {

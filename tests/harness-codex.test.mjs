@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile, readFile, chmod, stat, symlink } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { tmpdir, constants as osConstants } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
 import { spawn, spawnSync } from 'node:child_process'
@@ -1090,7 +1090,8 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
       assert.notEqual(pgid, String(trampoline.pid))
       assert.ok(pgrep(['-g', pgid]).length > 0)
       trampoline.kill(signal)
-      await exited
+      // The handler exits with 128+signal itself, so the exit is a code, not a signal death.
+      assert.deepEqual(await exited, [128 + osConstants.signals[signal], null])
       assert.deepEqual(await survivorsAfter(() => pgrep(['-g', pgid])), [])
       assert.deepEqual(await survivorsAfter(() => processesWith(token)), [])
     } finally {

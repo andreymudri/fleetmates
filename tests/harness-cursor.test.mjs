@@ -468,6 +468,8 @@ test('a .git directory holding HEAD, or a gitdir: pointer file, in an ancestor s
     for (const [name, plant] of [
       ['dir', async dir => { await mkdir(path.join(dir, '.git')); await writeFile(path.join(dir, '.git', 'HEAD'), 'ref: refs/heads/main\n') }],
       ['pointer', async dir => { await writeFile(path.join(dir, '.git'), 'gitdir: /home/you/elsewhere/.git/worktrees/x\n') }],
+      // A HEAD that is a dangling symlink is still a repository's HEAD: read with lstat, not stat.
+      ['dangling', async dir => { await mkdir(path.join(dir, '.git')); await symlink(path.join(dir, 'missing-head-target'), path.join(dir, '.git', 'HEAD')) }],
     ]) {
       const repo = path.join(ancestor, name)
       const cache = path.join(repo, 't', 'cache')
