@@ -136,3 +136,44 @@ open. The host reports 16 open issues (#26 and #33-47), incomplete live Claude
 callbacks due to weekly capacity, and no W02 campaign execution. Fixtures are
 not live callback evidence. No capacity reset date is inferred. Vault writes,
 publication and production deployment require separately granted authority.
+
+## Execution and recovery delivery, 2026-10-07
+
+The second delivery group adds `workflow-execute`, `workflow-resume`,
+`workflow-status` and `workflow-resolve` over the fixed profiles (W10), the
+version 2 execution journal with retained artifacts and resume reconciliation
+(W11), and strict completion obligations (W01). The table above is the state
+after PR 32 and is not rewritten here. The
+[validation report](2026-10-06-execution-recovery-validation.md) records the
+real trials on integrated source `db6a5f0c` and the per-issue matrices.
+
+Two authenticated Codex profile runs (bug-fix and feature) ran in isolated
+throwaway projects with required environment and role contracts. Native
+enforcement was observed for implementer and reviewer, the host-bounded merge
+landed, and operator acceptance checks passed on the integrated trees. Both
+runs ended `human-required` with exit 4, because nothing produces acceptance
+evidence. The verified-complete path and `finish` did not run.
+
+A controller killed during the feature run's gate resumed without
+redispatching a model or repeating the merge, and it reran collection and the
+gate fresh. That is one real boundary. Interruptions inside `dispatch`, real
+harness loss and Deck daemon restarts remain fixture-backed or untested.
+
+Issues 42, 43 and 33 stay open. Their remaining obligations:
+
+- W10 (#42): migration, UI and research profiles have no execution beyond
+  dry-run tests, and repair rounds are recorded but not delivered. Acceptance
+  evidence has no producer, and no W02 evaluation has run.
+- W11 (#43): the driver's per-attempt journal is not wired from the CLI, and
+  the PR outcome query has no entry point. Vault and publication adapters are
+  missing, no command prunes retained artifacts, and in-dispatch kill
+  boundaries were not exercised for real.
+- W01 (#33): live Claude Code callbacks, ambiguous bindings, suspension and
+  abandonment need owner-authorized real sessions. Input-change invalidation
+  is fixture-backed only.
+
+Separately confirmed limitations: `message` exits 0 on a spawn failure
+(exit code -2) and on a clean exit without a result, and with Cursor it does
+not read the stream-file result. `gate` exits 1 for both a FAIL verdict and a
+derive/run-state failure. The four-lens review and full phase gate for this
+documentation task belong to the host and are pending.
