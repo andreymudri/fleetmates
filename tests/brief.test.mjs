@@ -916,3 +916,54 @@ test('no brief row calls a gate rejection the cannot-verify code', async () => {
       'the superseded exit-4 rejection row is still rendered')
   }
 })
+
+test('trusted driver clone context preserves current tip and delegates location and gate to host', () => {
+  const runtime = { version: 1, root: '/project', cwd: '/project/clone', gitdir: '/project/gitdirs/T4', branch: TASK.branch, tip: 'a'.repeat(40), continuation: true, mode: 'clone' }
+  for (const caveman of [false, true]) {
+    const brief = composeBrief({ ...FULL, caveman, task: { ...TASK, runtime } })
+    assert.ok(!runnableReset.test(brief))
+    assert.ok(!brief.includes('cli.mjs" locate'))
+    assert.ok(!brief.includes('--git-common-dir'))
+    assert.ok(!brief.includes('cli.mjs" complete'))
+    assert.ok(brief.includes(runtime.tip))
+    assert.ok(brief.includes('Host owns collection and completion'))
+    assert.ok(brief.includes('BASELINE.'))
+  }
+})
+
+test('driver brief commands preserve later-phase and fix commits in a separate-git-dir clone', async t => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+  const { execFileSync } = await import('node:child_process')
+  const os = await import('node:os'); const path = await import('node:path')
+  const root = await mkdtemp(path.join(os.tmpdir(),'brief-current-'))
+  t.after(()=>rm(root,{recursive:true,force:true}))
+  const git = (...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim()
+  git('init','-b','old-base');git('config','user.name','Fixture');git('config','user.email','fixture@example.invalid')
+  await writeFile(path.join(root,'seed'),'seed');git('add','seed');git('commit','-m','test: original base')
+  git('checkout','-b','run/r');git('commit','--allow-empty','-m','test: integrated prior phase')
+  const cwd=path.join(root,"clone's checkout"),gitdir=path.join(root,'separate-git')
+  git('clone','--shared','--separate-git-dir='+gitdir,root,cwd)
+  await rm(path.join(cwd,'.git'))
+  const env={...process.env,GIT_DIR:gitdir,GIT_WORK_TREE:cwd}
+  const worker=(...args)=>execFileSync('git',args,{cwd,env,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim()
+  worker('branch','old-base','origin/old-base')
+  worker('checkout','-b',TASK.branch)
+  for(const fixRound of [false,true]) {
+    if(fixRound) worker('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','--allow-empty','-m','fix: preserved task work')
+    const tip=worker('rev-parse','HEAD')
+    const runtime={version:1,root,cwd,gitdir,branch:TASK.branch,tip,continuation:fixRound,mode:'clone'}
+    const brief=composeBrief({...FULL,baseBranch:'old-base',fixRound,task:{...TASK,runtime}})
+    const commands=brief.split('\n').filter(line=>/^    (?:export|git) /.test(line)).join('\n')
+    const output=execFileSync('bash',['-c',commands],{cwd,encoding:'utf8'})
+    assert.equal(output.trim(),TASK.branch+'\n'+tip)
+    assert.equal(worker('rev-parse','HEAD'),tip)
+    assert.ok(!runnableReset.test(brief))
+  }
+})
+
+test('malformed trusted runtime refuses composition instead of legacy fallback',()=>{
+  const runtime={version:1,root:'/project',cwd:'/project/clone',gitdir:'/project/git',branch:TASK.branch,tip:'a'.repeat(40),continuation:false,mode:'clone'}
+  for(const changed of [{tip:'missing'},{root:'relative'},{gitdir:'relative'},{branch:'wrong'},{mode:'unsupported'},{cwd:'/project/\nclone'}]) {
+    assert.throws(()=>composeBrief({...FULL,task:{...TASK,runtime:{...runtime,...changed}}}),/invalid trusted/)
+  }
+})

@@ -82,7 +82,7 @@ function makeStubAdapter({
 }
 
 function baseArgs(runDir, overrides = {}) {
-  return {
+  const args = {
     git: async () => ({ code: 0, stdout: '', stderr: '' }),
     runRepo: '/run/repo',
     runId: 'r',
@@ -99,6 +99,9 @@ function baseArgs(runDir, overrides = {}) {
     runDir,
     ...overrides,
   }
+  if (!overrides.git) args.git = async (argv, options = {}) => ({ code: 0, stderr: '',
+    stdout: argv.includes('symbolic-ref') ? `fleetmates/${args.runId}/${path.basename(options.cwd)}` : 'a'.repeat(40) })
+  return args
 }
 
 async function tmpRunDir(name) {
@@ -618,4 +621,35 @@ test('cleanupOnResult keeps the sandbox of a blocked or failed task', async () =
   await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement }))
   assert.equal((await readSession(runDir, 'T1')).state, 'failed')
   assert.deepEqual(cleaned, [])
+})
+
+test('a missing current checkout observation refuses dispatch instead of composing a base reset', async () => {
+  const runDir = await tmpRunDir('source-unavailable')
+  const { adapter, calls, completeEnforcement } = makeStubAdapter()
+  const out = await dispatchPhase(baseArgs(runDir, { adapter, completeEnforcement, git: async () => ({code:1,stdout:'',stderr:'unavailable'}) }))
+  assert.deepEqual(out.orphaned, ['T1'])
+  assert.equal(calls.spawn.length, 0)
+})
+
+test('legacy state-only reuse remains explicitly unverified', async () => {
+  const runDir = await tmpRunDir('legacy-observation')
+  await mkdir(path.join(runDir,'sessions'),{recursive:true})
+  await writeFile(path.join(runDir,'sessions','T1.json'),JSON.stringify({result:DONE,state:'done'}))
+  const {adapter,completeEnforcement}=makeStubAdapter()
+  const out=await dispatchPhase(baseArgs(runDir,{adapter,completeEnforcement}))
+  assert.equal(out.results[0].verifiedComplete,false)
+  assert.equal(out.results[0].evidence,'legacy-unverified')
+})
+
+test('legacy adapter with observed host source and unverified worker identity never receives base reset instructions', async () => {
+  const runDir=await tmpRunDir('legacy-worker-unverified')
+  const {adapter,calls,completeEnforcement}=makeStubAdapter()
+  const {composeBrief}=await import('../scripts/brief.mjs')
+  const out=await dispatchPhase(baseArgs(runDir,{adapter,completeEnforcement,
+    git:async argv=>({code:0,stderr:'',stdout:argv.includes('symbolic-ref')?'run/r':'a'.repeat(40)}),
+    composeBriefFor:task=>composeBrief({task:{...task,branch:'fleetmates/r/T1',files:['a']},runId:'r',planPath:'plan.md',baseBranch:'old-base'})}))
+  assert.equal(calls.spawn.length,1)
+  assert.equal(out.results[0]?.verifiedComplete,false)
+  assert.match(calls.spawn[0].prompt,/UNVERIFIED/)
+  assert.ok(!/^\s*git checkout -B/m.test(calls.spawn[0].prompt))
 })
