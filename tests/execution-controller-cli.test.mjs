@@ -414,8 +414,9 @@ test('workflow-prune keeps every artifact the journal references and removes non
 
 test('the run-id and request numeric bounds accept n and refuse n+1', async t => {
   const fixture = await project(t)
-  const { RETENTION_LIMITS } = await import('../scripts/execution-artifacts.mjs')
-  const { PROFILE_LIMITS } = await import('../scripts/workflow-profile.mjs')
+  // Written out rather than imported, so a moved bound in the code turns this red instead of moving
+  // the expectation with it.
+  const retentionUpper = { maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 * 1024 * 1024, maxAgeMs: 365 * 24 * 60 * 60 * 1000 }
   for (const command of ['workflow-status', 'workflow-prune']) {
     const accepted = await fixture.command(command, { run: 'a'.repeat(80) })
     assert.notEqual(accepted.code, 2, `${command} with an 80-character run id: ${accepted.output}`)
@@ -423,8 +424,8 @@ test('the run-id and request numeric bounds accept n and refuse n+1', async t =>
     assert.equal(refused.code, 2, `${command} with an 81-character run id`)
     assert.match(json(refused.output).error, /run identity/)
   }
-  const upper = { maxWallMs: PROFILE_LIMITS.maxWallMinutes[1] * 60_000, maxAttempts: 500, maxRepairRounds: PROFILE_LIMITS.maxRepairRounds[1], stepTimeoutMs: 21_600_000 }
-  for (const [key, bound] of Object.entries(RETENTION_LIMITS)) {
+  const upper = { maxWallMs: 1440 * 60_000, maxAttempts: 500, maxRepairRounds: 10, stepTimeoutMs: 21_600_000 }
+  for (const [key, bound] of Object.entries(retentionUpper)) {
     const refused = await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request({ retention: { ...retention, [key]: bound + 1 } })) })
     assert.equal(refused.code, 2, `retention.${key} ${bound + 1}: ${refused.output}`)
   }
@@ -434,7 +435,7 @@ test('the run-id and request numeric bounds accept n and refuse n+1', async t =>
   }
   assert.deepEqual(fixture.calls, [], 'no n+1 request reached the executor')
   assert.deepEqual(await fixture.events(), [])
-  const accepted = await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request({ retention: { ...RETENTION_LIMITS }, limits: upper })) })
+  const accepted = await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request({ retention: { ...retentionUpper }, limits: upper })) })
   assert.equal(accepted.code, 4, accepted.output)
   assert.equal(json(accepted.output).state, 'human-required', 'every bound at n runs the profile')
 })
@@ -903,6 +904,16 @@ test('message exits 4 for a failed process even when it wrote a new result', { s
   assert.equal(outcomeOf(failed.output).result, 'new-result')
   assert.equal(outcomeOf(failed.output).exitCode, 1)
   assert.equal(failed.code, 4, failed.output)
+  // Node reports a spawn failure as a negative exit code (-2 for ENOENT). A child object in that
+  // state beside a new result file is still no resumed turn: exit 4.
+  stubAdapter(t, 'codex', { resume: async () => {
+    await writeFile(resultPath, JSON.stringify({ ...done, summary: 'beside a spawn failure' }))
+    return { child: Object.assign(new EventEmitter(), { exitCode: -2, signalCode: null }), sessionId: Promise.resolve('sid'), flushed: Promise.resolve() }
+  } })
+  const unspawned = await run(messageArgv)
+  assert.equal(outcomeOf(unspawned.output).result, 'new-result')
+  assert.equal(outcomeOf(unspawned.output).exitCode, -2)
+  assert.equal(unspawned.code, 4, unspawned.output)
 })
 
 // Cursor writes its answer into the stream file, never into <task>.result.json, so message reads
