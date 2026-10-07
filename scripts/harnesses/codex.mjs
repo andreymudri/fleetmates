@@ -8,7 +8,7 @@ import { probeCommand } from './probe-command.mjs'
 // else — the driver, the CLI — talks to `codexAdapter` through the harness-neutral interface
 // (`scripts/harnesses/index.mjs`).
 import { spawn as spawnProcess } from 'node:child_process'
-import { writeFile, readFile, rm, mkdir, lstat, mkdtemp, realpath, access } from 'node:fs/promises'
+import { writeFile, rm, mkdir, lstat, mkdtemp, realpath, access, open } from 'node:fs/promises'
 import { createWriteStream } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -46,7 +46,14 @@ function requiredEnforcement(sandbox, enforcement, network) {
 // the driver runs headless and can never answer an interactive prompt. The two
 // `sandbox_workspace_write.exclude_*` keys stop /tmp and $TMPDIR from reading as
 // writable-by-default gaps in the sandbox.
+// A model and an effort each reach codex as ONE argv element (`-m <model>`,
+// `-c model_reasoning_effort=<effort>`), so each must be one bounded token: a leading dash reads as
+// a flag, and a comma, quote or space changes what the `-c` value means. Refused, never repaired.
+const MODEL_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/@+[\]-]{0,127}$/
+const EFFORT_TOKEN = /^[a-z][a-z0-9-]{0,31}$/
 function baseArgs({ model, effort, network, required }) {
+  if (model && (typeof model !== 'string' || !MODEL_TOKEN.test(model))) throw new Error('Invalid codex model name')
+  if (effort && (typeof effort !== 'string' || !EFFORT_TOKEN.test(effort))) throw new Error('Invalid codex reasoning effort')
   const args = [
     '--json', '--disable', 'hooks', '--skip-git-repo-check',
     '-c', 'approval_policy="never"',
@@ -108,41 +115,108 @@ export function buildResumeArgv({ sandbox, sessionId, model, effort, network, sc
 // place in the adapter that must never skip `.end()`. `sessionId` resolves from the first
 // `thread.started` line of the stream; stdout is written to `streamPath` as it arrives (also the
 // source `readUsage` sums), stderr to `errPath`.
-function run(argv, { promptText, streamPath, errPath, cwd }) {
+//
+// Capture is bounded: stdout and stderr share one budget of `maxStreamBytes` across their two
+// files. The chunk that crosses it keeps only the bytes that fit, the child is SIGKILLed, nothing
+// more is written, and the handle's `outputLimited` reads true, so an oversized capture is an
+// explicit failure rather than a truncated stream a reader takes for a whole one. `flushed`
+// resolves once both files have finished writing. The partial line held while looking for the
+// session id is dropped past SESSION_LINE_LIMIT (not exercised by a test).
+export const STREAM_LIMIT_BYTES = 64 * 1024 * 1024
+export const RESULT_LIMIT_BYTES = 1024 * 1024
+const SESSION_LINE_LIMIT = 1024 * 1024
+function run(argv, { promptText, streamPath, errPath, cwd, maxStreamBytes = STREAM_LIMIT_BYTES }) {
   const child = spawnProcess('codex', argv, { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
   const out = createWriteStream(streamPath)
   const err = createWriteStream(errPath)
-  child.stderr.pipe(err)
+  const flushed = Promise.all([out, err].map(stream => new Promise((resolve) => {
+    stream.on('finish', resolve)
+    stream.on('error', resolve)
+  }))).then(() => undefined)
 
   let resolveSessionId
   let idFound = false
   const sessionId = new Promise((resolve) => { resolveSessionId = resolve })
+  const settle = (value) => {
+    if (idFound) return
+    idFound = true
+    resolveSessionId(value)
+  }
+  let written = 0
+  let limited = false
+  // Every chunk passes through here before it is written. The chunk that crosses the bound keeps
+  // only the bytes that fit, so the files end exactly at the bound whatever the pipe's chunking.
+  const take = (chunk) => {
+    if (limited) return null
+    const room = maxStreamBytes - written
+    if (chunk.length <= room) { written += chunk.length; return chunk }
+    limited = true
+    written = maxStreamBytes
+    return chunk.subarray(0, Math.max(0, room))
+  }
+  const stop = () => {
+    out.end()
+    err.end()
+    try { child.kill('SIGKILL') } catch { /* already gone */ }
+    settle(null)
+  }
   let buffer = ''
+  child.stderr.on('data', (chunk) => {
+    const part = take(chunk)
+    if (part === null) return
+    if (part.length) err.write(part)
+    if (limited) stop()
+  })
   child.stdout.on('data', (chunk) => {
-    out.write(chunk)
-    buffer += chunk.toString('utf8')
-    let nl
-    while ((nl = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, nl)
-      buffer = buffer.slice(nl + 1)
-      if (idFound || !line.trim()) continue
-      let evt
-      try { evt = JSON.parse(line) } catch { continue }
-      if (evt && evt.type === 'thread.started' && typeof evt.thread_id === 'string') {
-        idFound = true
-        resolveSessionId(evt.thread_id)
+    const part = take(chunk)
+    if (part === null) return
+    if (part.length) out.write(part)
+    if (!idFound) {
+      buffer += part.toString('utf8')
+      let nl
+      while (!idFound && (nl = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, nl)
+        buffer = buffer.slice(nl + 1)
+        if (!line.trim()) continue
+        let evt
+        try { evt = JSON.parse(line) } catch { continue }
+        if (evt && evt.type === 'thread.started' && typeof evt.thread_id === 'string') settle(evt.thread_id)
       }
+      if (buffer.length > SESSION_LINE_LIMIT) buffer = ''
     }
+    if (limited) stop()
   })
   child.stdout.on('end', () => {
-    out.end()
-    if (!idFound) { idFound = true; resolveSessionId(null) }
+    if (!limited) out.end()
+    settle(null)
   })
+  child.stderr.on('end', () => { if (!limited) err.end() })
   child.on('error', () => {
-    if (!idFound) { idFound = true; resolveSessionId(null) }
+    if (!limited) { out.end(); err.end() }
+    settle(null)
   })
+  child.stdin.on('error', () => {})
   child.stdin.end(promptText) // close stdin: never leave it open (§2 item 4)
-  return { child, sessionId }
+  return { child, sessionId, flushed, get outputLimited() { return limited } }
+}
+
+// A bounded read that does not follow a final symlink: `null` when the file is absent, a link,
+// not a regular file, or larger than `max` bytes — never a throw.
+async function readBounded(file, max) {
+  let handle
+  try { handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)) } catch { return null }
+  try {
+    const info = await handle.stat()
+    if (!info.isFile() || info.size > max) return null
+    const buffer = Buffer.alloc(max + 1)
+    let offset = 0
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
+      if (!bytesRead) break
+      offset += bytesRead
+    }
+    return offset > max ? null : buffer.subarray(0, offset).toString('utf8')
+  } catch { return null } finally { await handle.close() }
 }
 
 // A git call that throws instead of returning a `{ code }` the caller must remember to check —
@@ -217,29 +291,26 @@ function withPreamble(sandbox, text) {
 // Writes `RESULT_SCHEMA` once per task, before the first spawn (a resume reuses the file a
 // spawn already wrote).
 export async function spawnCodex({
-  sandbox, prompt, model, effort, network, enforcement, schemaPath, resultPath, streamPath, errPath,
+  sandbox, prompt, model, effort, network, enforcement, schemaPath, resultPath, streamPath, errPath, maxStreamBytes,
 }) {
   const argv = buildSpawnArgv({ sandbox, model, effort, network, enforcement, schemaPath, resultPath })
   await writeFile(schemaPath, JSON.stringify(RESULT_SCHEMA))
-  return run(argv, { promptText: withPreamble(sandbox, prompt), streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd })
+  return run(argv, { promptText: withPreamble(sandbox, prompt), streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd, maxStreamBytes })
 }
 
 export async function resumeCodex({
-  sandbox, sessionId, message, model, effort, network, enforcement, schemaPath, resultPath, streamPath, errPath,
+  sandbox, sessionId, message, model, effort, network, enforcement, schemaPath, resultPath, streamPath, errPath, maxStreamBytes,
 }) {
   const argv = buildResumeArgv({ sandbox, sessionId, model, effort, network, enforcement, schemaPath, resultPath })
-  return run(argv, { promptText: withPreamble(sandbox, message), streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd })
+  return run(argv, { promptText: withPreamble(sandbox, message), streamPath, errPath: errPath ?? `${streamPath}.err`, cwd: sandbox.cwd, maxStreamBytes })
 }
 
-// Reads and parses the `-o` result file. `null` on ENOENT or a parse error — never a throw —
-// because "no result" and "unparsable result" are both `orphaned`, not a driver crash.
+// Reads and parses the `-o` result file. `null` on ENOENT, a parse error or a file past
+// RESULT_LIMIT_BYTES — never a throw — because "no result", "unparsable result" and "oversized
+// result" are all `orphaned`, not a driver crash.
 export async function readResult({ resultPath }) {
-  let raw
-  try {
-    raw = await readFile(resultPath, 'utf8')
-  } catch {
-    return null
-  }
+  const raw = await readBounded(resultPath, RESULT_LIMIT_BYTES)
+  if (raw === null) return null
   try {
     return JSON.parse(raw)
   } catch {
@@ -251,12 +322,8 @@ export async function readResult({ resultPath }) {
 // event (e.g. the process never got that far), so a caller can tell "zero usage" apart from
 // "no usage was ever recorded".
 export async function readUsage({ streamPath }) {
-  let raw
-  try {
-    raw = await readFile(streamPath, 'utf8')
-  } catch {
-    return null
-  }
+  const raw = await readBounded(streamPath, STREAM_LIMIT_BYTES)
+  if (raw === null) return null
   const totals = { input: 0, cachedInput: 0, cacheWrite: 0, output: 0, reasoning: 0 }
   let found = false
   for (const line of raw.split('\n')) {

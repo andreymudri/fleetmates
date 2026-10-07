@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { migrate } from './migrate.mjs'
 import { NAMES } from './names.mjs'
-import { readFile, writeFile, mkdir, mkdtemp, rename, lstat, readdir, opendir, readlink, unlink, open as openFile } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, mkdtemp, rename, lstat, readdir, opendir, readlink, unlink, realpath, open as openFile } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { livenessRows, renderLiveness, hasStall, hasUnknown, DEFAULT_STALE_MINUTES } from './liveness.mjs'
 import path from 'node:path'
@@ -160,6 +160,10 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|d
   workflow-profile --file <json> [--root <path>]
   execution-record --file <json> [--root <path>]
   execution-status --run <id> --file <json> [--root <path>]
+  workflow-execute --file <request-json> --root <absolute-path>
+  workflow-resume --run <id> --root <absolute-path>
+  workflow-status --run <id> --root <absolute-path>
+  workflow-resolve --file <resolution-json> --root <absolute-path>
   bind-session --run <id> --plan <path> --session <id> [--base <branch>] [--root <path>]
   suspend --run <id> --plan <path> [--base <branch>] [--root <path>]
   abandon --run <id> --plan <path> [--base <branch>] [--root <path>]
@@ -182,8 +186,8 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|d
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
   brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
-  dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
-  dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
+  dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
+  dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   dispatch-integrator --run <id> [--isolated-legacy] [--phase <name>] [--harness <name>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   message  --run <id> --task <id> --text <s> [--harness <name>] [--root <path>]
   sessions --run <id> [--root <path>]
@@ -316,6 +320,12 @@ export const REQUIRED = {
   'workflow-profile': ['file'],
   'execution-record': ['file'],
   'execution-status': ['run', 'file'],
+  // The project root is explicit and absolute for these four: the controller resolves the
+  // installed CLI and the project independently of cwd, and a relative root is refused below.
+  'workflow-execute': ['file', 'root'],
+  'workflow-resume': ['run', 'root'],
+  'workflow-status': ['run', 'root'],
+  'workflow-resolve': ['file', 'root'],
   'bind-session': ['run', 'plan', 'session'],
   suspend: ['run', 'plan'],
   resume: ['run'],
@@ -383,8 +393,8 @@ export const KNOWN_FLAGS = {
   brief: ['run', 'task', 'plan', 'base', 'fix-round'],
   complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
   workflow: ['run', 'phase', 'models', 'plan', 'base'],
-  dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
-  'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy'],
+  dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models', 'model', 'effort', 'environment', 'role-policy'],
+  'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'model', 'effort', 'environment', 'role-policy'],
   'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy', 'isolated-legacy'],
   message: ['run', 'task', 'harness', 'text'],
   sessions: ['run'],
@@ -402,6 +412,10 @@ export const KNOWN_FLAGS = {
   'workflow-profile': ['file'],
   'execution-record': ['file'],
   'execution-status': ['run', 'file'],
+  'workflow-execute': ['file'],
+  'workflow-resume': ['run'],
+  'workflow-status': ['run'],
+  'workflow-resolve': ['file'],
   'bind-session': ['run', 'plan', 'base', 'session'],
   suspend: ['run', 'plan', 'base'],
   resume: ['run'],
@@ -447,6 +461,7 @@ const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round', '
 // named them.
 const GIT_WRITING_COMMANDS = new Set([
   'dispatch', 'dispatch-reviews', 'dispatch-integrator', 'finish', 'prune-run', 'init-run', 'gate',
+  'workflow-execute', 'workflow-resume', 'workflow-resolve',
 ])
 
 // Every command that accepts caller-supplied check results. `gate` takes a flat list for the one
@@ -2940,6 +2955,312 @@ function workflowJson(value) {
   // Preserve valid JSON while keeping data from issuing terminal controls.
   return JSON.stringify(value, null, 2).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'))
 }
+// The same escaping on one line, for a report that shares stdout with other lines.
+function compactJson(value) {
+  return JSON.stringify(value).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'))
+}
+
+// `message` judges a resumed turn by its result file: its digest before the resume, then whether
+// the file afterwards is absent, unchanged, invalid or a new valid result. Read bounded (1 MiB,
+// no symlink), so an oversized or planted file is `invalid-result`, never a large read.
+async function messageResultDigest(file) {
+  try { return createHash('sha256').update(await readWorkflowInput(file).then(value => JSON.stringify(value))).digest('hex') }
+  catch (error) { return error?.code === 'ENOENT' ? null : 'unreadable' }
+}
+async function messageOutcome(file, before) {
+  let value
+  try { value = await readWorkflowInput(file) } catch (error) {
+    return { result: error?.code === 'ENOENT' ? 'no-result' : 'invalid-result' }
+  }
+  if (!validateResult(value)) return { result: 'invalid-result' }
+  const digest = createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  return digest === before ? { result: 'unchanged-result', status: value.status } : { result: 'new-result', status: value.status }
+}
+
+// ---- bounded workflow execution through versioned CLI contracts ----
+//
+// workflow-execute, workflow-resume, workflow-status and workflow-resolve route the fixed-profile
+// controller (scripts/workflow-controller.mjs), the journal reconciliation and the local effect
+// resolution through one explicit absolute project root. The installed CLI entrypoint and the
+// executor are the trusted host's, never the request's: `runCli` always passes the host below, and
+// only the exported `workflowCommand` accepts another one, which this suite uses to run a fake CLI.
+// Exit codes: 2 for a malformed or refused request; 4 for every execute/resume report that is not
+// verified complete and for a status with any unresolved attempt; 0 for a recorded resolution and
+// for a status whose attempts all reconcile (which still reports verifiedComplete false). An
+// execute/resume exit 0 requires a verified-complete report, which needs native verification and
+// acceptance evidence; no fixture in this repository produces one, so that path is unexercised.
+const WORKFLOW_COMMANDS = new Set(['workflow-execute', 'workflow-resume', 'workflow-status', 'workflow-resolve'])
+const WORKFLOW_EXECUTE_KEYS = ['version', 'profile', 'runId', 'planPath', 'baseBranch', 'baseCommit', 'runBranch', 'harness', 'sandboxMode',
+  'parameters', 'limits', 'environment', 'rolePolicy', 'retention', 'model', 'effort']
+const WORKFLOW_RESOLVE_KEYS = ['version', 'runId', 'effectId', 'outcome', 'reason']
+const WORKFLOW_RETENTION_UPPER = { maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 * 1024 * 1024, maxAgeMs: 365 * 24 * 60 * 60 * 1000 }
+// One argv token for a harness model flag: a leading dash would read as a flag of its own.
+const DISPATCH_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:/@+[\]-]{0,127}$/
+const WORKFLOW_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/
+const COMMIT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
+const WORKFLOW_LIMITATIONS = [
+  'workflow-status reads the local journal only: it never establishes completion, which needs fresh final gates through workflow-resume.',
+  'A Stop or SubagentStop handler run by a synthetic call is not a graceful harness callback; live callback validation is pending.',
+  'Standing skips are approved in the tracked manifest and never fail a gate; they remain unverified behavior.',
+  'An interrupted agent step stays an unknown effect: workflow-resolve resolves only recorded external effects, and no command clears an interrupted dispatch.',
+  'A code failure stops at the existing fix decision: no command delivers a repair round for a profile run, so maxRepairRounds is validated and recorded but not consumed.',
+  'No command produces acceptance evidence, so a profile run ends human-required until acceptance artifacts exist.',
+]
+const WORKFLOW_HOST_TRUST = 'Model and effort are added by the trusted host only to dispatch and dispatch-reviews, from the validated request; no request field supplies a command, argv, installed CLI path or executable.'
+
+// `--model`/`--effort` on dispatch and dispatch-reviews: one explicit selection for every model the
+// invocation dispatches, over the tier map and the configured effort. A value that cannot reach the
+// harness as given is refused before any probe or spawn rather than dropped.
+const SELECTION_REJECTED = Symbol('explicit selection rejected')
+function explicitSelection(flags, adapter, io) {
+  if (flags.model !== undefined && (typeof flags.model !== 'string' || !DISPATCH_MODEL.test(flags.model))) {
+    io.out('--model needs one bounded model name that does not start with a dash')
+    return SELECTION_REJECTED
+  }
+  if (flags.effort !== undefined && (typeof flags.effort !== 'string' || !configModule.EFFORTS.includes(flags.effort))) {
+    io.out(`--effort needs one of ${configModule.EFFORTS.join(', ')}`)
+    return SELECTION_REJECTED
+  }
+  if (flags.effort !== undefined && adapter.supportsEffort === false) {
+    io.out(`harness ${adapter.name} cannot enforce an explicit --effort; omit it`)
+    return SELECTION_REJECTED
+  }
+  return { model: flags.model, effort: flags.effort }
+}
+
+function trustedWorkflowHost() {
+  return { cliPath: fileURLToPath(import.meta.url), exec: defaultExec }
+}
+
+function workflowFields(value, keys, label) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    throw new Error(`${label} must be a JSON object`)
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string' || !keys.includes(key)) throw new Error(`${label} does not take field ${String(key).slice(0, 64)}`)
+  }
+  const missing = keys.filter(key => !Object.hasOwn(value, key))
+  if (missing.length) throw new Error(`${label} is missing ${missing.join(', ')}`)
+}
+
+// An explicit model is required; an explicit effort is a supported level or null. A harness that
+// cannot enforce effort (cursor) refuses a non-null one instead of dropping it silently.
+function dispatchSelection(value, harness) {
+  if (typeof value?.model !== 'string' || !DISPATCH_MODEL.test(value.model)) throw new Error('model must be one bounded model name that does not start with a dash')
+  if (value.effort !== null && !configModule.EFFORTS.includes(value.effort)) throw new Error(`effort must be null or one of ${configModule.EFFORTS.join(', ')}`)
+  if (value.effort !== null && getAdapter(harness)?.supportsEffort === false) throw new Error(`harness ${harness} cannot enforce an explicit effort; pass effort null`)
+  return { model: value.model, effort: value.effort }
+}
+
+// The trusted executor: the host's own, plus the validated model and effort on the two commands
+// that dispatch a model. Inserted before the trailing explicit `--root <path>` the controller adds.
+function workflowExecutor(host, cliPath, selection) {
+  return (command, cwd, options = {}) => {
+    const argv = options.argv
+    if (command === process.execPath && Array.isArray(argv) && argv[0] === cliPath && (argv[1] === 'dispatch' || argv[1] === 'dispatch-reviews')) {
+      const at = argv.lastIndexOf('--root')
+      const insert = ['--model', selection.model, ...(selection.effort === null ? [] : ['--effort', selection.effort])]
+      const next = at < 0 ? [...argv, ...insert] : [...argv.slice(0, at), ...insert, ...argv.slice(at)]
+      return host.exec(command, cwd, { ...options, argv: next })
+    }
+    return host.exec(command, cwd, options)
+  }
+}
+
+async function workflowCommon(root) {
+  const { discover } = await import('./workflow-lifecycle.mjs')
+  return realpath(discover(root).common)
+}
+
+// The request the controller retained for this run: the one completed `request` record and its
+// `workflow-request` artifact, which is what resumeWorkflowProfile reads back as well.
+async function retainedWorkflowBundle(common, runId) {
+  const { readExecutionEvents, strictExecutionAttempts } = await import('./execution-journal.mjs')
+  const { readExecutionArtifact } = await import('./execution-artifacts.mjs')
+  const requests = strictExecutionAttempts(await readExecutionEvents(common, runId)).filter(g => g.start.step === 'request' && g.end?.kind === 'step-completed')
+  if (requests.length !== 1) return null
+  const reference = requests[0].end.artifacts.find(a => a.kind === 'workflow-request')
+  if (!reference) return null
+  const bytes = await readExecutionArtifact({ common, runId, reference, retention: WORKFLOW_RETENTION_UPPER })
+  const bundle = JSON.parse(bytes.toString('utf8'))
+  return bundle && typeof bundle === 'object' && bundle.request?.runId === runId ? bundle : null
+}
+
+// The real gate exits 1 for a FAIL verdict AND when it cannot derive run state; the controller reads
+// every gate exit 1 as a code failure. The trusted host reads the retained gate output back, and a
+// verdict naming `derive` (no anchor/plan state) or `run-state` (unreadable run state) reports the
+// stop as blocked infrastructure instead: it is not something a repair round can fix.
+async function reclassifyGateStateFailure(report, { common, runId, retention }) {
+  const last = report.blockers?.at(-1)
+  if (!last || last.category !== 'code' || !/^gate-\d+$/.test(last.step)) return null
+  const step = report.steps.filter(s => s.id === last.step && s.status === 'failed').at(-1)
+  const reference = step?.artifacts.find(a => a.kind === 'step-output' || a.kind === 'step-stdout')
+  if (!reference) return null
+  const { readExecutionArtifact } = await import('./execution-artifacts.mjs')
+  let verdict = null
+  try {
+    const lines = (await readExecutionArtifact({ common, runId, reference, retention })).toString('utf8').split(/\r?\n/)
+    const start = lines.indexOf('{')
+    verdict = start < 0 ? null : JSON.parse(lines.slice(start).join('\n'))
+  } catch { return null }
+  const failed = Array.isArray(verdict?.failed) ? verdict.failed : []
+  const state = verdict?.verdict === 'FAIL' && ((failed.length === 1 && failed[0] === 'derive' && verdict.results === undefined)
+    || (failed.includes('run-state') && typeof verdict.error === 'string' && verdict.error.startsWith('could not read run state')))
+  if (!state) return null
+  last.category = 'infrastructure'
+  last.reason = `gate could not establish run state (${failed.includes('derive') ? 'derive' : 'run-state'}); not a code failure`.slice(0, 512)
+  if (report.state === 'failed') report.state = 'blocked'
+  return { step: last.step, from: 'code', to: 'infrastructure', evidence: `gate verdict failed: ${failed.includes('derive') ? 'derive' : 'run-state'}` }
+}
+
+async function finishWorkflowReport(command, report, { selection, request, common, retention }, io) {
+  const reclassified = await reclassifyGateStateFailure(report, { common, runId: request.runId, retention })
+  report.host = { version: 1, command, dispatch: selection,
+    repairRounds: { max: request.limits.maxRepairRounds, delivered: 0, decision: report.repair?.decision?.decision ?? null },
+    ...(reclassified ? { reclassified } : {}), limitations: WORKFLOW_LIMITATIONS, trust: WORKFLOW_HOST_TRUST }
+  io.out(workflowJson(report))
+  return report.state === 'verified-complete' && report.verifiedComplete === true ? 0 : 4
+}
+
+async function workflowExecute(root, flags, io, host) {
+  const input = await readWorkflowInput(flags.file)
+  workflowFields(input, WORKFLOW_EXECUTE_KEYS, 'workflow-execute request')
+  if (input.version !== 1) throw new Error('workflow-execute request version must be 1')
+  const selection = dispatchSelection(input, input.harness)
+  if (input.parameters === null || typeof input.parameters !== 'object' || Array.isArray(input.parameters)) throw new Error('parameters must be an object')
+  if (Object.hasOwn(input.parameters, 'dispatch')) throw new Error('parameters.dispatch is reserved for the explicit model and effort')
+  if (typeof input.baseCommit !== 'string' || !COMMIT_ID.test(input.baseCommit)) throw new Error('baseCommit must be an exact commit id')
+  if (typeof input.baseBranch !== 'string' || !input.baseBranch || input.baseBranch.startsWith('-')) throw new Error('baseBranch must be a branch name')
+  const request = { version: 1, profile: input.profile, runId: input.runId, planPath: input.planPath, baseBranch: input.baseBranch,
+    runBranch: input.runBranch, harness: input.harness, sandboxMode: input.sandboxMode,
+    parameters: { ...input.parameters, dispatch: selection }, limits: input.limits }
+  // The committed base the request names must still be the base: a moved base is a changed
+  // contract, refused before the controller writes a journal or runs anything.
+  let tip = null
+  try { tip = await createGit({ cwd: root }).resolveRef(`refs/heads/${input.baseBranch}`) } catch { tip = null }
+  if (tip !== input.baseCommit) {
+    io.out(workflowJson({ version: 1, runId: typeof input.runId === 'string' ? input.runId : null, state: 'blocked', verifiedComplete: false,
+      blockers: [{ category: 'changed-input', step: 'request', reason: 'the committed base no longer matches the requested baseCommit' }], steps: [] }))
+    return 4
+  }
+  const cliPath = await realpath(host.cliPath)
+  const { executeWorkflowProfile } = await import('./workflow-controller.mjs')
+  const report = await executeWorkflowProfile({ root, cliPath, request, environment: input.environment, rolePolicy: input.rolePolicy,
+    retention: input.retention, executor: workflowExecutor(host, cliPath, selection), now: host.now, verificationFactory: host.verificationFactory })
+  return finishWorkflowReport('workflow-execute', report, { selection, request, common: await workflowCommon(root), retention: input.retention }, io)
+}
+
+async function workflowResume(root, flags, io, host) {
+  if (typeof flags.run !== 'string' || !WORKFLOW_RUN_ID.test(flags.run)) throw new Error('Invalid run identity')
+  const common = await workflowCommon(root)
+  const bundle = await retainedWorkflowBundle(common, flags.run)
+  if (!bundle) throw new Error('Run has no single retained workflow request to resume')
+  const dispatch = bundle.request?.parameters?.dispatch
+  if (dispatch === undefined) throw new Error('The retained request names no explicit model and effort; it was not started through workflow-execute and has no unrestricted fallback')
+  const selection = dispatchSelection(dispatch, bundle.request.harness)
+  const cliPath = await realpath(host.cliPath)
+  const { resumeWorkflowProfile } = await import('./workflow-controller.mjs')
+  const report = await resumeWorkflowProfile({ root, cliPath, runId: flags.run, executor: workflowExecutor(host, cliPath, selection),
+    now: host.now, verificationFactory: host.verificationFactory })
+  return finishWorkflowReport('workflow-resume', report, { selection, request: bundle.request, common, retention: bundle.retention }, io)
+}
+
+// Read-only: the journal, retained artifacts, current refs and the root checkout are observed and
+// nothing is written. Shared by workflow-status and doctor. `null` when the run has no journal.
+async function workflowRecovery(root, runId) {
+  const { readExecutionEvents, strictExecutionAttempts } = await import('./execution-journal.mjs')
+  const { reconcileExecutionAttempt } = await import('./execution-recovery.mjs')
+  const { lifecycleStatus } = await import('./workflow-lifecycle.mjs')
+  const common = await workflowCommon(root)
+  const events = await readExecutionEvents(common, runId)
+  if (!events.length) return null
+  const groups = strictExecutionAttempts(events)
+  let bundle = null
+  try { bundle = await retainedWorkflowBundle(common, runId) } catch { bundle = null }
+  const strict = events.filter(e => e.version === 2)
+  const latest = strict.filter(e => e.step !== 'request').at(-1) ?? strict.at(-1)
+  const git = createGit({ cwd: root })
+  const refs = new Set(strict.flatMap(e => Object.keys(e.branches)))
+  if (bundle) for (const branch of [bundle.request.baseBranch, bundle.request.runBranch]) if (typeof branch === 'string') refs.add(`refs/heads/${branch}`)
+  const branches = {}
+  for (const ref of refs) { try { branches[ref] = await git.resolveRef(ref) } catch { /* absent ref */ } }
+  const retention = bundle?.retention ?? WORKFLOW_RETENTION_UPPER
+  const reconciled = latest
+    ? await reconcileExecutionAttempt({ common, runId, inputs: latest.inputs, branches, retention, checkouts: { root: await realpath(root) } })
+    : { attempts: [], trust: [] }
+  const ends = new Map(groups.map(g => [JSON.stringify([g.start.executionId, g.start.step, g.start.attempt]), g.end?.kind ?? null]))
+  const attempts = reconciled.attempts.map(a => {
+    const end = ends.get(JSON.stringify([a.executionId, a.step, a.attempt]))
+    return { executionId: a.executionId ?? null, task: a.task ?? null, step: a.step, attempt: a.attempt, state: a.state, ended: end != null,
+      outcome: end === 'step-completed' ? 'completed' : end === 'step-failed' ? 'failed' : null, reuse: a.reuse === true,
+      missingArtifacts: a.missingArtifacts?.length ?? 0, changedBranches: a.changedBranches ?? [], effects: a.effects ?? [] }
+  })
+  // The request record is a retained input, not a step output: its identity predates the observed
+  // environment, so it is listed but never counted as an unresolved step.
+  const unresolved = attempts.filter(a => a.step !== 'request' && !a.reuse)
+  const unknownEffects = attempts.flatMap(a => a.effects.filter(e => e.outcome === 'unknown').map(e => ({ step: a.step, attempt: a.attempt, id: e.id, kind: e.kind })))
+  let standingSkips = null, inputsChanged = null
+  if (bundle && typeof bundle.request.baseBranch === 'string') {
+    const tip = branches[`refs/heads/${bundle.request.baseBranch}`] ?? null
+    inputsChanged = latest ? tip !== latest.inputs.commit : null
+    try {
+      const manifest = tip ? JSON.parse(await git.fileAtCommit(tip, NAMES.gateFile)) : null
+      standingSkips = Array.isArray(manifest?.skips)
+        ? manifest.skips.filter(s => s && typeof s.file === 'string').slice(0, 100).map(s => ({ file: s.file, reason: typeof s.reason === 'string' ? s.reason : null }))
+        : []
+    } catch { standingSkips = null }
+  }
+  const lifecycle = lifecycleStatus(root, runId).state
+  return { version: 1, runId, state: unresolved.length || unknownEffects.length || lifecycle !== 'running' ? 'unresolved' : 'reconciled', lifecycle,
+    executionId: latest?.executionId ?? null, attempts, unresolvedAttempts: unresolved.length, unknownEffects, inputsChanged,
+    standingSkips, verifiedComplete: false, completion: 'not-established-by-status', limitations: WORKFLOW_LIMITATIONS, trust: reconciled.trust ?? [] }
+}
+
+async function workflowStatus(root, flags, io) {
+  if (typeof flags.run !== 'string' || !WORKFLOW_RUN_ID.test(flags.run)) throw new Error('Invalid run identity')
+  const report = await workflowRecovery(root, flags.run)
+  if (!report) {
+    io.out(workflowJson({ version: 1, runId: flags.run, state: 'absent', verifiedComplete: false, completion: 'not-established-by-status', limitations: WORKFLOW_LIMITATIONS }))
+    return 4
+  }
+  io.out(workflowJson(report))
+  return report.state === 'reconciled' ? 0 : 4
+}
+
+async function workflowResolve(root, flags, io) {
+  const input = await readWorkflowInput(flags.file)
+  workflowFields(input, WORKFLOW_RESOLVE_KEYS, 'workflow-resolve resolution')
+  if (input.version !== 1 || typeof input.runId !== 'string' || !WORKFLOW_RUN_ID.test(input.runId)) throw new Error('workflow-resolve resolution must be version 1 for a valid run')
+  const { resolveExecutionEffect } = await import('./execution-recovery.mjs')
+  const result = await resolveExecutionEffect({ common: await workflowCommon(root), runId: input.runId, effectId: input.effectId, resolution: input.outcome, reason: input.reason })
+  io.out(workflowJson({ version: 1, recorded: true, runId: input.runId, effectId: input.effectId, outcome: input.outcome, reason: input.reason,
+    trust: result.trust, authenticatedAuthorization: false, externalEffect: 'none-performed' }))
+  return 0
+}
+
+export async function workflowCommand(command, flags, io, host = trustedWorkflowHost()) {
+  try {
+    if (typeof flags.root !== 'string' || !path.isAbsolute(flags.root)) throw new Error(`${command} requires an absolute --root`)
+    const root = flags.root
+    if (command === 'workflow-execute') return await workflowExecute(root, flags, io, host)
+    if (command === 'workflow-resume') return await workflowResume(root, flags, io, host)
+    if (command === 'workflow-status') return await workflowStatus(root, flags, io)
+    if (command === 'workflow-resolve') return await workflowResolve(root, flags, io)
+    throw new Error(`unknown workflow command ${command}`)
+  } catch (error) {
+    io.out(workflowJson({ error: String(error?.message ?? error).slice(0, 2048) }))
+    return 2
+  }
+}
+
+// The single-line conventional subject the isolated legacy integrator is told to use for a task's
+// merge: the task id and its plan title, reduced to characters that stay inert inside a quoted
+// shell argument, on one line, at most 72 characters.
+export function integratorMergeSubject(task) {
+  const title = String(task?.title ?? '').split(/\r?\n/)[0].replace(/[^A-Za-z0-9 ,./()_:-]+/g, ' ').replace(/\s+/g, ' ').trim()
+  const subject = `merge: integrate ${task.id}${title ? ` ${title}` : ''}`
+  return subject.length <= 72 ? subject : subject.slice(0, 72).trimEnd()
+}
 
 export async function runCli(argv, io = { out: console.log }) {
   // Two channels, not one. `io.out` carries the ANSWER a command was asked for — and for
@@ -3017,6 +3338,12 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`missing required argument: ${missing.join(', ')}\n\n${USAGE}`)
       return 2
     }
+  }
+  // Before the migration reads the root: a workflow command never resolves a relative root
+  // against whatever cwd it happened to start in.
+  if (WORKFLOW_COMMANDS.has(command) && !path.isAbsolute(flags.root)) {
+    io.out(`${command} requires an absolute --root\n\n${USAGE}`)
+    return 2
   }
 
   // Before any command reads a name: a repository claude-teammates left behind is moved to the
@@ -3707,6 +4034,8 @@ export async function runCli(argv, io = { out: console.log }) {
 
     let adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
+    const selected = explicitSelection(flags, adapter, io)
+    if (selected === SELECTION_REJECTED) return 2
 
     const probe = await adapter.probe({})
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
@@ -3768,13 +4097,14 @@ export async function runCli(argv, io = { out: console.log }) {
       runRepo: root,
       runId,
       runBranch,
-      phaseTasks,
+      // An explicit model is the task's own model, which the driver prefers over the tier map.
+      phaseTasks: selected.model === undefined ? phaseTasks : phaseTasks.map((task) => ({ ...task, model: selected.model })),
       maxParallel: resolved.maxParallel,
       sandboxMode,
       network,
       timeoutMinutes,
       tierModels,
-      effortFor: () => resolved.agents.implementer.effort || undefined,
+      effortFor: () => selected.effort ?? (resolved.agents.implementer.effort || undefined),
       composeBriefFor,
       personaFor: (role) => personaBodies[role],
       runDir: runDir(root, runId),
@@ -3816,6 +4146,8 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!resolved) return 2
     const adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
+    const selected = explicitSelection(flags, adapter, io)
+    if (selected === SELECTION_REJECTED) return 2
 
     // The lenses and per-lens prompts come from `review-dispatch`, unchanged: this reuses that
     // command's output rather than re-deriving it, so both dispatch paths agree on what a phase's
@@ -3854,8 +4186,8 @@ export async function runCli(argv, io = { out: console.log }) {
       const handle = await adapter.spawn({
         sandbox: { cwd: root, meta: { mode: prerequisites?.enforcement ? 'clone' : 'full' } },
         prompt: `${persona}${captureInstruction}\n\n${reviewer.prompt}`,
-        model: reviewer.model,
-        effort: reviewer.effort,
+        model: selected.model ?? reviewer.model,
+        effort: selected.effort ?? reviewer.effort,
         network,
         schemaPath: `${base}.schema.json`,
         resultPath,
@@ -4003,7 +4335,7 @@ export async function runCli(argv, io = { out: console.log }) {
         run: runId, phase: derived.currentPhase, plan: planPath, planHash: derived.planHash,
         baseRef: `refs/heads/${derived.baseBranch}`, baseTip: snapshot.refs[`refs/heads/${derived.baseBranch}`],
         runRef: derived.runBranchRef, runTip: derived.runSha, anchor: derived.anchorSha,
-        tasks: phaseTasks.map(t => ({ id: t.id, ref: `refs/heads/${resolveTaskBranch(t, runId)}`, tip: snapshot.refs[`refs/heads/${resolveTaskBranch(t, runId)}`], files: t.files, mergeSubject: `merge(workflow): integrate ${t.id} execution recovery` })),
+        tasks: phaseTasks.map(t => ({ id: t.id, ref: `refs/heads/${resolveTaskBranch(t, runId)}`, tip: snapshot.refs[`refs/heads/${resolveTaskBranch(t, runId)}`], files: t.files, mergeSubject: integratorMergeSubject(t) })),
       }
       const prompt = `${persona}\nConcrete assignment for phase ${gateKey}:\n${JSON.stringify(assignment)}\n`
         + 'This is explicitly configured legacy full authority; filesystem, network and publication restrictions are instructions, not required-policy confinement. No remote actions or publication. Work only in this registered worktree. Verify exact refs and tips before every merge. Merge only the supplied tips, in task order, with git merge --no-ff --no-edit -m "<supplied mergeSubject>" <exact-tip>, using that task\'s supplied single-line conventional English mergeSubject. Preserve the configured Git author; do not override author configuration or add attribution or extra trailers. Keep the worktree clean between merges. On any conflict stop and escalate with owning task ids and both hunks; never resolve conflicts, force refs, update-ref, reset, rebase or commit extra edits. Do not touch the main worktree or its index. Return only the supplied task result schema: status done only after all merges, branch the run branch name, filesChanged repo-relative paths, summary observed merges, blockers empty. Otherwise return blocked or failed with concrete blockers. This schema supersedes the persona return example.\n'
@@ -4091,6 +4423,9 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
     const base = path.join(messageSessionsDir, `${flags.task}`)
+    // What the resume left behind is judged against what was there before it: a result file that
+    // is absent, unchanged or invalid afterwards is not a new structured result.
+    const resultBefore = await messageResultDigest(`${base}.result.json`)
     const handle = await adapter.resume({
       sandbox: record.sandbox,
       sessionId: record.sessionId,
@@ -4102,10 +4437,19 @@ export async function runCli(argv, io = { out: console.log }) {
       errPath: `${base}.stderr.log`,
     })
     await handle.sessionId
-    await waitForExit(handle.child, timeoutMs)
-    await handle.flushed
-    io.out(`resumed ${printable(flags.task)}`)
-    return 0
+    const exit = await waitForExit(handle.child, timeoutMs)
+    if (exit !== 'timeout') await handle.flushed
+    const outcome = await messageOutcome(`${base}.result.json`, resultBefore)
+    const exitCode = Number.isInteger(handle.child?.exitCode) ? handle.child.exitCode : null
+    const signal = typeof handle.child?.signalCode === 'string' ? handle.child.signalCode : null
+    // A timeout, an exhausted capture bound, or a process that started and then failed is
+    // unresolved: exit 4. An exit 0 says only that the resumed turn ended; the outcome line names
+    // whether it left a new structured result, and completion is never established here.
+    const failed = exit === 'timeout' || handle.outputLimited === true || signal !== null || (exitCode !== null && exitCode > 0)
+    io.out(`${failed ? 'resume unresolved for' : 'resumed'} ${printable(flags.task)}`)
+    io.out(compactJson({ task: flags.task, exit, exitCode, signal, outputLimited: handle.outputLimited === true, result: outcome.result,
+      ...(outcome.status ? { status: outcome.status } : {}), completion: 'unverified' }))
+    return failed ? 4 : 0
   }
 
   if (command === 'sessions') {
@@ -4240,6 +4584,21 @@ export async function runCli(argv, io = { out: console.log }) {
     const { lifecycleStatus } = await import('./workflow-lifecycle.mjs')
     const interruption = lifecycleStatus(root, runId)
     if (interruption.state !== 'running') io.out(JSON.stringify({ ...interruption, limitation: 'Stop guard fails open on missing state, errors, timeouts and harness retry; refs are local observations.' }))
+    // Recovery states from the execution journal, when the run has one, as one report line. It is
+    // not added to the problems below, so it does not move the exit code.
+    try {
+      const recovery = await workflowRecovery(root, runId)
+      if (recovery) {
+        const states = {}
+        for (const attempt of recovery.attempts) states[attempt.state] = (states[attempt.state] ?? 0) + 1
+        io.out(compactJson({ execution: { runId, attempts: recovery.attempts.length, states, unresolvedAttempts: recovery.unresolvedAttempts,
+          unknownEffects: recovery.unknownEffects.length, lifecycle: recovery.lifecycle, standingSkips: recovery.standingSkips?.length ?? null,
+          verifiedComplete: false, limitations: recovery.limitations } }))
+      }
+    } catch (error) {
+      // A run id the journal cannot key (legacy reporting accepts more than refs do) has no journal.
+      if (error?.message !== 'Invalid run identity') io.out(compactJson({ execution: { runId, unreadable: String(error?.message ?? error).slice(0, 512) } }))
+    }
     io.out(renderDoctor(report))
     if (anchorNote) {
       io.out(
@@ -4890,6 +5249,10 @@ export async function runCli(argv, io = { out: console.log }) {
       }
     }
     return failed > 0 ? 1 : 0
+  }
+
+  if (command === 'workflow-execute' || command === 'workflow-resume' || command === 'workflow-status' || command === 'workflow-resolve') {
+    return workflowCommand(command, flags, io)
   }
 
   if (command === 'execution-record' || command === 'execution-status') {

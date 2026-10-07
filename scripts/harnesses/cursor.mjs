@@ -7,9 +7,9 @@ import { probeCommand } from './probe-command.mjs'
 // Teammates only ever run in a git-less `files` checkout (spec §2): Cursor runs git outside its
 // own sandbox (§1 item 9), so no layout that leaves a repository in the workspace is safe.
 import { spawn as spawnProcess } from 'node:child_process'
-import { createWriteStream } from 'node:fs'
+import { createWriteStream, constants, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { lstat, mkdir, mkdtemp, readFile, rm, rmdir, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, open, readFile, rm, rmdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { validateResult } from '../result-schema.mjs'
@@ -56,7 +56,11 @@ function requiredEnforcement(sandbox, enforcement, network) {
 // With no `--model`, cursor-agent does not fall back to `auto`: it picks a named default, which a
 // free plan refuses at the first call ("Named models unavailable Free plans can only use Auto",
 // exit 1). An unmapped tier therefore asks for `auto` explicitly.
+// A model reaches cursor-agent as ONE argv element after `--model`, so it must be one bounded
+// token; a leading dash would read as a flag. Refused, never repaired.
+const MODEL_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/@+[\]-]{0,127}$/
 function baseArgs({ sandbox, model, enforcement, network }) {
+  if (model && (typeof model !== 'string' || !MODEL_TOKEN.test(model))) throw new Error('Invalid cursor model name')
   const required = requiredEnforcement(sandbox, enforcement, network)
   return ['-p', '--output-format', 'stream-json', '--trust', '--sandbox', 'enabled', '--workspace', sandbox.cwd,
     '--model', model || 'auto', ...(required?.mode ? ['--mode', required.mode] : [])]
@@ -119,12 +123,45 @@ async function prepareWorkspace(sandbox, network) {
 // sees the first session's result line. `flushed` resolves once the stream file holds every byte
 // the child wrote: the child's 'exit' can fire before the write stream finishes, and `readResult`
 // reads that file, so the driver awaits `flushed` before reading.
-function run(argv, { promptText, streamPath, errPath, cwd, append }) {
+//
+// The stream file is also where `readResult` finds the answer, so its bound counts the file: a
+// resume's budget of `maxStreamBytes` starts at the stream file's existing size, and stdout and
+// stderr draw on it together. The chunk that crosses it keeps only the bytes that fit, the child
+// is SIGKILLed, nothing more is written and the handle's `outputLimited` reads true, so an
+// oversized capture is an explicit failure. Exercised for stdout; the stderr share is not
+// exercised by a cursor test.
+export const STREAM_LIMIT_BYTES = 64 * 1024 * 1024
+const SESSION_LINE_LIMIT = 1024 * 1024
+const existingBytes = (file) => { try { return statSync(file).size } catch { return 0 } }
+function run(argv, { promptText, streamPath, errPath, cwd, append, maxStreamBytes = STREAM_LIMIT_BYTES }) {
   const child = spawnProcess('cursor-agent', argv, { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
   const flags = append ? 'a' : 'w'
+  let written = append ? existingBytes(streamPath) : 0
   const out = createWriteStream(streamPath, { flags })
   const err = createWriteStream(errPath ?? `${streamPath}.err`, { flags })
-  child.stderr.pipe(err)
+  let limited = false
+  // The chunk that crosses the bound keeps only the bytes that fit (see codex.mjs `run`).
+  const take = (chunk) => {
+    if (limited) return null
+    const room = maxStreamBytes - written
+    if (chunk.length <= room) { written += chunk.length; return chunk }
+    limited = true
+    written = maxStreamBytes
+    return chunk.subarray(0, Math.max(0, room))
+  }
+  const stop = () => {
+    out.end()
+    err.end()
+    try { child.kill('SIGKILL') } catch { /* already gone */ }
+    settle(null)
+  }
+  child.stderr.on('data', (chunk) => {
+    const part = take(chunk)
+    if (part === null) return
+    if (part.length) err.write(part)
+    if (limited) stop()
+  })
+  child.stderr.on('end', () => { if (!limited) err.end() })
   const flushed = Promise.all([
     new Promise((resolve) => { out.on('finish', resolve); out.on('error', resolve) }),
     new Promise((resolve) => { err.on('finish', resolve); err.on('error', resolve) }),
@@ -140,51 +177,75 @@ function run(argv, { promptText, streamPath, errPath, cwd, append }) {
   }
   let buffer = ''
   child.stdout.on('data', (chunk) => {
-    out.write(chunk)
-    if (idFound) return
-    buffer += chunk.toString('utf8')
-    let nl
-    while (!idFound && (nl = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, nl)
-      buffer = buffer.slice(nl + 1)
-      let evt
-      try { evt = JSON.parse(line) } catch { continue }
-      if (evt && evt.type === 'system' && evt.subtype === 'init' && typeof evt.session_id === 'string') {
-        settle(evt.session_id)
+    const part = take(chunk)
+    if (part === null) return
+    if (part.length) out.write(part)
+    if (!idFound) {
+      buffer += part.toString('utf8')
+      let nl
+      while (!idFound && (nl = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, nl)
+        buffer = buffer.slice(nl + 1)
+        let evt
+        try { evt = JSON.parse(line) } catch { continue }
+        if (evt && evt.type === 'system' && evt.subtype === 'init' && typeof evt.session_id === 'string') {
+          settle(evt.session_id)
+        }
       }
+      if (buffer.length > SESSION_LINE_LIMIT) buffer = ''
     }
+    if (limited) stop()
   })
   child.stdout.on('end', () => {
-    out.end()
+    if (!limited) out.end()
     settle(null)
   })
-  child.on('error', () => settle(null))
+  child.on('error', () => {
+    if (!limited) { out.end(); err.end() }
+    settle(null)
+  })
   child.stdin.on('error', () => {})
   child.stdin.end(promptText)
-  return { child, sessionId, flushed }
+  return { child, sessionId, flushed, get outputLimited() { return limited } }
 }
 
-export async function spawnCursor({ sandbox, prompt, model, network, enforcement, streamPath, errPath }) {
+export async function spawnCursor({ sandbox, prompt, model, network, enforcement, streamPath, errPath, maxStreamBytes }) {
   const argv = buildSpawnArgv({ sandbox, model, enforcement, network })
   const required = requiredEnforcement(sandbox, enforcement, network)
   await prepareWorkspace(sandbox, required ? required.network && network : network)
-  return run(argv, { promptText: withInstruction(sandbox, prompt), streamPath, errPath, cwd: sandbox.cwd, append: false })
+  return run(argv, { promptText: withInstruction(sandbox, prompt), streamPath, errPath, cwd: sandbox.cwd, append: false, maxStreamBytes })
 }
 
-export async function resumeCursor({ sandbox, sessionId, message, model, network, enforcement, streamPath, errPath }) {
+export async function resumeCursor({ sandbox, sessionId, message, model, network, enforcement, streamPath, errPath, maxStreamBytes }) {
   const argv = buildResumeArgv({ sandbox, sessionId, model, enforcement, network })
   const required = requiredEnforcement(sandbox, enforcement, network)
   await prepareWorkspace(sandbox, required ? required.network && network : network)
-  return run(argv, { promptText: withInstruction(sandbox, message), streamPath, errPath, cwd: sandbox.cwd, append: true })
+  return run(argv, { promptText: withInstruction(sandbox, message), streamPath, errPath, cwd: sandbox.cwd, append: true, maxStreamBytes })
 }
 
-async function streamEvents(streamPath) {
-  let raw
+// A bounded read of the stream file that does not follow a final symlink: `null` when it is
+// absent, a link, not a regular file or larger than `max` bytes, so such a stream yields no events
+// rather than a partial answer.
+async function readBounded(file, max) {
+  let handle
+  try { handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)) } catch { return null }
   try {
-    raw = await readFile(streamPath, 'utf8')
-  } catch {
-    return []
-  }
+    const info = await handle.stat()
+    if (!info.isFile() || info.size > max) return null
+    const buffer = Buffer.alloc(max + 1)
+    let offset = 0
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
+      if (!bytesRead) break
+      offset += bytesRead
+    }
+    return offset > max ? null : buffer.subarray(0, offset).toString('utf8')
+  } catch { return null } finally { await handle.close() }
+}
+
+async function streamEvents(streamPath, maxStreamBytes = STREAM_LIMIT_BYTES) {
+  const raw = await readBounded(streamPath, maxStreamBytes)
+  if (raw === null) return []
   const events = []
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue
@@ -225,8 +286,8 @@ function parseCandidates(text) {
 // message is read first and `result` is the fallback. Only the events after the last `user` line
 // count, so a resume never returns the previous session's answer. `null` — never a throw — for
 // anything that is not a valid result: every such case is `orphaned`, not a driver crash.
-export async function readResult({ streamPath }) {
-  const events = await streamEvents(streamPath)
+export async function readResult({ streamPath, maxStreamBytes }) {
+  const events = await streamEvents(streamPath, maxStreamBytes)
   let start = 0
   events.forEach((e, i) => { if (e.type === 'user') start = i })
   const turn = events.slice(start)

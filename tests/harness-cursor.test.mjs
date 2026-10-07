@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, stat, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
@@ -38,6 +38,8 @@ process.stdin.on('end', () => {
   const session_id = process.env.FAKE_CURSOR_SESSION || 'sess-1'
   const w = (o) => process.stdout.write(JSON.stringify(o) + '\\n')
   w({ type: 'system', subtype: 'init', session_id, cwd: process.cwd() })
+  // FAKE_CURSOR_FLOOD: never finishes and never prints a result, only an unbounded stream.
+  if (process.env.FAKE_CURSOR_FLOOD === '1') { setInterval(() => process.stdout.write('x'.repeat(Number(process.env.FAKE_CURSOR_FLOOD_CHUNK || 65536))), 1); return }
   w({ type: 'assistant', session_id, message: { content: [] } })
   if (process.env.FAKE_CURSOR_NO_RESULT !== '1') {
     w({
@@ -542,4 +544,49 @@ test('Cursor builders refuse a bound required policy with missing enforcement', 
 test('Cursor refuses required non-model verification rather than claiming native confinement', async () => {
   assert.equal(typeof cursorAdapter.createVerificationExecutor, 'function')
   await assert.rejects(cursorAdapter.createVerificationExecutor({ sandbox: { cwd: '/fixture/worker', meta: { mode: 'files' } } }), /unsupported/i)
+})
+
+// --- explicit model and bounded capture (execution recovery T8) -------------------------------
+
+test('cursor argv builders refuse a model that is not one bounded token', () => {
+  const sandbox = { cwd: '/w', meta: { mode: 'files' } }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) {
+    for (const model of ['--yolo', '-f', 'gpt 5', 'a\nb', 'x'.repeat(200)]) {
+      assert.throws(() => build({ sandbox, sessionId: 'sess-1', model }), /model/i, `${build.name} accepted model ${JSON.stringify(model)}`)
+    }
+    assert.ok(build({ sandbox, sessionId: 'sess-1', model: 'sonnet-4.5' }).includes('sonnet-4.5'))
+  }
+})
+
+test('spawnCursor stops an oversized stream, counting what a resume appends to, and reports the capture as limited', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
+  const cwd = await freshDir('flood')
+  const streamPath = path.join(scratch, `${path.basename(cwd)}.jsonl`)
+  // A resume appends to the session's stream, so its bound covers what is already on disk.
+  await writeFile(streamPath, 'p'.repeat(3000))
+  // 500-byte chunks, so the bound is crossed inside the stream rather than by one huge chunk.
+  await withEnv({ FAKE_CURSOR_FLOOD: '1', FAKE_CURSOR_FLOOD_CHUNK: '500' }, async () => {
+    const handle = await resumeCursor({ sandbox: { cwd, meta: { mode: 'full' } }, sessionId: 'sess-1', message: 'flood', streamPath, maxStreamBytes: 4096 })
+    const exited = once(handle.child, 'exit')
+    await handle.sessionId
+    const [, signal] = await exited
+    await handle.flushed
+    assert.equal(signal, 'SIGKILL')
+    assert.equal(handle.outputLimited, true)
+    const size = (await stat(streamPath)).size
+    assert.equal(size, 4096, 'the appended stream holds exactly what fit, counting the earlier session')
+    assert.equal((await readFile(streamPath, 'utf8')).slice(0, 3000), 'p'.repeat(3000), 'the earlier session stream was kept')
+  })
+})
+
+test('readResult refuses a stream file larger than its bound rather than parsing it', async () => {
+  const dir = await freshDir('big-stream')
+  const streamPath = path.join(dir, 's.jsonl')
+  const line = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(good), session_id: 's' })
+  await writeFile(streamPath, `${line}\n`)
+  assert.deepEqual(await readResult({ streamPath }), good)
+  assert.equal(await readResult({ streamPath, maxStreamBytes: line.length - 1 }), null)
+  // Not followed through a symlink, even to a valid stream.
+  const linked = path.join(dir, 'linked.jsonl')
+  await symlink(streamPath, linked)
+  assert.equal(await readResult({ streamPath: linked }), null)
 })
