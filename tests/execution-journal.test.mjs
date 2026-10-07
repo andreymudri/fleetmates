@@ -186,3 +186,38 @@ test('operator resolution independently rejects foreign trust while retaining va
   assert.deepEqual(executionEvent(event).resolution, resolution)
   assert.throws(() => executionEvent({ ...event, resolution: { ...resolution, trust: 'authenticated' } }), /Invalid local effect resolution/)
 })
+
+async function assertCompletedEffectBlocksAction(t, localResolution) {
+  const { runAfterExecutionStart } = await import('../scripts/execution-journal.mjs')
+  const { resolveExecutionEffect } = await import('../scripts/execution-recovery.mjs')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'strict-completed-retry-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const start = strictEvent('start', 'step-started')
+  const effect = { id: 'external-1', kind: 'publication', reference: null }
+  await appendExecutionEvent(common, start)
+  await appendExecutionEvent(common, strictEvent('effect-start', 'effect-started', { at: start.at + 1, effect }))
+  if (localResolution) {
+    await resolveExecutionEffect({ common, runId: start.runId, effectId: effect.id, resolution: 'completed', reason: 'inspected' })
+  } else {
+    await appendExecutionEvent(common, strictEvent('effect-end', 'effect-completed', { at: start.at + 2, effect }))
+  }
+  const before = await readExecutionEvents(common, start.runId)
+  assert.equal(before.at(-1).kind, localResolution ? 'effect-resolved' : 'effect-completed')
+  if (localResolution) assert.equal(before.at(-1).resolution.outcome, 'completed')
+  const retry = strictEvent('fresh-retry', 'step-started', { attempt: 'attempt-2', at: before.at(-1).at + 1 })
+  let actions = 0
+  const rejection = await runAfterExecutionStart({ common, event: retry, action: () => { actions++ } })
+    .then(() => null, error => error)
+  const after = await readExecutionEvents(common, start.runId)
+  assert.equal(actions, 0)
+  assert.equal(after.some(event => event.id === retry.id || event.attempt === retry.attempt), false)
+  assert.ok(rejection instanceof Error)
+  assert.match(rejection.message, /External effect outcome refuses non-idempotent retry/)
+  assert.deepEqual(after, before)
+}
+test('recorded completed effects reject a fresh attempt before persistence or action', async t => {
+  await assertCompletedEffectBlocksAction(t, false)
+})
+test('locally resolved completed effects reject a fresh attempt before persistence or action', async t => {
+  await assertCompletedEffectBlocksAction(t, true)
+})
