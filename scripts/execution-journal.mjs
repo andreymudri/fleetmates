@@ -222,6 +222,11 @@ export async function appendExecutionEvent(common, raw, { retention, now = Date.
       throw new Error('Historical external effect outcome refuses strict action')
     }
     const previous = strictExecutionAttempts(existing)
+    if (event.version === 2 && event.kind === 'effect-started' && previous.some(group =>
+      group.end && group.start.executionId === event.executionId && group.start.task === event.task
+      && group.start.step === event.step && group.start.attempt === event.attempt)) {
+      throw new Error('Execution attempt already ended; new external effect refused')
+    }
     if (event.version === 2 && ['step-started', 'effect-started'].includes(event.kind) && previous.some(group =>
       group.start.executionId === event.executionId && group.start.task === event.task && group.start.step === event.step
       && (event.kind === 'step-started' || group.start.attempt !== event.attempt)

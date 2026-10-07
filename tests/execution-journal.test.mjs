@@ -518,3 +518,98 @@ test('strict query and resolution APIs cannot clear historical unknown-effect re
   assert.match(rejection?.message ?? '', /Historical external effect outcome refuses strict action/)
   assert.deepEqual(await readExecutionEvents(common, strict.runId), before)
 })
+
+async function journalBytes(common, runId) {
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const { readdir, readFile } = await import('node:fs/promises')
+  const directory = await executionDirectory(common, runId)
+  return Promise.all((await readdir(directory)).sort().map(async name => ({ name, bytes: await readFile(path.join(directory, name)) })))
+}
+async function endedAttemptFixture(t, outcome, precedingEffect = false) {
+  const { retainExecutionArtifact, readExecutionArtifact } = await import('../scripts/execution-artifacts.mjs')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'ended-attempt-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const start = strictEvent('start', 'step-started'), endAt = start.at + 4
+  await appendExecutionEvent(common, start)
+  const effect = { id: 'recorded-effect', kind: 'publication', reference: null }
+  const first = { ...start, id: 'recorded-start', kind: 'effect-started', effect, at: start.at + 1 }
+  if (precedingEffect) await appendExecutionEvent(common, first)
+  let artifacts = []
+  if (outcome === 'step-completed') {
+    const retention = { maxArtifactBytes: 8192, maxRunBytes: 65536, maxAgeMs: 86400000 }
+    const bytes = Buffer.from('observed step result')
+    const { reference } = await retainExecutionArtifact({ common, runId: start.runId, kind: 'result', bytes, retention })
+    assert.deepEqual(await readExecutionArtifact({ common, runId: start.runId, reference, retention }), bytes)
+    artifacts = [reference]
+  }
+  if (outcome !== 'open') await appendExecutionEvent(common, { ...start, id: 'end', kind: outcome, at: endAt, artifacts })
+  return { common, start, endAt, first, effect }
+}
+for (const outcome of ['step-failed', 'step-completed', 'open']) {
+  for (const delta of [-1, 0, 1]) {
+    test('persisted ' + outcome + ' attempt gates new effect at end offset ' + delta, async t => {
+      const { common, start, endAt } = await endedAttemptFixture(t, outcome)
+      const { runAfterExecutionStart } = await import('../scripts/execution-journal.mjs')
+      const next = { ...start, id: 'late-effect', kind: 'effect-started', at: endAt + delta,
+        effect: { id: 'new-publication', kind: 'publication', reference: null } }
+      const before = await journalBytes(common, start.runId)
+      let actions = 0
+      const rejection = await runAfterExecutionStart({ common, event: next, action: () => { actions++ } })
+        .then(() => null, error => error)
+      const after = await journalBytes(common, start.runId)
+      const allowed = outcome === 'open'
+      assert.equal(actions, allowed ? 1 : 0)
+      assert.equal((await readExecutionEvents(common, start.runId)).some(record => record.id === next.id), allowed)
+      for (const record of before) assert.deepEqual(after.find(other => other.name === record.name), record)
+      if (allowed) {
+        assert.equal(rejection, null)
+        assert.equal(after.length, before.length + 1)
+      } else {
+        assert.deepEqual(after, before)
+        assert.match(rejection?.message ?? '', /Execution attempt already ended/)
+      }
+    })
+  }
+}
+for (const dimension of ['executionId', 'task', 'step', 'attempt']) {
+  test('closed attempt does not block an open action with distinct ' + dimension, async t => {
+    const { common, start, endAt } = await endedAttemptFixture(t, 'step-completed')
+    const { runAfterExecutionStart } = await import('../scripts/execution-journal.mjs')
+    const changes = { executionId: { executionId: 'execution-2' }, task: { task: 'T2', attempt: 'other-attempt' },
+      step: { step: 'review', attempt: 'other-attempt' }, attempt: { attempt: 'other-attempt' } }
+    const other = { ...start, ...changes[dimension], id: 'other-start', at: endAt + 1 }
+    await appendExecutionEvent(common, other)
+    const before = await journalBytes(common, start.runId)
+    let actions = 0
+    const next = { ...other, id: 'other-effect', kind: 'effect-started', at: endAt + 2,
+      effect: { id: 'other-publication', kind: 'publication', reference: null } }
+    const rejection = await runAfterExecutionStart({ common, event: next, action: () => { actions++ } })
+      .then(() => null, error => error)
+    assert.equal(rejection, null)
+    assert.equal(actions, 1)
+    const after = await journalBytes(common, start.runId)
+    for (const record of before) assert.deepEqual(after.find(other => other.name === record.name), record)
+    assert.equal(after.length, before.length + 1)
+  })
+}
+for (const observation of ['effect-completed', 'effect-failed', 'effect-unknown']) {
+  test('closed attempt retains existing effect observations and local resolution after ' + observation, async t => {
+    const { common, start, endAt, first, effect } = await endedAttemptFixture(t, 'step-completed', true)
+    const before = await journalBytes(common, start.runId)
+    await appendExecutionEvent(common, first)
+    assert.deepEqual(await journalBytes(common, start.runId), before)
+    const outcomeRejection = await appendExecutionEvent(common, { ...start, id: 'observed-outcome', kind: observation, effect, at: endAt })
+      .then(() => null, error => error)
+    assert.equal(outcomeRejection, null)
+    const resolutionRejection = await appendExecutionEvent(common, { ...start, id: 'local-resolution', kind: 'effect-resolved', effect, at: endAt + 1,
+      resolution: { outcome: 'completed', reason: 'inspected', trust: 'local-operator-observation', authenticatedAuthorization: false } })
+      .then(() => null, error => error)
+    assert.equal(resolutionRejection, null)
+    const events = await readExecutionEvents(common, start.runId)
+    assert.equal(events.find(record => record.id === 'observed-outcome').kind, observation)
+    assert.equal(events.find(record => record.id === 'local-resolution').resolution.authenticatedAuthorization, false)
+    const after = await journalBytes(common, start.runId)
+    for (const record of before) assert.deepEqual(after.find(other => other.name === record.name), record)
+    assert.equal(after.length, before.length + 2)
+  })
+}
