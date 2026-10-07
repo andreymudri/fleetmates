@@ -9,7 +9,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan, PlanParseError } from './plan-parser.mjs'
 import { readWorkflowInput } from './workflow-input.mjs'
-import { validateResult } from './result-schema.mjs'
+import { RESULT_SCHEMA, validateResult } from './result-schema.mjs'
 import { captureEnvironment, validateEnvironmentRecipe } from './environment-preflight.mjs'
 import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
 import { probeCapabilities } from './capability-preflight.mjs'
@@ -51,7 +51,7 @@ import { getAdapter, HARNESS_NAMES } from './harnesses/index.mjs'
 import { dispatchPhase, waitForExit, runPool, killProcess, pidAlive } from './driver.mjs'
 import { buildCoupling, neighboursOf, inventory, hotPairs, renderMap } from './codemap.mjs'
 import { mapNotesStale, mapNotesPrompt, mapNotesWritable } from './mapnotes.mjs'
-import { deriveContext } from './gate-runner.mjs'
+import { deriveContext, runOwnershipCheck } from './gate-runner.mjs'
 
 // The temp root as GIT would spell it, which is not what `os.tmpdir()` returns.
 //
@@ -2439,6 +2439,55 @@ async function resolveBranchShas(git, tasks, runId) {
   return branchShas
 }
 
+function integratorFailure(io, message) {
+  io.out(printable(message))
+  return 4
+}
+
+async function integratorGit(root, args) {
+  const result = await defaultGitExec(args, root)
+  if (result.code !== 0) throw new Error(result.stderr || 'Integrator Git command failed')
+  return result.stdout.trim()
+}
+
+async function deriveIntegrator(root, runId, flags, planState) {
+  const git = createGit({ cwd: root })
+  const head = await git.headBranch()
+  if (head.ok) {
+    if (planState?.runBranch && head.name !== planState.runBranch) throw new Error('Attached HEAD differs from the recorded run branch')
+    return derive(root, runId, flags)
+  }
+  if (head.kind !== 'detached') throw new Error(head.reason)
+  const runBranch = planState?.runBranch
+  if (typeof runBranch !== 'string' || runBranch.startsWith('refs/')) throw new Error('Missing recorded ordinary run branch')
+  await integratorGit(root, ['check-ref-format', `refs/heads/${runBranch}`])
+  const baseBranch = await resolveBaseBranch(git, flags.base)
+  if (runBranch === baseBranch) throw new Error('Integrator run branch and base branch must differ')
+  const ctx = await deriveContext({ git, runId, runBranch, baseBranch, planPath: flags.plan })
+  return { ...ctx, runBranchRef: `refs/heads/${runBranch}` }
+}
+
+async function integratorSnapshot(root, ctx, tasks) {
+  if (ctx.phaseError || ctx.currentPhase === null) throw new Error(ctx.phaseError || 'No current phase to integrate')
+  const refs = { [ctx.runBranchRef]: ctx.runSha,
+    [`refs/heads/${ctx.baseBranch}`]: await ctx.git.resolveRef(`refs/heads/${ctx.baseBranch}`) }
+  for (const task of tasks) refs[`refs/heads/${resolveTaskBranch(task, ctx.runId)}`] = await ctx.git.resolveRef(`refs/heads/${resolveTaskBranch(task, ctx.runId)}`)
+  const head = await integratorGit(root, ['rev-parse', '--verify', 'HEAD'])
+  const symbolic = await ctx.git.currentBranchRef()
+  const indexPath = await integratorGit(root, ['rev-parse', '--path-format=absolute', '--git-path', 'index'])
+  const index = await readFile(indexPath)
+  return { refs, head, symbolic, indexPath, index }
+}
+
+async function assertIntegratorSnapshot(root, ctx, snapshot, { merged = false } = {}) {
+  for (const [ref, sha] of Object.entries(snapshot.refs)) {
+    if (merged && ref === ctx.runBranchRef) continue
+    if (await ctx.git.resolveRef(ref) !== sha) throw new Error(`Integrator ref changed: ${ref}`)
+  }
+  if (await ctx.git.headSha() !== snapshot.head || await ctx.git.currentBranchRef() !== snapshot.symbolic
+    || !(await readFile(snapshot.indexPath)).equals(snapshot.index)) throw new Error('Main HEAD or index changed during integrator dispatch')
+}
+
 // `deps.git` is a TEST SEAM and nothing else — every production caller passes three arguments and
 // gets a git built here. It exists because the round-trip refusal below could not otherwise be
 // pinned at its CALL SITE: with the run branch resolved from HEAD's own ref, the two shas can
@@ -3841,38 +3890,15 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'dispatch-integrator') {
-    // Refuses unless the phase being integrated holds a recorded PASS. Unlike a teammate-facing
-    // decision, the integrator is dispatched by the orchestrator after the gate it itself ran wrote
-    // this record, so reading it is the orchestrator confirming its own prior verdict, not trusting
-    // an enforced party. No PASS means the gate has not passed, and nothing may merge.
-    //
-    // The record is looked up by the EXACT key `gate` writes — `String(ctx.currentPhase ?? phaseName)`
-    // (the NUMERIC derived fleet phase; see the gate handler) — derived here through the same
-    // `derive`/`deriveContext` the gate uses, NOT by scanning for a matching `phaseName`. A
-    // phaseName scan was wrong three ways and each is closed by the exact-key lookup:
-    //   - the one manifest phase is named `default`, so EVERY fleet phase records `phaseName:
-    //     'default'` — a scan authorized integrating phase 4 on phase 2's PASS; the numeric key
-    //     targets the specific phase being integrated.
-    //   - a `--no-fleet` gate records under a `solo:<phaseName>` key with the SAME `phaseName` but
-    //     with fileset+ownership enforcement STRIPPED; a scan matched it and merged on a vacuous
-    //     gate. The numeric key never equals `solo:...`, so a solo record is never consulted.
-    //   - `status.json` is JSON-parsed, so a text key `"__proto__"` is an OWN enumerable property
-    //     that `Object.values` reads — a scan let a forged `__proto__` PASS clear the guard.
-    //     `Object.hasOwn(gates, gateKey)` with a numeric `gateKey` never names it.
     const phaseName = flags.phase && flags.phase !== true ? flags.phase : 'default'
     const status = await readState(root, runId, 'status')
-    // `derive` reads the plan at the run anchor, so it needs a plan path. Take it from `--plan`, or
-    // fall back to the one `init-run` recorded — the same resolution `dispatch` uses. `derive`
-    // throws on a base/run-branch collision, a detached HEAD, or an unreadable plan; that is a
-    // "cannot verify which phase to integrate", handled like the gate handler handles it — a clear
-    // exit, not a crash.
     const planState = await readState(root, runId, 'plan')
     const planPath = (flags.plan && flags.plan !== true)
       ? flags.plan
       : (typeof planState?.planPath === 'string' ? planState.planPath : '')
     let derived
     try {
-      derived = await derive(root, runId, { ...flags, plan: planPath })
+      derived = await deriveIntegrator(root, runId, { ...flags, plan: planPath }, planState)
     } catch (err) {
       io.out(`cannot verify which phase to integrate for run ${printable(runId)}: ${printable(err.message)}`)
       return 4
@@ -3893,8 +3919,31 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
     if (probe.warning) io.out(`warning: ${probe.warning}`)
 
-    const { network, timeoutMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+    const settings = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+    const { network, timeoutMinutes } = settings
     const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
+    const tierModels = parseTierModels(flags, io)
+    if (tierModels === TIER_MODELS_REJECTED) return 2
+    const role = resolved.agents.integrator
+    const model = (tierModels ?? settings.tierModels)[role.tier ?? 'cheap']
+    const effort = role.effort
+    if (settings.sandboxMode !== 'full' || adapter.supportsEffort === false || !model || !effort) {
+      io.out('Legacy integrator requires explicitly configured full authority, role model and effort; required policy has no unrestricted fallback')
+      return 4
+    }
+    let snapshot, phaseTasks
+    try {
+      if (derived.phaseError || derived.currentPhase === null) throw new Error(derived.phaseError || 'No current phase')
+      if (flags.phase && flags.phase !== true && flags.phase !== recorded.phaseName && String(flags.phase) !== gateKey) throw new Error('Requested integrator phase is not current')
+      phaseTasks = derived.tasks.filter(t => t.phase === derived.currentPhase)
+      snapshot = await integratorSnapshot(root, derived, phaseTasks)
+      const tips = Object.fromEntries(phaseTasks.map(t => { const branch = resolveTaskBranch(t, runId); return [branch, snapshot.refs[`refs/heads/${branch}`]] }))
+      if (recorded.phase !== derived.currentPhase || recorded.anchorSha !== derived.anchorSha
+        || recorded.planHash !== derived.planHash || !isDeepStrictEqual(recorded.branchShas, tips)) throw new Error('Recorded PASS does not match exact current phase, anchor, plan and task tips')
+      const ownership = await runOwnershipCheck({ name: 'ownership', kind: 'ownership' }, derived)
+      if (ownership.status !== 'pass') throw new Error(`Integrator ownership preflight failed: ${ownership.output}`)
+      await assertIntegratorSnapshot(root, derived, snapshot)
+    } catch (error) { return integratorFailure(io, `cannot authorize integrator: ${error.message}`) }
     let learningContext = ''
     try {
       const { learningBundles } = await import('./learning-context.mjs')
@@ -3906,20 +3955,58 @@ export async function runCli(argv, io = { out: console.log }) {
     const persona = await personaFor('integrator') + learningContext
     const integratorSessionsDir = path.join(runDir(root, runId), 'sessions')
     await mkdir(integratorSessionsDir, { recursive: true })
-    const base = path.join(integratorSessionsDir, 'integrator')
-    const handle = await adapter.spawn({
-      sandbox: { cwd: root, meta: { mode: 'full' } },
-      prompt: persona,
-      network,
-      schemaPath: `${base}.schema.json`,
-      resultPath: `${base}.result.json`,
-      streamPath: `${base}.stream.jsonl`,
-      errPath: `${base}.stderr.log`,
-    })
-    await handle.sessionId
-    await waitForExit(handle.child, timeoutMs)
-    io.out(`dispatched integrator for phase ${printable(phaseName)}`)
-    return 0
+    const sessionDir = await mkdtemp(path.join(integratorSessionsDir, `integrator-${gateKey}-`))
+    const base = path.join(sessionDir, 'output')
+    const worktree = path.join(sessionDir, 'worktree')
+    try {
+      await derived.git.addWorktreeDetached(worktree, derived.runSha)
+      await integratorGit(worktree, ['switch', '--no-guess', '--', derived.runBranch])
+      const workerGit = createGit({ cwd: worktree })
+      if (await workerGit.currentBranchRef() !== derived.runBranchRef || await workerGit.headSha() !== derived.runSha) throw new Error('Integrator checkout is not the exact run ref and tip')
+      await assertIntegratorSnapshot(root, derived, snapshot)
+      await writeFile(`${base}.schema.json`, JSON.stringify(RESULT_SCHEMA))
+      const assignment = {
+        run: runId, phase: derived.currentPhase, plan: planPath, planHash: derived.planHash,
+        baseRef: `refs/heads/${derived.baseBranch}`, baseTip: snapshot.refs[`refs/heads/${derived.baseBranch}`],
+        runRef: derived.runBranchRef, runTip: derived.runSha, anchor: derived.anchorSha,
+        tasks: phaseTasks.map(t => ({ id: t.id, ref: `refs/heads/${resolveTaskBranch(t, runId)}`, tip: snapshot.refs[`refs/heads/${resolveTaskBranch(t, runId)}`], files: t.files })),
+      }
+      const prompt = `${persona}\nConcrete assignment for phase ${gateKey}:\n${JSON.stringify(assignment)}\n`
+        + 'This is explicitly configured legacy full authority; filesystem, network and publication restrictions are instructions, not required-policy confinement. No remote actions or publication. Work only in this registered worktree. Verify exact refs and tips before every merge. Merge only the supplied tips, in task order, with git merge --no-ff --no-edit <tip>. Keep the worktree clean between merges. On any conflict stop and escalate with owning task ids and both hunks; never resolve conflicts, force refs, update-ref, reset, rebase or commit extra edits. Do not touch the main worktree or its index. Return only the supplied task result schema: status done only after all merges, branch the run branch name, filesChanged repo-relative paths, summary observed merges, blockers empty. Otherwise return blocked or failed with concrete blockers. This schema supersedes the persona return example.\n'
+      const handle = await adapter.spawn({
+        sandbox: { cwd: worktree, meta: { mode: 'full' } }, prompt, model, effort, network,
+        schemaPath: `${base}.schema.json`, resultPath: `${base}.result.json`,
+        streamPath: `${base}.stream.jsonl`, errPath: `${base}.stderr.log`,
+      })
+      const exited = waitForExit(handle.child, timeoutMs)
+      handle.sessionId?.catch?.(() => {})
+      const exit = await exited
+      if (exit !== 'exit' || handle.child?.exitCode !== 0 || handle.child?.signalCode) throw new Error('Integrator process did not exit successfully')
+      const result = JSON.parse(await readFile(`${base}.result.json`, 'utf8'))
+      if (!validateResult(result) || result.status !== 'done' || result.branch !== derived.runBranch
+        || result.blockers.length !== 0 || result.filesChanged.some(f => !phaseTasks.some(t => t.files.includes(f)))) throw new Error('Integrator result is absent, malformed, failed or inconsistent')
+      await assertIntegratorSnapshot(root, derived, snapshot, { merged: true })
+      if (await workerGit.currentBranchRef() !== derived.runBranchRef || await workerGit.isDirty()) throw new Error('Integrator worktree is not clean on the run branch')
+      const runSha = await workerGit.headSha()
+      const commits = (await integratorGit(worktree, ['rev-list', '--reverse', '--first-parent', `${derived.runSha}..${runSha}`])).split('\n').filter(Boolean)
+      if (commits.length !== phaseTasks.length) throw new Error('Integrator did not produce exactly the allowed merges')
+      let previous = derived.runSha
+      for (let i = 0; i < commits.length; i++) {
+        const parents = await integratorGit(worktree, ['show', '-s', '--format=%P', commits[i]])
+        const tip = snapshot.refs[`refs/heads/${resolveTaskBranch(phaseTasks[i], runId)}`]
+        if (parents !== `${previous} ${tip}`) throw new Error('Integrator merge parents differ from the authorized order and tips')
+        previous = commits[i]
+      }
+      const ownership = await runOwnershipCheck({ name: 'ownership', kind: 'ownership' }, { ...derived, git: workerGit, runSha })
+      if (ownership.status !== 'pass') throw new Error(`Integrator ownership failed: ${ownership.output}`)
+      if (await derived.git.resolveRef(derived.runBranchRef) !== runSha) throw new Error('Run ref changed after integrator validation')
+      await integratorGit(worktree, ['switch', '--detach', '--', runSha])
+      await assertIntegratorSnapshot(root, derived, snapshot, { merged: true })
+      io.out(`verified legacy integrator merges for phase ${gateKey}; registered worktree retained`)
+      return 0
+    } catch (error) {
+      return integratorFailure(io, `integrator failed; registered worktree retained at ${worktree}: ${error.message}`)
+    }
   }
 
   if (command === 'message') {

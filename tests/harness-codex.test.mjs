@@ -827,7 +827,8 @@ test('required verification rejects a runtime without independent restriction re
       assert.equal(command, '/usr/bin/env')
       assert.ok(!cwd.startsWith(worker + path.sep))
       assert.ok(hasPair(options.argv, '-P', 'worker'))
-      assert.equal(options.timeoutMs, 5000)
+      assert.equal(options.timeoutMs, 6000)
+      assert.equal(JSON.parse(options.argv.at(-1)).timeoutMs, 5000)
       assert.equal(options.maxOutputBytes, 65536)
       assert.equal(options.maxCaptureBytes, 65536)
       home = options.argv.find(arg => arg.startsWith('CODEX_HOME=')).slice(11)
@@ -858,8 +859,9 @@ async function injectedVerification(fn, alter = () => {}) {
     if (!program?.includes('Object.entries(')) {
       const receipt = { code: 0, signal: null, output: '', outputLimited: false, completed: true, runnerCode: 0,
         pipelineCode: 0, pipelineSignal: null, launchError: null, runtimeError: null }
-      alterCommand(receipt)
-      return { code: 0, output: payload.marker + JSON.stringify(receipt) + '\n' }
+      const result = { code: 0 }
+      alterCommand(receipt, result)
+      return { output: payload.marker + JSON.stringify(receipt) + '\n', ...result }
     }
     const paths = JSON.parse(program.match(/Object.entries\((\{.*?\})\)/)[1])
     const marker = program.match(/FM_VERIFY_[a-f0-9]+ /)[0]
@@ -908,6 +910,7 @@ test('injected command completion requires successful independently observed run
       receipt => { delete receipt.pipelineSignal }, receipt => { receipt.pipelineSignal = 'SIGTERM' },
       receipt => { delete receipt.launchError }, receipt => { receipt.launchError = 'ENOENT' },
       receipt => { delete receipt.runtimeError }, receipt => { receipt.runtimeError = 'ENOBUFS' },
+      receipt => { receipt.timedOut = true },
     ]) {
       change(alter)
       const result = await executor.exec(process.execPath, worker, { argv: ['-e', ''] })
@@ -998,7 +1001,7 @@ test('verification trampoline preserves child exits and bounded output without c
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
-async function completionFixture({ command = process.execPath, source = '', runnerSource = null, missingSink = false,
+async function completionFixture({ timeoutMs = 5000, command = process.execPath, source = '', runnerSource = null, missingSink = false,
   missingShell = false, missingRunnerStatus = false, incompleteRunner = false, terminatedShell = false,
   runnerExit = null, terminatedRunnerAfterObservation = false } = {}) {
   const { buildVerificationInvocation } = await import('../scripts/harnesses/codex.mjs')
@@ -1006,7 +1009,7 @@ async function completionFixture({ command = process.execPath, source = '', runn
   const root = await mkdtemp(path.join(tmpdir(), 'fm-completion-'))
   try {
     const request = buildVerificationInvocation({ executable: '/fixture/codex', broker: root, home: root, worker: root,
-      temp: root, write: false, command, argv: ['-e', source], marker: 'fixture-completion ', maxOutputBytes: 32 })
+      temp: root, write: false, command, argv: ['-e', source], marker: 'fixture-completion ', maxOutputBytes: 32, timeoutMs })
     const argv = request.argv.slice(-3)
     if (runnerSource !== null || incompleteRunner || runnerExit !== null || terminatedRunnerAfterObservation) {
       const literal = argv[1].match(/process.execPath,'-e',("(?:\\.|[^"\\])*"),JSON.stringify\(r\)/)?.[1]
@@ -1018,7 +1021,7 @@ async function completionFixture({ command = process.execPath, source = '', runn
       argv[1] = argv[1].replace(literal, JSON.stringify(runnerSource))
     }
     if (missingSink) argv[1] = argv[1].replace('/bin/cat', '/fm-missing-sink')
-    if (missingShell) argv[1] = argv[1].replace("cp.spawnSync('/bin/sh'", "cp.spawnSync('/fm-missing-shell'")
+    if (missingShell) argv[1] = argv[1].replace("cp.spawn('/bin/sh'", "cp.spawn('/fm-missing-shell'")
     if (missingRunnerStatus) argv[1] = argv[1].replace(/printf "%s\\n" "\$status" >&4;/, ':;')
     if (terminatedShell) argv[1] = argv[1].replace(/'-c','[^']*'/, () => "'-c','kill -TERM $$'")
     const result = await defaultExec(process.execPath, root, { argv, timeoutMs: 5000, maxOutputBytes: 4096 })
@@ -1058,4 +1061,51 @@ test('ordinary completion fixture observes successful runner and pipeline termin
   assert.equal(receipt.launchError, null)
   assert.equal(receipt.runtimeError, null)
   assert.equal(Buffer.from(receipt.output, 'base64').toString(), 'ordinary\n')
+})
+
+
+test('ordinary timeout retains bounded partial stdout and stderr with incomplete completion', { skip: process.platform === 'win32' }, async () => {
+  const receipt = await completionFixture({ timeoutMs: 500, source: "require('fs').writeSync(1,'started stdout\\n');require('fs').writeSync(2,'started stderr\\n');setInterval(()=>{},1000)" })
+  assert.equal(Buffer.from(receipt.output, 'base64').toString(), 'started stdout\nstarted stderr\n')
+  assert.equal(receipt.timedOut, true)
+  assert.equal(receipt.completed, false)
+  assert.equal(receipt.code, 137)
+  assert.equal(receipt.signal, 'SIGKILL')
+  assert.equal(receipt.runtimeError, 'ETIMEDOUT')
+  assert.equal(receipt.outputLimited, false)
+})
+
+
+test('injected outer execution failures remain incomplete and nonzero while retaining captured output', async () => {
+  await injectedVerification(async (create, worker, change) => {
+    const executor = await create()
+    for (const observation of [{ code: 9 }, { code: 0, timedOut: true }, { code: 0, outputLimited: true }]) {
+      change((_receipt, result) => Object.assign(result, observation, { output: 'partial outer output' }))
+      const result = await executor.exec(process.execPath, worker, { argv: ['-e', ''] })
+      assert.equal(result.completed, false)
+      assert.notEqual(result.code, 0)
+      assert.equal(result.output, 'partial outer output')
+      if (observation.code) assert.equal(result.code, observation.code)
+    }
+  })
+})
+
+test('ordinary pipeline timeout stops its own delayed child fixture', { skip: process.platform === 'win32' }, async () => {
+  const { buildVerificationInvocation } = await import('../scripts/harnesses/codex.mjs')
+  const { defaultExec } = await import('../scripts/gate-runner.mjs')
+  const root = await mkdtemp(path.join(tmpdir(), 'fm-timeout-child-'))
+  try {
+    const late = path.join(root, 'late')
+    const program = `require('fs').writeSync(1,'started\\n');setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(late)},'late effect'),800)`
+    const request = buildVerificationInvocation({ executable: '/fixture/codex', broker: root, home: root, worker: root, temp: root, write: true,
+      command: process.execPath, argv: ['-e', program], marker: 'fixture-timeout ', timeoutMs: 200 })
+    const result = await defaultExec(process.execPath, root, { argv: request.argv.slice(-3), timeoutMs: 3000, maxOutputBytes: 4096 })
+    assert.equal(result.code, 0, result.output)
+    const receipt = JSON.parse(result.output.slice('fixture-timeout '.length))
+    assert.equal(Buffer.from(receipt.output, 'base64').toString(), 'started\n')
+    assert.equal(receipt.timedOut, true)
+    assert.equal(receipt.completed, false)
+    await new Promise(resolve => setTimeout(resolve, 900))
+    await assert.rejects(stat(late), { code: 'ENOENT' })
+  } finally { await rm(root, { recursive: true, force: true }) }
 })

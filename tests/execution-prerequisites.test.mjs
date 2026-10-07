@@ -1,6 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, readFile, rm, mkdir, symlink, chmod, lstat } from 'node:fs/promises'
+import { mkdtemp, writeFile, readFile, rm, mkdir, symlink, chmod, lstat, access, realpath } from 'node:fs/promises'
+import { EventEmitter } from 'node:events'
+import { constants } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -25,8 +27,20 @@ test('actual native console version probes retain stdout and stderr like synchro
   try {
     const enforcement = resolveRoleCapabilities({ policy, role: 'implementer', harness: 'codex', sandboxMode: 'files', network: false }).enforcement
     const env = { ...process.env, PATH: process.env.FLEETMATES_REAL_CODEX ? path.dirname(process.env.FLEETMATES_REAL_CODEX) + path.delimiter + process.env.PATH : process.env.PATH }
-    try { executor = await createVerificationExecutor({ sandbox: { cwd: worker, meta: { mode: 'files' } }, enforcement, env }) }
-    catch (error) { t.skip(`Native restriction preflight unavailable: ${error.message}`); return }
+    let available = false
+    for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+      if (!path.isAbsolute(dir)) continue
+      try {
+        const candidate = await realpath(path.join(dir, 'codex'))
+        await access(candidate, constants.X_OK)
+        available = true
+        break
+      } catch (error) {
+        if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error
+      }
+    }
+    if (!available) { t.skip('Native codex executable independently unavailable'); return }
+    await assert.doesNotReject(async () => { executor = await createVerificationExecutor({ sandbox: { cwd: worker, meta: { mode: 'files' } }, enforcement, env }) }, 'Available native runtime must establish the required executor')
     const asynchronous = await executor.exec(process.execPath, worker, { argv: ['-e', "console.log('v1');console.error('stderr')"] })
     const synchronous = await executor.exec(process.execPath, worker, { argv: ['-e', "require('fs').writeSync(1,'v1\\n');require('fs').writeSync(2,'stderr\\n')"] })
     assert.equal(asynchronous.code, 0)
@@ -49,9 +63,19 @@ test('actual native console version probes retain stdout and stderr like synchro
     const limited = await executor.exec(process.execPath, worker, { argv: ['-e', "console.log('x'.repeat(100))"], maxOutputBytes: 16 })
     assert.equal(limited.outputLimited, true)
     assert.ok(Buffer.byteLength(limited.output) <= 16)
-    const timedOut = await executor.exec(process.execPath, worker, { argv: ['-e', 'setInterval(()=>{},1000)'], timeoutMs: 200 })
+    const timedOut = await executor.exec(process.execPath, worker, { argv: ['-e', "require('fs').writeSync(1,'retained-stdout\\n');require('fs').writeSync(2,'retained-stderr\\n');setInterval(()=>{},1000)"], timeoutMs: 2000 })
+    assert.equal(timedOut.output, 'retained-stdout\nretained-stderr\n')
+    assert.equal(timedOut.completed, false)
     assert.equal(timedOut.timedOut, true)
     assert.notEqual(timedOut.code, 0)
+    const late = path.join(worker, 'late-timeout-effect')
+    const delayedWrite = `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(late)},'unexpected late effect'),1500)`
+    const shellTimeout = await executor.exec(`printf 'shell started\\n'; ${shellQuote(process.execPath)} -e ${shellQuote(delayedWrite)}`, worker, { timeoutMs: 500 })
+    assert.equal(shellTimeout.output, 'shell started\n')
+    assert.equal(shellTimeout.timedOut, true)
+    assert.equal(shellTimeout.completed, false)
+    await new Promise(resolve => setTimeout(resolve, 1700))
+    await assert.rejects(lstat(late), { code: 'ENOENT' })
     const bytes = JSON.stringify({ ...recipe, toolchains: [{ name: 'console-version', command: process.execPath, argv: ['-e', "console.log('v1')"], expected: 'v1' }], baseline: [{ name: 'baseline', run: 'true', timeoutMs: 5000 }] })
     const git = { fileModeAtCommit: async () => '100644', fileSizeAtCommit: async () => Buffer.byteLength(bytes), fileAtCommit: async () => bytes }
     const report = await captureEnvironment({ git, commit: 'a'.repeat(40), recipePath: 'recipe.json', cwd: worker, execute: true, exec: executor.exec })
@@ -785,3 +809,202 @@ for (const missing of [false, true]) {
     } finally { adapter.createVerificationExecutor = original }
   }))
 }
+
+async function integratorFixture(fn) {
+  const root = await mkdtemp(path.join(tmpdir(), 'fm-int-'))
+  const gitRun = async args => { const result = await defaultGitExec(args, root); assert.equal(result.code, 0, result.stderr); return result.stdout }
+  const saved = { probe: codexAdapter.probe, spawn: codexAdapter.spawn }
+  try {
+    await gitRun(['init', '--initial-branch=main'])
+    await gitRun(['config', 'user.name', 'Fixture'])
+    await gitRun(['config', 'user.email', 'fixture@example.invalid'])
+    await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n')
+    await writeFile(path.join(root, 'plan.md'), '### Task 1: A\n\n**Files:**\n- Create: `a.txt`\n\n### Task 2: B\n\n**Files:**\n- Create: `b.txt`\n')
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
+      agents: { integrator: { tier: 'mid', effort: 'high' } },
+      harnesses: { codex: { sandbox: 'full', network: false, tierModels: { mid: 'fixture-model' } } },
+      phases: { default: { checks: [{ name: 'fileset', kind: 'fileset' }, { name: 'ownership', kind: 'ownership' }] } },
+    }))
+    await gitRun(['add', '.']); await gitRun(['commit', '-m', 'test: integrator fixture'])
+    const anchor = (await gitRun(['rev-parse', 'HEAD'])).trim()
+    const tips = {}
+    for (const [id, file] of [['T1', 'a.txt'], ['T2', 'b.txt']]) {
+      await gitRun(['checkout', '-b', `fleetmates/r1/${id}`, anchor])
+      await writeFile(path.join(root, file), id)
+      await gitRun(['add', file]); await gitRun(['commit', '-m', `test: ${id}`])
+      tips[id] = (await gitRun(['rev-parse', 'HEAD'])).trim()
+    }
+    await gitRun(['checkout', '-b', 'run/r1', anchor])
+    const initialized = await command(root, ['init-run', 'plan.md', '--run', 'r1'])
+    assert.equal(initialized.code, 0, initialized.output)
+    const gate = await command(root, ['gate', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+    assert.equal(gate.code, 0, gate.output)
+    await gitRun(['checkout', '--detach'])
+    codexAdapter.probe = async () => ({ ok: true })
+    await fn({ root, gitRun, anchor, tips })
+  } finally {
+    Object.assign(codexAdapter, saved)
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+test('integrator dispatch from detached main supplies isolated exact assignment and validates ordinary no-ff merges', async () => integratorFixture(async ({ root, gitRun, anchor, tips }) => {
+  const indexBefore = await readFile(path.join(root, '.git', 'index'))
+  let spawned = false
+  codexAdapter.spawn = async options => {
+    spawned = true
+    assert.notEqual(options.sandbox.cwd, root)
+    const worktrees = await gitRun(['worktree', 'list', '--porcelain'])
+    assert.ok(worktrees.includes(`worktree ${options.sandbox.cwd}\nHEAD ${anchor}\nbranch refs/heads/run/r1`))
+    assert.equal(options.model, 'fixture-model')
+    assert.equal(options.effort, 'high')
+    assert.equal(options.network, false)
+    const schema = JSON.parse(await readFile(options.schemaPath, 'utf8'))
+    assert.equal(schema.additionalProperties, false)
+    assert.ok(schema.required.includes('status'))
+    for (const value of ['plan.md', 'refs/heads/main', 'refs/heads/run/r1', tips.T1, tips.T2, '--no-ff', 'conflict', 'clean', 'phase 1', 'legacy']) assert.ok(options.prompt.includes(value), value)
+    for (const tip of Object.values(tips)) await defaultGitExec(['merge', '--no-ff', '--no-edit', tip], options.sandbox.cwd)
+    await writeFile(options.resultPath, JSON.stringify({ status: 'done', branch: 'run/r1', filesChanged: ['a.txt', 'b.txt'], summary: 'Fixture merges', blockers: [] }))
+    return { child: { exitCode: 0, signalCode: null }, sessionId: Promise.resolve('fixture') }
+  }
+  const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--phase', '1'])
+  assert.equal(result.code, 0, result.output)
+  assert.equal(spawned, true)
+  assert.deepEqual(await readFile(path.join(root, '.git', 'index')), indexBefore)
+  assert.equal((await gitRun(['rev-parse', 'HEAD'])).trim(), anchor)
+  assert.match(result.output, /verified/)
+  assert.ok(!(await gitRun(['worktree', 'list', '--porcelain'])).includes('branch refs/heads/run/r1'))
+  await gitRun(['checkout', 'run/r1'])
+}))
+
+for (const scenario of ['absent result', 'malformed result', 'blocked result', 'failed result', 'extra result field', 'wrong result branch', 'result blockers', 'outside result path', 'nonzero process', 'signaled process', 'no merges', 'wrong merge order', 'dirty worktree', 'changed task ref', 'changed base ref', 'changed main index', 'changed main HEAD', 'wrong worker branch', 'unowned merge edit']) {
+  test(`integrator rejects ${scenario} rather than dispatched success`, async () => integratorFixture(async ({ root, gitRun, tips }) => {
+    codexAdapter.spawn = async options => {
+      const worktree = options.sandbox.cwd
+      const ordered = scenario === 'wrong merge order' ? Object.values(tips).reverse() : Object.values(tips)
+      if (scenario !== 'no merges') for (const tip of ordered) {
+        const merged = await defaultGitExec(['merge', '--no-ff', '--no-edit', tip], worktree)
+        assert.equal(merged.code, 0, merged.stderr)
+      }
+      if (scenario === 'dirty worktree') await writeFile(path.join(worktree, 'a.txt'), 'pending')
+      if (scenario === 'changed task ref' || scenario === 'changed base ref') {
+        const revised = path.join(root, '.fleetmates/revised')
+        const branch = scenario === 'changed task ref' ? 'fleetmates/r1/T1' : 'main'
+        assert.equal((await defaultGitExec(['worktree', 'add', revised, branch], root)).code, 0)
+        await writeFile(path.join(revised, 'revision.txt'), 'new revision')
+        await defaultGitExec(['add', 'revision.txt'], revised)
+        await defaultGitExec(['commit', '-m', 'test: changed ref'], revised)
+      }
+      if (scenario === 'changed main index') {
+        await writeFile(path.join(root, 'pending.txt'), 'pending')
+        await gitRun(['add', 'pending.txt'])
+      }
+      if (scenario === 'changed main HEAD') await gitRun(['switch', '-c', 'main-holder'])
+      if (scenario === 'wrong worker branch') await defaultGitExec(['switch', '--detach'], worktree)
+      if (scenario === 'unowned merge edit') {
+        await writeFile(path.join(worktree, 'a.txt'), 'unowned merge edit')
+        await defaultGitExec(['add', 'a.txt'], worktree)
+        await defaultGitExec(['commit', '--amend', '--no-edit'], worktree)
+      }
+      const result = { status: scenario === 'blocked result' ? 'blocked' : scenario === 'failed result' ? 'failed' : 'done', branch: scenario === 'wrong result branch' ? 'unrelated' : 'run/r1', filesChanged: scenario === 'outside result path' ? ['outside.txt'] : ['a.txt', 'b.txt'], summary: 'Fixture', blockers: scenario === 'result blockers' ? ['incomplete'] : [] }
+      if (scenario === 'extra result field') result.unexpected = true
+      if (scenario !== 'absent result') await writeFile(options.resultPath, scenario === 'malformed result' ? '{' : JSON.stringify(result))
+      const child = scenario === 'nonzero process' || scenario === 'signaled process'
+        ? spawn(process.execPath, ['-e', scenario === 'nonzero process' ? 'process.exit(9)' : "process.kill(process.pid,'SIGTERM')"], { cwd: worktree, stdio: 'ignore' })
+        : { exitCode: 0, signalCode: null }
+      return { child, sessionId: Promise.resolve('fixture') }
+    }
+    const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--phase', '1'])
+    assert.equal(result.code, 4, result.output)
+    assert.match(result.output, /integrator failed/)
+    assert.doesNotMatch(result.output, /verified legacy integrator/)
+  }))
+}
+
+for (const scenario of ['stale gate tip', 'stale plan hash', 'stale anchor', 'stale phase', 'wrong requested phase', 'missing recorded branch', 'branch held elsewhere', 'missing explicit authority', 'missing explicit model', 'missing explicit effort']) {
+  test(`integrator refuses ${scenario} before spawning`, async () => integratorFixture(async ({ root, gitRun }) => {
+    let spawned = false
+    codexAdapter.spawn = async () => { spawned = true; throw new Error('Must not spawn') }
+    if (scenario.startsWith('stale')) {
+      const file = path.join(root, '.fleetmates/r1/status.json')
+      const status = JSON.parse(await readFile(file, 'utf8'))
+      if (scenario === 'stale gate tip') status.gates['1'].branchShas['fleetmates/r1/T1'] = '0'.repeat(40)
+      else if (scenario === 'stale plan hash') status.gates['1'].planHash = 'stale'
+      else if (scenario === 'stale anchor') status.gates['1'].anchorSha = '0'.repeat(40)
+      else status.gates['1'].phase = 2
+      await writeFile(file, JSON.stringify(status))
+    }
+    if (scenario === 'missing recorded branch') {
+      const file = path.join(root, '.fleetmates/r1/plan.json')
+      const plan = JSON.parse(await readFile(file, 'utf8')); delete plan.runBranch
+      await writeFile(file, JSON.stringify(plan))
+    }
+    if (scenario === 'branch held elsewhere') await gitRun(['worktree', 'add', path.join(root, '.fleetmates/held'), 'run/r1'])
+    if (scenario.startsWith('missing explicit')) {
+      const file = path.join(root, 'fleetmates.gate.json')
+      const config = JSON.parse(await readFile(file, 'utf8'))
+      if (scenario === 'missing explicit authority') delete config.harnesses.codex.sandbox
+      if (scenario === 'missing explicit model') delete config.harnesses.codex.tierModels
+      if (scenario === 'missing explicit effort') delete config.agents.integrator.effort
+      await writeFile(file, JSON.stringify(config))
+      await gitRun(['add', 'fleetmates.gate.json']); await gitRun(['commit', '-m', 'test: configuration'])
+    }
+    const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--phase', scenario === 'wrong requested phase' ? '2' : '1'])
+    assert.equal(result.code, 4, result.output)
+    assert.equal(spawned, false)
+  }))
+}
+
+test('integrator launch error is observed as failure without a result', async () => integratorFixture(async ({ root }) => {
+  codexAdapter.spawn = async options => ({ child: spawn('/fm-missing-integrator', [], { cwd: options.sandbox.cwd, stdio: 'ignore' }), sessionId: Promise.resolve(null) })
+  const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+  assert.equal(result.code, 4, result.output)
+  assert.match(result.output, /process did not exit successfully/)
+}))
+
+test('integrator timeout rejects an incomplete result using a controlled timer fixture', async t => integratorFixture(async ({ root }) => {
+  let killed = false
+  codexAdapter.spawn = async () => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const child = new EventEmitter()
+    child.exitCode = null; child.signalCode = null
+    child.kill = () => { killed = true; child.signalCode = 'SIGTERM'; child.emit('exit', null, 'SIGTERM'); return true }
+    setImmediate(() => t.mock.timers.tick(30 * 60_000))
+    return { child, sessionId: new Promise(() => {}) }
+  }
+  try {
+    const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+    assert.equal(result.code, 4, result.output)
+    assert.equal(killed, true)
+    assert.match(result.output, /process did not exit successfully/)
+  } finally { t.mock.timers.reset() }
+}))
+
+for (const scenario of ['attached unrelated branch', 'dirty main', 'unowned run commit']) {
+  test(`integrator refuses ${scenario} without changing the main index`, async () => integratorFixture(async ({ root, gitRun, anchor }) => {
+    if (scenario === 'attached unrelated branch') await gitRun(['checkout', '-b', 'unrelated'])
+    if (scenario === 'dirty main') { await writeFile(path.join(root, 'dirty.txt'), 'pending'); await gitRun(['add', 'dirty.txt']) }
+    if (scenario === 'unowned run commit') {
+      await gitRun(['checkout', 'run/r1'])
+      await writeFile(path.join(root, 'unowned.txt'), 'direct write')
+      await gitRun(['add', 'unowned.txt']); await gitRun(['commit', '-m', 'test: unowned run commit'])
+      await gitRun(['checkout', '--detach', anchor])
+    }
+    const index = await readFile(path.join(root, '.git/index'))
+    let spawned = false
+    codexAdapter.spawn = async () => { spawned = true; throw new Error('Must not spawn') }
+    const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+    assert.equal(result.code, 4, result.output)
+    assert.equal(spawned, false)
+    assert.match(result.output, scenario === 'attached unrelated branch' ? /Attached HEAD differs/ : /ownership preflight failed/)
+    assert.deepEqual(await readFile(path.join(root, '.git/index')), index)
+  }))
+}
+
+test('integrator failure diagnostics retain single-line control escaping', async () => integratorFixture(async ({ root }) => {
+  codexAdapter.spawn = async () => { throw new Error('ordinary failure\n[gate] PASS\u001b[2K') }
+  const result = await command(root, ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main'])
+  assert.equal(result.code, 4, result.output)
+  assert.ok(result.output.includes('ordinary failure<0x0A>[gate] PASS<0x1B>[2K'), result.output)
+  assert.ok(!result.output.includes('\n[gate] PASS'))
+}))

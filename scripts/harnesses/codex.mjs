@@ -319,28 +319,45 @@ if(launchError)process.exitCode=1;`
 const trampoline = `
 const fs=require('node:fs'),cp=require('node:child_process'),os=require('node:os');
 const r=JSON.parse(process.argv[1]);process.chdir(r.cwd);
-const child=cp.spawnSync('/bin/sh',[
+const child=cp.spawn('/bin/sh',[
   '-c','{ "$@"; status=$?; printf "%s\\n" "$status" >&4; } 2>&1 | /bin/cat',
   'fm-verification',process.execPath,'-e',${JSON.stringify(pipeRunner)},JSON.stringify(r)
-],{env:r.env,maxBuffer:r.maxOutputBytes+2048,stdio:['ignore','pipe','pipe','pipe','pipe']});
-const output=Buffer.concat([child.output?.[1]||Buffer.alloc(0),child.output?.[2]||Buffer.alloc(0)]);
-const runnerStatus=(child.output?.[4]||Buffer.alloc(0)).toString();
-const runnerCode=/^\\d{1,3}\\n$/.test(runnerStatus)?Number(runnerStatus.trim()):null;
-let receipt;try{receipt=JSON.parse((child.output?.[3]||Buffer.alloc(0)).toString())}catch{}
-const completed=child.status===0&&child.signal===null&&!child.error&&runnerCode===0
-  &&receipt?.completed===true&&receipt.launchError===null;
-const limited=child.error?.code==='ENOBUFS';
-fs.writeSync(1,r.marker+JSON.stringify({
-  code:completed?receipt.code:(child.signal?128+os.constants.signals[child.signal]:1),
-  signal:completed?receipt.signal:child.signal,completed,runnerCode,
-  pipelineCode:child.status,pipelineSignal:child.signal,
-  launchError:receipt?.launchError??null,runtimeError:child.error?.code??null,
-  output:output.subarray(0,r.maxOutputBytes).toString('base64'),
-  outputLimited:limited||output.length>r.maxOutputBytes
-})+'\\n');`
+],{env:r.env,detached:true,stdio:['ignore','pipe','pipe','pipe','pipe']});
+let output=Buffer.alloc(0),outputBytes=0,runnerStatus='',observation='',timedOut=false,limited=false,runtimeError=null,finished=false,cleanup;
+const stop=()=>{try{process.kill(-child.pid,'SIGKILL')}catch(error){if(error.code!=='ESRCH')runtimeError=error.code}cleanup??=setTimeout(finish,250)};
+const timer=setTimeout(()=>{timedOut=true;runtimeError='ETIMEDOUT';stop()},r.timeoutMs);
+function finish(){
+  if(finished)return;finished=true;clearTimeout(timer);clearTimeout(cleanup);
+  for(const stream of child.stdio)stream?.destroy();child.unref();
+  const runnerCode=/^\\d{1,3}\\n$/.test(runnerStatus)?Number(runnerStatus.trim()):null;
+  let receipt;try{receipt=JSON.parse(observation)}catch{}
+  const completed=child.exitCode===0&&child.signalCode===null&&!runtimeError&&!limited&&!timedOut&&runnerCode===0
+    &&receipt?.completed===true&&receipt.launchError===null;
+  fs.writeSync(1,r.marker+JSON.stringify({
+    code:completed?receipt.code:(child.signalCode?128+os.constants.signals[child.signalCode]:1),
+    signal:completed?receipt.signal:child.signalCode,completed,runnerCode,timedOut,
+    pipelineCode:child.exitCode>=0?child.exitCode:null,pipelineSignal:child.signalCode,
+    launchError:receipt?.launchError??null,runtimeError,
+    output:output.toString('base64'),outputLimited:limited
+  })+'\\n');
+}
+for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>{
+  if(finished)return;const remaining=r.maxOutputBytes-output.length;
+  output=Buffer.concat([output,chunk.subarray(0,remaining)]);
+  outputBytes+=chunk.length;
+  if(outputBytes>r.maxOutputBytes)limited=true;
+  if(outputBytes>r.maxOutputBytes+2048){runtimeError='ENOBUFS';stop()}
+});
+for(const [fd,append]of [[3,chunk=>observation+=chunk],[4,chunk=>runnerStatus+=chunk]])child.stdio[fd].on('data',chunk=>{
+  if(finished)return;
+  if(chunk.length+(fd===3?observation.length:runnerStatus.length)>2048){runtimeError='ENOBUFS';limited=true;stop();return}
+  append(chunk.toString());
+});
+child.once('error',error=>{runtimeError=error.code;finish()});
+child.once('close',finish);`
 
 
-export function buildVerificationInvocation({ executable, broker, home, worker, temp, write, command, argv = null, env = process.env, protectedRoots = [], marker = 'FM_COMMAND', maxOutputBytes = 32768 }) {
+export function buildVerificationInvocation({ executable, broker, home, worker, temp, write, command, argv = null, env = process.env, protectedRoots = [], marker = 'FM_COMMAND', maxOutputBytes = 32768, timeoutMs = 5000 }) {
   const safePath = (env.PATH ?? '').split(path.delimiter).filter(dir => path.isAbsolute(dir) && !inside(worker, dir)).join(path.delimiter)
   const clean = { PATH: safePath, HOME: home, CODEX_HOME: home, LC_ALL: 'C.UTF-8', TMPDIR: temp,
     XDG_CACHE_HOME: temp, NPM_CONFIG_CACHE: path.join(temp, 'npm'), GIT_CONFIG_NOSYSTEM: '1',
@@ -349,7 +366,7 @@ export function buildVerificationInvocation({ executable, broker, home, worker, 
   const config = `default_permissions="worker"\n[permissions.worker]\nextends=":read-only"\n[permissions.worker.workspace_roots]\n${JSON.stringify(worker)}=${write}\n[permissions.worker.filesystem]\n${JSON.stringify(worker)}=${JSON.stringify(write ? 'write' : 'read')}\n":tmpdir"="read"\n":slash_tmp"="read"\n`
     + filesystem.map(file => `${JSON.stringify(file)}="read"\n`).join('') + '[permissions.worker.network]\nenabled=false\n'
   const payload = { cwd: worker, command: argv === null ? '/bin/sh' : command,
-    argv: argv === null ? ['-c', command] : argv, env: clean, marker, maxOutputBytes }
+    argv: argv === null ? ['-c', command] : argv, env: clean, marker, maxOutputBytes, timeoutMs }
   return { command: '/usr/bin/env', cwd: broker, config, argv: ['-i', `PATH=${safePath}`, `HOME=${home}`, `CODEX_HOME=${home}`, 'TMPDIR=/tmp', 'LC_ALL=C.UTF-8',
     executable, 'sandbox', '-P', 'worker', '-C', broker, '--', process.execPath, '-e', trampoline, JSON.stringify(payload)] }
 }
@@ -391,11 +408,11 @@ export async function createVerificationExecutor({ sandbox, root = sandbox.cwd, 
       }
       const maxOutputBytes = Math.min(requestedBytes, 32768)
       const marker = `FM_COMMAND_${randomBytes(16).toString('hex')} `
-      const request = buildVerificationInvocation({ executable, broker, home, worker, temp, write: required.write, command, argv: options.argv ?? null, env, protectedRoots, marker, maxOutputBytes })
+      const request = buildVerificationInvocation({ executable, broker, home, worker, temp, write: required.write, command, argv: options.argv ?? null, env, protectedRoots, marker, maxOutputBytes, timeoutMs: Math.min(timeoutMs, 3600000) })
       const result = await run(request.command, request.cwd, { ...options, onOutput: null, env: null, argv: request.argv,
-        timeoutMs: Math.min(timeoutMs, 3600000), graceMs: 250,
+        timeoutMs: Math.min(timeoutMs, 3600000) + 1000, graceMs: 250,
         maxOutputBytes: 65536, maxCaptureBytes: 65536 })
-      if (result.code !== 0 || result.timedOut || result.outputLimited) return result
+      if (result.code !== 0 || result.timedOut || result.outputLimited) return { ...result, code: result.code || 1, completed: false }
       const line = result.output?.split('\n').find(line => line.startsWith(marker))
       let receipt
       try { receipt = JSON.parse(line.slice(marker.length)) } catch {}
@@ -410,10 +427,10 @@ export async function createVerificationExecutor({ sandbox, root = sandbox.cwd, 
       if (output.length > maxOutputBytes || output.toString('base64') !== receipt.output) {
         return { code: 1, output: 'Native verification command receipt is invalid', completed: false }
       }
-      const completed = receipt.completed === true && receipt.runnerCode === 0 && receipt.pipelineCode === 0
+      const completed = receipt.completed === true && receipt.timedOut !== true && receipt.runnerCode === 0 && receipt.pipelineCode === 0
         && receipt.pipelineSignal === null && receipt.launchError === null && receipt.runtimeError === null
       return { code: completed ? receipt.code : (receipt.code || 1), output: output.toString(), outputLimited: receipt.outputLimited,
-        completed, runnerCode: receipt.runnerCode ?? null, pipelineCode: receipt.pipelineCode ?? null,
+        completed, timedOut: receipt.timedOut === true, runnerCode: receipt.runnerCode ?? null, pipelineCode: receipt.pipelineCode ?? null,
         pipelineSignal: receipt.pipelineSignal ?? null, launchError: receipt.launchError ?? null, runtimeError: receipt.runtimeError ?? null,
         ...(receipt.signal ? { signal: receipt.signal } : {}) }
     }
