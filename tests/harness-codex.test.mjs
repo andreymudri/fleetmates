@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile, readFile, chmod, stat } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, readFile, chmod, stat, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
@@ -63,6 +63,8 @@ process.stdin.on('data', (chunk) => { buffered += chunk })
 process.stdin.on('end', () => {
   if (resultPath) writeFileSync(\`\${resultPath}.stdin.txt\`, buffered)
   process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: threadId }) + '\\n')
+  // FAKE_CODEX_FLOOD: never finishes and never writes a result, only an unbounded stream.
+  if (process.env.FAKE_CODEX_FLOOD === '1') { const target = process.env.FAKE_CODEX_FLOOD_STREAM === 'stderr' ? process.stderr : process.stdout; setInterval(() => target.write('x'.repeat(Number(process.env.FAKE_CODEX_FLOOD_CHUNK || 65536))), 1); return }
   for (let i = 0; i < turns; i++) {
     process.stdout.write(JSON.stringify({
       type: 'turn.completed',
@@ -1108,4 +1110,99 @@ test('ordinary pipeline timeout stops its own delayed child fixture', { skip: pr
     await new Promise(resolve => setTimeout(resolve, 900))
     await assert.rejects(stat(late), { code: 'ENOENT' })
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+// --- explicit model/effort and bounded capture (execution recovery T8) ------------------------
+
+// A model or effort reaches codex as its own argv element, `-m <model>` and
+// `-c model_reasoning_effort=<effort>`. Anything that is not one bounded token is refused before a
+// process exists: a leading dash reads as a flag, and a comma or quote would change what the `-c`
+// value means. The accepted spellings still carry `--disable hooks`.
+test('codex argv builders refuse model and effort values that are not single bounded tokens and keep hooks disabled', () => {
+  const sandbox = { cwd: '/fixture/worker', meta: { mode: 'full' } }
+  const base = { sandbox, schemaPath: '/fixture/s.json', resultPath: '/fixture/r.json', sessionId: 'fixture-session' }
+  for (const build of [buildSpawnArgv, buildResumeArgv]) {
+    for (const model of ['-m', '--dangerously-bypass-approvals-and-sandbox', 'gpt 5', 'gpt"5', 'a\nb', 'x'.repeat(200)]) {
+      assert.throws(() => build({ ...base, model }), /model/i, `${build.name} accepted model ${JSON.stringify(model)}`)
+    }
+    for (const effort of ['high,sandbox_mode="danger-full-access"', '-c', 'HIGH', 'a b', 'x'.repeat(40)]) {
+      assert.throws(() => build({ ...base, effort }), /effort/i, `${build.name} accepted effort ${JSON.stringify(effort)}`)
+    }
+    const argv = build({ ...base, model: 'gpt-5.1-codex', effort: 'xhigh' })
+    assert.ok(hasPair(argv, '--disable', 'hooks'))
+    assert.ok(hasPair(argv, '-m', 'gpt-5.1-codex'))
+    assert.ok(hasPair(argv, '-c', 'model_reasoning_effort=xhigh'))
+  }
+})
+
+test('spawnCodex stops an oversized stream, kills the process and reports the capture as limited', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'tm-codex-flood-'))
+  try {
+    // 1000-byte chunks, so the bound is crossed inside the stream rather than by one huge chunk.
+    await withEnv({ FAKE_CODEX_FLOOD: '1', FAKE_CODEX_FLOOD_CHUNK: '1000' }, async () => {
+      const streamPath = path.join(cwd, 'T1.jsonl')
+      const handle = await spawnCodex({
+        sandbox: { cwd, meta: { mode: 'full' } }, prompt: 'flood', maxStreamBytes: 4096,
+        schemaPath: path.join(cwd, 'T1.schema.json'), resultPath: path.join(cwd, 'T1.json'), streamPath, errPath: path.join(cwd, 'T1.err'),
+      })
+      const exited = once(handle.child, 'exit')
+      assert.equal(await handle.sessionId, 'thread-fixture-1')
+      const [, signal] = await exited
+      await handle.flushed
+      assert.equal(signal, 'SIGKILL')
+      assert.equal(handle.outputLimited, true)
+      const size = (await stat(streamPath)).size
+      assert.equal(size, 4096, 'the stream file holds exactly what fit within its bound')
+      assert.equal(await readResult({ resultPath: path.join(cwd, 'T1.json') }), null)
+    })
+    // stderr draws on the same budget: a flood there stops the process just the same.
+    await withEnv({ FAKE_CODEX_FLOOD: '1', FAKE_CODEX_FLOOD_CHUNK: '1000', FAKE_CODEX_FLOOD_STREAM: 'stderr' }, async () => {
+      const streamPath = path.join(cwd, 'T2.jsonl'), errPath = path.join(cwd, 'T2.err')
+      const handle = await spawnCodex({
+        sandbox: { cwd, meta: { mode: 'full' } }, prompt: 'flood', maxStreamBytes: 4096,
+        schemaPath: path.join(cwd, 'T2.schema.json'), resultPath: path.join(cwd, 'T2.json'), streamPath, errPath,
+      })
+      const exited = once(handle.child, 'exit')
+      await handle.sessionId
+      const [, signal] = await exited
+      await handle.flushed
+      assert.equal(signal, 'SIGKILL')
+      assert.equal(handle.outputLimited, true)
+      assert.equal((await stat(streamPath)).size + (await stat(errPath)).size, 4096, 'stdout and stderr share one budget')
+    })
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('spawnCodex exposes a flushed promise and an unlimited capture for an ordinary run', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
+  const cwd = await mkdtemp(path.join(tmpdir(), 'tm-codex-flushed-'))
+  try {
+    const streamPath = path.join(cwd, 'T1.jsonl')
+    const handle = await spawnCodex({
+      sandbox: { cwd, meta: { mode: 'full' } }, prompt: 'ordinary',
+      schemaPath: path.join(cwd, 'T1.schema.json'), resultPath: path.join(cwd, 'T1.json'), streamPath, errPath: path.join(cwd, 'T1.err'),
+    })
+    const exited = once(handle.child, 'exit')
+    await handle.sessionId
+    await exited
+    assert.ok(handle.flushed instanceof Promise, 'codex handles must carry a flushed promise like cursor handles')
+    await handle.flushed
+    assert.equal(handle.outputLimited, false)
+    assert.match(await readFile(streamPath, 'utf8'), /turn\.completed/)
+  } finally { await rm(cwd, { recursive: true, force: true }) }
+})
+
+test('readResult refuses a result file larger than its bound rather than parsing it', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-codex-big-'))
+  try {
+    const resultPath = path.join(dir, 'T1.json')
+    const result = (summary) => JSON.stringify({ status: 'done', branch: 'fleetmates/r1/T1', filesChanged: [], summary, blockers: [] })
+    await writeFile(resultPath, result('x'.repeat(1024 * 1024)))
+    assert.equal(await readResult({ resultPath }), null)
+    await writeFile(resultPath, result('within bound'))
+    assert.equal((await readResult({ resultPath })).summary, 'within bound')
+    // Not followed through a symlink, even to a valid result.
+    const linked = path.join(dir, 'T2.json')
+    await symlink(resultPath, linked)
+    assert.equal(await readResult({ resultPath: linked }), null)
+  } finally { await rm(dir, { recursive: true, force: true }) }
 })
