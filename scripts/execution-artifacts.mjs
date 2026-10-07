@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { mkdir, open, lstat, realpath, opendir, link, unlink, rmdir, rename, rm } from 'node:fs/promises'
+import { mkdir, open, lstat, realpath, opendir, link, unlink, rename, rm } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { markerRef } from './workflow-lifecycle.mjs'
@@ -89,7 +89,7 @@ async function readBytes(file, reference, retention, sync = false) {
 async function inventory(dir) {
   const files = []
   for await (const entry of await opendir(dir)) {
-    if (entry.name === '.lock') continue
+    if (lockEntry(entry.name)) continue
     if (!/^[a-f0-9]{64}\.bin$/.test(entry.name)) throw new Error('Incomplete or unrecognized artifact storage')
     if (files.length >= MAX_FILES) throw new Error('Artifact count bound exceeded')
     const file = path.join(dir, entry.name), info = await lstat(file)
@@ -103,79 +103,126 @@ async function inventory(dir) {
 // directory `<dir>/.lock` holding `pid`, the decimal pid of the process that created it.
 export const LOCK_WAIT_MS = 5000, STALE_TEMPORARY_MS = 60000
 const LOCK_BACKOFF_MS = { first: 10, max: 250 }
-const TEMPORARY = /^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/
-const REMOVED_LOCK = /^\.lock\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.stale$/
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const TEMPORARY = new RegExp(`^\\.${UUID}\\.tmp$`)
+// `.lock.<pid>.<uuid>.new` is a lock process <pid> is creating and `.lock.<pid>.<uuid>.stale` one
+// it is deleting. Readers skip them; a writer holding the lock removes those whose pid is dead.
+const LOCK_ENTRY = new RegExp(`^\\.lock\\.([1-9][0-9]{0,9})\\.${UUID}\\.(new|stale)$`)
+export const lockEntry = name => name === '.lock' || LOCK_ENTRY.test(name)
+const MAX_RECLAIM_CHAIN = 8
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const lockEntryName = kind => `.lock.${process.pid}.${randomUUID()}.${kind}`
 function alive(pid) {
   try { process.kill(pid, 0); return true } catch (error) { return error.code === 'EPERM' }
+}
+async function readPid(file) {
+  let handle
+  try {
+    handle = await open(file, readFlags())
+    const buffer = Buffer.alloc(16), { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    const text = buffer.subarray(0, bytesRead).toString('latin1')
+    return /^[1-9][0-9]{0,9}\n$/.test(text) ? Number(text.trim()) : null
+  } catch (error) { if (['ENOENT', 'ELOOP', 'EISDIR'].includes(error.code)) return null; throw error }
+  finally { if (handle) await handle.close() }
+}
+async function writePid(file) {
+  const handle = await open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+  try { await handle.writeFile(`${process.pid}\n`) } finally { await handle.close() }
 }
 async function lockHolder(lock) {
   let info
   try { info = await lstat(lock) } catch (error) { if (error.code === 'ENOENT') return null; throw error }
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe storage lock')
-  let pid = null, handle
-  try {
-    handle = await open(path.join(lock, 'pid'), readFlags())
-    const buffer = Buffer.alloc(16), { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
-    const text = buffer.subarray(0, bytesRead).toString('latin1')
-    if (/^[1-9][0-9]{0,9}\n$/.test(text)) pid = Number(text.trim())
-  } catch (error) { if (!['ENOENT', 'ELOOP', 'EISDIR'].includes(error.code)) throw error }
-  finally { if (handle) await handle.close() }
-  return { pid, at: info.mtimeMs }
+  return { pid: await readPid(path.join(lock, 'pid')), at: info.mtimeMs, ino: info.ino }
 }
-// A holder whose pid is not alive is dead. A lock without a readable pid is a creator that has not
-// written it yet, so it is treated as held until it is older than STALE_TEMPORARY_MS.
+// A holder whose pid is not alive is dead. Locks are created with their pid already inside, so a
+// pid-less lock was left by a crashed or older writer; it is reclaimed once older than STALE_TEMPORARY_MS.
 function abandoned(holder) {
   if (holder.pid !== null) return alive(holder.pid) ? null : 'dead-lock-holder'
   return Date.now() - holder.at > STALE_TEMPORARY_MS ? 'abandoned-lock-without-pid' : null
 }
-async function removeAbandonedLock(dir, lock, holder) {
-  const moved = path.join(dir, `.lock.${randomUUID()}.stale`)
-  try { await rename(lock, moved) } catch (error) { if (error.code === 'ENOENT') return false; throw error }
-  const current = await lockHolder(moved)
-  if (current.pid !== holder.pid) { // another writer replaced the lock in between; hand it back
-    await rename(moved, lock).catch(() => {})
+// The lock appears with its pid already written: a staging directory holding `pid` is renamed into
+// place. A rename onto a non-empty directory fails, and every lock this code creates is non-empty.
+async function createLock(dir, lock) {
+  const staging = path.join(dir, lockEntryName('new'))
+  await mkdir(staging, { mode: 0o700 })
+  try {
+    await writePid(path.join(staging, 'pid'))
+    // An empty directory would be replaced by the rename, so an existing (pid-less) lock is left alone.
+    if (await lockHolder(lock)) return false
+    try { await rename(staging, lock); return true }
+    catch (error) { if (['EEXIST', 'ENOTEMPTY'].includes(error.code)) return false; throw error }
+  } finally { await rm(staging, { recursive: true, force: true }) }
+}
+// Creates `<lock>/<name>` holding this pid, atomically: false when the name already exists.
+async function claimToken(lock, name) {
+  const temporary = path.join(lock, `.${randomUUID()}.token`)
+  await writePid(temporary)
+  try { await link(temporary, path.join(lock, name)); return true }
+  catch (error) { if (error.code === 'EEXIST') return false; throw error }
+  finally { await unlink(temporary).catch(() => {}) }
+}
+// One reclaimer per dead lock instance: the token `reclaim.<dead pid>` is created inside that
+// instance, so only its holder may remove it. The holder then re-reads the lock and removes it only
+// if it is still the same directory with the same dead holder; anything else is left untouched.
+// A token whose own holder died is superseded by `<token>.<its pid>`, up to MAX_RECLAIM_CHAIN links.
+async function reclaimLock(dir, lock, holder) {
+  let name = `reclaim.${holder.pid ?? 'none'}`
+  try {
+    for (let step = 0; step < MAX_RECLAIM_CHAIN; step++) {
+      if (!await claimToken(lock, name)) {
+        const owner = await readPid(path.join(lock, name))
+        if (owner === null || alive(owner)) return false
+        name += '.' + owner
+        continue
+      }
+      const current = await lockHolder(lock)
+      if (!current || current.ino !== holder.ino || current.pid !== holder.pid || current.pid !== null && alive(current.pid)) {
+        await unlink(path.join(lock, name)).catch(() => {})
+        return false
+      }
+      const moved = path.join(dir, lockEntryName('stale'))
+      await rename(lock, moved)
+      await rm(moved, { recursive: true, force: true })
+      return true
+    }
     return false
-  }
-  await rm(moved, { recursive: true, force: true })
-  return true
+  } catch (error) { if (error.code === 'ENOENT') return false; throw error } // the lock went away meanwhile
 }
 export async function withStorageLock(dir, busy, action) {
   const lock = path.join(dir, '.lock'), reconciled = [], deadline = Date.now() + LOCK_WAIT_MS
   for (let delay = LOCK_BACKOFF_MS.first; ;) {
-    try {
-      await mkdir(lock, { mode: 0o700 })
-      try {
-        const handle = await open(path.join(lock, 'pid'), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-        try { await handle.writeFile(`${process.pid}\n`) } finally { await handle.close() }
-      } catch (error) { await rm(lock, { recursive: true, force: true }); throw error }
-      break
-    } catch (error) { if (error.code !== 'EEXIST') throw error }
+    if (await createLock(dir, lock)) break
     const holder = await lockHolder(lock)
-    if (holder) {
-      const reason = abandoned(holder)
-      if (reason && await removeAbandonedLock(dir, lock, holder)) { reconciled.push({ path: '.lock', reason }); continue }
-      if (!reason) {
-        const left = deadline - Date.now()
-        if (left <= 0) throw new Error(busy)
-        await sleep(Math.min(delay, left))
-        delay = Math.min(delay * 2, LOCK_BACKOFF_MS.max)
-      }
-    }
+    if (!holder) continue
+    const reason = abandoned(holder)
+    if (reason && await reclaimLock(dir, lock, holder)) { reconciled.push({ path: '.lock', reason }); continue }
+    const left = deadline - Date.now()
+    if (left <= 0) throw new Error(busy)
+    await sleep(Math.min(delay, left))
+    delay = Math.min(delay * 2, LOCK_BACKOFF_MS.max)
   }
   try { return await action(reconciled) }
-  finally { await unlink(path.join(lock, 'pid')); await rmdir(lock) }
+  finally {
+    const moved = path.join(dir, lockEntryName('stale'))
+    await rename(lock, moved)
+    await rm(moved, { recursive: true, force: true })
+  }
 }
 // Called while holding the storage lock, so no live writer owns a temporary file; the age
 // threshold still leaves young ones in place for the caller's storage check to refuse.
 export async function reconcileTemporaries(dir, reconciled) {
   const found = []
-  for await (const entry of await opendir(dir)) if (TEMPORARY.test(entry.name) || REMOVED_LOCK.test(entry.name)) found.push(entry.name)
+  for await (const entry of await opendir(dir)) if (TEMPORARY.test(entry.name) || LOCK_ENTRY.test(entry.name)) found.push(entry.name)
   for (const entry of found.sort()) {
-    const file = path.join(dir, entry), info = await lstat(file)
-    if (REMOVED_LOCK.test(entry)) {
-      if (!info.isDirectory()) continue
-      await rm(file, { recursive: true, force: true }); reconciled.push({ path: entry, reason: 'interrupted-lock-removal' })
+    const file = path.join(dir, entry)
+    let info
+    try { info = await lstat(file) } catch (error) { if (error.code === 'ENOENT') continue; throw error }
+    const owner = LOCK_ENTRY.exec(entry)
+    if (owner) {
+      if (!info.isDirectory() || alive(Number(owner[1]))) continue
+      await rm(file, { recursive: true, force: true })
+      reconciled.push({ path: entry, reason: owner[2] === 'new' ? 'interrupted-lock-creation' : 'interrupted-lock-removal' })
     } else if (info.isFile() && Date.now() - info.mtimeMs > STALE_TEMPORARY_MS) {
       await unlink(file); reconciled.push({ path: entry, reason: 'stale-temporary' })
     }
@@ -245,7 +292,7 @@ export async function pruneExecutionArtifacts({ common, runId, retention: raw, l
   const dir = await storage(common, runId, false, true)
   if (!dir) {
     return { removed: [], kept: [], bytes: 0, reconciled: [], unresolvedReferences: [...live.values()], limitsSatisfied: true,
-      retentionExceeded: { artifactBytes: false, runBytes: false, age: false } }
+      retentionExceeded: { artifactBytes: false, runBytes: false, age: false, count: false } }
   }
   return withStorageLock(dir, BUSY, async reconciled => {
     await reconcileTemporaries(dir, reconciled)
@@ -256,16 +303,20 @@ export async function pruneExecutionArtifacts({ common, runId, retention: raw, l
     }
     let bytes = files.reduce((sum, file) => sum + file.size, 0)
     const remaining = [], removed = []
-    // Oldest first: non-live content goes when it is past the age or artifact bound, or while the
-    // run is over its byte bound. Live content is never removed.
+    // Oldest first, live content is never removed. With an empty live set all content is non-live
+    // and goes. Otherwise non-live content goes when it is past the age or artifact bound, while the
+    // run is over its byte bound, or while the store is full, so a later retain has room.
+    let count = files.length
+    const everything = live.size === 0
     for (const file of files) {
-      if (!live.has(file.name) && (at - file.at > retention.maxAgeMs || file.size > retention.maxArtifactBytes || bytes > retention.maxRunBytes)) {
-        await unlink(file.file); bytes -= file.size; removed.push({ name: file.name, bytes: file.size })
+      if (!live.has(file.name) && (everything || count >= MAX_FILES || at - file.at > retention.maxAgeMs
+          || file.size > retention.maxArtifactBytes || bytes > retention.maxRunBytes)) {
+        await unlink(file.file); bytes -= file.size; count--; removed.push({ name: file.name, bytes: file.size })
       } else remaining.push(file)
     }
     if (removed.length) await syncDirectory(dir)
     const retentionExceeded = { artifactBytes: remaining.some(file => file.size > retention.maxArtifactBytes), runBytes: bytes > retention.maxRunBytes,
-      age: remaining.some(file => at - file.at > retention.maxAgeMs) }
+      age: remaining.some(file => at - file.at > retention.maxAgeMs), count: remaining.length >= MAX_FILES }
     return { removed, kept: remaining.map(file => ({ name: file.name, bytes: file.size, live: live.has(file.name) })), bytes, reconciled, unresolvedReferences, limitsSatisfied: !Object.values(retentionExceeded).some(Boolean), retentionExceeded }
   })
 }

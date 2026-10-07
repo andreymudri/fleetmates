@@ -5,7 +5,7 @@ import path from 'node:path'
 import { evidenceIdentity } from './workflow-evidence.mjs'
 import { strictExecutionIdentity } from './completion-obligations.mjs'
 import { markerRef } from './workflow-lifecycle.mjs'
-import { RETENTION_LIMITS, withStorageLock, reconcileTemporaries } from './execution-artifacts.mjs'
+import { RETENTION_LIMITS, withStorageLock, reconcileTemporaries, lockEntry } from './execution-artifacts.mjs'
 const digest = value => createHash('sha256').update(value).digest('hex')
 const LIMIT = 1024 * 1024, RECORD_LIMIT = 8192
 const plain = value => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= 256 && !/[\p{C}\p{Zl}\p{Zp}]/u.test(value)
@@ -176,7 +176,7 @@ export async function readExecutionEvents(common, runId) {
   const events = [], ids = new Set()
   let bytes = 0
   for await (const entry of dir) {
-    if (entry.name === '.lock') continue
+    if (lockEntry(entry.name)) continue
     if (!/^[a-f0-9]{64}\.json$/.test(entry.name)) throw new Error('Incomplete execution journal storage')
     const { event, bytes: size } = await readRecord(path.join(directory, entry.name))
     bytes += size
