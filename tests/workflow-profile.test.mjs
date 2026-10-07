@@ -63,3 +63,22 @@ test('workflow profile CLI reads exact committed plan and policy and executes no
   assert.equal(await runCli(['workflow-profile', '--file', file, '--root', root], io), 2)
   assert.match(JSON.parse(output.at(-1)).error, /identities/)
 })
+test('host-bounded expansion replaces generative integration, names the collect-reviews results path and carries required contracts', () => {
+  const legacy = expandWorkflowProfile(input)
+  assert.equal(legacy.steps.find(s => s.id === 'integrate-1').argv[2], 'dispatch-integrator')
+  const profile = expandWorkflowProfile({ ...input, integration: 'host-bounded', contracts: { environment: 'env.json', rolePolicy: 'roles.json' } })
+  const integrate = profile.steps.find(s => s.id === 'integrate-1')
+  assert.equal(integrate.kind, 'host-integration'); assert.equal(integrate.mode, 'host-bounded'); assert.equal(integrate.argv, undefined)
+  for (const id of ['implement-1', 'review-1']) assert.deepEqual(profile.steps.find(s => s.id === id).argv.slice(-4), ['--environment', 'env.json', '--role-policy', 'roles.json'])
+  const collect = profile.steps.find(s => s.id === 'collect-1'), gate = profile.steps.find(s => s.id === 'gate-1')
+  assert.equal(collect.resultsPath, '.fleetmates/r1/reviews/results-1.json'); assert.equal(collect.resultsFrom, 'success-write-line')
+  assert.equal(collect.stdoutArtifact, undefined)
+  assert.deepEqual(gate.argv.slice(-2), ['--results', collect.resultsPath])
+  assert.deepEqual(profile.steps.find(s => s.id === 'finish').argv.slice(-2), ['--results', '.fleetmates/r1/reviews/finish-results.json'], 'finish needs the collected reviews or it leaves the agent check pending')
+  assert.ok(!legacy.steps.find(s => s.id === 'finish').argv.includes('--results'))
+  assert.notEqual(profile.profileHash, legacy.profileHash)
+  assert.throws(() => expandWorkflowProfile({ ...input, integration: 'generative' }), /integration mode/)
+  for (const contracts of [{ environment: '/abs/env.json', rolePolicy: 'roles.json' }, { environment: 'env.json' }, { environment: '../env.json', rolePolicy: 'roles.json' }, { environment: 'env.json', rolePolicy: '--exec' }]) {
+    assert.throws(() => expandWorkflowProfile({ ...input, contracts }), /contracts/)
+  }
+})
