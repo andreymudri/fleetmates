@@ -221,3 +221,25 @@ test('recorded completed effects reject a fresh attempt before persistence or ac
 test('locally resolved completed effects reject a fresh attempt before persistence or action', async t => {
   await assertCompletedEffectBlocksAction(t, true)
 })
+
+async function assertPrivateDirectoryRequired(t, scope) {
+  const { mkdir, chmod } = await import('node:fs/promises')
+  const journal = await import('../scripts/execution-journal.mjs')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'private-journal-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  const start = strictEvent('private-required', 'step-started')
+  const directory = await journal.executionDirectory(common, start.runId)
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  await chmod(scope === 'parent' ? path.dirname(directory) : directory, 0o755)
+  let actions = 0
+  await assert.rejects(journal.runAfterExecutionStart({ common, event: start,
+    action: () => { actions++ } }), /Unsafe execution directory/)
+  assert.equal(actions, 0)
+  assert.equal((await journal.readExecutionEvents(common, start.runId)).some(e => e.id === start.id), false)
+}
+test('non-private journal parent refuses start persistence and action', async t => {
+  await assertPrivateDirectoryRequired(t, 'parent')
+})
+test('non-private run journal refuses start persistence and action', async t => {
+  await assertPrivateDirectoryRequired(t, 'run')
+})

@@ -12,12 +12,17 @@ import { executionDirectory } from '../scripts/execution-journal.mjs'
 import * as recovery from '../scripts/execution-recovery.mjs'
 const hash = value => createHash('sha256').update(value).digest('hex')
 const retention = { maxArtifactBytes: 1024, maxRunBytes: 4096, maxAgeMs: 86400000 }
-async function fixture(t, { effect, complete = true, legacy = false } = {}) {
+async function fixture(t, { effect, complete = true, legacy = false, fileContent = 'one', trackedSymlink = false, prepare } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'recovery-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   git(['init', '-b', 'main'], root)
   git(['config', 'user.name', 'Test'], root); git(['config', 'user.email', 'test@example.com'], root)
-  await writeFile(path.join(root, 'file'), 'one')
+  await writeFile(path.join(root, 'file'), fileContent)
+  if (trackedSymlink) {
+    const { symlink } = await import('node:fs/promises')
+    await symlink('file', path.join(root, 'link'))
+  }
+  if (prepare) await prepare(root)
   git(['add', '.'], root); git(['commit', '-m', 'baseline'], root)
   const common = discover(root).common, runId = 'r1', commit = git(['rev-parse', 'HEAD'], root)
   const inputs = { commit, ...Object.fromEntries(['plan', 'manifest', 'context', 'environment', 'verifier'].map(k => [k, hash(k)])) }
@@ -324,4 +329,129 @@ test('dirty tracked checkout content blocks reuse of otherwise current evidence'
   const result = await attempt(f.request)
   assert.equal(result.state, 'checkout-unavailable')
   assert.equal(result.reuse, false)
+})
+
+for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+  test('tracked checkout bytes are verified despite ' + flag, async t => {
+    const { readFile } = await import('node:fs/promises')
+    const f = await fixture(t)
+    git(['update-index', flag, 'file'], f.root)
+    const indexFile = path.join(f.request.common, 'index')
+    const before = await readFile(indexFile), refs = git(['show-ref'], f.root)
+    const clean = await attempt(f.request)
+    assert.equal(clean.state, 'ready')
+    assert.equal(clean.reuse, true)
+    assert.deepEqual(await readFile(indexFile), before)
+    assert.equal(git(['show-ref'], f.root), refs)
+    await writeFile(path.join(f.root, 'file'), 'different executable inputs')
+    assert.equal(git(['status', '--porcelain', '--untracked-files=no'], f.root), '')
+    const changed = await attempt(f.request)
+    assert.equal(changed.state, 'checkout-unavailable')
+    assert.equal(changed.reuse, false)
+    assert.deepEqual(await readFile(indexFile), before)
+    assert.equal(git(['show-ref'], f.root), refs)
+  })
+}
+
+test('checkout verification does not execute configured clean filters or accept normalized changed bytes', async t => {
+  const { access } = await import('node:fs/promises')
+  const f = await fixture(t)
+  await writeFile(path.join(f.request.common, 'info', 'attributes'), 'file filter=hide\n')
+  await writeFile(path.join(f.root, 'filter.mjs'), "import { writeFileSync } from 'node:fs'; writeFileSync('filter-ran', 'executed'); process.stdout.write('one'); process.stdin.resume()")
+  git(['config', 'filter.hide.clean', 'node filter.mjs'], f.root)
+  git(['config', 'filter.hide.required', 'true'], f.root)
+  await writeFile(path.join(f.root, 'file'), 'two')
+  const { utimes } = await import('node:fs/promises')
+  await utimes(path.join(f.root, 'file'), new Date(Date.now() + 2000), new Date(Date.now() + 2000))
+  const result = await attempt(f.request)
+  await assert.rejects(access(path.join(f.root, 'filter-ran')), { code: 'ENOENT' })
+  assert.equal(result.state, 'checkout-unavailable')
+  assert.equal(result.reuse, false)
+})
+test('checkout verification rejects changed bytes hidden by text normalization', async t => {
+  const f = await fixture(t, { fileContent: 'one\n' })
+  await writeFile(path.join(f.request.common, 'info', 'attributes'), 'file text\n')
+  git(['update-index', '--assume-unchanged', 'file'], f.root)
+  await writeFile(path.join(f.root, 'file'), 'one\r\n')
+  git(['config', 'core.autocrlf', 'true'], f.root)
+  const result = await attempt(f.request)
+  assert.equal(result.reuse, false)
+})
+
+for (const flag of ['--assume-unchanged', '--skip-worktree']) {
+  test('linked checkout bytes ignore ' + flag + ' while preserving its own index and refs', async t => {
+    const { readFile } = await import('node:fs/promises')
+    const f = await fixture(t), linked = path.join(f.root, 'linked')
+    git(['checkout', '-b', 'holding'], f.root)
+    git(['worktree', 'add', linked, 'main'], f.root)
+    git(['update-index', flag, 'file'], linked)
+    const indexFile = git(['rev-parse', '--path-format=absolute', '--git-path', 'index'], linked)
+    const index = await readFile(indexFile), refs = git(['show-ref'], f.root)
+    const request = { ...f.request, checkouts: { 'worker-1': linked } }
+    assert.equal((await attempt(request)).reuse, true)
+    assert.deepEqual(await readFile(indexFile), index)
+    await writeFile(path.join(linked, 'file'), 'different linked inputs')
+    assert.equal(git(['status', '--porcelain', '--untracked-files=no'], linked), '')
+    assert.equal((await attempt(request)).state, 'checkout-unavailable')
+    assert.deepEqual(await readFile(indexFile), index)
+    assert.equal(git(['show-ref'], f.root), refs)
+  })
+}
+test('tracked symlinks are checked as link bytes and cannot be replaced by regular files', async t => {
+  const { unlink } = await import('node:fs/promises')
+  const f = await fixture(t, { trackedSymlink: true })
+  git(['config', 'core.symlinks', 'false'], f.root)
+  assert.equal((await attempt(f.request)).reuse, true)
+  await unlink(path.join(f.root, 'link'))
+  await writeFile(path.join(f.root, 'link'), 'file')
+  assert.equal((await attempt(f.request)).state, 'checkout-unavailable')
+})
+test('a staged change cannot be hidden by restoring the tracked working bytes', async t => {
+  const { readFile } = await import('node:fs/promises')
+  const f = await fixture(t)
+  await writeFile(path.join(f.root, 'file'), 'staged replacement')
+  git(['add', 'file'], f.root)
+  await writeFile(path.join(f.root, 'file'), 'one')
+  const index = await readFile(path.join(f.request.common, 'index'))
+  const result = await attempt(f.request)
+  assert.equal(result.state, 'checkout-unavailable')
+  assert.equal(result.reuse, false)
+  assert.deepEqual(await readFile(path.join(f.request.common, 'index')), index)
+})
+
+test('checkout verification enforces the individual tracked byte bound', async t => {
+  const f = await fixture(t, { fileContent: Buffer.alloc(16 * 1024 * 1024 + 1) })
+  assert.equal((await attempt(f.request)).state, 'checkout-unavailable')
+})
+test('checkout verification enforces the aggregate tracked byte bound', async t => {
+  const { link } = await import('node:fs/promises')
+  const f = await fixture(t, { fileContent: Buffer.alloc(16 * 1024 * 1024), prepare: async root => {
+    for (let i = 0; i < 16; i++) await link(path.join(root, 'file'), path.join(root, 'copy-' + i))
+  } })
+  assert.equal((await attempt(f.request)).state, 'checkout-unavailable')
+})
+test('checkout verification enforces the tracked entry count bound', async t => {
+  const f = await fixture(t, { prepare: async root => {
+    for (let i = 0; i < 4096; i += 64) {
+      await Promise.all(Array.from({ length: 64 }, (_, j) => writeFile(path.join(root, 'entry-' + (i + j)), '')))
+    }
+  } })
+  assert.equal((await attempt(f.request)).state, 'checkout-unavailable')
+})
+test('checkout verification uses the supplied checkout despite core.worktree redirection', async t => {
+  const f = await fixture(t), decoy = path.join(f.root, 'decoy')
+  await mkdir(decoy); await writeFile(path.join(decoy, 'file'), 'one')
+  git(['config', 'core.worktree', decoy], f.root)
+  await writeFile(path.join(f.root, 'file'), 'different actual checkout')
+  assert.equal((await attempt(f.request)).state, 'checkout-unavailable')
+})
+test('checkout verification refuses unsupported gitlink evidence', async t => {
+  const f = await fixture(t)
+  git(['update-index', '--add', '--cacheinfo', '160000', f.request.inputs.commit, 'nested'], f.root)
+  git(['commit', '-m', 'gitlink observation'], f.root)
+  const tip = git(['rev-parse', 'HEAD'], f.root), end = f.records.at(-1)
+  const updated = { ...end, branches: { 'refs/heads/main': tip } }
+  const dir = await executionDirectory(f.request.common, 'r1')
+  await writeFile(path.join(dir, hash(end.id) + '.json'), JSON.stringify(updated) + '\n')
+  assert.equal((await attempt({ ...f.request, branches: updated.branches })).state, 'checkout-unavailable')
 })

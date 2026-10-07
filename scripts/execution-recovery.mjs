@@ -1,7 +1,10 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { realpath } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { realpath, mkdtemp, rm, open, lstat, readlink } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import path from 'node:path'
+import { tmpdir } from 'node:os'
+import { createHash, randomUUID } from 'node:crypto'
 import { strictExecutionIdentity } from './completion-obligations.mjs'
 import { readExecutionArtifact } from './execution-artifacts.mjs'
 import { readExecutionEvents, appendExecutionEvent, strictExecutionAttempts, executionBranches, authorizedPrReference, reconcileExecution } from './execution-journal.mjs'
@@ -42,15 +45,76 @@ function queryContract(queries) {
       || queries.authorizedPrReferences.some(ref => !authorizedPrReference(ref))
       || queries.queryPr !== undefined && typeof queries.queryPr !== 'function') throw new Error('Invalid bounded authorized effect queries')
 }
+const CHECKOUT_LIMITS = { files: 4096, fileBytes: 16 * 1024 * 1024, totalBytes: 256 * 1024 * 1024 }
+async function trackedBytesMatch(root, entries) {
+  if (!constants.O_NOFOLLOW || !constants.O_NONBLOCK || entries.length > CHECKOUT_LIMITS.files) return false
+  let total = 0
+  for (const entry of entries) {
+    const match = /^(100644|100755|120000) ([a-f0-9]{40}|[a-f0-9]{64}) 0\t([\s\S]+)$/.exec(entry)
+    if (!match) return false
+    const [, mode, expected, name] = match
+    if (path.isAbsolute(name) || name.split('/').some(part => !part || part === '.' || part === '..')) return false
+    const file = path.join(root, name)
+    if (await realpath(path.dirname(file)) !== path.dirname(file)) return false
+    const before = await lstat(file)
+    if (!Number.isSafeInteger(before.size) || before.size < 0 || before.size > CHECKOUT_LIMITS.fileBytes
+        || (total += before.size) > CHECKOUT_LIMITS.totalBytes) return false
+    let bytes
+    if (mode === '120000') {
+      if (!before.isSymbolicLink()) return false
+      bytes = await readlink(file, { encoding: 'buffer' })
+    } else {
+      if (!before.isFile() || Boolean(before.mode & 0o100) !== (mode === '100755')) return false
+      const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      try {
+        const opened = await handle.stat()
+        if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino) return false
+        const buffer = Buffer.alloc(before.size + 1)
+        let offset = 0
+        while (offset < buffer.length) {
+          const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
+          if (!bytesRead) break
+          offset += bytesRead
+        }
+        if (offset !== before.size) return false
+        bytes = buffer.subarray(0, offset)
+      } finally { await handle.close() }
+    }
+    const after = await lstat(file)
+    if (bytes.length !== before.size || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+        || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs || after.mode !== before.mode) return false
+    const actual = createHash(expected.length === 40 ? 'sha1' : 'sha256').update('blob ' + bytes.length + '\0').update(bytes).digest('hex')
+    if (actual !== expected) return false
+  }
+  return true
+}
 async function checkoutAvailable(common, checkouts, id, branches) {
-  const root = checkouts[id]
-  if (typeof root !== 'string' || !root.startsWith('/')) return false
+  const supplied = checkouts[id]
+  if (typeof supplied !== 'string' || !path.isAbsolute(supplied)) return false
+  let temporary
   try {
+    const root = await realpath(supplied)
     if (await realpath(discover(root).common) !== common) return false
-    const ref = git(['symbolic-ref', '--quiet', 'HEAD'], root)
-    if (!Object.hasOwn(branches, ref) || git(['rev-parse', '--verify', 'HEAD'], root) !== branches[ref]) return false
-    return git(['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', 'status', '--porcelain', '--untracked-files=no'], root) === ''
+    const gitDir = git(['rev-parse', '--absolute-git-dir'], root)
+    const args = ['--git-dir=' + gitDir, '--work-tree=' + root, '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
+      '-c', 'core.sparseCheckout=false', '-c', 'core.sparseCheckoutCone=false', '-c', 'index.sparse=false', '-c', 'core.splitIndex=false', '-c', 'core.ignorestat=false']
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')))
+    const options = { cwd: root, timeout: 5000, maxBuffer: 1024 * 1024, encoding: 'utf8', env: { ...env, GIT_OPTIONAL_LOCKS: '0' } }
+    const run = async (argv, settings = options) => (await execute('git', [...args, ...argv], settings)).stdout.trim()
+    const ref = await run(['symbolic-ref', '--quiet', 'HEAD'])
+    if (!Object.hasOwn(branches, ref) || await run(['rev-parse', '--verify', 'HEAD']) !== branches[ref]) return false
+    const index = await run(['rev-parse', '--path-format=absolute', '--git-path', 'index'])
+    await run(['diff', '--cached', '--quiet', '--no-ext-diff', '--no-textconv', branches[ref], '--'],
+      { ...options, env: { ...options.env, GIT_INDEX_FILE: index } })
+    temporary = await mkdtemp(path.join(tmpdir(), 'recovery-index-'))
+    const privateOptions = { ...options, env: { ...options.env, GIT_INDEX_FILE: path.join(temporary, 'index') } }
+    await run(['read-tree', branches[ref]], privateOptions)
+    const result = await execute('git', [...args, 'ls-files', '--stage', '-z'], { ...privateOptions, encoding: 'buffer' })
+    const text = new TextDecoder('utf8', { fatal: true }).decode(result.stdout)
+    if ((text && !text.endsWith('\0')) || !await trackedBytesMatch(root, text ? text.slice(0, -1).split('\0') : [])) return false
+    return await run(['rev-parse', '--verify', 'HEAD']) === branches[ref] && await run(['symbolic-ref', '--quiet', 'HEAD']) === ref
   } catch { return false }
+  finally { if (temporary) await rm(temporary, { recursive: true, force: true }) }
 }
 function recordedBranches(records) {
   const expected = {}, conflicts = new Set(), concurrent = new Map()
