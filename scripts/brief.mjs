@@ -59,7 +59,26 @@ const fixRoundSteps = (task) => [
   'Every file you read before this command has stale content and must be re-read after it.',
 ]
 
-const checkoutSteps = (task, baseBranch, fixRound = false) => (fixRound ? fixRoundSteps(task) : baseBranch ? [
+const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'"
+const runtimeSteps = task => [
+  'MANDATORY FIRST STEP. The host prepared this task checkout at the current tip.',
+  'Preserve all prior work. Do not reset this branch to the original base.',
+  'Expected branch: ' + task.runtime.branch + '. Expected tip: ' + task.runtime.tip + '.',
+  ...(task.runtime.mode === 'files' ? [
+    'This is a files checkout. The host owns Git operations; do not run checkout or reset.',
+  ] : [
+    'Run exactly:',
+    ...(task.runtime.gitdir ? ['    export GIT_DIR=' + shellQuote(task.runtime.gitdir),
+      '    export GIT_WORK_TREE=' + shellQuote(task.runtime.cwd)] : []),
+    '    git symbolic-ref --short HEAD',
+    '    git rev-parse HEAD',
+    'If either observation differs from the expected branch or tip, report status "blocked".',
+  ]),
+  'Host owns collection and completion verification in the main repository.',
+  "Do not run locate or infer a main root from this checkout's Git storage.",
+]
+
+const checkoutSteps = (task, baseBranch, fixRound = false) => (task.runtime ? runtimeSteps(task) : fixRound ? fixRoundSteps(task) : baseBranch ? [
   'MANDATORY FIRST STEP. Your worktree does not start on this run\'s base. Run exactly:',
   '',
   '    git checkout -B ' + task.branch + ' ' + baseBranch,
@@ -103,7 +122,7 @@ const blastRadius = (task) => (task.neighbours && task.neighbours.length ? [
 // the same path the hook will later ask about. The "blocked" fallback stays — this module is
 // still dispatched by a generator that may run against an older CLI on a user's machine, and an
 // unrecognised command must be reported, never worked around.
-const locateStep = (task, runId) => (runId ? [
+const locateStep = (task, runId) => (!task.runtime && runId ? [
   'RECORD YOUR WORKTREE. Immediately after the checkout above, run:',
   '',
   `    node ${JSON.stringify(CLI_PATH)} locate --run ${runId} --task ${task.id}`,
@@ -193,7 +212,7 @@ const locateStep = (task, runId) => (runId ? [
 // Omitted when no base branch was supplied — the same case `checkoutSteps` already refuses to
 // name a starting commit for. Inventing one here would assert a base the checkout step itself
 // would not commit to.
-const verifyStep = (task, runId, planPath, baseBranch) => (runId && planPath ? [
+const verifyStep = (task, runId, planPath, baseBranch) => (!task.runtime && runId && planPath ? [
   'BEFORE YOU RETURN "done". Run the task gate on your own work, in the FOREGROUND:',
   '',
   '    ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")',
@@ -412,6 +431,17 @@ export function composeBrief({ task, runId = '', planPath = '', baseBranch = '',
   if (!Array.isArray(task.files)) throw new Error(`composeBrief: task ${task.id} has no files array`)
   if (typeof task.branch !== 'string' || task.branch === '') {
     throw new Error(`composeBrief: task ${task.id} has no branch`)
+  }
+  if (task.runtime !== undefined) {
+    const runtime = task.runtime
+    if (!runtime || runtime.version !== 1 || runtime.branch !== task.branch
+      || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(runtime.tip)
+      || !['clone', 'files', 'full'].includes(runtime.mode)
+      || typeof runtime.continuation !== 'boolean'
+      || ![runtime.root, runtime.cwd].every(value => typeof value === 'string' && path.isAbsolute(value) && !/[\u0000-\u001f\u007f]/.test(value))
+      || runtime.gitdir !== null && (typeof runtime.gitdir !== 'string' || !path.isAbsolute(runtime.gitdir) || /[\u0000-\u001f\u007f]/.test(runtime.gitdir))) {
+      throw new Error('composeBrief: invalid trusted driver runtime context')
+    }
   }
   const options = { task, runId, planPath, baseBranch, constraints, caveman, fixRound }
   const brief = caveman ? terse(options) : full(options)
