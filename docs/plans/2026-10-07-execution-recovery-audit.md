@@ -181,17 +181,19 @@ written; a task that consumes one relies on nothing beyond it.
 - Modify: `scripts/cli.mjs`
 - Test: `tests/execution-controller-cli.test.mjs`
 - Test: `tests/cli.test.mjs`
+- Test: `tests/adversarial.test.mjs`
+- Test: `tests/execution-prerequisites.test.mjs`
 
 **Depends:** T1, T4
 
 **Acceptance:**
 - `gate` exits 5 when the only failed entries are `derive` and/or `run-state`, and 1 when any other check failed (including a real fileset failure alongside `run-state`); `reclassifyGateStateFailure` is deleted and the controller's classification is used.
 - `dispatch --execution <abs>` and `dispatch --fix-round --task <id>` implement the contracts above; a relative path, a missing file or an unknown task exits 2 before any spawn.
-- `workflow-accept --file <abs> --root <abs>` implements the acceptance contract; `workflow-resume` passes the retained acceptance references, and a fixture run reaches `verified-complete` with exit 0 and runs `finish`.
+- `workflow-accept --file <abs> --root <abs>` implements the acceptance contract; `workflow-resume` passes the retained acceptance references, and a fixture run with acceptance recorded runs `finish` and reports `obligations.verifiedComplete: true`. (Amended 2026-10-07: `verified-complete` with exit 0 also requires native verification, which runs the real `codex sandbox`; no real model or sandbox session is allowed in this run, so the injected-fixture run ends `unresolved` with exit 4 and the native path stays unproven, which T6 records.)
 - `workflow-status` passes the recorded integration steps' after-refs as `expectedAdvances`, so a normally finished run reports `reconciled` and exits 0; the existing tautological assertion at `tests/execution-controller-cli.test.mjs` (status exit vs its own unresolved count) is replaced by a concrete expected exit.
 - `workflow-prune --run <id> --root <abs>` calls `pruneExecutionArtifacts` with the journal's live references and prints what it removed and kept.
 - `workflow-resolve` resolves an interrupted `agent-dispatch` effect; an invalid `reason` gets an error that says it must be one token.
-- `message` exits 4 unless the resumed turn produced a new valid result: any `exitCode !== 0` (including -2 on spawn failure) and a clean exit with no new result exit 4; when the adapter exposes `readResult`, the outcome is read through it with `streamPath`, so a cursor result in the stream file counts. The tests in `tests/cli.test.mjs` that pinned the old exit 0 are updated to the new contract.
+- `message` exits 4 unless the resumed turn produced a new valid result: any `exitCode !== 0` (including -2 on spawn failure) and a clean exit with no new result exit 4; when the adapter exposes `readResult`, the outcome is read through it with `streamPath`, so a cursor result in the stream file counts. The tests in `tests/cli.test.mjs`, `tests/execution-prerequisites.test.mjs` (the two "required ... session persists enforcement through message and flagless dispatch" tests and "CLI message persists actual worker receipts...") that pinned the old exit 0 are updated to the new contract, and `tests/adversarial.test.mjs` "gate reports the ambiguity, not a silent guess, when both main and master exist" expects the derive-only exit 5; in those two files only the expected exit codes change (amended 2026-10-07).
 - The run-id and request numeric bounds are pinned by boundary tests (n accepted, n+1 refused).
 
 - [ ] Step 1: Write failing CLI-level tests in real temporary repositories for every acceptance line.
