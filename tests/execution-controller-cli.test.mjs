@@ -57,10 +57,13 @@ if (command === 'init-run') {
   if (mode.includes('hang-dispatch')) { writeFileSync(path.join(bin, 'hang.pid'), String(process.pid)); setInterval(() => {}, 1000) }
   else {
     const phase = Number(flag('phase')), runTip = git(['rev-parse', 'refs/heads/' + process.env.FAKE_RUN_BRANCH])
+    // --fix-round --task <id>... redispatches only the named tasks, on top of their current tips.
+    const fixRound = args.includes('--fix-round'), named = args.flatMap((arg, i) => arg === '--task' ? [args[i + 1]] : [])
     mkdirSync(path.join(dir, 'sessions'), { recursive: true })
-    for (const t of tasks.filter(t => t.phase === phase)) {
+    for (const t of tasks.filter(t => t.phase === phase && (!fixRound || named.includes(t.id)))) {
       const branch = 'fleetmates/' + run + '/' + t.id
-      git(['update-ref', 'refs/heads/' + branch, commit(runTip, t.file, t.id + '\n', 'feat: ' + t.id)])
+      const parent = fixRound ? git(['rev-parse', 'refs/heads/' + branch]) : runTip
+      git(['update-ref', 'refs/heads/' + branch, commit(parent, t.file, t.id + (fixRound ? ' fixed' : '') + '\n', (fixRound ? 'fix: ' : 'feat: ') + t.id)])
       writeFileSync(path.join(dir, 'sessions', t.id + '.result.json'),
         JSON.stringify({ status: 'done', branch, filesChanged: [t.file], summary: 'fixture', blockers: [] }))
     }
@@ -78,10 +81,11 @@ if (command === 'init-run') {
   writeFileSync(file, JSON.stringify({ results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] }, null, 2) + '\n')
   console.log('results written to ' + file + ' — pass that path to gate --results')
 } else if (command === 'gate') {
+  // The audit plan's gate contract: a FAIL whose only failed entries are derive and/or run-state exits 5.
   if (mode.includes('gate-run-state')) {
     console.log(JSON.stringify({ verdict: 'FAIL', failed: ['run-state'], phase: Number(flag('phase')), error: 'could not read run state: Unexpected token',
       results: [{ name: 'behavior', kind: 'command', status: 'pass' }] }, null, 2))
-    process.exit(1)
+    process.exit(5)
   }
   if (mode.includes('gate-derive')) {
     console.log(JSON.stringify({ verdict: 'FAIL', failed: ['derive'], error: 'plan.md is not present at the anchor commit' }, null, 2))
@@ -95,6 +99,8 @@ if (command === 'init-run') {
 } else if (command === 'fix') {
   const verdict = JSON.parse(readFileSync(flag('verdict'), 'utf8'))
   console.log(JSON.stringify({ decision: 'retry', tasks: [{ taskId: 'T1', tier: 'mid', round: 1, checks: verdict.results.filter(r => r.status === 'fail').map(r => r.name) }], reason: null }, null, 2))
+} else if (command === 'record-fix-round') {
+  console.log(flag('task') + ' phase ' + flag('phase') + ' round 1')
 } else process.exit(2)
 `
 const FAKE_CODEX = String.raw`
@@ -329,17 +335,18 @@ test('a gate that cannot derive run state is reported as blocked infrastructure,
   assert.equal(report.host.reclassified.evidence, 'gate verdict failed: derive')
   assert.ok(!commands(await fixture.invocations()).includes('fix'), 'no repair decision for a state failure')
 
-  // Unreadable run state carries check results, so the controller still asks fix for a decision;
-  // the host reports the stop as infrastructure all the same.
+  // Unreadable run state is gate exit 5, which the controller itself classifies as infrastructure:
+  // no fix decision, no repair round, and nothing for the host to reclassify.
   const unreadable = await project(t)
   unreadable.env.mode = 'gate-run-state'
   const second = json((await unreadable.command('workflow-execute', { file: await unreadable.requestFile(unreadable.request()) })).output)
   assert.equal(second.state, 'blocked')
-  assert.deepEqual(second.blockers.map(b => [b.category, b.step]), [['infrastructure', 'gate-1']])
-  assert.equal(second.host.reclassified.evidence, 'gate verdict failed: run-state')
+  assert.deepEqual(second.blockers.map(b => [b.category, b.step, b.reason]), [['infrastructure', 'gate-1', 'exit 5']])
+  assert.equal(second.host.reclassified, undefined)
+  assert.ok(!commands(await unreadable.invocations()).some(c => c === 'fix' || c === 'record-fix-round'), 'no repair decision for a state failure')
 })
 
-test('a failing gate stops with no merge and reports the repair budget as undelivered', async t => {
+test('a failing gate gets one repair round within its budget, then stops failed with no merge', async t => {
   const fixture = await project(t)
   fixture.env.mode = 'gate-fails'
   const runTip = git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1')
@@ -348,7 +355,12 @@ test('a failing gate stops with no merge and reports the repair budget as undeli
   const report = json(result.output)
   assert.equal(report.state, 'failed')
   assert.equal(report.repair.decision.decision, 'retry')
-  assert.deepEqual(report.host.repairRounds, { max: 2, delivered: 0, decision: 'retry' })
+  // The manifest fixRounds 1 under maxRepairRounds 2 allows one round: record, fix-round dispatch, review, collect, gate.
+  assert.deepEqual(commands(await fixture.invocations()).slice(-7), ['fix', 'record-fix-round', 'dispatch', 'dispatch-reviews', 'collect-reviews', 'gate', 'fix'])
+  assert.deepEqual(report.repair.rounds, [{ phase: 1, round: 1, tasks: ['T1'] }])
+  assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['code', 'gate-1.r1']])
+  assert.match(report.blockers[0].reason, /^budget-exhausted/)
+  assert.equal(report.host.repairRounds.max, 2)
   assert.equal(git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1'), runTip, 'no merge after a failing gate')
   assert.equal(report.host.reclassified, undefined)
 })

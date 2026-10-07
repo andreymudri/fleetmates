@@ -8,10 +8,10 @@ import { constants } from 'node:fs'
 import path from 'node:path'
 import { createGit } from './git.mjs'
 import { git as gitSync, lifecycleStatus } from './workflow-lifecycle.mjs'
-import { expandWorkflowProfile, profileTaskResultAccepted } from './workflow-profile.mjs'
+import { expandWorkflowProfile, profileTaskResultAccepted, PROFILE_LIMITS } from './workflow-profile.mjs'
 import { evidenceIdentity } from './workflow-evidence.mjs'
 import { strictExecutionIdentity, summarizeCompletionObligations } from './completion-obligations.mjs'
-import { retainExecutionArtifact, readExecutionArtifact } from './execution-artifacts.mjs'
+import { retainExecutionArtifact, readExecutionArtifact, RETENTION_LIMITS } from './execution-artifacts.mjs'
 import { appendExecutionEvent, readExecutionEvents, strictExecutionAttempts } from './execution-journal.mjs'
 import { reconcileExecutionAttempt } from './execution-recovery.mjs'
 import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
@@ -29,16 +29,28 @@ const STEP_COMMAND = { prepare: 'init-run', baseline: 'preview-check', implement
   collect: 'collect-reviews', gate: 'gate', finish: 'finish' }
 const COMMANDS = new Set(Object.values(STEP_COMMAND))
 const REQUEST_KEYS = ['version', 'profile', 'runId', 'planPath', 'baseBranch', 'runBranch', 'harness', 'sandboxMode', 'parameters', 'limits']
-const LIMITS = { maxWallMs: [1000, 86_400_000], maxAttempts: [1, 500], maxRepairRounds: [0, 10], stepTimeoutMs: [1000, 21_600_000] }
-const RETENTION_UPPER = { maxArtifactBytes: 16 * 1024 * 1024, maxRunBytes: 256 * 1024 * 1024, maxAgeMs: 365 * 24 * 60 * 60 * 1000 }
+// Inclusive request bounds. maxRepairRounds and the maxWallMs ceiling come from the profile's own
+// bounds, because the request's values are passed into the expansion.
+const LIMITS = { maxWallMs: [1000, PROFILE_LIMITS.maxWallMinutes[1] * 60_000], maxAttempts: [1, 500], maxRepairRounds: [...PROFILE_LIMITS.maxRepairRounds],
+  stepTimeoutMs: [1000, 21_600_000] }
+const PARAMETER_BYTES = 4096
+// The flags each fixed fragment may carry. The controller alone appends `--execution` to dispatch,
+// and `--fix-round --task <id>` to a repair dispatch, so a committed fragment never carries them.
+const FRAGMENT_FLAGS = {
+  'init-run': ['--run'], 'preview-check': [],
+  dispatch: ['--run', '--phase', '--harness', '--plan', '--base', '--environment', '--role-policy'],
+  'dispatch-reviews': ['--run', '--phase', '--harness', '--plan', '--base', '--environment', '--role-policy'],
+  'collect-reviews': ['--run', '--phase'], gate: ['--run', '--phase', '--plan', '--base', '--results'], finish: ['--run', '--plan', '--base', '--results'],
+}
+const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 const OUTPUT_BYTES = 4 * 1024 * 1024, FILE_BYTES = 1024 * 1024, SOURCE_BYTES = 512 * 1024, CLI_BYTES = 8 * 1024 * 1024
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
 const WRITE_LINE = /^results written to (.+) — pass that path to gate --results$/
 const TRUST = ['Commands come only from the fixed workflow-profile fragments and the fixed fix-decision call, run as the absolute installed CLI with an explicit project root.',
   'Executor, capability and environment observations are local same-UID observations, not hostile-process isolation.',
   'An injected verification fixture never establishes completion; publication and remote effects are absent.',
-  'An agent step that was interrupted or timed out is an unknown effect and is not redispatched automatically.',
-  'A code failure stops with the existing fix decision; the controller dispatches no repair round.']
+  'An agent step is journaled as an agent-dispatch effect; one that was interrupted or timed out is an unknown effect, redispatched only after a local operator resolves it not-started and reused only after it is resolved completed and its outputs validate.',
+  'A code failure goes to the existing fix decision; a retry records each round with record-fix-round and redispatches only the named tasks with dispatch --fix-round, at most min(maxRepairRounds, the fix budget) rounds per phase.']
 
 const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
   && [Object.prototype, null].includes(Object.getPrototypeOf(value))
@@ -62,7 +74,7 @@ function validateRequest(request) {
   if (request.version !== 1 || !text(request.profile, 64) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(request.runId ?? '')
       || !repoPath(request.planPath) || !['codex', 'cursor'].includes(request.harness) || !['clone', 'files'].includes(request.sandboxMode)
       || request.baseBranch === request.runBranch || !plainObject(request.parameters)
-      || Buffer.byteLength(JSON.stringify(request.parameters)) > 4096) throw new Error('Invalid workflow request')
+      || Buffer.byteLength(JSON.stringify(request.parameters)) > PARAMETER_BYTES) throw new Error('Invalid workflow request')
   exactKeys(request.limits, Object.keys(LIMITS), [], 'workflow request limits')
   for (const [key, [low, high]] of Object.entries(LIMITS)) {
     if (!Number.isSafeInteger(request.limits[key]) || request.limits[key] < low || request.limits[key] > high) throw new Error(`Invalid workflow request limit ${key}`)
@@ -70,8 +82,8 @@ function validateRequest(request) {
   return structuredClone(request)
 }
 function validateRetention(retention) {
-  exactKeys(retention, Object.keys(RETENTION_UPPER), [], 'retention')
-  for (const [key, upper] of Object.entries(RETENTION_UPPER)) {
+  exactKeys(retention, Object.keys(RETENTION_LIMITS), [], 'retention')
+  for (const [key, upper] of Object.entries(RETENTION_LIMITS)) {
     if (!Number.isSafeInteger(retention[key]) || retention[key] <= 0 || retention[key] > upper) throw new Error(`Invalid retention ${key}`)
   }
   return { ...retention }
@@ -144,6 +156,12 @@ const verifierNow = async cliPath => {
   } catch { return null }
 }
 
+// Every `--` token after the command must be one of `allowed`.
+const flagsWithin = (argv, allowed) => argv.slice(3).every(arg => !arg.startsWith('--') || allowed.includes(arg))
+// The fragment a step instantiates: `implement`, `review`, ... for the expanded steps, and the
+// explicit `name` a repair-round step carries (`repair`, `record`, `fix`, or the rerun fragment).
+const nameOf = step => step.name ?? step.id.replace(/-\d+$/, '')
+
 function expectedStepIds(phases) {
   return ['prepare', 'baseline', ...phases.flatMap(p => ['implement', 'review', 'collect', 'gate', 'integrate'].map(s => `${s}-${p}`)), 'acceptance', 'finish']
 }
@@ -168,7 +186,7 @@ export function validateWorkflowExpansion(expanded, { inputs, request }) {
     }
     const argv = step.argv
     if (!Array.isArray(argv) || argv.length > 32 || argv[0] !== 'node' || argv[1] !== 'scripts/cli.mjs' || argv[2] !== STEP_COMMAND[kind]
-        || !COMMANDS.has(argv[2]) || argv.some(arg => !text(arg)) || argv.includes('--root')
+        || !COMMANDS.has(argv[2]) || argv.some(arg => !text(arg)) || argv.includes('--root') || !flagsWithin(argv, FRAGMENT_FLAGS[argv[2]])
         || (kind === 'baseline' ? argv.length !== 3 : argv.indexOf('--run') < 0 || argv[argv.indexOf('--run') + 1] !== request.runId)) throw new Error(`Step ${step.id} is not a whitelisted CLI fragment`)
     const phaseResults = `${NAMES.stateDir}/${request.runId}/reviews/results-${step.id.replace(/^\D+-/, '')}.json`
     if (kind === 'collect' && step.resultsPath !== phaseResults) throw new Error('Unexpected review results path')
@@ -304,17 +322,24 @@ async function gateInputsCurrent(ctx, phase) {
   return { ok: true, artifacts: [{ kind: 'gate-input', bytes: JSON.stringify({ version: 1, phase, results: collected.sha256, taskTips: ctx.taskTips[phase] }) }] }
 }
 
-// Exit codes as read from the handlers in scripts/cli.mjs, not observed from a live run here: gate and
-// finish return 1 for a FAIL verdict (the only code failures); gate returns 3 after inferring a manifest.
+// The exit contract the controller classifies by. Gate exit 1 is not only a code failure: the gate
+// in this tree also exits 1 for a FAIL whose only failed entry is `derive` (observed with
+// `gate --plan <a plan not committed on the base>`). The audit plan's T5 contract moves a FAIL whose
+// only failed entries are `derive` and/or `run-state` to exit 5, classified here as infrastructure
+// because no repair round can establish run state; this controller relies on that contract, which
+// its tests exercise through a fake CLI only. Until the gate implements it, such a failure still
+// arrives as exit 1 and is classified as code. Finish exit 1 is a FAIL verdict; a code failure at
+// review collection or at the host gate comes from the validated outputs instead.
 const EXIT_CONTRACT = {
   'init-run': { 1: 'policy', 2: 'policy' },
   'preview-check': { 1: 'policy', 2: 'policy', 4: 'infrastructure' },
   dispatch: { 2: 'policy', 4: 'infrastructure' },
   'dispatch-reviews': { 2: 'policy', 4: 'infrastructure' },
   'collect-reviews': { 2: 'policy', 4: 'missing-artifact' },
-  gate: { 1: 'code', 2: 'policy', 3: 'policy', 4: 'infrastructure' },
+  gate: { 1: 'code', 2: 'policy', 3: 'policy', 4: 'infrastructure', 5: 'infrastructure' },
   finish: { 1: 'code', 2: 'policy', 4: 'infrastructure' },
   fix: { 1: 'infrastructure', 2: 'policy' },
+  'record-fix-round': { 1: 'infrastructure', 2: 'policy' },
 }
 function classifyExit(step, result) {
   const agent = step.kind === 'agent'
@@ -342,22 +367,75 @@ async function writeInside(root, relative, text) {
 }
 
 // A code failure is handed to the existing fix contract (`fix --verdict`) for its budget and
-// escalation decision. No fixed CLI fragment performs the repair itself: `dispatch` treats a
-// recorded done result as final and does not respawn the task, so the controller stops with the
-// decision instead of re-running dispatch as if that repaired anything.
-async function repairDecision(ctx, failedStep, phase, failure) {
+// escalation decision. A retry becomes one repair round (see `repairSteps`). Rounds per phase are
+// bounded by min(request maxRepairRounds, the fix decision's remaining budget): the phase contract's
+// `repair.maxRounds` already folds the manifest fix budget under the request bound, a round number
+// the decision reports past that bound stops the phase, and the decision itself escalates once
+// recorded rounds reach the manifest budget. Returns `{ tasks }` for the next round, or `{ blocker }`.
+async function repairDecision(ctx, failedStep, phase, failure, round) {
   if (!failure.verdict) return { blocker: blocker('code', failedStep.id, `${failure.blocker.reason}; no readable verdict for the fix decision`) }
   const relative = `${NAMES.stateDir}/${ctx.request.runId}/profile-verdict-${phase}.json`
   try { await writeInside(ctx.root, relative, JSON.stringify(failure.verdict)) }
   catch (error) { return { blocker: blocker('infrastructure', failedStep.id, `verdict not written: ${error.message}`) } }
-  const step = { id: `fix-${phase}`, kind: 'deterministic', argv: ['node', 'scripts/cli.mjs', 'fix', '--run', ctx.request.runId, '--phase', String(phase), '--verdict', relative] }
+  const step = { id: `fix-${phase}${round ? `.r${round}` : ''}`, name: 'fix', kind: 'deterministic',
+    argv: ['node', 'scripts/cli.mjs', 'fix', '--run', ctx.request.runId, '--phase', String(phase), '--verdict', relative] }
   const result = await runCli(ctx, step, phase)
   if (!result.ok) return result
   const decision = result.outcome.decision
-  ctx.report.repair = { phase, step: failedStep.id, decision }
-  const reason = decision.decision === 'retry' ? 'repair-round-required: fix decided retry; no fixed CLI fragment respawns a recorded done task'
-    : decision.decision === 'escalate' ? `fix-escalated: ${decision.reason}` : 'fix-decision-none-for-a-failed-verdict'
-  return { blocker: blocker('code', failedStep.id, reason) }
+  ctx.report.repair = { phase, step: failedStep.id, decision, rounds: ctx.repairRounds }
+  if (decision.decision === 'escalate') return { blocker: blocker('code', failedStep.id, `fix-escalated: ${decision.reason}`) }
+  if (decision.decision !== 'retry') return { blocker: blocker('code', failedStep.id, 'fix-decision-none-for-a-failed-verdict') }
+  const tasks = decision.tasks.map(task => task?.taskId)
+  if (!repairTasksValid(ctx, phase, tasks) || decision.tasks.some(task => !Number.isSafeInteger(task.round) || task.round < 1)) {
+    return { blocker: blocker('infrastructure', step.id, 'fix decision names no valid task of this phase') }
+  }
+  const contract = ctx.expanded.phaseContracts.find(c => c.phase === phase)
+  // Under a strict driver journal every dispatch of the phase shares one driver executionId, whose
+  // harness invocations per task are capped at DRIVER_ATTEMPTS: the first dispatch plus each round
+  // uses at least one, so at most DRIVER_ATTEMPTS - 1 rounds fit.
+  const journal = driverJournal(ctx.request)
+  const allowed = Math.min(ctx.request.limits.maxRepairRounds, contract.repair.maxRounds, journal ? DRIVER_ATTEMPTS - 1 : Infinity)
+  if (round >= allowed || decision.tasks.some(task => task.round > allowed)) {
+    return { blocker: blocker('code', failedStep.id, `budget-exhausted: maxRepairRounds ${ctx.request.limits.maxRepairRounds}, phase repair limit ${contract.repair.maxRounds}, ${round} round(s) delivered${journal ? `, driver round limit ${DRIVER_ATTEMPTS - 1}` : ''}`) }
+  }
+  return { tasks, rounds: Object.fromEntries(decision.tasks.map(task => [task.taskId, task.round])) }
+}
+function repairTasksValid(ctx, phase, tasks) {
+  const ids = phaseTasks(ctx, phase).map(task => task.id)
+  return Array.isArray(tasks) && tasks.length > 0 && new Set(tasks).size === tasks.length
+    && tasks.every(id => typeof id === 'string' && TASK_ID.test(id) && ids.includes(id))
+}
+// One repair round as steps: record-fix-round for each named task, then dispatch --fix-round for
+// exactly those tasks (the validated implement fragment plus `--fix-round --task <id>...`), then
+// the phase's review, collect, gate and integration fragments again under round-suffixed ids.
+// Round-suffixed ids keep each round its own journal history: the journal refuses a second start
+// of an agent step whose dispatch effect completed, unless that effect is resolved not-started.
+// Each record step carries the round the fix decision named for its task, so a round already
+// recorded is never recorded again (see `recordLanded`).
+function repairSteps(ctx, phase, round, plan) {
+  const tasks = plan?.tasks
+  if (!repairTasksValid(ctx, phase, tasks) || tasks.some(id => !Number.isSafeInteger(plan.rounds?.[id]) || plan.rounds[id] < 1)) return null
+  const base = name => ctx.expanded.steps.find(s => s.id === `${name}-${phase}`)
+  const suffix = `.r${round}`
+  return [
+    ...tasks.map(id => ({ id: `record-${phase}${suffix}.${id}`, name: 'record', kind: 'deterministic', task: id, round: plan.rounds[id],
+      argv: ['node', 'scripts/cli.mjs', 'record-fix-round', '--run', ctx.request.runId, '--phase', String(phase), '--task', id] })),
+    { ...base('implement'), id: `repair-${phase}${suffix}`, name: 'repair', tasks: [...tasks],
+      argv: [...base('implement').argv, '--fix-round', ...tasks.flatMap(id => ['--task', id])] },
+    ...['review', 'collect', 'gate', 'integrate'].map(name => ({ ...base(name), id: `${name}-${phase}${suffix}`, name })),
+  ]
+}
+// Each named task's tip after a fix round must descend from, and differ from, its tip just before it.
+async function validateRepair(ctx, phase, tasks, before) {
+  const validation = await validateImplement(ctx, phase)
+  if (!validation.ok) return validation
+  for (const id of tasks) {
+    const prior = before?.[id], now = ctx.taskTips[phase][id]
+    let advanced = false
+    if (prior && now !== prior) { try { gitSync(['merge-base', '--is-ancestor', '--end-of-options', prior, now], ctx.root); advanced = true } catch { advanced = false } }
+    if (!advanced) return { ok: false, category: 'changed-input', reason: `task ${id} fix round did not advance from the reviewed tip it started from` }
+  }
+  return validation
 }
 
 function budget(ctx, stepId) {
@@ -394,7 +472,7 @@ async function guarded(ctx, step, action, { counts = true } = {}) {
   if (counts) ctx.attemptsUsed++
   const started = ctx.now()
   let outcome
-  try { outcome = await action(Math.min(ctx.request.limits.stepTimeoutMs, bound.remaining)) }
+  try { outcome = await action(Math.min(ctx.request.limits.stepTimeoutMs, bound.remaining), attempt) }
   catch (error) { outcome = { ok: false, category: 'infrastructure', reason: error.message, artifacts: [] } }
   const durationMs = Math.max(0, ctx.now() - started)
   const references = []
@@ -416,9 +494,38 @@ async function guarded(ctx, step, action, { counts = true } = {}) {
     : { ok: false, category: outcome.category ?? 'missing-artifact', verdict: outcome.verdict ?? null, blocker: blocker(outcome.category ?? 'missing-artifact', step.id, outcome.reason ?? 'validation failed') }
 }
 
+// The dispatch execution contract (audit plan, amended T5 -> T4): one JSON file per dispatch
+// attempt holding exactly the object `dispatchPhase` validates as its required execution:
+// `{ version: 1, common, runId, executionId, inputs, retention, maxAttempts, deadlineAt }`.
+// `executionId` is derived from this controller's execution and the phase rather than from each
+// attempt id: the driver refuses a session record or retained attempt bound to another executionId,
+// so a repair round or a redispatch of the same phase must reuse it. `inputs` is the controller's
+// strict identity with the commit the run branch is at now, which the driver requires. The
+// deadline is the step's own timeout from now, which never exceeds the remaining wall budget.
+// Strict driver execution refuses files sandboxes, so no contract is written for them.
+const driverJournal = request => request.harness !== 'cursor' && request.sandboxMode !== 'files'
+// The driver's own upper bound on a required execution's maxAttempts (driver.mjs requiredExecution).
+const DRIVER_ATTEMPTS = 10
+async function executionContract(ctx, attempt, phase, timeoutMs) {
+  const relative = `${NAMES.stateDir}/${ctx.request.runId}/execution/dispatch-${attempt}.json`
+  const contract = { version: 1, common: ctx.common, runId: ctx.request.runId, executionId: `${ctx.executionId}-p${phase}`,
+    inputs: { ...ctx.inputs, commit: refTip(ctx.root, `refs/heads/${ctx.request.runBranch}`) }, retention: { ...ctx.retention },
+    maxAttempts: DRIVER_ATTEMPTS, deadlineAt: Date.now() + timeoutMs }
+  strictExecutionIdentity(contract.inputs)
+  await writeInside(ctx.root, relative, JSON.stringify(contract))
+  return path.join(ctx.root, relative)
+}
+
 async function runCli(ctx, step, phase) {
-  return guarded(ctx, step, async timeoutMs => {
+  return guarded(ctx, step, async (timeoutMs, attempt) => {
     let argv = step.argv.slice(2)
+    const command = argv[0], name = nameOf(step)
+    // validateWorkflowExpansion refused any fragment already carrying a controller flag, so this is
+    // the only `--execution` on the argv.
+    if (command === 'dispatch' && driverJournal(ctx.request)) {
+      try { argv = [...argv, '--execution', await executionContract(ctx, attempt, phase, timeoutMs)] }
+      catch (error) { return { ok: false, category: 'infrastructure', reason: `execution contract not written: ${error.message}`, artifacts: [] } }
+    }
     if (step.argv[2] === 'gate') {
       const index = argv.indexOf('--results'), collected = ctx.reviewResults[phase]
       argv = [...argv.slice(0, index + 1), collected.path, ...argv.slice(index + 2)]
@@ -441,24 +548,44 @@ async function runCli(ctx, step, phase) {
       const index = argv.indexOf('--verdict')
       argv = [...argv.slice(0, index + 1), path.join(ctx.root, argv[index + 1]), ...argv.slice(index + 2)]
     }
+    // An agent step is an `agent-dispatch` effect: its start is persisted before the spawn, so an
+    // attempt with no effect start never reached the executor, and its outcome after the spawn.
+    const effect = step.kind === 'agent' ? { id: `agent.${attempt}`, kind: 'agent-dispatch', reference: null } : null
+    const settle = async kind => {
+      if (!effect) return true
+      try { await append(ctx, { ...event(ctx, step.id, attempt, kind), effect }); return true } catch { return false }
+    }
+    if (effect) {
+      try { await append(ctx, { ...event(ctx, step.id, attempt, 'effect-started'), effect }) }
+      catch (error) { return { ok: false, category: 'infrastructure', reason: `agent-dispatch start not persisted: ${error.message}`, artifacts: [] } }
+    }
+    const priorTips = name === 'repair' ? currentTips(ctx, phase) : null
     let result
     try {
       result = await ctx.executor(process.execPath, ctx.root, { argv: [ctx.cliPath, ...argv, '--root', ctx.root],
         timeoutMs, graceMs: 1000, maxOutputBytes: OUTPUT_BYTES, maxCaptureBytes: OUTPUT_BYTES })
-    } catch (error) { return { ok: false, category: 'infrastructure', reason: `spawn failed: ${error.message}`, artifacts: [] } }
+    } catch (error) {
+      if (!await settle('effect-unknown')) return { ok: false, category: 'unknown-effect', reason: 'agent-dispatch outcome not persisted', artifacts: [] }
+      return { ok: false, category: effect ? 'unknown-effect' : 'infrastructure', reason: `spawn failed: ${error.message}`, artifacts: [] }
+    }
     const streams = plainObject(result) && typeof result.stdout === 'string' && typeof result.stderr === 'string'
     if (!plainObject(result) || !Number.isInteger(result.code) || !(typeof result.output === 'string' || streams)) {
-      return { ok: false, category: 'infrastructure', reason: 'malformed executor receipt', artifacts: [] }
+      await settle('effect-unknown')
+      return { ok: false, category: effect ? 'unknown-effect' : 'infrastructure', reason: 'malformed executor receipt', artifacts: [] }
     }
     const output = typeof result.output === 'string' ? result.output : `${result.stdout}${result.stderr}`
     const artifacts = [...(streams ? [{ kind: 'step-stdout', bytes: result.stdout }, { kind: 'step-stderr', bytes: result.stderr }] : [{ kind: 'step-output', bytes: output }]), ...extra]
     const observed = { exitCode: result.code, timedOut: result.timedOut === true }
     if (result.code !== 0 || result.timedOut || result.outputLimited) {
       const category = classifyExit(step, result)
+      if (!await settle(category === 'unknown-effect' ? 'effect-unknown' : 'effect-failed')) {
+        return { ok: false, ...observed, category: 'unknown-effect', reason: 'agent-dispatch outcome not persisted', artifacts }
+      }
       return { ok: false, ...observed, category, reason: result.timedOut ? 'timed out' : result.outputLimited ? 'output limit exceeded' : `exit ${result.code}`, artifacts,
         ...(category === 'code' && step.argv[2] === 'gate' ? { verdict: gateVerdict(streams ? result.stdout : output) } : {}) }
     }
-    const kind = step.id.replace(/-\d+$/, '')
+    if (!await settle('effect-completed')) return { ok: false, ...observed, category: 'unknown-effect', reason: 'agent-dispatch outcome not persisted', artifacts }
+    const kind = name
     if (kind === 'fix') {
       const decision = parseJson(Buffer.from(streams ? result.stdout : output))
       if (!plainObject(decision) || !['none', 'retry', 'escalate'].includes(decision.decision) || !Array.isArray(decision.tasks)) {
@@ -468,6 +595,7 @@ async function runCli(ctx, step, phase) {
     }
     const validation = kind === 'prepare' ? await validatePrepare(ctx)
       : kind === 'implement' ? await validateImplement(ctx, phase)
+      : kind === 'repair' ? await validateRepair(ctx, phase, step.tasks, priorTips)
       : kind === 'review' ? await reviewsCurrent(ctx, phase)
       : kind === 'collect' ? await validateCollect(ctx, phase, step, streams ? result.stdout : output)
       : kind === 'gate' ? await gateInputsCurrent(ctx, phase)
@@ -544,33 +672,108 @@ const REUSE = {
   prepare: ctx => validatePrepare(ctx),
   baseline: async () => ({ ok: true }),
   implement: (ctx, phase) => validateImplement(ctx, phase),
+  // A repair round is reused only if each named task still advances from the tip its attempt
+  // started at, the same check a fresh round must pass.
+  repair: (ctx, phase, group, step) => validateRepair(ctx, phase, step.tasks,
+    Object.fromEntries(step.tasks.map(id => [id, group.start.branches[`refs/heads/${taskBranchName(ctx.request.runId, id)}`] ?? null]))),
+  record: async () => ({ ok: true }),
   review: (ctx, phase) => reviewsCurrent(ctx, phase),
   integrate: integrationStillCurrent,
 }
 // Decides whether a prior attempt's observed output may be reused. Returns 'reuse', 'run' or a blocker.
 async function priorDecision(ctx, step, phase) {
-  const kind = step.id.replace(/-\d+$/, '')
   const group = latestAttempt(ctx, step.id)
   if (!group) return { action: 'run' }
-  const agentLike = step.kind === 'agent' || step.kind === 'host-integration'
+  if (step.kind === 'agent') return agentDecision(ctx, step, phase, group)
   if (!group.end) {
-    if (kind === 'integrate' && group.start.branches[`refs/heads/${ctx.request.runBranch}`] === refTip(ctx.root, `refs/heads/${ctx.request.runBranch}`)) return { action: 'run' }
-    return agentLike ? { action: 'block', blocker: blocker('unknown-effect', step.id, 'prior attempt has no recorded outcome; reconcile its effects before redispatch') } : { action: 'run' }
+    if (nameOf(step) === 'integrate' && group.start.branches[`refs/heads/${ctx.request.runBranch}`] === refTip(ctx.root, `refs/heads/${ctx.request.runBranch}`)) return { action: 'run' }
+    return step.kind === 'host-integration' ? { action: 'block', blocker: blocker('unknown-effect', step.id, 'prior attempt has no recorded outcome; reconcile its effects before redispatch') } : { action: 'run' }
   }
   if (group.end.kind === 'step-failed') {
     const outcome = await outcomeOf(ctx, group)
-    if (agentLike && (!outcome || outcome.category === 'unknown-effect')) return { action: 'block', blocker: blocker('unknown-effect', step.id, 'prior attempt ended with an unknown effect') }
+    if (step.kind === 'host-integration' && (!outcome || outcome.category === 'unknown-effect')) return { action: 'block', blocker: blocker('unknown-effect', step.id, 'prior attempt ended with an unknown effect') }
     return { action: 'run' }
   }
-  const reuse = REUSE[kind]
+  return completedDecision(ctx, step, phase, group)
+}
+async function completedDecision(ctx, step, phase, group) {
+  const reuse = REUSE[nameOf(step)]
   if (!reuse) return { action: 'run' }
   const reconciled = ctx.reconciled.find(a => a.step === step.id && a.attempt === group.start.attempt)
   if (!reconciled || ['stale', 'missing-artifact', 'retention-exceeded', 'unknown-effect'].includes(reconciled.state)) return { action: 'run' }
   for (const reference of group.end.artifacts) if (!await observe(ctx, reference)) return { action: 'run' }
-  const validation = await reuse(ctx, phase, group)
+  const validation = await reuse(ctx, phase, group, step)
   if (!validation.ok) return { action: 'run' }
   ctx.report.steps.push({ id: step.id, attempt: group.start.attempt, status: 'reused', exitCode: null, durationMs: null, artifacts: group.end.artifacts })
   return { action: 'reuse' }
+}
+// An agent step's prior attempt is decided by its agent-dispatch effect: an operator resolution
+// when there is one, else the recorded effect outcome. not-started or failed redispatches; completed
+// never redispatches (the journal refuses a second start of a step whose dispatch completed) and
+// is reused only when its outputs validate against the current tree; anything else blocks.
+async function agentDecision(ctx, step, phase, group) {
+  const effect = group.effects.find(e => e.start.effect.kind === 'agent-dispatch') ?? null
+  const resolved = effect?.resolution?.resolution.outcome ?? null
+  const recorded = effect?.end?.kind === 'effect-completed' ? 'completed' : effect?.end?.kind === 'effect-failed' ? 'failed' : null
+  const state = resolved ?? recorded ?? (effect ? 'unknown' : 'absent')
+  if (state === 'not-started' || state === 'failed') return { action: 'run' }
+  if (state === 'completed') {
+    if (group.end?.kind === 'step-completed') {
+      const decision = await completedDecision(ctx, step, phase, group)
+      if (decision.action === 'reuse') return decision
+    }
+    return revalidated(ctx, step, phase, group, resolved !== null)
+  }
+  if (state === 'absent') {
+    // The spawn is reached only after the effect start persisted, so an attempt without one never
+    // dispatched anything. A journal written before effects were recorded keeps the old rules.
+    if (!group.end) return { action: 'run' }
+    if (group.end.kind === 'step-completed') return completedDecision(ctx, step, phase, group)
+    const outcome = await outcomeOf(ctx, group)
+    return !outcome || outcome.category === 'unknown-effect' ? { action: 'block', blocker: blocker('unknown-effect', step.id, 'prior attempt ended with an unknown effect') } : { action: 'run' }
+  }
+  return { action: 'block', blocker: blocker('unknown-effect', step.id, group.end
+    ? 'prior attempt ended with an unknown agent-dispatch effect; resolve it not-started or completed before redispatch'
+    : 'prior attempt has no recorded outcome; resolve its agent-dispatch effect not-started or completed before redispatch') }
+}
+// Reuses a completed dispatch after validating its outputs against the current tree, retaining
+// them afresh; an attempt that never recorded an outcome is closed with them.
+async function revalidated(ctx, step, phase, group, resolved) {
+  const reuse = REUSE[nameOf(step)]
+  let validation = { ok: false, reason: 'no reusable output' }
+  try { if (reuse) validation = await reuse(ctx, phase, group, step) } catch (error) { validation = { ok: false, reason: error.message } }
+  if (!validation.ok) {
+    return { action: 'block', blocker: blocker('missing-artifact', step.id, `agent dispatch ${resolved ? 'resolved' : 'recorded'} completed but its outputs do not validate${validation.reason ? ` (${validation.reason})` : ''}; resolve its agent-dispatch effect not-started to redispatch`) }
+  }
+  const references = []
+  try {
+    for (const artifact of validation.artifacts ?? []) references.push(await retain(ctx, artifact.kind, artifact.bytes))
+    references.push(await retain(ctx, 'step-outcome', JSON.stringify({ version: 1, step: step.id, attempt: group.start.attempt, ok: true, category: null,
+      exitCode: null, timedOut: false, durationMs: null })))
+    if (!group.end) await append(ctx, event(ctx, step.id, group.start.attempt, 'step-completed', references))
+  } catch (error) { return { action: 'block', blocker: blocker('infrastructure', step.id, `revalidated outputs not persisted: ${error.message}`) } }
+  ctx.report.steps.push({ id: step.id, attempt: group.start.attempt, status: 'reused', exitCode: null, durationMs: null, artifacts: references,
+    revalidated: resolved ? 'resolved-completed' : 'completed' })
+  return { action: 'reuse' }
+}
+
+// The highest repair round a prior invocation of this phase reached, and the tasks its fix
+// decision named, so a resumed phase continues in that round instead of starting over.
+function priorRound(ctx, phase) {
+  const pattern = new RegExp(`^(?:record|repair)-${phase}\\.r(\\d+)(?:\\.|$)`)
+  return Math.max(0, ...ctx.priorGroups.map(g => pattern.exec(g.start.step)).filter(Boolean).map(m => Number(m[1])))
+}
+async function priorRepairTasks(ctx, phase, round) {
+  const id = `fix-${phase}${round > 1 ? `.r${round - 1}` : ''}`
+  const group = ctx.priorGroups.filter(g => g.start.step === id && g.end?.kind === 'step-completed')
+    .sort((a, b) => a.start.at - b.start.at || a.start.id.localeCompare(b.start.id)).at(-1)
+  const reference = group?.end.artifacts.find(a => a.kind === 'fix-decision')
+  if (!reference) return null
+  try {
+    const decision = parseJson(await readArtifact(ctx, reference))
+    return decision?.decision === 'retry' && Array.isArray(decision.tasks)
+      ? { tasks: decision.tasks.map(task => task?.taskId), rounds: Object.fromEntries(decision.tasks.map(task => [task?.taskId, task?.round])) } : null
+  } catch { return null }
 }
 
 // ---- obligations ----
@@ -591,21 +794,23 @@ async function obligations(ctx, finishReferences, acceptanceReferences) {
     return fresh?.artifacts.find(a => a.kind === kind) ?? null
   }
   const phases = ctx.phases
+  // The step ids of the round that integrated each phase: the expanded ids, or a repair round's.
+  const ids = phase => ctx.finalSteps[phase] ?? { implement: `implement-${phase}`, gate: `gate-${phase}`, collect: `collect-${phase}`, integrate: `integrate-${phase}` }
   for (const phase of phases) {
     const record = ctx.integrated[phase]
     if (!record) return null
     const taskRefs = Object.fromEntries(Object.entries(record.taskTips).map(([id, tip]) => [`refs/heads/${taskBranchName(ctx.request.runId, id)}`, tip]))
     for (const [id, tip] of Object.entries(record.taskTips)) {
       add({ id: `implementation-${phase}-${id}`, kind: 'implementation', scope: 'step', tree: gitSync(['rev-parse', `${tip}^{tree}`], ctx.root),
-        refs: { [`refs/heads/${taskBranchName(ctx.request.runId, id)}`]: tip } }, stepArtifact(`implement-${phase}`, 'task-result'))
+        refs: { [`refs/heads/${taskBranchName(ctx.request.runId, id)}`]: tip } }, stepArtifact(ids(phase).repair ?? ids(phase).implement, 'task-result'))
     }
-    add({ id: `command-${phase}`, kind: 'command', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(`gate-${phase}`, 'gate-input'))
-    add({ id: `review-${phase}`, kind: 'review', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(`collect-${phase}`, 'review-results'))
-    add({ id: `integration-${phase}`, kind: 'integration', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(`integrate-${phase}`, 'integration-receipt'))
+    add({ id: `command-${phase}`, kind: 'command', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(ids(phase).gate, 'gate-input'))
+    add({ id: `review-${phase}`, kind: 'review', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(ids(phase).collect, 'review-results'))
+    add({ id: `integration-${phase}`, kind: 'integration', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(ids(phase).integrate, 'integration-receipt'))
   }
   const last = ctx.integrated[phases.at(-1)]
   const finalReview = last.testedTree === finalTree && last.review.every(([, status]) => status === 'pass') && last.review.length > 0
-  add({ id: 'final-review', kind: 'review', scope: 'final', tree: finalTree, refs: { [runRef]: finalTip } }, finalReview ? stepArtifact(`integrate-${phases.at(-1)}`, 'integration-receipt') : null)
+  add({ id: 'final-review', kind: 'review', scope: 'final', tree: finalTree, refs: { [runRef]: finalTip } }, finalReview ? stepArtifact(ids(phases.at(-1)).integrate, 'integration-receipt') : null)
   add({ id: 'final-command', kind: 'command', scope: 'final', tree: finalTree, refs: { [runRef]: finalTip } }, finishReferences?.find(a => a.kind === 'step-output' || a.kind === 'step-stdout') ?? null)
   for (const [criterion, reference] of acceptanceReferences) {
     add({ id: `acceptance-${criterion}`, kind: 'acceptance', scope: 'step', tree: finalTree, refs: { [runRef]: finalTip } }, reference)
@@ -614,8 +819,10 @@ async function obligations(ctx, finishReferences, acceptanceReferences) {
   const branches = {}
   for (const requirement of requirements) for (const ref of Object.keys(requirement.refs)) branches[ref] = refTip(ctx.root, ref)
   const artifactObservations = [...ctx.observations.values()].map(reference => ({ reference, verified: true }))
+  // The lifecycle as the run's marker refs record it now, never assumed: a suspended or abandoned
+  // run cannot satisfy its obligations.
   return summarizeCompletionObligations({ inputs: ctx.inputs, requirements, receipts, artifactObservations, branches,
-    lifecycle: { runId: ctx.request.runId, state: 'running' } })
+    lifecycle: { runId: ctx.request.runId, state: lifecycleStatus(ctx.root, ctx.request.runId).state } })
 }
 
 async function acceptanceEvidence(ctx) {
@@ -662,36 +869,94 @@ async function executeSteps(ctx) {
     if (!result.ok) return stop(ctx, result)
   }
   for (const contract of ctx.expanded.phaseContracts) {
-    const phase = contract.phase
-    for (const name of ['implement', 'review', 'collect', 'gate', 'integrate']) {
-      const step = ctx.expanded.steps.find(s => s.id === `${name}-${phase}`)
-      const decision = ctx.resume ? await priorDecision(ctx, step, phase) : { action: 'run' }
-      if (decision.action === 'block') return stop(ctx, decision)
-      if (decision.action === 'reuse') continue
-      const result = name === 'integrate' ? await runIntegration(ctx, step, phase) : await runCli(ctx, step, phase)
-      if (result.ok) continue
-      if (result.category === 'code') return stop(ctx, await repairDecision(ctx, step, phase, result))
-      return stop(ctx, result)
-    }
+    const stopped = await runPhase(ctx, contract.phase)
+    if (stopped) return stop(ctx, stopped)
   }
   const acceptance = await acceptanceEvidence(ctx)
   ctx.report.acceptance = { required: ctx.acceptanceRequired, missing: acceptance.missing, tree: acceptance.finalTree }
   if (acceptance.missing.length) {
-    return finalize(ctx, 'human-required', { obligations: await obligations(ctx, null, acceptance.accepted) })
+    const summary = await obligations(ctx, null, acceptance.accepted)
+    const lifecycle = lifecycleStatus(ctx.root, ctx.request.runId).state
+    return finalize(ctx, lifecycle === 'running' ? 'human-required' : lifecycle, { obligations: summary })
   }
   const finish = ctx.expanded.steps.find(s => s.id === 'finish')
   const result = await runCli(ctx, finish)
   if (!result.ok) return stop(ctx, result)
   const summary = await obligations(ctx, result.references, acceptance.accepted)
+  const lifecycle = lifecycleStatus(ctx.root, ctx.request.runId).state
   const native = ctx.report.verification === 'native-required'
-  const verified = summary?.verifiedComplete === true && native
-  return finalize(ctx, verified ? 'verified-complete' : 'unresolved', { obligations: summary, verifiedComplete: verified })
+  const verified = summary?.verifiedComplete === true && native && lifecycle === 'running'
+  return finalize(ctx, lifecycle !== 'running' ? lifecycle : verified ? 'verified-complete' : 'unresolved', { obligations: summary, verifiedComplete: verified })
+}
+
+// A round's record-fix-round has landed when the CLI-recorded count for the task, read where the
+// command writes it (`fixRounds[phase][task]` in the run's status.json), already reaches the round
+// the fix decision named. Recording it again would spend budget with no second dispatch.
+async function recordLanded(ctx, phase, step) {
+  const bytes = await readInside(ctx.root, `${NAMES.stateDir}/${ctx.request.runId}/status.json`)
+  const rounds = bytes && parseJson(bytes)?.fixRounds?.[String(phase)]
+  const count = plainObject(rounds) && Object.hasOwn(rounds, step.task) ? rounds[step.task] : 0
+  return Number.isSafeInteger(count) && count >= step.round
+}
+// Every dispatch of a phase shares one driver executionId, and the strict driver refuses records
+// bound to another input identity. A dispatch this phase already handed to a driver under other
+// inputs (for example before the installed verifier changed) therefore stops a new dispatch here,
+// explicitly, instead of orphaning every task inside the driver.
+function driverIdentityDrift(ctx, phase, step) {
+  if (!driverJournal(ctx.request)) return null
+  const identity = strictExecutionIdentity(ctx.inputs)
+  const pattern = new RegExp(`^(?:implement-${phase}|repair-${phase}\\.r\\d+)$`)
+  const drifted = ctx.priorGroups.some(g => pattern.test(g.start.step) && g.start.identity !== identity
+    && g.effects.some(e => e.start.effect.kind === 'agent-dispatch' && e.resolution?.resolution.outcome !== 'not-started'))
+  return drifted ? { blocker: blocker('changed-input', step.id, `phase ${phase} was dispatched to the strict driver under other inputs; the driver refuses records bound to them, so no further dispatch runs`) } : null
+}
+
+// One phase: implement, review, collect, gate and integrate, then on a code failure the fix
+// decision and, while it retries within budget, repair rounds until the phase integrates.
+// Returns null once the phase is integrated, or the stop (a result or decision with a blocker).
+async function runPhase(ctx, phase) {
+  let round = ctx.resume ? priorRound(ctx, phase) : 0
+  let plan = round ? await priorRepairTasks(ctx, phase, round) : null
+  for (;;) {
+    const steps = round ? repairSteps(ctx, phase, round, plan)
+      : ['implement', 'review', 'collect', 'gate', 'integrate'].map(name => ctx.expanded.steps.find(s => s.id === `${name}-${phase}`))
+    if (!steps) return { blocker: blocker('missing-artifact', `repair-${phase}.r${round}`, 'the retained fix decision for this repair round is missing or names no task of this phase') }
+    let failure = null
+    for (const step of steps) {
+      if (nameOf(step) === 'record' && await recordLanded(ctx, phase, step)) {
+        ctx.report.steps.push({ id: step.id, attempt: null, status: 'reused', exitCode: null, durationMs: null, artifacts: [], recorded: 'already-landed' })
+        continue
+      }
+      const decision = ctx.resume ? await priorDecision(ctx, step, phase) : { action: 'run' }
+      if (decision.action === 'block') return decision
+      if (decision.action === 'reuse') continue
+      const drift = ['implement', 'record', 'repair'].includes(nameOf(step)) ? driverIdentityDrift(ctx, phase, step) : null
+      if (drift) return drift
+      const result = nameOf(step) === 'integrate' ? await runIntegration(ctx, step, phase) : await runCli(ctx, step, phase)
+      if (result.ok) {
+        if (nameOf(step) === 'repair') ctx.repairRounds.push({ phase, round, tasks: [...plan.tasks] })
+        continue
+      }
+      if (result.category !== 'code') return result
+      failure = { step, result }
+      break
+    }
+    if (!failure) {
+      ctx.finalSteps[phase] = Object.fromEntries(steps.map(step => [nameOf(step), step.id]))
+      return null
+    }
+    const next = await repairDecision(ctx, failure.step, phase, failure.result, round)
+    if (next.blocker) return next
+    round += 1
+    plan = next
+  }
 }
 
 function baseReport(ctx) {
   return { version: 1, mode: 'executed', runId: ctx.request.runId, executionId: ctx.executionId, profile: ctx.request.profile,
     profileHash: null, identity: null, inputs: null, state: 'unresolved', blockers: [], steps: [], acceptance: null,
     verification: typeof ctx.verificationFactory === 'function' ? 'injected-unit-fixture' : 'native-required',
+    driverJournal: driverJournal(ctx.request) ? 'required-execution' : 'unavailable: strict driver execution refuses files sandboxes',
     obligations: null, verifiedComplete: false, publication: 'absent', trust: [...TRUST] }
 }
 
@@ -723,7 +988,7 @@ async function controller({ root, cliPath, request: rawRequest, environment, rol
   let last = 0
   const ctx = { root: host.root, cliPath: host.cliPath, common: host.common, request, retention, executor, verificationFactory,
     acceptance: validateAcceptance(acceptance), resume, executionId, now: () => { const at = now(); if (!Number.isSafeInteger(at) || at < 0) throw new Error('Invalid clock'); return at },
-    observations: new Map(), taskTips: {}, reviewResults: {}, integrated: {},
+    observations: new Map(), taskTips: {}, reviewResults: {}, integrated: {}, repairRounds: [], finalSteps: {},
     attemptCounts: new Map(), attemptsUsed: 0, wallUsed: 0, priorGroups: [], reconciled: [], manifest: JSON.parse(manifestText) }
   ctx.tick = () => { last = Math.max(ctx.now(), last + 1); return last }
   ctx.invocationStart = ctx.now()
@@ -807,7 +1072,7 @@ export async function resumeWorkflowProfile({ root, cliPath, runId, executor, no
   if (requests.length !== 1) throw new Error('Run has no single retained workflow request to resume')
   const reference = requests[0].end.artifacts.find(a => a.kind === 'workflow-request')
   if (!reference) throw new Error('Retained workflow request reference is missing')
-  const bundle = parseJson(await readExecutionArtifact({ common, runId, reference, retention: RETENTION_UPPER }))
+  const bundle = parseJson(await readExecutionArtifact({ common, runId, reference, retention: RETENTION_LIMITS }))
   exactKeys(bundle, ['version', 'request', 'environment', 'rolePolicy', 'retention'], [], 'retained workflow request')
   if (bundle.version !== 1 || bundle.request?.runId !== runId) throw new Error('Retained workflow request does not match the run')
   const executionId = 'wf-' + hash(JSON.stringify([bundle.request, bundle.environment, bundle.rolePolicy])).slice(0, 40)

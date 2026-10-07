@@ -25,27 +25,31 @@ const git = async (args, opts = {}) => { try { const r = await exec('git', args,
 const branch = 'fleetmates/r/T1';
 const cwd = path.join(config.root, 'clone');
 const gitdir = path.join(config.root, 'clone-git');
+// T1 keeps the original checkout paths; any other task gets its own clone and git dir.
+const sandboxFor = id => id === 'T1' ? { cwd, gitdir } : { cwd: path.join(config.root, 'clone-' + id), gitdir: path.join(config.root, 'clone-git-' + id) };
 let enforcementCalls = 0; const boundaries = {};
 const hang = () => new Promise(()=>{});
 const late = () => new Promise(resolve=>setTimeout(resolve,Math.max(1,config.execution.deadlineAt-Date.now()+20)));
 const mark = async name => { await writeFile(path.join(config.root, name), 'yes'); };
 const worker = async opts => {
- await mark('spawn-count-' + Date.now());
+ await mark('spawn-count-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+ await writeFile(path.join(config.root, 'prompt-last.txt'), String(opts.prompt ?? opts.message ?? ''));
  const freshness = {};
  for(const [key,file] of Object.entries({result:opts.resultPath,stream:opts.streamPath,stderr:opts.errPath})) { try { await access(file); freshness[key]=false } catch { freshness[key]=true } }
  await writeFile(path.join(config.root,'fresh-inputs-'+(opts.resumed?'resume':'spawn')+'.json'),JSON.stringify(freshness));
  if (config.noOutput || opts.noOutput) return { child: spawn(process.execPath, ['-e', 'process.exit(0)']), sessionId: Promise.resolve('sid') };
  const code = \`const { execFileSync } = require('node:child_process'); const fs = require('node:fs');
- const cwd = process.env.WORKER_CWD, gd = process.env.WORKER_GIT;
+ const cwd = process.env.WORKER_CWD, gd = process.env.WORKER_GIT, taskBranch = process.env.TASK_BRANCH;
  const g = (...a) => execFileSync('git', ['--git-dir='+gd, '--work-tree='+cwd,...a], {cwd});
- if (!fs.existsSync(cwd+'/work.txt')) { fs.writeFileSync(cwd+'/work.txt','preserved'); g('add','work.txt'); g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fix: fixture work'); }
+ if (process.env.RESET_WORK === 'true') { g('reset','--hard',process.env.RESET_TO); fs.writeFileSync(cwd+'/work.txt','reset'); g('add','work.txt'); g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fix: reset work'); }
+ else if (!fs.existsSync(cwd+'/work.txt')) { fs.writeFileSync(cwd+'/work.txt','preserved'); g('add','work.txt'); g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fix: fixture work'); }
  if (process.env.FIX_COMMIT === 'true') { fs.writeFileSync(cwd+'/fix.txt','second commit');g('add','fix.txt');g('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','fix: fixture continuation'); }
- fs.writeFileSync(process.env.RESULT, JSON.stringify({status:'done',branch:'fleetmates/r/T1',filesChanged:['work.txt'],summary:process.env.DISTINCT_FIX==='true'?'fixture fix':'fixture',blockers:[]}));\n if (process.env.MALFORMED === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done'}));\n if (process.env.WRONG_BRANCH === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done',branch:'wrong',filesChanged:[],summary:'bad',blockers:[]}));\n const invalid=process.env.INVALID_OUTPUT; const target=invalid?.endsWith('stream')?process.env.STREAM:process.env.RESULT;
+ fs.writeFileSync(process.env.RESULT, JSON.stringify({status:'done',branch:taskBranch,filesChanged:['work.txt'],summary:process.env.DISTINCT_FIX==='true'?'fixture fix':'fixture',blockers:[]}));\n if (process.env.MALFORMED === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done'}));\n if (process.env.WRONG_BRANCH === 'true') fs.writeFileSync(process.env.RESULT,JSON.stringify({status:'done',branch:'wrong',filesChanged:[],summary:'bad',blockers:[]}));\n const invalid=process.env.INVALID_OUTPUT; const target=invalid?.endsWith('stream')?process.env.STREAM:process.env.RESULT;
  if(invalid) { fs.rmSync(target,{force:true}); if(invalid.startsWith('fifo')) execFileSync('mkfifo',[target]); else if(invalid.startsWith('directory')) fs.mkdirSync(target); else fs.writeFileSync(target,'x'.repeat(Number(process.env.BYTE_LIMIT)+1)); }
  if(process.env.STREAM_RESULT==='true') { fs.copyFileSync(process.env.RESULT,process.env.STREAM);fs.unlinkSync(process.env.RESULT); }
  fs.writeFileSync(process.env.WORKER_EXIT,'success');
  process.exit(Number(process.env.EXIT_CODE ?? 0));\`;
- const child = spawn(process.execPath, ['-e', code], { env: { ...process.env, WORKER_CWD: cwd, WORKER_GIT: gitdir, RESULT: opts.resultPath, MALFORMED: String(config.malformed), WRONG_BRANCH: String(config.wrongBranch), EXIT_CODE: String(config.exitCode??0), FIX_COMMIT:String(opts.resumed&&config.fixCommit), DISTINCT_FIX:String(opts.resumed&&config.distinctFixEvidence), INVALID_OUTPUT:config.invalidOutput??'', STREAM:opts.streamPath, BYTE_LIMIT:String(config.execution.retention.maxArtifactBytes), STREAM_RESULT:String(config.streamResult), WORKER_EXIT:path.join(config.root,'worker-exit-success') }, stdio: 'ignore' });
+ const child = spawn(process.execPath, ['-e', code], { env: { ...process.env, WORKER_CWD: opts.sandbox.cwd, WORKER_GIT: opts.sandbox.meta.gitdir, TASK_BRANCH: opts.sandbox.meta.branch, RESET_WORK: String(!!(opts.resumed && config.resetWork)), RESET_TO: config.execution.inputs.commit, RESULT: opts.resultPath, MALFORMED: String(config.malformed), WRONG_BRANCH: String(config.wrongBranch), EXIT_CODE: String(config.exitCode??0), FIX_COMMIT:String(opts.resumed&&config.fixCommit), DISTINCT_FIX:String(opts.resumed&&config.distinctFixEvidence), INVALID_OUTPUT:config.invalidOutput??'', STREAM:opts.streamPath, BYTE_LIMIT:String(config.execution.retention.maxArtifactBytes), STREAM_RESULT:String(config.streamResult), WORKER_EXIT:path.join(config.root,'worker-exit-success') }, stdio: 'ignore' });
  await writeFile(path.join(config.root,'worker.pid'),String(child.pid));
  return { child, sessionId: config.hangStage==='session'?hang():Promise.resolve('sid'), flushed: config.hangStage==='flush'?hang():Promise.resolve() };
 };
@@ -53,9 +57,11 @@ const adapter = {
  name: 'fixture', supportsEffort: true,
  async makeSandbox(_git, opts) {
   if(config.hangStage==='setup') await hang();
+  const { cwd, gitdir } = sandboxFor(opts.taskId), branch = 'fleetmates/r/' + opts.taskId;
+  await writeFile(path.join(config.root, 'sandbox-base-' + opts.taskId), String(opts.runBranch));
   try { await access(cwd); } catch {
    let r = await git(['clone','--shared','--separate-git-dir='+gitdir, config.root, cwd]); if(r.code) throw Error(r.stderr);
-   r = await git(['checkout','-b',branch,'origin/run/r'], {cwd}); if(r.code) throw Error(r.stderr);
+   r = await git(['checkout','-b',branch,'origin/'+opts.runBranch], {cwd}); if(r.code) throw Error(r.stderr);
    if(config.workerWrongRef) { r=await git(['checkout','-b','wrong'],{cwd});if(r.code) throw Error(r.stderr); }
   }
   return { cwd, meta: { mode: config.mode ?? 'clone', gitdir, branch, workerEnvironment: config.preparation === 'missing' ? null : { ready:config.preparation!=='failed', workspace:'fresh', setup:{status:'pass',durationMs:7,checks:[{log:{complete:!config.incompleteSetup,output:'setup log'}}]},baseline:{status:'pass',durationMs:9,checks:[{log:{complete:true,output:'baseline log'}}]},durationMs:16 } } };
@@ -82,9 +88,9 @@ const adapter = {
   }
   if(config.virtualResult) return {status:'done',branch,filesChanged:[],summary:'virtual',blockers:[]}; try { return JSON.parse(await readFile(config.streamResult?streamPath:resultPath,'utf8')); } catch { return null; } },
  async readUsage() { if(config.hangStage==='usage') await hang(); return null; },
- async collect(_git, {sandbox,branch}) { if(config.hangStage==='collection') await hang(); if(config.lateCollection) await late(); const events=await readExecutionEvents(config.execution.common,'r');await writeFile(path.join(config.root,'collection-order.json'),JSON.stringify(events.some(e=>e.step==='collection'&&e.kind==='step-started'))); const r = await _git(['fetch','--no-tags',sandbox.meta.gitdir,'refs/heads/'+branch+':refs/heads/'+branch]); if(r.code) throw Error(r.stderr); await mark('collected'); },
+ async collect(_git, {sandbox,branch}) { if(config.hangStage==='collection') await hang(); if(config.lateCollection) await late(); const events=await readExecutionEvents(config.execution.common,'r');await writeFile(path.join(config.root,'collection-order.json'),JSON.stringify(events.some(e=>e.step==='collection'&&e.kind==='step-started'))); await writeFile(path.join(config.root,'collect-base.txt'),String(sandbox.meta.runBranch)); const r = await _git(['fetch','--no-tags',sandbox.meta.gitdir,(config.forceCollect?'+':'')+'refs/heads/'+branch+':refs/heads/'+branch]); if(r.code) throw Error(r.stderr); await mark('collected'); },
 };
-const args = { adapter, git, runRepo: config.root, runId:'r',runBranch:'run/r',phaseTasks:[{id:'T1',title:'fixture',files:['work.txt'],model:config.model}],maxParallel:1,sandboxMode:'clone',network:false,timeoutMinutes:1,tierModels:{},effortFor:()=> config.effort ?? 'high',personaFor:()=> config.persona ?? 'fixture persona',composeBriefFor:t=>composeBrief({task:{...t,branch},runId:'r',planPath:'plan.md',baseBranch:'old-base'}),runDir:path.join(config.root,'state'),completeEnforcement:async()=>{
+const args = { adapter, git, runRepo: config.root, runId:'r',runBranch:'run/r',phaseTasks:(config.tasks??['T1']).map(id=>({id,title:'fixture',files:['work.txt'],model:config.model})),maxParallel:config.maxParallel??1,fixRound:config.fixRound,sandboxMode:'clone',network:false,timeoutMinutes:1,tierModels:{},effortFor:()=> config.effort ?? 'high',personaFor:()=> config.persona ?? 'fixture persona',composeBriefFor:t=>composeBrief({task:{...t,branch:'fleetmates/r/'+t.id},runId:'r',planPath:'plan.md',baseBranch:'old-base',fixRound:config.fixRound===true}),runDir:path.join(config.root,'state'),completeEnforcement:async()=>{
  await mark('verified-'+Date.now());
  if(config.hangStage==='verification') await hang(); if(config.slowEnforcement) await late();
  const code=config.enforcementCodes?.[enforcementCalls++]??config.enforcement??0;
@@ -294,6 +300,19 @@ test('unknown external effect remains unresolved without query or duplicate mode
   const start=(await readExecutionEvents(config.execution.common,'r')).find(e=>e.step==='harness'&&e.kind==='step-started')
   await appendExecutionEvent(config.execution.common,{...start,id:'effect-start',kind:'effect-started',at:start.at+1,artifacts:[],effect:{id:'publication-attempt',kind:'publication',reference:null}})
   await assertRefusal(config,t,/unknown-effect/)
+})
+
+test('an open agent-dispatch effect of the launching controller does not refuse the strict driver it launched',async t=>{
+  const config=await setup(t)
+  const {appendExecutionEvent}=await import('../scripts/execution-journal.mjs')
+  const parent={version:2,runId:'r',executionId:'wf-parent',task:'profile',step:'implement-1',attempt:'implement-1.1',inputs:config.execution.inputs,
+    branches:{'refs/heads/run/r':config.execution.inputs.commit},checkout:'root',artifacts:[]}
+  const at=Date.now()-1000
+  await appendExecutionEvent(config.execution.common,{...parent,id:'parent-start',kind:'step-started',at},{requireFreshStart:true})
+  await appendExecutionEvent(config.execution.common,{...parent,id:'parent-effect',kind:'effect-started',at:at+1,effect:{id:'agent.implement-1.1',kind:'agent-dispatch',reference:null}})
+  const out=await outcome(config,t)
+  assert.deepEqual(out.orphaned,[]);assert.equal(out.results[0]?.status,'done')
+  assert.equal((await names(config)).filter(n=>n.startsWith('spawn-count-')).length,1)
 })
 
 test('strict initial preparation must exist and pass before spawn',async t=>{
@@ -585,3 +604,98 @@ for(const kind of ['worker-setup','harness-result','worker-continuation']) {
     assert.ok(!(await names(config)).some(n=>n.startsWith('verified-')))
   })
 }
+
+// ---- fix-round dispatch and parallel strict execution ----
+
+const spawnCount = async config => (await names(config)).filter(n => n.startsWith('spawn-count-')).length
+async function session(config, id = 'T1') { return JSON.parse(await readFile(path.join(config.root, 'state', 'sessions', id + '.json'), 'utf8')) }
+
+test('two tasks at maxParallel 2 under one execution contract both complete without a busy storage error', async t => {
+  const config = await setup(t)
+  const out = await outcome({ ...config, tasks: ['T1', 'T2'], maxParallel: 2 }, t)
+  assert.deepEqual(out.orphaned, [], JSON.stringify(await Promise.all(['T1', 'T2'].map(id => session(config, id).then(s => s.exitReason, () => null)))))
+  assert.deepEqual(out.results.map(r => [r.taskId, r.status]), [['T1', 'done'], ['T2', 'done']])
+  const events = await readExecutionEvents(config.execution.common, 'r')
+  for (const id of ['T1', 'T2']) {
+    assert.ok(events.some(e => e.task === id && e.step === 'verification' && e.kind === 'step-completed'), id)
+    assert.notEqual(git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/' + id), config.execution.inputs.commit)
+  }
+  assert.equal(await spawnCount(config), 2)
+})
+
+test('a legacy fix round resumes a task whose done result is recorded, builds on its tip and journals the attempt', async t => {
+  const config = await setup(t)
+  const first = await outcome({ ...config, legacy: true }, t)
+  assert.equal(first.results[0]?.status, 'done')
+  const prior = git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/T1')
+  const again = await outcome({ ...config, legacy: true }, t)
+  assert.equal(again.results[0]?.status, 'done')
+  assert.equal(await spawnCount(config), 1, 'without a fix round a recorded done result is final')
+  const fixed = await outcome({ ...config, legacy: true, fixRound: true, fixCommit: true }, t)
+  assert.equal(fixed.results[0]?.status, 'done')
+  assert.equal(await spawnCount(config), 2, 'the fix round respawned the task')
+  assert.ok((await names(config)).includes('fresh-inputs-resume.json'), 'the recorded session was resumed in its own sandbox')
+  const tip = git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/T1')
+  assert.notEqual(tip, prior)
+  git(config.root, 'merge-base', '--is-ancestor', prior, tip)
+  const record = await session(config)
+  assert.equal(record.fixRounds?.length, 1)
+  assert.deepEqual([record.fixRounds[0].priorTip, record.fixRounds[0].tip, record.fixRounds[0].outcome], [prior, tip, 'done'])
+  assert.match(record.fixRounds[0].attempt ?? '', /^[0-9a-f-]{36}$/)
+})
+
+test('a legacy fix round whose sandbox is gone is cut from the task branch, never from the run branch', async t => {
+  const config = await setup(t)
+  await outcome({ ...config, legacy: true }, t)
+  const prior = git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/T1')
+  await rm(path.join(config.root, 'clone'), { recursive: true, force: true })
+  await rm(path.join(config.root, 'clone-git'), { recursive: true, force: true })
+  const fixed = await outcome({ ...config, legacy: true, fixRound: true }, t)
+  assert.equal(fixed.results[0]?.status, 'done')
+  assert.equal(await readFile(path.join(config.root, 'sandbox-base-T1'), 'utf8'), 'fleetmates/r/T1')
+  assert.equal(git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/T1'), prior, 'nothing reset the task branch')
+  git(config.root, '--git-dir=' + path.join(config.root, 'clone-git'), 'merge-base', '--is-ancestor', prior, 'HEAD')
+})
+
+test('a legacy fix round in a files checkout is briefed and collected on the prior task tip', async t => {
+  const config = await setup(t)
+  await outcome({ ...config, legacy: true, mode: 'files' }, t)
+  const prior = git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/T1')
+  assert.notEqual(prior, config.execution.inputs.commit)
+  const fixed = await outcome({ ...config, legacy: true, mode: 'files', fixRound: true, fixCommit: true }, t)
+  assert.equal(fixed.results[0]?.status, 'done')
+  assert.equal(await readFile(path.join(config.root, 'collect-base.txt'), 'utf8'), 'fleetmates/r/T1', 'a files collection commits on the task branch')
+  const prompt = await readFile(path.join(config.root, 'prompt-last.txt'), 'utf8')
+  assert.ok(prompt.includes(prior), 'the brief names the prior task tip')
+  assert.ok(!prompt.includes(config.execution.inputs.commit), 'the brief never names the run branch tip')
+})
+
+test('a legacy fix round that moves the task branch off its prior tip is refused and the tip is restored', async t => {
+  const config = await setup(t)
+  await outcome({ ...config, legacy: true }, t)
+  const prior = git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/T1')
+  const out = await outcome({ ...config, legacy: true, fixRound: true, resetWork: true, forceCollect: true }, t)
+  assert.equal(out.results[0]?.status, 'failed')
+  assert.match(out.results[0].blockers.join(' '), /prior task tip/)
+  assert.equal(git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/T1'), prior)
+  assert.equal((await session(config)).fixRounds.at(-1).outcome, 'reset-refused')
+})
+
+test('a strict fix round invokes a new journaled harness attempt over a collected done result and keeps its commits', async t => {
+  const config = await setup(t)
+  assert.equal((await outcome(config, t)).results[0]?.status, 'done')
+  // The fix round's own prompt differs from the collected attempt's; only a reuse would compare them.
+  const fixed = await outcome({ ...config, fixRound: true, fixCommit: true, persona: 'fix-round persona' }, t)
+  assert.equal(fixed.results[0]?.status, 'done')
+  assert.equal(await spawnCount(config), 2)
+  const tips = await retainedTips(config)
+  assert.equal(tips.length, 2); assert.notEqual(tips[0], tips[1])
+  git(config.root, 'merge-base', '--is-ancestor', tips[0], tips[1])
+  assert.equal(git(config.root, 'rev-parse', 'refs/heads/fleetmates/r/T1'), tips[1])
+  const events = await readExecutionEvents(config.execution.common, 'r')
+  const starts = events.filter(e => e.step === 'harness' && e.kind === 'step-started')
+  const binding = JSON.parse(await readExecutionArtifact({ common: config.execution.common, runId: 'r', retention,
+    reference: starts.at(-1).artifacts.find(a => a.kind === 'driver-invocation') }))
+  assert.equal(binding.fixRound, true)
+  assert.equal(binding.hostTip, tips[0])
+})
