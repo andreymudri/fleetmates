@@ -93,7 +93,7 @@ const adapter = {
 const args = { adapter, git, runRepo: config.root, runId:'r',runBranch:'run/r',phaseTasks:(config.tasks??['T1']).map(id=>({id,title:'fixture',files:['work.txt'],model:config.model})),maxParallel:config.maxParallel??1,fixRound:config.fixRound,sandboxMode:'clone',network:false,timeoutMinutes:1,tierModels:{},effortFor:()=> config.effort ?? 'high',personaFor:()=> config.persona ?? 'fixture persona',composeBriefFor:t=>composeBrief({task:{...t,branch:'fleetmates/r/'+t.id},runId:'r',planPath:'plan.md',baseBranch:'old-base',fixRound:config.fixRound===true}),runDir:path.join(config.root,'state'),completeEnforcement:async()=>{
  await mark('verified-'+Date.now());
  if(config.hangStage==='verification') await hang(); if(config.slowEnforcement) await late();
- const code=config.enforcementCodes?.[enforcementCalls++]??config.enforcement??0;
+ const call=enforcementCalls++; const code=config.enforcementAnswers?.[call]??config.enforcementCodes?.[call]??config.enforcement??0;
  if(config.seedBeforeResume && code===3) for(const suffix of ['stream.jsonl','stderr.log']) await writeFile(path.join(config.root,'state','sessions','T1.'+suffix),'x'.repeat(config.execution.retention.maxArtifactBytes+1));
  return code;
  },
@@ -698,4 +698,55 @@ test('a strict fix round invokes a new journaled harness attempt over a collecte
     reference: starts.at(-1).artifacts.find(a => a.kind === 'driver-invocation') }))
   assert.equal(binding.fixRound, true)
   assert.equal(binding.hostTip, tips[0])
+})
+
+// The strict driver's enforcement answer is { code, pendingOnly, pending }, which the CLI builds from
+// the verdict `complete` computes. Exit 4 is accepted only with pendingOnly, and the receipt's scope
+// names the pending kinds.
+async function verificationReceipts(config) {
+  const events = (await readExecutionEvents(config.execution.common, 'r')).filter(e => e.step === 'verification' && e.kind !== 'step-started')
+  const receipts = []
+  for (const event of events) {
+    receipts.push({ kind: event.kind, receipt: JSON.parse(await readExecutionArtifact({ common: config.execution.common, runId: 'r', reference: event.artifacts[0], retention })) })
+  }
+  return receipts
+}
+
+test('strict enforcement exit 4 with only a pending agent check is accepted and its receipt names the pending kind', async t => {
+  const config = await setup(t)
+  const out = await outcome({ ...config, enforcementAnswers: [{ code: 4, pendingOnly: true, pending: ['agent'] }] }, t)
+  assert.deepEqual(out.orphaned, []); assert.equal(out.results[0]?.status, 'done')
+  assert.equal(out.results[0].verifiedComplete, false)
+  const receipts = await verificationReceipts(config)
+  assert.deepEqual(receipts.map(r => [r.kind, r.receipt.code, r.receipt.scope, r.receipt.pendingOnly]),
+    [['step-completed', 4, 'enforcement-only-pending-agent', true]])
+})
+
+for (const answer of [{ code: 4, pendingOnly: false, pending: ['agent'] }, { code: 4 }, 4, { code: 2, pendingOnly: true, pending: ['agent'] }]) {
+  test('strict enforcement answer ' + JSON.stringify(answer) + ' is refused and the task orphaned', async t => {
+    const config = await setup(t)
+    const out = await outcome({ ...config, enforcementAnswers: [answer] }, t)
+    assert.deepEqual(out.orphaned, ['T1']); assert.deepEqual(out.results, [])
+    assert.deepEqual((await verificationReceipts(config)).map(r => r.kind), ['step-failed'])
+    assert.match((await session(config)).exitReason, /mandatory enforcement/)
+  })
+}
+
+test('a task-scoped enforcement rejection twice orphans the task and its latest verification event is step-failed', async t => {
+  const config = await setup(t); config.execution.maxAttempts = 3
+  const rejected = { code: 3, pendingOnly: false, pending: [] }
+  const out = await outcome({ ...config, enforcementAnswers: [rejected, rejected] }, t)
+  assert.deepEqual(out.orphaned, ['T1']); assert.deepEqual(out.results, [])
+  assert.deepEqual((await verificationReceipts(config)).map(r => [r.kind, r.receipt.code]), [['step-failed', 3], ['step-failed', 3]])
+})
+
+test('the legacy driver reads the code out of a structured answer and still treats only 3 as a rejection', async t => {
+  const config = await setup(t)
+  const pending = await outcome({ ...config, legacy: true, enforcementAnswers: [{ code: 4, pendingOnly: false, pending: ['agent'] }] }, t)
+  assert.equal(pending.results[0]?.status, 'done')
+  const second = await setup(t)
+  const rejected = { code: 3, pendingOnly: false, pending: [] }
+  const out = await outcome({ ...second, legacy: true, enforcementAnswers: [rejected, rejected] }, t)
+  assert.equal(out.results[0]?.status, 'failed')
+  assert.match(out.results[0].blockers.join(' '), /rejected the task twice/)
 })

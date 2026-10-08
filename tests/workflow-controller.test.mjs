@@ -7,10 +7,10 @@ import path from 'node:path'
 import { execFileSync, execFile } from 'node:child_process'
 import { executeWorkflowProfile, resumeWorkflowProfile, validateWorkflowExpansion } from '../scripts/workflow-controller.mjs'
 import { expandWorkflowProfile } from '../scripts/workflow-profile.mjs'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { defaultExec } from '../scripts/gate-runner.mjs'
 import { retainExecutionArtifact } from '../scripts/execution-artifacts.mjs'
-import { readExecutionEvents } from '../scripts/execution-journal.mjs'
+import { readExecutionEvents, appendExecutionEvent } from '../scripts/execution-journal.mjs'
 import { resolveExecutionEffect } from '../scripts/execution-recovery.mjs'
 import { dispatchPhase } from '../scripts/driver.mjs'
 import { strictExecutionIdentity } from '../scripts/completion-obligations.mjs'
@@ -96,6 +96,12 @@ if (command === 'init-run') {
       git(['update-ref', 'refs/heads/' + branch, tip])
       if (!mode.includes('no-result')) writeFileSync(path.join(dir, 'sessions', t.id + '.result.json'),
         JSON.stringify({ status: 'done', branch: mode.includes('wrong-branch') ? 'fleetmates/' + run + '/other' : branch, filesChanged: [t.file], summary: 'fixture', blockers: [] }))
+    }
+    // orphaned: as the real dispatch does when the driver returns a task as orphaned, status.json
+    // records it, while the harness's own result file stays where the session wrote it.
+    if (mode.includes('orphaned')) {
+      const file = path.join(dir, 'status.json'), status = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+      writeFileSync(file, JSON.stringify({ ...status, tasks: phaseTasks.map(t => ({ id: t.id, state: 'orphaned' })) }))
     }
     if (mode.includes('hang-after-dispatch') && !fixRound) { writeFileSync(path.join(bin, 'hang.pid'), String(process.pid)); setInterval(() => {}, 1000) }
     else console.log('dispatched')
@@ -1056,4 +1062,135 @@ test('request bounds are pinned at both edges: n is accepted and n+1 is refused 
     assert.deepEqual(report.blockers.map(b => b.category), ['capability'], label)
   }
   assert.equal(Buffer.byteLength(JSON.stringify(pad(4096))), 4096)
+})
+
+// The driver's verification outcomes, appended to the journal exactly where the strict driver writes
+// them: the phase's driver executionId from the --execution contract, the task as both task and
+// checkout, step `verification`. Each entry is one attempt: a start plus its outcome, or a start
+// alone when the entry is null. Only the first dispatch of the run gets them.
+function driverVerifications(fixture, outcomes, task = 'T1') {
+  let done = false, clock = Date.now()
+  fixture.env.hook = async (command, options) => {
+    if (options.argv?.[1] !== 'dispatch' || done) return
+    done = true
+    const contract = JSON.parse(await readFile(options.argv[options.argv.indexOf('--execution') + 1], 'utf8'))
+    for (const kind of outcomes) {
+      const base = { version: 2, runId: 'r1', executionId: contract.executionId, task, step: 'verification', attempt: randomUUID(),
+        inputs: contract.inputs, branches: { 'refs/heads/fleetmates/run/r1': contract.inputs.commit }, checkout: task, artifacts: [] }
+      await appendExecutionEvent(fixture.common, { ...base, id: randomUUID(), kind: 'step-started', at: clock++ }, { requireFreshStart: true })
+      if (!kind) continue
+      const bytes = Buffer.from(JSON.stringify({ version: 1, code: kind === 'step-completed' ? 0 : 3, scope: 'enforcement-only', attempt: base.attempt }))
+      const { reference } = await retainExecutionArtifact({ common: fixture.common, runId: 'r1', kind: 'driver-verification', bytes, retention })
+      await appendExecutionEvent(fixture.common, { ...base, id: randomUUID(), kind, at: clock++, artifacts: [reference] })
+    }
+  }
+}
+
+// Open item 12 (the T4 real trial): the strict driver orphaned the task, dispatch still exited 0 and
+// the session's result file still said done, and the controller accepted the task from that file.
+test('a task the driver orphaned is refused at implement even with a done result file, and the run never reaches acceptance', async t => {
+  const fixture = await project(t)
+  fixture.env.mode = 'orphaned'
+  const report = await fixture.run()
+  assert.deepEqual(commands(await fixture.invocations()), upTo.implement)
+  assert.deepEqual(report.blockers.map(b => b.step), ['implement-1'])
+  assert.match(report.blockers[0].reason, /task T1 .*orphaned/)
+  assert.ok(!['human-required', 'verified-complete', 'unresolved'].includes(report.state), report.state)
+  assert.equal(report.verifiedComplete, false)
+})
+
+for (const [label, outcomes] of [['failed', ['step-failed']], ['completed then failed', ['step-completed', 'step-failed']], ['started without an outcome', [null]]]) {
+  test(`a task whose latest driver verification is ${label} is refused at implement`, async t => {
+    const fixture = await project(t)
+    driverVerifications(fixture, outcomes)
+    const report = await fixture.run()
+    assert.deepEqual(commands(await fixture.invocations()), upTo.implement)
+    assert.deepEqual(report.blockers.map(b => b.step), ['implement-1'])
+    assert.match(report.blockers[0].reason, /task T1 .*driver verification/)
+    assert.equal(report.verifiedComplete, false)
+  })
+}
+
+// An enforcement rejection the driver saw fixed on its second attempt leaves step-completed as the
+// latest verification event, and implementation is accepted.
+test('a task whose driver verification failed and then completed is accepted at implement', async t => {
+  const fixture = await project(t)
+  driverVerifications(fixture, ['step-failed', 'step-completed'])
+  const report = await fixture.run()
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+  assert.equal(report.steps.find(step => step.id === 'implement-1').status, 'completed')
+})
+
+// A driver that accepted the task (for example a pending-only exit 4) leaves one step-completed
+// verification, and the run goes on. The verification here is the injected unit fixture, which the
+// controller never counts as completion, so the end state is `unresolved` with every obligation
+// verified; only native verification turns that into `verified-complete`.
+test('a task whose latest driver verification is step-completed proceeds through finish with every obligation verified', async t => {
+  const fixture = await project(t)
+  driverVerifications(fixture, ['step-completed'])
+  const report = await fixture.run()
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+  const acceptance = []
+  for (const criterion of report.acceptance.required) {
+    const bytes = Buffer.from(JSON.stringify({ version: 1, criterion, tree: report.acceptance.tree, status: 'pass' }))
+    acceptance.push({ criterion, reference: (await retainExecutionArtifact({ common: fixture.common, runId: 'r1', kind: 'acceptance-evidence', bytes, retention })).reference })
+  }
+  const done = await fixture.resume({ acceptance })
+  assert.equal(commands(await fixture.invocations()).at(-1), 'finish')
+  assert.equal(done.obligations.verifiedComplete, true)
+  assert.equal(done.verification, 'injected-unit-fixture')
+  assert.equal(done.state, 'unresolved')
+  const { runCli } = await import('../scripts/cli.mjs')
+  const lines = []
+  const code = await runCli(['workflow-status', '--run', 'r1', '--root', fixture.root], { out: line => lines.push(line), err: () => {} })
+  assert.equal(code, 0, lines.join('\n'))
+  assert.equal(JSON.parse(lines.join('\n')).state, 'reconciled')
+})
+
+// The CLI's half of the structured answer: the real `complete --enforcement-only` over a real run
+// with a mandatory agent check.
+async function enforcementRepo(t, { agent = true } = {}) {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'wfc-enf-')))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  git(root, 'init', '-q', '-b', 'main')
+  git(root, 'config', 'user.name', 'Example'); git(root, 'config', 'user.email', 'example@example.invalid')
+  await writeFile(path.join(root, 'plan.md'), '### Task 1: A\n\n**Files:**\n- Create: `a.mjs`\n')
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n')
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [
+    { name: 'noop', kind: 'command', run: `${node} -e ""` }, { name: 'fileset', kind: 'fileset' }, { name: 'ownership', kind: 'ownership' },
+    ...(agent ? [{ name: 'review', kind: 'agent', lens: ['correctness'] }] : [])] } } }))
+  git(root, 'add', '.'); git(root, 'commit', '-q', '-m', 'test: anchor')
+  git(root, 'checkout', '-q', '-b', 'run-branch')
+  const { runCli } = await import('../scripts/cli.mjs')
+  assert.equal(await runCli(['init-run', path.join(root, 'plan.md'), '--run', 'r1', '--root', root], { out: () => {}, err: () => {} }), 0)
+  const task = (files) => {
+    git(root, 'checkout', '-q', '-b', 'fleetmates/r1/T1', 'run-branch')
+    for (const file of files) { writeFileSync(path.join(root, file), 'export const x = 1\n'); git(root, 'add', file) }
+    git(root, 'commit', '-q', '-m', 'feat: T1'); git(root, 'checkout', '-q', 'run-branch')
+  }
+  return { root, task }
+}
+
+test('the CLI enforcement answer is pendingOnly exactly when the only non-passing checks are pending agent checks', async t => {
+  const { completeEnforcementAnswer } = await import('../scripts/cli.mjs')
+  const ask = root => completeEnforcementAnswer({ runId: 'r1', taskId: 'T1', planPath: 'plan.md', baseBranch: 'main', root })
+
+  const pending = await enforcementRepo(t)
+  pending.task(['a.mjs'])
+  assert.deepEqual(await ask(pending.root), { code: 4, pendingOnly: true, pending: ['agent'] })
+
+  const rejected = await enforcementRepo(t)
+  rejected.task(['a.mjs', 'undeclared.mjs'])
+  assert.deepEqual(await ask(rejected.root), { code: 3, pendingOnly: false, pending: ['agent'] })
+
+  // A run-wide failure beside the pending agent check: exit 4, but a check failed.
+  const unowned = await enforcementRepo(t)
+  unowned.task(['a.mjs'])
+  writeFileSync(path.join(unowned.root, 'direct.txt'), 'direct\n')
+  git(unowned.root, 'add', 'direct.txt'); git(unowned.root, 'commit', '-q', '-m', 'chore: direct write')
+  assert.deepEqual(await ask(unowned.root), { code: 4, pendingOnly: false, pending: ['agent'] })
+
+  const passing = await enforcementRepo(t, { agent: false })
+  passing.task(['a.mjs'])
+  assert.deepEqual(await ask(passing.root), { code: 0, pendingOnly: false, pending: [] })
 })
