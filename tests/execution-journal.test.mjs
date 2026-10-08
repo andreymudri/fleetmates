@@ -810,3 +810,161 @@ test('EFFECT_RESOLUTIONS lists the exact outcomes for every strict effect kind',
   const resolution = { outcome: 'unknown', reason: 'inspected', trust: 'local-operator-observation', authenticatedAuthorization: false }
   assert.equal(executionEvent(strictEvent('r', 'effect-resolved', { effect: { id: 'pr-1', kind: 'pr', reference: 'example/project#12' }, resolution })).resolution.outcome, 'unknown')
 })
+
+// Open item 14: an appender's `.<uuid>.tmp` exists between its write and its unlink, and an
+// unlocked reader (the driver reads this way) listed it as unexpected storage.
+const appenderTemporary = () => '.' + crypto.randomUUID() + '.tmp'
+async function plantJournalEntry(common, runId, name, { ageMs = 0, kind = 'file' } = {}) {
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const { mkdir, writeFile, symlink, utimes, lutimes } = await import('node:fs/promises')
+  const directory = await executionDirectory(common, runId), file = path.join(directory, name), at = (Date.now() - ageMs) / 1000
+  if (kind === 'file') { await writeFile(file, 'partial', { mode: 0o600 }); await utimes(file, at, at) }
+  else if (kind === 'symlink') { await writeFile(path.join(common, 'outside'), 'partial', { mode: 0o600 }); await symlink(path.join(common, 'outside'), file); await lutimes(file, at, at) }
+  else { await mkdir(file, { mode: 0o700 }); await utimes(file, at, at) }
+  return file
+}
+test('concurrent appenders in other processes never make an unlocked read fail on their in-flight temporary', { timeout: 60000 }, async t => {
+  const { spawn } = await import('node:child_process')
+  const { once } = await import('node:events')
+  const { readdir } = await import('node:fs/promises')
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-race-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  await appendExecutionEvent(common, event('seed', 'step-started', 1, { runId: 'race', step: 'seed' }))
+  const directory = await executionDirectory(common, 'race'), module = new URL('../scripts/execution-journal.mjs', import.meta.url).href
+  const perChild = 12
+  // Each appender holds its synced temporary in place for 25 ms before linking it, so the window
+  // the reader must survive is wide and is hit on every run instead of by chance.
+  const child = name => spawn(process.execPath, ['--input-type=module', '-e', `
+    import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module'
+    const link = fs.promises.link
+    fs.promises.link = async (...args) => { await new Promise(resolve => setTimeout(resolve, 25)); return link(...args) }
+    syncBuiltinESMExports()
+    const { appendExecutionEvent } = await import(${JSON.stringify(module)})
+    for (let i = 0; i < ${perChild}; i++) await appendExecutionEvent(${JSON.stringify(common)}, { ...${JSON.stringify(event('x', 'step-started', 2, { runId: 'race' }))}, id: '${name}-' + i, step: '${name}-' + i })
+  `], { stdio: ['ignore', 'ignore', 'pipe'] })
+  const children = ['alpha', 'beta'].map(child)
+  t.after(() => { for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL') })
+  const stderr = children.map(c => { const chunks = []; c.stderr.on('data', chunk => chunks.push(chunk)); return chunks })
+  const exits = Promise.all(children.map(c => c.exitCode !== null ? [c.exitCode] : once(c, 'exit')))
+  let done = false, sightings = 0, reads = 0
+  const errors = []
+  exits.finally(() => { done = true })
+  while (!done) {
+    if ((await readdir(directory)).some(name => /^\.[0-9a-f-]{36}\.tmp$/.test(name))) sightings++
+    try { await readExecutionEvents(common, 'race'); reads++ } catch (error) { errors.push(error.message) }
+  }
+  assert.deepEqual((await exits).map(([code]) => code), [0, 0], Buffer.concat(stderr.flat()).toString())
+  assert.deepEqual([...new Set(errors)], [])
+  assert.ok(sightings > 0 && reads > 0, `sightings ${sightings}, reads ${reads}`)
+  assert.equal((await readExecutionEvents(common, 'race')).length, 1 + 2 * perChild)
+})
+test('an unlocked read ignores only a young temporary of the exact appender name shape', async t => {
+  const { lstat, rm: remove } = await import('node:fs/promises')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-tmp-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  await appendExecutionEvent(common, event('start', 'step-started', 1, { runId: 'tmp' }))
+  const young = await plantJournalEntry(common, 'tmp', appenderTemporary(), { ageMs: 59000 })
+  assert.deepEqual((await readExecutionEvents(common, 'tmp')).map(e => e.id), ['start'])
+  assert.equal((await lstat(young)).isFile(), true)
+  await remove(young)
+  const refused = [
+    ['a stale temporary no lock holder reconciled', appenderTemporary(), { ageMs: 61000 }],
+    ['a non-UUID temporary name', '.' + 'a'.repeat(36) + '.tmp', {}],
+    ['a temporary name without the leading dot', crypto.randomUUID() + '.tmp', {}],
+    ['an uppercase UUID temporary name', '.' + crypto.randomUUID().toUpperCase() + '.tmp', {}],
+    ['an unrelated .tmp name', 'partial.tmp', {}],
+    ['a symlink with the appender name shape', appenderTemporary(), { kind: 'symlink' }],
+    ['a directory with the appender name shape', appenderTemporary(), { kind: 'directory' }],
+    ['a non-matching name', 'unexpected', {}]
+  ]
+  for (const [label, name, options] of refused) {
+    const file = await plantJournalEntry(common, 'tmp', name, options)
+    await assert.rejects(readExecutionEvents(common, 'tmp'), /^Error: Incomplete execution journal storage$/, label)
+    await remove(file, { recursive: true })
+  }
+  // Under the storage lock no live writer owns a temporary, so the append still refuses a young one.
+  await plantJournalEntry(common, 'tmp', appenderTemporary())
+  await assert.rejects(appendExecutionEvent(common, event('next', 'step-started', 2, { runId: 'tmp', step: 'next' })), /^Error: Incomplete execution journal storage$/)
+})
+test('an unlocked read accepts a record whose second link is a young appender temporary and no other second link', async t => {
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const { link, unlink, utimes, readdir } = await import('node:fs/promises')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-link-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  await appendExecutionEvent(common, event('start', 'step-started', 1, { runId: 'link' }))
+  const directory = await executionDirectory(common, 'link'), [name] = await readdir(directory), record = path.join(directory, name)
+  const temporary = path.join(directory, appenderTemporary())
+  await link(record, temporary)
+  assert.deepEqual((await readExecutionEvents(common, 'link')).map(e => e.id), ['start'])
+  const stale = (Date.now() - 61000) / 1000
+  await utimes(temporary, stale, stale)
+  await assert.rejects(readExecutionEvents(common, 'link'), /^Error: (Unsafe execution record|Incomplete execution journal storage)$/)
+  await unlink(temporary)
+  await link(record, path.join(common, 'outside-link'))
+  await assert.rejects(readExecutionEvents(common, 'link'), /^Error: Unsafe execution record$/)
+})
+async function linkedJournal(t, runId) {
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const { readdir } = await import('node:fs/promises')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-' + runId + '-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  await appendExecutionEvent(common, event('start', 'step-started', 1, { runId }))
+  const directory = await executionDirectory(common, runId), [name] = await readdir(directory)
+  return { common, directory, record: path.join(directory, name), name }
+}
+const tenYearsAhead = () => (Date.now() + 10 * 365 * 86400000) / 1000
+test('an unlocked read refuses a future-dated temporary', async t => {
+  const { utimes } = await import('node:fs/promises')
+  const { common } = await linkedJournal(t, 'future')
+  const future = tenYearsAhead()
+  const alone = await plantJournalEntry(common, 'future', appenderTemporary())
+  await utimes(alone, future, future)
+  await assert.rejects(readExecutionEvents(common, 'future'), /^Error: Incomplete execution journal storage$/)
+})
+test('an unlocked read refuses a record linked to a future-dated temporary', async t => {
+  const { link, unlink, utimes } = await import('node:fs/promises')
+  const { common, directory, record } = await linkedJournal(t, 'future')
+  const future = tenYearsAhead()
+  const linked = path.join(directory, appenderTemporary())
+  await link(record, linked)
+  await utimes(linked, future, future)
+  await assert.rejects(readExecutionEvents(common, 'future'), /^Error: (Unsafe execution record|Incomplete execution journal storage)$/)
+  await unlink(linked)
+  assert.deepEqual((await readExecutionEvents(common, 'future')).map(e => e.id), ['start'])
+})
+test('an unrelated young temporary does not excuse a record whose second link is elsewhere', async t => {
+  const { link } = await import('node:fs/promises')
+  const { common, record } = await linkedJournal(t, 'unrelated')
+  await plantJournalEntry(common, 'unrelated', appenderTemporary())
+  await link(record, path.join(common, 'outside-link'))
+  await assert.rejects(readExecutionEvents(common, 'unrelated'), /^Error: Unsafe execution record$/)
+})
+test('a locked append refuses a record whose second link is a young temporary at the record itself', async t => {
+  const { link, unlink, opendir, readFile, writeFile } = await import('node:fs/promises')
+  const { common, directory, record, name } = await linkedJournal(t, 'locked')
+  const text = await readFile(record)
+  // Directory order (opendir, unsorted) decides which entry the append meets first, and it differs
+  // by filesystem: creation order on btrfs, newest first on tmpfs (both measured), hash order on
+  // ext4 with dir_index (not measured here). Alternate which name is created last, the temporary
+  // (even tries) or the record (odd tries, the way an appender links it), until the listing returns
+  // the record before the temporary, so the refusal must come from the record's second link and
+  // not from the temporary's name.
+  let temporary = null
+  for (let i = 0; i < 64 && !temporary; i++) {
+    const candidate = appenderTemporary()
+    if (i % 2 === 0) await link(record, path.join(directory, candidate))
+    else {
+      await unlink(record)
+      await writeFile(path.join(directory, candidate), text, { mode: 0o600 })
+      await link(path.join(directory, candidate), record)
+    }
+    const order = []
+    for await (const entry of await opendir(directory)) order.push(entry.name)
+    if (order.indexOf(name) < order.indexOf(candidate)) temporary = candidate
+    else await unlink(path.join(directory, candidate))
+  }
+  assert.ok(temporary, 'no temporary name listed after the record')
+  assert.deepEqual((await readExecutionEvents(common, 'locked')).map(e => e.id), ['start'])
+  await assert.rejects(appendExecutionEvent(common, event('next', 'step-started', 2, { runId: 'locked', step: 'next' })), /^Error: Unsafe execution record$/)
+})

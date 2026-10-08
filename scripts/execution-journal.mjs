@@ -1,11 +1,11 @@
 import { constants } from 'node:fs'
-import { mkdir, open, realpath, link, unlink, opendir, lstat } from 'node:fs/promises'
+import { mkdir, open, realpath, link, unlink, opendir, lstat, readdir } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { evidenceIdentity } from './workflow-evidence.mjs'
 import { strictExecutionIdentity } from './completion-obligations.mjs'
 import { markerRef } from './workflow-lifecycle.mjs'
-import { RETENTION_LIMITS, withStorageLock, reconcileTemporaries, lockEntry } from './execution-artifacts.mjs'
+import { RETENTION_LIMITS, withStorageLock, reconcileTemporaries, lockEntry, STALE_TEMPORARY_MS } from './execution-artifacts.mjs'
 const digest = value => createHash('sha256').update(value).digest('hex')
 const LIMIT = 1024 * 1024, RECORD_LIMIT = 8192
 const plain = value => typeof value === 'string' && value.length > 0 && Buffer.byteLength(value) <= 256 && !/[\p{C}\p{Zl}\p{Zp}]/u.test(value)
@@ -147,11 +147,13 @@ export async function executionDirectory(common, runId) {
   markerRef(runId, 'suspended')
   return path.join(await realpath(common), 'fleetmates-execution', digest(runId))
 }
-async function readRecord(file) {
+async function readRecord(file, inFlightLink) {
   const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
   try {
     const stat = await handle.stat()
-    if (!stat.isFile() || stat.nlink !== 1 || stat.mode & 0o077 || stat.size > RECORD_LIMIT || await realpath(file) !== file) throw new Error('Unsafe execution record')
+    // Between `link` and `unlink` an appender's record has a second name, its temporary.
+    const linked = stat.nlink === 1 || stat.nlink === 2 && inFlightLink && await inFlightLink(handle)
+    if (!stat.isFile() || !linked || stat.mode & 0o077 || stat.size > RECORD_LIMIT || await realpath(file) !== file) throw new Error('Unsafe execution record')
     const buffer = Buffer.alloc(RECORD_LIMIT + 1)
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
     if (bytesRead > RECORD_LIMIT) throw new Error('Execution record exceeds budget')
@@ -169,16 +171,44 @@ async function privateExecutionDirectories(directory, allowMissing = false) {
   }
   return true
 }
-export async function readExecutionEvents(common, runId) {
+// The exact name `appendExecutionEvent` gives its temporary: `.` + randomUUID() + `.tmp`.
+const TEMPORARY = /^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/
+// How far in the future a temporary's mtime may lie and still count as young. Without a lower
+// bound a far-future mtime would be skipped by every unlocked read forever.
+const TEMPORARY_CLOCK_SKEW_MS = 5000
+// A temporary another appender may still own: the exact name shape, a regular file, and no older
+// than the threshold past which a lock holder reconciles it as stale. 'gone' means it was unlinked.
+async function inFlightTemporary(directory, name) {
+  if (!TEMPORARY.test(name)) return null
+  let info
+  try { info = await lstat(path.join(directory, name), { bigint: true }) }
+  catch (error) { if (error.code === 'ENOENT') return 'gone'; throw error }
+  const age = Date.now() - Number(info.mtimeMs)
+  return info.isFile() && age >= -TEMPORARY_CLOCK_SKEW_MS && age <= STALE_TEMPORARY_MS ? info : null
+}
+// Unlocked readers (the driver) race live appenders. A young temporary is never a record, so it is
+// skipped; a record whose second link is such a temporary is complete, because the appender synced
+// it before linking. Under the storage lock no live writer owns a temporary, so both stay refused.
+export async function readExecutionEvents(common, runId) { return readEvents(common, runId, false) }
+async function readEvents(common, runId, locked) {
   const directory = await executionDirectory(common, runId)
   if (!await privateExecutionDirectories(directory, true)) return []
   const dir = await opendir(directory)
   const events = [], ids = new Set()
   let bytes = 0
+  const inFlightLink = locked ? null : async handle => {
+    const record = await handle.stat({ bigint: true })
+    for (const name of await readdir(directory)) {
+      const info = await inFlightTemporary(directory, name)
+      if (info && info !== 'gone' && info.ino === record.ino && info.dev === record.dev) return true
+    }
+    return (await handle.stat()).nlink === 1
+  }
   for await (const entry of dir) {
     if (lockEntry(entry.name)) continue
+    if (!locked && await inFlightTemporary(directory, entry.name)) continue
     if (!/^[a-f0-9]{64}\.json$/.test(entry.name)) throw new Error('Incomplete execution journal storage')
-    const { event, bytes: size } = await readRecord(path.join(directory, entry.name))
+    const { event, bytes: size } = await readRecord(path.join(directory, entry.name), inFlightLink)
     bytes += size
     if (bytes > LIMIT || events.length >= 1000) throw new Error('Execution journal exceeds budget')
     if (event.runId !== runId || entry.name !== digest(event.id) + '.json' || ids.has(event.id)) throw new Error('Execution record identity mismatch')
@@ -220,7 +250,7 @@ export async function appendExecutionEvent(common, raw, { retention, now = Date.
   return withStorageLock(directory, 'Execution journal busy; required start not persisted', async found => {
     reconciled = found
     await reconcileTemporaries(directory, reconciled)
-    const existing = await readExecutionEvents(common, event.runId)
+    const existing = await readEvents(common, event.runId, true)
     const duplicate = existing.find(e => e.id === event.id)
     if (duplicate) {
       if (requireFreshStart) throw new Error('Execution start already persisted; reconcile before action')
