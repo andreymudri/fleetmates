@@ -10055,9 +10055,12 @@ test('every command this CLI dispatches refuses a flag it does not read', async 
   const commands = Object.keys(REQUIRED)
   assert.ok(commands.length > 0)
   await withRepo(async ({ root, io, lines }) => {
+    // Strict commands refuse on Windows before their flags are read; this test is about flags, so
+    // it takes the supported path on every platform.
+    const supported = { ...io, strictSupport: { supported: true, reason: null } }
     for (const command of commands) {
       lines.length = 0
-      const code = await runCli([command, '--totally-bogus', 'x', '--root', root], io)
+      const code = await runCli([command, '--totally-bogus', 'x', '--root', root], supported)
       assert.equal(code, 2, `${command} accepted --totally-bogus`)
       assert.match(lines.join('\n'), new RegExp(`${command} does not take --totally-bogus`))
     }

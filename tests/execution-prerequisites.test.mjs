@@ -667,7 +667,8 @@ test('worker receipt observes linked dependencies even when the recipe declares 
 }))
 
 
-test('worker link inspection has a finite bound and reports an unverified layout', async () => withWorker(codexAdapter, 'files', { setup: [{ name: 'many-deps', timeoutMs: 5000,
+// 4100 file creations take well over 5 s on a Windows runner, so the setup gets a minute.
+test('worker link inspection has a finite bound and reports an unverified layout', async () => withWorker(codexAdapter, 'files', { setup: [{ name: 'many-deps', timeoutMs: 60_000,
   run: dependencySetup + ' && node -e "const fs=require(\'fs\');for(let i=0;i<4100;i++)fs.writeFileSync(\'.deps/entry-\'+i,\'fixture\')"' }] }, async ({ make }) => {
   const sandbox = await make()
   assert.equal(sandbox.meta.workerEnvironment.dependencies.layout, 'unverified')
