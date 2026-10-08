@@ -9,6 +9,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parsePlan, PlanParseError } from './plan-parser.mjs'
 import { readWorkflowInput } from './workflow-input.mjs'
+import { strictExecutionSupport } from './execution-platform.mjs'
 import { RESULT_SCHEMA, validateResult } from './result-schema.mjs'
 import { captureEnvironment, validateEnvironmentRecipe } from './environment-preflight.mjs'
 import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
@@ -3051,6 +3052,8 @@ async function messageOutcome(adapter, paths, before) {
 // verified-complete report, which needs native verification as well as acceptance evidence; the
 // suites here inject a verification fixture, so that exit is not exercised by them.
 const WORKFLOW_COMMANDS = new Set(['workflow-execute', 'workflow-resume', 'workflow-status', 'workflow-resolve', 'workflow-accept', 'workflow-prune'])
+// The commands strict execution owns; `runCli` refuses them where `strictExecutionSupport` says no.
+const STRICT_COMMANDS = new Set([...WORKFLOW_COMMANDS, 'execution-record', 'execution-status'])
 const WORKFLOW_EXECUTE_KEYS = ['version', 'profile', 'runId', 'planPath', 'baseBranch', 'baseCommit', 'runBranch', 'harness', 'sandboxMode',
   'parameters', 'limits', 'environment', 'rolePolicy', 'retention', 'model', 'effort']
 const WORKFLOW_RESOLVE_KEYS = ['version', 'runId', 'effectId', 'outcome', 'reason']
@@ -3452,6 +3455,17 @@ export async function runCli(argv, io = { out: console.log }) {
     const advice = rejected.map(({ raw, name }) => `\`${raw}\` — ${spellingAdvice(name)}`)
     io.out(`unsupported flag spelling: ${advice.join('; ')}\n\n${USAGE}`)
     return 2
+  }
+  // Strict execution is POSIX-only. Its commands, and `dispatch --execution`, are refused here,
+  // after the flag-spelling refusal above and before every other check and the command body,
+  // with the reason on one JSON line and exit 2.
+  // `io.strictSupport` lets a test take the unsupported path on a POSIX host.
+  if (STRICT_COMMANDS.has(command) || (command === 'dispatch' && flags.execution !== undefined)) {
+    const support = io.strictSupport ?? strictExecutionSupport()
+    if (!support.supported) {
+      io.out(JSON.stringify({ error: support.reason }))
+      return 2
+    }
   }
   // An empty or whitespace-only --root must never silently fall through to cwd: `??` only
   // catches `undefined`, so `--root ""` survives to become `repoRoot: ''` downstream, which
