@@ -659,10 +659,15 @@ test('readResult without O_NOFOLLOW still refuses a symlinked stream file and re
   const streamPath = path.join(dir, 's.jsonl')
   const line = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(good), session_id: 's' })
   await writeFile(streamPath, `${line}\n`)
-  assert.deepEqual(await readResult({ streamPath, noFollow: null }), good)
+  // `beforeOpen` runs only once lstat has accepted the path, right before the open.
+  let opens = 0
+  const beforeOpen = () => { opens += 1 }
+  assert.deepEqual(await readResult({ streamPath, noFollow: null, beforeOpen }), good)
+  assert.equal(opens, 1, 'a regular file reaches the open')
   const linked = path.join(dir, 'linked.jsonl')
   await symlink(streamPath, linked)
-  assert.equal(await readResult({ streamPath: linked, noFollow: null }), null)
+  assert.equal(await readResult({ streamPath: linked, noFollow: null, beforeOpen }), null)
+  assert.equal(opens, 1, 'a symlink is refused by lstat before it is ever opened')
 })
 
 test('readResult without O_NOFOLLOW refuses a stream file replaced between its lstat and its open', async () => {

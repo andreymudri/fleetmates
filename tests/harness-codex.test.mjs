@@ -1331,10 +1331,15 @@ test('readResult without O_NOFOLLOW still refuses a symlinked result file and re
   try {
     const resultPath = path.join(dir, 'T1.json')
     await writeFile(resultPath, JSON.stringify({ status: 'done', branch: 'fleetmates/r1/T1', filesChanged: [], summary: 'within bound', blockers: [] }))
-    assert.equal((await readResult({ resultPath, noFollow: null })).summary, 'within bound')
+    // `beforeOpen` runs only once lstat has accepted the path, right before the open.
+    let opens = 0
+    const beforeOpen = () => { opens += 1 }
+    assert.equal((await readResult({ resultPath, noFollow: null, beforeOpen })).summary, 'within bound')
+    assert.equal(opens, 1, 'a regular file reaches the open')
     const linked = path.join(dir, 'T2.json')
     await symlink(resultPath, linked)
-    assert.equal(await readResult({ resultPath: linked, noFollow: null }), null)
+    assert.equal(await readResult({ resultPath: linked, noFollow: null, beforeOpen }), null)
+    assert.equal(opens, 1, 'a symlink is refused by lstat before it is ever opened')
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
