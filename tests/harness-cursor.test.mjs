@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, stat, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, stat, symlink, rename } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
@@ -651,4 +651,35 @@ test('readResult refuses a stream file larger than its bound rather than parsing
   const linked = path.join(dir, 'linked.jsonl')
   await symlink(streamPath, linked)
   assert.equal(await readResult({ streamPath: linked }), null)
+})
+
+test('readResult without O_NOFOLLOW still refuses a symlinked stream file and reads a regular one', async () => {
+  // `noFollow: null` forces the path win32 takes, where O_NOFOLLOW is undefined.
+  const dir = await freshDir('nofollow-stream')
+  const streamPath = path.join(dir, 's.jsonl')
+  const line = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(good), session_id: 's' })
+  await writeFile(streamPath, `${line}\n`)
+  // `beforeOpen` runs only once lstat has accepted the path, right before the open.
+  let opens = 0
+  const beforeOpen = () => { opens += 1 }
+  assert.deepEqual(await readResult({ streamPath, noFollow: null, beforeOpen }), good)
+  assert.equal(opens, 1, 'a regular file reaches the open')
+  const linked = path.join(dir, 'linked.jsonl')
+  await symlink(streamPath, linked)
+  assert.equal(await readResult({ streamPath: linked, noFollow: null, beforeOpen }), null)
+  assert.equal(opens, 1, 'a symlink is refused by lstat before it is ever opened')
+})
+
+test('readResult without O_NOFOLLOW refuses a stream file replaced between its lstat and its open', async () => {
+  const dir = await freshDir('swap-stream')
+  const streamPath = path.join(dir, 's.jsonl')
+  const line = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(good), session_id: 's' })
+  await writeFile(streamPath, `${line}\n`)
+  const other = path.join(dir, 'other.jsonl')
+  await writeFile(other, `${line}\n`)
+  // A different regular file renamed over the path after lstat: the opened handle is not the file lstat saw.
+  let swapped = false
+  const beforeOpen = async () => { await rename(other, streamPath); swapped = true }
+  assert.equal(await readResult({ streamPath, noFollow: null, beforeOpen }), null)
+  assert.equal(swapped, true, 'the swap ran, so null is the dev/ino refusal')
 })

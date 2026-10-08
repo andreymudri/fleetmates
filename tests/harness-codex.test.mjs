@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile, readFile, chmod, stat, symlink } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, readFile, chmod, stat, symlink, rename } from 'node:fs/promises'
 import { tmpdir, constants as osConstants } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
@@ -797,7 +797,7 @@ test('Codex builders refuse a bound required policy with missing enforcement', (
   }
 })
 
-test('verification broker construction uses host configuration, structured argv and a filtered environment', async () => {
+test('verification broker construction uses host configuration, structured argv and a filtered environment', { skip: process.platform === 'win32' && 'native verification is POSIX-only' }, async () => {
   const module = await import('../scripts/harnesses/codex.mjs')
   assert.equal(typeof module.buildVerificationInvocation, 'function')
   const request = module.buildVerificationInvocation({ executable: '/fixture/codex', broker: '/fixture/broker', home: '/fixture/config', worker: '/fixture/worker', temp: '/fixture/worker/temp', write: true,
@@ -986,7 +986,7 @@ for (const [name, alter] of [
   ...['outside', 'broker', 'git', 'temporary'].map(key => [`observed ${key} write`, ({ observed }) => { observed[key] = true }]),
   ...['outside', 'broker', 'git', 'temporary'].map(key => [`actual ${key} write`, async ({ paths }) => { await writeFile(paths[key], 'dummy') }]),
   ['network allowed', ({ observed }) => { observed.network = 'allowed' }],
-]) test(`injected restriction fixture rejects ${name}`, async () => {
+]) test(`injected restriction fixture rejects ${name}`, { skip: process.platform === 'win32' && 'native verification is POSIX-only' }, async () => {
   await injectedVerification(async create => { await assert.rejects(create(), /not independently observed/) }, alter)
 })
 
@@ -1322,5 +1322,38 @@ test('readResult refuses a result file larger than its bound rather than parsing
     const linked = path.join(dir, 'T2.json')
     await symlink(resultPath, linked)
     assert.equal(await readResult({ resultPath: linked }), null)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('readResult without O_NOFOLLOW still refuses a symlinked result file and reads a regular one', async () => {
+  // `noFollow: null` forces the path win32 takes, where O_NOFOLLOW is undefined.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-codex-nofollow-'))
+  try {
+    const resultPath = path.join(dir, 'T1.json')
+    await writeFile(resultPath, JSON.stringify({ status: 'done', branch: 'fleetmates/r1/T1', filesChanged: [], summary: 'within bound', blockers: [] }))
+    // `beforeOpen` runs only once lstat has accepted the path, right before the open.
+    let opens = 0
+    const beforeOpen = () => { opens += 1 }
+    assert.equal((await readResult({ resultPath, noFollow: null, beforeOpen })).summary, 'within bound')
+    assert.equal(opens, 1, 'a regular file reaches the open')
+    const linked = path.join(dir, 'T2.json')
+    await symlink(resultPath, linked)
+    assert.equal(await readResult({ resultPath: linked, noFollow: null, beforeOpen }), null)
+    assert.equal(opens, 1, 'a symlink is refused by lstat before it is ever opened')
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('readResult without O_NOFOLLOW refuses a result file replaced between its lstat and its open', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-codex-swap-'))
+  try {
+    const resultPath = path.join(dir, 'T1.json')
+    const result = (summary) => JSON.stringify({ status: 'done', branch: 'fleetmates/r1/T1', filesChanged: [], summary, blockers: [] })
+    await writeFile(resultPath, result('seen by lstat'))
+    const other = path.join(dir, 'other.json')
+    await writeFile(other, result('swapped in'))
+    // A different regular file renamed over the path after lstat: the opened handle is not the file lstat saw.
+    const beforeOpen = () => rename(other, resultPath)
+    assert.equal(await readResult({ resultPath, noFollow: null, beforeOpen }), null)
+    assert.match(await readFile(resultPath, 'utf8'), /swapped in/, 'the swap ran, so null is the dev/ino refusal')
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
