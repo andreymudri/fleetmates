@@ -309,7 +309,7 @@ export function SessionCard({ session, repo, requests = [], steps, now = Date.no
   return (
     <article className={classes.join(' ')} aria-labelledby={domId(session.id)}>
       <CardHeader session={session} repo={repo} title={title} t={t} now={now} navigate={navigate} size="md" pillVariant="pill" />
-      <FleetReport session={session} steps={steps} lang={lang} />
+      <FleetReport session={session} steps={steps} lang={lang} compact />
       <Steps steps={steps} />
       {now_ ? <p className="card-now">{now_}</p> : null}
       {open.length && NEEDS.has(session.state) ? <RequestBox session={session} open={open} t={t} navigate={navigate} deckdDown={deckdDown} answers={answers} onAnswer={onAnswer} onReview={onReview} lang={lang} /> : null}

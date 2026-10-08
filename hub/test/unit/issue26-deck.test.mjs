@@ -131,6 +131,18 @@ test('research ranks known recency and engagement before drafting and rejects fa
   }
 })
 
+// Home cards carry the report on one clipped line (Home AC1: nothing scrolls at 1920 x 1080 busy), so
+// the compact form keeps the whole sentence in its title; the full form stays a plain paragraph.
+test('the compact fleet report is one clipped line that keeps the full text in its title', () => {
+  const props = { session: { state: 'done' }, steps: [{ status: 'done' }, { status: 'running' }] }
+  const compact = renderToStaticMarkup(createElement(FleetReport, { ...props, compact: true }))
+  assert.match(compact, /class="fleet-report fleet-report--compact"/)
+  assert.match(compact, /title="Next: Review the changes\. Step 1 of 2 done/)
+  const full = renderToStaticMarkup(createElement(FleetReport, props))
+  assert.match(full, /class="fleet-report"/)
+  assert.doesNotMatch(full, /title=/)
+})
+
 test('native reports, diagrams and timelines render next action first and escape source text', async () => {
   const html = renderToStaticMarkup(createElement(FleetReport, { session: { state: 'done' }, steps: [{ status: 'done' }, { status: 'running' }] }))
   assert.match(html, /Next: Review the changes\. Step 1 of 2 done/)

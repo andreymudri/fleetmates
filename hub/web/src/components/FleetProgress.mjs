@@ -16,8 +16,10 @@ export function reportShape(session, steps = [], lang = 'en') {
   return pt ? `Próximo: ${next}. Etapa ${count ? done : '?'} de ${count || '?'} concluída: ${done} etapas registradas. Estado: ${state}.`
     : `Next: ${next}. Step ${count ? done : '?'} of ${count || '?'} done: ${done} recorded steps. Current: ${state}.`
 }
-export function FleetReport({ session, steps, lang }) {
-  return h('p', { className: 'fleet-report' }, reportShape(session, steps, lang))
+// `compact` is the Home card form: one clipped line, the whole sentence in its title.
+export function FleetReport({ session, steps, lang, compact = false }) {
+  const text = reportShape(session, steps, lang)
+  return compact ? h('p', { className: 'fleet-report fleet-report--compact', title: text }, text) : h('p', { className: 'fleet-report' }, text)
 }
 
 export function ExtensionScanNotice({ request, lang = 'en' }) {
