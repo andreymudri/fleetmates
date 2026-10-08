@@ -322,14 +322,12 @@ async function gateInputsCurrent(ctx, phase) {
   return { ok: true, artifacts: [{ kind: 'gate-input', bytes: JSON.stringify({ version: 1, phase, results: collected.sha256, taskTips: ctx.taskTips[phase] }) }] }
 }
 
-// The exit contract the controller classifies by. Gate exit 1 is not only a code failure: the gate
-// in this tree also exits 1 for a FAIL whose only failed entry is `derive` (observed with
-// `gate --plan <a plan not committed on the base>`). The audit plan's T5 contract moves a FAIL whose
-// only failed entries are `derive` and/or `run-state` to exit 5, classified here as infrastructure
-// because no repair round can establish run state; this controller relies on that contract, which
-// its tests exercise through a fake CLI only. Until the gate implements it, such a failure still
-// arrives as exit 1 and is classified as code. Finish exit 1 is a FAIL verdict; a code failure at
-// review collection or at the host gate comes from the validated outputs instead.
+// The exit contract the controller classifies by. The gate exits 5 for a FAIL whose only failed
+// entries are `derive` and/or `run-state` (for example `gate --plan <a plan absent at the anchor>`,
+// or an unreadable status.json), classified here as infrastructure because no repair round can
+// establish run state. It exits 1 when any other check failed, even beside a state failure, and
+// that is classified as code. Finish exit 1 is a FAIL verdict; a code failure at review collection
+// or at the host gate comes from the validated outputs instead.
 const EXIT_CONTRACT = {
   'init-run': { 1: 'policy', 2: 'policy' },
   'preview-check': { 1: 'policy', 2: 'policy', 4: 'infrastructure' },
