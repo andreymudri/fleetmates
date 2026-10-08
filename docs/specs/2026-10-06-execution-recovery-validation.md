@@ -28,6 +28,11 @@ Trial 3 below was added by the release-blockers run (task T4) on source
 v26.7.0 and Codex CLI 0.160.1. Its receipts are in `/tmp/hx/b4/receipts`
 (mode 0700). It is the only real-model run in that task.
 
+Trial 4 below was added by release-blockers task T6 on source `44558820`
+(the T5 merge on `run/release-blockers`), on the same host, Node v26.7.0 and
+Codex CLI 0.160.1. Its receipts are in `/tmp/hx/b6/receipts` (mode 0700). It
+is the only real-model run in that task.
+
 ## Clean projects and contracts
 
 Each project was a fresh Git repository created by a setup script, with no
@@ -257,9 +262,11 @@ separate non-model probe built that same executor
 (`createVerificationExecutor` with the gate's implementer enforcement) over
 a detached worktree of `run/p4`, with a logging `codex` shim first on `PATH`.
 It reported `{"kind":"required","runtime":"codex-sandbox","platform":"linux","write":true,"network":false,"sharedRefs":false,"publication":false,"temporaryFiles":"private-worker-directory","observed":true}`,
-ran `npm test` inside it with exit 0 (2 test files passing), and the shim
-logged two `codex sandbox -P worker ...` invocations: the restriction probe
-and the command.
+ran `npm test` inside it with exit 0 (2 test files passing). The retained
+shim log (`/tmp/hx/b4/receipts/codex-shim.log`) holds four `codex sandbox
+-P worker ...` invocations, not two: the probe ran twice, and each run
+logged two (the restriction probe and the command) under its own
+`fm-verification-*` directory.
 
 Two observations from this trial are not covered by its exit 0:
 
@@ -280,6 +287,114 @@ Two observations from this trial are not covered by its exit 0:
   that driver `verification` attempt (`failed-observation`, task T1). Every
   other step attempt read `superseded` or `ready`, and the request read
   `stale` as in trials 1 and 2.
+
+After the trial, `pgrep -af codex` listed only the Codex processes that
+existed before it, and `pgrep -af "node -e setInterval"` matched nothing.
+
+## Trial 4: verified-complete with the task done (release-blockers T6)
+
+Trial 4 repeats trial 3 after the T5 fix (`bda27323`, tests `679481be`,
+merged `44558820`). Project `p6` under `/tmp/hx/b6` holds the same
+committed files as `p4` at its `main`: `plan.md` (one task, T1),
+`fleetmates.gate.json` (a `tests` command check and a mandatory `review`
+agent check), `env.json`, `roles.json`, `package.json`, lockfile, smoke test
+and subtracting `src/sum.cjs`. Those files were copied from the T4 fixture and
+committed on `main` as `f778dd56` with a placeholder identity passed per
+command (`GIT_AUTHOR_*` and `GIT_COMMITTER_*`); the repository has no
+`[user]` section in its config. `run/p6` was created from it and checked
+out. The request equals the `p4` request with run `p6`, run branch `run/p6`
+and base commit `f778dd565c73f60bd548f3b03845c905dff1f04d`: harness
+`codex`, sandbox mode `clone`, model `gpt-6.1-sol`, effort `low`. With one
+task there is no `maxParallel` race. Every command ran with
+`TMPDIR=/tmp/hx/b6`, the same placeholder identity in its environment, and
+`<product>` at `44558820`.
+
+| # | Command | Exit | Wall time |
+| --- | --- | --- | --- |
+| 1 | `node <product>/scripts/cli.mjs workflow-execute --file /tmp/hx/b6/receipts/p6-request.json --root /tmp/hx/b6/p6` | 4 | 114.3 s |
+| 2 | `node <product>/scripts/cli.mjs workflow-accept --file /tmp/hx/b6/receipts/p6-accept.json --root /tmp/hx/b6/p6` | 0 | 0.14 s |
+| 3 | `node <product>/scripts/cli.mjs workflow-resume --run p6 --root /tmp/hx/b6/p6` | 0 | 1.8 s |
+| 4 | `node <product>/scripts/cli.mjs workflow-status --run p6 --root /tmp/hx/b6/p6` | 0 | 0.28 s |
+
+Command 1 ran prepare (154 ms), baseline (137 ms), implement-1 (64,051 ms),
+review-1 (46,945 ms), collect-1 (100 ms), gate-1 (425 ms) and the
+host-bounded integrate-1 (1,208 ms), all completed, 7 of 40 attempts. It
+reported `"state": "human-required"`, `"verification": "native-required"`,
+`"verifiedComplete": false`, `"driverJournal": "required-execution"`, no
+blockers, and acceptance `required: ["reproducer", "regression-check"]`,
+both missing, on tree `117536595c4773d48cfbea93335d3d6bd224877e`. Its
+obligations had `final-command` and `acceptance` unresolved and the other
+five passing. The implement-1 step output, read back through
+`readExecutionArtifact`, ends with the dispatch line `T1: done`, and its
+environment preflight recorded `"enforcement": {"kind": "required",
+"runtime": "codex-sandbox", ..., "observed": true}`.
+
+After command 1, `.fleetmates/p6/status.json` listed the task as:
+
+```json
+{"id":"T1","title":"fix sum and add its regression test","state":"done"}
+```
+
+The session record `sessions/T1.json` had `"state": "done"` and `exitReason`
+`exit`. The driver journal, read with `readExecutionEvents`, holds three T1
+driver attempts (`harness`, `collection`, `verification`), each a
+`step-started` and a `step-completed` event, and the whole journal holds no
+`step-failed` event. The verification
+attempt's events are `step-started` then `step-completed`, and its
+`driver-verification` receipt, read back through `readExecutionArtifact`,
+is verbatim:
+
+```json
+{"version":1,"identity":"a639957c6e2842c2fe2cfcde465a06ed21bd2cecf36af458a1b0c636a1ed6a47","branch":"fleetmates/p6/T1","tip":"235259f271c4c3871c30b7c63adc46058f4b5dc2","code":4,"pendingOnly":true,"scope":"enforcement-only-pending-agent","verifiedComplete":false}
+```
+
+So `complete --enforcement-only` still exited 4 on the mandatory agent check,
+and the strict driver accepted it as pending only, as T5 specifies.
+
+Before command 2, an operator script exported `run/p6` (`955a34e7`) with
+`git archive` and checked the plan's acceptance: `npm test` exited 0 with 3
+tests passing, `sum(2, 3)` and `sum(-1, 1)` printed `5 0`, the new
+`test/sum.test.cjs` requires `node:test` and `node:assert/strict`, and
+against the original subtraction `node --test test/sum.test.cjs` exited 1
+with 0 pass and 2 fail (`actual: -1, expected: 5` and `actual: -2,
+expected: 0`). Command 2 recorded both criteria as `pass` for that tree and
+printed `"recorded": true`, attempt `acceptance.1`, two
+`acceptance-evidence` references, `"trust": "local-operator-observation"`
+and `"authenticatedAuthorization": false`.
+
+Command 3 reused prepare, baseline, implement-1, review-1 and integrate-1,
+reran `collect-1.2` (96 ms) and `gate-1.2` (421 ms), and ran `finish.1`
+(459 ms, exit 0). It used 10 of 40 attempts and 114,879 of 2,400,000 ms in
+total, with `host.repairRounds` max 1, delivered 0. No model was dispatched
+again. Its report fields, verbatim:
+
+```json
+{"state":"verified-complete","verification":"native-required","verifiedComplete":true,"blockers":[],"acceptance":{"required":["reproducer","regression-check"],"missing":[],"tree":"117536595c4773d48cfbea93335d3d6bd224877e"}}
+{"version":2,"identity":"a639957c6e2842c2fe2cfcde465a06ed21bd2cecf36af458a1b0c636a1ed6a47","verifiedComplete":true,"state":"verified-complete","stale":0}
+```
+
+All eight obligations (`implementation-1-T1`, `command-1`, `review-1`,
+`integration-1`, `final-review`, `final-command`, `acceptance-reproducer`,
+`acceptance-regression-check`) had `"status": "pass"` and `"stale": 0`.
+
+Command 4 exited 0 with these fields, verbatim (the `attempts`,
+`limitations` and `trust` arrays omitted):
+
+```json
+{"version":1,"runId":"p6","state":"reconciled","lifecycle":"running","executionId":"wf-129b65d8fbd73dd8d9170ff46f9453d6f7276989","unresolvedAttempts":0,"unknownEffects":[],"inputsChanged":false,"standingSkips":[],"verifiedComplete":false,"completion":"not-established-by-status"}
+```
+
+Its 15 attempts read 9 `superseded`, 5 `ready` and 1 `stale` (the
+request); the T1 driver `verification` attempt read `superseded` with
+outcome `completed`. `status.json` still listed T1 as `done` after command
+3.
+
+One observation outside the acceptance: the implementer's task commit
+`235259f2` carries the placeholder author, but the host-bounded merge
+commit `955a34e7` carries the host user's configured Git identity for
+author and committer, although the placeholder was set in the environment of every
+command and the repository has no local identity. Why the merge does not
+take the environment identity was not investigated.
 
 After the trial, `pgrep -af codex` listed only the Codex processes that
 existed before it, and `pgrep -af "node -e setInterval"` matched nothing.
@@ -458,6 +573,10 @@ and were not repeated in T4. In T4 the 22 named tests passed at `b913d713`
 pass, 0 fail), and the root suite reported 3,557 tests, 3,540 pass, 0 fail
 and 17 skipped.
 
+Release-blockers T6 checked item 12 at `44558820` and marked it fixed; it
+added items 13 and 14, whose file and line references were read at that
+tip. It left every other item's status as T4 recorded it.
+
 1. The controller writes `maxAttempts: DRIVER_ATTEMPTS` (10) into every
    dispatch execution contract (`scripts/workflow-controller.mjs:508` and
    `:513`), not min(10, the request's `maxAttempts`). This is a design call
@@ -566,6 +685,59 @@ and 17 skipped.
     Whether exit 4 from `complete` should count as a pass for the driver, or
     the controller should refuse an orphaned task, is a design call for the
     owner.
+    Status: fixed in release-blockers T5 (`bda27323`, tests `679481be`,
+    merged `44558820`), which does both. The driver accepts exit 4 only when
+    every non-passing check is a pending `agent` or `mcp` check
+    (`scripts/driver.mjs:647-649`) and records the scope that names them,
+    and `validateImplement` refuses a task that `status.json` lists as
+    `orphaned` or whose latest driver verification event is not
+    `step-completed`. Real trial 4 ended `verified-complete` with exit 0,
+    T1 `done` in `status.json`, a `step-completed` driver verification with
+    scope `enforcement-only-pending-agent`, and `workflow-status` exit 0.
+    Pinned in `tests/driver-recovery.test.mjs` by "strict enforcement exit
+    4 with only a pending agent check is accepted and its receipt names the
+    pending kind", the "strict enforcement answer ... is refused and the
+    task orphaned" cases, "a task-scoped enforcement rejection twice
+    orphans the task and its latest verification event is step-failed" and
+    "the legacy driver reads the code out of a structured answer and still
+    treats only 3 as a rejection"; and in
+    `tests/workflow-controller.test.mjs` by "a task the driver orphaned is
+    refused at implement even with a done result file, and the run never
+    reaches acceptance", the "a task whose latest driver verification is
+    ... is refused at implement" cases, "a task whose driver verification
+    failed and then completed is accepted at implement", "a task whose
+    latest driver verification is step-completed proceeds through finish
+    with every obligation verified", "the CLI enforcement answer is
+    pendingOnly exactly when the only non-passing checks are pending agent
+    checks", "the CLI enforcement answer refuses each failure shape on its
+    own and ignores optional pending checks", "dispatch through the CLI
+    with a mandatory agent check: the strict driver accepts the
+    pending-only answer and the task is done" and "dispatch through the CLI
+    with a pending check of a kind that is not agent or mcp: the strict
+    driver orphans the task". Those tests passed at `44558820` (21 pass, 0
+    fail).
+13. New in release-blockers T6, from review of T5. When a strict driver
+    verification attempt ends `step-failed` and a later one completes,
+    `workflow-status` still reports the run `unresolved` and exits 4. The
+    failed attempt keeps the state `failed-observation`
+    (`scripts/execution-recovery.mjs:212`), and the status count excludes
+    only `request` steps, reused attempts and `superseded` ones
+    (`scripts/cli.mjs:3288`). The controller's own outcome is unaffected:
+    it accepts the task on the latest verification event. A reviewer
+    reproduced this with a fixture; no real run has hit it, and T6 did not
+    rerun the fixture.
+14. New in release-blockers T6, reasoned from code only. The strict driver
+    reads the execution journal without the storage lock
+    (`readExecutionEvents` at `scripts/driver.mjs:439` and `:616`; only the
+    append path takes `withStorageLock`, `scripts/execution-journal.mjs:220`).
+    An append from a parallel task briefly leaves a `.<uuid>.tmp` file in
+    the journal directory (`scripts/execution-journal.mjs:250`), and the
+    reader rejects any entry that is neither a lock entry nor a 64-hex
+    `.json` record with `Incomplete execution journal storage` (`:180`).
+    This is the likely cause of a flake seen once in "two tasks at
+    maxParallel 2 under one execution contract both complete without a busy
+    storage error" (`tests/driver-recovery.test.mjs:613`). It was not
+    reproduced.
 
 ## CLI contracts, defaults and trust limits
 
@@ -673,4 +845,13 @@ tests, 3,540 pass, 0 fail and 17 skipped. T4 spent one real model run
 the acceptance script, the sandbox probe and the `complete` reproduction
 started no model. Every number in trial 3 comes from those commands'
 retained stdout and from artifacts read back through
+`readExecutionArtifact` and `readExecutionEvents`.
+
+Release-blockers T6 also changed only this report. In its worktree at
+`44558820`, before any edit, `TMPDIR=/tmp/hx/b6 npm test` reported 3,578
+tests, 3,561 pass, 0 fail and 17 skipped. T6 spent one real model run
+(trial 4: one implementer and one reviewer Codex session inside
+`workflow-execute`); `workflow-accept`, `workflow-resume`, `workflow-status`
+and the acceptance script started no model. Every number in trial 4 comes
+from those commands' retained stdout and from artifacts read back through
 `readExecutionArtifact` and `readExecutionEvents`.
