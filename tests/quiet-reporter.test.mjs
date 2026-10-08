@@ -293,3 +293,23 @@ test('a newline in a test name cannot open a line of its own', async () => {
   const forged = out.split('\n').filter((l) => /^20 tests \| 20 pass/.test(l))
   assert.equal(forged.length, 0, 'a newline in the name drew a standalone summary line')
 })
+
+// A failure names its file and line. Without them a CI log of a few hundred failures cannot be
+// mapped back to test files: names built at run time, or reused by subtests ("branch", "bytes"),
+// match nothing a search of the sources can find.
+test('a failure names the file and line of the failing test', async () => {
+  const file = path.join(process.cwd(), 'tests', 'sample.test.mjs')
+  const out = await collect([
+    { type: 'test:fail', data: { name: 'breaks', file, line: 12, details: { error: new Error('boom') } } },
+    rootSummary({ tests: 1, failed: 1 }, false),
+  ])
+  assert.match(out, /✖ breaks \(tests[\\/]sample\.test\.mjs:12\)\n/)
+})
+
+test('a failure without a file keeps the bare name line', async () => {
+  const out = await collect([
+    { type: 'test:fail', data: { name: 'breaks', details: { error: new Error('boom') } } },
+    rootSummary({ tests: 1, failed: 1 }, false),
+  ])
+  assert.match(out, /✖ breaks\n/)
+})

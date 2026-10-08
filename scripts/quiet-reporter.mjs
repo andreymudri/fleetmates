@@ -1,3 +1,5 @@
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { printable, printableBlock } from './reviews.mjs'
 
 // A test reporter that prints failures and one summary line, and nothing else.
@@ -34,7 +36,12 @@ function renderFailure(data) {
   // newline in a name still opened a line of its own, and an earlier version of this comment
   // claimed that forgery was closed when only its U+2028 spelling was. The stack is a block whose
   // line structure IS its content, so it gets `printableBlock` and loses no legibility.
-  return `✖ ${printable(data.name)}\n${printableBlock(body)}\n\n`
+  // Where, relative to the working directory: a CI log of many failures cannot otherwise be mapped
+  // back to files, since names built at run time or reused by subtests match nothing in a search.
+  const where = typeof data.file === 'string'
+    ? ` (${printable(path.relative(process.cwd(), data.file.startsWith('file:') ? fileURLToPath(data.file) : data.file))}${Number.isInteger(data.line) ? `:${data.line}` : ''})`
+    : ''
+  return `✖ ${printable(data.name)}${where}\n${printableBlock(body)}\n\n`
 }
 
 // Printed on green AND red. It is what satisfies this project's evidence rule — a claim that
