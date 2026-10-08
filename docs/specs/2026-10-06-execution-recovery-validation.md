@@ -23,6 +23,11 @@ receipts and both run-state directories found no match. Authentication data
 was never read or copied. Commands below use `<product>` for the repository
 checkout and `<project>` for a trial project.
 
+Trial 3 below was added by the release-blockers run (task T4) on source
+`b913d713` (the T3 merge on `run/release-blockers`), on the same host, Node
+v26.7.0 and Codex CLI 0.160.1. Its receipts are in `/tmp/hx/b4/receipts`
+(mode 0700). It is the only real-model run in that task.
+
 ## Clean projects and contracts
 
 Each project was a fresh Git repository created by a setup script, with no
@@ -173,6 +178,112 @@ outcome-less attempt that resume will not redispatch` covers that boundary
 with fixtures only. A real abrupt harness loss and a Deck daemon restart were
 not exercised.
 
+## Trial 3: native verified-complete (release-blockers T4)
+
+Project `p4` under `/tmp/hx/b4` was built by a setup script from the `p1b`
+fixture files at its `main` (same `plan.md`, `fleetmates.gate.json`,
+`env.json`, `roles.json`, `package.json`, lockfile, smoke test and
+subtracting `src/sum.cjs`), committed on `main` as `7bdce722` with a
+placeholder identity, with `run/p4` created from it and checked out. The
+recipe is the committed `env.json` (toolchain `node` prefix `v26.`, no setup,
+baseline `npm test`, `required: []`, `clean-checkout`). The role policy is
+the committed `roles.json`: implementer read/write/execute, reviewer
+read/execute, integrator read/write/execute/sharedRefs, network and
+publication false for every role. The request equals the `p1b` request above
+with run `p4`, run branch `run/p4` and base commit
+`7bdce7224031d848731c3d196809487f6a68deef`. Every command used
+`TMPDIR=/tmp/hx/b4` and `<product>` at `b913d713`.
+
+| # | Command | Exit | Wall time |
+| --- | --- | --- | --- |
+| 1 | `node <product>/scripts/cli.mjs workflow-execute --file /tmp/hx/b4/receipts/p4-request.json --root /tmp/hx/b4/p4` | 4 | 92.1 s |
+| 2 | `node <product>/scripts/cli.mjs workflow-accept --file /tmp/hx/b4/receipts/p4-accept.json --root /tmp/hx/b4/p4` | 0 | 0.16 s |
+| 3 | `node <product>/scripts/cli.mjs workflow-resume --run p4 --root /tmp/hx/b4/p4` | 0 | 1.9 s |
+| 4 | `node <product>/scripts/cli.mjs workflow-status --run p4 --root /tmp/hx/b4/p4` | 4 | 1.4 s |
+
+Command 1 ran prepare (125 ms), baseline (87 ms), implement-1 (55,002 ms),
+review-1 (34,209 ms), collect-1 (104 ms), gate-1 (413 ms) and the
+host-bounded integrate-1 (1,248 ms), all completed, 7 of 40 attempts. The
+report said `"state": "human-required"`, `"verification": "native-required"`,
+`"verifiedComplete": false`, `"driverJournal": "required-execution"`, no
+blockers, and acceptance `required: ["reproducer", "regression-check"]`,
+both missing, on tree `5be55c139e851899ccf1ac689ad360c279a1ed5e`. Its
+obligations had `final-command` and `acceptance` unresolved and the other
+five passing. The retained integration receipt, read back through
+`readExecutionArtifact`, was:
+
+```json
+{"version":1,"mode":"host-bounded","verification":"native-required","phase":1,"testedTree":"5be55c139e851899ccf1ac689ad360c279a1ed5e","before":"7bdce7224031d848731c3d196809487f6a68deef","after":"51066ae554483a853d499730bccfb47beea724ad","merges":[{"task":"T1","tip":"24118e45addb424aac27115c39578019932a4770","before":"7bdce7224031d848731c3d196809487f6a68deef","after":"51066ae554483a853d499730bccfb47beea724ad"}],"taskTips":{"T1":"24118e45addb424aac27115c39578019932a4770"},"review":[["review","pass"]]}
+```
+
+Before command 2, an operator script exported `run/p4` with `git archive`
+and checked the plan's acceptance itself: `npm test` exited 0 with 3 tests
+passing, `sum(2, 3)` and `sum(-1, 1)` printed `5 0`, the new
+`test/sum.test.cjs` requires `node:test` and `node:assert/strict`, and
+against the original subtraction it exited 1 with 0 pass and 2 fail
+(`actual: -1, expected: 5` and `actual: -2, expected: 0`). Command 2 then
+recorded both criteria as `pass` for that tree and printed `"recorded":
+true`, attempt `acceptance.1`, two `acceptance-evidence` references,
+`"trust": "local-operator-observation"` and `"authenticatedAuthorization":
+false`.
+
+Command 3 reused prepare, baseline, implement-1, review-1 and integrate-1,
+reran `collect-1.2` (97 ms) and `gate-1.2` (426 ms), and ran `finish.1`
+(486 ms, exit 0). It used 10 of 40 attempts and 93,022 of 2,400,000 ms in
+total, with `host.repairRounds` max 1, delivered 0. No model was dispatched
+again. Its report fields, verbatim (the obligations `trust` array of three
+strings is omitted):
+
+```json
+{"state":"verified-complete","verification":"native-required","verifiedComplete":true}
+{"version":2,"identity":"86e80e914791bd8d3374beffbe8734ba87f8d9dca963f9d763b24b3ccfd38b46","verifiedComplete":true,"state":"verified-complete","stale":0,"obligations":[
+  {"id":"implementation-1-T1","kind":"implementation","mandatory":true,"scope":"step","identity":"86e80e914791bd8d3374beffbe8734ba87f8d9dca963f9d763b24b3ccfd38b46","tree":"5be55c139e851899ccf1ac689ad360c279a1ed5e","refs":{"refs/heads/fleetmates/p4/T1":"24118e45addb424aac27115c39578019932a4770"},"status":"pass","receipts":["receipt-implementation-1-T1"],"stale":0},
+  {"id":"command-1","kind":"command","mandatory":true,"scope":"step","identity":"86e80e914791bd8d3374beffbe8734ba87f8d9dca963f9d763b24b3ccfd38b46","tree":"5be55c139e851899ccf1ac689ad360c279a1ed5e","refs":{"refs/heads/fleetmates/p4/T1":"24118e45addb424aac27115c39578019932a4770"},"status":"pass","receipts":["receipt-command-1"],"stale":0},
+  {"id":"review-1","kind":"review","mandatory":true,"scope":"step","identity":"86e80e914791bd8d3374beffbe8734ba87f8d9dca963f9d763b24b3ccfd38b46","tree":"5be55c139e851899ccf1ac689ad360c279a1ed5e","refs":{"refs/heads/fleetmates/p4/T1":"24118e45addb424aac27115c39578019932a4770"},"status":"pass","receipts":["receipt-review-1"],"stale":0},
+  {"id":"integration-1","kind":"integration","mandatory":true,"scope":"step","identity":"86e80e914791bd8d3374beffbe8734ba87f8d9dca963f9d763b24b3ccfd38b46","tree":"5be55c139e851899ccf1ac689ad360c279a1ed5e","refs":{"refs/heads/fleetmates/p4/T1":"24118e45addb424aac27115c39578019932a4770"},"status":"pass","receipts":["receipt-integration-1"],"stale":0},
+  {"id":"final-review","kind":"review","mandatory":true,"scope":"final","identity":"86e80e914791bd8d3374beffbe8734ba87f8d9dca963f9d763b24b3ccfd38b46","tree":"5be55c139e851899ccf1ac689ad360c279a1ed5e","refs":{"refs/heads/run/p4":"51066ae554483a853d499730bccfb47beea724ad"},"status":"pass","receipts":["receipt-final-review"],"stale":0},
+  {"id":"final-command","kind":"command","mandatory":true,"scope":"final","identity":"86e80e914791bd8d3374beffbe8734ba87f8d9dca963f9d763b24b3ccfd38b46","tree":"5be55c139e851899ccf1ac689ad360c279a1ed5e","refs":{"refs/heads/run/p4":"51066ae554483a853d499730bccfb47beea724ad"},"status":"pass","receipts":["receipt-final-command"],"stale":0},
+  {"id":"acceptance-reproducer","kind":"acceptance","mandatory":true,"scope":"step","identity":"86e80e914791bd8d3374beffbe8734ba87f8d9dca963f9d763b24b3ccfd38b46","tree":"5be55c139e851899ccf1ac689ad360c279a1ed5e","refs":{"refs/heads/run/p4":"51066ae554483a853d499730bccfb47beea724ad"},"status":"pass","receipts":["receipt-acceptance-reproducer"],"stale":0},
+  {"id":"acceptance-regression-check","kind":"acceptance","mandatory":true,"scope":"step","identity":"86e80e914791bd8d3374beffbe8734ba87f8d9dca963f9d763b24b3ccfd38b46","tree":"5be55c139e851899ccf1ac689ad360c279a1ed5e","refs":{"refs/heads/run/p4":"51066ae554483a853d499730bccfb47beea724ad"},"status":"pass","receipts":["receipt-acceptance-regression-check"],"stale":0}]}
+```
+
+The report's top-level `verification` is set to `native-required` whenever no
+verification fixture is injected (`scripts/workflow-controller.mjs:956`); it
+is a mode, not an observation. The sandbox itself is used by the host gate
+inside integrate-1 (`scripts/reviewed-integration.mjs:277-289`), which
+refuses unless the executor reports `runtime: "codex-sandbox"` and
+`observed: true`. The run itself kept no record of the sandbox process, so a
+separate non-model probe built that same executor
+(`createVerificationExecutor` with the gate's implementer enforcement) over
+a detached worktree of `run/p4`, with a logging `codex` shim first on `PATH`.
+It reported `{"kind":"required","runtime":"codex-sandbox","platform":"linux","write":true,"network":false,"sharedRefs":false,"publication":false,"temporaryFiles":"private-worker-directory","observed":true}`,
+ran `npm test` inside it with exit 0 (2 test files passing), and the shim
+logged two `codex sandbox -P worker ...` invocations: the restriction probe
+and the command.
+
+Two observations from this trial are not covered by its exit 0:
+
+- The strict driver orphaned T1. Its journal holds one `verification`
+  attempt that failed with `"code":4,"scope":"enforcement-only"`, the session
+  record says `"state": "orphaned"` with `exitReason` `Fresh mandatory
+  enforcement did not pass`, the dispatch stdout printed `T1: orphaned`, and
+  `status.json` lists T1 as `orphaned`. `dispatch` still exited 0, and the
+  controller accepted implement-1 from `T1.result.json`. Rerunning `complete
+  --run p4 --task T1 --plan plan.md --base main --enforcement-only` on a copy
+  of `p4` with `run/p4` reset to the anchor exited 4 with `could not run:
+  review (kind agent)`. The manifest's mandatory `agent` check, which the
+  controller reads as required (`agentCheck`,
+  `scripts/workflow-controller.mjs:279`, read from source), is what makes
+  the driver's enforcement call exit 4 here (open item 12).
+- Command 4 exited 4 with `"state": "unresolved"` and `unresolvedAttempts:
+  1` after the run was `verified-complete`. The one unresolved attempt is
+  that driver `verification` attempt (`failed-observation`, task T1). Every
+  other step attempt read `superseded` or `ready`, and the request read
+  `stale` as in trials 1 and 2.
+
+After the trial, `pgrep -af codex` listed only the Codex processes that
+existed before it, and `pgrep -af "node -e setInterval"` matched nothing.
+
 ## Identities and resources
 
 | Field | p1b | p2 |
@@ -233,8 +344,9 @@ Code trial was run for the audit, so no real outcome above changes.
    `workflow-accept` retains the evidence and `workflow-resume` passes it. In
    the fixture test, `finish` runs and `obligations.verifiedComplete` is true,
    but the injected verification fixture keeps the state `unresolved` with
-   exit 4. The exit 0 path through native verification stays unproven (open
-   item 8 below).
+   exit 4. Real trial 3 then reached the exit 0 path through native
+   verification: `workflow-accept`, then `workflow-resume`, ran `finish` and
+   ended `verified-complete` (open item 8 below).
 2. On a code failure the controller stops at the existing `fix` decision and
    delivers no repair round. `maxRepairRounds` is validated and recorded but
    not consumed. Neither real run had a code failure, so this path is
@@ -334,9 +446,17 @@ Code trial was run for the audit, so no real outcome above changes.
 
 ## Open items after the audit
 
-These remain open at `584e9175`. File and line references were read at that
-tip. "Unpinned" means the mutation named was applied, the named test files
-still passed, and the file was then restored.
+These were open at `584e9175`. File and line references in each item's first
+paragraph were read at that tip. "Unpinned" means the mutation named was
+applied, the named test files still passed, and the file was then restored.
+Items 2, 4 to 8 and 10 now end with their status after the release-blockers
+run, checked at `b913d713`; items 1, 3, 9 and 11 are unchanged, and item 12
+is new. "Pinned" and "fixed" cite the T1 to T3 commits and the tests they
+added. The mutations that show those tests fail were applied by those tasks
+and were not repeated in T4. In T4 the 22 named tests passed at `b913d713`
+(`node --test --test-name-pattern=...` over the four test files below: 22
+pass, 0 fail), and the root suite reported 3,557 tests, 3,540 pass, 0 fail
+and 17 skipped.
 
 1. The controller writes `maxAttempts: DRIVER_ATTEMPTS` (10) into every
    dispatch execution contract (`scripts/workflow-controller.mjs:508` and
@@ -349,6 +469,12 @@ still passed, and the file was then restored.
    (`scripts/workflow-controller.mjs:908`), counting a `not-started`
    resolution as drift (`:910`), and applying the 9-round driver cap without
    a driver journal (`:397`). The cap with a journal is pinned.
+   Status: pinned in release-blockers T2 (`07a04990`) by three tests in
+   `tests/workflow-controller.test.mjs`: "a phase whose only prior dispatch
+   is its implement step under other inputs stops before the first round is
+   recorded", "a prior dispatch resolved not-started under other inputs is
+   not drift: resume redispatches it" and "without a driver journal the
+   driver attempt limit does not cap the repair rounds".
 3. The harness-codex test "ordinary pipeline timeout stops its own delayed
    child fixture" is reported flaky under load. It passed in every run in
    this task; the flake was not reproduced.
@@ -356,21 +482,55 @@ still passed, and the file was then restored.
    (`scripts/execution-artifacts.mjs:180`, `current.ino !== holder.ino`) is
    unpinned: removing it left `tests/execution-artifacts.test.mjs` and
    `tests/execution-journal.test.mjs` at 129 of 129 passing.
+   Status: pinned in release-blockers T1 (`9cd245a1`) by "a lock directory
+   swapped for a new one between the holder read and the reclaim is left in
+   place" in `tests/execution-artifacts.test.mjs`.
 5. A chain of 8 dead reclaim tokens leaves the artifact store busy for good
    (`MAX_RECLAIM_CHAIN` at `scripts/execution-artifacts.mjs:112`, loop at
    `:172`). A probe planted a dead-holder lock with 7 and with 8 dead tokens.
    With 7 the next retain reclaimed it (`dead-lock-holder`). With 8, two
    consecutive retains each refused after about 5,000 ms with `Artifact
    storage is busy or an interrupted write requires reconciliation`.
+   Status: fixed in release-blockers T1 (`9cd245a1`). The reclaim bound is
+   derived from the entries in the lock directory, and a directory over the
+   stated hard cap is refused with an error naming the lock. Pinned in
+   `tests/execution-artifacts.test.mjs` by "a dead lock carrying a chain of 8
+   dead reclaim tokens is reclaimed by the next retain", the same with 20,
+   and "a dead lock directory over the entry cap is refused at once with an
+   error naming the lock".
 6. `claimToken` (`scripts/execution-artifacts.mjs:158`) writes its token
    through `writePid` (`:128`), which does not fsync; the file's only `sync()`
    calls are at `:85`, `:237` and `:272`.
+   Status: fixed in release-blockers T1 (`9cd245a1`). At `b913d713`
+   `writePid` (`scripts/execution-artifacts.mjs:131`) calls `handle.sync()`
+   before closing (`:133`). Pinned by "every pid file and reclaim token
+   written through a handle is synced through it" in
+   `tests/execution-artifacts.test.mjs`.
 7. `retainedAcceptance` keeping the latest evidence per criterion
    (`scripts/cli.mjs:3195`) is unpinned: a keep-first mutation left
    `tests/execution-controller-cli.test.mjs` at 26 of 26 passing.
+   Status: pinned in release-blockers T3 (`e284301d`) by "workflow-accept
+   recorded fail then pass for one criterion hands workflow-resume only the
+   later evidence" and the same with pass then fail, in
+   `tests/execution-controller-cli.test.mjs`. The same commit added, in
+   `tests/execution-prerequisites.test.mjs`, the "refuses a committed
+   --role-policy (or --environment) holding valid JSON with an unknown key
+   (or bytes that are not JSON) with exit 2 and no spawn" tests for plain
+   `dispatch`, `dispatch-integrator` without a mode flag and
+   `dispatch-integrator --isolated-legacy` (12 tests).
 8. The native `verified-complete` path (exit 0 through the real `codex
    sandbox` verification) is unproven. The audit ran no real-model or sandbox
    trial; the fixture run ends `unresolved` with exit 4.
+   Status: proven by real trial 3 above. `workflow-execute` exited 4
+   (`human-required`), `workflow-accept` exited 0, and `workflow-resume`
+   exited 0 with `"state": "verified-complete"`, `"verification":
+   "native-required"`, `"verifiedComplete": true` and every obligation
+   `pass`. The host gate inside the integration of `workflow-execute`
+   passed. By source it refuses unless its executor reports an observed
+   `codex-sandbox` runtime; the run kept no record of the sandbox process,
+   and a separate non-model probe observed that executor invoke `codex
+   sandbox`. The run also exposed open item 12: the strict driver orphaned the task, and
+   the run still became `verified-complete`.
 9. The hub test "fm ls lists each PTY with its repo, pid, start and attached
    clients" is reported flaky under load. It passed in the one run in this
    task; the flake was not reproduced.
@@ -378,11 +538,34 @@ still passed, and the file was then restored.
     still says a derive or run-state failure arrives as exit 1 until the gate
     implements exit 5. The gate exits 5 at this tip (finding 4), so that
     sentence is stale.
+    Status: fixed in release-blockers T2 (`07a04990`). At `b913d713` the
+    comment (`scripts/workflow-controller.mjs:325-330`) says the gate exits
+    5 for a FAIL whose only failed entries are `derive` and/or `run-state`,
+    and 1 when any other check failed.
 11. `dispatch-integrator --isolated-legacy` is kept by owner decision.
     README's "Integrator dispatch outside the workflow" paragraph states what
     it checks and its trust limits: full same-user authority, restrictions
     that are prompt instructions, and after-the-fact checks over refs, the
     checkouts and the result file only.
+12. New in release-blockers T4, from real trial 3 at `b913d713`. The strict
+    driver runs `complete --enforcement-only` after collection
+    (`scripts/driver.mjs:632`), and treats any exit other than 0 and 3 as a
+    failure (`scripts/driver.mjs:645`, `Fresh mandatory enforcement did not
+    pass`). The profile controller requires a mandatory `agent` check
+    (`agentCheck`, `scripts/workflow-controller.mjs:279`), which `complete`
+    cannot run, so it exits 4 (`could not run: review (kind agent)`) and the
+    driver orphans the task. `dispatch` still exits 0 after printing `T1:
+    orphaned` (`scripts/cli.mjs:4314-4315`), and `validateImplement`
+    (`scripts/workflow-controller.mjs:260`) accepts the task from
+    `<task>.result.json` without reading the orphaned state. The run then
+    integrates and can end `verified-complete`, while `status.json` lists the
+    task as `orphaned`, and `workflow-status` exited 4 after the run on the
+    failed driver `verification` attempt. That the controller requires the
+    `agent` check is read from source (`reviewsCurrent` and
+    `validateCollect` read `agentCheck(...)` without a fallback), not run.
+    Whether exit 4 from `complete` should count as a pass for the driver, or
+    the controller should refuse an orphaned task, is a design call for the
+    owner.
 
 ## CLI contracts, defaults and trust limits
 
@@ -415,7 +598,10 @@ evidence).
 The matrices record T9's evidence on `db6a5f0c` and are not re-scored here.
 Where a gap cites finding 1, 2, 5, 8 or 9, the audit added code and fixture
 or probe evidence only, as each finding's status says; no criterion moved to
-met, because no real run exercised the new paths.
+met, because no real run exercised the new paths. Real trial 3 later
+exercised the acceptance producer, `finish` and the `verified-complete`
+exit 0 path, and reached the driver journal through `workflow-execute`; the
+matrices were not re-scored for it.
 
 ### Issue 42 (W10)
 
@@ -478,3 +664,13 @@ T9 changes no code.
 No telemetry, Vault write, fixture recapture, model download, push or
 publication was performed. Live Claude callbacks, W02 campaigns and human
 acceptance judgments remain owner obligations.
+
+Release-blockers T4 changed only this report. In its worktree at
+`b913d713`, before any edit, `TMPDIR=/tmp/hx/b4 npm test` reported 3,557
+tests, 3,540 pass, 0 fail and 17 skipped. T4 spent one real model run
+(trial 3: one implementer and one reviewer Codex turn inside
+`workflow-execute`); `workflow-accept`, `workflow-resume`, `workflow-status`,
+the acceptance script, the sandbox probe and the `complete` reproduction
+started no model. Every number in trial 3 comes from those commands'
+retained stdout and from artifacts read back through
+`readExecutionArtifact` and `readExecutionEvents`.
