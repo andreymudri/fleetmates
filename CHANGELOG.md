@@ -51,6 +51,7 @@
 - `message` exits 4 unless the resumed turn produced a new valid result. It used to exit 0 after a
   spawn failure or a clean exit with no result. A Cursor result in the stream file now counts.
 - Reviewers check the tracked task specification and declared scope before their lens.
+- The quiet test reporter names the file and line of each failure.
 
 ### Fixed
 
@@ -63,9 +64,15 @@
   ended attempts; repair rounds are idempotent on resume.
 - Git output is decoded as a stream, so UTF-8 split across chunks survives, and numeric task ids
   survive in fleet reports.
+- The strict driver run directory and the isolated integrator session directory are canonicalized
+  under linked paths, such as the macOS `/var` link.
 
 ### Known issues
 
+- Strict execution and native verification are POSIX-only. On Windows `workflow-execute`,
+  `workflow-resume`, `workflow-status`, `workflow-resolve`, `workflow-accept`, `workflow-prune`,
+  `execution-record`, `execution-status` and `dispatch --execution` refuse with exit 2 and one line
+  naming the reason. Legacy dispatch is unaffected.
 - The controller writes `maxAttempts` 10 into every dispatch execution contract, whatever the
   request says. This is an open design call.
 - `dispatch-integrator --isolated-legacy` gives the agent full same-user authority. Its limits are

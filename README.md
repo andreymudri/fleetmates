@@ -186,6 +186,11 @@ The Cursor sandbox behaviour above was measured on Linux. The adapter spawns `cu
 directly, without a shell, which a Windows `.cmd` shim does not support; running Cursor teammates on
 Windows is untested.
 
+Strict execution and native verification are POSIX-only. On Windows `workflow-execute`,
+`workflow-resume`, `workflow-status`, `workflow-resolve`, `workflow-accept`, `workflow-prune`,
+`execution-record`, `execution-status` and `dispatch --execution` refuse with exit 2 and print the
+reason on one line. Legacy dispatch without `--execution` is unaffected.
+
 ### Models and effort
 
 Cursor has no separate effort setting: effort is part of the model id. Map each tier to the variant
