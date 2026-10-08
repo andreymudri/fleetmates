@@ -389,6 +389,28 @@ test('workflow-accept retains evidence for the integrated tree only, and workflo
   assert.equal((await fixture.events()).length, after)
 })
 
+for (const [earlier, later] of [['fail', 'pass'], ['pass', 'fail']]) {
+  test(`workflow-accept recorded ${earlier} then ${later} for one criterion hands workflow-resume only the later evidence`, async t => {
+    const fixture = await project(t)
+    const first = json((await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request()) })).output)
+    assert.equal(first.state, 'human-required')
+    const tree = first.acceptance.tree
+    const [criterion, ...others] = first.acceptance.required
+    const accept = async criteria => {
+      const result = await fixture.cli(['workflow-accept', '--file', await fixture.requestFile({ version: 1, runId: 'r1', tree, criteria })])
+      assert.equal(result.code, 0, result.output)
+    }
+    const note = 'observed by the fixture'
+    await accept([{ criterion, status: earlier, note }, ...others.map(other => ({ criterion: other, status: 'pass', note }))])
+    await accept([{ criterion, status: later, note }])
+    const report = json((await fixture.command('workflow-resume', { run: 'r1' })).output)
+    // The controller refuses a criterion handed more than one entry, and counts only a pass entry,
+    // so the criterion is missing exactly when the later evidence failed.
+    assert.deepEqual(report.acceptance.missing, later === 'pass' ? [] : [criterion])
+    assert.equal(commands(await fixture.invocations()).at(-1) === 'finish', later === 'pass')
+  })
+}
+
 test('workflow-prune keeps every artifact the journal references and removes non-live content past its bounds', async t => {
   const fixture = await project(t)
   await fixture.command('workflow-execute', { file: await fixture.requestFile(fixture.request()) })
