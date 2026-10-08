@@ -199,17 +199,20 @@ test('FIFO capability handling rejects command failures, inconsistent output and
 test('Node builtin Unix socket artifacts receive an explicit non-regular file denial', { skip: process.platform === 'win32', timeout: 5000 }, async t => {
   const request = await repository(t), { reference } = await retain(request, Buffer.alloc(0))
   const file = artifactFile(request, reference), socket = path.join(path.dirname(request.common), 'probe.sock')
-  const server = createServer()
+  const server = createServer(), cwd = process.cwd()
   t.after(() => new Promise(resolve => server.close(() => resolve())))
   try {
+    // Bound by its relative name from its own directory: a Unix socket path is limited to about 108
+    // bytes, which a long TMPDIR (the hostile-TMPDIR sweep) exceeds.
+    process.chdir(path.dirname(socket))
     await new Promise((resolve, reject) => {
       server.once('error', reject)
-      server.listen(socket, () => { server.off('error', reject); resolve() })
+      server.listen(path.basename(socket), () => { server.off('error', reject); resolve() })
     })
   } catch (error) {
     if (['EAFNOSUPPORT', 'EPROTONOSUPPORT', 'ENOTSUP'].includes(error.code)) { t.skip(`Unix socket fixture unavailable: ${error.code}`); return }
     throw error
-  }
+  } finally { process.chdir(cwd) }
   assert.ok((await lstat(socket)).isSocket())
   await chmod(socket, 0o600)
   await rm(file); await rename(socket, file)

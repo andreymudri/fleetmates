@@ -85,7 +85,8 @@ async function probeReportFixture(kind, { platform = process.platform, env = pro
       } else if (kind === 'special') {
         await fifoCreate(file, env)
       } else {
-        execFileSync(process.execPath, ['-e', `require('net').createServer().listen(${JSON.stringify(file)},()=>process.exit(0))`], { env, stdio: ['ignore', 'pipe', 'pipe'] })
+        // Relative to its directory: a long TMPDIR exceeds the ~108-byte Unix socket path limit.
+        execFileSync(process.execPath, ['-e', `require('net').createServer().listen(${JSON.stringify(path.basename(file))},()=>process.exit(0))`], { cwd: path.dirname(file), env, stdio: ['ignore', 'pipe', 'pipe'] })
       }
     }, kind === 'link' ? ['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP'] : kind === 'special' ? ['ENOENT'] : [])
     if (!capability.available) return capability
@@ -765,7 +766,7 @@ test('private report transfer rejects symbolic, special, oversized and excessive
   for (const [kind, body, expected] of [
     ['link', 'fs.writeFileSync(dir+"/target","dummy");fs.symlinkSync(dir+"/target",dir+"/report.xml","file")', /symbolic link/],
     ['special', 'require("child_process").execFileSync("mkfifo",[dir+"/report.xml"])', /regular file/],
-    ['socket', 'require("net").createServer().listen(dir+"/report.xml",()=>process.exit(0))', /regular file/],
+    ['socket', 'process.chdir(dir);require("net").createServer().listen("report.xml",()=>process.exit(0))', /regular file/],
     ['bytes', 'const fd=fs.openSync(dir+"/report.xml","w");fs.ftruncateSync(fd,50*1024*1024+1);fs.closeSync(fd)', /byte bound/],
     ['count', 'for(let i=0;i<1001;i++)fs.writeFileSync(dir+"/"+i+".xml",\'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>\')', /count exceeded/],
     ['depth', 'let nested=dir;for(let i=0;i<9;i++){nested+="/d";fs.mkdirSync(nested)}fs.writeFileSync(nested+"/report.xml",\'<testsuite name="suite"><testcase file="test.mjs" name="kept"/></testsuite>\')', /directory is unsafe/]
