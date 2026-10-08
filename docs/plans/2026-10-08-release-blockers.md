@@ -96,3 +96,52 @@ with exit 0 through native verification, and the validation record shows the evi
 - [ ] Step 2: Run it for real; capture the commands, exits and report fields.
 - [ ] Step 3: Update the validation doc from those outputs only.
 - [ ] Step 4: Run `git diff --check`, `node scripts/security-lint.mjs --root . --json` and a scan for personal paths and em dashes; commit only the declared file.
+
+### Task 5: verified-complete requires the driver's own verification to pass
+
+**Files:**
+- Modify: `scripts/driver.mjs`
+- Modify: `scripts/cli.mjs`
+- Modify: `scripts/workflow-controller.mjs`
+- Test: `tests/driver-recovery.test.mjs`
+- Test: `tests/workflow-controller.test.mjs`
+
+**Depends:** T4
+
+**Acceptance:**
+- Background (open item 12, found by the T4 real trial, amended 2026-10-08): with a manifest that declares a mandatory `agent` check, the strict driver's `complete --enforcement-only` exits 4 (`could not run: review (kind agent)`), `scripts/driver.mjs` ~645 throws `Fresh mandatory enforcement did not pass`, and the task is orphaned. Even so, `dispatch` exits 0 and `validateImplement` (`scripts/workflow-controller.mjs` ~260) accepts the task from its result file, so the run still reaches `verified-complete`.
+- The driver's enforcement call gives the strict path a structured answer, not only an exit code. The answer is `{ code, pendingOnly }`, where `pendingOnly` is true exactly when every non-passing check is a `pending` `agent` or `mcp` check (could not run) and no check failed. `scripts/cli.mjs` builds it from the same verdict `complete` computes. The strict driver accepts `code === 0`, and it also accepts `code === 4` with `pendingOnly`. It records the verification receipt with a scope that names the pending checks (for example `enforcement-only-pending-agent`). Any other code, or exit 4 with a failed check, still throws, and the task is orphaned as before.
+- The controller refuses to accept a task that the driver did not accept. `validateImplement` (and the repair path, if it validates separately) returns `ok: false` with a reason naming the task in either case:
+  - the task's state in `status.json` is `orphaned`;
+  - a driver journal exists and the task's latest driver verification event is not `step-completed`.
+- A run whose implementer task was orphaned therefore never reaches `verified-complete`.
+- A test runs the controller over a fake harness with a mandatory agent check in the manifest. The driver accepts the task (pending only), the run reaches `verified-complete`, and `workflow-status` on the finished run exits 0.
+- A second test forces a real task-scoped enforcement failure (exit 3 twice, or a failed check). It asserts that the task is orphaned and the controller stops with a reason naming that task, never `verified-complete`.
+- Mutations each fail a test, then are restored:
+  - accepting any exit 4 without checking `pendingOnly`;
+  - dropping the orphaned-state refusal in `validateImplement`;
+  - dropping the driver-verification-event refusal.
+
+- [ ] Step 1: Reproduce the defect with a failing test: a mandatory agent check plus the strict driver gives an orphaned task and a `verified-complete` run.
+- [ ] Step 2: Add the failing tests for the pending-only acceptance and for the controller refusal.
+- [ ] Step 3: Implement the structured enforcement answer, the strict-driver acceptance and the controller refusal.
+- [ ] Step 4: Apply the three mutations, observe the matching failures, and restore.
+- [ ] Step 5: Run `tests/driver-recovery.test.mjs`, `tests/workflow-controller.test.mjs`, `tests/execution-controller-cli.test.mjs` and the root suite, then commit only the declared files.
+
+### Task 6: prove verified-complete again with no orphaned task
+
+**Files:**
+- Modify: `docs/specs/2026-10-06-execution-recovery-validation.md`
+
+**Depends:** T5
+
+**Acceptance:**
+- One real Codex run uses the same fixture shape as the T4 trial: a committed environment recipe, a required role policy, and a manifest with a mandatory agent check. The owner authorized this run on 2026-10-08. The run goes through `workflow-execute`, then `workflow-accept`, then `workflow-resume`, and it ends `verified-complete` with exit 0.
+- In that run, `status.json` shows the task as `done`, not `orphaned`. The task's driver verification event is `step-completed`, with the pending-only scope. `workflow-status` after the run exits 0.
+- The validation doc records the commands, exits and fields verbatim, with personal paths replaced by `/home/you`. It marks open item 12 as fixed, citing the T5 commit and its test names, and it keeps every other item's status as T4 left it.
+- If the run cannot reach exit 0 with no orphan, the task records the exact refusal and returns `blocked`, and the doc does not mark item 12 fixed.
+- At most 2 real runs. Before returning, no Codex process this task started is still running.
+
+- [ ] Step 1: Rebuild the T4 fixture under `/tmp/hx`, then run it for real and capture the receipts.
+- [ ] Step 2: Update the validation doc from those outputs only.
+- [ ] Step 3: Run `git diff --check`, `node scripts/security-lint.mjs --root . --json` and a scan for personal paths and em dashes, then commit only the declared file.
