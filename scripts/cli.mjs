@@ -3457,7 +3457,8 @@ export async function runCli(argv, io = { out: console.log }) {
     return 2
   }
   // Strict execution is POSIX-only. Its commands, and `dispatch --execution`, are refused here,
-  // before any other check or command body, with the reason on one JSON line and exit 2.
+  // after the flag-spelling refusal above and before every other check and the command body,
+  // with the reason on one JSON line and exit 2.
   // `io.strictSupport` lets a test take the unsupported path on a POSIX host.
   if (STRICT_COMMANDS.has(command) || (command === 'dispatch' && flags.execution !== undefined)) {
     const support = io.strictSupport ?? strictExecutionSupport()
