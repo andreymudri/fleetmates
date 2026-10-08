@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { strictTest } from './strict-platform.mjs'
 import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, readFile, rm, mkdir, symlink, chmod, lstat, access, realpath } from 'node:fs/promises'
 import { EventEmitter } from 'node:events'
@@ -701,7 +702,7 @@ for (const mode of ['files', 'clone']) test(`required ${mode} worker verificatio
   assert.deepEqual(calls, [])
 }))
 
-test('linked setup reaches layout assertions under apostrophe TMPDIR', async () => {
+test('linked setup reaches layout assertions under apostrophe TMPDIR', { skip: process.platform === 'win32' && 'POSIX-only fixture: it spawns /usr/bin/env' }, async () => {
   const temp = await mkdtemp(path.join(tmpdir(), "fm-quote'"))
   try {
     const result = await defaultExec('/usr/bin/env', process.cwd(), { argv: ['-u', 'NODE_TEST_CONTEXT', process.execPath, '--test', '--test-name-pattern=linked worker receipt|worker receipt observes linked', path.join(process.cwd(), 'tests/execution-prerequisites.test.mjs')], env: { TMPDIR: temp, NODE_TEST_CONTEXT: '' }, timeoutMs: 30000, maxOutputBytes: 64 * 1024 })
@@ -783,7 +784,7 @@ test('required host preflight confines project setup before authentication or mo
 }))
 
 for (const missing of [false, true]) {
-  test(`required message refuses ${missing ? 'missing' : 'unavailable'} native verifier without retaining an old ready receipt`, async () => withBoundSession(true, async ({ file, calls, message }) => {
+  strictTest(`required message refuses ${missing ? 'missing' : 'unavailable'} native verifier without retaining an old ready receipt`, async () => withBoundSession(true, async ({ file, calls, message }) => {
     const record = JSON.parse(await readFile(file, 'utf8'))
     record.sandbox.meta.prerequisites.environment = 'recipe.json'
     record.prerequisites = record.sandbox.meta.prerequisites
@@ -848,6 +849,16 @@ async function integratorFixture(fn, { effort = 'high', tier = 'mid' } = {}) {
   }
 }
 
+// Windows CI showed `git worktree list --porcelain` printing forward slashes where the native path
+// has backslashes, so worktree paths are compared after realpath and path.resolve, not as raw text.
+const worktreeEntries = porcelain => porcelain.split(/\r?\n\r?\n/).filter(block => block.trim()).map(block => Object.fromEntries(block.split(/\r?\n/).filter(Boolean).map(line => {
+  const space = line.indexOf(' ')
+  return space < 0 ? [line, true] : [line.slice(0, space), line.slice(space + 1)]
+})))
+async function canonicalPath(value) {
+  try { return path.resolve(await realpath(value)) } catch { return path.resolve(value) }
+}
+
 for (const optional of [false, true]) test(`integrator dispatch from detached main supplies isolated exact assignment with ${optional ? 'inherited' : 'configured'} effort and validates ordinary no-ff merges`, async () => integratorFixture(async ({ root, gitRun, anchor, tips }) => {
   const indexBefore = await readFile(path.join(root, '.git', 'index'))
   let spawned = false
@@ -855,7 +866,12 @@ for (const optional of [false, true]) test(`integrator dispatch from detached ma
     spawned = true
     assert.notEqual(options.sandbox.cwd, root)
     const worktrees = await gitRun(['worktree', 'list', '--porcelain'])
-    assert.ok(worktrees.includes(`worktree ${options.sandbox.cwd}\nHEAD ${anchor}\nbranch refs/heads/run/r1`))
+    const expected = await canonicalPath(options.sandbox.cwd)
+    const matches = []
+    for (const entry of worktreeEntries(worktrees)) if (entry.worktree && await canonicalPath(entry.worktree) === expected) matches.push(entry)
+    assert.equal(matches.length, 1, worktrees)
+    assert.equal(matches[0].HEAD, anchor)
+    assert.equal(matches[0].branch, 'refs/heads/run/r1')
     assert.equal(options.model, optional ? 'fixture-cheap' : 'fixture-model')
     if (optional) assert.equal(Object.hasOwn(options, 'effort'), false)
     else assert.equal(options.effort, 'high')

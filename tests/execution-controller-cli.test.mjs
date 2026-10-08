@@ -1,4 +1,5 @@
-import { test, mock } from 'node:test'
+import { mock } from 'node:test'
+import { strictTest as test } from './strict-platform.mjs'
 import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, readFile, rm, mkdir, realpath, symlink, chmod, access } from 'node:fs/promises'
 import { existsSync, readFileSync, constants } from 'node:fs'

@@ -1,4 +1,4 @@
-import test from 'node:test'
+import { strictTest as test } from './strict-platform.mjs'
 import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, readFile, rm, mkdir, chmod, cp, access, realpath, symlink, lstat } from 'node:fs/promises'
 import { constants } from 'node:fs'
