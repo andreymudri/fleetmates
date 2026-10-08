@@ -228,8 +228,9 @@ export async function resumeCursor({ sandbox, sessionId, message, model, network
 // rather than a partial answer.
 // win32 has no O_NOFOLLOW, so there the link is refused by lstat before the open, and the opened
 // handle must be the very file lstat saw (same dev and ino), as `openReportFile` in
-// scripts/test-report.mjs does. `noFollow: null` forces that path on any platform.
-async function readBounded(file, max, { noFollow = constants.O_NOFOLLOW } = {}) {
+// scripts/test-report.mjs does. `noFollow: null` forces that path on any platform; `beforeOpen`,
+// a test-only hook run between the lstat and the open, lets a test swap the file in that window.
+async function readBounded(file, max, { noFollow = constants.O_NOFOLLOW, beforeOpen } = {}) {
   let handle
   let seen = null
   try {
@@ -238,6 +239,7 @@ async function readBounded(file, max, { noFollow = constants.O_NOFOLLOW } = {}) 
     } else {
       seen = await lstat(file, { bigint: true })
       if (!seen.isFile()) return null
+      await beforeOpen?.()
       handle = await open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
     }
   } catch { return null }
@@ -256,8 +258,8 @@ async function readBounded(file, max, { noFollow = constants.O_NOFOLLOW } = {}) 
   } catch { return null } finally { await handle.close() }
 }
 
-async function streamEvents(streamPath, maxStreamBytes = STREAM_LIMIT_BYTES, { noFollow } = {}) {
-  const raw = await readBounded(streamPath, maxStreamBytes, { noFollow })
+async function streamEvents(streamPath, maxStreamBytes = STREAM_LIMIT_BYTES, { noFollow, beforeOpen } = {}) {
+  const raw = await readBounded(streamPath, maxStreamBytes, { noFollow, beforeOpen })
   if (raw === null) return []
   const events = []
   for (const line of raw.split('\n')) {
@@ -299,8 +301,8 @@ function parseCandidates(text) {
 // message is read first and `result` is the fallback. Only the events after the last `user` line
 // count, so a resume never returns the previous session's answer. `null` — never a throw — for
 // anything that is not a valid result: every such case is `orphaned`, not a driver crash.
-export async function readResult({ streamPath, maxStreamBytes, noFollow }) {
-  const events = await streamEvents(streamPath, maxStreamBytes, { noFollow })
+export async function readResult({ streamPath, maxStreamBytes, noFollow, beforeOpen }) {
+  const events = await streamEvents(streamPath, maxStreamBytes, { noFollow, beforeOpen })
   let start = 0
   events.forEach((e, i) => { if (e.type === 'user') start = i })
   const turn = events.slice(start)

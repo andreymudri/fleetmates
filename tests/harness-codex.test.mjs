@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile, readFile, chmod, stat, symlink } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, readFile, chmod, stat, symlink, rename } from 'node:fs/promises'
 import { tmpdir, constants as osConstants } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
@@ -1335,5 +1335,20 @@ test('readResult without O_NOFOLLOW still refuses a symlinked result file and re
     const linked = path.join(dir, 'T2.json')
     await symlink(resultPath, linked)
     assert.equal(await readResult({ resultPath: linked, noFollow: null }), null)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('readResult without O_NOFOLLOW refuses a result file replaced between its lstat and its open', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-codex-swap-'))
+  try {
+    const resultPath = path.join(dir, 'T1.json')
+    const result = (summary) => JSON.stringify({ status: 'done', branch: 'fleetmates/r1/T1', filesChanged: [], summary, blockers: [] })
+    await writeFile(resultPath, result('seen by lstat'))
+    const other = path.join(dir, 'other.json')
+    await writeFile(other, result('swapped in'))
+    // A different regular file renamed over the path after lstat: the opened handle is not the file lstat saw.
+    const beforeOpen = () => rename(other, resultPath)
+    assert.equal(await readResult({ resultPath, noFollow: null, beforeOpen }), null)
+    assert.match(await readFile(resultPath, 'utf8'), /swapped in/, 'the swap ran, so null is the dev/ino refusal')
   } finally { await rm(dir, { recursive: true, force: true }) }
 })

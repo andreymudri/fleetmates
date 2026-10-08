@@ -204,8 +204,9 @@ function run(argv, { promptText, streamPath, errPath, cwd, maxStreamBytes = STRE
 // not a regular file, or larger than `max` bytes — never a throw.
 // win32 has no O_NOFOLLOW, so there the link is refused by lstat before the open, and the opened
 // handle must be the very file lstat saw (same dev and ino), as `openReportFile` in
-// scripts/test-report.mjs does. `noFollow: null` forces that path on any platform.
-async function readBounded(file, max, { noFollow = constants.O_NOFOLLOW } = {}) {
+// scripts/test-report.mjs does. `noFollow: null` forces that path on any platform; `beforeOpen`,
+// a test-only hook run between the lstat and the open, lets a test swap the file in that window.
+async function readBounded(file, max, { noFollow = constants.O_NOFOLLOW, beforeOpen } = {}) {
   let handle
   let seen = null
   try {
@@ -214,6 +215,7 @@ async function readBounded(file, max, { noFollow = constants.O_NOFOLLOW } = {}) 
     } else {
       seen = await lstat(file, { bigint: true })
       if (!seen.isFile()) return null
+      await beforeOpen?.()
       handle = await open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
     }
   } catch { return null }
@@ -328,8 +330,8 @@ export async function resumeCodex({
 // Reads and parses the `-o` result file. `null` on ENOENT, a parse error or a file past
 // RESULT_LIMIT_BYTES — never a throw — because "no result", "unparsable result" and "oversized
 // result" are all `orphaned`, not a driver crash.
-export async function readResult({ resultPath, noFollow }) {
-  const raw = await readBounded(resultPath, RESULT_LIMIT_BYTES, { noFollow })
+export async function readResult({ resultPath, noFollow, beforeOpen }) {
+  const raw = await readBounded(resultPath, RESULT_LIMIT_BYTES, { noFollow, beforeOpen })
   if (raw === null) return null
   try {
     return JSON.parse(raw)
