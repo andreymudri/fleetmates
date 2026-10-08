@@ -983,10 +983,10 @@ full authority as the same user, and its filesystem, network and publication
 restrictions are prompt instructions, not confinement. The checks come after
 the fact and observe refs, the main checkout, the worktree and the result
 file only, so anything else it did, such as a remote action or a write
-outside those, is not detected. On either mode, a committed `--role-policy`
-or `--environment` contract exits 4 and a missing or uncommitted one exits 2;
-neither spawns, because a required policy never falls back to legacy
-dispatch.
+outside those, is not detected. On either mode, a committed, valid
+`--role-policy` or `--environment` contract exits 4; a missing, uncommitted,
+modified or invalid one exits 2; neither spawns, because a required policy
+never falls back to legacy dispatch.
 
 Limits: the read-only PR outcome query has no CLI entry point; Vault and
 publication effects have no adapter. Observations are same-UID local
