@@ -108,13 +108,24 @@ async function verifierIdentity() {
   return hash(JSON.stringify(entries))
 }
 
+// The filter `git lfs install` writes runs only when user or system configuration installed it; the
+// same entries in repository configuration, or any other value, stay refused.
+const lfsFilter = new Map([['filter.lfs.clean', 'git-lfs clean -- %f'], ['filter.lfs.smudge', 'git-lfs smudge -- %f'],
+  ['filter.lfs.process', 'git-lfs filter-process']])
+
+function allowedConfig(line) {
+  const match = /^([a-z]+)\t(\S+) (.*)$/.exec(line)
+  if (!match) return false
+  const [, origin, key, value] = match
+  if (/^(core\.bare|core\.sparsecheckout)$/i.test(key)) return /^false$/i.test(value)
+  return ['system', 'global'].includes(origin) && lfsFilter.get(key) === value
+}
+
 async function configuration(scope) {
   const executableConfig = '^(merge\\..*\\.driver|filter\\..*\\.(clean|smudge|process)|diff\\.(external|.*\\.(command|textconv))|branch\\..*\\.mergeoptions|core\\.alternaterefscommand|core\\.bare|core\\.sparsecheckout|extensions\\..*)$'
-  const { code, stdout, signal } = await scope.exec(['config', '--get-regexp', executableConfig])
+  const { code, stdout, signal } = await scope.exec(['config', '--show-scope', '--get-regexp', executableConfig])
   if (signal || ![0, 1].includes(code)) throw new Error('unsupported Git configuration')
-  if (stdout.split('\n').some(line => line && !/^(core\.bare|core\.sparsecheckout) false$/i.test(line))) {
-    throw new Error('unsupported Git configuration')
-  }
+  if (stdout.split('\n').some(line => line && !allowedConfig(line))) throw new Error('unsupported Git configuration')
   if (await scope.run(['for-each-ref', '--format=%(refname)', 'refs/replace/'])) throw new Error('unsupported replacement configuration')
   return scope.binding()
 }

@@ -25,7 +25,8 @@
   A required policy never falls back to legacy dispatch: a valid committed contract that cannot be
   honoured exits 4, a missing, uncommitted, modified or invalid one exits 2.
 - Reviewed host integration. The controller merges each phase itself after a passing gate, bound to
-  its own worktree, with conventional merge subjects.
+  its own worktree, with conventional merge subjects. It refuses Git configuration that runs
+  commands, except the filter `git lfs install` writes, verbatim, in user or system configuration.
 - `dispatch --execution <absolute path>` hands an execution contract to the driver, and
   `dispatch --fix-round --task <id>` (repeatable) redispatches only the named tasks with a fix-round
   brief that keeps the task branch tip. `dispatch-integrator --isolated-legacy` runs the integrator

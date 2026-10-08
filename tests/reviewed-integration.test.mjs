@@ -477,6 +477,52 @@ test('unsupported configured command execution is rejected before checkout', asy
   }
 })
 
+// The filter section `git lfs install` writes, verbatim.
+const lfsFilter = '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n\tsmudge = git-lfs smudge -- %f\n\tprocess = git-lfs filter-process\n\trequired = true\n'
+
+async function withGlobalConfig(t, text, body) {
+  const home = await mkdtemp(path.join(tmpdir(), 'ri-home-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  await mkdir(path.join(home, 'xdg'))
+  await writeFile(path.join(home, '.gitconfig'), text)
+  const planted = { HOME: home, XDG_CONFIG_HOME: path.join(home, 'xdg') }
+  const saved = Object.fromEntries(Object.keys(planted).map(key => [key, process.env[key]]))
+  Object.assign(process.env, planted)
+  try { await body() } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+test('the standard git-lfs filter is accepted from global configuration only', async t => {
+  await withGlobalConfig(t, lfsFilter, async () => {
+    const { input, gate } = await fixture(t)
+    const receipt = await integrateReviewedPhase({ ...input, gateReceipt: await gate() })
+    assert.notEqual(receipt.after, input.expectedRunTip)
+  })
+  {
+    const { root, input, gate } = await fixture(t)
+    const gateReceipt = await gate()
+    for (const [key, value] of [['clean', 'git-lfs clean -- %f'], ['smudge', 'git-lfs smudge -- %f'], ['process', 'git-lfs filter-process']]) {
+      git(root, 'config', `filter.lfs.${key}`, value)
+    }
+    await assert.rejects(integrateReviewedPhase({ ...input, gateReceipt }), /configuration/)
+    assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
+  }
+  for (const text of [lfsFilter.replace('git-lfs smudge -- %f', 'sh -c true'),
+    lfsFilter.replace('[filter "lfs"]', '[filter "LFS"]'),
+    '[filter "custom"]\n\tsmudge = git-lfs smudge -- %f\n']) {
+    const { root, input, gate } = await fixture(t)
+    const gateReceipt = await gate()
+    await withGlobalConfig(t, text, async () => {
+      await assert.rejects(integrateReviewedPhase({ ...input, gateReceipt }), /configuration/)
+    })
+    assert.equal(git(root, 'rev-parse', input.branch), input.expectedRunTip)
+  }
+})
+
 test('failure retains the first merge and observed second conflict for reconciliation', async t => {
   const { root, input, gate } = await fixture(t)
   const gateReceipt = await gate()
