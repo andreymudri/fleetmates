@@ -218,24 +218,51 @@ observations; the controller cannot consume them as acceptance evidence.
 
 ## Findings from the trials
 
+The findings below are as T9 recorded them on `db6a5f0c`. Each ends with its
+status after the audit run `execution-recovery-audit`, checked at that run's
+tip `584e9175`. "Fixed" names the audit task and its commits and rests on
+repository tests and local probes only: no new real-model, sandbox or Claude
+Code trial was run for the audit, so no real outcome above changes.
+
 1. Nothing produces `acceptance-evidence`. The only references are the profile
    output name and the controller's consumer check, and the CLI request has no
    acceptance field. Every profile run therefore ends `human-required` with
    exit 4, and both real runs did. The `verified-complete` exit 0 path, and
    the `finish` step that precedes it, did not run in these trials.
+   Status: producer fixed in audit T5 (`4a8992de`, merged `8775d8d4`):
+   `workflow-accept` retains the evidence and `workflow-resume` passes it. In
+   the fixture test, `finish` runs and `obligations.verifiedComplete` is true,
+   but the injected verification fixture keeps the state `unresolved` with
+   exit 4. The exit 0 path through native verification stays unproven (open
+   item 8 below).
 2. On a code failure the controller stops at the existing `fix` decision and
    delivers no repair round. `maxRepairRounds` is validated and recorded but
    not consumed. Neither real run had a code failure, so this path is
    fixture-backed only.
+   Status: fixed in audit T4 (`f0743b53`, `27b8f876`, merged `1d277dc2`) with
+   the CLI side in audit T5 (`4a8992de`). A retry runs `record-fix-round`,
+   then `dispatch --fix-round --task <id>...`, then review, collection and
+   gate again, at most min(`maxRepairRounds`, the phase fix budget) rounds per
+   phase, and at most 9 under the driver journal. Still fixture-only; open
+   item 2 lists the guards around it that no test pins.
 3. `message` returns 0 for a resumed child with `exitCode: -2` (the adapters'
    spawn failure value) and for a clean exit that leaves no result. It reads
    only `<task>.result.json`, so a Cursor result delivered in the stream file,
    where the Cursor adapter's `readResult` looks, reports `no-result`. A probe
    using the suite's adapter-stub seam observed all three for both harnesses.
+   Status: fixed in audit T5 (`4a8992de`, `b82bd04a`, `05cad812`). `message`
+   exits 4 unless the resumed turn produced a new valid result, and a Cursor
+   result in the stream file counts.
 4. `gate` exits 1 both for a FAIL verdict and when it cannot derive run state.
    On `p2`, `gate --plan missing-plan.md` exited 1 with `failed: ["derive"]`.
    The CLI reclassifies derive and run-state failures as infrastructure by
    reading the retained gate output; the gate's exit code alone cannot.
+   Status: fixed in audit T5 (`4a8992de`, `05cad812`); the controller maps
+   exit 5 to infrastructure since audit T4 (`f0743b53`). A probe at the tip:
+   `gate --plan missing-plan.md` exited 5 with `failed: ["derive"]`, an
+   unreadable `status.json` alone exited 5 with `failed: ["run-state"]`, the
+   same beside a fileset violation exited 1 with
+   `failed: ["fileset","run-state"]`, and a fileset violation alone exited 1.
 5. The only `dispatchPhase` call, in `scripts/cli.mjs`, passes no `execution`
    contract. T6's per-attempt driver journal (attempts persisted before
    spawn, model/effort/prompt binding, in-driver recovery) is therefore not
@@ -243,29 +270,119 @@ observations; the controller cannot consume them as acceptance evidence.
    events with task `profile`. Per the CLI's own limitation text and the
    fixture test named above, an interrupted implement or review step stays an
    unknown effect that no command clears; this was not reproduced for real.
+   Status: fixed for codex clone runs in audit T4 (`9cd83cf7`, `27b8f876`)
+   and audit T5 (`4a8992de`). The controller writes an execution contract per
+   dispatch attempt and passes it with `dispatch --execution`. A cursor
+   harness or a files sandbox still gets none, because strict driver
+   execution refuses files sandboxes, and the report names the driver journal
+   unavailable. An interrupted agent step is now an `agent-dispatch` effect
+   that `workflow-resolve` clears with `not-started` or `completed` (audit T1
+   `6c68985a`). The contract's `maxAttempts` is always 10 (open item 1). No
+   real model run has reached the driver journal.
 6. After a completed `human-required` run, `workflow-status` exits 4 because
    attempts recorded before integration reconcile as `branch-changed` once the
    run branch moves. Status exit 4 does not distinguish that from a stuck run.
+   Status: fixed in audit T1 (`6c68985a`, the `superseded` state) and audit
+   T5 (`4a8992de`, the integration after-refs passed as `expectedAdvances`).
+   Status exits 0 only with no unresolved attempt, no unknown effect and the
+   lifecycle `running`. A probe at the tip: one completed step exited 0, a
+   `suspended` lifecycle marker exited 4, and an interrupted `agent-dispatch`
+   exited 4 with one unknown effect.
 7. In clone mode the implementer's task commit carried the host's global Git
    identity, not the fixture repository's local identity. The host-bounded
    merge commit carried the local identity. Projects that require a specific
    author need their identity configured globally or in the clone.
+   Status: fixed in audit T2 (`be5c2137`, `234d95b7`, merged `a0586108`). The
+   codex clone receives the run repository's identity, and the Cursor
+   checkout commit uses the run repository's identity, per the harness tests
+   that passed at the tip.
 8. The read-only PR outcome query and `pruneExecutionArtifacts` have no caller
    outside their modules. No CLI command prunes retained artifacts or queries
    an effect. Vault and publication effects have no adapter.
+   Status: pruning fixed in audit T1 (`6c68985a`, `7c05f5cc`) and audit T5
+   (`4a8992de`, `workflow-prune`). Still open: the PR outcome query in
+   `scripts/execution-recovery.mjs` has no caller outside the module, and
+   Vault and publication effects have no adapter.
 9. `workflow-resolve` requires `reason` to be one token matching
    `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. A reason with spaces was refused with
    the generic `Invalid bounded local operator resolution`. An effect the
    journal never recorded was refused with `Resolution needs one strict
    recorded external effect`. Both exited 2.
+   Status: fixed in audit T5 (`4a8992de`). A reason with spaces now exits 2
+   with `reason must be one token: a letter or digit, then up to 127 letters,
+   digits, dots, underscores or dashes, with no spaces`.
 10. Each of the two root suite runs with `TMPDIR=/tmp/hx` left four
     processes (a `node -e setInterval` child under a trampoline shell) whose
     cwd was a deleted `fm-trampoline-*` directory. That directory is created by the
     `verification trampoline preserves child exits...` test in
     `tests/harness-codex.test.mjs`. They were killed by hand.
+    Status: fixed in audit T2 (`be5c2137`, `234d95b7`). The harness tests
+    that terminate the trampoline with SIGTERM, SIGINT and SIGHUP from
+    outside, and the one with an outer timeout shorter than its own, assert
+    that no process of the command's group survives; SIGKILL cannot be
+    trapped. After both harness test files ran at the tip, `pgrep -af "node
+    -e setInterval"` matched no process.
 11. The first hub run failed `fm ls lists each PTY with its repo, pid, start
     and attached clients` (repo column `tmp` instead of `~/ls-plain`). The
     file passed alone (27/27) and the full hub rerun passed 1,873/1,873.
+    Status: the empty-`.git` misattribution was fixed in audit T3
+    (`f2202bce`, `2d33f133`, merged `6cec44e7`): the three walk-ups count a
+    `.git` directory only with a `HEAD`. With an empty `.git` in an ancestor
+    of `TMPDIR`, `fm.test.mjs`, `machines.test.mjs` and `tiers.test.mjs`
+    passed 336 of 336 at the tip. The test is still reported flaky under load
+    (open item 9).
+
+## Open items after the audit
+
+These remain open at `584e9175`. File and line references were read at that
+tip. "Unpinned" means the mutation named was applied, the named test files
+still passed, and the file was then restored.
+
+1. The controller writes `maxAttempts: DRIVER_ATTEMPTS` (10) into every
+   dispatch execution contract (`scripts/workflow-controller.mjs:508` and
+   `:513`), not min(10, the request's `maxAttempts`). This is a design call
+   left to the owner.
+2. Three audit T4 guards are unpinned. Each mutation left
+   `tests/workflow-controller.test.mjs` and
+   `tests/execution-controller-cli.test.mjs` at 59 of 59 passing: dropping
+   `implement-<phase>` from the driver identity drift pattern
+   (`scripts/workflow-controller.mjs:908`), counting a `not-started`
+   resolution as drift (`:910`), and applying the 9-round driver cap without
+   a driver journal (`:397`). The cap with a journal is pinned.
+3. The harness-codex test "ordinary pipeline timeout stops its own delayed
+   child fixture" is reported flaky under load. It passed in every run in
+   this task; the flake was not reproduced.
+4. The artifacts lock reclaim's inode recheck
+   (`scripts/execution-artifacts.mjs:180`, `current.ino !== holder.ino`) is
+   unpinned: removing it left `tests/execution-artifacts.test.mjs` and
+   `tests/execution-journal.test.mjs` at 129 of 129 passing.
+5. A chain of 8 dead reclaim tokens leaves the artifact store busy for good
+   (`MAX_RECLAIM_CHAIN` at `scripts/execution-artifacts.mjs:112`, loop at
+   `:172`). A probe planted a dead-holder lock with 7 and with 8 dead tokens.
+   With 7 the next retain reclaimed it (`dead-lock-holder`). With 8, two
+   consecutive retains each refused after about 5,000 ms with `Artifact
+   storage is busy or an interrupted write requires reconciliation`.
+6. `claimToken` (`scripts/execution-artifacts.mjs:158`) writes its token
+   through `writePid` (`:128`), which does not fsync; the file's only `sync()`
+   calls are at `:85`, `:237` and `:272`.
+7. `retainedAcceptance` keeping the latest evidence per criterion
+   (`scripts/cli.mjs:3195`) is unpinned: a keep-first mutation left
+   `tests/execution-controller-cli.test.mjs` at 26 of 26 passing.
+8. The native `verified-complete` path (exit 0 through the real `codex
+   sandbox` verification) is unproven. The audit ran no real-model or sandbox
+   trial; the fixture run ends `unresolved` with exit 4.
+9. The hub test "fm ls lists each PTY with its repo, pid, start and attached
+   clients" is reported flaky under load. It passed in the one run in this
+   task; the flake was not reproduced.
+10. The comment above `EXIT_CONTRACT` (`scripts/workflow-controller.mjs:330`)
+    still says a derive or run-state failure arrives as exit 1 until the gate
+    implements exit 5. The gate exits 5 at this tip (finding 4), so that
+    sentence is stale.
+11. `dispatch-integrator --isolated-legacy` is kept by owner decision.
+    README's "Integrator dispatch outside the workflow" paragraph states what
+    it checks and its trust limits: full same-user authority, restrictions
+    that are prompt instructions, and after-the-fact checks over refs, the
+    checkouts and the result file only.
 
 ## CLI contracts, defaults and trust limits
 
@@ -294,6 +411,11 @@ PTYs across a daemon restart, which remains the accepted Deck boundary.
 Status values: met (observed in a real run or probe on this source), partial,
 fixture (repository tests only), unmet, pending (needs owner or provider
 evidence).
+
+The matrices record T9's evidence on `db6a5f0c` and are not re-scored here.
+Where a gap cites finding 1, 2, 5, 8 or 9, the audit added code and fixture
+or probe evidence only, as each finding's status says; no criterion moved to
+met, because no real run exercised the new paths.
 
 ### Issue 42 (W10)
 

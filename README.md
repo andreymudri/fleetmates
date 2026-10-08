@@ -248,7 +248,10 @@ Driving a run:
 - `init-run <planPath> --run <id>` — parse the plan, assign phases, write `.fleetmates/<id>/`
 - `workflow --run <id> --phase <n>` — generate the phase's implementer dispatches
 - `complete --run <id> --task <id>` — a teammate verifying its own task before returning
-- `gate --run <id> --plan <path>` — compute the current phase's verdict
+- `gate --run <id> --plan <path>`: compute the current phase's verdict. Exit 0 is PASS, 1 FAIL, 2 a
+  broken manifest and 3 no manifest. Exit 5 is a FAIL whose only failed entries are `derive` and/or
+  `run-state`: the gate could not establish the run, plan or run state it was asked to judge, so no
+  check judged the work. A check that failed beside `run-state` keeps exit 1
 - `fix --run <id> --phase <n> --verdict <path>` — decide retry, escalate, or none
 - `finish --run <id> --plan <path>` — recompute a verdict for **every** phase, not just the current one
 
@@ -811,14 +814,17 @@ adapters remain unsupported; these commands repeat no external action.
 
 ### Bounded workflow execution (issues 42, 43 and 33 remain open)
 
-Four commands run and recover a fixed workflow profile. Each requires an
-absolute `--root`; a missing or relative root exits 2 before anything is read.
+Six commands run, recover and maintain a fixed workflow profile. Each
+requires an absolute `--root`; a missing or relative root exits 2 before
+anything is read.
 
 ```sh
 node scripts/cli.mjs workflow-execute --file <request.json> --root <absolute-project-root>
 node scripts/cli.mjs workflow-resume  --run <id>            --root <absolute-project-root>
 node scripts/cli.mjs workflow-status  --run <id>            --root <absolute-project-root>
 node scripts/cli.mjs workflow-resolve --file <resolution.json> --root <absolute-project-root>
+node scripts/cli.mjs workflow-accept  --file <absolute-acceptance.json> --root <absolute-project-root>
+node scripts/cli.mjs workflow-prune   --run <id>            --root <absolute-project-root>
 ```
 
 A version 1 request has exactly these fields. There are no defaults: a
@@ -862,39 +868,128 @@ path from the request. Each step's start is journaled before it runs, and its
 outputs are retained and read back before the next step is released.
 
 Exit codes. `workflow-execute` and `workflow-resume` exit 0 only for a
-`verified-complete` report and 4 for every other report. Nothing currently
-produces acceptance evidence, so real runs end `human-required` with exit 4,
-and the exit 0 path has not run against a real project. `workflow-status`
-reads only, exits 0 when every attempt reconciles and 4 otherwise, including
-an absent run and a finished run whose earlier attempts read `branch-changed`
-after integration moved the run branch. `workflow-resolve` takes
-`{"version":1,"runId":"<id>","effectId":"<id>","outcome":"completed|failed|unknown","reason":"<token>"}`,
-where `reason` matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. It records only a
-local observation of an effect already in the journal, performs no external
-action, and exits 2 for an effect the journal never recorded.
+`verified-complete` report and 4 for every other report. A
+`verified-complete` report needs passing acceptance evidence for every
+required criterion and native verification, which runs the real `codex
+sandbox`. No real-model or sandbox trial has run against this source, so the
+exit 0 path is unproven. In the repository suite, a fixture run with
+acceptance recorded runs `finish` and reports `obligations.verifiedComplete:
+true`, and its injected verification fixture keeps the state `unresolved`
+with exit 4. `workflow-status` reads only. It exits 0 only when no attempt is
+unresolved, no effect is unknown and the run lifecycle is `running`, and 4
+otherwise, including an absent run and a run whose lifecycle marker reads
+`suspended`. Attempts recorded before an integration moved the run branch to
+the after-ref its integration receipt names read `superseded`, which is not
+unresolved, so a normally finished run reports `reconciled`.
+`workflow-resolve` takes
+`{"version":1,"runId":"<id>","effectId":"<id>","outcome":"<outcome>","reason":"<token>"}`,
+where `reason` matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; any other reason
+exits 2 with an error saying it must be one token with no spaces. Outcomes
+depend on the effect kind: `agent-dispatch` takes `not-started` or
+`completed`, while `pr`, `vault` and `publication` take `completed`,
+`failed` or `unknown`. It records only a local observation of an effect
+already in the journal, performs no external action, and exits 2 for an
+effect the journal never recorded or an outcome its kind does not take.
+
+`workflow-accept` reads
+`{"version":1,"runId":"<id>","tree":"<tree id>","criteria":[{"criterion":"<token>","status":"pass|fail","note":"<text>"}]}`
+with 1 to 20 criteria, each named once and each note at most 1,024
+characters. It exits 2 for a relative `--file`, a run with no retained
+request, a tree other than the run branch's current tree, or a run branch
+that is no longer at the tip its last completed integration recorded. It
+retains one `acceptance-evidence` artifact per criterion holding
+`{version, criterion, tree, status}`, records them as a completed
+`acceptance` journal step and exits 0. `workflow-resume` passes the retained
+references to the controller, one per criterion; the code keeps the latest
+one recorded for a criterion, a choice no test pins yet. The evidence is a
+local operator observation, not authenticated authorization.
+
+`workflow-prune` treats every artifact a journal event references as live
+and never removes it. Non-live content goes when it is older than
+`maxAgeMs` or larger than `maxArtifactBytes`, while the run is over
+`maxRunBytes`, or while the store is full; when the journal references no
+artifact at all, everything goes. It prints what it removed and kept (each
+kept entry marked live or not), the bytes left, unresolved references and
+whether the retention limits hold, and exits 0. An invalid run id exits 2.
+An unreferenced artifact within its bounds is kept.
 
 Resume rereads the retained request and the committed contracts, reuses prior
 outputs only after revalidating them, and always reruns `collect-reviews` and
 `gate`. In the 2026-10-07 trial a controller killed during the gate was
-resumed without redispatching any model or repeating the merge. An agent step
-that ends without an outcome stays an unknown effect and is not redispatched;
-no command clears it. `doctor` reports the same journal summary.
+resumed without redispatching any model or repeating the merge. Each agent
+step (`dispatch`, `dispatch-reviews`) is journaled as an `agent-dispatch`
+effect whose start is persisted before the spawn. One that was interrupted or
+timed out is an unknown effect: status exits 4 and resume will not redispatch
+it until an operator resolves it with `workflow-resolve`. `not-started` lets
+resume redispatch the step; `completed` lets resume reuse it once its outputs
+validate, and blocks it when they do not. `doctor` reports the same journal
+summary.
+
+Repair rounds. A gate FAIL (exit 1) is a code failure and goes to the
+existing `fix --verdict` decision. On `retry` the controller runs
+`record-fix-round` for each named task, then `dispatch --fix-round --task
+<id>...` for exactly those tasks, then review, collection, gate and
+integration again under round-suffixed step ids. Rounds per phase are
+bounded by the smaller of `maxRepairRounds` and the phase's manifest fix
+budget and, when the driver journal is in use, by 9 (the driver's 10
+attempts per task less the first dispatch). `escalate`, a `none` decision
+for a failed verdict, or an exhausted budget stops the run `failed`; the
+report's `host.repairRounds.delivered` counts the rounds run. Gate exit 5 is
+classified as infrastructure and never reaches the fix decision.
+
+Two `dispatch` flags serve the controller. `--execution <absolute path>`
+names a JSON execution contract `{version: 1, common, runId, executionId,
+inputs, retention, maxAttempts, deadlineAt}` that is passed unchanged to the
+driver as its required execution, so the driver journals each attempt. The
+controller writes one per dispatch attempt under
+`.fleetmates/<run>/execution/` and appends the flag to every `dispatch` argv,
+except for a cursor harness or a files sandbox, which strict driver execution
+refuses; the report then names the driver journal unavailable. The contract
+it writes always says `maxAttempts` 10, whatever the request's
+`maxAttempts`. `--fix-round --task <id>` (repeatable) dispatches only the
+named tasks of the phase with the fix-round brief, which checks the task
+branch out without resetting it, and respawns them even when a `done` result
+is recorded. `--task` without `--fix-round`, `--fix-round` without `--task`,
+a task outside the phase, a relative `--execution` path and a missing
+contract file all exit 2 before any probe or spawn.
 
 Storage is private and local: the journal is under
 `<git-common-dir>/fleetmates-execution/<sha256 of run id>/` (at most 1,000
 events and 1 MiB) and artifacts under
 `<git-common-dir>/fleetmates-artifacts/<sha256 of run id>/<sha256>.bin`, with
 0700 directories and 0600 files. Artifacts can contain task summaries, private
-log paths and command output. No command prunes them; delete a run's two
-directories by hand when the evidence is no longer needed.
+log paths and command output. `workflow-prune` removes what no journal event
+references once it is past its bounds; delete a run's two directories by hand
+to drop live evidence as well.
 
-Limits: a code failure stops at the existing `fix` decision and no repair
-round is dispatched, so `maxRepairRounds` is recorded but not consumed.
-`dispatch` is called without the driver's execution contract, so per-attempt
-driver records and prompt identities are not journaled on this path. The
-read-only PR outcome query has no CLI entry point; Vault and publication
-effects have no adapter. Observations are same-UID local evidence, not
-isolation from a hostile process. Driver recovery does not keep Deck terminals
-alive across a deckd restart. See the
+Integrator dispatch outside the workflow. The controller merges in its own
+host-bounded mode and uses neither legacy `dispatch-integrator` mode; both are
+kept by owner decision. Both exit 4 before spawning unless the run's status
+records a PASS for the current phase. Without a flag the integrator agent runs
+in full mode in the main checkout, and the command exits 0 once the process
+exits, printing that completion is unverified: nothing checks what it did.
+`--isolated-legacy` is a bare flag (a value exits 2). It also requires the
+recorded PASS to match the current phase, anchor, plan hash and task tips and
+an ownership preflight to pass, and it exits 4 unless the harness supports
+effort, the configured sandbox mode is `full` and the integrator role has a
+model. It spawns the agent in a registered worktree on the run branch under
+`.fleetmates/<run>/sessions/`, and accepts the work only if the process exits
+0, the result is `done` for the run branch with files inside the phase's
+declared sets, the worktree is clean, the run branch gained exactly one
+first-parent merge per task in plan order whose parents are the previous tip
+and the recorded task tip, ownership passes, and the run ref did not move
+during validation. The worktree is kept. Trust limits: the agent runs with
+full authority as the same user, and its filesystem, network and publication
+restrictions are prompt instructions, not confinement. The checks come after
+the fact and observe refs, the main checkout, the worktree and the result
+file only, so anything else it did, such as a remote action or a write
+outside those, is not detected. A `--role-policy` or `--environment` on
+either mode exits 4 without spawning: a required policy never falls back to
+legacy dispatch.
+
+Limits: the read-only PR outcome query has no CLI entry point; Vault and
+publication effects have no adapter. Observations are same-UID local
+evidence, not isolation from a hostile process. Driver recovery does not keep
+Deck terminals alive across a deckd restart. See the
 [execution and recovery validation](docs/specs/2026-10-06-execution-recovery-validation.md)
-for the real trials, findings and issue matrices.
+for the real trials, findings, open items and issue matrices.
