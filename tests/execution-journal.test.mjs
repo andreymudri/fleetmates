@@ -944,15 +944,21 @@ test('a locked append refuses a record whose second link is a young temporary at
   const { link, unlink, opendir, readFile, writeFile } = await import('node:fs/promises')
   const { common, directory, record, name } = await linkedJournal(t, 'locked')
   const text = await readFile(record)
-  // Directory order (opendir, unsorted) decides which entry the append meets first. Rebuild the record the way an
-  // appender does (temporary first, then the record linked to it) until the listing returns the
-  // record before the temporary, so the refusal must come from the record's second link, not the name.
+  // Directory order (opendir, unsorted) decides which entry the append meets first, and it differs
+  // by filesystem: creation order on btrfs, newest first on tmpfs (both measured), hash order on
+  // ext4 with dir_index (not measured here). Alternate which name is created last, the temporary
+  // (even tries) or the record (odd tries, the way an appender links it), until the listing returns
+  // the record before the temporary, so the refusal must come from the record's second link and
+  // not from the temporary's name.
   let temporary = null
   for (let i = 0; i < 64 && !temporary; i++) {
     const candidate = appenderTemporary()
-    await unlink(record)
-    await writeFile(path.join(directory, candidate), text, { mode: 0o600 })
-    await link(path.join(directory, candidate), record)
+    if (i % 2 === 0) await link(record, path.join(directory, candidate))
+    else {
+      await unlink(record)
+      await writeFile(path.join(directory, candidate), text, { mode: 0o600 })
+      await link(path.join(directory, candidate), record)
+    }
     const order = []
     for await (const entry of await opendir(directory)) order.push(entry.name)
     if (order.indexOf(name) < order.indexOf(candidate)) temporary = candidate
