@@ -109,7 +109,10 @@ const TEMPORARY = new RegExp(`^\\.${UUID}\\.tmp$`)
 // it is deleting. Readers skip them; a writer holding the lock removes those whose pid is dead.
 const LOCK_ENTRY = new RegExp(`^\\.lock\\.([1-9][0-9]{0,9})\\.${UUID}\\.(new|stale)$`)
 export const lockEntry = name => name === '.lock' || LOCK_ENTRY.test(name)
-const MAX_RECLAIM_CHAIN = 8
+// A lock directory holding more entries than this is refused by name instead of walked.
+const MAX_LOCK_ENTRIES = 64
+// Longest reclaim token name tried; a longer one is refused like an oversized lock directory.
+const MAX_TOKEN_NAME = 240
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const lockEntryName = kind => `.lock.${process.pid}.${randomUUID()}.${kind}`
 function alive(pid) {
@@ -127,7 +130,7 @@ async function readPid(file) {
 }
 async function writePid(file) {
   const handle = await open(file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
-  try { await handle.writeFile(`${process.pid}\n`) } finally { await handle.close() }
+  try { await handle.writeFile(`${process.pid}\n`); await handle.sync() } finally { await handle.close() }
 }
 async function lockHolder(lock) {
   let info
@@ -165,11 +168,22 @@ async function claimToken(lock, name) {
 // One reclaimer per dead lock instance: the token `reclaim.<dead pid>` is created inside that
 // instance, so only its holder may remove it. The holder then re-reads the lock and removes it only
 // if it is still the same directory with the same dead holder; anything else is left untouched.
-// A token whose own holder died is superseded by `<token>.<its pid>`, up to MAX_RECLAIM_CHAIN links.
+// A token whose own holder died is superseded by `<token>.<its pid>`. Each link of the chain is an
+// entry of the lock directory, so the entries counted once per attempt, plus the final claim, bound the walk.
+function oversizedLock(lock) {
+  return new Error(`Storage lock ${lock} holds more than ${MAX_LOCK_ENTRIES} entries or too long a reclaim chain; check that no writer is alive and remove it by hand`)
+}
+async function lockEntries(lock) {
+  let entries = 0
+  for await (const entry of await opendir(lock)) if (++entries > MAX_LOCK_ENTRIES) throw oversizedLock(lock)
+  return entries
+}
 async function reclaimLock(dir, lock, holder) {
   let name = `reclaim.${holder.pid ?? 'none'}`
   try {
-    for (let step = 0; step < MAX_RECLAIM_CHAIN; step++) {
+    const bound = await lockEntries(lock) + 1
+    for (let step = 0; step < bound; step++) {
+      if (name.length > MAX_TOKEN_NAME) throw oversizedLock(lock)
       if (!await claimToken(lock, name)) {
         const owner = await readPid(path.join(lock, name))
         if (owner === null || alive(owner)) return false
