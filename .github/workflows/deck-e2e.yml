@@ -1,0 +1,30 @@
+name: deck-e2e
+
+# Runs the deck end-to-end specs alone, without packing or publishing, on a push to an `e2e/**` branch
+# or by hand. deck-release.yml runs the same specs before a publish; this lets a failure seen only on a
+# GitHub runner be investigated without a release tag.
+
+on:
+  push:
+    branches: ['e2e/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      TMPDIR: /tmp/hx
+      CHROMIUM_PATH: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: hub/.node-version
+          cache: npm
+          cache-dependency-path: hub/package-lock.json
+      - run: mkdir -p /tmp/hx
+      - run: npm ci --prefix hub
+      - run: node --test hub/test/e2e/observe.spec.mjs hub/test/e2e/security.spec.mjs hub/test/e2e/accessibility.spec.mjs

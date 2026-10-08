@@ -482,7 +482,8 @@ test('untrusted text (M3): qa 1.7 payloads in option labels, rule patterns read 
   await writeFile(path.join(dir, 'README.md'), `${repo}\n${diffText}\n`)
   const edit = { tool_name: 'Edit', tool_input: { file_path: path.join(dir, 'README.md'), old_string: repo, new_string: `${repo}\n${diffText}`, replace_all: false } }
   await h.observe(session, [{ e: 'PreToolUse', ...edit }, { e: 'PostToolUse', ...edit }, { e: 'Stop' }])
-  await until(() => (h.session(id).changedFiles ?? []).length === 1, { message: 'the changed file' })
+  try { await until(() => (h.session(id).changedFiles ?? []).length === 1, { message: 'the changed file' }) }
+  catch (error) { throw Error(`${error.message}\n${await changeDiagnostics(h.session(id), dir)}`) }
   const served = await h.api(`/api/sessions/${id}/diff?path=README.md`)
   assert.equal(served.status, 200)
   assert.ok(served.data.diff.includes(`+${diffText}`), 'the server diff carries the payload')
@@ -820,3 +821,20 @@ test('confidential live meeting (M4): browser storage and the Cache API hold no 
   assert.ok(transcript.length >= conf.live.length, `${transcript.length} meeting.transcript frames`)
   assert.deepEqual(transcript.filter(frame => frame.data?.ephemeral !== true || 'seq' in frame), [], 'every meeting.transcript frame is ephemeral and unsequenced')
 })
+
+// What the change scan saw when an observed edit never surfaced: the session row, the review baseline the
+// server would capture now and how long that took, and Git's own view of the working tree. Printed only on
+// failure, to diagnose a timeout seen on GitHub runners and not locally.
+async function changeDiagnostics(row, dir) {
+  const { captureReviewBaseline, workingRoot } = await import('../../server/machines/session.mjs')
+  const lines = [`session: ${JSON.stringify({ id: row?.id, state: row?.state, cwd: row?.cwd, changedFiles: row?.changedFiles, keys: Object.keys(row ?? {}) })}`]
+  const root = workingRoot(row?.cwd ?? dir)
+  const started = Date.now()
+  const baseline = captureReviewBaseline(root, null, false)
+  lines.push(`workingRoot: ${root}; captureReviewBaseline: ${baseline === null ? 'null' : `${baseline.length} bytes`} in ${Date.now() - started} ms`)
+  for (const args of [['rev-parse', 'HEAD'], ['status', '--porcelain'], ['ls-files', '--cached', '--others', '--exclude-standard'], ['config', '--show-origin', '--list']]) {
+    const t0 = Date.now(), r = spawnSync('git', args, { cwd: root, encoding: 'utf8', timeout: 10_000 })
+    lines.push(`git ${args.join(' ')} -> ${r.status} in ${Date.now() - t0} ms: ${(r.stdout + r.stderr).trim().slice(0, 1500)}`)
+  }
+  return lines.join('\n')
+}
