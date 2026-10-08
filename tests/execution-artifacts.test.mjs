@@ -251,8 +251,10 @@ test('reports incomplete storage and sync failures without returning a usable re
   const handle = await open(path.join(request.common, 'sync-probe'), 'wx', 0o600)
   const prototype = Object.getPrototypeOf(handle), originalSync = prototype.sync
   await handle.close()
+  // Only the one-byte artifact matches; a lock pid file holds at least two bytes.
   const mocked = t.mock.method(prototype, 'sync', async function () {
-    if ((await this.stat()).isFile()) throw new Error('injected sync failure')
+    const info = await this.stat()
+    if (info.isFile() && info.size === 1) throw new Error('injected sync failure')
     return originalSync.call(this)
   })
   await assert.rejects(retain(request, Buffer.from('y')), /injected sync failure/)
@@ -356,14 +358,16 @@ test('separate checkouts discover and share canonical common Git artifact storag
 })
 
 test('exclusive publication refuses a competing identity without overwriting it', async t => {
-  const request = await repository(t), bytes = Buffer.from('new')
+  // Longer than any lock pid file, so only the artifact temporary's sync matches its size.
+  const request = await repository(t), bytes = Buffer.from('new artifact body')
   await retain(request, Buffer.from('existing'))
   const expected = { version: 1, runId: request.runId, kind: 'stdout', sha256: hash(bytes), byteLength: bytes.length }
   const handle = await open(path.join(request.common, 'sync-probe'), 'wx', 0o600)
   const prototype = Object.getPrototypeOf(handle), originalSync = prototype.sync
   await handle.close()
   const mocked = t.mock.method(prototype, 'sync', async function () {
-    if ((await this.stat()).isFile()) await writeFile(artifactFile(request, expected), 'conflict', { flag: 'wx', mode: 0o600 })
+    const info = await this.stat()
+    if (info.isFile() && info.size === bytes.length) await writeFile(artifactFile(request, expected), 'conflict', { flag: 'wx', mode: 0o600 })
     return originalSync.call(this)
   })
   await assert.rejects(retain(request, bytes), { code: 'EEXIST' })
@@ -620,4 +624,94 @@ test('a dead lock whose reclaim token names a dead reclaimer is still reclaimed,
   await writeFile(path.join(lock, `reclaim.${dead}`), `${process.pid}\n`, { mode: 0o600 })
   await assert.rejects(retain(request, Buffer.from('third')), /busy/)
   assert.equal(await readFile(path.join(lock, 'pid'), 'utf8'), `${dead}\n`)
+})
+
+// Plants a dead-holder lock whose reclaim token chain is `length` links long, every link owned by a dead pid.
+async function plantReclaimChain(dir, length) {
+  const dead = deadPid(), lock = path.join(dir, '.lock')
+  await plantLock(dir, dead)
+  let name = `reclaim.${dead}`
+  for (let step = 0; step < length; step++) {
+    const owner = deadPid()
+    await writeFile(path.join(lock, name), `${owner}\n`, { mode: 0o600 })
+    name += '.' + owner
+  }
+  return lock
+}
+for (const length of [8, 20]) {
+  test(`a dead lock carrying a chain of ${length} dead reclaim tokens is reclaimed by the next retain`, { timeout: 30000 }, async t => {
+    const request = await repository(t)
+    await retain(request, Buffer.from('first'))
+    const lock = await plantReclaimChain(directory(request), length)
+    const started = Date.now()
+    const result = await retain(request, Buffer.from('second'))
+    assert.ok(Date.now() - started < 4000, `took ${Date.now() - started} ms`)
+    assert.deepEqual(result.reconciled, [{ path: '.lock', reason: 'dead-lock-holder' }])
+    await assert.rejects(lstat(lock), { code: 'ENOENT' })
+  })
+}
+
+test('a dead lock directory over the entry cap is refused at once with an error naming the lock', { timeout: 30000 }, async t => {
+  const request = await repository(t)
+  await retain(request, Buffer.from('first'))
+  const lock = await plantReclaimChain(directory(request), 0)
+  for (let entry = 0; entry < 100; entry++) await writeFile(path.join(lock, `junk.${entry}`), '', { mode: 0o600 })
+  const started = Date.now()
+  await assert.rejects(retain(request, Buffer.from('second')), error => error.message.includes(lock) && !/busy/.test(error.message))
+  assert.ok(Date.now() - started < 4000, `took ${Date.now() - started} ms`)
+  assert.ok((await lstat(lock)).isDirectory())
+})
+
+test('every pid file and reclaim token written through a handle is synced through it', { timeout: 30000 }, async t => {
+  const request = await repository(t)
+  await retain(request, Buffer.from('first'))
+  await plantReclaimChain(directory(request), 2)
+  const handle = await open(path.join(request.common, 'sync-probe'), 'wx', 0o600)
+  const prototype = Object.getPrototypeOf(handle), originalSync = prototype.sync, originalWrite = prototype.writeFile
+  await handle.close()
+  // inode of each pid-sized file written during the retain -> whether its handle was synced after the write.
+  const size = `${process.pid}\n`.length, written = new Map()
+  t.mock.method(prototype, 'writeFile', async function (...args) {
+    const out = await originalWrite.apply(this, args), info = await this.stat()
+    if (info.isFile() && info.size === size) written.set(info.ino, false)
+    return out
+  })
+  t.mock.method(prototype, 'sync', async function () {
+    const out = await originalSync.call(this), info = await this.stat()
+    if (written.has(info.ino)) written.set(info.ino, true)
+    return out
+  })
+  const result = await retain(request, Buffer.from('a body longer than any pid file'))
+  t.mock.restoreAll()
+  assert.deepEqual(result.reconciled, [{ path: '.lock', reason: 'dead-lock-holder' }])
+  // The staging pid of the refused first attempt, one temporary per reclaim token claim (three for a
+  // chain of two) and the staging pid of the winning attempt.
+  assert.ok(written.size >= 5, `saw ${written.size} pid files`)
+  assert.deepEqual([...written.values()].filter(value => !value), [])
+})
+
+test('a lock directory swapped for a new one between the holder read and the reclaim is left in place', { timeout: 30000 }, async t => {
+  const request = await repository(t)
+  await retain(request, Buffer.from('first'))
+  const dir = directory(request), lock = path.join(dir, '.lock'), dead = deadPid(), aside = path.join(request.common, 'old-lock')
+  await plantLock(dir, dead)
+  const { renameSync, mkdirSync, writeFileSync, existsSync, lstatSync } = await import('node:fs')
+  const original = lstatSync(lock).ino, originalKill = process.kill
+  let fresh = null
+  t.mock.method(process, 'kill', function (pid, signal) {
+    if (pid !== dead || signal !== 0) return originalKill.call(process, pid, signal)
+    if (fresh === null) {
+      // First liveness check of the original holder: replace the directory, same dead pid, new inode.
+      renameSync(lock, aside)
+      mkdirSync(lock, { mode: 0o700 }); writeFileSync(path.join(lock, 'pid'), `${dead}\n`, { mode: 0o600 })
+      fresh = lstatSync(lock).ino
+    } else if (!existsSync(path.join(lock, `reclaim.${dead}`))) return true // later holder checks: treat it as live so the run stops
+    throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })
+  })
+  await assert.rejects(retain(request, Buffer.from('second')), /busy/)
+  t.mock.restoreAll()
+  assert.ok(fresh !== null && fresh !== original)
+  assert.equal((await lstat(lock)).ino, fresh)
+  assert.equal(await readFile(path.join(lock, 'pid'), 'utf8'), `${dead}\n`)
+  assert.deepEqual(await readdir(lock), ['pid'])
 })
