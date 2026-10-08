@@ -722,7 +722,9 @@ test('strict enforcement exit 4 with only a pending agent check is accepted and 
     [['step-completed', 4, 'enforcement-only-pending-agent', true]])
 })
 
-for (const answer of [{ code: 4, pendingOnly: false, pending: ['agent'] }, { code: 4 }, 4, { code: 2, pendingOnly: true, pending: ['agent'] }]) {
+for (const answer of [{ code: 4, pendingOnly: false, pending: ['agent'] }, { code: 4 }, 4, { code: 2, pendingOnly: true, pending: ['agent'] },
+  { code: 4, pendingOnly: 'yes', pending: ['agent'] }, { code: 4, pendingOnly: true, pending: [] }, { code: 4, pendingOnly: true, pending: ['merge'] },
+  { code: 4, pendingOnly: true, pending: ['agent', 'merge'] }]) {
   test('strict enforcement answer ' + JSON.stringify(answer) + ' is refused and the task orphaned', async t => {
     const config = await setup(t)
     const out = await outcome({ ...config, enforcementAnswers: [answer] }, t)
