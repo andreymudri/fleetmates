@@ -669,16 +669,17 @@ test('every pid file and reclaim token written through a handle is synced throug
   const handle = await open(path.join(request.common, 'sync-probe'), 'wx', 0o600)
   const prototype = Object.getPrototypeOf(handle), originalSync = prototype.sync, originalWrite = prototype.writeFile
   await handle.close()
-  // inode of each pid-sized file written during the retain -> whether its handle was synced after the write.
+  // Handle of each pid-sized file written during the retain -> whether it was synced after the write.
+  // Keyed by handle, not inode: ext4 hands a removed temporary's inode to the next file.
   const size = `${process.pid}\n`.length, written = new Map()
   t.mock.method(prototype, 'writeFile', async function (...args) {
     const out = await originalWrite.apply(this, args), info = await this.stat()
-    if (info.isFile() && info.size === size) written.set(info.ino, false)
+    if (info.isFile() && info.size === size) written.set(this, false)
     return out
   })
   t.mock.method(prototype, 'sync', async function () {
-    const out = await originalSync.call(this), info = await this.stat()
-    if (written.has(info.ino)) written.set(info.ino, true)
+    const out = await originalSync.call(this)
+    if (written.has(this)) written.set(this, true)
     return out
   })
   const result = await retain(request, Buffer.from('a body longer than any pid file'))
