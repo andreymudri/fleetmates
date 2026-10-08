@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+import { strictTest as test } from './strict-platform.mjs'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile, mkdir, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'

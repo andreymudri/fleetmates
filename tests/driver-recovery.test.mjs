@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+import { strictTest as test } from './strict-platform.mjs'
 import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'

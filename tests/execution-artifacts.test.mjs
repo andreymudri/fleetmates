@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+import { strictTest as test } from './strict-platform.mjs'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, readdir, writeFile, stat, lstat, chmod, symlink, link, mkdir, open, readFile, rename, utimes } from 'node:fs/promises'
 import { execFileSync, spawnSync } from 'node:child_process'
