@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { reconcileExecutionAttempt } from '../scripts/execution-recovery.mjs'
-import { mkdtemp, readFile, writeFile, rm, access } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, rm, access, symlink } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { readExecutionEvents, executionDirectory } from '../scripts/execution-journal.mjs'
@@ -90,7 +90,7 @@ const adapter = {
  async readUsage() { if(config.hangStage==='usage') await hang(); return null; },
  async collect(_git, {sandbox,branch}) { if(config.hangStage==='collection') await hang(); if(config.lateCollection) await late(); const events=await readExecutionEvents(config.execution.common,'r');await writeFile(path.join(config.root,'collection-order.json'),JSON.stringify(events.some(e=>e.step==='collection'&&e.kind==='step-started'))); await writeFile(path.join(config.root,'collect-base.txt'),String(sandbox.meta.runBranch)); const r = await _git(['fetch','--no-tags',sandbox.meta.gitdir,(config.forceCollect?'+':'')+'refs/heads/'+branch+':refs/heads/'+branch]); if(r.code) throw Error(r.stderr); await mark('collected'); },
 };
-const args = { adapter, git, runRepo: config.root, runId:'r',runBranch:'run/r',phaseTasks:(config.tasks??['T1']).map(id=>({id,title:'fixture',files:['work.txt'],model:config.model})),maxParallel:config.maxParallel??1,fixRound:config.fixRound,sandboxMode:'clone',network:false,timeoutMinutes:1,tierModels:{},effortFor:()=> config.effort ?? 'high',personaFor:()=> config.persona ?? 'fixture persona',composeBriefFor:t=>composeBrief({task:{...t,branch:'fleetmates/r/'+t.id},runId:'r',planPath:'plan.md',baseBranch:'old-base',fixRound:config.fixRound===true}),runDir:path.join(config.root,'state'),completeEnforcement:async()=>{
+const args = { adapter, git, runRepo: config.root, runId:'r',runBranch:'run/r',phaseTasks:(config.tasks??['T1']).map(id=>({id,title:'fixture',files:['work.txt'],model:config.model})),maxParallel:config.maxParallel??1,fixRound:config.fixRound,sandboxMode:'clone',network:false,timeoutMinutes:1,tierModels:{},effortFor:()=> config.effort ?? 'high',personaFor:()=> config.persona ?? 'fixture persona',composeBriefFor:t=>composeBrief({task:{...t,branch:'fleetmates/r/'+t.id},runId:'r',planPath:'plan.md',baseBranch:'old-base',fixRound:config.fixRound===true}),runDir:config.runDir??path.join(config.root,'state'),completeEnforcement:async()=>{
  await mark('verified-'+Date.now());
  if(config.hangStage==='verification') await hang(); if(config.slowEnforcement) await late();
  const call=enforcementCalls++; const code=config.enforcementAnswers?.[call]??config.enforcementCodes?.[call]??config.enforcement??0;
@@ -300,6 +300,17 @@ test('unknown external effect remains unresolved without query or duplicate mode
   const start=(await readExecutionEvents(config.execution.common,'r')).find(e=>e.step==='harness'&&e.kind==='step-started')
   await appendExecutionEvent(config.execution.common,{...start,id:'effect-start',kind:'effect-started',at:start.at+1,artifacts:[],effect:{id:'publication-attempt',kind:'publication',reference:null}})
   await assertRefusal(config,t,/unknown-effect/)
+})
+
+test('a strict dispatch whose run directory is reached through a symbolic link completes', async t => {
+  // macOS temp directories live under /var, a link to /private/var: the run directory a caller hands
+  // over is not canonical there, and the strict output reads refuse a path whose realpath differs.
+  const config = await setup(t)
+  const link = path.join(os.tmpdir(), `dr-link-${process.pid}-${Date.now()}`)
+  await symlink(config.root, link)
+  t.after(() => rm(link, { force: true }))
+  const out = await outcome({ ...config, runDir: path.join(link, 'state') }, t)
+  assert.deepEqual(out.orphaned, []); assert.equal(out.results[0]?.status, 'done')
 })
 
 test('an open agent-dispatch effect of the launching controller does not refuse the strict driver it launched',async t=>{

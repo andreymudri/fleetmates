@@ -387,9 +387,12 @@ export async function dispatchPhase({
 }) {
   if (typeof fixRound !== 'boolean') throw new Error('fixRound must be a boolean')
   const contract = execution === undefined ? null : requiredExecution(execution, runId)
+  await mkdir(path.join(runDir, 'sessions'), { recursive: true })
+  // Canonical once, here: the strict output reads refuse a path whose realpath differs, which a
+  // run directory reached through a symbolic link (macOS /var -> /private/var) always would.
+  runDir = await realpath(runDir)
   const sessionsDir = path.join(runDir, 'sessions')
   const lockPath = path.join(runDir, 'driver.lock')
-  await mkdir(sessionsDir, { recursive: true })
   await acquireLock(lockPath)
 
   const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000

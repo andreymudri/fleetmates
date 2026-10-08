@@ -4524,7 +4524,9 @@ export async function runCli(argv, io = { out: console.log }) {
     const persona = await personaFor('integrator') + learningContext
     const integratorSessionsDir = path.join(runDir(root, runId), 'sessions')
     await mkdir(integratorSessionsDir, { recursive: true })
-    const sessionDir = await mkdtemp(path.join(integratorSessionsDir, `integrator-${gateKey}-`))
+    // Canonical, as `git worktree list` reports it: under a linked root (macOS /var) the integrator
+    // would otherwise be handed a checkout path Git does not list.
+    const sessionDir = await realpath(await mkdtemp(path.join(integratorSessionsDir, `integrator-${gateKey}-`)))
     const base = path.join(sessionDir, 'output')
     const worktree = path.join(sessionDir, 'worktree')
     try {
