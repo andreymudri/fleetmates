@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, mkdir, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -618,4 +618,94 @@ test('recovery exposes reconcileExecution and bounds retention by RETENTION_LIMI
   for (const key of Object.keys(RETENTION_LIMITS)) {
     await assert.rejects(recovery.reconcileExecutionAttempt({ ...f.request, retention: { ...RETENTION_LIMITS, [key]: RETENTION_LIMITS[key] + 1 } }), /retention/)
   }
+})
+
+// Open item 13: attempt-1 ends step-failed, then each later attempt is planted after it with its own
+// start and, unless `end` is null, its outcome. `failedEffect` gives attempt-1 a failed external effect.
+async function retried(t, later, { failedEffect = false } = {}) {
+  const f = await fixture(t, { complete: false, effect: failedEffect ? { id: 'effect-1', kind: 'publication', reference: null } : undefined })
+  const base = f.records[0], dir = await executionDirectory(f.request.common, 'r1')
+  const records = []
+  if (failedEffect) records.push({ ...f.records[1], id: 'effect-end', kind: 'effect-failed' })
+  records.push({ ...base, id: 'fail-1', kind: 'step-failed', at: base.at + 2 })
+  later.forEach(({ end, ...fields }, i) => {
+    const retry = { ...base, attempt: `attempt-${i + 2}`, at: base.at + 10 * (i + 1), ...fields }
+    records.push({ ...retry, id: `start-${i + 2}`, kind: 'step-started' })
+    if (end) records.push({ ...retry, id: `end-${i + 2}`, kind: end, at: retry.at + 1, artifacts: end === 'step-completed' ? [f.reference] : [] })
+  })
+  for (const record of records) await writeFile(path.join(dir, hash(record.id) + '.json'), JSON.stringify(record) + '\n', { mode: 0o600 })
+  const report = await recovery.reconcileExecutionAttempt(f.request)
+  return { report, failed: report.attempts.find(a => a.attempt === 'attempt-1') }
+}
+test('a failed attempt followed by a completed attempt of the same execution, task and step is superseded', async t => {
+  const { report, failed } = await retried(t, [{ end: 'step-completed' }])
+  assert.equal(failed.state, 'superseded')
+  assert.equal(failed.reuse, false)
+  assert.equal(failed.retryAllowed, false)
+  assert.equal(report.attempts.find(a => a.attempt === 'attempt-2').state, 'ready')
+  assert.equal(report.unresolved, false)
+  const twice = await retried(t, [{ end: 'step-failed' }, { end: 'step-completed' }])
+  assert.deepEqual(twice.report.attempts.map(a => [a.attempt, a.state]).sort(),
+    [['attempt-1', 'superseded'], ['attempt-2', 'superseded'], ['attempt-3', 'ready']])
+  assert.equal(twice.report.unresolved, false)
+})
+for (const [label, later] of [
+  ['no later attempt', []],
+  ['a later attempt that only started', [{ end: null }]],
+  ['a later attempt that failed again', [{ end: 'step-failed' }]],
+  ['a later completed attempt under another executionId', [{ end: 'step-completed', executionId: 'execution-2' }]],
+  ['a later completed attempt of another task', [{ end: 'step-completed', task: 'T2' }]],
+  ['a later completed attempt of another step', [{ end: 'step-completed', step: 'other' }]],
+]) {
+  test(`a failed attempt with ${label} stays failed-observation and unresolved`, async t => {
+    const { report, failed } = await retried(t, later)
+    assert.equal(failed.state, 'failed-observation')
+    assert.equal(failed.retryAllowed, true)
+    assert.equal(report.unresolved, true)
+  })
+}
+test('an earlier completed attempt does not supersede a later failed attempt', async t => {
+  const { report, failed } = await retried(t, [{ end: 'step-completed', at: Date.now() - 1000 }])
+  assert.equal(failed.state, 'failed-observation')
+  assert.equal(report.unresolved, true)
+})
+test('a failed attempt whose external effect failed is not superseded by a completed retry', async t => {
+  const { report, failed } = await retried(t, [{ end: 'step-completed' }], { failedEffect: true })
+  assert.equal(failed.effects[0].outcome, 'failed')
+  assert.equal(failed.state, 'failed-observation')
+  assert.equal(report.unresolved, true)
+})
+// Modelled on the T5 driver fixture in tests/workflow-controller.test.mjs with outcomes
+// ['step-failed', 'step-completed']: two `verification` attempts of one executionId and task, each a
+// start plus its outcome with a retained driver-verification artifact. The checkout is the root so
+// the completed attempt is current without an integration advance.
+test('workflow-status reconciles a run whose driver verification failed and then completed', async t => {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'recovery-cli-')))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  git(['init', '-q', '-b', 'main'], root)
+  await writeFile(path.join(root, 'file'), 'one'); git(['add', '.'], root)
+  git(['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '-m', 'baseline'], root)
+  const common = discover(root).common, commit = git(['rev-parse', 'HEAD'], root)
+  const inputs = { commit, ...Object.fromEntries(['plan', 'manifest', 'context', 'environment', 'verifier'].map(k => [k, hash(k)])) }
+  const { appendExecutionEvent } = await import('../scripts/execution-journal.mjs')
+  const { runCli } = await import('../scripts/cli.mjs')
+  const status = async () => {
+    const lines = []
+    const code = await runCli(['workflow-status', '--run', 'r1', '--root', root], { out: line => lines.push(line), err: () => {} })
+    return { code, report: JSON.parse(lines.join('\n')) }
+  }
+  let clock = Date.now()
+  for (const kind of ['step-failed', 'step-completed']) {
+    const base = { version: 2, runId: 'r1', executionId: 'execution-1', task: 'T1', step: 'verification', attempt: `attempt-${kind}`,
+      inputs, identity: strictExecutionIdentity(inputs), branches: { 'refs/heads/main': commit }, checkout: 'root', artifacts: [], effect: null, resolution: null }
+    await appendExecutionEvent(common, { ...base, id: `start-${kind}`, kind: 'step-started', at: clock++ }, { requireFreshStart: true })
+    const bytes = Buffer.from(JSON.stringify({ version: 1, code: kind === 'step-completed' ? 0 : 3, scope: 'enforcement-only', attempt: base.attempt }))
+    const { reference } = await retainExecutionArtifact({ common, runId: 'r1', kind: 'driver-verification', bytes, retention })
+    await appendExecutionEvent(common, { ...base, id: `end-${kind}`, kind, at: clock++, artifacts: [reference] })
+    if (kind === 'step-failed') assert.equal((await status()).code, 4, 'a lone failed verification is unresolved')
+  }
+  const { code, report } = await status()
+  assert.equal(code, 0, JSON.stringify(report))
+  assert.equal(report.state, 'reconciled')
+  assert.deepEqual(report.attempts.map(a => [a.attempt, a.state]).sort(), [['attempt-step-completed', 'ready'], ['attempt-step-failed', 'superseded']])
 })
