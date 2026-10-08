@@ -1720,14 +1720,15 @@ test('defaultGitExec keeps multi-byte characters intact across stdout chunk boun
 // The same for stderr, which feeds every GitError message. git caps `die()` text at 4 KiB, so the
 // long stderr comes from GIT_TRACE echoing argv; the trace prefix length is git's, so the argument
 // is padded by 0, 1 and 2 bytes to put a chunk boundary inside a `€` whatever that prefix is.
-// On win32 the argument is 10_000 characters, not 40_000: a Windows command line is capped at 32767
-// characters, and the 40_000 form failed CI with spawn ENAMETOOLONG. 10_000 still spans more than
-// one pipe read.
+// On win32 the argument is 30_000 euros, not 40_000: a Windows command line is capped at 32767
+// characters, and the 40_000 form failed CI with spawn ENAMETOOLONG. 30_000 euros are about 90 KB
+// of UTF-8 in the trace output, more than one 64 KiB pipe read, and about 30_010 characters on the
+// command line.
 test('defaultGitExec keeps multi-byte characters intact across stderr chunk boundaries', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'tm-git-'))
   try {
     await defaultGitExec(['init', '--initial-branch=main'], root)
-    const euros = '€'.repeat(process.platform === 'win32' ? 10_000 : 40_000)
+    const euros = '€'.repeat(process.platform === 'win32' ? 30_000 : 40_000)
     for (const pad of ['', 'x', 'xx']) {
       const { stderr } = await defaultGitExec(
         ['rev-parse', '--verify', '--quiet', pad + euros], { cwd: root, env: { GIT_TRACE: '2' } })
