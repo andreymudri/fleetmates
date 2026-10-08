@@ -226,12 +226,25 @@ export async function resumeCursor({ sandbox, sessionId, message, model, network
 // A bounded read of the stream file that does not follow a final symlink: `null` when it is
 // absent, a link, not a regular file or larger than `max` bytes, so such a stream yields no events
 // rather than a partial answer.
-async function readBounded(file, max) {
+// win32 has no O_NOFOLLOW, so there the link is refused by lstat before the open, and the opened
+// handle must be the very file lstat saw (same dev and ino), as `openReportFile` in
+// scripts/test-report.mjs does. `noFollow: null` forces that path on any platform.
+async function readBounded(file, max, { noFollow = constants.O_NOFOLLOW } = {}) {
   let handle
-  try { handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)) } catch { return null }
+  let seen = null
   try {
-    const info = await handle.stat()
-    if (!info.isFile() || info.size > max) return null
+    if (noFollow) {
+      handle = await open(file, constants.O_RDONLY | noFollow | (constants.O_NONBLOCK ?? 0))
+    } else {
+      seen = await lstat(file, { bigint: true })
+      if (!seen.isFile()) return null
+      handle = await open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
+    }
+  } catch { return null }
+  try {
+    const info = await handle.stat({ bigint: true })
+    if (seen && (info.dev !== seen.dev || info.ino !== seen.ino)) return null
+    if (!info.isFile() || info.size > BigInt(max)) return null
     const buffer = Buffer.alloc(max + 1)
     let offset = 0
     while (offset < buffer.length) {
@@ -243,8 +256,8 @@ async function readBounded(file, max) {
   } catch { return null } finally { await handle.close() }
 }
 
-async function streamEvents(streamPath, maxStreamBytes = STREAM_LIMIT_BYTES) {
-  const raw = await readBounded(streamPath, maxStreamBytes)
+async function streamEvents(streamPath, maxStreamBytes = STREAM_LIMIT_BYTES, { noFollow } = {}) {
+  const raw = await readBounded(streamPath, maxStreamBytes, { noFollow })
   if (raw === null) return []
   const events = []
   for (const line of raw.split('\n')) {
@@ -286,8 +299,8 @@ function parseCandidates(text) {
 // message is read first and `result` is the fallback. Only the events after the last `user` line
 // count, so a resume never returns the previous session's answer. `null` — never a throw — for
 // anything that is not a valid result: every such case is `orphaned`, not a driver crash.
-export async function readResult({ streamPath, maxStreamBytes }) {
-  const events = await streamEvents(streamPath, maxStreamBytes)
+export async function readResult({ streamPath, maxStreamBytes, noFollow }) {
+  const events = await streamEvents(streamPath, maxStreamBytes, { noFollow })
   let start = 0
   events.forEach((e, i) => { if (e.type === 'user') start = i })
   const turn = events.slice(start)

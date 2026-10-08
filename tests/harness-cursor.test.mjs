@@ -652,3 +652,15 @@ test('readResult refuses a stream file larger than its bound rather than parsing
   await symlink(streamPath, linked)
   assert.equal(await readResult({ streamPath: linked }), null)
 })
+
+test('readResult without O_NOFOLLOW still refuses a symlinked stream file and reads a regular one', async () => {
+  // `noFollow: null` forces the path win32 takes, where O_NOFOLLOW is undefined.
+  const dir = await freshDir('nofollow-stream')
+  const streamPath = path.join(dir, 's.jsonl')
+  const line = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(good), session_id: 's' })
+  await writeFile(streamPath, `${line}\n`)
+  assert.deepEqual(await readResult({ streamPath, noFollow: null }), good)
+  const linked = path.join(dir, 'linked.jsonl')
+  await symlink(streamPath, linked)
+  assert.equal(await readResult({ streamPath: linked, noFollow: null }), null)
+})

@@ -797,7 +797,7 @@ test('Codex builders refuse a bound required policy with missing enforcement', (
   }
 })
 
-test('verification broker construction uses host configuration, structured argv and a filtered environment', async () => {
+test('verification broker construction uses host configuration, structured argv and a filtered environment', { skip: process.platform === 'win32' && 'native verification is POSIX-only' }, async () => {
   const module = await import('../scripts/harnesses/codex.mjs')
   assert.equal(typeof module.buildVerificationInvocation, 'function')
   const request = module.buildVerificationInvocation({ executable: '/fixture/codex', broker: '/fixture/broker', home: '/fixture/config', worker: '/fixture/worker', temp: '/fixture/worker/temp', write: true,
@@ -986,7 +986,7 @@ for (const [name, alter] of [
   ...['outside', 'broker', 'git', 'temporary'].map(key => [`observed ${key} write`, ({ observed }) => { observed[key] = true }]),
   ...['outside', 'broker', 'git', 'temporary'].map(key => [`actual ${key} write`, async ({ paths }) => { await writeFile(paths[key], 'dummy') }]),
   ['network allowed', ({ observed }) => { observed.network = 'allowed' }],
-]) test(`injected restriction fixture rejects ${name}`, async () => {
+]) test(`injected restriction fixture rejects ${name}`, { skip: process.platform === 'win32' && 'native verification is POSIX-only' }, async () => {
   await injectedVerification(async create => { await assert.rejects(create(), /not independently observed/) }, alter)
 })
 
@@ -1322,5 +1322,18 @@ test('readResult refuses a result file larger than its bound rather than parsing
     const linked = path.join(dir, 'T2.json')
     await symlink(resultPath, linked)
     assert.equal(await readResult({ resultPath: linked }), null)
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('readResult without O_NOFOLLOW still refuses a symlinked result file and reads a regular one', async () => {
+  // `noFollow: null` forces the path win32 takes, where O_NOFOLLOW is undefined.
+  const dir = await mkdtemp(path.join(tmpdir(), 'tm-codex-nofollow-'))
+  try {
+    const resultPath = path.join(dir, 'T1.json')
+    await writeFile(resultPath, JSON.stringify({ status: 'done', branch: 'fleetmates/r1/T1', filesChanged: [], summary: 'within bound', blockers: [] }))
+    assert.equal((await readResult({ resultPath, noFollow: null })).summary, 'within bound')
+    const linked = path.join(dir, 'T2.json')
+    await symlink(resultPath, linked)
+    assert.equal(await readResult({ resultPath: linked, noFollow: null }), null)
   } finally { await rm(dir, { recursive: true, force: true }) }
 })

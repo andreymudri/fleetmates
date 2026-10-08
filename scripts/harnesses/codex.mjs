@@ -202,12 +202,25 @@ function run(argv, { promptText, streamPath, errPath, cwd, maxStreamBytes = STRE
 
 // A bounded read that does not follow a final symlink: `null` when the file is absent, a link,
 // not a regular file, or larger than `max` bytes — never a throw.
-async function readBounded(file, max) {
+// win32 has no O_NOFOLLOW, so there the link is refused by lstat before the open, and the opened
+// handle must be the very file lstat saw (same dev and ino), as `openReportFile` in
+// scripts/test-report.mjs does. `noFollow: null` forces that path on any platform.
+async function readBounded(file, max, { noFollow = constants.O_NOFOLLOW } = {}) {
   let handle
-  try { handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)) } catch { return null }
+  let seen = null
   try {
-    const info = await handle.stat()
-    if (!info.isFile() || info.size > max) return null
+    if (noFollow) {
+      handle = await open(file, constants.O_RDONLY | noFollow | (constants.O_NONBLOCK ?? 0))
+    } else {
+      seen = await lstat(file, { bigint: true })
+      if (!seen.isFile()) return null
+      handle = await open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
+    }
+  } catch { return null }
+  try {
+    const info = await handle.stat({ bigint: true })
+    if (seen && (info.dev !== seen.dev || info.ino !== seen.ino)) return null
+    if (!info.isFile() || info.size > BigInt(max)) return null
     const buffer = Buffer.alloc(max + 1)
     let offset = 0
     while (offset < buffer.length) {
@@ -315,8 +328,8 @@ export async function resumeCodex({
 // Reads and parses the `-o` result file. `null` on ENOENT, a parse error or a file past
 // RESULT_LIMIT_BYTES — never a throw — because "no result", "unparsable result" and "oversized
 // result" are all `orphaned`, not a driver crash.
-export async function readResult({ resultPath }) {
-  const raw = await readBounded(resultPath, RESULT_LIMIT_BYTES)
+export async function readResult({ resultPath, noFollow }) {
+  const raw = await readBounded(resultPath, RESULT_LIMIT_BYTES, { noFollow })
   if (raw === null) return null
   try {
     return JSON.parse(raw)
