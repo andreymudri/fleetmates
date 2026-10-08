@@ -211,6 +211,11 @@ export async function reconcileExecutionAttempt({ common, runId, inputs, branche
       : missingArtifacts.length ? 'missing-artifact' : !available ? 'checkout-unavailable'
       : unknownEffects ? 'unknown-effect' : effects.some(e => e.outcome === 'failed') ? 'failed-observation' : !end ? 'interrupted' : end.kind === 'step-failed' ? 'failed-observation' : 'ready'
     if (state === 'ready' && advanced) state = 'superseded'
+    // A step-failed attempt is superseded by a strictly later attempt of the same executionId, task and
+    // step that ended step-completed. A failed external effect keeps it unresolved: a retry does not undo it.
+    if (state === 'failed-observation' && end?.kind === 'step-failed' && !effects.some(e => e.outcome === 'failed')
+        && groups.some(other => other !== group && other.end?.kind === 'step-completed' && other.start.at > end.at
+          && other.start.executionId === start.executionId && other.start.task === start.task && other.start.step === start.step)) state = 'superseded'
     attempts.push({ executionId: start.executionId, task: start.task, step: start.step, attempt: start.attempt, state,
       reuse: state === 'ready', retryAllowed: ['interrupted', 'failed-observation'].includes(state) && effects.every(e => e.retryAllowed),
       requiresCurrentGates: true, changedBranches, conflictingBranches, artifacts, missingArtifacts, effects })
