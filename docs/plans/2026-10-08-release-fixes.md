@@ -2,7 +2,7 @@
 
 ## Destination
 
-Before fleetmates 2.4.0 and the deck are released, three things hold. Parallel strict tasks never fail a journal read because another task is mid-append. The host-bounded integration merge keeps the commit identity the operator set in the environment. A run whose driver verification failed once and then passed reports reconciled in `workflow-status`. Each fix is pinned by a test that fails without it.
+Before fleetmates 2.4.0 and the deck are released, three things hold. Parallel strict tasks never fail a journal read because another task is mid-append. The integration merge's identity rule (the repository's configured user, local then global, never an inherited environment identity) is pinned and documented. A run whose driver verification failed once and then passed reports reconciled in `workflow-status`. Each fix is pinned by a test that fails without it.
 
 ## Global Constraints
 
@@ -40,23 +40,19 @@ Before fleetmates 2.4.0 and the deck are released, three things hold. Parallel s
 - [ ] Step 3: Apply the three mutations; observe the matching failures; restore.
 - [ ] Step 4: Run `tests/execution-journal.test.mjs` and `tests/driver-recovery.test.mjs` (the latter 5 times, to cover the test at ~613), then the root suite; commit only the declared files.
 
-### Task 2: host-bounded integration keeps the operator's environment identity
+### Task 2: pin the integration identity design
 
 **Files:**
-- Modify: `scripts/reviewed-integration.mjs`
 - Test: `tests/reviewed-integration.test.mjs`
 
 **Acceptance:**
-- Background. `scopedGit` (`scripts/reviewed-integration.mjs` ~54) drops every `GIT_*` variable, and that includes `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`. So the integration merge (~365) takes the host's global identity, even when the operator set a placeholder identity in the environment. The real T6 trial showed this.
-- After the fix, those four variables pass through to the integration git calls when they are set. Every other `GIT_*` variable is still dropped, including `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG*` and `GIT_EXEC_PATH`.
-- Test 1 runs an isolated `HOME` whose gitconfig names a host identity, with a placeholder identity in the environment. It asserts that the real integration merge commit has the placeholder as both author and committer.
-- Test 2 asserts that a planted `GIT_DIR` or `GIT_INDEX_FILE` in the environment still does not reach the integration git.
-- Mutations each fail a test, then are restored: dropping the identity allowance, and allowing every `GIT_*` variable through.
+- Amended 2026-10-08. The original Task 2 asked to pass `GIT_AUTHOR_*` and `GIT_COMMITTER_*` through `scopedGit` (`scripts/reviewed-integration.mjs` ~54). That conflicts with a deliberate design, which `tests/reviewed-integration.test.mjs` ~565 ("integration uses configured author even with inherited Git author overrides") already pins: an inherited environment identity is untrusted. The owner chose to keep the design and document it. `scripts/reviewed-integration.mjs` is not changed.
+- A new test pins the fallback the documentation will state. It uses an isolated `HOME` and `XDG_CONFIG_HOME` whose gitconfig names a placeholder host identity, and a run repository with no `[user]` section of its own. Under those conditions the integration merge commit carries the host-config identity as author and committer, even with a different placeholder in `GIT_AUTHOR_*` and `GIT_COMMITTER_*`. A repo-local identity, when set, still wins over the host one. That is a second case in the same test, or a separate test.
+- Mutations each fail a test, then are restored: letting the four identity variables through the `scopedGit` filter, and dropping the `GIT_` filter entirely.
 
-- [ ] Step 1: Write both tests; observe the identity test fail.
-- [ ] Step 2: Implement the four-variable allowance.
-- [ ] Step 3: Apply the mutations; observe the failures; restore.
-- [ ] Step 4: Run `tests/reviewed-integration.test.mjs` and the root suite; commit only the declared files.
+- [ ] Step 1: Write the test; confirm it passes on the current code.
+- [ ] Step 2: Apply the mutations; observe the failures; restore.
+- [ ] Step 3: Run `tests/reviewed-integration.test.mjs` and the root suite; commit only the declared file.
 
 ### Task 3: a failed attempt followed by a completed retry is superseded
 
@@ -85,7 +81,8 @@ Before fleetmates 2.4.0 and the deck are released, three things hold. Parallel s
 **Depends:** T1, T2, T3
 
 **Acceptance:**
-- Open items 13 and 14 and the integration-identity observation from Trial 4 are marked fixed. Each cites the task commit and the test names that pin it, and each test name is checked by running it at the task's tip.
+- Open items 13 and 14 are marked fixed. Each cites the task commit and the test names that pin it, and each test name is checked by running it at the task's tip.
+- The integration-identity observation from Trial 4 is marked by design. The doc states that integration authors as the repository's configured user, local then global, and never as an inherited `GIT_AUTHOR_*` or `GIT_COMMITTER_*`. A project that wants a placeholder identity sets a repository-local `user.name` and `user.email`. The entry cites the T2 test and the existing test at `tests/reviewed-integration.test.mjs` ~565.
 - No other item's status changes. The doc states that no new real-model trial was run for these fixes.
 
 - [ ] Step 1: Run the cited tests at the tip and record the counts.
