@@ -575,6 +575,42 @@ test('integration uses configured author even with inherited Git author override
   }
 })
 
+test('integration falls back to the host gitconfig identity, never the inherited environment identity', async t => {
+  const home = await mkdtemp(path.join(tmpdir(), 'ri-home-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  await mkdir(path.join(home, 'xdg'))
+  await writeFile(path.join(home, '.gitconfig'), '[user]\n\tname = Host Placeholder\n\temail = host@example.invalid\n')
+  const planted = { HOME: home, XDG_CONFIG_HOME: path.join(home, 'xdg'),
+    GIT_AUTHOR_NAME: 'Env Placeholder', GIT_AUTHOR_EMAIL: 'env@example.invalid',
+    GIT_COMMITTER_NAME: 'Env Placeholder', GIT_COMMITTER_EMAIL: 'env@example.invalid' }
+  const saved = Object.fromEntries(Object.keys(planted).map(key => [key, process.env[key]]))
+  Object.assign(process.env, planted)
+  try {
+    const identity = (root, rev) => git(root, 'show', '-s', '--format=%an <%ae>|%cn <%ce>', rev)
+    {
+      const { root, input, gate } = await fixture(t)
+      git(root, 'config', '--unset', 'user.name')
+      git(root, 'config', '--unset', 'user.email')
+      const receipt = await integrateReviewedPhase({ ...input, gateReceipt: await gate() })
+      for (const merge of receipt.merges) {
+        assert.equal(identity(root, merge.after), 'Host Placeholder <host@example.invalid>|Host Placeholder <host@example.invalid>')
+      }
+    }
+    {
+      const { root, input, gate } = await fixture(t)
+      const receipt = await integrateReviewedPhase({ ...input, gateReceipt: await gate() })
+      for (const merge of receipt.merges) {
+        assert.equal(identity(root, merge.after), 'Example <example@example.invalid>|Example <example@example.invalid>')
+      }
+    }
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
+
 test('hidden index edits added after gating are refused', async t => {
   for (const flag of ['--assume-unchanged', '--skip-worktree']) {
     const { root, input, gate } = await fixture(t)
