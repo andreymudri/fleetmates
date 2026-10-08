@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, readFile, rm, mkdir, symlink, chmod, lstat, access, realpath } from 'node:fs/promises'
 import { EventEmitter } from 'node:events'
-import { constants } from 'node:fs'
+import { constants, existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -1088,3 +1088,49 @@ test('isolated legacy integrator refuses unsupported adapter capabilities withou
     else codexAdapter.supportsEffort = previous
   }
 }))
+
+// A PATH holding only the fixture's own shim directory and the directories that provide git, so a
+// probe that escapes the fixture can never reach an installed codex, cursor-agent or claude.
+function shimOnlyPath(shimDir) {
+  const model = ['codex', 'cursor-agent', 'claude']
+  const kept = (process.env.PATH ?? '').split(path.delimiter).filter(dir => dir && existsSync(path.join(dir, 'git'))
+    && !model.some(name => existsSync(path.join(dir, name))))
+  return [shimDir, ...kept].join(path.delimiter)
+}
+
+const invalidContracts = [
+  ['role-policy', 'valid JSON with an unknown key', JSON.stringify({ ...policy, unexpected: true })],
+  ['role-policy', 'bytes that are not JSON', '{ not json'],
+  ['environment', 'valid JSON with an unknown key', JSON.stringify({ ...recipe, unexpected: true })],
+  ['environment', 'bytes that are not JSON', '{ not json'],
+]
+const invalidContractCommands = [
+  ['dispatch-integrator without a mode flag', ['dispatch-integrator', '--run', 'r1', '--plan', 'plan.md', '--base', 'main']],
+  ['dispatch-integrator --isolated-legacy', ['dispatch-integrator', '--isolated-legacy', '--run', 'r1', '--plan', 'plan.md', '--base', 'main']],
+  ['plain dispatch', ['dispatch', '--run', 'r1', '--phase', '1', '--plan', 'plan.md', '--base', 'main']],
+]
+for (const [flag, shape, bytes] of invalidContracts) for (const [name, args] of invalidContractCommands) {
+  test(`${name} refuses a committed --${flag} holding ${shape} with exit 2 and no spawn`, { skip: process.platform === 'win32' }, async () => integratorFixture(async ({ root, gitRun }) => {
+    const file = `invalid-${flag}.json`
+    await writeFile(path.join(root, file), bytes)
+    await gitRun(['add', file]); await gitRun(['commit', '-m', 'test: invalid contract'])
+    const shims = path.join(root, '.fleetmates', 'shims')
+    const marker = path.join(root, 'probe-ran')
+    await mkdir(shims, { recursive: true })
+    await writeFile(path.join(shims, 'codex'), `#!/bin/sh\necho "$*" >> ${shellQuote(marker)}\necho 'Logged in'\n`)
+    await chmod(path.join(shims, 'codex'), 0o755)
+    let effects = 0
+    const savedProbe = codexAdapter.probe
+    codexAdapter.probe = async () => { effects++; return { ok: true } }
+    codexAdapter.spawn = async () => { effects++; throw new Error('Must not spawn') }
+    const previousPath = process.env.PATH
+    process.env.PATH = shimOnlyPath(shims)
+    try {
+      const result = await command(root, [...args, `--${flag}`, file])
+      assert.equal(result.code, 2, result.output)
+      assert.match(JSON.parse(result.output).error, shape.includes('unknown') ? (flag === 'role-policy' ? /role policy has an unknown key/ : /Invalid environment recipe/) : /JSON/)
+      assert.equal(effects, 0)
+      await assert.rejects(lstat(marker), { code: 'ENOENT' })
+    } finally { codexAdapter.probe = savedProbe; process.env.PATH = previousPath }
+  }))
+}
