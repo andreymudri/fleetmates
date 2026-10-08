@@ -12,7 +12,8 @@ Phases run autonomously end to end. The boundary is where verification happens.
     node "<fleetmates root>/scripts/cli.mjs" gate --run <runId> --root <project root> [--phase <name>]
 
 Exit codes: `0` PASS, `1` FAIL, `2` the manifest is broken, `3` no manifest (an inferred one
-was printed).
+was printed), `5` a derive or run-state failure only (the only failed entries are `derive`
+and/or `run-state`, so nothing was judged; a check that failed beside them keeps exit `1`).
 
 On exit 3, show the user the inferred manifest, get confirmation, and save it as
 `fleetmates.gate.json`. Never invent checks silently.
