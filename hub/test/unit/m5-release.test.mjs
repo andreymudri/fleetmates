@@ -13,10 +13,10 @@ function newestChangelogVersion(text) {
   return match ? match[1] : null
 }
 
-test('the M5 package version is 0.5.0, equals the newest CHANGELOG heading and stays private', () => {
+test('the M5 package version is 0.5.0, equals the newest CHANGELOG heading and is publishable', () => {
   assert.equal(pkg.version, '0.5.0')
   assert.equal(newestChangelogVersion(changelog), pkg.version)
-  assert.equal(pkg.private, true)
+  assert.equal(pkg.private, undefined)
 })
 
 test('GET /api/version reports the newest CHANGELOG version with build m5', async t => {

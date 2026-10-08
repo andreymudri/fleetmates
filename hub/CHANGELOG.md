@@ -5,10 +5,11 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
-## v0.5.0 (unreleased)
+## v0.5.0
 
-M5, Memory. Prepared locally; tagging, publication and the dogfood restart are pending.
-See `docs/deck/m5-exit.md` for automated evidence and the owner checks.
+M5, Memory. The first version published to npm. It includes everything listed under 0.1.0 to
+0.4.0, which were never published. The manual owner checks in `docs/deck/m5-exit.md` remain
+owner-pending; that report also holds the automated evidence.
 
 - Tested Claude Code: 2.1.285 (unchanged)
 - deckd changed: no. The PTY protocol is unchanged.
@@ -20,10 +21,10 @@ See `docs/deck/m5-exit.md` for automated evidence and the owner checks.
 - Added `export-misses --kind retrieval|all [--out <file>]` with private output permissions.
 - Ask prose is confined to thread tables and ephemeral WebSocket events. It is excluded from
   event history, logs and browser persistence; deleting a thread uses SQLite secure deletion.
-- Contract and performance tests pin development dependency `@andreymudri/vault-mcp` 0.4.0.
+- Contract and performance tests pin development dependency `@andreymudri/vault-mcp` 0.5.0.
 - No vault writes, capture revert, embeddings or hybrid retrieval in M5.
 
-## v0.4.0 (unreleased)
+## v0.4.0 (not published; included in 0.5.0)
 
 M4, Meetings. TurbidAssist meetings are recorded, followed and read from the deck over scribed's
 socket, with scribed and TurbidAssist unchanged. Prepared, not tagged or published; the exit report
@@ -80,7 +81,7 @@ is `docs/deck/m4-exit.md`.
   as confidential.
 - "Research first" and "Save answer to meeting note" are not shown.
 
-## v0.3.0 (unreleased)
+## v0.3.0 (not published; included in 0.5.0)
 
 M3, Unblock. Permission prompts and questions of sessions that run in deckd are answered from the
 browser, within tier rules the server enforces. Prepared, not tagged or published; the exit report is
@@ -146,7 +147,7 @@ browser, within tier rules the server enforces. Prepared, not tagged or publishe
   prompt shows that label, so for Bash it is not offered until a real prompt confirms the wording.
 - A running Claude Code session may keep an old rule until it restarts.
 
-## v0.2.0 (unreleased)
+## v0.2.0 (not published; included in 0.5.0)
 
 M2, Control. Every session started with `fm claude` or from the deck runs in a deckd PTY and is
 controlled from the browser. Prepared, not tagged or published; the exit report is
@@ -202,7 +203,7 @@ controlled from the browser. Prepared, not tagged or published; the exit report 
 - No diff view: Changes lists the changed files only.
 - Teammates have no terminal of their own; the Team run page shows their tool steps only.
 
-## v0.1.0 (unreleased)
+## v0.1.0 (not published; included in 0.5.0)
 
 M1, Observe. The first public release is prepared but not published. Publishing waits for the
 owner's dogfood week, manual smoke test, design QA, clean install on a fresh account and the

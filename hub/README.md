@@ -7,10 +7,9 @@ into it.
 
 ![Home with nine sessions, three of them waiting on you](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
 
-**Status: 0.5.0 release candidate, private and not published.** Includes Memory and Research
-on top of Meetings, Unblock, Control, and Observe. The package name
-(`@andreymudri/fleetmates-deck`) and the command names (`fleetmates-deck`, `fm`) are still an open
-decision and may change before the first release.
+**Status: 0.5.0, the first version published to npm** as `@andreymudri/fleetmates-deck`, with
+the commands `fleetmates-deck` and `fm`. Includes Memory and Research on top of Meetings,
+Unblock, Control, and Observe.
 
 ## What M1 does
 

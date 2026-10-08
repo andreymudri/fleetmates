@@ -1,5 +1,83 @@
 # Changelog
 
+## v2.4.0
+
+### Added
+
+- Bounded workflow execution. `workflow-execute` runs a fixed profile (`bug-fix`, `feature`,
+  `migration`, `ui` or `research`) from a version 1 request with no defaults, through `init-run`,
+  each phase's dispatch, reviews, gate and a host-bounded merge, then acceptance and `finish`.
+  `workflow-resume` reuses earlier outputs only after revalidating them; `workflow-status` only
+  reads; `workflow-resolve` records the outcome of an effect the journal left unknown;
+  `workflow-accept` retains acceptance evidence per criterion for the run branch's current tree;
+  `workflow-prune` removes unreferenced artifacts past their retention bounds. `workflow-execute`
+  and `workflow-resume` exit 0 only for a `verified-complete` report and 4 for any other.
+- Profiles and the controller. `workflow-profile` expands a profile in dry-run mode. The controller
+  journals each step before it runs and reads its outputs back before the next one. Repair rounds:
+  on a gate FAIL and a `retry` decision it redispatches only the named tasks, at most the smaller of
+  `maxRepairRounds` and the phase's fix budget, and at most 9 under the driver journal.
+- A strict execution journal in the driver. Given an execution contract, it persists each attempt
+  before spawning, binds model, effort and prompt to it, and recovers from it. Journal and
+  artifacts are private and size-bounded under the git common directory. `execution-record` and
+  `execution-status` store and reconcile execution observations.
+- Required prerequisites. `environment-check` verifies a committed recipe at an exact commit, and
+  `dispatch`, `dispatch-reviews` and `dispatch-integrator` take `--environment` and `--role-policy`.
+  A required policy never falls back to legacy dispatch: a valid committed contract that cannot be
+  honoured exits 4, a missing, uncommitted, modified or invalid one exits 2.
+- Reviewed host integration. The controller merges each phase itself after a passing gate, bound to
+  its own worktree, with conventional merge subjects.
+- `dispatch --execution <absolute path>` hands an execution contract to the driver, and
+  `dispatch --fix-round --task <id>` (repeatable) redispatches only the named tasks with a fix-round
+  brief that keeps the task branch tip. `dispatch-integrator --isolated-legacy` runs the integrator
+  in a registered worktree and accepts its work only after checking the result, one merge per task
+  in plan order, the declared files and ownership.
+- Completion obligations. `finish` reports `obligations`; `verifiedComplete` needs passing
+  acceptance evidence for every required criterion, the driver's own verification and native
+  verification.
+- Security lint for agent instructions. `scripts/security-lint.mjs` scans `skills/` and `agents/`,
+  and a commit's changed instruction files including `AGENTS.md`, in CI and inside the mandatory
+  `fileset` check, with fixed diagnostics that never forward instruction text.
+- Also new: `ci-status`, `feedback-draft`, `workflow-report` reviewer outcomes, private command
+  output logs on gate results, `**Acceptance:**` and `ui:` task contracts, `digest --ledger`,
+  `doctor --hooks`, `bind-session` with a main-session `Stop` guard, and `suspend`, `resume`,
+  `abandon` and `run-status`.
+
+### Changed
+
+- `gate` exits 5 for a FAIL whose only failed entries are `derive` and/or `run-state`, so no check
+  judged the work; a check that failed beside `run-state` keeps exit 1. The controller treats exit
+  5 as infrastructure, never as a code failure.
+- `message` exits 4 unless the resumed turn produced a new valid result. It used to exit 0 after a
+  spawn failure or a clean exit with no result. A Cursor result in the stream file now counts.
+- Reviewers check the tracked task specification and declared scope before their lens.
+
+### Fixed
+
+- Many recovery and journal fixes from the execution-recovery audit and the release runs. Among
+  them: an unlocked journal read skips an appender's young in-flight temporary; a failed attempt is
+  superseded once a later attempt of the same execution, task and step completes; the controller
+  refuses a task the driver orphaned; the strict driver accepts `complete` exit 4 only when every
+  non-passing check is a pending `agent` or `mcp` check; dead-lock reclaim in the artifact store is
+  safe across processes and bounded; strict actions are refused after uncertain effects and in
+  ended attempts; repair rounds are idempotent on resume.
+- Git output is decoded as a stream, so UTF-8 split across chunks survives, and numeric task ids
+  survive in fleet reports.
+
+### Known issues
+
+- The controller writes `maxAttempts` 10 into every dispatch execution contract, whatever the
+  request says. This is an open design call.
+- `dispatch-integrator --isolated-legacy` gives the agent full same-user authority. Its limits are
+  prompt instructions, and its checks run afterwards and see only refs, the checkouts and the
+  result file.
+- Issues 33, 42, 43, 44 and 45 remain open, as README's execution sections state.
+- Flaky tests, each reported and not reproduced: the harness-codex test "ordinary pipeline timeout
+  stops its own delayed child fixture" under load; a one-off native crash in
+  `tests/plan-context.test.mjs`; the hub test "fm ls lists each PTY with its repo, pid, start and
+  attached clients" under load; the hub watcher test at
+  `hub/test/unit/fleetmates-adapter.test.mjs:291`; and `tests/inventory-gate.test.mjs` picking up
+  `tm-report-*` temporary directories when tests share one TMPDIR.
+
 ## v2.3.1
 
 ### Fixed

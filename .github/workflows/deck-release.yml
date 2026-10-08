@@ -92,8 +92,7 @@ jobs:
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
       - name: Package must not be private
-        # hub/package.json carries "private": true until the owner settles the package name (Q1 in
-        # docs/deck/15-open-questions.md) and removes it; npm refuses to publish a private package.
+        # npm refuses to publish a private package; a reintroduced "private" fails here, before publish.
         run: |
           if [ "$(node -p "require('./hub/package.json').private === true")" = "true" ]; then
             echo "hub/package.json is still private: remove \"private\" before tagging a deck release"

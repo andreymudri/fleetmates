@@ -20,7 +20,7 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
   const lock = await json(path.join(hub, 'package-lock.json'))
   const rootPkg = await json(path.join(root, 'package.json'))
 
-  assert.equal(pkg.private, true)
+  assert.equal(pkg.private, undefined)
   assert.equal(pkg.type, 'module')
   assert.equal(pkg.engines.node, '>=24.2.0')
   assert.equal(typeof pkg.scripts.build, 'string')
