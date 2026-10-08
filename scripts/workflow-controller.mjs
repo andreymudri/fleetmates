@@ -257,9 +257,28 @@ function phaseTasks(ctx, phase) { return ctx.tasks.filter(task => task.phase ===
 function currentTips(ctx, phase) {
   return Object.fromEntries(phaseTasks(ctx, phase).map(task => [task.id, refTip(ctx.root, `refs/heads/${taskBranchName(ctx.request.runId, task.id)}`)]))
 }
+// Whether the driver accepted each task, independent of the session's result file: the task's state
+// in status.json (which dispatch sets to `orphaned` for a task the driver returned without a result),
+// and, when the strict driver journaled anything for the task under this phase's driver
+// executionId, its latest `verification` event. Returns the refusal reason, or null.
+async function driverRefusal(ctx, phase, taskId, journal) {
+  const statusBytes = await readInside(ctx.root, `${NAMES.stateDir}/${ctx.request.runId}/status.json`)
+  const status = statusBytes && parseJson(statusBytes)
+  const entry = Array.isArray(status?.tasks) ? status.tasks.find(t => plainObject(t) && t.id === taskId) : null
+  if (entry?.state === 'orphaned') return `task ${taskId} was orphaned by the driver`
+  const own = journal.filter(e => e.executionId === `${ctx.executionId}-p${phase}` && e.task === taskId)
+  if (!own.length) return null
+  const latest = own.filter(e => e.step === 'verification').at(-1)
+  return latest?.kind === 'step-completed' ? null : `task ${taskId} has no passing driver verification (latest: ${latest?.kind ?? 'none'})`
+}
 async function validateImplement(ctx, phase) {
   const runTip = refTip(ctx.root, `refs/heads/${ctx.request.runBranch}`), artifacts = [], tips = {}
+  let journal
+  try { journal = await readExecutionEvents(ctx.common, ctx.request.runId) }
+  catch (error) { return { ok: false, reason: `driver journal is unreadable: ${error.message}` } }
   for (const task of phaseTasks(ctx, phase)) {
+    const refused = await driverRefusal(ctx, phase, task.id, journal)
+    if (refused) return { ok: false, reason: refused }
     const bytes = await readInside(ctx.root, `${NAMES.stateDir}/${ctx.request.runId}/sessions/${task.id}.result.json`)
     const result = bytes && parseJson(bytes)
     const branch = taskBranchName(ctx.request.runId, task.id)

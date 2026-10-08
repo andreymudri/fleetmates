@@ -4,16 +4,20 @@ import { mkdtemp, writeFile, readFile, rm, mkdir, realpath } from 'node:fs/promi
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { execFileSync, execFile } from 'node:child_process'
+import { execFileSync, execFile, spawn } from 'node:child_process'
 import { executeWorkflowProfile, resumeWorkflowProfile, validateWorkflowExpansion } from '../scripts/workflow-controller.mjs'
 import { expandWorkflowProfile } from '../scripts/workflow-profile.mjs'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { defaultExec } from '../scripts/gate-runner.mjs'
 import { retainExecutionArtifact } from '../scripts/execution-artifacts.mjs'
-import { readExecutionEvents } from '../scripts/execution-journal.mjs'
+import { readExecutionEvents, appendExecutionEvent } from '../scripts/execution-journal.mjs'
 import { resolveExecutionEffect } from '../scripts/execution-recovery.mjs'
 import { dispatchPhase } from '../scripts/driver.mjs'
 import { strictExecutionIdentity } from '../scripts/completion-obligations.mjs'
+import { runCli, enforcementAnswer } from '../scripts/cli.mjs'
+import { getAdapter } from '../scripts/harnesses/index.mjs'
+import { aggregateVerdict } from '../scripts/gate-runner.mjs'
+import { readExecutionArtifact } from '../scripts/execution-artifacts.mjs'
 
 // The child CLI is a real Node process started through the bounded executor. It stands in for the
 // installed fleetmates CLI: it records every invocation, writes only the artifacts the real
@@ -96,6 +100,12 @@ if (command === 'init-run') {
       git(['update-ref', 'refs/heads/' + branch, tip])
       if (!mode.includes('no-result')) writeFileSync(path.join(dir, 'sessions', t.id + '.result.json'),
         JSON.stringify({ status: 'done', branch: mode.includes('wrong-branch') ? 'fleetmates/' + run + '/other' : branch, filesChanged: [t.file], summary: 'fixture', blockers: [] }))
+    }
+    // orphaned: as the real dispatch does when the driver returns a task as orphaned, status.json
+    // records it, while the harness's own result file stays where the session wrote it.
+    if (mode.includes('orphaned')) {
+      const file = path.join(dir, 'status.json'), status = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {}
+      writeFileSync(file, JSON.stringify({ ...status, tasks: phaseTasks.map(t => ({ id: t.id, state: 'orphaned' })) }))
     }
     if (mode.includes('hang-after-dispatch') && !fixRound) { writeFileSync(path.join(bin, 'hang.pid'), String(process.pid)); setInterval(() => {}, 1000) }
     else console.log('dispatched')
@@ -1056,4 +1066,237 @@ test('request bounds are pinned at both edges: n is accepted and n+1 is refused 
     assert.deepEqual(report.blockers.map(b => b.category), ['capability'], label)
   }
   assert.equal(Buffer.byteLength(JSON.stringify(pad(4096))), 4096)
+})
+
+// The driver's verification outcomes, appended to the journal exactly where the strict driver writes
+// them: the phase's driver executionId from the --execution contract, the task as both task and
+// checkout, step `verification`. Each entry is one attempt: a start plus its outcome, or a start
+// alone when the entry is null. Only the first dispatch of the run gets them.
+function driverVerifications(fixture, outcomes, task = 'T1') {
+  let done = false, clock = Date.now()
+  fixture.env.hook = async (command, options) => {
+    if (options.argv?.[1] !== 'dispatch' || done) return
+    done = true
+    const contract = JSON.parse(await readFile(options.argv[options.argv.indexOf('--execution') + 1], 'utf8'))
+    for (const kind of outcomes) {
+      const base = { version: 2, runId: 'r1', executionId: contract.executionId, task, step: 'verification', attempt: randomUUID(),
+        inputs: contract.inputs, branches: { 'refs/heads/fleetmates/run/r1': contract.inputs.commit }, checkout: task, artifacts: [] }
+      await appendExecutionEvent(fixture.common, { ...base, id: randomUUID(), kind: 'step-started', at: clock++ }, { requireFreshStart: true })
+      if (!kind) continue
+      const bytes = Buffer.from(JSON.stringify({ version: 1, code: kind === 'step-completed' ? 0 : 3, scope: 'enforcement-only', attempt: base.attempt }))
+      const { reference } = await retainExecutionArtifact({ common: fixture.common, runId: 'r1', kind: 'driver-verification', bytes, retention })
+      await appendExecutionEvent(fixture.common, { ...base, id: randomUUID(), kind, at: clock++, artifacts: [reference] })
+    }
+  }
+}
+
+// Open item 12 (the T4 real trial): the strict driver orphaned the task, dispatch still exited 0 and
+// the session's result file still said done, and the controller accepted the task from that file.
+test('a task the driver orphaned is refused at implement even with a done result file, and the run never reaches acceptance', async t => {
+  const fixture = await project(t)
+  fixture.env.mode = 'orphaned'
+  const report = await fixture.run()
+  assert.deepEqual(commands(await fixture.invocations()), upTo.implement)
+  assert.deepEqual(report.blockers.map(b => b.step), ['implement-1'])
+  assert.match(report.blockers[0].reason, /task T1 .*orphaned/)
+  assert.ok(!['human-required', 'verified-complete', 'unresolved'].includes(report.state), report.state)
+  assert.equal(report.verifiedComplete, false)
+})
+
+for (const [label, outcomes] of [['failed', ['step-failed']], ['completed then failed', ['step-completed', 'step-failed']], ['started without an outcome', [null]]]) {
+  test(`a task whose latest driver verification is ${label} is refused at implement`, async t => {
+    const fixture = await project(t)
+    driverVerifications(fixture, outcomes)
+    const report = await fixture.run()
+    assert.deepEqual(commands(await fixture.invocations()), upTo.implement)
+    assert.deepEqual(report.blockers.map(b => b.step), ['implement-1'])
+    assert.match(report.blockers[0].reason, /task T1 .*driver verification/)
+    assert.equal(report.verifiedComplete, false)
+  })
+}
+
+// An enforcement rejection the driver saw fixed on its second attempt leaves step-completed as the
+// latest verification event, and implementation is accepted.
+test('a task whose driver verification failed and then completed is accepted at implement', async t => {
+  const fixture = await project(t)
+  driverVerifications(fixture, ['step-failed', 'step-completed'])
+  const report = await fixture.run()
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+  assert.equal(report.steps.find(step => step.id === 'implement-1').status, 'completed')
+})
+
+// A driver that accepted the task (for example a pending-only exit 4) leaves one step-completed
+// verification, and the run goes on. The verification here is the injected unit fixture, which the
+// controller never counts as completion, so the end state is `unresolved` with every obligation
+// verified; only native verification turns that into `verified-complete`.
+test('a task whose latest driver verification is step-completed proceeds through finish with every obligation verified', async t => {
+  const fixture = await project(t)
+  driverVerifications(fixture, ['step-completed'])
+  const report = await fixture.run()
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+  const acceptance = []
+  for (const criterion of report.acceptance.required) {
+    const bytes = Buffer.from(JSON.stringify({ version: 1, criterion, tree: report.acceptance.tree, status: 'pass' }))
+    acceptance.push({ criterion, reference: (await retainExecutionArtifact({ common: fixture.common, runId: 'r1', kind: 'acceptance-evidence', bytes, retention })).reference })
+  }
+  const done = await fixture.resume({ acceptance })
+  assert.equal(commands(await fixture.invocations()).at(-1), 'finish')
+  assert.equal(done.obligations.verifiedComplete, true)
+  assert.equal(done.verification, 'injected-unit-fixture')
+  assert.equal(done.state, 'unresolved')
+  const { runCli } = await import('../scripts/cli.mjs')
+  const lines = []
+  const code = await runCli(['workflow-status', '--run', 'r1', '--root', fixture.root], { out: line => lines.push(line), err: () => {} })
+  assert.equal(code, 0, lines.join('\n'))
+  assert.equal(JSON.parse(lines.join('\n')).state, 'reconciled')
+})
+
+// The CLI's half of the structured answer: the real `complete --enforcement-only` over a real run
+// with a mandatory agent check.
+async function enforcementRepo(t, { agent = true } = {}) {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), 'wfc-enf-')))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  git(root, 'init', '-q', '-b', 'main')
+  git(root, 'config', 'user.name', 'Example'); git(root, 'config', 'user.email', 'example@example.invalid')
+  await writeFile(path.join(root, 'plan.md'), '### Task 1: A\n\n**Files:**\n- Create: `a.mjs`\n')
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n')
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [
+    { name: 'noop', kind: 'command', run: `${node} -e ""` }, { name: 'fileset', kind: 'fileset' }, { name: 'ownership', kind: 'ownership' },
+    ...(agent ? [{ name: 'review', kind: 'agent', lens: ['correctness'] }] : [])] } } }))
+  git(root, 'add', '.'); git(root, 'commit', '-q', '-m', 'test: anchor')
+  git(root, 'checkout', '-q', '-b', 'run-branch')
+  const { runCli } = await import('../scripts/cli.mjs')
+  assert.equal(await runCli(['init-run', path.join(root, 'plan.md'), '--run', 'r1', '--root', root], { out: () => {}, err: () => {} }), 0)
+  const task = (files) => {
+    git(root, 'checkout', '-q', '-b', 'fleetmates/r1/T1', 'run-branch')
+    for (const file of files) { writeFileSync(path.join(root, file), 'export const x = 1\n'); git(root, 'add', file) }
+    git(root, 'commit', '-q', '-m', 'feat: T1'); git(root, 'checkout', '-q', 'run-branch')
+  }
+  return { root, task }
+}
+
+test('the CLI enforcement answer is pendingOnly exactly when the only non-passing checks are pending agent checks', async t => {
+  const { completeEnforcementAnswer } = await import('../scripts/cli.mjs')
+  const ask = root => completeEnforcementAnswer({ runId: 'r1', taskId: 'T1', planPath: 'plan.md', baseBranch: 'main', root })
+
+  const pending = await enforcementRepo(t)
+  pending.task(['a.mjs'])
+  assert.deepEqual(await ask(pending.root), { code: 4, pendingOnly: true, pending: ['agent'] })
+
+  const rejected = await enforcementRepo(t)
+  rejected.task(['a.mjs', 'undeclared.mjs'])
+  assert.deepEqual(await ask(rejected.root), { code: 3, pendingOnly: false, pending: ['agent'] })
+
+  // A run-wide failure beside the pending agent check: exit 4, but a check failed.
+  const unowned = await enforcementRepo(t)
+  unowned.task(['a.mjs'])
+  writeFileSync(path.join(unowned.root, 'direct.txt'), 'direct\n')
+  git(unowned.root, 'add', 'direct.txt'); git(unowned.root, 'commit', '-q', '-m', 'chore: direct write')
+  assert.deepEqual(await ask(unowned.root), { code: 4, pendingOnly: false, pending: ['agent'] })
+
+  const passing = await enforcementRepo(t, { agent: false })
+  passing.task(['a.mjs'])
+  assert.deepEqual(await ask(passing.root), { code: 0, pendingOnly: false, pending: [] })
+})
+
+// The real join: `dispatch --execution` through the CLI, so the strict driver gets the CLI's own
+// completeEnforcement closure and the real `complete --enforcement-only` answers it. Only the codex
+// adapter's methods are stubbed (restored after the test): a clone with its own git dir, a worker
+// child that commits the task's file and writes a done result, and a fetch back into the host.
+async function strictDispatch(t, checks) {
+  const base = await realpath(await mkdtemp(path.join(tmpdir(), 'wfc-join-')))
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const root = path.join(base, 'repo')
+  await mkdir(root)
+  git(root, 'init', '-q', '-b', 'main')
+  git(root, 'config', 'user.name', 'Example'); git(root, 'config', 'user.email', 'example@example.invalid')
+  await writeFile(path.join(root, 'plan.md'), '### Task 1: A\n\n**Files:**\n- Create: `a.mjs`\n')
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n')
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks } } }))
+  git(root, 'add', '.'); git(root, 'commit', '-q', '-m', 'test: anchor')
+  git(root, 'checkout', '-q', '-b', 'run')
+  const quiet = { out: () => {}, err: () => {} }
+  assert.equal(await runCli(['init-run', 'plan.md', '--run', 'r1', '--root', root], quiet), 0)
+  const environment = ready => ({ ready, workspace: 'fresh', setup: { status: 'pass', durationMs: 1, checks: [{ log: { complete: true, output: 'setup log' } }] },
+    baseline: { status: 'pass', durationMs: 1, checks: [{ log: { complete: true, output: 'baseline log' } }] }, durationMs: 2 })
+  const adapter = getAdapter('codex')
+  const stubs = {
+    probe: async () => ({ ok: true }),
+    async makeSandbox(_git, { taskId, runBranch }) {
+      const cwd = path.join(base, 'clone-' + taskId), gitdir = path.join(base, 'clone-git-' + taskId), branch = 'fleetmates/r1/' + taskId
+      execFileSync('git', ['clone', '-q', '--shared', '--separate-git-dir=' + gitdir, root, cwd])
+      execFileSync('git', ['checkout', '-q', '-b', branch, 'origin/' + runBranch], { cwd })
+      return { cwd, meta: { mode: 'clone', gitdir, branch, workerEnvironment: environment(true) } }
+    },
+    async spawn(opts) {
+      opts.sandbox.meta.workerEnvironment = { ready: true, workspace: 'existing', setup: { status: 'not-rerun', durationMs: null, checks: [] },
+        baseline: { status: 'pass', checks: [] }, durationMs: 1 }
+      const code = `const { execFileSync } = require('node:child_process'); const fs = require('node:fs');
+        const [cwd, gitdir, branch, result] = process.argv.slice(1);
+        const g = (...a) => execFileSync('git', ['--git-dir=' + gitdir, '--work-tree=' + cwd, ...a], { cwd });
+        fs.writeFileSync(cwd + '/a.mjs', 'export const a = 1\\n'); g('add', 'a.mjs');
+        g('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-q', '-m', 'feat: a');
+        fs.writeFileSync(result, JSON.stringify({ status: 'done', branch, filesChanged: ['a.mjs'], summary: 'fixture', blockers: [] }));`
+      const child = spawn(process.execPath, ['-e', code, opts.sandbox.cwd, opts.sandbox.meta.gitdir, opts.sandbox.meta.branch, opts.resultPath], { stdio: 'ignore' })
+      return { child, sessionId: Promise.resolve('sid'), flushed: Promise.resolve() }
+    },
+    resume: async () => { throw new Error('the fixture never resumes') },
+    async readResult({ resultPath }) { try { return JSON.parse(await readFile(resultPath, 'utf8')) } catch { return null } },
+    readUsage: async () => null,
+    async collect(gitExec, { sandbox, branch }) {
+      const r = await gitExec(['fetch', '--no-tags', sandbox.meta.gitdir, 'refs/heads/' + branch + ':refs/heads/' + branch])
+      if (r.code) throw new Error(r.stderr)
+    },
+  }
+  const originals = Object.fromEntries(Object.keys(stubs).map(key => [key, adapter[key]]))
+  Object.assign(adapter, stubs)
+  t.after(() => Object.assign(adapter, originals))
+  const common = git(root, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+  const sha = n => n.repeat(64)
+  const contract = { version: 1, common, runId: 'r1', executionId: 'join-p1',
+    inputs: { commit: git(root, 'rev-parse', 'HEAD'), plan: sha('1'), manifest: sha('2'), context: sha('3'), environment: sha('4'), verifier: sha('5') },
+    retention, maxAttempts: 2, deadlineAt: Date.now() + 600_000 }
+  const file = path.join(root, '.fleetmates', 'r1', 'execution.json')
+  await writeFile(file, JSON.stringify(contract))
+  const lines = []
+  const code = await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--base', 'main', '--harness', 'codex', '--execution', file, '--root', root],
+    { out: line => lines.push(line), err: line => lines.push(line) })
+  const status = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'status.json'), 'utf8'))
+  const verifications = []
+  for (const event of (await readExecutionEvents(common, 'r1')).filter(e => e.step === 'verification' && e.kind !== 'step-started')) {
+    verifications.push([event.kind, JSON.parse(await readExecutionArtifact({ common, runId: 'r1', reference: event.artifacts[0], retention }))])
+  }
+  return { code, output: lines.join('\n'), state: status.tasks.find(task => task.id === 'T1').state, verifications }
+}
+const enforcementChecks = [{ name: 'fileset', kind: 'fileset' }, { name: 'ownership', kind: 'ownership' }]
+
+test('dispatch through the CLI with a mandatory agent check: the strict driver accepts the pending-only answer and the task is done', { skip: process.platform === 'win32' }, async t => {
+  const run = await strictDispatch(t, [...enforcementChecks, { name: 'review', kind: 'agent', lens: ['correctness'] }])
+  assert.equal(run.code, 0, run.output)
+  assert.equal(run.state, 'done', run.output)
+  assert.match(run.output, /T1: done/)
+  assert.deepEqual(run.verifications.map(([kind, receipt]) => [kind, receipt.code, receipt.pendingOnly, receipt.scope]),
+    [['step-completed', 4, true, 'enforcement-only-pending-agent']])
+})
+
+test('dispatch through the CLI with a pending check of a kind that is not agent or mcp: the strict driver orphans the task', { skip: process.platform === 'win32' }, async t => {
+  const run = await strictDispatch(t, [...enforcementChecks, { name: 'review', kind: 'agent', lens: ['correctness'] }, { name: 'typo', kind: 'lnit' }])
+  assert.equal(run.state, 'orphaned', run.output)
+  assert.match(run.output, /T1: orphaned/)
+  assert.deepEqual(run.verifications.map(([kind, receipt]) => [kind, receipt.code, receipt.pendingOnly, receipt.scope]),
+    [['step-failed', 4, false, 'enforcement-only']])
+})
+
+// The two failure guards and the optional filter of the CLI answer, each on its own: an unrecognized
+// status lands in verdict.failed without being a `fail` result; an optional failing check is a
+// `fail` result outside verdict.failed; an optional pending check is outside both.
+test('the CLI enforcement answer refuses each failure shape on its own and ignores optional pending checks', () => {
+  const agent = { name: 'review', kind: 'agent', status: 'pending' }
+  const answer = results => enforcementAnswer(4, { results, verdict: aggregateVerdict(results) })
+  assert.deepEqual(answer([agent]), { code: 4, pendingOnly: true, pending: ['agent'] })
+  assert.deepEqual(answer([agent, { name: 'odd', kind: 'fileset', status: 'weird' }]), { code: 4, pendingOnly: false, pending: ['agent'] })
+  assert.deepEqual(answer([agent, { name: 'lint', kind: 'fileset', status: 'fail', optional: true }]), { code: 4, pendingOnly: false, pending: ['agent'] })
+  assert.deepEqual(answer([agent, { name: 'typo', kind: 'lnit', status: 'pending', optional: true }]), { code: 4, pendingOnly: true, pending: ['agent'] })
+  assert.deepEqual(answer([agent, { name: 'typo', kind: 'lnit', status: 'pending' }]), { code: 4, pendingOnly: false, pending: ['agent', 'lnit'] })
+  assert.deepEqual(answer([{ name: 'deep', kind: 'mcp', status: 'pending' }]), { code: 4, pendingOnly: true, pending: ['mcp'] })
 })

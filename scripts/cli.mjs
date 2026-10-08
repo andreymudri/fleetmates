@@ -1333,6 +1333,38 @@ export function completeExitCode(results, verdict) {
   return rejected ? COMPLETE_REJECTED : COMPLETE_CANNOT_VERIFY
 }
 
+// The kinds no runner in this CLI answers to by design: their checks land as `pending` and are
+// decided later by the phase gate from supplied results.
+const DEFERRED_KINDS = new Set(['agent', 'mcp'])
+
+// The driver's structured enforcement answer. `pendingOnly` is true exactly when the verdict did not
+// pass, no check failed (optional or not, and no unrecognized status), and every non-optional
+// pending check is an `agent` or `mcp` check. `pending` lists the kinds of the non-optional pending
+// checks, sorted and unique. Built from the same `results` and `verdict` `complete` computes.
+export function enforcementAnswer(code, observed) {
+  const results = observed?.results ?? [], verdict = observed?.verdict ?? null
+  const pendingChecks = results.filter((r) => r.status === 'pending' && !r.optional)
+  const pending = [...new Set(pendingChecks.map((r) => String(r.kind)))].sort()
+  const pendingOnly = verdict !== null && verdict.verdict !== 'PASS'
+    && verdict.failed.length === 0 && verdict.pending.length > 0
+    && !results.some((r) => r.status === 'fail')
+    && pendingChecks.every((r) => DEFERRED_KINDS.has(r.kind))
+  return { code, pendingOnly, pending }
+}
+
+// Runs `complete --enforcement-only` with its output swallowed and returns `enforcementAnswer` over
+// the verdict that command computed. A refusal before any verdict (no manifest, a run-branch
+// mismatch, an unknown task) has no verdict, so it is never pendingOnly.
+export async function completeEnforcementAnswer({ runId, taskId, planPath, baseBranch, root }) {
+  let observed = null
+  const code = await runCli(
+    ['complete', '--run', runId, '--task', taskId, '--plan', planPath,
+      ...(baseBranch ? ['--base', baseBranch] : []), '--enforcement-only', '--root', root],
+    { out: () => {}, err: () => {}, completeVerdict: (value) => { observed = value } },
+  )
+  return enforcementAnswer(code, observed)
+}
+
 // Preferring `main` when both `main` and `master` exist is the same ref-creation primitive
 // as the tag-shadowing bypass the design closed elsewhere: a teammate creates a branch
 // named `main`, the heuristic silently prefers it, mergeBase(main, run) collapses onto the
@@ -4244,14 +4276,11 @@ export async function runCli(argv, io = { out: console.log }) {
       runId, planPath, baseBranch, constraints, caveman: resolved.caveman, fixRound: fixRoundTasks !== null,
     })
 
-    // Runs the existing `complete --enforcement-only` code path in `root` and returns its exit
-    // code — the same check the phase gate recomputes. Output is swallowed: the driver reads only
-    // the code, and a `3` triggers its one enforcement resume with the fixed refusal.
-    const completeEnforcement = (taskId) => runCli(
-      ['complete', '--run', runId, '--task', taskId, '--plan', planPath,
-        ...(baseBranch ? ['--base', baseBranch] : []), '--enforcement-only', '--root', root],
-      { out: () => {}, err: () => {} },
-    )
+    // Runs the existing `complete --enforcement-only` code path in `root` and returns its structured
+    // answer `{ code, pendingOnly, pending }` (see `completeEnforcementAnswer`). Output is
+    // swallowed: a `3` triggers the driver's one enforcement resume with the fixed refusal, and the
+    // strict driver accepts a `4` only with `pendingOnly`.
+    const completeEnforcement = (taskId) => completeEnforcementAnswer({ runId, taskId, planPath, baseBranch, root })
 
     // Personas are pre-resolved into strings HERE, because the driver interpolates the accessor it
     // is given straight into a template literal WITHOUT awaiting it (driver.mjs's `${personaFor(
@@ -6885,6 +6914,8 @@ export async function runCli(argv, io = { out: console.log }) {
     // inventory anyway, so a teammate's own completion check reports it as skipped.
     const results = await runPhaseChecks(allChecks, { ...taskCtx, early: true }, enforcementOnly)
     const verdict = aggregateVerdict(results)
+    // The verdict, handed to an in-process caller that asked for it (`completeEnforcementAnswer`).
+    if (typeof io.completeVerdict === 'function') io.completeVerdict({ results, verdict })
 
     // A check that did not run is reported by name and by reason, every time and whatever the
     // verdict — `--enforcement-only` here, and the merge-conflict skip `runChecks` produces on

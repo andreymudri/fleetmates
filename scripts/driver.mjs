@@ -357,6 +357,16 @@ export async function releaseLock(lockPath) {
   }
 }
 
+// `completeEnforcement` answers `{ code, pendingOnly, pending }` (cli.mjs `enforcementAnswer`); a
+// bare exit code is read as that code with nothing pending. `pendingOnly` counts only when it is
+// literally `true` and `pending` names only agent or mcp kinds.
+function enforcementAnswer(raw) {
+  if (typeof raw === 'number') return { code: raw, pendingOnly: false, pending: [] }
+  const code = raw?.code
+  const pending = Array.isArray(raw?.pending) && raw.pending.every(kind => ['agent', 'mcp'].includes(kind)) ? [...raw.pending] : null
+  return { code, pendingOnly: raw?.pendingOnly === true && pending !== null && pending.length > 0, pending: pending ?? [] }
+}
+
 // Runs one phase's implementer tasks on a harness, at most `maxParallel` at once. Returns
 // `{ results, orphaned }` in the shape the Workflow path returns: `results` is `{ taskId, ... }`
 // entries (the teammate's own result fields), `orphaned` is the ids of tasks that produced no
@@ -629,20 +639,26 @@ export async function dispatchPhase({
       const verificationAttempt = randomUUID()
       await event('verification', verificationAttempt, 'step-started', [collectedRef], { [runRef]: runTip, [ref]: tip })
       checkDeadline()
-      const code = await bounded(() => completeEnforcement(taskId))
+      const answer = enforcementAnswer(await bounded(() => completeEnforcement(taskId)))
+      const { code } = answer
       if (await observedHost() !== tip || await checkedGit(guardedGit, ['rev-parse', runRef], runRepo) !== runTip) throw new Error('Refs changed during mandatory verification')
-      const receipt = await retain('driver-verification', { version: 1, identity, branch, tip, code, scope: 'enforcement-only', verifiedComplete: false })
-      await event('verification', verificationAttempt, code === 0 ? 'step-completed' : 'step-failed', [receipt], { [runRef]: runTip, [ref]: tip })
-      return code
+      // Accepted: a pass, or exit 4 whose only non-passing checks are pending agent or mcp checks
+      // that no runner here can execute. Any other code, or a 4 beside a failed check, is refused.
+      const pendingOnly = code === 4 && answer.pendingOnly
+      const accepted = code === 0 || pendingOnly
+      const scope = pendingOnly ? `enforcement-only-pending-${answer.pending.join('-') || 'unnamed'}` : 'enforcement-only'
+      const receipt = await retain('driver-verification', { version: 1, identity, branch, tip, code, pendingOnly, scope, verifiedComplete: false })
+      await event('verification', verificationAttempt, accepted ? 'step-completed' : 'step-failed', [receipt], { [runRef]: runTip, [ref]: tip })
+      return { code, accepted }
     }
 
     if (!latest || fixOverCollected) await invoke(undefined, fixOverCollected)
-    let code = await collectAndVerify()
-    if (code === 3) {
+    let verified = await collectAndVerify()
+    if (verified.code === 3) {
       await invoke(fixedRefusal(taskId, runId))
-      code = await collectAndVerify()
+      verified = await collectAndVerify()
     }
-    if (code !== 0) throw new Error('Fresh mandatory enforcement did not pass')
+    if (!verified.accepted) throw new Error('Fresh mandatory enforcement did not pass')
     record = { ...record, state: result.status, result, exitReason: 'exit', usage,
       verifiedComplete: false, evidence: 'strict-execution-enforcement-only' }
     await persist()
@@ -787,7 +803,7 @@ export async function dispatchPhase({
     await adapter.collect(git, { runRepo, sandbox, branch })
     const reset = await refuseResetTip(result)
     if (reset) return reset
-    let code = await completeEnforcement(taskId)
+    let code = enforcementAnswer(await completeEnforcement(taskId)).code
     await observe('gate-result', code === 0 ? 'pass' : code === 3 ? 'fail' : 'unknown')
 
     if (code === 3) {
@@ -808,7 +824,7 @@ export async function dispatchPhase({
       await adapter.collect(git, { runRepo, sandbox, branch })
       const resetAgain = await refuseResetTip(result)
       if (resetAgain) return resetAgain
-      code = await completeEnforcement(taskId)
+      code = enforcementAnswer(await completeEnforcement(taskId)).code
       await observe('gate-result', code === 0 ? 'pass' : code === 3 ? 'fail' : 'unknown')
       if (code === 3) {
         const failed = {
