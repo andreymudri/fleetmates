@@ -207,11 +207,13 @@ written; a task that consumes one relies on nothing beyond it.
 **Files:**
 - Modify: `README.md`
 - Modify: `docs/specs/2026-10-06-execution-recovery-validation.md`
+- Modify: `skills/phase-gate/SKILL.md`
 
 **Depends:** T2, T3, T5
 
 **Acceptance:**
 - README documents `gate` exit 5, `dispatch --execution`, `dispatch --fix-round`, `workflow-accept`, `workflow-prune`, the `agent-dispatch` resolution, repair rounds and their bound, the corrected `workflow-status` exit rule (0 only with no unresolved attempts, no unknown effects and lifecycle `running`), and `dispatch-integrator --isolated-legacy` with its trust limits.
+- `skills/phase-gate/SKILL.md` lists gate exit 5 (derive or run-state failure only) beside 0 to 3, with no other change to that skill.
 - The validation doc's findings list marks each item this run fixed as fixed with the commit, keeps every unfixed item listed, and states that no new real-model trial was run.
 - Every sentence about what code does is backed by a command run at the task's tip; nothing unmet is reported as met.
 
