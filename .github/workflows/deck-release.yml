@@ -118,7 +118,9 @@ jobs:
           '
       - name: Pack the tarball for the clean-install job
         working-directory: hub
-        run: npm pack --pack-destination /tmp/deck-pack
+        run: |
+          mkdir -p /tmp/deck-pack
+          npm pack --pack-destination /tmp/deck-pack
       - uses: actions/upload-artifact@v4
         with:
           name: deck-tarball

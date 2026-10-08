@@ -598,8 +598,9 @@ if (import.meta.main) {
     const first = await page.textContent('#palette-opt-0 .palette-row-title')
     assert.equal(first, 'rustot · cargo test --release combat::', 'the first option is the oldest request, rustot, read as its command')
     await page.fill('.palette-input', 'rus')
-    // M2 adds the Actions group (palette.md 4.1) after Needs you and Sessions.
-    assert.deepEqual(await page.$$eval('.palette-group-title', rows => rows.map(row => row.textContent)), ['Needs you', 'Sessions', 'Actions'])
+    // M2 adds the Actions group (palette.md 4.1) after Needs you and Sessions; M5 adds Memory last,
+    // shown once there is a query (palette.md: no Memory group on an empty query).
+    assert.deepEqual(await page.$$eval('.palette-group-title', rows => rows.map(row => row.textContent)), ['Needs you', 'Sessions', 'Actions', 'Memory'])
     const sessions = await page.$$eval('.palette-group--sessions .palette-row--session', rows => rows.map(row => [row.querySelector('.palette-row-title').textContent, row.querySelector('kbd')?.textContent ?? null]))
     const order = fixture('busy').expect.grid.concat(fixture('busy').expect.quiet)
     assert.deepEqual(sessions, [['rustot · combat-tick', `Alt ${order.indexOf('rustot') + 1}`], ['rustot-client · ui/inventory', `Alt ${order.indexOf('rustot-client') + 1}`]])
@@ -801,9 +802,10 @@ if (import.meta.main) {
       .map(row => row.getAttribute('role') ?? row.className))
     assert.ok(buttons.every(role => role === 'tab'), `only tabs are buttons: ${buttons.join(', ')}`)
     assert.equal(await page.textContent('.focus-request .request-terminal'), 'Answer in your terminal')
+    // Tabs are Changes, Facts and (M5) Memory: ArrowRight from Facts moves to Memory.
     await page.focus('#focus-tab-facts')
     await page.keyboard.press('ArrowRight')
-    assert.equal(await page.getAttribute('.focus-tab[aria-selected="true"]', 'id'), 'focus-tab-changes')
+    assert.equal(await page.getAttribute('.focus-tab[aria-selected="true"]', 'id'), 'focus-tab-memory')
   })
 
   // xterm.js adds the class `focus` to its `.xterm` element while the terminal has focus; a screen
