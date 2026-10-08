@@ -575,6 +575,43 @@ test('under the driver journal the repair rounds stop at the driver attempt limi
   assert.equal(dispatches, 10, 'one implement and nine repair dispatches share the driver attempt cap of 10')
 })
 
+test('without a driver journal the driver attempt limit does not cap the repair rounds', async t => {
+  const fixture = await project(t, { fixRounds: 10 })
+  fixture.env.mode = 'gate-fails'
+  const report = await fixture.run({ request: { ...fixture.request, sandboxMode: 'files', limits: { ...fixture.request.limits, maxRepairRounds: 10, maxAttempts: 200 } } })
+  assert.match(report.driverJournal, /^unavailable/)
+  assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['code', 'gate-1.r10']])
+  assert.doesNotMatch(report.blockers[0].reason, /driver round limit/)
+  assert.deepEqual(await recorded(fixture), { T1: 10 })
+  const dispatches = commands(await fixture.invocations()).filter(command => command === 'dispatch').length
+  assert.equal(dispatches, 11, 'one implement and ten repair dispatches')
+})
+
+test('a phase whose only prior dispatch is its implement step under other inputs stops before the first round is recorded', async t => {
+  const fixture = await project(t, { fixRounds: 3 })
+  fixture.env.mode = 'gate-infra-once'
+  const first = await fixture.run()
+  assert.deepEqual(first.blockers.map(b => [b.category, b.step]), [['infrastructure', 'gate-1']])
+  await writeFile(fixture.cliPath, (await readFile(fixture.cliPath, 'utf8')) + '\n// upgraded installed CLI\n')
+  const seen = (await fixture.invocations()).length
+  fixture.env.mode = 'gate-fails'
+  const resumed = await fixture.resume()
+  assert.ok(!commands(await fixture.invocations()).slice(seen).some(c => c === 'record-fix-round' || c === 'dispatch'), 'no record-fix-round and no dispatch')
+  assert.deepEqual(resumed.blockers.map(b => [b.category, b.step]), [['changed-input', 'record-1.r1.T1']])
+  assert.match(resumed.blockers[0].reason, /dispatched to the strict driver under other inputs/)
+})
+
+test('a prior dispatch resolved not-started under other inputs is not drift: resume redispatches it', async t => {
+  const fixture = await project(t)
+  const effectId = await killDuringDispatch(fixture, 'hang-dispatch')
+  await resolveExecutionEffect({ common: fixture.common, runId: 'r1', effectId, resolution: 'not-started', reason: 'operator-saw-no-session' })
+  await writeFile(fixture.cliPath, (await readFile(fixture.cliPath, 'utf8')) + '\n// upgraded installed CLI\n')
+  const resumed = await fixture.resume()
+  assert.deepEqual(resumed.blockers, [])
+  assert.equal(resumed.steps.find(step => step.id === 'implement-1')?.status, 'completed')
+  assert.equal(commands(await fixture.invocations()).filter(c => c === 'dispatch').length, 2, 'the interrupted dispatch and its redispatch')
+})
+
 test('budgets stop before spawning', async t => {
   const attempts = await project(t)
   const limited = await attempts.run({ request: { ...attempts.request, limits: { ...attempts.request.limits, maxAttempts: 2 } } })
