@@ -5,6 +5,20 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
+## v0.5.1
+
+Release fixes for 0.5.0.
+
+- Tested Claude Code: 2.1.285 (unchanged)
+- deckd changed: no. The PTY protocol is unchanged.
+- Database migration: no.
+- Restart the web server to pick it up.
+- Home cards show the "Next: ... Step X of Y done" line on one clipped line, with the full sentence in
+  its tooltip. In 0.5.0 the line wrapped and added margins to every card, so a busy Home at
+  1920 x 1080 scrolled. Focus and the prompt bar keep the full paragraph.
+- The release workflow creates its pack directory, and its end-to-end specs expect the M5 Memory
+  group in the palette and the Memory tab in Focus.
+
 ## v0.5.0
 
 M5, Memory. The first version published to npm. It includes everything listed under 0.1.0 to
