@@ -904,3 +904,61 @@ test('an unlocked read accepts a record whose second link is a young appender te
   await link(record, path.join(common, 'outside-link'))
   await assert.rejects(readExecutionEvents(common, 'link'), /^Error: Unsafe execution record$/)
 })
+async function linkedJournal(t, runId) {
+  const { executionDirectory } = await import('../scripts/execution-journal.mjs')
+  const { readdir } = await import('node:fs/promises')
+  const common = await realpath(await mkdtemp(path.join(tmpdir(), 'journal-' + runId + '-')))
+  t.after(() => rm(common, { recursive: true, force: true }))
+  await appendExecutionEvent(common, event('start', 'step-started', 1, { runId }))
+  const directory = await executionDirectory(common, runId), [name] = await readdir(directory)
+  return { common, directory, record: path.join(directory, name), name }
+}
+const tenYearsAhead = () => (Date.now() + 10 * 365 * 86400000) / 1000
+test('an unlocked read refuses a future-dated temporary', async t => {
+  const { utimes } = await import('node:fs/promises')
+  const { common } = await linkedJournal(t, 'future')
+  const future = tenYearsAhead()
+  const alone = await plantJournalEntry(common, 'future', appenderTemporary())
+  await utimes(alone, future, future)
+  await assert.rejects(readExecutionEvents(common, 'future'), /^Error: Incomplete execution journal storage$/)
+})
+test('an unlocked read refuses a record linked to a future-dated temporary', async t => {
+  const { link, unlink, utimes } = await import('node:fs/promises')
+  const { common, directory, record } = await linkedJournal(t, 'future')
+  const future = tenYearsAhead()
+  const linked = path.join(directory, appenderTemporary())
+  await link(record, linked)
+  await utimes(linked, future, future)
+  await assert.rejects(readExecutionEvents(common, 'future'), /^Error: (Unsafe execution record|Incomplete execution journal storage)$/)
+  await unlink(linked)
+  assert.deepEqual((await readExecutionEvents(common, 'future')).map(e => e.id), ['start'])
+})
+test('an unrelated young temporary does not excuse a record whose second link is elsewhere', async t => {
+  const { link } = await import('node:fs/promises')
+  const { common, record } = await linkedJournal(t, 'unrelated')
+  await plantJournalEntry(common, 'unrelated', appenderTemporary())
+  await link(record, path.join(common, 'outside-link'))
+  await assert.rejects(readExecutionEvents(common, 'unrelated'), /^Error: Unsafe execution record$/)
+})
+test('a locked append refuses a record whose second link is a young temporary at the record itself', async t => {
+  const { link, unlink, opendir, readFile, writeFile } = await import('node:fs/promises')
+  const { common, directory, record, name } = await linkedJournal(t, 'locked')
+  const text = await readFile(record)
+  // Directory order (opendir, unsorted) decides which entry the append meets first. Rebuild the record the way an
+  // appender does (temporary first, then the record linked to it) until the listing returns the
+  // record before the temporary, so the refusal must come from the record's second link, not the name.
+  let temporary = null
+  for (let i = 0; i < 64 && !temporary; i++) {
+    const candidate = appenderTemporary()
+    await unlink(record)
+    await writeFile(path.join(directory, candidate), text, { mode: 0o600 })
+    await link(path.join(directory, candidate), record)
+    const order = []
+    for await (const entry of await opendir(directory)) order.push(entry.name)
+    if (order.indexOf(name) < order.indexOf(candidate)) temporary = candidate
+    else await unlink(path.join(directory, candidate))
+  }
+  assert.ok(temporary, 'no temporary name listed after the record')
+  assert.deepEqual((await readExecutionEvents(common, 'locked')).map(e => e.id), ['start'])
+  await assert.rejects(appendExecutionEvent(common, event('next', 'step-started', 2, { runId: 'locked', step: 'next' })), /^Error: Unsafe execution record$/)
+})

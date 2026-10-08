@@ -173,6 +173,9 @@ async function privateExecutionDirectories(directory, allowMissing = false) {
 }
 // The exact name `appendExecutionEvent` gives its temporary: `.` + randomUUID() + `.tmp`.
 const TEMPORARY = /^\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/
+// How far in the future a temporary's mtime may lie and still count as young. Without a lower
+// bound a far-future mtime would be skipped by every unlocked read forever.
+const TEMPORARY_CLOCK_SKEW_MS = 5000
 // A temporary another appender may still own: the exact name shape, a regular file, and no older
 // than the threshold past which a lock holder reconciles it as stale. 'gone' means it was unlinked.
 async function inFlightTemporary(directory, name) {
@@ -180,7 +183,8 @@ async function inFlightTemporary(directory, name) {
   let info
   try { info = await lstat(path.join(directory, name), { bigint: true }) }
   catch (error) { if (error.code === 'ENOENT') return 'gone'; throw error }
-  return info.isFile() && Date.now() - Number(info.mtimeMs) <= STALE_TEMPORARY_MS ? info : null
+  const age = Date.now() - Number(info.mtimeMs)
+  return info.isFile() && age >= -TEMPORARY_CLOCK_SKEW_MS && age <= STALE_TEMPORARY_MS ? info : null
 }
 // Unlocked readers (the driver) race live appenders. A young temporary is never a record, so it is
 // skipped; a record whose second link is such a temporary is complete, because the appender synced
