@@ -33,6 +33,12 @@ Trial 4 below was added by release-blockers task T6 on source `44558820`
 Codex CLI 0.160.1. Its receipts are in `/tmp/hx/b6/receipts` (mode 0700). It
 is the only real-model run in that task.
 
+The release-fixes run (tasks T1 to T3, merged on `run/release-fixes` at
+`f47259bc`) fixed open items 13 and 14 and pinned the integration identity
+rule behind the trial 4 observation. Release-fixes task T4 recorded them here
+from the tests named below, run at `f47259bc`. No new real-model trial was
+run for these fixes.
+
 ## Clean projects and contracts
 
 Each project was a fresh Git repository created by a setup script, with no
@@ -395,6 +401,16 @@ commit `955a34e7` carries the host user's configured Git identity for
 author and committer, although the placeholder was set in the environment of every
 command and the repository has no local identity. Why the merge does not
 take the environment identity was not investigated.
+Status: by design, pinned in release-fixes T2 (`f741c0c1`, merged
+`0a6fd4e5`). Integration authors as the repository's configured user, local
+then global, and never as an inherited `GIT_AUTHOR_*` or `GIT_COMMITTER_*`:
+an inherited environment identity is untrusted. A project that wants a
+placeholder identity sets a repository-local `user.name` and `user.email`.
+Pinned in `tests/reviewed-integration.test.mjs` by "integration falls back
+to the host gitconfig identity, never the inherited environment identity"
+(added by T2) and the existing "integration uses configured author even with
+inherited Git author overrides" (line 565). Both passed at `f47259bc` (2
+pass, 0 fail). No real-model trial was rerun.
 
 After the trial, `pgrep -af codex` listed only the Codex processes that
 existed before it, and `pgrep -af "node -e setInterval"` matched nothing.
@@ -577,6 +593,10 @@ Release-blockers T6 checked item 12 at `44558820` and marked it fixed; it
 added items 13 and 14, whose file and line references were read at that
 tip. It left every other item's status as T4 recorded it.
 
+The release-fixes run marked items 13 and 14 fixed, each status citing its
+task commit and tests that passed at `f47259bc`. It changed no other item's
+status and ran no new real-model trial.
+
 1. The controller writes `maxAttempts: DRIVER_ATTEMPTS` (10) into every
    dispatch execution contract (`scripts/workflow-controller.mjs:508` and
    `:513`), not min(10, the request's `maxAttempts`). This is a design call
@@ -726,6 +746,21 @@ tip. It left every other item's status as T4 recorded it.
     it accepts the task on the latest verification event. A reviewer
     reproduced this with a fixture; no real run has hit it, and T6 did not
     rerun the fixture.
+    Status: fixed in release-fixes T3 (`ec4307b8`, merged `f47259bc`). A
+    `step-failed` attempt is `superseded` once a strictly later attempt of
+    the same executionId, task and step ended `step-completed`, unless one
+    of its external effects failed. Pinned in
+    `tests/execution-recovery.test.mjs` by "a failed attempt followed by a
+    completed attempt of the same execution, task and step is superseded",
+    the six "a failed attempt with ... stays failed-observation and
+    unresolved" cases (no later attempt, a later attempt that only started,
+    a later attempt that failed again, and a later completed attempt under
+    another executionId, of another task, or of another step), "an earlier
+    completed attempt does not supersede a later failed attempt", "a failed
+    attempt whose external effect failed is not superseded by a completed
+    retry" and "workflow-status reconciles a run whose driver verification
+    failed and then completed". Those tests passed at `f47259bc` (10 pass, 0
+    fail). No real-model trial was rerun.
 14. New in release-blockers T6, reasoned from code only. The strict driver
     reads the execution journal without the storage lock
     (`readExecutionEvents` at `scripts/driver.mjs:439` and `:616`; only the
@@ -738,6 +773,24 @@ tip. It left every other item's status as T4 recorded it.
     maxParallel 2 under one execution contract both complete without a busy
     storage error" (`tests/driver-recovery.test.mjs:613`). It was not
     reproduced.
+    Status: fixed in release-fixes T1 (`5a2c24b7`, `2713ea39`, `1a1e7b9d`,
+    merged `6b6b476a`). An unlocked read ignores a temporary of the
+    appender's exact name shape (`.` + UUID + `.tmp`) whose age lies between
+    a small clock-skew allowance below zero (`TEMPORARY_CLOCK_SKEW_MS`) and
+    the stale threshold, and accepts a record whose second link is such a
+    temporary. The locked path stays strict. Pinned in
+    `tests/execution-journal.test.mjs` by "concurrent appenders in other
+    processes never make an unlocked read fail on their in-flight
+    temporary", "an unlocked read ignores only a young temporary of the
+    exact appender name shape", "an unlocked read accepts a record whose
+    second link is a young appender temporary and no other second link",
+    "an unlocked read refuses a future-dated temporary", "an unlocked read
+    refuses a record linked to a future-dated temporary", "an unrelated
+    young temporary does not excuse a record whose second link is
+    elsewhere" and "a locked append refuses a record whose second link is a
+    young temporary at the record itself". Those tests passed at `f47259bc`
+    (7 pass, 0 fail), and the `driver-recovery` test above passed in 5 of 5
+    runs there. No real-model trial was rerun.
 
 ## CLI contracts, defaults and trust limits
 
