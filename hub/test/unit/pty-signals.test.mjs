@@ -273,6 +273,14 @@ test('on darwin a spawn helper that cannot be prepared fails the spawn with spaw
   assert.deepEqual(order, ['prepare'])
 })
 
+test('on darwin a spawn_failed from the spawn helper says to reinstall unless the error already names its fix', () => {
+  const chmod = 'node-pty spawn helper /x/spawn-helper is not executable and this user cannot change it (EPERM); run chmod +x /x/spawn-helper as its owner'
+  for (const [message, reinstall] of /** @type {[string, boolean][]} */ ([[chmod, false], ['node-pty spawn helper must be a regular file', true]])) {
+    assert.throws(() => spawnWith(['claude'], { platform: 'darwin', ptySpawn: fakePtySpawn([]), prepare: recordingPrepare([], new Error(message)) }),
+      (/** @type {any} */ err) => err.code === 'spawn_failed' && err.message.includes(message) && /reinstall/.test(err.message) === reinstall, message)
+  }
+})
+
 test('off darwin PtyHost never prepares the spawn helper', () => {
   for (const [platform, argv0] of [['linux', 'claude'], ['win32', CLAUDE_EXE]]) {
     /** @type {any[]} */

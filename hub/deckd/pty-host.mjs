@@ -229,7 +229,11 @@ export class PtyHost {
         prepare()
       } catch (err) {
         this.screen.dispose()
-        throw new DeckdError('spawn_failed', `cannot make node-pty's spawn helper executable, reinstall the deck: ${/** @type {Error} */ (err).message}`)
+        // prepareNativeSync names the fix when it knows one (reinstall for a missing helper, a chmod
+        // by the owner for one this user cannot change); anything else gets the reinstall advice.
+        const message = /** @type {Error} */ (err).message
+        const fix = /reinstall|chmod \+x/.test(message) ? '' : '; reinstall the deck'
+        throw new DeckdError('spawn_failed', `node-pty's spawn helper is not ready, so no PTY can spawn: ${message}${fix}`)
       }
       prepared.add(prepare)
     }
