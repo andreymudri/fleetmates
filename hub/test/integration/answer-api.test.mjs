@@ -69,9 +69,11 @@ function entries(log) {
 // On win32 the console inside ConPTY answers the ESC[c queries in the replayed frames with DA1 replies written to the
 // child's stdin (diagnosed on the Windows VM); those are dropped there, and an input that held only them goes too.
 const DA1_REPLY = /\x1b\[\?[0-9;]*c/g
+/** `text` without DA1 replies on win32; unchanged elsewhere. */
+const typedText = text => process.platform === 'win32' ? text.replace(DA1_REPLY, '') : text
 const inputs = log => {
   const typed = entries(log).filter(entry => typeof entry.input === 'string').map(entry => entry.input)
-  return process.platform === 'win32' ? typed.map(input => input.replace(DA1_REPLY, '')).filter(input => input !== '') : typed
+  return process.platform === 'win32' ? typed.map(typedText).filter(input => input !== '') : typed
 }
 /** Every input the fake logged, as it arrived (console replies kept), for failure messages. */
 const rawInputs = log => JSON.stringify(entries(log).filter(entry => typeof entry.input === 'string').map(entry => entry.input))
@@ -403,7 +405,8 @@ test('the follow-up after a deck deny reaches the fake over HTTP as one sanitize
   }, 'the follow-up to be accepted')
   assert.equal(sent.status, 202)
   await until(() => entries(s.log).some(entry => entry.expectInput), () => `the fake to take the paste; it read ${rawInputs(s.log)}`)
-  assert.equal(entries(s.log).find(entry => entry.expectInput).expectInput, '\x1b[200~use pnpm[A instead\x1b[201~\r')
+  // The fake logs its whole match, which on win32 can start with the console's DA1 replies (see scriptFor).
+  assert.equal(typedText(entries(s.log).find(entry => entry.expectInput).expectInput), '\x1b[200~use pnpm[A instead\x1b[201~\r')
 })
 
 safeTest('answer-batch refuses any choice but allow and answers nothing; with allow it returns one result per id', async t => {
