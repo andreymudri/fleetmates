@@ -6,6 +6,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 
 const token = 'a'.repeat(43)
@@ -20,13 +21,16 @@ function home(t, { runtime = true } = {}) {
     env.XDG_RUNTIME_DIR = path.join(dir, 'r')
     fs.mkdirSync(env.XDG_RUNTIME_DIR, { mode: 0o700 })
   }
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // Every deck path comes from setupPaths, the function the server reads them from (XDG on linux and darwin,
+  // %LOCALAPPDATA% and %APPDATA% under HOME on win32).
+  const paths = setupPaths(env)
+  const state = paths.state
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
+  fs.writeFileSync(paths.token, token, { mode: 0o600 })
   const staticDir = path.join(dir, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  return { dir, env, state, staticDir }
+  return { dir, env, paths, state, staticDir }
 }
 
 async function harness(t, options = {}, place = home(t)) {
@@ -34,7 +38,7 @@ async function harness(t, options = {}, place = home(t)) {
     connectDeckd: async () => { throw Error('fake offline') }, reconnectMs: 60_000,
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }), ...options })
   t.after(async () => { await deck.close()
-    fs.rmSync(place.dir, { recursive: true, force: true }) })
+    fs.rmSync(place.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) })
   const request = async (route, init = {}) => {
     const origin = `http://127.0.0.1:${deck.address().port}`
     const headers = { Authorization: `Bearer ${token}`, Origin: origin, ...(init.body ? { 'Content-Type': 'application/json' } : {}) }
@@ -224,8 +228,8 @@ test('Start runs the deckd unit, then probes and publishes ok after the checking
 
 test('a path containing NUL is a 400, not a 500: the configured scan root and a session cwd', async t => {
   const place = home(t)
-  fs.mkdirSync(path.join(place.dir, '.config/fleetmates/deck'), { recursive: true })
-  fs.writeFileSync(path.join(place.dir, '.config/fleetmates/deck/config.json'), JSON.stringify({ scanRoot: path.join(place.dir, 'a\0b') }))
+  fs.mkdirSync(place.paths.config, { recursive: true })
+  fs.writeFileSync(path.join(place.paths.config, 'config.json'), JSON.stringify({ scanRoot: path.join(place.dir, 'a\0b') }))
   const h = await harness(t, {}, place)
   const rescan = await h.request('/api/repos/rescan', { method: 'POST' })
   assert.equal(rescan.status, 400)

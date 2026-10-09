@@ -145,7 +145,7 @@ export async function createDeckServer(options = {}) {
     reconnectMs = 1000, random = Math.random, tokenPollMs = 250, runCommand: command = runCommand,
     retentionTimer = defaultRetentionTimer, platform = process.platform, uid = process.getuid?.() ?? null } = options
   if (host !== '127.0.0.1') throw Error('deck server requires IPv4 loopback 127.0.0.1')
-  const paths = options.paths ?? setupPaths(env)
+  const paths = options.paths ?? setupPaths(env, { platform })
   const owner = { platform, uid }
   privateDir(paths.state, owner)
   const token = readToken(paths.token, owner)
