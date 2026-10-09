@@ -8,6 +8,7 @@ import { Ring } from './ring.mjs'
 import { ScreenModel } from './screen-model.mjs'
 import { dropSessionVars } from './login-env.mjs'
 import { isClaudeProgram, killTree, resolveCommand, commandSpawn, windowsChildEnv, createInputModeFilter } from '../platform/index.mjs'
+import { prepareNativeSync } from '../bin/prepare-native.mjs'
 
 const require = createRequire(import.meta.url)
 /** @type {typeof import('node-pty')} */
@@ -79,9 +80,17 @@ export function signalProcessGroup (pid, signal, kill = process.kill) {
  * and the win32 check of the file to run; `readFile` serves commandSpawn;
  * `kill` and `spawnSync` serve killTree; `hostEnv` is the environment the
  * Windows base variables are taken from (this process's); `nodePath` is the
- * node an npm cmd-shim is run with (this process's).
- * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function, hostEnv?: Record<string, string | undefined>, nodePath?: string }} PtyDeps
+ * node an npm cmd-shim is run with (this process's); `prepare` makes node-pty's
+ * macOS spawn helper executable (prepareNativeSync).
+ * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function, hostEnv?: Record<string, string | undefined>, nodePath?: string, prepare?: () => unknown }} PtyDeps
  */
+
+/**
+ * The `prepare` functions that have succeeded in this process. For the default, prepareNativeSync,
+ * that makes it once per process; a test's own `prepare` gets its own once.
+ * @type {WeakSet<Function>}
+ */
+const prepared = new WeakSet()
 
 const AGENT_SHAPE = "node-pty's agent is not the 1.1.0 shape"
 
@@ -151,7 +160,7 @@ export class PtyHost {
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
    * @param {PtyDeps} [deps]
    */
-  constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync, hostEnv = process.env, nodePath } = {}) {
+  constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync, hostEnv = process.env, nodePath, prepare = prepareNativeSync } = {}) {
     this.platform = platform
     /** Set once node-pty's kill() has closed the win32 pseudoconsole. */
     this.pseudoconsoleClosed = false
@@ -212,6 +221,22 @@ export class PtyHost {
       const e = /** @type {Error & { code?: string }} */ (err)
       throw new DeckdError(e.code === 'unsafe_cmd_arg' ? 'bad_request' : 'spawn_failed', e.message)
     }
+    // An npm that skips install scripts (npm 11.19.0 did for `npm install -g <tarball>`) never ran
+    // the postinstall that makes node-pty's macOS spawn helper executable, and without it every
+    // spawn fails. So on darwin the first spawn of the process does it first.
+    if (platform === 'darwin' && !prepared.has(prepare)) {
+      try {
+        prepare()
+      } catch (err) {
+        this.screen.dispose()
+        // prepareNativeSync names the fix when it knows one (reinstall for a missing helper, a chmod
+        // by the owner for one this user cannot change); anything else gets the reinstall advice.
+        const message = /** @type {Error} */ (err).message
+        const fix = /reinstall|chmod \+x/.test(message) ? '' : '; reinstall the deck'
+        throw new DeckdError('spawn_failed', `node-pty's spawn helper is not ready, so no PTY can spawn: ${message}${fix}`)
+      }
+      prepared.add(prepare)
+    }
     try {
       this.proc = ptySpawn(cmd.file, cmd.options.windowsVerbatimArguments ? cmd.args.join(' ') : cmd.args, {
         name: 'xterm-256color',
@@ -228,6 +253,11 @@ export class PtyHost {
       throw new DeckdError('spawn_failed', /** @type {Error} */ (err).message)
     }
     this.pid = this.proc.pid
+    /**
+     * Why the PTY was ended after a win32 stream error, or null. @type {string | null}
+     */
+    this.inputFailed = null
+    if (platform === 'win32') this.#watchStreamErrors()
     const filter = createInputModeFilter({ platform })
     this.proc.onData((/** @type {Buffer | string} */ d) => {
       let buf = typeof d === 'string' ? Buffer.from(d, 'utf8') : d
@@ -248,6 +278,41 @@ export class PtyHost {
       this.exited = { code: typeof exitCode === 'number' ? exitCode : null, signal: signalName(signal), at: Date.now() }
       hooks.onExit(this, this.exited)
     })
+  }
+
+  /**
+   * win32, node-pty 1.1.0: its agent writes input through `_agent._inSocket`, a net.Socket with no
+   * 'error' listener, so a `write EAGAIN` under a burst of input (reported once from the Windows VM
+   * run of deckd-link.test.mjs) is an uncaughtException that would end deckd and every session. And the terminal's own
+   * 'error' (its output socket) rethrows anything but EIO unless someone else listens.
+   *
+   * Both get a listener here. A net.Socket destroys itself on a write error, and later writes to it
+   * fail with no error event (shown on Linux with a pipe whose reader closed it), so the bytes of
+   * that write and every later keystroke would be lost without a word. The PTY cannot be kept
+   * writable, so it is ended as a crash: logged with the ptyId, the reason kept in `inputFailed`,
+   * then killed like kill() does. EIO on the terminal is, per node-pty's own comment, the child
+   * going away, which node-pty already handles, so it is left to it. A process without these node-pty internals gets no listener.
+   */
+  #watchStreamErrors () {
+    const inSocket = this.proc._agent?._inSocket
+    if (typeof inSocket?.on === 'function') inSocket.on('error', (/** @type {Error} */ err) => this.#endOnStreamError('input', err))
+    if (typeof this.proc.on === 'function') {
+      this.proc.on('error', (/** @type {NodeJS.ErrnoException} */ err) => {
+        if (String(err?.code ?? '').includes('EIO')) return
+        this.#endOnStreamError('terminal', err)
+      })
+    }
+  }
+
+  /**
+   * @param {string} stream
+   * @param {Error} err
+   */
+  #endOnStreamError (stream, err) {
+    if (this.inputFailed !== null || this.exited) return
+    this.inputFailed = `${stream} stream error: ${err?.message ?? String(err)}`
+    console.error(`deckd: ${this.ptyId} ended, its ${this.inputFailed} (the failed write and any input after it are lost)`)
+    this.kill()
   }
 
   /**

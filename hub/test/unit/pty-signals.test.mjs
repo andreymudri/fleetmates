@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { signalProcessGroup, PtyHost } from '../../deckd/pty-host.mjs'
 
 test('PTY signals prefer the group, fall back to the owned PID on EPERM, and retain other errors', () => {
@@ -233,4 +234,173 @@ test('on linux kill signals the process group through the injected kill and neve
     host.dispose()
   }
   assert.deepEqual(ptyKills, [])
+})
+
+/**
+ * A recording `prepare` dep: pushes `'prepare'` onto `order`, then throws `error` if given.
+ * @param {any[]} order
+ * @param {Error} [error]
+ */
+function recordingPrepare (order, error) {
+  return () => {
+    order.push('prepare')
+    if (error) throw error
+    return 1
+  }
+}
+
+/** A ptySpawn that pushes `'ptySpawn'` onto `order` before returning a fake process. @param {any[]} order */
+function orderedPtySpawn (order) {
+  const spawn = fakePtySpawn([])
+  return (/** @type {[string, any, any]} */ ...a) => { order.push('ptySpawn'); return spawn(...a) }
+}
+
+test('on darwin PtyHost makes the spawn helper executable before the first node-pty spawn, once across hosts', () => {
+  /** @type {any[]} */
+  const order = []
+  const deps = { platform: 'darwin', ptySpawn: orderedPtySpawn(order), prepare: recordingPrepare(order) }
+  spawnWith(['claude'], deps).dispose()
+  spawnWith(['claude'], deps).dispose()
+  assert.deepEqual(order, ['prepare', 'ptySpawn', 'ptySpawn'])
+})
+
+test('on darwin a spawn helper that cannot be prepared fails the spawn with spawn_failed and node-pty is not called', () => {
+  /** @type {any[]} */
+  const order = []
+  const prepare = recordingPrepare(order, new Error('node-pty macOS spawn helper is missing; reinstall dependencies'))
+  assert.throws(() => spawnWith(['claude'], { platform: 'darwin', ptySpawn: orderedPtySpawn(order), prepare }),
+    (/** @type {any} */ err) => err.code === 'spawn_failed' && /reinstall/.test(err.message) && /spawn helper is missing/.test(err.message))
+  assert.deepEqual(order, ['prepare'])
+})
+
+test('on darwin a spawn_failed from the spawn helper says to reinstall unless the error already names its fix', () => {
+  const chmod = 'node-pty spawn helper /x/spawn-helper is not executable and this user cannot change it (EPERM); run chmod +x /x/spawn-helper as its owner'
+  for (const [message, reinstall] of /** @type {[string, boolean][]} */ ([[chmod, false], ['node-pty spawn helper must be a regular file', true]])) {
+    assert.throws(() => spawnWith(['claude'], { platform: 'darwin', ptySpawn: fakePtySpawn([]), prepare: recordingPrepare([], new Error(message)) }),
+      (/** @type {any} */ err) => err.code === 'spawn_failed' && err.message.includes(message) && /reinstall/.test(err.message) === reinstall, message)
+  }
+})
+
+test('off darwin PtyHost never prepares the spawn helper', () => {
+  for (const [platform, argv0] of [['linux', 'claude'], ['win32', CLAUDE_EXE]]) {
+    /** @type {any[]} */
+    const order = []
+    spawnWith([argv0], { platform, exists: exeExists, ptySpawn: orderedPtySpawn(order), prepare: recordingPrepare(order) }).dispose()
+    assert.deepEqual(order, ['ptySpawn'], platform)
+  }
+})
+
+/**
+ * A ptySpawn returning a fake node-pty 1.1.0 win32 process: the process itself and its agent's
+ * input socket are EventEmitters, so an 'error' emitted on either with no listener throws.
+ * @param {{ proc?: any }} out receives the process
+ * @param {any[][]} events as for fakePtySpawn
+ */
+function emitterPtySpawn (out, events) {
+  return (/** @type {[string, any, any]} */ ...a) => {
+    const proc = Object.assign(new EventEmitter(), fakePtySpawn([], events)(...a))
+    proc._agent._inSocket = Object.assign(new EventEmitter(), { readable: true })
+    out.proc = proc
+    return proc
+  }
+}
+
+/**
+ * Run `fn` on a later turn of the event loop and resolve a turn after it, returning every
+ * uncaughtException seen meanwhile.
+ * @param {() => void} fn
+ * @returns {Promise<Error[]>}
+ */
+async function uncaughtDuring (fn) {
+  /** @type {Error[]} */
+  const seen = []
+  const onUncaught = (/** @type {Error} */ err) => { seen.push(err) }
+  process.on('uncaughtException', onUncaught)
+  try {
+    await new Promise((resolve) => setImmediate(() => { setImmediate(resolve); fn() }))
+  } finally {
+    process.off('uncaughtException', onUncaught)
+  }
+  return seen
+}
+
+/**
+ * Spawn a fake win32 claude.exe whose process and input socket are EventEmitters.
+ * @param {any[][]} events receives the taskkill calls and the console close
+ */
+function win32EmitterHost (events) {
+  /** @type {{ proc?: any }} */
+  const out = {}
+  const host = spawnWith([CLAUDE_EXE], {
+    platform: 'win32',
+    exists: exeExists,
+    ptySpawn: emitterPtySpawn(out, events),
+    spawnSync: (/** @type {any[]} */ ...args) => { events.push(args) }
+  })
+  return { host, proc: out.proc }
+}
+
+const ENDED_ON_WIN32 = [
+  ['taskkill', ['/PID', '4242', '/T', '/F'], { windowsHide: true, stdio: 'ignore' }],
+  ['native.kill', 7, false],
+  ['conout.dispose']
+]
+
+test('on win32 a write EAGAIN on the input socket is logged with the ptyId and ends the PTY, never an uncaughtException', async (t) => {
+  /** @type {any[][]} */
+  const events = []
+  const errors = t.mock.method(console, 'error', () => {})
+  const { host, proc } = win32EmitterHost(events)
+  try {
+    const eagain = Object.assign(new Error('write EAGAIN'), { code: 'EAGAIN', syscall: 'write' })
+    assert.deepEqual(await uncaughtDuring(() => proc._agent._inSocket.emit('error', eagain)), [])
+    const logged = errors.mock.calls.map((c) => String(c.arguments[0]))
+    assert.ok(logged.some((m) => m.includes(host.ptyId) && m.includes('write EAGAIN')), logged.join('\n'))
+    // ended as a crash: taskkill on the tree, the pseudoconsole closed, and the reason kept
+    assert.deepEqual(events, ENDED_ON_WIN32)
+    assert.match(String(host.inputFailed), /write EAGAIN/)
+    // a second error on the destroyed socket does not end it again
+    proc._agent._inSocket.emit('error', eagain)
+    assert.deepEqual(events, ENDED_ON_WIN32)
+  } finally {
+    host.dispose()
+  }
+})
+
+test('on win32 a terminal error other than EIO is logged and ends the PTY; EIO, a normal end, does neither', async (t) => {
+  for (const [code, ends] of /** @type {[string, boolean][]} */ ([['EPIPE', true], ['EIO', false]])) {
+    /** @type {any[][]} */
+    const events = []
+    const errors = t.mock.method(console, 'error', () => {})
+    const { host, proc } = win32EmitterHost(events)
+    try {
+      assert.deepEqual(await uncaughtDuring(() => proc.emit('error', Object.assign(new Error(`read ${code}`), { code }))), [], code)
+      assert.deepEqual(events, ends ? ENDED_ON_WIN32 : [], code)
+      assert.equal(errors.mock.calls.some((c) => String(c.arguments[0]).includes(host.ptyId)), ends, code)
+    } finally {
+      host.dispose()
+      errors.mock.restore()
+    }
+  }
+})
+
+test('on win32 a process without the 1.1.0 input socket or an on() still spawns', () => {
+  const host = spawnWith([CLAUDE_EXE], {
+    platform: 'win32',
+    exists: exeExists,
+    ptySpawn: (/** @type {[string, any, any]} */ ...a) => { const p = fakePtySpawn([])(...a); delete p._agent._inSocket; return p }
+  })
+  host.dispose()
+})
+
+test('on linux PtyHost adds no error listener to the process', () => {
+  /** @type {{ proc?: any }} */
+  const out = {}
+  const host = spawnWith(['claude'], { platform: 'linux', ptySpawn: emitterPtySpawn(out, []) })
+  try {
+    assert.equal(out.proc.listenerCount('error'), 0)
+    assert.equal(out.proc._agent._inSocket.listenerCount('error'), 0)
+  } finally {
+    host.dispose()
+  }
 })
