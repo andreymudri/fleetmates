@@ -4,7 +4,8 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
 import { hookEndpoint, makeEnvelope } from '../../hook/deck-hook.mjs'
@@ -164,18 +165,22 @@ test('hook sends one complete line to the runtime socket without creating spool'
     const hook = JSON.parse(await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
     // The 200 ms budget is the hook script's own run, which its in-script timer bounds. Node's
     // interpreter boot comes before the script and grows with machine load, so the clock is read
-    // inside the child: a preload writes performance.now() to fd 3 once before the hook module
-    // loads and once at process exit.
+    // inside the child: a preload appends performance.now() to a file, synchronously, once before
+    // the hook module loads and once at process exit. A file rather than an extra stdio pipe, so the
+    // channel does not depend on how the platform passes fd 3 to a child. --import is given a file
+    // URL: an absolute win32 path there would be read as a URL with scheme `c:`.
     const clock = path.join(home, 'clock.mjs')
-    await writeFile(clock, "import { writeSync } from 'node:fs'\nwriteSync(3, `${performance.now()}\\n`)\nprocess.on('exit', () => { writeSync(3, `${performance.now()}\\n`) })\n")
-    const child = spawn(process.execPath, ['--import', clock, executable], { env: hookEnv, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] })
+    const clockFile = path.join(home, 'clock.txt')
+    await writeFile(clock, `import { appendFileSync } from 'node:fs'\nconst file = ${JSON.stringify(clockFile)}\nappendFileSync(file, \`\${performance.now()}\\n\`)\nprocess.on('exit', () => { appendFileSync(file, \`\${performance.now()}\\n\`) })\n`)
+    const child = spawn(process.execPath, ['--import', pathToFileURL(clock).href, executable], { env: hookEnv, stdio: ['pipe', 'pipe', 'pipe'] })
     child.stdin.end(JSON.stringify(hook))
     const output = []
     child.stdout.on('data', chunk => output.push(chunk))
     child.stderr.on('data', chunk => output.push(chunk))
-    let clockText = ''
+    const clockText = () => { try { return readFileSync(clockFile, 'utf8') } catch { return '' } }
     let childTimer
     let startTimer
+    let poll
     let exit
     try {
       exit = await Promise.race([
@@ -185,19 +190,16 @@ test('hook sends one complete line to the runtime socket without creating spool'
           // hangs before the preload writes would never meet it. This startup bound is generous
           // because it covers Node's boot under load, which the 200 ms budget deliberately leaves out.
           startTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook never started its clock')) }, 10_000)
-          child.stdio[3].setEncoding('utf8')
-          child.stdio[3].on('data', chunk => {
-            const first = !clockText.includes('\n')
-            clockText += chunk
-            if (first && clockText.includes('\n')) {
-              clearTimeout(startTimer)
-              childTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook did not exit')) }, 500)
-            }
-          })
+          poll = setInterval(() => {
+            if (!clockText().includes('\n')) return
+            clearInterval(poll)
+            clearTimeout(startTimer)
+            childTimer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('socket hook did not exit')) }, 500)
+          }, 5)
         }),
       ])
-    } finally { clearTimeout(startTimer); clearTimeout(childTimer) }
-    const [scriptStart, scriptExit] = clockText.trim().split('\n').map(Number)
+    } finally { clearInterval(poll); clearTimeout(startTimer); clearTimeout(childTimer) }
+    const [scriptStart, scriptExit] = clockText().trim().split('\n').map(Number)
     assert.ok(Number.isFinite(scriptStart) && Number.isFinite(scriptExit), 'socket hook clock did not report')
     assert.ok(scriptExit - scriptStart < 200, 'socket hook exceeded its 200 ms budget')
     assert.equal(exit, 0)

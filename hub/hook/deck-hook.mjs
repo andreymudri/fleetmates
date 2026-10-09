@@ -137,9 +137,27 @@ function sendSocket(line, endpointPath) {
   })
 }
 
+/**
+ * The private spool directory, the `spool` of setupPaths(env, { platform }) in
+ * hub/server/setup/paths.mjs, computed here because this file is copied alone. linux and darwin:
+ * <XDG_STATE_HOME or ~/.local/state>/fleetmates/deck/spool. win32: <XDG_STATE_HOME>\fleetmates\deck\spool
+ * when XDG_STATE_HOME is set, else <LOCALAPPDATA>\fleetmates\deck\state\spool.
+ */
+export function spoolDir(env = process.env, platform = process.platform) {
+  if (platform === 'win32') {
+    const p = path.win32
+    const home = env.HOME || env.USERPROFILE || os.homedir()
+    const state = env.XDG_STATE_HOME
+      ? p.join(env.XDG_STATE_HOME, 'fleetmates', 'deck')
+      : p.join(env.LOCALAPPDATA || p.join(home, 'AppData', 'Local'), 'fleetmates', 'deck', 'state')
+    return p.join(state, 'spool')
+  }
+  const stateHome = env.XDG_STATE_HOME || path.posix.join(env.HOME || os.homedir(), '.local', 'state')
+  return path.posix.join(stateHome, 'fleetmates', 'deck', 'spool')
+}
+
 function spool(line, env, hookTs) {
-  const stateHome = env.XDG_STATE_HOME || path.join(env.HOME || os.homedir(), '.local', 'state')
-  const dir = path.join(stateHome, 'fleetmates', 'deck', 'spool')
+  const dir = spoolDir(env)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   chmodSync(dir, 0o700)
   const day = new Date(hookTs).toISOString().slice(0, 10).replaceAll('-', '')

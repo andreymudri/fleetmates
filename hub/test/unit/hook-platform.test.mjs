@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { endpoint, runtimeBase } from '../../platform/index.mjs'
-import { ancestry, hookEndpoint, makeEnvelope } from '../../hook/deck-hook.mjs'
+import { ancestry, hookEndpoint, makeEnvelope, spoolDir } from '../../hook/deck-hook.mjs'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
 import { deckHookCommand, hooksInstalled, HOOK_EVENTS, isDeckHook, transformHooks } from '../../server/setup/hooks.mjs'
 
@@ -52,6 +52,23 @@ test('a win32 envelope validates with a null claudePid', () => {
   assert.equal(validateEnvelope(JSON.stringify(envelope)).ok, true)
 })
 
+// The expected values are setupPaths(env, { platform }).spool from hub/server/setup/paths.mjs as
+// task T6 defines it, written out literally because that module is not on this branch.
+const spoolCases = [
+  ['linux, XDG_STATE_HOME unset', 'linux', { HOME: '/home/you' }, '/home/you/.local/state/fleetmates/deck/spool'],
+  ['linux, XDG_STATE_HOME set', 'linux', { HOME: '/home/you', XDG_STATE_HOME: '/home/you/st' }, '/home/you/st/fleetmates/deck/spool'],
+  ['darwin, XDG_STATE_HOME unset', 'darwin', { HOME: '/Users/you' }, '/Users/you/.local/state/fleetmates/deck/spool'],
+  ['win32, LOCALAPPDATA', 'win32', { HOME: 'C:\\Users\\you', LOCALAPPDATA: 'C:\\Users\\you\\AppData\\Local' }, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\state\\spool'],
+  ['win32, USERPROFILE only', 'win32', { USERPROFILE: 'C:\\Users\\you' }, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\state\\spool'],
+  ['win32, XDG_STATE_HOME set', 'win32', { LOCALAPPDATA: 'C:\\Users\\you\\AppData\\Local', XDG_STATE_HOME: 'D:\\state' }, 'D:\\state\\fleetmates\\deck\\spool'],
+]
+
+for (const [name, platform, env, expected] of spoolCases) {
+  test(`spoolDir is where setupPaths puts the spool: ${name}`, () => {
+    assert.equal(spoolDir(env, platform), expected)
+  })
+}
+
 const winNode = 'C:\\Program Files\\nodejs\\node.exe'
 const winHook = 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\share\\hook\\deck-hook.mjs'
 
@@ -60,7 +77,8 @@ test('deckHookCommand keeps the single-quoted form on linux and darwin', () => {
     assert.equal(deckHookCommand('/usr/bin/node', "/home/you/it's/fleetmates-deck/hook/deck-hook.mjs", { platform }),
       "'/usr/bin/node' '/home/you/it'\\''s/fleetmates-deck/hook/deck-hook.mjs'")
   }
-  assert.equal(deckHookCommand('/usr/bin/node', '/home/you/hub/hook/deck-hook.mjs'), "'/usr/bin/node' '/home/you/hub/hook/deck-hook.mjs'", 'the platform defaults to the host (linux here)')
+  assert.equal(deckHookCommand('/usr/bin/node', '/home/you/hub/hook/deck-hook.mjs'),
+    deckHookCommand('/usr/bin/node', '/home/you/hub/hook/deck-hook.mjs', { platform: process.platform }), 'the platform defaults to the host')
 })
 
 test('deckHookCommand on win32 double-quotes forward-slash paths', () => {
