@@ -3637,6 +3637,7 @@ test('literal launchctl deck controls retain their floor across paths and wrappe
     'launchctl kickstart gui/501/io.fleetmates.deck.deckd',
     "launchctl kickstart -k 'gui/501/io.fleetmates.deck.web'",
     '/bin/launchctl bootout gui/501/io.fleetmates.deck.deckd',
+    'launchctl bootout gui/501/IO.FLEETMATES.DECK.DECKD',
     'env -i launchctl bootstrap gui/501 /Users/you/Library/LaunchAgents/io.fleetmates.deck.web.plist',
     "bash -lc 'launchctl bootout gui/501/io.fleetmates.deck.web'"
   ]) assert.equal(legacyDestructive(hook(command)), true, command)

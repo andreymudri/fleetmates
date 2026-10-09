@@ -1691,6 +1691,7 @@ test('launchctl against an io.fleetmates.deck label and reg against the Run key 
       'launchctl kickstart -k gui/501/io.fleetmates.deck.web',
       '/bin/launchctl bootout gui/501/io.fleetmates.deck.deckd',
       'launchctl kill SIGTERM gui/501/io.fleetmates.deck.deckd',
+      'launchctl kickstart gui/501/IO.FLEETMATES.DECK.DECKD',
       "reg add 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' /v fleetmates-deck /t REG_SZ /d x /f",
       "reg delete 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' /v fleetmates-deck /f",
       'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v fleetmates-deck /d x /f',
