@@ -356,10 +356,13 @@ posixTest('startDeckd refuses a runtime dir with group or world permission bits'
   const loose = await mkdtemp(path.join(rt.dir, 'loose-'))
   try {
     await chmod(loose, 0o755)
-    assert.match(String((await startError(loose))?.message), /mode 0755/)
+    // ensurePrivateDir's message: the base is checked before anything is created under it
+    assert.equal(String((await startError(loose))?.message), `runtime dir ${loose} has mode 0755; it must allow no group or world access (0700)`)
     await mkdir(path.join(loose, 'g'), { mode: 0o700 })
     await chmod(path.join(loose, 'g'), 0o710)
-    assert.match(String((await startError(path.join(loose, 'g')))?.message), /mode 0710/)
+    assert.equal(String((await startError(path.join(loose, 'g')))?.message), `runtime dir ${path.join(loose, 'g')} has mode 0710; it must allow no group or world access (0700)`)
+    // and nothing was created under the refused base
+    await assert.rejects(stat(path.join(loose, 'fleetmates-deck')), { code: 'ENOENT' })
   } finally {
     await rm(loose, { recursive: true, force: true })
   }
