@@ -310,9 +310,20 @@ export function TerminalView({
       // reflows their desktop terminal under them. Decided for remote access: full control from the phone, except
       // this. The viewport decides, not the user agent.
       const phoneAtAttach = phoneViewport(scope)
+      // On a phone the local terminal takes the PTY's own size instead, from `term.attached`: a 120-column screen
+      // written into a 37-column xterm rewraps into nonsense, while the PTY's width scrolls sideways intact.
+      let ptySize = null
       const refit = () => {
+        if (phoneAtAttach) {
+          if (ptySize) {
+            try { term.resize(ptySize.cols, ptySize.rows) } catch {}
+            // The prompt and the cursor live at the bottom of the screen: start the phone there.
+            element.scrollTop = element.scrollHeight
+          }
+          return
+        }
         try { fit.fit() } catch {}
-        if (!phoneAtAttach) handle?.resize(term.cols, term.rows)
+        handle?.resize(term.cols, term.rows)
       }
       const scheduleResize = () => {
         if (timer !== null) { pending = true
@@ -338,7 +349,11 @@ export function TerminalView({
         handle = client.attach(sessionId, { cols: term.cols, rows: term.rows, resize: !phoneAtAttach }, handlers)
       }
       const handlers = {
-        onAttached: () => {
+        onAttached: message => {
+          if (phoneAtAttach && message?.cols > 0 && message?.rows > 0) {
+            ptySize = { cols: message.cols, rows: message.rows }
+            refit()
+          }
           attachedOnce = true
           sawDown.current = false
           setWaiting(false)

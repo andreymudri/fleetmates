@@ -153,6 +153,12 @@
     color: var(--brand-accent);
   }
 
+  /* The phone's xterm keeps the PTY's size (components/TerminalView.jsx), so its host scrolls both ways. */
+  .terminal-host {
+    max-height: 58dvh;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
   /* The terminal key bar (components/TerminalView.jsx): 52px above the keyboard, 44px keys, scrolling sideways.
      The bottom bar is in flow, not fixed, so the two never fight over the bottom edge while the keyboard is up. */
   .terminal-keys {

@@ -156,7 +156,7 @@ test('a phone viewport never sends a terminal resize, because the PTY is the one
   assert.equal(module.phoneViewport({}), false, 'no matchMedia is not a phone')
   const source = await readFile(`${web}src/components/TerminalView.jsx`, 'utf8')
   // The local fit still runs; only the message to the server is withheld.
-  assert.match(source, /try \{ fit\.fit\(\) \} catch \{\}\n\s*if \(!phoneAtAttach\) handle\?\.resize\(term\.cols, term\.rows\)/)
+  // The behaviour (no resize, the attach says so, the PTY width kept) is pinned in Chromium by terminal-phone.test.mjs.
 })
 
 test('the sticky Ctrl turns the next keystroke into its control code, and only the keys that have one', async () => {
@@ -205,9 +205,6 @@ test('the key bar fires on release, survives a reader tap, and never outlives it
   assert.match(source, /const onBlur = \(\) => \{[^}]*sticky\.current = false/s)
   // The render flag follows the query; the resize guard keeps its own, read when the PTY is attached.
   assert.match(source, /const phoneAtAttach = phoneViewport\(scope\)/)
-  assert.match(source, /if \(!phoneAtAttach\) handle\?\.resize/)
-  // The first attach is a resize too (the server fits the PTY to it), so it carries the same guard.
-  assert.match(source, /client\.attach\(sessionId, \{ cols: term\.cols, rows: term\.rows, resize: !phoneAtAttach \}, handlers\)/)
   assert.match(source, /query\.addEventListener\('change', onChange\)/)
   const mobile = await readFile(`${web}src/styles/mobile.css`, 'utf8')
   assert.match(mobile, /touch-action: pan-x/)
