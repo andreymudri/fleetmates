@@ -10,7 +10,7 @@ import { MetaLine, StatusPill, pillParams, shown, stateLabel, titleText, transla
 import { linkHandler } from '../../shell/Rail.jsx'
 import { addRule, answerRequest, fetchArchived, fetchMeeting, fetchMeetings, fetchCaptures, fetchMisses, nudgeSession, revokeRule, stopSession } from '../../state/actions.js'
 import { clockTime, dayLabel, durationText, meetingTitle } from '../meetings/MeetingDetail.jsx'
-import { archivedCount, readDensity, writeDensity } from '../../state/deck-store.js'
+import { PHONE_QUERY, archivedCount, phoneViewport, readDensity, writeDensity } from '../../state/deck-store.js'
 import { NeedsYouDrawer, deckApi, needsLinkDetail, openOverlay, repoFor } from '../drawer/NeedsYouDrawer.jsx'
 import { ResearchHome } from '../research/Research.jsx'
 import { Palette, openLaunch, orderSessions } from '../palette/Palette.jsx'
@@ -764,7 +764,7 @@ function Calm({ state, layout, now, t, navigate, lang, archiveAll = null, archiv
  *   lastMeeting?: React.ReactNode }} props
  */
 export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverlay = (overlay, detail) => openOverlay(overlay, undefined, detail), onFocusCard = focusCard, onHold = () => {}, lang = 'en',
-  density = 'comfortable', onDensity = () => {}, onLaunch = () => openLaunch(navigate), steps = {}, onNudge, onStop, onArchive, onArchiveFinished, onUnarchive = () => Promise.resolve(), api, storage,
+  density = 'comfortable', phone = false, onDensity = () => {}, onLaunch = () => openLaunch(navigate), steps = {}, onNudge, onStop, onArchive, onArchiveFinished, onUnarchive = () => Promise.resolve(), api, storage,
   answers = {}, onAnswer = () => {}, onReview = id => onOverlay('drawer', { request: id }), onAcceptRule = () => {}, lastMeeting = null, vaultSections = null }) {
   const { sessions, requests, repos, order, counts, runs } = state.data
   const shape = layout ?? homeLayout(sessions, { order, requests, now })
@@ -782,13 +782,23 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
   const oldestDone = shape.grid.concat(shape.strip).filter(row => row.state === 'done').sort((a, b) => (a.stateSince ?? 0) - (b.stateSince ?? 0))[0]
   const firstRunning = shape.grid.find(row => row.state === 'running' || row.state === 'starting')
   const hidden = shape.strip.length - STRIP_MAX
-  const compact = density === 'compact'
+  const compact = density === 'compact' || phone
+  // Density B on a phone (design mobile-mockups-notes.md section 4): the compact grid, except that a session
+  // waiting on a human keeps its full card with every control at full size. A card that changes state while you
+  // are looking at it grows, rather than switching the whole list into another mode.
+  const needsFull = item => phone && !item.team && NEEDS.has(item.session.state)
   const deckdDown = deckdDownOf(state)
   const tails = state.data.tails ?? {}
   const answering = { deckdDown, answers, onAnswer, onReview }
   return (
     <section className="home" onFocus={event => onHold('focus', inCard(event.target))} onBlur={event => onHold('focus', inCard(event.relatedTarget))}>
       <header className="home-header">
+        {/* The deck's mark, shown only in the phone layout: the bottom bar has no room for a fifth item, and the
+            logo is not a destination there anyway (its link is Sessions, which is the first item). */}
+        <svg className="home-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false" fill="none" stroke="currentColor"
+          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 3v15" /><path d="M5 10h14" /><path d="M4 15a8 8 0 0 0 16 0" />
+        </svg>
         <h1 className="page-title">{translate(t, HOME_COPY, 'home.header.title')}</h1>
         {archiveAll}
         <Counts counts={counts} t={t} onNeeds={() => onOverlay('drawer')}
@@ -811,8 +821,11 @@ export function HomeView({ state, t, now = Date.now(), navigate, layout, onOverl
               ? <CompactCard key={item.team.key} team={item.team} repo={repoFor(repos, item.team.run.repoId)} t={t} now={now} navigate={navigate} {...answering}
                 label={item.team.needs ? translate(t, HOME_COPY, 'home.card.team.pill', { needs: item.team.needs, total: item.team.total }) : undefined}
                 tail={item.team.lead ? tails[item.team.lead.id] : undefined} steps={item.team.lead ? steps[item.team.lead.id] : undefined} />
-              : <CompactCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} t={t} now={now} navigate={navigate} {...answering}
-                tail={tails[item.session.id]} steps={steps[item.session.id]} />)}
+              : needsFull(item)
+                ? <SessionCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} now={now} lang={lang} t={t} navigate={navigate}
+                  onArchive={onArchive} {...answering} ruleOffers={state.data.ruleOffers ?? []} onAcceptRule={onAcceptRule} />
+                : <CompactCard key={item.session.id} session={item.session} repo={repo(item.session)} requests={requests} t={t} now={now} navigate={navigate} {...answering}
+                  tail={tails[item.session.id]} steps={steps[item.session.id]} />)}
           </section>
           {archived}
         </div>
@@ -890,6 +903,9 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
   onOverlay = (overlay, detail) => openOverlay(overlay, globalThis.window, detail) }) {
   const now = useMinuteNow()
   const [density, setDensity] = useState(() => readDensity(storage))
+  // A phone always takes the compact grid, whatever the stored density: the Density control is hidden there
+  // (styles/mobile.css) because the choice belongs to a screen wide enough for both.
+  const [phone, setPhone] = useState(() => phoneViewport({ matchMedia: globalThis.matchMedia?.bind(globalThis) }))
   const [stopping, setStopping] = useState(null)
   const [steps, setSteps] = useState({})
   const needsOpened = useRef(false)
@@ -912,15 +928,23 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
     hold.current = { ...hold.current, [kind]: value }
     if (!value) wake(n => n + 1)
   }
+  useEffect(() => {
+    const query = globalThis.matchMedia?.(PHONE_QUERY)
+    if (!query?.addEventListener) return undefined
+    const onChange = () => setPhone(query.matches)
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }, [])
+  const gridDensity = phone ? 'compact' : density
   const teams = teamCards(state.data.runs, state.data.sessions, state.data.requests)
-  const tailIds = tailSubscription(density, layout, teams)
+  const tailIds = tailSubscription(gridDensity, layout, teams)
   const tailKey = tailIds.join('\u0000')
   useEffect(() => {
     terminals?.subscribeTails(tailIds)
   }, [terminals, tailKey])
   useEffect(() => () => { terminals?.subscribeTails([]) }, [terminals])
   // Observed compact cards list their last hook steps; they reload when the session's activity moves.
-  const observed = density === 'compact'
+  const observed = gridDensity === 'compact'
     ? compactEntries(layout, teams).map(item => item.session ?? item.team.lead).filter(row => row && row.origin === 'observed')
     : []
   const observedKey = observed.map(row => `${row.id}@${row.lastActivityAt ?? ''}`).join('\u0000')
@@ -954,7 +978,7 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
   return (
     <>
       <HomeView state={{ ...state, data: { ...state.data, order: held.order } }} t={t} now={now} navigate={navigate} layout={layout} onHold={onHold}
-        density={density} onDensity={value => pickDensity(storage, value, setDensity)} steps={steps} onNudge={actions.nudge} onStop={actions.openStop}
+        density={density} phone={phone} onDensity={value => pickDensity(storage, value, setDensity)} steps={steps} onNudge={actions.nudge} onStop={actions.openStop}
         onArchive={session => flow.archive(session.id)} onArchiveFinished={flow.archiveFinished} onUnarchive={flow.unarchive} api={http} storage={storage}
         answers={answers} onAnswer={answering.answer} onReview={id => onOverlay('drawer', { request: id })} onAcceptRule={answering.acceptRule}
         lastMeeting={<LastMeetingSection api={http} now={now} t={t} navigate={navigate} dispatch={dispatch} />} vaultSections={<HomeMemorySection api={http} state={state} navigate={navigate} />} />

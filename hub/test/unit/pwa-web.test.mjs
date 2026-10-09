@@ -148,8 +148,9 @@ test('the phone layout is one media block that lifts the 1280px floor and clears
 })
 
 test('a phone viewport never sends a terminal resize, because the PTY is the one on the machine', async () => {
-  const { module } = await runnerImport(path.join(hub, 'web/src/components/TerminalView.jsx'), { configFile: false, logLevel: 'silent', root: hub })
-  const media = matches => query => ({ matches: query === '(max-width: 767px)' && matches })
+  const { module } = await runnerImport(path.join(hub, 'web/src/state/deck-store.js'), { configFile: false, logLevel: 'silent', root: hub })
+  const media = matches => query => ({ matches: query === module.PHONE_QUERY && matches })
+  assert.equal(module.PHONE_QUERY, '(max-width: 767px)', 'one below --breakpoint-mobile')
   assert.equal(module.phoneViewport({ matchMedia: media(true) }), true)
   assert.equal(module.phoneViewport({ matchMedia: media(false) }), false)
   assert.equal(module.phoneViewport({}), false, 'no matchMedia is not a phone')
@@ -157,4 +158,63 @@ test('a phone viewport never sends a terminal resize, because the PTY is the one
   // The local fit still runs; only the message to the server is withheld.
   assert.match(source, /const phone = phoneViewport\(scope\)/)
   assert.match(source, /try \{ fit\.fit\(\) \} catch \{\}\n\s*if \(!phone\) handle\?\.resize\(term\.cols, term\.rows\)/)
+})
+
+test('the terminal key bar sends what a touch keyboard cannot, and Ctrl sticks to the next keystroke', async () => {
+  const { module } = await runnerImport(path.join(hub, 'web/src/components/TerminalView.jsx'), { configFile: false, logLevel: 'silent', root: hub })
+  assert.deepEqual(module.KEY_BAR.map(key => key.id), ['esc', 'tab', 'ctrl', 'up', 'down', 'left', 'right', 'slash', 'pipe', 'tilde'])
+  assert.equal(module.KEY_BAR.find(key => key.id === 'esc').send, '\x1b')
+  assert.equal(module.KEY_BAR.find(key => key.id === 'up').send, '\x1b[A')
+  assert.equal(module.KEY_BAR.find(key => key.id === 'ctrl').send, undefined, 'Ctrl sends nothing of its own; it is a modifier')
+  // Ctrl+C is the reason the bar exists: a touch keyboard has no modifier to produce it.
+  assert.equal(module.controlOf('c'), '\x03')
+  assert.equal(module.controlOf('D'), '\x04')
+  assert.equal(module.controlOf('/'), '\x1f')
+  assert.equal(module.controlOf(' '), '\x00')
+  // An arrow sequence or a paste passes through, so holding Ctrl never swallows a key.
+  assert.equal(module.controlOf('\x1b[A'), '\x1b[A')
+  assert.equal(module.controlOf('hello'), 'hello')
+  // Smaller glyphs on a phone, because the buffer keeps the machine's columns and scrolls instead of reflowing.
+  assert.equal(module.terminalOptions({ phone: true }).fontSize, 12)
+  assert.equal(module.terminalOptions({}).fontSize, 14)
+  const source = await readFile(`${web}src/components/TerminalView.jsx`, 'utf8')
+  // The press keeps focus in the terminal: a bar that blurred it would unmount itself on first use.
+  assert.match(source, /onPointerDown=\{press\(key\)\}/)
+  assert.match(source, /event\.preventDefault\(\)\n\s*if \(key\.id === 'ctrl'\)/)
+  assert.match(source, /\{phone && !readOnly && hasFocus \? \(/, 'mounted only while the terminal has focus')
+})
+
+test('a phone takes the compact grid but keeps the full card for the sessions that need a human', async () => {
+  const home = await readFile(`${web}src/screens/home/Home.jsx`, 'utf8')
+  assert.match(home, /const compact = density === 'compact' \|\| phone/)
+  assert.match(home, /const needsFull = item => phone && !item\.team && NEEDS\.has\(item\.session\.state\)/)
+  assert.match(home, /needsFull\(item\)\n\s*\? <SessionCard/, 'a card that changes state grows, instead of a separate mode')
+  assert.match(home, /const gridDensity = phone \? 'compact' : density/, 'the tail subscription follows the grid actually shown')
+  const mobile = await readFile(`${web}src/styles/mobile.css`, 'utf8')
+  assert.match(mobile, /\.home-density \{ display: none; \}/, 'the density control has no meaning where the layout is fixed')
+  assert.match(mobile, /\.home-mark \{[^}]*display: block/, 'the mark moves to the Home header, since the bottom bar has no room')
+  const shell = await readFile(`${web}src/styles/shell.css`, 'utf8')
+  assert.match(shell, /\.home-mark \{ display: none; \}/, 'and nowhere else')
+})
+
+test('Needs you is a full screen pane on a phone, and its footer keeps the half that carries information', async () => {
+  const { module } = await runnerImport(path.join(hub, 'web/src/screens/drawer/NeedsYouDrawer.jsx'), { configFile: false, logLevel: 'silent', root: hub })
+  // Split so the phone can drop the shortcuts; concatenated they are the desktop sentence, character for character.
+  assert.equal(module.DRAWER_COPY['drawer.footer.keys'] + module.DRAWER_COPY['drawer.footer.rules'], module.DRAWER_COPY['drawer.footer'])
+  assert.match(module.DRAWER_COPY['drawer.footer.rules'], /\.claude\/settings\.local\.json/)
+  const drawer = await readFile(`${web}src/screens/drawer/NeedsYouDrawer.jsx`, 'utf8')
+  // Back already closes it: openOverlay pushes a history entry, which is what makes the pane a route.
+  assert.match(drawer, /env\.history\.pushState\(state, '', here\(env\)\)/)
+  const mobile = await readFile(`${web}src/styles/mobile.css`, 'utf8')
+  assert.match(mobile, /\.drawer \{[^}]*width: 100%[^}]*animation-name: deck-fade-in/s, 'no side slide at a width where it is already full screen')
+  assert.match(mobile, /\.drawer-footer-keys \{ display: none; \}/)
+  assert.match(mobile, /\.focus-tabs \{[^}]*overflow-x: auto/s, 'five tabs do not fit in 358px')
+})
+
+test('the recording bar quiet note is a button, reachable without hover', async () => {
+  const rec = await readFile(`${web}src/shell/RecBar.jsx`, 'utf8')
+  assert.match(rec, /<button type="button" className="rec-bar-quiet-info" aria-label=\{quiet\} aria-expanded=/)
+  assert.doesNotMatch(rec, /role="tooltip"/, 'a tooltip no tap can open is not an affordance')
+  const shell = await readFile(`${web}src/styles/shell.css`, 'utf8')
+  assert.doesNotMatch(shell, /rec-bar-quiet-info:hover/, 'there is no hover on touch')
 })

@@ -1,13 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { titleText, translate } from './StatusPill.jsx'
-import { isGlobalChord } from '../state/deck-store.js'
+import { isGlobalChord, phoneViewport } from '../state/deck-store.js'
 import { pasteNeedsConfirm, pasteSizeText, sanitizePaste } from '../state/terminal.js'
 
 /** English copy for the terminal section (docs/deck/design/components.md section 14). */
 export const TERMINAL_COPY = Object.freeze({
   'terminal.label': 'Terminal, {label}',
   // No spec copy deck names this string yet; 08-security 4.6 only requires that the real URL is shown.
-  'terminal.link.confirm': 'Open this link from the terminal?\n{url}'
+  'terminal.link.confirm': 'Open this link from the terminal?\n{url}',
+  // The phone key bar (mobile-focus-mockup): the keys a touch keyboard cannot send.
+  'terminal.keys.label': 'Terminal keys'
 })
 
 const SKELETON_LINES = 6
@@ -32,10 +34,12 @@ export function linkDecision(uri) {
  * @param {{ readOnly?: boolean, connected?: boolean, screenReaderMode?: boolean, reducedMotion?: boolean, theme?: object }} options
  * @returns {Record<string, any>}
  */
-export function terminalOptions({ readOnly = false, connected = false, screenReaderMode = false, reducedMotion = false, theme } = {}) {
+export function terminalOptions({ readOnly = false, connected = false, screenReaderMode = false, reducedMotion = false, phone = false, theme } = {}) {
   return {
     fontFamily: "'Geist Mono', ui-monospace, monospace",
-    fontSize: 14,
+    // A phone never resizes the PTY (see the refit below), so the buffer keeps the machine's column count and
+    // scrolls sideways. A smaller glyph is then simply more of the line on screen, and costs the desktop nothing.
+    fontSize: phone ? 12 : 14,
     lineHeight: 1.2,
     scrollback: 5000,
     cursorBlink: !reducedMotion,
@@ -49,8 +53,6 @@ export function terminalOptions({ readOnly = false, connected = false, screenRea
 }
 
 const REDUCE_QUERY = '(prefers-reduced-motion: reduce)'
-// One below --breakpoint-mobile (768px), the width at which styles/mobile.css lays the deck out as a phone.
-const PHONE_QUERY = '(max-width: 767px)'
 
 /**
  * Whether motion is reduced: the OS `prefers-reduced-motion` query, or Settings "Always reduce motion",
@@ -60,16 +62,6 @@ const PHONE_QUERY = '(max-width: 767px)'
  */
 export function motionReduced({ matchMedia, root } = {}) {
   return !!matchMedia?.(REDUCE_QUERY)?.matches || root?.getAttribute?.('data-motion') === 'reduce'
-}
-
-/**
- * Whether this client lays out as a phone, from the viewport and never from a user agent string, the same way
- * `motionReduced` reads its media query.
- * @param {{ matchMedia?: (query: string) => { matches: boolean } }} [scope]
- * @returns {boolean}
- */
-export function phoneViewport({ matchMedia } = {}) {
-  return !!matchMedia?.(PHONE_QUERY)?.matches
 }
 
 function cssVar(element, name, fallback) {
@@ -109,6 +101,59 @@ export function handleLink(uri, { confirmLink, open }) {
 }
 
 /**
+ * The control code one keystroke becomes while the key bar's sticky Ctrl is held: a letter or one of the few
+ * punctuation keys that have a control code, as a terminal's own Ctrl would produce. Anything else (an arrow
+ * sequence, a multi-character paste) passes through, so holding Ctrl never swallows a key.
+ * @param {string} input one keystroke as xterm reports it
+ * @returns {string}
+ */
+export function controlOf(input) {
+  if (typeof input !== 'string' || input.length !== 1) return input
+  const code = input.toUpperCase().charCodeAt(0)
+  if (code >= 64 && code <= 95) return String.fromCharCode(code - 64)
+  if (input === ' ') return '\x00'
+  if (input === '/') return '\x1f'
+  if (input === '?') return '\x7f'
+  return input
+}
+
+/** The key bar's keys, in the order the design puts them (mobile-focus-mockup). `ctrl` is the sticky modifier. */
+export const KEY_BAR = Object.freeze([
+  { id: 'esc', label: 'Esc', send: '\x1b' },
+  { id: 'tab', label: 'Tab', send: '\t' },
+  { id: 'ctrl', label: 'Ctrl' },
+  { id: 'up', label: '\u2191', send: '\x1b[A' },
+  { id: 'down', label: '\u2193', send: '\x1b[B' },
+  { id: 'left', label: '\u2190', send: '\x1b[D' },
+  { id: 'right', label: '\u2192', send: '\x1b[C' },
+  { id: 'slash', label: '/', send: '/' },
+  { id: 'pipe', label: '|', send: '|' },
+  { id: 'tilde', label: '~', send: '~' }
+])
+
+/**
+ * The phone key bar (mobile-focus-mockup): the keys a touch keyboard has no way to send, above the keyboard and
+ * only while the terminal has focus. Every press is a `pointerdown` with its default prevented, so the terminal
+ * keeps focus and the keyboard stays up; a bar that blurred the terminal would unmount itself on first use.
+ * @param {{ ctrl: boolean, t?: Function, onCtrl: () => void, onKey: (text: string) => void }} props
+ */
+function KeyBar({ ctrl, t, onCtrl, onKey }) {
+  const press = key => event => {
+    event.preventDefault()
+    if (key.id === 'ctrl') onCtrl()
+    else onKey(key.send)
+  }
+  return (
+    <div className="terminal-keys" role="toolbar" aria-label={translate(t, TERMINAL_COPY, 'terminal.keys.label')}>
+      {KEY_BAR.map(key => (
+        <button key={key.id} type="button" className="terminal-key" onPointerDown={press(key)} onMouseDown={event => event.preventDefault()}
+          {...(key.id === 'ctrl' ? { 'aria-pressed': ctrl ? 'true' : 'false' } : {})}>{key.label}</button>
+      ))}
+    </div>
+  )
+}
+
+/**
  * The live xterm for one session (components.md section 14). xterm and the fit addon load with dynamic
  * `import()` inside an effect, so the component renders its labelled section and skeleton lines under
  * `renderToStaticMarkup` in Node without loading them. A snapshot frame resets the terminal; output frames
@@ -138,6 +183,12 @@ export function TerminalView({
   const [waiting, setWaiting] = useState(false)
   const reattach = useRef(null)
   const sawDown = useRef(false)
+  const send = useRef(null)
+  const sticky = useRef(false)
+  const [ctrl, setCtrl] = useState(false)
+  const [hasFocus, setHasFocus] = useState(false)
+  // Read once, at mount, as the resize guard reads it: a phone gets the key bar, a desktop never does.
+  const [phone] = useState(() => phoneViewport({ matchMedia: globalThis.matchMedia?.bind(globalThis) }))
   latest.current = { readOnly, connected, onFocusChange, confirmPaste, confirmLink, deckdUp, t }
 
   useEffect(() => {
@@ -164,7 +215,7 @@ export function TerminalView({
       if (disposed) return
       // Motion is read here, after the import: the shell can set data-motion while xterm loads.
       term = new Terminal({
-        ...terminalOptions({ readOnly: latest.current.readOnly, connected: false, screenReaderMode, reducedMotion: motionReduced(scope), theme: themeFor(section.current) }),
+        ...terminalOptions({ readOnly: latest.current.readOnly, connected: false, screenReaderMode, reducedMotion: motionReduced(scope), phone: phoneViewport(scope), theme: themeFor(section.current) }),
         linkHandler: {
           allowNonHttpProtocols: false,
           activate: (_event, uri) => handleLink(uri, {
@@ -196,8 +247,10 @@ export function TerminalView({
 
       const textarea = term.textarea
       const onFocus = () => { focused = true
+        setHasFocus(true)
         latest.current.onFocusChange?.(true) }
       const onBlur = () => { focused = false
+        setHasFocus(false)
         latest.current.onFocusChange?.(false) }
       textarea?.addEventListener('focus', onFocus)
       textarea?.addEventListener('blur', onBlur)
@@ -206,9 +259,20 @@ export function TerminalView({
 
       const data = term.onData(input => {
         if (latest.current.readOnly || !(focused || pasting)) return
+        // The key bar's Ctrl is sticky: it transforms the next keystroke the phone keyboard produces, which is
+        // the only way to reach Ctrl+C on a touch keyboard that has no modifier of its own.
+        if (sticky.current) { sticky.current = false
+          setCtrl(false)
+          handle?.write(controlOf(input))
+          return }
         handle?.write(input)
       })
       cleanups.push(() => data.dispose())
+      send.current = text => {
+        if (latest.current.readOnly) return
+        handle?.write(text)
+      }
+      cleanups.push(() => { send.current = null })
 
       const onPaste = async event => {
         event.preventDefault()
@@ -329,6 +393,10 @@ export function TerminalView({
         </div>
       )}
       <div ref={host} className="terminal-host" />
+      {phone && !readOnly && hasFocus ? (
+        <KeyBar ctrl={ctrl} t={t} onCtrl={() => { sticky.current = !sticky.current
+          setCtrl(sticky.current) }} onKey={text => send.current?.(text)} />
+      ) : null}
     </section>
   )
 }

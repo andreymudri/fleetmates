@@ -345,11 +345,14 @@ Three steps, all on the machine that runs the deck.
    from then on it opens straight into the deck.
 
 Below 768px the deck lays itself out as a phone: one column, the Rail as a labelled bottom bar, the
-Focus session list dropped, 44px touch targets and the toasts clear of the home indicator. That
-layout lives in one sheet, `web/src/styles/mobile.css`.
+Focus session list dropped, 44px touch targets and the toasts clear of the home indicator. Home keeps
+the full card for the sessions that need an answer and compacts the rest, so roughly five sessions fit
+a screen; Needs you is a full screen pane the back button closes. That layout lives in one sheet,
+`web/src/styles/mobile.css`.
 
-The terminal is the one exception to full control. The phone mirrors it and types into it, but it
-never sends its size to the server: the PTY is the one running on your machine, so a resize from a
+The terminal is the one exception to full control. The phone mirrors it and types into it, with a key
+bar above the keyboard for Esc, Tab, a sticky Ctrl (tap it, then the next key is the combination),
+arrows and `/ | ~`. What it never does is send its size to the server: the PTY is the one running on your machine, so a resize from a
 390px phone would reflow the terminal you are working in. Claude Code output stays laid out for the
 width the machine set.
 

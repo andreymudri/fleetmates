@@ -144,9 +144,66 @@
     transform: none;
   }
 
-  /* 7. The overlays: the drawer and the palette are full screen, and the palette starts near the top so the
-     keyboard does not push its list off the screen. */
-  .drawer { width: 100%; }
+  /* The density control belongs to a screen wide enough for both; a phone always takes the compact grid, with
+     the full card kept for the states that need a human (Home.jsx `needsFull`). */
+  .home-density { display: none; }
+  .home-mark {
+    display: block;
+    flex: none;
+    color: var(--brand-accent);
+  }
+
+  /* The terminal key bar (components/TerminalView.jsx): 52px above the keyboard, 44px keys, scrolling sideways.
+     The bottom bar is in flow, not fixed, so the two never fight over the bottom edge while the keyboard is up. */
+  .terminal-keys {
+    display: flex;
+    gap: var(--space-6);
+    flex: none;
+    align-items: center;
+    height: 52px;
+    padding: 0 var(--space-8);
+    overflow-x: auto;
+    scrollbar-width: none;
+    background: var(--bg-sunken);
+    border-top: 1px solid var(--border-subtle);
+  }
+  .terminal-key {
+    flex: none;
+    min-width: 44px;
+    height: 44px;
+    padding: 0 var(--space-8);
+    background: var(--bg-control);
+    color: var(--text-default);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    font-family: var(--font-family-mono);
+    font-size: var(--font-size-sm);
+  }
+  /* The sticky Ctrl, while it is waiting for the next keystroke. */
+  .terminal-key[aria-pressed='true'] {
+    background: var(--brand-accent);
+    color: var(--text-on-primary);
+    border-color: var(--brand-accent);
+  }
+  /* Five tabs (Log, Changes, Facts, Memory, Terminal) do not fit in 358px, so the row scrolls. */
+  .focus-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  /* 7. The overlays: Needs you is a full screen pane, not a side drawer. `openOverlay` already pushes a history
+     entry, so the Android back button closes it; at this width the slide and the scrim bought nothing. */
+  .drawer {
+    width: 100%;
+    max-width: none;
+    box-shadow: none;
+    animation-name: deck-fade-in;
+  }
+  .drawer-scrim { background: var(--bg-canvas); }
+  /* The keyboard half of the footer is dead weight on a phone; where the rules live is not. */
+  .drawer-footer-keys { display: none; }
+  .drawer-footer-rules::first-letter { text-transform: uppercase; }
   .palette-scrim { padding-top: var(--space-24); }
   .palette { width: 100%; }
 

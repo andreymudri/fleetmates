@@ -23,8 +23,14 @@ schema changed.
   worker that caches the static shell only. Nothing under `/api` or `/.well-known` is cached, and
   the token is kept in `localStorage` so an installed app does not lose it between launches.
 - A phone layout below the new `--breakpoint-mobile` (768px), in one sheet (`web/src/styles/mobile.css`):
-  the shell loses its 1280px floor, the Rail becomes a labelled bottom bar, Home and Focus go to one
-  column, inline actions reach 44px and the toasts clear the home indicator.
+  the shell loses its 1280px floor, the Rail becomes a labelled bottom bar with the deck's mark moved
+  to the Home header, Home and Focus go to one column, inline actions reach 44px and the toasts clear
+  the home indicator. On a phone Home shows the full card only for the sessions waiting on a human and
+  the compact card for the rest, and Needs you is a full screen pane the back button closes.
+- A key bar above the keyboard on a phone's terminal (Esc, Tab, a sticky Ctrl, arrows, `/`, `|`, `~`),
+  mounted only while the terminal has focus, so Ctrl+C is reachable without a hardware keyboard. The
+  terminal's own font drops to 12px there, since the buffer keeps the machine's column count.
+- The recording bar's quiet note is a button with `aria-expanded` instead of a hover-only tooltip.
 - A client laid out as a phone no longer sends terminal resizes. The PTY is the one on the machine,
   so a phone opening Focus would otherwise reflow the terminal its owner is working in.
 

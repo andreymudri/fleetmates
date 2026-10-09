@@ -370,7 +370,8 @@ test('the read-only drawer groups by tier, counts from the server and only says 
   assert.doesNotMatch(html, />(Allow once|Deny|Reply|Allow both Safe once)</)
   assert.doesNotMatch(html, /<(input|textarea)/, 'no reply field in M1')
   // M3: the drawer answers, so the footer lists the shortcuts instead of the M1 "for now" line.
-  assert.match(html, /Alt A allow focused · Alt D deny · Alt Shift A allow all Safe · rules live in each repo&#x27;s \.claude\/settings\.local\.json/)
+  // Two spans now (the phone drops the shortcut half), so the assertion reads the text rather than the markup.
+  assert.match(html.replace(/<[^>]+>/g, ''), /Alt A allow focused · Alt D deny · Alt Shift A allow all Safe · rules live in each repo&#x27;s \.claude\/settings\.local\.json/)
   assert.doesNotMatch(html, /Answering here arrives with approvals/)
   assert.match(html, /rustot · combat-tick · waiting 3m/)
   const order = [...html.matchAll(/<h3 class="drawer-section-title"><span class="tier-badge tier-badge--(\w+)">/g)].map(match => match[1])
