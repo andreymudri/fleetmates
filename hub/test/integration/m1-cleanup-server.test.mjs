@@ -166,12 +166,16 @@ test('a deckd drop during the handshake counts one reconnect attempt, not two', 
 })
 
 test('Retry now without XDG_RUNTIME_DIR republishes the true down state after the checking row', async t => {
-  const h = await harness(t, {}, home(t, { runtime: false }))
+  // Without XDG_RUNTIME_DIR the link connects under the runtimeBase fallback, so the failed startup attempt publishes a
+  // down row first. darwin (win32 on Windows) puts that base under this test's own HOME, not the shared linux
+  // /tmp/fleetmates-deck-<uid> that another test or a real deckd may hold.
+  const h = await harness(t, { platform: process.platform === 'win32' ? 'win32' : 'darwin' }, home(t, { runtime: false }))
+  assert.deepEqual(deckdRows(h.deck).map(row => [row.state, row.reason]), [['down', 'deckd_unavailable']])
   const response = await h.request('/api/deps/deckd/retry', { method: 'POST' })
   assert.equal(response.status, 202)
   assert.equal(response.data.dep.state, 'checking')
-  await waitFor(() => deckdRows(h.deck).length >= 2, 'the republished state')
-  assert.deepEqual(deckdRows(h.deck).map(row => [row.state, row.reason]), [['checking', null], ['down', 'deckd_unavailable']])
+  await waitFor(() => deckdRows(h.deck).length >= 3, 'the republished state')
+  assert.deepEqual(deckdRows(h.deck).map(row => [row.state, row.reason]), [['down', 'deckd_unavailable'], ['checking', null], ['down', 'deckd_unavailable']])
 })
 
 test('Retry now probes on a later macrotask, so the probe outcome is published after the API\'s checking row', async t => {
