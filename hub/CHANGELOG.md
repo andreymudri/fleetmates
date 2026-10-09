@@ -17,8 +17,9 @@ schema changed.
   `fleetmates-deck remote-pass` sets the passphrase a new device types to get the deck token; it is
   read from the terminal, stored as a scrypt hash in a private file, and the exchange is throttled:
   one attempt at a time, a delay that doubles to 4 s, a bounded queue, and a `Retry-After` once 10
-  wrong answers land within 5 minutes. A correct passphrase is always checked, so no one on the
-  tailnet can lock the owner out by guessing.
+  wrong answers land within 5 minutes. Reaching the 10-failure limit never refuses a correct
+  passphrase. A tailnet peer that keeps the queue full can still delay pairing a new device while it
+  does; devices already paired keep their token and are unaffected.
 - The deck is installable as a PWA: a manifest, icons, iOS meta tags, safe areas, and a service
   worker that caches the static shell only. Nothing under `/api` or `/.well-known` is cached, and
   the token is kept in `localStorage` so an installed app does not lose it between launches.

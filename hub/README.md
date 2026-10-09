@@ -364,8 +364,10 @@ including your browser.
 The exchange is throttled rather than locked: attempts run one at a time, a wrong one costs a delay
 that doubles up to 4 seconds, anything arriving while three are already queued is refused without
 being checked, and after 10 wrong answers in 5 minutes every further wrong answer is refused with a
-`Retry-After`. The right passphrase is always checked, so nobody on your tailnet can lock you out of
-your own deck by guessing at it. All of that is defence in depth: the tailnet is the real perimeter.
+`Retry-After`. Those 10 wrong answers never cause the right passphrase to be refused. The queue limit
+is different: a device on your tailnet that keeps three wrong attempts in flight blocks every new
+attempt, yours included, for as long as it keeps doing it. That only delays pairing a new device;
+one already paired keeps its token. All of that is defence in depth: the tailnet is the real perimeter.
 
 The installed app caches only the static shell (HTML, JS, CSS, icons, fonts). Nothing under `/api`
 or `/.well-known` is ever cached, and the WebSocket does not go through the service worker, so no

@@ -105,10 +105,14 @@ export async function verifyPassphrase(passphrase, record) {
  * WebSocket hub, which run in this same process. `maxPending` caps how many may wait, and anything beyond it is
  * refused without touching scrypt, so the work a peer can queue is bounded whatever it sends.
  *
- * **The right passphrase always gets through.** A full window refuses wrong answers, never a correct one. Counting
- * before verifying would let anyone on the tailnet lock the owner's own phone out with ten cheap wrong guesses,
- * which is a worse failure than the one the counter exists to prevent. What throttles a guesser instead is the
- * queue of one plus a delay that doubles to 4 s, so sustained guessing settles at well under one per second.
+ * **A full window never refuses the right passphrase.** It refuses wrong answers only. Counting before verifying
+ * would let anyone on the tailnet lock the owner's own phone out with ten cheap wrong guesses, which is a worse
+ * failure than the one the counter exists to prevent. What throttles a guesser instead is the queue of one plus a
+ * delay that doubles to 4 s, so sustained guessing settles at well under one per second. The bounded queue is the
+ * one limit that does not tell answers apart: a peer that keeps `maxPending` wrong attempts in flight gets every
+ * new attempt refused unchecked, the owner's correct one too, for as long as it keeps them there. Nothing short
+ * of an identity can separate the two (see the next paragraph), so this delays pairing a new device; a device
+ * already paired holds the token and never comes here.
  *
  * **Only real guesses count.** An empty or too-short passphrase is refused before scrypt and is not counted, so
  * free requests cannot fill the window.
