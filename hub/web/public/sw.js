@@ -8,7 +8,8 @@
  */
 const CACHE = 'fleetmates-deck-shell-v1'
 /** The entry points precached at install. Hashed assets join the cache as the shell requests them. */
-const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/maskable-512.png', '/icons/apple-touch-icon.png']
+const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-192.png', '/icons/icon-maskable-512.png',
+  '/icons/apple-touch-icon-180.png', '/icons/favicon.svg', '/icons/favicon-32.png']
 /** Extensions of the static shell: markup, code, styles, icons and fonts. */
 const STATIC = /\.(?:js|mjs|css|png|svg|ico|webmanifest|woff2)$/
 

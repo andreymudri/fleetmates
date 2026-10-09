@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="fleetmates deck"><defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1b1c26"/>
+      <stop offset="1" stop-color="#0f1016"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="32.0" cy="26.88" r="33.28" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7fe3e3" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#7fe3e3" stop-opacity="0"/>
+    </radialGradient>
+  </defs><rect x="0" y="0" width="64" height="64" rx="14.08" fill="url(#plate)"/><rect x="0" y="0" width="64" height="64" rx="14.08" fill="url(#glow)"/><rect x="0.5" y="0.5" width="63" height="63" rx="13.58" fill="none" stroke="#22243a" stroke-width="1"/><g transform="translate(12.032 10.368) scale(1.6640)" fill="none" stroke="#3cc8c8" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v15"/><path d="M5 10h14"/><path d="M4 15a8 8 0 0 0 16 0"/></g></svg>

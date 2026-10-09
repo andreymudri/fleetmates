@@ -55,7 +55,30 @@ export const messages = {
   'fail.retryNow': 'Retry now',
   'fail.reconnected': 'Reconnected',
   'fail.loading': 'Loading {thing}',
-  'fail.loading.sessions': 'sessions'
+  'fail.loading.sessions': 'sessions',
+  'shell.page.unlock': 'Unlock',
+  'unlock.title': 'Unlock the deck',
+  'unlock.subtitle': 'Enter the remote access passphrase you set on the machine running the deck.',
+  'unlock.field.label': 'Passphrase',
+  'unlock.field.hint': 'Exactly as you set it. Capitals and spaces count.',
+  'unlock.reveal.show': 'Show passphrase',
+  'unlock.reveal.hide': 'Hide passphrase',
+  'unlock.submit': 'Unlock',
+  'unlock.submit.busy': 'Checking…',
+  'unlock.retry': 'Try again',
+  'unlock.remember': 'This device stays signed in after the first unlock.',
+  'unlock.tailnet': 'The deck only answers inside your tailnet. The passphrase keeps your other devices out until you let them in.',
+  'unlock.success': 'Aboard. Opening the deck…',
+  'unlock.error.wrong': 'That passphrase does not match. Check it on the machine running the deck.',
+  'unlock.error.wrong.hint': 'Set it again with `{command}`.',
+  'unlock.wait.seconds': 'Too many attempts. Try again in {n, plural, one {# second} other {# seconds}}.',
+  'unlock.wait.minutes': 'Too many attempts. Try again in {n, plural, one {# minute} other {# minutes}}.',
+  'unlock.error.offline': 'Cannot reach the deck. Check that Tailscale is connected on this phone and that the deck is still running.',
+  'unlock.unset.title': 'Remote access is not set up yet',
+  'unlock.unset.body': 'The deck has no remote access passphrase. Set one on the machine running the deck, then come back to this page.',
+  'unlock.unset.retry': 'I set it, check again',
+  'unlock.copy': 'Copy command',
+  'unlock.copied': 'Copied'
 }
 
 /**
