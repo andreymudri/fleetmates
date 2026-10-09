@@ -1,6 +1,7 @@
 // One PTY owned by deckd: the node-pty process, its scrollback ring, its
 // headless screen model, attached clients and the last input source.
 import os from 'node:os'
+import fs from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { Ring } from './ring.mjs'
@@ -74,11 +75,12 @@ export function signalProcessGroup (pid, signal, kill = process.kill) {
 /**
  * What PtyHost takes from its surroundings, each defaulting to the live one,
  * so a test can pin the platform and stand in for node-pty and the kill
- * calls: `ptySpawn` is node-pty's `spawn`; `exists` and `readFile` serve
- * resolveCommand and commandSpawn; `kill` and `spawnSync` serve killTree;
- * `hostEnv` is the environment the
- * Windows base variables are taken from (this process's).
- * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function, hostEnv?: Record<string, string | undefined> }} PtyDeps
+ * calls: `ptySpawn` is node-pty's `spawn`; `exists` serves resolveCommand
+ * and the win32 check of the file to run; `readFile` serves commandSpawn;
+ * `kill` and `spawnSync` serve killTree; `hostEnv` is the environment the
+ * Windows base variables are taken from (this process's); `nodePath` is the
+ * node an npm cmd-shim is run with (this process's).
+ * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function, hostEnv?: Record<string, string | undefined>, nodePath?: string }} PtyDeps
  */
 
 export class PtyHost {
@@ -113,15 +115,18 @@ export class PtyHost {
    * directly, any other `.cmd` or `.bat` runs through ComSpec, its command
    * line handed to node-pty as one string so it is not quoted again. An
    * argument cmd.exe cannot pass to a batch file is refused with
-   * `bad_request`. Output is passed through createInputModeFilter, so a
-   * win32-input-mode request (`ESC [ ? 9001 h` or `l`) reaches neither the
-   * ring, the screen model nor output events. On POSIX argv runs as given and
-   * output is not touched.
+   * `bad_request`. The file that would run must then exist and end in
+   * `.exe` or `.com`, else `spawn_failed` and node-pty is not called: in the
+   * Windows VM run node-pty leaked its pseudoconsole, a worker and a pipe when
+   * CreateProcess failed on a file that is not a PE image. Output is
+   * passed through createInputModeFilter, so a win32-input-mode request
+   * (`ESC [ ? 9001 h` or `l`) reaches neither the ring, the screen model nor
+   * output events. On POSIX argv runs as given and output is not touched.
    * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, baseEnv?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
    * @param {PtyDeps} [deps]
    */
-  constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync, hostEnv = process.env } = {}) {
+  constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync, hostEnv = process.env, nodePath } = {}) {
     this.platform = platform
     /** Set once node-pty's kill() has closed the win32 pseudoconsole. */
     this.pseudoconsoleClosed = false
@@ -173,7 +178,10 @@ export class PtyHost {
     let cmd
     try {
       const file = resolveCommand(req.argv[0], { env, platform, exists })
-      cmd = commandSpawn(file, req.argv.slice(1), { platform, env, readFile })
+      cmd = commandSpawn(file, req.argv.slice(1), { platform, env, readFile, nodePath })
+      if (platform === 'win32' && !(/\.(exe|com)$/i.test(cmd.file) && (exists ?? fs.existsSync)(cmd.file))) {
+        throw new Error(`${req.argv[0]} runs ${cmd.file}, which is not an existing .exe or .com program`)
+      }
     } catch (err) {
       this.screen.dispose()
       const e = /** @type {Error & { code?: string }} */ (err)

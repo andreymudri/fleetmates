@@ -361,6 +361,54 @@ test('on win32 PtyHost removes win32-input-mode requests from output, also split
   }
 })
 
+test('on win32 PtyHost refuses with spawn_failed, without calling node-pty, a claude that is not an existing .exe or .com', () => {
+  const realShim = '@ECHO off\r\n"%dp0%\\node_modules\\claude-code\\bin\\claude.exe"   %*\r\n'
+  const refused = [
+    // a .mjs that PATHEXT made claude resolve to
+    { argv: ['claude'], env: { PATH: 'C:\\bin', PATHEXT: '.MJS;.EXE' }, exists: (/** @type {string} */ p) => p === 'C:\\bin\\claude.mjs' },
+    // a .exe that does not exist
+    { argv: ['C:\\bin\\claude.exe'], exists: () => false },
+    // claude found nowhere on PATH
+    { argv: ['claude'], env: { PATH: 'C:\\bin' }, exists: () => false },
+    // an npm shim whose .exe target is missing
+    { argv: ['C:\\npm\\claude.cmd'], exists: (/** @type {string} */ p) => p === 'C:\\npm\\claude.cmd', readFile: () => realShim }
+  ]
+  for (const { argv, env = {}, exists, readFile = () => '' } of refused) {
+    /** @type {any[]} */
+    const calls = []
+    assert.throws(() => PtyHost.spawn({ argv, cwd: '/home/you', baseEnv: {}, env }, { onOutput () {}, onExit () {} },
+      { platform: 'win32', ptySpawn: recordingPtySpawn(calls), exists, readFile, hostEnv: {} }),
+    (/** @type {any} */ err) => err.code === 'spawn_failed' && /\.exe or \.com/.test(err.message), argv[0])
+    assert.deepEqual(calls, [], argv[0])
+  }
+  // accepted, each existing: a .exe in any case, a .com PATHEXT found, the .exe an npm shim points
+  // at, and ComSpec for a .cmd that is not a shim
+  const accepted = [
+    { argv: ['C:\\bin\\CLAUDE.EXE'], file: 'C:\\bin\\CLAUDE.EXE' },
+    { argv: ['claude'], env: { PATH: 'C:\\bin', PATHEXT: '.COM' }, file: 'C:\\bin\\claude.com' },
+    { argv: ['C:\\npm\\claude.cmd'], readFile: () => realShim, file: 'C:\\npm\\node_modules\\claude-code\\bin\\claude.exe' },
+    { argv: ['C:\\bin\\claude.cmd'], env: { ComSpec: 'C:\\Windows\\system32\\cmd.exe' }, readFile: () => '@echo off\r\n', file: 'C:\\Windows\\system32\\cmd.exe' }
+  ]
+  for (const { argv, env = {}, readFile = () => '', file } of accepted) {
+    /** @type {any[]} */
+    const calls = []
+    /** @type {string[]} */
+    const checked = []
+    const host = PtyHost.spawn({ argv, cwd: '/home/you', baseEnv: {}, env }, { onOutput () {}, onExit () {} },
+      { platform: 'win32', ptySpawn: recordingPtySpawn(calls), exists: (p) => { checked.push(p); return true }, readFile, hostEnv: {} })
+    host.dispose()
+    assert.equal(calls.length, 1, argv[0])
+    assert.equal(calls[0].file, file)
+    assert.ok(checked.includes(file), `${file} was checked for existence: ${checked.join(', ')}`)
+  }
+})
+
+test('on linux PtyHost runs claude without the PE check', () => {
+  const { host, calls } = fakeHost('linux', { argv: ['claude'], exists: () => false })
+  host.dispose()
+  assert.equal(calls[0].file, 'claude')
+})
+
 test('on linux PtyHost passes output through byte for byte, win32-input-mode requests included', () => {
   /** @type {Buffer[]} */
   const events = []

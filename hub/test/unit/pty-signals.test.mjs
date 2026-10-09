@@ -54,6 +54,12 @@ function fakePtySpawn (calls, events = []) {
 
 const hooks = { onOutput () {}, onExit () {} }
 
+/** An `exists` under which every .exe or .com file exists and nothing else does. */
+const exeExists = (/** @type {string} */ p) => /\.(exe|com)$/i.test(p)
+
+/** The claude.exe the win32 kill and console tests run; it passes the PE check. */
+const CLAUDE_EXE = 'C:\\bin\\claude.exe'
+
 /**
  * Spawn through PtyHost with a fake pty; returns the host (the caller disposes it) or throws.
  * @param {string[]} argv
@@ -79,7 +85,9 @@ test('on win32 PtyHost accepts claude, claude.exe and claude.cmd in any case', (
   for (const argv0 of ['claude', 'claude.exe', 'C:\\Users\\you\\AppData\\Roaming\\npm\\Claude.CMD', 'CLAUDE.EXE']) {
     /** @type {any[]} */
     const calls = []
-    const host = spawnWith([argv0], { platform: 'win32', ptySpawn: fakePtySpawn(calls), exists: () => false, readFile: () => '' })
+    // every .exe or .com exists, so what runs passes the PE check: claude found on PATH, the name
+    // itself, or cmd.exe for the .cmd that is not an npm shim
+    const host = spawnWith([argv0], { platform: 'win32', env: { PATH: 'C:\\bin' }, ptySpawn: fakePtySpawn(calls), exists: exeExists, readFile: () => '' })
     try {
       assert.equal(calls.length, 1, argv0)
     } finally {
@@ -99,13 +107,15 @@ test('on win32 PtyHost resolves claude on PATH, unwraps an npm cmd-shim and pass
   const host = spawnWith(['claude', '--resume', 'a b'], {
     platform: 'win32',
     env: { Path: 'C:\\nothing;C:\\npm', PATHEXT: '.EXE;.CMD' },
-    exists: (/** @type {string} */ p) => p === 'C:\\npm\\claude.cmd',
+    exists: (/** @type {string} */ p) => p === 'C:\\npm\\claude.cmd' || p === 'C:\\node\\node.exe',
     readFile: (/** @type {string} */ p) => { assert.equal(p, 'C:\\npm\\claude.cmd'); return shim },
+    // the node the shim is run with; on a Linux host process.execPath has no .exe
+    nodePath: 'C:\\node\\node.exe',
     ptySpawn: fakePtySpawn(calls)
   })
   try {
     assert.equal(calls.length, 1)
-    assert.equal(calls[0].file, process.execPath)
+    assert.equal(calls[0].file, 'C:\\node\\node.exe')
     assert.deepEqual(calls[0].args, ['C:\\npm\\node_modules\\pkg\\cli.js', '--resume', 'a b'])
     assert.equal(calls[0].opts.windowsHide, true)
     // the argv the deck reports is still the one it was asked for
@@ -121,6 +131,7 @@ test('on win32 a claude.cmd that is not an npm shim runs through ComSpec with on
   const host = spawnWith(['C:\\tools\\claude.cmd', 'a b', 'x&y'], {
     platform: 'win32',
     env: { ComSpec: 'C:\\Windows\\system32\\cmd.exe' },
+    exists: (/** @type {string} */ p) => p === 'C:\\Windows\\system32\\cmd.exe',
     readFile: () => '@echo off\r\nnode "%~dp0\\x.js" --flag %*\r\n',
     ptySpawn: fakePtySpawn(calls)
   })
@@ -149,9 +160,9 @@ test('on win32 kill runs taskkill on the tree for SIGTERM, SIGINT and SIGHUP, th
   for (const signal of /** @type {NodeJS.Signals[]} */ (['SIGTERM', 'SIGINT', 'SIGHUP'])) {
     /** @type {any[]} */
     const order = []
-    const host = spawnWith(['claude'], {
+    const host = spawnWith([CLAUDE_EXE], {
       platform: 'win32',
-      exists: () => false,
+      exists: exeExists,
       ptySpawn: fakePtySpawn([], order),
       spawnSync: (/** @type {any[]} */ ...args) => { order.push(args) },
       kill: () => { throw new Error('process.kill must not be called on win32') }
@@ -178,9 +189,9 @@ test('on win32 dispose closes a pseudoconsole that is still open, once, without 
   const events = []
   /** @type {any} */
   let proc
-  const host = spawnWith(['claude'], {
+  const host = spawnWith([CLAUDE_EXE], {
     platform: 'win32',
-    exists: () => false,
+    exists: exeExists,
     ptySpawn: (/** @type {any[]} */ ...a) => { proc = fakePtySpawn([], events)(...a); return proc }
   })
   host.dispose()
@@ -194,9 +205,9 @@ test('on win32 a node-pty without the 1.1.0 agent shape is left open and never k
   /** @type {any[][]} */
   const events = []
   const errors = t.mock.method(console, 'error', () => {})
-  const host = spawnWith(['claude'], {
+  const host = spawnWith([CLAUDE_EXE], {
     platform: 'win32',
-    exists: () => false,
+    exists: exeExists,
     ptySpawn: (/** @type {any[]} */ ...a) => { const p = fakePtySpawn([], events)(...a); delete p._agent; return p }
   })
   host.dispose()
