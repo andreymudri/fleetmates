@@ -1,12 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   runtimeBase, deckDir, endpoint, isPipe, ensurePrivateDir, privateFileProblem, killTree,
-  resolveCommand, quoteCmdArg, commandSpawn, openUrlArgv, isClaudeProgram,
+  resolveCommand, quoteCmdArg, commandSpawn, openUrlArgv, isClaudeProgram, unwrapNodeShim,
 } from '../../platform/index.mjs'
 import * as platformModule from '../../platform/index.mjs'
 
@@ -19,7 +20,7 @@ test('the platform module imports only node: modules and exports exactly the doc
   for (const s of specifiers) assert.match(s, /^node:/, `${s} is not a node: module`)
   assert.deepEqual(Object.keys(platformModule).sort(), [
     'commandSpawn', 'deckDir', 'endpoint', 'ensurePrivateDir', 'isClaudeProgram', 'isPipe', 'killTree',
-    'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand', 'runtimeBase',
+    'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand', 'runtimeBase', 'unwrapNodeShim',
   ])
 })
 
@@ -173,17 +174,22 @@ test('quoteCmdArg quotes for cmd.exe the way cross-spawn does', () => {
   assert.equal(quoteCmdArg('100%'), '^"100^%^"')
   assert.equal(quoteCmdArg('a\\'), '^"a\\\\^"')
   assert.equal(quoteCmdArg('a\\b'), '^"a\\b^"')
+  // Backslashes before a double quote are doubled, then the quote is escaped (CommandLineToArgvW).
+  assert.equal(quoteCmdArg('a\\"b'), '^"a\\\\\\^"b^"')
+  assert.equal(quoteCmdArg('a\\\\"b'), '^"a\\\\\\\\\\^"b^"')
   assert.equal(quoteCmdArg('(x)!^<y>|z'), '^"^(x^)^!^^^<y^>^|z^"')
 })
 
+const noShim = () => '@echo off\r\nC:\\tools\\real.exe %*\r\n'
+
 test('commandSpawn wraps .cmd and .bat in cmd.exe on win32 and passes everything else through', () => {
-  const cmd = commandSpawn('C:\\npm\\claude.cmd', ['--resume', 'a&b'], { platform: 'win32', env: { ComSpec: 'C:\\Windows\\System32\\cmd.exe' } })
+  const cmd = commandSpawn('C:\\npm\\claude.cmd', ['--resume', 'a&b'], { platform: 'win32', env: { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }, readFile: noShim })
   assert.deepEqual(cmd, {
     file: 'C:\\Windows\\System32\\cmd.exe',
     args: ['/d', '/s', '/c', '"^"C:\\npm\\claude.cmd^" ^"--resume^" ^"a^&b^""'],
     options: { windowsVerbatimArguments: true, windowsHide: true },
   })
-  assert.equal(commandSpawn('X.BAT', [], { platform: 'win32', env: {} }).file, 'cmd.exe')
+  assert.equal(commandSpawn('X.BAT', [], { platform: 'win32', env: {}, readFile: noShim }).file, 'cmd.exe')
   assert.deepEqual(commandSpawn('C:\\bin\\claude.exe', ['a b'], { platform: 'win32', env: {} }),
     { file: 'C:\\bin\\claude.exe', args: ['a b'], options: { windowsHide: true } })
   assert.deepEqual(commandSpawn('/usr/bin/claude', ['a b'], { platform: 'linux' }), { file: '/usr/bin/claude', args: ['a b'], options: {} })
@@ -208,4 +214,56 @@ test('isClaudeProgram accepts claude, and on win32 also claude.exe and claude.cm
   }
   assert.equal(isClaudeProgram('C:\\bin\\claude.bat', { platform: 'win32' }), false)
   assert.equal(isClaudeProgram('C:\\bin\\notclaude.exe', { platform: 'win32' }), false)
+})
+
+// The body npm's cmd-shim writes for a package bin (CRLF line endings).
+const CMD_SHIM = [
+  '@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT /b', ':start', 'SETLOCAL', 'CALL :find_dp0', '',
+  'IF EXIST "%dp0%\\node.exe" (', '  SET "_prog=%dp0%\\node.exe"', ') ELSE (', '  SET "_prog=node"', '  SET PATHEXT=%PATHEXT:;.JS;=;%', ')', '',
+  'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*', '',
+].join('\r\n')
+
+test('unwrapNodeShim finds the JS entry of an npm cmd-shim written to disk, and null otherwise', async () => {
+  const base = await mkdtemp(path.join(tmpdir(), 'deck-shim-'))
+  try {
+    const shim = path.join(base, 'claude.cmd')
+    await writeFile(shim, CMD_SHIM)
+    const file = 'C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd'
+    const readShim = p => { assert.equal(p, file); return readFileSync(shim, 'utf8') }
+    assert.equal(unwrapNodeShim(file, { readFile: readShim }), 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js')
+    // %~dp0, upper case, .mjs and .cjs, and a parent-relative path.
+    assert.equal(unwrapNodeShim('C:\\a\\b\\x.cmd', { readFile: () => '@"%~DP0\\..\\lib\\X.MJS" %*' }), 'C:\\a\\lib\\X.MJS')
+    assert.equal(unwrapNodeShim('C:\\a\\x.cmd', { readFile: () => 'node "%dp0%\\bin\\x.cjs" %*' }), 'C:\\a\\bin\\x.cjs')
+    assert.equal(unwrapNodeShim('C:\\a\\x.cmd', { readFile: () => 'C:\\tools\\real.exe %*' }), null)
+    assert.equal(unwrapNodeShim('C:\\a\\x.cmd', { readFile: () => '"%dp0%\\node.exe" %*' }), null)
+    assert.equal(unwrapNodeShim('C:\\a\\x.cmd', { readFile: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) } }), null)
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('commandSpawn runs an npm cmd-shim .cmd through node directly, with no cmd.exe', () => {
+  const file = 'C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd'
+  const js = 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js'
+  const args = ['x"&echo INJECTED>%TEMP%\\pwn.txt&"y', 'a\nb']
+  assert.deepEqual(commandSpawn(file, args, { platform: 'win32', env: {}, readFile: () => CMD_SHIM, nodePath: 'C:\\node\\node.exe' }),
+    { file: 'C:\\node\\node.exe', args: [js, ...args], options: { windowsHide: true } })
+  assert.equal(commandSpawn(file, [], { platform: 'win32', env: {}, readFile: () => CMD_SHIM }).file, process.execPath)
+})
+
+test('commandSpawn refuses ", CR, LF and % in an argument to a .cmd or .bat it cannot unwrap, naming only the index', () => {
+  for (const file of ['C:\\tools\\run.cmd', 'C:\\tools\\RUN.BAT']) {
+    for (const bad of ['x"&echo INJECTED&"y', 'a\rb', 'a\nb', '100%']) {
+      assert.throws(() => commandSpawn(file, ['ok', bad], { platform: 'win32', env: {}, readFile: noShim }), err => {
+        assert.equal(err.code, 'unsafe_cmd_arg')
+        assert.match(err.message, /argument 1\b/)
+        assert.ok(!err.message.includes(bad), 'the message does not echo the argument')
+        return true
+      }, `${file} ${JSON.stringify(bad)}`)
+    }
+    assert.equal(commandSpawn(file, ['a^b', 'a!b', 'a&b'], { platform: 'win32', env: {}, readFile: noShim }).args.length, 4)
+  }
+  // POSIX and a win32 .exe pass the same arguments through untouched.
+  assert.deepEqual(commandSpawn('/usr/bin/run.cmd', ['100%'], { platform: 'linux' }).args, ['100%'])
+  assert.deepEqual(commandSpawn('C:\\bin\\x.exe', ['a"b%'], { platform: 'win32', env: {} }).args, ['a"b%'])
 })

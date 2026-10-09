@@ -158,15 +158,48 @@ export function quoteCmdArg (arg) {
 }
 
 /**
- * The file, argv and spawn options to run `file` with `args`. A win32 `.cmd` or `.bat` runs through cmd.exe.
+ * The JS entry of an npm cmd-shim `.cmd` (a quoted `%dp0%\...` or `%~dp0\...` path ending in .js,
+ * .cjs or .mjs), resolved against the shim's directory; null when `file` is not one or cannot be read.
+ * @param {string} file
+ * @param {{ readFile?: (p: string, enc: string) => string }} [opts]
+ * @returns {string | null}
+ */
+export function unwrapNodeShim (file, { readFile = fs.readFileSync } = {}) {
+  let text
+  try {
+    text = String(readFile(file, 'utf8'))
+  } catch {
+    return null
+  }
+  const match = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:js|cjs|mjs))"/i.exec(text)
+  if (!match) return null
+  return path.win32.resolve(path.win32.dirname(file), match[1])
+}
+
+// cmd.exe re-parses a batch file's %* after the caret escapes are gone, so these cannot be passed
+// to a .cmd or .bat safely (CVE-2024-27980); a line feed also truncates the argument.
+const UNSAFE_CMD_CHARS = /["\r\n%]/
+
+/**
+ * The file, argv and spawn options to run `file` with `args`. On win32 an npm cmd-shim `.cmd` runs
+ * its JS entry with node directly; any other `.cmd` or `.bat` runs through cmd.exe and refuses an
+ * argument containing `"`, CR, LF or `%` with code `unsafe_cmd_arg`.
  * @param {string} file
  * @param {string[]} args
- * @param {{ platform?: string, env?: Record<string, string | undefined> }} [opts]
+ * @param {{ platform?: string, env?: Record<string, string | undefined>, nodePath?: string, readFile?: (p: string, enc: string) => string }} [opts]
  * @returns {{ file: string, args: string[], options: Record<string, boolean> }}
  */
-export function commandSpawn (file, args, { platform = process.platform, env = process.env } = {}) {
+export function commandSpawn (file, args, { platform = process.platform, env = process.env, nodePath, readFile = fs.readFileSync } = {}) {
   if (platform !== 'win32') return { file, args, options: {} }
+  if (/\.cmd$/i.test(file)) {
+    const js = unwrapNodeShim(file, { readFile })
+    if (js !== null) return { file: nodePath ?? process.execPath, args: [js, ...args], options: { windowsHide: true } }
+  }
   if (/\.(cmd|bat)$/i.test(file)) {
+    const bad = args.findIndex(arg => UNSAFE_CMD_CHARS.test(String(arg)))
+    if (bad !== -1) {
+      throw Object.assign(new Error(`argument ${bad} contains a double quote, CR, LF or % that cmd.exe cannot pass safely to a .cmd or .bat file`), { code: 'unsafe_cmd_arg' })
+    }
     return {
       file: env.ComSpec || 'cmd.exe',
       args: ['/d', '/s', '/c', '"' + [file, ...args].map(quoteCmdArg).join(' ') + '"'],
