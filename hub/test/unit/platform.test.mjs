@@ -7,10 +7,11 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import net from 'node:net'
+import { spawn } from 'node:child_process'
 import { posixTest } from '../helpers/platform.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
 import {
-  runtimeBase, deckDir, endpoint, endpointSecret, listenEndpoint, isPipe, ensurePrivateDir, privateFileProblem, killTree,
+  runtimeBase, deckDir, dropEndpoint, endpoint, endpointSecret, listenEndpoint, isPipe, ensurePrivateDir, privateFileProblem, killTree,
   resolveCommand, quoteCmdArg, escapeCmdCommand, commandSpawn, openUrlArgv, isClaudeProgram, unwrapCmdShim,
   windowsChildEnv, openNoFollowSync, openNoFollow, createInputModeFilter,
 } from '../../platform/index.mjs'
@@ -49,7 +50,7 @@ test('the platform module imports only node: modules and exports exactly the doc
   assert.ok(specifiers.length > 0)
   for (const s of specifiers) assert.match(s, /^node:/, `${s} is not a node: module`)
   assert.deepEqual(Object.keys(platformModule).sort(), [
-    'commandSpawn', 'createInputModeFilter', 'deckDir', 'endpoint', 'endpointSecret', 'ensurePrivateDir', 'escapeCmdCommand', 'isClaudeProgram',
+    'POWERSHELL_UTF8', 'commandSpawn', 'createInputModeFilter', 'deckDir', 'dropEndpoint', 'endpoint', 'endpointSecret', 'ensurePrivateDir', 'escapeCmdCommand', 'isClaudeProgram',
     'isPipe', 'killTree', 'listenEndpoint', 'openNoFollow', 'openNoFollowSync', 'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand',
     'runtimeBase', 'unwrapCmdShim', 'windowsChildEnv',
   ])
@@ -280,7 +281,7 @@ async function send (pipe, text) {
 test('endpointSecret takes over a start lock whose holder is dead, and refuses while a live deck server holds it', async () => {
   await inScratch(async () => {
     fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
-    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, cmd: 'x' }))
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, started: 1 }))
     const asked = []
     const alive = pid => { asked.push(pid); return pid !== DEAD }
     assert.match(endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, alive }), /^[0-9a-f]{64}$/)
@@ -358,7 +359,7 @@ test('after a crash a squatter on the old pipe name neither blocks the next star
     const oldKey = 'b'.repeat(64)
     fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
     fs.writeFileSync(keyFile('base', 'hooks'), oldKey)
-    fs.writeFileSync(lockFile('base', 'hooks'), JSON.stringify({ pid: DEAD, cmd: process.argv[1] }))
+    fs.writeFileSync(lockFile('base', 'hooks'), JSON.stringify({ pid: DEAD, started: 1 }))
     // Another local user who saw the name creates it.
     const squat = await listener(endpoint('base', 'hooks', { platform: 'win32', secret: oldKey }))
     const deck = net.createServer(socket => { socket.on('data', chunk => received.push(String(chunk))) })
@@ -376,21 +377,24 @@ test('after a crash a squatter on the old pipe name neither blocks the next star
   })
 })
 
-test('a lock whose live pid is not a deck server (a reused pid) is taken over; a matching command line, or one that cannot be read, holds it', async () => {
+test('a lock whose live pid was created at another time (a reused pid) is taken over; a matching creation time, or one that cannot be read, holds it', async () => {
   await inScratch(async () => {
     fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
-    const record = JSON.stringify({ pid: 4242, cmd: 'C:\\Users\\you\\hub\\deckd\\main.mjs' })
+    const started = 1_790_000_000_000
+    const record = JSON.stringify({ pid: 4242, started })
     const cases = [
-      ['another program', '"C:\\Windows\\notepad.exe"', true],
-      ['the deck, other case and separators', '"node" "c:/users/YOU/hub/deckd/main.mjs"', false],
+      ['a later process', started + 60_000, true],
+      ['no such process', undefined, true],
+      ['the holder, 1.5 s off', started + 1500, false],
+      ['the holder, 1.5 s the other way', started - 1500, false],
       ['a query that failed', null, false],
     ]
-    for (const [label, line, starts] of cases) {
+    for (const [label, created, starts] of cases) {
       fs.writeFileSync(lockFile('base', 'deckd'), record)
       const asked = []
       const server = net.createServer()
       try {
-        const start = listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: () => true, commandLine: pid => { asked.push(pid); return line } })
+        const start = listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: () => true, creationTime: pid => { asked.push(pid); return created } })
         if (starts) assert.match(await start, /-deckd$/, label)
         else await assert.rejects(start, { code: 'EADDRINUSE', holder: 4242 }, label)
         assert.deepEqual(asked, [4242], label)
@@ -402,7 +406,7 @@ test('a lock whose live pid is not a deck server (a reused pid) is taken over; a
     const asked = []
     const server = net.createServer()
     try {
-      await listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: () => false, commandLine: pid => { asked.push(pid); return '' } })
+      await listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: () => false, creationTime: pid => { asked.push(pid); return started } })
       assert.deepEqual(asked, [], 'a dead pid is not asked about')
     } finally {
       await closeServer(server)
@@ -410,10 +414,177 @@ test('a lock whose live pid is not a deck server (a reused pid) is taken over; a
   })
 })
 
+test('the creation time query runs PowerShell with UTF-8 output and reads Win32_Process.CreationDate as ticks', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    const started = 1_790_000_000_123
+    const ticks = String(BigInt(started) * 10000n + 621355968000000000n)
+    const answers = [
+      ['the holder', { status: 0, stdout: `${ticks}\r\n` }, false],
+      ['no such process', { status: 0, stdout: '\r\n' }, true],
+      ['a later process', { status: 0, stdout: `${BigInt(ticks) + 600_000_000n}\r\n` }, true],
+      ['output that is not ticks', { status: 0, stdout: 'Andr�\r\n' }, false],
+      ['a failed query', { status: 1, stdout: '' }, false],
+      ['no powershell', { error: Object.assign(new Error('spawnSync powershell ENOENT'), { code: 'ENOENT' }), status: null, stdout: '' }, false],
+    ]
+    for (const [label, answer, starts] of answers) {
+      fs.writeFileSync(lockFile('base', 'hooks'), JSON.stringify({ pid: 4242, started }))
+      const spawned = []
+      const spawnSync = (file, args, options) => { spawned.push({ file, args, options }); return answer }
+      const server = net.createServer()
+      try {
+        const start = listenEndpoint('base', 'hooks', server, { platform: 'win32', alive: () => true, spawnSync })
+        if (starts) assert.match(await start, /-hooks$/, label)
+        else await assert.rejects(start, { code: 'EADDRINUSE', holder: 4242 }, label)
+      } finally {
+        await closeServer(server)
+      }
+      assert.equal(spawned.length, 1, label)
+      assert.equal(spawned[0].file, 'powershell')
+      assert.deepEqual(spawned[0].args, ['-NoProfile', '-Command',
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;$p=Get-CimInstance Win32_Process -Filter 'ProcessId=4242';if($p){$p.CreationDate.ToUniversalTime().Ticks}"])
+      assert.equal(spawned[0].options.windowsHide, true)
+      assert.equal(spawned[0].options.encoding, 'utf8')
+    }
+  })
+})
+
+/** When process `pid` started, in ms since the epoch, from /proc (Linux, with the usual 100 clock ticks per second). */
+function procStart (pid) {
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+  const startTicks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19])
+  const btime = Number(readFileSync('/proc/stat', 'utf8').match(/^btime (\d+)$/m)[1])
+  return btime * 1000 + startTicks * 10
+}
+
+test('a deck server started from a relative script path under a non-ASCII directory holds its start lock against a second start', {
+  skip: !['linux', 'win32'].includes(process.platform) && 'reads a process start time from /proc or Windows',
+}, async () => {
+  await inScratch(async (dir) => {
+    const scriptDir = path.join(dir, 'André', 'hub')
+    fs.mkdirSync(scriptDir, { recursive: true })
+    const moduleUrl = new URL('../../platform/index.mjs', import.meta.url).href
+    fs.writeFileSync(path.join(scriptDir, 'holder.mjs'), [
+      "import net from 'node:net'",
+      `const { listenEndpoint } = await import(${JSON.stringify(moduleUrl)})`,
+      'const server = net.createServer()',
+      "await listenEndpoint('base', 'deckd', server, { platform: 'win32' })",
+      "process.stdout.write('READY\\n')",
+      "process.stdin.on('end', () => process.exit(0)).resume()",
+    ].join('\n'))
+    // Relative, as `node hub/deckd/main.mjs` is typed.
+    const child = spawn(process.execPath, [path.join('André', 'hub', 'holder.mjs')], { cwd: dir, stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true })
+    const exited = new Promise(resolve => child.once('exit', resolve))
+    const second = net.createServer()
+    try {
+      await new Promise((resolve, reject) => {
+        child.stdout.on('data', chunk => { if (String(chunk).includes('READY')) resolve(undefined) })
+        child.once('exit', code => reject(new Error(`holder exited ${code}`)))
+      })
+      // On Windows the default query asks PowerShell; elsewhere /proc stands in for it.
+      const opts = process.platform === 'win32' ? {} : { creationTime: procStart }
+      await assert.rejects(listenEndpoint('base', 'deckd', second, { platform: 'win32', ...opts }), { code: 'EADDRINUSE', holder: child.pid })
+      assert.equal(second.listening, false)
+    } finally {
+      await closeServer(second)
+      child.stdin.end()
+      await exited
+    }
+  })
+})
+
+test('dropEndpoint removes the key and lock of the pid that was killed, and only those', async () => {
+  await inScratch(async () => {
+    const dead = () => false
+    const plant = (name, holder) => {
+      fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+      fs.writeFileSync(keyFile('base', name), 'd'.repeat(64))
+      if (holder !== null) fs.writeFileSync(lockFile('base', name), JSON.stringify({ pid: holder, started: 1 }))
+    }
+    plant('deckd', 777)
+    assert.equal(dropEndpoint('base', 'deckd', 777, { platform: 'win32', alive: dead }), true)
+    assert.equal(fs.existsSync(keyFile('base', 'deckd')), false)
+    assert.equal(fs.existsSync(lockFile('base', 'deckd')), false)
+    plant('hooks', 888)
+    assert.equal(dropEndpoint('base', 'hooks', 777, { platform: 'win32', alive: dead }), false, 'another pid\'s lock')
+    assert.equal(readFileSync(keyFile('base', 'hooks'), 'utf8'), 'd'.repeat(64))
+    assert.equal(JSON.parse(readFileSync(lockFile('base', 'hooks'), 'utf8')).pid, 888)
+    fs.rmSync(lockFile('base', 'hooks'))
+    assert.equal(dropEndpoint('base', 'hooks', 777, { platform: 'win32', alive: dead }), false, 'no lock')
+    assert.equal(fs.existsSync(keyFile('base', 'hooks')), true)
+    plant('hooks', 777)
+    assert.throws(() => dropEndpoint('base', 'hooks', 777, { platform: 'win32', alive: () => true, creationTime: () => 1 }), { code: 'EADDRINUSE' }, 'still a live deck')
+    assert.equal(fs.existsSync(keyFile('base', 'hooks')), true)
+    assert.equal(dropEndpoint('base', 'hooks', 777, { platform: 'linux' }), false)
+    assert.equal(fs.existsSync(keyFile('base', 'hooks')), true, 'off win32 nothing is done')
+  })
+})
+
+test('dropEndpoint leaves the key when another starter took the lock over between the check and the takeover', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(keyFile('base', 'deckd'), 'd'.repeat(64))
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: 777, started: 1 }))
+    let swapped = false
+    // Just before dropEndpoint's takeover links its own lock, a dead pid 999 has replaced 777's.
+    const racing = { ...fs, linkSync (from, to) {
+      if (!swapped && to === lockFile('base', 'deckd')) {
+        swapped = true
+        fs.writeFileSync(`${to}.x`, JSON.stringify({ pid: 999, started: 1 }))
+        fs.renameSync(`${to}.x`, to)
+      }
+      return fs.linkSync(from, to)
+    } }
+    assert.equal(dropEndpoint('base', 'deckd', 777, { platform: 'win32', alive: () => false, fs: racing }), false)
+    assert.equal(swapped, true)
+    assert.equal(readFileSync(keyFile('base', 'deckd'), 'utf8'), 'd'.repeat(64))
+  })
+})
+
+test('a starter whose stale lock was moved away by another before its own rename tries again and takes the lock', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, started: 1 }))
+    let moved = false
+    const racing = { ...fs, renameSync (from, to) {
+      if (!moved && from === lockFile('base', 'deckd') && to.endsWith('.stale')) {
+        moved = true
+        fs.rmSync(from)
+      }
+      return fs.renameSync(from, to)
+    } }
+    const server = net.createServer()
+    try {
+      assert.match(await listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: allButDead, fs: racing }), /-deckd$/)
+      assert.equal(moved, true)
+      assert.equal(JSON.parse(readFileSync(lockFile('base', 'deckd'), 'utf8')).pid, process.pid)
+    } finally {
+      await closeServer(server)
+    }
+  })
+})
+
+test('endpointSecret create reads the key again under the lock: a creator that found none returns the key another wrote meanwhile', async () => {
+  await inScratch(async () => {
+    /** @type {string | undefined} */
+    let other
+    // Between this creator's first read (no key) and its lock, another creator writes a key and releases the lock.
+    const racing = { ...fs, mkdirSync (dir, options) {
+      if (other === undefined) other = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true })
+      return fs.mkdirSync(dir, options)
+    } }
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    const mine = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, fs: racing })
+    assert.match(other ?? '', /^[0-9a-f]{64}$/)
+    assert.equal(mine, other)
+    assert.equal(readFileSync(keyFile('base', 'deckd'), 'utf8'), other)
+  })
+})
+
 test('two starters taking over one stale lock: the one whose rename moved the other\'s fresh lock puts it back, so only one server runs', async () => {
   await inScratch(async () => {
     fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
-    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, cmd: 'x' }))
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, started: 1 }))
     const first = net.createServer()
     const second = net.createServer()
     /** @type {Promise<string> | null} */
@@ -445,7 +616,7 @@ test('closing removes the start lock and the key only while they are still this 
     const server = net.createServer()
     await listenEndpoint('base', 'deckd', server, { platform: 'win32' })
     // Another process's lock and key took their places.
-    const otherLock = JSON.stringify({ pid: 4242, cmd: 'other' })
+    const otherLock = JSON.stringify({ pid: 4242, started: 1 })
     fs.writeFileSync(`${lockFile('base', 'deckd')}.other`, otherLock)
     fs.renameSync(`${lockFile('base', 'deckd')}.other`, lockFile('base', 'deckd'))
     fs.writeFileSync(keyFile('base', 'deckd'), 'c'.repeat(64))

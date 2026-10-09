@@ -126,7 +126,7 @@ test('after a crash, a squatter on the old hooks pipe does not stop startHookSoc
     const oldKey = 'b'.repeat(64)
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.key'), oldKey)
-    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.lock'), JSON.stringify({ pid: 2147483646, cmd: 'gone' }))
+    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.lock'), JSON.stringify({ pid: 2147483646, started: 1 }))
     const squatted = []
     const squat = net.createServer(socket => socket.on('data', chunk => squatted.push(String(chunk))))
     await new Promise(resolve => squat.listen(endpoint(base, 'hooks', { platform: 'win32', secret: oldKey }), resolve))

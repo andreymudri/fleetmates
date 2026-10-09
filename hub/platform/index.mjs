@@ -54,18 +54,36 @@ function defaultAlive (pid) {
   }
 }
 
+// PowerShell writes a redirected stdout in the console's code page unless told otherwise; every query
+// the deck runs through it starts with this, so its output is UTF-8.
+export const POWERSHELL_UTF8 = '[Console]::OutputEncoding=[Text.Encoding]::UTF8;'
+// .NET ticks (100 ns since 0001-01-01) at the Unix epoch.
+const EPOCH_TICKS = 621355968000000000n
+// How far apart a lock's recorded start and its pid's creation time may be for the pid to be its holder.
+const START_TOLERANCE_MS = 2000
+
+/** When this process started, in ms since the epoch: now less its uptime. */
+const ownStart = () => Math.round(Date.now() - process.uptime() * 1000)
+
 /**
- * The command line of process `pid`: this process's own from process.argv; another's on a Windows host
- * from Win32_Process through PowerShell, '' when no such process, and null when the query fails or the
- * host is not Windows. `pid` is a positive integer (checked by the caller) before it enters the query.
+ * When process `pid` was created, in ms since the epoch: this process's own from ownStart; another's
+ * from Win32_Process.CreationDate through PowerShell (as .NET ticks, so the output is only digits).
+ * `undefined` when no such process; null when the query fails or prints something else. `pid` is a
+ * positive integer (checked by the caller) before it enters the query.
+ * @param {number} pid
+ * @param {{ spawnSync?: typeof childProcess.spawnSync }} [opts]
+ * @returns {number | undefined | null}
  */
-function defaultCommandLine (pid) {
-  if (pid === process.pid) return [process.execPath, ...process.argv.slice(1)].join(' ')
-  if (process.platform !== 'win32') return null
-  const result = childProcess.spawnSync('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`],
-    { encoding: 'utf8', timeout: 10000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+function defaultCreationTime (pid, { spawnSync = childProcess.spawnSync } = {}) {
+  if (pid === process.pid) return ownStart()
+  const result = spawnSync('powershell', ['-NoProfile', '-Command',
+    `${POWERSHELL_UTF8}$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}';if($p){$p.CreationDate.ToUniversalTime().Ticks}`],
+  { encoding: 'utf8', timeout: 10000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
   if (result.error || result.status !== 0) return null
-  return String(result.stdout ?? '').trim()
+  const out = String(result.stdout ?? '').trim()
+  if (out === '') return undefined
+  if (!/^\d+$/.test(out)) return null
+  return Number((BigInt(out) - EPOCH_TICKS) / 10000n)
 }
 
 function checkName (name) {
@@ -130,35 +148,37 @@ function publishKey (file, secret, fsImpl, random) {
   }
 }
 
-const fold = text => text.replace(/\//g, '\\').toLowerCase()
-
 /**
- * Whether the holder a lock records is a live deck server: its pid is alive and its command line
- * contains the script the lock recorded (case-insensitive, `/` and `\` alike), so a pid Windows reused
- * for another program does not hold the lock. The command line is asked for only when the pid is
- * alive. A command line that cannot be read counts as a deck, so a failing query refuses a start
- * rather than letting a second server run: a lock then stays held while both that pid lives and the
- * query fails, and the error names the lock file.
+ * Whether the holder a lock records is a live deck server: its pid is alive and was created within
+ * START_TOLERANCE_MS of the start the lock recorded, so a pid Windows reused for a later process does
+ * not hold the lock, whatever its command line. The creation time is asked for only when the pid is
+ * alive. One that cannot be read counts as a deck, so a failing query refuses a start rather than
+ * letting a second server run: a lock then stays held while both that pid lives and the query fails,
+ * and the error names the lock file. Not excluded: a pid reused by a process created within the
+ * tolerance of the holder's start, which needs the holder to die within about that long of starting.
  */
-function holderIsDeck (record, { alive, commandLine }) {
-  if (!record || typeof record !== 'object' || !Number.isInteger(record.pid) || record.pid <= 0 || typeof record.cmd !== 'string' || record.cmd === '') return false
+function holderIsDeck (record, { alive, creationTime }) {
+  if (!record || typeof record !== 'object' || !Number.isInteger(record.pid) || record.pid <= 0 || !Number.isFinite(record.started)) return false
   if (!alive(record.pid)) return false
-  const line = commandLine(record.pid)
-  if (line === null) return true
-  return fold(line).includes(fold(record.cmd))
+  const created = creationTime(record.pid)
+  if (created === null) return true
+  return typeof created === 'number' && Math.abs(created - record.started) <= START_TOLERANCE_MS
 }
 
 /**
- * Take the start lock of endpoint `name`: a file recording this pid and script, linked into place so
+ * Take the start lock of endpoint `name`: a file recording this pid and its start time, linked into place so
  * it appears whole or not at all. A lock whose holder is a live deck server (holderIsDeck) refuses
  * with EADDRINUSE and `holder`. Any other lock is stale and is moved aside with a rename, which moves
  * one file: of two starters that judged the same stale lock, the one that finds it moved a different
  * file (another starter's fresh lock) links that file back and starts over, so neither deletes the
  * other's lock. A third starter linking its own lock in the instant that file is away is not
- * excluded. Returns the release function, which removes the lock only while it is still this one.
+ * excluded. Returns the release function, which removes the lock only while it is still this one,
+ * and `previous`, the record of the stale lock it took over (null when there was none).
+ * @returns {{ release: () => void, previous: any }}
  */
-function takeLock (lock, name, { fsImpl, random, alive, commandLine }) {
-  const record = JSON.stringify({ pid: process.pid, cmd: process.argv[1] || process.execPath })
+function takeLock (lock, name, { fsImpl, random, alive, creationTime }) {
+  const record = JSON.stringify({ pid: process.pid, started: ownStart() })
+  let previous = null
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
     const temp = writeTemp(lock, record, fsImpl, random)
     let linked = false
@@ -172,12 +192,13 @@ function takeLock (lock, name, { fsImpl, random, alive, commandLine }) {
     }
     if (linked) {
       const mine = fsImpl.lstatSync(lock, { bigint: true })
-      return () => {
+      const release = () => {
         try {
           const now = fsImpl.lstatSync(lock, { bigint: true })
           if (now.ino === mine.ino && now.dev === mine.dev) fsImpl.unlinkSync(lock)
         } catch {}
       }
+      return { release, previous }
     }
     let seen
     let holder = null
@@ -187,7 +208,7 @@ function takeLock (lock, name, { fsImpl, random, alive, commandLine }) {
     } catch (err) {
       if (err.code === 'ENOENT' && !seen) continue
     }
-    if (holderIsDeck(holder, { alive, commandLine })) {
+    if (holderIsDeck(holder, { alive, creationTime })) {
       throw Object.assign(new Error(`another ${name} server holds ${lock} (pid ${holder.pid})`), { code: 'EADDRINUSE', holder: holder.pid })
     }
     const aside = `${lock}.${random(6).toString('hex')}.stale`
@@ -198,7 +219,8 @@ function takeLock (lock, name, { fsImpl, random, alive, commandLine }) {
       throw err
     }
     const moved = fsImpl.lstatSync(aside, { bigint: true })
-    if (!(seen && moved.ino === seen.ino && moved.dev === seen.dev)) {
+    if (seen && moved.ino === seen.ino && moved.dev === seen.dev) previous = holder
+    else {
       try { fsImpl.linkSync(aside, lock) } catch {}
     }
     fsImpl.unlinkSync(aside)
@@ -209,17 +231,18 @@ function takeLock (lock, name, { fsImpl, random, alive, commandLine }) {
 /**
  * The secret the win32 endpoint `name` hashes, read from `<deckDir(base)>\endpoint-<name>.key`. Null off
  * win32, and on win32 null when the key is missing, is not exactly 64 lowercase hex digits, or is a
- * symbolic link. Clients call this on every connect. With `create: true` a missing or bad key is
- * written under the start lock (a bad one is logged) and the lock released again, and a valid one is
- * returned as it is; while a live deck server holds the lock that write refuses with EADDRINUSE. The
- * deck itself starts its endpoints with `listenEndpoint`, which writes a new key every time.
+ * symbolic link. Clients call this on every connect. With `create: true` (test fixtures that stand in
+ * for a server use it) a valid key is returned as it is; otherwise the start lock is taken, the key read
+ * again under it (another creator may have written one since), a missing or bad one written (a bad one
+ * logged), and the lock released. While a live deck server holds the lock that refuses with EADDRINUSE.
+ * The deck itself starts its endpoints with `listenEndpoint`, which writes a new key every time.
  * @param {string} base
  * @param {{ platform?: string, name?: 'deckd' | 'hooks', create?: boolean, fs?: any, log?: (line: string) => void,
- *   random?: (n: number) => Buffer, alive?: (pid: number) => boolean, commandLine?: (pid: number) => string | null }} [opts]
+ *   random?: (n: number) => Buffer, alive?: (pid: number) => boolean, creationTime?: (pid: number) => number | undefined | null, spawnSync?: typeof childProcess.spawnSync }} [opts]
  * @returns {string | null}
  */
 export function endpointSecret (base, { platform = process.platform, name, create = false, fs: fsImpl = fs, log = logLine,
-  random = randomBytes, alive = defaultAlive, commandLine = defaultCommandLine } = {}) {
+  random = randomBytes, alive = defaultAlive, spawnSync = childProcess.spawnSync, creationTime = pid => defaultCreationTime(pid, { spawnSync }) } = {}) {
   if (platform !== 'win32') return null
   checkName(name)
   const { dir, key, lock } = keyPaths(base, name)
@@ -227,7 +250,7 @@ export function endpointSecret (base, { platform = process.platform, name, creat
   if ('secret' in found) return found.secret
   if (!create) return null
   fsImpl.mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const release = takeLock(lock, name, { fsImpl, random, alive, commandLine })
+  const { release } = takeLock(lock, name, { fsImpl, random, alive, creationTime })
   try {
     const now = readEndpointKey(key, fsImpl)
     if ('secret' in now) return now.secret
@@ -253,28 +276,31 @@ export function endpointSecret (base, { platform = process.platform, name, creat
  * reads the key before it connects, so the pipe a key names is already this server's when the key
  * appears. When the key cannot be written the server is closed, the lock released and the error
  * rethrown. When the server closes, the key is removed if it is still this server's, then the lock
- * released, so clients of a stopped deck find no key and treat it as not running.
+ * released, so clients find no key and treat the server as not running. On Windows the deck's own
+ * `stop` ends the server with `taskkill /F`, which skips that close, so the service manager removes the
+ * key and lock itself after the kill (dropEndpoint).
  *
- * Not closed: a server that dies without closing (a crash, a kill) leaves its key and lock behind.
- * Until the next start replaces the key, clients keep dialing the dead server's pipe name, and a local
- * user who saw that name in `\\.\pipe\` can create it and receive what they send (hook envelopes,
- * fm's hello).
+ * Not closed: a server ended any other way (a crash, logoff, a reboot, a kill outside `stop`) leaves its
+ * key and lock behind. Until the next start replaces the key, the hook and fm keep dialing the dead
+ * server's pipe name, and another local user who saw that name in `\\.\pipe\` can create it and
+ * receive what they send: hook envelopes with their tool input, fm's hello and then keystrokes. Clients
+ * do not check the lock's holder before they send.
  * @param {string} base
  * @param {'deckd' | 'hooks'} name
  * @param {import('node:net').Server} server
  * @param {{ platform?: string, fs?: any, log?: (line: string) => void, random?: (n: number) => Buffer,
- *   alive?: (pid: number) => boolean, commandLine?: (pid: number) => string | null }} [opts]
+ *   alive?: (pid: number) => boolean, creationTime?: (pid: number) => number | undefined | null, spawnSync?: typeof childProcess.spawnSync }} [opts]
  * @returns {Promise<string>}
  */
 export async function listenEndpoint (base, name, server, { platform = process.platform, fs: fsImpl = fs, log = logLine,
-  random = randomBytes, alive = defaultAlive, commandLine = defaultCommandLine } = {}) {
+  random = randomBytes, alive = defaultAlive, spawnSync = childProcess.spawnSync, creationTime = pid => defaultCreationTime(pid, { spawnSync }) } = {}) {
   if (platform !== 'win32') throw new Error('listenEndpoint names win32 pipes only')
   checkName(name)
   const { dir, key, lock } = keyPaths(base, name)
   fsImpl.mkdirSync(dir, { recursive: true, mode: 0o700 })
   let release
   try {
-    release = takeLock(lock, name, { fsImpl, random, alive, commandLine })
+    release = takeLock(lock, name, { fsImpl, random, alive, creationTime }).release
   } catch (err) {
     const current = readEndpointKey(key, fsImpl)
     if (err.code === 'EADDRINUSE' && 'secret' in current) {
@@ -309,6 +335,44 @@ export async function listenEndpoint (base, name, server, { platform = process.p
     release()
   })
   return pipe
+}
+
+/**
+ * After the server of endpoint `name` was ended without closing (the service manager's `taskkill /F`),
+ * remove its key and lock, so clients stop dialing its pipe name. Only when the lock is that server's:
+ * a lock that is missing or records another pid is left alone with the key. Otherwise the lock is taken
+ * over (takeLock, so a start racing this sees a live holder and refuses), the key removed if the lock
+ * taken over still recorded `pid`, and the lock released. Returns whether the key was removed. Off win32
+ * nothing is done. Throws EADDRINUSE while the holder still counts as a live deck server (holderIsDeck).
+ * @param {string} base
+ * @param {'deckd' | 'hooks'} name
+ * @param {number} pid
+ * @param {{ platform?: string, fs?: any, random?: (n: number) => Buffer, alive?: (pid: number) => boolean,
+ *   creationTime?: (pid: number) => number | undefined | null, spawnSync?: typeof childProcess.spawnSync }} [opts]
+ * @returns {boolean}
+ */
+export function dropEndpoint (base, name, pid, { platform = process.platform, fs: fsImpl = fs, random = randomBytes, alive = defaultAlive,
+  spawnSync = childProcess.spawnSync, creationTime = pid => defaultCreationTime(pid, { spawnSync }) } = {}) {
+  if (platform !== 'win32') return false
+  checkName(name)
+  const { key, lock } = keyPaths(base, name)
+  let named = null
+  try {
+    named = JSON.parse(readNoFollow(lock, fsImpl))
+  } catch {}
+  if (named?.pid !== pid) return false
+  const { release, previous } = takeLock(lock, name, { fsImpl, random, alive, creationTime })
+  try {
+    if (previous?.pid !== pid) return false
+    try {
+      fsImpl.unlinkSync(key)
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
+    return true
+  } finally {
+    release()
+  }
 }
 
 /**

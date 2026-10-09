@@ -17,6 +17,9 @@ const TARGETS = {
   win32: { home: 'C:\\Users\\you', state: 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck', hub: 'C:\\Users\\you\\hub', node: 'C:\\Program Files\\nodejs\\node.exe' }
 }
 
+// The win32 runtime base whose deck dir holds the endpoint keys.
+const RUN_BASE = 'C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run'
+
 /** Recording fakes for every injected effect. */
 function harness({ platform, active = () => false, runCode = () => 0, runOut = () => '', uid = 501 } = {}) {
   const target = TARGETS[platform]
@@ -28,6 +31,7 @@ function harness({ platform, active = () => false, runCode = () => 0, runOut = (
     logs: `${target.state}${sep}logs`,
     units: '/home/you/.config/systemd/user'
   }
+  if (platform === 'win32') paths.runtime = `${RUN_BASE}\\fleetmates-deck`
   if (platform === 'linux') {
     paths.units = fs.mkdtempSync(path.join(os.tmpdir(), 'svc-'))
     roots.push(paths.units)
@@ -41,6 +45,7 @@ function harness({ platform, active = () => false, runCode = () => 0, runOut = (
   const dirs = []
   const opens = []
   const closed = []
+  const drops = []
   let nextPid = 4242
   const manager = createServiceManager({
     platform, paths, uid,
@@ -62,9 +67,10 @@ function harness({ platform, active = () => false, runCode = () => 0, runOut = (
     },
     rm: async file => { removed.push(file); files.delete(file) },
     open: (file, flags, mode) => { opens.push({ file, flags, mode }); return 100 + opens.length - 1 },
-    close: fd => { closed.push(fd) }
+    close: fd => { closed.push(fd) },
+    dropEndpoint: (base, name, pid, options) => { drops.push([base, name, pid, options?.platform]); return true }
   })
-  return { manager, paths, files, calls, spawns, writes, removed, probes, dirs, opens, closed, target }
+  return { manager, paths, files, calls, spawns, writes, removed, probes, dirs, opens, closed, target, drops }
 }
 
 test('systemd install writes both units and runs the same systemctl sequence init runs today', async () => {
@@ -247,7 +253,8 @@ const WEB_LINE = '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\you\\hub\\se
 const DECKD_LINE = '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\you\\hub\\deckd\\main.mjs"\r\n'
 
 /** The command line query stop runs for `pid`. */
-const PS = pid => ['powershell', '-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`]
+// The exact query, with the prefix that makes PowerShell print UTF-8 (a path such as C:\Users\André matches only then).
+const PS = pid => ['powershell', '-NoProfile', '-Command', `[Console]::OutputEncoding=[Text.Encoding]::UTF8;(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`]
 const TASKKILL = pid => ['taskkill', '/PID', String(pid), '/T', '/F']
 
 /**
@@ -265,10 +272,11 @@ function commandLines (lines) {
 }
 
 test('detached stop kills a pid whose command line runs the service entry, then removes the pid file', async () => {
-  const { manager, files, calls, removed } = harness({ platform: 'win32', runOut: commandLines({ 777: WEB_LINE }) })
+  const { manager, files, calls, removed, drops } = harness({ platform: 'win32', runOut: commandLines({ 777: WEB_LINE }) })
   files.set(WEB_PID, '777\n')
   await manager.stop('web')
   assert.deepEqual(calls, [PS(777), TASKKILL(777)])
+  assert.deepEqual(drops, [[RUN_BASE, 'hooks', 777, 'win32']], 'the killed server\'s hooks key and lock are dropped')
   assert.deepEqual(removed, [WEB_PID])
   assert.equal(files.has(WEB_PID), false)
   calls.length = 0
@@ -294,19 +302,21 @@ test('detached stop does not kill a pid whose command line is not this service, 
     ''
   ]
   for (const line of others) {
-    const { manager, files, calls } = harness({ platform: 'win32', active: () => true, runOut: commandLines({ 777: line }) })
+    const { manager, files, calls, drops } = harness({ platform: 'win32', active: () => true, runOut: commandLines({ 777: line }) })
     files.set(WEB_PID, '777\n')
     await manager.stop('web')
     assert.deepEqual(calls, [PS(777)], JSON.stringify(line))
+    assert.deepEqual(drops, [], 'nothing killed, no key dropped')
     assert.equal(files.has(WEB_PID), false, 'the stale pid file is dropped')
   }
 })
 
 test('detached stop of a hung service whose probe is silent still kills it by its command line', async () => {
-  const { manager, files, calls } = harness({ platform: 'win32', active: () => false, runOut: commandLines({ 4242: DECKD_LINE }) })
+  const { manager, files, calls, drops } = harness({ platform: 'win32', active: () => false, runOut: commandLines({ 4242: DECKD_LINE }) })
   files.set(DECKD_PID, '4242\n')
   await manager.stop('deckd')
   assert.deepEqual(calls, [PS(4242), TASKKILL(4242)])
+  assert.deepEqual(drops, [[RUN_BASE, 'deckd', 4242, 'win32']])
   assert.equal(files.has(DECKD_PID), false)
 })
 
@@ -342,21 +352,23 @@ test('detached stop never passes a corrupt pid to powershell or taskkill', async
 })
 
 test('detached stop rechecks after a failed taskkill: it throws and keeps the pid file while the process lives, and succeeds once it is gone', async () => {
-  const { manager, files, calls } = harness({ platform: 'win32', runCode: file => file === 'taskkill' ? 1 : 0, runOut: commandLines({ 777: WEB_LINE }) })
+  const { manager, files, calls, drops } = harness({ platform: 'win32', runCode: file => file === 'taskkill' ? 1 : 0, runOut: commandLines({ 777: WEB_LINE }) })
   files.set(WEB_PID, '777\n')
   await assert.rejects(manager.stop('web'), /taskkill \/PID 777 failed/)
   assert.deepEqual(calls, [PS(777), TASKKILL(777), PS(777)])
   assert.equal(files.has(WEB_PID), true)
+  assert.deepEqual(drops, [], 'a server still running keeps its key')
   const gone = harness({ platform: 'win32', runCode: file => file === 'taskkill' ? 128 : 0, runOut: commandLines({ 777: asked => asked === 0 ? WEB_LINE : '' }) })
   gone.files.set(WEB_PID, '777\n')
   await gone.manager.stop('web')
   assert.deepEqual(gone.calls, [PS(777), TASKKILL(777), PS(777)])
+  assert.deepEqual(gone.drops, [[RUN_BASE, 'hooks', 777, 'win32']])
   assert.equal(gone.files.has(WEB_PID), false, 'taskkill failed but the process is gone, so stop succeeds')
 })
 
 test('detached install adds the HKCU Run value and starts both services; uninstall deletes it and stops both', async () => {
   let running = false
-  const { manager, files, calls, spawns } = harness({ platform: 'win32', active: () => running,
+  const { manager, files, calls, spawns, drops } = harness({ platform: 'win32', active: () => running,
     runOut: commandLines({ 4242: DECKD_LINE, 4243: WEB_LINE }) })
   await manager.install()
   const command = 'conhost.exe --headless "C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\you\\hub\\bin\\fleetmates-deck.mjs" start'
@@ -370,5 +382,6 @@ test('detached install adds the HKCU Run value and starts both services; uninsta
     PS(4242), TASKKILL(4242),
     PS(4243), TASKKILL(4243)
   ])
+  assert.deepEqual(drops, [[RUN_BASE, 'deckd', 4242, 'win32'], [RUN_BASE, 'hooks', 4243, 'win32']])
   assert.equal(files.has(`${WIN_STATE}\\run\\deckd.pid`), false)
 })

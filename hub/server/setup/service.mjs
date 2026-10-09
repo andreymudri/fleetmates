@@ -2,9 +2,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import childProcess from 'node:child_process'
 import { LAUNCHD_LABELS, UNIT_NAMES, renderPlist, renderUnit, writeUnit } from './units.mjs'
+import { POWERSHELL_UTF8, dropEndpoint as platformDropEndpoint } from '../../platform/index.mjs'
 
 const SERVICES = ['deckd', 'web']
 const ENTRIES = { deckd: ['deckd', 'main.mjs'], web: ['server', 'main.mjs'] }
+// The win32 endpoint each detached service serves.
+const ENDPOINTS = { deckd: 'deckd', web: 'hooks' }
 const SYSTEMD_UNITS = { deckd: 'fleetmates-deckd.service', web: 'fleetmates-deck.service' }
 const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
 const RUN_VALUE = 'fleetmates-deck'
@@ -25,7 +28,8 @@ function checkService(service) {
 export function createServiceManager({
   platform = process.platform, paths, nodePath = process.execPath, hubPath, run = defaultRun, spawn = childProcess.spawn,
   uid = process.getuid?.() ?? null, probe, writeFile = fs.promises.writeFile, mkdir = fs.promises.mkdir,
-  readFile = fs.promises.readFile, rm = fs.promises.rm, env = process.env, open = fs.openSync, close = fs.closeSync
+  readFile = fs.promises.readFile, rm = fs.promises.rm, env = process.env, open = fs.openSync, close = fs.closeSync,
+  dropEndpoint = platformDropEndpoint
 }) {
   // Paths follow the target platform, not the host, so an injected platform builds the same paths on any host.
   const p = platform === 'win32' ? path.win32 : path.posix
@@ -118,10 +122,10 @@ export function createServiceManager({
       await writeFile(pidFile(service), `${child.pid}\n`, { mode: 0o600 })
     }
     // The command line of process `pid` from Win32_Process, or null when the query fails or prints nothing. Only a
-    // positive decimal integer is put into the query text.
+    // positive decimal integer is put into the query text, after the prefix that makes PowerShell print UTF-8.
     const commandLineOf = async pid => {
       if (!/^[1-9][0-9]*$/.test(pid)) return null
-      const result = await run('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`])
+      const result = await run('powershell', ['-NoProfile', '-Command', `${POWERSHELL_UTF8}(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`])
       if (result.code !== 0) return null
       return String(result.stdout ?? '').trim() || null
     }
@@ -145,10 +149,12 @@ export function createServiceManager({
       try { pid = String(await readFile(pidFile(service), 'utf8')).trim() } catch (error) { if (error.code === 'ENOENT') return; throw error }
       // A pid file left by a crash or a reboot may name an unrelated process tree. Kill only a pid whose command line
       // runs this service's entry; otherwise only drop the stale pid file. A failed taskkill is checked again the same
-      // way, and stop fails while the process still runs.
+      // way, and stop fails while the process still runs. taskkill /F skips the server's own close, which removes its
+      // endpoint key, so once the process is gone its key and lock are removed here, if they are still that pid's.
       if (await isServiceProcess(pid, service)) {
         const result = await run('taskkill', ['/PID', pid, '/T', '/F'])
         if (result.code !== 0 && await isServiceProcess(pid, service)) throw new Error(`taskkill /PID ${pid} failed: ${result.stderr?.trim() || `exit ${result.code}`}`)
+        if (paths.runtime) dropEndpoint(p.dirname(paths.runtime), ENDPOINTS[service], Number(pid), { platform })
       }
       await rm(pidFile(service), { force: true })
     }
