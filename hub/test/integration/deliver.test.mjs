@@ -80,6 +80,26 @@ function entries(log) {
 const CONSOLE_REPLIES = process.platform === 'win32' ? /\x1b\[\?[0-9;]*c/g : null
 const typedText = text => CONSOLE_REPLIES ? text.replace(CONSOLE_REPLIES, '') : text
 const inputs = log => entries(log).filter(entry => typeof entry.input === 'string').map(entry => typedText(entry.input)).filter(text => text !== '')
+/** Every input the fake logged, as it arrived (console replies kept), for failure messages. */
+const rawInputs = log => JSON.stringify(entries(log).filter(entry => typeof entry.input === 'string').map(entry => entry.input))
+
+/**
+ * The fixture script `name`, as an object. On Windows every `^`-anchored expectInput also lets console
+ * replies come first: the fake matches against everything it read since the last step, and the replies to
+ * idle-input's queries arrive just before what the deck types.
+ */
+function scriptFor(name) {
+  const script = JSON.parse(fs.readFileSync(path.join(scriptsDir, `${name}.json`), 'utf8'))
+  if (!CONSOLE_REPLIES) return script
+  const tolerate = steps => {
+    for (const step of steps) {
+      if (step.expectInput?.match?.startsWith('^')) step.expectInput.match = '^(?:\\x1b\\[\\?[0-9;]*c)*' + step.expectInput.match.slice(1)
+      for (const branch of Object.values(step.branch ?? {})) tolerate(branch)
+    }
+  }
+  tolerate(script.steps)
+  return script
+}
 // Every request is at least Caution on Windows (floor.platform in approvals/tiers.mjs), and the projector
 // classifies with the host platform, so a test that needs a Safe request cannot run there.
 const NEEDS_SAFE = process.platform === 'win32' && 'every request asks on Windows (floor.platform)'
@@ -236,7 +256,7 @@ test('approve-always (SYNTHETIC frame, D-95): option 2 lands only when allowAlwa
 })
 
 test('deny-then-instruct: deny lands 3, then the follow-up text reaches the fake with no control byte', async t => {
-  const s = await scenario(t, 'deny-then-instruct')
+  const s = await scenario(t, scriptFor('deny-then-instruct'))
   const req = await s.request('npm run test')
   await refused(s.deliverer.followup(req.id, 'too early'), 'followup_window_closed')
   const { outcome } = await s.deliverer.answer(req.id, { choice: 'deny' })
@@ -252,6 +272,7 @@ test('deny-then-instruct: deny lands 3, then the follow-up text reaches the fake
     }
   }, 'the follow-up to be accepted')
   await until(() => entries(s.log).some(entry => entry.expectInput), 'the fake to take the paste')
+    .catch(error => { throw new Error(`${error.message}; the fake read ${rawInputs(s.log)}`) })
   const pasted = typedText(entries(s.log).find(entry => entry.expectInput).expectInput)
   assert.equal(pasted, '\x1b[200~use pnpm[A instead\n\tplease1~\x1b[201~\r')
   const inner = pasted.slice('\x1b[200~'.length, -'\x1b[201~\r'.length)
