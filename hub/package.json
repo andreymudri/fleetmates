@@ -1,6 +1,6 @@
 {
   "name": "@andreymudri/fleetmates-deck",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "fleetmates deck: a local web deck that observes Claude Code sessions",
   "license": "MIT",
   "homepage": "https://github.com/andreymudri/fleetmates/tree/master/hub#readme",
@@ -14,7 +14,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=24.2.0"
+    "node": ">=24.16.0"
   },
   "bin": {
     "fleetmates-deck": "bin/fleetmates-deck.mjs",
@@ -23,6 +23,7 @@
   "files": [
     "bin/",
     "deckd/",
+    "platform/",
     "server/",
     "hook/",
     "web/dist/",
@@ -38,7 +39,7 @@
     "build": "vite build --config web/vite.config.mjs",
     "prepack": "node bin/vendor-fleetmates.mjs && npm run build",
     "postpack": "node bin/vendor-fleetmates.mjs --clean",
-    "test": "node --test --test-timeout=120000 --test-reporter=tap \"test/**/*.test.mjs\"",
+    "test": "node --import ./test/helpers/canonical-tmp.mjs --test --test-timeout=120000 --test-reporter=tap \"test/**/*.test.mjs\"",
     "perf": "node test/perf/focus-echo.mjs",
     "postinstall": "node bin/prepare-native.mjs"
   },

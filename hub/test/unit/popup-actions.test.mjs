@@ -10,8 +10,12 @@ import { openDeckDb } from '../../server/db/index.mjs'
 import { createProjector } from '../../server/machines/projector.mjs'
 import { ACTION_WAIT_MS, createNotifier } from '../../server/adapters/notify.mjs'
 import { createNotificationMachine, popupActions, requestPopupText } from '../../server/machines/notification.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 
 const settle = () => new Promise(resolve => setImmediate(resolve))
+// Popup actions are notify-send's; the win32 notifier is in-tab only and never runs anything, so every notifier
+// here is pinned to linux.
+const linux = 'linux'
 
 /** A fake runner: popups without actions answer at once; waiting popups stay open until killed or exited. */
 function fakeRunner() {
@@ -54,7 +58,7 @@ test('two Safe requests, Caution, Destructive, a question and an observed sessio
 
 test('the action argv puts every option before --, waits and prints the id, and only offers allow and open', async () => {
   const fake = fakeRunner()
-  const notifier = createNotifier({ run: fake.run })
+  const notifier = createNotifier({ run: fake.run, platform: linux })
   const sent = notifier.popup({ title: '-t', body: 'b', actions: ['allow', 'open', 'rm'], onAction: () => {} })
   await settle()
   fake.procs[0].line('7')
@@ -67,7 +71,7 @@ test('the action argv puts every option before --, waits and prints the id, and 
 
 test('stdout lines call onAction once for an offered key and ignore anything else', async () => {
   const fake = fakeRunner()
-  const notifier = createNotifier({ run: fake.run })
+  const notifier = createNotifier({ run: fake.run, platform: linux })
   const keys = []
   const sent = notifier.popup({ title: 't', body: 'b', actions: ['open'], onAction: key => keys.push(key) })
   await settle()
@@ -90,7 +94,7 @@ test('the waiting process is killed on dismiss, on replace and after the wait wi
   const notifier = createNotifier({ run: async (command, args, options) => {
     if (command === 'makoctl') { dismissed.push(args); return { ok: true, exitCode: 0, stdout: '' } }
     return fake.run(command, args, options)
-  } })
+  }, platform: linux })
   const first = notifier.popup({ title: 't', body: 'b', actions: ['open'], onAction: () => {} })
   await settle()
   fake.procs[0].line('5')
@@ -109,7 +113,7 @@ test('the waiting process is killed on dismiss, on replace and after the wait wi
   await third
   assert.equal(fake.procs[1].killed, true, 'replacing a popup kills the old wait')
   assert.equal(fake.procs[2].killed, false, 'the replacement keeps waiting')
-  const quick = createNotifier({ run: fake.run, actionWaitMs: 30 })
+  const quick = createNotifier({ run: fake.run, actionWaitMs: 30, platform: linux })
   const timed = quick.popup({ title: 't', body: 'b', actions: ['open'], onAction: () => {} })
   await settle()
   fake.procs[3].line('8')
@@ -120,7 +124,7 @@ test('the waiting process is killed on dismiss, on replace and after the wait wi
 
 test('a wait that exits before printing an id fails privately, and one that never prints an id is killed', async () => {
   const fake = fakeRunner()
-  const notifier = createNotifier({ run: fake.run, timeoutMs: 30 })
+  const notifier = createNotifier({ run: fake.run, timeoutMs: 30, platform: linux })
   const exited = notifier.popup({ title: 't', body: 'b', actions: ['open'], onAction: () => {} })
   await settle()
   fake.procs[0].exit(3)
@@ -131,7 +135,7 @@ test('a wait that exits before printing an id fails privately, and one that neve
   assert.equal(fake.procs[1].killed, true)
 })
 
-test('the default runner streams a real child\'s stdout by line and kills it on dismiss', async () => {
+posixTest('the default runner streams a real child\'s stdout by line and kills it on dismiss', { reason: 'the stand-in notify-send is a #! script, and win32 has no desktop popups' }, async () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'deck-popup-'))
   const pidFile = path.join(dir, 'pid')
   const action = path.join(dir, 'action.mjs')
@@ -146,12 +150,12 @@ test('the default runner streams a real child\'s stdout by line and kills it on 
     const keys = []
     let clicked
     const picked = new Promise(resolve => { clicked = resolve })
-    const notifier = createNotifier({ notifyCommand: action, dismissCommand: done, env })
+    const notifier = createNotifier({ notifyCommand: action, dismissCommand: done, env, platform: linux })
     assert.deepEqual(await notifier.popup({ title: 't', body: 'b', actions: ['allow', 'open'], onAction: key => { keys.push(key); clicked() } }), { ok: true, id: 42 })
     await picked
     await new Promise(resolve => setTimeout(resolve, 50))
     assert.deepEqual(keys, ['allow'])
-    const holder = createNotifier({ notifyCommand: waiting, dismissCommand: done, env })
+    const holder = createNotifier({ notifyCommand: waiting, dismissCommand: done, env, platform: linux })
     assert.deepEqual(await holder.popup({ title: 't', body: 'b', actions: ['open'], onAction: () => {} }), { ok: true, id: 43 })
     assert.ok(existsSync(pidFile))
     pid = Number(readFileSync(pidFile, 'utf8'))
@@ -173,7 +177,7 @@ async function harness({ onAction }) {
   const store = openDeckDb(path.join(dir, 'deck.db'))
   let at = 1000
   const fake = fakeRunner()
-  const notifier = createNotifier({ run: fake.run })
+  const notifier = createNotifier({ run: fake.run, platform: linux })
   const machine = createNotificationMachine({ store, notifier, now: () => at, onAction })
   const projector = createProjector({ store, now: () => at })
   const hook = JSON.parse(readFileSync(new URL('../fixtures/hooks/2.1.282/SessionStart.startup.json', import.meta.url), 'utf8'))
@@ -198,7 +202,8 @@ async function harness({ onAction }) {
       await ticked
       return proc
     },
-    cleanup() { store.close(); rmSync(dir, { recursive: true, force: true }) }
+    // The machine and the store close first; Windows can still refuse the removal for a while (EPERM), so it retries.
+    cleanup() { machine.close(); store.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
   }
 }
 

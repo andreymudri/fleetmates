@@ -4,6 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { listBackups } from './backups.mjs'
+import { privateFileProblem } from '../../platform/index.mjs'
 
 const migrationsDir = fileURLToPath(new URL('./migrations/', import.meta.url))
 const migrations = readdirSync(migrationsDir).filter(name => /^\d{4}[-_].+\.sql$/.test(name)).sort()
@@ -44,12 +45,19 @@ function backupBeforeMigration(db, file, version) {
   for (const old of backups.slice(3)) unlinkSync(old.file)
 }
 
-/** Open the deck database, applying forward migrations before returning a writer. */
-export function openDeckDb(file) {
+/**
+ * Open the deck database, applying forward migrations before returning a writer. On POSIX the directory must be
+ * owned by `uid`, and a permissive mode is tightened to 0700 rather than refused; win32 has no owner uid to check.
+ * @param {string} file
+ * @param {{ platform?: string, uid?: number | null }} [opts]
+ */
+export function openDeckDb(file, { platform = process.platform, uid = process.getuid?.() ?? null } = {}) {
   if (typeof file !== 'string' || !path.isAbsolute(file)) throw new TypeError('deck database needs an absolute file path')
   const dir = path.dirname(file)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
-  if (statSync(dir).uid !== process.getuid()) throw Error('deck database directory must be owned by the current user')
+  const info = statSync(dir)
+  // The mode passed is the directory's own, so only the owner is checked here; chmod below makes the mode private.
+  if (privateFileProblem(info, { platform, uid, mode: info.mode & 0o777 })) throw Error('deck database directory must be owned by the current user')
   chmodSync(dir, 0o700)
   const previousUmask = process.umask(0o077)
   let db

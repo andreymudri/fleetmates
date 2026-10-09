@@ -5,7 +5,9 @@
 import { createHash } from 'node:crypto'
 import { existsSync, globSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs'
 import os from 'node:os'
-import path from 'node:path'
+// docs/deck/16-platforms.md section 6: Claude Code runs the Bash tool through Git Bash on Windows, so
+// parsed command paths are POSIX paths on every host, never the host's `path`.
+import nodePath, { posix as path } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gitRead, HOOKS_PATH_ENV, HOOKS_PATH_READS, hooksPathEnvironment, hooksPathFileRead } from '../adapters/git-read.mjs'
 import { destructiveSql, legacyDestructive } from '../machines/request.mjs'
@@ -71,6 +73,20 @@ const gitConfigWriteRunsCode = key => /^(?:remote\..+\.(?:push|mirror)|alias\..*
 const DEV_NULLS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr'])
 const PERSISTENCE_FILES = Object.freeze(['.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.profile', '.zshrc', '.zprofile', '.zshenv', '.zlogin', '.zlogout', '.config/fish/config.fish'])
 const PERSISTENCE_DIRS = Object.freeze(['.config/fish/conf.d', '.config/hypr', '.config/systemd/user', '.config/autostart'])
+// The deck's own launchd agents (docs/deck/16-platforms.md), folded as relFolded folds.
+const LAUNCH_AGENT_PREFIX = 'library/launchagents/io.fleetmates.deck.'
+// The deck's service controls on macOS and Windows: a launchctl word naming a deck label, and reg
+// writing the per-user Run key that starts the deck at login. The key is matched with or without
+// its backslashes, because an unquoted key loses them to the shell.
+const namesLaunchLabel = word => fold(word).includes('io.fleetmates.deck')
+const namesRunKey = word => /currentversion[\\/]*run(?:$|[\\/])/.test(fold(word))
+const REG_WRITES = Object.freeze(['add', 'delete', 'copy', 'import', 'restore', 'load'])
+function controlsDeckService(name, words) {
+  const base = fold(name).replace(/\.exe$/, '')
+  if (base === 'launchctl') return words.slice(1).some(namesLaunchLabel)
+  if (base === 'reg') return REG_WRITES.includes(fold(words[1] ?? '')) && words.slice(2).some(namesRunKey)
+  return false
+}
 // Bash read commands whose path operands go through the sensitive list (F9) whether or not the
 // file exists yet. Every other command's operands and option values go through it too, once the
 // path exists (a path that does not exist holds nothing to read).
@@ -162,8 +178,36 @@ function realExisting(location) {
   return current
 }
 
+// On win32 (docs/deck/16-platforms.md section 6) a Windows path and its Git Bash form name the same
+// file: `C:\x`, `C:/x` and `/c/x` all read as `/c/x`, with `\` read as `/`. A drive path the parser
+// already joined to the working directory (`/c/repo/C:\x`) is taken from its drive on. Set by
+// classify for the length of one synchronous call.
+let windowsPaths = false
+function gitBashPath(text) {
+  if (typeof text !== 'string') return text
+  const at = text.search(/(?:^|\/)[A-Za-z]:[\\/]/)
+  const rest = (at < 0 ? text : text.slice(text[at] === '/' ? at + 1 : at)).replace(/\\/g, '/')
+  const drive = /^([A-Za-z]):\//.exec(rest)
+  return drive ? path.normalize(`/${drive[1].toLowerCase()}${rest.slice(2)}`) : rest
+}
+const hostForm = text => windowsPaths ? gitBashPath(text) : text
+// On win32 a docker -v value is `<drive>:<path>:<target>[:opts]`; the parser splits it on every `:`,
+// so a one-letter source followed by a path is rejoined into the drive path it was.
+const trimSeparators = text => {
+  const trimmed = text.replace(/[\\/]+$/, '')
+  return trimmed === '' || (windowsPaths && /^\/[A-Za-z]$/.test(trimmed)) ? text : trimmed
+}
+const mountSource = mount => windowsPaths && /^[A-Za-z]$/.test(mount.source) && typeof mount.target === 'string' && /^[\\/]/.test(mount.target) ? `${mount.source}:${mount.target}` : mount.source
+// An absolute input path (home, cwd, repo root, deck paths): POSIX, or on win32 also a Windows path.
+const inputPath = (text, platform) => {
+  if (typeof text !== 'string') return null
+  const form = platform === 'win32' ? gitBashPath(text) : text
+  return path.isAbsolute(form) ? path.normalize(form) : null
+}
+
 function resolveIn(location, cwd) {
   if (typeof location !== 'string' || !location) return null
+  location = hostForm(location)
   if (path.isAbsolute(location)) return path.normalize(location)
   return typeof cwd === 'string' && path.isAbsolute(cwd) ? path.resolve(cwd, location) : null
 }
@@ -177,6 +221,7 @@ function isPersistence(location, home) {
   const rel = relFolded(location, home)
   if (rel === null) return false
   return PERSISTENCE_FILES.includes(rel) || PERSISTENCE_DIRS.some(dir => rel === dir || rel.startsWith(`${dir}/`))
+    || rel.startsWith(LAUNCH_AGENT_PREFIX)
 }
 
 function isSensitive(location, home) {
@@ -237,14 +282,16 @@ function scopeRelative(location, scope) {
   return null
 }
 
-function deckControls(deckPaths, home) {
+// On win32 the defaults are the win32 layout (setupPaths with `platform: 'win32'`, from the home as
+// given), and every path is compared in its Git Bash form.
+function deckControls(deckPaths, home, platform) {
   const env = { ...process.env, ...(home ? { HOME: home } : {}) }
-  const defaults = setupPaths(env)
+  const defaults = setupPaths(env, { platform })
   const given = deckPaths ?? {}
   const config = given.config ?? defaults.config
   const state = given.state ?? defaults.state
   const runtime = given.runtime === undefined ? defaults.runtime : given.runtime
-  const dirs = [config, state, runtime, given.token].filter(dir => typeof dir === 'string' && path.isAbsolute(dir))
+  const dirs = [config, state, runtime, given.token].map(dir => inputPath(dir, platform)).filter(Boolean)
   const all = new Set(dirs)
   for (const dir of dirs) all.add(realExisting(dir))
   const port = String(given.port ?? process.env.DECK_PORT ?? 47800)
@@ -521,14 +568,18 @@ const FILTER_READS = Object.freeze({
   yq: /\b(?:env|strenv|envsubst|load\w*|eval\w*)\b/
 })
 
-function context(input) {
-  const home = typeof input.homeDir === 'string' && path.isAbsolute(input.homeDir) ? path.normalize(input.homeDir) : (process.env.HOME && path.isAbsolute(process.env.HOME) ? process.env.HOME : os.homedir())
+function context(input, platform) {
+  const win = platform === 'win32'
+  const given = [input.homeDir, process.env.HOME, ...(win ? [process.env.USERPROFILE] : []), os.homedir()].find(dir => inputPath(dir, platform) !== null) ?? null
+  const home = inputPath(given, platform)
+  const repoRoot = win ? inputPath(input.repoRoot, platform) : input.repoRoot
+  const worktrees = win && Array.isArray(input.worktrees) ? input.worktrees.map(tree => inputPath(tree, platform)) : input.worktrees
   return {
     home,
-    cwd: typeof input.cwd === 'string' && path.isAbsolute(input.cwd) ? path.normalize(input.cwd) : null,
-    deck: deckControls(input.deckPaths, home),
-    scope: repoScope(input.repoRoot, input.worktrees, home),
-    lexicalRoots: repoScope(input.repoRoot, input.worktrees, home, true)
+    cwd: inputPath(input.cwd, platform),
+    deck: deckControls(input.deckPaths, win ? given : home, platform),
+    scope: repoScope(repoRoot, worktrees, home),
+    lexicalRoots: repoScope(repoRoot, worktrees, home, true)
   }
 }
 
@@ -537,6 +588,7 @@ const reason = (entryId, tier, segment, description) => ({ entryId, tier, segmen
 // The verdict on one write target: a floor, "writes outside the repo", or null inside the scope.
 function writeVerdict(location, ctx, segment) {
   if (location === null) return reason('scope.outside', 'caution', segment, 'writes outside the repo')
+  location = hostForm(location)
   if (DEV_NULLS.has(location)) return null
   const paths = candidates(location)
   if (paths.some(candidate => ctx.deck.dirs.some(dir => withinFolded(candidate, dir)))) return reason('floor.deck', 'destructive', segment, 'writes the deck\'s own files')
@@ -1438,8 +1490,11 @@ function classifySegment(segment, ctx, ready, out) {
   for (const assigned of segment.assignments) if (envFloor(assigned.name)) push(reason('floor.env', 'caution', text, `sets ${assigned.name}`))
   if (segment.payloadOf !== null) push(reason('floor.payload', 'caution', text, segment.remote ? 'runs on another host or in a container' : 'runs a command for another command'))
   for (const mount of segment.mounts) {
-    const source = typeof mount.source === 'string' ? path.normalize(mount.source) : null
-    if (source && (source === '/' || within(ctx.home, source))) push(reason('floor.mount', 'destructive', text, 'mounts your home directory into a container'))
+    // A trailing separator names the same directory; a root (`/`, `/c`, `/c/`) is kept whole.
+    const source = typeof mount.source === 'string' ? trimSeparators(path.normalize(hostForm(mountSource(mount)))) : null
+    // On win32 a drive root (`/c`) is the root of a file system, as `/` is.
+    const root = source === '/' || (windowsPaths && /^\/[a-z]\/?$/i.test(source ?? ''))
+    if (source && (root || (windowsPaths ? withinFolded(ctx.home, source) : within(ctx.home, source)))) push(reason('floor.mount', 'destructive', text, 'mounts your home directory into a container'))
   }
   if (segment.privileged) push(reason('floor.privileged', 'destructive', text, 'runs a privileged container'))
   for (const write of segment.writes) {
@@ -1486,6 +1541,7 @@ function classifySegment(segment, ctx, ready, out) {
   const named = [...operands, ...optionValues]
   if (!TEXT_COMMANDS.includes(name) && operands.some(({ location }) => namesControl(location, ctx))) push(reason('floor.deck', 'destructive', text, 'names the deck\'s own files'))
   if (name === 'systemctl' && words.some(word => /^fleetmates-deck/.test(commandBase(word)))) push(reason('floor.deck', 'destructive', text, 'controls the deck\'s own services'))
+  if (controlsDeckService(name, words)) push(reason('floor.deck', 'destructive', text, 'controls the deck\'s own services'))
   // Commands that read a whole directory tree: their roots may not hold the deck's files (F9). diff
   // -r prints every file under its operands in full (with -N, against an empty directory).
   const shortFlag = (flags) => words.some(word => new RegExp(`^-[^-]*[${flags}]`).test(word))
@@ -1840,15 +1896,22 @@ function actionInput(toolName, toolInput) {
  * realpath and glob checks of the paths it names, the read-only, cached D-91 (3) look at the repo's
  * root-level links and `.git` file, and the D-92 (a) core.hooksPath cache, whose git read it starts
  * in the background when one is due (`hooksPathCache`).
- * @param {{ toolName: string, toolInput?: object, cwd?: string, repoRoot?: string, worktrees?: string[], homeDir?: string, deckPaths?: { config?: string, state?: string, runtime?: string|null, token?: string, port?: number|string }, tiers?: { entries: object[] } }} input
+ * @param {{ toolName: string, toolInput?: object, cwd?: string, repoRoot?: string, worktrees?: string[], homeDir?: string, deckPaths?: { config?: string, state?: string, runtime?: string|null, token?: string, port?: number|string }, tiers?: { entries: object[] }, platform?: string }} input
  * @returns {{ tier: 'safe'|'caution'|'destructive', reasons: { entryId: string, tier: string, segment: string, description: string }[], ruleCandidate: string|null, ruleNote: string|null, confirm: { template: string|null, count: string|null }, description: string }}
  */
 export function classify(input) {
+  const platform = input?.platform ?? process.platform
+  const previous = windowsPaths
+  windowsPaths = platform === 'win32'
+  try { return classifyOn(input, platform) } finally { windowsPaths = previous }
+}
+
+function classifyOn(input, platform) {
   const { toolName, cwd = null, repoRoot = null } = input ?? {}
   const toolInput = actionInput(toolName, input?.toolInput)
   const tiers = input?.tiers ?? DEFAULT_TIERS
   const ready = prepare(tiers)
-  const ctx = context(input ?? {})
+  const ctx = context(input ?? {}, platform)
   const reasons = []
   let ruleCandidate = null
   let ruleNote = null
@@ -1877,6 +1940,8 @@ export function classify(input) {
   }
   if (!reasons.some(item => !item.entryId.startsWith('floor.'))) reasons.push(reason('unknown.tool', 'caution', toolName ?? '', 'no pattern matches this request'))
   if (legacyDestructive({ tool_name: toolName, tool_input: toolInput, cwd }, { repoRoot })) reasons.push(reason('floor.m1', 'destructive', '', 'matches a Destructive check of the M1 classifier'))
+  // docs/deck/16-platforms.md section 6: a `C:\` path can escape the POSIX scope checks.
+  if (platform === 'win32') reasons.push(reason('floor.platform', 'caution', '', 'Windows requests always ask: the tier rules read POSIX paths'))
   const tier = maxTier(...reasons.map(item => item.tier)) ?? 'caution'
   if (bash) {
     const segments = bash.parsed.ok ? bash.parsed.segments : []
@@ -1902,32 +1967,36 @@ export function classify(input) {
   }
 }
 
+const hostDirectory = root => {
+  try { return existsSync(root) && statSync(root).isDirectory() } catch { return false }
+}
+
 /**
  * A per-repo cache of `git worktree list --porcelain` read through the Task 11 helper, so the
  * synchronous classifier can take worktrees. `get` returns the cached list (empty until the first
  * read finishes) and starts that read; `drop` forgets a repo, for WorktreeCreate and
- * WorktreeRemove hooks.
- * @param {{ read?: (root: string, args: string[]) => Promise<{ code: number, stdout: Buffer } | null> }} [options]
+ * WorktreeRemove hooks. Roots and worktrees are kept as given and as git prints them, in the host's
+ * form: on win32 a drive path (`C:\x`, `C:/x`) is absolute too, and classify converts it.
+ * @param {{ read?: (root: string, args: string[]) => Promise<{ code: number, stdout: Buffer } | null>, platform?: string, isDirectory?: (root: string) => boolean }} [options]
  */
-export function createWorktreeCache({ read = gitRead } = {}) {
+export function createWorktreeCache({ read = gitRead, platform = process.platform, isDirectory = hostDirectory } = {}) {
   const cache = new Map()
+  const absolute = text => typeof text === 'string' && (platform === 'win32' ? nodePath.win32 : path).isAbsolute(text)
   const refresh = async root => {
     const result = await read(root, ['worktree', 'list', '--porcelain'])
-    const list = result && result.code === 0 ? String(result.stdout).split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice(9)).filter(tree => path.isAbsolute(tree)) : []
+    const list = result && result.code === 0 ? String(result.stdout).split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice(9)).filter(absolute) : []
     const entry = cache.get(root)
     if (entry) entry.list = list
     return list
   }
   return {
     get(root) {
-      if (typeof root !== 'string' || !path.isAbsolute(root)) return []
+      if (!absolute(root)) return []
       const entry = cache.get(root)
       if (entry) return entry.list
       const fresh = { list: [] }
       cache.set(root, fresh)
-      let directory = false
-      try { directory = existsSync(root) && statSync(root).isDirectory() } catch {}
-      fresh.pending = directory ? refresh(root) : Promise.resolve([])
+      fresh.pending = isDirectory(root) ? refresh(root) : Promise.resolve([])
       return fresh.list
     },
     async load(root) {

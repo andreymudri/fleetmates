@@ -1,9 +1,15 @@
 import { readFileSync, lstatSync } from 'node:fs'
 import { timingSafeEqual } from 'node:crypto'
-/** Read a private, owner-owned base64url token without following symlinks. */
-export function readToken(file) {
+import { privateFileProblem } from '../../platform/index.mjs'
+/**
+ * Read a private, owner-owned base64url token without following symlinks. On POSIX the file must be owned by `uid`
+ * and have mode 0600; on win32 it has no mode to check, and the owner's profile ACLs are what keep it private.
+ * @param {string} file
+ * @param {{ platform?: string, uid?: number | null }} [opts]
+ */
+export function readToken(file, { platform = process.platform, uid = process.getuid?.() ?? null } = {}) {
   const info = lstatSync(file)
-  if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o600) throw Error('deck token must be a private 0600 file')
+  if (!info.isFile() || privateFileProblem(info, { platform, uid })) throw Error('deck token must be a private 0600 file')
   const token = readFileSync(file, 'utf8').trim()
   if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw Error('invalid deck token')
   return token

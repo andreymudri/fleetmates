@@ -2,13 +2,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { spawnSync } from 'node:child_process'
 import http from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { setupPaths } from '../server/setup/paths.mjs'
 import { deckHookCommand, readSettings, transformHooks, writeSettings } from '../server/setup/hooks.mjs'
-import { UNIT_NAMES, renderUnit, writeUnit } from '../server/setup/units.mjs'
-import { doctor, status } from '../server/setup/doctor.mjs'
+import { UNIT_NAMES, renderUnit } from '../server/setup/units.mjs'
+import { doctor, serviceProbe, status } from '../server/setup/doctor.mjs'
+import { createServiceManager } from '../server/setup/service.mjs'
+import { ensurePrivateDir, openNoFollowSync } from '../platform/index.mjs'
 import { initChecks } from '../server/setup/wait.mjs'
 import { openInBrowser } from '../server/setup/browser.mjs'
 import { redact } from '../server/approvals/audit.mjs'
@@ -18,21 +19,26 @@ const hub = fileURLToPath(new URL('..', import.meta.url))
 const paths = setupPaths()
 const command = deckHookCommand(process.execPath, paths.hook)
 const args = process.argv.slice(2)
-const USAGE = 'usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | uninstall-hooks | audit [--repo <name>] [--since <YYYY-MM-DD>] | export-misses [--kind retrieval|all] [--out <file>]'
+const USAGE = 'usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | start | stop | uninstall-hooks | audit [--repo <name>] [--since <YYYY-MM-DD>] | export-misses [--kind retrieval|all] [--out <file>]'
 // The user's tiers.json (07-approvals 4.1): created by init only when missing, with the schema copied beside it.
 const tiersFile = path.join(paths.config, 'tiers.json')
 const tiersSchema = path.join(paths.config, 'tiers.schema.json')
 const tiersStub = `${JSON.stringify({ $schema: './tiers.schema.json', version: 1, extends: 'default', disable: [], entries: [] }, null, 2)}\n`
 
-function run(file, argv) {
-  const result = spawnSync(file, argv, { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] })
-  if (result.error || result.status !== 0) throw new Error(`${file} failed: ${result.error?.message || result.stderr?.trim() || `exit ${result.status}`}`)
-  return result
+// The deckd and web services through the platform's service manager (systemd, launchd or detached processes).
+// Built on first use, so commands that do not touch the services work on a platform without a service manager.
+let manager = null
+function services() {
+  manager ??= createServiceManager({ paths, hubPath: hub, probe: serviceProbe(paths) })
+  return manager
 }
 
-function privateDir(dir) {
+// Create a private directory: an existing one is narrowed to 0700 first, as before, and then ensurePrivateDir
+// refuses it on POSIX when another user owns it or it still has a group or world bit.
+async function privateDir(dir) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   fs.chmodSync(dir, 0o700)
+  await ensurePrivateDir(dir)
 }
 
 function writeIfMissing(file, content, mode = 0o600) {
@@ -87,7 +93,8 @@ async function init(dryRun, rotateToken) {
   const versionContent = `${JSON.stringify({ version: JSON.parse(fs.readFileSync(path.join(hub, 'package.json'), 'utf8')).version })}\n`
   let versionChanged = true
   try { versionChanged = fs.readFileSync(versionFile, 'utf8') !== versionContent } catch (error) { if (error.code !== 'ENOENT') throw error }
-  const unitChanges = UNIT_NAMES.map(name => {
+  // systemd units are compared for the dry run; the service adapter writes them.
+  const unitChanges = services().kind !== 'systemd' ? [] : UNIT_NAMES.map(name => {
     const content = renderUnit(name, process.execPath, hub)
     let changed = true
     try { changed = fs.readFileSync(path.join(paths.units, name), 'utf8') !== content } catch (error) { if (error.code !== 'ENOENT') throw error }
@@ -101,9 +108,10 @@ async function init(dryRun, rotateToken) {
     process.stdout.write(`token: ${rotateToken ? 'would rotate' : 'would create if missing'}\n`)
     process.stdout.write(`tiers: ${tiersFile} (${fs.existsSync(tiersFile) ? 'unchanged' : 'would create'})\n`)
     for (const unit of unitChanges) process.stdout.write(`${unit.name}: ${unit.changed ? 'would write' : 'unchanged'}\n`)
+    if (services().kind !== 'systemd') process.stdout.write(`services: would install (${services().kind})\n`)
     return
   }
-  for (const dir of [paths.config, paths.state, paths.spool, paths.logs, paths.share, path.dirname(paths.hook)]) privateDir(dir)
+  for (const dir of [paths.config, paths.state, paths.spool, paths.logs, paths.share, path.dirname(paths.hook)]) await privateDir(dir)
   if (!fs.existsSync(paths.hook) || !fs.readFileSync(paths.hook).equals(source)) fs.writeFileSync(paths.hook, source, { mode: 0o600 })
   fs.chmodSync(paths.hook, 0o600)
   if (versionChanged) fs.writeFileSync(versionFile, versionContent, { mode: 0o600 })
@@ -119,18 +127,9 @@ async function init(dryRun, rotateToken) {
   if (writeIfMissing(tiersFile, tiersStub)) process.stdout.write(`tiers: ${tiersFile} created\n`)
   fs.copyFileSync(path.join(hub, 'server/approvals/tiers.schema.json'), tiersSchema)
   fs.chmodSync(tiersSchema, 0o600)
-  let changedUnit = false
-  let webUnitChanged = false
-  for (const unit of unitChanges) {
-    const changed = writeUnit(path.join(paths.units, unit.name), unit.content)
-    changedUnit = changed || changedUnit
-    if (unit.name === 'fleetmates-deck.service') webUnitChanged = changed
-  }
-  if (changedUnit) run('systemctl', ['--user', 'daemon-reload'])
-  if (webUnitChanged) run('systemctl', ['--user', 'try-restart', 'fleetmates-deck.service'])
-  run('systemctl', ['--user', 'enable', '--now', ...UNIT_NAMES])
+  await services().install()
   process.stdout.write('deckd remains running if it was already active\n')
-  const checks = await initChecks(paths, command)
+  const checks = await initChecks(paths, command, { service: services() })
   for (const check of checks) process.stdout.write(`${check.id}: ${check.state} (${check.detail})\n`)
   if (checks.find(check => check.id === 'hooks')?.state !== 'ok') process.exitCode = 1
 }
@@ -187,7 +186,7 @@ async function main() {
     try {
       const lines = exportMisses({ all: sql => db.prepare(sql).all() }, { kind })
       if (out) {
-        const fd = fs.openSync(out, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o600)
+        const fd = openNoFollowSync(out, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, { mode: 0o600 })
         try { fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, lines) } finally { fs.closeSync(fd) }
       } else process.stdout.write(lines)
     } finally { db.close() }
@@ -202,16 +201,24 @@ async function main() {
     return
   }
   if (name === 'doctor' && rest.length === 0) {
-    const checks = await doctor(paths, command)
+    const checks = await doctor(paths, command, { service: services() })
     for (const check of checks) process.stdout.write(`${check.id}: ${check.state} (${check.detail})\n`)
     if (checks.find(check => check.id === 'hooks')?.state !== 'ok') process.exitCode = 1
     return
   }
-  if (name === 'status' && rest.length === 0) { process.stdout.write(`${JSON.stringify(await status(paths, command), null, 2)}\n`); return }
+  if (name === 'status' && rest.length === 0) { process.stdout.write(`${JSON.stringify(await status(paths, command, { service: services() }), null, 2)}\n`); return }
+  if (name === 'start' && rest.length === 0) {
+    for (const service of ['deckd', 'web']) await services().start(service)
+    return
+  }
+  if (name === 'stop' && rest.length === 0) {
+    for (const service of ['web', 'deckd']) await services().stop(service)
+    return
+  }
   if (name === 'open' && rest.length === 0) {
     if (!fs.existsSync(path.join(hub, 'server/main.mjs'))) throw new Error('web server entrypoint is not installed')
     if (!fs.lstatSync(paths.state).isDirectory()) throw new Error('deck state directory is not a directory')
-    fs.chmodSync(paths.state, 0o700)
+    await privateDir(paths.state)
     const token = fs.readFileSync(paths.token, 'utf8').trim()
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error('invalid deck token')
     let port = 47800
@@ -221,7 +228,7 @@ async function main() {
       port = Number(process.env.DECK_PORT)
     }
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('invalid deck port')
-    run('systemctl', ['--user', 'start', 'fleetmates-deck.service'])
+    await services().start('web')
     await verifyListener(port, token)
     const url = `http://127.0.0.1:${port}/#token=${token}`
     const bootstrap = path.join(paths.state, 'open.html')

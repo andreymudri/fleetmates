@@ -1,7 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { findChromium } from '../helpers/chromium.mjs'
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -626,7 +630,7 @@ createRoot(document.getElementById('root')).render(<App />)
 `
 
 test('in Chromium the Focus route ignores the 1 answer key on an archived session and takes it once the session is unarchived', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the Focus browser test')
   const dir = await mkdtemp(path.join(tmpdir(), 'focusarc-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
@@ -882,29 +886,33 @@ test('applyAppearance sets the text size as --text-base and reduced motion as da
   assert.equal(props.size + attrs.size, 0)
 })
 
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
+/**
+ * Run npm with `args`: `process.execPath` with the npm-cli.js installed next to it (Windows layout, then the POSIX
+ * `lib/` layout), else `npm` through resolveCommand and commandSpawn, since `npm` is `npm.cmd` on Windows and a
+ * spawn without a shell cannot run that.
+ */
+function npm(args, options) {
+  const dir = path.dirname(process.execPath)
+  const cli = [path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), path.join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')].find(file => existsSync(file))
+  if (cli) return execFileSync(process.execPath, [cli, ...args], options)
+  const spawn = commandSpawn(resolveCommand('npm'), args)
+  return execFileSync(spawn.file, spawn.args, { ...options, ...spawn.options })
 }
 
 test('in Chromium the deck drops the fragment, authenticates the socket and shows a stale token without retrying', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the shell browser test')
   const { startDeckServer } = await import('../../server/main.mjs')
   const dir = await mkdtemp(path.join(tmpdir(), 'shell-'))
   const token = 'a'.repeat(43)
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   await mkdir(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // The token where the server reads it for this env: ~/.local/state/fleetmates/deck on Linux.
+  const { state, token: tokenFile } = setupPaths(env)
   await mkdir(state, { recursive: true, mode: 0o700 })
-  await writeFile(path.join(state, 'token'), token, { mode: 0o600 })
+  await writeFile(tokenFile, token, { mode: 0o600 })
   const out = path.join(dir, 'web')
-  execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
+  npm(['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
   const deck = await startDeckServer({ env, port: 0, staticDir: out, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }) })
   const browser = await chromium.launch({ executablePath, headless: true })

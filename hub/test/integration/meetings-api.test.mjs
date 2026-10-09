@@ -15,6 +15,10 @@ import { startFakeScribed } from '../fakes/fake-scribed.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { meetings5, writeMeetingsTree } from '../helpers/meetings-tree.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const run = promisify(execFile)
 const token = 'm'.repeat(43)
 const hookFixture = JSON.parse(fs.readFileSync(new URL('../fixtures/hooks/2.1.282/SessionStart.startup.json', import.meta.url)))
@@ -116,13 +120,13 @@ async function harness(t, { variants = [], scribed = true, fake = {}, execFile: 
   return h
 }
 
-test('the shims are what a test resolves for every host binary', () => {
+test('the shims are what a test resolves for every host binary', { skip: LINUX_ONLY }, () => {
   for (const name of HOST_BINARIES) {
     assert.equal(execFileSync('/bin/sh', ['-c', `command -v ${name}`], { env: process.env, encoding: 'utf8' }).trim(), path.join(shimDir, name))
   }
 })
 
-test('POST /api/meetings/start { tag: client-a } reaches the fake as that command, answers 202 recording, and the row is confidential', async t => {
+test('POST /api/meetings/start { tag: client-a } reaches the fake as that command, answers 202 recording, and the row is confidential', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t)
   const recorder = await h.start('client-a')
   assert.equal(recorder.state, 'recording')
@@ -135,7 +139,7 @@ test('POST /api/meetings/start { tag: client-a } reaches the fake as that comman
   assert.equal(detail.data.meeting.confidential, true)
 })
 
-test('an unknown tag is 422 unknown_tag and scribed receives no start', async t => {
+test('an unknown tag is 422 unknown_tag and scribed receives no start', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t)
   const response = await h.request('/api/meetings/start', { method: 'POST', body: { tag: 'not-a-tag' } })
   assert.equal(response.status, 422)
@@ -143,7 +147,7 @@ test('an unknown tag is 422 unknown_tag and scribed receives no start', async t 
   assert.equal(h.fake.received.some(entry => entry.parsed?.cmd === 'start'), false)
 })
 
-test('scribed refusing a start is 409 scribed_refused with its message verbatim in details.text', async t => {
+test('scribed refusing a start is 409 scribed_refused with its message verbatim in details.text', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t)
   h.fake.on('start', () => ({ type: 'error', cmd: 'start', message: 'sessão já ativa; pare a atual antes' }))
   const response = await h.request('/api/meetings/start', { method: 'POST', body: { tag: 'pessoal' } })
@@ -153,7 +157,7 @@ test('scribed refusing a start is 409 scribed_refused with its message verbatim 
   assert.deepEqual(response.data.error.details, { text: 'sessão já ativa; pare a atual antes' })
 })
 
-test('POST /api/meetings/stop answers 202 stopping within 200 ms while scribed takes 2 s to stop', async t => {
+test('POST /api/meetings/stop answers 202 stopping within 200 ms while scribed takes 2 s to stop', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { fake: { stopDelayMs: 2000 } })
   await h.start('pessoal')
   const started = Date.now()
@@ -167,7 +171,7 @@ test('POST /api/meetings/stop answers 202 stopping within 200 ms while scribed t
   assert.equal(again.data.error.code, 'not_recording')
 })
 
-test('two pins 1 s apart give 201 then 200 with the same pin, labelled from the ring; a confidential pin has a null label', async t => {
+test('two pins 1 s apart give 201 then 200 with the same pin, labelled from the ring; a confidential pin has a null label', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t)
   const recorder = await h.start('pessoal')
   const id = recorder.meetingId
@@ -197,7 +201,7 @@ test('two pins 1 s apart give 201 then 200 with the same pin, labelled from the 
   assert.equal(pinned.data.pin.label, null)
 })
 
-test('the transcript route reads the file again on every call', async t => {
+test('the transcript route reads the file again on every call', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t)
   const id = h.tree.ids.planning
   const first = await h.request(`/api/meetings/${id}/transcript`)
@@ -214,7 +218,7 @@ test('the transcript route reads the file again on every call', async t => {
   assert.equal((await h.request('/api/meetings/2020-01-01T00-00-00/transcript')).status, 404)
 })
 
-test('search: q=a is 422; a confidential sentinel is found, a file change is seen, and deck.db holds no sentinel', async t => {
+test('search: q=a is 422; a confidential sentinel is found, a file change is seen, and deck.db holds no sentinel', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { variants: ['confidential'] })
   const short = await h.request('/api/meetings/search?q=a')
   assert.equal(short.status, 422)
@@ -236,12 +240,12 @@ test('search: q=a is 422; a confidential sentinel is found, a file change is see
   }
 })
 
-test('open postmeetLog of a log symlinked out of session_dir is 403 path_not_allowed and opens nothing', async t => {
+test('open postmeetLog of a log symlinked out of session_dir is 403 path_not_allowed and opens nothing', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t)
   const id = h.tree.ids.planning
   const ok = await h.request('/api/open', { method: 'POST', body: { kind: 'postmeetLog', ref: id } })
   assert.equal(ok.status, 202)
-  assert.deepEqual(h.opened, [fs.realpathSync(path.join(h.tree.sessionDir, id, 'postmeet.log'))])
+  assert.deepEqual(h.opened, [fs.realpathSync.native(path.join(h.tree.sessionDir, id, 'postmeet.log'))])
   const outside = path.join(h.home, 'outside.log')
   fs.writeFileSync(outside, 'not a meeting log\n')
   const log = path.join(h.tree.sessionDir, id, 'postmeet.log')
@@ -256,7 +260,7 @@ test('open postmeetLog of a log symlinked out of session_dir is 403 path_not_all
   assert.equal(h.opened[1], `obsidian://open?vault=vault&file=${encodeURIComponent(h.tree.notes.planning)}`)
 })
 
-test('a hook envelope whose cwd is inside session_dir creates no session, one outside does', async t => {
+test('a hook envelope whose cwd is inside session_dir creates no session, one outside does', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t)
   const send = (cwd, sessionId) => {
     h.deck.ingest.receive(JSON.stringify({ v: 1, hookTs: Date.now(), ptyId: null, claudePid: null, pidChain: [], truncated: false,
@@ -271,7 +275,7 @@ test('a hook envelope whose cwd is inside session_dir creates no session, one ou
   assert.equal(h.deck.meetingHookDrops(), 1)
 })
 
-test('a meeting ask streams ask.delta and ask.done without seq, and no ask event can reach the events table', async t => {
+test('a meeting ask streams ask.delta and ask.done without seq, and no ask event can reach the events table', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { fake: { askDeltas: ['Quarta', '-feira.'] } })
   const recorder = await h.start('pessoal')
   const { messages, ready } = h.socket()
@@ -294,7 +298,7 @@ test('a meeting ask streams ask.delta and ask.done without seq, and no ask event
   assert.equal(vault.data.error.code, 'vault_unavailable')
 })
 
-test('with no scribed socket GET /api/meetings still lists the five past meetings, recorder unavailable', async t => {
+test('with no scribed socket GET /api/meetings still lists the five past meetings, recorder unavailable', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { scribed: false })
   const list = await h.request('/api/meetings')
   assert.equal(list.status, 200)
@@ -314,7 +318,7 @@ test('with no scribed socket GET /api/meetings still lists the five past meeting
   assert.equal(start.data.error.retryable, true)
 })
 
-test('POST /api/deps/scribed/start runs the systemd-run shim with the decided argv and no token in its environment', async t => {
+test('POST /api/deps/scribed/start runs the systemd-run shim with the decided argv and no token in its environment', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, {
     scribed: false,
     execFile: async (h, file, args, options) => {
@@ -340,7 +344,7 @@ function sendHook(h, cwd, sessionId, event, extra = {}) {
   h.deck.ingest.flush()
 }
 
-test('the hook guard keeps the last good session_dir when config.yaml stops reading, so a prompt from inside it is never stored', async t => {
+test('the hook guard keeps the last good session_dir when config.yaml stops reading, so a prompt from inside it is never stored', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { scribed: false })
   const inside = path.join(h.tree.sessionDir, h.tree.ids.planning)
   sendHook(h, inside, 'guard-before', 'SessionStart')
@@ -358,7 +362,7 @@ test('the hook guard keeps the last good session_dir when config.yaml stops read
   }
 })
 
-test('a hook whose cwd is a symlink outside session_dir pointing into it is dropped', async t => {
+test('a hook whose cwd is a symlink outside session_dir pointing into it is dropped', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { scribed: false })
   const link = path.join(h.home, 'looks-outside')
   fs.symlinkSync(path.join(h.tree.sessionDir, h.tree.ids.planning), link)
@@ -367,7 +371,7 @@ test('a hook whose cwd is a symlink outside session_dir pointing into it is drop
   assert.equal(h.deck.meetingHookDrops(), 1)
 })
 
-test('without XDG_RUNTIME_DIR in its env the server never reaches the socket of the process environment', async t => {
+test('without XDG_RUNTIME_DIR in its env the server never reaches the socket of the process environment', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { runtime: false, processRuntime: true })
   assert.equal(process.env.XDG_RUNTIME_DIR, h.rt.dir)
   await sleep(300)
@@ -378,7 +382,7 @@ test('without XDG_RUNTIME_DIR in its env the server never reaches the socket of 
   assert.deepEqual(h.fake.received, [])
 })
 
-test('a turbidassistConfig pref change is located and read again: GET /api/meetings shows the new tags and configPath', async t => {
+test('a turbidassistConfig pref change is located and read again: GET /api/meetings shows the new tags and configPath', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { scribed: false })
   const first = await h.request('/api/meetings')
   assert.equal(first.data.configPath, h.tree.configPath)
@@ -395,13 +399,13 @@ test('a turbidassistConfig pref change is located and read again: GET /api/meeti
   assert.deepEqual(after.data.tags.map(tag => tag.tag), ['pessoal', 'client-a', 'acme'])
 })
 
-test('meeting detail sends the distinct speaker names', async t => {
+test('meeting detail sends the distinct speaker names', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { scribed: false })
   const detail = await h.request(`/api/meetings/${h.tree.ids.planning}`)
   assert.deepEqual(detail.data.speakers, ['Você', 'SPEAKER_00'])
 })
 
-test('open meetingNote refuses a stored note path that is not .md, and the log route bounds lines at 1000', async t => {
+test('open meetingNote refuses a stored note path that is not .md, and the log route bounds lines at 1000', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t, { scribed: false })
   const id = h.tree.ids.planning
   fs.writeFileSync(path.join(h.tree.vaultPath, 'Meetings', 'planning.txt'), 'plain text\n')
@@ -416,7 +420,7 @@ test('open meetingNote refuses a stored note path that is not .md, and the log r
   assert.equal(over.data.error.code, 'validation_failed')
 })
 
-test('the recorder view in the API is confidential once the stored row is, even when the recorder still says otherwise', async t => {
+test('the recorder view in the API is confidential once the stored row is, even when the recorder still says otherwise', { skip: LINUX_ONLY }, async t => {
   const h = await harness(t)
   const recorder = await h.start('pessoal')
   assert.equal(recorder.confidential, false)

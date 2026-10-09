@@ -7,6 +7,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises'
 import { captureLoginEnv, dropSessionVars, changedNames, CLAUDE_SESSION_VARS } from '../../deckd/login-env.mjs'
+import { posixTest } from '../helpers/platform.mjs'
+
+/** Every probe test runs a fake login shell written as a `#!/bin/sh` script. */
+const SH = { reason: 'the fake login shell is a /bin/sh script' }
 
 // captureLoginEnv defaults `shell` to $SHELL. Point it at nothing, so a call
 // that forgets to pass a fake shell falls back instead of running the
@@ -54,7 +58,7 @@ test('CLAUDE_SESSION_VARS is exactly the per-session list the owner chose', () =
   assert.ok(Object.isFrozen(CLAUDE_SESSION_VARS))
 })
 
-test('captureLoginEnv keeps profile CLAUDE_CODE_* names and drops the session ones and TERM', async () => {
+posixTest('captureLoginEnv keeps profile CLAUDE_CODE_* names and drops the session ones and TERM', SH, async () => {
   const argvLog = path.join(dir, 'argv.log')
   // Records its argv, then runs the probe's command with an environment of
   // its own, as a login shell would after reading a profile.
@@ -79,7 +83,7 @@ test('captureLoginEnv keeps profile CLAUDE_CODE_* names and drops the session on
   assert.match(argv[3], /^printf '%s\\0' __FLEETMATES_DECK_ENV_[0-9a-f]{16}__; env -0$/)
 })
 
-test('captureLoginEnv keeps every variable when the profile prints a banner first', async () => {
+posixTest('captureLoginEnv keeps every variable when the profile prints a banner first', SH, async () => {
   // Prints a banner with no newline, runs whatever the probe asked for
   // before `env -0`, then an `env -0` whose first variable follows the banner.
   const shell = await fakeShell('sh-banner', [
@@ -93,7 +97,7 @@ test('captureLoginEnv keeps every variable when the profile prints a banner firs
   assert.equal(env.FROM_BASE, undefined)
 })
 
-test('captureLoginEnv parses only what follows the marker, so an assignment-shaped banner is not a variable', async () => {
+posixTest('captureLoginEnv parses only what follows the marker, so an assignment-shaped banner is not a variable', SH, async () => {
   // A profile that prints `NAME=value` text before the probe command runs.
   // The fake shell never reads a profile: it prints the banner itself.
   const shell = await fakeShell('sh-assign-banner', [
@@ -106,7 +110,7 @@ test('captureLoginEnv parses only what follows the marker, so an assignment-shap
   assert.equal(env.OTHER_VAR, '2')
 })
 
-test('captureLoginEnv answers when the shell exits, though a background job still holds stdout', async () => {
+posixTest('captureLoginEnv answers when the shell exits, though a background job still holds stdout', SH, async () => {
   const pidFile = path.join(dir, 'sleeper.pid')
   const shell = await fakeShell('sh-bg', [
     `sleep 30 & echo $! > '${pidFile}'`,
@@ -127,7 +131,7 @@ test('captureLoginEnv answers when the shell exits, though a background job stil
   }
 })
 
-test('captureLoginEnv reports why it fell back', async () => {
+posixTest('captureLoginEnv reports why it fell back', SH, async () => {
   const base = { FROM_BASE: '1' }
   /** @param {string} shell */
   const reason = async (shell, timeoutMs = 5000) => {
@@ -143,13 +147,13 @@ test('captureLoginEnv reports why it fell back', async () => {
   assert.deepEqual(await reason(''), ['no_shell'])
 })
 
-test('captureLoginEnv falls back to the base environment, with the same drops, on exit 1', async () => {
+posixTest('captureLoginEnv falls back to the base environment, with the same drops, on exit 1', SH, async () => {
   const shell = await fakeShell('sh-fail', 'env -i FROM_SHELL=1 /bin/sh -c "$4"; exit 1')
   const env = await captureLoginEnv({ shell, baseEnv: { FROM_BASE: '1', TERM: 'xterm', CLAUDECODE: '1', CLAUDE_CODE_USE_BEDROCK: '1' } })
   assert.deepEqual(env, { FROM_BASE: '1', CLAUDE_CODE_USE_BEDROCK: '1' })
 })
 
-test('captureLoginEnv falls back when the shell runs past the timeout', async () => {
+posixTest('captureLoginEnv falls back when the shell runs past the timeout', SH, async () => {
   const shell = await fakeShell('sh-slow', "sleep 5; printf 'FROM_SHELL=1\\0'")
   const t0 = Date.now()
   const env = await captureLoginEnv({ shell, timeoutMs: 200, baseEnv: { FROM_BASE: '1' } })
@@ -157,12 +161,29 @@ test('captureLoginEnv falls back when the shell runs past the timeout', async ()
   assert.ok(Date.now() - t0 < 4000, `took ${Date.now() - t0} ms`)
 })
 
-test('captureLoginEnv falls back on a missing shell, an empty shell name and empty output', async () => {
+posixTest('captureLoginEnv falls back on a missing shell, an empty shell name and empty output', SH, async () => {
   const base = { FROM_BASE: '1' }
   assert.deepEqual(await captureLoginEnv({ shell: path.join(dir, 'no-such-shell'), baseEnv: base }), base)
   assert.deepEqual(await captureLoginEnv({ shell: '', baseEnv: base }), base)
   const empty = await fakeShell('sh-empty', 'exit 0')
   assert.deepEqual(await captureLoginEnv({ shell: empty, baseEnv: base }), base)
+})
+
+test('on win32 captureLoginEnv spawns nothing and returns the base environment with the drops, reason windows', async () => {
+  // A shell that would leave a marker if it ran; on win32 it must not run.
+  const marker = path.join(dir, 'win32-ran')
+  const shell = await fakeShell('sh-win32', `: > '${marker}'\nenv -i FROM_SHELL=1 /bin/sh -c "$4"`)
+  /** @type {string[]} */
+  const reasons = []
+  const env = await captureLoginEnv({
+    platform: 'win32',
+    shell,
+    baseEnv: { FROM_BASE: '1', TERM: 'xterm', CLAUDECODE: '1' },
+    onFallback: (r) => reasons.push(r)
+  })
+  assert.deepEqual(env, { FROM_BASE: '1' })
+  assert.deepEqual(reasons, ['windows'])
+  await assert.rejects(readFile(marker), { code: 'ENOENT' })
 })
 
 test('dropSessionVars removes TERM and the list, returns a copy', () => {

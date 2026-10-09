@@ -1,40 +1,55 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
 import { createApiClient } from '../../web/src/state/api.js'
+import { setupPaths } from '../../server/setup/paths.mjs'
+import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
+import { findChromium } from '../helpers/chromium.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const token = 'a'.repeat(43)
 const fixture = JSON.parse(await readFile(new URL('../fixtures/hooks/2.1.282/SessionStart.startup.json', import.meta.url)))
 
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
+/**
+ * Run npm with `args`: `process.execPath` with the npm-cli.js installed next to it (Windows layout, then the POSIX
+ * `lib/` layout), else `npm` through resolveCommand and commandSpawn, since `npm` is `npm.cmd` on Windows and a
+ * spawn without a shell cannot run that.
+ */
+function npm(args, options) {
+  const dir = path.dirname(process.execPath)
+  const cli = [path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), path.join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')].find(file => existsSync(file))
+  if (cli) return execFileSync(process.execPath, [cli, ...args], options)
+  const spawn = commandSpawn(resolveCommand('npm'), args)
+  return execFileSync(spawn.file, spawn.args, { ...options, ...spawn.options })
 }
+
+/** Write the token where the server reads it for `env`: ~/.local/state/... on linux, under AppData\Local on win32. */
+async function writeToken(env) {
+  const file = setupPaths(env).token
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+  await writeFile(file, token, { mode: 0o600 })
+}
+
+// Windows refuses to remove a directory while a just-closed file in it is still held; retry for a while.
+const rmDir = dir => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 
 /** The built deck on a real server with two done sessions, and a Chromium page holding the token. */
 async function deckWithTwoSessions(t) {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the M1 web fixes browser test')
   const { startDeckServer } = await import('../../server/main.mjs')
   const dir = await mkdtemp(path.join(tmpdir(), 'm1w-'))
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   await mkdir(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
-  await mkdir(state, { recursive: true, mode: 0o700 })
-  await writeFile(path.join(state, 'token'), token, { mode: 0o600 })
+  await writeToken(env)
   const out = path.join(dir, 'web')
-  execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
+  npm(['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
   // deckd answers, so no deckd banner is up: its once-a-second countdown would re-render the shell and hide stale state.
   const deckd = { request: async op => op === 'list' ? { ptys: [] } : op === 'exits' ? { exits: [] } : {}, on: () => () => {}, close() {} }
   // The sessions below are observed, with hooks stamped at 1000. On the wall clock they are decades old, so the
@@ -45,7 +60,7 @@ async function deckWithTwoSessions(t) {
   const browser = await chromium.launch({ executablePath, headless: true })
   t.after(async () => { await browser.close()
     await deck.close()
-    await rm(dir, { recursive: true, force: true }) })
+    await rmDir(dir) })
   const base = `http://127.0.0.1:${deck.address().port}`
   // First run is done, so `/` does not redirect to /welcome (the fake home has no hooks for its checks to pass).
   deck.store.run('INSERT INTO prefs(key,value,updated_at) VALUES(?,?,?)', 'firstRunCompletedAt', JSON.stringify(1000), 1000)
@@ -130,14 +145,12 @@ test('the REST client hands screens the bare body the real deck server sends', a
   const dir = await mkdtemp(path.join(tmpdir(), 'm1r-'))
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   await mkdir(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
-  await mkdir(state, { recursive: true, mode: 0o700 })
-  await writeFile(path.join(state, 'token'), token, { mode: 0o600 })
+  await writeToken(env)
   await mkdir(path.join(dir, 'dev'))
   const deck = await startDeckServer({ env, port: 0, staticDir: dir, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }) })
   t.after(async () => { await deck.close()
-    await rm(dir, { recursive: true, force: true }) })
+    await rmDir(dir) })
   const base = `http://127.0.0.1:${deck.address().port}`
   const client = createApiClient({ token, fetch: (route, init) => fetch(base + route, { ...init, headers: { ...init.headers, Origin: base } }) })
   assert.deepEqual(await client.get('/api/version'), { apiVersion: 1,

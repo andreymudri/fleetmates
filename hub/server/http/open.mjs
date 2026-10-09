@@ -2,6 +2,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { apiError } from './router.mjs'
 import { SESSION_ID } from '../meetings/history.mjs'
+import { openNoFollow } from '../../platform/index.mjs'
 
 /** Largest plan the API returns; the rest is cut and `truncated` is set (05-api 2.8). */
 export const PLAN_CAP = 256 * 1024
@@ -39,7 +40,7 @@ export async function resolveRunPlan(run, repoRoot) {
  */
 export async function readRunPlan(file) {
   let handle
-  try { handle = await fs.open(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW) }
+  try { handle = await openNoFollow(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0)) }
   catch (error) { throw missing(error) ? apiError(404, 'not_found') : notAllowed() }
   try {
     const info = await handle.stat()

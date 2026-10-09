@@ -5,7 +5,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
-import { readFile, mkdtemp } from 'node:fs/promises'
+import { readFile, mkdtemp, rm } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
@@ -47,8 +47,9 @@ before(async () => {
 after(async () => {
   c?.close()
   await deckd?.close()
-  await fake?.cleanup()
-  await rt?.cleanup()
+  // Retried: the Windows VM run could not remove a directory a just-killed child still held.
+  const rmRetry = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }
+  for (const d of [fake?.binDir, rt?.dir]) if (d) await rm(d, rmRetry)
 })
 
 /**

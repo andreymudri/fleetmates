@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { closeSync, openSync, writeFileSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -9,6 +9,8 @@ import { createIngestor, startHookSocket } from '../../server/ingest/socket.mjs'
 import { drainSpool, startSpoolDrain } from '../../server/ingest/spool.mjs'
 import { createReorderBuffer } from '../../server/ingest/reorder.mjs'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
+import { endpoint } from '../../platform/index.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 
 const hook = { session_id: 's1', transcript_path: '/home/you/.claude/projects/x/a.jsonl', cwd: '/repo', hook_event_name: 'Stop', stop_hook_active: false }
 const line = (hookTs = 1, payload = hook) => JSON.stringify({ v: 1, deckHookVersion: '0.1.0', hookTs, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: payload }) + '\n'
@@ -136,7 +138,7 @@ test('timed ingest retries failed delivery without crashing or repeating applied
   } finally { ingest.close() }
 })
 
-test('socket rejects partial lines and accepts complete lines', async () => {
+posixTest('socket rejects partial lines and accepts complete lines', { reason: 'asserts Unix socket and directory modes' }, async () => {
   const dir = await mkdtemp(path.join('/tmp/hx', 'ingest-'))
   const accepted = []
   const rejected = []
@@ -158,7 +160,7 @@ test('socket rejects partial lines and accepts complete lines', async () => {
   } finally { await server.close(); ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
-test('socket listener restarts after an unclean exit without replacing a live listener', async () => {
+posixTest('socket listener restarts after an unclean exit without replacing a live listener', { reason: 'replaces a stale Unix socket file' }, async () => {
   const dir = await mkdtemp(path.join('/tmp/hx', 'stale-socket-'))
   const moduleUrl = new URL('../../server/ingest/socket.mjs', import.meta.url).href
   const childScript = `import {startHookSocket} from ${JSON.stringify(moduleUrl)}; await startHookSocket({runtimeDir:process.argv[1],ingest:{receive(){},rejectRaw(){}}}); console.log('ready')`
@@ -310,4 +312,84 @@ test('a failed spool apply can retry on the same ingestor without losing its ded
     assert.deepEqual(accepted, [1])
     assert.deepEqual(await readdir(dir), [])
   } finally { ingest.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('on win32 the hook socket listens on the hooks pipe and never touches the file system; a second listener is EADDRINUSE', async () => {
+  // On a POSIX host the pipe name is a relative path, so the listener runs in a private working directory.
+  const cwd = process.cwd()
+  const work = await mkdtemp(path.join(os.tmpdir(), 'ingest-pipe-'))
+  const runtimeDir = path.win32.join('C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run', path.basename(work))
+  const touched = []
+  const spy = name => () => { touched.push(name) }
+  const fsOps = { mkdirSync: spy('mkdirSync'), chmodSync: spy('chmodSync'), lstatSync: spy('lstatSync'), unlinkSync: spy('unlinkSync') }
+  const accepted = []
+  const ingest = createIngestor({ onEvent: row => accepted.push(row.hookTs), onRejected: () => {}, reorderMs: 0 })
+  process.chdir(work)
+  let server
+  try {
+    server = await startHookSocket({ runtimeDir, ingest, platform: 'win32', fsOps })
+    assert.equal(server.path, endpoint(runtimeDir, 'hooks', { platform: 'win32' }))
+    await assert.rejects(startHookSocket({ runtimeDir, ingest, platform: 'win32', fsOps }), { code: 'EADDRINUSE' })
+    const { connect } = await import('node:net')
+    await new Promise(resolve => { const socket = connect(server.path); socket.on('connect', () => socket.end(line(7))); socket.on('close', resolve) })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    ingest.flush()
+    assert.deepEqual(accepted, [7])
+    assert.deepEqual(touched, [])
+  } finally {
+    await server?.close()
+    ingest.close()
+    process.chdir(cwd)
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+posixTest('a socket file that disappears between EADDRINUSE and its inspection is listened on again, not an ENOENT failure', { reason: 'unlinks a Unix socket file' }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ingest-gone-'))
+  const { createServer } = await import('node:net')
+  const holder = createServer()
+  const ingest = createIngestor({ onEvent: () => {}, onRejected: () => {}, reorderMs: 0 })
+  const socketPath = endpoint(dir, 'hooks')
+  mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 })
+  await new Promise(resolve => holder.listen(socketPath, resolve))
+  let server
+  try {
+    // The first inspection finds the file gone, as when the server that held it closes at that moment.
+    let first = true
+    const fsOps = { mkdirSync, chmodSync, unlinkSync, lstatSync: file => {
+      if (first) { first = false
+        unlinkSync(file)
+        throw Object.assign(new Error(`ENOENT: no such file or directory, lstat '${file}'`), { code: 'ENOENT' }) }
+      return lstatSync(file)
+    } }
+    server = await startHookSocket({ runtimeDir: dir, ingest, fsOps })
+    assert.equal(server.path, socketPath)
+    assert.equal((await stat(socketPath)).isSocket(), true)
+    assert.equal((await stat(socketPath)).mode & 0o777, 0o600)
+  } finally {
+    await server?.close()
+    await new Promise(resolve => holder.close(resolve))
+    ingest.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+posixTest('the hook socket refuses a runtime base that is world-writable or owned by another uid, as deckd does', { reason: 'POSIX file modes and owners' }, async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), 'ingest-base-'))
+  const ingest = createIngestor({ onEvent: () => {}, onRejected: () => {}, reorderMs: 0 })
+  // The refusal, or null after closing a listener that should not have started (so a regression fails, not hangs).
+  const refusal = options => startHookSocket({ runtimeDir: base, ingest, ...options }).then(async server => { await server.close()
+    return null }, error => error)
+  try {
+    chmodSync(base, 0o777)
+    assert.equal((await refusal())?.message, `runtime dir ${base} has mode 0777; it must allow no group or world access (0700)`)
+    chmodSync(base, 0o700)
+    const otherUid = process.getuid() + 1
+    assert.equal((await refusal({ uid: otherUid }))?.message, `runtime dir ${base} is owned by uid ${process.getuid()}, not by this user`)
+    const server = await startHookSocket({ runtimeDir: base, ingest })
+    await server.close()
+  } finally {
+    ingest.close()
+    await rm(base, { recursive: true, force: true })
+  }
 })

@@ -11,6 +11,10 @@ import {
 } from '../../server/meetings/history.mjs'
 import { writeMeetingsTree, meetings5, VARIANTS } from '../helpers/meetings-tree.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const MIN = 60 * 1000
 
 async function tree(t, options) {
@@ -104,7 +108,7 @@ test('postState without /proc/locks treats a lock changed within 10 minutes as h
   assert.equal((await postState(m.sessionDir, m.ids.stuck, { now: m.now, procLocks: unreadable })).stuck, true)
 })
 
-test('postState detects a btrfs-style lock: /proc/locks lists the mount device, stat() an anonymous one', async t => {
+test('postState detects a btrfs-style lock: /proc/locks lists the mount device, stat() an anonymous one', { skip: LINUX_ONLY }, async t => {
   const m = await tree(t, { variants: ['stuck'] })
   const lock = path.join(m.sessionDir, 'postmeet.lock')
   await writeFile(lock, '')
@@ -345,7 +349,7 @@ test('search keeps a long line snippet within 160 characters around the match, a
   await assert.rejects(searchTranscripts(list, ' a '), { code: 'validation_failed' })
 })
 
-test('logTail returns the last lines of postmeet.log and refuses a symlink out of session_dir', async t => {
+test('logTail returns the last lines of postmeet.log and refuses a symlink out of session_dir', { skip: LINUX_ONLY }, async t => {
   const m = await tree(t, { variants: ['stuck'] })
   assert.equal(await logTail(m.sessionDir, m.ids.weekly, 2), 'síntese concluída\nnota publicada no vault')
   const log = path.join(m.sessionDir, m.ids.stuck, 'postmeet.log')
@@ -375,7 +379,7 @@ test('logTail reads only the last 64 KiB and drops the cut first line', async t 
   assert.ok(lines.includes(tail.split('\n')[0]))
 })
 
-test('the fixture writes every variant with its sentinels and private modes', async t => {
+test('the fixture writes every variant with its sentinels and private modes', { skip: LINUX_ONLY }, async t => {
   const m = await tree(t, { variants: VARIANTS })
   assert.deepEqual(Object.keys(m.sentinels).sort(), [...VARIANTS].sort())
   const info = await stat(path.join(m.sessionDir, m.ids.confidential, 'transcript.jsonl'))

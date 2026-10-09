@@ -275,26 +275,44 @@ test('normalizeLongOption matches exact options and unique prefixes', () => {
   assert.equal(normalizeLongOption('-f', []), '-f')
 })
 
+// The 100 KB parse is timed against a 10 KB parse of the same shape, not against a fixed budget. The
+// 10 KB parse is timed as a batch of ten, so both timed blocks take about as long and a loaded machine
+// slows them alike; the rounds alternate the two. The ratio is per parse: linear work gives about 10,
+// quadratic work about 100.
 test('a 100 KB command of nested quotes parses in linear time', () => {
   const unit = `"a'b'c" 'd"e"f' $'g\\'h' "i\\"j" `
-  const command = 'echo ' + unit.repeat(Math.ceil(100 * 1024 / unit.length))
-  assert.ok(command.length >= 100 * 1024)
+  const flat = size => 'echo ' + unit.repeat(Math.ceil(size / unit.length))
   const doubleQuote = text => `"${text.replace(/[\\"$`]/g, '\\$&')}"`
-  let nested = 'echo ' + `'a b' "c d" `.repeat(2500)
-  for (let level = 0; level < 4; level++) nested = `bash -c ${doubleQuote(nested)}`
+  const nesting = pairs => {
+    let nested = 'echo ' + `'a b' "c d" `.repeat(pairs)
+    for (let level = 0; level < 4; level++) nested = `bash -c ${doubleQuote(nested)}`
+    return nested
+  }
+  const command = flat(100 * 1024)
+  assert.ok(command.length >= 100 * 1024)
+  const nested = nesting(2500)
   assert.ok(nested.length >= 100 * 1024)
   const nestedResult = parseCommand(nested, { cwd })
   assert.equal(nestedResult.segments.length, 5, 'four nested bash -c payloads and the innermost echo')
   assert.equal(nestedResult.segments[4].words.length, 5001)
-  for (const input of [command, nested]) {
-    let best = Infinity
-    for (let run = 0; run < 5; run++) {
-      const started = performance.now()
-      const result = parseCommand(input, { cwd })
-      best = Math.min(best, performance.now() - started)
-      assert.equal(result.ok, true)
+  const BATCH = 10
+  const timed = (input, times) => {
+    const started = performance.now()
+    for (let k = 0; k < times; k++) assert.equal(parseCommand(input, { cwd }).ok, true)
+    return performance.now() - started
+  }
+  for (const [large, small] of [[command, flat(10 * 1024)], [nested, nesting(250)]]) {
+    assert.ok(small.length * 9 < large.length && large.length < small.length * 11, `${small.length} and ${large.length} characters`)
+    timed(small, BATCH)
+    timed(large, 1)
+    let smallMs = Infinity
+    let largeMs = Infinity
+    for (let round = 0; round < 7; round++) {
+      smallMs = Math.min(smallMs, timed(small, BATCH) / BATCH)
+      largeMs = Math.min(largeMs, timed(large, 1))
     }
-    assert.ok(best < 50, `parsed ${input.length} characters in ${best.toFixed(1)} ms`)
+    const ratio = largeMs / smallMs
+    assert.ok(ratio < 30, `parsed ${large.length} characters in ${largeMs.toFixed(1)} ms and ${small.length} in ${smallMs.toFixed(2)} ms: ratio ${ratio.toFixed(1)}`)
   }
 })
 

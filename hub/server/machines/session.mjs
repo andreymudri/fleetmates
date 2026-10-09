@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { expireRequests, matchKey, toolLine } from './request.mjs'
+import { openNoFollowSync } from '../../platform/index.mjs'
 
 const maxGitOutput = 1024 * 1024
 const maxChangedPaths = 512
@@ -79,7 +80,7 @@ function scanBudget() {
 
 function workingPath(root, name, budget) {
   if (Date.now() >= budget.deadline) throw new Error('scan timeout')
-  const boundary = realpathSync(root)
+  const boundary = realpathSync.native(root)
   const file = path.resolve(boundary, name)
   if (!file.startsWith(`${boundary}${path.sep}`)) throw new Error('path outside repository')
   let directory = boundary
@@ -97,7 +98,7 @@ function workingPath(root, name, budget) {
 }
 
 function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false, ident = false) {
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const fd = openNoFollowSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
   try {
     const before = fstatSync(fd)
     if (Date.now() >= budget.deadline || !before.isFile() || before.size > budget.remaining) throw new Error('scan limit')
@@ -287,7 +288,7 @@ function gitlinkState(directory, budget, depth) {
       return null
     }
     const top = git(directory, ['rev-parse', '--show-toplevel'], budget)?.toString('utf8').trim()
-    if (!top || realpathSync(top) !== realpathSync(directory)) return null
+    if (!top || realpathSync.native(top) !== realpathSync.native(directory)) return null
     const head = gitHead(directory, budget)
     if (!head || head === 'unborn') return null
     const scan = gitPaths(directory, head, budget, depth)
@@ -318,7 +319,7 @@ function lineBytes(root, name, scan, budget) {
       return bytes
     }
     if (!stat.isFile() || stat.size > maxGitOutput || stat.size > budget.remaining) return null
-    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    fd = openNoFollowSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
     const before = fstatSync(fd)
     if (!before.isFile() || before.size !== stat.size) return null
     const bytes = Buffer.alloc(before.size)
@@ -441,7 +442,7 @@ function headMarks(marker) {
 /** Resolve the bounded canonical working tree used for filesystem observations. */
 export function workingRoot(cwd) {
   let root = cwd || '/unknown'
-  try { root = realpathSync(root) } catch {}
+  try { root = realpathSync.native(root) } catch {}
   let current = root
   for (let depth = 0; depth < 32; depth++) {
     const marker = path.join(current, '.git')
@@ -463,7 +464,7 @@ function repo(store, cwd, at) {
   let id = root
   const common = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir'])?.toString('utf8').trim()
   if (common && path.isAbsolute(common) && path.basename(common) === '.git') {
-    try { id = realpathSync(path.dirname(common)) } catch {}
+    try { id = realpathSync.native(path.dirname(common)) } catch {}
   }
   if (store.get('SELECT id FROM repos WHERE id=?', id)) return id
   let name = path.basename(id) || id
@@ -775,8 +776,9 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
 }
 
-// `scripts/cli.mjs`, then (in the same command segment) `--run <id>` or `--run=<id>`, the id bare or quoted.
-const LEAD_COMMAND = /scripts\/cli\.mjs\b["']?[^;&|\n]*?\s--run(?:=|\s+)(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;&|"'()<>`$]+))/
+// `scripts/cli.mjs` (or `scripts\cli.mjs`, as a Windows shell writes it), then (in the same command
+// segment) `--run <id>` or `--run=<id>`, the id bare or quoted.
+const LEAD_COMMAND = /scripts[\\/]cli\.mjs\b["']?[^;&|\n]*?\s--run(?:=|\s+)(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;&|"'()<>`$]+))/
 
 /**
  * The run id a fleetmates lead names in a Bash command (`node scripts/cli.mjs <verb> --run <id>`), or null.

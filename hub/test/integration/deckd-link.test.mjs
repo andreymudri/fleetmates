@@ -9,12 +9,14 @@ import os from 'node:os'
 import { startDeckd } from '../../deckd/main.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { createProjector, PROMPT_GONE_REASON } from '../../server/machines/projector.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createDeckdLink } from '../../server/pty/link.mjs'
 import { readStoredHistory } from '../../server/screen/history.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
+import { runtimeBase } from '../../platform/index.mjs'
 
 const token = 'a'.repeat(43)
 const hooks = new URL('../fixtures/hooks/2.1.282/', import.meta.url)
@@ -41,19 +43,21 @@ after(async () => {
   await deckd?.close()
   await bin?.cleanup()
   await rt?.cleanup()
-  fs.rmSync(dir, { recursive: true, force: true })
+  if (dir) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 
 /** A deck server on its own state dir, linked to the shared deckd; `runtimeDir` is its XDG_RUNTIME_DIR. */
 async function server(t, { runtimeDir = rt.dir, ...options } = {}) {
   const home = fs.mkdtempSync(path.join(dir, 'home-'))
-  const state = path.join(home, '.local/state/fleetmates/deck')
+  const env = { HOME: home, XDG_RUNTIME_DIR: runtimeDir }
+  // Where the server reads its state for this env on this platform.
+  const { state } = setupPaths(env)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   const staticDir = path.join(home, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  const deck = await startDeckServer({ env: { HOME: home, XDG_RUNTIME_DIR: runtimeDir }, port: 0, staticDir, notifications: false,
+  const deck = await startDeckServer({ env, port: 0, staticDir, notifications: false,
     runPollMs: 3_600_000, runCommand: () => ({ status: 0, stdout: '', stderr: '' }), ...options })
   t.after(() => deck.close())
   const published = []
@@ -89,6 +93,26 @@ async function until(fn, what) {
 }
 
 const sessionOf = (deck, ptyId) => deck.projector.snapshot().sessions.find(row => row.ptyId === ptyId)
+
+test('without XDG_RUNTIME_DIR the link connects, and retries, under the runtimeBase fallback of its platform', async t => {
+  const home = fs.mkdtempSync(path.join(dir, 'nox-'))
+  const store = openDeckDb(path.join(home, 'deck.db'))
+  const projector = createProjector({ store })
+  t.after(() => store.close())
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const env = { HOME: home }
+    const dirs = []
+    const link = createDeckdLink({ env, platform, reconnectMs: 60_000, connectDeckd: async options => { dirs.push(options.runtimeDir)
+      throw Error('fake offline') }, store, projector, publish: () => {} })
+    await link.start()
+    assert.equal(link.health().state, 'down')
+    link.retry()
+    await until(() => dirs.length === 2, 'the retry probe')
+    link.close()
+    assert.deepEqual(dirs, [runtimeBase({ env, platform }), runtimeBase({ env, platform })], platform)
+  }
+  assert.equal(runtimeBase({ env: { HOME: home }, platform: 'darwin' }), path.posix.join(home, 'Library', 'Caches', 'fleetmates-deck'))
+})
 const write = (deck, ptyId, text, kind = 'deck') => deck.link.request('write', { ptyId, data: Buffer.from(text).toString('base64'), source: { kind } })
 
 test('a wrapped spawn becomes one starting row that did not join mid-life', async t => {

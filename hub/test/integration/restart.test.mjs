@@ -13,6 +13,7 @@ import { WebSocket } from 'ws'
 import { startDeckd } from '../../deckd/main.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { encodeFrame, decodeFrame, FRAME_KIND } from '../../server/pty-bridge/frames.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
@@ -37,7 +38,7 @@ after(async () => {
   await deckd?.close()
   await bin?.cleanup()
   await rt?.cleanup()
-  fs.rmSync(dir, { recursive: true, force: true })
+  if (dir) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 
 /** Resolve once `fn()` is truthy, re-checked whenever `changed` fires. */
@@ -93,10 +94,12 @@ async function tab(t, deck, resume = { lastSeq: 0, epoch: null }) {
 
 test('a restarted server reconciles the three running PTYs and the reconnected tab types into each again', async t => {
   const home = fs.mkdtempSync(path.join(dir, 'home-'))
-  const stateDir = path.join(home, '.local/state/fleetmates/deck')
+  const env = { HOME: home, XDG_RUNTIME_DIR: rt.dir }
+  // Where the server reads its state for this env on this platform; both servers start on it.
+  const stateDir = setupPaths(env).state
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(stateDir, 'token'), token, { mode: 0o600 })
-  const start = () => startDeckServer({ env: { HOME: home, XDG_RUNTIME_DIR: rt.dir }, port: 0, notifications: false,
+  const start = () => startDeckServer({ env, port: 0, notifications: false,
     runPollMs: 3_600_000, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
 
   const first = await start()

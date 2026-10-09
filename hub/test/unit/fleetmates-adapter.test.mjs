@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { posixTest } from '../helpers/platform.mjs'
 import { createFleetmatesReader, createTaskLocator, fleetmatesScriptsDir, isRunName, taskForCwd } from '../../server/adapters/fleetmates.mjs'
 
 const rootState = await import(pathToFileURL(path.join(fleetmatesScriptsDir(), 'state.mjs')).href)
@@ -15,7 +16,7 @@ async function withRepo(run) {
   try {
     await run(repo)
   } finally {
-    await rm(repo, { recursive: true, force: true })
+    await rm(repo, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 }
 
@@ -55,7 +56,7 @@ test('reader discovers nested runs, skips index and keeps unknown states as safe
   })
 })
 
-test('reader returns an error for truncated JSON or a FIFO without hanging', async () => {
+posixTest('reader returns an error for truncated JSON or a FIFO without hanging', { reason: 'mkfifo' }, async () => {
   await withRepo(async (repo) => {
     const dir = await writeRun(repo, 'r1', { runId: 'r1', totalPhases: 1, tasks: [] })
     await writeFile(path.join(dir, 'status.json'), '{"tasks":')
@@ -506,7 +507,7 @@ test('recorded gate keyed by a manifest phase name remains visible', async () =>
 // taskForCwd (M2 Task 7): the one index record for a worktree, read synchronously with the root guards.
 async function withTeammate(run) {
   await withRepo(async (base) => {
-    const repo = fs.realpathSync(base)
+    const repo = fs.realpathSync.native(base)
     const worktree = path.join(repo, 'wt-T2')
     await mkdir(worktree)
     await rootState.writeLocation(repo, 'r1', 'T2', { worktree, branch: 'fleetmates/r1/T2' })
@@ -576,7 +577,7 @@ test('taskForCwd caches a hit for 60 s and never caches a miss', async () => {
   })
 })
 
-test('taskForCwd refuses an oversized record, a FIFO and a record naming another worktree', async () => {
+posixTest('taskForCwd refuses an oversized record, a FIFO and a record naming another worktree', { reason: 'mkfifo' }, async () => {
   await withTeammate(async (repo, worktree) => {
     const record = path.join(rootState.indexDir(repo), `${rootState.worktreeKey(worktree)}.json`)
     const fresh = () => createTaskLocator().taskForCwd(repo, worktree)

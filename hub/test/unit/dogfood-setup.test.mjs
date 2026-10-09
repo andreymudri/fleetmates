@@ -12,6 +12,8 @@ import { initChecks, waitForSocket } from '../../server/setup/wait.mjs'
 import { openInBrowser } from '../../server/setup/browser.mjs'
 import { HOOK_EVENTS, deckHookCommand, hooksInstalled, transformHooks } from '../../server/setup/hooks.mjs'
 import { spawnSync } from 'node:child_process'
+import { posixTest } from '../helpers/platform.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const tested = JSON.parse(readFileSync(path.join(hub, 'package.json'), 'utf8')).fleetmatesDeck.testedClaudeCode
@@ -42,22 +44,24 @@ test('waitForSocket gives up after 3 seconds of virtual time', async () => {
 })
 
 test('initChecks waits for an active deckd socket before running the checks', async () => {
-  const paths = { runtime: '/run/user/1000/fleetmates-deck' }
+  const paths = { runtime: '/run/user/1000/fleetmates-deck', endpoints: { deckd: '/run/user/1000/fleetmates-deck/deckd.sock' } }
   const order = []
   const checks = [{ id: 'deckd', state: 'ok' }]
   const result = await initChecks(paths, 'cmd', {
+    platform: 'linux',
     run: (file, argv) => { order.push(`${file} ${argv.join(' ')}`); return { status: 0 } },
     wait: async file => { order.push(`wait ${file}`); await new Promise(resolve => setImmediate(resolve)); order.push('waited'); return true },
     check: async (p, command) => { order.push(`doctor ${command}`); return checks }
   })
   assert.equal(result, checks)
-  assert.deepEqual(order, ['systemctl --user is-active fleetmates-deckd.service', 'wait /run/user/1000/fleetmates-deck/deckd.sock', 'waited', 'doctor cmd'])
+  assert.deepEqual(order, ['systemctl --user is-active --quiet fleetmates-deckd.service', 'wait /run/user/1000/fleetmates-deck/deckd.sock', 'waited', 'doctor cmd'])
 })
 
-test('initChecks does not wait when deckd is not active or there is no runtime dir', async () => {
-  for (const [paths, status] of [[{ runtime: '/run/x' }, 3], [{ runtime: null }, 0]]) {
+test('initChecks does not wait when deckd is not active or there is no deckd endpoint', async () => {
+  for (const [paths, status] of [[{ runtime: '/run/x', endpoints: { deckd: '/run/x/deckd.sock' } }, 3], [{ runtime: '/run/x' }, 0]]) {
     const order = []
     await initChecks(paths, 'cmd', {
+      platform: 'linux',
       run: () => ({ status }),
       wait: async () => { order.push('wait'); return true },
       check: async () => { order.push('doctor'); return [] }
@@ -66,11 +70,30 @@ test('initChecks does not wait when deckd is not active or there is no runtime d
   }
 })
 
+test('initChecks off linux asks the service adapter, waits on the platform endpoint and hands the adapter to the checks', async () => {
+  const cases = [
+    ['darwin', setupPaths({ HOME: '/Users/you' }, { platform: 'darwin', uid: 501 })],
+    ['win32', setupPaths({ USERPROFILE: 'C:\\Users\\you', LOCALAPPDATA: 'C:\\Users\\you\\AppData\\Local' }, { platform: 'win32', uid: null })]
+  ]
+  for (const [platform, paths] of cases) {
+    const order = []
+    const service = { kind: platform === 'win32' ? 'detached' : 'launchd', isActive: async name => { order.push(`active ${name}`); return true } }
+    await initChecks(paths, 'cmd', {
+      platform, service,
+      run: file => { order.push(`run ${file}`); return { status: 0 } },
+      wait: async file => { order.push(`wait ${file}`); return true },
+      check: async (p, command, options) => { order.push(`doctor ${options.service === service} ${options.platform}`); return [] }
+    })
+    assert.deepEqual(order, ['active deckd', `wait ${paths.endpoints.deckd}`, `doctor true ${platform}`], platform)
+  }
+  assert.match(cases[1][1].endpoints.deckd, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-deckd$/)
+})
+
 test('doctor reports a newer Claude Code as a non-blocking warning and keeps missing or older as failed', async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'deck-cc-'))
   try {
     const paths = { settings: path.join(dir, 'settings.json'), hook: path.join(dir, 'hook.mjs'), runtime: null }
-    const claudeFor = async reply => (await doctor(paths, 'cmd', { run: file => file === 'claude' ? reply : { status: 3, stdout: '' } })).find(row => row.id === 'claude')
+    const claudeFor = async reply => (await doctor(paths, 'cmd', { platform: 'linux', run: file => file === 'claude' ? reply : { status: 3, stdout: '' } })).find(row => row.id === 'claude')
     const [major, minor, patch] = tested.split('.').map(Number)
     const newer = await claudeFor({ status: 0, stdout: `${major}.${minor}.${patch + 3} (Claude Code)\n` })
     assert.deepEqual(newer, { id: 'claude', state: 'warn', blocking: false, detail: `Claude Code ${major}.${minor}.${patch + 3} is newer than this deck was tested with (${tested})` })
@@ -98,15 +121,16 @@ function spawner(results, stdout = {}) {
 
 test('open honours $BROWSER first, with %s substitution, and passes only the file path', async () => {
   const file = '/home/you/.local/state/fleetmates/deck/open.html'
+  // $BROWSER is the Linux opener's; darwin and win32 open with their own commands, so the platform is pinned.
   const s = spawner({ firefox: true })
-  assert.equal(await openInBrowser(file, { env: { BROWSER: 'firefox --new-window' }, ...s }), true)
+  assert.equal(await openInBrowser(file, { env: { BROWSER: 'firefox --new-window' }, platform: 'linux', ...s }), true)
   assert.deepEqual(s.calls.map(call => [call.file, call.argv]), [['firefox', ['--new-window', file]]])
   const t = spawner({ chromium: true })
-  assert.equal(await openInBrowser(file, { env: { BROWSER: 'nobrowser:chromium --app=%s' }, ...t }), true)
+  assert.equal(await openInBrowser(file, { env: { BROWSER: 'nobrowser:chromium --app=%s' }, platform: 'linux', ...t }), true)
   assert.deepEqual(t.calls.map(call => [call.file, call.argv]), [['nobrowser', [file]], ['chromium', [`--app=${file}`]]])
 })
 
-test('open launches the default web browser entry before falling back to xdg-open', async () => {
+posixTest('open launches the default web browser entry before falling back to xdg-open', { reason: 'xdg desktop entries and launchers are Linux only' }, async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'deck-browser-'))
   try {
     const apps = path.join(root, 'share/applications')
@@ -117,7 +141,7 @@ test('open launches the default web browser entry before falling back to xdg-ope
     const answer = { 'xdg-settings': { status: 0, stdout: 'chromium.desktop\n' } }
 
     const viaGtk = spawner({ 'gtk-launch': true }, answer)
-    assert.equal(await openInBrowser(file, { env, ...viaGtk }), true)
+    assert.equal(await openInBrowser(file, { env, platform: 'linux', ...viaGtk }), true)
     assert.deepEqual(viaGtk.calls.map(call => [call.kind, call.file, call.argv]), [
       ['query', 'xdg-settings', ['get', 'default-web-browser']],
       ['start', 'gtk-launch', ['chromium.desktop', file]]
@@ -125,20 +149,20 @@ test('open launches the default web browser entry before falling back to xdg-ope
     assert.equal('BROWSER' in viaGtk.calls[0].env, false, 'xdg-settings answers from $BROWSER unless it is unset')
 
     const viaGio = spawner({ gio: true }, answer)
-    assert.equal(await openInBrowser(file, { env, ...viaGio }), true)
+    assert.equal(await openInBrowser(file, { env, platform: 'linux', ...viaGio }), true)
     assert.deepEqual(viaGio.calls.slice(1).map(call => [call.file, call.argv]), [
       ['gtk-launch', ['chromium.desktop', file]],
       ['gio', ['launch', path.join(apps, 'chromium.desktop'), file]]
     ])
 
     const none = spawner({}, answer)
-    assert.equal(await openInBrowser(file, { env, ...none }), false)
+    assert.equal(await openInBrowser(file, { env, platform: 'linux', ...none }), false)
     assert.deepEqual(none.calls.slice(1).map(call => call.file), ['gtk-launch', 'gio', 'xdg-open'])
     assert.deepEqual(none.calls.at(-1).argv, [file])
 
     for (const reply of [{ status: 0, stdout: '../../evil.desktop\n' }, { status: 0, stdout: '\n' }, { status: 1, stdout: 'chromium.desktop\n' }]) {
       const odd = spawner({ 'xdg-open': true }, { 'xdg-settings': reply })
-      assert.equal(await openInBrowser(file, { env, ...odd }), true)
+      assert.equal(await openInBrowser(file, { env, platform: 'linux', ...odd }), true)
       assert.deepEqual(odd.calls.map(call => call.file), ['xdg-settings', 'xdg-open'])
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
@@ -154,7 +178,7 @@ const doubleForm = (a, b) => `${JSON.stringify(a)} ${JSON.stringify(b)}`
 // Independent of isDeckHook, the code under test: any command naming the hook script.
 const deckHooks = settings => Object.fromEntries(Object.entries(settings.hooks).map(([event, groups]) => [event, groups.flatMap(group => group.hooks).filter(hook => String(hook.command).includes('deck-hook.mjs')).map(hook => hook.command)]))
 
-test('deckHookCommand round-trips a path with a space, a single quote and a dollar sign through sh', () => {
+posixTest('deckHookCommand round-trips a path with a space, a single quote and a dollar sign through sh', { reason: 'runs sh' }, () => {
   const command = deckHookCommand(nodeBin, hookFile)
   const result = spawnSync('sh', ['-c', `printf '%s\\n' ${command}`], { encoding: 'utf8' })
   assert.equal(result.status, 0)

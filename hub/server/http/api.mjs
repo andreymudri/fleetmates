@@ -360,7 +360,7 @@ export function createApi({ store, projector, paths, env = {}, now = Date.now, p
    */
   async function settingsTracked(repoId) {
     let root = repoId
-    try { root = fs.realpathSync(repoId) } catch {}
+    try { root = fs.realpathSync.native(repoId) } catch {}
     return (approvals?.gitRead ?? gitRead)(root, ['ls-files', '--error-unmatch', '.claude/settings.local.json']).then(result => result?.code === 0, () => false)
   }
   /**

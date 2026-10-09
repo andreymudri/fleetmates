@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { fileURLToPath } from 'node:url'
 import { runRetention } from '../../server/db/retention.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 
 async function withDatabase(fn) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-db-'))
@@ -14,7 +15,7 @@ async function withDatabase(fn) {
   try { await fn(file, dir) } finally { await rm(dir, { recursive: true, force: true }) }
 }
 
-test('opens strict M1 schema with private files, WAL, foreign keys and a stable epoch', async () => withDatabase(async file => {
+posixTest('opens strict M1 schema with private files, WAL, foreign keys and a stable epoch', { reason: 'asserts 0600 and 0700 file modes' }, async () => withDatabase(async file => {
   const store = openDeckDb(file)
   try {
     assert.equal(store.get('PRAGMA user_version').user_version, 8)
@@ -34,7 +35,7 @@ test('opens strict M1 schema with private files, WAL, foreign keys and a stable 
   } finally { store.close() }
 }))
 
-test('opening an existing permissive state directory makes it private', async () => withDatabase(async file => {
+posixTest('opening an existing permissive state directory makes it private', { reason: 'asserts 0755 and 0700 directory modes' }, async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o755 })
   await chmod(path.dirname(file), 0o755)
   assert.equal((await stat(path.dirname(file))).mode & 0o777, 0o755)
@@ -46,7 +47,7 @@ test('database rejects relative paths before changing the current directory', ()
   assert.throws(() => openDeckDb('deck.db'), /absolute file path/)
 })
 
-test('opening an existing permissive database file makes it private', async () => withDatabase(async file => {
+posixTest('opening an existing permissive database file makes it private', { reason: 'asserts 0644 and 0600 file modes' }, async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   await writeFile(file, '')
   await chmod(file, 0o644)
@@ -107,7 +108,7 @@ test('a version 1 database migrates to the latest version with a pre-0002 backup
   try { assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 1) } finally { backup.close() }
 }))
 
-test('a version 2 database migrates to the latest schema with a pre-0003 backup and gains sessions.archived_at and archived_by, request reasons and the approvals audit', async () => withDatabase(async file => {
+posixTest('a version 2 database migrates to the latest schema with a pre-0003 backup and gains sessions.archived_at and archived_by, request reasons and the approvals audit', { reason: 'asserts the 0600 mode of the backup' }, async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
   for (const name of ['0001-init.sql', '0002-launch.sql']) db.exec(await readFile(fileURLToPath(new URL(`../../server/db/migrations/${name}`, import.meta.url)), 'utf8'))
@@ -220,7 +221,7 @@ test('misses.resolved_by accepts null, research, note and dismissed, and refuses
   } finally { store.close() }
 }))
 
-test('failed migration rolls back schema changes and preserves the backup',async () => withDatabase(async file => {
+posixTest('failed migration rolls back schema changes and preserves the backup', { reason: 'asserts the 0600 mode of the backup' }, async () => withDatabase(async file => {
   await mkdir(path.dirname(file), { recursive: true })
   const db = new DatabaseSync(file)
   db.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT')
@@ -328,4 +329,12 @@ test('retention rolls back earlier deletions when a later deletion fails', async
     assert.equal(store.get("SELECT count(*) AS n FROM sessions WHERE id='old'").n, 1)
     assert.equal(store.get("SELECT count(*) AS n FROM events WHERE type='session.removed'").n, 0)
   } finally { store.close() }
+}))
+
+test('the database directory owner is checked on POSIX with the same message, and not on win32', async () => withDatabase(async file => {
+  const otherUid = (process.getuid?.() ?? 0) + 1
+  assert.throws(() => openDeckDb(file, { platform: 'linux', uid: otherUid }), { message: 'deck database directory must be owned by the current user' })
+  assert.throws(() => openDeckDb(file, { platform: 'darwin', uid: otherUid }), { message: 'deck database directory must be owned by the current user' })
+  const store = openDeckDb(file, { platform: 'win32', uid: otherUid })
+  try { assert.equal(store.get('PRAGMA user_version').user_version, 8) } finally { store.close() }
 }))

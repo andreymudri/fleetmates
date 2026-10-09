@@ -10,8 +10,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Every step runs on all three runners, in each runner's default shell (pwsh on Windows).
+    # Windows: TMPDIR=/tmp/hx resolves on the current drive, and the prepare step records its
+    # realpath, a drive path. Node documents that os.tmpdir() on Windows reads TEMP and TMP, not
+    # TMPDIR, and no hub source or test reads TMPDIR itself. TEMP there is the 8.3 short name C:\Users\RUNNER~1\...,
+    # so `npm --prefix hub test` preloads hub/test/helpers/canonical-tmp.mjs, which points TEMP and TMP at its long
+    # name. The browser tests find Chrome from the runner image under
+    # %ProgramFiles% (hub/test/helpers/chromium.mjs). The regression check stays on Windows: four
+    # of the tests it names are POSIX only and skip there with a reason; the other two (the HTTP
+    # body limits) run, as they do in the full suite.
     env:
       TMPDIR: /tmp/hx
     steps:

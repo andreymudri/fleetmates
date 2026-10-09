@@ -5,14 +5,21 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { countFor } from '../../server/approvals/confirm-count.mjs'
+import { posixTest } from '../helpers/platform.mjs'
+
+// Windows cannot remove a directory while a file in it is still held; retry instead of failing the cleanup.
+const RM = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }
+
+// Git for Windows runs a filter command through its own sh, which drops the backslashes of a native path.
+const shPath = file => file.replaceAll('\\', '/')
 
 function git(repo, ...args) {
   return execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', ...args], { timeout: 5000 }).toString('utf8').trim()
 }
 
 function tempRepo(t) {
-  const repo = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-count-')))
-  t.after(() => rmSync(repo, { recursive: true, force: true }))
+  const repo = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-count-')))
+  t.after(() => rmSync(repo, RM))
   git(repo, 'init', '-q', '-b', 'main')
   writeFileSync(path.join(repo, 'a.txt'), 'a\n')
   git(repo, 'add', 'a.txt')
@@ -66,18 +73,18 @@ test('countFor reset_files counts tracked changes a reset discards and never unt
 
 /** Points HOME and XDG_CONFIG_HOME at a fresh temporary directory and sets GIT_CONFIG_NOSYSTEM=1 for the rest of the test. */
 function isolatedHome(t) {
-  const home = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
+  const home = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
   const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value
-    rmSync(home, { recursive: true, force: true })
+    rmSync(home, RM)
   })
   process.env.HOME = home
   process.env.XDG_CONFIG_HOME = path.join(home, '.config')
   process.env.GIT_CONFIG_NOSYSTEM = '1'
 }
 
-test('countFor reset_files counts a work-tree executable-bit change that git status lists', async t => {
+posixTest('countFor reset_files counts a work-tree executable-bit change that git status lists', { reason: 'executable bit (NTFS has no mode bits)' }, async t => {
   isolatedHome(t)
   const repo = tempRepo(t)
   chmodSync(path.join(repo, 'a.txt'), 0o755)
@@ -88,7 +95,7 @@ test('countFor reset_files counts a work-tree executable-bit change that git sta
   assert.equal(await countFor('reset_files', ['git', 'reset', '--hard'], repo), 0)
 })
 
-test('countFor reset_files counts a staged mode change whose content and work tree match the index', async t => {
+posixTest('countFor reset_files counts a staged mode change whose content and work tree match the index', { reason: 'executable bit (NTFS has no mode bits)' }, async t => {
   isolatedHome(t)
   const repo = tempRepo(t)
   chmodSync(path.join(repo, 'a.txt'), 0o755)
@@ -124,11 +131,11 @@ test('countFor reset_files in a repo with a marker clean filter never runs the f
   t.after(() => rmSync(marker, { force: true }))
   const script = path.join(repo, '..', `${path.basename(repo)}-filter.sh`)
   t.after(() => rmSync(script, { force: true }))
-  writeFileSync(script, `#!/bin/sh\necho ran >> '${marker}'\ncat\n`)
+  writeFileSync(script, `#!/bin/sh\necho ran >> '${shPath(marker)}'\ncat\n`)
   chmodSync(script, 0o755)
   writeFileSync(path.join(repo, '.gitattributes'), '* filter=evil\n')
   writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil\n')
-  git(repo, 'config', 'filter.evil.clean', script)
+  git(repo, 'config', 'filter.evil.clean', shPath(script))
   const stale = () => utimesSync(path.join(repo, 'a.txt'), new Date('2001-01-01'), new Date('2001-01-01'))
   // The fixture is live: a plain git status re-hashes the stat-dirty a.txt through the filter.
   stale()
@@ -165,8 +172,8 @@ test('countFor rm_paths counts literal operands and returns null for a glob', as
 })
 
 test('countFor returns null for an unknown kind or a failing git call', async t => {
-  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-nogit-')))
-  t.after(() => rmSync(outside, { recursive: true, force: true }))
+  const outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-nogit-')))
+  t.after(() => rmSync(outside, RM))
   assert.equal(await countFor('sql', ['psql'], outside), null)
   assert.equal(await countFor('push_overwritten', ['git', 'push', '--force', 'origin', 'main'], outside), null)
 })

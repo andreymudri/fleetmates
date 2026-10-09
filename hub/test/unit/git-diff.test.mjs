@@ -7,14 +7,21 @@ import { test } from 'node:test'
 import { SAFE_GIT_FLAGS, allowedCommand, gitEnv, gitRead } from '../../server/adapters/git-read.mjs'
 import { MAX_DIFF_BYTES, sessionDiff } from '../../server/adapters/git-diff.mjs'
 import { captureReviewBaseline } from '../../server/machines/session.mjs'
+import { posixTest } from '../helpers/platform.mjs'
+
+// Windows cannot remove a directory while a file in it is still held; retry instead of failing the cleanup.
+const RM = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }
+
+// Git for Windows runs a filter or driver command through its own sh, which drops the backslashes of a native path.
+const shPath = file => file.replaceAll('\\', '/')
 
 function git(repo, ...args) {
   return execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', ...args], { timeout: 5000 }).toString('utf8')
 }
 
 function tempRepo(t, files = {}) {
-  const repo = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-gitdiff-')))
-  t.after(() => rmSync(repo, { recursive: true, force: true }))
+  const repo = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-gitdiff-')))
+  t.after(() => rmSync(repo, RM))
   git(repo, 'init', '-q')
   for (const [name, content] of Object.entries(files)) {
     mkdirSync(path.dirname(path.join(repo, name)), { recursive: true })
@@ -30,11 +37,11 @@ function tempRepo(t, files = {}) {
  * rest of the test, so no git call here reads the owner's global or system config. Returns the home.
  */
 function isolatedHome(t) {
-  const home = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
+  const home = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
   const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value
-    rmSync(home, { recursive: true, force: true })
+    rmSync(home, RM)
   })
   mkdirSync(path.join(home, '.config', 'git'), { recursive: true })
   process.env.HOME = home
@@ -84,8 +91,8 @@ test('sessionDiff shows a new untracked file against an empty baseline side', as
 })
 
 test('sessionDiff refuses paths that escape the repository with validation_failed', async t => {
-  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-outside-')))
-  t.after(() => rmSync(outside, { recursive: true, force: true }))
+  const outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-outside-')))
+  t.after(() => rmSync(outside, RM))
   writeFileSync(path.join(outside, 'secret.txt'), 'secret\n')
   const repo = tempRepo(t, { 'a.txt': 'a\n' })
   symlinkSync(outside, path.join(repo, 'link'))
@@ -110,8 +117,8 @@ test('sessionDiff serves an absolute changed path under its repository-relative 
 })
 
 test('sessionDiff refuses an absolute path that is not a changed file, or lies outside the repository, with validation_failed', async t => {
-  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-outside-')))
-  t.after(() => rmSync(outside, { recursive: true, force: true }))
+  const outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-outside-')))
+  t.after(() => rmSync(outside, RM))
   writeFileSync(path.join(outside, 'secret.txt'), 'secret\n')
   const repo = tempRepo(t, { 'a.txt': 'a\n', 'b.txt': 'b\n' })
   const value = captureReviewBaseline(repo)
@@ -154,8 +161,8 @@ test('sessionDiff reports a binary file with binary: true, no diff text and its 
 })
 
 test('sessionDiff reports a symlink by its target text and never follows it', async t => {
-  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-target-')))
-  t.after(() => rmSync(outside, { recursive: true, force: true }))
+  const outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-target-')))
+  t.after(() => rmSync(outside, RM))
   writeFileSync(path.join(outside, 'target.txt'), 'followed\n')
   const repo = tempRepo(t, {})
   const value = captureReviewBaseline(repo)
@@ -171,10 +178,10 @@ test('a repo config diff.external and core.fsmonitor pointing at a marker script
   const marker = path.join(repo, '..', `${path.basename(repo)}-marker`)
   t.after(() => rmSync(marker, { force: true }))
   const script = path.join(repo, 'hook.sh')
-  writeFileSync(script, `#!/bin/sh\necho ran >> '${marker}'\nexit 0\n`)
+  writeFileSync(script, `#!/bin/sh\necho ran >> '${shPath(marker)}'\nexit 0\n`)
   chmodSync(script, 0o755)
-  git(repo, 'config', 'diff.external', script)
-  git(repo, 'config', 'core.fsmonitor', script)
+  git(repo, 'config', 'diff.external', shPath(script))
+  git(repo, 'config', 'core.fsmonitor', shPath(script))
   const value = captureReviewBaseline(repo)
   writeFileSync(path.join(repo, 'a.txt'), 'two\n')
   // gitRead refuses a work-tree diff and status outright, so the safe flags are run here by hand: without
@@ -199,11 +206,11 @@ function filterRepo(t) {
   t.after(() => rmSync(marker, { force: true }))
   const script = path.join(repo, '..', `${path.basename(repo)}-filter.sh`)
   t.after(() => rmSync(script, { force: true }))
-  writeFileSync(script, `#!/bin/sh\necho ran >> '${marker}'\nif [ -n "$1" ]; then cat "$1"; else cat; fi\n`)
+  writeFileSync(script, `#!/bin/sh\necho ran >> '${shPath(marker)}'\nif [ -n "$1" ]; then cat "$1"; else cat; fi\n`)
   chmodSync(script, 0o755)
   writeFileSync(path.join(repo, '.gitattributes'), '* filter=evil diff=evil\n')
   writeFileSync(path.join(repo, '.git', 'info', 'attributes'), '* filter=evil diff=evil\n')
-  for (const key of ['filter.evil.clean', 'filter.evil.smudge', 'filter.evil.process', 'diff.evil.textconv', 'diff.evil.command']) git(repo, 'config', key, script)
+  for (const key of ['filter.evil.clean', 'filter.evil.smudge', 'filter.evil.process', 'diff.evil.textconv', 'diff.evil.command']) git(repo, 'config', key, shPath(script))
   // Stat-dirty with unchanged content: git status would re-hash a.txt through the clean filter.
   utimesSync(path.join(repo, 'a.txt'), new Date('2001-01-01'), new Date('2001-01-01'))
   writeFileSync(path.join(repo, 'before'), 'x\n')
@@ -220,7 +227,7 @@ test('a status-like gitRead in a repo with a marker clean filter is refused and 
   rmSync(marker)
   utimesSync(path.join(repo, 'a.txt'), new Date('2001-01-01'), new Date('2001-01-01'))
   const checkout = path.join(repo, '..', `${path.basename(repo)}-checkout`)
-  t.after(() => rmSync(checkout, { recursive: true, force: true }))
+  t.after(() => rmSync(checkout, RM))
   const hooks = path.join(repo, '..', `${path.basename(repo)}-hooks`)
   git(repo, 'config', 'user.useConfigOnly', 'false')
   for (const args of [['status', '--porcelain'], ['diff-files', '--name-only'], ['diff-index', '--name-only', 'HEAD'], ['ls-files', '-m'], ['ls-files', '--modified'], ['ls-files', '-dm'], ['show', 'HEAD'], ['log', '-p'], ['diff', '--no-ext-diff', '--no-textconv'], ['cat-file', '--filters', 'HEAD:a.txt'], ['clean', '-f'], ['clean', '-nf'], ['symbolic-ref', 'HEAD', 'refs/heads/x'], ['-c', 'x=y', 'rev-parse', 'HEAD'], ['add', 'a.txt'], ['cat-file', '--textconv', 'HEAD:a.txt'], ['worktree', 'add', checkout], ['worktree', 'add', '--detach', checkout, 'HEAD'], ['worktree', 'remove', repo], ['config', 'core.hooksPath', hooks], ['config', '--add', 'core.hooksPath', hooks], ['config', '--unset', 'user.useConfigOnly']]) {
@@ -257,16 +264,16 @@ test('every command gitRead allows runs in a repo with marker filter and diff dr
 
 test('gitRead diff --no-index never runs a clean filter selected by the user-level attributes file', async t => {
   const home = isolatedHome(t)
-  const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-noindex-')))
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-noindex-')))
+  t.after(() => rmSync(dir, RM))
   const marker = path.join(dir, 'marker')
   const script = path.join(dir, 'filter.sh')
-  writeFileSync(script, `#!/bin/sh\necho ran >> '${marker}'\ncat\n`)
+  writeFileSync(script, `#!/bin/sh\necho ran >> '${shPath(marker)}'\ncat\n`)
   chmodSync(script, 0o755)
   // Global attributes ($XDG_CONFIG_HOME/git/attributes, git's default core.attributesFile) and a global
   // filter driver: no repository is involved, so GIT_DIR=/dev/null cannot keep them out.
   writeFileSync(path.join(home, '.config', 'git', 'attributes'), '* filter=evil\n')
-  writeFileSync(path.join(home, '.gitconfig'), `[filter "evil"]\n\tclean = ${script}\n`)
+  writeFileSync(path.join(home, '.gitconfig'), `[filter "evil"]\n\tclean = ${shPath(script)}\n`)
   writeFileSync(path.join(dir, 'a'), 'one\n')
   writeFileSync(path.join(dir, 'b'), 'two\n')
   const args = ['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--', 'a', 'b']
@@ -281,9 +288,9 @@ test('gitRead diff --no-index never runs a clean filter selected by the user-lev
   assert.equal(existsSync(marker), false)
 })
 
-test('gitRead starts git with the 4.8 flags and environment, without credential or GIT_ variables', async t => {
-  const bin = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-fakegit-')))
-  t.after(() => rmSync(bin, { recursive: true, force: true }))
+posixTest('gitRead starts git with the 4.8 flags and environment, without credential or GIT_ variables', { reason: 'a #!/bin/sh fake git found through PATH' }, async t => {
+  const bin = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-fakegit-')))
+  t.after(() => rmSync(bin, RM))
   const record = path.join(bin, 'record')
   writeFileSync(path.join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$@" > '${record}.argv'\nenv | cut -d= -f1 > '${record}.env'\nprintf '%s' "$GIT_TERMINAL_PROMPT$GIT_OPTIONAL_LOCKS$GIT_CONFIG_NOSYSTEM $GIT_ASKPASS"\n`)
   chmodSync(path.join(bin, 'git'), 0o755)
@@ -300,9 +307,9 @@ test('gitRead starts git with the 4.8 flags and environment, without credential 
   assert.equal(names.includes('GIT_EXTERNAL_DIFF'), false)
 })
 
-test('gitRead resolves null when git outlives its timeout', async t => {
-  const bin = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-slowgit-')))
-  t.after(() => rmSync(bin, { recursive: true, force: true }))
+posixTest('gitRead resolves null when git outlives its timeout', { reason: 'a #!/bin/sh fake git found through PATH' }, async t => {
+  const bin = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-slowgit-')))
+  t.after(() => rmSync(bin, RM))
   writeFileSync(path.join(bin, 'git'), '#!/bin/sh\nexec sleep 5\n')
   chmodSync(path.join(bin, 'git'), 0o755)
   const saved = process.env.PATH

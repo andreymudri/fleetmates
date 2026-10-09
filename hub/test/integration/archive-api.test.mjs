@@ -10,6 +10,8 @@ import net from 'node:net'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
+import { endpoint } from '../../platform/index.mjs'
 
 const token = 'a'.repeat(43)
 const HOUR = 3_600_000
@@ -17,9 +19,14 @@ const fixture = JSON.parse(fs.readFileSync(new URL('../fixtures/hooks/2.1.282/Se
 
 async function harness(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-'))
+  let deck
+  t.after(async () => { await deck?.close()
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   fs.mkdirSync(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // Where the server reads its state and config for this env on this platform.
+  const paths = setupPaths(env)
+  const state = paths.state
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   const staticDir = path.join(dir, 'web')
@@ -27,7 +34,7 @@ async function harness(t, options = {}) {
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
   const opts = { env, port: 0, staticDir, notifications: false, connectDeckd: async () => { throw Error('fake offline') }, runPollMs: 3_600_000,
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }), ...options }
-  let deck = await startDeckServer(opts)
+  deck = await startDeckServer(opts)
   const origin = () => `http://127.0.0.1:${deck.address().port}`
   const request = async (route, init = {}) => {
     const response = await fetch(origin() + route, {
@@ -40,9 +47,7 @@ async function harness(t, options = {}) {
       hook: { ...fixture, cwd: dir, hook_event_name: event, ...extra } }))
     deck.ingest.flush()
   }
-  t.after(async () => { await deck.close()
-    fs.rmSync(dir, { recursive: true, force: true }) })
-  return { get deck() { return deck }, dir, env, request, send, origin,
+  return { get deck() { return deck }, dir, env, paths, request, send, origin,
     async restart(extra = {}) { await deck.close()
       deck = await startDeckServer({ ...opts, ...extra }) } }
 }
@@ -181,7 +186,7 @@ test('autoArchiveAfter defaults to 24 in the DB prefs and accepts only 6, 12, 24
     assert.equal(set.data.sources.autoArchiveAfter, 'db')
   }
   assert.equal(JSON.parse(h.deck.store.get('SELECT value FROM prefs WHERE key=?', 'autoArchiveAfter').value), 168)
-  assert.equal(fs.existsSync(path.join(h.dir, '.config/fleetmates/deck/config.json')), false, 'not a config file key')
+  assert.equal(fs.existsSync(path.join(h.paths.config, 'config.json')), false, 'not a config file key')
 })
 
 // An injected clock far from the real one: the rows' ages are measured against it, not against Date.now().
@@ -242,7 +247,8 @@ test('an archived live session that gets a permission hook on the hook socket is
   assert.equal(snapshot.sessions.find(session => session.id === id).archivedBy, 'owner')
   assert.equal(snapshot.counts.archived, 1)
 
-  const sock = net.connect(path.join(h.env.XDG_RUNTIME_DIR, 'fleetmates-deck/hooks.sock'))
+  // The hook endpoint the server listens on for this XDG_RUNTIME_DIR: a Unix socket on POSIX, a named pipe on win32.
+  const sock = net.connect(endpoint(h.env.XDG_RUNTIME_DIR, 'hooks'))
   await once(sock, 'connect')
   sock.end(JSON.stringify({ v: 1, hookTs: Date.now(), ptyId: null, claudePid: null, pidChain: [], truncated: false,
     hook: { ...fixture, cwd: h.dir, hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'pwd' } } }) + '\n')

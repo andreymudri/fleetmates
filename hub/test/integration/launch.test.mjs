@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { startDeckd } from '../../deckd/main.mjs'
 import { startDeckServer } from '../../server/main.mjs'
 import { deckHookCommand, transformHooks } from '../../server/setup/hooks.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { FLEETMATES_JOB_PROMPT, firstPromptKeys } from '../../server/launch/launch.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
@@ -18,44 +19,74 @@ import { fakeBin } from '../helpers/fake-bin.mjs'
 const token = 'a'.repeat(43)
 const hookScript = fileURLToPath(new URL('../../hook/deck-hook.mjs', import.meta.url))
 const TASK = 'fix the flaky combat test'
+const scriptsDir = fileURLToPath(new URL('../fixtures/scripts/', import.meta.url))
+
+// The captured idle-input frame asks the terminal for its device attributes (`ESC [ c`, twice). On Windows
+// the console answers that itself, so the replies reach the fake as input; in the Windows VM run they were
+// `ESC [ ? 61;6;7;21;22;23;24;28;32;42 c`. Nothing the deck types looks like one, so they are dropped there.
+const CONSOLE_REPLY = '\\x1b\\[\\?[0-9;]*c'
+const CONSOLE_REPLIES = process.platform === 'win32' ? new RegExp(CONSOLE_REPLY, 'g') : null
+const typedText = text => CONSOLE_REPLIES ? text.replace(CONSOLE_REPLIES, '') : text
+
+/**
+ * The fixture script `name`, or on Windows a copy whose anchored expectInput matches also let console replies
+ * come first. The copy is removed after the test.
+ */
+function scriptFor(t, name) {
+  if (!CONSOLE_REPLIES) return name
+  const script = JSON.parse(fs.readFileSync(path.join(scriptsDir, `${name}.json`), 'utf8'))
+  for (const step of script.steps) {
+    if (step.expectInput?.match?.startsWith('^')) step.expectInput.match = `^(?:${CONSOLE_REPLY})*` + step.expectInput.match.slice(1)
+  }
+  const file = path.join(os.tmpdir(), `lch-${name}-${process.pid}-${Math.random().toString(16).slice(2)}.json`)
+  fs.writeFileSync(file, JSON.stringify(script))
+  t.after(() => fs.rmSync(file, { force: true }))
+  return file
+}
 
 /**
  * A deckd, a deck server and one repo `ship` (a `.git` with HEAD on main) under a private HOME whose Claude
  * settings run deck-hook. The fake claude runs `script` (a fixture name or a path) and logs to `log`.
  */
 async function deck(t, script) {
-  const rt = await makeRuntimeDir()
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lch-'))
-  const bin = await fakeBin({ version: '2.1.282' })
+  // The cleanup is registered before the first call that can throw, so a start that fails part way (the
+  // server, say) still closes the deckd it started and removes the directories. Each step undoes only what
+  // was made, deckd and the server before their directories.
+  let rt, home, bin, deckd, server, off
+  let deckdClosed = false
+  const stopDeckd = async () => { if (deckd && !deckdClosed) { deckdClosed = true
+    await deckd.close() } }
+  t.after(async () => {
+    off?.()
+    await stopDeckd()
+    await server?.close()
+    // Retried: the Windows VM run could not remove a directory a just-killed child still held.
+    const rmRetry = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }
+    for (const dir of [bin?.binDir, rt?.dir, home]) if (dir) fs.rmSync(dir, rmRetry)
+  })
+  rt = await makeRuntimeDir()
+  home = fs.mkdtempSync(path.join(os.tmpdir(), 'lch-'))
+  bin = await fakeBin({ version: '2.1.282' })
   const log = path.join(home, 'fake.log')
-  const state = path.join(home, '.local/state/fleetmates/deck')
-  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
-  fs.mkdirSync(path.join(home, '.claude'))
-  fs.writeFileSync(path.join(home, '.claude/settings.json'), JSON.stringify(transformHooks({}, deckHookCommand(process.execPath, hookScript))))
+  const serverEnv = { HOME: home, XDG_RUNTIME_DIR: rt.dir }
+  // the deck's state dir and Claude Code's settings file for this HOME, on the host's platform
+  const paths = setupPaths(serverEnv)
+  fs.mkdirSync(paths.state, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(paths.token, token, { mode: 0o600 })
+  fs.mkdirSync(path.dirname(paths.settings), { recursive: true })
+  fs.writeFileSync(paths.settings, JSON.stringify(transformHooks({}, deckHookCommand(process.execPath, hookScript))))
   const repo = path.join(home, 'repos', 'ship')
   fs.mkdirSync(path.join(repo, '.git'), { recursive: true })
   fs.writeFileSync(path.join(repo, '.git/HEAD'), 'ref: refs/heads/main\n')
   const staticDir = path.join(home, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  const deckd = await startDeckd({ runtimeDir: rt.dir, loginEnv: { PATH: bin.env.PATH, HOME: home, XDG_RUNTIME_DIR: rt.dir,
+  deckd = await startDeckd({ runtimeDir: rt.dir, loginEnv: { PATH: bin.env.PATH, HOME: home, XDG_RUNTIME_DIR: rt.dir,
     FAKE_CLAUDE_SCRIPT: script, FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_VERSION: '2.1.282' } })
-  const server = await startDeckServer({ env: { HOME: home, XDG_RUNTIME_DIR: rt.dir }, port: 0, staticDir, notifications: false,
+  server = await startDeckServer({ env: serverEnv, port: 0, staticDir, notifications: false,
     runPollMs: 3_600_000, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
   const published = []
-  const off = server.subscribe(event => published.push(event))
-  let deckdClosed = false
-  const stopDeckd = async () => { if (!deckdClosed) { deckdClosed = true
-    await deckd.close() } }
-  t.after(async () => {
-    off()
-    await stopDeckd()
-    await server.close()
-    await bin.cleanup()
-    await rt.cleanup()
-    fs.rmSync(home, { recursive: true, force: true })
-  })
+  off = server.subscribe(event => published.push(event))
   const origin = `http://127.0.0.1:${server.address().port}`
   const request = async (route, method = 'GET', body) => {
     const response = await fetch(origin + route, { method, body: body === undefined ? undefined : JSON.stringify(body),
@@ -65,9 +96,12 @@ async function deck(t, script) {
   assert.equal((await request('/api/prefs', 'PATCH', { scanRoot: path.join(home, 'repos') })).status, 200)
   assert.equal((await request('/api/repos/rescan', 'POST')).status, 202)
   const entries = () => fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
+  // the input entries, without console replies (see CONSOLE_REPLIES)
+  const typed = () => entries().filter(entry => typeof entry.input === 'string').map(entry => ({ ...entry, input: typedText(entry.input) }))
+    .filter(entry => entry.input !== '')
   const states = id => published.filter(event => event.type === 'session.upserted' && event.data.id === id).map(event => event.data.state)
   const session = id => server.projector.snapshot().sessions.find(row => row.id === id)
-  return { server, request, published, entries, states, session, stopDeckd, repo: fs.realpathSync(repo) }
+  return { server, request, published, entries, typed, states, session, stopDeckd, repo: fs.realpathSync.native(repo) }
 }
 
 async function until(fn, what, ms = 15_000) {
@@ -81,7 +115,7 @@ async function until(fn, what, ms = 15_000) {
 }
 
 test('a launch stays starting after SessionStart, gets its task typed on the idle screen, then runs', async t => {
-  const h = await deck(t, 'slow-start')
+  const h = await deck(t, scriptFor(t, 'slow-start'))
   const launched = await h.request('/api/sessions', 'POST', { repoKey: 'ship', task: TASK })
   assert.equal(launched.status, 201)
   const { session } = launched.data
@@ -92,12 +126,11 @@ test('a launch stays starting after SessionStart, gets its task typed on the idl
   await until(() => h.session(session.id).claudeSessionId, 'the SessionStart hook')
   assert.equal(h.session(session.id).state, 'starting', 'row 4: SessionStart keeps it starting while the task is still to type')
 
-  const input = await until(() => h.entries().filter(entry => typeof entry.input === 'string').length && h.entries(), 'the typed task')
-  const hookAt = input.find(entry => entry.hook === 'SessionStart').ts
-  const typed = input.filter(entry => typeof entry.input === 'string')
+  const typed = await until(() => h.typed().length && h.typed(), 'the typed task')
+  const hookAt = h.entries().find(entry => entry.hook === 'SessionStart').ts
   assert.ok(typed[0].ts - hookAt >= 900, `the task was typed ${typed[0].ts - hookAt} ms after SessionStart, on the idle screen`)
   await until(() => h.entries().some(entry => entry.expectInput), 'the fake to read the whole paste')
-  assert.equal(h.entries().filter(entry => typeof entry.input === 'string').map(entry => entry.input).join(''), firstPromptKeys(TASK))
+  assert.equal(h.typed().map(entry => entry.input).join(''), firstPromptKeys(TASK))
   assert.equal(firstPromptKeys(TASK), `\u001b[200~${TASK}\u001b[201~\r`)
 
   await until(() => h.states(session.id).includes('running'), 'running')
@@ -130,7 +163,7 @@ test('a launch task holding a paste end marker reaches claude with exactly one e
   const launched = await h.request('/api/sessions', 'POST', { repoKey: 'ship', task: 'fix it\u001b[201~ now' })
   assert.equal(launched.status, 201)
   await until(() => h.entries().some(entry => entry.expectInput), 'the fake to read the paste through Enter')
-  const typed = h.entries().filter(entry => typeof entry.input === 'string').map(entry => entry.input).join('')
+  const typed = h.typed().map(entry => entry.input).join('')
   assert.equal(typed.split('\u001b[201~').length - 1, 1, `one paste end marker in ${JSON.stringify(typed)}`)
   assert.equal(typed, '\u001b[200~fix it now\u001b[201~\r')
 })
@@ -151,7 +184,7 @@ test('an empty plain launch writes no input, even on an idle screen, and goes id
   await until(() => !h.session(id).alive, 'the fake to exit')
   assert.ok(h.states(id).includes('idle'), `passed through idle: ${h.states(id).join(', ')}`)
   assert.ok(idles.some(event => event.sessionId === id), 'the idle screen was seen')
-  assert.equal(h.entries().filter(entry => typeof entry.input === 'string').length, 0, 'nothing was typed')
+  assert.equal(h.typed().length, 0, 'nothing was typed')
 })
 
 test('a second launch in a busy repo warns with the first session and is still created', async t => {
@@ -188,7 +221,7 @@ test('a fleetmates launch types the D-68 prompt with the task; an empty fleetmat
   assert.equal(launched.status, 201)
   assert.equal(launched.data.session.task, TASK, 'the displayed task stays the owner text')
   await until(() => h.entries().some(entry => entry.expectInput), 'the typed prompt')
-  const typed = h.entries().filter(entry => typeof entry.input === 'string').map(entry => entry.input).join('')
+  const typed = h.typed().map(entry => entry.input).join('')
   assert.equal(typed, firstPromptKeys(`${FLEETMATES_JOB_PROMPT}\n\n${TASK}`))
   assert.ok(typed.includes('Run this task as a fleetmates run: write a fleetmates plan for it, then execute that plan with fleetmates so every task works in its own git worktree. The task:\n\nfix the flaky combat test'))
 })

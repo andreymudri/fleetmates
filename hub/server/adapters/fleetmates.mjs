@@ -1,7 +1,8 @@
 import fs, { constants, existsSync, readFileSync, watch as fsWatch } from 'node:fs'
-import { open, readdir, realpath, stat } from 'node:fs/promises'
+import { readdir, realpath, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { openNoFollow } from '../../platform/index.mjs'
 
 /**
  * Where this adapter loads the fleetmates modules (names, liveness, git) from. Inside a fleetmates
@@ -35,7 +36,7 @@ const MAX_FILE_BYTES = 1024 * 1024
 const MAX_DISCOVERY_DEPTH = 16
 const MAX_TOUCH_ENTRIES = 5000
 const RUN_INTERNAL_DIRS = new Set(['claims', 'clones', 'index', 'reviews', 'sessions', 'worktrees'])
-const READ_FLAGS = constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0)
+const READ_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)
 
 const safeText = (value) => {
   try { return String(value ?? '').replace(/[\p{Bidi_Control}\p{Cc}]/gu, '') } catch { return '' }
@@ -47,7 +48,7 @@ async function readJson(file, retryDelayMs) {
   for (let attempt = 0; attempt < 2; attempt++) {
     let handle
     try {
-      handle = await open(file, READ_FLAGS)
+      handle = await openNoFollow(file, READ_FLAGS)
       const info = await handle.stat()
       if (!info.isFile()) throw new Error('not a regular file')
       if (info.size > MAX_FILE_BYTES) throw new Error('file exceeds size limit')

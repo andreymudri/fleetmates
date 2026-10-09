@@ -1,8 +1,9 @@
-import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, openSync, readlinkSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, mkdtempSync, readlinkSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { baselineContent, baselineHead, workingRoot } from '../machines/session.mjs'
 import { gitRead } from './git-read.mjs'
+import { openNoFollowSync } from '../../platform/index.mjs'
 
 /** Diff text is cut at a line start above this many bytes (docs/deck/05-api.md 2.3). */
 export const MAX_DIFF_BYTES = 512 * 1024
@@ -33,10 +34,10 @@ function inside(boundary, file) {
 /** The deepest existing ancestor of `file`, resolved through symlinks, must stay inside the repository. */
 function resolvesInside(root, file) {
   let boundary
-  try { boundary = realpathSync(root) } catch { return false }
+  try { boundary = realpathSync.native(root) } catch { return false }
   let current = path.dirname(file)
   while (true) {
-    try { return inside(boundary, realpathSync(current)) }
+    try { return inside(boundary, realpathSync.native(current)) }
     catch (error) {
       if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return false
     }
@@ -58,7 +59,7 @@ function readCurrent(file) {
   }
   if (!stat.isFile()) return { kind: 'special', bytes: null, size: 0 }
   if (stat.size > MAX_SIDE_BYTES) return { kind: 'file', bytes: null, size: stat.size }
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const fd = openNoFollowSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
   try {
     const before = fstatSync(fd)
     if (!before.isFile()) return { kind: 'special', bytes: null, size: 0 }

@@ -114,7 +114,7 @@ async function makeRepos(home, { team = true, repos = control.repos } = {}) {
   }
   if (!team) return null
   const spec = placed(control.team, home)
-  const repo = fs.realpathSync(path.join(dev, spec.repo))
+  const repo = fs.realpathSync.native(path.join(dev, spec.repo))
   git(repo, 'branch', spec.runBranch)
   const planFile = path.join(repo, spec.planPath)
   await mkdir(path.dirname(planFile), { recursive: true })
@@ -139,8 +139,8 @@ async function makeRepos(home, { team = true, repos = control.repos } = {}) {
     const worktree = path.join(home, 'wt', taskId)
     const branch = `fleetmates/${spec.runId}/${taskId}`
     git(repo, 'worktree', 'add', '-q', '-b', branch, worktree)
-    await rootState.writeLocation(repo, spec.runId, taskId, { worktree: fs.realpathSync(worktree), branch })
-    worktrees[taskId] = fs.realpathSync(worktree)
+    await rootState.writeLocation(repo, spec.runId, taskId, { worktree: fs.realpathSync.native(worktree), branch })
+    worktrees[taskId] = fs.realpathSync.native(worktree)
   }
   return { ...spec, repo, runDir, plan, status, worktrees }
 }

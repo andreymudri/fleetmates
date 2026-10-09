@@ -94,6 +94,12 @@ export function terminalPopupTitle(task, kind) {
 }
 
 const graceMs = 3000
+/**
+ * Whether a notifier result says the platform has no desktop popups or bells (win32 answers
+ * `{ ok: false, reason: 'unsupported on win32' }`). Such a result is not a delivery failure: the deck tab is the
+ * only notification surface there.
+ */
+const unsupported = result => result?.ok === false && typeof result.reason === 'string' && result.reason.startsWith('unsupported on ')
 const prefix = 'notify:popup:'
 const defaults = Object.freeze({ bell: true, renotifyAfter: 10, notifyDone: true, quietInMeetings: true, notifyCrash: true })
 
@@ -194,6 +200,12 @@ export function createNotificationMachine({ store, notifier = createNotifier(), 
     try {
       result = await notifier.popup({ title, body, replaceId: replacing?.id ?? null, actions: popupActions(requests, observed, rendered), onAction: key => act(token, key) })
     } catch { result = { ok: false } }
+    if (unsupported(result)) {
+      // Recorded as skipped: the history claim stays, so later ticks and restarts do not ask again, and no
+      // notify.failed is published. Nothing was shown, so notified_at stays null and there is no popup to replace.
+      targets.delete(token)
+      return false
+    }
     if (!result.ok) {
       targets.delete(token)
       store.tx(() => { for (const key of keys) store.run('DELETE FROM notification_history WHERE dedupe_key=?', key) })
@@ -261,6 +273,8 @@ export function createNotificationMachine({ store, notifier = createNotifier(), 
     const body = kind === 'done' ? `${JSON.parse(session.changed_files).length} files changed · Review changes` : 'The session stopped unexpectedly · Open the session'
     let result
     try { result = await notifier.popup({ title, body, urgency: kind === 'done' ? 'low' : 'normal' }) } catch { result = { ok: false } }
+    // Unsupported here is skipped the same way as in popup(): the claim stays and nothing is published.
+    if (unsupported(result)) return
     if (!result.ok) {
       store.run('DELETE FROM notification_history WHERE dedupe_key=?', key)
       publish({ type: 'notify.failed', data: { code: 'notify_failed' } })

@@ -210,10 +210,21 @@ process.stdin.on('end', () => {
   for (const fn of inputListeners) fn()
 })
 
-process.on('SIGWINCH', () => {
+// A resize can arrive both as SIGWINCH and as a process.stdout 'resize' event; a size equal to
+// the last one reported is dropped, so one resize is logged once. getWindowSize() returns the
+// size the stdout stream cached, which its own SIGWINCH listener refreshes; the SIGWINCH report
+// waits one setImmediate so it never reads the size from before the refresh.
+/** @type {string | undefined} */
+let lastResize
+function reportResize () {
   const [cols, rows] = process.stdout.isTTY ? process.stdout.getWindowSize() : [0, 0]
+  const key = `${cols}x${rows}`
+  if (key === lastResize) return
+  lastResize = key
   log({ resize: { cols, rows } })
-})
+}
+process.on('SIGWINCH', () => setImmediate(reportResize))
+process.stdout.on('resize', reportResize)
 
 /** @type {Set<Promise<void>>} */
 const runningHooks = new Set()
@@ -306,7 +317,8 @@ function hookCommands (event, payload) {
 }
 
 /**
- * Run one hook command through sh with the payload on stdin, killed after its timeout.
+ * Run one hook command through /bin/sh (through `shell: true` when process.platform is win32;
+ * not exercised on Windows here) with the payload on stdin, killed after its timeout.
  * @param {string} command
  * @param {string} input
  * @param {number} timeoutSec
@@ -314,7 +326,11 @@ function hookCommands (event, payload) {
  */
 function runHookCommand (command, input, timeoutSec) {
   return new Promise(resolve => {
-    const child = spawn('/bin/sh', ['-c', command], { cwd, env: process.env, stdio: ['pipe', 'ignore', 'ignore'] })
+    /** @type {import('node:child_process').SpawnOptions} */
+    const options = { cwd, env: process.env, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true }
+    const child = process.platform === 'win32'
+      ? spawn(command, { ...options, shell: true })
+      : spawn('/bin/sh', ['-c', command], options)
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutSec * 1000)
     child.on('error', () => { clearTimeout(timer); resolve() })
     child.on('close', () => { clearTimeout(timer); resolve() })

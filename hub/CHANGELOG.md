@@ -5,6 +5,39 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
+## v0.6.0
+
+Platform support: the deck runs on Linux, macOS and native Windows (D-149,
+`docs/deck/16-platforms.md`).
+
+- Tested Claude Code: 2.1.285 (unchanged)
+- deckd changed: yes. It listens on a named pipe on Windows and runs claude through ConPTY there.
+  On Linux the PTY protocol and the socket are unchanged; restarting deckd still ends every PTY
+  session.
+- Database migration: no.
+- Node floor raised to `>=24.16.0`: Node 24.2 to 24.15 `node:sqlite` truncates a bound string at
+  its first NUL.
+- macOS: deckd and the web server run as launchd LaunchAgents (`io.fleetmates.deck.deckd`,
+  `io.fleetmates.deck.web`) with logs in the state `logs` directory. Covered by unit tests with an
+  injected platform and the CI job on `macos-latest`; not yet run on a real Mac.
+- Windows: `fleetmates-deck start` and `stop` run deckd and the web server as hidden detached
+  processes, and `init` adds an HKCU Run value that starts them at logon. `stop` kills a recorded
+  pid only when its command line runs the deck's entry file. The deckd and hook endpoints are
+  named pipes whose names hash a per-endpoint key that changes at every start. Every approval
+  request asks, and no permission rule is written. Popups and the bell stay in the deck tab;
+  Meetings are Linux only. The hub suite runs on a Windows 11 VM with no failures (1684 pass, 428
+  skipped with a reason).
+- ConPTY: deckd gives children the Windows base environment (`SystemRoot` and the rest), refuses
+  a program that is not an existing `.exe` or `.com` with `spawn_failed`, and removes the
+  win32-input-mode request (`ESC[?9001h`) from output, so `Ctrl ] d` detaches `fm` on Windows.
+- No-follow opens use `openNoFollowSync` and `openNoFollow`, which refuse symbolic links on Windows
+  too, where `O_NOFOLLOW` does not exist.
+- npm 11 skips install scripts by default, including this package's `postinstall`. On macOS
+  deckd makes node-pty's spawn helper executable itself before its first spawn, and skips that
+  when it already is. When it cannot (a root-owned or read-only install), the spawn fails with a
+  message saying to `chmod +x` the helper as its owner.
+- CI: the hub job runs on `ubuntu-latest`, `macos-latest` and `windows-latest`.
+
 ## v0.5.2
 
 The first published 0.5 release. Tag deck-v0.5.1 exists, but its release workflow never published: one end-to-end spec timed out on the GitHub runner.

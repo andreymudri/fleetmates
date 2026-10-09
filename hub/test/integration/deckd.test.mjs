@@ -3,16 +3,71 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { stat, mkdir, chmod } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
+import { stat, mkdir, chmod, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import os from 'node:os'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
+import { cmdShim } from '../helpers/fake-bin.mjs'
+import { posixTest } from '../helpers/platform.mjs'
+import { endpoint, endpointSecret, deckDir } from '../../platform/index.mjs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { startDeckd } from '../../deckd/main.mjs'
+import { connectDeckd } from '../../deckd/client.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
 import { PtyHost, RESIZE_MIN_INTERVAL_MS } from '../../deckd/pty-host.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const mainPath = path.resolve(here, '..', '..', 'deckd', 'main.mjs')
-const stubDir = path.join(here, 'stubs')
+const stubScript = path.join(here, 'stubs', 'claude')
 const QUEUE_CAP = 16 * 1024
+const onWindows = process.platform === 'win32'
+
+/** CSI sequences (`ESC [ ... final`) and OSC strings (`ESC ] ... BEL or ST`), one after another, at the start of a string. */
+const LEADING_ESCAPES = /^(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))+/
+
+/**
+ * Raw PTY output as the assertions read it. On Windows ConPTY starts the
+ * stream with mode and repaint sequences (the VM run showed
+ * `ESC[?9001h ESC[?1004h ...` before READY), so those leading escapes are
+ * dropped there. Elsewhere the bytes are returned unchanged.
+ * @param {string} s
+ * @returns {string}
+ */
+function rawStart (s) {
+  return onWindows ? s.replace(LEADING_ESCAPES, '') : s
+}
+
+/** CSI sequences and OSC strings anywhere in a string. */
+const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+
+/**
+ * Raw PTY output with every escape sequence dropped, on Windows only: on the
+ * Windows 11 VM the count below found 199 of 200 written lines in ConPTY's
+ * output, presumably one behind a repaint sequence (inferred; the bytes were
+ * not inspected). Elsewhere the bytes are returned unchanged.
+ * @param {string} s
+ * @returns {string}
+ */
+function plainText (s) {
+  return onWindows ? s.replace(ESCAPES, '') : s
+}
+
+/**
+ * A directory holding a `claude` deckd can run that runs the stub. POSIX: the
+ * stubs directory itself, whose `claude` is a node script with a shebang.
+ * Windows: a temp directory with an npm cmd-shim `claude.cmd` and an entry
+ * module beside it that imports the stub, because the shim addresses a script
+ * relative to its own directory.
+ * @returns {Promise<{ dir: string, claude: string, cleanup: () => Promise<void> }>}
+ */
+async function stubLauncher () {
+  if (!onWindows) return { dir: path.dirname(stubScript), claude: stubScript, cleanup: async () => {} }
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-stub-'))
+  await writeFile(path.join(dir, 'stub-entry.mjs'), `await import(${JSON.stringify(pathToFileURL(stubScript).href)})\n`)
+  const claude = path.join(dir, 'claude.cmd')
+  await writeFile(claude, cmdShim('stub-entry.mjs'))
+  return { dir, claude, cleanup: () => rm(dir, { recursive: true, force: true }) }
+}
 
 /**
  * A deckd client for tests: request/response by id, events collected in order.
@@ -103,6 +158,8 @@ async function connect (socketPath) {
 
 /** @type {Awaited<ReturnType<typeof makeRuntimeDir>>} */
 let rt
+/** @type {Awaited<ReturnType<typeof stubLauncher>>} */
+let stub
 /** @type {import('node:child_process').ChildProcess} */
 let deckd
 /** @type {string} */
@@ -160,14 +217,16 @@ async function spawnReady (env = {}, argv = ['claude']) {
 
 before(async () => {
   rt = await makeRuntimeDir()
-  socketPath = path.join(rt.dir, 'fleetmates-deck', 'deckd.sock')
-  // A socket dir left behind with a looser mode must be tightened to 0700.
-  await mkdir(path.dirname(socketPath), { mode: 0o755 })
-  await chmod(path.dirname(socketPath), 0o755)
+  stub = await stubLauncher()
+  if (!onWindows) {
+    // A socket dir left behind with a looser mode must be tightened to 0700.
+    await mkdir(deckDir(rt.dir), { mode: 0o755 })
+    await chmod(deckDir(rt.dir), 0o755)
+  }
   deckd = spawn(process.execPath, [mainPath], {
     env: {
       ...rt.env,
-      PATH: [stubDir, rt.env.PATH].join(path.delimiter),
+      PATH: [stub.dir, rt.env.PATH].join(path.delimiter),
       DECKD_OUTPUT_QUEUE_CAP: String(QUEUE_CAP),
       // no login-shell probe: the test never runs the owner's profile
       DECKD_LOGIN_ENV: 'inherit'
@@ -185,6 +244,8 @@ before(async () => {
     })
     deckd.once('exit', (code) => reject(new Error(`deckd exited ${code}: ${deckdStderr}`)))
   })
+  // On win32 the pipe name hashes the deckd key, which deckd writes when it starts listening, so it is computed now.
+  socketPath = endpoint(rt.dir, 'deckd')
   // A deckd that dies mid-file takes every later test down with it; print
   // why at once, and fail every test that ends after it (afterEach below).
   deckd.on('exit', (code, signal) => {
@@ -210,12 +271,14 @@ after(async () => {
     await exited
   }
   await rt?.cleanup()
+  await stub?.cleanup()
 })
 
 /** @type {string} */
 let ptyId
 
-test('socket is 0600 inside a 0700 dir, even when the dir existed at 0755', async () => {
+posixTest('socket is 0600 inside a 0700 dir, even when the dir existed at 0755', async () => {
+  assert.equal(path.dirname(socketPath), deckDir(rt.dir))
   assert.equal((await stat(path.dirname(socketPath))).mode & 0o777, 0o700)
   const st = await stat(socketPath)
   assert.ok(st.isSocket())
@@ -307,7 +370,8 @@ test('screen returns the READY row', async () => {
   assert.equal(res.lines.length, 24)
   assert.equal(res.lines[0], 'READY')
   assert.equal(res.cols, 80)
-  assert.ok(Buffer.from(res.scrollback, 'base64').toString().startsWith('READY'))
+  const scrollback = rawStart(Buffer.from(res.scrollback, 'base64').toString())
+  assert.ok(scrollback.startsWith('READY'), JSON.stringify(scrollback.slice(0, 40)))
 })
 
 test('watchScreen sends a screen event when rows change', async () => {
@@ -327,7 +391,9 @@ test('resize follows the last input source only', async () => {
   assert.ok(!c.output(ptyId).includes('SIZE 90x20'))
 })
 
-test('a client that stops reading receives dropped after the cap, then output again', async () => {
+posixTest('a client that stops reading receives dropped after the cap, then output again', {
+  reason: 'on a Windows 11 VM the 2 MiB keystroke flood did not reach the ConPTY screen within 30 s'
+}, async () => {
   // The main client stops streaming so that only `slow` is subject to the cap
   // here; the test then waits on deckd's own screen model, never on how fast
   // this process reads.
@@ -387,13 +453,15 @@ test('kill produces an exit event and exits { since } returns it', async () => {
 })
 
 test('an absolute path whose basename is claude is accepted', async () => {
-  const id = await spawnReady({}, [path.join(stubDir, 'claude')])
+  // POSIX: the stub itself; Windows: its absolute claude.cmd shim.
+  const id = await spawnReady({}, [stub.claude])
   await c.request('kill', { ptyId: id, signal: 'SIGTERM', graceMs: 2000 })
   const ev = await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id)
-  assert.equal(ev.signal, 'SIGTERM')
+  // A signal reaches the process group only on POSIX; win32 kill is taskkill /F.
+  if (!onWindows) assert.equal(ev.signal, 'SIGTERM')
 })
 
-test('kill escalates to SIGKILL after graceMs when SIGTERM is ignored', async () => {
+posixTest('kill escalates to SIGKILL after graceMs when SIGTERM is ignored', { reason: 'win32 kill is taskkill /F whatever the signal' }, async () => {
   const id = await spawnReady({ STUB_IGNORE_SIGTERM: '1' })
   const t0 = Date.now()
   await c.request('kill', { ptyId: id, signal: 'SIGTERM', graceMs: 300 })
@@ -418,8 +486,8 @@ test('screen scrollback returns the last N lines of the ring', async () => {
   assert.match(rows[49], /^L199y/)
   // N larger than the ring: everything, from the first byte
   const all = Buffer.from((await c.request('screen', { ptyId: id, scrollback: 5000 })).scrollback, 'base64').toString()
-  assert.ok(all.startsWith('READY\r'), JSON.stringify(all.slice(0, 20)))
-  assert.equal(all.split('\n').filter((l) => /^L\d{3}y/.test(l)).length, 200)
+  assert.ok(rawStart(all).startsWith('READY\r'), JSON.stringify(all.slice(0, 40)))
+  assert.equal(plainText(all).split('\n').filter((l) => /^L\d{3}y/.test(l)).length, 200)
   await c.request('kill', { ptyId: id, signal: 'SIGKILL', graceMs: 0 })
   await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id)
 })
@@ -464,7 +532,7 @@ async function localHost (env = {}) {
   let onExit = () => {}
   /** @type {Promise<{ code: number, signal: string | null }>} */
   const exited = new Promise((resolve) => { onExit = resolve })
-  const host = PtyHost.spawn({ cwd: rt.dir, argv: [path.join(stubDir, 'claude')], env, cols: 80, rows: 24 }, {
+  const host = PtyHost.spawn({ cwd: rt.dir, argv: [stub.claude], env, cols: 80, rows: 24 }, {
     onOutput: () => {},
     onExit: (_h, exit) => onExit(exit)
   })
@@ -524,7 +592,7 @@ test('kill cancels a deferred resize and ignores later ones', async () => {
   }
 })
 
-test('SIGTERM stops deckd cleanly and kills its PTYs', async () => {
+posixTest('SIGTERM stops deckd cleanly and kills its PTYs', { reason: 'SIGTERM to deckd, and a socket file removed on close' }, async () => {
   const res = await c.request('spawn', { cwd: rt.dir, argv: ['claude'], env: {}, cols: 80, rows: 24, origin: 'launched' })
   assert.equal(res.ok, true)
   const exited = new Promise((resolve) => deckd.once('exit', (code) => resolve(code)))
@@ -533,4 +601,83 @@ test('SIGTERM stops deckd cleanly and kills its PTYs', async () => {
   assert.equal(await exited, 0)
   assert.throws(() => process.kill(res.pid, 0), { code: 'ESRCH' })
   await assert.rejects(stat(socketPath), { code: 'ENOENT' })
+})
+
+test('deckd writes the deckd key on win32 and listens on the pipe hashed from it; on POSIX it writes none', () => {
+  const keyFile = (onWindows ? path.win32 : path.posix).join(deckDir(rt.dir), 'endpoint-deckd.key')
+  if (onWindows) {
+    const secret = readFileSync(keyFile, 'utf8')
+    assert.match(secret, /^[0-9a-f]{64}$/)
+    assert.equal(socketPath, endpoint(rt.dir, 'deckd', { secret }))
+  } else {
+    assert.equal(existsSync(keyFile), false)
+    assert.equal(socketPath, path.join(deckDir(rt.dir), 'deckd.sock'))
+  }
+  assert.ok(deckdStderr.includes(`deckd listening on ${socketPath}`), deckdStderr)
+})
+
+test('with platform win32 deckd writes a new key at every start, a client reads the key at every connect, and without a key a client finds no deckd', async () => {
+  // win32 is injected. Off Windows the pipe name and the relative base's win32 paths are files and
+  // dirs in a temp dir made the working directory for this test only.
+  const cwd = process.cwd()
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'deckd-key-'))
+  process.chdir(scratch)
+  /** @type {Awaited<ReturnType<typeof startDeckd>> | undefined} */
+  let first
+  try {
+    first = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} })
+    const secret = endpointSecret('base', { platform: 'win32', name: 'deckd' })
+    assert.match(secret ?? '', /^[0-9a-f]{64}$/)
+    assert.equal(first.socketPath, endpoint('base', 'deckd', { platform: 'win32', secret }))
+    // A second start that is wrongly allowed is closed again, so a failure here cannot leave it running.
+    const second = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} }).then(async (d) => { await d.close(); return null }, (err) => err)
+    assert.equal(second?.message, `another deckd is listening on ${first.socketPath}`)
+    const client = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
+    try {
+      assert.equal(client.bootId, first.bootId)
+    } finally {
+      client.close()
+    }
+    const firstPipe = first.socketPath
+    await first.close()
+    // A clean close removes the key: a client finds no deckd rather than dialing the dead pipe's name.
+    await assert.rejects(connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
+    first = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} })
+    const fresh = endpointSecret('base', { platform: 'win32', name: 'deckd' })
+    assert.notEqual(fresh, secret, 'a restart writes a new key')
+    assert.notEqual(first.socketPath, firstPipe)
+    assert.equal(first.socketPath, endpoint('base', 'deckd', { platform: 'win32', secret: fresh }))
+    const again = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
+    try {
+      assert.equal(again.bootId, first.bootId, 'the client read the new key')
+    } finally {
+      again.close()
+    }
+    // A holder that kill(pid, 0) answers EPERM for (an elevated deckd, to an unelevated client) is alive.
+    const lockPath = path.win32.join(deckDir('base', { platform: 'win32' }), 'endpoint-deckd.lock')
+    const ownLock = readFileSync(lockPath, 'utf8')
+    writeFileSync(lockPath, JSON.stringify({ pid: 4242, started: 1 }))
+    const realKill = process.kill
+    process.kill = (target, signal) => {
+      if (target === 4242) throw Object.assign(new Error('kill EPERM 4242'), { code: 'EPERM', syscall: 'kill' })
+      return realKill.call(process, target, signal)
+    }
+    try {
+      const elevated = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
+      elevated.close()
+    } finally {
+      process.kill = realKill
+      writeFileSync(lockPath, ownLock)
+    }
+    await assert.rejects(connectDeckd({ runtimeDir: 'nokey', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
+    // What a crashed deckd leaves: its key, and its lock naming a pid that is gone.
+    mkdirSync(deckDir('crashed', { platform: 'win32' }), { recursive: true })
+    writeFileSync(path.win32.join(deckDir('crashed', { platform: 'win32' }), 'endpoint-deckd.key'), 'f'.repeat(64))
+    writeFileSync(path.win32.join(deckDir('crashed', { platform: 'win32' }), 'endpoint-deckd.lock'), JSON.stringify({ pid: 2147483645, started: 1 }))
+    await assert.rejects(connectDeckd({ runtimeDir: 'crashed', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
+  } finally {
+    await first?.close()
+    process.chdir(cwd)
+    await rm(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
 })

@@ -1,12 +1,14 @@
 // One PTY owned by deckd: the node-pty process, its scrollback ring, its
 // headless screen model, attached clients and the last input source.
-import path from 'node:path'
 import os from 'node:os'
+import fs from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { Ring } from './ring.mjs'
 import { ScreenModel } from './screen-model.mjs'
 import { dropSessionVars } from './login-env.mjs'
+import { isClaudeProgram, killTree, resolveCommand, commandSpawn, windowsChildEnv, createInputModeFilter } from '../platform/index.mjs'
+import { prepareNativeSync } from '../bin/prepare-native.mjs'
 
 const require = createRequire(import.meta.url)
 /** @type {typeof import('node-pty')} */
@@ -59,48 +61,111 @@ export function newPtyId () {
   return 'pty_' + randomBytes(4).toString('hex')
 }
 
-/** Signal the group first; macOS can refuse a dying group while its owned PID is still signalable. */
+/**
+ * Signal the process group, POSIX only: killTree's POSIX branch whatever the
+ * host. The group first; macOS can refuse a dying group while its owned PID
+ * is still signalable, so EPERM falls back to the PID.
+ * @param {number} pid
+ * @param {NodeJS.Signals} signal
+ * @param {typeof process.kill} [kill]
+ */
 export function signalProcessGroup (pid, signal, kill = process.kill) {
+  killTree(pid, signal, { platform: 'linux', kill })
+}
+
+/**
+ * What PtyHost takes from its surroundings, each defaulting to the live one,
+ * so a test can pin the platform and stand in for node-pty and the kill
+ * calls: `ptySpawn` is node-pty's `spawn`; `exists` serves resolveCommand
+ * and the win32 check of the file to run; `readFile` serves commandSpawn;
+ * `kill` and `spawnSync` serve killTree; `hostEnv` is the environment the
+ * Windows base variables are taken from (this process's); `nodePath` is the
+ * node an npm cmd-shim is run with (this process's); `prepare` makes node-pty's
+ * macOS spawn helper executable (prepareNativeSync).
+ * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function, hostEnv?: Record<string, string | undefined>, nodePath?: string, prepare?: () => unknown }} PtyDeps
+ */
+
+/**
+ * The `prepare` functions that have succeeded in this process. For the default, prepareNativeSync,
+ * that makes it once per process; a test's own `prepare` gets its own once.
+ * @type {WeakSet<Function>}
+ */
+const prepared = new WeakSet()
+
+const AGENT_SHAPE = "node-pty's agent is not the 1.1.0 shape"
+
+/**
+ * Close the win32 pseudoconsole of a node-pty 1.1.0 process the way PtyHost does (its
+ * #closePseudoconsole explains why not through node-pty's kill()): the native kill, which calls
+ * ClosePseudoConsole, then disposing the conout worker. Exported for tests that run node-pty
+ * themselves. Returns null once closed, else why it was not: the agent is not the 1.1.0 shape, or
+ * the message of what threw.
+ * @param {any} proc a node-pty process
+ * @returns {string | null}
+ */
+export function closeWin32Pseudoconsole (proc) {
+  const agent = proc._agent
+  if (!agent || typeof agent._ptyNative?.kill !== 'function' || typeof agent._pty !== 'number') return AGENT_SHAPE
   try {
-    kill(-pid, signal)
+    if (agent._inSocket) agent._inSocket.readable = false
+    if (agent._outSocket) agent._outSocket.readable = false
+    agent._ptyNative.kill(agent._pty, Boolean(agent._useConptyDll))
+    agent._conoutSocketWorker?.dispose()
   } catch (err) {
-    if (err.code === 'ESRCH') return
-    if (err.code !== 'EPERM') throw err
-    try {
-      kill(pid, signal)
-    } catch (pidError) {
-      if (pidError.code !== 'ESRCH') throw pidError
-    }
+    return /** @type {Error} */ (err).message
   }
+  return null
 }
 
 export class PtyHost {
   /**
-   * Spawn `claude` in a new PTY. Refuses any argv[0] whose basename is not
-   * `claude` with code `spawn_refused`. The child's environment is
-   * `{ ...baseEnv, ...env }` (baseEnv defaults to this process's environment
-   * without TERM and Claude Code's session variables), then
-   * `FLEETMATES_DECK_PTY=<ptyId>` and `TERM=xterm-256color`.
+   * Spawn `claude` in a new PTY. Refuses with code `spawn_refused` any argv[0]
+   * that isClaudeProgram rejects for the platform: basename `claude`, and on
+   * win32 also `claude.exe` or `claude.cmd` in any case. The child's
+   * environment is `{ ...baseEnv, ...env }` (baseEnv defaults to this
+   * process's environment without TERM and Claude Code's session variables),
+   * then `FLEETMATES_DECK_PTY=<ptyId>` and `TERM=xterm-256color`; on win32
+   * that goes through windowsChildEnv, so it has one key per variable name
+   * and the Windows base variables (SystemRoot and the rest) it lacks.
    * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, baseEnv?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
+   * @param {PtyDeps} [deps]
    * @returns {PtyHost}
    */
-  static spawn (req, hooks) {
+  static spawn (req, hooks, deps = {}) {
     const argv = req.argv
     if (!Array.isArray(argv) || argv.length === 0 || typeof argv[0] !== 'string' || !argv.every((a) => typeof a === 'string')) {
       throw new DeckdError('bad_request', 'argv must be a non-empty array of strings')
     }
-    if (path.basename(argv[0]) !== 'claude') {
+    if (!isClaudeProgram(argv[0], { platform: deps.platform ?? process.platform })) {
       throw new DeckdError('spawn_refused', `deckd only spawns claude, not ${argv[0]}`)
     }
-    return new PtyHost(req, hooks)
+    return new PtyHost(req, hooks, deps)
   }
 
   /**
+   * On win32 argv[0] is resolved on the child's PATH with resolveCommand, and
+   * commandSpawn decides what runs it: an npm cmd-shim runs its target
+   * directly, any other `.cmd` or `.bat` runs through ComSpec, its command
+   * line handed to node-pty as one string so it is not quoted again. An
+   * argument cmd.exe cannot pass to a batch file is refused with
+   * `bad_request`. The file that would run must then exist and end in
+   * `.exe` or `.com`, else `spawn_failed` and node-pty is not called: in the
+   * Windows VM run node-pty leaked its pseudoconsole, a worker and a pipe when
+   * CreateProcess failed on a file that is not a PE image. Output is
+   * passed through createInputModeFilter, so a win32-input-mode request
+   * (`ESC [ ? 9001 h` or `l`) reaches neither the ring, the screen model nor
+   * output events. On POSIX argv runs as given and output is not touched.
    * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, baseEnv?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
+   * @param {PtyDeps} [deps]
    */
-  constructor (req, hooks) {
+  constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync, hostEnv = process.env, nodePath, prepare = prepareNativeSync } = {}) {
+    this.platform = platform
+    /** Set once node-pty's kill() has closed the win32 pseudoconsole. */
+    this.pseudoconsoleClosed = false
+    /** For killTree; undefined keeps its defaults. */
+    this.killDeps = { platform, kill, spawnSync }
     this.ptyId = newPtyId()
     this.cwd = req.cwd ?? os.homedir()
     this.argv = req.argv
@@ -141,24 +206,66 @@ export class PtyHost {
     /** @type {(() => void) | null} */
     this.unwatchScreen = null
 
-    const env = { ...(req.baseEnv ?? dropSessionVars(process.env)), ...(req.env ?? {}), FLEETMATES_DECK_PTY: this.ptyId, TERM: 'xterm-256color' }
+    const merged = { ...(req.baseEnv ?? dropSessionVars(process.env)), ...(req.env ?? {}), FLEETMATES_DECK_PTY: this.ptyId, TERM: 'xterm-256color' }
+    const env = /** @type {Record<string, string>} */ (windowsChildEnv(merged, { base: hostEnv, platform }))
+    /** @type {{ file: string, args: string[], options: Record<string, boolean> }} */
+    let cmd
     try {
-      this.proc = nodePty.spawn(req.argv[0], req.argv.slice(1), {
+      const file = resolveCommand(req.argv[0], { env, platform, exists })
+      cmd = commandSpawn(file, req.argv.slice(1), { platform, env, readFile, nodePath })
+      if (platform === 'win32' && !(/\.(exe|com)$/i.test(cmd.file) && (exists ?? fs.existsSync)(cmd.file))) {
+        throw new Error(`${req.argv[0]} runs ${cmd.file}, which is not an existing .exe or .com program`)
+      }
+    } catch (err) {
+      this.screen.dispose()
+      const e = /** @type {Error & { code?: string }} */ (err)
+      throw new DeckdError(e.code === 'unsafe_cmd_arg' ? 'bad_request' : 'spawn_failed', e.message)
+    }
+    // An npm that skips install scripts (npm 11.19.0 did for `npm install -g <tarball>`) never ran
+    // the postinstall that makes node-pty's macOS spawn helper executable, and without it every
+    // spawn fails. So on darwin the first spawn of the process does it first.
+    if (platform === 'darwin' && !prepared.has(prepare)) {
+      try {
+        prepare()
+      } catch (err) {
+        this.screen.dispose()
+        // prepareNativeSync names the fix when it knows one (reinstall for a missing helper, a chmod
+        // by the owner for one this user cannot change); anything else gets the reinstall advice.
+        const message = /** @type {Error} */ (err).message
+        const fix = /reinstall|chmod \+x/.test(message) ? '' : '; reinstall the deck'
+        throw new DeckdError('spawn_failed', `node-pty's spawn helper is not ready, so no PTY can spawn: ${message}${fix}`)
+      }
+      prepared.add(prepare)
+    }
+    try {
+      this.proc = ptySpawn(cmd.file, cmd.options.windowsVerbatimArguments ? cmd.args.join(' ') : cmd.args, {
         name: 'xterm-256color',
         cols: this.cols,
         rows: this.rows,
         cwd: this.cwd,
         env,
         // raw bytes in onData, so a character split across reads stays intact in the ring
-        encoding: null
+        encoding: null,
+        ...(cmd.options.windowsHide ? { windowsHide: true } : {})
       })
     } catch (err) {
       this.screen.dispose()
       throw new DeckdError('spawn_failed', /** @type {Error} */ (err).message)
     }
     this.pid = this.proc.pid
+    /**
+     * Why the PTY was ended after a win32 stream error, or null. @type {string | null}
+     */
+    this.inputFailed = null
+    if (platform === 'win32') this.#watchStreamErrors()
+    const filter = createInputModeFilter({ platform })
     this.proc.onData((/** @type {Buffer | string} */ d) => {
-      const buf = typeof d === 'string' ? Buffer.from(d, 'utf8') : d
+      let buf = typeof d === 'string' ? Buffer.from(d, 'utf8') : d
+      if (platform === 'win32') {
+        // latin1 maps each byte to one char and back, so a character split across reads stays split
+        buf = Buffer.from(filter(buf.toString('latin1')), 'latin1')
+        if (buf.length === 0) return
+      }
       this.ring.push(buf)
       this.screen.write(buf)
       hooks.onOutput(this, buf)
@@ -166,9 +273,46 @@ export class PtyHost {
     this.proc.onExit(({ exitCode, signal }) => {
       if (this.killTimer) clearTimeout(this.killTimer)
       if (this.resizeTimer) clearTimeout(this.resizeTimer)
-      this.exited = { code: exitCode, signal: signalName(signal), at: Date.now() }
+      // node-pty on win32 can report the exit with no code when the
+      // pseudoconsole was closed before the process exit was seen; null then.
+      this.exited = { code: typeof exitCode === 'number' ? exitCode : null, signal: signalName(signal), at: Date.now() }
       hooks.onExit(this, this.exited)
     })
+  }
+
+  /**
+   * win32, node-pty 1.1.0: its agent writes input through `_agent._inSocket`, a net.Socket with no
+   * 'error' listener, so a `write EAGAIN` under a burst of input (reported once from the Windows VM
+   * run of deckd-link.test.mjs) is an uncaughtException that would end deckd and every session. And the terminal's own
+   * 'error' (its output socket) rethrows anything but EIO unless someone else listens.
+   *
+   * Both get a listener here. A net.Socket destroys itself on a write error, and later writes to it
+   * fail with no error event (shown on Linux with a pipe whose reader closed it), so the bytes of
+   * that write and every later keystroke would be lost without a word. The PTY cannot be kept
+   * writable, so it is ended as a crash: logged with the ptyId, the reason kept in `inputFailed`,
+   * then killed like kill() does. EIO on the terminal is, per node-pty's own comment, the child
+   * going away, which node-pty already handles, so it is left to it. A process without these node-pty internals gets no listener.
+   */
+  #watchStreamErrors () {
+    const inSocket = this.proc._agent?._inSocket
+    if (typeof inSocket?.on === 'function') inSocket.on('error', (/** @type {Error} */ err) => this.#endOnStreamError('input', err))
+    if (typeof this.proc.on === 'function') {
+      this.proc.on('error', (/** @type {NodeJS.ErrnoException} */ err) => {
+        if (String(err?.code ?? '').includes('EIO')) return
+        this.#endOnStreamError('terminal', err)
+      })
+    }
+  }
+
+  /**
+   * @param {string} stream
+   * @param {Error} err
+   */
+  #endOnStreamError (stream, err) {
+    if (this.inputFailed !== null || this.exited) return
+    this.inputFailed = `${stream} stream error: ${err?.message ?? String(err)}`
+    console.error(`deckd: ${this.ptyId} ended, its ${this.inputFailed} (the failed write and any input after it are lost)`)
+    this.kill()
   }
 
   /**
@@ -299,13 +443,43 @@ export class PtyHost {
    */
   #signalGroup (signal) {
     if (this.exited) return
-    // node-pty makes the child a session leader, so its pid is its process group id.
-    signalProcessGroup(this.pid, signal)
+    // POSIX: node-pty makes the child a session leader, so its pid is its
+    // process group id. win32: taskkill /T /F on the tree, whatever the signal.
+    killTree(this.pid, signal, this.killDeps)
+    this.#closePseudoconsole()
   }
 
+  /**
+   * win32 only, at most once: close the pseudoconsole. On a Windows 11 VM a
+   * tree killed by taskkill alone left `conhost.exe --headless` running, no
+   * exit event came, and the process holding the PTY never exited; calling
+   * node-pty's kill() after taskkill fixed that.
+   * node-pty's kill() is not called, though. Read from node-pty 1.1.0's
+   * lib/windowsPtyAgent.js: before closing the console it forks an agent
+   * that attaches to the shell's console to list its processes. Once the
+   * shell is dead (always, after taskkill or a natural exit) the attach
+   * fails, which the VM run printed as `AttachConsole failed`, and 5 s later
+   * the agent falls back to process.kill() of the shell's old pid, which
+   * Windows may have given to another process by then. So this does the
+   * rest of that kill() itself: the native kill, which calls
+   * ClosePseudoConsole (src/win/conpty.cc), then disposing the conout
+   * worker. These are node-pty 1.1.0 internals (the version is pinned
+   * exactly in package.json). When they are not there, it logs and does not
+   * fall back to kill().
+   */
+  #closePseudoconsole () {
+    if (this.platform !== 'win32' || this.pseudoconsoleClosed) return
+    this.pseudoconsoleClosed = true
+    const problem = closeWin32Pseudoconsole(this.proc)
+    if (problem === AGENT_SHAPE) console.error(`deckd: cannot close the pseudoconsole of ${this.ptyId}: ${problem}`)
+    else if (problem) console.error(`deckd: closing the pseudoconsole of ${this.ptyId} failed: ${problem}`)
+  }
+
+  /** Clear the timers and the screen model; on win32 also close the pseudoconsole if still open. */
   dispose () {
     if (this.killTimer) clearTimeout(this.killTimer)
     if (this.resizeTimer) clearTimeout(this.resizeTimer)
+    this.#closePseudoconsole()
     this.screen.dispose()
   }
 }

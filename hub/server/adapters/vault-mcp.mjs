@@ -7,6 +7,7 @@
 // arguments or answers.
 
 import { spawn as nodeSpawn } from 'node:child_process'
+import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
 
 /** The protocol version the client offers in `initialize`. */
 export const PROTOCOL_VERSION = '2025-06-18'
@@ -79,6 +80,8 @@ export function capabilitiesOf (tools) {
  * @param {{
  *   command: string[],
  *   env?: Record<string, string | undefined>,
+ *   platform?: string,
+ *   exists?: (file: string) => boolean,
  *   spawn?: typeof nodeSpawn,
  *   now?: () => number,
  *   timers?: Timers,
@@ -104,6 +107,8 @@ export function capabilitiesOf (tools) {
 export function createVaultClient ({
   command,
   env,
+  platform = process.platform,
+  exists,
   spawn = nodeSpawn,
   now = Date.now,
   timers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (id) => clearTimeout(id) },
@@ -287,7 +292,11 @@ export function createVaultClient ({
     const myGen = ++gen
     let proc
     try {
-      proc = spawn(command[0], command.slice(1), { stdio: ['pipe', 'pipe', 'pipe'], env })
+      // win32: a bare name such as `npx` resolves through PATH and PATHEXT (to npx.cmd), and commandSpawn runs it.
+      const lookupEnv = env ?? process.env
+      const resolved = resolveCommand(command[0], { env: lookupEnv, platform, ...(exists ? { exists } : {}) })
+      const spawnable = commandSpawn(resolved, command.slice(1), { platform, env: lookupEnv })
+      proc = spawn(spawnable.file, spawnable.args, { stdio: ['pipe', 'pipe', 'pipe'], env, ...spawnable.options })
     } catch (err) {
       goDown(`spawn failed: ${/** @type {any} */ (err)?.code ?? /** @type {any} */ (err)?.message}`)
       return false

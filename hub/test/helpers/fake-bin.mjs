@@ -1,7 +1,7 @@
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fakeClaude = path.join(hubDir, 'test', 'fake-claude', 'fake-claude.mjs')
@@ -16,23 +16,84 @@ function shq (s) {
 }
 
 /**
+ * The npm cmd-shim body for a node script, CRLF line endings, exactly as npm writes it: `_prog` is
+ * `%dp0%\node.exe` when that exists, else `node` from PATH (fakeBin's env keeps PATH).
+ * @param {string} rel the script relative to the shim's directory, backslash separated
+ * @returns {string}
+ */
+export function cmdShim (rel) {
+  return [
+    '@ECHO off',
+    'GOTO start',
+    ':find_dp0',
+    'SET dp0=%~dp0',
+    'EXIT /b',
+    ':start',
+    'SETLOCAL',
+    'CALL :find_dp0',
+    '',
+    'IF EXIST "%dp0%\\node.exe" (',
+    '  SET "_prog=%dp0%\\node.exe"',
+    ') ELSE (',
+    '  SET "_prog=node"',
+    '  SET PATHEXT=%PATHEXT:;.JS;=;%',
+    ')',
+    '',
+    `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\${rel}" %*`,
+    ''
+  ].join('\r\n')
+}
+
+/**
+ * Write `claude.cmd` in `dir`: an npm cmd-shim (see cmdShim) for a `fake-claude-entry.mjs` written
+ * next to it, which imports `script` (the fake claude by default) by file URL. `unwrapCmdShim`
+ * recognises the shim, so `commandSpawn` runs the entry with `process.execPath` and no cmd.exe.
+ * @param {string} dir
+ * @param {{ script?: string }} [opts]
+ * @returns {Promise<string>} the path of claude.cmd
+ */
+export async function nodeClaudeShim (dir, { script = fakeClaude } = {}) {
+  const entry = 'fake-claude-entry.mjs'
+  await writeFile(path.join(dir, entry), `await import(${JSON.stringify(pathToFileURL(script).href)})\n`)
+  const shim = path.join(dir, 'claude.cmd')
+  await writeFile(shim, cmdShim(entry), { mode: 0o755 })
+  return shim
+}
+
+/**
  * Put a fake `claude` first on PATH. The wrapper execs the fake from
  * test/fake-claude/ at run time; the fake need not exist when this is called.
- * @param {{ script?: string, log?: string, version?: string }} opts
- * @returns {Promise<{ binDir: string, env: NodeJS.ProcessEnv, cleanup: () => Promise<void> }>}
+ * On Windows (or under FLEETMATES_TEST_FORCE_WINDOWS=1, which only changes the file written) the
+ * wrapper is `claude.cmd`, an npm cmd-shim (see cmdShim) addressing fake-claude.mjs relative to binDir;
+ * when no relative path exists (binDir on another drive) it addresses a `fake-claude-entry.mjs`
+ * written into binDir that imports the real fake. Elsewhere it is a `#!/bin/sh` script named `claude`.
+ * `relative` is injectable so a test can take the other-drive branch.
+ * @param {{ script?: string, log?: string, version?: string, platform?: NodeJS.Platform, relative?: (from: string, to: string) => string }} opts
+ * @returns {Promise<{ binDir: string, claudePath: string, env: NodeJS.ProcessEnv, cleanup: () => Promise<void> }>}
  */
-export async function fakeBin ({ script, log, version = '2.1.282' } = {}) {
+export async function fakeBin ({ script, log, version = '2.1.282', platform = process.platform, relative = path.relative } = {}) {
   const binDir = await mkdtemp(path.join(os.tmpdir(), 'deck-fake-bin-'))
-  const wrapper = `#!/bin/sh\nexec ${shq(process.execPath)} ${shq(fakeClaude)} "$@"\n`
-  await writeFile(path.join(binDir, 'claude'), wrapper, { mode: 0o755 })
-  /** @type {NodeJS.ProcessEnv} */
-  const env = {
-    ...process.env,
-    PATH: [binDir, process.env.PATH].filter(Boolean).join(path.delimiter),
-    FAKE_CLAUDE_VERSION: version
+  const windows = platform === 'win32' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1'
+  const claudePath = path.join(binDir, windows ? 'claude.cmd' : 'claude')
+  if (windows) {
+    let rel = relative(binDir, fakeClaude)
+    if (path.isAbsolute(rel) || path.win32.isAbsolute(rel)) {
+      rel = 'fake-claude-entry.mjs'
+      await writeFile(path.join(binDir, rel), `await import(${JSON.stringify(pathToFileURL(fakeClaude).href)})\n`)
+    }
+    await writeFile(claudePath, cmdShim(rel.split(/[\\/]/).join('\\')), { mode: 0o755 })
+  } else {
+    await writeFile(claudePath, `#!/bin/sh\nexec ${shq(process.execPath)} ${shq(fakeClaude)} "$@"\n`, { mode: 0o755 })
   }
+  /** @type {NodeJS.ProcessEnv} */
+  const env = { ...process.env }
+  // On Windows `{ ...process.env }` can carry `Path`; a child given both `Path` and `PATH` uses `Path`
+  // and would miss binDir, so the windows branch keeps a single PATH key.
+  if (windows) for (const key of Object.keys(env)) if (/^path$/i.test(key)) delete env[key]
+  env.PATH = [binDir, process.env.PATH].filter(Boolean).join(path.delimiter)
+  env.FAKE_CLAUDE_VERSION = version
   if (script !== undefined) env.FAKE_CLAUDE_SCRIPT = script
   if (log !== undefined) env.FAKE_CLAUDE_LOG = log
   const cleanup = () => rm(binDir, { recursive: true, force: true })
-  return { binDir, env, cleanup }
+  return { binDir, claudePath, env, cleanup }
 }
