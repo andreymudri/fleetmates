@@ -101,7 +101,7 @@ async function deck(t, script) {
     .filter(entry => entry.input !== '')
   const states = id => published.filter(event => event.type === 'session.upserted' && event.data.id === id).map(event => event.data.state)
   const session = id => server.projector.snapshot().sessions.find(row => row.id === id)
-  return { server, request, published, entries, typed, states, session, stopDeckd, repo: fs.realpathSync(repo) }
+  return { server, request, published, entries, typed, states, session, stopDeckd, repo: fs.realpathSync.native(repo) }
 }
 
 async function until(fn, what, ms = 15_000) {

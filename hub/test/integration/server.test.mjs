@@ -340,7 +340,7 @@ posixTest('SPA fallback refuses an index.html symlink that escapes the static ro
   }
   assert.equal(await (await fetch(base + '/app.js')).text(), 'export const deck = true')
 })
-posixTest('default server process delivers T7 popups, suppresses recording bells and resumes normal bells', { timeout: 15_000, reason: 'runs #! shims and a Unix-socket scribed' }, async t => {
+posixTest('default server process delivers T7 popups, suppresses recording bells and resumes normal bells', { timeout: 15_000, reason: 'runs #! shims and a Unix-socket scribed', skip: process.platform !== 'linux' && 'Linux only: the server child process picks the notifier and scribed by host platform, and these are the linux notify-send, pw-play and scribed' }, async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proc-'))
   const runtime = path.join(dir, 'r')
   const { state, token: tokenFile } = setupPaths({ HOME: dir })
@@ -454,6 +454,23 @@ test('no unguarded process.getuid() call remains under hub/server', () => {
     })
   }
   assert.deepEqual(unguarded, [])
+})
+
+// The JavaScript fs.realpathSync keeps a Windows 8.3 short name that fs.promises.realpath and git expand, so one
+// directory got two ids (run-join.test pins the effect on the run join). Every sync realpath is the native one.
+test('every synchronous realpath under hub/server is fs.realpathSync.native', () => {
+  const files = sources(fileURLToPath(new URL('../../server/', import.meta.url)))
+  assert.ok(files.length > 50, `found ${files.length} server sources`)
+  const javascript = []
+  let native = 0
+  for (const file of files) {
+    stripComments(fs.readFileSync(file, 'utf8')).split('\n').forEach((line, index) => {
+      native += (line.match(/\brealpathSync\.native\(/g) ?? []).length
+      if (/\brealpathSync\s*\(/.test(line)) javascript.push(`${path.basename(file)}:${index + 1}`)
+    })
+  }
+  assert.ok(native >= 10, `found ${native} native calls`)
+  assert.deepEqual(javascript, [])
 })
 
 test('readToken accepts a token on win32 on owner profile ACLs alone and keeps the POSIX refusals and their message', async t => {

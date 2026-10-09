@@ -245,7 +245,7 @@ test('open postmeetLog of a log symlinked out of session_dir is 403 path_not_all
   const id = h.tree.ids.planning
   const ok = await h.request('/api/open', { method: 'POST', body: { kind: 'postmeetLog', ref: id } })
   assert.equal(ok.status, 202)
-  assert.deepEqual(h.opened, [fs.realpathSync(path.join(h.tree.sessionDir, id, 'postmeet.log'))])
+  assert.deepEqual(h.opened, [fs.realpathSync.native(path.join(h.tree.sessionDir, id, 'postmeet.log'))])
   const outside = path.join(h.home, 'outside.log')
   fs.writeFileSync(outside, 'not a meeting log\n')
   const log = path.join(h.tree.sessionDir, id, 'postmeet.log')

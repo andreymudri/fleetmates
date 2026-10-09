@@ -8,6 +8,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
+import { syncBuiltinESMExports } from 'node:module'
 import { startDeckServer } from '../../server/main.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
 import { posixTest } from '../helpers/platform.mjs'
@@ -26,8 +27,8 @@ async function fleetRepo(dir, { record = true } = {}) {
   fs.writeFileSync(path.join(repo, 'README.md'), 'alpha\n')
   git(repo, 'add', 'README.md')
   git(repo, 'commit', '-q', '-m', 'init')
-  const real = fs.realpathSync(repo)
-  const worktree = path.join(fs.realpathSync(dir), 'wt', 'T2')
+  const real = fs.realpathSync.native(repo)
+  const worktree = path.join(fs.realpathSync.native(dir), 'wt', 'T2')
   git(real, 'worktree', 'add', '-q', '-b', 'fleetmates/r1/T2', worktree)
   const runDir = path.join(real, '.fleetmates', 'r1')
   fs.mkdirSync(runDir, { recursive: true })
@@ -89,7 +90,7 @@ async function harness(t, { runPollMs = 3_600_000, record = true } = {}) {
   deck.subscribe(event => events.push(event))
   // A further task worktree with no index record until `locate` writes one, as a teammate's own first act does.
   const addWorktree = taskId => {
-    const worktree = path.join(fs.realpathSync(dir), 'wt', taskId)
+    const worktree = path.join(fs.realpathSync.native(dir), 'wt', taskId)
     git(place.repo, 'worktree', 'add', '-q', '-b', `fleetmates/r1/${taskId}`, worktree)
     return worktree
   }
@@ -123,6 +124,35 @@ test('a lead running scripts/cli.mjs --run from the repo root becomes the run le
   h.start('lead-2', h.repo)
   h.bash('lead-2', h.repo, `node "${path.join(h.repo, 'scripts', 'cli.mjs').replaceAll(path.sep, '/')}" gate --plan p.md --run=r1 --phase 1`)
   assert.equal(h.sessionFor('lead-2').role, 'lead')
+})
+
+// On Windows the JavaScript fs.realpathSync keeps an 8.3 short name (C:\Users\RUNNER~1, a TEMP path on the GitHub
+// runner) while fs.realpathSync.native and fs.promises.realpath expand it, so a hook cwd resolved one way never
+// matched a run repoId resolved the other. This models that layout on any host: a directory symlink stands for the
+// short name, and fs.realpathSync is swapped for one that leaves it unresolved, as the JavaScript realpath does.
+posixTest('a lead whose hook cwd names the repo through a short-name alias still joins the run', { reason: 'creates a directory symlink' }, async t => {
+  const h = await harness(t)
+  const alias = path.join(path.dirname(path.dirname(h.repo)), 'SHORT~1')
+  fs.symlinkSync(path.dirname(h.repo), alias, 'dir')
+  const cwd = path.join(alias, path.basename(h.repo))
+  const real = fs.realpathSync
+  const keepsShortNames = (file, ...rest) => {
+    const resolved = path.resolve(String(file))
+    return resolved === alias || resolved.startsWith(alias + path.sep) ? resolved : real(file, ...rest)
+  }
+  keepsShortNames.native = real.native
+  fs.realpathSync = keepsShortNames
+  syncBuiltinESMExports()
+  t.after(() => { fs.realpathSync = real
+    syncBuiltinESMExports() })
+  assert.equal(fs.realpathSync(cwd), cwd, 'the stand-in leaves the alias unresolved')
+  assert.equal(fs.realpathSync.native(cwd), h.repo, 'the native realpath expands it')
+  h.start('lead-short', cwd)
+  assert.equal((await h.request('/api/runs')).data.runs.find(run => run.runId === 'r1').repoId, h.repo)
+  h.bash('lead-short', cwd, 'node scripts/cli.mjs dispatch --run r1 --phase 1')
+  const lead = h.sessionFor('lead-short')
+  assert.equal(lead.role, 'lead')
+  assert.deepEqual(lead.runRef, { repoId: h.repo, runId: 'r1', taskId: null })
 })
 
 test('a run id failing the root name rules, or a call away from the repo root, joins nothing', async t => {

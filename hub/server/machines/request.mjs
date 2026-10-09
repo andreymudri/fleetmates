@@ -400,7 +400,7 @@ function canonicalExistingPath(location) {
   let current = path.resolve(location)
   const missing = []
   for (;;) {
-    try { return path.join(realpathSync(current), ...missing.reverse()) }
+    try { return path.join(realpathSync.native(current), ...missing.reverse()) }
     catch {
       const parent = path.dirname(current)
       if (parent === current) return path.resolve(location)

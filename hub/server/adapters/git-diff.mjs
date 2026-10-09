@@ -34,10 +34,10 @@ function inside(boundary, file) {
 /** The deepest existing ancestor of `file`, resolved through symlinks, must stay inside the repository. */
 function resolvesInside(root, file) {
   let boundary
-  try { boundary = realpathSync(root) } catch { return false }
+  try { boundary = realpathSync.native(root) } catch { return false }
   let current = path.dirname(file)
   while (true) {
-    try { return inside(boundary, realpathSync(current)) }
+    try { return inside(boundary, realpathSync.native(current)) }
     catch (error) {
       if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return false
     }

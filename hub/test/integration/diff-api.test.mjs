@@ -18,7 +18,7 @@ function git(repo, ...args) {
 }
 
 test('the diff route returns the hunk of a changed file and refuses an escaping, unknown or missing path', async t => {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dif-')))
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'dif-')))
   const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
   let deck
   // Registered before anything that can throw; the server closes before its directory is removed.

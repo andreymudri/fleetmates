@@ -31,7 +31,7 @@ function home() {
   const repo = path.join(dir, 'dev', 'alpha')
   fs.mkdirSync(path.join(repo, 'docs'), { recursive: true })
   fs.writeFileSync(path.join(repo, 'docs', 'plan.md'), '# Plan\n\n- T1 build it\n')
-  return { dir, env, bin, staticDir, repo: fs.realpathSync(repo) }
+  return { dir, env, bin, staticDir, repo: fs.realpathSync.native(repo) }
 }
 
 async function harness(t, options = {}) {
@@ -286,7 +286,8 @@ function fakeOpener(place) {
 
 posixTest('the production opener answers 202 without waiting for a foreground xdg-open, with argv only and no token in its environment', { reason: 'the fake xdg-open is a #!/bin/sh script' }, async t => {
   // runCommand: undefined restores the real synchronous runner, so a regression to it blocks here for 5 s.
-  const h = await harness(t, { services: {}, runCommand: undefined })
+  // The opener is pinned to linux's xdg-open: darwin's is `open`, which this fake does not stand in for.
+  const h = await harness(t, { services: {}, runCommand: undefined, platform: 'linux' })
   h.addRepo(h.place.repo, 'alpha', 0)
   h.runs.push({ repoId: h.place.repo, runId: 'r1', planPath: 'docs/plan.md', tasks: [] })
   const opener = fakeOpener(h.place)

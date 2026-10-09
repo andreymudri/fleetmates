@@ -116,7 +116,7 @@ function parseError(error) {
 // the target, the parse and the type checks. Never follows a symlink at `.claude` or the target.
 function readSettings(repoRoot, { create = false } = {}) {
   let root
-  try { root = realpathSync(repoRoot) } catch (error) { throw fail(settingsPath(repoRoot), error.code ?? 'not found') }
+  try { root = realpathSync.native(repoRoot) } catch (error) { throw fail(settingsPath(repoRoot), error.code ?? 'not found') }
   const dir = path.join(root, '.claude')
   const file = settingsPath(root)
   let dirInfo = null
@@ -281,7 +281,7 @@ function realExisting(location) {
   let current = location
   const rest = []
   for (let depth = 0; depth < 64; depth++) {
-    try { return path.join(realpathSync(current), ...rest.reverse()) } catch {}
+    try { return path.join(realpathSync.native(current), ...rest.reverse()) } catch {}
     const parent = path.dirname(current)
     if (parent === current) return location
     rest.push(path.basename(current))

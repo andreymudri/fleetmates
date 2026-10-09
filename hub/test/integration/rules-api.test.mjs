@@ -22,7 +22,7 @@ const fixture = name => JSON.parse(fs.readFileSync(new URL(`${name}.json`, hooks
 
 /** A server over a fresh home, and one repo (with a package.json whose `test` script makes `npm run test` Safe). */
 async function harness(t) {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'rul-')))
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'rul-')))
   let deck = null
   // One hook, so the server (and its SQLite file) is closed before its directory is removed: Windows
   // cannot remove an open file.
@@ -212,7 +212,7 @@ test('settings_changed answers 409 with retryable true (05-api section 4)', asyn
 // through the real rules service with the platform injected, so it runs on every host.
 // Mutation run for this test: the win32 refusal removed from validatePattern; this test failed.
 test('on win32 POST /api/rules answers 422 rules_unsupported_on_win32 and writes nothing', async t => {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'rul-w32-')))
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'rul-w32-')))
   const store = openDeckDb(path.join(dir, 'state', 'deck.db'))
   let api = null
   t.after(() => {

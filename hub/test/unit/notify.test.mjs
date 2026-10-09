@@ -31,7 +31,7 @@ process.stdout.write('42\\n')
 `, { mode: 0o700 })
   try {
     const env = { PATH: process.env.PATH, HOME: dir, XDG_RUNTIME_DIR: dir, SHIM_LOG: log }
-    const adapter = createNotifier({ notifyCommand: shim, soundCommand: shim, dismissCommand: shim, env })
+    const adapter = createNotifier({ platform: 'linux', notifyCommand: shim, soundCommand: shim, dismissCommand: shim, env })
     const text = '<private> $(touch forbidden)'
     assert.deepEqual(await adapter.popup({ title: '-session', body: text, replaceId: 41, urgency: 'low' }), { ok: true, id: 42 })
     assert.deepEqual(await adapter.bell(), { ok: true })
@@ -41,10 +41,10 @@ process.stdout.write('42\\n')
     assert.deepEqual(calls[1].args, ['--raw', '--format=s16', '--rate=48000', '--channels=1', '-'])
     assert.ok(calls[1].bytes > 1000)
     assert.deepEqual(calls[2].args, ['dismiss', '-n', '42'])
-    const failed = createNotifier({ notifyCommand: shim, env: { ...env, SHIM_FAIL: '1' } })
+    const failed = createNotifier({ platform: 'linux', notifyCommand: shim, env: { ...env, SHIM_FAIL: '1' } })
     assert.deepEqual(await failed.popup({ title: 'test', body: text }), { ok: false, error: { code: 'notify_failed', exitCode: 7 } })
     assert.equal(JSON.stringify(await failed.testPing()).includes('private'), false)
-    const absent = createNotifier({ notifyCommand: path.join(dir, 'missing'), env })
+    const absent = createNotifier({ platform: 'linux', notifyCommand: path.join(dir, 'missing'), env })
     assert.equal((await absent.testPing()).error.code, 'notify_failed')
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })

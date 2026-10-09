@@ -39,7 +39,7 @@
     "build": "vite build --config web/vite.config.mjs",
     "prepack": "node bin/vendor-fleetmates.mjs && npm run build",
     "postpack": "node bin/vendor-fleetmates.mjs --clean",
-    "test": "node --test --test-timeout=120000 --test-reporter=tap \"test/**/*.test.mjs\"",
+    "test": "node --import ./test/helpers/canonical-tmp.mjs --test --test-timeout=120000 --test-reporter=tap \"test/**/*.test.mjs\"",
     "perf": "node test/perf/focus-echo.mjs",
     "postinstall": "node bin/prepare-native.mjs"
   },

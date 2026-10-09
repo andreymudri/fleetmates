@@ -148,7 +148,7 @@ const run = (row, extra = {}) => classify({
 // names is read before any row runs, so no row sees the fallback for an unread repo.
 const { hooksPathCache } = await import('../../server/approvals/tiers.mjs')
 const corpusRoots = new Set([path.join(home, 'repo'), ...cases.flatMap(row => [row.repoRoot, ...(row.worktrees ?? [])]).filter(item => typeof item === 'string').map(place)])
-for (const dir of corpusRoots) for (const form of new Set([dir, (() => { try { return realpathSync(dir) } catch { return dir } })()])) await hooksPathCache.load(form, home)
+for (const dir of corpusRoots) for (const form of new Set([dir, (() => { try { return realpathSync.native(dir) } catch { return dir } })()])) await hooksPathCache.load(form, home)
 const shown = row => `line ${row.line}: ${row.toolName} ${row.toolInput.command ?? row.toolInput.file_path ?? row.toolInput.url ?? ''}`
 
 // The corpus pins the POSIX verdicts (docs/deck/16-platforms.md section 6), and its paths are moved

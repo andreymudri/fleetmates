@@ -18,7 +18,7 @@ function git(repo, ...args) {
 }
 
 function tempRepo(t) {
-  const repo = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-count-')))
+  const repo = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-count-')))
   t.after(() => rmSync(repo, RM))
   git(repo, 'init', '-q', '-b', 'main')
   writeFileSync(path.join(repo, 'a.txt'), 'a\n')
@@ -73,7 +73,7 @@ test('countFor reset_files counts tracked changes a reset discards and never unt
 
 /** Points HOME and XDG_CONFIG_HOME at a fresh temporary directory and sets GIT_CONFIG_NOSYSTEM=1 for the rest of the test. */
 function isolatedHome(t) {
-  const home = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
+  const home = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
   const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value
@@ -172,7 +172,7 @@ test('countFor rm_paths counts literal operands and returns null for a glob', as
 })
 
 test('countFor returns null for an unknown kind or a failing git call', async t => {
-  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-nogit-')))
+  const outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-nogit-')))
   t.after(() => rmSync(outside, RM))
   assert.equal(await countFor('sql', ['psql'], outside), null)
   assert.equal(await countFor('push_overwritten', ['git', 'push', '--force', 'origin', 'main'], outside), null)
