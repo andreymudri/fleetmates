@@ -69,10 +69,13 @@ export function ancestry({ platform = process.platform, readFile = readFileSync,
 
 /**
  * The hooks endpoint the deck server listens on. A copy of `endpoint(runtimeBase({ env, platform }),
- * 'hooks', { platform })` from hub/platform/index.mjs, because this file is copied alone by init and
- * imports only node: modules; hook-platform.test.mjs pins the two together.
+ * 'hooks', { platform, secret })` from hub/platform/index.mjs, because this file is copied alone by init
+ * and imports only node: modules; hook-platform.test.mjs pins the two together. On win32 the pipe name
+ * hashes `secret`, by default the hooks key the deck server wrote when it started listening, read on
+ * every call (`<base>\fleetmates-deck\endpoint-hooks.key`, exactly 64 lowercase hex digits); without
+ * one, or when `endpoint-hooks.lock` names a pid that is not alive, it throws with code ENOENT.
  */
-export function hookEndpoint(env = process.env, platform = process.platform) {
+export function hookEndpoint(env = process.env, platform = process.platform, { secret, alive = pidAlive } = {}) {
   const uid = process.getuid?.() ?? null
   const home = env.HOME || os.homedir()
   let base
@@ -81,11 +84,30 @@ export function hookEndpoint(env = process.env, platform = process.platform) {
   else if (platform === 'win32') base = path.win32.join(env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local'), 'fleetmates-deck', 'run')
   else base = `/tmp/fleetmates-deck-${uid}`
   if (platform === 'win32') {
-    const h = createHash('sha256').update(path.win32.resolve(base).toLowerCase()).digest('hex').slice(0, 16)
+    let key = secret
+    if (key === undefined) {
+      try { key = readFileSync(path.win32.join(base, 'fleetmates-deck', 'endpoint-hooks.key'), 'utf8') } catch { key = null }
+      // A key whose lock names a pid that is not alive is what a crashed server leaves: no server.
+      let holder = null
+      try { holder = JSON.parse(readFileSync(path.win32.join(base, 'fleetmates-deck', 'endpoint-hooks.lock'), 'utf8')) } catch {}
+      if (Number.isInteger(holder?.pid) && holder.pid > 0 && !alive(holder.pid)) key = null
+    }
+    if (typeof key !== 'string' || !/^[0-9a-f]{64}$/.test(key)) throw Object.assign(Error('no hooks endpoint key: the deck server is not running'), { code: 'ENOENT' })
+    const h = createHash('sha256').update(path.win32.resolve(base).toLowerCase() + '\0' + key).digest('hex').slice(0, 16)
     return `\\\\.\\pipe\\fleetmates-deck-${h}-hooks`
   }
   const sock = path.posix.join(base, 'fleetmates-deck', 'hooks.sock')
   return Buffer.byteLength(sock) > 100 ? `/tmp/fleetmates-deck-${uid}/hooks.sock` : sock
+}
+
+/** Whether process `pid` exists (EPERM: it exists, owned by someone else). */
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
 }
 
 function truncateInput(value, state) {

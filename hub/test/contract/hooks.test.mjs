@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
 import { hookEndpoint, makeEnvelope } from '../../hook/deck-hook.mjs'
+import { endpointSecret } from '../../platform/index.mjs'
 import { isWindows, posixTest } from '../helpers/platform.mjs'
 
 const fixtures = fileURLToPath(new URL('../fixtures/hooks/2.1.282/', import.meta.url))
@@ -147,7 +148,9 @@ test('hook sends one complete line to the runtime socket without creating spool'
   const runtime = path.join(home, 'runtime')
   const socketDir = path.join(runtime, 'fleetmates-deck')
   const hookEnv = { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: runtime }
-  // The hook's own endpoint rule: <runtime>/fleetmates-deck/hooks.sock here, a named pipe on win32.
+  // The hook's own endpoint rule: <runtime>/fleetmates-deck/hooks.sock here, a named pipe on win32 whose name hashes
+  // the hooks key, which the deck server writes; this stand-in writes one (a no-op off win32).
+  endpointSecret(runtime, { name: 'hooks', create: true })
   const socketPath = hookEndpoint(hookEnv)
   if (!isWindows) assert.equal(socketPath, path.join(socketDir, 'hooks.sock'))
   await mkdir(socketDir, { recursive: true, mode: 0o700 })

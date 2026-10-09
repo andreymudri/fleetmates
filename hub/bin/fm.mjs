@@ -229,8 +229,9 @@ export async function main (argv, { platform = process.platform, proc = process,
 
   // On POSIX, deckd's socket counts only inside directories private to this user; anything else
   // (another user's pre-created /tmp/fleetmates-deck-<uid>, a symlink, a 0777 dir) is treated as
-  // no deckd. A missing dir is just no deckd, without a message.
-  const problem = endpointDirProblem(endpoint(runtimeDir, 'deckd', { platform }), { platform })
+  // no deckd. A missing dir is just no deckd, without a message. A win32 pipe has no directory to
+  // check, and its name needs the endpoint key, which connectDeckd reads (no key: no deckd).
+  const problem = platform === 'win32' ? null : endpointDirProblem(endpoint(runtimeDir, 'deckd', { platform }), { platform })
   if (problem) {
     if (!problem.includes('(ENOENT)')) proc.stderr.write(`fm: not connecting to deckd: ${problem}\n`)
     if (cmd === 'claude') return plainClaude(rest, platform, { proc, spawn: spawnChild })

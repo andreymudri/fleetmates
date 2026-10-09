@@ -5,8 +5,13 @@ import fs, { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
+import net from 'node:net'
+import { spawn } from 'node:child_process'
+import { posixTest } from '../helpers/platform.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import {
-  runtimeBase, deckDir, endpoint, isPipe, ensurePrivateDir, privateFileProblem, killTree,
+  runtimeBase, deckDir, dropEndpoint, endpoint, endpointSecret, listenEndpoint, isPipe, ensurePrivateDir, privateFileProblem, killTree,
   resolveCommand, quoteCmdArg, escapeCmdCommand, commandSpawn, openUrlArgv, isClaudeProgram, unwrapCmdShim,
   windowsChildEnv, openNoFollowSync, openNoFollow, createInputModeFilter,
 } from '../../platform/index.mjs'
@@ -14,14 +19,39 @@ import * as platformModule from '../../platform/index.mjs'
 
 const moduleFile = fileURLToPath(new URL('../../platform/index.mjs', import.meta.url))
 
+const SECRET = 'a'.repeat(64)
+const OTHER_SECRET = '0123456789abcdef'.repeat(4)
+
+/** The win32 key and start-lock files of endpoint `name` under `base`. */
+const keyFile = (base, name) => path.win32.join(deckDir(base, { platform: 'win32' }), `endpoint-${name}.key`)
+const lockFile = (base, name) => path.win32.join(deckDir(base, { platform: 'win32' }), `endpoint-${name}.lock`)
+
+/**
+ * Run `fn` with a fresh temp dir as the working directory. The win32 key file of the relative base
+ * 'base' is then a file under that dir on any host: on Windows `base\fleetmates-deck\endpoint-deckd.key`,
+ * on POSIX one file whose name holds the backslashes.
+ * @param {(dir: string) => Promise<void>} fn
+ */
+async function inScratch (fn) {
+  const cwd = process.cwd()
+  const dir = await mkdtemp(path.join(tmpdir(), 'deck-key-'))
+  process.chdir(dir)
+  try {
+    await fn(dir)
+  } finally {
+    process.chdir(cwd)
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+}
+
 test('the platform module imports only node: modules and exports exactly the documented names', async () => {
   const source = await readFile(moduleFile, 'utf8')
   const specifiers = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map(m => m[1])
   assert.ok(specifiers.length > 0)
   for (const s of specifiers) assert.match(s, /^node:/, `${s} is not a node: module`)
   assert.deepEqual(Object.keys(platformModule).sort(), [
-    'commandSpawn', 'createInputModeFilter', 'deckDir', 'endpoint', 'ensurePrivateDir', 'escapeCmdCommand', 'isClaudeProgram',
-    'isPipe', 'killTree', 'openNoFollow', 'openNoFollowSync', 'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand',
+    'POWERSHELL_UTF8', 'commandSpawn', 'createInputModeFilter', 'deckDir', 'dropEndpoint', 'endpoint', 'endpointSecret', 'ensurePrivateDir', 'escapeCmdCommand', 'isClaudeProgram',
+    'isPipe', 'killTree', 'listenEndpoint', 'openNoFollow', 'openNoFollowSync', 'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand',
     'runtimeBase', 'unwrapCmdShim', 'windowsChildEnv',
   ])
 })
@@ -53,7 +83,8 @@ test('every path is built with the injected platform flavour, never the host pat
   assert.equal(deckDir('/Users/you/run', { platform: 'darwin' }), '/Users/you/run/fleetmates-deck')
   assert.equal(deckDir('/home/you\\run', { platform: 'linux' }), '/home/you\\run/fleetmates-deck')
   assert.equal(endpoint('/Users/you/run', 'hooks', { platform: 'darwin', uid: 501 }), '/Users/you/run/fleetmates-deck/hooks.sock')
-  assert.equal(endpoint('C:/Users/you/run', 'deckd', { platform: 'win32', uid: null }), endpoint('C:\\Users\\you\\run', 'deckd', { platform: 'win32', uid: null }))
+  assert.equal(endpoint('C:/Users/you/run', 'deckd', { platform: 'win32', uid: null, secret: SECRET }),
+    endpoint('C:\\Users\\you\\run', 'deckd', { platform: 'win32', uid: null, secret: SECRET }))
   assert.equal(resolveCommand('claude', { platform: 'win32', env: { PATH: 'C:/npm' }, exists: p => p === 'C:\\npm\\claude.cmd' }), 'C:\\npm\\claude.cmd')
   assert.deepEqual(unwrapCmdShim('C:/npm/claude.cmd', { readFile: () => '"%dp0%\\bin\\claude.exe" %*' }), { kind: 'exe', file: 'C:\\npm\\bin\\claude.exe' })
   assert.equal(isClaudeProgram('/usr/bin\\claude', { platform: 'linux' }), false)
@@ -83,15 +114,611 @@ test('endpoint on POSIX is a socket under deckDir, with a /tmp fallback past 100
   assert.equal(endpoint('/' + 'y'.repeat(73), 'deckd', { platform: 'linux', uid: 7 }), '/tmp/fleetmates-deck-7/deckd.sock')
 })
 
-test('endpoint on win32 is a named pipe hashed from the case-folded base', () => {
-  const a = endpoint('C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run', 'deckd', { platform: 'win32', uid: null })
+test('endpoint on win32 is a named pipe hashed from the case-folded base and the secret', () => {
+  const base = 'C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run'
+  const a = endpoint(base, 'deckd', { platform: 'win32', uid: null, secret: SECRET })
   assert.match(a, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-deckd$/)
-  const upper = endpoint('C:\\USERS\\YOU\\AppData\\Local\\fleetmates-deck\\run', 'deckd', { platform: 'win32', uid: null })
+  const h = createHash('sha256').update(path.win32.resolve(base).toLowerCase() + '\0' + SECRET).digest('hex').slice(0, 16)
+  assert.equal(a, `\\\\.\\pipe\\fleetmates-deck-${h}-deckd`)
+  const upper = endpoint('C:\\USERS\\YOU\\AppData\\Local\\fleetmates-deck\\run', 'deckd', { platform: 'win32', uid: null, secret: SECRET })
   assert.equal(upper, a, 'same base, different case, same pipe')
-  const other = endpoint('D:\\elsewhere', 'deckd', { platform: 'win32', uid: null })
+  const other = endpoint('D:\\elsewhere', 'deckd', { platform: 'win32', uid: null, secret: SECRET })
   assert.notEqual(other, a)
-  const hooks = endpoint('C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run', 'hooks', { platform: 'win32', uid: null })
+  const hooks = endpoint(base, 'hooks', { platform: 'win32', uid: null, secret: SECRET })
   assert.equal(hooks, a.replace(/-deckd$/, '-hooks'))
+  // Another user who knows the base but not the secret cannot predict the name.
+  assert.notEqual(endpoint(base, 'deckd', { platform: 'win32', uid: null, secret: OTHER_SECRET }), a)
+  const keyless = createHash('sha256').update(path.win32.resolve(base).toLowerCase()).digest('hex').slice(0, 16)
+  assert.notEqual(a, `\\\\.\\pipe\\fleetmates-deck-${keyless}-deckd`)
+})
+
+test('endpoint on win32 without a secret and without a key file throws ENOENT; a secret that is not 64 hex digits throws', async () => {
+  await inScratch(async () => {
+    assert.throws(() => endpoint('base', 'deckd', { platform: 'win32', uid: null }), { code: 'ENOENT' })
+    for (const secret of ['', 'abc', SECRET.toUpperCase(), SECRET + '0', 42]) {
+      assert.throws(() => endpoint('base', 'hooks', { platform: 'win32', uid: null, secret }), /secret/, String(secret))
+    }
+  })
+})
+
+test('endpoint on win32 without a secret reads the key of its own name: the deckd key does not name the hooks pipe', async () => {
+  await inScratch(async () => {
+    const secret = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true })
+    assert.equal(endpoint('base', 'deckd', { platform: 'win32', uid: null }), endpoint('base', 'deckd', { platform: 'win32', uid: null, secret }))
+    assert.throws(() => endpoint('base', 'hooks', { platform: 'win32', uid: null }), { code: 'ENOENT' })
+    assert.ok(fs.existsSync(keyFile('base', 'deckd')))
+    assert.equal(fs.existsSync(keyFile('base', 'hooks')), false)
+  })
+})
+
+test('endpoint on POSIX ignores a secret: the socket path is the same with and without one', () => {
+  for (const [platform, uid] of [['linux', 1000], ['darwin', 501]]) {
+    for (const base of ['/run/user/1000', '/run/' + 'x'.repeat(90)]) {
+      assert.equal(endpoint(base, 'deckd', { platform, uid, secret: SECRET }), endpoint(base, 'deckd', { platform, uid }), `${platform} ${base}`)
+    }
+  }
+})
+
+test('endpointSecret is null off win32 and touches no file', async () => {
+  await inScratch(async (dir) => {
+    for (const platform of ['linux', 'darwin']) {
+      assert.equal(endpointSecret('base', { platform, name: 'deckd' }), null)
+      assert.equal(endpointSecret('base', { platform, name: 'hooks', create: true }), null)
+    }
+    assert.deepEqual(fs.readdirSync(dir), [])
+  })
+})
+
+test('endpointSecret on win32: a reader gets null for a missing key and creates nothing; a creator writes 64 hex digits that every later call reads', async () => {
+  await inScratch(async (dir) => {
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd' }), null)
+    assert.deepEqual(fs.readdirSync(dir), [], 'a reader creates nothing')
+    const created = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true })
+    assert.match(created, /^[0-9a-f]{64}$/)
+    assert.equal(readFileSync(keyFile('base', 'deckd'), 'utf8'), created, 'the key file holds exactly the secret')
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd' }), created)
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', create: true }), created, 'a creator keeps a valid key')
+    assert.equal(fs.existsSync(lockFile('base', 'deckd')), false, 'the start lock is released')
+  })
+})
+
+test('endpointSecret on win32 treats a malformed key as missing for readers; a creator logs it and writes a new one', async () => {
+  await inScratch(async () => {
+    for (const bad of ['', 'abc', 'z'.repeat(64), 'a'.repeat(64) + '\n', 'a'.repeat(63)]) {
+      fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+      fs.writeFileSync(keyFile('base', 'hooks'), bad)
+      assert.equal(endpointSecret('base', { platform: 'win32', name: 'hooks' }), null, JSON.stringify(bad))
+      assert.equal(readFileSync(keyFile('base', 'hooks'), 'utf8'), bad, 'a reader leaves it alone')
+      const logged = []
+      const fresh = endpointSecret('base', { platform: 'win32', name: 'hooks', create: true, log: line => logged.push(line) })
+      assert.match(fresh, /^[0-9a-f]{64}$/)
+      assert.equal(readFileSync(keyFile('base', 'hooks'), 'utf8'), fresh)
+      assert.equal(logged.length, 1)
+      assert.match(logged[0], /malformed/)
+    }
+  })
+})
+
+test('endpointSecret on win32: two creators over a malformed key end on the one key the file holds, because the second finds the start lock held', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(keyFile('base', 'deckd'), 'malformed')
+    /** @type {{ value?: string, error?: any }} */
+    const second = {}
+    let nested = false
+    // The second creator runs while the first is about to rename its new key into place.
+    const racing = { ...fs, renameSync (from, to) {
+      if (!nested) {
+        nested = true
+        try { second.value = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, log: () => {} }) } catch (error) { second.error = error }
+      }
+      return fs.renameSync(from, to)
+    } }
+    const first = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, log: () => {}, fs: racing })
+    const final = readFileSync(keyFile('base', 'deckd'), 'utf8')
+    assert.equal(first, final)
+    assert.equal(nested, true)
+    assert.ok(second.value === undefined || second.value === final, `the second creator got ${second.value}, the file holds ${final}`)
+    assert.equal(second.error?.code, 'EADDRINUSE', 'the second creator found the lock held by a live deck process')
+  })
+})
+
+posixTest('a symbolic link at a key file is not followed: readers get no key, and a creator replaces the link, not its target', { reason: 'creating a symbolic link needs a privilege on Windows' }, async () => {
+  await inScratch(async (dir) => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    const target = path.join(dir, 'planted')
+    fs.writeFileSync(target, 'e'.repeat(64))
+    fs.symlinkSync(target, keyFile('base', 'deckd'))
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd' }), null)
+    assert.throws(() => endpoint('base', 'deckd', { platform: 'win32', uid: null }), { code: 'ENOENT' })
+    const logged = []
+    const fresh = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, log: line => logged.push(line) })
+    assert.notEqual(fresh, 'e'.repeat(64))
+    assert.match(logged[0], /unreadable \(ELOOP\)/)
+    assert.equal(fs.lstatSync(keyFile('base', 'deckd')).isSymbolicLink(), false)
+    assert.equal(readFileSync(target, 'utf8'), 'e'.repeat(64), 'the target is untouched')
+  })
+})
+
+posixTest('a symbolic link planted at the temp name a key is written through is refused, even by a file system whose exclusive create follows it as Windows does', { reason: 'creating a symbolic link needs a privilege on Windows' }, async () => {
+  await inScratch(async (dir) => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    const random = n => Buffer.alloc(n, 0x11)
+    const temp = `${keyFile('base', 'deckd')}.${random(6).toString('hex')}.tmp`
+    const target = path.join(dir, 'created-through-the-link')
+    fs.symlinkSync(target, temp)
+    // An O_EXCL open that follows a dangling symbolic link and creates its target, as reported from the Windows VM.
+    const followsLinks = { ...fs, openSync (file, flags, mode) {
+      if (flags & fs.constants.O_EXCL) {
+        let link = null
+        try { link = fs.readlinkSync(file) } catch {}
+        if (link !== null) return fs.openSync(link, flags, mode)
+      }
+      return fs.openSync(file, flags, mode)
+    } }
+    assert.throws(() => endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, fs: followsLinks, random }), { code: 'ELOOP' })
+    assert.equal(fs.existsSync(target), false, 'nothing was created through the link')
+  })
+})
+
+const DEAD = 999999
+/** An `alive` for which only DEAD is gone. */
+const allButDead = pid => pid !== DEAD
+const closeServer = server => server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve()
+/** Bytes a stand-in listener received, by connection. */
+async function listener (pipe) {
+  const got = []
+  const server = net.createServer(socket => { socket.on('data', chunk => got.push(String(chunk))) })
+  await new Promise(resolve => server.listen(pipe, resolve))
+  return { server, got }
+}
+/** Connect to `pipe`, send `text`, and wait until the server side had time to read it. */
+async function send (pipe, text) {
+  await new Promise((resolve, reject) => { const socket = net.connect(pipe); socket.on('error', reject); socket.on('connect', () => socket.end(text)); socket.on('close', resolve) })
+  await new Promise(resolve => setTimeout(resolve, 20))
+}
+
+test('endpointSecret takes over a start lock whose holder is dead, and refuses while a live deck server holds it', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, started: 1 }))
+    const asked = []
+    const alive = pid => { asked.push(pid); return pid !== DEAD }
+    assert.match(endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, alive }), /^[0-9a-f]{64}$/)
+    assert.deepEqual(asked, [DEAD])
+    assert.equal(fs.existsSync(lockFile('base', 'deckd')), false, 'endpointSecret releases the lock')
+    const server = net.createServer()
+    try {
+      await listenEndpoint('base', 'hooks', server, { platform: 'win32' })
+      fs.rmSync(keyFile('base', 'hooks'))
+      assert.throws(() => endpointSecret('base', { platform: 'win32', name: 'hooks', create: true }), { code: 'EADDRINUSE', message: /pid \d+/ })
+    } finally {
+      await closeServer(server)
+    }
+  })
+})
+
+test('listenEndpoint on win32 listens on a new key each start, writes the key only after the pipe listens, holds the start lock while listening, and a clean close removes the key and the lock', async () => {
+  await inScratch(async () => {
+    /** @type {any[]} */
+    const atPublish = []
+    let server = net.createServer()
+    const watching = { ...fs, renameSync (from, to) {
+      if (to === keyFile('base', 'deckd')) {
+        const secret = readFileSync(from, 'utf8')
+        atPublish.push({ listening: server.listening, address: server.address(), pipe: endpoint('base', 'deckd', { platform: 'win32', secret }) })
+      }
+      return fs.renameSync(from, to)
+    } }
+    let first, firstKey
+    try {
+      first = await listenEndpoint('base', 'deckd', server, { platform: 'win32', fs: watching })
+      assert.match(first, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-deckd$/)
+      assert.equal(first, endpoint('base', 'deckd', { platform: 'win32' }), 'a client computes the pipe the server listens on')
+      assert.deepEqual(atPublish, [{ listening: true, address: first, pipe: first }], 'the key appeared only after its pipe was listening')
+      firstKey = endpointSecret('base', { platform: 'win32', name: 'deckd' })
+      assert.equal(JSON.parse(readFileSync(lockFile('base', 'deckd'), 'utf8')).pid, process.pid, 'the start lock is held while listening')
+    } finally {
+      await closeServer(server)
+    }
+    assert.equal(fs.existsSync(keyFile('base', 'deckd')), false, 'a clean close removes the key')
+    assert.equal(fs.existsSync(lockFile('base', 'deckd')), false, 'and releases the lock')
+    assert.throws(() => endpoint('base', 'deckd', { platform: 'win32' }), { code: 'ENOENT' }, 'clients find the server not running')
+    server = net.createServer()
+    try {
+      const second = await listenEndpoint('base', 'deckd', server, { platform: 'win32' })
+      assert.notEqual(second, first, 'a restart listens under a new name')
+      assert.notEqual(endpointSecret('base', { platform: 'win32', name: 'deckd' }), firstKey)
+      assert.equal(second, endpoint('base', 'deckd', { platform: 'win32' }))
+    } finally {
+      await closeServer(server)
+    }
+  })
+})
+
+test('listenEndpoint on win32 refuses with EADDRINUSE and the current pipe while a live deck server holds the start lock, and leaves its key', async () => {
+  await inScratch(async () => {
+    const live = net.createServer()
+    const other = net.createServer()
+    try {
+      const pipe = await listenEndpoint('base', 'hooks', live, { platform: 'win32' })
+      const key = endpointSecret('base', { platform: 'win32', name: 'hooks' })
+      await assert.rejects(listenEndpoint('base', 'hooks', other, { platform: 'win32' }), { code: 'EADDRINUSE', path: pipe, holder: process.pid })
+      assert.equal(other.listening, false)
+      assert.equal(endpointSecret('base', { platform: 'win32', name: 'hooks' }), key)
+    } finally {
+      await closeServer(live)
+      await closeServer(other)
+    }
+  })
+})
+
+test('after a crash a squatter on the old pipe name neither blocks the next start nor receives anything sent after it', async () => {
+  await inScratch(async () => {
+    // What a server killed while listening leaves: its key, and its lock naming a dead pid.
+    const oldKey = 'b'.repeat(64)
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(keyFile('base', 'hooks'), oldKey)
+    fs.writeFileSync(lockFile('base', 'hooks'), JSON.stringify({ pid: DEAD, started: 1 }))
+    // Another local user who saw the name creates it.
+    const squat = await listener(endpoint('base', 'hooks', { platform: 'win32', secret: oldKey }))
+    const deck = net.createServer(socket => { socket.on('data', chunk => received.push(String(chunk))) })
+    const received = []
+    try {
+      const pipe = await listenEndpoint('base', 'hooks', deck, { platform: 'win32', alive: allButDead })
+      assert.notEqual(pipe, squat.server.address())
+      await send(endpoint('base', 'hooks', { platform: 'win32' }), 'envelope\n')
+      assert.deepEqual(received, ['envelope\n'])
+      assert.deepEqual(squat.got, [])
+    } finally {
+      await closeServer(deck)
+      await closeServer(squat.server)
+    }
+  })
+})
+
+test('a lock whose live pid was created at another time (a reused pid) is taken over; a matching creation time, or one that cannot be read, holds it', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    const started = 1_790_000_000_000
+    const record = JSON.stringify({ pid: 4242, started })
+    const cases = [
+      ['a later process', started + 60_000, true],
+      ['no such process', undefined, true],
+      ['the holder, 1.5 s off', started + 1500, false],
+      ['the holder, 1.5 s the other way', started - 1500, false],
+      ['a query that failed', null, false],
+    ]
+    for (const [label, created, starts] of cases) {
+      fs.writeFileSync(lockFile('base', 'deckd'), record)
+      const asked = []
+      const server = net.createServer()
+      try {
+        const start = listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: () => true, creationTime: pid => { asked.push(pid); return created } })
+        if (starts) assert.match(await start, /-deckd$/, label)
+        else await assert.rejects(start, { code: 'EADDRINUSE', holder: 4242 }, label)
+        assert.deepEqual(asked, [4242], label)
+      } finally {
+        await closeServer(server)
+      }
+    }
+    fs.writeFileSync(lockFile('base', 'deckd'), record)
+    const asked = []
+    const server = net.createServer()
+    try {
+      await listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: () => false, creationTime: pid => { asked.push(pid); return started } })
+      assert.deepEqual(asked, [], 'a dead pid is not asked about')
+    } finally {
+      await closeServer(server)
+    }
+  })
+})
+
+test('the creation time query runs Windows PowerShell with UTF-8 output and reads Win32_Process.CreationDate as a CIM datetime with its UTC offset', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    // Measured on the Windows VM: this CreationDate and Get-CimInstance's .ToUniversalTime().Ticks
+    // 639271432882101190 are the same instant, 2026-10-09T11:48:08.210Z.
+    const started = Date.UTC(2026, 9, 9, 11, 48, 8, 210)
+    const answers = [
+      ['the holder, UTC-7', { status: 0, stdout: '20261009044808.210119-420\r\n' }, false],
+      ['the holder, UTC+2', { status: 0, stdout: '20261009134808.210119+120\r\n' }, false],
+      ['the holder, UTC', { status: 0, stdout: '20261009114808.210119+000\r\n' }, false],
+      ['a process created a minute later', { status: 0, stdout: '20261009044908.210119-420\r\n' }, true],
+      ['no such process', { status: 0, stdout: '\r\n' }, true],
+      ['an offset of two digits', { status: 0, stdout: '20261009044808.210119-42\r\n' }, false],
+      ['ticks, not a CIM datetime', { status: 0, stdout: '639271432882101190\r\n' }, false],
+      ['a mangled string', { status: 0, stdout: 'Andr�\r\n' }, false],
+      ['a failed query', { status: 1, stdout: '' }, false],
+      ['no powershell', { error: Object.assign(new Error('spawnSync powershell ENOENT'), { code: 'ENOENT' }), status: null, stdout: '' }, false],
+    ]
+    for (const [label, answer, starts] of answers) {
+      fs.writeFileSync(lockFile('base', 'hooks'), JSON.stringify({ pid: 4242, started }))
+      const spawned = []
+      const spawnSync = (file, args, options) => { spawned.push({ file, args, options }); return answer }
+      const server = net.createServer()
+      try {
+        const start = listenEndpoint('base', 'hooks', server, { platform: 'win32', alive: () => true, spawnSync })
+        if (starts) assert.match(await start, /-hooks$/, label)
+        else await assert.rejects(start, { code: 'EADDRINUSE', holder: 4242 }, label)
+      } finally {
+        await closeServer(server)
+      }
+      assert.equal(spawned.length, 1, label)
+      assert.equal(spawned[0].file, 'powershell')
+      assert.deepEqual(spawned[0].args, ['-NoProfile', '-Command',
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;$p=Get-WmiObject Win32_Process -Filter 'ProcessId=4242';if($p){$p.CreationDate}"])
+      assert.equal(spawned[0].options.windowsHide, true)
+      assert.equal(spawned[0].options.encoding, 'utf8')
+    }
+  })
+})
+
+test('endpointSecret with liveHolder treats a key whose lock names a dead pid as missing, and keeps one with a live holder or no lock', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(keyFile('base', 'deckd'), 'e'.repeat(64))
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', liveHolder: true }), 'e'.repeat(64), 'no lock')
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: process.pid, started: 1 }))
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', liveHolder: true }), 'e'.repeat(64), 'a live holder')
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, started: 1 }))
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', liveHolder: true, alive: allButDead }), null, 'a dead holder')
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', alive: allButDead }), 'e'.repeat(64), 'without liveHolder the lock is not read')
+  })
+})
+
+/** When process `pid` started, in ms since the epoch, from /proc (Linux, with the usual 100 clock ticks per second). */
+function procStart (pid) {
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+  const startTicks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19])
+  const btime = Number(readFileSync('/proc/stat', 'utf8').match(/^btime (\d+)$/m)[1])
+  return btime * 1000 + startTicks * 10
+}
+
+test('a deck server started from a relative script path under a non-ASCII directory holds its start lock against a second start', {
+  skip: !['linux', 'win32'].includes(process.platform) && 'reads a process start time from /proc or Windows',
+}, async () => {
+  await inScratch(async (dir) => {
+    const scriptDir = path.join(dir, 'André', 'hub')
+    fs.mkdirSync(scriptDir, { recursive: true })
+    const moduleUrl = new URL('../../platform/index.mjs', import.meta.url).href
+    fs.writeFileSync(path.join(scriptDir, 'holder.mjs'), [
+      "import net from 'node:net'",
+      `const { listenEndpoint } = await import(${JSON.stringify(moduleUrl)})`,
+      'const server = net.createServer()',
+      // Lock well after starting, as the server does after its startup work, so the recorded start must
+      // be the process's start and not the time the lock was taken.
+      'await new Promise(resolve => setTimeout(resolve, 3000))',
+      "await listenEndpoint('base', 'deckd', server, { platform: 'win32' })",
+      "process.stdout.write('READY\\n')",
+      "process.stdin.on('end', () => process.exit(0)).resume()",
+    ].join('\n'))
+    // Relative, as `node hub/deckd/main.mjs` is typed.
+    const child = spawn(process.execPath, [path.join('André', 'hub', 'holder.mjs')], { cwd: dir, stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true })
+    const exited = new Promise(resolve => child.once('exit', resolve))
+    const second = net.createServer()
+    try {
+      await new Promise((resolve, reject) => {
+        child.stdout.on('data', chunk => { if (String(chunk).includes('READY')) resolve(undefined) })
+        child.once('exit', code => reject(new Error(`holder exited ${code}`)))
+      })
+      // On Windows the default query asks PowerShell; elsewhere /proc stands in for it.
+      const opts = process.platform === 'win32' ? {} : { creationTime: procStart }
+      await assert.rejects(listenEndpoint('base', 'deckd', second, { platform: 'win32', ...opts }), { code: 'EADDRINUSE', holder: child.pid })
+      assert.equal(second.listening, false)
+    } finally {
+      await closeServer(second)
+      child.stdin.end()
+      await exited
+    }
+  })
+})
+
+/**
+ * Run `fn` with process.kill answering EPERM for `pid` (signal 0), as Windows does for a process of a
+ * user this one may not signal, such as an elevated deck server. Restored afterwards.
+ */
+async function withEpermFor (pid, fn) {
+  const real = process.kill
+  process.kill = (target, signal) => {
+    if (target === pid) throw Object.assign(new Error(`kill EPERM ${pid}`), { code: 'EPERM', errno: -1, syscall: 'kill' })
+    return real.call(process, target, signal)
+  }
+  try {
+    return await fn()
+  } finally {
+    process.kill = real
+  }
+}
+
+test('a lock holder that kill(pid, 0) answers EPERM for is alive: it refuses a second start, and liveHolder keeps its key', async () => {
+  await inScratch(async () => {
+    const started = 1_790_000_000_000
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: 4242, started }))
+    fs.writeFileSync(keyFile('base', 'deckd'), 'e'.repeat(64))
+    const server = net.createServer()
+    await withEpermFor(4242, async () => {
+      try {
+        // The default alive check; only the creation time is injected.
+        await assert.rejects(listenEndpoint('base', 'deckd', server, { platform: 'win32', creationTime: () => started }), { code: 'EADDRINUSE', holder: 4242 })
+        assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', liveHolder: true }), 'e'.repeat(64))
+      } finally {
+        await closeServer(server)
+      }
+    })
+  })
+})
+
+test('dropEndpoint removes the key and lock of the pid that was killed, and only those', async () => {
+  await inScratch(async () => {
+    const dead = () => false
+    const plant = (name, holder) => {
+      fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+      fs.writeFileSync(keyFile('base', name), 'd'.repeat(64))
+      if (holder !== null) fs.writeFileSync(lockFile('base', name), JSON.stringify({ pid: holder, started: 1 }))
+    }
+    plant('deckd', 777)
+    assert.equal(dropEndpoint('base', 'deckd', 777, { platform: 'win32', alive: dead }), true)
+    assert.equal(fs.existsSync(keyFile('base', 'deckd')), false)
+    assert.equal(fs.existsSync(lockFile('base', 'deckd')), false)
+    plant('hooks', 888)
+    assert.equal(dropEndpoint('base', 'hooks', 777, { platform: 'win32', alive: dead }), false, 'another pid\'s lock')
+    assert.equal(readFileSync(keyFile('base', 'hooks'), 'utf8'), 'd'.repeat(64))
+    assert.equal(JSON.parse(readFileSync(lockFile('base', 'hooks'), 'utf8')).pid, 888)
+    fs.rmSync(lockFile('base', 'hooks'))
+    assert.equal(dropEndpoint('base', 'hooks', 777, { platform: 'win32', alive: dead }), false, 'no lock')
+    assert.equal(fs.existsSync(keyFile('base', 'hooks')), true)
+    plant('hooks', 777)
+    assert.throws(() => dropEndpoint('base', 'hooks', 777, { platform: 'win32', alive: () => true, creationTime: () => 1 }), { code: 'EADDRINUSE' }, 'still a live deck')
+    assert.equal(fs.existsSync(keyFile('base', 'hooks')), true)
+    assert.equal(dropEndpoint('base', 'hooks', 777, { platform: 'linux' }), false)
+    assert.equal(fs.existsSync(keyFile('base', 'hooks')), true, 'off win32 nothing is done')
+  })
+})
+
+test('dropEndpoint leaves the key when another starter took the lock over between the check and the takeover', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(keyFile('base', 'deckd'), 'd'.repeat(64))
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: 777, started: 1 }))
+    let swapped = false
+    // Just before dropEndpoint's takeover links its own lock, a dead pid 999 has replaced 777's.
+    const racing = { ...fs, linkSync (from, to) {
+      if (!swapped && to === lockFile('base', 'deckd')) {
+        swapped = true
+        fs.writeFileSync(`${to}.x`, JSON.stringify({ pid: 999, started: 1 }))
+        fs.renameSync(`${to}.x`, to)
+      }
+      return fs.linkSync(from, to)
+    } }
+    assert.equal(dropEndpoint('base', 'deckd', 777, { platform: 'win32', alive: () => false, fs: racing }), false)
+    assert.equal(swapped, true)
+    assert.equal(readFileSync(keyFile('base', 'deckd'), 'utf8'), 'd'.repeat(64))
+  })
+})
+
+test('a starter whose stale lock was moved away by another before its own rename tries again and takes the lock', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, started: 1 }))
+    let moved = false
+    const racing = { ...fs, renameSync (from, to) {
+      if (!moved && from === lockFile('base', 'deckd') && to.endsWith('.stale')) {
+        moved = true
+        fs.rmSync(from)
+      }
+      return fs.renameSync(from, to)
+    } }
+    const server = net.createServer()
+    try {
+      assert.match(await listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: allButDead, fs: racing }), /-deckd$/)
+      assert.equal(moved, true)
+      assert.equal(JSON.parse(readFileSync(lockFile('base', 'deckd'), 'utf8')).pid, process.pid)
+    } finally {
+      await closeServer(server)
+    }
+  })
+})
+
+test('endpointSecret create reads the key again under the lock: a creator that found none returns the key another wrote meanwhile', async () => {
+  await inScratch(async () => {
+    /** @type {string | undefined} */
+    let other
+    // Between this creator's first read (no key) and its lock, another creator writes a key and releases the lock.
+    const racing = { ...fs, mkdirSync (dir, options) {
+      if (other === undefined) other = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true })
+      return fs.mkdirSync(dir, options)
+    } }
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    const mine = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, fs: racing })
+    assert.match(other ?? '', /^[0-9a-f]{64}$/)
+    assert.equal(mine, other)
+    assert.equal(readFileSync(keyFile('base', 'deckd'), 'utf8'), other)
+  })
+})
+
+test('two starters taking over one stale lock: the one whose rename moved the other\'s fresh lock puts it back, so only one server runs', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, started: 1 }))
+    const first = net.createServer()
+    const second = net.createServer()
+    /** @type {Promise<string> | null} */
+    let firstStart = null
+    // `second` judged the lock stale; before its rename moves it aside, `first` takes the same stale lock over.
+    const racing = { ...fs, renameSync (from, to) {
+      if (!firstStart && from === lockFile('base', 'deckd') && to.endsWith('.stale')) firstStart = listenEndpoint('base', 'deckd', first, { platform: 'win32', alive: allButDead })
+      return fs.renameSync(from, to)
+    } }
+    try {
+      const secondStart = listenEndpoint('base', 'deckd', second, { platform: 'win32', alive: allButDead, fs: racing })
+      await assert.rejects(secondStart, { code: 'EADDRINUSE' })
+      assert.ok(firstStart)
+      const pipe = await firstStart
+      assert.equal(first.listening, true)
+      assert.equal(second.listening, false)
+      assert.equal(endpoint('base', 'deckd', { platform: 'win32' }), pipe)
+      assert.equal(JSON.parse(readFileSync(lockFile('base', 'deckd'), 'utf8')).pid, process.pid)
+      assert.deepEqual(fs.readdirSync('.').filter(f => f.endsWith('.stale')), [], 'nothing is left aside')
+    } finally {
+      await closeServer(first)
+      await closeServer(second)
+    }
+  })
+})
+
+test('closing removes the start lock and the key only while they are still this server\'s', async () => {
+  await inScratch(async () => {
+    const server = net.createServer()
+    await listenEndpoint('base', 'deckd', server, { platform: 'win32' })
+    // Another process's lock and key took their places.
+    const otherLock = JSON.stringify({ pid: 4242, started: 1 })
+    fs.writeFileSync(`${lockFile('base', 'deckd')}.other`, otherLock)
+    fs.renameSync(`${lockFile('base', 'deckd')}.other`, lockFile('base', 'deckd'))
+    fs.writeFileSync(keyFile('base', 'deckd'), 'c'.repeat(64))
+    await closeServer(server)
+    assert.equal(readFileSync(lockFile('base', 'deckd'), 'utf8'), otherLock)
+    assert.equal(readFileSync(keyFile('base', 'deckd'), 'utf8'), 'c'.repeat(64))
+  })
+})
+
+test('listenEndpoint closes the server, releases the lock and rethrows when the key cannot be written', async () => {
+  await inScratch(async () => {
+    const failing = { ...fs, renameSync (from, to) {
+      if (to === keyFile('base', 'hooks')) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' })
+      return fs.renameSync(from, to)
+    } }
+    const server = net.createServer()
+    try {
+      await assert.rejects(listenEndpoint('base', 'hooks', server, { platform: 'win32', fs: failing }), { code: 'EIO' })
+      assert.equal(server.listening, false)
+      assert.equal(fs.existsSync(lockFile('base', 'hooks')), false)
+      assert.equal(fs.existsSync(keyFile('base', 'hooks')), false)
+    } finally {
+      await closeServer(server)
+    }
+  })
+})
+
+test('setupPaths on win32 names the pipes from the key files at each access, and without a key one unreachable name per paths object', async () => {
+  await inScratch(async () => {
+    const env = { USERPROFILE: 'C:\\Users\\you', LOCALAPPDATA: 'local' }
+    const paths = setupPaths(env, { platform: 'win32', uid: null })
+    const base = runtimeBase({ env, platform: 'win32' })
+    const before = paths.endpoints.deckd
+    assert.match(before, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-deckd$/)
+    assert.equal(paths.endpoints.deckd, before, 'the same name at every access while there is no key')
+    assert.equal(paths.endpoints.hooks, before.replace(/-deckd$/, '-hooks'))
+    // Unpredictable: another paths object gives another name, and no fixed secret gives this one.
+    assert.notEqual(setupPaths(env, { platform: 'win32', uid: null }).endpoints.deckd, before)
+    for (const fixed of ['a', '0', 'f'].map(c => c.repeat(64))) assert.notEqual(endpoint(base, 'deckd', { platform: 'win32', secret: fixed }), before, fixed)
+    const deckdKey = endpointSecret(base, { platform: 'win32', name: 'deckd', create: true })
+    assert.equal(paths.endpoints.deckd, endpoint(base, 'deckd', { platform: 'win32', secret: deckdKey }), 'a key written after setupPaths is read at access')
+    assert.equal(paths.endpoints.hooks, before.replace(/-deckd$/, '-hooks'), 'the hooks name waits for its own key')
+    const hooksKey = endpointSecret(base, { platform: 'win32', name: 'hooks', create: true })
+    assert.equal(paths.endpoints.hooks, endpoint(base, 'hooks', { platform: 'win32', secret: hooksKey }))
+  })
 })
 
 test('endpoint refuses an unknown name on every platform', () => {

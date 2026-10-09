@@ -1,6 +1,19 @@
+import { randomBytes } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
-import { deckDir, endpoint, runtimeBase } from '../../platform/index.mjs'
+import { deckDir, endpoint, endpointSecret, runtimeBase } from '../../platform/index.mjs'
+
+/**
+ * The deckd and hooks endpoints of `base`. POSIX: two socket paths. win32: each pipe name hashes its endpoint key, which
+ * deckd or the server writes anew whenever it starts listening, so each access reads the key again; while there is
+ * none, the name hashes one random secret made for this object, which nothing listens on.
+ */
+function endpointsOf(base, { platform, uid }) {
+  if (platform !== 'win32') return { deckd: endpoint(base, 'deckd', { platform, uid }), hooks: endpoint(base, 'hooks', { platform, uid }) }
+  let unreachable
+  const name = which => endpoint(base, which, { platform, uid, secret: endpointSecret(base, { platform, name: which }) ?? (unreachable ??= randomBytes(32).toString('hex')) })
+  return { get deckd() { return name('deckd') }, get hooks() { return name('hooks') } }
+}
 
 /**
  * Resolve setup paths from an isolated environment for `platform`. linux and darwin use the XDG layout; win32 uses
@@ -36,6 +49,6 @@ export function setupPaths(env = process.env, { platform = process.platform, uid
     settings: p.join(env.CLAUDE_CONFIG_DIR || p.join(home, '.claude'), 'settings.json'),
     units,
     runtime: deckDir(base, { platform }),
-    endpoints: { deckd: endpoint(base, 'deckd', { platform, uid }), hooks: endpoint(base, 'hooks', { platform, uid }) }
+    endpoints: endpointsOf(base, { platform, uid })
   }
 }

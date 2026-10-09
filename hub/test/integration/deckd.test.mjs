@@ -9,7 +9,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { cmdShim } from '../helpers/fake-bin.mjs'
 import { posixTest } from '../helpers/platform.mjs'
-import { endpoint, deckDir } from '../../platform/index.mjs'
+import { endpoint, endpointSecret, deckDir } from '../../platform/index.mjs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { startDeckd } from '../../deckd/main.mjs'
+import { connectDeckd } from '../../deckd/client.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
 import { PtyHost, RESIZE_MIN_INTERVAL_MS } from '../../deckd/pty-host.mjs'
 
@@ -215,7 +218,6 @@ async function spawnReady (env = {}, argv = ['claude']) {
 before(async () => {
   rt = await makeRuntimeDir()
   stub = await stubLauncher()
-  socketPath = endpoint(rt.dir, 'deckd')
   if (!onWindows) {
     // A socket dir left behind with a looser mode must be tightened to 0700.
     await mkdir(deckDir(rt.dir), { mode: 0o755 })
@@ -242,6 +244,8 @@ before(async () => {
     })
     deckd.once('exit', (code) => reject(new Error(`deckd exited ${code}: ${deckdStderr}`)))
   })
+  // On win32 the pipe name hashes the deckd key, which deckd writes when it starts listening, so it is computed now.
+  socketPath = endpoint(rt.dir, 'deckd')
   // A deckd that dies mid-file takes every later test down with it; print
   // why at once, and fail every test that ends after it (afterEach below).
   deckd.on('exit', (code, signal) => {
@@ -597,4 +601,83 @@ posixTest('SIGTERM stops deckd cleanly and kills its PTYs', { reason: 'SIGTERM t
   assert.equal(await exited, 0)
   assert.throws(() => process.kill(res.pid, 0), { code: 'ESRCH' })
   await assert.rejects(stat(socketPath), { code: 'ENOENT' })
+})
+
+test('deckd writes the deckd key on win32 and listens on the pipe hashed from it; on POSIX it writes none', () => {
+  const keyFile = (onWindows ? path.win32 : path.posix).join(deckDir(rt.dir), 'endpoint-deckd.key')
+  if (onWindows) {
+    const secret = readFileSync(keyFile, 'utf8')
+    assert.match(secret, /^[0-9a-f]{64}$/)
+    assert.equal(socketPath, endpoint(rt.dir, 'deckd', { secret }))
+  } else {
+    assert.equal(existsSync(keyFile), false)
+    assert.equal(socketPath, path.join(deckDir(rt.dir), 'deckd.sock'))
+  }
+  assert.ok(deckdStderr.includes(`deckd listening on ${socketPath}`), deckdStderr)
+})
+
+test('with platform win32 deckd writes a new key at every start, a client reads the key at every connect, and without a key a client finds no deckd', async () => {
+  // win32 is injected. Off Windows the pipe name and the relative base's win32 paths are files and
+  // dirs in a temp dir made the working directory for this test only.
+  const cwd = process.cwd()
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'deckd-key-'))
+  process.chdir(scratch)
+  /** @type {Awaited<ReturnType<typeof startDeckd>> | undefined} */
+  let first
+  try {
+    first = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} })
+    const secret = endpointSecret('base', { platform: 'win32', name: 'deckd' })
+    assert.match(secret ?? '', /^[0-9a-f]{64}$/)
+    assert.equal(first.socketPath, endpoint('base', 'deckd', { platform: 'win32', secret }))
+    // A second start that is wrongly allowed is closed again, so a failure here cannot leave it running.
+    const second = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} }).then(async (d) => { await d.close(); return null }, (err) => err)
+    assert.equal(second?.message, `another deckd is listening on ${first.socketPath}`)
+    const client = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
+    try {
+      assert.equal(client.bootId, first.bootId)
+    } finally {
+      client.close()
+    }
+    const firstPipe = first.socketPath
+    await first.close()
+    // A clean close removes the key: a client finds no deckd rather than dialing the dead pipe's name.
+    await assert.rejects(connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
+    first = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} })
+    const fresh = endpointSecret('base', { platform: 'win32', name: 'deckd' })
+    assert.notEqual(fresh, secret, 'a restart writes a new key')
+    assert.notEqual(first.socketPath, firstPipe)
+    assert.equal(first.socketPath, endpoint('base', 'deckd', { platform: 'win32', secret: fresh }))
+    const again = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
+    try {
+      assert.equal(again.bootId, first.bootId, 'the client read the new key')
+    } finally {
+      again.close()
+    }
+    // A holder that kill(pid, 0) answers EPERM for (an elevated deckd, to an unelevated client) is alive.
+    const lockPath = path.win32.join(deckDir('base', { platform: 'win32' }), 'endpoint-deckd.lock')
+    const ownLock = readFileSync(lockPath, 'utf8')
+    writeFileSync(lockPath, JSON.stringify({ pid: 4242, started: 1 }))
+    const realKill = process.kill
+    process.kill = (target, signal) => {
+      if (target === 4242) throw Object.assign(new Error('kill EPERM 4242'), { code: 'EPERM', syscall: 'kill' })
+      return realKill.call(process, target, signal)
+    }
+    try {
+      const elevated = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
+      elevated.close()
+    } finally {
+      process.kill = realKill
+      writeFileSync(lockPath, ownLock)
+    }
+    await assert.rejects(connectDeckd({ runtimeDir: 'nokey', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
+    // What a crashed deckd leaves: its key, and its lock naming a pid that is gone.
+    mkdirSync(deckDir('crashed', { platform: 'win32' }), { recursive: true })
+    writeFileSync(path.win32.join(deckDir('crashed', { platform: 'win32' }), 'endpoint-deckd.key'), 'f'.repeat(64))
+    writeFileSync(path.win32.join(deckDir('crashed', { platform: 'win32' }), 'endpoint-deckd.lock'), JSON.stringify({ pid: 2147483645, started: 1 }))
+    await assert.rejects(connectDeckd({ runtimeDir: 'crashed', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
+  } finally {
+    await first?.close()
+    process.chdir(cwd)
+    await rm(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
 })
