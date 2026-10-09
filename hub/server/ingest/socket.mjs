@@ -92,11 +92,18 @@ export async function startHookSocket({ runtimeDir, ingest, platform = process.p
     await listen(server, socketPath)
   } catch (error) {
     if (error.code !== 'EADDRINUSE' || pipe) throw error
-    const before = fsOps.lstatSync(socketPath)
-    if (!before.isSocket() || (uid !== null && before.uid !== uid) || !(await staleSocket(socketPath))) throw error
-    const after = fsOps.lstatSync(socketPath)
-    if (before.dev !== after.dev || before.ino !== after.ino) throw error
-    fsOps.unlinkSync(socketPath)
+    // A socket file that is gone when inspected was closed by its listener in between: the path is free, listen again.
+    const inspect = () => {
+      try { return fsOps.lstatSync(socketPath) } catch (lstatError) { if (lstatError.code === 'ENOENT') return null
+        throw lstatError }
+    }
+    const before = inspect()
+    if (before) {
+      if (!before.isSocket() || (uid !== null && before.uid !== uid) || !(await staleSocket(socketPath))) throw error
+      const after = inspect()
+      if (after && (before.dev !== after.dev || before.ino !== after.ino)) throw error
+      if (after) fsOps.unlinkSync(socketPath)
+    }
     await listen(server, socketPath)
   }
   if (!pipe) fsOps.chmodSync(socketPath, 0o600)

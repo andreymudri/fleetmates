@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { closeSync, openSync, writeFileSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
@@ -341,5 +341,35 @@ test('on win32 the hook socket listens on the hooks pipe and never touches the f
     ingest.close()
     process.chdir(cwd)
     await rm(work, { recursive: true, force: true })
+  }
+})
+
+posixTest('a socket file that disappears between EADDRINUSE and its inspection is listened on again, not an ENOENT failure', { reason: 'unlinks a Unix socket file' }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'ingest-gone-'))
+  const { createServer } = await import('node:net')
+  const holder = createServer()
+  const ingest = createIngestor({ onEvent: () => {}, onRejected: () => {}, reorderMs: 0 })
+  const socketPath = endpoint(dir, 'hooks')
+  mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 })
+  await new Promise(resolve => holder.listen(socketPath, resolve))
+  let server
+  try {
+    // The first inspection finds the file gone, as when the server that held it closes at that moment.
+    let first = true
+    const fsOps = { mkdirSync, chmodSync, unlinkSync, lstatSync: file => {
+      if (first) { first = false
+        unlinkSync(file)
+        throw Object.assign(new Error(`ENOENT: no such file or directory, lstat '${file}'`), { code: 'ENOENT' }) }
+      return lstatSync(file)
+    } }
+    server = await startHookSocket({ runtimeDir: dir, ingest, fsOps })
+    assert.equal(server.path, socketPath)
+    assert.equal((await stat(socketPath)).isSocket(), true)
+    assert.equal((await stat(socketPath)).mode & 0o777, 0o600)
+  } finally {
+    await server?.close()
+    await new Promise(resolve => holder.close(resolve))
+    ingest.close()
+    await rm(dir, { recursive: true, force: true })
   }
 })
