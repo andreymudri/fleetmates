@@ -91,7 +91,7 @@ function standInRecorder(status, now) {
 }
 const insideDir = (root, target) => target === root || target.startsWith(root.endsWith(path.sep) ? root : root + path.sep)
 const realOrResolved = file => {
-  try { return fs.realpathSync(file) } catch { return path.resolve(file) }
+  try { return fs.realpathSync.native(file) } catch { return path.resolve(file) }
 }
 /**
  * Create `dir` and make it private: on POSIX it must be a directory owned by `uid` (a permissive mode is tightened to

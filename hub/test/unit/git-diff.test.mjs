@@ -20,7 +20,7 @@ function git(repo, ...args) {
 }
 
 function tempRepo(t, files = {}) {
-  const repo = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-gitdiff-')))
+  const repo = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-gitdiff-')))
   t.after(() => rmSync(repo, RM))
   git(repo, 'init', '-q')
   for (const [name, content] of Object.entries(files)) {
@@ -37,7 +37,7 @@ function tempRepo(t, files = {}) {
  * rest of the test, so no git call here reads the owner's global or system config. Returns the home.
  */
 function isolatedHome(t) {
-  const home = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
+  const home = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-home-')))
   const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
   t.after(() => {
     for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value
@@ -91,7 +91,7 @@ test('sessionDiff shows a new untracked file against an empty baseline side', as
 })
 
 test('sessionDiff refuses paths that escape the repository with validation_failed', async t => {
-  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-outside-')))
+  const outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-outside-')))
   t.after(() => rmSync(outside, RM))
   writeFileSync(path.join(outside, 'secret.txt'), 'secret\n')
   const repo = tempRepo(t, { 'a.txt': 'a\n' })
@@ -117,7 +117,7 @@ test('sessionDiff serves an absolute changed path under its repository-relative 
 })
 
 test('sessionDiff refuses an absolute path that is not a changed file, or lies outside the repository, with validation_failed', async t => {
-  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-outside-')))
+  const outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-outside-')))
   t.after(() => rmSync(outside, RM))
   writeFileSync(path.join(outside, 'secret.txt'), 'secret\n')
   const repo = tempRepo(t, { 'a.txt': 'a\n', 'b.txt': 'b\n' })
@@ -161,7 +161,7 @@ test('sessionDiff reports a binary file with binary: true, no diff text and its 
 })
 
 test('sessionDiff reports a symlink by its target text and never follows it', async t => {
-  const outside = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-target-')))
+  const outside = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-target-')))
   t.after(() => rmSync(outside, RM))
   writeFileSync(path.join(outside, 'target.txt'), 'followed\n')
   const repo = tempRepo(t, {})
@@ -264,7 +264,7 @@ test('every command gitRead allows runs in a repo with marker filter and diff dr
 
 test('gitRead diff --no-index never runs a clean filter selected by the user-level attributes file', async t => {
   const home = isolatedHome(t)
-  const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-noindex-')))
+  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-noindex-')))
   t.after(() => rmSync(dir, RM))
   const marker = path.join(dir, 'marker')
   const script = path.join(dir, 'filter.sh')
@@ -289,7 +289,7 @@ test('gitRead diff --no-index never runs a clean filter selected by the user-lev
 })
 
 posixTest('gitRead starts git with the 4.8 flags and environment, without credential or GIT_ variables', { reason: 'a #!/bin/sh fake git found through PATH' }, async t => {
-  const bin = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-fakegit-')))
+  const bin = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-fakegit-')))
   t.after(() => rmSync(bin, RM))
   const record = path.join(bin, 'record')
   writeFileSync(path.join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$@" > '${record}.argv'\nenv | cut -d= -f1 > '${record}.env'\nprintf '%s' "$GIT_TERMINAL_PROMPT$GIT_OPTIONAL_LOCKS$GIT_CONFIG_NOSYSTEM $GIT_ASKPASS"\n`)
@@ -308,7 +308,7 @@ posixTest('gitRead starts git with the 4.8 flags and environment, without creden
 })
 
 posixTest('gitRead resolves null when git outlives its timeout', { reason: 'a #!/bin/sh fake git found through PATH' }, async t => {
-  const bin = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-slowgit-')))
+  const bin = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-slowgit-')))
   t.after(() => rmSync(bin, RM))
   writeFileSync(path.join(bin, 'git'), '#!/bin/sh\nexec sleep 5\n')
   chmodSync(path.join(bin, 'git'), 0o755)

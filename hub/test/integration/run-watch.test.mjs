@@ -26,7 +26,7 @@ function home(t) {
   const env = { HOME: dir, PATH: process.env.PATH }
   // Where the server reads its state for this env on this platform.
   const paths = setupPaths(env)
-  const repo = path.join(fs.realpathSync(dir), 'dev', 'alpha')
+  const repo = path.join(fs.realpathSync.native(dir), 'dev', 'alpha')
   const runDir = path.join(repo, '.fleetmates', 'r1')
   fs.mkdirSync(runDir, { recursive: true })
   fs.writeFileSync(path.join(runDir, 'plan.json'), JSON.stringify({ runId: 'r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'First', phase: 1, files: [], deps: [] }] }))

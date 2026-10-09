@@ -80,7 +80,7 @@ function scanBudget() {
 
 function workingPath(root, name, budget) {
   if (Date.now() >= budget.deadline) throw new Error('scan timeout')
-  const boundary = realpathSync(root)
+  const boundary = realpathSync.native(root)
   const file = path.resolve(boundary, name)
   if (!file.startsWith(`${boundary}${path.sep}`)) throw new Error('path outside repository')
   let directory = boundary
@@ -288,7 +288,7 @@ function gitlinkState(directory, budget, depth) {
       return null
     }
     const top = git(directory, ['rev-parse', '--show-toplevel'], budget)?.toString('utf8').trim()
-    if (!top || realpathSync(top) !== realpathSync(directory)) return null
+    if (!top || realpathSync.native(top) !== realpathSync.native(directory)) return null
     const head = gitHead(directory, budget)
     if (!head || head === 'unborn') return null
     const scan = gitPaths(directory, head, budget, depth)
@@ -442,7 +442,7 @@ function headMarks(marker) {
 /** Resolve the bounded canonical working tree used for filesystem observations. */
 export function workingRoot(cwd) {
   let root = cwd || '/unknown'
-  try { root = realpathSync(root) } catch {}
+  try { root = realpathSync.native(root) } catch {}
   let current = root
   for (let depth = 0; depth < 32; depth++) {
     const marker = path.join(current, '.git')
@@ -464,7 +464,7 @@ function repo(store, cwd, at) {
   let id = root
   const common = git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir'])?.toString('utf8').trim()
   if (common && path.isAbsolute(common) && path.basename(common) === '.git') {
-    try { id = realpathSync(path.dirname(common)) } catch {}
+    try { id = realpathSync.native(path.dirname(common)) } catch {}
   }
   if (store.get('SELECT id FROM repos WHERE id=?', id)) return id
   let name = path.basename(id) || id

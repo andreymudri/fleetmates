@@ -17,6 +17,10 @@ const SANDBOX_REASON = 'the setup sandbox runs /bin/sh fake binaries and uses Un
 const posixTest = (name, optsOrFn, fn) => typeof optsOrFn === 'function'
   ? posixOnlyTest(name, { reason: SANDBOX_REASON }, optsOrFn)
   : posixOnlyTest(name, { reason: SANDBOX_REASON, ...optsOrFn }, fn)
+// The CLI runs in a child process on the host platform, so these tests cannot inject one. They pin the linux
+// service manager and opener (systemd units, systemctl, xdg-open); on darwin the CLI uses launchd and `open`, whose
+// behaviour the injected-platform tests near the end of this file and service.test cover.
+const SYSTEMD_ONLY = process.platform !== 'linux' && 'Linux only: the CLI child process uses systemd units, systemctl and xdg-open'
 import { chromium } from 'playwright-core'
 import { doctor, status } from '../../server/setup/doctor.mjs'
 import { PROTO } from '../../deckd/protocol.mjs'
@@ -281,7 +285,7 @@ posixTest('init and uninstall remove only legacy deck worktree handlers and pres
   }
 })
 
-posixTest('dry run reports pending changes without exposing settings secrets', () => {
+posixTest('dry run reports pending changes without exposing settings secrets', { skip: SYSTEMD_ONLY }, () => {
   const s = sandbox()
   const secret = 'sentinel-service-api-key-7f3e'
   writeFileSync(s.settings, JSON.stringify({ env: { SERVICE_API_KEY: secret } }))
@@ -321,7 +325,7 @@ posixTest('init writes the hub version beside the installed hook so the installe
   assert.equal(await stamp('second'), '9.8.7')
 })
 
-posixTest('init merges hooks, preserves existing order and is byte identical twice', () => {
+posixTest('init merges hooks, preserves existing order and is byte identical twice', { skip: SYSTEMD_ONLY }, () => {
   const s = sandbox('existing-hooks.json')
   assert.equal(s.run('init').status, 0)
   const first = readFileSync(s.settings)
@@ -401,7 +405,7 @@ posixTest('init rotate token replaces the token and keeps private file mode', ()
   assert.equal(statSync(tokenFile).mode & 0o777, 0o600)
 })
 
-posixTest('init skips the absent web entry and starts it after installation', () => {
+posixTest('init skips the absent web entry and starts it after installation', { skip: SYSTEMD_ONLY }, () => {
   const s = sandbox('empty.json', { isolatedHub: true })
   const entry = path.join(s.hubPath, 'server/main.mjs')
   const serviceState = path.join(s.root, 'web-service-state')
@@ -435,7 +439,7 @@ posixTest('fresh home without settings.json installs hooks without a backup', ()
   assert.equal(readdirSync(path.dirname(s.settings)).filter(name => name.includes('deck-backup-')).length, 0)
 })
 
-posixTest('changed web unit triggers try-restart only for web while active', () => {
+posixTest('changed web unit triggers try-restart only for web while active', { skip: SYSTEMD_ONLY }, () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   const webUnit = path.join(s.config, 'systemd/user/fleetmates-deck.service')
@@ -464,7 +468,7 @@ posixTest('uninstall removes deck hooks and keeps other hook entries', () => {
   assert.equal(Object.values(parsed.hooks).flatMap(groups => groups.flatMap(group => group.hooks)).some(h => h.command?.includes('deck-hook.mjs')), false)
 })
 
-posixTest('open uses a private bootstrap file after identity proof and reaches the deck', async () => {
+posixTest('open uses a private bootstrap file after identity proof and reaches the deck', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -508,7 +512,7 @@ posixTest('open uses a private bootstrap file after identity proof and reaches t
   } finally { await stopListener(server.child) }
 })
 
-posixTest('open uses validated DECK_PORT ahead of config port', async () => {
+posixTest('open uses validated DECK_PORT ahead of config port', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -526,7 +530,7 @@ posixTest('open uses validated DECK_PORT ahead of config port', async () => {
   } finally { await stopListener(server.child) }
 })
 
-posixTest('open refuses a loopback listener without the token proof', async () => {
+posixTest('open refuses a loopback listener without the token proof', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -539,7 +543,7 @@ posixTest('open refuses a loopback listener without the token proof', async () =
   } finally { await stopListener(server.child) }
 })
 
-posixTest('open rejects an identity relay to another port before exposing the token', async () => {
+posixTest('open rejects an identity relay to another port before exposing the token', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -572,7 +576,7 @@ posixTest('open rejects an identity relay to another port before exposing the to
   }
 })
 
-posixTest('open refuses the old nonce-only identity proof', async () => {
+posixTest('open refuses the old nonce-only identity proof', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -587,7 +591,7 @@ posixTest('open refuses the old nonce-only identity proof', async () => {
   } finally { await stopListener(server.child) }
 })
 
-posixTest('open waits for a valid listener after systemctl start returns', async () => {
+posixTest('open waits for a valid listener after systemctl start returns', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -601,7 +605,7 @@ posixTest('open waits for a valid listener after systemctl start returns', async
   } finally { await stopListener(server.child) }
 })
 
-posixTest('open stops retrying when no listener appears', async () => {
+posixTest('open stops retrying when no listener appears', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -615,7 +619,7 @@ posixTest('open stops retrying when no listener appears', async () => {
   } finally { await stopListener(server.child) }
 })
 
-posixTest('open launches the default web browser entry, not the text/html handler, with only the file path', async () => {
+posixTest('open launches the default web browser entry, not the text/html handler, with only the file path', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -638,7 +642,7 @@ posixTest('open launches the default web browser entry, not the text/html handle
   } finally { await stopListener(server.child) }
 })
 
-posixTest('open prints the bootstrap file path and fails when no launcher works', async () => {
+posixTest('open prints the bootstrap file path and fails when no launcher works', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -651,7 +655,7 @@ posixTest('open prints the bootstrap file path and fails when no launcher works'
   } finally { await stopListener(server.child) }
 })
 
-posixTest('init probes the active deckd socket for readiness before its deckd check', async () => {
+posixTest('init probes the active deckd socket for readiness before its deckd check', { skip: SYSTEMD_ONLY }, async () => {
   const s = sandbox()
   const paths = setupPaths(s.env)
   mkdirSync(paths.runtime, { recursive: true })
@@ -725,7 +729,7 @@ posixTest('init updates an old deck hook in place', () => {
 
 posixTest('renamed Node init is idempotent and uninstall preserves unrelated groups', t => {
   const s = sandbox('existing-hooks.json')
-  const executableDir = fs.realpathSync(mkdtempSync(path.join('/var/tmp', 'deck-node-test-')))
+  const executableDir = fs.realpathSync.native(mkdtempSync(path.join('/var/tmp', 'deck-node-test-')))
   const executable = path.join(executableDir, 'deck-node-runtime')
   t.after(() => fs.rmSync(executableDir, { recursive: true, force: true }))
   try {
@@ -822,7 +826,7 @@ posixTest('restricted old hook gains wildcard coverage without widening unrelate
   assert.match(s.run('doctor').stdout, /hooks: ok/)
 })
 
-posixTest('doctor and status read setup state without service mutations', () => {
+posixTest('doctor and status read setup state without service mutations', { skip: SYSTEMD_ONLY }, () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   writeFileSync(s.calls, '')
@@ -984,14 +988,14 @@ posixTest('doctor finds the scribed Unix listener in the runtime directory', asy
   const server = createServer(socket => socket.end())
   await new Promise((resolve, reject) => server.listen(path.join(s.runtime, 'turbidassist.sock'), resolve).once('error', reject))
   try {
-    const checks = await doctor(setupPaths(s.env), 'unused', { run: file => file === 'claude' ? { status: 0, stdout: '2.1.282' } : { status: 3 } })
+    const checks = await doctor(setupPaths(s.env, { platform: 'linux' }), 'unused', { platform: 'linux', run: file => file === 'claude' ? { status: 0, stdout: '2.1.282' } : { status: 3 } })
     assert.equal(checks.find(check => check.id === 'scribed').state, 'ok')
   } finally {
     await new Promise(resolve => server.close(resolve))
   }
 })
 
-posixTest('installed units use absolute Node and hub paths with private umask', () => {
+posixTest('installed units use absolute Node and hub paths with private umask', { skip: SYSTEMD_ONLY }, () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   const unitDir = path.join(s.config, 'systemd/user')
@@ -1225,7 +1229,7 @@ test('status names the services per adapter and asks the adapter, not systemctl,
   }
 })
 
-posixTest('start and stop run the service adapter for both services, and refuse extra arguments', () => {
+posixTest('start and stop run the service adapter for both services, and refuse extra arguments', { skip: SYSTEMD_ONLY }, () => {
   const s = sandbox()
   const start = s.run('start')
   assert.equal(start.status, 0, start.stderr)

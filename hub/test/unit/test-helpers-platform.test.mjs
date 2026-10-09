@@ -140,7 +140,12 @@ const SHIM_LINES = [
 const SHIM_SCRIPT = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:js|cjs|mjs))"/i
 
 test('fakeBin writes claude.cmd as an npm cmd-shim with CRLF under FLEETMATES_TEST_FORCE_WINDOWS=1', async () => {
-  const bin = await forcedFakeBin({})
+  // When the temp directory and this checkout are on different drives (C: and D: on the GitHub Windows runner)
+  // fakeBin rightly takes the other-drive branch, which the next test pins. This test pins the same-drive shim, so
+  // there it is handed the relative path a same-drive layout would give.
+  const crossDrive = path.isAbsolute(path.relative(os.tmpdir(), fakeClaude))
+  const sameDrive = path.join('..', 'fake-claude', 'fake-claude.mjs')
+  const bin = await forcedFakeBin(crossDrive ? { relative: () => sameDrive } : {})
   try {
     assert.equal(bin.claudePath, path.join(bin.binDir, 'claude.cmd'))
     const text = await readFile(bin.claudePath, 'utf8')
@@ -148,7 +153,7 @@ test('fakeBin writes claude.cmd as an npm cmd-shim with CRLF under FLEETMATES_TE
     const m = SHIM_SCRIPT.exec(text)
     assert.ok(m, 'the shim names a %dp0%-relative script')
     const rel = m[1]
-    assert.equal(path.resolve(bin.binDir, rel.split('\\').join(path.sep)), fakeClaude)
+    assert.equal(path.resolve(bin.binDir, rel.split('\\').join(path.sep)), crossDrive ? path.resolve(bin.binDir, sameDrive) : fakeClaude)
     const want = SHIM_LINES.join('\r\n').replace('<rel>', rel)
     assert.equal(text, want)
     assert.match(text, new RegExp(`\\r\\n[^\\r\\n]* & "%_prog%"  "%dp0%\\\\${rel.replace(/[.\\]/g, '\\$&')}" %\\*\\r\\n$`))

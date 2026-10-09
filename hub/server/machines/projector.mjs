@@ -152,7 +152,7 @@ export const PROMPT_GONE_REASON = 'interrupted'
 const PTY_ORIGINS = ['wrapped', 'launched']
 
 const realPath = location => {
-  try { return realpathSync(location) } catch { return null }
+  try { return realpathSync.native(location) } catch { return null }
 }
 
 /**

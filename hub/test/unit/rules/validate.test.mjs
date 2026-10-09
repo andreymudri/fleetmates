@@ -96,7 +96,7 @@ test('a suggestion written for npm run test:unit writes exactly Bash(npm run tes
     const repo = path.join(root, 'web')
     mkdirSync(repo)
     git(repo, ['init', '-q'])
-    const repoId = realpathSync(repo)
+    const repoId = realpathSync.native(repo)
     writeFileSync(path.join(repoId, 'package.json'), '{"scripts":{"test:unit":"node --test"}}\n')
     await hooksPathCache.load(repoId, process.env.HOME && path.isAbsolute(process.env.HOME) ? process.env.HOME : homedir())
     const classified = classify({ toolName: 'Bash', toolInput: { command: 'npm run test:unit' }, cwd: repoId, repoRoot: repoId })
@@ -116,8 +116,8 @@ function sandbox() {
   const repo = path.join(home, 'dev', 'rustot')
   mkdirSync(repo, { recursive: true })
   git(repo, ['init', '-q'])
-  const repoRoot = realpathSync(repo)
-  const homeDir = realpathSync(home)
+  const repoRoot = realpathSync.native(repo)
+  const homeDir = realpathSync.native(home)
   const options = { repoRoot, homeDir, env: { HOME: homeDir } }
   return { root, homeDir, repoRoot, options, settle: () => hooksPathCache.load(repoRoot, homeDir), close: () => rmSync(root, { recursive: true, force: true }) }
 }
@@ -401,7 +401,7 @@ test('on win32 every rule is refused with rules_unsupported_on_win32 and writeRu
   const root = mkdtempSync(path.join(tmpdir(), 'deck-rules-win32-'))
   const store = openDeckDb(path.join(root, 'state', 'deck.db'))
   try {
-    const repoId = realpathSync(root)
+    const repoId = realpathSync.native(root)
     store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', repoId, 'web', 0, 0, 'web', 1)
     await assert.rejects(writeRule(store, { repoId, pattern: 'mcp__vault__vault_search', source: 'manual', stateDir: path.join(root, 'state'), at: 1, gitRead: async () => null, platform: 'win32' }),
       error => error.code === 'rules_unsupported_on_win32' && error.status === 422)
@@ -432,7 +432,7 @@ test('a path rule reaching ~/Library/LaunchAgents/io.fleetmates.deck.* is refuse
 // host: the platform is injected.
 // Mutation run for this test: ruleView calling validatePattern instead of judgePattern; this test failed.
 test('on win32 listRules still marks a hand-added Destructive rule destructive', () => {
-  const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-rules-list-')))
+  const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-rules-list-')))
   const store = openDeckDb(path.join(root, 'state', 'deck.db'))
   try {
     const repoId = path.join(root, 'web')

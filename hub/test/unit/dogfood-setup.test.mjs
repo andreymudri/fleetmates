@@ -141,7 +141,7 @@ posixTest('open launches the default web browser entry before falling back to xd
     const answer = { 'xdg-settings': { status: 0, stdout: 'chromium.desktop\n' } }
 
     const viaGtk = spawner({ 'gtk-launch': true }, answer)
-    assert.equal(await openInBrowser(file, { env, ...viaGtk }), true)
+    assert.equal(await openInBrowser(file, { env, platform: 'linux', ...viaGtk }), true)
     assert.deepEqual(viaGtk.calls.map(call => [call.kind, call.file, call.argv]), [
       ['query', 'xdg-settings', ['get', 'default-web-browser']],
       ['start', 'gtk-launch', ['chromium.desktop', file]]
@@ -149,20 +149,20 @@ posixTest('open launches the default web browser entry before falling back to xd
     assert.equal('BROWSER' in viaGtk.calls[0].env, false, 'xdg-settings answers from $BROWSER unless it is unset')
 
     const viaGio = spawner({ gio: true }, answer)
-    assert.equal(await openInBrowser(file, { env, ...viaGio }), true)
+    assert.equal(await openInBrowser(file, { env, platform: 'linux', ...viaGio }), true)
     assert.deepEqual(viaGio.calls.slice(1).map(call => [call.file, call.argv]), [
       ['gtk-launch', ['chromium.desktop', file]],
       ['gio', ['launch', path.join(apps, 'chromium.desktop'), file]]
     ])
 
     const none = spawner({}, answer)
-    assert.equal(await openInBrowser(file, { env, ...none }), false)
+    assert.equal(await openInBrowser(file, { env, platform: 'linux', ...none }), false)
     assert.deepEqual(none.calls.slice(1).map(call => call.file), ['gtk-launch', 'gio', 'xdg-open'])
     assert.deepEqual(none.calls.at(-1).argv, [file])
 
     for (const reply of [{ status: 0, stdout: '../../evil.desktop\n' }, { status: 0, stdout: '\n' }, { status: 1, stdout: 'chromium.desktop\n' }]) {
       const odd = spawner({ 'xdg-open': true }, { 'xdg-settings': reply })
-      assert.equal(await openInBrowser(file, { env, ...odd }), true)
+      assert.equal(await openInBrowser(file, { env, platform: 'linux', ...odd }), true)
       assert.deepEqual(odd.calls.map(call => call.file), ['xdg-settings', 'xdg-open'])
     }
   } finally { rmSync(root, { recursive: true, force: true }) }

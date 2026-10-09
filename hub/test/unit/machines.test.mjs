@@ -940,7 +940,7 @@ test('sessions in sibling directories share the canonical Git repository root', 
 
 test('an ancestor with an empty .git directory, or a .git file without gitdir:, is not the session repository root', () => {
   const h = harness()
-  const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-empty-git-')))
+  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-empty-git-')))
   try {
     mkdirSync(path.join(dir, '.git'))
     const plain = path.join(dir, 'plain', 'src')
@@ -1147,6 +1147,57 @@ test('Bash-created untracked files enter review and the review baseline advances
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
     assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file])
   } finally { h.close(); rmSync(dir, RM) }
+})
+
+// A Windows 8.3 short name (C:\Users\RUNNER~1, a TEMP path on the GitHub runner) stays in a path the JavaScript
+// fs.realpathSync resolves, while git prints the long name, so the check that a gitlink directory is its own work
+// tree compared two spellings of one directory and the dirty submodule never entered review. A directory symlink
+// stands for the short name, and fs.realpathSync is swapped for one that leaves it unresolved.
+posixTest('a dirty submodule reached through a short-name alias still enters review', { reason: 'creates a directory symlink' }, () => {
+  const dir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'deck-short-name-')))
+  const repo = path.join(dir, 'repo')
+  const alias = path.join(dir, 'REPO~1')
+  const h = harness()
+  const real = fs.realpathSync
+  try {
+    const runGit = (cwd, ...args) => execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args], { cwd, timeout: 3000, stdio: 'pipe' }).toString().trim()
+    const sub = path.join(repo, 'sub')
+    mkdirSync(sub, { recursive: true })
+    runGit(repo, 'init', '-q')
+    runGit(sub, 'init', '-q')
+    writeFileSync(path.join(sub, 'file.txt'), 'initial\n')
+    runGit(sub, 'add', '.')
+    runGit(sub, 'commit', '-qm', 'initial')
+    runGit(repo, 'update-index', '--add', '--cacheinfo', `160000,${runGit(sub, 'rev-parse', 'HEAD')},sub`)
+    runGit(repo, 'commit', '-qm', 'submodule')
+    symlinkSync(repo, alias, 'dir')
+    const keepsShortNames = (file, ...rest) => {
+      const resolved = path.resolve(String(file))
+      return resolved === alias || resolved.startsWith(alias + path.sep) ? resolved : real(file, ...rest)
+    }
+    keepsShortNames.native = real.native
+    fs.realpathSync = keepsShortNames
+    syncBuiltinESMExports()
+    assert.equal(fs.realpathSync(path.join(alias, 'sub')), path.join(alias, 'sub'), 'the stand-in leaves the alias unresolved')
+    const hook = (event, at) => {
+      const envelope = fixture('SessionStart.startup.json', { hook_event_name: event, cwd: alias, prompt: 'Work', stop_hook_active: false })
+      envelope.hookTs = at
+      return envelope
+    }
+    h.projector.applyHooks([hook('SessionStart', 1000), hook('UserPromptSubmit', 2000), hook('Stop', 2500)])
+    assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
+    writeFileSync(path.join(sub, 'file.txt'), 'dirty\n')
+    h.projector.applyHooks([hook('UserPromptSubmit', 2700), hook('Stop', 2800)])
+    const session = h.projector.snapshot().sessions[0]
+    assert.equal(session.repoId, repo)
+    assert.equal(session.state, 'done')
+    assert.equal(session.changedFiles.length, 1)
+  } finally {
+    fs.realpathSync = real
+    syncBuiltinESMExports()
+    h.close()
+    rmSync(dir, RM)
+  }
 })
 
 test('an unborn Git repository still reports Bash-created files at Stop', () => {

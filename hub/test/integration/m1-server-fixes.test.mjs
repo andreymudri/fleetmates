@@ -234,5 +234,5 @@ test('a lost PTY session records the files it changed since its baseline', t => 
   projector.signal(id, { type: 'lost' }, 2000)
   const session = projector.snapshot().sessions.find(row => row.id === id)
   assert.equal(session.crashKind, 'lost')
-  assert.deepEqual(session.changedFiles.map(row => row.path), [fs.realpathSync(file)])
+  assert.deepEqual(session.changedFiles.map(row => row.path), [fs.realpathSync.native(file)])
 })

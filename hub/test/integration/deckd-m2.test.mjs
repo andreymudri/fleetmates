@@ -303,12 +303,17 @@ test('spawn refuses a non-string env value, an env that is not an object, and a 
     // Only PTYs these spawns could have added count, not one an earlier test left running.
     const before = new Set((await c.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId))
     const base = { argv: [stub], origin: 'launched' }
+    // path.relative gives back an absolute path when rt.dir is on another drive than the working directory (TEMP
+    // on C:, the checkout on D: on the GitHub Windows runner); '.' is then the relative directory that exists.
+    const fromHere = path.relative(process.cwd(), rt.dir)
+    const relative = fromHere && !path.isAbsolute(fromHere) ? fromHere : '.'
+    assert.equal(path.isAbsolute(relative), false, relative)
     for (const fields of [
       { cwd: rt.dir, env: { A: 1 } },
       { cwd: rt.dir, env: ['A=1'] },
       { cwd: rt.dir, env: 'A=1' },
       // relative, though it names a directory that exists from here
-      { cwd: path.relative(process.cwd(), rt.dir) || '.', env: {} },
+      { cwd: relative, env: {} },
       { cwd: path.join(rt.dir, 'missing'), env: {} },
       { cwd: stub, env: {} }
     ]) {

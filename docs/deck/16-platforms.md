@@ -255,3 +255,13 @@ win on Windows too when they are set, which is what the tests use.
 Tests that assert POSIX modes, symlinks or Unix socket files skip on Windows through
 `posixTest` in `hub/test/helpers/platform.mjs`, with the reason in the skip message. A skip is
 reported as a skip.
+
+A few tests pin Linux behaviour in a child process that cannot be handed another platform: the
+setup CLI tests that assert systemd units, `systemctl` and `xdg-open`, and the server process test
+that asserts `notify-send`, `pw-play` and scribed. They skip off Linux with their reason in the skip
+message. The darwin paths they would cover are pinned by tests that inject `platform: 'darwin'`.
+
+`npm --prefix hub test` preloads `hub/test/helpers/canonical-tmp.mjs`, which points the temp
+variables at the canonical temp directory. On the GitHub Windows runner TEMP names it by its 8.3
+short name (`C:\Users\RUNNER~1\...`), and the deck resolves every directory with the native
+realpath, which expands that name, so a path a test built from the short name never matched.

@@ -38,7 +38,7 @@ export function scanRepos({ store, root, now, onInsert = () => {} }) {
       return
     }
     if (repo) {
-      const id = fs.realpathSync(dir)
+      const id = fs.realpathSync.native(dir)
       if (!store.get('SELECT id FROM repos WHERE id=?', id)) {
         let name = path.basename(dir)
         if (store.get('SELECT id FROM repos WHERE name=?', name)) name = `${path.basename(path.dirname(dir))}/${name}`

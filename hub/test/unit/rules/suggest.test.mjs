@@ -14,7 +14,7 @@ function harness() {
   const root = mkdtempSync(path.join(tmpdir(), 'deck-rules-suggest-'))
   const repo = path.join(root, 'rustot')
   mkdirSync(repo)
-  const repoId = realpathSync(repo)
+  const repoId = realpathSync.native(repo)
   const store = openDeckDb(path.join(root, 'state', 'deck.db'))
   store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', repoId, 'rustot', 0, 0, 'rustot', 1)
   store.run("INSERT INTO sessions(id,origin,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at) VALUES('s1','wrapped',?,?,'running',1,1,1,1,1)", repoId, repoId)

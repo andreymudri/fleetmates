@@ -507,7 +507,7 @@ test('recorded gate keyed by a manifest phase name remains visible', async () =>
 // taskForCwd (M2 Task 7): the one index record for a worktree, read synchronously with the root guards.
 async function withTeammate(run) {
   await withRepo(async (base) => {
-    const repo = fs.realpathSync(base)
+    const repo = fs.realpathSync.native(base)
     const worktree = path.join(repo, 'wt-T2')
     await mkdir(worktree)
     await rootState.writeLocation(repo, 'r1', 'T2', { worktree, branch: 'fleetmates/r1/T2' })
