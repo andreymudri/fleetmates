@@ -3,7 +3,7 @@ import { connect, createServer } from 'node:net'
 import path from 'node:path'
 import { createReorderBuffer } from './reorder.mjs'
 import { dedupeKey, validateEnvelope } from './validate.mjs'
-import { endpoint, isPipe } from '../../platform/index.mjs'
+import { endpoint, ensurePrivateDir, isPipe } from '../../platform/index.mjs'
 
 const maxLine = 1024 * 1024
 
@@ -54,7 +54,8 @@ export function createIngestor({ onEvent, onRejected, reorderMs = 250, now = Dat
 
 /**
  * Listen for newline-delimited hook envelopes on `endpoint(runtimeDir, 'hooks')`: a 0600 Unix socket in a 0700
- * directory on POSIX, a named pipe on win32. A pipe has no file, so nothing is created, checked, chmodded or
+ * directory on POSIX, a named pipe on win32. On POSIX a runtime base or socket directory owned by another uid, or with
+ * any group or world permission bit, is refused with ensurePrivateDir's error. A pipe has no file, so nothing is created, checked, chmodded or
  * unlinked for it; a pipe name already in use fails with EADDRINUSE. `fsOps` replaces the file system calls in tests.
  * @param {{ runtimeDir: string, ingest: object, platform?: string, uid?: number | null,
  *   fsOps?: { mkdirSync: typeof mkdirSync, chmodSync: typeof chmodSync, lstatSync: typeof lstatSync, unlinkSync: typeof unlinkSync } }} opts
@@ -64,9 +65,13 @@ export async function startHookSocket({ runtimeDir, ingest, platform = process.p
   const socketPath = endpoint(runtimeDir, 'hooks', { platform, uid })
   const pipe = isPipe(socketPath)
   if (!pipe) {
+    // The base (XDG_RUNTIME_DIR, or a shared fallback such as /tmp/fleetmates-deck-<uid>) must be this user's and
+    // private, as deckd requires; the socket's own directory is made 0700, then held to the same rule.
+    await ensurePrivateDir(runtimeDir, { platform, uid })
     const dir = path.posix.dirname(socketPath)
     fsOps.mkdirSync(dir, { recursive: true, mode: 0o700 })
     fsOps.chmodSync(dir, 0o700)
+    await ensurePrivateDir(dir, { platform, uid })
   }
   const server = createServer(socket => {
     let pending = ''

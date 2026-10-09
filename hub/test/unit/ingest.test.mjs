@@ -373,3 +373,23 @@ posixTest('a socket file that disappears between EADDRINUSE and its inspection i
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+posixTest('the hook socket refuses a runtime base that is world-writable or owned by another uid, as deckd does', { reason: 'POSIX file modes and owners' }, async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), 'ingest-base-'))
+  const ingest = createIngestor({ onEvent: () => {}, onRejected: () => {}, reorderMs: 0 })
+  // The refusal, or null after closing a listener that should not have started (so a regression fails, not hangs).
+  const refusal = options => startHookSocket({ runtimeDir: base, ingest, ...options }).then(async server => { await server.close()
+    return null }, error => error)
+  try {
+    chmodSync(base, 0o777)
+    assert.equal((await refusal())?.message, `runtime dir ${base} has mode 0777; it must allow no group or world access (0700)`)
+    chmodSync(base, 0o700)
+    const otherUid = process.getuid() + 1
+    assert.equal((await refusal({ uid: otherUid }))?.message, `runtime dir ${base} is owned by uid ${process.getuid()}, not by this user`)
+    const server = await startHookSocket({ runtimeDir: base, ingest })
+    await server.close()
+  } finally {
+    ingest.close()
+    await rm(base, { recursive: true, force: true })
+  }
+})
