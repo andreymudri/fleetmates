@@ -34,6 +34,21 @@ function rawStart (s) {
   return onWindows ? s.replace(LEADING_ESCAPES, '') : s
 }
 
+/** CSI sequences and OSC strings anywhere in a string. */
+const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g
+
+/**
+ * Raw PTY output with every escape sequence dropped, on Windows only: on the
+ * Windows 11 VM the count below found 199 of 200 written lines in ConPTY's
+ * output, presumably one behind a repaint sequence (inferred; the bytes were
+ * not inspected). Elsewhere the bytes are returned unchanged.
+ * @param {string} s
+ * @returns {string}
+ */
+function plainText (s) {
+  return onWindows ? s.replace(ESCAPES, '') : s
+}
+
 /**
  * A directory holding a `claude` deckd can run that runs the stub. POSIX: the
  * stubs directory itself, whose `claude` is a node script with a shebang.
@@ -466,7 +481,7 @@ test('screen scrollback returns the last N lines of the ring', async () => {
   // N larger than the ring: everything, from the first byte
   const all = Buffer.from((await c.request('screen', { ptyId: id, scrollback: 5000 })).scrollback, 'base64').toString()
   assert.ok(rawStart(all).startsWith('READY\r'), JSON.stringify(all.slice(0, 40)))
-  assert.equal(all.split('\n').filter((l) => /^L\d{3}y/.test(l)).length, 200)
+  assert.equal(plainText(all).split('\n').filter((l) => /^L\d{3}y/.test(l)).length, 200)
   await c.request('kill', { ptyId: id, signal: 'SIGKILL', graceMs: 0 })
   await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id)
 })

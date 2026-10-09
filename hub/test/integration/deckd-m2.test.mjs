@@ -28,6 +28,15 @@ const onWindows = process.platform === 'win32'
 const winBaseEnv = onWindows && process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}
 
 /**
+ * This process's environment as plain string values (Windows only; see the
+ * loginEnv in before()).
+ * @returns {Record<string, string>}
+ */
+function winFullEnv () {
+  return Object.fromEntries(Object.entries(process.env).filter((e) => typeof e[1] === 'string'))
+}
+
+/**
  * Write a `claude` into `dir` that runs the node module `script` with this
  * node, and return its path. POSIX: a `#!/bin/sh` script that execs node on
  * it. Windows: an npm cmd-shim `claude.cmd` and an entry module beside it
@@ -88,7 +97,11 @@ before(async () => {
   deckd = await startDeckd({
     runtimeDir: rt.dir,
     version: '9.9.9',
-    loginEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: rt.dir, [LOGIN_ONLY]: 'from-login' }
+    // On Windows the stub, a node process, starts from this environment too.
+    // On the Windows 11 VM the stubs launched with only these three names
+    // were gone about a second after spawn while the wrapped ones, which had
+    // SystemRoot, ran; so there it gets this process's environment under them.
+    loginEnv: { ...(onWindows ? winFullEnv() : {}), PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: rt.dir, [LOGIN_ONLY]: 'from-login' }
   })
 })
 

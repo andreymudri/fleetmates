@@ -24,14 +24,31 @@ test('PTY signals prefer the group, fall back to the owned PID on EPERM, and ret
 
 /**
  * A stand-in for node-pty's spawn that records its arguments and returns a process that never runs.
- * Each call of the process's own kill() is pushed onto `ptyKills` with its arguments.
+ * Its `_agent` has the node-pty 1.1.0 Windows agent's shape (pty id 7). Pushed onto `events`: the
+ * process's own kill() as `['pty.kill', ...args]`, the agent's native kill as
+ * `['native.kill', id, useConptyDll]` and the conout worker's dispose as `['conout.dispose']`.
  * @param {any[]} calls
- * @param {any[][]} [ptyKills]
+ * @param {any[][]} [events]
  */
-function fakePtySpawn (calls, ptyKills = []) {
+function fakePtySpawn (calls, events = []) {
   return (/** @type {string} */ file, /** @type {any} */ args, /** @type {any} */ opts) => {
     calls.push({ file, args, opts })
-    return { pid: 4242, onData () {}, onExit () {}, write () {}, resize () {}, kill (/** @type {any[]} */ ...a) { ptyKills.push(a) } }
+    return {
+      pid: 4242,
+      onData () {},
+      onExit () {},
+      write () {},
+      resize () {},
+      kill (/** @type {any[]} */ ...a) { events.push(['pty.kill', ...a]) },
+      _agent: {
+        _pty: 7,
+        _useConptyDll: false,
+        _inSocket: { readable: true },
+        _outSocket: { readable: true },
+        _ptyNative: { kill (/** @type {any[]} */ ...a) { events.push(['native.kill', ...a]) } },
+        _conoutSocketWorker: { dispose () { events.push(['conout.dispose']) } }
+      }
+    }
   }
 }
 
@@ -135,36 +152,59 @@ test('on win32 kill runs taskkill on the tree for SIGTERM, SIGINT and SIGHUP, th
     const host = spawnWith(['claude'], {
       platform: 'win32',
       exists: () => false,
-      ptySpawn: (/** @type {any[]} */ ...a) => {
-        const proc = fakePtySpawn([])(...a)
-        proc.kill = (/** @type {any[]} */ ...k) => { order.push(['pty.kill', ...k]) }
-        return proc
-      },
+      ptySpawn: fakePtySpawn([], order),
       spawnSync: (/** @type {any[]} */ ...args) => { order.push(args) },
       kill: () => { throw new Error('process.kill must not be called on win32') }
     })
     try {
       host.kill(signal, 60000)
-      // node-pty's kill() with no signal: on Windows it throws for any signal
-      assert.deepEqual(order, [['taskkill', ['/PID', '4242', '/T', '/F'], { windowsHide: true, stdio: 'ignore' }], ['pty.kill']], signal)
+      // the console is closed natively, never through node-pty's kill(), whose console-list
+      // agent fails on the dead shell and later kills its pid
+      assert.deepEqual(order, [
+        ['taskkill', ['/PID', '4242', '/T', '/F'], { windowsHide: true, stdio: 'ignore' }],
+        ['native.kill', 7, false],
+        ['conout.dispose']
+      ], signal)
     } finally {
       host.dispose()
     }
     // dispose after kill does not close the pseudoconsole a second time
-    assert.equal(order.filter((o) => o[0] === 'pty.kill').length, 1, signal)
+    assert.equal(order.filter((o) => o[0] === 'native.kill').length, 1, signal)
   }
 })
 
-test('on win32 dispose closes a pseudoconsole that is still open, once', () => {
+test('on win32 dispose closes a pseudoconsole that is still open, once, without node-pty kill()', () => {
   /** @type {any[][]} */
-  const ptyKills = []
-  const host = spawnWith(['claude'], { platform: 'win32', exists: () => false, ptySpawn: fakePtySpawn([], ptyKills) })
+  const events = []
+  /** @type {any} */
+  let proc
+  const host = spawnWith(['claude'], {
+    platform: 'win32',
+    exists: () => false,
+    ptySpawn: (/** @type {any[]} */ ...a) => { proc = fakePtySpawn([], events)(...a); return proc }
+  })
   host.dispose()
   host.dispose()
-  assert.deepEqual(ptyKills, [[]])
+  assert.deepEqual(events, [['native.kill', 7, false], ['conout.dispose']])
+  assert.equal(proc._agent._inSocket.readable, false)
+  assert.equal(proc._agent._outSocket.readable, false)
 })
 
-test('on linux kill signals the process group through the injected kill and never calls the pty kill', () => {
+test('on win32 a node-pty without the 1.1.0 agent shape is left open and never killed through kill()', (t) => {
+  /** @type {any[][]} */
+  const events = []
+  const errors = t.mock.method(console, 'error', () => {})
+  const host = spawnWith(['claude'], {
+    platform: 'win32',
+    exists: () => false,
+    ptySpawn: (/** @type {any[]} */ ...a) => { const p = fakePtySpawn([], events)(...a); delete p._agent; return p }
+  })
+  host.dispose()
+  assert.deepEqual(events, [])
+  assert.match(String(errors.mock.calls[0]?.arguments[0]), /cannot close the pseudoconsole/)
+})
+
+test('on linux kill signals the process group through the injected kill and never touches the console', () => {
   /** @type {any[]} */
   const kills = []
   /** @type {any[][]} */

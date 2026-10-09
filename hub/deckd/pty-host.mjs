@@ -338,18 +338,36 @@ export class PtyHost {
   }
 
   /**
-   * win32 only, at most once: node-pty's own kill(), which closes the
-   * pseudoconsole. On a Windows 11 VM a tree killed by taskkill alone left
-   * `conhost.exe --headless` running, no exit event came, and the process
-   * holding the PTY never exited. That kill() is what fixes it is read from
-   * node-pty 1.1.0's lib/windowsPtyAgent.js (it calls the native kill that
-   * closes the console), not run on Windows here.
+   * win32 only, at most once: close the pseudoconsole. On a Windows 11 VM a
+   * tree killed by taskkill alone left `conhost.exe --headless` running, no
+   * exit event came, and the process holding the PTY never exited; calling
+   * node-pty's kill() after taskkill fixed that.
+   * node-pty's kill() is not called, though. Read from node-pty 1.1.0's
+   * lib/windowsPtyAgent.js: before closing the console it forks an agent
+   * that attaches to the shell's console to list its processes. Once the
+   * shell is dead (always, after taskkill or a natural exit) the attach
+   * fails, which the VM run printed as `AttachConsole failed`, and 5 s later
+   * the agent falls back to process.kill() of the shell's old pid, which
+   * Windows may have given to another process by then. So this does the
+   * rest of that kill() itself: the native kill, which calls
+   * ClosePseudoConsole (src/win/conpty.cc), then disposing the conout
+   * worker. These are node-pty 1.1.0 internals (the version is pinned
+   * exactly in package.json). When they are not there, it logs and does not
+   * fall back to kill().
    */
   #closePseudoconsole () {
     if (this.platform !== 'win32' || this.pseudoconsoleClosed) return
     this.pseudoconsoleClosed = true
+    const agent = this.proc._agent
+    if (!agent || typeof agent._ptyNative?.kill !== 'function' || typeof agent._pty !== 'number') {
+      console.error(`deckd: cannot close the pseudoconsole of ${this.ptyId}: node-pty's agent is not the 1.1.0 shape`)
+      return
+    }
     try {
-      this.proc.kill()
+      if (agent._inSocket) agent._inSocket.readable = false
+      if (agent._outSocket) agent._outSocket.readable = false
+      agent._ptyNative.kill(agent._pty, Boolean(agent._useConptyDll))
+      agent._conoutSocketWorker?.dispose()
     } catch (err) {
       console.error(`deckd: closing the pseudoconsole of ${this.ptyId} failed: ${/** @type {Error} */ (err).message}`)
     }
