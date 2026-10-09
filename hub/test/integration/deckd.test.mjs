@@ -3,16 +3,38 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
-import { stat, mkdir, chmod } from 'node:fs/promises'
-import { fileURLToPath } from 'node:url'
+import { stat, mkdir, chmod, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import os from 'node:os'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
+import { cmdShim } from '../helpers/fake-bin.mjs'
+import { posixTest } from '../helpers/platform.mjs'
+import { endpoint, deckDir } from '../../platform/index.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
 import { PtyHost, RESIZE_MIN_INTERVAL_MS } from '../../deckd/pty-host.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const mainPath = path.resolve(here, '..', '..', 'deckd', 'main.mjs')
-const stubDir = path.join(here, 'stubs')
+const stubScript = path.join(here, 'stubs', 'claude')
 const QUEUE_CAP = 16 * 1024
+const onWindows = process.platform === 'win32'
+
+/**
+ * A directory holding a `claude` deckd can run that runs the stub. POSIX: the
+ * stubs directory itself, whose `claude` is a node script with a shebang.
+ * Windows: a temp directory with an npm cmd-shim `claude.cmd` and an entry
+ * module beside it that imports the stub, because the shim addresses a script
+ * relative to its own directory.
+ * @returns {Promise<{ dir: string, claude: string, cleanup: () => Promise<void> }>}
+ */
+async function stubLauncher () {
+  if (!onWindows) return { dir: path.dirname(stubScript), claude: stubScript, cleanup: async () => {} }
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-stub-'))
+  await writeFile(path.join(dir, 'stub-entry.mjs'), `await import(${JSON.stringify(pathToFileURL(stubScript).href)})\n`)
+  const claude = path.join(dir, 'claude.cmd')
+  await writeFile(claude, cmdShim('stub-entry.mjs'))
+  return { dir, claude, cleanup: () => rm(dir, { recursive: true, force: true }) }
+}
 
 /**
  * A deckd client for tests: request/response by id, events collected in order.
@@ -103,6 +125,8 @@ async function connect (socketPath) {
 
 /** @type {Awaited<ReturnType<typeof makeRuntimeDir>>} */
 let rt
+/** @type {Awaited<ReturnType<typeof stubLauncher>>} */
+let stub
 /** @type {import('node:child_process').ChildProcess} */
 let deckd
 /** @type {string} */
@@ -160,14 +184,17 @@ async function spawnReady (env = {}, argv = ['claude']) {
 
 before(async () => {
   rt = await makeRuntimeDir()
-  socketPath = path.join(rt.dir, 'fleetmates-deck', 'deckd.sock')
-  // A socket dir left behind with a looser mode must be tightened to 0700.
-  await mkdir(path.dirname(socketPath), { mode: 0o755 })
-  await chmod(path.dirname(socketPath), 0o755)
+  stub = await stubLauncher()
+  socketPath = endpoint(rt.dir, 'deckd')
+  if (!onWindows) {
+    // A socket dir left behind with a looser mode must be tightened to 0700.
+    await mkdir(deckDir(rt.dir), { mode: 0o755 })
+    await chmod(deckDir(rt.dir), 0o755)
+  }
   deckd = spawn(process.execPath, [mainPath], {
     env: {
       ...rt.env,
-      PATH: [stubDir, rt.env.PATH].join(path.delimiter),
+      PATH: [stub.dir, rt.env.PATH].join(path.delimiter),
       DECKD_OUTPUT_QUEUE_CAP: String(QUEUE_CAP),
       // no login-shell probe: the test never runs the owner's profile
       DECKD_LOGIN_ENV: 'inherit'
@@ -210,12 +237,14 @@ after(async () => {
     await exited
   }
   await rt?.cleanup()
+  await stub?.cleanup()
 })
 
 /** @type {string} */
 let ptyId
 
-test('socket is 0600 inside a 0700 dir, even when the dir existed at 0755', async () => {
+posixTest('socket is 0600 inside a 0700 dir, even when the dir existed at 0755', async () => {
+  assert.equal(path.dirname(socketPath), deckDir(rt.dir))
   assert.equal((await stat(path.dirname(socketPath))).mode & 0o777, 0o700)
   const st = await stat(socketPath)
   assert.ok(st.isSocket())
@@ -386,14 +415,14 @@ test('kill produces an exit event and exits { since } returns it', async () => {
   assert.deepEqual(list.ptys, [])
 })
 
-test('an absolute path whose basename is claude is accepted', async () => {
-  const id = await spawnReady({}, [path.join(stubDir, 'claude')])
+posixTest('an absolute path whose basename is claude is accepted', { reason: 'SIGTERM reaches the process group only on POSIX' }, async () => {
+  const id = await spawnReady({}, [stub.claude])
   await c.request('kill', { ptyId: id, signal: 'SIGTERM', graceMs: 2000 })
   const ev = await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id)
   assert.equal(ev.signal, 'SIGTERM')
 })
 
-test('kill escalates to SIGKILL after graceMs when SIGTERM is ignored', async () => {
+posixTest('kill escalates to SIGKILL after graceMs when SIGTERM is ignored', { reason: 'win32 kill is taskkill /F whatever the signal' }, async () => {
   const id = await spawnReady({ STUB_IGNORE_SIGTERM: '1' })
   const t0 = Date.now()
   await c.request('kill', { ptyId: id, signal: 'SIGTERM', graceMs: 300 })
@@ -464,7 +493,7 @@ async function localHost (env = {}) {
   let onExit = () => {}
   /** @type {Promise<{ code: number, signal: string | null }>} */
   const exited = new Promise((resolve) => { onExit = resolve })
-  const host = PtyHost.spawn({ cwd: rt.dir, argv: [path.join(stubDir, 'claude')], env, cols: 80, rows: 24 }, {
+  const host = PtyHost.spawn({ cwd: rt.dir, argv: [stub.claude], env, cols: 80, rows: 24 }, {
     onOutput: () => {},
     onExit: (_h, exit) => onExit(exit)
   })
@@ -524,7 +553,7 @@ test('kill cancels a deferred resize and ignores later ones', async () => {
   }
 })
 
-test('SIGTERM stops deckd cleanly and kills its PTYs', async () => {
+posixTest('SIGTERM stops deckd cleanly and kills its PTYs', { reason: 'SIGTERM to deckd, and a socket file removed on close' }, async () => {
   const res = await c.request('spawn', { cwd: rt.dir, argv: ['claude'], env: {}, cols: 80, rows: 24, origin: 'launched' })
   assert.equal(res.ok, true)
   const exited = new Promise((resolve) => deckd.once('exit', (code) => resolve(code)))

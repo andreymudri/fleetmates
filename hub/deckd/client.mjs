@@ -1,8 +1,9 @@
-// deckd client: one connection to deckd.sock speaking the JSON-lines
-// protocol of docs/deck/05-api.md section 5. Used by `fm` and the web server.
+// deckd client: one connection to deckd's endpoint (a Unix socket, or a named
+// pipe on win32) speaking the JSON-lines protocol of docs/deck/05-api.md
+// section 5. Used by `fm` and the web server.
 import net from 'node:net'
-import path from 'node:path'
 import { encode, createLineDecoder, PROTO } from './protocol.mjs'
+import { endpoint } from '../platform/index.mjs'
 
 /**
  * An error answered by deckd (`ok: false`), or a request cut off by the
@@ -34,13 +35,14 @@ export class DeckdRequestError extends Error {
  * deckd agreed to, its version, its bootId and the features it announced are
  * then `client.proto`, `client.deckdVersion`, `client.bootId` and
  * `client.features`.
- * @param {{ runtimeDir: string, kind: 'server' | 'terminal', name?: string, proto?: number }} opts
+ *
+ * `platform` (default the live one) picks the endpoint kind; a test pins it.
+ * @param {{ runtimeDir: string, kind: 'server' | 'terminal', name?: string, proto?: number, platform?: string }} opts
  */
-export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO }) {
-  // Same path as main.mjs socketPaths(); not imported from there, because
-  // main.mjs loads node-pty, which a client has no use for.
-  const socketPath = path.join(runtimeDir, 'fleetmates-deck', 'deckd.sock')
-  const socket = net.connect(socketPath)
+export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO, platform = process.platform }) {
+  // The endpoint main.mjs listens on, from the platform module rather than
+  // from main.mjs, because main.mjs loads node-pty, which a client has no use for.
+  const socket = net.connect(endpoint(runtimeDir, 'deckd', { platform }))
   await new Promise((resolve, reject) => {
     socket.once('connect', () => { socket.off('error', reject); resolve(undefined) })
     socket.once('error', reject)

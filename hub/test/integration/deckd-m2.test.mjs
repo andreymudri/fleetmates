@@ -6,10 +6,14 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import path from 'node:path'
-import { mkdtemp, mkdir, chmod, writeFile, readFile, rm } from 'node:fs/promises'
+import os from 'node:os'
+import { mkdtemp, mkdir, chmod, writeFile, readFile, rm, stat } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
+import { cmdShim } from '../helpers/fake-bin.mjs'
+import { posixTest } from '../helpers/platform.mjs'
+import { runtimeBase, deckDir, endpoint } from '../../platform/index.mjs'
 import { startDeckd } from '../../deckd/main.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
@@ -17,8 +21,53 @@ import { PtyHost } from '../../deckd/pty-host.mjs'
 import { Ring } from '../../deckd/ring.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const stub = path.join(here, 'stubs', 'claude')
+const stubScript = path.join(here, 'stubs', 'claude')
 const mainPath = path.resolve(here, '..', '..', 'deckd', 'main.mjs')
+const onWindows = process.platform === 'win32'
+/** What a minimal environment keeps so node can start on Windows; nothing elsewhere. */
+const winBaseEnv = onWindows && process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}
+
+/**
+ * Write a `claude` into `dir` that runs the node module `script` with this
+ * node, and return its path. POSIX: a `#!/bin/sh` script that execs node on
+ * it. Windows: an npm cmd-shim `claude.cmd` and an entry module beside it
+ * that imports `script`, because the shim addresses a script relative to its
+ * own directory.
+ * @param {string} dir
+ * @param {string} script
+ * @returns {Promise<string>}
+ */
+async function nodeClaude (dir, script) {
+  if (onWindows) {
+    await writeFile(path.join(dir, 'claude-entry.mjs'), `await import(${JSON.stringify(pathToFileURL(script).href)})\n`)
+    const file = path.join(dir, 'claude.cmd')
+    await writeFile(file, cmdShim('claude-entry.mjs'))
+    return file
+  }
+  const q = (/** @type {string} */ v) => `'${v.replaceAll("'", "'\\''")}'`
+  const file = path.join(dir, 'claude')
+  await writeFile(file, `#!/bin/sh\nexec ${q(process.execPath)} ${q(script)} "$@"\n`, { mode: 0o700 })
+  return file
+}
+
+/**
+ * Write a `claude` into `dir` that prints `prefix` and then, for each name in
+ * `names`, ` <label>=[<value or empty>]`, then echoes its input until killed.
+ * @param {string} dir
+ * @param {string} prefix
+ * @param {[string, string][]} names label and variable name pairs
+ * @returns {Promise<string>}
+ */
+async function envClaude (dir, prefix, names) {
+  const script = path.join(dir, 'env-claude.mjs')
+  await writeFile(script, [
+    `const names = ${JSON.stringify(names)}`,
+    `const line = ${JSON.stringify(prefix)} + names.map(([label, name]) => \` \${label}=[\${process.env[name] ?? ''}]\`).join('')`,
+    "process.stdout.write(line + '\\r\\n')",
+    "process.stdin.on('data', (d) => process.stdout.write(d))"
+  ].join('\n') + '\n')
+  return nodeClaude(dir, script)
+}
 
 /** @type {Awaited<ReturnType<typeof makeRuntimeDir>>} */
 let rt
@@ -26,17 +75,16 @@ let rt
 let deckd
 /** @type {string} */
 let binDir
+/** The stub `claude` deckd spawns. @type {string} */
+let stub
 const LOGIN_ONLY = 'DECK_TEST_LOGIN_ONLY'
 
 before(async () => {
   rt = await makeRuntimeDir()
   binDir = await mkdtemp(path.join(rt.dir, 'bin-'))
+  stub = onWindows ? await nodeClaude(await mkdtemp(path.join(rt.dir, 'stub-')), stubScript) : stubScript
   // A `claude` that prints the variables under test, then echoes input.
-  await writeFile(path.join(binDir, 'claude'), [
-    '#!/bin/sh',
-    `printf 'ENV login=[%s] term=[%s] pty=[%s]\\r\\n' "$${LOGIN_ONLY}" "$TERM" "$FLEETMATES_DECK_PTY"`,
-    'exec cat'
-  ].join('\n') + '\n', { mode: 0o700 })
+  await envClaude(binDir, 'ENV', [['login', LOGIN_ONLY], ['term', 'TERM'], ['pty', 'FLEETMATES_DECK_PTY']])
   deckd = await startDeckd({
     runtimeDir: rt.dir,
     version: '9.9.9',
@@ -211,9 +259,9 @@ test('the exit event keeps { ptyId, code, signal, at } for a proto 2 client', as
 test('launched spawns get the login env, wrapped spawns only req.env; both get TERM and FLEETMATES_DECK_PTY', async () => {
   const c = await client(2)
   try {
-    const argv = [path.join(binDir, 'claude')]
+    const argv = [path.join(binDir, onWindows ? 'claude.cmd' : 'claude')]
     const launched = await c.request('spawn', { cwd: rt.dir, argv, env: {}, origin: 'launched' })
-    const wrapped = await c.request('spawn', { cwd: rt.dir, argv, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', TERM: 'dumb' }, origin: 'wrapped' })
+    const wrapped = await c.request('spawn', { cwd: rt.dir, argv, env: { ...winBaseEnv, PATH:process.env.PATH ?? '/usr/bin:/bin', TERM: 'dumb' }, origin: 'wrapped' })
     const l = await waitRow(c, launched.ptyId, (row) => row.startsWith('ENV '))
     const w = await waitRow(c, wrapped.ptyId, (row) => row.startsWith('ENV '))
     assert.equal(l, `ENV login=[from-login] term=[xterm-256color] pty=[${launched.ptyId}]`)
@@ -278,7 +326,7 @@ async function startError (runtimeDir) {
   return startDeckd({ runtimeDir, loginEnv: {} }).then((d) => d.close().then(() => null), (err) => err)
 }
 
-test('startDeckd refuses a runtime dir with group or world permission bits', async () => {
+posixTest('startDeckd refuses a runtime dir with group or world permission bits', async () => {
   const loose = await mkdtemp(path.join(rt.dir, 'loose-'))
   try {
     await chmod(loose, 0o755)
@@ -366,13 +414,7 @@ test('pin: a second resize 100 ms after the first lands no sooner than 1 s after
  * @returns {Promise<string>} its path
  */
 async function sessionVarsClaude (dir) {
-  const file = path.join(dir, 'claude')
-  await writeFile(file, [
-    '#!/bin/sh',
-    `printf 'SESS cc=[%s] sid=[%s] foo=[%s]\\r\\n' "$CLAUDECODE" "$CLAUDE_CODE_SESSION_ID" "$CLAUDE_CODE_FOO"`,
-    'exec cat'
-  ].join('\n') + '\n', { mode: 0o700 })
-  return file
+  return envClaude(dir, 'SESS', [['cc', 'CLAUDECODE'], ['sid', 'CLAUDE_CODE_SESSION_ID'], ['foo', 'CLAUDE_CODE_FOO']])
 }
 
 /**
@@ -383,7 +425,21 @@ async function sessionVarsClaude (dir) {
  */
 async function withMain (env, fn = async () => {}) {
   const runtime = await makeRuntimeDir()
-  const proc = spawn(process.execPath, [mainPath], { env: { ...env, XDG_RUNTIME_DIR: runtime.dir }, stdio: ['ignore', 'ignore', 'pipe'] })
+  try {
+    await runMain({ ...env, XDG_RUNTIME_DIR: runtime.dir }, (stderr) => fn(runtime.dir, stderr))
+  } finally {
+    await runtime.cleanup()
+  }
+}
+
+/**
+ * Run `node main.mjs` with exactly `env` until it listens, call `fn`, then
+ * stop it with SIGTERM.
+ * @param {Record<string, string>} env
+ * @param {(stderr: () => string) => Promise<void>} fn
+ */
+async function runMain (env, fn) {
+  const proc = spawn(process.execPath, [mainPath], { env, stdio: ['ignore', 'ignore', 'pipe'] })
   let stderr = ''
   proc.stderr?.on('data', (d) => { stderr += d })
   try {
@@ -394,18 +450,17 @@ async function withMain (env, fn = async () => {}) {
       })
       proc.once('exit', (code) => { clearTimeout(timer); reject(new Error(`deckd exited ${code}: ${stderr}`)) })
     })
-    await fn(runtime.dir, () => stderr)
+    await fn(() => stderr)
   } finally {
     if (proc.exitCode === null) {
       const exited = new Promise((resolve) => proc.once('exit', resolve))
       proc.kill('SIGTERM')
       await exited
     }
-    await runtime.cleanup()
   }
 }
 
-test('main runs the login probe unless DECKD_LOGIN_ENV=inherit; NODE_TEST_CONTEXT does not skip it', async () => {
+posixTest('main runs the login probe unless DECKD_LOGIN_ENV=inherit; NODE_TEST_CONTEXT does not skip it', { reason: 'the fake login shell is a /bin/sh script, and win32 runs no probe' }, async () => {
   const dir = await mkdtemp(path.join(rt.dir, 'probe-'))
   const marker = path.join(dir, 'probe.argv')
   // A fake login shell: records its argv, then runs the probe's command
@@ -430,6 +485,7 @@ test('main with DECKD_LOGIN_ENV=inherit still drops the session variables from l
   const claude = await sessionVarsClaude(dir)
   try {
     await withMain({
+      ...winBaseEnv,
       PATH: process.env.PATH ?? '/usr/bin:/bin',
       HOME: dir,
       SHELL: path.join(dir, 'no-such-shell'),
@@ -476,5 +532,63 @@ test('startDeckd without loginEnv drops the session variables of its own environ
     c.close()
     await d?.close()
     await runtime.cleanup()
+  }
+})
+
+test('main with XDG_RUNTIME_DIR unset listens under the runtimeBase fallback, and connectDeckd reaches it there', {
+  skip: process.platform !== 'linux' && 'the /tmp/fleetmates-deck-<uid> fallback is the linux base'
+}, async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'deck-home-'))
+  const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, SHELL: path.join(home, 'no-such-shell'), DECKD_LOGIN_ENV: 'inherit' }
+  const base = runtimeBase({ env })
+  assert.equal(base, `/tmp/fleetmates-deck-${process.getuid?.()}`)
+  // Remove afterwards only what this test created: another run may own the base.
+  const exists = (/** @type {string} */ p) => stat(p).then(() => true, () => false)
+  const baseExisted = await exists(base)
+  const deckDirExisted = await exists(deckDir(base))
+  try {
+    await runMain(env, async (stderr) => {
+      assert.ok(stderr().includes(`deckd listening on ${endpoint(base, 'deckd')}`), stderr())
+      const c = await connectDeckd({ runtimeDir: base, kind: 'server', name: 'm2' })
+      try {
+        assert.equal(typeof (await c.request('ping')).at, 'number')
+      } finally {
+        c.close()
+      }
+    })
+  } finally {
+    if (!baseExisted) await rm(base, { recursive: true, force: true })
+    else if (!deckDirExisted) await rm(deckDir(base), { recursive: true, force: true })
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
+test('on a pipe endpoint a second deckd on the same base is refused, and connectDeckd reaches the first', async () => {
+  // win32 is injected. Off Windows the `\\.\pipe\...` name is then a Unix
+  // socket file of that name in the working directory, and so is the
+  // win32-joined deck dir: both land in a temp dir made the working directory
+  // for this test only.
+  const cwd = process.cwd()
+  const scratch = await mkdtemp(path.join(rt.dir, 'pipe-'))
+  const base = path.join(scratch, 'base')
+  process.chdir(scratch)
+  /** @type {Awaited<ReturnType<typeof startDeckd>> | undefined} */
+  let first
+  try {
+    first = await startDeckd({ runtimeDir: base, platform: 'win32', loginEnv: {} })
+    const pipe = endpoint(base, 'deckd', { platform: 'win32' })
+    assert.equal(first.socketPath, pipe)
+    assert.match(pipe, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-deckd$/)
+    await assert.rejects(startDeckd({ runtimeDir: base, platform: 'win32', loginEnv: {} }), { message: `another deckd is listening on ${pipe}` })
+    const c = await connectDeckd({ runtimeDir: base, platform: 'win32', kind: 'server', name: 'm2' })
+    try {
+      assert.equal(c.bootId, first.bootId)
+    } finally {
+      c.close()
+    }
+  } finally {
+    await first?.close()
+    process.chdir(cwd)
+    await rm(scratch, { recursive: true, force: true })
   }
 })
