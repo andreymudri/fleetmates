@@ -97,7 +97,7 @@ test('tool hooks write session_steps: PreToolUse opens a step, PostToolUse, Post
   h.send('s', 'PermissionDenied', 2700, { tool_name: 'Bash', tool_input: { command: 'rm -rf build' } })
   steps = (await h.request(`/api/sessions/${id}/steps`)).data.steps
   assert.deepEqual(steps.map(step => [step.line, step.status, step.adds, step.dels]), [
-    ['Update src/notes.txt', 'ok', 1, 0],
+    [`Update ${path.join('src', 'notes.txt')}`, 'ok', 1, 0],
     ['Bash npm test', 'failed', null, null],
     ['Bash npm run lint', 'ok', null, null],
     ['Bash rm -rf build', 'failed', null, null]
@@ -106,7 +106,7 @@ test('tool hooks write session_steps: PreToolUse opens a step, PostToolUse, Post
   // A PostToolUse whose PreToolUse the deck never saw (joined mid-turn) still records one settled step.
   h.send('s', 'PostToolUse', 2800, { tool_name: 'Read', tool_input: { file_path: file }, tool_response: {} })
   steps = (await h.request(`/api/sessions/${id}/steps`)).data.steps
-  assert.deepEqual(steps.at(-1).line, 'Read src/notes.txt')
+  assert.deepEqual(steps.at(-1).line, `Read ${path.join('src', 'notes.txt')}`)
   assert.equal(steps.at(-1).status, 'ok')
   assert.equal(h.deck.projector.snapshot().sessions.find(row => row.id === id).toolCalls, 5)
   const focus = (await h.request(`/api/sessions/${id}`)).data
