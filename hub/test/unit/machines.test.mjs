@@ -17,7 +17,7 @@ import { runRetention } from '../../server/db/retention.mjs'
 import { createProjector, PROMPT_GONE_REASON, SCROLLBACK_CAP } from '../../server/machines/projector.mjs'
 import { applySessionHook, captureReviewBaseline, leadRunId, workingRoot } from '../../server/machines/session.mjs'
 import { projectHome } from '../../server/machines/counts.mjs'
-import { applyRequestHook, classifyHook, expireRequests, permissionTier } from '../../server/machines/request.mjs'
+import { applyRequestHook, classifyHook, expireRequests, legacyDestructive, permissionTier } from '../../server/machines/request.mjs'
 import { classify, hooksPathCache, worktrees } from '../../server/approvals/tiers.mjs'
 
 function execFileSync(file, args, options = {}) {
@@ -3626,6 +3626,30 @@ test('literal systemctl deck controls retain their floor across quoting options 
     'systemctl --user status unrelated-fleetmates-deck.service'
   ]) assert.equal(tier(command), 'caution', command)
   assert.equal(tier("printf '%s' 'systemctl --user stop fleetmates-deck.service'"), 'safe')
+})
+
+// The M1 classifier mirrors the launchctl floor of approvals/tiers.mjs. permissionTier runs both,
+// so the mirror is checked through legacyDestructive on its own as well.
+test('literal launchctl deck controls retain their floor across paths and wrappers', () => {
+  const hook = command => ({ cwd: '/tmp', tool_name: 'Bash', tool_input: { command } })
+  const tier = command => permissionTier(hook(command))
+  for (const command of [
+    'launchctl kickstart gui/501/io.fleetmates.deck.deckd',
+    "launchctl kickstart -k 'gui/501/io.fleetmates.deck.web'",
+    '/bin/launchctl bootout gui/501/io.fleetmates.deck.deckd',
+    'env -i launchctl bootstrap gui/501 /Users/you/Library/LaunchAgents/io.fleetmates.deck.web.plist',
+    "bash -lc 'launchctl bootout gui/501/io.fleetmates.deck.web'"
+  ]) assert.equal(legacyDestructive(hook(command)), true, command)
+  for (const command of ['launchctl list', 'launchctl kickstart gui/501/com.example.agent']) assert.equal(legacyDestructive(hook(command)), false, command)
+  for (const command of [
+    'launchctl kickstart gui/501/io.fleetmates.deck.deckd',
+    "launchctl kickstart -k 'gui/501/io.fleetmates.deck.web'",
+    '/bin/launchctl bootout gui/501/io.fleetmates.deck.deckd',
+    'launchctl kill SIGTERM gui/501/io.fleetmates.deck.deckd',
+    'env -i launchctl bootstrap gui/501 /Users/you/Library/LaunchAgents/io.fleetmates.deck.web.plist',
+    "bash -lc 'launchctl bootout gui/501/io.fleetmates.deck.web'"
+  ]) assert.equal(tier(command), 'destructive', command)
+  for (const command of ['launchctl list', 'launchctl kickstart gui/501/com.example.agent']) assert.notEqual(tier(command), 'destructive', command)
 })
 
 test('resuming another repository updates only authorized cwd and Git review boundaries', () => {

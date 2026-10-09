@@ -1658,3 +1658,60 @@ test('words that name Object.prototype members classify as unknown commands with
     for (const toolName of ['constructor', '__proto__', 'toString']) expectTier(s.run(toolName, {}), 'caution', 'unknown.tool', toolName)
   } finally { s.close() }
 })
+
+// Platforms (docs/deck/16-platforms.md section 6): the tier rules read POSIX paths, so on win32
+// every request asks; the service-control floors know launchctl and the Windows Run key.
+test('on win32 every request asks with floor.platform and offers no rule; linux and darwin keep Safe commands Safe', () => {
+  const s = sandbox()
+  try {
+    const win = s.bash('git status', { platform: 'win32' })
+    expectTier(win, 'caution', 'floor.platform', 'git status on win32')
+    assert.equal(win.ruleCandidate, null)
+    const lint = s.bash('npm run lint', { platform: 'win32' })
+    expectTier(lint, 'caution', 'floor.platform', 'npm run lint on win32')
+    assert.equal(lint.ruleCandidate, null)
+    assert.equal(lint.ruleNote, null)
+    expectTier(s.run('mcp__vault__vault_search', { query: 'x' }, { platform: 'win32' }), 'caution', 'floor.platform', 'mcp tool on win32')
+    for (const platform of ['linux', 'darwin']) {
+      const result = s.bash('git status', { platform })
+      expectTier(result, 'safe', null, `git status on ${platform}`)
+      assert.ok(!result.reasons.some(item => item.entryId === 'floor.platform'), platform)
+      assert.equal(s.bash('npm run lint', { platform }).ruleCandidate, 'Bash(npm run lint)', platform)
+    }
+    // A Destructive request stays Destructive on win32: the floor only adds a Caution reason.
+    expectTier(s.bash('rm -rf x', { platform: 'win32' }), 'destructive', 'floor.platform', 'rm -rf on win32')
+  } finally { s.close() }
+})
+
+test('launchctl against an io.fleetmates.deck label and reg against the Run key hit the deck floor', () => {
+  const s = sandbox()
+  try {
+    for (const command of [
+      'launchctl kickstart gui/501/io.fleetmates.deck.deckd',
+      'launchctl kickstart -k gui/501/io.fleetmates.deck.web',
+      '/bin/launchctl bootout gui/501/io.fleetmates.deck.deckd',
+      'launchctl kill SIGTERM gui/501/io.fleetmates.deck.deckd',
+      "reg add 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' /v fleetmates-deck /t REG_SZ /d x /f",
+      "reg delete 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' /v fleetmates-deck /f",
+      'reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v fleetmates-deck /d x /f',
+      "reg.exe add 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' /v other /d x /f",
+      "REG DELETE 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' /va /f"
+    ]) expectTier(s.bash(command), 'destructive', 'floor.deck', command)
+    for (const command of ['launchctl list', 'launchctl kickstart gui/501/com.example.agent', "reg query 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'", "reg add 'HKCU\\Software\\Example' /v fleetmates-deck /d x /f"]) {
+      const result = s.bash(command)
+      assert.ok(!result.reasons.some(item => item.entryId === 'floor.deck'), `${command}: ${ids(result)}`)
+    }
+  } finally { s.close() }
+})
+
+test('a write to ~/Library/LaunchAgents/io.fleetmates.deck.* hits the persistence floor', () => {
+  const s = sandbox()
+  try {
+    for (const name of ['io.fleetmates.deck.web.plist', 'io.fleetmates.deck.deckd.plist', 'IO.FLEETMATES.DECK.WEB.PLIST']) {
+      expectTier(s.run('Write', { file_path: path.join(s.home, 'Library', 'LaunchAgents', name), content: 'x' }), 'destructive', 'floor.persistence', name)
+    }
+    expectTier(s.bash(`cp x ${path.join(s.home, 'Library', 'LaunchAgents', 'io.fleetmates.deck.web.plist')}`), 'destructive', 'floor.persistence', 'cp into LaunchAgents')
+    const other = s.run('Write', { file_path: path.join(s.home, 'Library', 'LaunchAgents', 'com.example.agent.plist'), content: 'x' })
+    assert.ok(!other.reasons.some(item => item.entryId === 'floor.persistence'), ids(other))
+  } finally { s.close() }
+})
