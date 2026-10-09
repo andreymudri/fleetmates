@@ -7,7 +7,7 @@ import http from 'node:http'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
 import { startDeckServer } from '../../server/main.mjs'
-import { hashPassphrase, writePassphraseFile } from '../../server/http/remote-pass.mjs'
+import { hashPassphrase, writeRemotePass } from '../../server/http/remote-pass.mjs'
 
 const token = 'a'.repeat(43)
 const PUBLIC = 'https://machine.tail1234.ts.net'
@@ -23,7 +23,7 @@ async function harness(t, options = {}) {
   const state = path.join(dir, '.local/state/fleetmates/deck')
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
-  if (options.passphrase !== false) writePassphraseFile(path.join(state, 'remote-pass.json'), await hashPassphrase(PASSPHRASE))
+  if (options.passphrase !== false) writeRemotePass(path.join(state, 'remote-pass.json'), await hashPassphrase(PASSPHRASE))
   const staticDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rem-web-'))
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
   fs.writeFileSync(path.join(staticDir, 'manifest.webmanifest'), '{"name":"fleetmates deck"}')
@@ -96,6 +96,9 @@ test('the passphrase exchange returns the deck token, and refuses a wrong one an
   const flooded = await h.pair(PASSPHRASE)
   assert.equal(flooded.status, 429)
   assert.equal(flooded.data.error.code, 'too_many_attempts')
+  // The Unlock screen counts down from this header and never invents a number when it is absent.
+  assert.match(flooded.headers['retry-after'], /^\d+$/)
+  assert.equal(wrong.headers['retry-after'], undefined, 'a wrong passphrase carries no wait')
   // The exchange is still a same-origin surface: a foreign Origin never reaches it.
   assert.equal((await h.request('/.well-known/fleetmates-deck/pair', { 'Content-Type': 'application/json', Origin: 'https://evil.example' }, 'POST', '{}')).status, 403)
   assert.equal((await h.request('/.well-known/fleetmates-deck/pair')).status, 404, 'GET is not the exchange')

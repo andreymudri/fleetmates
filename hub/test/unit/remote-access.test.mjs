@@ -6,7 +6,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { authorize, parsePublicOrigin, requestOrigin, securityHeaders } from '../../server/http/auth.mjs'
-import { checkPassphrase, createRemoteAccess, hashPassphrase, readPassphraseFile, verifyPassphrase, writePassphraseFile } from '../../server/http/remote-pass.mjs'
+import { checkPassphrase, createRemoteAccess, hashPassphrase, readRemotePass, verifyPassphrase, writeRemotePass } from '../../server/http/remote-pass.mjs'
 import { parseServerArgs } from '../../server/main.mjs'
 
 const origin = parsePublicOrigin('https://machine.tail1234.ts.net')
@@ -86,14 +86,20 @@ test('a passphrase is checked, stored as a scrypt hash in a 0600 file, and compa
   // The same passphrase hashed again differs, so the salt is per installation.
   assert.notEqual((await hashPassphrase('correct horse battery')).hash, record.hash)
   const file = path.join(dir, 'remote-pass.json')
-  writePassphraseFile(file, record)
+  writeRemotePass(file, record)
   assert.equal(fs.lstatSync(file).mode & 0o777, 0o600)
-  assert.deepEqual(readPassphraseFile(file), record)
+  assert.deepEqual(readRemotePass(file), { record })
+  assert.deepEqual(readRemotePass(path.join(dir, 'nothing.json')), { missing: true }, 'a deck with no passphrase is not a deck with a broken one')
   fs.chmodSync(file, 0o644)
-  assert.throws(() => readPassphraseFile(file), /private 0600 file/)
+  assert.match(readRemotePass(file).bad, /mode 0644/)
+  // On win32 there is no mode to check: the owner's profile ACLs are what keep the file private.
+  assert.deepEqual(readRemotePass(file, { platform: 'win32' }), { record })
   fs.chmodSync(file, 0o600)
+  assert.equal(readRemotePass(file, { uid: process.getuid() + 1 }).bad.includes('not by this user'), true)
   fs.writeFileSync(file, '{"v":2}', { mode: 0o600 })
-  assert.throws(() => readPassphraseFile(file), /invalid remote access passphrase file/)
+  assert.equal(readRemotePass(file).bad, 'not a passphrase record')
+  fs.writeFileSync(file, 'not json', { mode: 0o600 })
+  assert.equal(readRemotePass(file).bad, 'not JSON')
 })
 
 test('the exchange is unavailable without a passphrase file, and rate limited once there is one', async t => {
@@ -102,11 +108,12 @@ test('the exchange is unavailable without a passphrase file, and rate limited on
   const file = path.join(dir, 'remote-pass.json')
   let at = 1_000_000
   const slept = []
-  const remote = createRemoteAccess({ file, now: () => at, maxAttempts: 3, windowMs: 1000, sleep: ms => { slept.push(ms)
+  const logged = []
+  const remote = createRemoteAccess({ file, now: () => at, maxAttempts: 3, windowMs: 1000, log: line => logged.push(line), sleep: ms => { slept.push(ms)
     return Promise.resolve() } })
   assert.equal(remote.enabled(), false)
   assert.deepEqual(await remote.verify('correct horse battery'), { ok: false, code: 'pairing_unavailable' })
-  writePassphraseFile(file, await hashPassphrase('correct horse battery'))
+  writeRemotePass(file, await hashPassphrase('correct horse battery'))
   assert.equal(remote.enabled(), true)
   assert.deepEqual(await remote.verify('wrong one here'), { ok: false, code: 'unauthorized' })
   assert.deepEqual(await remote.verify('wrong two here'), { ok: false, code: 'unauthorized' })
@@ -124,6 +131,11 @@ test('the exchange is unavailable without a passphrase file, and rate limited on
   assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
   assert.deepEqual(await remote.verify('wrong once more'), { ok: false, code: 'unauthorized' })
   assert.equal(slept.at(-1), 250, 'the delay restarts after a success')
+  // A file that exists but cannot be used reads as "no passphrase set", and says why once.
+  fs.writeFileSync(file, '{"v":9}', { mode: 0o600 })
+  assert.deepEqual(await remote.verify('correct horse battery'), { ok: false, code: 'pairing_unavailable' })
+  assert.deepEqual(await remote.verify('correct horse battery'), { ok: false, code: 'pairing_unavailable' })
+  assert.deepEqual(logged, ['remote_pass.rejected not a passphrase record'])
 })
 
 test('the CLI writes the public origin to config.json and the passphrase, read from stdin, to its own file', async t => {
@@ -149,6 +161,6 @@ test('the CLI writes the public origin to config.json and the passphrase, read f
   assert.equal(set.status, 0, set.stderr)
   const file = path.join(dir, '.local/state/fleetmates/deck/remote-pass.json')
   assert.equal(fs.lstatSync(file).mode & 0o777, 0o600)
-  assert.equal(await verifyPassphrase('correct horse battery', readPassphraseFile(file)), true)
+  assert.equal(await verifyPassphrase('correct horse battery', readRemotePass(file).record), true)
   assert.equal(fs.readFileSync(file, 'utf8').includes('correct horse'), false)
 })
