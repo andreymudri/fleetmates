@@ -312,24 +312,60 @@ function loopError (file) {
 /** Whether two bigint stats name the same file. */
 const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino
 
+// How many times a win32 no-follow open re-runs lstat, open and fstat when the name appears or
+// disappears between the lstat and the open.
+const WIN32_OPEN_ATTEMPTS = 3
+
 /**
- * The flags a win32 no-follow open passes to open: `O_TRUNC` waits for the check (ftruncate after
- * it), and a name lstat did not find is created exclusively, so a symlink planted in between fails
- * the open instead of being followed.
+ * The flags a win32 no-follow open passes to open. `O_TRUNC` waits for the check (ftruncate after
+ * it). A name lstat found is opened without `O_CREAT`, so a swap to a dangling symlink cannot create
+ * the link's target; a name lstat did not find is created with `O_CREAT | O_EXCL`, so a symlink
+ * planted in between fails the open instead of being followed.
  * @param {number} flags
  * @param {boolean} missing
  */
 function win32OpenFlags (flags, missing) {
-  const { O_EXCL = 0, O_TRUNC = 0 } = fs.constants
-  return missing ? (flags & ~O_TRUNC) | O_EXCL : flags & ~O_TRUNC
+  const { O_CREAT = 0, O_EXCL = 0, O_TRUNC = 0 } = fs.constants
+  return missing ? (flags & ~O_TRUNC) | O_CREAT | O_EXCL : flags & ~(O_TRUNC | O_CREAT | O_EXCL)
+}
+
+/**
+ * Whether a win32 open error means the name changed between lstat and open, so the sequence is
+ * worth re-running: EEXIST after a missing name, ENOENT after a found one. Only under the caller's
+ * `O_CREAT` without `O_EXCL`; otherwise the error is the answer POSIX would give.
+ * @param {NodeJS.ErrnoException} err
+ * @param {number} flags
+ * @param {boolean} missing
+ */
+function win32Retryable (err, flags, missing) {
+  const { O_CREAT = 0, O_EXCL = 0 } = fs.constants
+  if (!(flags & O_CREAT) || (flags & O_EXCL)) return false
+  return err.code === (missing ? 'EEXIST' : 'ENOENT')
+}
+
+/**
+ * Refuse what a win32 no-follow open's first lstat found: ELOOP for a symbolic link, and EEXIST for
+ * an existing name under the caller's `O_CREAT | O_EXCL` (the open itself runs without `O_CREAT`
+ * for a found name, so it would not report that). `before` is null for a missing name.
+ * @param {string} file
+ * @param {number} flags
+ * @param {any} before
+ */
+function win32CheckBefore (file, flags, before) {
+  const { O_CREAT = 0, O_EXCL = 0 } = fs.constants
+  if (before?.isSymbolicLink()) throw loopError(file)
+  if (before && (flags & O_CREAT) && (flags & O_EXCL)) {
+    throw Object.assign(new Error(`EEXIST: file already exists, open '${file}'`), { code: 'EEXIST', syscall: 'open', path: file })
+  }
 }
 
 /**
  * Open `file` without following a symbolic link at its last component, returning an fd. POSIX adds
  * `O_NOFOLLOW`. win32 has no `O_NOFOLLOW`: it lstats the name and refuses a symbolic link with
  * ELOOP, opens, then fstats the fd and refuses (closing it) when its dev and ino differ from the
- * lstat. On win32 `O_TRUNC` is applied with ftruncate after that check, and a name missing under
- * `O_CREAT` is created with `O_EXCL` and lstat after the open.
+ * lstat. On win32 `O_TRUNC` is applied with ftruncate after that check, a found name is opened
+ * without `O_CREAT`, a missing name under `O_CREAT` is created with `O_EXCL` and lstat after the
+ * open, and a name that appeared or vanished in between re-runs the sequence (at most 3 attempts).
  * @param {string} file
  * @param {number} [flags]
  * @param {{ platform?: string, fs?: any, mode?: number }} [opts]
@@ -337,23 +373,34 @@ function win32OpenFlags (flags, missing) {
  */
 export function openNoFollowSync (file, flags = fs.constants.O_RDONLY, { platform = process.platform, fs: fsImpl = fs, mode } = {}) {
   if (platform !== 'win32') return fsImpl.openSync(file, flags | fs.constants.O_NOFOLLOW, mode)
-  let before = null
-  try {
-    before = fsImpl.lstatSync(file, { bigint: true })
-  } catch (err) {
-    if (err.code !== 'ENOENT' || !(flags & (fs.constants.O_CREAT ?? 0))) throw err
+  let last
+  for (let attempt = 0; attempt < WIN32_OPEN_ATTEMPTS; attempt++) {
+    let before = null
+    try {
+      before = fsImpl.lstatSync(file, { bigint: true })
+    } catch (err) {
+      if (err.code !== 'ENOENT' || !(flags & (fs.constants.O_CREAT ?? 0))) throw err
+    }
+    win32CheckBefore(file, flags, before)
+    let fd
+    try {
+      fd = fsImpl.openSync(file, win32OpenFlags(flags, before === null), mode)
+    } catch (err) {
+      if (!win32Retryable(err, flags, before === null)) throw err
+      last = err
+      continue
+    }
+    try {
+      const seen = before ?? fsImpl.lstatSync(file, { bigint: true })
+      if (seen.isSymbolicLink() || !sameFile(seen, fsImpl.fstatSync(fd, { bigint: true }))) throw loopError(file)
+      if (before !== null && (flags & (fs.constants.O_TRUNC ?? 0))) fsImpl.ftruncateSync(fd, 0)
+    } catch (err) {
+      fsImpl.closeSync(fd)
+      throw err
+    }
+    return fd
   }
-  if (before?.isSymbolicLink()) throw loopError(file)
-  const fd = fsImpl.openSync(file, win32OpenFlags(flags, before === null), mode)
-  try {
-    const seen = before ?? fsImpl.lstatSync(file, { bigint: true })
-    if (seen.isSymbolicLink() || !sameFile(seen, fsImpl.fstatSync(fd, { bigint: true }))) throw loopError(file)
-    if (before !== null && (flags & (fs.constants.O_TRUNC ?? 0))) fsImpl.ftruncateSync(fd, 0)
-  } catch (err) {
-    fsImpl.closeSync(fd)
-    throw err
-  }
-  return fd
+  throw last
 }
 
 /**
@@ -366,23 +413,34 @@ export function openNoFollowSync (file, flags = fs.constants.O_RDONLY, { platfor
 export async function openNoFollow (file, flags = fs.constants.O_RDONLY, { platform = process.platform, fs: fsImpl = fs, mode } = {}) {
   const fsp = fsImpl.promises
   if (platform !== 'win32') return fsp.open(file, flags | fs.constants.O_NOFOLLOW, mode)
-  let before = null
-  try {
-    before = await fsp.lstat(file, { bigint: true })
-  } catch (err) {
-    if (err.code !== 'ENOENT' || !(flags & (fs.constants.O_CREAT ?? 0))) throw err
+  let last
+  for (let attempt = 0; attempt < WIN32_OPEN_ATTEMPTS; attempt++) {
+    let before = null
+    try {
+      before = await fsp.lstat(file, { bigint: true })
+    } catch (err) {
+      if (err.code !== 'ENOENT' || !(flags & (fs.constants.O_CREAT ?? 0))) throw err
+    }
+    win32CheckBefore(file, flags, before)
+    let handle
+    try {
+      handle = await fsp.open(file, win32OpenFlags(flags, before === null), mode)
+    } catch (err) {
+      if (!win32Retryable(err, flags, before === null)) throw err
+      last = err
+      continue
+    }
+    try {
+      const seen = before ?? await fsp.lstat(file, { bigint: true })
+      if (seen.isSymbolicLink() || !sameFile(seen, await handle.stat({ bigint: true }))) throw loopError(file)
+      if (before !== null && (flags & (fs.constants.O_TRUNC ?? 0))) await handle.truncate(0)
+    } catch (err) {
+      await handle.close()
+      throw err
+    }
+    return handle
   }
-  if (before?.isSymbolicLink()) throw loopError(file)
-  const handle = await fsp.open(file, win32OpenFlags(flags, before === null), mode)
-  try {
-    const seen = before ?? await fsp.lstat(file, { bigint: true })
-    if (seen.isSymbolicLink() || !sameFile(seen, await handle.stat({ bigint: true }))) throw loopError(file)
-    if (before !== null && (flags & (fs.constants.O_TRUNC ?? 0))) await handle.truncate(0)
-  } catch (err) {
-    await handle.close()
-    throw err
-  }
-  return handle
+  throw last
 }
 
 const INPUT_MODE_SEQUENCES = ['\x1b[?9001h', '\x1b[?9001l']

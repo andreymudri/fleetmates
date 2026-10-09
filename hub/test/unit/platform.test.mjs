@@ -430,17 +430,20 @@ function lyingLstatFs () {
 }
 
 /** An fs whose fstat reports another inode than lstat, as when the name was swapped between the two. */
-function swappedInodeFs () {
+function swappedInodeFs (/** @type {string[]} */ closed = []) {
   const bump = st => restat(st, { ino: st.ino + 1n })
   return {
     ...fs,
     fstatSync: (fd, o) => bump(fs.fstatSync(fd, o)),
+    closeSync: fd => { closed.push('sync'); fs.closeSync(fd) },
     promises: {
       ...fs.promises,
       open: async (...a) => {
         const h = await fs.promises.open(...a)
         const realStat = h.stat.bind(h)
+        const realClose = h.close.bind(h)
         h.stat = async o => bump(await realStat(o))
+        h.close = async () => { closed.push('handle'); return realClose() }
         return h
       },
     },
@@ -506,13 +509,13 @@ test('openNoFollowSync and openNoFollow on win32 refuse when lstat reports a sym
 test('openNoFollowSync and openNoFollow on win32 refuse and close when the opened file is not the one lstat saw', async () => {
   const fx = await linkFixture()
   try {
-    const injected = swappedInodeFs()
-    /** @type {number[]} */
+    /** @type {string[]} */
     const closed = []
-    const tracking = { ...injected, closeSync: fd => { closed.push(fd); fs.closeSync(fd) } }
-    assert.throws(() => openNoFollowSync(fx.real, fs.constants.O_RDONLY, { platform: 'win32', fs: tracking }), { code: 'ELOOP' })
-    assert.equal(closed.length, 1, 'the fd opened before the check is closed')
+    const injected = swappedInodeFs(closed)
+    assert.throws(() => openNoFollowSync(fx.real, fs.constants.O_RDONLY, { platform: 'win32', fs: injected }), { code: 'ELOOP' })
+    assert.deepEqual(closed, ['sync'], 'the fd opened before the check is closed')
     await assert.rejects(openNoFollow(fx.real, fs.constants.O_RDONLY, { platform: 'win32', fs: injected }), { code: 'ELOOP' })
+    assert.deepEqual(closed, ['sync', 'handle'], 'the handle opened before the check is closed')
   } finally {
     await fx.cleanup()
   }
@@ -548,6 +551,103 @@ test('openNoFollowSync and openNoFollow rethrow ENOENT without O_CREAT on win32'
   await assert.rejects(openNoFollow(missing, fs.constants.O_RDONLY, { platform: 'win32' }), { code: 'ENOENT' })
 })
 
+/**
+ * The real fs, except that the first lstat (sync or promise) runs `race` right after the real lstat
+ * and before its result or error is returned: the name changes between lstat and open.
+ * @param {(p: string) => void} race
+ */
+function racingFs (race) {
+  let raced = false
+  const once = p => { if (!raced) { raced = true; race(p) } }
+  return {
+    ...fs,
+    lstatSync: (p, o) => { try { return fs.lstatSync(p, o) } finally { once(p) } },
+    promises: { ...fs.promises, lstat: async (p, o) => { try { return await fs.promises.lstat(p, o) } finally { once(p) } } },
+  }
+}
+
+const OPEN_FNS = [
+  ['openNoFollowSync', async (file, flags, opts) => fs.closeSync(openNoFollowSync(file, flags, opts))],
+  ['openNoFollow', async (file, flags, opts) => (await openNoFollow(file, flags, opts)).close()],
+]
+
+test('a symlink planted on win32 between an lstat that found nothing and the open is refused, and its target is not created', async t => {
+  const fx = await linkFixture()
+  try {
+    if (!fx.symlinkOk) return t.skip('this account cannot create symlinks')
+    const { O_WRONLY, O_CREAT, O_TRUNC } = fs.constants
+    for (const [name, open] of OPEN_FNS) {
+      const file = path.join(fx.dir, `out-${name}`)
+      const victim = path.join(fx.dir, `victim-${name}`)
+      const injected = racingFs(p => fs.symlinkSync(victim, p))
+      await assert.rejects(open(file, O_WRONLY | O_CREAT | O_TRUNC, { platform: 'win32', fs: injected }), { code: 'ELOOP' }, name)
+      assert.equal(fs.existsSync(victim), false, `${name}: the symlink target is not created`)
+    }
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('a regular file swapped on win32 for a dangling symlink between lstat and open is refused, and its target is not created', async t => {
+  const fx = await linkFixture()
+  try {
+    if (!fx.symlinkOk) return t.skip('this account cannot create symlinks')
+    const { O_WRONLY, O_CREAT, O_TRUNC } = fs.constants
+    for (const [name, open] of OPEN_FNS) {
+      const file = path.join(fx.dir, `out-${name}`)
+      const victim = path.join(fx.dir, `victim-${name}`)
+      fs.writeFileSync(file, 'old')
+      const injected = racingFs(p => { fs.unlinkSync(p); fs.symlinkSync(victim, p) })
+      await assert.rejects(open(file, O_WRONLY | O_CREAT | O_TRUNC, { platform: 'win32', fs: injected }), { code: 'ELOOP' }, name)
+      assert.equal(fs.existsSync(victim), false, `${name}: the symlink target is not created`)
+    }
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('a name created on win32 between an lstat that found nothing and the open is opened under O_CREAT, and refused under O_EXCL', async () => {
+  const fx = await linkFixture()
+  try {
+    const { O_WRONLY, O_CREAT, O_EXCL } = fs.constants
+    for (const [name, open] of OPEN_FNS) {
+      const file = path.join(fx.dir, `new-${name}`)
+      await open(file, O_WRONLY | O_CREAT, { platform: 'win32', fs: racingFs(p => fs.writeFileSync(p, 'other')) })
+      assert.equal(fs.readFileSync(file, 'utf8'), 'other', name)
+      const excl = path.join(fx.dir, `excl-${name}`)
+      await assert.rejects(open(excl, O_WRONLY | O_CREAT | O_EXCL, { platform: 'win32', fs: racingFs(p => fs.writeFileSync(p, 'other')) }),
+        { code: 'EEXIST' }, name)
+      // The caller's O_EXCL on a name lstat finds is EEXIST too, as on POSIX.
+      await assert.rejects(open(fx.real, O_WRONLY | O_CREAT | O_EXCL, { platform: 'win32' }), { code: 'EEXIST' }, name)
+      assert.equal(fs.readFileSync(fx.real, 'utf8'), 'secret')
+    }
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('a win32 no-follow open gives up after 3 attempts when the name keeps changing, with the last error', async () => {
+  const enoent = () => Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+  const eexist = () => Object.assign(new Error('EEXIST'), { code: 'EEXIST' })
+  let opens = 0
+  const flaky = {
+    ...fs,
+    lstatSync: () => { throw enoent() },
+    openSync: () => { opens++; throw eexist() },
+    promises: { ...fs.promises, lstat: async () => { throw enoent() }, open: async () => { opens++; throw eexist() } },
+  }
+  const { O_WRONLY, O_CREAT } = fs.constants
+  assert.throws(() => openNoFollowSync('C:\\x\\flaky', O_WRONLY | O_CREAT, { platform: 'win32', fs: flaky }), { code: 'EEXIST' })
+  assert.equal(opens, 3)
+  await assert.rejects(openNoFollow('C:\\x\\flaky', O_WRONLY | O_CREAT, { platform: 'win32', fs: flaky }), { code: 'EEXIST' })
+  assert.equal(opens, 6)
+  // The caller's own O_EXCL makes EEXIST the answer: no retry.
+  assert.throws(() => openNoFollowSync('C:\\x\\flaky', O_WRONLY | O_CREAT | fs.constants.O_EXCL, { platform: 'win32', fs: flaky }), { code: 'EEXIST' })
+  assert.equal(opens, 7)
+  await assert.rejects(openNoFollow('C:\\x\\flaky', O_WRONLY | O_CREAT | fs.constants.O_EXCL, { platform: 'win32', fs: flaky }), { code: 'EEXIST' })
+  assert.equal(opens, 8)
+})
+
 const MODE_ON = '\x1b[?9001h'
 const MODE_OFF = '\x1b[?9001l'
 
@@ -555,6 +655,8 @@ test('createInputModeFilter on win32 removes ESC[?9001h and ESC[?9001l', () => {
   const filter = createInputModeFilter({ platform: 'win32' })
   assert.equal(filter(`${MODE_ON}a${MODE_OFF}b${MODE_ON}${MODE_ON}c`), 'abc')
   assert.equal(filter('plain'), 'plain')
+  // Removing the inner sequence joins its neighbours into another one, which goes too.
+  assert.equal(filter('a\x1b[?9001\x1b[?9001hhb'), 'ab')
 })
 
 test('createInputModeFilter on win32 removes a sequence split at every offset across two chunks', () => {
