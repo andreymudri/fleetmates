@@ -74,7 +74,15 @@ function entries(log) {
   try { text = fs.readFileSync(log, 'utf8') } catch {}
   return text.split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
-const inputs = log => entries(log).filter(entry => typeof entry.input === 'string').map(entry => entry.input)
+// The captured idle-input frame asks the terminal for its device attributes (`ESC [ c`, twice). On Windows
+// the console answers that itself, so the replies reach the fake as input; in the Windows VM run they were
+// `ESC [ ? 61;6;7;21;22;23;24;28;32;42 c`. Nothing the deck typed looks like one, so they are dropped there.
+const CONSOLE_REPLIES = process.platform === 'win32' ? /\x1b\[\?[0-9;]*c/g : null
+const typedText = text => CONSOLE_REPLIES ? text.replace(CONSOLE_REPLIES, '') : text
+const inputs = log => entries(log).filter(entry => typeof entry.input === 'string').map(entry => typedText(entry.input)).filter(text => text !== '')
+// Every request is at least Caution on Windows (floor.platform in approvals/tiers.mjs), and the projector
+// classifies with the host platform, so a test that needs a Safe request cannot run there.
+const NEEDS_SAFE = process.platform === 'win32' && 'every request asks on Windows (floor.platform)'
 
 /**
  * A server side (store, projector, deckd link, deliverer) and one fake claude spawned through deckd as
@@ -176,7 +184,7 @@ async function refused(promise, code) {
   })
 }
 
-test('approve-safe: allow answers 1 and the request closes answered via browser within 3 s', async t => {
+test('approve-safe: allow answers 1 and the request closes answered via browser within 3 s', { skip: NEEDS_SAFE }, async t => {
   const s = await scenario(t, 'approve-safe')
   const req = await s.request('npm run test')
   assert.equal(req.tier, 'safe')
@@ -204,7 +212,7 @@ test('approve-safe: allow answers 1 and the request closes answered via browser 
   assert.equal(s.store.get('SELECT count FROM rule_counters WHERE pattern = ?', 'Bash(npm run test)')?.count, 1)
 })
 
-test('approve-always (SYNTHETIC frame, D-95): option 2 lands only when allowAlways holds, else tier_forbids', async t => {
+test('approve-always (SYNTHETIC frame, D-95): option 2 lands only when allowAlways holds, else tier_forbids', { skip: NEEDS_SAFE }, async t => {
   // Not offered: a Caution request on the captured permission-2 frame, whose option 2 is "No".
   const caution = await scenario(t, 'did-not-land')
   const creq = await caution.request('node --test capture.test.mjs')
@@ -244,7 +252,7 @@ test('deny-then-instruct: deny lands 3, then the follow-up text reaches the fake
     }
   }, 'the follow-up to be accepted')
   await until(() => entries(s.log).some(entry => entry.expectInput), 'the fake to take the paste')
-  const pasted = entries(s.log).find(entry => entry.expectInput).expectInput
+  const pasted = typedText(entries(s.log).find(entry => entry.expectInput).expectInput)
   assert.equal(pasted, '\x1b[200~use pnpm[A instead\n\tplease1~\x1b[201~\r')
   const inner = pasted.slice('\x1b[200~'.length, -'\x1b[201~\r'.length)
   assert.doesNotMatch(inner, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/)
@@ -297,7 +305,7 @@ test('typing guard (D-84): terminal or Focus input 300 ms before the answer give
   }
 })
 
-test('prompt-swap: a Safe answer is refused not_on_screen when a Destructive prompt replaced it; Destructive needs confirm', async t => {
+test('prompt-swap: a Safe answer is refused not_on_screen when a Destructive prompt replaced it; Destructive needs confirm', { skip: NEEDS_SAFE }, async t => {
   const s = await scenario(t, 'prompt-swap')
   const safe = await s.request('npm run test', { onScreen: false })
   const rm = await s.request('rm -rf build')
@@ -334,7 +342,7 @@ test('a popup answer on a Caution request gets tier_forbids', async t => {
   assert.deepEqual(inputs(s.log), [])
 })
 
-test('subagents-parallel: a Safe batch of two prompts of one session answers them in turn (F12)', async t => {
+test('subagents-parallel: a Safe batch of two prompts of one session answers them in turn (F12)', { skip: NEEDS_SAFE }, async t => {
   const s = await scenario(t, 'subagents-parallel')
   const first = await s.request('npm run test')
   const second = await s.request('npm run lint', { onScreen: false })
@@ -345,7 +353,7 @@ test('subagents-parallel: a Safe batch of two prompts of one session answers the
   assert.equal(JSON.parse(s.row(second.id).answer).via, 'batch')
 })
 
-test('a Safe answer after the user tiers file raised the command to Caution follows the Caution rules', async t => {
+test('a Safe answer after the user tiers file raised the command to Caution follows the Caution rules', { skip: NEEDS_SAFE }, async t => {
   const s = await scenario(t, 'approve-safe')
   const req = await s.request('npm run test')
   assert.equal(req.tier, 'safe')
@@ -446,7 +454,7 @@ test('an AskUserQuestion with several questions or a multi-select question gets 
   }
 })
 
-test('the closing hook wins over the deck choice: a terminal allow after a deck deny, a terminal deny after a deck allow', async t => {
+test('the closing hook wins over the deck choice: a terminal allow after a deck deny, a terminal deny after a deck allow', { skip: NEEDS_SAFE }, async t => {
   // The deck's keys are lost, so each answer is did_not_land; then the owner answers in the terminal.
   const a = await scenario(t, 'approve-safe', { wrapLink: lossy, claudePid: 4242 })
   const reqA = await a.request('npm run test')
@@ -509,7 +517,7 @@ test('a follow-up is refused when the screen after the deny is a new prompt, not
   assert.deepEqual(inputs(s.log), ['3'], 'no paste reached the new prompt')
 })
 
-test('a deck allow its own hook proves is counted once with a real Claude pid', async t => {
+test('a deck allow its own hook proves is counted once with a real Claude pid', { skip: NEEDS_SAFE }, async t => {
   const s = await scenario(t, 'approve-safe', { claudePid: 4242, wrapLink: link => linkWith(link, { onParsed: () => () => {} }) })
   const req = await s.request('npm run test')
   const { outcome } = await s.deliverer.answer(req.id, { choice: 'allow' })
@@ -519,7 +527,7 @@ test('a deck allow its own hook proves is counted once with a real Claude pid', 
   assert.equal(s.store.get('SELECT count FROM rule_counters WHERE pattern = ?', 'Bash(npm run test)')?.count, 1)
 })
 
-test('a batch id that re-classifies above Safe is skipped_not_safe', async t => {
+test('a batch id that re-classifies above Safe is skipped_not_safe', { skip: NEEDS_SAFE }, async t => {
   const s = await scenario(t, 'approve-safe')
   const req = await s.request('npm run test')
   setActiveTiers(() => effectiveTiers(DEFAULT_TIERS, { disable: ['safe.npm.run-script'] }))
@@ -572,7 +580,7 @@ test('a stop_question reply is typed only into the idle input box and its UserPr
 
 const terminalKey = (s, key) => term.request('write', { ptyId: s.ptyId, data: b64(key), source: { kind: 'terminal', name: 'test-terminal' } })
 
-test('a terminal answer while the deck keys are still in flight is a terminal answer, counted and audited', async t => {
+test('a terminal answer while the deck keys are still in flight is a terminal answer, counted and audited', { skip: NEEDS_SAFE }, async t => {
   // The owner presses 1 in the terminal before deckd answers the guarded write, which the keypress
   // makes deckd refuse.
   const ctx = {}
@@ -614,7 +622,7 @@ test('an AskUserQuestion hook that reports another option than the deck typed is
   assert.equal(p.audits(q2.id).at(-1).option_label, 'A')
 })
 
-test('a Try again refused at write time keeps watching the earlier did_not_land answer', async t => {
+test('a Try again refused at write time keeps watching the earlier did_not_land answer', { skip: NEEDS_SAFE }, async t => {
   let writes = 0
   const s = await scenario(t, 'approve-safe', { claudePid: 4242, deliver: { verifyMs: 500 },
     wrapLink: link => linkWith(link, { writeGuarded: (...args) => ++writes === 1 ? Promise.resolve({ at: Date.now() }) : link.writeGuarded(...args) }) })
@@ -644,7 +652,7 @@ test('a UserPromptSubmit closing a deck allow that did not land is a terminal de
   assert.equal(s.store.get('SELECT count(*) AS n FROM rule_counters').n, 0)
 })
 
-test('a hook contradicting the deck inside the verify window settles closed, and batch reports it not ok', async t => {
+test('a hook contradicting the deck inside the verify window settles closed, and batch reports it not ok', { skip: NEEDS_SAFE }, async t => {
   const s = await scenario(t, 'approve-safe', { wrapLink: lossy })
   const req = await s.request('npm run test')
   const { outcome } = await s.deliverer.answer(req.id, { choice: 'allow' })
@@ -660,7 +668,7 @@ test('a hook contradicting the deck inside the verify window settles closed, and
   assert.deepEqual(await results, [{ id: reqB.id, ok: false, error: 'request_closed' }])
 })
 
-test('a hook that closes the request before deckd answers the accepted write is settled once by the write', async t => {
+test('a hook that closes the request before deckd answers the accepted write is settled once by the write', { skip: NEEDS_SAFE }, async t => {
   // Agreeing hook: the deck's keys were accepted, so the deck answered, counted and audited once.
   const ctx = {}
   const accepted = link => linkWith(link, { writeGuarded: async (...args) => {
@@ -722,7 +730,7 @@ test('a tier that rises during the screen read is checked before the keys are wr
   assert.deepEqual(inputs(s.log), [])
 })
 
-test('a terminal answer while a Try again is in flight is audited once, via terminal, and counted', async t => {
+test('a terminal answer while a Try again is in flight is audited once, via terminal, and counted', { skip: NEEDS_SAFE }, async t => {
   let writes = 0
   const ctx = {}
   const s = await scenario(t, 'approve-safe', { claudePid: 4242, deliver: { verifyMs: 300 }, wrapLink: link => linkWith(link, { writeGuarded: async () => {
@@ -783,7 +791,7 @@ test('a deck free-text reply that did not land is a terminal answer when the own
   assert.doesNotMatch(s.row(question.id).answer, /deck text/)
 })
 
-test('a late proof of a did_not_land answer while a Try again is refused is the deck answer (row 15)', async t => {
+test('a late proof of a did_not_land answer while a Try again is refused is the deck answer (row 15)', { skip: NEEDS_SAFE }, async t => {
   // The deck's first '1' reaches Claude, which is slow: no screen proof (onParsed is a no-op) and its
   // PostToolUse is held. Try again reads the stale screen (Claude has not redrawn); its write is then
   // refused screen_changed by deckd after the held hook closed the request.
@@ -842,7 +850,7 @@ test('a refused Try again restores the earlier answer: deck allow, refused deny,
   await refused(a.deliverer.followup(idA, 'use pnpm'), 'followup_window_closed')
 })
 
-test('a refused Try again restores the earlier answer: deck deny, refused allow, the owner presses 1', async t => {
+test('a refused Try again restores the earlier answer: deck deny, refused allow, the owner presses 1', { skip: NEEDS_SAFE }, async t => {
   // A terminal allow, counted as terminal.
   const b = await scenario(t, 'approve-safe', { claudePid: 4242, deliver: { verifyMs: 300 }, wrapLink: refusedRetry() })
   const idB = (await b.request('npm run test')).id
@@ -857,7 +865,7 @@ test('a refused Try again restores the earlier answer: deck deny, refused allow,
   assert.equal(b.store.get('SELECT count FROM rule_counters WHERE pattern = ?', 'Bash(npm run test)')?.count, 1)
 })
 
-test('an accepted Try again stops the earlier late watch: one audit row and one count', async t => {
+test('an accepted Try again stops the earlier late watch: one audit row and one count', { skip: NEEDS_SAFE }, async t => {
   let writes = 0
   const s = await scenario(t, 'approve-safe', { claudePid: 4242, deliver: { verifyMs: 300 },
     wrapLink: link => linkWith(link, { writeGuarded: (...args) => ++writes === 1 ? Promise.resolve({ at: Date.now() }) : link.writeGuarded(...args) }) })

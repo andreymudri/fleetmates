@@ -11,6 +11,7 @@ import nodePty from 'node-pty'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
+import { closeWin32Pseudoconsole } from '../../deckd/pty-host.mjs'
 import { endpoint, killTree, runtimeBase } from '../../platform/index.mjs'
 import { posixTest } from '../helpers/platform.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
@@ -190,10 +191,23 @@ afterEach(() => {
 })
 
 after(async () => {
-  // killTree, not pty.kill(): on win32 node-pty's kill() lists the console's processes through an
-  // agent that failed with `AttachConsole failed` in the Windows VM run, leaving children alive.
+  // deckd's own PTYs first, through deckd, which kills each tree and on win32 closes its console. Node
+  // documents that kill() on Windows ends a process abruptly, so the SIGTERM below runs no deckd shutdown
+  // there and would leave them running.
+  const left = browser ? await browser.request('list').then((res) => res.ptys, () => []) : []
+  await Promise.all(left.map((/** @type {any} */ p) => new Promise((resolve) => {
+    const timer = setTimeout(done, 5000)
+    const off = browser.on('exit', (ev) => { if (ev.ptyId === p.ptyId) done() })
+    function done () { clearTimeout(timer); off(); resolve(undefined) }
+    browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(done)
+  })))
+  // This file's own PTYs. killTree, not pty.kill(): on win32 node-pty's kill() lists the console's
+  // processes through an agent that failed with `AttachConsole failed` in the Windows VM run, leaving
+  // children alive. On win32 the console is then closed as deckd closes its own; deckd's PtyHost
+  // explains why a killed or exited ConPTY child needs that.
   for (const { pty } of ptys) {
     try { killTree(pty.pid, 'SIGKILL') } catch {}
+    if (process.platform === 'win32') closeWin32Pseudoconsole(pty)
   }
   browser?.close()
   stoppingDeckd = true
@@ -302,10 +316,23 @@ test('fm attach replays earlier output, then streams, with no byte lost or doubl
 
 test('fm claude and fm attach exit with the code of a signalled child when the PTY dies', async () => {
   const attach = ptys[ptys.length - 1]
+  /** @type {Promise<any>} */
+  const exitEvent = new Promise((resolve) => {
+    const off = browser.on('exit', (ev) => { if (ev.ptyId === ptyId) { off(); resolve(ev) } })
+  })
   await browser.request('kill', { ptyId, signal: 'SIGKILL', graceMs: 0 })
-  const [a, b] = await Promise.all([fm.exited(), attach.exited()])
-  assert.equal(a.exitCode, 128 + 9)
-  assert.equal(b.exitCode, 128 + 9)
+  const [a, b, ev] = await Promise.all([fm.exited(), attach.exited(), exitEvent])
+  if (process.platform === 'win32') {
+    // taskkill /F ends the tree without a signal: deckd reports the exit code Windows gives it (1 in
+    // the Windows VM run), and fm exits with that code.
+    assert.equal(ev.signal, null)
+    assert.equal(a.exitCode, ev.code)
+    assert.equal(b.exitCode, ev.code)
+  } else {
+    assert.equal(ev.signal, 'SIGKILL')
+    assert.equal(a.exitCode, 128 + 9)
+    assert.equal(b.exitCode, 128 + 9)
+  }
 })
 
 posixTest('fm claude passes its environment, exits with the child\'s exit code, and restores the terminal', { reason: '/bin/sh and stty' }, async () => {
@@ -1202,7 +1229,10 @@ for (const [platform, skip] of /** @type {const} */ ([['win32', false], ['linux'
         spawn: /** @type {any} */ ((/** @type {string} */ file, /** @type {string[]} */ args) => { spawned.push([file, args]); return child })
       })
       assert.equal(fm.stderr(), FALLBACK_LINE)
-      assert.deepEqual(spawned.map(([, args]) => args), [['--flag']])
+      // fm's own arguments come last. On a Windows host claude resolves to fakeBin's claude.cmd, which
+      // commandSpawn unwraps to node with the fake's script before them (the Windows VM run).
+      assert.equal(spawned.length, 1)
+      assert.deepEqual(spawned[0][1].slice(-1), ['--flag'])
       assert.deepEqual(fm.signals, platform === 'win32' ? ['SIGTERM', 'SIGINT'] : ['SIGHUP', 'SIGTERM', 'SIGINT'])
       child.emit('exit', 4, null)
       assert.equal(await fm.exited, 4)

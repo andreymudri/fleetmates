@@ -83,6 +83,31 @@ export function signalProcessGroup (pid, signal, kill = process.kill) {
  * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function, hostEnv?: Record<string, string | undefined>, nodePath?: string }} PtyDeps
  */
 
+const AGENT_SHAPE = "node-pty's agent is not the 1.1.0 shape"
+
+/**
+ * Close the win32 pseudoconsole of a node-pty 1.1.0 process the way PtyHost does (its
+ * #closePseudoconsole explains why not through node-pty's kill()): the native kill, which calls
+ * ClosePseudoConsole, then disposing the conout worker. Exported for tests that run node-pty
+ * themselves. Returns null once closed, else why it was not: the agent is not the 1.1.0 shape, or
+ * the message of what threw.
+ * @param {any} proc a node-pty process
+ * @returns {string | null}
+ */
+export function closeWin32Pseudoconsole (proc) {
+  const agent = proc._agent
+  if (!agent || typeof agent._ptyNative?.kill !== 'function' || typeof agent._pty !== 'number') return AGENT_SHAPE
+  try {
+    if (agent._inSocket) agent._inSocket.readable = false
+    if (agent._outSocket) agent._outSocket.readable = false
+    agent._ptyNative.kill(agent._pty, Boolean(agent._useConptyDll))
+    agent._conoutSocketWorker?.dispose()
+  } catch (err) {
+    return /** @type {Error} */ (err).message
+  }
+  return null
+}
+
 export class PtyHost {
   /**
    * Spawn `claude` in a new PTY. Refuses with code `spawn_refused` any argv[0]
@@ -380,19 +405,9 @@ export class PtyHost {
   #closePseudoconsole () {
     if (this.platform !== 'win32' || this.pseudoconsoleClosed) return
     this.pseudoconsoleClosed = true
-    const agent = this.proc._agent
-    if (!agent || typeof agent._ptyNative?.kill !== 'function' || typeof agent._pty !== 'number') {
-      console.error(`deckd: cannot close the pseudoconsole of ${this.ptyId}: node-pty's agent is not the 1.1.0 shape`)
-      return
-    }
-    try {
-      if (agent._inSocket) agent._inSocket.readable = false
-      if (agent._outSocket) agent._outSocket.readable = false
-      agent._ptyNative.kill(agent._pty, Boolean(agent._useConptyDll))
-      agent._conoutSocketWorker?.dispose()
-    } catch (err) {
-      console.error(`deckd: closing the pseudoconsole of ${this.ptyId} failed: ${/** @type {Error} */ (err).message}`)
-    }
+    const problem = closeWin32Pseudoconsole(this.proc)
+    if (problem === AGENT_SHAPE) console.error(`deckd: cannot close the pseudoconsole of ${this.ptyId}: ${problem}`)
+    else if (problem) console.error(`deckd: closing the pseudoconsole of ${this.ptyId} failed: ${problem}`)
   }
 
   /** Clear the timers and the screen model; on win32 also close the pseudoconsole if still open. */
