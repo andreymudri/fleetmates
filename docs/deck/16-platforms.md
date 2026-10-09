@@ -23,6 +23,15 @@ in `doctor` instead of failing.
 | Meetings (scribed) | yes | no, reported by doctor | no, reported by doctor |
 | Auto-approve (safe tier) | yes | yes | no: every request asks (section 6) |
 
+The Node floor is `>=24.16.0` (`engines` in `hub/package.json`) on every platform. Node 24.2 to
+24.15 `node:sqlite` truncates a bound string at its first NUL. This was measured with Node 24.9 on
+the Windows 11 test VM, and Node 24.16 fixes it.
+
+On macOS node-pty runs every PTY through its prebuilt `spawn-helper`, which needs its execute bits.
+npm 11 skips install scripts by default, so the deck's `postinstall` that sets them may never
+run. deckd therefore makes the helper executable itself before its first PTY spawn on macOS
+([13-operations.md](13-operations.md) section 14.1).
+
 ## 2. Runtime base and endpoints
 
 Every process that talks to deckd or the hook endpoint derives the address from one function,
@@ -40,9 +49,11 @@ Linux 108) the endpoint moves to `/tmp/fleetmates-deck-<uid>/<name>.sock`, and t
 apply to that directory.
 
 On Windows an endpoint is `\\.\pipe\fleetmates-deck-<h>-<name>`, where `<h>` is the first 16 hex
-digits of the SHA-256 of the resolved runtime base, lower-cased. Two tests with two runtime dirs
-get two pipes, and the hook, which is copied alone into the share directory, computes the same
-name with its own inline copy of the function. A unit test pins that the two copies agree.
+digits of the SHA-256 of the resolved runtime base, lower-cased, followed by a NUL and the
+endpoint's secret (section 3). Without a secret `endpoint` throws on win32. Two tests with two
+runtime dirs get two pipes, and the hook, which is copied alone into the share directory,
+computes the same name with its own inline copy of the function. A unit test
+(`hook-platform.test.mjs`) pins that the two copies agree.
 
 The hook stays a single self-contained file (it is copied to `share/hook/deck-hook.mjs` by
 `init`), so it never imports `hub/platform/`.
@@ -53,17 +64,47 @@ On POSIX nothing changes: the socket is 0600 inside a 0700 directory owned by th
 file mode is the authentication (03-architecture section 5).
 
 On Windows a named pipe has no file mode. libuv creates the pipe with the default security
-descriptor, which grants full control to the creating user, SYSTEM and Administrators, and read
-access to Everyone. A client must open the pipe for read and write, so another non-admin user
-cannot connect. The orchestrator measures this on the Windows 11 test VM with a second local
-account before the change ships, and records the result here. Administrators can reach the pipe, the same as they can read a POSIX user's
-files with sudo.
+descriptor. Measured with a probe on the Windows 11 test VM (Node 24.21): the pipe's DACL grants
+read to Everyone and to Anonymous, full control to SYSTEM and to Administrators, and full control
+to the creating user. A client must open the pipe for read and write, so another non-admin user
+cannot connect. Administrators can reach the pipe, the same as they can read a POSIX user's files
+with sudo. A second `listen` on a pipe name that is already listening fails with `EADDRINUSE`
+(measured on the same VM), so another process cannot serve a name the deck holds.
 
-The pipe name is predictable. To stop another user from creating the pipe first and waiting for
-the deck to connect (squatting), deckd creates its pipe with the first-instance flag that libuv
-sets on every `listen` (`FILE_FLAG_FIRST_PIPE_INSTANCE`), and refuses to start when the name is
-taken. A client does not verify the server, which matches the POSIX model, where the runtime
-directory check is what stops a squatter.
+A pipe name is machine-global, and any local user can list `\\.\pipe\`. A user who could
+predict the name could create it before the deck starts and receive hook envelopes or `fm`
+keystrokes (squatting). The name is therefore not predictable. Each endpoint has its own key
+file in the deck directory, `<deckDir(base)>\endpoint-deckd.key` and `endpoint-hooks.key`, under
+`%LOCALAPPDATA%`, which only the user, SYSTEM and Administrators can read. A key is 32 random bytes
+written as 64 lowercase hex digits, and the pipe name hashes it (section 2), so the name changes
+every time its creator starts.
+
+- The creator (deckd for `deckd`, the deck server for `hooks`) starts its pipe with
+  `listenEndpoint` in `hub/platform/index.mjs`. It first takes a start lock,
+  `endpoint-<name>.lock`, which records its pid and start time and is held while it listens. A
+  lock whose holder is a live deck process (its pid is alive and was created at the recorded
+  start time, within 2 s) refuses the start with `EADDRINUSE`, so deckd still refuses to run
+  twice. A lock whose holder is dead, or whose pid now belongs to a process created at another
+  time, is taken over. The creator then listens on the pipe of a new random key, and only then
+  writes the key file, so a client never reads a key whose pipe is not yet this server's. A clean
+  close removes the key and the lock.
+- Clients (the deckd client used by `fm` and the web server, and the hook) read the key on every
+  connect and never write it. A missing key means the server is not running: the hook spools,
+  `fm` reports that deckd is not running. A key whose lock names a pid that is not alive (what a
+  crashed server leaves) counts as missing for the hook and the deckd client.
+- On Windows `fleetmates-deck stop` ends a service with `taskkill /F`, which skips the server's
+  own close, so the service manager removes that server's key and lock itself after the kill, only
+  while the lock still names the pid it killed.
+- A process that answers on an old pipe name is not asked anything at the next start: the key is
+  replaced, so clients move to the new name. A unit test pins that a squatter on the old name of a
+  crashed server neither blocks the next start nor receives what is sent after it.
+
+What remains (stated in `listenEndpoint`'s comment): a server ended without `stop` (a crash, a
+logoff, a reboot) leaves its key and lock. Once Windows gives the dead pid to another process, the
+hook and the deckd client dial the old name again until the next start replaces the key, and a
+local user who saw that name and created it receives what they send. `setupPaths` and the doctor's
+probe read the key without checking the lock. A client does not verify the server, which matches
+the POSIX model, where the runtime directory check is what stops a squatter.
 
 ## 4. Services
 
@@ -75,12 +116,17 @@ implementation from `process.platform`:
 - **launchd** (macOS): plists `io.fleetmates.deck.deckd.plist` and `io.fleetmates.deck.web.plist`
   with `ProgramArguments` set to the absolute node binary and entry file, `RunAtLoad`,
   `KeepAlive` on failure, `Umask` 63 (octal 077), stdout and stderr to files in the state `logs`
-  directory. `launchctl bootstrap gui/<uid>`, `launchctl kickstart -k gui/<uid>/<label>`,
-  `launchctl bootout` and `launchctl print` drive them.
+  directory. `install` runs `launchctl bootout` and then `launchctl bootstrap gui/<uid> <plist>`
+  for each; `start` is `launchctl kickstart gui/<uid>/<label>`, `restart` is
+  `launchctl kickstart -k`, and `stop` is `launchctl kill SIGTERM`. `isActive` is the same
+  endpoint or HTTP probe as on Windows.
 - **detached** (Windows): `start` spawns `node <entry>` detached with `windowsHide`, writes the
   pid to `<state>/run/<service>.pid`, and logs to the state `logs` directory. `isActive` is a
-  connect probe of the endpoint (deckd) or an HTTP probe (web), never the pid alone. `stop` kills
-  the recorded tree with `taskkill`. `install` adds a value under
+  connect probe of the endpoint (deckd) or an HTTP probe (web), never the pid alone. `stop` first
+  reads the recorded pid's command line (`Get-CimInstance Win32_Process` through PowerShell) and
+  kills the tree with `taskkill /T /F` only when that command line runs this service's entry file;
+  otherwise, or when the query fails, it only removes the pid file. After a failed
+  `taskkill` it checks again, and `stop` fails while the process still runs. `install` adds a value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` that runs
   `conhost.exe --headless <node> <fleetmates-deck.mjs> start`, so no console window appears at
   logon. No admin rights are needed anywhere.
@@ -103,6 +149,40 @@ deck) goes through the adapter.
   Windows, which both cmd and Git Bash accept. `isDeckHook` matches either separator, so `init`
   stays idempotent and uninstall finds the entry.
 
+ConPTY facts, measured on the Windows 11 test VM (Node 24.21, node-pty 1.1.0), and what the deck
+does about each:
+
+- **SystemRoot.** node-pty passes the environment it is given as it is, and a node child whose
+  environment lacks `SystemRoot` dies at start (exit 134, a `ncrypto::CSPRNG` assertion).
+  `child_process` adds the Windows base variables itself; node-pty does not. deckd hands node-pty
+  `windowsChildEnv(env)`: one key per case-insensitive variable name (so `Path` and `PATH` do not
+  both reach the child), with `SystemRoot`, `SystemDrive`, `windir`, `TEMP`, `TMP`,
+  `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `USERNAME`, `USERDOMAIN`, `LOGONSERVER`, `ComSpec` and
+  `PATHEXT` filled from deckd's own environment when the request lacks them.
+- **Failed spawns.** When `CreateProcess` fails on a file that is not a PE image (error 193),
+  node-pty 1.1.0 leaks the pseudoconsole, a worker thread and the input pipe, so deckd would never
+  exit. deckd therefore checks the program it resolved (after `PATH`, `PATHEXT` and npm cmd-shim
+  unwrapping) before it calls node-pty: anything that is not an existing `.exe` or `.com` file is
+  refused with `spawn_failed`, and node-pty is not called. A `.cmd` that is not an npm shim runs
+  through `ComSpec`, which is an `.exe`.
+- **win32-input-mode.** ConPTY output starts with `ESC[?9001h`, the request for win32-input-mode.
+  Replayed to `fm`'s own console, it switched `fm`'s stdin to input records, and the `Ctrl ]`
+  byte never arrived, so `Ctrl ] d` did not detach. `createInputModeFilter` removes `ESC[?9001h`
+  and `ESC[?9001l`, also when a sequence is split across reads. deckd filters each PTY's output
+  before the ring buffer, the screen model and output events, and `fm` filters everything it
+  writes to its own stdout. On Linux and macOS the filter passes every byte through.
+- **Console replies.** The Windows console answers device attribute queries (`ESC[c`, DA1) by
+  writing the reply into the child's stdin. Bracketed paste reaches the child intact.
+- **No `O_NOFOLLOW`.** `fs.constants.O_NOFOLLOW` is undefined on win32, and a normal user can
+  create symbolic links there, so a plain `O_NOFOLLOW` open follows a link. Every no-follow open
+  in the deck goes through `openNoFollowSync` or `openNoFollow` in `hub/platform/index.mjs`. On
+  POSIX they add `O_NOFOLLOW`. On win32 they `lstat` the name and refuse a symbolic link with
+  `ELOOP`, open, then `fstat` the descriptor and refuse (closing it) when its device and inode
+  differ from the `lstat`. An `O_CREAT | O_EXCL` open on Windows follows a dangling symbolic link
+  planted after the `lstat` and creates its target; the open then refuses and removes that
+  target, but only when it is still the descriptor's own empty regular file. Residual: a window
+  between that `lstat` and the `unlink`, and only an empty regular file is ever removed.
+
 ## 6. Approvals on Windows
 
 The tier engine parses POSIX shell and POSIX paths. On Windows a `C:\` path can escape the
@@ -110,6 +190,21 @@ repository-scope checks, so `classify` adds `floor.platform` (tier `caution`) to
 when the platform is `win32`. Nothing is auto-approved there; every request reaches the human.
 Floors that name service control gain their macOS and Windows forms: `launchctl` against a
 `io.fleetmates.deck.*` label, and writes to `~/Library/LaunchAgents/io.fleetmates.deck.*`.
+
+Decision (D-150):
+
+- **POSIX path parsing for Bash.** Claude Code runs its Bash tool through Git Bash on Windows, so
+  the tier engine resolves parsed command paths with `path.posix` on every platform, never with
+  the host's `path`. On win32 a Windows path and its Git Bash form name the same file: `C:\x`,
+  `C:/x` and `/c/x` all read as `/c/x`, with `\` read as `/`.
+- **Case-insensitive deck paths.** On win32 the deck's own protected paths (from
+  `setupPaths(env, { platform: 'win32' })`) match case-insensitively, with `\` and `/` alike. Every
+  floor probe that is Destructive on Linux stays Destructive on win32, plus `floor.platform`.
+- **No rule writes on win32.** Auto-approval is off there, and a permission rule written into
+  `.claude/settings.local.json` would auto-approve inside Claude Code itself. `validatePattern`
+  and the rule write path refuse every rule on win32 with `rules_unsupported_on_win32`
+  (`POST /api/rules` answers 422). Rules added by hand are still listed and classified. The
+  persistence floor for rules also covers `~/Library/LaunchAgents/io.fleetmates.deck.*`.
 
 ## 7. Paths
 
@@ -127,13 +222,35 @@ win on Windows too when they are set, which is what the tests use.
 ## 8. Verification
 
 - Linux: the hub suite and the e2e specs, as before.
-- Windows: the hub suite runs on a local Windows 11 VM (dockur/windows over KVM, Node 24, Git for
-  Windows), plus a manual smoke: `init`, `start`, a session from the deck, `fm claude` with the
-  fake claude, `fm attach`, and a hook event reaching the Home card.
-- macOS: there is no local macOS machine and a macOS VM on non-Apple hardware breaks the license,
-  so the macOS paths are pinned by unit tests that inject `platform: 'darwin'`, and by running
-  the Linux suite with `XDG_RUNTIME_DIR` unset and a long `HOME` (the fallback paths). The hub
-  suite on a GitHub macOS runner is the last check, not the first.
+- Windows: the hub suite runs on a local Windows 11 VM (dockur/windows over KVM, Node 24.21, Git
+  for Windows), one test file at a time, driven by scripts kept outside the repository. The
+  results, all reported by the orchestrator from that VM:
+
+  | Tree | Pass | Fail | Skipped |
+  |---|---|---|---|
+  | master before the port | 891 | 951 | not recorded |
+  | after the Windows test sweep | 1653 | 0 | 425 |
+  | after the per-endpoint pipe keys (section 3) | 1684 | 0 | 428 |
+
+  Each skip is one test with its reason in the skip message (`posixTest`, below).
+- Windows end to end, from the npm tarball (0.5.2) on the same VM:
+  `npm install -g --prefix <dir> <tarball>`, `fleetmates-deck init`, `fleetmates-deck start`,
+  `fleetmates-deck doctor` (exit 0, deckd and web active), then `fm claude` with a fake claude (a
+  node script behind `claude.cmd`) through deckd in ConPTY. Its SessionStart, UserPromptSubmit
+  and SessionEnd hooks reached the server: the session was linked to the claude session id, its
+  task was taken from the prompt, and its state was ended after the exit. `fm ls` and the
+  scrollback API answered, and `fm` exited 0.
+- macOS: there was no macOS machine. A macOS VM on non-Apple hardware breaks the license. Nothing
+  was observed on a real Mac. The macOS paths are pinned by unit tests on Linux that inject
+  `platform: 'darwin'`, by the Linux suite run with `XDG_RUNTIME_DIR` unset and a long `HOME`
+  (the fallback paths), and by the CI job below on `macos-latest`.
+- CI: the `hub` job of `.github/workflows/deck.yml` runs on a matrix of `ubuntu-latest`,
+  `macos-latest` and `windows-latest`, with `fail-fast: false`. Every runner runs the same
+  steps: the Node version from `hub/.node-version`, `npm ci`, the web build, a short check of
+  named platform regressions, then `npm --prefix hub test`. On Windows the browser tests use the
+  Chrome of the runner image, found by `findChromium` under `%ProgramFiles%`, and the regression
+  check's POSIX-only tests skip with their reason. The Windows and macOS runs of this job had not
+  happened when this section was written.
 
 Tests that assert POSIX modes, symlinks or Unix socket files skip on Windows through
 `posixTest` in `hub/test/helpers/platform.mjs`, with the reason in the skip message. A skip is

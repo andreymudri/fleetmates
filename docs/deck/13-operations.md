@@ -8,8 +8,8 @@ Command names follow [03-architecture.md](03-architecture.md) section 6. They ar
 
 | Need | Version or note | Status |
 |---|---|---|
-| Linux with systemd user services | Omarchy (Arch, Hyprland) is the reference machine. WSL, Windows and macOS are out of v1 | Decided (Linux only) |
-| Node.js | 24.2 or newer (fleetmates requires `>=24.2.0`); the hub pins an exact tested minor in `hub/.node-version` for CI ([09-testing.md](09-testing.md) section 10) | Decided (Node 24+); minor pin Proposed |
+| Linux with systemd user services | Omarchy (Arch, Hyprland) is the reference machine. macOS and native Windows also run the deck since D-149 (section 14, [16-platforms.md](16-platforms.md)) | Decided (D-149) |
+| Node.js | 24.16 or newer for the hub (`engines` `>=24.16.0`, [16-platforms.md](16-platforms.md) section 1); fleetmates itself requires `>=24.2.0`; the hub pins an exact tested minor in `hub/.node-version` for CI ([09-testing.md](09-testing.md) section 10) | Decided (Node 24+); minor pin Proposed |
 | Build tools for `node-pty` | Only if the pinned `node-pty` has no Linux prebuild for Node 24 (verify at M0). On Arch: `base-devel` and `python` | Proposed |
 | Claude Code | Any version; the tested one is the newest hook fixture set, shown by `fleetmates-deck doctor` | Decided (pinned tested version) |
 | Browser | Chromium or Firefox, current | Proposed (qa-checklist 1.10) |
@@ -411,6 +411,90 @@ Built from [screens/failures-and-loading.md](screens/failures-and-loading.md) an
 - **Root `README.md`**: a short "fleetmates deck" section: one sentence, one screenshot, three install commands, link to `hub/README.md` and `docs/deck/`.
 - **`hub/README.md`** (also the npm page): what it is and what M1 does (observe; control and approvals come in later milestones), requirements (section 1), install and first run, the security model in plain words (127.0.0.1 only, token, Origin and Host checks, deckd not reachable from the browser), what is stored and for how long (section 8), confidential meeting handling, uninstall, troubleshooting link, milestone roadmap. English (OPS-O4).
 - **Screenshots**: for screens built in M1 (Home busy and calm, Needs-you drawer read-only, First run, failure states), use build screenshots from the Playwright visual suite (fixtures, frozen clock, 1920 x 1080, [qa/qa-checklist.md](qa/qa-checklist.md) section 3). Canvas renders (`render/shots/<Board>.png`) may appear only in a "Where it is going" section, each captioned "Design mockup, not built yet". Store images in `docs/deck/img/` and reference them from `hub/README.md` with absolute `raw.githubusercontent.com` URLs so they render on npm.
+
+## 14. macOS and Windows (D-149)
+
+The design is [16-platforms.md](16-platforms.md). The sections above describe Linux. This one
+covers what differs on macOS and on native Windows. On every platform `fleetmates-deck init`,
+`open`, `start`, `stop`, `doctor` and `status` go through one service adapter
+(`hub/server/setup/service.mjs`), so the commands are the same; what they drive differs.
+
+### 14.1 Installing: npm skips install scripts
+
+npm 11 skips package install scripts by default. Measured with npm 11.19.0 on Linux and on the
+Windows 11 test VM (`npm install -g <tarball>`): npm skips every install script that `allowScripts`
+does not cover, including the deck's own `postinstall` (`node bin/prepare-native.mjs`), even when
+the package is named in `--allow-scripts` for a tarball install.
+
+- Windows and Linux: node-pty's prebuilt binaries work without that script.
+- macOS: the script exists to give node-pty's prebuilt `spawn-helper` its execute bits, and every
+  PTY spawn needs them. deckd does it itself: before its first PTY spawn it makes the helper
+  executable, and it skips the change when the helper already is. When the change is needed but
+  the user running the deck cannot make it (a root-owned or read-only install), the spawn fails
+  with `spawn_failed` and a message saying to `chmod +x` the helper as its owner. Do that, then
+  start the session again.
+
+### 14.2 macOS: launchd
+
+`init` writes two LaunchAgents, `~/Library/LaunchAgents/io.fleetmates.deck.deckd.plist` and
+`io.fleetmates.deck.web.plist`, then for each runs `launchctl bootout` (a job that is not loaded
+is not an error) and `launchctl bootstrap gui/<uid> <plist>`. Each plist runs the absolute node
+binary with the entry file, starts at load (`RunAtLoad`), restarts after a failed exit
+(`KeepAlive` with `SuccessfulExit` false) and sets `Umask` 63 (octal 077).
+
+| Task | Command |
+|---|---|
+| Start both | `fleetmates-deck start` (`launchctl kickstart gui/<uid>/<label>`) |
+| Stop both | `fleetmates-deck stop` (`launchctl kill SIGTERM gui/<uid>/<label>`; stopping deckd ends every PTY session) |
+| Restart the web server | `launchctl kickstart -k gui/<uid>/io.fleetmates.deck.web` |
+| Inspect a job (by hand; the deck never runs it) | `launchctl print gui/<uid>/io.fleetmates.deck.deckd` |
+| Remove autostart | `launchctl bootout gui/<uid>/io.fleetmates.deck.web`, the same for `io.fleetmates.deck.deckd`, then remove the two plists |
+
+Logs: launchd writes each service's stdout and stderr to the state `logs` directory,
+`~/.local/state/fleetmates/deck/logs/deckd.out.log` and `deckd.err.log`, and `web.out.log` and
+`web.err.log`. macOS keeps the XDG paths of section 5 ([16-platforms.md](16-platforms.md)
+section 7). Desktop popups use `osascript`, the bell `afplay`, and Meetings are not available
+(doctor says so).
+
+macOS was not observed on a real machine: these steps are what the adapter's unit tests pin with
+an injected `platform: 'darwin'` on Linux, plus the CI job on `macos-latest`
+([16-platforms.md](16-platforms.md) section 8).
+
+### 14.3 Windows: detached processes and the Run key
+
+There is no service manager. `fleetmates-deck start` starts deckd and the web server as detached,
+hidden `node` processes, each only when its probe does not answer, writes each pid to
+`%LOCALAPPDATA%\fleetmates\deck\state\run\<service>.pid` (`deckd.pid`, `web.pid`), and
+appends its output to `%LOCALAPPDATA%\fleetmates\deck\state\logs\<service>.log`
+(`deckd.log`, `web.log`). No admin rights are needed anywhere.
+
+| Task | Command |
+|---|---|
+| Start both | `fleetmates-deck start` |
+| Stop both | `fleetmates-deck stop` (web first, then deckd; stopping deckd ends every PTY session) |
+| Status | `fleetmates-deck status`, `fleetmates-deck doctor` |
+| Remove autostart | `reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v fleetmates-deck /f` |
+| Logs | `Get-Content -Wait $env:LOCALAPPDATA\fleetmates\deck\state\logs\web.log` (and `deckd.log`) |
+
+- **Autostart.** `init` adds the value `fleetmates-deck` under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, holding
+  `conhost.exe --headless "<node>" "<hub>\bin\fleetmates-deck.mjs" start`, so both services
+  start at logon without a console window. Then it starts both services.
+- **Stop.** `stop` kills a pid only when its command line, read through PowerShell
+  (`Get-CimInstance Win32_Process`), runs that service's entry file. A pid file left by a crash or
+  a reboot that names another program is only removed. It kills with `taskkill /T /F`, which skips
+  the server's own cleanup, so `stop` then removes that server's endpoint key and lock itself
+  ([16-platforms.md](16-platforms.md) section 3).
+- **Start from a local console, or let the Run key start it.** Measured on the Windows 11 test
+  VM: a deck started over an OpenSSH session is killed when that session ends, because the
+  session's job object ends every process in it. Start it from a local console, or log on and let
+  the Run key start it.
+- **Restarts.** Windows Update restarts the machine on its own schedule, which is outside the
+  deck's control. A restart ends every PTY session, as a reboot does on Linux (section 4.1); the
+  Run key starts the deck again at the next logon.
+- Approvals: every request asks, and the deck writes no permission rules on Windows
+  ([16-platforms.md](16-platforms.md) section 6, D-150). Popups and the bell are in-tab only.
+  Meetings are not available (doctor says so).
 
 ## Open items
 

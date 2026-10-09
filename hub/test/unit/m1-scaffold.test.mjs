@@ -105,15 +105,14 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
   }
 })
 
-test('deck CI declares pinned Node, build, and tests on Linux and macOS', async () => {
+test('deck CI declares pinned Node, build, and tests on Linux, macOS and Windows', async () => {
   const version = (await readFile(path.join(hub, '.node-version'), 'utf8')).trim()
   const workflow = await readFile(path.join(root, '.github/workflows/deck.yml'), 'utf8')
   assert.match(version, /^24\.\d+\.\d+$/)
   assert.match(workflow, /^on:\n  push:\n    branches: \[master\]\n  pull_request:\n\njobs:/m)
-  assert.doesNotMatch(workflow, /windows-latest/)
   const hubJob = workflow.split(/^  hub:\s*$/m)[1]?.split(/^  [\w-]+:\s*$/m)[0]
   assert.ok(hubJob)
-  assert.match(hubJob, /^      matrix:\n        os: \[ubuntu-latest, macos-latest\]\n    runs-on: \$\{\{ matrix\.os \}\}$/m)
+  assert.match(hubJob, /^      matrix:\n        os: \[ubuntu-latest, macos-latest, windows-latest\]\n    runs-on: \$\{\{ matrix\.os \}\}$/m)
   assert.match(hubJob, /^      TMPDIR: \/tmp\/hx$/m)
   const steps = hubJob.match(/^    steps:\n[\s\S]*$/m)?.[0].trimEnd()
   assert.equal(steps, [
