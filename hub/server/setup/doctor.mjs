@@ -1,10 +1,18 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import net from 'node:net'
+import http from 'node:http'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { createLineDecoder, encode, PROTO } from '../../deckd/protocol.mjs'
+import { commandSpawn, isPipe, resolveCommand } from '../../platform/index.mjs'
 import { SOCKET_NAME } from '../adapters/scribed.mjs'
 import { hooksInstalled, readSettings } from './hooks.mjs'
+import { createServiceManager } from './service.mjs'
+import { LAUNCHD_LABELS, UNIT_NAMES } from './units.mjs'
+
+const HUB = fileURLToPath(new URL('../..', import.meta.url))
+const SERVICES = ['deckd', 'web']
 
 /** The Claude Code version the newest hook fixture set covers (docs/deck/09-testing.md section 4). */
 export const TESTED_CLAUDE_CODE = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).fleetmatesDeck.testedClaudeCode
@@ -28,13 +36,84 @@ function claudeCheck(version) {
   return { id: 'claude', state: 'failed', blocking: false, detail: `Claude Code ${version}; tested ${tested}` }
 }
 
-function probe(file, args, timeout = 2000) {
-  return spawnSync(file, args, { encoding: 'utf8', timeout, env: process.env })
+function probe(file, args, options = {}) {
+  return spawnSync(file, args, { encoding: 'utf8', timeout: 2000, env: process.env, ...options })
+}
+
+/** Resolve true once `target` (a socket or pipe path, or net connect options) accepts a connection, false on any error or after `timeout` ms. */
+export function connectOnce(target, timeout = 500) {
+  if (!target) return Promise.resolve(false)
+  return new Promise(resolve => {
+    const socket = net.createConnection(target)
+    const done = ok => { clearTimeout(timer); socket.destroy(); resolve(ok) }
+    const timer = setTimeout(() => done(false), timeout)
+    socket.once('connect', () => done(true))
+    socket.once('error', () => done(false))
+  })
+}
+
+/** The web port: DECK_PORT when valid, else config.json `port`, else 47800. Never throws. */
+export function webPort(paths, env = process.env) {
+  if (/^[1-9][0-9]{0,4}$/.test(env.DECK_PORT ?? '') && Number(env.DECK_PORT) <= 65535) return Number(env.DECK_PORT)
+  try {
+    const port = JSON.parse(fs.readFileSync(path.join(paths.config, 'config.json'), 'utf8')).port
+    if (Number.isInteger(port) && port > 0 && port < 65536) return port
+  } catch {}
+  return 47800
+}
+
+/** Resolve true when the web server answers any HTTP request on loopback `port` within `timeout` ms. */
+function httpOnce(port, timeout = 500) {
+  return new Promise(resolve => {
+    const req = http.get({ hostname: '127.0.0.1', port, path: '/', agent: false, timeout }, res => { res.resume(); resolve(true) })
+    req.on('timeout', () => req.destroy(new Error('timeout')))
+    req.on('error', () => resolve(false))
+  })
+}
+
+/** The liveness probe the service adapter uses where the service manager cannot answer (launchd, detached). */
+export function serviceProbe(paths, env = process.env) {
+  return service => service === 'deckd' ? connectOnce(paths.endpoints?.deckd) : httpOnce(webPort(paths, env))
+}
+
+/**
+ * The service adapter doctor, status and init use: `service` when given, else one built for `platform` whose
+ * commands go through the synchronous `run(file, args)` (spawnSync-shaped: `{ status, stdout, stderr }`).
+ */
+export function deckService(paths, { platform = process.platform, run = probe, service, env = process.env } = {}) {
+  if (service) return service
+  return createServiceManager({
+    platform, paths, hubPath: HUB, env,
+    run: async (file, args) => {
+      const result = run(file, args)
+      return { code: result?.status ?? null, stdout: result?.stdout ?? '', stderr: result?.stderr ?? '' }
+    },
+    probe: serviceProbe(paths, env)
+  })
+}
+
+/** The name `status` reports for `service` under the adapter `kind`. */
+function serviceName(kind, service) {
+  if (kind === 'systemd') return UNIT_NAMES[SERVICES.indexOf(service)]
+  if (kind === 'launchd') return LAUNCHD_LABELS[service]
+  return service
+}
+
+/** `claude --version` through resolveCommand and commandSpawn; the x.y.z version or null. */
+function claudeVersion(run, { platform, env, exists, readFile }) {
+  let spawn
+  try {
+    const file = resolveCommand('claude', { env, platform, ...(exists ? { exists } : {}) })
+    spawn = commandSpawn(file, ['--version'], { platform, env, ...(readFile ? { readFile } : {}) })
+  } catch { return null }
+  const result = run(spawn.file, spawn.args, spawn.options)
+  return result?.status === 0 ? String(result.stdout ?? '').match(/\d+\.\d+\.\d+/)?.[0] ?? null : null
 }
 
 function probeDeckd(paths, list = false) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection(path.join(paths.runtime, 'deckd.sock'))
+    if (!paths.endpoints?.deckd) { reject(new Error('no deckd endpoint')); return }
+    const socket = net.createConnection(paths.endpoints.deckd)
     let settled = false
     let expectedId = 1
     const finish = (error, result) => {
@@ -79,11 +158,12 @@ function deckdDetail(hello) {
   return names.length ? `login env adds ${names.length} names: ${names.join(', ')}` : 'deckd running'
 }
 
-/** Run the six terminal setup checks without changing local state. */
-export async function doctor(paths, command, { run = probe } = {}) {
-  const claude = run('claude', ['--version'])
-  const version = claude.status === 0 ? claude.stdout.match(/\d+\.\d+\.\d+/)?.[0] : null
-  const checks = [claudeCheck(version)]
+/**
+ * Run the six terminal setup checks without changing local state. Service state comes from the service adapter
+ * (`service`, or one built for `platform` over `run`); claude runs through resolveCommand and commandSpawn.
+ */
+export async function doctor(paths, command, { run = probe, platform = process.platform, env = process.env, service, exists, readFile } = {}) {
+  const checks = [claudeCheck(claudeVersion(run, { platform, env, exists, readFile }))]
   let configured = false
   try { configured = hooksInstalled(readSettings(paths.settings).value, command) } catch {}
   let usable = false
@@ -94,35 +174,39 @@ export async function doctor(paths, command, { run = probe } = {}) {
     } catch { usable = false }
   }
   checks.push({ id: 'hooks', state: configured && usable ? 'ok' : 'failed', blocking: true, detail: !configured ? 'Observation hooks missing' : usable ? 'Observation hooks installed' : 'Observation hook script missing or unreadable' })
-  const unit = run('systemctl', ['--user', 'is-active', 'fleetmates-deckd.service'])
+  const active = await deckService(paths, { platform, run, service, env }).isActive('deckd')
   let socket = false
   let hello = null
-  if (unit.status === 0 && paths.runtime) {
+  if (active) {
     try {
       hello = await probeDeckd(paths)
       socket = true
     } catch {}
   }
-  checks.push({ id: 'deckd', state: unit.status === 0 && socket ? 'ok' : 'failed', blocking: false, detail: unit.status === 0 && socket ? deckdDetail(hello) : 'deckd unavailable' })
+  checks.push({ id: 'deckd', state: active && socket ? 'ok' : 'failed', blocking: false, detail: active && socket ? deckdDetail(hello) : 'deckd unavailable' })
   checks.push({ id: 'vault', state: 'optional_skipped', blocking: false, detail: 'vault-mcp not checked by terminal setup' })
-  checks.push({ id: 'scribed', state: paths.runtime && fs.existsSync(path.join(path.dirname(paths.runtime), SOCKET_NAME)) ? 'ok' : 'optional_skipped', blocking: false, detail: 'scribed socket optional' })
-  checks.push({ id: 'notify', state: 'pending', blocking: false, detail: 'Send a test ping from Settings' })
+  if (platform === 'linux') checks.push({ id: 'scribed', state: paths.runtime && fs.existsSync(path.join(path.dirname(paths.runtime), SOCKET_NAME)) ? 'ok' : 'optional_skipped', blocking: false, detail: 'scribed socket optional' })
+  else checks.push({ id: 'scribed', state: 'optional_skipped', blocking: false, detail: `unsupported on ${platform}` })
+  if (platform === 'win32') checks.push({ id: 'notify', state: 'optional_skipped', blocking: false, detail: 'in-tab only on win32' })
+  else checks.push({ id: 'notify', state: 'pending', blocking: false, detail: 'Send a test ping from Settings' })
   return checks
 }
 
 /** Read service and hook status for the terminal. */
-export async function status(paths, command, { run = probe } = {}) {
-  const units = ['fleetmates-deckd.service', 'fleetmates-deck.service'].map(name => ({ name, active: run('systemctl', ['--user', 'is-active', name]).status === 0 }))
+export async function status(paths, command, { run = probe, platform = process.platform, env = process.env, service, exists, readFile } = {}) {
+  const manager = deckService(paths, { platform, run, service, env })
+  const units = []
+  for (const name of SERVICES) units.push({ name: serviceName(manager.kind, name), active: await manager.isActive(name) })
   let hooks = false
   try { hooks = hooksInstalled(readSettings(paths.settings).value, command) } catch {}
-  const socket = paths.runtime ? fs.existsSync(path.join(paths.runtime, 'deckd.sock')) : false
-  const claude = run('claude', ['--version'])
-  const claudeVersion = claude.status === 0 ? claude.stdout.match(/\d+\.\d+\.\d+/)?.[0] ?? null : null
+  const deckd = paths.endpoints?.deckd
+  const socket = !deckd ? false : isPipe(deckd) ? await connectOnce(deckd) : fs.existsSync(deckd)
+  const version = claudeVersion(run, { platform, env, exists, readFile })
   let livePtys = 0
   if (socket) {
     try {
       livePtys = (await probeDeckd(paths, true)).ptys.length
     } catch {}
   }
-  return { units, hooks, socket, livePtys, claudeVersion, testedClaudeVersion: TESTED_CLAUDE_CODE }
+  return { units, hooks, socket, livePtys, claudeVersion: version, testedClaudeVersion: TESTED_CLAUDE_CODE }
 }
