@@ -9,6 +9,8 @@ import os from 'node:os'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 import { fleetmatesScriptsDir } from '../../server/adapters/fleetmates.mjs'
 
 const rootState = await import(pathToFileURL(path.join(fleetmatesScriptsDir(), 'state.mjs')).href)
@@ -52,19 +54,21 @@ function stateTree(repo) {
 
 async function harness(t, { runPollMs = 3_600_000, record = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rj-'))
+  let deck
+  t.after(async () => { await deck?.close()
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
   const place = await fleetRepo(dir, { record })
   const env = { HOME: dir, PATH: process.env.PATH }
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // Where the server reads its state for this env on this platform.
+  const { state } = setupPaths(env)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   const staticDir = path.join(dir, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  const deck = await startDeckServer({ env, port: 0, staticDir, notifications: false,
+  deck = await startDeckServer({ env, port: 0, staticDir, notifications: false,
     connectDeckd: async () => { throw Error('fake offline') }, reconnectMs: 60_000, runPollMs,
     runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
-  t.after(async () => { await deck.close()
-    fs.rmSync(dir, { recursive: true, force: true }) })
   let at = 1_790_000_000_000
   let tool = 0
   // `envelope` overrides envelope fields, such as the `claudePid` the hook was stamped with.
@@ -173,7 +177,7 @@ test('a SessionStart inside a teammate worktree makes a teammate session with th
   assert.deepEqual((await h.request(`/api/sessions/${mate.id}/steps`)).data.steps.map(step => step.taskId), ['T2'])
 })
 
-test('an index record that is a FIFO or over 64 KiB is ignored without blocking the projector', async () => {
+posixTest('an index record that is a FIFO or over 64 KiB is ignored without blocking the projector', { reason: 'mkfifo' }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rj-'))
   try {
     const { repo, worktree } = await fleetRepo(dir)
@@ -207,7 +211,7 @@ test('an index record that is a FIFO or over 64 KiB is ignored without blocking 
     execFileSync('mkfifo', [record])
     assert.deepEqual(run(), { steps: [null], roles: ['solo', 'solo'] }, 'a FIFO')
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 

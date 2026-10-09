@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { startDeckServer } from '../../server/main.mjs'
 
 const token = 'a'.repeat(43)
@@ -14,18 +15,20 @@ const pinned = name => JSON.parse(fs.readFileSync(new URL(name, fixtures)))
 
 async function harness(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm1e-'))
+  let deck
+  t.after(async () => { await deck?.close()
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   fs.mkdirSync(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // Where the server reads its state for this env on this platform.
+  const { state } = setupPaths(env)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   const staticDir = path.join(dir, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  const deck = await startDeckServer({ env, port: 0, staticDir, notifications: false,
+  deck = await startDeckServer({ env, port: 0, staticDir, notifications: false,
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }), ...options })
-  t.after(async () => { await deck.close()
-    fs.rmSync(dir, { recursive: true, force: true }) })
   const request = async route => {
     const origin = `http://127.0.0.1:${deck.address().port}`
     const response = await fetch(origin + route, { headers: { Authorization: `Bearer ${token}`, Origin: origin } })

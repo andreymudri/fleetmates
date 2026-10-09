@@ -15,6 +15,7 @@ import { connectDeckd } from '../../deckd/client.mjs'
 import { startDeckServer } from '../../server/main.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const scriptsDir = path.resolve(here, '..', 'fixtures', 'scripts')
@@ -41,7 +42,7 @@ after(async () => {
   await deckd?.close()
   await bin?.cleanup()
   await rt?.cleanup()
-  fs.rmSync(dir, { recursive: true, force: true })
+  if (dir) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -77,13 +78,14 @@ const destructive = inline([
 /** A deck server linked to the shared deckd, with a recording notifier and browser opener. */
 async function server(t, options = {}) {
   const home = fs.mkdtempSync(path.join(dir, 'home-'))
-  const state = path.join(home, '.local/state/fleetmates/deck')
+  // The environment the server gets; the token goes where the server reads it on this platform.
+  const env = { HOME: home, XDG_RUNTIME_DIR: rt.dir, ...options.env }
+  const { state, config } = setupPaths(env)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   const staticDir = path.join(home, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  const config = path.join(home, '.config/fleetmates/deck')
   fs.mkdirSync(config, { recursive: true, mode: 0o700 })
   const popups = []
   const opened = []
@@ -94,13 +96,13 @@ async function server(t, options = {}) {
       return { ok: true, id: popups.length } },
     async dismiss() {}, async bell() {}, async testPing() { return { ok: true } }, close() { closed++ }
   }
-  const deck = await startDeckServer({ env: { HOME: home, XDG_RUNTIME_DIR: rt.dir }, port: 0, staticDir, runPollMs: 3_600_000,
+  const deck = await startDeckServer({ port: 0, staticDir, runPollMs: 3_600_000,
     runCommand: () => ({ status: 0, stdout: '', stderr: '' }), notifier, notificationTickMs: 100,
     scribedStatus: { start: async () => {}, stop() {}, snapshot: () => ({ state: 'unknown' }), isRecording: () => false },
     openBrowser: async (file, { env } = {}) => {
       opened.push(fs.readFileSync(file, 'utf8'))
       openings.push({ mode: fs.statSync(file).mode & 0o777, dirMode: fs.statSync(path.dirname(file)).mode & 0o777, env: { ...env } })
-      return true }, ...options, env: { HOME: home, XDG_RUNTIME_DIR: rt.dir, ...options.env } })
+      return true }, ...options, env })
   t.after(() => deck.close())
   const published = []
   t.after(deck.subscribe(event => published.push(event)))
@@ -232,8 +234,11 @@ test('a popup allow action on a Destructive request answers nothing and opens th
   await until(() => h.opened.length === 1, 'the browser opener')
   assert.match(h.opened[0], new RegExp(`#token=${token}&to=${encodeURIComponent(`/s/${rm.session_id}`)}`))
   const [opening] = h.openings
-  assert.equal(opening.mode, 0o600, 'the bootstrap file is 0600')
-  assert.equal(opening.dirMode, 0o700, 'its directory is 0700 again')
+  // POSIX file modes; Windows has no mode bits to read back, so only the rest of this test runs there.
+  if (process.platform !== 'win32') {
+    assert.equal(opening.mode, 0o600, 'the bootstrap file is 0600')
+    assert.equal(opening.dirMode, 0o700, 'its directory is 0700 again')
+  }
   assert.deepEqual(Object.entries(opening.env).filter(([key, value]) => /TOKEN/i.test(key) || String(value).includes(token)), [], 'the opener env carries no deck token')
   await sleep(300)
   assert.deepEqual(inputs(s.log), [], 'no key reached the Destructive prompt')

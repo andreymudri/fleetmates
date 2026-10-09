@@ -9,17 +9,25 @@ import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { fakeBin } from '../helpers/fake-bin.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 test('child server keeps question and answer in thread tables only and thread deletion scrubs database bytes', async t => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'mpriv-'))
-  const bin = await fakeBin()
-  const state = path.join(home, '.local/state/fleetmates/deck'), config = path.join(home, '.config/fleetmates/deck')
+  let bin, child
+  // Registered before anything that can throw; the server exits before its directory is removed.
+  t.after(async () => { if (child && child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited }
+    await bin?.cleanup(); await fs.rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
+  bin = await fakeBin()
+  const fixture = path.join(home, 'answer.jsonl')
+  const probe = net.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
+  const serverEnv = { HOME: home, PATH: bin.env.PATH, DECK_PORT: String(port), XDG_RUNTIME_DIR: home, FAKE_CLAUDE_P_FIXTURE: fixture }
+  // Where the child server reads its state and config for this env on this platform.
+  const { state, config } = setupPaths(serverEnv)
   await fs.mkdir(state, { recursive: true }); await fs.mkdir(config, { recursive: true })
   const token = 'p'.repeat(43), question = 'QUESTION_PRIVATE_SENTINEL', answer = 'ANSWER_PRIVATE_SENTINEL'
   await fs.writeFile(path.join(state, 'token'), token, { mode: 0o600 })
   await fs.writeFile(path.join(config, 'config.json'), JSON.stringify({ vaultPath: path.join(home, 'unreadable-vault'),
-    vaultCommand: [process.execPath, fileURLToPath(new URL('../fakes/fake-vault-mcp.mjs', import.meta.url))], claudeCommand: path.join(bin.binDir, 'claude') }))
-  const fixture = path.join(home, 'answer.jsonl')
+    vaultCommand: [process.execPath, fileURLToPath(new URL('../fakes/fake-vault-mcp.mjs', import.meta.url))], claudeCommand: bin.claudePath }))
   const original = await fs.readFile(new URL('../fixtures/claude-p/synthetic/no-block.jsonl', import.meta.url), 'utf8')
   const lines = original.trim().split('\n').map(line => JSON.parse(line))
   let sent = false
@@ -29,12 +37,10 @@ test('child server keeps question and answer in thread tables only and thread de
     if (line.event?.delta?.type === 'text_delta') { line.event.delta.text = sent ? '' : answer; sent = true }
   }
   await fs.writeFile(fixture, lines.map(line => JSON.stringify(line)).join('\n') + '\n')
-  const probe = net.createServer(); probe.listen(0, '127.0.0.1'); await once(probe, 'listening'); const port = probe.address().port; await new Promise(resolve => probe.close(resolve))
   let logs = ''
-  const child = spawn(process.execPath, [fileURLToPath(new URL('../../server/main.mjs', import.meta.url))], {
-    env: { HOME: home, PATH: bin.env.PATH, DECK_PORT: String(port), XDG_RUNTIME_DIR: home, FAKE_CLAUDE_P_FIXTURE: fixture }, stdio: ['ignore', 'pipe', 'pipe'] })
+  child = spawn(process.execPath, [fileURLToPath(new URL('../../server/main.mjs', import.meta.url))], {
+    env: serverEnv, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
   child.stdout.on('data', chunk => { logs += chunk }); child.stderr.on('data', chunk => { logs += chunk })
-  t.after(async () => { if (child.exitCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited } await bin.cleanup(); await fs.rm(home, { recursive: true, force: true }) })
   const base = `http://127.0.0.1:${port}`
   const request = async (route, method = 'GET', body) => {
     const response = await fetch(base + route, { method, headers: { Origin: base, Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) })

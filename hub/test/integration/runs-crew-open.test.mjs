@@ -7,6 +7,8 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 
 const token = 'a'.repeat(43)
 const CAP = 256 * 1024
@@ -19,7 +21,8 @@ function home() {
   const bin = path.join(dir, 'bin')
   fs.mkdirSync(bin)
   const env = { HOME: dir, PATH: bin, DECK_TEST_TOKEN: 'not-a-real-token' }
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // Where the server reads its state for this env on this platform.
+  const { state } = setupPaths(env)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   const staticDir = path.join(dir, 'web')
@@ -33,17 +36,18 @@ function home() {
 
 async function harness(t, options = {}) {
   const place = home()
+  let deck
+  t.after(async () => { await deck?.close()
+    fs.rmSync(place.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
   const runs = []
   let reads = 0
   const opened = []
   const runReader = { async list() { reads++
     return structuredClone(runs) }, close() {} }
-  const deck = await startDeckServer({ env: place.env, port: 0, staticDir: place.staticDir, notifications: false,
+  deck = await startDeckServer({ env: place.env, port: 0, staticDir: place.staticDir, notifications: false,
     connectDeckd: async () => { throw Error('fake offline') }, reconnectMs: 60_000, runPollMs: 3_600_000,
     runCommand: () => ({ status: 0, stdout: '', stderr: '' }), runReader,
     services: { async open(...args) { opened.push(args) } }, ...options })
-  t.after(async () => { await deck.close()
-    fs.rmSync(place.dir, { recursive: true, force: true }) })
   const events = []
   deck.subscribe(event => events.push(event))
   const request = async (route, init = {}) => {
@@ -179,7 +183,7 @@ test('plan read returns the markdown, and cuts it at 256 KiB with truncated: tru
   assert.equal((await h.request('/api/runs/alpha/r1/plan')).status, 404)
 })
 
-test('planPath outside the repo, a symlink leaving it, .desktop, an executable .md and a FIFO are 403 path_not_allowed', async t => {
+posixTest('planPath outside the repo, a symlink leaving it, .desktop, an executable .md and a FIFO are 403 path_not_allowed', { reason: 'mkfifo, a symlink and the executable bit' }, async t => {
   const h = await harness(t)
   h.addRepo(h.place.repo, 'alpha', 0)
   const outside = path.join(path.dirname(h.place.repo), 'outside.md')
@@ -280,7 +284,7 @@ function fakeOpener(place) {
   }
 }
 
-test('the production opener answers 202 without waiting for a foreground xdg-open, with argv only and no token in its environment', async t => {
+posixTest('the production opener answers 202 without waiting for a foreground xdg-open, with argv only and no token in its environment', { reason: 'the fake xdg-open is a #!/bin/sh script' }, async t => {
   // runCommand: undefined restores the real synchronous runner, so a regression to it blocks here for 5 s.
   const h = await harness(t, { services: {}, runCommand: undefined })
   h.addRepo(h.place.repo, 'alpha', 0)
