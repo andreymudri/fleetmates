@@ -28,7 +28,7 @@ ${JSON.stringify(request)}`
 export function validateRequest (body) {
   const keys = ['topic', 'preset', 'domain', 'sourceTypes', 'focusNotes', 'repoKey', 'missId', 'relatedNotes', 'sourceUrls']
   // Each refusal names the field, so the form can say which one to fix instead of a bare validation_failed.
-  const fail = field => { throw apiError(422, 'validation_failed', { field }) }
+  const fail = field => { throw apiError(422, 'validation_failed', { fields: [field] }) }
   const unknown = Object.keys(body).find(key => !keys.includes(key))
   if (unknown) fail(unknown)
   const text = (value, max) => typeof value === 'string' && value.trim() && value.length <= max && !/[\u0000-\u001f]/u.test(value)

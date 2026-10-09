@@ -5,11 +5,12 @@ import { searchVault } from '../../state/actions.js'
 import { linkHandler } from '../../shell/Rail.jsx'
 
 /** The form's name for each field the server can refuse (server/research/service.mjs validateRequest). */
-const FIELD_LABELS = { topic: 'the topic', domain: 'the target domain (letters, numbers, - and _ only)', sourceTypes: 'the source types', focusNotes: 'the focus notes', relatedNotes: 'the notes to link', sourceUrls: 'the starting sources (public http or https URLs)', preset: 'the depth' }
+const FIELD_LABELS = { repoKey: 'the repository (research runs in a git repository)', topic: 'the topic', domain: 'the target domain (letters, numbers, - and _ only)', sourceTypes: 'the source types', focusNotes: 'the focus notes', relatedNotes: 'the notes to link', sourceUrls: 'the starting sources (public http or https URLs)', preset: 'the depth' }
 
 export function ResearchForm ({ repos = [], initialTopic = '', domains = [], down = false, busy = false, error, api, onSubmit }) {
   const [topic, setTopic] = useState(initialTopic)
-  const [repoKey, setRepo] = useState(repos[0]?.name ?? '')
+  // Nothing preselected: the list also holds folders the deck only saw sessions in, which are not git repositories.
+  const [repoKey, setRepo] = useState('')
   const [domain, setDomain] = useState(domains[0] ?? '')
   const [preset, setPreset] = useState('standard')
   const [sourceTypes, setSources] = useState(['docs', 'repo'])
@@ -36,7 +37,7 @@ export function ResearchForm ({ repos = [], initialTopic = '', domains = [], dow
       {lookupFailed && !down && <p>Could not check existing notes. Research can proceed.</p>}
       <label>Focus notes (optional)<textarea rows={3} maxLength={3000} value={focusNotes} onChange={event => setFocus(event.target.value)} /></label>
       {down && <p>Could not check your vault for existing notes. Research can proceed; saving will wait.</p>}
-      {error && <p role="alert">{FIELD_LABELS[error.details?.field] ? `Check ${FIELD_LABELS[error.details.field]}: the deck could not accept it.` : titleText(error.message ?? error.code ?? String(error))}</p>}
+      {error && <p role="alert">{FIELD_LABELS[error.details?.fields?.[0]] ? `Check ${FIELD_LABELS[error.details.fields[0]]}: the deck could not accept it.` : titleText(error.message ?? error.code ?? String(error))}</p>}
       <button type="submit" disabled={busy || !sourceTypes.length || !repoKey}>{busy ? 'Launching…' : 'Send scouts'}</button>
     </form></section>
 }
