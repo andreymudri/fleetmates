@@ -66,7 +66,13 @@ function entries(log) {
   try { text = fs.readFileSync(log, 'utf8') } catch {}
   return text.split('\n').filter(Boolean).map(line => JSON.parse(line))
 }
-const inputs = log => entries(log).filter(entry => typeof entry.input === 'string').map(entry => entry.input)
+// On win32 the console inside ConPTY answers the ESC[c queries in the replayed frames with DA1 replies written to the
+// child's stdin (diagnosed on the Windows VM); those are dropped there, and an input that held only them goes too.
+const DA1_REPLY = /\x1b\[\?[0-9;]*c/g
+const inputs = log => {
+  const typed = entries(log).filter(entry => typeof entry.input === 'string').map(entry => entry.input)
+  return process.platform === 'win32' ? typed.map(input => input.replace(DA1_REPLY, '')).filter(input => input !== '') : typed
+}
 
 const CLEAR = { print: '\u001b[2J\u001b[H' }
 const bashInput = (command, description) => ({ tool_name: 'Bash', tool_input: { command, description } })
