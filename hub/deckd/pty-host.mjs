@@ -116,6 +116,8 @@ export class PtyHost {
    */
   constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync } = {}) {
     this.platform = platform
+    /** Set once node-pty's kill() has closed the win32 pseudoconsole. */
+    this.pseudoconsoleClosed = false
     /** For killTree; undefined keeps its defaults. */
     this.killDeps = { platform, kill, spawnSync }
     this.ptyId = newPtyId()
@@ -194,7 +196,9 @@ export class PtyHost {
     this.proc.onExit(({ exitCode, signal }) => {
       if (this.killTimer) clearTimeout(this.killTimer)
       if (this.resizeTimer) clearTimeout(this.resizeTimer)
-      this.exited = { code: exitCode, signal: signalName(signal), at: Date.now() }
+      // node-pty on win32 can report the exit with no code when the
+      // pseudoconsole was closed before the process exit was seen; null then.
+      this.exited = { code: typeof exitCode === 'number' ? exitCode : null, signal: signalName(signal), at: Date.now() }
       hooks.onExit(this, this.exited)
     })
   }
@@ -330,11 +334,32 @@ export class PtyHost {
     // POSIX: node-pty makes the child a session leader, so its pid is its
     // process group id. win32: taskkill /T /F on the tree, whatever the signal.
     killTree(this.pid, signal, this.killDeps)
+    this.#closePseudoconsole()
   }
 
+  /**
+   * win32 only, at most once: node-pty's own kill(), which closes the
+   * pseudoconsole. On a Windows 11 VM a tree killed by taskkill alone left
+   * `conhost.exe --headless` running, no exit event came, and the process
+   * holding the PTY never exited. That kill() is what fixes it is read from
+   * node-pty 1.1.0's lib/windowsPtyAgent.js (it calls the native kill that
+   * closes the console), not run on Windows here.
+   */
+  #closePseudoconsole () {
+    if (this.platform !== 'win32' || this.pseudoconsoleClosed) return
+    this.pseudoconsoleClosed = true
+    try {
+      this.proc.kill()
+    } catch (err) {
+      console.error(`deckd: closing the pseudoconsole of ${this.ptyId} failed: ${/** @type {Error} */ (err).message}`)
+    }
+  }
+
+  /** Clear the timers and the screen model; on win32 also close the pseudoconsole if still open. */
   dispose () {
     if (this.killTimer) clearTimeout(this.killTimer)
     if (this.resizeTimer) clearTimeout(this.resizeTimer)
+    this.#closePseudoconsole()
     this.screen.dispose()
   }
 }

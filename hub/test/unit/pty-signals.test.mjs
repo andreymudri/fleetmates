@@ -24,12 +24,14 @@ test('PTY signals prefer the group, fall back to the owned PID on EPERM, and ret
 
 /**
  * A stand-in for node-pty's spawn that records its arguments and returns a process that never runs.
+ * Each call of the process's own kill() is pushed onto `ptyKills` with its arguments.
  * @param {any[]} calls
+ * @param {any[][]} [ptyKills]
  */
-function fakePtySpawn (calls) {
+function fakePtySpawn (calls, ptyKills = []) {
   return (/** @type {string} */ file, /** @type {any} */ args, /** @type {any} */ opts) => {
     calls.push({ file, args, opts })
-    return { pid: 4242, onData () {}, onExit () {}, write () {}, resize () {} }
+    return { pid: 4242, onData () {}, onExit () {}, write () {}, resize () {}, kill (/** @type {any[]} */ ...a) { ptyKills.push(a) } }
   }
 }
 
@@ -126,32 +128,50 @@ test('on win32 an argument cmd.exe cannot pass safely to a batch claude is refus
   assert.deepEqual(calls, [])
 })
 
-test('on win32 kill runs taskkill on the tree for SIGTERM, SIGINT and SIGHUP and never signals a group', () => {
+test('on win32 kill runs taskkill on the tree for SIGTERM, SIGINT and SIGHUP, then closes the pseudoconsole, and never signals a group', () => {
   for (const signal of /** @type {NodeJS.Signals[]} */ (['SIGTERM', 'SIGINT', 'SIGHUP'])) {
     /** @type {any[]} */
-    const taskkills = []
+    const order = []
     const host = spawnWith(['claude'], {
       platform: 'win32',
       exists: () => false,
-      ptySpawn: fakePtySpawn([]),
-      spawnSync: (/** @type {any[]} */ ...args) => { taskkills.push(args) },
+      ptySpawn: (/** @type {any[]} */ ...a) => {
+        const proc = fakePtySpawn([])(...a)
+        proc.kill = (/** @type {any[]} */ ...k) => { order.push(['pty.kill', ...k]) }
+        return proc
+      },
+      spawnSync: (/** @type {any[]} */ ...args) => { order.push(args) },
       kill: () => { throw new Error('process.kill must not be called on win32') }
     })
     try {
       host.kill(signal, 60000)
-      assert.deepEqual(taskkills, [['taskkill', ['/PID', '4242', '/T', '/F'], { windowsHide: true, stdio: 'ignore' }]], signal)
+      // node-pty's kill() with no signal: on Windows it throws for any signal
+      assert.deepEqual(order, [['taskkill', ['/PID', '4242', '/T', '/F'], { windowsHide: true, stdio: 'ignore' }], ['pty.kill']], signal)
     } finally {
       host.dispose()
     }
+    // dispose after kill does not close the pseudoconsole a second time
+    assert.equal(order.filter((o) => o[0] === 'pty.kill').length, 1, signal)
   }
 })
 
-test('on linux kill signals the process group through the injected kill', () => {
+test('on win32 dispose closes a pseudoconsole that is still open, once', () => {
+  /** @type {any[][]} */
+  const ptyKills = []
+  const host = spawnWith(['claude'], { platform: 'win32', exists: () => false, ptySpawn: fakePtySpawn([], ptyKills) })
+  host.dispose()
+  host.dispose()
+  assert.deepEqual(ptyKills, [[]])
+})
+
+test('on linux kill signals the process group through the injected kill and never calls the pty kill', () => {
   /** @type {any[]} */
   const kills = []
+  /** @type {any[][]} */
+  const ptyKills = []
   const host = spawnWith(['claude'], {
     platform: 'linux',
-    ptySpawn: fakePtySpawn([]),
+    ptySpawn: fakePtySpawn([], ptyKills),
     spawnSync: () => { throw new Error('spawnSync must not be called on linux') },
     kill: (/** @type {number} */ pid, /** @type {string} */ signal) => { kills.push([pid, signal]) }
   })
@@ -161,4 +181,5 @@ test('on linux kill signals the process group through the injected kill', () => 
   } finally {
     host.dispose()
   }
+  assert.deepEqual(ptyKills, [])
 })
