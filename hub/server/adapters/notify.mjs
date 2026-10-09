@@ -112,8 +112,59 @@ export function clipText(text, max, { keepLineFeeds = false } = {}) {
  * the id from the first integer stdout line, then calls `onAction(key)` once for the first later line equal to
  * an offered key; other lines are ignored. The waiting process is killed after `actionWaitMs`, on
  * `dismiss(id)`, when another popup replaces it, and on `close()`. Without `actions` a popup runs as before.
+ * That is the linux notifier; `platform` picks it by default. darwin gets the osascript and afplay notifier below,
+ * and win32 one whose popups and bells resolve `{ ok: false, reason: 'unsupported on win32' }` without running anything.
  */
-export function createNotifier({ notifyCommand = 'notify-send', soundCommand = 'pw-play', dismissCommand = 'makoctl', env = process.env, run = execute, timeoutMs = 2000, actionWaitMs = ACTION_WAIT_MS } = {}) {
+export function createNotifier({ platform = process.platform, ...options } = {}) {
+  if (platform === 'win32') return unsupportedNotifier(platform)
+  if (platform === 'darwin') return createDarwinNotifier(options)
+  return createLinuxNotifier(options)
+}
+
+/** A notifier for a platform without desktop popups: popups and bells resolve unsupported and nothing runs. */
+function unsupportedNotifier(platform) {
+  const unsupported = async () => ({ ok: false, reason: `unsupported on ${platform}` })
+  return { popup: unsupported, bell: unsupported, testPing: unsupported, async dismiss() { return { ok: true } }, close() {} }
+}
+
+/** An AppleScript string literal: backslash, double quote, CR and LF escaped, the whole in double quotes. */
+function appleScriptString(text) {
+  return `"${String(text).replace(/[\\"]/g, char => `\\${char}`).replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`
+}
+
+/**
+ * macOS: a popup is `osascript` with three `-e` script lines, the title and the body each set from an AppleScript
+ * string literal, run as argv with no shell. Notification Center offers no action buttons to a script, so `actions`
+ * are dropped, a popup has no id and `dismiss` does nothing. The bell is `afplay` on the Glass system sound.
+ */
+function createDarwinNotifier({ notifyCommand = 'osascript', soundCommand = 'afplay', env = process.env, run = execute, timeoutMs = 2000 } = {}) {
+  async function call(command, args, code) {
+    try {
+      const result = await run(command, args, { env, timeoutMs })
+      return result.ok ? result : { ok: false, error: { code, exitCode: result.exitCode ?? null } }
+    } catch { return { ok: false, error: { code, exitCode: null } } }
+  }
+  async function popup({ title, body }) {
+    const result = await call(notifyCommand, [
+      '-e', `set deckTitle to ${appleScriptString(clipText(title, TITLE_MAX))}`,
+      '-e', `set deckBody to ${appleScriptString(clipText(body, BODY_MAX, { keepLineFeeds: true }))}`,
+      '-e', 'display notification deckBody with title deckTitle'
+    ], 'notify_failed')
+    return result.ok ? { ok: true, id: null } : result
+  }
+  return {
+    popup,
+    async bell() {
+      const result = await call(soundCommand, ['/System/Library/Sounds/Glass.aiff'], 'bell_failed')
+      return result.ok ? { ok: true } : result
+    },
+    async dismiss() { return { ok: true } },
+    testPing() { return popup({ title: 'fleetmates deck', body: 'Test ping · Desktop notifications are working.' }) },
+    close() {}
+  }
+}
+
+function createLinuxNotifier({ notifyCommand = 'notify-send', soundCommand = 'pw-play', dismissCommand = 'makoctl', env = process.env, run = execute, timeoutMs = 2000, actionWaitMs = ACTION_WAIT_MS } = {}) {
   /** Popup id to the controller that kills its waiting process. */
   const waits = new Map()
   async function call(command, args, code, input) {

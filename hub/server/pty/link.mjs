@@ -10,6 +10,7 @@ import { parseScreen } from '../screen/index.mjs'
 import { ensureRepo } from '../adapters/repos.mjs'
 import { apiError } from '../http/router.mjs'
 import { createIdleTracker, isCountedOutput } from './screen-signals.mjs'
+import { runtimeBase } from '../../platform/index.mjs'
 
 /** deckd events the link forwards to `on` subscribers. */
 const FORWARDED = ['output', 'exit', 'screen', 'input', 'client', 'dropped', 'spawned']
@@ -59,12 +60,13 @@ export function reconnectDelay(attempt, baseMs, random = Math.random) {
  */
 
 /**
- * Create the deckd link. Nothing connects until `start()`.
- * @param {{ env: Record<string, string | undefined>, connectDeckd: Function, reconnectMs?: number, random?: () => number,
+ * Create the deckd link. Nothing connects until `start()`. deckd is reached under `runtimeBase({ env, platform })`:
+ * `XDG_RUNTIME_DIR` when it is set, else the platform's fallback base.
+ * @param {{ env: Record<string, string | undefined>, platform?: string, connectDeckd: Function, reconnectMs?: number, random?: () => number,
  *   now?: () => number, store: object, projector: object, publish: (event: object) => void, timeoutMs?: number }} options
  * @returns {DeckdLink}
  */
-export function createDeckdLink({ env, connectDeckd, reconnectMs = 1000, random = Math.random, now = Date.now, store, projector, publish, timeoutMs = 2000 }) {
+export function createDeckdLink({ env, platform = process.platform, connectDeckd, reconnectMs = 1000, random = Math.random, now = Date.now, store, projector, publish, timeoutMs = 2000 }) {
   let client = null
   let ready = false
   let stopped = false
@@ -207,7 +209,7 @@ export function createDeckdLink({ env, connectDeckd, reconnectMs = 1000, random 
   function retry() {
     setImmediate(() => {
       if (stopped) return
-      if (client || !env.XDG_RUNTIME_DIR) return stateEvent()
+      if (client) return stateEvent()
       clearTimeout(reconnect)
       void connect()
     })
@@ -238,12 +240,12 @@ export function createDeckdLink({ env, connectDeckd, reconnectMs = 1000, random 
     if (wasReady) emit('down', health())
   }
   async function connect() {
-    if (stopped || connecting || client || !env.XDG_RUNTIME_DIR) return
+    if (stopped || connecting || client) return
     connecting = true
     const turn = generation
     let candidate
     try {
-      candidate = await bounded(Promise.resolve().then(() => connectDeckd({ runtimeDir: env.XDG_RUNTIME_DIR, kind: 'server', proto: PROTO })).then(next => {
+      candidate = await bounded(Promise.resolve().then(() => connectDeckd({ runtimeDir: runtimeBase({ env, platform }), kind: 'server', proto: PROTO })).then(next => {
         if (stopped || turn !== generation) { next.close()
           throw Error('stale connection') }
         return next

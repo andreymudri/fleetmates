@@ -3,6 +3,7 @@ import { connect, createServer } from 'node:net'
 import path from 'node:path'
 import { createReorderBuffer } from './reorder.mjs'
 import { dedupeKey, validateEnvelope } from './validate.mjs'
+import { endpoint, isPipe } from '../../platform/index.mjs'
 
 const maxLine = 1024 * 1024
 
@@ -51,12 +52,22 @@ export function createIngestor({ onEvent, onRejected, reorderMs = 250, now = Dat
   }
 }
 
-/** Listen for newline-delimited hook envelopes on the private runtime socket. */
-export async function startHookSocket({ runtimeDir, ingest }) {
-  const dir = path.join(runtimeDir, 'fleetmates-deck')
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
-  chmodSync(dir, 0o700)
-  const socketPath = path.join(dir, 'hooks.sock')
+/**
+ * Listen for newline-delimited hook envelopes on `endpoint(runtimeDir, 'hooks')`: a 0600 Unix socket in a 0700
+ * directory on POSIX, a named pipe on win32. A pipe has no file, so nothing is created, checked, chmodded or
+ * unlinked for it; a pipe name already in use fails with EADDRINUSE. `fsOps` replaces the file system calls in tests.
+ * @param {{ runtimeDir: string, ingest: object, platform?: string, uid?: number | null,
+ *   fsOps?: { mkdirSync: typeof mkdirSync, chmodSync: typeof chmodSync, lstatSync: typeof lstatSync, unlinkSync: typeof unlinkSync } }} opts
+ */
+export async function startHookSocket({ runtimeDir, ingest, platform = process.platform, uid = process.getuid?.() ?? null,
+  fsOps = { mkdirSync, chmodSync, lstatSync, unlinkSync } }) {
+  const socketPath = endpoint(runtimeDir, 'hooks', { platform, uid })
+  const pipe = isPipe(socketPath)
+  if (!pipe) {
+    const dir = path.posix.dirname(socketPath)
+    fsOps.mkdirSync(dir, { recursive: true, mode: 0o700 })
+    fsOps.chmodSync(dir, 0o700)
+  }
   const server = createServer(socket => {
     let pending = ''
     socket.setEncoding('utf8')
@@ -80,14 +91,14 @@ export async function startHookSocket({ runtimeDir, ingest }) {
   try {
     await listen(server, socketPath)
   } catch (error) {
-    if (error.code !== 'EADDRINUSE') throw error
-    const before = lstatSync(socketPath)
-    if (!before.isSocket() || before.uid !== process.getuid() || !(await staleSocket(socketPath))) throw error
-    const after = lstatSync(socketPath)
+    if (error.code !== 'EADDRINUSE' || pipe) throw error
+    const before = fsOps.lstatSync(socketPath)
+    if (!before.isSocket() || (uid !== null && before.uid !== uid) || !(await staleSocket(socketPath))) throw error
+    const after = fsOps.lstatSync(socketPath)
     if (before.dev !== after.dev || before.ino !== after.ino) throw error
-    unlinkSync(socketPath)
+    fsOps.unlinkSync(socketPath)
     await listen(server, socketPath)
   }
-  chmodSync(socketPath, 0o600)
+  if (!pipe) fsOps.chmodSync(socketPath, 0o600)
   return { path: socketPath, close: () => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 }

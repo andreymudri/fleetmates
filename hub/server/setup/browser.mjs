@@ -2,10 +2,11 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
+import { openUrlArgv } from '../../platform/index.mjs'
 
 /** Run a short query command and return its exit status and stdout. */
 async function queryCommand(file, argv, env) {
-  const result = spawnSync(file, argv, { encoding: 'utf8', env, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] })
+  const result = spawnSync(file, argv, { encoding: 'utf8', env, timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
   return { status: result.error ? null : result.status, stdout: result.stdout ?? '' }
 }
 
@@ -13,10 +14,10 @@ async function queryCommand(file, argv, env) {
  * Start a launcher detached. A launcher that exits within `grace` ms reports its exit code; one
  * still running then (a browser started directly from $BROWSER) counts as started and is left alone.
  */
-function startCommand(file, argv, env, grace = 1500) {
+function startCommand(file, argv, env, extra = {}, grace = 1500) {
   return new Promise(resolve => {
     let child
-    try { child = spawn(file, argv, { env, detached: true, stdio: 'ignore' }) } catch { resolve(false); return }
+    try { child = spawn(file, argv, { env, detached: true, stdio: 'ignore', windowsHide: true, ...extra }) } catch { resolve(false); return }
     const timer = setTimeout(() => { child.removeAllListeners(); child.unref(); resolve(true) }, grace)
     child.once('error', () => { clearTimeout(timer); resolve(false) })
     child.once('exit', code => { clearTimeout(timer); resolve(code === 0) })
@@ -38,10 +39,16 @@ function desktopFile(id, env) {
  * Order: each command in $BROWSER (colon separated, `%s` replaced by the file, else appended), then
  * the `xdg-settings get default-web-browser` entry through `gtk-launch` and then `gio launch`, then
  * `xdg-open`. Only the file path is ever passed, so a token inside the file never reaches argv.
+ * That order is linux's. On darwin the file is opened with `open`, and on win32 with `cmd.exe /d /s /c start`
+ * (openUrlArgv, the file quoted by quoteCmdArg, verbatim arguments and no window); $BROWSER is not read there.
  * `query` and `start` are injectable spawners.
  * @returns {Promise<boolean>} whether some launcher reported success
  */
-export async function openInBrowser(file, { env = process.env, query = queryCommand, start = startCommand } = {}) {
+export async function openInBrowser(file, { env = process.env, query = queryCommand, start = startCommand, platform = process.platform } = {}) {
+  if (platform === 'darwin' || platform === 'win32') {
+    const [command, ...argv] = openUrlArgv(file, { platform })
+    return platform === 'win32' ? start(command, argv, env, { windowsVerbatimArguments: true, windowsHide: true }) : start(command, argv, env)
+  }
   for (const entry of (env.BROWSER || '').split(':')) {
     const words = entry.trim().split(/\s+/).filter(Boolean)
     if (!words.length) continue

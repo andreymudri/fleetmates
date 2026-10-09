@@ -9,6 +9,8 @@ import { createIngestor, startHookSocket } from '../../server/ingest/socket.mjs'
 import { drainSpool, startSpoolDrain } from '../../server/ingest/spool.mjs'
 import { createReorderBuffer } from '../../server/ingest/reorder.mjs'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
+import { endpoint } from '../../platform/index.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 
 const hook = { session_id: 's1', transcript_path: '/home/you/.claude/projects/x/a.jsonl', cwd: '/repo', hook_event_name: 'Stop', stop_hook_active: false }
 const line = (hookTs = 1, payload = hook) => JSON.stringify({ v: 1, deckHookVersion: '0.1.0', hookTs, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: payload }) + '\n'
@@ -136,7 +138,7 @@ test('timed ingest retries failed delivery without crashing or repeating applied
   } finally { ingest.close() }
 })
 
-test('socket rejects partial lines and accepts complete lines', async () => {
+posixTest('socket rejects partial lines and accepts complete lines', { reason: 'asserts Unix socket and directory modes' }, async () => {
   const dir = await mkdtemp(path.join('/tmp/hx', 'ingest-'))
   const accepted = []
   const rejected = []
@@ -158,7 +160,7 @@ test('socket rejects partial lines and accepts complete lines', async () => {
   } finally { await server.close(); ingest.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
-test('socket listener restarts after an unclean exit without replacing a live listener', async () => {
+posixTest('socket listener restarts after an unclean exit without replacing a live listener', { reason: 'replaces a stale Unix socket file' }, async () => {
   const dir = await mkdtemp(path.join('/tmp/hx', 'stale-socket-'))
   const moduleUrl = new URL('../../server/ingest/socket.mjs', import.meta.url).href
   const childScript = `import {startHookSocket} from ${JSON.stringify(moduleUrl)}; await startHookSocket({runtimeDir:process.argv[1],ingest:{receive(){},rejectRaw(){}}}); console.log('ready')`
@@ -310,4 +312,34 @@ test('a failed spool apply can retry on the same ingestor without losing its ded
     assert.deepEqual(accepted, [1])
     assert.deepEqual(await readdir(dir), [])
   } finally { ingest.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('on win32 the hook socket listens on the hooks pipe and never touches the file system; a second listener is EADDRINUSE', async () => {
+  // On a POSIX host the pipe name is a relative path, so the listener runs in a private working directory.
+  const cwd = process.cwd()
+  const work = await mkdtemp(path.join(os.tmpdir(), 'ingest-pipe-'))
+  const runtimeDir = path.win32.join('C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run', path.basename(work))
+  const touched = []
+  const spy = name => () => { touched.push(name) }
+  const fsOps = { mkdirSync: spy('mkdirSync'), chmodSync: spy('chmodSync'), lstatSync: spy('lstatSync'), unlinkSync: spy('unlinkSync') }
+  const accepted = []
+  const ingest = createIngestor({ onEvent: row => accepted.push(row.hookTs), onRejected: () => {}, reorderMs: 0 })
+  process.chdir(work)
+  let server
+  try {
+    server = await startHookSocket({ runtimeDir, ingest, platform: 'win32', fsOps })
+    assert.equal(server.path, endpoint(runtimeDir, 'hooks', { platform: 'win32' }))
+    await assert.rejects(startHookSocket({ runtimeDir, ingest, platform: 'win32', fsOps }), { code: 'EADDRINUSE' })
+    const { connect } = await import('node:net')
+    await new Promise(resolve => { const socket = connect(server.path); socket.on('connect', () => socket.end(line(7))); socket.on('close', resolve) })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    ingest.flush()
+    assert.deepEqual(accepted, [7])
+    assert.deepEqual(touched, [])
+  } finally {
+    await server?.close()
+    ingest.close()
+    process.chdir(cwd)
+    await rm(work, { recursive: true, force: true })
+  }
 })

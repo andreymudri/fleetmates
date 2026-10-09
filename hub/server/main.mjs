@@ -44,27 +44,30 @@ import { createVaultService, localDate } from './vault/service.mjs'
 import { refreshCaptures } from './vault/captures.mjs'
 import { createAskEngine } from './ask/engine.mjs'
 import { createAskService } from './ask/service.mjs'
+import { createServiceManager } from './setup/service.mjs'
+import { openUrlArgv, privateFileProblem, runtimeBase } from '../platform/index.mjs'
 const builtSpa = fileURLToPath(new URL('../web/dist/', import.meta.url))
 const deckVersion = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 // Consecutive envelopes at the current deckHookVersion that return an outdated hooks row to ok.
 const currentHookRun = 3
 function runCommand(file, args, env) {
-  try { return { status: 0, stdout: execFileSync(file, args, { encoding: 'utf8', timeout: 5000, env, stdio: ['ignore', 'pipe', 'pipe'] }), stderr: '' } }
+  try { return { status: 0, stdout: execFileSync(file, args, { encoding: 'utf8', timeout: 5000, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }), stderr: '' } }
   catch (error) { return { status: error.status ?? 1, stdout: '', stderr: '' } }
 }
 /**
- * A scribed client for a server without `XDG_RUNTIME_DIR`: every call fails as unavailable, so nothing falls back to
- * the process environment's socket (scribed.mjs `defaultSocketPath` reads `process.env`).
+ * A scribed client for a server without `XDG_RUNTIME_DIR`, or off linux, where scribed does not run: every call fails
+ * as unavailable with `message`, so nothing falls back to the process environment's socket (scribed.mjs
+ * `defaultSocketPath` reads `process.env`).
  */
-function unavailableScribed() {
-  const fail = async () => { throw new ScribedUnavailable('XDG_RUNTIME_DIR is not set') }
+function unavailableScribed(message) {
+  const fail = async () => { throw new ScribedUnavailable(message) }
   return {
     status: fail, start: fail, stop: fail, tail: fail, history: fail, ask: fail,
     subscribe({ onClose = () => {} } = {}) {
       let closed = false
       const finish = error => { if (!closed) { closed = true
         onClose(error) } }
-      queueMicrotask(() => finish(new ScribedUnavailable('XDG_RUNTIME_DIR is not set')))
+      queueMicrotask(() => finish(new ScribedUnavailable(message)))
       return { close: () => finish(null) }
     },
     stats: () => ({ unknownTypes: 0 })
@@ -90,11 +93,33 @@ const insideDir = (root, target) => target === root || target.startsWith(root.en
 const realOrResolved = file => {
   try { return fs.realpathSync(file) } catch { return path.resolve(file) }
 }
-function privateDir(dir) {
+/**
+ * Create `dir` and make it private: on POSIX it must be a directory owned by `uid` (a permissive mode is tightened to
+ * 0700, not refused); win32 has no owner uid to check.
+ */
+function privateDir(dir, { platform, uid }) {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   const info = fs.lstatSync(dir)
-  if (!info.isDirectory() || info.uid !== process.getuid()) throw Error('deck directory must be private and owner-owned')
+  if (!info.isDirectory() || privateFileProblem(info, { platform, uid, mode: info.mode & 0o777 })) throw Error('deck directory must be private and owner-owned')
   fs.chmodSync(dir, 0o700)
+}
+/**
+ * Open one resolved, checked absolute path with the platform opener (openUrlArgv): argv only, no shell, detached and
+ * never awaited, since the opener may run an editor in the foreground; only a failure to spawn it is reported.
+ * @param {string} file
+ * @param {{ platform?: string, env?: Record<string, string | undefined>, spawn?: typeof spawn }} [opts]
+ * @returns {Promise<void>}
+ */
+export function openPath(file, { platform = process.platform, env = process.env, spawn: spawnOpener = spawn } = {}) {
+  return new Promise((resolve, reject) => {
+    const [command, ...args] = openUrlArgv(file, { platform })
+    let child
+    try { child = spawnOpener(command, args, { env, stdio: 'ignore', detached: true, ...(platform === 'win32' ? { windowsVerbatimArguments: true, windowsHide: true } : {}) }) }
+    catch { return reject(apiError(502, 'open_failed')) }
+    child.once('error', () => reject(apiError(502, 'open_failed')))
+    child.once('spawn', () => { child.unref()
+      resolve() })
+  })
 }
 export { reconnectDelay } from './pty/link.mjs'
 /**
@@ -118,11 +143,12 @@ const defaultRetentionTimer = {
 export async function createDeckServer(options = {}) {
   const { env = process.env, host = '127.0.0.1', now = Date.now, connectDeckd = defaultConnectDeckd,
     reconnectMs = 1000, random = Math.random, tokenPollMs = 250, runCommand: command = runCommand,
-    retentionTimer = defaultRetentionTimer } = options
+    retentionTimer = defaultRetentionTimer, platform = process.platform, uid = process.getuid?.() ?? null } = options
   if (host !== '127.0.0.1') throw Error('deck server requires IPv4 loopback 127.0.0.1')
   const paths = options.paths ?? setupPaths(env)
-  privateDir(paths.state)
-  const token = readToken(paths.token)
+  const owner = { platform, uid }
+  privateDir(paths.state, owner)
+  const token = readToken(paths.token, owner)
   let currentToken = token
   let tokenValid = true
   let config = {}
@@ -130,7 +156,7 @@ export async function createDeckServer(options = {}) {
   const port = options.port ?? (env.DECK_PORT === undefined ? config.port ?? 47800 : Number(env.DECK_PORT))
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('invalid DECK_PORT')
   let boundPort = port
-  const store = options.store ?? openDeckDb(path.join(paths.state, 'deck.db'))
+  const store = options.store ?? openDeckDb(path.join(paths.state, 'deck.db'), owner)
   const epoch = store.get('SELECT value FROM meta WHERE key=?', 'epoch').value
   let hub
   let api
@@ -151,7 +177,10 @@ export async function createDeckServer(options = {}) {
   let captureBusy = false
   let vaultState = { dep: 'vault-mcp', state: 'down', reason: 'VAULT_PATH is not set', since: now(), nextProbeAt: null, attempt: 0, version: null, capabilities: [] }
   const vaultHealth = () => vaultClient?.health() ?? { ...vaultState }
-  const health = () => [link.health(), { ...hooksState }, ...['vault-mcp', 'scribed', 'notify', 'fleetmates'].map(dep => dep === 'vault-mcp' ? vaultHealth() : dep === 'scribed' && recorder ? recorder.health() : { dep, state: 'unknown', reason: null, since: now(), nextProbeAt: null, attempt: 0 })]
+  // scribed runs only on linux; elsewhere its row is down with the reason `unsupported on <platform>`.
+  const scribedUnsupported = platform === 'linux' ? null : `unsupported on ${platform}`
+  const scribedHealth = () => scribedUnsupported ? { ...recorder.health(), state: 'down', reason: scribedUnsupported, nextProbeAt: null } : recorder.health()
+  const health = () => [link.health(), { ...hooksState }, ...['vault-mcp', 'scribed', 'notify', 'fleetmates'].map(dep => dep === 'vault-mcp' ? vaultHealth() : dep === 'scribed' && recorder ? scribedHealth() : { dep, state: 'unknown', reason: null, since: now(), nextProbeAt: null, attempt: 0 })]
   const subscribers = new Set()
   let archiveAfter
   let approvalsEvent = () => {}
@@ -165,7 +194,7 @@ export async function createDeckServer(options = {}) {
     if (event.type === 'prefs.changed' && event.data?.prefs?.autoArchiveAfter !== archiveAfter) setImmediate(() => archiveSweep())
   }
   const projector = createProjector({ store, now, publish, locateTask: taskForCwd })
-  link = createDeckdLink({ env, connectDeckd, reconnectMs, random, now, store, projector, publish, timeoutMs: options.deckdTimeoutMs ?? 2000 })
+  link = createDeckdLink({ env, platform, connectDeckd, reconnectMs, random, now, store, projector, publish, timeoutMs: options.deckdTimeoutMs ?? 2000 })
   // M3 wiring (docs/plans/2026-10-02-deck-m3.md, Task 16): tiers, screen match, confirm labels, delivery, rules,
   // the approvals audit and popup actions.
   const maxSeq = () => Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq)
@@ -348,9 +377,9 @@ export async function createDeckServer(options = {}) {
   })
   const meetingConfig = () => configWatcher.current()
   if (meetingConfig()?.ok) sessionRoot = realOrResolved(meetingConfig().sessionDir)
-  const scribedClient = options.scribedClient ?? (env.XDG_RUNTIME_DIR
+  const scribedClient = options.scribedClient ?? (scribedUnsupported ? unavailableScribed(scribedUnsupported) : env.XDG_RUNTIME_DIR
     ? createScribedClient({ socketPath: path.join(env.XDG_RUNTIME_DIR, SOCKET_NAME), ...(options.scribedTimeouts ? { timeouts: options.scribedTimeouts } : {}) })
-    : unavailableScribed())
+    : unavailableScribed('XDG_RUNTIME_DIR is not set'))
   const postWatch = createPostWatch({ store, config: meetingConfig, publish, now })
   recorder = options.scribedStatus ? standInRecorder(options.scribedStatus, now) : createRecorder({
     client: scribedClient, store, config: meetingConfig, prefs: () => currentPrefs() ?? {}, publish, now, log: meetingsLog,
@@ -453,7 +482,7 @@ export async function createDeckServer(options = {}) {
     vaultClient = null
     vaultService = null
     if (prefs.vaultPath) {
-      const client = createVaultClient({ command: prefs.vaultCommand, env: {
+      const client = createVaultClient({ command: prefs.vaultCommand, platform, env: {
         PATH: env.PATH, HOME: paths.home, XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR,
         VAULT_PATH: prefs.vaultPath, VAULT_LANG: prefs.lang
       }, now, ...(options.vaultSpawn ? { spawn: options.vaultSpawn } : {}), ...(options.vaultTimers ? { timers: options.vaultTimers } : {}), log: options.vaultLog ?? (() => {}) })
@@ -463,7 +492,7 @@ export async function createDeckServer(options = {}) {
       await client.start()
     } else publishVault({ dep: 'vault-mcp', state: 'down', reason: 'VAULT_PATH is not set', since: now(), nextProbeAt: null, attempt: 0, version: null, capabilities: [] })
     if (stopped) { await vaultClient?.close(); return }
-    const engine = createAskEngine({ claudeCommand: prefs.claudeCommand, stateDir: paths.state, env, now,
+    const engine = createAskEngine({ claudeCommand: prefs.claudeCommand, platform, stateDir: paths.state, env, now,
       ...(options.askSpawn ? { spawn: options.askSpawn } : {}), ...(options.askTimers ? { timers: options.askTimers } : {}), log: options.askLog ?? (() => {}) })
     askService = createAskService({ store, engine, vault: dynamicVault, health: vaultHealth, publish, now, prefs: vaultPrefs, log: options.askLog ?? (() => {}) })
     askService.reapOrphans()
@@ -506,6 +535,19 @@ export async function createDeckServer(options = {}) {
     publish({ seq: Number(store.appendEvent({ at, type: 'health.changed', data: { ...hooksState } })), at, type: 'health.changed', data: { ...hooksState } })
   }
   async function checks() { return doctor(paths, hookCommand, { run }) }
+  // "Start deckd" goes through the platform's service manager (systemd, launchd or a detached process), made on first
+  // use, since a platform without one throws. It probes deckd by connecting once; the web service is this process.
+  let serviceManager = options.serviceManager ?? null
+  const manager = () => serviceManager ??= createServiceManager({
+    platform, paths, uid, env: processEnv, hubPath: fileURLToPath(new URL('..', import.meta.url)),
+    run: async (file, args) => { const result = run(file, args)
+      return { code: result.status, stdout: result.stdout, stderr: result.stderr } },
+    probe: async service => {
+      if (service !== 'deckd') return true
+      try { (await connectDeckd({ runtimeDir: runtimeBase({ env, platform, uid }), kind: 'server' })).close()
+        return true } catch { return false }
+    }
+  })
   const services = {
     checks,
     async installHooks() {
@@ -521,13 +563,13 @@ export async function createDeckServer(options = {}) {
     async startDependency(dep) {
       if (dep === 'vault-mcp') { await queueVault(); return vaultClient ? vaultClient.retry() : vaultHealth() }
       if (dep === 'scribed') {
+        if (scribedUnsupported) throw apiError(503, 'scribed_unavailable', { reason: scribedUnsupported })
         // OPS-O1: the decided systemd-run command, with the token-free environment, then an immediate probe.
         await startScribed({ scribedCommand: api.preferences().prefs.scribedCommand, env: processEnv, probe: () => scribedClient.status(),
           ...(options.scribedExecFile ? { execFile: options.scribedExecFile } : {}) })
         return recorder.probeNow()
       }
-      const result = run('systemctl', ['--user', 'start', 'fleetmates-deckd.service'])
-      if (result.status !== 0) throw apiError(502, 'dependency_start_failed')
+      try { await manager().start('deckd') } catch { throw apiError(502, 'dependency_start_failed') }
       return link.retry()
     },
     async retryDependency(dep) {
@@ -553,19 +595,8 @@ export async function createDeckServer(options = {}) {
       })
       return { cwd, mounts }
     },
-    // Opens one resolved, checked absolute path (open.mjs): argv only, no shell, the token-free environment.
-    // The opener is detached and never awaited, since xdg-open may run the editor in the foreground; only a
-    // failure to spawn it (ENOENT, EACCES) is reported.
-    open(file) {
-      return new Promise((resolve, reject) => {
-        let child
-        try { child = spawn('xdg-open', [file], { env: processEnv, stdio: 'ignore', detached: true }) }
-        catch { return reject(apiError(502, 'open_failed')) }
-        child.once('error', () => reject(apiError(502, 'open_failed')))
-        child.once('spawn', () => { child.unref()
-          resolve() })
-      })
-    },
+    // Opens one resolved, checked absolute path (open.mjs) with the token-free environment.
+    open(file) { return openPath(file, { platform, env: processEnv }) },
     async rescan() {
       try {
         let root
@@ -617,11 +648,11 @@ export async function createDeckServer(options = {}) {
     const bootstrap = path.join(paths.state, 'open.html')
     const temp = path.join(paths.state, `.open-${process.pid}-${Date.now()}.tmp`)
     try {
-      privateDir(paths.state)
+      privateDir(paths.state, owner)
       fs.writeFileSync(temp, `<!doctype html><meta charset="utf-8"><meta name="referrer" content="no-referrer"><script>location.replace(${JSON.stringify(url)})</script>\n`, { flag: 'wx', mode: 0o600 })
       fs.renameSync(temp, bootstrap)
     } catch { return Promise.resolve() } finally { try { fs.unlinkSync(temp) } catch {} }
-    return Promise.resolve().then(() => (options.openBrowser ?? openInBrowser)(bootstrap, { env: processEnv })).catch(() => {})
+    return Promise.resolve().then(() => (options.openBrowser ?? openInBrowser)(bootstrap, { env: processEnv, platform })).catch(() => {})
   }
   /**
    * A popup action (Task 5): `allow` answers the single Safe request through the deliverer, anything else opens.
@@ -701,7 +732,7 @@ export async function createDeckServer(options = {}) {
     if (!options.store) store.close()
   }
   try {
-    privateDir(paths.spool)
+    privateDir(paths.spool, owner)
     await queueVault()
     if (['ok', 'degraded'].includes(vaultHealth().state)) await memory.captures(localDate(now()).day).catch(() => {})
     const captureTimer = setInterval(() => {
@@ -726,10 +757,16 @@ export async function createDeckServer(options = {}) {
         import('./adapters/notify.mjs'), import('./machines/notification.mjs')
       ])
       notifications = createNotificationMachine({ store, now, publish, onAction: popupAction,
-        notifier: options.notifier ?? createNotifier({ env: processEnv }), recording: () => recorder.isRecording() })
+        notifier: options.notifier ?? createNotifier({ platform, env: processEnv }), recording: () => recorder.isRecording() })
     }
     spool = await startSpoolDrain({ dir: paths.spool, ingest })
-    if (env.XDG_RUNTIME_DIR) hooks = await startHookSocket({ runtimeDir: env.XDG_RUNTIME_DIR, ingest })
+    // The hook endpoint lives under runtimeBase: XDG_RUNTIME_DIR when it is set, else the platform's fallback base. On
+    // linux that fallback is shared by every deck server of this user, so when another one already listens there this
+    // server leaves it alone and takes hooks from the spool only.
+    try { hooks = await startHookSocket({ runtimeDir: runtimeBase({ env, platform, uid }), ingest, platform, uid }) } catch (error) {
+      if (error.code !== 'EADDRINUSE' || env.XDG_RUNTIME_DIR) throw error
+      try { process.stderr.write('deck: hooks.endpoint_in_use\n') } catch {}
+    }
     await link.start()
     if (notifications) {
       await notifications.tick(now())
@@ -787,6 +824,8 @@ export async function createDeckServer(options = {}) {
     server, store, projector, ingest, epoch, publish, link, notifications, recording: recorder, recorder, snapshot: api.snapshot, preferences: api.preferences,
     /** Hook envelopes dropped because their `cwd` is inside the configured `session_dir`. */
     meetingHookDrops: () => meetingHookDrops,
+    /** The hook endpoint this server listens on, or null when it takes hooks from the spool only. */
+    hookEndpoint: () => hooks?.path ?? null,
     address: () => server.address(), close,
     /** Subscribe a notification consumer to committed events; return its removal function. */
     subscribe(callback) { subscribers.add(callback)
