@@ -330,6 +330,7 @@ function destructiveSegment(words, depth) {
   const args = words.slice(index + 1).map(word => word.value)
   const gitArgs = command === 'git' ? gitSubcommandArgs(args) : args
   if (command === 'systemctl' && args.some(arg => /^fleetmates-deck/.test(path.posix.basename(arg)))) return true
+  if (command === 'launchctl' && args.some(arg => arg.toLowerCase().includes('io.fleetmates.deck'))) return true
   if (['rm', 'shred', 'dd', 'wipefs', 'truncate', 'shutdown', 'reboot'].includes(command) || command.startsWith('mkfs')) return true
   if (command === 'find' && (args.includes('-delete') || ['-exec', '-execdir', '-ok'].some(flag => {
     const at = args.indexOf(flag)

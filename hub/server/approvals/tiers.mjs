@@ -71,6 +71,20 @@ const gitConfigWriteRunsCode = key => /^(?:remote\..+\.(?:push|mirror)|alias\..*
 const DEV_NULLS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr'])
 const PERSISTENCE_FILES = Object.freeze(['.bashrc', '.bash_profile', '.bash_login', '.bash_logout', '.profile', '.zshrc', '.zprofile', '.zshenv', '.zlogin', '.zlogout', '.config/fish/config.fish'])
 const PERSISTENCE_DIRS = Object.freeze(['.config/fish/conf.d', '.config/hypr', '.config/systemd/user', '.config/autostart'])
+// The deck's own launchd agents (docs/deck/16-platforms.md), folded as relFolded folds.
+const LAUNCH_AGENT_PREFIX = 'library/launchagents/io.fleetmates.deck.'
+// The deck's service controls on macOS and Windows: a launchctl word naming a deck label, and reg
+// writing the per-user Run key that starts the deck at login. The key is matched with or without
+// its backslashes, because an unquoted key loses them to the shell.
+const namesLaunchLabel = word => fold(word).includes('io.fleetmates.deck')
+const namesRunKey = word => /currentversion[\\/]*run(?:$|[\\/])/.test(fold(word))
+const REG_WRITES = Object.freeze(['add', 'delete', 'copy', 'import', 'restore', 'load'])
+function controlsDeckService(name, words) {
+  const base = fold(name).replace(/\.exe$/, '')
+  if (base === 'launchctl') return words.slice(1).some(namesLaunchLabel)
+  if (base === 'reg') return REG_WRITES.includes(fold(words[1] ?? '')) && words.slice(2).some(namesRunKey)
+  return false
+}
 // Bash read commands whose path operands go through the sensitive list (F9) whether or not the
 // file exists yet. Every other command's operands and option values go through it too, once the
 // path exists (a path that does not exist holds nothing to read).
@@ -177,6 +191,7 @@ function isPersistence(location, home) {
   const rel = relFolded(location, home)
   if (rel === null) return false
   return PERSISTENCE_FILES.includes(rel) || PERSISTENCE_DIRS.some(dir => rel === dir || rel.startsWith(`${dir}/`))
+    || rel.startsWith(LAUNCH_AGENT_PREFIX)
 }
 
 function isSensitive(location, home) {
@@ -1486,6 +1501,7 @@ function classifySegment(segment, ctx, ready, out) {
   const named = [...operands, ...optionValues]
   if (!TEXT_COMMANDS.includes(name) && operands.some(({ location }) => namesControl(location, ctx))) push(reason('floor.deck', 'destructive', text, 'names the deck\'s own files'))
   if (name === 'systemctl' && words.some(word => /^fleetmates-deck/.test(commandBase(word)))) push(reason('floor.deck', 'destructive', text, 'controls the deck\'s own services'))
+  if (controlsDeckService(name, words)) push(reason('floor.deck', 'destructive', text, 'controls the deck\'s own services'))
   // Commands that read a whole directory tree: their roots may not hold the deck's files (F9). diff
   // -r prints every file under its operands in full (with -N, against an empty directory).
   const shortFlag = (flags) => words.some(word => new RegExp(`^-[^-]*[${flags}]`).test(word))
@@ -1840,11 +1856,11 @@ function actionInput(toolName, toolInput) {
  * realpath and glob checks of the paths it names, the read-only, cached D-91 (3) look at the repo's
  * root-level links and `.git` file, and the D-92 (a) core.hooksPath cache, whose git read it starts
  * in the background when one is due (`hooksPathCache`).
- * @param {{ toolName: string, toolInput?: object, cwd?: string, repoRoot?: string, worktrees?: string[], homeDir?: string, deckPaths?: { config?: string, state?: string, runtime?: string|null, token?: string, port?: number|string }, tiers?: { entries: object[] } }} input
+ * @param {{ toolName: string, toolInput?: object, cwd?: string, repoRoot?: string, worktrees?: string[], homeDir?: string, deckPaths?: { config?: string, state?: string, runtime?: string|null, token?: string, port?: number|string }, tiers?: { entries: object[] }, platform?: string }} input
  * @returns {{ tier: 'safe'|'caution'|'destructive', reasons: { entryId: string, tier: string, segment: string, description: string }[], ruleCandidate: string|null, ruleNote: string|null, confirm: { template: string|null, count: string|null }, description: string }}
  */
 export function classify(input) {
-  const { toolName, cwd = null, repoRoot = null } = input ?? {}
+  const { toolName, cwd = null, repoRoot = null, platform = process.platform } = input ?? {}
   const toolInput = actionInput(toolName, input?.toolInput)
   const tiers = input?.tiers ?? DEFAULT_TIERS
   const ready = prepare(tiers)
@@ -1877,6 +1893,8 @@ export function classify(input) {
   }
   if (!reasons.some(item => !item.entryId.startsWith('floor.'))) reasons.push(reason('unknown.tool', 'caution', toolName ?? '', 'no pattern matches this request'))
   if (legacyDestructive({ tool_name: toolName, tool_input: toolInput, cwd }, { repoRoot })) reasons.push(reason('floor.m1', 'destructive', '', 'matches a Destructive check of the M1 classifier'))
+  // docs/deck/16-platforms.md section 6: a `C:\` path can escape the POSIX scope checks.
+  if (platform === 'win32') reasons.push(reason('floor.platform', 'caution', '', 'Windows requests always ask: the tier rules read POSIX paths'))
   const tier = maxTier(...reasons.map(item => item.tier)) ?? 'caution'
   if (bash) {
     const segments = bash.parsed.ok ? bash.parsed.segments : []
