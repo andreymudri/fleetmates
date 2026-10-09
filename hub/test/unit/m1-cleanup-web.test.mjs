@@ -51,18 +51,21 @@ test('first run shows a missing Claude Code as missing, even though the doctor d
   const { rowView } = first
   const dir = await mkdtemp(path.join(tmpdir(), 'm1-cleanup-'))
   try {
-    const paths = setupPaths({ HOME: path.join(dir, 'home'), XDG_RUNTIME_DIR: path.join(dir, 'r') })
-    const missing = (await doctor(paths, 'deck-hook', { run: () => ({ status: 127, stdout: '', stderr: 'not found' }) })).find(row => row.id === 'claude')
+    // The doctor is pinned to linux, where it asks `run` for `claude` by that name; on win32 it would resolve
+    // claude through PATH and PATHEXT first, so a real claude.cmd on the host would answer instead.
+    const env = { HOME: path.join(dir, 'home'), XDG_RUNTIME_DIR: path.join(dir, 'r') }
+    const paths = setupPaths(env, { platform: 'linux' })
+    const missing = (await doctor(paths, 'deck-hook', { platform: 'linux', env, run: () => ({ status: 127, stdout: '', stderr: 'not found' }) })).find(row => row.id === 'claude')
     assert.ok(missing.detail.includes(testedVersion()), 'the doctor detail for a missing claude names the tested version')
     const view = rowView(missing)
     assert.equal(view.title, 'Claude Code was not found')
     assert.equal(view.tone, 'warn')
     assert.doesNotMatch(view.title, /newer/)
 
-    const newer = (await doctor(paths, 'deck-hook', { run: file => file === 'claude' ? { status: 0, stdout: '2.2.0 (Claude Code)\n', stderr: '' } : { status: 3, stdout: '', stderr: '' } })).find(row => row.id === 'claude')
+    const newer = (await doctor(paths, 'deck-hook', { platform: 'linux', env, run: file => file === 'claude' ? { status: 0, stdout: '2.2.0 (Claude Code)\n', stderr: '' } : { status: 3, stdout: '', stderr: '' } })).find(row => row.id === 'claude')
     assert.equal(rowView(newer).title, 'Claude Code 2.2.0 is newer than this deck was tested with')
   } finally {
-    await rm(dir, { recursive: true, force: true })
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
   assert.equal(rowView(claudeCheck('failed', 'Claude Code unavailable; tested 2.1.282')).title, 'Claude Code was not found')
   assert.equal(rowView(claudeCheck('ok', 'Claude Code 2.1.282; tested 2.1.282')).title, 'Claude Code 2.1.282 compatible')
