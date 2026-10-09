@@ -12,7 +12,7 @@ import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
 import { closeWin32Pseudoconsole } from '../../deckd/pty-host.mjs'
-import { endpoint, killTree, runtimeBase } from '../../platform/index.mjs'
+import { endpoint, endpointSecret, killTree, runtimeBase } from '../../platform/index.mjs'
 import { posixTest } from '../helpers/platform.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
 import { forwardedSignals, main as fmMain, onHangup } from '../../bin/fm.mjs'
@@ -380,6 +380,8 @@ async function scriptedDeckd (respond) {
       respond(req, sock)
     }, () => {}))
   })
+  // On win32 the pipe name hashes the deckd key, which deckd writes; this fake writes one (a no-op off win32).
+  endpointSecret(fakeRt.dir, { name: 'deckd', create: true })
   await new Promise((resolve) => server.listen(endpoint(fakeRt.dir, 'deckd'), () => resolve(undefined)))
   return {
     ops,
@@ -856,6 +858,7 @@ async function deckdProxy ({ hold } = {}) {
     })
     up.on('close', () => sock.destroy())
   })
+  endpointSecret(proxyRt.dir, { name: 'deckd', create: true })
   await new Promise((resolve) => server.listen(endpoint(proxyRt.dir, 'deckd'), () => resolve(undefined)))
   return {
     log,

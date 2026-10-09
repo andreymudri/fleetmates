@@ -244,7 +244,7 @@ before(async () => {
     })
     deckd.once('exit', (code) => reject(new Error(`deckd exited ${code}: ${deckdStderr}`)))
   })
-  // On win32 the pipe name hashes the endpoint key deckd writes when it starts, so it is computed now.
+  // On win32 the pipe name hashes the deckd key, which deckd writes when it starts listening, so it is computed now.
   socketPath = endpoint(rt.dir, 'deckd')
   // A deckd that dies mid-file takes every later test down with it; print
   // why at once, and fail every test that ends after it (afterEach below).
@@ -603,8 +603,8 @@ posixTest('SIGTERM stops deckd cleanly and kills its PTYs', { reason: 'SIGTERM t
   await assert.rejects(stat(socketPath), { code: 'ENOENT' })
 })
 
-test('deckd writes the endpoint key on win32 and listens on the pipe hashed from it; on POSIX it writes none', () => {
-  const keyFile = (onWindows ? path.win32 : path.posix).join(deckDir(rt.dir), 'endpoint.key')
+test('deckd writes the deckd key on win32 and listens on the pipe hashed from it; on POSIX it writes none', () => {
+  const keyFile = (onWindows ? path.win32 : path.posix).join(deckDir(rt.dir), 'endpoint-deckd.key')
   if (onWindows) {
     const secret = readFileSync(keyFile, 'utf8')
     assert.match(secret, /^[0-9a-f]{64}$/)
@@ -616,7 +616,7 @@ test('deckd writes the endpoint key on win32 and listens on the pipe hashed from
   assert.ok(deckdStderr.includes(`deckd listening on ${socketPath}`), deckdStderr)
 })
 
-test('with platform win32 deckd writes the endpoint key once, a client reads it, and without a key a client finds no deckd', async () => {
+test('with platform win32 deckd writes a new key at every start, a client reads the key at every connect, and without a key a client finds no deckd', async () => {
   // win32 is injected. Off Windows the pipe name and the relative base's win32 paths are files and
   // dirs in a temp dir made the working directory for this test only.
   const cwd = process.cwd()
@@ -626,19 +626,29 @@ test('with platform win32 deckd writes the endpoint key once, a client reads it,
   let first
   try {
     first = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} })
-    const secret = endpointSecret('base', { platform: 'win32' })
+    const secret = endpointSecret('base', { platform: 'win32', name: 'deckd' })
     assert.match(secret ?? '', /^[0-9a-f]{64}$/)
     assert.equal(first.socketPath, endpoint('base', 'deckd', { platform: 'win32', secret }))
+    await assert.rejects(startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} }), { message: `another deckd is listening on ${first.socketPath}` })
     const client = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
     try {
       assert.equal(client.bootId, first.bootId)
     } finally {
       client.close()
     }
+    const firstPipe = first.socketPath
     await first.close()
     first = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} })
-    assert.equal(endpointSecret('base', { platform: 'win32' }), secret, 'a restart keeps the key')
-    assert.equal(first.socketPath, endpoint('base', 'deckd', { platform: 'win32', secret }))
+    const fresh = endpointSecret('base', { platform: 'win32', name: 'deckd' })
+    assert.notEqual(fresh, secret, 'a restart writes a new key')
+    assert.notEqual(first.socketPath, firstPipe)
+    assert.equal(first.socketPath, endpoint('base', 'deckd', { platform: 'win32', secret: fresh }))
+    const again = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
+    try {
+      assert.equal(again.bootId, first.bootId, 'the client read the new key')
+    } finally {
+      again.close()
+    }
     await assert.rejects(connectDeckd({ runtimeDir: 'nokey', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
   } finally {
     await first?.close()

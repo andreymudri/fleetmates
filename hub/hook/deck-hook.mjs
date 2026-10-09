@@ -71,9 +71,9 @@ export function ancestry({ platform = process.platform, readFile = readFileSync,
  * The hooks endpoint the deck server listens on. A copy of `endpoint(runtimeBase({ env, platform }),
  * 'hooks', { platform, secret })` from hub/platform/index.mjs, because this file is copied alone by init
  * and imports only node: modules; hook-platform.test.mjs pins the two together. On win32 the pipe name
- * hashes `secret`, by default the endpoint key the deck server or deckd wrote under the base
- * (`<base>\fleetmates-deck\endpoint.key`, exactly 64 lowercase hex digits); without one it throws with
- * code ENOENT.
+ * hashes `secret`, by default the hooks key the deck server wrote when it started listening, read on
+ * every call (`<base>\fleetmates-deck\endpoint-hooks.key`, exactly 64 lowercase hex digits); without
+ * one it throws with code ENOENT.
  */
 export function hookEndpoint(env = process.env, platform = process.platform, { secret } = {}) {
   const uid = process.getuid?.() ?? null
@@ -86,9 +86,9 @@ export function hookEndpoint(env = process.env, platform = process.platform, { s
   if (platform === 'win32') {
     let key = secret
     if (key === undefined) {
-      try { key = readFileSync(path.win32.join(base, 'fleetmates-deck', 'endpoint.key'), 'utf8') } catch { key = null }
+      try { key = readFileSync(path.win32.join(base, 'fleetmates-deck', 'endpoint-hooks.key'), 'utf8') } catch { key = null }
     }
-    if (typeof key !== 'string' || !/^[0-9a-f]{64}$/.test(key)) throw Object.assign(Error('no endpoint key: the deck server is not running'), { code: 'ENOENT' })
+    if (typeof key !== 'string' || !/^[0-9a-f]{64}$/.test(key)) throw Object.assign(Error('no hooks endpoint key: the deck server is not running'), { code: 'ENOENT' })
     const h = createHash('sha256').update(path.win32.resolve(base).toLowerCase() + '\0' + key).digest('hex').slice(0, 16)
     return `\\\\.\\pipe\\fleetmates-deck-${h}-hooks`
   }

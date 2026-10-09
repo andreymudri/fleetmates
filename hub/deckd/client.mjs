@@ -81,9 +81,10 @@ export class DeckdRequestError extends Error {
  */
 export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO, platform = process.platform, uid = process.getuid?.() ?? null }) {
   await checkEndpointDirs(runtimeDir, { platform, uid })
-  // win32: the pipe name hashes the endpoint key deckd writes when it starts;
-  // a client only reads it, and without one there is no deckd to reach.
-  const secret = endpointSecret(runtimeDir, { platform })
+  // win32: the pipe name hashes the deckd key, which deckd writes anew each
+  // time it starts listening, so it is read on every connect; a client never
+  // writes it, and without one there is no deckd to reach.
+  const secret = endpointSecret(runtimeDir, { platform, name: 'deckd' })
   if (platform === 'win32' && secret === null) {
     throw Object.assign(new Error(`deckd is not running: no endpoint key in ${deckDir(runtimeDir, { platform })}`), { code: 'ENOENT' })
   }

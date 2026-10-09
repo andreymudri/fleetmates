@@ -4,14 +4,14 @@ import path from 'node:path'
 import { deckDir, endpoint, endpointSecret, runtimeBase } from '../../platform/index.mjs'
 
 /**
- * The deckd and hooks endpoints of `base`. POSIX: two socket paths. win32: the pipe names hash the endpoint key, which
- * deckd or the server writes when it starts, so each access reads the key again; while there is none, the names hash
- * one random secret made for this object, which nothing listens on.
+ * The deckd and hooks endpoints of `base`. POSIX: two socket paths. win32: each pipe name hashes its endpoint key, which
+ * deckd or the server writes anew whenever it starts listening, so each access reads the key again; while there is
+ * none, the name hashes one random secret made for this object, which nothing listens on.
  */
 function endpointsOf(base, { platform, uid }) {
   if (platform !== 'win32') return { deckd: endpoint(base, 'deckd', { platform, uid }), hooks: endpoint(base, 'hooks', { platform, uid }) }
   let unreachable
-  const name = which => endpoint(base, which, { platform, uid, secret: endpointSecret(base, { platform }) ?? (unreachable ??= randomBytes(32).toString('hex')) })
+  const name = which => endpoint(base, which, { platform, uid, secret: endpointSecret(base, { platform, name: which }) ?? (unreachable ??= randomBytes(32).toString('hex')) })
   return { get deckd() { return name('deckd') }, get hooks() { return name('hooks') } }
 }
 

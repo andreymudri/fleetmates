@@ -4,6 +4,7 @@
 import childProcess from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
+import net from 'node:net'
 import { mkdir, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -15,7 +16,9 @@ const currentUid = () => process.getuid?.() ?? null
 const octal = mode => (mode & 0o777).toString(8).padStart(4, '0')
 
 /**
- * The directory the deck's runtime dir lives under.
+ * The directory the deck's runtime dir lives under. A set XDG_RUNTIME_DIR wins on win32 as well (tests
+ * set it); the win32 endpoint keys then live wherever it points rather than under %LOCALAPPDATA%, and
+ * nothing here checks who can read that directory.
  * @param {{ env?: Record<string, string | undefined>, platform?: string, uid?: number | null, home?: string }} [opts]
  * @returns {string}
  */
@@ -35,82 +38,258 @@ export function deckDir (base, { platform = process.platform } = {}) {
   return (platform === 'win32' ? path.win32 : path.posix).join(base, 'fleetmates-deck')
 }
 
-// The win32 endpoint key: 32 random bytes as 64 lowercase hex digits, in `<deckDir(base)>\endpoint.key`.
-const ENDPOINT_KEY = 'endpoint.key'
+// win32 endpoint keys: one per endpoint, `<deckDir(base)>\endpoint-<name>.key`, holding 32 random bytes
+// as 64 lowercase hex digits. `endpoint-<name>.lock` serializes the processes that write one.
 const SECRET_RE = /^[0-9a-f]{64}$/
+const LOCK_WAIT_MS = 3000
+const LOCK_POLL_MS = 25
+const LOCK_RETRIES = 10
+const PROBE_MS = 1000
+const SLEEPER = new Int32Array(new SharedArrayBuffer(4))
+const logLine = line => { process.stderr.write(`deck: ${line}\n`) }
+
+/** Whether process `pid` exists (EPERM: it exists, owned by someone else). */
+function defaultAlive (pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return err.code === 'EPERM'
+  }
+}
+
+function checkName (name) {
+  if (!ENDPOINT_NAMES.has(name)) throw new Error(`unknown endpoint name ${JSON.stringify(name)}; expected deckd or hooks`)
+}
+
+/** The key and lock files of endpoint `name` under `base`. */
+function keyPaths (base, name) {
+  const dir = deckDir(base, { platform: 'win32' })
+  return { dir, key: path.win32.join(dir, `endpoint-${name}.key`), lock: path.win32.join(dir, `endpoint-${name}.lock`) }
+}
+
+/** The text of `file`, opened with openNoFollowSync's win32 rules, so a symbolic link is refused with ELOOP. */
+function readNoFollow (file, fsImpl) {
+  const fd = openNoFollowSync(file, fs.constants.O_RDONLY, { platform: 'win32', fs: fsImpl })
+  try {
+    return String(fsImpl.readFileSync(fd, 'utf8'))
+  } finally {
+    fsImpl.closeSync(fd)
+  }
+}
 
 /**
- * Read a win32 endpoint key file without following a symbolic link.
+ * Read a key file.
  * @returns {{ secret: string } | { missing: true } | { bad: string }}
  */
 function readEndpointKey (file, fsImpl) {
-  let fd
+  let text
   try {
-    fd = openNoFollowSync(file, fs.constants.O_RDONLY, { platform: 'win32', fs: fsImpl })
+    text = readNoFollow(file, fsImpl)
   } catch (err) {
     if (err.code === 'ENOENT') return { missing: true }
     return { bad: `unreadable (${err.code ?? err.message})` }
   }
+  return SECRET_RE.test(text) ? { secret: text } : { bad: 'malformed' }
+}
+
+/**
+ * Write `text` to a new file named after `file` with a random suffix, created exclusively by
+ * openNoFollowSync with its win32 rules (a symbolic link already at that name is refused).
+ * @returns {string} the new file
+ */
+function writeTemp (file, text, fsImpl, random) {
+  const temp = `${file}.${random(6).toString('hex')}.tmp`
+  const { O_WRONLY, O_CREAT, O_EXCL } = fs.constants
+  const fd = openNoFollowSync(temp, O_WRONLY | O_CREAT | O_EXCL, { platform: 'win32', fs: fsImpl, mode: 0o600 })
   try {
-    const text = String(fsImpl.readFileSync(fd, 'utf8'))
-    return SECRET_RE.test(text) ? { secret: text } : { bad: 'malformed' }
-  } catch (err) {
-    return { bad: `unreadable (${err.code ?? err.message})` }
+    fsImpl.writeSync(fd, text)
   } finally {
     fsImpl.closeSync(fd)
+  }
+  return temp
+}
+
+/** Put `secret` at `file` by renaming a complete temp file over it, so a reader sees the old key or the new one. */
+function publishKey (file, secret, fsImpl, random) {
+  const temp = writeTemp(file, secret, fsImpl, random)
+  try {
+    fsImpl.renameSync(temp, file)
+  } finally {
+    try { fsImpl.unlinkSync(temp) } catch {}
   }
 }
 
 /**
- * The secret a win32 endpoint name hashes, read from `<deckDir(base)>\endpoint.key`. Null off
- * win32, and on win32 null when the key is missing or is not exactly 64 lowercase hex digits. With
- * `create: true` a missing key is written (a temp file linked to the name, so it fails when another
- * starter wrote one first, then reread), and a malformed or unreadable one is logged and replaced.
- * deckd and the deck server create; clients only read.
- * @param {string} base
- * @param {{ platform?: string, create?: boolean, fs?: any, log?: (line: string) => void }} [opts]
- * @returns {string | null}
+ * One attempt at the start lock: a file holding this pid, linked into place so it appears whole or not
+ * at all. `held` when a live process holds it; a lock whose holder is dead or unreadable is removed
+ * (only while it is still the file that was judged) and the answer is `again`.
+ * @returns {{ state: 'taken', release: () => void } | { state: 'held', holder: number } | { state: 'again' }}
  */
-export function endpointSecret (base, { platform = process.platform, create = false, fs: fsImpl = fs, log = line => { process.stderr.write(`deck: ${line}\n`) } } = {}) {
-  if (platform !== 'win32') return null
-  const dir = deckDir(base, { platform })
-  const file = path.win32.join(dir, ENDPOINT_KEY)
-  const found = readEndpointKey(file, fsImpl)
-  if ('secret' in found) return found.secret
-  if (!create) return null
-  fsImpl.mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const temp = path.win32.join(dir, `${ENDPOINT_KEY}.${randomBytes(6).toString('hex')}.tmp`)
-  const { O_WRONLY, O_CREAT, O_EXCL } = fs.constants
-  const fd = openNoFollowSync(temp, O_WRONLY | O_CREAT | O_EXCL, { platform, fs: fsImpl, mode: 0o600 })
+function tryLock (lock, { fsImpl, alive, random }) {
+  const temp = writeTemp(lock, String(process.pid), fsImpl, random)
   try {
-    fsImpl.writeSync(fd, randomBytes(32).toString('hex'))
-  } finally {
-    fsImpl.closeSync(fd)
-  }
-  try {
-    if ('missing' in found) {
-      try {
-        fsImpl.linkSync(temp, file)
-      } catch (err) {
-        if (err.code !== 'EEXIST') throw err
-      }
-    } else {
-      log(`endpoint key ${file} is ${found.bad}; writing a new one`)
-      fsImpl.renameSync(temp, file)
+    fsImpl.linkSync(temp, lock)
+    const mine = fsImpl.lstatSync(lock, { bigint: true })
+    return {
+      state: 'taken',
+      release () {
+        try {
+          const now = fsImpl.lstatSync(lock, { bigint: true })
+          if (now.ino === mine.ino && now.dev === mine.dev) fsImpl.unlinkSync(lock)
+        } catch {}
+      },
     }
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err
   } finally {
     try { fsImpl.unlinkSync(temp) } catch {}
   }
-  const again = readEndpointKey(file, fsImpl)
-  if ('secret' in again) return again.secret
-  throw new Error(`endpoint key ${file} is ${'missing' in again ? 'missing' : again.bad} after writing it`)
+  let seen
+  let holder = NaN
+  try {
+    seen = fsImpl.lstatSync(lock, { bigint: true })
+    holder = Number(readNoFollow(lock, fsImpl))
+  } catch (err) {
+    if (err.code === 'ENOENT') return { state: 'again' }
+  }
+  if (Number.isInteger(holder) && holder > 0 && alive(holder)) return { state: 'held', holder }
+  try {
+    const now = fsImpl.lstatSync(lock, { bigint: true })
+    if (seen && now.ino === seen.ino && now.dev === seen.dev) fsImpl.unlinkSync(lock)
+  } catch {}
+  return { state: 'again' }
+}
+
+function lockBusy (name, holder) {
+  return Object.assign(new Error(`another ${name} endpoint is starting (pid ${holder})`), { code: 'EADDRINUSE' })
+}
+
+/**
+ * Take the start lock of endpoint `name`, waiting at most `waitMs` for a live holder. `sleep` is
+ * synchronous (Atomics.wait) in `lockSync` and a timer in `lockAsync`.
+ */
+function lockSync (lock, name, opts) {
+  const deadline = Date.now() + opts.waitMs
+  for (let again = 0; again < LOCK_RETRIES;) {
+    const got = tryLock(lock, opts)
+    if (got.state === 'taken') return got.release
+    if (got.state === 'again') { again++; continue }
+    if (Date.now() >= deadline) throw lockBusy(name, got.holder)
+    Atomics.wait(SLEEPER, 0, 0, LOCK_POLL_MS)
+  }
+  throw new Error(`could not take the endpoint lock ${lock}`)
+}
+
+async function lockAsync (lock, name, opts) {
+  const deadline = Date.now() + opts.waitMs
+  for (let again = 0; again < LOCK_RETRIES;) {
+    const got = tryLock(lock, opts)
+    if (got.state === 'taken') return got.release
+    if (got.state === 'again') { again++; continue }
+    if (Date.now() >= deadline) throw lockBusy(name, got.holder)
+    await new Promise(resolve => setTimeout(resolve, LOCK_POLL_MS))
+  }
+  throw new Error(`could not take the endpoint lock ${lock}`)
+}
+
+/** Whether something accepts a connection on `pipe` within `ms`; a connection that neither opens nor fails in time counts as an answer. */
+function answers (pipe, ms) {
+  return new Promise(resolve => {
+    const socket = net.connect(pipe)
+    const done = value => { clearTimeout(timer); socket.destroy(); resolve(value) }
+    const timer = setTimeout(() => done(true), ms)
+    socket.once('connect', () => done(true))
+    socket.once('error', () => done(false))
+  })
+}
+
+/**
+ * The secret the win32 endpoint `name` hashes, read from `<deckDir(base)>\endpoint-<name>.key`. Null off
+ * win32, and on win32 null when the key is missing, is not exactly 64 lowercase hex digits, or is a
+ * symbolic link. Clients call this on every connect. With `create: true` a missing or bad key is
+ * written under the start lock (a bad one is logged), and a valid one is returned as it is; the deck
+ * itself starts its endpoints with `listenEndpoint`, which writes a new key every time.
+ * @param {string} base
+ * @param {{ platform?: string, name?: 'deckd' | 'hooks', create?: boolean, fs?: any, log?: (line: string) => void,
+ *   random?: (n: number) => Buffer, alive?: (pid: number) => boolean, lockWaitMs?: number }} [opts]
+ * @returns {string | null}
+ */
+export function endpointSecret (base, { platform = process.platform, name, create = false, fs: fsImpl = fs, log = logLine,
+  random = randomBytes, alive = defaultAlive, lockWaitMs = LOCK_WAIT_MS } = {}) {
+  if (platform !== 'win32') return null
+  checkName(name)
+  const { dir, key, lock } = keyPaths(base, name)
+  const found = readEndpointKey(key, fsImpl)
+  if ('secret' in found) return found.secret
+  if (!create) return null
+  fsImpl.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const release = lockSync(lock, name, { fsImpl, alive, random, waitMs: lockWaitMs })
+  try {
+    const now = readEndpointKey(key, fsImpl)
+    if ('secret' in now) return now.secret
+    if ('bad' in now) log(`endpoint key ${key} is ${now.bad}; writing a new one`)
+    publishKey(key, random(32).toString('hex'), fsImpl, random)
+    const again = readEndpointKey(key, fsImpl)
+    if ('secret' in again) return again.secret
+    throw new Error(`endpoint key ${key} is ${'missing' in again ? 'missing' : again.bad} after writing it`)
+  } finally {
+    release()
+  }
+}
+
+/**
+ * Listen `server` on the win32 pipe of endpoint `name` under a new key, and return the pipe. Under the
+ * start lock: when the pipe of the current key answers, reject with code EADDRINUSE and `path` set to
+ * that pipe, leaving the key alone. Otherwise the order is: listen on the pipe of a new random secret,
+ * then write that secret to the key file. A client reads the key before it connects, so the pipe a key
+ * names is already this server's when the key appears; until then clients still read the old key.
+ * When the key cannot be written the server is closed and the error rethrown.
+ * @param {string} base
+ * @param {'deckd' | 'hooks'} name
+ * @param {import('node:net').Server} server
+ * @param {{ platform?: string, fs?: any, log?: (line: string) => void, random?: (n: number) => Buffer,
+ *   alive?: (pid: number) => boolean, lockWaitMs?: number, probeMs?: number }} [opts]
+ * @returns {Promise<string>}
+ */
+export async function listenEndpoint (base, name, server, { platform = process.platform, fs: fsImpl = fs, log = logLine,
+  random = randomBytes, alive = defaultAlive, lockWaitMs = LOCK_WAIT_MS, probeMs = PROBE_MS } = {}) {
+  if (platform !== 'win32') throw new Error('listenEndpoint names win32 pipes only')
+  checkName(name)
+  const { dir, key, lock } = keyPaths(base, name)
+  fsImpl.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const release = await lockAsync(lock, name, { fsImpl, alive, random, waitMs: lockWaitMs })
+  try {
+    const current = readEndpointKey(key, fsImpl)
+    if ('secret' in current) {
+      const live = endpoint(base, name, { platform, secret: current.secret })
+      if (await answers(live, probeMs)) throw Object.assign(new Error(`another ${name} is listening on ${live}`), { code: 'EADDRINUSE', path: live })
+    } else if ('bad' in current) {
+      log(`endpoint key ${key} is ${current.bad}; writing a new one`)
+    }
+    const secret = random(32).toString('hex')
+    const pipe = endpoint(base, name, { platform, secret })
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(pipe, () => { server.off('error', reject); resolve(undefined) })
+    })
+    try {
+      publishKey(key, secret, fsImpl, random)
+    } catch (err) {
+      await new Promise(resolve => server.close(() => resolve(undefined)))
+      throw err
+    }
+    return pipe
+  } finally {
+    release()
+  }
 }
 
 /**
  * The deckd or hooks endpoint: a Unix socket on POSIX, a named pipe on win32. The pipe name hashes
- * the case-folded base and `secret`, which defaults to `endpointSecret(base)`; on win32 a missing
- * secret throws with code ENOENT, and one that is not 64 lowercase hex digits throws. POSIX takes no
- * secret.
+ * the case-folded base and `secret`, which defaults to the key read now by `endpointSecret(base, { name })`;
+ * on win32 a missing secret throws with code ENOENT, and one that is not 64 lowercase hex digits throws.
+ * POSIX takes no secret.
  * @param {string} base
  * @param {'deckd' | 'hooks'} name
  * @param {{ platform?: string, uid?: number | null, secret?: string | null }} [opts]
@@ -119,9 +298,9 @@ export function endpointSecret (base, { platform = process.platform, create = fa
 export function endpoint (base, name, { platform = process.platform, uid = currentUid(), secret } = {}) {
   if (!ENDPOINT_NAMES.has(name)) throw new Error(`unknown endpoint name ${JSON.stringify(name)}; expected deckd or hooks`)
   if (platform === 'win32') {
-    const key = secret === undefined ? endpointSecret(base, { platform }) : secret
+    const key = secret === undefined ? endpointSecret(base, { platform, name }) : secret
     if (key === null) {
-      throw Object.assign(new Error(`no endpoint key under ${deckDir(base, { platform })}: deckd and the deck server write it when they start`), { code: 'ENOENT' })
+      throw Object.assign(new Error(`no ${name} endpoint key under ${deckDir(base, { platform })}: its server writes one when it starts listening`), { code: 'ENOENT' })
     }
     if (typeof key !== 'string' || !SECRET_RE.test(key)) throw new Error('the endpoint secret must be 64 lowercase hex digits')
     const h = createHash('sha256').update(path.win32.resolve(base).toLowerCase() + '\0' + key).digest('hex').slice(0, 16)

@@ -66,20 +66,21 @@ async function inScratch (fn) {
 
 const WIN_ENV = { LOCALAPPDATA: 'local', USERPROFILE: 'C:\\Users\\you' }
 
-test('hookEndpoint on win32 reads the key the deck wrote under its base, and throws without a valid one', async () => {
+test('hookEndpoint on win32 reads the hooks key the deck wrote under its base, and throws without a valid one', async () => {
   await inScratch(async () => {
     const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })
-    assert.throws(() => hookEndpoint(WIN_ENV, 'win32'), { code: 'ENOENT' }, 'no key: the caller spools')
-    fs.mkdirSync(deckDir(base, { platform: 'win32' }), { recursive: true })
-    const keyFile = path.win32.join(deckDir(base, { platform: 'win32' }), 'endpoint.key')
+    assert.throws(() => hookEndpoint(WIN_ENV, 'win32'), { code: 'ENOENT' }, 'no key')
+    endpointSecret(base, { platform: 'win32', name: 'deckd', create: true })
+    assert.throws(() => hookEndpoint(WIN_ENV, 'win32'), { code: 'ENOENT' }, 'the deckd key is not the hooks key')
+    const keyFile = path.win32.join(deckDir(base, { platform: 'win32' }), 'endpoint-hooks.key')
     fs.writeFileSync(keyFile, 'not a key')
     assert.throws(() => hookEndpoint(WIN_ENV, 'win32'), { code: 'ENOENT' }, 'a malformed key is no key')
-    const secret = endpointSecret(base, { platform: 'win32', create: true, log: () => {} })
+    const secret = endpointSecret(base, { platform: 'win32', name: 'hooks', create: true, log: () => {} })
     assert.equal(hookEndpoint(WIN_ENV, 'win32'), endpoint(base, 'hooks', { platform: 'win32', secret }))
   })
 })
 
-test('startHookSocket on win32 writes the endpoint key and listens on the pipe the hook computes from it', async () => {
+test('startHookSocket on win32 writes a new hooks key each start and listens on the pipe the hook computes from it; a second one is refused while the first answers', async () => {
   await inScratch(async () => {
     const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })
     const accepted = []
@@ -87,7 +88,7 @@ test('startHookSocket on win32 writes the endpoint key and listens on the pipe t
     let server
     try {
       server = await startHookSocket({ runtimeDir: base, ingest, platform: 'win32', uid: null })
-      const secret = endpointSecret(base, { platform: 'win32' })
+      const secret = endpointSecret(base, { platform: 'win32', name: 'hooks' })
       assert.match(secret ?? '', /^[0-9a-f]{64}$/, 'the server wrote the key')
       assert.equal(server.path, endpoint(base, 'hooks', { platform: 'win32', secret }))
       assert.equal(hookEndpoint(WIN_ENV, 'win32'), server.path)
@@ -97,6 +98,16 @@ test('startHookSocket on win32 writes the endpoint key and listens on the pipe t
       await new Promise(resolve => setTimeout(resolve, 20))
       ingest.flush()
       assert.deepEqual(accepted, [9])
+      // Another deck server on the same base: refused while this one answers, and this one's key stays.
+      await assert.rejects(startHookSocket({ runtimeDir: base, ingest, platform: 'win32', uid: null }), { code: 'EADDRINUSE', path: server.path })
+      assert.equal(endpointSecret(base, { platform: 'win32', name: 'hooks' }), secret)
+      assert.equal(hookEndpoint(WIN_ENV, 'win32'), server.path)
+      // After this one closes, the next start writes a new key, and the hook follows it.
+      const first = server.path
+      await server.close()
+      server = await startHookSocket({ runtimeDir: base, ingest, platform: 'win32', uid: null })
+      assert.notEqual(server.path, first)
+      assert.equal(hookEndpoint(WIN_ENV, 'win32'), server.path)
     } finally {
       await server?.close()
       ingest.close()
