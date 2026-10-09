@@ -279,6 +279,8 @@ and opens `http://127.0.0.1:47800/` in your browser with the token in the URL fr
 | `fleetmates-deck doctor` | The setup checks in the terminal; exits 1 when the hooks are missing |
 | `fleetmates-deck status` | Units, sockets, hook state and Claude Code version as JSON |
 | `fleetmates-deck uninstall-hooks` | Removes only the deck's hook entries, after a backup |
+| `fleetmates-deck remote-access --public-origin <url> \| --off` | Opts the deck into one exact public origin for remote access (see below) |
+| `fleetmates-deck remote-pass` | Sets the remote access passphrase, read from the terminal, stored hashed |
 | `fleetmates-deck audit [--repo <name>] [--since <YYYY-MM-DD>]` | Prints the approvals and rule audit (M3) |
 | `fm claude [args]`, `fm attach <id\|repo>`, `fm ls` | Run, attach to and list sessions in the deck's PTY daemon (see above) |
 
@@ -290,12 +292,65 @@ and opens `http://127.0.0.1:47800/` in your browser with the token in the URL fr
   never sent over the network.
 - The server checks the `Host` and `Origin` headers, so another web page, a DNS rebinding trick or a
   proxy cannot talk to it. Only `127.0.0.1:<port>` is accepted; `localhost` is redirected to it.
+  One exact public origin can be added for remote access, never a wildcard; see "Remote access from
+  a phone".
 - Keys typed in the browser reach a session only over the authenticated WebSocket, for a session
   that tab has attached, at most 64 KiB per frame.
 - The PTY daemon `fleetmates-deckd` listens on a Unix socket in a 0700 directory and is not
   reachable from the browser.
 - The hook never prints to Claude Code and never blocks it. Private files are 0600 and private
   directories 0700. The token and hook payloads are kept out of the default logs.
+
+## Remote access from a phone
+
+The deck is loopback only by default and that does not change. Opting in lets you reach it from a
+phone on your [Tailscale](https://tailscale.com/) tailnet, as an installable PWA, with the same
+control you have on the laptop: terminals, approvals, everything.
+
+**Read this first.** There is no read-only mode. Anyone who can reach the tunnel and knows the
+passphrase has full control of every session the deck drives, including typing into terminals and
+answering Destructive approvals. On your tailnet that means every device signed into it, and
+anyone you have shared the machine with. Turn it off when you do not need it.
+
+Three steps, all on the machine that runs the deck.
+
+1. Expose the port on your tailnet, HTTPS only, not on the public internet:
+
+        tailscale serve --bg 47800
+
+   `tailscale serve status` prints the origin it gave you, for example
+   `https://machine.tail1234.ts.net`. Use `tailscale funnel` only if you really want the open
+   internet to reach it; the deck cannot tell the difference, and the passphrase is then the only
+   thing in the way.
+
+2. Tell the deck that origin, and set the passphrase:
+
+        fleetmates-deck remote-access --public-origin https://machine.tail1234.ts.net
+        fleetmates-deck remote-pass
+        systemctl --user restart fleetmates-deck
+
+   The origin must be one exact `https://` origin: no wildcard, no path, no `http://`. The deck
+   refuses to start otherwise. It keeps accepting `127.0.0.1:<port>` as before, and accepts the
+   public origin only as a whole `Host` and `Origin` pair, so a request that mixes the two is
+   refused. `remote-access --off` returns the deck to loopback only.
+
+   `remote-pass` asks for the passphrase on the terminal, twice, and never takes it as an argument
+   (arguments show up in `ps` and in your shell history). It is stored as a scrypt hash in
+   `~/.local/state/fleetmates/deck/remote-pass.json`, mode 0600. At least 10 characters, and the
+   obvious ones are refused.
+
+3. On the phone, open the origin, type the passphrase, then "Add to home screen". The deck trades
+   the passphrase for its token, the installed app keeps that token, and from then on it opens
+   straight into the deck.
+
+What the pairing screen hands the phone is the deck's own token, not a per-device one. Revoking a
+phone therefore means rotating the deck token (`fleetmates-deck init --rotate-token`), which signs
+out every client, including your browser. The exchange is rate limited globally, 10 attempts per 5
+minutes with a growing delay, as defence in depth: the tailnet is the real perimeter.
+
+The installed app caches only the static shell (HTML, JS, CSS, icons, fonts). Nothing under `/api`
+or `/.well-known` is ever cached, and the WebSocket does not go through the service worker, so no
+session content and no token reach the cache.
 
 ## What is stored, and for how long
 

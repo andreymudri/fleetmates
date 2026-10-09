@@ -5,6 +5,21 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
+## Unreleased
+
+- Tested Claude Code: 2.1.285 (unchanged)
+- deckd changed: no. The PTY protocol is unchanged.
+- Database migration: no.
+- Restart the web server to pick it up.
+- Remote access from a phone, opt in and off by default. `fleetmates-deck remote-access
+  --public-origin <url>` adds one exact HTTPS origin (a `tailscale serve` address) to the Host,
+  Origin and Content-Security-Policy checks; without it the server behaves exactly as before.
+  `fleetmates-deck remote-pass` sets the passphrase a new device types to get the deck token; it is
+  read from the terminal, stored as a scrypt hash in a 0600 file, and the exchange is rate limited.
+- The deck is installable as a PWA: a manifest, iOS meta tags, safe areas, and a service worker that
+  caches the static shell only. Nothing under `/api` or `/.well-known` is cached, and the token is
+  kept in `localStorage` so an installed app does not lose it between launches.
+
 ## v0.6.0
 
 Platform support: the deck runs on Linux, macOS and native Windows (D-149,
