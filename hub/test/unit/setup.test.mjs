@@ -9,6 +9,14 @@ import { createContext, runInContext } from 'node:vm'
 import { createServer } from 'node:net'
 import { once } from 'node:events'
 import test, { afterEach } from 'node:test'
+import { posixTest as posixOnlyTest } from '../helpers/platform.mjs'
+
+// The sandbox tests run /bin/sh fake binaries and use Unix sockets and POSIX file modes, so they skip on Windows.
+// The injected-platform tests at the end of this file use plain `test` and run everywhere.
+const SANDBOX_REASON = 'the setup sandbox runs /bin/sh fake binaries and uses Unix sockets and POSIX file modes'
+const posixTest = (name, optsOrFn, fn) => typeof optsOrFn === 'function'
+  ? posixOnlyTest(name, { reason: SANDBOX_REASON }, optsOrFn)
+  : posixOnlyTest(name, { reason: SANDBOX_REASON, ...optsOrFn }, fn)
 import { chromium } from 'playwright-core'
 import { doctor, status } from '../../server/setup/doctor.mjs'
 import { PROTO } from '../../deckd/protocol.mjs'
@@ -54,7 +62,7 @@ function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false
   // xdg-open succeeds; DECK_TEST_DEFAULT_BROWSER, DECK_TEST_GTK_LAUNCH, DECK_TEST_XDG_OPEN_STATUS steer them.
   for (const name of ['systemctl', 'xdg-open', 'claude', 'notify-send', 'xdg-settings', 'gtk-launch', 'gio', 'deck-test-browser']) {
     const file = path.join(bin, name)
-    writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$DECK_TEST_CALLS"\nif [ '${name}' = claude ]; then echo "\${DECK_TEST_CLAUDE_VERSION:-${testedVersion()}} (Claude Code)"; fi\nif [ '${name}' = xdg-settings ]; then [ -n "$DECK_TEST_DEFAULT_BROWSER" ] || exit 1; echo "$DECK_TEST_DEFAULT_BROWSER"; exit 0; fi\nif [ '${name}' = gtk-launch ]; then exit \${DECK_TEST_GTK_LAUNCH:-1}; fi\nif [ '${name}' = gio ] || [ '${name}' = deck-test-browser ]; then exit 1; fi\nif [ '${name}' = xdg-open ]; then exit \${DECK_TEST_XDG_OPEN_STATUS:-0}; fi\nif [ '${name}' = systemctl ] && [ "$2" = is-active ]; then if [ "$3" = fleetmates-deck.service ] && [ "$DECK_TEST_WEB_ACTIVE" = 1 ]; then exit 0; fi; if [ "$3" = fleetmates-deckd.service ] && [ "$DECK_TEST_DECKD_ACTIVE" = 1 ]; then exit 0; fi; exit 3; fi\nif [ '${name}' = systemctl ] && [ "$DECK_TEST_MODEL_WEB" = 1 ] && [ "$2" = enable ]; then\n  if [ -e "$DECK_TEST_WEB_ENTRY" ]; then\n    printf active > "$DECK_TEST_WEB_STATE"\n  elif grep -Fqx "ConditionPathExists=$DECK_TEST_WEB_ENTRY" "$XDG_CONFIG_HOME/systemd/user/fleetmates-deck.service"; then\n    printf skipped > "$DECK_TEST_WEB_STATE"\n  else\n    printf failed > "$DECK_TEST_WEB_STATE"\n    exit 1\n  fi\nfi\n`)
+    writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$DECK_TEST_CALLS"\nif [ '${name}' = claude ]; then echo "\${DECK_TEST_CLAUDE_VERSION:-${testedVersion()}} (Claude Code)"; fi\nif [ '${name}' = xdg-settings ]; then [ -n "$DECK_TEST_DEFAULT_BROWSER" ] || exit 1; echo "$DECK_TEST_DEFAULT_BROWSER"; exit 0; fi\nif [ '${name}' = gtk-launch ]; then exit \${DECK_TEST_GTK_LAUNCH:-1}; fi\nif [ '${name}' = gio ] || [ '${name}' = deck-test-browser ]; then exit 1; fi\nif [ '${name}' = xdg-open ]; then exit \${DECK_TEST_XDG_OPEN_STATUS:-0}; fi\nif [ '${name}' = systemctl ] && [ "$2" = is-active ]; then unit="$3"; if [ "$unit" = --quiet ]; then unit="$4"; fi; if [ "$unit" = fleetmates-deck.service ] && [ "$DECK_TEST_WEB_ACTIVE" = 1 ]; then exit 0; fi; if [ "$unit" = fleetmates-deckd.service ] && [ "$DECK_TEST_DECKD_ACTIVE" = 1 ]; then exit 0; fi; exit 3; fi\nif [ '${name}' = systemctl ] && [ "$DECK_TEST_MODEL_WEB" = 1 ] && [ "$2" = enable ]; then\n  if [ -e "$DECK_TEST_WEB_ENTRY" ]; then\n    printf active > "$DECK_TEST_WEB_STATE"\n  elif grep -Fqx "ConditionPathExists=$DECK_TEST_WEB_ENTRY" "$XDG_CONFIG_HOME/systemd/user/fleetmates-deck.service"; then\n    printf skipped > "$DECK_TEST_WEB_STATE"\n  else\n    printf failed > "$DECK_TEST_WEB_STATE"\n    exit 1\n  fi\nfi\n`)
     execFileSync('chmod', ['700', file])
   }
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: config, XDG_STATE_HOME: state, XDG_DATA_HOME: path.join(root, 'data'), XDG_RUNTIME_DIR: runtime, PATH: `${bin}:${process.env.PATH}`, DECK_TEST_CALLS: calls, CLAUDE_CONFIG_DIR: path.join(home, '.claude') }
@@ -65,7 +73,7 @@ function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false
     mkdirSync(hubPath)
     // package.json carries fleetmatesDeck.testedClaudeCode, which doctor reads.
     cpSync(path.join(hub, 'package.json'), path.join(hubPath, 'package.json'))
-    for (const name of ['bin', 'server', 'deckd', 'hook', 'systemd']) cpSync(path.join(hub, name), path.join(hubPath, name), { recursive: true, filter: source => !isolatedHub || source !== path.join(hub, 'server/main.mjs') })
+    for (const name of ['bin', 'server', 'deckd', 'hook', 'systemd', 'platform']) cpSync(path.join(hub, name), path.join(hubPath, name), { recursive: true, filter: source => !isolatedHub || source !== path.join(hub, 'server/main.mjs') })
     if (webEntry) writeFileSync(path.join(hubPath, 'server/main.mjs'), '')
   }
   const cliPath = path.join(hubPath, 'bin/fleetmates-deck.mjs')
@@ -99,7 +107,7 @@ async function listener(s, token, valid, delayMs = 0, { relayPort = 0, legacyPro
   return { child, port, requestFile }
 }
 
-test('dry run leaves settings, directories and services untouched', () => {
+posixTest('dry run leaves settings, directories and services untouched', () => {
   const s = sandbox()
   const before = readFileSync(s.settings)
   const result = s.run('init', '--dry-run')
@@ -112,7 +120,7 @@ test('dry run leaves settings, directories and services untouched', () => {
   assert.equal(readdirSync(s.root).includes('calls'), false)
 })
 
-test('hooksInstalled requires the installed command for every subscribed event', () => {
+posixTest('hooksInstalled requires the installed command for every subscribed event', () => {
   const command = 'node /tmp/fleetmates-deck/hook/deck-hook.mjs'
   const settings = {
     hooks: Object.fromEntries(requiredHookEvents.map(event => [event, [
@@ -135,7 +143,7 @@ test('hooksInstalled requires the installed command for every subscribed event',
   }
 })
 
-test('init installs every event required by the hook integration contract', () => {
+posixTest('init installs every event required by the hook integration contract', () => {
   const s = sandbox()
   const result = s.run('init')
   assert.equal(result.status, 0, result.stderr)
@@ -152,7 +160,7 @@ test('init installs every event required by the hook integration contract', () =
   }
 })
 
-test('init writes the tiers.json stub with mode 0600 and the schema beside it, and leaves an existing tiers.json untouched', () => {
+posixTest('init writes the tiers.json stub with mode 0600 and the schema beside it, and leaves an existing tiers.json untouched', () => {
   const s = sandbox()
   const config = path.join(s.config, 'fleetmates/deck')
   const tiers = path.join(config, 'tiers.json')
@@ -172,7 +180,7 @@ test('init writes the tiers.json stub with mode 0600 and the schema beside it, a
   assert.equal(readFileSync(tiers, 'utf8'), edited, 'the owner\'s tiers.json is kept')
 })
 
-test('audit prints approval and rule audit rows oldest first, one per line, with redacted summaries, filtered by --repo and --since', async () => {
+posixTest('audit prints approval and rule audit rows oldest first, one per line, with redacted summaries, filtered by --repo and --since', async () => {
   const s = sandbox()
   const { openDeckDb } = await import('../../server/db/index.mjs')
   const state = path.join(s.state, 'fleetmates/deck')
@@ -222,7 +230,7 @@ function dispatchSyntheticWorktree(settings, event, s, directory) {
 }
 
 for (const event of ['WorktreeCreate', 'WorktreeRemove']) {
-  test(`init preserves default ${event} dispatch instead of registering a silent observer`, () => {
+  posixTest(`init preserves default ${event} dispatch instead of registering a silent observer`, () => {
     const s = sandbox()
     assert.equal(s.run('init').status, 0)
     const settings = JSON.parse(readFileSync(s.settings, 'utf8'))
@@ -238,7 +246,7 @@ for (const event of ['WorktreeCreate', 'WorktreeRemove']) {
   })
 }
 
-test('init and uninstall remove only legacy deck worktree handlers and preserve opaque groups', () => {
+posixTest('init and uninstall remove only legacy deck worktree handlers and preserve opaque groups', () => {
   for (const action of ['init', 'uninstall-hooks']) {
     const s = sandbox()
     const installed = `'${process.execPath}' '${setupPaths(s.env).hook}'`
@@ -273,7 +281,7 @@ test('init and uninstall remove only legacy deck worktree handlers and preserve 
   }
 })
 
-test('dry run reports pending changes without exposing settings secrets', () => {
+posixTest('dry run reports pending changes without exposing settings secrets', () => {
   const s = sandbox()
   const secret = 'sentinel-service-api-key-7f3e'
   writeFileSync(s.settings, JSON.stringify({ env: { SERVICE_API_KEY: secret } }))
@@ -284,7 +292,7 @@ test('dry run reports pending changes without exposing settings secrets', () => 
   assert.doesNotMatch(result.stdout + result.stderr, new RegExp(secret))
 })
 
-test('init writes the hub version beside the installed hook so the installed copy stamps it', async () => {
+posixTest('init writes the hub version beside the installed hook so the installed copy stamps it', async () => {
   // Task 23: init copies only deck-hook.mjs, whose version comes from ../package.json, so init also
   // writes <share>/package.json holding just the hub version.
   const s = sandbox('empty.json', { isolatedHub: true })
@@ -313,7 +321,7 @@ test('init writes the hub version beside the installed hook so the installed cop
   assert.equal(await stamp('second'), '9.8.7')
 })
 
-test('init merges hooks, preserves existing order and is byte identical twice', () => {
+posixTest('init merges hooks, preserves existing order and is byte identical twice', () => {
   const s = sandbox('existing-hooks.json')
   assert.equal(s.run('init').status, 0)
   const first = readFileSync(s.settings)
@@ -332,7 +340,7 @@ test('init merges hooks, preserves existing order and is byte identical twice', 
   assert.equal(calls.includes('restart fleetmates-deckd'), false)
 })
 
-test('settings replacement is atomic and preserves originals through interrupted writes', { concurrency: false }, () => {
+posixTest('settings replacement is atomic and preserves originals through interrupted writes', { concurrency: false }, () => {
   const s = sandbox('existing-hooks.json')
   const original = readFileSync(s.settings)
   const current = readSettings(s.settings)
@@ -379,7 +387,7 @@ test('settings replacement is atomic and preserves originals through interrupted
   }
 })
 
-test('init rotate token replaces the token and keeps private file mode', () => {
+posixTest('init rotate token replaces the token and keeps private file mode', () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   const tokenFile = path.join(s.state, 'fleetmates/deck/token')
@@ -393,7 +401,7 @@ test('init rotate token replaces the token and keeps private file mode', () => {
   assert.equal(statSync(tokenFile).mode & 0o777, 0o600)
 })
 
-test('init skips the absent web entry and starts it after installation', () => {
+posixTest('init skips the absent web entry and starts it after installation', () => {
   const s = sandbox('empty.json', { isolatedHub: true })
   const entry = path.join(s.hubPath, 'server/main.mjs')
   const serviceState = path.join(s.root, 'web-service-state')
@@ -415,7 +423,7 @@ test('init skips the absent web entry and starts it after installation', () => {
   assert.equal(readFileSync(serviceState, 'utf8'), 'active')
 })
 
-test('fresh home without settings.json installs hooks without a backup', () => {
+posixTest('fresh home without settings.json installs hooks without a backup', () => {
   const s = sandbox()
   unlinkSync(s.settings)
   assert.equal(existsSync(s.settings), false)
@@ -427,7 +435,7 @@ test('fresh home without settings.json installs hooks without a backup', () => {
   assert.equal(readdirSync(path.dirname(s.settings)).filter(name => name.includes('deck-backup-')).length, 0)
 })
 
-test('changed web unit triggers try-restart only for web while active', () => {
+posixTest('changed web unit triggers try-restart only for web while active', () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   const webUnit = path.join(s.config, 'systemd/user/fleetmates-deck.service')
@@ -446,7 +454,7 @@ test('changed web unit triggers try-restart only for web while active', () => {
   assert.doesNotMatch(readFileSync(s.calls, 'utf8'), /try-restart/)
 })
 
-test('uninstall removes deck hooks and keeps other hook entries', () => {
+posixTest('uninstall removes deck hooks and keeps other hook entries', () => {
   const s = sandbox('existing-hooks.json')
   assert.equal(s.run('init').status, 0)
   assert.equal(s.run('uninstall-hooks').status, 0)
@@ -456,7 +464,7 @@ test('uninstall removes deck hooks and keeps other hook entries', () => {
   assert.equal(Object.values(parsed.hooks).flatMap(groups => groups.flatMap(group => group.hooks)).some(h => h.command?.includes('deck-hook.mjs')), false)
 })
 
-test('open uses a private bootstrap file after identity proof and reaches the deck', async () => {
+posixTest('open uses a private bootstrap file after identity proof and reaches the deck', async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -500,7 +508,7 @@ test('open uses a private bootstrap file after identity proof and reaches the de
   } finally { await stopListener(server.child) }
 })
 
-test('open uses validated DECK_PORT ahead of config port', async () => {
+posixTest('open uses validated DECK_PORT ahead of config port', async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -518,7 +526,7 @@ test('open uses validated DECK_PORT ahead of config port', async () => {
   } finally { await stopListener(server.child) }
 })
 
-test('open refuses a loopback listener without the token proof', async () => {
+posixTest('open refuses a loopback listener without the token proof', async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -531,7 +539,7 @@ test('open refuses a loopback listener without the token proof', async () => {
   } finally { await stopListener(server.child) }
 })
 
-test('open rejects an identity relay to another port before exposing the token', async () => {
+posixTest('open rejects an identity relay to another port before exposing the token', async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -564,7 +572,7 @@ test('open rejects an identity relay to another port before exposing the token',
   }
 })
 
-test('open refuses the old nonce-only identity proof', async () => {
+posixTest('open refuses the old nonce-only identity proof', async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -579,7 +587,7 @@ test('open refuses the old nonce-only identity proof', async () => {
   } finally { await stopListener(server.child) }
 })
 
-test('open waits for a valid listener after systemctl start returns', async () => {
+posixTest('open waits for a valid listener after systemctl start returns', async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -593,7 +601,7 @@ test('open waits for a valid listener after systemctl start returns', async () =
   } finally { await stopListener(server.child) }
 })
 
-test('open stops retrying when no listener appears', async () => {
+posixTest('open stops retrying when no listener appears', async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -607,7 +615,7 @@ test('open stops retrying when no listener appears', async () => {
   } finally { await stopListener(server.child) }
 })
 
-test('open launches the default web browser entry, not the text/html handler, with only the file path', async () => {
+posixTest('open launches the default web browser entry, not the text/html handler, with only the file path', async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -630,7 +638,7 @@ test('open launches the default web browser entry, not the text/html handler, wi
   } finally { await stopListener(server.child) }
 })
 
-test('open prints the bootstrap file path and fails when no launcher works', async () => {
+posixTest('open prints the bootstrap file path and fails when no launcher works', async () => {
   const s = sandbox('empty.json', { webEntry: true })
   assert.equal(s.run('init').status, 0)
   const token = readFileSync(path.join(s.state, 'fleetmates/deck/token'), 'utf8').trim()
@@ -643,7 +651,7 @@ test('open prints the bootstrap file path and fails when no launcher works', asy
   } finally { await stopListener(server.child) }
 })
 
-test('init probes the active deckd socket for readiness before its deckd check', async () => {
+posixTest('init probes the active deckd socket for readiness before its deckd check', async () => {
   const s = sandbox()
   const paths = setupPaths(s.env)
   mkdirSync(paths.runtime, { recursive: true })
@@ -678,7 +686,7 @@ test('init probes the active deckd socket for readiness before its deckd check',
   } finally { await new Promise(resolve => server.close(resolve)) }
 })
 
-test('doctor and init show a newer Claude Code as a warning that does not fail the exit code', () => {
+posixTest('doctor and init show a newer Claude Code as a warning that does not fail the exit code', () => {
   const s = sandbox()
   const newer = { DECK_TEST_CLAUDE_VERSION: newerVersion() }
   const init = s.runWith(newer, 'init')
@@ -690,7 +698,7 @@ test('doctor and init show a newer Claude Code as a warning that does not fail t
   assert.match(doctor.stdout, /^hooks: ok /m)
 })
 
-test('invalid settings stops init before it writes directories or services', () => {
+posixTest('invalid settings stops init before it writes directories or services', () => {
   const s = sandbox()
   writeFileSync(s.settings, '{ broken')
   assert.equal(s.run('init').status, 1)
@@ -700,7 +708,7 @@ test('invalid settings stops init before it writes directories or services', () 
   assert.equal(readdirSync(s.root).includes('calls'), false)
 })
 
-test('init updates an old deck hook in place', () => {
+posixTest('init updates an old deck hook in place', () => {
   const s = sandbox()
   const settings = { hooks: { PreToolUse: [{ matcher: '*', hooks: [
     { type: 'command', command: 'node /home/you/fleetmates-deck/hook/deck-hook.mjs', async: true, timeout: 5 },
@@ -715,7 +723,7 @@ test('init updates an old deck hook in place', () => {
   assert.equal(groups[0].hooks[1].command, 'node /home/you/other.mjs')
 })
 
-test('renamed Node init is idempotent and uninstall preserves unrelated groups', t => {
+posixTest('renamed Node init is idempotent and uninstall preserves unrelated groups', t => {
   const s = sandbox('existing-hooks.json')
   const executableDir = fs.realpathSync(mkdtempSync(path.join('/var/tmp', 'deck-node-test-')))
   const executable = path.join(executableDir, 'deck-node-runtime')
@@ -754,7 +762,7 @@ test('renamed Node init is idempotent and uninstall preserves unrelated groups',
   assert.deepEqual(JSON.parse(readFileSync(s.settings)), original)
 })
 
-test('legacy node and nodejs hooks merge once and uninstall without removing other commands', () => {
+posixTest('legacy node and nodejs hooks merge once and uninstall without removing other commands', () => {
   const command = "'/opt/deck/node-runtime' '/tmp/fleetmates-deck/hook/deck-hook.mjs'"
   const unrelated = [
     'echo /tmp/old/hub/hook/deck-hook.mjs',
@@ -777,7 +785,7 @@ test('legacy node and nodejs hooks merge once and uninstall without removing oth
   }
 })
 
-test('init replaces an old hub path hook and preserves unrelated commands', () => {
+posixTest('init replaces an old hub path hook and preserves unrelated commands', () => {
   const s = sandbox()
   const old = 'node /tmp/old-install/hub/hook/deck-hook.mjs'
   const unrelated = ['node /home/you/other/hook/deck-hook.mjs', 'echo /tmp/old-install/hub/hook/deck-hook.mjs', 'node\n/tmp/old-install/hub/hook/deck-hook.mjs', 'node /home/you/other.mjs']
@@ -790,7 +798,7 @@ test('init replaces an old hub path hook and preserves unrelated commands', () =
   assert.deepEqual(groups[0].hooks.slice(1).map(hook => hook.command), unrelated)
 })
 
-test('uninstall removes an old hub path hook and preserves unrelated commands', () => {
+posixTest('uninstall removes an old hub path hook and preserves unrelated commands', () => {
   const s = sandbox()
   const old = 'node /tmp/old-install/hub/hook/deck-hook.mjs'
   const unrelated = ['node /home/you/other/hook/deck-hook.mjs', 'echo /tmp/old-install/hub/hook/deck-hook.mjs', 'node\n/tmp/old-install/hub/hook/deck-hook.mjs', 'node /home/you/other.mjs']
@@ -800,7 +808,7 @@ test('uninstall removes an old hub path hook and preserves unrelated commands', 
   assert.deepEqual(groups[0].hooks.map(hook => hook.command), unrelated)
 })
 
-test('restricted old hook gains wildcard coverage without widening unrelated hooks', () => {
+posixTest('restricted old hook gains wildcard coverage without widening unrelated hooks', () => {
   const s = sandbox()
   writeFileSync(s.settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [
     { type: 'command', command: 'node /home/you/fleetmates-deck/hook/deck-hook.mjs', async: true, timeout: 5 },
@@ -814,7 +822,7 @@ test('restricted old hook gains wildcard coverage without widening unrelated hoo
   assert.match(s.run('doctor').stdout, /hooks: ok/)
 })
 
-test('doctor and status read setup state without service mutations', () => {
+posixTest('doctor and status read setup state without service mutations', () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   writeFileSync(s.calls, '')
@@ -831,14 +839,14 @@ test('doctor and status read setup state without service mutations', () => {
   assert.equal(summary.livePtys, 0)
   const serviceCalls = readFileSync(s.calls, 'utf8').trim().split('\n').filter(call => call.startsWith('systemctl:'))
   assert.deepEqual(serviceCalls, [
-    'systemctl:--user is-active fleetmates-deckd.service',
-    'systemctl:--user is-active fleetmates-deckd.service',
-    'systemctl:--user is-active fleetmates-deck.service'
+    'systemctl:--user is-active --quiet fleetmates-deckd.service',
+    'systemctl:--user is-active --quiet fleetmates-deckd.service',
+    'systemctl:--user is-active --quiet fleetmates-deck.service'
   ])
 })
 
 for (const stall of ['hello', 'list', null]) {
-  test(`setup socket probe ${stall ? `bounds stalled ${stall}` : 'reads a responsive daemon'}`, async () => {
+  posixTest(`setup socket probe ${stall ? `bounds stalled ${stall}` : 'reads a responsive daemon'}`, async () => {
     const s = sandbox()
     const paths = setupPaths(s.env)
     mkdirSync(paths.runtime, { recursive: true })
@@ -925,27 +933,27 @@ async function deckdCheckWith(hello) {
   }
 }
 
-test('doctor names the login environment variables deckd adds, never their values', async () => {
+posixTest('doctor names the login environment variables deckd adds, never their values', async () => {
   const check = await deckdCheckWith({ proto: 2, deckdVersion: '0.2.0', bootId: 'b', loginEnvNames: ['PATH', 'MISE_SHELL'] })
   assert.equal(check.state, 'ok')
   assert.equal(check.detail, 'login env adds 2 names: MISE_SHELL, PATH')
   assert.doesNotMatch(check.detail, /=/)
 })
 
-test('doctor prints only loginEnvNames entries shaped like a variable name', async () => {
+posixTest('doctor prints only loginEnvNames entries shaped like a variable name', async () => {
   const check = await deckdCheckWith({ proto: 2, deckdVersion: '0.2.0', bootId: 'b', loginEnvNames: ['MISE_SHELL', 'PATH=/home/you/bin', 'PATH', 7] })
   assert.equal(check.detail, 'login env adds 2 names: MISE_SHELL, PATH')
   assert.doesNotMatch(check.detail, /home\/you|=/)
 })
 
-test('doctor keeps the deckd detail for an empty login env list and names the upgrade for a proto 1 deckd', async () => {
+posixTest('doctor keeps the deckd detail for an empty login env list and names the upgrade for a proto 1 deckd', async () => {
   assert.equal((await deckdCheckWith({ proto: 2, deckdVersion: '0.2.0', bootId: 'b', loginEnvNames: [] })).detail, 'deckd running')
   const old = await deckdCheckWith({ proto: 1, deckdVersion: '0.1.0', bootId: 'b' })
   assert.equal(old.state, 'ok')
   assert.equal(old.detail, 'deckd running; login env names need deckd 0.2.0')
 })
 
-test('doctor fails when the configured hook script is missing or not a file', () => {
+posixTest('doctor fails when the configured hook script is missing or not a file', () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   const hook = setupPaths(s.env).hook
@@ -959,7 +967,7 @@ test('doctor fails when the configured hook script is missing or not a file', ()
   assert.match(directory.stdout, /hooks: failed \(Observation hook script missing or unreadable\)/)
 })
 
-test('doctor fails when the configured hook script is unreadable', () => {
+posixTest('doctor fails when the configured hook script is unreadable', () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   const hook = setupPaths(s.env).hook
@@ -971,7 +979,7 @@ test('doctor fails when the configured hook script is unreadable', () => {
   } finally { chmodSync(hook, 0o600) }
 })
 
-test('doctor finds the scribed Unix listener in the runtime directory', async () => {
+posixTest('doctor finds the scribed Unix listener in the runtime directory', async () => {
   const s = sandbox()
   const server = createServer(socket => socket.end())
   await new Promise((resolve, reject) => server.listen(path.join(s.runtime, 'turbidassist.sock'), resolve).once('error', reject))
@@ -983,7 +991,7 @@ test('doctor finds the scribed Unix listener in the runtime directory', async ()
   }
 })
 
-test('installed units use absolute Node and hub paths with private umask', () => {
+posixTest('installed units use absolute Node and hub paths with private umask', () => {
   const s = sandbox()
   assert.equal(s.run('init').status, 0)
   const unitDir = path.join(s.config, 'systemd/user')
@@ -997,7 +1005,7 @@ test('installed units use absolute Node and hub paths with private umask', () =>
   assert.doesNotMatch(web, /^Documentation=/m)
 })
 
-test('installed hook command runs from an XDG data directory with spaces', () => {
+posixTest('installed hook command runs from an XDG data directory with spaces', () => {
   const s = sandbox()
   const data = path.join(s.root, "deck review home's")
   const result = s.runWith({ XDG_DATA_HOME: data }, 'init')
@@ -1014,7 +1022,7 @@ test('installed hook command runs from an XDG data directory with spaces', () =>
   assert.equal(event.hook.session_id, 'installed-hook-session')
 })
 
-test('both unit templates quote executable and entry paths with spaces', () => {
+posixTest('both unit templates quote executable and entry paths with spaces', () => {
   const nodePath = '/tmp/node install/bin/node'
   const hubPath = '/tmp/deck review home/hub'
   for (const [name, entry] of [['fleetmates-deck.service', 'server/main.mjs'], ['fleetmates-deckd.service', 'deckd/main.mjs']]) {
@@ -1027,21 +1035,21 @@ test('both unit templates quote executable and entry paths with spaces', () => {
 
 // The next two tests run in this order: the first leaves its listener running, as a failing test would.
 let abandoned
-test('a test may stop early and leave its listener running', async () => {
+posixTest('a test may stop early and leave its listener running', async () => {
   const s = sandbox()
   mkdirSync(path.join(s.config, 'fleetmates/deck'), { recursive: true })
   abandoned = await listener(s, 'token', true)
   assert.equal(abandoned.child.exitCode, null, 'the listener is up when its test ends')
 })
 
-test('every listener a test started has exited before the next test runs, including an abandoned one', () => {
+posixTest('every listener a test started has exited before the next test runs, including an abandoned one', () => {
   assert.ok(abandoned, 'the previous test started a listener')
   assert.ok(startedListeners.length >= 9, `the earlier tests started listeners: ${startedListeners.length}`)
   const alive = startedListeners.filter(child => child.exitCode === null && child.signalCode === null)
   assert.deepEqual(alive.map(child => child.pid), [], 'no listener outlives its test')
 })
 
-test('a listener exits on its own when the process that started it goes away', async () => {
+posixTest('a listener exits on its own when the process that started it goes away', async () => {
   const s = sandbox()
   mkdirSync(path.join(s.config, 'fleetmates/deck'), { recursive: true })
   const { child } = await listener(s, 'token', true)
@@ -1054,10 +1062,183 @@ test('a listener exits on its own when the process that started it goes away', a
   assert.equal(outcome, 'exited')
 })
 
-test('each deck-setup sandbox is removed once the test that made it finishes', () => {
+posixTest('each deck-setup sandbox is removed once the test that made it finishes', () => {
   const current = sandbox()
   assert.ok(sandboxRoots.length > 1, 'the earlier tests in this file created sandboxes')
   const left = sandboxRoots.filter(root => root !== current.root && existsSync(root))
   assert.deepEqual(left, [])
   assert.ok(existsSync(current.root), 'a sandbox stays while its own test runs')
+})
+
+// Injected-platform tests: setupPaths, doctor and status for linux, darwin and win32, with placeholder paths and
+// injected run, service, exists and readFile functions. They touch no real service manager and run on any host.
+
+test('setupPaths on linux keeps the XDG layout and adds runtime and endpoints under XDG_RUNTIME_DIR', () => {
+  const paths = setupPaths({ HOME: '/home/you', XDG_RUNTIME_DIR: '/run/user/1000' }, { platform: 'linux', uid: 1000 })
+  assert.deepEqual(paths, {
+    home: '/home/you',
+    config: '/home/you/.config/fleetmates/deck',
+    state: '/home/you/.local/state/fleetmates/deck',
+    share: '/home/you/.local/share/fleetmates-deck',
+    spool: '/home/you/.local/state/fleetmates/deck/spool',
+    logs: '/home/you/.local/state/fleetmates/deck/logs',
+    token: '/home/you/.local/state/fleetmates/deck/token',
+    hook: '/home/you/.local/share/fleetmates-deck/hook/deck-hook.mjs',
+    settings: '/home/you/.claude/settings.json',
+    units: '/home/you/.config/systemd/user',
+    runtime: '/run/user/1000/fleetmates-deck',
+    endpoints: { deckd: '/run/user/1000/fleetmates-deck/deckd.sock', hooks: '/run/user/1000/fleetmates-deck/hooks.sock' }
+  })
+})
+
+test('setupPaths on linux without XDG_RUNTIME_DIR has a runtime dir and endpoints under /tmp, never null', () => {
+  const paths = setupPaths({ HOME: '/home/you' }, { platform: 'linux', uid: 1000 })
+  assert.equal(paths.runtime, '/tmp/fleetmates-deck-1000/fleetmates-deck')
+  assert.deepEqual(paths.endpoints, { deckd: '/tmp/fleetmates-deck-1000/fleetmates-deck/deckd.sock', hooks: '/tmp/fleetmates-deck-1000/fleetmates-deck/hooks.sock' })
+})
+
+test('setupPaths on darwin keeps the XDG layout, runs from Library/Caches and puts units in LaunchAgents', () => {
+  const paths = setupPaths({ HOME: '/Users/you' }, { platform: 'darwin', uid: 501 })
+  assert.equal(paths.config, '/Users/you/.config/fleetmates/deck')
+  assert.equal(paths.state, '/Users/you/.local/state/fleetmates/deck')
+  assert.equal(paths.share, '/Users/you/.local/share/fleetmates-deck')
+  assert.equal(paths.units, '/Users/you/Library/LaunchAgents')
+  assert.equal(paths.runtime, '/Users/you/Library/Caches/fleetmates-deck/fleetmates-deck')
+  assert.equal(paths.endpoints.deckd, '/Users/you/Library/Caches/fleetmates-deck/fleetmates-deck/deckd.sock')
+  const xdg = setupPaths({ HOME: '/Users/you', XDG_CONFIG_HOME: '/Users/you/cfg', XDG_RUNTIME_DIR: '/Users/you/run' }, { platform: 'darwin', uid: 501 })
+  assert.equal(xdg.config, '/Users/you/cfg/fleetmates/deck')
+  assert.equal(xdg.units, '/Users/you/Library/LaunchAgents', 'launchd reads LaunchAgents whatever XDG_CONFIG_HOME says')
+  assert.equal(xdg.runtime, '/Users/you/run/fleetmates-deck')
+})
+
+const WIN_ENV = { USERPROFILE: 'C:\\Users\\you', APPDATA: 'C:\\Users\\you\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\you\\AppData\\Local' }
+const PIPE = /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-(deckd|hooks)$/
+
+test('setupPaths on win32 puts config under APPDATA, state and share under LOCALAPPDATA, and the endpoints on named pipes', () => {
+  const paths = setupPaths(WIN_ENV, { platform: 'win32', uid: null })
+  assert.equal(paths.home, 'C:\\Users\\you')
+  assert.equal(paths.config, 'C:\\Users\\you\\AppData\\Roaming\\fleetmates\\deck')
+  assert.equal(paths.state, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\state')
+  assert.equal(paths.share, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\share')
+  assert.equal(paths.spool, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\state\\spool')
+  assert.equal(paths.logs, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\state\\logs')
+  assert.equal(paths.token, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\state\\token')
+  assert.equal(paths.hook, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\share\\hook\\deck-hook.mjs')
+  assert.equal(paths.settings, 'C:\\Users\\you\\.claude\\settings.json')
+  assert.equal(paths.units, null)
+  assert.equal(paths.runtime, 'C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run\\fleetmates-deck')
+  assert.match(paths.endpoints.deckd, PIPE)
+  assert.match(paths.endpoints.hooks, PIPE)
+  assert.ok(paths.endpoints.deckd.endsWith('-deckd') && paths.endpoints.hooks.endsWith('-hooks'))
+  assert.equal(paths.endpoints.deckd.replace(/-deckd$/, ''), paths.endpoints.hooks.replace(/-hooks$/, ''), 'both pipes share one hash')
+})
+
+test('setupPaths on win32 falls back to the profile AppData folders, never ~/.config, and lets set XDG variables win', () => {
+  const bare = setupPaths({ USERPROFILE: 'C:\\Users\\you' }, { platform: 'win32', uid: null })
+  assert.equal(bare.config, 'C:\\Users\\you\\AppData\\Roaming\\fleetmates\\deck')
+  assert.equal(bare.state, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\state')
+  assert.equal(bare.share, 'C:\\Users\\you\\AppData\\Local\\fleetmates\\deck\\share')
+  for (const value of [bare.config, bare.state, bare.share]) assert.doesNotMatch(value, /\.config|\.local/)
+  const xdg = setupPaths({ ...WIN_ENV, XDG_CONFIG_HOME: 'D:\\xdg\\config', XDG_STATE_HOME: 'D:\\xdg\\state', XDG_DATA_HOME: 'D:\\xdg\\data', XDG_RUNTIME_DIR: 'D:\\xdg\\run' }, { platform: 'win32', uid: null })
+  assert.equal(xdg.config, 'D:\\xdg\\config\\fleetmates\\deck')
+  assert.equal(xdg.state, 'D:\\xdg\\state\\fleetmates\\deck')
+  assert.equal(xdg.share, 'D:\\xdg\\data\\fleetmates-deck')
+  assert.equal(xdg.runtime, 'D:\\xdg\\run\\fleetmates-deck')
+  assert.match(xdg.endpoints.deckd, PIPE)
+  assert.notEqual(xdg.endpoints.deckd, setupPaths(WIN_ENV, { platform: 'win32', uid: null }).endpoints.deckd, 'another runtime base gives another pipe')
+})
+
+/** A recording spawnSync-shaped `run`: claude answers `claudeOut`, systemctl answers `systemctlStatus`. */
+function recordingRun({ claudeOut = `${testedVersion()} (Claude Code)\n`, systemctlStatus = 3 } = {}) {
+  const calls = []
+  const run = (file, args, options) => {
+    calls.push({ file, args, options })
+    if (file === 'systemctl') return { status: systemctlStatus, stdout: '', stderr: '' }
+    return { status: 0, stdout: claudeOut, stderr: '' }
+  }
+  return { calls, run }
+}
+
+/** A recording service adapter. */
+function fakeService(kind, active = () => false) {
+  const asked = []
+  return { asked, service: { kind, isActive: async name => { asked.push(name); return active(name) } } }
+}
+
+const checkById = (checks, id) => checks.find(check => check.id === id)
+
+test('doctor on linux asks the systemd adapter whether deckd is active and keeps the scribed and notify checks', async () => {
+  const paths = setupPaths({ HOME: '/home/you', XDG_RUNTIME_DIR: '/nonexistent-deck-test-runtime' }, { platform: 'linux', uid: 1000 })
+  const { calls, run } = recordingRun()
+  const checks = await doctor(paths, 'cmd', { platform: 'linux', run, env: {} })
+  assert.deepEqual(calls.map(call => [call.file, ...call.args]), [['claude', '--version'], ['systemctl', '--user', 'is-active', '--quiet', 'fleetmates-deckd.service']])
+  assert.deepEqual(calls[0].options, {}, 'claude runs through commandSpawn, whose POSIX options are empty')
+  assert.equal(checkById(checks, 'claude').state, 'ok')
+  assert.deepEqual(checkById(checks, 'deckd'), { id: 'deckd', state: 'failed', blocking: false, detail: 'deckd unavailable' })
+  assert.deepEqual(checkById(checks, 'scribed'), { id: 'scribed', state: 'optional_skipped', blocking: false, detail: 'scribed socket optional' })
+  assert.deepEqual(checkById(checks, 'notify'), { id: 'notify', state: 'pending', blocking: false, detail: 'Send a test ping from Settings' })
+})
+
+test('doctor on darwin never runs systemctl: deckd comes from the launchd adapter probe, scribed is unsupported', async () => {
+  const paths = setupPaths({ HOME: '/Users/you' }, { platform: 'darwin', uid: 501 })
+  const { calls, run } = recordingRun({ systemctlStatus: 0 })
+  const checks = await doctor(paths, 'cmd', { platform: 'darwin', run, env: {} })
+  assert.deepEqual(calls.map(call => call.file), ['claude'], 'no systemctl and no launchctl for a read-only check')
+  assert.equal(checkById(checks, 'deckd').state, 'failed', 'nothing listens on the darwin endpoint')
+  assert.deepEqual(checkById(checks, 'scribed'), { id: 'scribed', state: 'optional_skipped', blocking: false, detail: 'unsupported on darwin' })
+  assert.equal(checkById(checks, 'notify').state, 'pending')
+
+  const { asked, service } = fakeService('launchd')
+  const injected = recordingRun({ systemctlStatus: 0 })
+  await doctor(paths, 'cmd', { platform: 'darwin', run: injected.run, env: {}, service })
+  assert.deepEqual(asked, ['deckd'])
+  assert.deepEqual(injected.calls.map(call => call.file), ['claude'])
+})
+
+test('doctor on win32 resolves claude.cmd on PATH, runs its unwrapped exe hidden, and reports win32 limits', async () => {
+  const paths = setupPaths(WIN_ENV, { platform: 'win32', uid: null })
+  const { calls, run } = recordingRun()
+  const shim = '@ECHO off\r\nGOTO start\r\n:start\r\nSETLOCAL\r\n"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n'
+  const checks = await doctor(paths, 'cmd', {
+    platform: 'win32', run,
+    env: { PATH: 'C:\\Users\\you\\AppData\\Roaming\\npm', PATHEXT: '.EXE;.CMD' },
+    exists: file => file === 'C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd',
+    readFile: file => { assert.equal(file, 'C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd'); return shim }
+  })
+  assert.deepEqual(calls, [{ file: 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe', args: ['--version'], options: { windowsHide: true } }])
+  assert.equal(checkById(checks, 'claude').state, 'ok')
+  assert.equal(checkById(checks, 'deckd').state, 'failed')
+  assert.deepEqual(checkById(checks, 'scribed'), { id: 'scribed', state: 'optional_skipped', blocking: false, detail: 'unsupported on win32' })
+  assert.deepEqual(checkById(checks, 'notify'), { id: 'notify', state: 'optional_skipped', blocking: false, detail: 'in-tab only on win32' })
+})
+
+test('status names the services per adapter and asks the adapter, not systemctl, off linux', async () => {
+  for (const [platform, kind, names] of [['darwin', 'launchd', ['io.fleetmates.deck.deckd', 'io.fleetmates.deck.web']], ['win32', 'detached', ['deckd', 'web']]]) {
+    const paths = platform === 'win32' ? setupPaths(WIN_ENV, { platform, uid: null }) : setupPaths({ HOME: '/Users/you' }, { platform, uid: 501 })
+    const { asked, service } = fakeService(kind, name => name === 'web')
+    const { calls, run } = recordingRun({ systemctlStatus: 0 })
+    const summary = await status(paths, 'cmd', { platform, run, env: {}, service, exists: () => false })
+    assert.deepEqual(summary.units, [{ name: names[0], active: false }, { name: names[1], active: true }], platform)
+    assert.deepEqual(asked, ['deckd', 'web'], platform)
+    assert.deepEqual(calls.map(call => call.file), ['claude'], platform)
+    assert.equal(summary.socket, false, platform)
+  }
+})
+
+posixTest('start and stop run the service adapter for both services, and refuse extra arguments', () => {
+  const s = sandbox()
+  const start = s.run('start')
+  assert.equal(start.status, 0, start.stderr)
+  assert.deepEqual(readFileSync(s.calls, 'utf8').trim().split('\n'), ['systemctl:--user start fleetmates-deckd.service', 'systemctl:--user start fleetmates-deck.service'])
+  writeFileSync(s.calls, '')
+  const stop = s.run('stop')
+  assert.equal(stop.status, 0, stop.stderr)
+  assert.deepEqual(readFileSync(s.calls, 'utf8').trim().split('\n'), ['systemctl:--user stop fleetmates-deck.service', 'systemctl:--user stop fleetmates-deckd.service'])
+  writeFileSync(s.calls, '')
+  for (const args of [['start', 'deckd'], ['stop', '--now']]) {
+    const refused = s.run(...args)
+    assert.equal(refused.status, 1, args.join(' '))
+    assert.match(refused.stderr, /usage: fleetmates-deck .*\| start \| stop \|/)
+  }
+  assert.equal(readFileSync(s.calls, 'utf8'), '', 'a refused command touches no service')
 })
