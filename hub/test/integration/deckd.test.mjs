@@ -629,7 +629,9 @@ test('with platform win32 deckd writes a new key at every start, a client reads 
     const secret = endpointSecret('base', { platform: 'win32', name: 'deckd' })
     assert.match(secret ?? '', /^[0-9a-f]{64}$/)
     assert.equal(first.socketPath, endpoint('base', 'deckd', { platform: 'win32', secret }))
-    await assert.rejects(startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} }), { message: `another deckd is listening on ${first.socketPath}` })
+    // A second start that is wrongly allowed is closed again, so a failure here cannot leave it running.
+    const second = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} }).then(async (d) => { await d.close(); return null }, (err) => err)
+    assert.equal(second?.message, `another deckd is listening on ${first.socketPath}`)
     const client = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
     try {
       assert.equal(client.bootId, first.bootId)

@@ -99,7 +99,9 @@ test('startHookSocket on win32 writes a new hooks key each start and listens on 
       ingest.flush()
       assert.deepEqual(accepted, [9])
       // Another deck server on the same base: refused while this one answers, and this one's key stays.
-      await assert.rejects(startHookSocket({ runtimeDir: base, ingest, platform: 'win32', uid: null }), { code: 'EADDRINUSE', path: server.path })
+      const refused = await startError({ runtimeDir: base, ingest, platform: 'win32', uid: null })
+      assert.equal(refused?.code, 'EADDRINUSE')
+      assert.equal(refused?.path, server.path)
       assert.equal(endpointSecret(base, { platform: 'win32', name: 'hooks' }), secret)
       assert.equal(hookEndpoint(WIN_ENV, 'win32'), server.path)
       // A clean close removes the key, so the hook finds no server; the next start writes a new key, and the hook follows it.
