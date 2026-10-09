@@ -40,7 +40,7 @@ function harness({ platform, active = () => false, runCode = () => 0, uid = 501 
       return child
     },
     probe: async service => { probes.push(service); return active(service) },
-    writeFile: async (file, content, options) => { writes.push({ file, content: String(content) }); await fs.promises.writeFile(file, content, options) },
+    writeFile: async (file, content, options) => { writes.push({ file, content: String(content), mode: options?.mode }); await fs.promises.writeFile(file, content, options) },
     mkdir: (dir, options) => fs.promises.mkdir(dir, options),
     readFile: (file, encoding) => fs.promises.readFile(file, encoding),
     rm: async (file, options) => { removed.push(file); await fs.promises.rm(file, options) }
@@ -124,12 +124,13 @@ test('renderPlist escapes XML and sets Umask 63, KeepAlive on failure and the lo
 })
 
 test('launchd install writes both plists, then boots out and bootstraps each in gui/<uid>', async () => {
-  const { manager, paths, calls } = harness({ platform: 'darwin', uid: 501, runCode: (file, args) => args[0] === 'bootout' ? 113 : 0 })
+  const { manager, paths, calls, writes } = harness({ platform: 'darwin', uid: 501, runCode: (file, args) => args[0] === 'bootout' ? 113 : 0 })
   assert.equal(manager.kind, 'launchd')
   await manager.install()
   const agents = path.join(paths.home, 'Library/LaunchAgents')
   const deckdPlist = path.join(agents, 'io.fleetmates.deck.deckd.plist')
   const webPlist = path.join(agents, 'io.fleetmates.deck.web.plist')
+  assert.deepEqual(writes.map(w => [w.file, w.mode]), [[deckdPlist, 0o644], [webPlist, 0o644]])
   assert.equal(fs.readFileSync(deckdPlist, 'utf8'), renderPlist('io.fleetmates.deck.deckd', '/usr/bin/node', path.join(hub, 'deckd/main.mjs'), paths.logs))
   assert.equal(fs.readFileSync(webPlist, 'utf8'), renderPlist('io.fleetmates.deck.web', '/usr/bin/node', path.join(hub, 'server/main.mjs'), paths.logs))
   assert.deepEqual(calls, [
@@ -138,6 +139,11 @@ test('launchd install writes both plists, then boots out and bootstraps each in 
     ['launchctl', 'bootout', 'gui/501/io.fleetmates.deck.web'],
     ['launchctl', 'bootstrap', 'gui/501', webPlist]
   ])
+})
+
+test('launchd install rejects when bootstrap fails', async () => {
+  const { manager } = harness({ platform: 'darwin', uid: 501, runCode: (file, args) => args[0] === 'bootstrap' ? 5 : 0 })
+  await assert.rejects(manager.install(), /launchctl bootstrap .*failed/)
 })
 
 test('launchd start, restart, stop use kickstart and kill, isActive trusts probe, uninstall removes the plists', async () => {
@@ -182,7 +188,7 @@ test('detached start spawns node hidden and detached with append-mode logs, unre
   assert.equal(typeof options.stdio[2], 'number')
   assert.equal(child.unrefCalled, true)
   const pidFile = path.join(paths.state, 'run/deckd.pid')
-  assert.deepEqual(writes.filter(w => w.file === pidFile).map(w => w.content), ['4242\n'])
+  assert.deepEqual(writes.filter(w => w.file === pidFile).map(w => [w.content, w.mode]), [['4242\n', 0o600]])
   assert.equal(fs.readFileSync(pidFile, 'utf8'), '4242\n')
   assert.ok(fs.existsSync(path.join(paths.logs, 'deckd.log')), 'the log file is opened under logs')
   fs.writeFileSync(path.join(paths.logs, 'deckd.log'), 'before\n')
@@ -211,11 +217,16 @@ test('detached isActive trusts probe, not the pid file', async () => {
   assert.equal(await live.manager.isActive('web'), true, 'no pid file, but the probe answers')
 })
 
-test('detached stop runs taskkill on the recorded tree and removes the pid file', async () => {
-  const { manager, paths, calls, removed } = harness({ platform: 'win32' })
-  const pidFile = path.join(paths.state, 'run/web.pid')
-  fs.mkdirSync(path.dirname(pidFile), { recursive: true })
-  fs.writeFileSync(pidFile, '777\n')
+function writePid(paths, service, content) {
+  const file = path.join(paths.state, `run/${service}.pid`)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, content)
+  return file
+}
+
+test('detached stop of an active service runs taskkill on the recorded tree and removes the pid file', async () => {
+  const { manager, paths, calls, removed } = harness({ platform: 'win32', active: () => true })
+  const pidFile = writePid(paths, 'web', '777\n')
   await manager.stop('web')
   assert.deepEqual(calls, [['taskkill', '/PID', '777', '/T', '/F']])
   assert.deepEqual(removed, [pidFile])
@@ -225,13 +236,46 @@ test('detached stop runs taskkill on the recorded tree and removes the pid file'
   assert.deepEqual(calls, [], 'no pid file, nothing to kill')
 })
 
+test('detached stop with a leftover pid file and no answering probe kills nothing and removes the pid file', async () => {
+  const { manager, paths, calls, probes } = harness({ platform: 'win32', active: () => false })
+  const pidFile = writePid(paths, 'deckd', '4242\n')
+  await manager.stop('deckd')
+  assert.deepEqual(probes, ['deckd'])
+  assert.deepEqual(calls, [])
+  assert.equal(fs.existsSync(pidFile), false)
+})
+
+test('detached stop never passes a corrupt pid to taskkill', async () => {
+  for (const content of ['12abc\n', '0\n', '-1\n', '\n']) {
+    const { manager, paths, calls } = harness({ platform: 'win32', active: () => true })
+    const pidFile = writePid(paths, 'web', content)
+    await manager.stop('web')
+    assert.deepEqual(calls, [], `pid file ${JSON.stringify(content)}`)
+    assert.equal(fs.existsSync(pidFile), false)
+  }
+})
+
+test('detached stop throws and keeps the pid file when taskkill fails while the probe still answers', async () => {
+  const { manager, paths } = harness({ platform: 'win32', active: () => true, runCode: () => 1 })
+  const pidFile = writePid(paths, 'web', '777\n')
+  await assert.rejects(manager.stop('web'), /taskkill \/PID 777 failed/)
+  assert.equal(fs.existsSync(pidFile), true)
+  let alive = true
+  const gone = harness({ platform: 'win32', active: () => { const was = alive; alive = false; return was }, runCode: () => 128 })
+  const gonePid = writePid(gone.paths, 'web', '777\n')
+  await gone.manager.stop('web')
+  assert.equal(fs.existsSync(gonePid), false, 'taskkill failed but the service is down, so stop succeeds')
+})
+
 test('detached install adds the HKCU Run value and starts both services; uninstall deletes it and stops both', async () => {
-  const { manager, paths, calls, spawns } = harness({ platform: 'win32' })
+  let running = false
+  const { manager, paths, calls, spawns } = harness({ platform: 'win32', active: () => running })
   await manager.install()
   const command = `conhost.exe --headless "/usr/bin/node" "${path.join(hub, 'bin/fleetmates-deck.mjs')}" start`
   assert.deepEqual(calls, [['reg', 'add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v', 'fleetmates-deck', '/t', 'REG_SZ', '/d', command, '/f']])
   assert.deepEqual(spawns.map(s => s.args[0]), [path.join(hub, 'deckd/main.mjs'), path.join(hub, 'server/main.mjs')])
   calls.length = 0
+  running = true
   await manager.uninstall()
   assert.deepEqual(calls, [
     ['reg', 'delete', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', '/v', 'fleetmates-deck', '/f'],

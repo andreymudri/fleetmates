@@ -118,7 +118,8 @@ export function createServiceManager({
     const stop = async service => {
       let pid
       try { pid = String(await readFile(pidFile(service), 'utf8')).trim() } catch (error) { if (error.code === 'ENOENT') return; throw error }
-      if (/^[1-9][0-9]*$/.test(pid)) {
+      // A pid file left by a crash or a reboot may name an unrelated process tree, so kill only while the probe answers.
+      if (await probe(service) && /^[1-9][0-9]*$/.test(pid)) {
         const result = await run('taskkill', ['/PID', pid, '/T', '/F'])
         if (result.code !== 0 && await probe(service)) throw new Error(`taskkill /PID ${pid} failed: ${result.stderr?.trim() || `exit ${result.code}`}`)
       }
