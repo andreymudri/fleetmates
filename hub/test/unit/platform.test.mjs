@@ -238,8 +238,12 @@ test('a start lock left by a dead process is taken over; one held by a live proc
     assert.ok(Date.now() - started >= 80, 'it waited for the holder')
     assert.equal(readFileSync(lockFile('base', 'hooks'), 'utf8'), '4242', 'a live holder keeps its lock')
     const server = net.createServer()
-    await assert.rejects(listenEndpoint('base', 'hooks', server, { platform: 'win32', alive: () => true, lockWaitMs: 80 }), { code: 'EADDRINUSE' })
-    assert.equal(server.listening, false)
+    try {
+      await assert.rejects(listenEndpoint('base', 'hooks', server, { platform: 'win32', alive: () => true, lockWaitMs: 80 }), { code: 'EADDRINUSE' })
+      assert.equal(server.listening, false)
+    } finally {
+      if (server.listening) await new Promise(resolve => server.close(resolve))
+    }
   })
 })
 
@@ -293,12 +297,16 @@ test('listenEndpoint on win32 listens on a new key each start and writes the key
       }
       return fs.renameSync(from, to)
     } }
-    const first = await listenEndpoint('base', 'deckd', server, { platform: 'win32', fs: watching })
-    assert.match(first, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-deckd$/)
-    assert.equal(first, endpoint('base', 'deckd', { platform: 'win32' }), 'a client computes the pipe the server listens on')
-    assert.deepEqual(atPublish, [{ listening: true, address: first, pipe: first }], 'the key appeared only after its pipe was listening')
-    const firstKey = endpointSecret('base', { platform: 'win32', name: 'deckd' })
-    await new Promise(resolve => server.close(resolve))
+    let first, firstKey
+    try {
+      first = await listenEndpoint('base', 'deckd', server, { platform: 'win32', fs: watching })
+      assert.match(first, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-deckd$/)
+      assert.equal(first, endpoint('base', 'deckd', { platform: 'win32' }), 'a client computes the pipe the server listens on')
+      assert.deepEqual(atPublish, [{ listening: true, address: first, pipe: first }], 'the key appeared only after its pipe was listening')
+      firstKey = endpointSecret('base', { platform: 'win32', name: 'deckd' })
+    } finally {
+      if (server.listening) await new Promise(resolve => server.close(resolve))
+    }
     server = net.createServer()
     const second = await listenEndpoint('base', 'deckd', server, { platform: 'win32', fs: watching })
     try {
@@ -324,6 +332,7 @@ test('listenEndpoint on win32 refuses with EADDRINUSE while the current key\'s p
       assert.equal(endpointSecret('base', { platform: 'win32', name: 'hooks' }), key)
     } finally {
       await new Promise(resolve => live.close(resolve))
+      if (other.listening) await new Promise(resolve => other.close(resolve))
     }
   })
 })
