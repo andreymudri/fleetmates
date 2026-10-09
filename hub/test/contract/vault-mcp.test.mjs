@@ -28,7 +28,9 @@ async function withClients (fn) {
   const tree = await makeVaultTree({ kind: 'vault22' })
   const tools = []
   const env = { HOME: tree.root, XDG_RUNTIME_DIR: tree.root, VAULT_PATH: tree.root, VAULT_LANG: 'en' }
-  const real = createVaultClient({ command: [process.execPath, realServer], env, spawn: (...args) => {
+  // This file pins schemas and parsers, not latency: a slowMs no cold start reaches keeps both clients ok.
+  const slowMs = 600_000
+  const real = createVaultClient({ command: [process.execPath, realServer], env, slowMs, spawn: (...args) => {
     const child = spawn(...args)
     let pending = ''
     child.stdout.on('data', chunk => {
@@ -43,7 +45,7 @@ async function withClients (fn) {
     })
     return child
   } })
-  const fake = createVaultClient({ command: [process.execPath, fakeServer], env })
+  const fake = createVaultClient({ command: [process.execPath, fakeServer], env, slowMs })
   let realPid, fakePid
   try {
     assert.equal((await real.start()).state, 'ok')
@@ -129,7 +131,7 @@ test('the generated vault has exactly N deterministic notes over eight domains a
     }
     const files = await walk(trees[0].root)
     assert.equal(files.length, 40)
-    assert.equal(new Set(files.filter(file => file.includes('02-wiki')).map(file => path.relative(trees[0].root, file).split('/')[1])).size, 8)
+    assert.equal(new Set(files.filter(file => file.includes('02-wiki')).map(file => path.relative(trees[0].root, file).split(/[\\/]/)[1])).size, 8)
     assert.ok(!files.some(file => file.includes('.git')))
     for (const file of files) {
       const relative = path.relative(trees[0].root, file)

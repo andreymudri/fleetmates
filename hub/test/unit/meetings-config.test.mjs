@@ -5,6 +5,10 @@ import path from 'node:path'
 import { test } from 'node:test'
 import { createConfigWatcher, locateConfig, parseConfig, policyFor, readConfig } from '../../server/meetings/config.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const HOME = '/home/you'
 
 // The shape of contract 2.11 (config.example.yaml), with placeholder paths and tags.
@@ -161,7 +165,7 @@ test('a flow mapping as the value of synthesis.tag_policies is unsupported with 
   assert.deepEqual([block.error.code, block.error.line], ['unsupported', 1])
 })
 
-test('session_dir expands ~/ against home and must be absolute', () => {
+test('session_dir expands ~/ against home and must be absolute', { skip: LINUX_ONLY }, () => {
   const config = parse('session_dir: ~/meetings\nvault:\n  path: "~/vault"\n')
   assert.equal(config.sessionDir, '/home/you/meetings')
   assert.equal(config.vaultPath, '/home/you/vault')
@@ -208,7 +212,7 @@ test('leading document marker is accepted and a second document is unsupported',
   assert.deepEqual([anchor.error.code, anchor.error.line], ['unsupported', 1])
 })
 
-test('readConfig reports not_found, too_large and reads a real file', () => {
+test('readConfig reports not_found, too_large and reads a real file', { skip: LINUX_ONLY }, () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'deck-mcfg-'))
   try {
     const file = path.join(dir, 'config.yaml')
@@ -224,7 +228,7 @@ test('readConfig reports not_found, too_large and reads a real file', () => {
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('locateConfig prefers the pref and uses the default path only when it exists', () => {
+test('locateConfig prefers the pref and uses the default path only when it exists', { skip: LINUX_ONLY }, () => {
   const seen = []
   const exists = file => { seen.push(file); return true }
   assert.equal(locateConfig({ pref: '~/ta/config.yaml', home: HOME, exists }), '/home/you/ta/config.yaml')

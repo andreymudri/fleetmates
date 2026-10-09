@@ -19,6 +19,10 @@ import { startFakeScribed } from '../fakes/fake-scribed.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { meetings5, writeMeetingsTree } from '../helpers/meetings-tree.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const token = 'c'.repeat(43)
 const serverMain = fileURLToPath(new URL('../../server/main.mjs', import.meta.url))
 const deckHook = fileURLToPath(new URL('../../hook/deck-hook.mjs', import.meta.url))
@@ -277,13 +281,13 @@ async function recordAndScan(t, tag) {
   return { sources, answers }
 }
 
-test('client-a: a recorded, pinned, asked, searched, read and synthesized meeting and a spooled hook leave zero sentinel hits', { timeout: 60_000 }, async t => {
+test('client-a: a recorded, pinned, asked, searched, read and synthesized meeting and a spooled hook leave zero sentinel hits', { skip: LINUX_ONLY, timeout: 60_000 }, async t => {
   const { sources, answers } = await recordAndScan(t, 'client-a')
   assert.deepEqual(hits(sources, Object.values(SENTINEL)), [])
   answers()
 })
 
-test('pessoal: the same leaves zero sentinel hits except the pin labels in deck.db', { timeout: 60_000 }, async t => {
+test('pessoal: the same leaves zero sentinel hits except the pin labels in deck.db', { skip: LINUX_ONLY, timeout: 60_000 }, async t => {
   const { sources, answers } = await recordAndScan(t, 'pessoal')
   const pins = [SENTINEL.pinA, SENTINEL.pinB]
   const found = hits(sources, Object.values(SENTINEL))

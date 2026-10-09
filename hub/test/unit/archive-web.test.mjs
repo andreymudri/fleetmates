@@ -3,7 +3,8 @@
 // Focus view. Pure screens are walked as trees; one headless-Chromium test mounts the real Home route.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { findChromium } from '../helpers/chromium.mjs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -310,16 +311,6 @@ test('observe.css styles the archive rows, toggle and banner with tokens only', 
   }
 })
 
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
-}
-
 // The real Home route with a recording API double. The archived list serves `window.h.archived` and Unarchive
 // drops the row server-side, so the row leaves the page only when Home fetches the list again.
 const HOME_HARNESS = `import React from 'react'
@@ -353,7 +344,7 @@ createRoot(document.getElementById('root')).render(<Home state={state} navigate=
 `
 
 test('the real Home route: Archived (N) fetches archived=1 on expand, Unarchive refetches without the row, Archive and Undo post', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the Home browser test')
   const dir = await mkdtemp(path.join(tmpdir(), 'archive-'))
   t.after(() => rm(dir, { recursive: true, force: true }))

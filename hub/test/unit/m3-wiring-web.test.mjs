@@ -4,7 +4,8 @@
 // over a Safe request, the request is allowed from the palette and then closed, and the store must hold the toast.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { findChromium } from '../helpers/chromium.mjs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -13,16 +14,6 @@ import { build, runnerImport } from 'vite'
 import { chromium } from 'playwright-core'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
-
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
-}
 
 /** Every element of a React element tree, depth first. */
 function elements(node, out = []) {
@@ -92,7 +83,7 @@ createRoot(document.getElementById('root')).render(<App />)
 `
 
 test('the palette Allow toast reaches the store from Home, Focus, Team run, Settings, New session and the Crew sheet', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the wiring browser test')
   const dir = await mkdtemp(path.join(tmpdir(), 'm3wire-'))
   t.after(() => rm(dir, { recursive: true, force: true }))

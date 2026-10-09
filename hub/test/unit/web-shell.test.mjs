@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { findChromium } from '../helpers/chromium.mjs'
 import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -626,7 +627,7 @@ createRoot(document.getElementById('root')).render(<App />)
 `
 
 test('in Chromium the Focus route ignores the 1 answer key on an archived session and takes it once the session is unarchived', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the Focus browser test')
   const dir = await mkdtemp(path.join(tmpdir(), 'focusarc-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
@@ -882,18 +883,8 @@ test('applyAppearance sets the text size as --text-base and reduced motion as da
   assert.equal(props.size + attrs.size, 0)
 })
 
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
-}
-
 test('in Chromium the deck drops the fragment, authenticates the socket and shows a stale token without retrying', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the shell browser test')
   const { startDeckServer } = await import('../../server/main.mjs')
   const dir = await mkdtemp(path.join(tmpdir(), 'shell-'))

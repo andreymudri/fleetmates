@@ -4,14 +4,31 @@ import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { prepareNative } from '../../bin/prepare-native.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 
-test('native preparation makes the macOS spawn helper executable and rejects unsafe or missing helpers', async () => {
+/** A private package root and the darwin-arm64 options and helper path inside it. */
+async function packageRoot () {
   const root = await mkdtemp(path.join(os.tmpdir(), 'deck-native-'))
   const options = { platform: 'darwin', arch: 'arm64', packageRoot: root }
   const helper = path.join(root, 'prebuilds/darwin-arm64/spawn-helper')
+  return { root, options, helper }
+}
+
+test('native preparation does nothing off macOS, finds the macOS spawn helper and rejects a missing one', async () => {
+  const { root, options, helper } = await packageRoot()
   try {
     assert.equal(await prepareNative({ ...options, platform: 'linux' }), 0)
     await assert.rejects(prepareNative(options), /helper is missing/)
+    await mkdir(path.dirname(helper), { recursive: true })
+    await writeFile(helper, 'Synthetic helper', { mode: 0o600 })
+    assert.equal(await prepareNative(options), 1)
+    assert.equal(await prepareNative(options), 1)
+  } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+posixTest('native preparation makes the macOS spawn helper executable and rejects a symlinked helper', { reason: 'execute bits and symlinks' }, async () => {
+  const { root, options, helper } = await packageRoot()
+  try {
     await mkdir(path.dirname(helper), { recursive: true })
     await writeFile(helper, 'Synthetic helper', { mode: 0o600 })
     assert.equal(await prepareNative(options), 1)

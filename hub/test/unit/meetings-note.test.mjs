@@ -7,6 +7,10 @@ import path from 'node:path'
 import { findNote, parseNote, readNote, itemKey, splitOwner } from '../../server/meetings/note.mjs'
 import { writeMeetingsTree, meetings5 } from '../helpers/meetings-tree.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 async function tree(t, options) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'deck-note-'))
   t.after(() => rm(root, { recursive: true, force: true }))
@@ -15,7 +19,7 @@ async function tree(t, options) {
 
 const where = (m, key, tag) => ({ vaultPath: m.vaultPath, meetingsFolder: 'Meetings', id: m.ids[key], tag, date: m.ids[key].slice(0, 10) })
 
-test('findNote resolves two candidates with the same date and tag prefix by frontmatter session_id', async t => {
+test('findNote resolves two candidates with the same date and tag prefix by frontmatter session_id', { skip: LINUX_ONLY }, async t => {
   const m = await tree(t)
   const other = path.join(m.vaultPath, 'Meetings', `2026-09-12 client-a \u2014 aaa outra reunião.md`)
   await writeFile(other, '---\ntags: [meeting, client-a]\ndate: 2026-09-12\nsession_id: 2026-09-12T09-00-00\n---\n\n# aaa outra reunião\n')
@@ -58,7 +62,7 @@ test('findNote refuses a meetings folder that is the vault itself or outside it'
   try { assert.equal(await findNote({ ...base, meetingsFolder: '../locked' }), null) } finally { await chmod(locked, 0o700) }
 })
 
-test('readNote reads a vault-relative note and refuses a symlink', async t => {
+test('readNote reads a vault-relative note and refuses a symlink', { skip: LINUX_ONLY }, async t => {
   const m = await tree(t)
   const text = await readNote({ vaultPath: m.vaultPath, notePath: m.notes.weekly })
   assert.equal(parseNote(text).title, 'weekly sync')

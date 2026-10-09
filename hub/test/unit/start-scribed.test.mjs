@@ -13,6 +13,10 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { startScribed } from '../../server/meetings/start-scribed.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const execFileAsync = promisify(execFileCallback)
 const DECIDED = ['--user', '--collect', '--unit=turbidassist-scribed', '--property=KillMode=process']
 
@@ -76,7 +80,7 @@ function probeAfter (misses) {
   return { probe, count: () => n }
 }
 
-test('the default command runs exactly the decided systemd-run argv, then returns started once the probe answers', async (t) => {
+test('the default command runs exactly the decided systemd-run argv, then returns started once the probe answers', { skip: LINUX_ONLY }, async (t) => {
   const s = await shim(t)
   const { probe } = probeAfter(2)
   const result = await s.start({ probe, intervalMs: 1 })
@@ -88,7 +92,7 @@ test('the default command runs exactly the decided systemd-run argv, then return
   assert.equal(s.spawned[0].options.timeout, 5000)
 })
 
-test('the shell falls back to os.userInfo().shell when env has no SHELL', async (t) => {
+test('the shell falls back to os.userInfo().shell when env has no SHELL', { skip: LINUX_ONLY }, async (t) => {
   const s = await shim(t)
   const env = { ...s.env }
   delete env.SHELL
@@ -97,7 +101,7 @@ test('the shell falls back to os.userInfo().shell when env has no SHELL', async 
   assert.equal(call.argv[DECIDED.length], os.userInfo().shell || '/bin/sh')
 })
 
-test('a custom scribedCommand arrives as one argv element after exec "$0" and never reaches a shell parser', async (t) => {
+test('a custom scribedCommand arrives as one argv element after exec "$0" and never reaches a shell parser', { skip: LINUX_ONLY }, async (t) => {
   const s = await shim(t, { runShell: true })
   const pwned = path.join(s.dir, 'pwned')
   const command = `scribed --x; touch ${pwned}`
@@ -119,7 +123,7 @@ test('a probe that answers spawns nothing and returns running', async (t) => {
   assert.deepEqual(s.spawned, [])
 })
 
-test('a non-zero systemd-run exit throws dependency_start_failed with its exit code and stderr', async (t) => {
+test('a non-zero systemd-run exit throws dependency_start_failed with its exit code and stderr', { skip: LINUX_ONLY }, async (t) => {
   const stderr = 'Failed to start transient service unit: Unit turbidassist-scribed.service already exists.\n'
   const s = await shim(t, { exitCode: 1, stderr })
   const { probe, count } = probeAfter(1000)
@@ -134,7 +138,7 @@ test('a non-zero systemd-run exit throws dependency_start_failed with its exit c
   assert.equal(count(), 1, 'no probing after a failed spawn')
 })
 
-test('stderr keeps only its last 2 KiB and is redacted', async (t) => {
+test('stderr keeps only its last 2 KiB and is redacted', { skip: LINUX_ONLY }, async (t) => {
   const stderr = `${'x'.repeat(4096)}\ntoken=abc123secret Unit turbidassist-scribed.service already exists.\n`
   const s = await shim(t, { exitCode: 1, stderr })
   await assert.rejects(s.start({ probe: probeAfter(1000).probe, intervalMs: 1 }), (error) => {
@@ -145,7 +149,7 @@ test('stderr keeps only its last 2 KiB and is redacted', async (t) => {
   })
 })
 
-test('a probe that never answers within an injected 300 ms throws dependency_start_failed with reason no_socket', async (t) => {
+test('a probe that never answers within an injected 300 ms throws dependency_start_failed with reason no_socket', { skip: LINUX_ONLY }, async (t) => {
   const s = await shim(t)
   let clock = 0
   const now = () => clock
@@ -161,7 +165,7 @@ test('a probe that never answers within an injected 300 ms throws dependency_sta
   assert.equal(count(), 4, 'one probe before the spawn, then one every 100 ms up to 300 ms')
 })
 
-test('the systemd-run environment carries no token, secret, password or authorization key, and keeps the rest', async (t) => {
+test('the systemd-run environment carries no token, secret, password or authorization key, and keeps the rest', { skip: LINUX_ONLY }, async (t) => {
   const s = await shim(t)
   const saved = process.env.FLEETMATES_DECK_TOKEN
   process.env.FLEETMATES_DECK_TOKEN = 'deck-token-sentinel'

@@ -12,6 +12,10 @@ import {
 import { startFakeScribed } from '../fakes/fake-scribed.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const MiB = 1024 * 1024
 
 /**
@@ -54,7 +58,7 @@ async function waitFor (cond, ms = 2000) {
   }
 }
 
-test('an ã split between two writes decodes whole', async () => {
+test('an ã split between two writes decodes whole', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const line = Buffer.from(JSON.stringify({ type: 'tail', text: 'sessão' }) + '\n', 'utf8')
     const at = line.indexOf(Buffer.from('ã', 'utf8')) + 1
@@ -64,7 +68,7 @@ test('an ã split between two writes decodes whole', async () => {
   })
 })
 
-test('a line of exactly 1 MiB is accepted and one byte more is a ProtocolError that closes the connection', async () => {
+test('a line of exactly 1 MiB is accepted and one byte more is a ProtocolError that closes the connection', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     fake.on('status', () => paddedStatusLine(MiB) + '\n')
@@ -78,7 +82,7 @@ test('a line of exactly 1 MiB is accepted and one byte more is a ProtocolError t
   })
 })
 
-test('more than 1 MiB with no newline is a ProtocolError long before the status timeout', async () => {
+test('more than 1 MiB with no newline is a ProtocolError long before the status timeout', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath, timeouts: { status: 30000 } })
     fake.on('status', () => 'x'.repeat(3 * MiB))
@@ -90,7 +94,7 @@ test('more than 1 MiB with no newline is a ProtocolError long before the status 
   })
 })
 
-test('more than 16 MiB with no newline is a ProtocolError long before the tail timeout', async () => {
+test('more than 16 MiB with no newline is a ProtocolError long before the tail timeout', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath, timeouts: { tail: 30000 } })
     fake.on('tail', () => 'x'.repeat(17 * MiB))
@@ -100,7 +104,7 @@ test('more than 16 MiB with no newline is a ProtocolError long before the tail t
   })
 })
 
-test('a 2 MiB tail answer is accepted', async () => {
+test('a 2 MiB tail answer is accepted', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const text = 'x'.repeat(2 * MiB)
     fake.on('tail', () => ({ type: 'tail', text }))
@@ -109,7 +113,7 @@ test('a 2 MiB tail answer is accepted', async () => {
   })
 })
 
-test('start sends exactly one start line with only the tag', async () => {
+test('start sends exactly one start line with only the tag', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     const res = await client.start('client-a')
@@ -118,7 +122,7 @@ test('start sends exactly one start line with only the tag', async () => {
   })
 })
 
-test('an unanswered start rejects ScribedTimeout after timeouts.start', async () => {
+test('an unanswered start rejects ScribedTimeout after timeouts.start', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     fake.on('start', () => null)
     const client = createScribedClient({ socketPath: fake.socketPath, timeouts: { start: 50 } })
@@ -126,7 +130,7 @@ test('an unanswered start rejects ScribedTimeout after timeouts.start', async ()
   })
 })
 
-test('a stop answered after 300 ms resolves even with a 50 ms status timeout', async () => {
+test('a stop answered after 300 ms resolves even with a 50 ms status timeout', { skip: LINUX_ONLY }, async () => {
   await withFake({ stopDelayMs: 300 }, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath, timeouts: { status: 50 } })
     await client.start('pessoal')
@@ -137,7 +141,7 @@ test('a stop answered after 300 ms resolves even with a 50 ms status timeout', a
   })
 })
 
-test('ask delivers deltas in order and resolves on ask_done', async () => {
+test('ask delivers deltas in order and resolves on ask_done', { skip: LINUX_ONLY }, async () => {
   await withFake({ askDeltas: ['um ', 'dois ', 'três'] }, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     await client.start('pessoal')
@@ -149,7 +153,7 @@ test('ask delivers deltas in order and resolves on ask_done', async () => {
   })
 })
 
-test('ask with a single fallback delta works', async () => {
+test('ask with a single fallback delta works', { skip: LINUX_ONLY }, async () => {
   await withFake({ askDeltas: ['resposta inteira'] }, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     await client.start('pessoal')
@@ -160,7 +164,7 @@ test('ask with a single fallback delta works', async () => {
   })
 })
 
-test('an error after two deltas rejects ask with the message verbatim', async () => {
+test('an error after two deltas rejects ask with the message verbatim', { skip: LINUX_ONLY }, async () => {
   await withFake({ askDeltas: ['a', 'b'], askError: 'ask falhou: x' }, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     await client.start('pessoal')
@@ -176,7 +180,7 @@ test('an error after two deltas rejects ask with the message verbatim', async ()
   })
 })
 
-test('aborting an ask stops the deltas and closes its connection', async () => {
+test('aborting an ask stops the deltas and closes its connection', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     await client.start('pessoal')
@@ -193,7 +197,7 @@ test('aborting an ask stops the deltas and closes its connection', async () => {
   })
 })
 
-test('the known scribed error messages surface verbatim', async () => {
+test('the known scribed error messages surface verbatim', { skip: LINUX_ONLY }, async () => {
   await withFake({ tags: ['pessoal', 'client-a'] }, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     /**
@@ -218,7 +222,7 @@ test('the known scribed error messages surface verbatim', async () => {
   })
 })
 
-test('an ok for another cmd is a ProtocolError', async () => {
+test('an ok for another cmd is a ProtocolError', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     fake.on('stop', () => ({ type: 'ok', cmd: 'start', session_id: 's1' }))
     const client = createScribedClient({ socketPath: fake.socketPath })
@@ -226,7 +230,7 @@ test('an ok for another cmd is a ProtocolError', async () => {
   })
 })
 
-test('a known event type that is not the awaited answer is a ProtocolError', async () => {
+test('a known event type that is not the awaited answer is a ProtocolError', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     fake.on('status', () => ({ type: 'tail', text: '' }))
     const client = createScribedClient({ socketPath: fake.socketPath })
@@ -234,7 +238,7 @@ test('a known event type that is not the awaited answer is a ProtocolError', asy
   })
 })
 
-test('EOF before an answer and a missing socket reject ScribedUnavailable', async () => {
+test('EOF before an answer and a missing socket reject ScribedUnavailable', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     fake.on('history', () => ({ events: [], end: true }))
     const client = createScribedClient({ socketPath: fake.socketPath })
@@ -249,7 +253,7 @@ test('EOF before an answer and a missing socket reject ScribedUnavailable', asyn
   }
 })
 
-test('two concurrent asks use two connections', async () => {
+test('two concurrent asks use two connections', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     await client.start('pessoal')
@@ -301,7 +305,7 @@ test('transcriptLine maps a transcript event and refuses a boolean t0', () => {
   assert.equal(transcriptLine({ ...ev, text: 7 }), null)
 })
 
-test('an unknown event type before the status answer is skipped and counted', async () => {
+test('an unknown event type before the status answer is skipped and counted', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     /** @type {Array<Record<string, unknown>>} */
     const logs = []
@@ -314,7 +318,7 @@ test('an unknown event type before the status answer is skipped and counted', as
   })
 })
 
-test('a subscription skips an unknown event type and keeps delivering transcripts', async () => {
+test('a subscription skips an unknown event type and keeps delivering transcripts', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     /** @type {Array<Record<string, any>>} */
@@ -344,7 +348,7 @@ test('a subscription skips an unknown event type and keeps delivering transcript
   })
 })
 
-test('a bad line ends a subscription with a ProtocolError, once', async () => {
+test('a bad line ends a subscription with a ProtocolError, once', { skip: LINUX_ONLY }, async () => {
   await withFake({}, async (fake) => {
     const client = createScribedClient({ socketPath: fake.socketPath })
     /** @type {Array<Error | null>} */
@@ -360,7 +364,7 @@ test('a bad line ends a subscription with a ProtocolError, once', async () => {
   })
 })
 
-test('the log receives event, cmd and bytes only, never text', async () => {
+test('the log receives event, cmd and bytes only, never text', { skip: LINUX_ONLY }, async () => {
   await withFake({ askDeltas: ['segredo da reunião'] }, async (fake) => {
     /** @type {Array<Record<string, unknown>>} */
     const logs = []

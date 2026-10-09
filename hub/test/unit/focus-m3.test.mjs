@@ -3,7 +3,8 @@
 // key and fetch wiring, the real Focus route in headless Chromium with a recording API double.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { findChromium } from '../helpers/chromium.mjs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -197,16 +198,6 @@ test('a diff with <script> text renders literally, with add and delete classes',
   assert.doesNotMatch(source, /dangerouslySetInnerHTML|innerHTML/)
 })
 
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
-}
-
 // The real Focus route with a stub terminal client and an API double that records every call in `window.calls`.
 // `window.h.request(row)` replaces s1's open request.
 const HARNESS = `import React, { useState } from 'react'
@@ -243,7 +234,7 @@ createRoot(document.getElementById('root')).render(<App />)
 `
 
 test('the Focus route: digits answer a Safe request only outside the terminal and never a Destructive one; Down fetches the next diff (AC4, AC6, AC12)', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the Focus browser test')
   const dir = await mkdtemp(path.join(tmpdir(), 'focus3-'))
   t.after(() => rm(dir, { recursive: true, force: true }))

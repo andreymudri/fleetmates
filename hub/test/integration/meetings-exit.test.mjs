@@ -17,6 +17,10 @@ import { startFakeScribed } from '../fakes/fake-scribed.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { meetings5, writeMeetingsTree } from '../helpers/meetings-tree.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const token = 'x'.repeat(43)
 const HOST_BINARIES = ['systemd-run', 'systemctl', 'scribed', 'scribe', 'postmeet', 'xdg-open', 'notify-send', 'makoctl', 'pw-play']
 
@@ -110,13 +114,13 @@ async function harness(t, { fake = {} } = {}) {
   return { home, tree, rt, state, fake: scribed, deck, request, socket, start }
 }
 
-test('the shims are what a test resolves for every host binary', () => {
+test('the shims are what a test resolves for every host binary', { skip: LINUX_ONLY }, () => {
   for (const name of HOST_BINARIES) {
     assert.equal(execFileSync('/bin/sh', ['-c', `command -v ${name}`], { env: process.env, encoding: 'utf8' }).trim(), path.join(shimDir, name))
   }
 })
 
-test('a recording through the API streams meeting.transcript, a stop answered after 30 s stays stopping, and recorded, transcribed, synthesized arrive in order with the note path last', { timeout: 60_000 }, async t => {
+test('a recording through the API streams meeting.transcript, a stop answered after 30 s stays stopping, and recorded, transcribed, synthesized arrive in order with the note path last', { skip: LINUX_ONLY, timeout: 60_000 }, async t => {
   const h = await harness(t, { fake: { stopDelayMs: 30_000 } })
   const messages = await h.socket()
   const id = await h.start('pessoal')
@@ -179,7 +183,7 @@ test('a recording through the API streams meeting.transcript, a stop answered af
   assert.equal(updates().slice(0, -1).some(message => message.data.notePath), false)
 })
 
-test('subscribers ended mid-recording: lines appended to transcript.jsonl reach the client with meeting.recovered', { timeout: 20_000 }, async t => {
+test('subscribers ended mid-recording: lines appended to transcript.jsonl reach the client with meeting.recovered', { skip: LINUX_ONLY, timeout: 20_000 }, async t => {
   const h = await harness(t)
   const messages = await h.socket()
   const id = await h.start('pessoal')
@@ -201,7 +205,7 @@ test('subscribers ended mid-recording: lines appended to transcript.jsonl reach 
   assert.equal(transcript.data.lines.length, 4)
 })
 
-test('with the fake stopped and its socket removed, GET /api/meetings still lists every past meeting and the recorder is unavailable', { timeout: 20_000 }, async t => {
+test('with the fake stopped and its socket removed, GET /api/meetings still lists every past meeting and the recorder is unavailable', { skip: LINUX_ONLY, timeout: 20_000 }, async t => {
   const h = await harness(t)
   const id = await h.start('pessoal')
   assert.equal((await h.request('/api/meetings/stop', { method: 'POST' })).status, 202)
