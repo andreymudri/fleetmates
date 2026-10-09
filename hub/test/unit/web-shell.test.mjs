@@ -5,6 +5,7 @@ import { findChromium } from '../helpers/chromium.mjs'
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -906,9 +907,10 @@ test('in Chromium the deck drops the fragment, authenticates the socket and show
   const token = 'a'.repeat(43)
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   await mkdir(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // The token where the server reads it for this env: ~/.local/state/fleetmates/deck on Linux.
+  const { state, token: tokenFile } = setupPaths(env)
   await mkdir(state, { recursive: true, mode: 0o700 })
-  await writeFile(path.join(state, 'token'), token, { mode: 0o600 })
+  await writeFile(tokenFile, token, { mode: 0o600 })
   const out = path.join(dir, 'web')
   npm(['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
   const deck = await startDeckServer({ env, port: 0, staticDir: out, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
