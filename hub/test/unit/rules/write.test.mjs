@@ -27,7 +27,9 @@ function harness(name) {
   }
   const git = []
   const gitRead = async (cwd, args) => { git.push([cwd, args]); return { code: 1, stdout: Buffer.alloc(0) } }
-  const write = (pattern, options = {}) => writeRule(store, { repoId, pattern, source: 'manual', stateDir: state, at: 1_790_000_000_000, gitRead, ...options })
+  // platform 'linux': these tests pin the writer's mechanics, which win32 never reaches because it refuses
+  // every rule (docs/deck/16-platforms.md section 6, pinned in validate.test.mjs).
+  const write = (pattern, options = {}) => writeRule(store, { repoId, pattern, source: 'manual', stateDir: state, at: 1_790_000_000_000, gitRead, platform: 'linux', ...options })
   const revoke = (pattern, options = {}) => revokeRule(store, { repoId, pattern, stateDir: state, at: 1_790_000_100_000, ...options })
   const events = type => store.all('SELECT data FROM events WHERE type = ? ORDER BY seq', type).map(row => JSON.parse(row.data))
   const audit = () => store.all('SELECT pattern, action, actor FROM rule_audit ORDER BY id').map(row => ({ ...row }))
@@ -260,7 +262,7 @@ test('revoke reports already_removed, resets the counter and audits revoked or u
   const h = harness('local-full.json')
   try {
     h.store.run("INSERT INTO rule_counters(repo_id,pattern,count,state,updated_at) VALUES(?,'Bash(npm run test)',5,'offered',1)", h.repoId)
-    const written = await writeRule(h.store, { repoId: h.repoId, pattern: 'Bash(npm run test)', source: 'suggested', stateDir: h.state, at: 5, gitRead: async () => ({ code: 0, stdout: Buffer.alloc(0) }) })
+    const written = await writeRule(h.store, { repoId: h.repoId, pattern: 'Bash(npm run test)', source: 'suggested', stateDir: h.state, at: 5, gitRead: async () => ({ code: 0, stdout: Buffer.alloc(0) }), platform: 'linux' })
     assert.equal(written.rule.source, 'suggested')
     assert.equal(written.rule.approvalsBefore, 5)
     assert.equal(written.rule.tracked, true)

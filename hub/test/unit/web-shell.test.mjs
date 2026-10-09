@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { findChromium } from '../helpers/chromium.mjs'
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -883,6 +885,19 @@ test('applyAppearance sets the text size as --text-base and reduced motion as da
   assert.equal(props.size + attrs.size, 0)
 })
 
+/**
+ * Run npm with `args`: `process.execPath` with the npm-cli.js installed next to it (Windows layout, then the POSIX
+ * `lib/` layout), else `npm` through resolveCommand and commandSpawn, since `npm` is `npm.cmd` on Windows and a
+ * spawn without a shell cannot run that.
+ */
+function npm(args, options) {
+  const dir = path.dirname(process.execPath)
+  const cli = [path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), path.join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')].find(file => existsSync(file))
+  if (cli) return execFileSync(process.execPath, [cli, ...args], options)
+  const spawn = commandSpawn(resolveCommand('npm'), args)
+  return execFileSync(spawn.file, spawn.args, { ...options, ...spawn.options })
+}
+
 test('in Chromium the deck drops the fragment, authenticates the socket and shows a stale token without retrying', async t => {
   const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the shell browser test')
@@ -895,7 +910,7 @@ test('in Chromium the deck drops the fragment, authenticates the socket and show
   await mkdir(state, { recursive: true, mode: 0o700 })
   await writeFile(path.join(state, 'token'), token, { mode: 0o600 })
   const out = path.join(dir, 'web')
-  execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
+  npm(['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
   const deck = await startDeckServer({ env, port: 0, staticDir: out, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }) })
   const browser = await chromium.launch({ executablePath, headless: true })
