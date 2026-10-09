@@ -309,14 +309,20 @@ export function compactEntries(shape, teams) {
 /**
  * The session ids Home subscribes to with `subscribeTails`: the controllable PTY sessions (and team leads) of the
  * compact grid; none outside compact, which clears the set.
+ *
+ * `phone` drops the sessions a phone draws as full cards (`needsFull`), because `SessionCard` shows no tail: the
+ * tails of those sessions would travel the tunnel to be thrown away.
  * @param {'comfortable' | 'compact'} density
  * @param {ReturnType<typeof homeLayout>} shape
  * @param {object[]} teams
+ * @param {{ phone?: boolean }} [options]
  * @returns {string[]}
  */
-export function tailSubscription(density, shape, teams) {
+export function tailSubscription(density, shape, teams, { phone = false } = {}) {
   if (density !== 'compact') return []
-  return compactEntries(shape, teams).map(item => item.session ?? item.team.lead).filter(row => row && controllable(row)).map(row => row.id)
+  return compactEntries(shape, teams)
+    .filter(item => !(phone && item.session && NEEDS.has(item.session.state)))
+    .map(item => item.session ?? item.team.lead).filter(row => row && controllable(row)).map(row => row.id)
 }
 
 /**
@@ -937,7 +943,7 @@ export function Home({ state, t, navigate, api, terminals = null, storage = glob
   }, [])
   const gridDensity = phone ? 'compact' : density
   const teams = teamCards(state.data.runs, state.data.sessions, state.data.requests)
-  const tailIds = tailSubscription(gridDensity, layout, teams)
+  const tailIds = tailSubscription(gridDensity, layout, teams, { phone })
   const tailKey = tailIds.join('\u0000')
   useEffect(() => {
     terminals?.subscribeTails(tailIds)

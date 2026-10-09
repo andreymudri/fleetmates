@@ -184,3 +184,60 @@ export function pasteNeedsConfirm(text) {
 export function pasteSizeText(text) {
   return `${Math.round(encoder.encode(String(text ?? '')).length / 1024)} KB`
 }
+
+// The phone key bar and its sticky Ctrl (design mobile-focus-mockup). The logic lives here, as a pure
+// transition, so it is tested as behaviour rather than as the shape of the component that calls it.
+
+/** Characters that have a control code, tested before any case conversion (see {@link controlOf}). */
+const CONTROL_KEYS = /^[a-zA-Z@[\\\]^_]$/
+/** The arrow sequences, and what the same arrow is with Ctrl held. */
+const CTRL_ARROWS = Object.freeze({ '\x1b[A': '\x1b[1;5A', '\x1b[B': '\x1b[1;5B', '\x1b[C': '\x1b[1;5C', '\x1b[D': '\x1b[1;5D' })
+
+/**
+ * The control code one keystroke becomes while the sticky Ctrl is held.
+ *
+ * The class is tested on the character itself, never on its upper case form: `'ß'.toUpperCase()` is `'SS'`, so
+ * converting first and then taking code unit 0 turned `ß` into Ctrl+S, the XOFF that freezes a terminal, and
+ * `ı` into Tab. Anything without a control code (an accent, a digit, an emoji, a multi-character paste or an
+ * escape sequence) passes through unchanged, so holding Ctrl never alters a key it cannot modify.
+ * @param {string} input one keystroke as xterm reports it
+ * @returns {string}
+ */
+export function controlOf(input) {
+  if (typeof input !== 'string' || input.length !== 1) return input
+  if (CONTROL_KEYS.test(input)) return String.fromCharCode(input.toUpperCase().charCodeAt(0) - 64)
+  if (input === ' ') return '\x00'
+  if (input === '/') return '\x1f'
+  if (input === '?') return '\x7f'
+  return input
+}
+
+/**
+ * One keystroke through the sticky modifier, from the phone keyboard or from the key bar alike: what to send,
+ * and the modifier afterwards. Any keystroke consumes an armed Ctrl, including one the modifier cannot change,
+ * so a bar key can never leave it armed for a later letter the user did not mean to modify.
+ * @param {string} input
+ * @param {boolean} [ctrl] whether the sticky Ctrl is armed
+ * @returns {{ send: string, ctrl: boolean }}
+ */
+export function keystroke(input, ctrl = false) {
+  if (!ctrl) return { send: input, ctrl: false }
+  return { send: CTRL_ARROWS[input] ?? controlOf(input), ctrl: false }
+}
+
+/**
+ * The key bar's keys, in the order the design puts them (mobile-focus-mockup). The `ctrl` entry sends nothing of
+ * its own: it arms the modifier the next keystroke consumes.
+ */
+export const KEY_BAR = Object.freeze([
+  { id: 'esc', label: 'Esc', send: '\x1b' },
+  { id: 'tab', label: 'Tab', send: '\t' },
+  { id: 'ctrl', label: 'Ctrl' },
+  { id: 'up', label: '\u2191', send: '\x1b[A' },
+  { id: 'down', label: '\u2193', send: '\x1b[B' },
+  { id: 'left', label: '\u2190', send: '\x1b[D' },
+  { id: 'right', label: '\u2192', send: '\x1b[C' },
+  { id: 'slash', label: '/', send: '/' },
+  { id: 'pipe', label: '|', send: '|' },
+  { id: 'tilde', label: '~', send: '~' }
+])

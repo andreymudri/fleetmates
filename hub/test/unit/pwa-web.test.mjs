@@ -156,32 +156,59 @@ test('a phone viewport never sends a terminal resize, because the PTY is the one
   assert.equal(module.phoneViewport({}), false, 'no matchMedia is not a phone')
   const source = await readFile(`${web}src/components/TerminalView.jsx`, 'utf8')
   // The local fit still runs; only the message to the server is withheld.
-  assert.match(source, /const phone = phoneViewport\(scope\)/)
-  assert.match(source, /try \{ fit\.fit\(\) \} catch \{\}\n\s*if \(!phone\) handle\?\.resize\(term\.cols, term\.rows\)/)
+  assert.match(source, /try \{ fit\.fit\(\) \} catch \{\}\n\s*if \(!phoneAtAttach\) handle\?\.resize\(term\.cols, term\.rows\)/)
 })
 
-test('the terminal key bar sends what a touch keyboard cannot, and Ctrl sticks to the next keystroke', async () => {
-  const { module } = await runnerImport(path.join(hub, 'web/src/components/TerminalView.jsx'), { configFile: false, logLevel: 'silent', root: hub })
-  assert.deepEqual(module.KEY_BAR.map(key => key.id), ['esc', 'tab', 'ctrl', 'up', 'down', 'left', 'right', 'slash', 'pipe', 'tilde'])
-  assert.equal(module.KEY_BAR.find(key => key.id === 'esc').send, '\x1b')
-  assert.equal(module.KEY_BAR.find(key => key.id === 'up').send, '\x1b[A')
-  assert.equal(module.KEY_BAR.find(key => key.id === 'ctrl').send, undefined, 'Ctrl sends nothing of its own; it is a modifier')
-  // Ctrl+C is the reason the bar exists: a touch keyboard has no modifier to produce it.
-  assert.equal(module.controlOf('c'), '\x03')
-  assert.equal(module.controlOf('D'), '\x04')
-  assert.equal(module.controlOf('/'), '\x1f')
-  assert.equal(module.controlOf(' '), '\x00')
-  // An arrow sequence or a paste passes through, so holding Ctrl never swallows a key.
-  assert.equal(module.controlOf('\x1b[A'), '\x1b[A')
-  assert.equal(module.controlOf('hello'), 'hello')
-  // Smaller glyphs on a phone, because the buffer keeps the machine's columns and scrolls instead of reflowing.
-  assert.equal(module.terminalOptions({ phone: true }).fontSize, 12)
-  assert.equal(module.terminalOptions({}).fontSize, 14)
+test('the sticky Ctrl turns the next keystroke into its control code, and only the keys that have one', async () => {
+  const { KEY_BAR, controlOf, keystroke } = await import('../../web/src/state/terminal.js')
+  assert.deepEqual(KEY_BAR.map(key => key.id), ['esc', 'tab', 'ctrl', 'up', 'down', 'left', 'right', 'slash', 'pipe', 'tilde'])
+  assert.equal(KEY_BAR.find(key => key.id === 'ctrl').send, undefined, 'Ctrl sends nothing of its own; it is a modifier')
+  // The letters and the punctuation that have control codes.
+  for (const [input, code] of [['c', '\x03'], ['C', '\x03'], ['d', '\x04'], ['@', '\x00'], ['[', '\x1b'], ['\\', '\x1c'],
+    [']', '\x1d'], ['^', '\x1e'], ['_', '\x1f'], [' ', '\x00'], ['/', '\x1f'], ['?', '\x7f']]) {
+    assert.equal(controlOf(input), code, `Ctrl+${JSON.stringify(input)}`)
+  }
+  // The class is tested on the character, never on its upper case form: 'ß'.toUpperCase() is 'SS', and taking
+  // code unit 0 of that turned ß into Ctrl+S, the XOFF that freezes the terminal, and ı into Tab.
+  for (const input of ['ß', 'ı', 'ﬁ', 'ﬀ', 'ﬄ', 'ſ', 'ﬅ', 'é', 'µ', '7', '\r', '\n', '😀', 'hello world']) {
+    assert.equal(controlOf(input), input, `${JSON.stringify(input)} has no control code and must pass through`)
+  }
+  // The transition: an armed Ctrl modifies the next keystroke and is spent, whatever that keystroke was.
+  assert.deepEqual(keystroke('c', false), { send: 'c', ctrl: false })
+  assert.deepEqual(keystroke('c', true), { send: '\x03', ctrl: false })
+  assert.deepEqual(keystroke('\x1b[A', true), { send: '\x1b[1;5A', ctrl: false }, 'Ctrl plus an arrow is the modified sequence')
+  assert.deepEqual(keystroke('\x1b', true), { send: '\x1b', ctrl: false }, 'Esc has no control code, and still spends the modifier')
+  assert.deepEqual(keystroke('ß', true), { send: 'ß', ctrl: false }, 'and so does a key the modifier cannot change')
+  assert.deepEqual(keystroke('pasted text', true), { send: 'pasted text', ctrl: false })
+  // A key bar press is the same transition, so Ctrl plus a bar key works and no bar key leaves Ctrl armed for a
+  // letter the user never meant to modify.
+  const bar = id => KEY_BAR.find(key => key.id === id).send
+  assert.deepEqual(keystroke(bar('slash'), true), { send: '\x1f', ctrl: false })
+  assert.deepEqual(keystroke(bar('up'), true), { send: '\x1b[1;5A', ctrl: false })
+  assert.deepEqual(keystroke(bar('tilde'), true), { send: '~', ctrl: false })
+  assert.deepEqual(keystroke(bar('esc'), false), { send: '\x1b', ctrl: false })
+})
+
+test('the key bar fires on release, survives a reader tap, and never outlives its session or its focus', async () => {
   const source = await readFile(`${web}src/components/TerminalView.jsx`, 'utf8')
-  // The press keeps focus in the terminal: a bar that blurred it would unmount itself on first use.
-  assert.match(source, /onPointerDown=\{press\(key\)\}/)
-  assert.match(source, /event\.preventDefault\(\)\n\s*if \(key\.id === 'ctrl'\)/)
-  assert.match(source, /\{phone && !readOnly && hasFocus \? \(/, 'mounted only while the terminal has focus')
+  // Every path into the PTY goes through the one transition, the bar included.
+  assert.match(source, /handle\?\.write\(stroke\(input\)\)/)
+  assert.match(source, /send\.current = text => \{[^}]*handle\?\.write\(stroke\(text\)\)/s)
+  assert.match(source, /const onBarKey = key => \{\n\s*if \(key\.id === 'ctrl'\)/)
+  // Ten 44px keys are wider than the screen, so a drag to reach ~ must not send Esc.
+  assert.match(source, /onPointerUp=\{up\(key\)\}/)
+  assert.match(source, /onPointerDown=\{down\}/)
+  assert.match(source, /PRESS_SLOP/)
+  assert.match(source, /onClick=\{click\(key\)\}/, 'a screen reader activation dispatches click, not pointerdown')
+  // The modifier cannot survive a session change or a dismissed keyboard.
+  assert.match(source, /sticky\.current = false\n\s*setCtrl\(false\)\n\s*setHasFocus\(false\)/, 'reset at the top of the effect')
+  assert.match(source, /const onBlur = \(\) => \{[^}]*sticky\.current = false/s)
+  // The render flag follows the query; the resize guard keeps its own, read when the PTY is attached.
+  assert.match(source, /const phoneAtAttach = phoneViewport\(scope\)/)
+  assert.match(source, /if \(!phoneAtAttach\) handle\?\.resize/)
+  assert.match(source, /query\.addEventListener\('change', onChange\)/)
+  const mobile = await readFile(`${web}src/styles/mobile.css`, 'utf8')
+  assert.match(mobile, /touch-action: pan-x/)
 })
 
 test('a phone takes the compact grid but keeps the full card for the sessions that need a human', async () => {
@@ -190,6 +217,14 @@ test('a phone takes the compact grid but keeps the full card for the sessions th
   assert.match(home, /const needsFull = item => phone && !item\.team && NEEDS\.has\(item\.session\.state\)/)
   assert.match(home, /needsFull\(item\)\n\s*\? <SessionCard/, 'a card that changes state grows, instead of a separate mode')
   assert.match(home, /const gridDensity = phone \? 'compact' : density/, 'the tail subscription follows the grid actually shown')
+  // A phone draws needs-you sessions as full cards, and SessionCard shows no tail, so their tails must not be
+  // subscribed: that would be traffic over the tunnel for data nothing renders.
+  const { module } = await runnerImport(path.join(hub, 'web/src/screens/home/Home.jsx'), { configFile: false, logLevel: 'silent', root: hub })
+  const session = (id, state) => ({ id, state, repoId: '/home/you/dev/x', ptyId: `pty-${id}`, alive: true })
+  const shape = module.homeLayout([session('a', 'running'), session('b', 'needs_approval')], { order: ['a', 'b'], requests: [], now: Date.now() })
+  assert.deepEqual(module.tailSubscription('compact', shape, []), ['a', 'b'], 'the compact grid tails every controllable session')
+  assert.deepEqual(module.tailSubscription('compact', shape, [], { phone: true }), ['a'], 'a phone skips the ones it draws as full cards')
+  assert.deepEqual(module.tailSubscription('comfortable', shape, [], { phone: true }), [])
   const mobile = await readFile(`${web}src/styles/mobile.css`, 'utf8')
   assert.match(mobile, /\.home-density \{ display: none; \}/, 'the density control has no meaning where the layout is fixed')
   assert.match(mobile, /\.home-mark \{[^}]*display: block/, 'the mark moves to the Home header, since the bottom bar has no room')

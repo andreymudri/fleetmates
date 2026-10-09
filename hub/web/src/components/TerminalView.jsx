@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { titleText, translate } from './StatusPill.jsx'
-import { isGlobalChord, phoneViewport } from '../state/deck-store.js'
-import { pasteNeedsConfirm, pasteSizeText, sanitizePaste } from '../state/terminal.js'
+import { PHONE_QUERY, isGlobalChord, phoneViewport } from '../state/deck-store.js'
+import { KEY_BAR, keystroke, pasteNeedsConfirm, pasteSizeText, sanitizePaste } from '../state/terminal.js'
 
 /** English copy for the terminal section (docs/deck/design/components.md section 14). */
 export const TERMINAL_COPY = Object.freeze({
@@ -100,53 +100,47 @@ export function handleLink(uri, { confirmLink, open }) {
   return true
 }
 
-/**
- * The control code one keystroke becomes while the key bar's sticky Ctrl is held: a letter or one of the few
- * punctuation keys that have a control code, as a terminal's own Ctrl would produce. Anything else (an arrow
- * sequence, a multi-character paste) passes through, so holding Ctrl never swallows a key.
- * @param {string} input one keystroke as xterm reports it
- * @returns {string}
- */
-export function controlOf(input) {
-  if (typeof input !== 'string' || input.length !== 1) return input
-  const code = input.toUpperCase().charCodeAt(0)
-  if (code >= 64 && code <= 95) return String.fromCharCode(code - 64)
-  if (input === ' ') return '\x00'
-  if (input === '/') return '\x1f'
-  if (input === '?') return '\x7f'
-  return input
-}
-
-/** The key bar's keys, in the order the design puts them (mobile-focus-mockup). `ctrl` is the sticky modifier. */
-export const KEY_BAR = Object.freeze([
-  { id: 'esc', label: 'Esc', send: '\x1b' },
-  { id: 'tab', label: 'Tab', send: '\t' },
-  { id: 'ctrl', label: 'Ctrl' },
-  { id: 'up', label: '\u2191', send: '\x1b[A' },
-  { id: 'down', label: '\u2193', send: '\x1b[B' },
-  { id: 'left', label: '\u2190', send: '\x1b[D' },
-  { id: 'right', label: '\u2192', send: '\x1b[C' },
-  { id: 'slash', label: '/', send: '/' },
-  { id: 'pipe', label: '|', send: '|' },
-  { id: 'tilde', label: '~', send: '~' }
-])
+/** How far a pointer may travel on a key and still count as a press rather than a scroll of the bar. */
+const PRESS_SLOP = 10
 
 /**
  * The phone key bar (mobile-focus-mockup): the keys a touch keyboard has no way to send, above the keyboard and
- * only while the terminal has focus. Every press is a `pointerdown` with its default prevented, so the terminal
- * keeps focus and the keyboard stays up; a bar that blurred the terminal would unmount itself on first use.
- * @param {{ ctrl: boolean, t?: Function, onCtrl: () => void, onKey: (text: string) => void }} props
+ * only while the terminal has focus.
+ *
+ * A key fires on `pointerup`, not on `pointerdown`: ten 44px keys are wider than the screen, so the bar scrolls
+ * sideways and almost every draggable pixel is a key. Firing on the way down would send Esc to a real PTY every
+ * time someone swipes to reach `~`. `pointerdown` still prevents its default, which is what keeps the focus (and
+ * the keyboard) on the terminal. `click` is the path assistive technology and a Bluetooth keyboard take, and it
+ * acts only when the pointer path did not already.
+ * @param {{ ctrl: boolean, t?: Function, onKey: (key: object) => void }} props
  */
-function KeyBar({ ctrl, t, onCtrl, onKey }) {
-  const press = key => event => {
+function KeyBar({ ctrl, t, onKey }) {
+  const origin = useRef(null)
+  const handled = useRef(false)
+  const down = event => {
     event.preventDefault()
-    if (key.id === 'ctrl') onCtrl()
-    else onKey(key.send)
+    origin.current = { id: event.pointerId, x: event.clientX, y: event.clientY }
+  }
+  const up = key => event => {
+    const from = origin.current
+    origin.current = null
+    if (!from || from.id !== event.pointerId) return
+    // The pointer path has decided this interaction either way, so the click that follows must not act: a drag
+    // across the bar is a scroll, and a browser that still fires click after it would send the key anyway.
+    handled.current = true
+    if (Math.abs(event.clientX - from.x) > PRESS_SLOP || Math.abs(event.clientY - from.y) > PRESS_SLOP) return
+    onKey(key)
+  }
+  const click = key => () => {
+    if (handled.current) { handled.current = false
+      return }
+    onKey(key)
   }
   return (
     <div className="terminal-keys" role="toolbar" aria-label={translate(t, TERMINAL_COPY, 'terminal.keys.label')}>
       {KEY_BAR.map(key => (
-        <button key={key.id} type="button" className="terminal-key" onPointerDown={press(key)} onMouseDown={event => event.preventDefault()}
+        <button key={key.id} type="button" className="terminal-key" onPointerDown={down} onPointerUp={up(key)}
+          onPointerCancel={() => { origin.current = null }} onClick={click(key)} onMouseDown={event => event.preventDefault()}
           {...(key.id === 'ctrl' ? { 'aria-pressed': ctrl ? 'true' : 'false' } : {})}>{key.label}</button>
       ))}
     </div>
@@ -187,8 +181,23 @@ export function TerminalView({
   const sticky = useRef(false)
   const [ctrl, setCtrl] = useState(false)
   const [hasFocus, setHasFocus] = useState(false)
-  // Read once, at mount, as the resize guard reads it: a phone gets the key bar, a desktop never does.
-  const [phone] = useState(() => phoneViewport({ matchMedia: globalThis.matchMedia?.bind(globalThis) }))
+  // Followed, not read once: the key bar's styles live inside the phone media query, so a turn to landscape
+  // has to take the bar away with them. The resize guard keeps its own flag, read when the PTY is attached.
+  const [phone, setPhone] = useState(() => phoneViewport({ matchMedia: globalThis.matchMedia?.bind(globalThis) }))
+  /** One keystroke through the sticky modifier. Every path into the PTY goes through this, bar keys included. */
+  const stroke = input => {
+    const next = keystroke(input, sticky.current)
+    if (sticky.current) { sticky.current = false
+      setCtrl(false) }
+    return next.send
+  }
+  /** A key bar press: Ctrl arms or disarms the modifier, every other key goes through `stroke` like a keystroke. */
+  const onBarKey = key => {
+    if (key.id === 'ctrl') { sticky.current = !sticky.current
+      setCtrl(sticky.current)
+      return }
+    send.current?.(key.send)
+  }
   latest.current = { readOnly, connected, onFocusChange, confirmPaste, confirmLink, deckdUp, t }
 
   useEffect(() => {
@@ -207,6 +216,12 @@ export function TerminalView({
     // A new session (or client) starts detached and unpainted, so the stdin effect re-runs on its attach.
     setConnected(false)
     setWaiting(false)
+    // A new session (or client) starts with no modifier armed and no focus: an armed Ctrl must never survive
+    // into another session's PTY. Focus.jsx keys this component by session id today, so the effect re-runs on a
+    // fresh instance, but the component's own contract is that `sessionId` may change.
+    sticky.current = false
+    setCtrl(false)
+    setHasFocus(false)
     sawDown.current = !latest.current.deckdUp
     setPainted(!!initialText)
 
@@ -249,8 +264,12 @@ export function TerminalView({
       const onFocus = () => { focused = true
         setHasFocus(true)
         latest.current.onFocusChange?.(true) }
+      // Dismissing the keyboard disarms Ctrl: an armed modifier that waits through a blur would silently
+      // modify the first key typed after coming back.
       const onBlur = () => { focused = false
         setHasFocus(false)
+        sticky.current = false
+        setCtrl(false)
         latest.current.onFocusChange?.(false) }
       textarea?.addEventListener('focus', onFocus)
       textarea?.addEventListener('blur', onBlur)
@@ -261,16 +280,12 @@ export function TerminalView({
         if (latest.current.readOnly || !(focused || pasting)) return
         // The key bar's Ctrl is sticky: it transforms the next keystroke the phone keyboard produces, which is
         // the only way to reach Ctrl+C on a touch keyboard that has no modifier of its own.
-        if (sticky.current) { sticky.current = false
-          setCtrl(false)
-          handle?.write(controlOf(input))
-          return }
-        handle?.write(input)
+        handle?.write(stroke(input))
       })
       cleanups.push(() => data.dispose())
       send.current = text => {
         if (latest.current.readOnly) return
-        handle?.write(text)
+        handle?.write(stroke(text))
       }
       cleanups.push(() => { send.current = null })
 
@@ -294,10 +309,10 @@ export function TerminalView({
       // phone must not do: the PTY is the one the owner is working in on the machine, so a resize from a phone
       // reflows their desktop terminal under them. Decided for remote access: full control from the phone, except
       // this. The viewport decides, not the user agent.
-      const phone = phoneViewport(scope)
+      const phoneAtAttach = phoneViewport(scope)
       const refit = () => {
         try { fit.fit() } catch {}
-        if (!phone) handle?.resize(term.cols, term.rows)
+        if (!phoneAtAttach) handle?.resize(term.cols, term.rows)
       }
       const scheduleResize = () => {
         if (timer !== null) { pending = true
@@ -370,6 +385,14 @@ export function TerminalView({
     term.options.screenReaderMode = !!screenReaderMode
   }, [readOnly, connected, screenReaderMode])
 
+  useEffect(() => {
+    const query = globalThis.matchMedia?.(PHONE_QUERY)
+    if (!query?.addEventListener) return undefined
+    const onChange = () => setPhone(query.matches)
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }, [])
+
   // The server forgot an attach deckd never completed; ask again once deckd is back. "Back" is a return to up
   // after down, so a health row that still reads up when the error arrives does not start an attach loop.
   useEffect(() => {
@@ -393,10 +416,7 @@ export function TerminalView({
         </div>
       )}
       <div ref={host} className="terminal-host" />
-      {phone && !readOnly && hasFocus ? (
-        <KeyBar ctrl={ctrl} t={t} onCtrl={() => { sticky.current = !sticky.current
-          setCtrl(sticky.current) }} onKey={text => send.current?.(text)} />
-      ) : null}
+      {phone && !readOnly && hasFocus ? <KeyBar ctrl={ctrl} t={t} onKey={onBarKey} /> : null}
     </section>
   )
 }

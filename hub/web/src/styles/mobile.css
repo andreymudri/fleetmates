@@ -164,6 +164,9 @@
     padding: 0 var(--space-8);
     overflow-x: auto;
     scrollbar-width: none;
+    /* The bar is wider than the screen, so it scrolls; pan-x tells the browser a horizontal drag is a scroll
+       and not a press, which is the other half of the key firing on pointerup. */
+    touch-action: pan-x;
     background: var(--bg-sunken);
     border-top: 1px solid var(--border-subtle);
   }
