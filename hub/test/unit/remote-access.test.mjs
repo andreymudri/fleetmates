@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { isWindows, posixTest } from '../helpers/platform.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -8,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { authorize, parsePublicOrigin, requestOrigin, securityHeaders } from '../../server/http/auth.mjs'
 import { checkPassphrase, createRemoteAccess, hashPassphrase, readRemotePass, verifyPassphrase, writeRemotePass } from '../../server/http/remote-pass.mjs'
 import { parseServerArgs } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 const origin = parsePublicOrigin('https://machine.tail1234.ts.net')
 const request = (headers, method = 'GET') => ({ method, headers })
@@ -72,9 +74,9 @@ test('the server entrypoint takes --public-origin and refuses anything else', ()
   for (const argv of [['--public-origin'], ['--open'], ['https://machine.tail1234.ts.net']]) assert.throws(() => parseServerArgs(argv), /usage/)
 })
 
-test('a passphrase is checked, stored as a scrypt hash in a 0600 file, and compared against that hash', async t => {
+test('a passphrase is checked, stored as a scrypt hash, and compared against that hash', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pass-'))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   for (const value of ['', '   ', 'short', 'password', 'PASSWORD', 'let-me-in', 'fleetmates']) assert.throws(() => checkPassphrase(value), Error, value)
   assert.equal(checkPassphrase('correct horse battery'), 'correct horse battery')
   const record = await hashPassphrase('correct horse battery')
@@ -87,24 +89,32 @@ test('a passphrase is checked, stored as a scrypt hash in a 0600 file, and compa
   assert.notEqual((await hashPassphrase('correct horse battery')).hash, record.hash)
   const file = path.join(dir, 'remote-pass.json')
   writeRemotePass(file, record)
-  assert.equal(fs.lstatSync(file).mode & 0o777, 0o600)
   assert.deepEqual(readRemotePass(file), { record })
   assert.deepEqual(readRemotePass(path.join(dir, 'nothing.json')), { missing: true }, 'a deck with no passphrase is not a deck with a broken one')
-  fs.chmodSync(file, 0o644)
-  assert.match(readRemotePass(file).bad, /mode 0644/)
-  // On win32 there is no mode to check: the owner's profile ACLs are what keep the file private.
-  assert.deepEqual(readRemotePass(file, { platform: 'win32' }), { record })
-  fs.chmodSync(file, 0o600)
-  assert.equal(readRemotePass(file, { uid: process.getuid() + 1 }).bad.includes('not by this user'), true)
   fs.writeFileSync(file, '{"v":2}', { mode: 0o600 })
   assert.equal(readRemotePass(file).bad, 'not a passphrase record')
   fs.writeFileSync(file, 'not json', { mode: 0o600 })
   assert.equal(readRemotePass(file).bad, 'not JSON')
 })
 
+posixTest('the record file is private, and only POSIX has a mode and an owner to check', { reason: 'file modes and uids; NTFS has neither' }, async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pass-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  const file = path.join(dir, 'remote-pass.json')
+  const record = await hashPassphrase('correct horse battery')
+  writeRemotePass(file, record)
+  assert.equal(fs.lstatSync(file).mode & 0o777, 0o600)
+  fs.chmodSync(file, 0o644)
+  assert.match(readRemotePass(file).bad, /mode 0644/)
+  // On win32 there is no mode to check: the owner's profile ACLs are what keep the file private.
+  assert.deepEqual(readRemotePass(file, { platform: 'win32' }), { record })
+  fs.chmodSync(file, 0o600)
+  assert.equal(readRemotePass(file, { uid: process.getuid() + 1 }).bad.includes('not by this user'), true)
+})
+
 test('the exchange is unavailable without a passphrase file, and rate limited once there is one', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pass-'))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const file = path.join(dir, 'remote-pass.json')
   let at = 1_000_000
   const slept = []
@@ -140,10 +150,13 @@ test('the exchange is unavailable without a passphrase file, and rate limited on
 
 test('the CLI writes the public origin to config.json and the passphrase, read from stdin, to its own file', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-'))
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  // The paths the CLI derives from this environment, on whatever platform the suite runs.
+  const env = { HOME: dir, XDG_CONFIG_HOME: path.join(dir, 'config'), XDG_STATE_HOME: path.join(dir, 'state') }
+  const paths = setupPaths(env)
+  const configFile = path.join(paths.config, 'config.json')
   const bin = fileURLToPath(new URL('../../bin/fleetmates-deck.mjs', import.meta.url))
-  const run = (args, input = '') => spawnSync(process.execPath, [bin, ...args], { env: { ...process.env, HOME: dir, XDG_CONFIG_HOME: path.join(dir, '.config'), XDG_STATE_HOME: path.join(dir, '.local/state') }, input, encoding: 'utf8' })
-  const configFile = path.join(dir, '.config/fleetmates/deck/config.json')
+  const run = (args, input = '') => spawnSync(process.execPath, [bin, ...args], { env: { ...process.env, ...env }, input, encoding: 'utf8' })
   fs.mkdirSync(path.dirname(configFile), { recursive: true, mode: 0o700 })
   fs.writeFileSync(configFile, '{"port":47801}\n', { mode: 0o600 })
   assert.equal(run(['remote-access', '--public-origin', 'https://machine.tail1234.ts.net/']).status, 0)
@@ -159,8 +172,8 @@ test('the CLI writes the public origin to config.json and the passphrase, read f
   assert.equal(run(['remote-pass'], 'correct horse battery\nanother one here\n').status, 1)
   const set = run(['remote-pass'], 'correct horse battery\ncorrect horse battery\n')
   assert.equal(set.status, 0, set.stderr)
-  const file = path.join(dir, '.local/state/fleetmates/deck/remote-pass.json')
-  assert.equal(fs.lstatSync(file).mode & 0o777, 0o600)
+  const file = path.join(paths.state, 'remote-pass.json')
+  if (!isWindows) assert.equal(fs.lstatSync(file).mode & 0o777, 0o600)
   assert.equal(await verifyPassphrase('correct horse battery', readRemotePass(file).record), true)
   assert.equal(fs.readFileSync(file, 'utf8').includes('correct horse'), false)
 })

@@ -158,7 +158,10 @@ export async function createDeckServer(options = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('invalid DECK_PORT')
   // Remote access (08-security 4.2): opt in with one exact public origin, resolved as the port is. Without it the
   // deck answers IPv4 loopback only, exactly as before, and the passphrase exchange does not exist.
-  const publicOrigin = parsePublicOrigin(options.publicOrigin ?? env.DECK_PUBLIC_ORIGIN ?? config.publicOrigin ?? null)
+  // Resolved in the shape the port above is resolved: the option, then DECK_PUBLIC_ORIGIN, then config.json. A set
+  // but empty variable is not an absent one; it means loopback only, so a drop-in turns remote access off without
+  // editing config.json.
+  const publicOrigin = parsePublicOrigin(options.publicOrigin ?? (env.DECK_PUBLIC_ORIGIN === undefined ? config.publicOrigin ?? null : env.DECK_PUBLIC_ORIGIN))
   const remote = createRemoteAccess({ file: path.join(paths.state, 'remote-pass.json'), now, ...owner, ...(options.remoteAccess ?? {}) })
   let boundPort = port
   const store = options.store ?? openDeckDb(path.join(paths.state, 'deck.db'), owner)

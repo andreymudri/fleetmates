@@ -7,6 +7,7 @@ import http from 'node:http'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { hashPassphrase, writeRemotePass } from '../../server/http/remote-pass.mjs'
 
 const token = 'a'.repeat(43)
@@ -20,7 +21,9 @@ const PASSPHRASE = 'correct horse battery'
  */
 async function harness(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rem-'))
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // The state path the server derives from this env: ~/.local/state/... on linux, %LOCALAPPDATA% or its HOME
+  // fallback on win32.
+  const state = path.dirname(setupPaths({ HOME: dir }).token)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   if (options.passphrase !== false) writeRemotePass(path.join(state, 'remote-pass.json'), await hashPassphrase(PASSPHRASE))
@@ -31,9 +34,11 @@ async function harness(t, options = {}) {
   const deck = await startDeckServer({ env: { HOME: dir }, port: 0, notifications: false, staticDir, tokenPollMs: 20,
     connectDeckd: async () => { throw Error('offline') }, remoteAccess: { sleep: () => Promise.resolve() },
     ...(options.publicOrigin === null ? {} : { publicOrigin: options.publicOrigin ?? PUBLIC }) })
+  // Windows cannot remove a directory while a file in it is still open; retry for a while after the server closed.
+  const rmDir = target => fs.rmSync(target, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   t.after(async () => { await deck.close()
-    fs.rmSync(dir, { recursive: true, force: true })
-    fs.rmSync(staticDir, { recursive: true, force: true }) })
+    rmDir(dir)
+    rmDir(staticDir) })
   const port = deck.address().port
   const request = (route, headers = {}, method = 'GET', body = '') => new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: route, method,
@@ -139,14 +144,45 @@ test('the shell paths are served with their own types, and a missing one is a re
 
 test('a public origin that is a wildcard or plaintext stops the server from starting', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rem-bad-'))
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  const state = path.dirname(setupPaths({ HOME: dir }).token)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   for (const [value, reason] of [['https://*.ts.net', /wildcard/], ['http://machine.tail1234.ts.net', /https/], ['https://machine.tail1234.ts.net/deck', /path, query or fragment/]]) {
     await assert.rejects(async () => {
       const deck = await startDeckServer({ env: { HOME: dir }, port: 0, notifications: false, publicOrigin: value, connectDeckd: async () => { throw Error('offline') } })
       await deck.close()
     }, reason, value)
   }
+})
+
+test('the public origin resolves as the port does: options, then the environment, then config.json', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rem-env-'))
+  const paths = setupPaths({ HOME: dir })
+  fs.mkdirSync(paths.state, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(paths.token, token, { mode: 0o600 })
+  fs.mkdirSync(paths.config, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(path.join(paths.config, 'config.json'), JSON.stringify({ publicOrigin: 'https://from-config.ts.net' }), { mode: 0o600 })
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  const start = async env => {
+    const deck = await startDeckServer({ env: { HOME: dir, ...env }, port: 0, notifications: false, connectDeckd: async () => { throw Error('offline') } })
+    t.after(() => deck.close())
+    const port = deck.address().port
+    const ask = host => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/api/version', headers: { Host: host, Authorization: `Bearer ${token}` } }, res => { res.resume()
+        resolve(res.statusCode) })
+      req.on('error', reject)
+      req.end()
+    })
+    return { ask, port }
+  }
+  const fromConfig = await start({})
+  assert.equal(await fromConfig.ask('from-config.ts.net'), 200, 'config.json alone opens the origin')
+  const fromEnv = await start({ DECK_PUBLIC_ORIGIN: 'https://from-env.ts.net' })
+  assert.equal(await fromEnv.ask('from-env.ts.net'), 200)
+  assert.equal(await fromEnv.ask('from-config.ts.net'), 403, 'the environment wins over config.json, as DECK_PORT does')
+  // A set but empty variable is not an absent one: it turns remote access off without editing config.json.
+  const off = await start({ DECK_PUBLIC_ORIGIN: '' })
+  assert.equal(await off.ask('from-config.ts.net'), 403)
+  assert.equal(await off.ask(`127.0.0.1:${off.port}`), 200)
 })
