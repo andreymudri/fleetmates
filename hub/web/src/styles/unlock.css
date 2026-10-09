@@ -1,0 +1,179 @@
+/* Unlock: the remote access passphrase screen (design pairing-screen.md). It replaces the whole shell, as First
+   run hides the Rail, and it is the one screen designed phone first. Tokens only. */
+
+.unlock {
+  display: grid;
+  min-height: 100dvh;
+  background: var(--bg-canvas);
+  color: var(--text-default);
+  place-items: center;
+  align-content: end;
+  padding:
+    max(var(--space-24), env(safe-area-inset-top))
+    max(var(--space-24), env(safe-area-inset-right))
+    max(var(--space-40), env(safe-area-inset-bottom))
+    max(var(--space-24), env(safe-area-inset-left));
+}
+
+.unlock-card {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, var(--layout-panel-sm));
+}
+.unlock-mark { color: var(--brand-accent); }
+.unlock-title {
+  margin-top: var(--space-24);
+  font: var(--type-heading-detail);
+  letter-spacing: var(--type-heading-detail-tracking);
+  color: var(--text-strong);
+}
+.unlock-subtitle {
+  margin-top: var(--space-8);
+  max-width: 34ch;
+  font: var(--type-body);
+  color: var(--text-secondary);
+}
+.unlock-form { margin-top: var(--space-28); }
+
+.unlock-label {
+  display: block;
+  margin-bottom: var(--space-8);
+  font: var(--type-label);
+  color: var(--text-secondary);
+}
+.unlock-field { position: relative; }
+.unlock-field input {
+  width: 100%;
+  min-height: var(--size-control-hero);
+  padding: 0 var(--space-48) 0 var(--space-14);
+  background: var(--bg-control);
+  color: var(--text-strong);
+  border: 1px solid var(--border-field);
+  border-radius: var(--radius-lg);
+  font-family: var(--font-family-mono);
+  /* 16px exactly, or iOS Safari zooms the page on focus and the layout jumps. */
+  font-size: var(--font-size-lg);
+}
+.unlock-field input:focus { border-color: var(--border-field-focus); }
+.unlock-field input[aria-invalid='true'] { border-color: var(--state-crashed-border); }
+.unlock-reveal {
+  position: absolute;
+  inset-inline-end: var(--space-4);
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  background: none;
+  border: 0;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.unlock-reveal[aria-pressed='true'] { color: var(--text-default); }
+.unlock-hint {
+  margin-top: var(--space-8);
+  font: var(--type-meta);
+  color: var(--text-muted);
+}
+.unlock-hint-command { font-family: var(--font-family-mono); }
+
+.unlock-status {
+  display: flex;
+  gap: var(--space-8);
+  align-items: flex-start;
+  margin-top: var(--space-16);
+  padding: var(--space-12) var(--space-14);
+  border-radius: var(--radius-lg);
+  font: var(--type-body-sm);
+  font-variant-numeric: tabular-nums;
+}
+.unlock-status .unlock-icon { flex: none; }
+.unlock-status--error {
+  background: var(--state-crashed-bg);
+  color: var(--text-on-red-tint);
+  border: 1px solid var(--state-crashed-border);
+}
+.unlock-status--wait {
+  background: var(--state-stale-bg);
+  color: var(--text-on-amber-tint);
+  border: 1px solid var(--state-stale-border);
+}
+.unlock-status--ok {
+  background: var(--state-running-bg);
+  color: var(--text-on-green-tint);
+  border: 1px solid var(--state-running-border);
+}
+.unlock-status--info {
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+/* The submit button: full width and 48px tall, the same primary colours as First run's "Install hooks". */
+.button--block {
+  width: 100%;
+  justify-content: center;
+  min-height: var(--size-control-hero);
+  border-radius: var(--radius-lg);
+  font-size: var(--font-size-lg);
+}
+.unlock-form .button--block { margin-top: var(--space-20); }
+/* aria-disabled, not the attribute, so the reason stays reachable by a screen reader. */
+.unlock-form .button[aria-disabled='true'] {
+  background: var(--bg-control);
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.unlock-remember,
+.unlock-tailnet {
+  margin-top: var(--space-16);
+  font: var(--type-meta);
+  color: var(--text-muted);
+}
+.unlock-unset-title {
+  font: var(--type-label);
+  color: var(--text-strong);
+}
+.unlock-unset-body {
+  margin-top: var(--space-8);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+.unlock-command {
+  display: flex;
+  gap: var(--space-8);
+  align-items: center;
+  margin-top: var(--space-12);
+  padding: var(--space-8) var(--space-12);
+  background: var(--bg-sunken);
+  border-radius: var(--radius-md);
+}
+.unlock-command code {
+  flex: 1;
+  font: var(--type-mono-md);
+  color: var(--text-code);
+  user-select: all;
+}
+.unlock-copy {
+  min-width: 44px;
+  min-height: 44px;
+  background: none;
+  border: 0;
+  color: var(--text-secondary);
+  font: var(--type-meta);
+  cursor: pointer;
+}
+.unlock-unset .button--block { margin-top: var(--space-16); }
+
+/* From 480px up the page becomes a centred card: on a phone the page is the card. */
+@media (min-width: 480px) {
+  .unlock { align-content: center; }
+  .unlock-card {
+    padding: var(--space-32);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-2xl);
+  }
+}

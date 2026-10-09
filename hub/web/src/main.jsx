@@ -18,7 +18,8 @@ import './styles/memory.css'
 import './styles/memory-graph.css'
 import './styles/memory-ask.css'
 import './styles/memory-lists.css'
-import './styles/pairing.css'
+import './styles/unlock.css'
+import './styles/mobile.css'
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { Shell } from './shell/App.jsx'
@@ -27,7 +28,7 @@ import { createDeckStore } from './state/deck-store.js'
 import { createSetupFeed, tapSetupChecks } from './screens/first-run/FirstRun.jsx'
 import { deckScreens } from './screens/failures/Failures.jsx'
 import { createTerminalClient } from './state/terminal.js'
-import { Pairing } from './screens/pairing/Pairing.jsx'
+import { Unlock } from './screens/unlock/Unlock.jsx'
 import { TOKEN_KEY } from './state/api.js'
 
 // Components and screens never import CSS themselves (the vite runnerImport test loader cannot load it);
@@ -60,13 +61,14 @@ connection.start()
 const terminals = createTerminalClient(connection)
 const screens = deckScreens({ api, feed, terminals, dispatch: store.dispatch })
 
-// A device with no token (an installed PWA opens at its start_url, with no `#token=` fragment) pairs first:
-// the passphrase is traded for the deck token, which is stored durably, and the app then starts normally.
-const paired = nextToken => {
+// A device with no token (an installed PWA opens at its start_url, with no `#token=` fragment) unlocks first:
+// the passphrase is traded for the deck token, which is stored durably, and the app then starts normally. The
+// reload replaces the entry, so the browser back button never lands on an Unlock screen that is now pointless.
+const unlocked = nextToken => {
   window.sessionStorage.setItem(TOKEN_KEY, nextToken)
   window.localStorage.setItem(TOKEN_KEY, nextToken)
-  window.location.reload()
+  window.location.replace('/')
 }
 createRoot(document.getElementById('root')).render(token
   ? <Shell store={store} connection={connection} api={api} screens={screens} />
-  : <Pairing onPaired={paired} />)
+  : <Unlock onUnlocked={unlocked} />)
