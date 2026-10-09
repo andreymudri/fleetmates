@@ -40,6 +40,28 @@ test('runtimeBase falls back per platform when XDG_RUNTIME_DIR is missing or emp
     'C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run')
 })
 
+test('every path is built with the injected platform flavour, never the host path module', async () => {
+  // win32 normalises forward slashes to backslashes; posix leaves both kinds alone. Both hold on any host.
+  assert.equal(runtimeBase({ env: { LOCALAPPDATA: 'C:/Users/you/AppData/Local' }, platform: 'win32', uid: null, home: 'C:/Users/you' }),
+    'C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run')
+  assert.equal(runtimeBase({ env: {}, platform: 'win32', uid: null, home: 'C:/Users/you' }), 'C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run')
+  assert.equal(runtimeBase({ env: {}, platform: 'darwin', uid: 501, home: '/Users/you' }), '/Users/you/Library/Caches/fleetmates-deck')
+  assert.equal(runtimeBase({ env: {}, platform: 'darwin', uid: 501, home: '/Users/you\\x' }), '/Users/you\\x/Library/Caches/fleetmates-deck')
+  assert.equal(deckDir('C:/Users/you/run', { platform: 'win32' }), 'C:\\Users\\you\\run\\fleetmates-deck')
+  assert.equal(deckDir('/Users/you/run', { platform: 'darwin' }), '/Users/you/run/fleetmates-deck')
+  assert.equal(deckDir('/home/you\\run', { platform: 'linux' }), '/home/you\\run/fleetmates-deck')
+  assert.equal(endpoint('/Users/you/run', 'hooks', { platform: 'darwin', uid: 501 }), '/Users/you/run/fleetmates-deck/hooks.sock')
+  assert.equal(endpoint('C:/Users/you/run', 'deckd', { platform: 'win32', uid: null }), endpoint('C:\\Users\\you\\run', 'deckd', { platform: 'win32', uid: null }))
+  assert.equal(resolveCommand('claude', { platform: 'win32', env: { PATH: 'C:/npm' }, exists: p => p === 'C:\\npm\\claude.cmd' }), 'C:\\npm\\claude.cmd')
+  assert.deepEqual(unwrapCmdShim('C:/npm/claude.cmd', { readFile: () => '"%dp0%\\bin\\claude.exe" %*' }), { kind: 'exe', file: 'C:\\npm\\bin\\claude.exe' })
+  assert.equal(isClaudeProgram('/usr/bin\\claude', { platform: 'linux' }), false)
+  // The host flavour is the same as posix on Linux, so pin the source as well: with comments
+  // stripped, no call goes through the bare `path` module.
+  const code = (await readFile(moduleFile, 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
+  const bare = [...code.matchAll(/\bpath\.(?!(?:posix|win32)\b)\w+/g)].map(m => m[0])
+  assert.deepEqual(bare, [], 'every path call names path.posix or path.win32')
+})
+
 test('deckDir joins with the platform path flavour', () => {
   assert.equal(deckDir('/run/user/1000', { platform: 'linux' }), '/run/user/1000/fleetmates-deck')
   assert.equal(deckDir('/Users/you/Library/Caches/fleetmates-deck', { platform: 'darwin' }), '/Users/you/Library/Caches/fleetmates-deck/fleetmates-deck')
@@ -83,7 +105,10 @@ test('isPipe recognises both pipe prefixes and nothing else', () => {
   assert.equal(isPipe('C:\\pipe\\x'), false)
 })
 
-test('ensurePrivateDir creates a 0700 dir, rejects 0755 on linux and accepts it on win32', async () => {
+// This half needs real POSIX modes and uids, so it cannot run on a Windows host.
+const posixHostOnly = { skip: process.platform === 'win32' && 'needs POSIX file modes and process.getuid on the host' }
+
+test('ensurePrivateDir creates a 0700 dir, rejects 0755 on linux and accepts it on win32', posixHostOnly, async () => {
   const base = await mkdtemp(path.join(tmpdir(), 'deck-platform-'))
   try {
     const uid = process.getuid()
@@ -99,6 +124,19 @@ test('ensurePrivateDir creates a 0700 dir, rejects 0755 on linux and accepts it 
     await assert.rejects(ensurePrivateDir(fresh, { platform: 'linux', uid: uid + 1 }),
       { message: `runtime dir ${fresh} is owned by uid ${uid}, not by this user` })
     await ensurePrivateDir(fresh, { platform: 'linux', uid: null })
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
+test('ensurePrivateDir with platform win32 only creates the dir, and accepts an existing one, on any host', async () => {
+  const base = await mkdtemp(path.join(tmpdir(), 'deck-platform-'))
+  try {
+    const fresh = path.join(base, 'a', 'b')
+    await ensurePrivateDir(fresh, { platform: 'win32', uid: null })
+    assert.ok((await stat(fresh)).isDirectory())
+    await chmod(fresh, 0o755)
+    await ensurePrivateDir(fresh, { platform: 'win32', uid: null })
   } finally {
     await rm(base, { recursive: true, force: true })
   }

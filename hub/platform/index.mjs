@@ -21,7 +21,7 @@ const octal = mode => (mode & 0o777).toString(8).padStart(4, '0')
  */
 export function runtimeBase ({ env = process.env, platform = process.platform, uid = currentUid(), home = env.HOME || os.homedir() } = {}) {
   if (typeof env.XDG_RUNTIME_DIR === 'string' && env.XDG_RUNTIME_DIR !== '') return env.XDG_RUNTIME_DIR
-  if (platform === 'darwin') return path.join(home, 'Library', 'Caches', 'fleetmates-deck')
+  if (platform === 'darwin') return path.posix.join(home, 'Library', 'Caches', 'fleetmates-deck')
   if (platform === 'win32') return path.win32.join(env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local'), 'fleetmates-deck', 'run')
   return `/tmp/fleetmates-deck-${uid}`
 }
