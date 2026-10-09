@@ -83,8 +83,9 @@ export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO, pla
   await checkEndpointDirs(runtimeDir, { platform, uid })
   // win32: the pipe name hashes the deckd key, which deckd writes anew each
   // time it starts listening, so it is read on every connect; a client never
-  // writes it, and without one there is no deckd to reach.
-  const secret = endpointSecret(runtimeDir, { platform, name: 'deckd' })
+  // writes it, and without one there is no deckd to reach. A key whose lock
+  // names a dead pid (a crashed deckd's) counts as none.
+  const secret = endpointSecret(runtimeDir, { platform, name: 'deckd', liveHolder: true })
   if (platform === 'win32' && secret === null) {
     throw Object.assign(new Error(`deckd is not running: no endpoint key in ${deckDir(runtimeDir, { platform })}`), { code: 'ENOENT' })
   }

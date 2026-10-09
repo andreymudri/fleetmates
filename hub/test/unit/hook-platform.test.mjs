@@ -80,6 +80,24 @@ test('hookEndpoint on win32 reads the hooks key the deck wrote under its base, a
   })
 })
 
+test('hookEndpoint on win32 treats a hooks key whose lock names a dead pid as missing, so the hook spools instead of dialing a crashed server\'s name', async () => {
+  await inScratch(async () => {
+    const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })
+    const dir = deckDir(base, { platform: 'win32' })
+    fs.mkdirSync(dir, { recursive: true })
+    const secret = 'f'.repeat(64)
+    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.key'), secret)
+    assert.equal(hookEndpoint(WIN_ENV, 'win32'), endpoint(base, 'hooks', { platform: 'win32', secret }), 'no lock: the key stands')
+    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.lock'), JSON.stringify({ pid: process.pid, started: 1 }))
+    assert.equal(hookEndpoint(WIN_ENV, 'win32'), endpoint(base, 'hooks', { platform: 'win32', secret }), 'a live holder')
+    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.lock'), JSON.stringify({ pid: 4242, started: 1 }))
+    assert.throws(() => hookEndpoint(WIN_ENV, 'win32', { alive: pid => pid !== 4242 }), { code: 'ENOENT' }, 'a dead holder')
+    // With no injection the check is process.kill(pid, 0); no process has an odd pid this large on Windows or Linux.
+    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.lock'), JSON.stringify({ pid: 2147483645, started: 1 }))
+    assert.throws(() => hookEndpoint(WIN_ENV, 'win32'), { code: 'ENOENT' }, 'a dead holder, default check')
+  })
+})
+
 test('startHookSocket on win32 writes a new hooks key each start and listens on the pipe the hook computes from it; a second one is refused while the first answers', async () => {
   await inScratch(async () => {
     const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })

@@ -57,8 +57,9 @@ function defaultAlive (pid) {
 // PowerShell writes a redirected stdout in the console's code page unless told otherwise; every query
 // the deck runs through it starts with this, so its output is UTF-8.
 export const POWERSHELL_UTF8 = '[Console]::OutputEncoding=[Text.Encoding]::UTF8;'
-// .NET ticks (100 ns since 0001-01-01) at the Unix epoch.
-const EPOCH_TICKS = 621355968000000000n
+// A CIM datetime as Win32_Process.CreationDate prints it: local date and time, microseconds, and the
+// offset from UTC in minutes (yyyymmddHHMMSS.mmmmmm+UUU).
+const DMTF_RE = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-])(\d{3})$/
 // How far apart a lock's recorded start and its pid's creation time may be for the pid to be its holder.
 const START_TOLERANCE_MS = 2000
 
@@ -67,8 +68,9 @@ const ownStart = () => Math.round(Date.now() - process.uptime() * 1000)
 
 /**
  * When process `pid` was created, in ms since the epoch: this process's own from ownStart; another's
- * from Win32_Process.CreationDate through PowerShell (as .NET ticks, so the output is only digits).
- * `undefined` when no such process; null when the query fails or prints something else. `pid` is a
+ * from Win32_Process.CreationDate through Windows PowerShell's Get-WmiObject, which prints the raw CIM
+ * datetime with its own UTC offset, converted here without any local time zone. `undefined` when no
+ * such process; null when the query fails or prints anything that is not such a datetime. `pid` is a
  * positive integer (checked by the caller) before it enters the query.
  * @param {number} pid
  * @param {{ spawnSync?: typeof childProcess.spawnSync }} [opts]
@@ -77,13 +79,16 @@ const ownStart = () => Math.round(Date.now() - process.uptime() * 1000)
 function defaultCreationTime (pid, { spawnSync = childProcess.spawnSync } = {}) {
   if (pid === process.pid) return ownStart()
   const result = spawnSync('powershell', ['-NoProfile', '-Command',
-    `${POWERSHELL_UTF8}$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}';if($p){$p.CreationDate.ToUniversalTime().Ticks}`],
+    `${POWERSHELL_UTF8}$p=Get-WmiObject Win32_Process -Filter 'ProcessId=${pid}';if($p){$p.CreationDate}`],
   { encoding: 'utf8', timeout: 10000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
   if (result.error || result.status !== 0) return null
   const out = String(result.stdout ?? '').trim()
   if (out === '') return undefined
-  if (!/^\d+$/.test(out)) return null
-  return Number((BigInt(out) - EPOCH_TICKS) / 10000n)
+  const m = DMTF_RE.exec(out)
+  if (!m) return null
+  const [y, mo, d, h, mi, s, us, sign, offset] = m.slice(1)
+  const local = Date.UTC(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)) + Math.floor(Number(us) / 1000)
+  return local - (sign === '-' ? -1 : 1) * Number(offset) * 60000
 }
 
 function checkName (name) {
@@ -235,18 +240,28 @@ function takeLock (lock, name, { fsImpl, random, alive, creationTime }) {
  * for a server use it) a valid key is returned as it is; otherwise the start lock is taken, the key read
  * again under it (another creator may have written one since), a missing or bad one written (a bad one
  * logged), and the lock released. While a live deck server holds the lock that refuses with EADDRINUSE.
- * The deck itself starts its endpoints with `listenEndpoint`, which writes a new key every time.
+ * The deck itself starts its endpoints with `listenEndpoint`, which writes a new key every time. With
+ * `liveHolder: true` (connectDeckd) a key whose lock names a pid that is not alive counts as missing: what
+ * a crashed server leaves. A key without a lock is still returned (test fixtures write one).
  * @param {string} base
  * @param {{ platform?: string, name?: 'deckd' | 'hooks', create?: boolean, fs?: any, log?: (line: string) => void,
- *   random?: (n: number) => Buffer, alive?: (pid: number) => boolean, creationTime?: (pid: number) => number | undefined | null, spawnSync?: typeof childProcess.spawnSync }} [opts]
+ *   random?: (n: number) => Buffer, alive?: (pid: number) => boolean, creationTime?: (pid: number) => number | undefined | null, spawnSync?: typeof childProcess.spawnSync,
+ *   liveHolder?: boolean }} [opts]
  * @returns {string | null}
  */
-export function endpointSecret (base, { platform = process.platform, name, create = false, fs: fsImpl = fs, log = logLine,
+export function endpointSecret (base, { platform = process.platform, name, create = false, liveHolder = false, fs: fsImpl = fs, log = logLine,
   random = randomBytes, alive = defaultAlive, spawnSync = childProcess.spawnSync, creationTime = pid => defaultCreationTime(pid, { spawnSync }) } = {}) {
   if (platform !== 'win32') return null
   checkName(name)
   const { dir, key, lock } = keyPaths(base, name)
   const found = readEndpointKey(key, fsImpl)
+  if ('secret' in found && liveHolder) {
+    let holder = null
+    try {
+      holder = JSON.parse(readNoFollow(lock, fsImpl))
+    } catch {}
+    if (Number.isInteger(holder?.pid) && holder.pid > 0 && !alive(holder.pid)) return null
+  }
   if ('secret' in found) return found.secret
   if (!create) return null
   fsImpl.mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -280,11 +295,13 @@ export function endpointSecret (base, { platform = process.platform, name, creat
  * `stop` ends the server with `taskkill /F`, which skips that close, so the service manager removes the
  * key and lock itself after the kill (dropEndpoint).
  *
- * Not closed: a server ended any other way (a crash, logoff, a reboot, a kill outside `stop`) leaves its
- * key and lock behind. Until the next start replaces the key, the hook and fm keep dialing the dead
- * server's pipe name, and another local user who saw that name in `\\.\pipe\` can create it and
- * receive what they send: hook envelopes with their tool input, fm's hello and then keystrokes. Clients
- * do not check the lock's holder before they send.
+ * Narrowed, not closed: a server ended any other way (a crash, logoff, a reboot, a kill outside `stop`)
+ * leaves its key and lock behind. The hook and connectDeckd (so fm and the web server's deckd link)
+ * treat a key whose lock names a pid that is not alive as missing, so they do not dial the dead
+ * server's name. What remains: once Windows gives that pid to another process, they dial it again until
+ * the next start replaces the key, and another local user who saw the name in `\\.\pipe\` and created
+ * it receives what they send: hook envelopes with their tool input, fm's hello and then keystrokes. Other
+ * readers of the key (setupPaths, the doctor's probe) do not check the lock.
  * @param {string} base
  * @param {'deckd' | 'hooks'} name
  * @param {import('node:net').Server} server

@@ -414,16 +414,21 @@ test('a lock whose live pid was created at another time (a reused pid) is taken 
   })
 })
 
-test('the creation time query runs PowerShell with UTF-8 output and reads Win32_Process.CreationDate as ticks', async () => {
+test('the creation time query runs Windows PowerShell with UTF-8 output and reads Win32_Process.CreationDate as a CIM datetime with its UTC offset', async () => {
   await inScratch(async () => {
     fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
-    const started = 1_790_000_000_123
-    const ticks = String(BigInt(started) * 10000n + 621355968000000000n)
+    // Measured on the Windows VM: this CreationDate and Get-CimInstance's .ToUniversalTime().Ticks
+    // 639271432882101190 are the same instant, 2026-10-09T11:48:08.210Z.
+    const started = Date.UTC(2026, 9, 9, 11, 48, 8, 210)
     const answers = [
-      ['the holder', { status: 0, stdout: `${ticks}\r\n` }, false],
+      ['the holder, UTC-7', { status: 0, stdout: '20261009044808.210119-420\r\n' }, false],
+      ['the holder, UTC+2', { status: 0, stdout: '20261009134808.210119+120\r\n' }, false],
+      ['the holder, UTC', { status: 0, stdout: '20261009114808.210119+000\r\n' }, false],
+      ['a process created a minute later', { status: 0, stdout: '20261009044908.210119-420\r\n' }, true],
       ['no such process', { status: 0, stdout: '\r\n' }, true],
-      ['a later process', { status: 0, stdout: `${BigInt(ticks) + 600_000_000n}\r\n` }, true],
-      ['output that is not ticks', { status: 0, stdout: 'Andr�\r\n' }, false],
+      ['an offset of two digits', { status: 0, stdout: '20261009044808.210119-42\r\n' }, false],
+      ['ticks, not a CIM datetime', { status: 0, stdout: '639271432882101190\r\n' }, false],
+      ['a mangled string', { status: 0, stdout: 'Andr�\r\n' }, false],
       ['a failed query', { status: 1, stdout: '' }, false],
       ['no powershell', { error: Object.assign(new Error('spawnSync powershell ENOENT'), { code: 'ENOENT' }), status: null, stdout: '' }, false],
     ]
@@ -442,10 +447,23 @@ test('the creation time query runs PowerShell with UTF-8 output and reads Win32_
       assert.equal(spawned.length, 1, label)
       assert.equal(spawned[0].file, 'powershell')
       assert.deepEqual(spawned[0].args, ['-NoProfile', '-Command',
-        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;$p=Get-CimInstance Win32_Process -Filter 'ProcessId=4242';if($p){$p.CreationDate.ToUniversalTime().Ticks}"])
+        "[Console]::OutputEncoding=[Text.Encoding]::UTF8;$p=Get-WmiObject Win32_Process -Filter 'ProcessId=4242';if($p){$p.CreationDate}"])
       assert.equal(spawned[0].options.windowsHide, true)
       assert.equal(spawned[0].options.encoding, 'utf8')
     }
+  })
+})
+
+test('endpointSecret with liveHolder treats a key whose lock names a dead pid as missing, and keeps one with a live holder or no lock', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(keyFile('base', 'deckd'), 'e'.repeat(64))
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', liveHolder: true }), 'e'.repeat(64), 'no lock')
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: process.pid, started: 1 }))
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', liveHolder: true }), 'e'.repeat(64), 'a live holder')
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, started: 1 }))
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', liveHolder: true, alive: allButDead }), null, 'a dead holder')
+    assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', alive: allButDead }), 'e'.repeat(64), 'without liveHolder the lock is not read')
   })
 })
 
@@ -468,6 +486,9 @@ test('a deck server started from a relative script path under a non-ASCII direct
       "import net from 'node:net'",
       `const { listenEndpoint } = await import(${JSON.stringify(moduleUrl)})`,
       'const server = net.createServer()',
+      // Lock well after starting, as the server does after its startup work, so the recorded start must
+      // be the process's start and not the time the lock was taken.
+      'await new Promise(resolve => setTimeout(resolve, 3000))',
       "await listenEndpoint('base', 'deckd', server, { platform: 'win32' })",
       "process.stdout.write('READY\\n')",
       "process.stdin.on('end', () => process.exit(0)).resume()",

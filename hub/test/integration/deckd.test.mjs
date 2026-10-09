@@ -10,7 +10,7 @@ import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { cmdShim } from '../helpers/fake-bin.mjs'
 import { posixTest } from '../helpers/platform.mjs'
 import { endpoint, endpointSecret, deckDir } from '../../platform/index.mjs'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { startDeckd } from '../../deckd/main.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
@@ -654,6 +654,11 @@ test('with platform win32 deckd writes a new key at every start, a client reads 
       again.close()
     }
     await assert.rejects(connectDeckd({ runtimeDir: 'nokey', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
+    // What a crashed deckd leaves: its key, and its lock naming a pid that is gone.
+    mkdirSync(deckDir('crashed', { platform: 'win32' }), { recursive: true })
+    writeFileSync(path.win32.join(deckDir('crashed', { platform: 'win32' }), 'endpoint-deckd.key'), 'f'.repeat(64))
+    writeFileSync(path.win32.join(deckDir('crashed', { platform: 'win32' }), 'endpoint-deckd.lock'), JSON.stringify({ pid: 2147483645, started: 1 }))
+    await assert.rejects(connectDeckd({ runtimeDir: 'crashed', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
   } finally {
     await first?.close()
     process.chdir(cwd)
