@@ -14,7 +14,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=24.2.0"
+    "node": ">=24.16.0"
   },
   "bin": {
     "fleetmates-deck": "bin/fleetmates-deck.mjs",

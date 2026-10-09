@@ -61,8 +61,9 @@ async function harness() {
   const calls = []
   const publications = []
   const notifier = {
-    async popup(value) { calls.push({ type: 'popup', ...value }); return fail ? { ok: false, error: { code: 'notify_failed', exitCode: 1 } } : { ok: true, id: calls.length } },
-    async bell() { calls.push({ type: 'bell' }); return { ok: true } },
+    // `fail` is false, true (a failed notify-send) or the exact result object popups and bells answer with.
+    async popup(value) { calls.push({ type: 'popup', ...value }); return fail === true ? { ok: false, error: { code: 'notify_failed', exitCode: 1 } } : fail || { ok: true, id: calls.length } },
+    async bell() { calls.push({ type: 'bell' }); return typeof fail === 'object' ? fail : { ok: true } },
     async dismiss(id) { calls.push({ type: 'dismiss', id }); return { ok: true } },
     async testPing() { calls.push({ type: 'ping' }); return { ok: !fail } }
   }
@@ -239,6 +240,49 @@ test('closed grace requests stay silent, delivery failure retries privately and 
     assert.equal(h.calls.at(-1).type, 'ping')
     assert.equal(h.store.all('SELECT * FROM notification_history').length, 1)
     assert.equal(h.publications.some(row => JSON.stringify(row).includes('ls')), false)
+  } finally { h.cleanup() }
+})
+
+test('an unsupported popup is recorded as skipped without notify.failed and is not retried; any other ok:false stays notify.failed', async () => {
+  const h = await harness()
+  try {
+    const unsupported = { ok: false, reason: 'unsupported on win32' }
+    h.setFail(unsupported)
+    const id = h.open()
+    await h.tick(4000)
+    assert.equal(h.calls.filter(row => row.type === 'popup').length, 1)
+    assert.equal(h.publications.some(row => row.type === 'notify.failed'), false)
+    // The claim stays, so the next ticks and a restart do not ask the notifier again.
+    assert.deepEqual(h.store.all('SELECT kind,request_id FROM notification_history').map(row => ({ ...row })), [{ kind: 'request', request_id: id }])
+    assert.equal(h.store.get('SELECT notified_at FROM requests WHERE id=?', id).notified_at, null)
+    await h.tick(5000)
+    h.restart()
+    await h.tick(700000)
+    assert.equal(h.calls.filter(row => row.type === 'popup').length, 1)
+    h.close()
+    h.projector.signal(h.sessionId, { type: 'pid_gone' }, 700001)
+    await h.tick(700001)
+    assert.match(h.calls.filter(row => row.type === 'popup').at(-1).title, /crashed/)
+    assert.equal(h.publications.some(row => row.type === 'notify.failed'), false)
+    assert.equal(h.store.all("SELECT * FROM notification_history WHERE kind='crash'").length, 1)
+    await h.tick(700002)
+    assert.equal(h.calls.filter(row => row.type === 'popup').length, 2)
+
+    const other = await harness()
+    try {
+      other.setFail({ ok: false, reason: 'popup daemon gone' })
+      other.open()
+      await other.tick(4000)
+      assert.deepEqual(other.publications.at(-1), { type: 'notify.failed', data: { code: 'notify_failed' } })
+      assert.equal(other.store.all('SELECT * FROM notification_history').length, 0)
+      other.close()
+      other.projector.signal(other.sessionId, { type: 'pid_gone' }, 4001)
+      other.publications.length = 0
+      await other.tick(4001)
+      assert.match(other.calls.at(-1).title, /crashed/)
+      assert.deepEqual(other.publications.filter(row => row.type === 'notify.failed'), [{ type: 'notify.failed', data: { code: 'notify_failed' } }])
+      assert.equal(other.store.all("SELECT * FROM notification_history WHERE kind='crash'").length, 0)
+    } finally { other.cleanup() }
   } finally { h.cleanup() }
 })
 
