@@ -1,13 +1,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { chmod, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import fs, { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   runtimeBase, deckDir, endpoint, isPipe, ensurePrivateDir, privateFileProblem, killTree,
   resolveCommand, quoteCmdArg, escapeCmdCommand, commandSpawn, openUrlArgv, isClaudeProgram, unwrapCmdShim,
+  windowsChildEnv, openNoFollowSync, openNoFollow, createInputModeFilter,
 } from '../../platform/index.mjs'
 import * as platformModule from '../../platform/index.mjs'
 
@@ -19,8 +20,9 @@ test('the platform module imports only node: modules and exports exactly the doc
   assert.ok(specifiers.length > 0)
   for (const s of specifiers) assert.match(s, /^node:/, `${s} is not a node: module`)
   assert.deepEqual(Object.keys(platformModule).sort(), [
-    'commandSpawn', 'deckDir', 'endpoint', 'ensurePrivateDir', 'escapeCmdCommand', 'isClaudeProgram', 'isPipe', 'killTree',
-    'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand', 'runtimeBase', 'unwrapCmdShim',
+    'commandSpawn', 'createInputModeFilter', 'deckDir', 'endpoint', 'ensurePrivateDir', 'escapeCmdCommand', 'isClaudeProgram',
+    'isPipe', 'killTree', 'openNoFollow', 'openNoFollowSync', 'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand',
+    'runtimeBase', 'unwrapCmdShim', 'windowsChildEnv',
   ])
 })
 
@@ -360,4 +362,226 @@ test('commandSpawn refuses ", CR, LF and % in an argument to a .cmd or .bat it c
   // POSIX and a win32 .exe pass the same arguments through untouched.
   assert.deepEqual(commandSpawn('/usr/bin/run.cmd', ['100%'], { platform: 'linux' }).args, ['100%'])
   assert.deepEqual(commandSpawn('C:\\bin\\x.exe', ['a"b%'], { platform: 'win32', env: {} }).args, ['a"b%'])
+})
+
+test('windowsChildEnv returns the same env object on POSIX', () => {
+  const env = { Path: 'a', PATH: 'b' }
+  for (const platform of ['linux', 'darwin']) assert.equal(windowsChildEnv(env, { base: { SystemRoot: 'C:\\Windows' }, platform }), env)
+})
+
+test('windowsChildEnv on win32 keeps one key per case-insensitive name, env winning over base', () => {
+  const env = { Path: 'C:\\old', FOO: '1', PATH: 'C:\\fake-bin;C:\\old', SystemRoot: 'D:\\Win' }
+  const base = { PATH: 'C:\\base', SYSTEMROOT: 'C:\\Windows', SystemDrive: 'C:', Other: 'not copied' }
+  const out = windowsChildEnv(env, { base, platform: 'win32' })
+  assert.notEqual(out, env)
+  assert.deepEqual(Object.keys(out).filter(k => /^path$/i.test(k)), ['PATH'])
+  assert.equal(out.PATH, 'C:\\fake-bin;C:\\old')
+  // A present SystemRoot is kept, a missing SystemDrive is filled from base, other base keys are not copied.
+  assert.deepEqual(Object.keys(out).filter(k => /^systemroot$/i.test(k)), ['SystemRoot'])
+  assert.equal(out.SystemRoot, 'D:\\Win')
+  assert.equal(out.SystemDrive, 'C:')
+  assert.equal(out.Other, undefined)
+  assert.equal(out.FOO, '1')
+  // env is not modified.
+  assert.deepEqual(Object.keys(env), ['Path', 'FOO', 'PATH', 'SystemRoot'])
+})
+
+test('windowsChildEnv on win32 fills every Windows base variable from base, case-insensitively, when env has none', () => {
+  const names = ['SystemRoot', 'SystemDrive', 'windir', 'TEMP', 'TMP', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'USERNAME',
+    'USERDOMAIN', 'LOGONSERVER', 'ComSpec', 'PATHEXT']
+  const base = Object.fromEntries(names.map(n => [n.toLowerCase(), `v-${n}`]))
+  const out = windowsChildEnv({ PATH: 'C:\\bin' }, { base, platform: 'win32' })
+  for (const n of names) assert.equal(out[n], `v-${n}`, n)
+  assert.deepEqual(Object.keys(out).sort(), ['PATH', ...names].sort())
+  assert.equal(windowsChildEnv({}, { base: { SystemRoot: 'C:\\Windows' }, platform: 'win32' }).SystemRoot, 'C:\\Windows')
+  // Nothing in base leaves the key absent rather than undefined.
+  assert.deepEqual(windowsChildEnv({ A: 'x' }, { base: {}, platform: 'win32' }), { A: 'x' })
+})
+
+/**
+ * A temp dir holding a regular file `real` and a symlink `link` to it. `symlinkOk` is false when the
+ * host refuses to create a symlink (a Windows account without the privilege).
+ */
+async function linkFixture () {
+  const dir = await mkdtemp(path.join(tmpdir(), 'deck-nofollow-'))
+  const real = path.join(dir, 'real')
+  const link = path.join(dir, 'link')
+  await writeFile(real, 'secret')
+  let symlinkOk = true
+  try {
+    await symlink(real, link)
+  } catch (err) {
+    if (err.code !== 'EPERM') throw err
+    symlinkOk = false
+  }
+  return { dir, real, link, symlinkOk, cleanup: () => rm(dir, { recursive: true, force: true, maxRetries: 5 }) }
+}
+
+/** A copy of a Stats object with some fields overridden. */
+const restat = (st, over) => Object.assign(Object.create(Object.getPrototypeOf(st)), st, over)
+
+/** An fs whose lstat calls see every file as a symbolic link; everything else is the real fs. */
+function lyingLstatFs () {
+  return {
+    ...fs,
+    lstatSync: (p, o) => restat(fs.lstatSync(p, o), { isSymbolicLink: () => true }),
+    promises: { ...fs.promises, lstat: async (p, o) => restat(await fs.promises.lstat(p, o), { isSymbolicLink: () => true }) },
+  }
+}
+
+/** An fs whose fstat reports another inode than lstat, as when the name was swapped between the two. */
+function swappedInodeFs () {
+  const bump = st => restat(st, { ino: st.ino + 1n })
+  return {
+    ...fs,
+    fstatSync: (fd, o) => bump(fs.fstatSync(fd, o)),
+    promises: {
+      ...fs.promises,
+      open: async (...a) => {
+        const h = await fs.promises.open(...a)
+        const realStat = h.stat.bind(h)
+        h.stat = async o => bump(await realStat(o))
+        return h
+      },
+    },
+  }
+}
+
+test('openNoFollowSync and openNoFollow open a regular file on the host platform', async () => {
+  const fx = await linkFixture()
+  try {
+    const fd = openNoFollowSync(fx.real)
+    try {
+      assert.equal(fs.readFileSync(fd, 'utf8'), 'secret')
+    } finally {
+      fs.closeSync(fd)
+    }
+    const h = await openNoFollow(fx.real, fs.constants.O_RDONLY)
+    try {
+      assert.equal(await h.readFile('utf8'), 'secret')
+    } finally {
+      await h.close()
+    }
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('openNoFollowSync and openNoFollow refuse a real symlink with ELOOP on the host platform', async t => {
+  const fx = await linkFixture()
+  try {
+    if (!fx.symlinkOk) return t.skip('this account cannot create symlinks')
+    assert.throws(() => openNoFollowSync(fx.link), { code: 'ELOOP' })
+    await assert.rejects(openNoFollow(fx.link, fs.constants.O_RDONLY), { code: 'ELOOP' })
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('openNoFollowSync and openNoFollow on win32 refuse a real symlink through lstat', async t => {
+  const fx = await linkFixture()
+  try {
+    if (!fx.symlinkOk) return t.skip('this account cannot create symlinks')
+    assert.throws(() => openNoFollowSync(fx.link, fs.constants.O_RDONLY, { platform: 'win32' }), { code: 'ELOOP' })
+    await assert.rejects(openNoFollow(fx.link, fs.constants.O_RDONLY, { platform: 'win32' }), { code: 'ELOOP' })
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('openNoFollowSync and openNoFollow on win32 refuse when lstat reports a symbolic link', async () => {
+  const fx = await linkFixture()
+  try {
+    const injected = lyingLstatFs()
+    assert.throws(() => openNoFollowSync(fx.real, fs.constants.O_RDONLY, { platform: 'win32', fs: injected }), { code: 'ELOOP' })
+    await assert.rejects(openNoFollow(fx.real, fs.constants.O_RDONLY, { platform: 'win32', fs: injected }), { code: 'ELOOP' })
+    // The same file through the real fs opens.
+    fs.closeSync(openNoFollowSync(fx.real, fs.constants.O_RDONLY, { platform: 'win32' }))
+    await (await openNoFollow(fx.real, fs.constants.O_RDONLY, { platform: 'win32' })).close()
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('openNoFollowSync and openNoFollow on win32 refuse and close when the opened file is not the one lstat saw', async () => {
+  const fx = await linkFixture()
+  try {
+    const injected = swappedInodeFs()
+    /** @type {number[]} */
+    const closed = []
+    const tracking = { ...injected, closeSync: fd => { closed.push(fd); fs.closeSync(fd) } }
+    assert.throws(() => openNoFollowSync(fx.real, fs.constants.O_RDONLY, { platform: 'win32', fs: tracking }), { code: 'ELOOP' })
+    assert.equal(closed.length, 1, 'the fd opened before the check is closed')
+    await assert.rejects(openNoFollow(fx.real, fs.constants.O_RDONLY, { platform: 'win32', fs: injected }), { code: 'ELOOP' })
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('openNoFollowSync and openNoFollow on win32 create a missing file under O_CREAT and truncate only after the check', async () => {
+  const fx = await linkFixture()
+  try {
+    const { O_WRONLY, O_CREAT, O_TRUNC } = fs.constants
+    const fresh = path.join(fx.dir, 'fresh')
+    fs.closeSync(openNoFollowSync(fresh, O_WRONLY | O_CREAT | O_TRUNC, { platform: 'win32', mode: 0o600 }))
+    assert.equal(fs.readFileSync(fresh, 'utf8'), '')
+    fs.closeSync(openNoFollowSync(fx.real, O_WRONLY | O_CREAT | O_TRUNC, { platform: 'win32' }))
+    assert.equal(fs.readFileSync(fx.real, 'utf8'), '', 'O_TRUNC is honoured')
+    await writeFile(fx.real, 'secret')
+    // A refused open under O_TRUNC leaves the file it opened untouched.
+    assert.throws(() => openNoFollowSync(fx.real, O_WRONLY | O_TRUNC, { platform: 'win32', fs: swappedInodeFs() }), { code: 'ELOOP' })
+    await assert.rejects(openNoFollow(fx.real, O_WRONLY | O_TRUNC, { platform: 'win32', fs: swappedInodeFs() }), { code: 'ELOOP' })
+    assert.equal(fs.readFileSync(fx.real, 'utf8'), 'secret')
+    const fresh2 = path.join(fx.dir, 'fresh2')
+    await (await openNoFollow(fresh2, O_WRONLY | O_CREAT | O_TRUNC, { platform: 'win32' })).close()
+    assert.equal(fs.readFileSync(fresh2, 'utf8'), '')
+    await (await openNoFollow(fx.real, O_WRONLY | O_TRUNC, { platform: 'win32' })).close()
+    assert.equal(fs.readFileSync(fx.real, 'utf8'), '', 'O_TRUNC is honoured by openNoFollow')
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('openNoFollowSync and openNoFollow rethrow ENOENT without O_CREAT on win32', async () => {
+  const missing = path.join(tmpdir(), `deck-nofollow-missing-${process.pid}`)
+  assert.throws(() => openNoFollowSync(missing, fs.constants.O_RDONLY, { platform: 'win32' }), { code: 'ENOENT' })
+  await assert.rejects(openNoFollow(missing, fs.constants.O_RDONLY, { platform: 'win32' }), { code: 'ENOENT' })
+})
+
+const MODE_ON = '\x1b[?9001h'
+const MODE_OFF = '\x1b[?9001l'
+
+test('createInputModeFilter on win32 removes ESC[?9001h and ESC[?9001l', () => {
+  const filter = createInputModeFilter({ platform: 'win32' })
+  assert.equal(filter(`${MODE_ON}a${MODE_OFF}b${MODE_ON}${MODE_ON}c`), 'abc')
+  assert.equal(filter('plain'), 'plain')
+})
+
+test('createInputModeFilter on win32 removes a sequence split at every offset across two chunks', () => {
+  for (const seq of [MODE_ON, MODE_OFF]) {
+    for (let i = 0; i <= seq.length; i++) {
+      const filter = createInputModeFilter({ platform: 'win32' })
+      const first = filter('x' + seq.slice(0, i))
+      assert.equal(first, 'x', `offset ${i}: the incomplete prefix is held back`)
+      assert.equal(first + filter(seq.slice(i) + 'y'), 'xy', `offset ${i}`)
+    }
+  }
+})
+
+test('createInputModeFilter on win32 leaves ESC[?900h and other CSI alone, also when split', () => {
+  for (const other of ['\x1b[?900h', '\x1b[?2004h', '\x1b[?9002h', '\x1b[?90011h', '\x1b[31m', '\x1b[?9001x', '\x1b\x1b[?9001']) {
+    assert.equal(createInputModeFilter({ platform: 'win32' })(other + 'z'), other + 'z')
+    for (let i = 0; i <= other.length; i++) {
+      const filter = createInputModeFilter({ platform: 'win32' })
+      assert.equal(filter(other.slice(0, i)) + filter(other.slice(i) + 'z'), other + 'z', `${JSON.stringify(other)} at ${i}`)
+    }
+  }
+})
+
+test('createInputModeFilter on POSIX returns every chunk unchanged', () => {
+  for (const platform of ['linux', 'darwin']) {
+    const filter = createInputModeFilter({ platform })
+    assert.equal(filter(`a${MODE_ON}b`), `a${MODE_ON}b`)
+    assert.equal(filter('\x1b[?90'), '\x1b[?90')
+  }
 })
