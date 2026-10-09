@@ -1,9 +1,10 @@
-// deckd: owns every deck PTY and serves them over a Unix socket
-// (docs/deck/05-api.md section 5). Run as `node hub/deckd/main.mjs`.
+// deckd: owns every deck PTY and serves them over a Unix socket, or a named
+// pipe on win32 (docs/deck/05-api.md section 5). Run as `node hub/deckd/main.mjs`.
 //
-// Authentication is the file mode alone: the directory is 0700 and the
-// socket 0600. 05-api.md also asks for an SO_PEERCRED uid check, but Node
+// On POSIX authentication is the file mode alone: the directory is 0700 and
+// the socket 0600. 05-api.md also asks for an SO_PEERCRED uid check, but Node
 // cannot read SO_PEERCRED without a native addon, so deckd does not do it.
+// A named pipe has no file mode, so none of the mode steps run for one.
 import net from 'node:net'
 import path from 'node:path'
 import { mkdir, chmod, unlink, lstat, stat, readFile } from 'node:fs/promises'
@@ -13,6 +14,8 @@ import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP, MAX_LINE } from './
 import { PtyHost, DeckdError } from './pty-host.mjs'
 import { captureLoginEnv, dropSessionVars, changedNames } from './login-env.mjs'
 import { capHistory } from './screen-model.mjs'
+import { checkEndpointDirs } from './client.mjs'
+import { runtimeBase, deckDir, endpoint, isPipe, ensurePrivateDir } from '../platform/index.mjs'
 
 /** How long `exits` keeps an exit record. */
 const EXIT_RETENTION_MS = 24 * 60 * 60 * 1000
@@ -33,13 +36,14 @@ const GUARD_QUIET_MAX_MS = 5000
  */
 
 /**
- * Socket directory and path for a runtime dir.
+ * The deck directory and deckd's endpoint for a runtime dir: `socketPath` is
+ * a Unix socket path on POSIX and a named pipe on win32.
  * @param {string} runtimeDir
+ * @param {{ platform?: string }} [opts]
  * @returns {{ dir: string, socketPath: string }}
  */
-export function socketPaths (runtimeDir) {
-  const dir = path.join(runtimeDir, 'fleetmates-deck')
-  return { dir, socketPath: path.join(dir, 'deckd.sock') }
+export function socketPaths (runtimeDir, { platform = process.platform } = {}) {
+  return { dir: deckDir(runtimeDir, { platform }), socketPath: endpoint(runtimeDir, 'deckd', { platform }) }
 }
 
 /**
@@ -133,20 +137,6 @@ async function checkCwd (cwd) {
 }
 
 /**
- * Refuse a runtime dir that another user owns or that has any group or
- * world permission bit (docs/deck/08-security.md 4.3).
- * @param {string} runtimeDir
- */
-async function checkRuntimeDir (runtimeDir) {
-  const st = await stat(runtimeDir)
-  const mode = (st.mode & 0o777).toString(8).padStart(4, '0')
-  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
-    throw new Error(`runtime dir ${runtimeDir} is owned by uid ${st.uid}, not by this user`)
-  }
-  if ((st.mode & 0o077) !== 0) throw new Error(`runtime dir ${runtimeDir} has mode ${mode}; it must allow no group or world access (0700)`)
-}
-
-/**
  * The newest EXIT_TAIL_LINES lines of a ring, cut to its last
  * EXIT_TAIL_BYTES from a line start, base64.
  * @param {PtyHost} host
@@ -182,22 +172,43 @@ async function exitHistory (host, maxBytes) {
 }
 
 /**
- * Start deckd listening on `$runtimeDir/fleetmates-deck/deckd.sock`.
+ * Start deckd listening on `endpoint(runtimeDir, 'deckd')`: on POSIX
+ * `$runtimeDir/fleetmates-deck/deckd.sock` (or the short /tmp path when that
+ * is too long for a socket), on win32 a named pipe.
+ * The runtime dir is created when missing and, on POSIX, refused when another
+ * user owns it or it has any group or world permission bit
+ * (docs/deck/08-security.md 4.3); the socket's directory is made 0700 and
+ * checked the same way.
  * `loginEnv` is the environment `launched` sessions start from; when absent
  * it is this process's environment without Claude Code's session variables,
  * so a caller that passes none never runs a shell.
  * `historyCap` is the byte cap of an exit record's `history.data`
  * (EXIT_TAIL_BYTES unless a test sets it).
- * @param {{ runtimeDir: string, outputQueueCap?: number, version?: string, loginEnv?: Record<string, string>, historyCap?: number }} opts
+ * `platform` (default the live one) picks the endpoint kind and how PTYs are
+ * spawned and killed; a test pins it.
+ * @param {{ runtimeDir: string, outputQueueCap?: number, version?: string, loginEnv?: Record<string, string>, historyCap?: number, platform?: string }} opts
  * @returns {Promise<{ socketPath: string, bootId: string, close: () => Promise<void> }>}
  */
-export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CAP, version = '0.0.0', loginEnv = dropSessionVars(process.env), historyCap = EXIT_TAIL_BYTES }) {
-  await checkRuntimeDir(runtimeDir)
+export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CAP, version = '0.0.0', loginEnv = dropSessionVars(process.env), historyCap = EXIT_TAIL_BYTES, platform = process.platform }) {
+  await ensurePrivateDir(runtimeDir, { platform })
   const loginEnvNames = changedNames(loginEnv, process.env).slice(0, LOGIN_ENV_NAMES_MAX)
-  const { dir, socketPath } = socketPaths(runtimeDir)
-  await mkdir(dir, { recursive: true, mode: 0o700 })
-  await chmod(dir, 0o700)
-  await clearStaleSocket(socketPath)
+  const { dir, socketPath } = socketPaths(runtimeDir, { platform })
+  const pipe = isPipe(socketPath)
+  if (pipe) {
+    await ensurePrivateDir(dir, { platform })
+  } else {
+    // The deck dir, and the socket's own dir when the endpoint fell back to
+    // a short /tmp path; a dir left behind with a looser mode is tightened.
+    for (const d of new Set([dir, path.dirname(socketPath)])) {
+      await mkdir(d, { recursive: true, mode: 0o700 })
+      await chmod(d, 0o700)
+      await ensurePrivateDir(d, { platform })
+    }
+    // ensurePrivateDir follows symlinks; the clients' rule does not. Refuse
+    // here what every client would refuse, such as a symlinked deck dir.
+    await checkEndpointDirs(runtimeDir, { platform })
+    await clearStaleSocket(socketPath)
+  }
 
   const bootId = randomBytes(8).toString('hex')
   /** @type {Map<string, PtyHost>} */
@@ -360,7 +371,7 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
           h.dispose()
           broadcast({ ev: 'exit', ...event })
         }
-      })
+      }, { platform })
       ptys.set(host.ptyId, host)
       broadcast({ ev: 'spawned', ptyId: host.ptyId, pid: host.pid, origin: host.origin, cwd: host.cwd, argv: host.argv, startedAt: host.startedAt })
       return { ptyId: host.ptyId, pid: host.pid, startedAt: host.startedAt }
@@ -437,6 +448,7 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
         throw new DeckdError('bad_request', 'signal must be SIGTERM, SIGKILL, SIGINT or SIGHUP')
       }
       const graceMs = Number.isInteger(req.graceMs) && req.graceMs >= 0 ? req.graceMs : 5000
+      // On win32 every signal becomes killTree's taskkill /T /F (PtyHost.kill).
       host.kill(signal, graceMs)
       return {}
     },
@@ -480,19 +492,29 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
     })
   })
 
-  const oldMask = process.umask(0o177)
-  try {
-    await new Promise((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(socketPath, () => {
-        server.off('error', reject)
-        resolve(undefined)
-      })
+  const listen = () => new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(socketPath, () => {
+      server.off('error', reject)
+      resolve(undefined)
     })
-  } finally {
-    process.umask(oldMask)
+  })
+  if (pipe) {
+    // A pipe name in use means another deckd serves this base; a pipe
+    // vanishes with its server, so there is nothing stale to clear.
+    await listen().catch((err) => {
+      if (err.code === 'EADDRINUSE') throw new Error(`another deckd is listening on ${socketPath}`)
+      throw err
+    })
+  } else {
+    const oldMask = process.umask(0o177)
+    try {
+      await listen()
+    } finally {
+      process.umask(oldMask)
+    }
+    await chmod(socketPath, 0o600)
   }
-  await chmod(socketPath, 0o600)
 
   const close = async () => {
     const pending = [...ptys.values()].map((host) => new Promise((resolve) => {
@@ -502,18 +524,15 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
     await Promise.race([Promise.all(pending), new Promise((resolve) => setTimeout(resolve, 3000).unref())])
     for (const c of conns) c.socket.destroy()
     await new Promise((resolve) => server.close(() => resolve(undefined)))
-    await unlink(socketPath).catch(() => {})
+    if (!pipe) await unlink(socketPath).catch(() => {})
   }
 
   return { socketPath, bootId, close }
 }
 
 async function main () {
-  const runtimeDir = process.env.XDG_RUNTIME_DIR
-  if (!runtimeDir) {
-    console.error('deckd: XDG_RUNTIME_DIR is not set')
-    process.exit(1)
-  }
+  // XDG_RUNTIME_DIR when set, else the platform's fallback base.
+  const runtimeDir = runtimeBase()
   const cap = Number(process.env.DECKD_OUTPUT_QUEUE_CAP)
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
   // DECKD_LOGIN_ENV=inherit skips the login-shell probe; nothing else does.
@@ -526,6 +545,7 @@ async function main () {
     : await captureLoginEnv({ onFallback: (reason) => { failed = reason } })
   const added = changedNames(loginEnv, process.env)
   if (skipProbe) console.error('deckd: login environment probe skipped (DECKD_LOGIN_ENV=inherit), using the service environment')
+  else if (failed === 'windows') console.error('deckd: no login shell to ask on Windows, using the service environment')
   else if (failed) console.error(`deckd: login environment probe failed (${failed}), using the service environment`)
   else console.error(`deckd: login environment adds ${added.length} names${added.length ? ': ' + added.join(', ') : ''}`)
   const deckd = await startDeckd({

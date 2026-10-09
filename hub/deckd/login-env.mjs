@@ -75,7 +75,7 @@ function parseEnv0 (out) {
 const EXIT_DRAIN_MS = 100
 
 /**
- * @typedef {'no_shell' | 'spawn_error' | 'exit' | 'timeout' | 'no_output'} FallbackReason
+ * @typedef {'no_shell' | 'spawn_error' | 'exit' | 'timeout' | 'no_output' | 'windows'} FallbackReason
  */
 
 /**
@@ -89,16 +89,18 @@ const EXIT_DRAIN_MS = 100
  * exit, the timeout, or output without the marker or any variable, and
  * reports which through `onFallback`. On the timeout the shell's whole
  * process group is killed with SIGKILL, because an interactive shell may
- * ignore SIGTERM.
- * @param {{ shell?: string, timeoutMs?: number, baseEnv?: Record<string, string | undefined>, onFallback?: (reason: FallbackReason) => void }} [opts]
+ * ignore SIGTERM. On win32 there is no login shell to ask: nothing is
+ * spawned, and the answer is the `windows` fallback.
+ * @param {{ platform?: string, shell?: string, timeoutMs?: number, baseEnv?: Record<string, string | undefined>, onFallback?: (reason: FallbackReason) => void }} [opts]
  * @returns {Promise<Record<string, string>>}
  */
-export function captureLoginEnv ({ shell = process.env.SHELL, timeoutMs = 5000, baseEnv = process.env, onFallback = () => {} } = {}) {
+export function captureLoginEnv ({ platform = process.platform, shell = process.env.SHELL, timeoutMs = 5000, baseEnv = process.env, onFallback = () => {} } = {}) {
   /** @param {FallbackReason} reason */
   const fallback = (reason) => {
     onFallback(reason)
     return dropSessionVars(baseEnv)
   }
+  if (platform === 'win32') return Promise.resolve(fallback('windows'))
   if (typeof shell !== 'string' || shell === '') return Promise.resolve(fallback('no_shell'))
   const marker = `__FLEETMATES_DECK_ENV_${randomBytes(8).toString('hex')}__`
   return new Promise((resolve) => {

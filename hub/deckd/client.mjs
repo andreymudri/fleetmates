@@ -1,8 +1,46 @@
-// deckd client: one connection to deckd.sock speaking the JSON-lines
-// protocol of docs/deck/05-api.md section 5. Used by `fm` and the web server.
+// deckd client: one connection to deckd's endpoint (a Unix socket, or a named
+// pipe on win32) speaking the JSON-lines protocol of docs/deck/05-api.md
+// section 5. Used by `fm` and the web server.
 import net from 'node:net'
 import path from 'node:path'
+import { lstat as fsLstat } from 'node:fs/promises'
 import { encode, createLineDecoder, PROTO } from './protocol.mjs'
+import { endpoint, deckDir } from '../platform/index.mjs'
+
+/**
+ * On POSIX, refuse to connect through a directory another local user could
+ * have prepared: with XDG_RUNTIME_DIR unset the base is the shared
+ * `/tmp/fleetmates-deck-<uid>`, and whoever creates it first would receive
+ * the hello and every keystroke. The runtime dir and its deck dir (or, when
+ * the endpoint fell back to a short /tmp path, only that path's dir) are
+ * lstat'ed, and each must be a real directory (not a symlink), owned by `uid`
+ * (when not null), with no group or world permission bit. Otherwise rejects
+ * with code `not_private` and a message naming the dir. A dir that does not
+ * exist rejects with the lstat error (ENOENT), as an unreachable deckd does.
+ * Nothing is checked on win32, whose endpoint is a named pipe.
+ * @param {string} runtimeDir
+ * @param {{ platform?: string, uid?: number | null, lstat?: (p: string) => Promise<import('node:fs').Stats> }} [opts]
+ */
+export async function checkEndpointDirs (runtimeDir, { platform = process.platform, uid = process.getuid?.() ?? null, lstat = fsLstat } = {}) {
+  if (platform === 'win32') return
+  const socket = endpoint(runtimeDir, 'deckd', { platform })
+  const deck = deckDir(runtimeDir, { platform })
+  // The same rule as the hook and fm: the base and its deck dir for
+  // `<base>/fleetmates-deck/deckd.sock`; only the socket's own dir for the
+  // short /tmp fallback a too-long path gets.
+  const dirs = socket === path.posix.join(deck, 'deckd.sock') ? [runtimeDir, deck] : [path.posix.dirname(socket)]
+  for (const dir of dirs) {
+    const st = await lstat(dir)
+    let problem = null
+    if (st.isSymbolicLink()) problem = 'is a symlink'
+    else if (!st.isDirectory()) problem = 'is not a directory'
+    else if (uid !== null && st.uid !== uid) problem = `is owned by uid ${st.uid}, not by this user`
+    else if ((st.mode & 0o077) !== 0) problem = `has mode ${(st.mode & 0o777).toString(8).padStart(4, '0')}, which allows group or world access`
+    if (problem) {
+      throw Object.assign(new Error(`deckd endpoint dir ${dir} is not private: it ${problem}`), { code: 'not_private' })
+    }
+  }
+}
 
 /**
  * An error answered by deckd (`ok: false`), or a request cut off by the
@@ -21,8 +59,9 @@ export class DeckdRequestError extends Error {
 
 /**
  * Connect to deckd and say `hello`. Rejects with the socket error (`code`
- * ENOENT or ECONNREFUSED when no deckd listens), or with a
- * DeckdRequestError when deckd refuses the hello.
+ * ENOENT or ECONNREFUSED when no deckd listens), with code `not_private`
+ * when checkEndpointDirs refuses the directories (POSIX; checked before
+ * connecting), or with a DeckdRequestError when deckd refuses the hello.
  *
  * Every inbound message gets a sequence number in arrival order, readable
  * with `seqOf(msg)` for responses and passed as the second argument to event
@@ -34,13 +73,16 @@ export class DeckdRequestError extends Error {
  * deckd agreed to, its version, its bootId and the features it announced are
  * then `client.proto`, `client.deckdVersion`, `client.bootId` and
  * `client.features`.
- * @param {{ runtimeDir: string, kind: 'server' | 'terminal', name?: string, proto?: number }} opts
+ *
+ * `platform` (default the live one) picks the endpoint kind; `uid` (default
+ * this process's) is the owner checkEndpointDirs requires. A test pins both.
+ * @param {{ runtimeDir: string, kind: 'server' | 'terminal', name?: string, proto?: number, platform?: string, uid?: number | null }} opts
  */
-export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO }) {
-  // Same path as main.mjs socketPaths(); not imported from there, because
-  // main.mjs loads node-pty, which a client has no use for.
-  const socketPath = path.join(runtimeDir, 'fleetmates-deck', 'deckd.sock')
-  const socket = net.connect(socketPath)
+export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO, platform = process.platform, uid = process.getuid?.() ?? null }) {
+  await checkEndpointDirs(runtimeDir, { platform, uid })
+  // The endpoint main.mjs listens on, from the platform module rather than
+  // from main.mjs, because main.mjs loads node-pty, which a client has no use for.
+  const socket = net.connect(endpoint(runtimeDir, 'deckd', { platform }))
   await new Promise((resolve, reject) => {
     socket.once('connect', () => { socket.off('error', reject); resolve(undefined) })
     socket.once('error', reject)
