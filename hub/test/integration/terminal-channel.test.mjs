@@ -16,13 +16,15 @@ import { createPtyBridge } from '../../server/pty-bridge/bridge.mjs'
 import { encodeFrame, decodeFrame, FRAME_KIND } from '../../server/pty-bridge/frames.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 const token = 'a'.repeat(43)
 const startFixture = JSON.parse(fs.readFileSync(new URL('../fixtures/hooks/2.1.282/SessionStart.startup.json', import.meta.url)))
 let dir
 
 before(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tch-')) })
-after(() => fs.rmSync(dir, { recursive: true, force: true }))
+// `dir` is removed by the last `after` below, once deckd and its children are gone: Windows refuses to remove a
+// directory that a live process has as its cwd.
 
 /**
  * A scripted deckd connection for the server's link. Every message gets an arrival sequence number when it
@@ -116,10 +118,12 @@ async function server(t, connectDeckd, runtimeDir) {
     fs.chmodSync(runtimeDir, 0o700)
   }
   const home = fs.mkdtempSync(path.join(dir, 'home-'))
-  const state = path.join(home, '.local/state/fleetmates/deck')
-  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
-  const deck = await startDeckServer({ env: { HOME: home, XDG_RUNTIME_DIR: runtimeDir }, port: 0, notifications: false, connectDeckd,
+  const env = { HOME: home, XDG_RUNTIME_DIR: runtimeDir }
+  // The token where the server reads it for this env: ~/.local/state/... on linux, under AppData\Local on win32.
+  const tokenFile = setupPaths(env).token
+  fs.mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 })
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 })
+  const deck = await startDeckServer({ env, port: 0, notifications: false, connectDeckd,
     reconnectMs: 3_600_000, runPollMs: 3_600_000, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
   t.after(() => deck.close())
   return deck
@@ -580,6 +584,7 @@ after(async () => {
   await deckd?.close()
   await bin?.cleanup()
   await rt?.cleanup()
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 
 test('an input frame for a session the socket has not attached is not_attached and the PTY gets nothing', async t => {

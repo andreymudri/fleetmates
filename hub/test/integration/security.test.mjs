@@ -7,16 +7,20 @@ import http from 'node:http'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
 import { createDeckServer, startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
+import { posixTest } from '../helpers/platform.mjs'
+// Windows cannot remove a directory while a file in it is still open; retry for a while after the server closed.
+const rmDir = dir => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 const token = 'a'.repeat(43)
 async function harness(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sec-'))
-  const state = path.join(dir, '.local/state/fleetmates/deck')
-  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  const tokenFile = path.join(state, 'token')
+  // The token path the server derives from this env: ~/.local/state/... on linux, %LOCALAPPDATA% or its HOME fallback on win32.
+  const tokenFile = setupPaths({ HOME: dir }).token
+  fs.mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 })
   fs.writeFileSync(tokenFile, token, { mode: 0o600 })
   const deck = await startDeckServer({ env: { HOME: dir }, port: 0, notifications: false, connectDeckd: async () => { throw Error('offline') }, tokenPollMs: 20, helloTimeoutMs: 30, ...options })
   t.after(async () => { await deck.close()
-    fs.rmSync(dir, { recursive: true, force: true }) })
+    rmDir(dir) })
   const port = deck.address().port
   const request = (route, headers = {}, method = 'GET', body = '') => new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: route, method,
@@ -151,7 +155,14 @@ test('bad, missing and incompatible WebSocket hello messages close with specifie
     assert.equal((await closing)[0], expected)
   }
 })
-test('server refuses non-loopback binds and unsafe token files', async t => {
+test('server refuses a non-loopback bind', async t => {
+  const h = await harness(t)
+  await assert.rejects(async () => {
+    const candidate = await createDeckServer({ host: '0.0.0.0', env: { HOME: h.dir }, port: 0, notifications: false, connectDeckd: async () => { throw Error('offline') } })
+    await candidate.close()
+  }, /loopback/)
+})
+posixTest('server refuses non-loopback binds and unsafe token files', { reason: 'a 0644 mode is what makes the token unsafe, and NTFS has no mode bits' }, async t => {
   const h = await harness(t)
   await assert.rejects(async () => {
     const candidate = await createDeckServer({ host: '0.0.0.0', env: { HOME: h.dir }, port: 0, notifications: false, connectDeckd: async () => { throw Error('offline') } })
@@ -168,7 +179,11 @@ test('server refuses a token path that is a symlink to a private token file', as
   const target = path.join(h.dir, 'elsewhere-token')
   fs.writeFileSync(target, 'b'.repeat(43), { mode: 0o600 })
   fs.rmSync(h.tokenFile)
-  fs.symlinkSync(target, h.tokenFile)
+  try { fs.symlinkSync(target, h.tokenFile) } catch (error) {
+    // Windows lets only an administrator or Developer Mode create a symlink.
+    if (process.platform === 'win32' && error.code === 'EPERM') return t.skip('creating a symlink needs Developer Mode or an administrator on Windows')
+    throw error
+  }
   await assert.rejects(async () => {
     const candidate = await startDeckServer({ env: { HOME: h.dir }, port: 0, notifications: false, connectDeckd: async () => { throw Error('offline') } })
     await candidate.close()
@@ -194,10 +209,10 @@ test('a term.attach from a socket opened with a wrong token is never processed: 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sec-home-'))
   const runtimeDir = path.join(home, 'run')
   fs.mkdirSync(runtimeDir, { mode: 0o700 })
-  const state = path.join(home, '.local/state/fleetmates/deck')
-  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const tokenFile = setupPaths({ HOME: home, XDG_RUNTIME_DIR: runtimeDir }).token
+  fs.mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 })
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 })
+  t.after(() => rmDir(home))
   const h = await harness(t, { env: { HOME: home, XDG_RUNTIME_DIR: runtimeDir }, connectDeckd: async () => deckdClient, helloTimeoutMs: 5000 })
   assert.equal(h.deck.link.connected, true)
   const client = h.ws({}, ['deck.v1', 'deck.auth.wrong'])
