@@ -38,11 +38,22 @@ function shellWords(command) {
 const shellQuote = value => `'${value.replaceAll("'", "'\\''")}'`
 
 /**
- * The hook command `init` and the web server both install: each word single-quoted, which survives
- * spaces, quotes and `$` in either path (a double-quoted `$` would expand).
+ * The hook command `init` and the web server both install. On linux and darwin each word is
+ * single-quoted, which survives spaces, quotes and `$` in either path (a double-quoted `$` would
+ * expand). On win32 both paths are double-quoted with forward slashes, a form meant to work in both
+ * cmd and Git Bash (docs/deck/16-platforms.md; not verified on Windows here). A path holding `"`,
+ * `%`, a backtick or `$` is refused: inside double quotes cmd expands `%` and a POSIX shell expands
+ * `$` and backticks.
+ * @param {string} execPath
+ * @param {string} hookPath
+ * @param {{ platform?: string }} [opts]
  */
-export function deckHookCommand(execPath, hookPath) {
-  return `${shellQuote(execPath)} ${shellQuote(hookPath)}`
+export function deckHookCommand(execPath, hookPath, { platform = process.platform } = {}) {
+  if (platform !== 'win32') return `${shellQuote(execPath)} ${shellQuote(hookPath)}`
+  for (const file of [execPath, hookPath]) {
+    if (/["%`$]/.test(file)) throw new Error(`cannot write a Windows hook command for ${file}: it holds a double quote, %, backtick or $`)
+  }
+  return [execPath, hookPath].map(file => `"${file.replaceAll('\\', '/')}"`).join(' ')
 }
 
 /**
@@ -57,14 +68,20 @@ function sameCommand(a, b) {
   return !!x && !!y && x.length === y.length && x.every((word, i) => word === y[i])
 }
 
-/** Check whether a command names a deck hook script. */
+// The script a deck hook entry runs, with either separator: the hub checkout, the linux and darwin
+// share dir (fleetmates-deck), or the win32 share dir (fleetmates/deck/share).
+const deckHookScript = /[\\/](?:hub|fleetmates-deck|fleetmates[\\/]deck[\\/]share)[\\/]hook[\\/]deck-hook\.mjs$/
+const nodeNames = ['node', 'nodejs', 'node.exe']
+
+/** Check whether a command names a deck hook script, written with `/` or `\\` separators. */
 export function isDeckHook(command, installedCommand) {
   if (typeof command !== 'string' || /[\r\n]/.test(command)) return false
   const words = shellWords(command)
   if (words?.length !== 2) return false
   const [node, script] = words
-  const knownNode = node === process.execPath || ['node', 'nodejs'].includes(node) || (path.isAbsolute(node) && ['node', 'nodejs'].includes(path.basename(node)))
-  return (knownNode || sameCommand(command, installedCommand)) && path.isAbsolute(script) && /\/(?:hub|fleetmates-deck)\/hook\/deck-hook\.mjs$/.test(script)
+  const absolute = file => path.posix.isAbsolute(file) || path.win32.isAbsolute(file)
+  const knownNode = node === process.execPath || nodeNames.includes(node) || (absolute(node) && nodeNames.includes(path.win32.basename(node).toLowerCase()))
+  return (knownNode || sameCommand(command, installedCommand)) && absolute(script) && deckHookScript.test(script)
 }
 
 /** Merge or remove deck hooks without moving unrelated groups. */

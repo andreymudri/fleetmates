@@ -52,6 +52,13 @@ test('the hook stamps the version from the package.json beside it', async () => 
   } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('the hook imports only node: modules, since init copies it alone', () => {
+  const source = fs.readFileSync(path.join(hub, 'hook/deck-hook.mjs'), 'utf8')
+  const specifiers = [...source.matchAll(/^\s*import\s[^'"]*?from\s+['"]([^'"]+)['"]|\bimport\(\s*['"]([^'"]+)['"]\s*\)/gm)].map(m => m[1] ?? m[2])
+  assert.ok(specifiers.length > 0, 'the import scan found the hook\'s imports')
+  assert.deepEqual(specifiers.filter(s => !s.startsWith('node:')), [])
+})
+
 test('Connections shows the older hooks line only for a hooks row with reason hooks_outdated', async () => {
   const { module: settings } = await runnerImport(path.join(hub, 'web/src/screens/settings/Settings.jsx'), { configFile: false, logLevel: 'silent', root: hub })
   const { ConnectionsSection } = settings

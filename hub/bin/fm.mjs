@@ -10,7 +10,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { connectDeckd } from '../deckd/client.mjs'
+import { endpointDirProblem } from '../hook/deck-hook.mjs'
+import { commandSpawn, endpoint, resolveCommand, runtimeBase } from '../platform/index.mjs'
 
 const REPLAY_LINES = 5000
 const USAGE = 'usage: fm claude [args...] | fm attach <ptyId|repo> | fm ls'
@@ -71,17 +74,47 @@ function deckdDown (err) {
 }
 
 /**
- * D-67: run plain `claude args...` in this terminal, without deckd. The
- * child gets this environment minus FLEETMATES_DECK_PTY; SIGHUP, SIGTERM and
- * SIGINT sent to fm are passed on to it, and fm exits with its status.
- * @param {string[]} args
+ * The signals fm passes on to a plain claude child: SIGHUP, SIGTERM and SIGINT, without SIGHUP on win32.
+ * @param {string} platform
+ * @returns {NodeJS.Signals[]}
  */
-function plainClaude (args) {
+export function forwardedSignals (platform = process.platform) {
+  return platform === 'win32' ? ['SIGTERM', 'SIGINT'] : ['SIGHUP', 'SIGTERM', 'SIGINT']
+}
+
+/**
+ * Listen for SIGHUP on `proc`, off win32 only. Returns whether a listener was added.
+ * @param {() => void} handler
+ * @param {{ platform?: string, proc?: { on: (event: string, fn: () => void) => unknown } }} [opts]
+ * @returns {boolean}
+ */
+export function onHangup (handler, { platform = process.platform, proc = process } = {}) {
+  if (platform === 'win32') return false
+  proc.on('SIGHUP', handler)
+  return true
+}
+
+/**
+ * D-67: run plain `claude args...` in this terminal, without deckd. The
+ * child gets this environment minus FLEETMATES_DECK_PTY; SIGHUP (off win32),
+ * SIGTERM and SIGINT sent to fm are passed on to it, and fm exits with its
+ * status. On win32 `claude` is looked up on PATH with PATHEXT and a `.cmd`
+ * runs through commandSpawn.
+ * @param {string[]} args
+ * @param {string} platform
+ */
+function plainClaude (args, platform) {
   process.stderr.write(FALLBACK + '\n')
   const env = { ...process.env }
   delete env.FLEETMATES_DECK_PTY
-  const child = spawn('claude', args, { stdio: 'inherit', env })
-  for (const sig of /** @type {const} */ (['SIGHUP', 'SIGTERM', 'SIGINT'])) {
+  let run
+  try {
+    run = commandSpawn(resolveCommand('claude', { env, platform }), args, { platform, env })
+  } catch (err) {
+    die(1, `fm: ${/** @type {Error} */ (err).message}`)
+  }
+  const child = spawn(run.file, run.args, { stdio: 'inherit', env, ...run.options })
+  for (const sig of forwardedSignals(platform)) {
     process.on(sig, () => { child.kill(sig) })
   }
   child.once('error', (err) => {
@@ -114,7 +147,8 @@ function hasGitMarker (dir) {
 /**
  * What `fm ls` shows as a PTY's repo: the basename of the nearest ancestor
  * of `cwd` (itself included) that holds a repository marker (see
- * `hasGitMarker`), else `cwd` with the home directory shown as `~`.
+ * `hasGitMarker`), else `cwd` with the home directory shown as `~`. The
+ * home prefix ends at a `/` or a `\`, whichever separator the paths use.
  * @param {string} cwd
  * @param {string} home
  * @returns {string}
@@ -124,7 +158,9 @@ function repoOf (cwd, home) {
     if (hasGitMarker(dir)) return path.basename(dir)
     if (path.dirname(dir) === dir) break
   }
-  if (home && (cwd === home || cwd.startsWith(home.endsWith('/') ? home : home + '/'))) return '~' + cwd.slice(home.replace(/\/$/, '').length)
+  if (!home) return cwd
+  const trimmed = home.replace(/[\\/]$/, '')
+  if (cwd === home || cwd === trimmed || (cwd.startsWith(trimmed) && /[\\/]/.test(cwd.charAt(trimmed.length)))) return '~' + cwd.slice(trimmed.length)
   return cwd
 }
 
@@ -160,26 +196,34 @@ function printList (ptys, home) {
 /**
  * Run `fm claude`, `fm attach` or `fm ls`.
  * @param {string[]} argv arguments after `fm`
+ * @param {{ platform?: string }} [opts]
  */
-async function main (argv) {
+async function main (argv, { platform = process.platform } = {}) {
   const [cmd, ...rest] = argv
   if (cmd !== 'claude' && !(cmd === 'attach' && rest.length === 1) && !(cmd === 'ls' && rest.length === 0)) die(1, USAGE)
 
-  const runtimeDir = process.env.XDG_RUNTIME_DIR
-  if (!runtimeDir) {
-    if (cmd === 'claude') return plainClaude(rest)
-    die(2, 'deckd is not running (XDG_RUNTIME_DIR is not set)')
-  }
+  // XDG_RUNTIME_DIR when set, else the platform's fallback base.
+  const runtimeDir = runtimeBase({ platform })
   const name = process.env.TERM_PROGRAM || process.env.TERM
   /** @type {{ kind: 'terminal', name?: string }} */
   const source = name ? { kind: 'terminal', name } : { kind: 'terminal' }
+
+  // On POSIX, deckd's socket counts only inside directories private to this user; anything else
+  // (another user's pre-created /tmp/fleetmates-deck-<uid>, a symlink, a 0777 dir) is treated as
+  // no deckd. A missing dir is just no deckd, without a message.
+  const problem = endpointDirProblem(endpoint(runtimeDir, 'deckd', { platform }), { platform })
+  if (problem) {
+    if (!problem.includes('(ENOENT)')) process.stderr.write(`fm: not connecting to deckd: ${problem}\n`)
+    if (cmd === 'claude') return plainClaude(rest, platform)
+    die(2, 'deckd is not running')
+  }
 
   let client
   try {
     client = await connectDeckd({ runtimeDir, kind: 'terminal', name })
   } catch (err) {
     if (deckdDown(err)) {
-      if (cmd === 'claude') return plainClaude(rest)
+      if (cmd === 'claude') return plainClaude(rest, platform)
       die(2, 'deckd is not running')
     }
     die(1, `fm: ${/** @type {Error} */ (err).message}`)
@@ -324,12 +368,12 @@ async function main (argv) {
   // The terminal closed: detach without printing. deckd lists this client
   // as soon as it handles `attach`, so a SIGHUP from before `spawn` or
   // `attach` is sent is remembered, and becomes a `detach` once fm has
-  // sent `attach` for a PTY id.
-  process.on('SIGHUP', () => {
+  // sent `attach` for a PTY id. Registered off win32 only.
+  onHangup(() => {
     hungUp = true
     if (attachedOk) detach()
     else if (attaching !== null && hangupDetach === null) hangupDetach = deckd.request('detach', { ptyId: attaching }).catch(() => {})
-  })
+  }, { platform })
 
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
 
@@ -394,7 +438,7 @@ async function main (argv) {
       }
       deckd.request('write', { ptyId: id, data: out.toString('base64'), source }).catch(() => {})
     })
-    process.on('SIGWINCH', () => {
+    process.stdout.on('resize', () => {
       const size = termSize()
       if (size) deckd.request('resize', { ptyId: id, ...size, source }).catch(() => {})
     })
@@ -427,7 +471,20 @@ async function resolveRepo (deckd, arg) {
   die(1, `fm: ${matches.length} sessions for ${arg}: ${matches.join(', ')}`)
 }
 
-main(process.argv.slice(2)).catch((err) => {
-  restoreTerminal()
-  die(1, `fm: ${err.message}`)
-})
+/**
+ * Whether this file is the program node was started with, also through a symlink such as npm's
+ * `node_modules/.bin/fm`. False when a test imports it for its exports.
+ */
+function invokedDirectly () {
+  if (!process.argv[1]) return false
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))
+  } catch { return false }
+}
+
+if (invokedDirectly()) {
+  main(process.argv.slice(2)).catch((err) => {
+    restoreTerminal()
+    die(1, `fm: ${err.message}`)
+  })
+}
