@@ -493,6 +493,8 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 - Test: `hub/test/unit/hook-platform.test.mjs`
 - Test: `hub/test/unit/service.test.mjs`
 - Test: `hub/test/integration/deckd.test.mjs`
+- Test: `hub/test/integration/fm.test.mjs`
+- Test: `hub/test/contract/hooks.test.mjs`
 
 **Depends:** T10, T11, T12, T13, T14, T15
 
@@ -501,6 +503,7 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 **Acceptance:**
 - Threat: on Windows a named pipe name is machine-global. Another local user who can predict `\\.\pipe\fleetmates-deck-<h>-<name>` can create it first and receive hook envelopes or fm keystrokes. Fix: on win32 the pipe name also hashes a 32-byte random secret stored in `<deckDir(base)>\endpoint.key`. `deckDir` lives under `%LOCALAPPDATA%`, which only the user, SYSTEM and Administrators can read. `endpoint(base, name, { platform, secret })` on win32 takes `<h>` = the first 16 hex digits of SHA-256 of `resolved-lowercased-base + '\0' + secret`; without a secret on win32 it throws. A new `endpointSecret(base, { platform, create })` reads the key file, and with `create: true` writes it (exclusive create, then reread) when it is missing. deckd and the server call it with `create: true`; the clients (deckd client, link, hook, fm) read it and treat a missing key as "deckd/server not running" (the hook spools). POSIX endpoints are unchanged and take no secret.
 - The hook's inline `hookEndpoint` computes the same name; `hook-platform.test.mjs` pins parity with a secret.
+- Amendment (2026-10-09, phase 5 security review): a persistent key makes the names stable across restarts, and any local user can list `\\.\pipe\`, so a name seen once can be created first during a later restart. Each endpoint therefore has its own key (`endpoint-<name>.key`), and its creator (deckd for `deckd`, the server for `hooks`) writes a fresh key every time it starts listening, after making sure no live instance answers on the current name (deckd keeps refusing to run twice). Clients reread the key on every connect. Two creators racing over a malformed or missing key must not end up on different names than the clients compute. `fm.test.mjs` and `contract/hooks.test.mjs` create the key with `endpointSecret` before they listen on a win32 endpoint.
 - `service.mjs` detached `stop`: before `taskkill`, the pid is confirmed to be this deck's process by its command line (from `wmic`-free `Get-CimInstance Win32_Process` output or `tasklist /V` is not enough; use `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=<n>').CommandLine"` through `run`) containing the service's entry path; otherwise the pid file is removed without killing. A failed `taskkill` is followed by a recheck, and stop reports failure if the process is still alive. Both paths have tests with injected `run`.
 - Mutations each fail a test, then are restored: endpoint without the secret on win32; the hook's copy ignoring the secret; stop killing without the command-line check.
 
