@@ -1,4 +1,4 @@
-import { constants, readFileSync, mkdirSync, openSync, writeSync, closeSync, fstatSync, fchmodSync, readdirSync, renameSync, existsSync, unlinkSync, chmodSync } from 'node:fs'
+import { constants, readFileSync, lstatSync, mkdirSync, openSync, writeSync, closeSync, fstatSync, fchmodSync, readdirSync, renameSync, existsSync, unlinkSync, chmodSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { connect } from 'node:net'
 import { execFileSync } from 'node:child_process'
@@ -128,8 +128,35 @@ function readStdin() {
   })
 }
 
+/**
+ * Why the directories holding a POSIX endpoint are not private to this user, or null. Checks the
+ * endpoint's directory and, when that is the `fleetmates-deck` dir of a base, the base too: each
+ * must be a real directory (lstat, so a symlink fails), owned by `uid`, with no group or world bits.
+ * A missing directory is a reason too. win32 pipes have no directory: always null there. fm uses
+ * this before connecting to deckd, and the hook before sending, so neither talks to a socket another
+ * local user planted, for example in a pre-created /tmp/fleetmates-deck-<uid>.
+ * @param {string} endpointPath
+ * @param {{ platform?: string, uid?: number | null, lstat?: (p: string) => import('node:fs').Stats }} [opts]
+ * @returns {string | null}
+ */
+export function endpointDirProblem(endpointPath, { platform = process.platform, uid = process.getuid?.() ?? null, lstat = lstatSync } = {}) {
+  if (platform === 'win32') return null
+  const dir = path.posix.dirname(endpointPath)
+  const dirs = path.posix.basename(dir) === 'fleetmates-deck' ? [dir, path.posix.dirname(dir)] : [dir]
+  for (const item of dirs) {
+    let info
+    try { info = lstat(item) } catch (error) { return `runtime dir ${item} cannot be read (${error.code ?? error.message})` }
+    if (!info.isDirectory()) return `runtime dir ${item} is not a directory`
+    if (uid !== null && uid !== undefined && info.uid !== uid) return `runtime dir ${item} is owned by uid ${info.uid}, not by this user`
+    if ((info.mode & 0o077) !== 0) return `runtime dir ${item} has mode ${(info.mode & 0o777).toString(8).padStart(4, '0')}; it is not private`
+  }
+  return null
+}
+
 function sendSocket(line, endpointPath) {
   return new Promise((resolve, reject) => {
+    const problem = endpointDirProblem(endpointPath)
+    if (problem) { reject(Error(`runtime dir not private: ${problem}`)); return }
     const socket = connect(endpointPath)
     socket.setTimeout(100, () => socket.destroy(Error('socket timeout')))
     socket.once('error', reject)

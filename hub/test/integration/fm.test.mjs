@@ -4,7 +4,7 @@ import path from 'node:path'
 import net from 'node:net'
 import os from 'node:os'
 import { spawn, spawnSync } from 'node:child_process'
-import { readFile, writeFile, mkdtemp, mkdir, rm, stat, symlink } from 'node:fs/promises'
+import { chmod, readFile, writeFile, mkdtemp, mkdir, rm, stat, symlink } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import nodePty from 'node-pty'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
@@ -13,6 +13,7 @@ import { connectDeckd } from '../../deckd/client.mjs'
 import { endpoint, runtimeBase } from '../../platform/index.mjs'
 import { posixTest } from '../helpers/platform.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
+import { forwardedSignals, onHangup } from '../../bin/fm.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const hubDir = path.resolve(here, '..', '..')
@@ -1086,3 +1087,89 @@ test('fm with XDG_RUNTIME_DIR unset attaches to a deckd on the platform fallback
     if (!existed) await rm(base, { recursive: true, force: true })
   }
 })
+
+test('fm forwards SIGHUP to plain claude off win32 only', () => {
+  assert.deepEqual(forwardedSignals('linux'), ['SIGHUP', 'SIGTERM', 'SIGINT'])
+  assert.deepEqual(forwardedSignals('darwin'), ['SIGHUP', 'SIGTERM', 'SIGINT'])
+  assert.deepEqual(forwardedSignals('win32'), ['SIGTERM', 'SIGINT'])
+})
+
+test('fm listens for SIGHUP off win32 only', () => {
+  for (const [platform, listens] of /** @type {const} */ ([['linux', true], ['darwin', true], ['win32', false]])) {
+    /** @type {string[]} */
+    const events = []
+    const handler = () => {}
+    const proc = { on: (/** @type {string} */ event, /** @type {() => void} */ fn) => { assert.equal(fn, handler); events.push(event) } }
+    assert.equal(onHangup(handler, { platform, proc }), listens, platform)
+    assert.deepEqual(events, listens ? ['SIGHUP'] : [], platform)
+  }
+})
+
+posixTest('fm run through a symlink, as npm installs its bin, still runs', { reason: 'symlinks' }, async () => {
+  const noDeckd = await makeRuntimeDir()
+  const link = path.join(tmp, 'fm-link.mjs')
+  await symlink(fmPath, link)
+  try {
+    const r = await new Promise((resolve) => {
+      const child = spawn(process.execPath, [link, 'ls'], { env: { ...env, XDG_RUNTIME_DIR: noDeckd.dir }, stdio: ['ignore', 'pipe', 'pipe'] })
+      let stderr = ''
+      child.stderr?.on('data', (d) => { stderr += d })
+      child.once('exit', (code) => resolve({ code, stderr }))
+    })
+    assert.equal(r.code, 2, r.stderr)
+    assert.match(r.stderr, /deckd is not running/)
+  } finally {
+    await rm(link, { force: true })
+    await noDeckd.cleanup()
+  }
+})
+
+/**
+ * A listening socket where deckd's would be, in a runtime dir `layout` makes unsafe, and how many
+ * connections it got.
+ * @param {(runtime: string) => Promise<string>} layout returns the path to listen on
+ */
+async function squattedDeckd (layout) {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'deck-fm-squat-'))
+  const runtime = path.join(root, 'rt')
+  let connections = 0
+  const real = net.createServer((sock) => { connections++; sock.destroy() })
+  const listenOn = await layout(runtime)
+  await new Promise((resolve) => real.listen(listenOn, () => resolve(undefined)))
+  return {
+    runtime,
+    connections: () => connections,
+    async close () {
+      await new Promise((resolve) => real.close(() => resolve(undefined)))
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+}
+
+for (const [name, layout, reason] of /** @type {const} */ ([
+  ['a 0777 runtime dir', async (/** @type {string} */ runtime) => {
+    await mkdir(path.join(runtime, 'fleetmates-deck'), { recursive: true, mode: 0o700 })
+    await chmod(runtime, 0o777)
+    return path.join(runtime, 'fleetmates-deck', 'deckd.sock')
+  }, /runtime dir .*rt has mode 0777/],
+  ['a symlinked deck dir', async (/** @type {string} */ runtime) => {
+    const elsewhere = path.join(path.dirname(runtime), 'elsewhere')
+    await mkdir(elsewhere, { mode: 0o700 })
+    await mkdir(runtime, { mode: 0o700 })
+    await symlink(elsewhere, path.join(runtime, 'fleetmates-deck'))
+    return path.join(elsewhere, 'deckd.sock')
+  }, /runtime dir .*fleetmates-deck is not a directory/]
+])) {
+  posixTest(`fm does not connect to a deckd socket in ${name}, and says why`, { reason: 'file modes, symlinks and Unix sockets' }, async () => {
+    const squat = await squattedDeckd(layout)
+    try {
+      const r = await runFm(['ls'], { ...env, XDG_RUNTIME_DIR: squat.runtime })
+      assert.equal(r.code, 2, r.stderr)
+      assert.match(r.stderr, reason)
+      assert.match(r.stderr, /deckd is not running/)
+      assert.equal(squat.connections(), 0)
+    } finally {
+      await squat.close()
+    }
+  })
+}

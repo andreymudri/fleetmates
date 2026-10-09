@@ -10,8 +10,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { connectDeckd } from '../deckd/client.mjs'
-import { commandSpawn, resolveCommand, runtimeBase } from '../platform/index.mjs'
+import { endpointDirProblem } from '../hook/deck-hook.mjs'
+import { commandSpawn, endpoint, resolveCommand, runtimeBase } from '../platform/index.mjs'
 
 const REPLAY_LINES = 5000
 const USAGE = 'usage: fm claude [args...] | fm attach <ptyId|repo> | fm ls'
@@ -72,6 +74,27 @@ function deckdDown (err) {
 }
 
 /**
+ * The signals fm passes on to a plain claude child: SIGHUP, SIGTERM and SIGINT, without SIGHUP on win32.
+ * @param {string} platform
+ * @returns {NodeJS.Signals[]}
+ */
+export function forwardedSignals (platform = process.platform) {
+  return platform === 'win32' ? ['SIGTERM', 'SIGINT'] : ['SIGHUP', 'SIGTERM', 'SIGINT']
+}
+
+/**
+ * Listen for SIGHUP on `proc`, off win32 only. Returns whether a listener was added.
+ * @param {() => void} handler
+ * @param {{ platform?: string, proc?: { on: (event: string, fn: () => void) => unknown } }} [opts]
+ * @returns {boolean}
+ */
+export function onHangup (handler, { platform = process.platform, proc = process } = {}) {
+  if (platform === 'win32') return false
+  proc.on('SIGHUP', handler)
+  return true
+}
+
+/**
  * D-67: run plain `claude args...` in this terminal, without deckd. The
  * child gets this environment minus FLEETMATES_DECK_PTY; SIGHUP (off win32),
  * SIGTERM and SIGINT sent to fm are passed on to it, and fm exits with its
@@ -91,8 +114,7 @@ function plainClaude (args, platform) {
     die(1, `fm: ${/** @type {Error} */ (err).message}`)
   }
   const child = spawn(run.file, run.args, { stdio: 'inherit', env, ...run.options })
-  const signals = /** @type {NodeJS.Signals[]} */ (platform === 'win32' ? ['SIGTERM', 'SIGINT'] : ['SIGHUP', 'SIGTERM', 'SIGINT'])
-  for (const sig of signals) {
+  for (const sig of forwardedSignals(platform)) {
     process.on(sig, () => { child.kill(sig) })
   }
   child.once('error', (err) => {
@@ -185,6 +207,16 @@ async function main (argv, { platform = process.platform } = {}) {
   const name = process.env.TERM_PROGRAM || process.env.TERM
   /** @type {{ kind: 'terminal', name?: string }} */
   const source = name ? { kind: 'terminal', name } : { kind: 'terminal' }
+
+  // On POSIX, deckd's socket counts only inside directories private to this user; anything else
+  // (another user's pre-created /tmp/fleetmates-deck-<uid>, a symlink, a 0777 dir) is treated as
+  // no deckd. A missing dir is just no deckd, without a message.
+  const problem = endpointDirProblem(endpoint(runtimeDir, 'deckd', { platform }), { platform })
+  if (problem) {
+    if (!problem.includes('(ENOENT)')) process.stderr.write(`fm: not connecting to deckd: ${problem}\n`)
+    if (cmd === 'claude') return plainClaude(rest, platform)
+    die(2, 'deckd is not running')
+  }
 
   let client
   try {
@@ -337,13 +369,11 @@ async function main (argv, { platform = process.platform } = {}) {
   // as soon as it handles `attach`, so a SIGHUP from before `spawn` or
   // `attach` is sent is remembered, and becomes a `detach` once fm has
   // sent `attach` for a PTY id. Registered off win32 only.
-  if (platform !== 'win32') {
-    process.on('SIGHUP', () => {
-      hungUp = true
-      if (attachedOk) detach()
-      else if (attaching !== null && hangupDetach === null) hangupDetach = deckd.request('detach', { ptyId: attaching }).catch(() => {})
-    })
-  }
+  onHangup(() => {
+    hungUp = true
+    if (attachedOk) detach()
+    else if (attaching !== null && hangupDetach === null) hangupDetach = deckd.request('detach', { ptyId: attaching }).catch(() => {})
+  }, { platform })
 
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
 
@@ -441,7 +471,20 @@ async function resolveRepo (deckd, arg) {
   die(1, `fm: ${matches.length} sessions for ${arg}: ${matches.join(', ')}`)
 }
 
-main(process.argv.slice(2)).catch((err) => {
-  restoreTerminal()
-  die(1, `fm: ${err.message}`)
-})
+/**
+ * Whether this file is the program node was started with, also through a symlink such as npm's
+ * `node_modules/.bin/fm`. False when a test imports it for its exports.
+ */
+function invokedDirectly () {
+  if (!process.argv[1]) return false
+  try {
+    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))
+  } catch { return false }
+}
+
+if (invokedDirectly()) {
+  main(process.argv.slice(2)).catch((err) => {
+    restoreTerminal()
+    die(1, `fm: ${err.message}`)
+  })
+}

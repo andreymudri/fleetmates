@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { endpoint, runtimeBase } from '../../platform/index.mjs'
-import { ancestry, hookEndpoint, makeEnvelope, spoolDir } from '../../hook/deck-hook.mjs'
+import { ancestry, endpointDirProblem, hookEndpoint, makeEnvelope, spoolDir } from '../../hook/deck-hook.mjs'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
 import { deckHookCommand, hooksInstalled, HOOK_EVENTS, isDeckHook, transformHooks } from '../../server/setup/hooks.mjs'
 
@@ -110,4 +110,58 @@ test('a second transformHooks run with the win32 command adds nothing, and remov
   assert.deepEqual(transformHooks(once, command), once)
   for (const event of HOOK_EVENTS) assert.equal(once.hooks[event].length, 1, event)
   assert.deepEqual(transformHooks(once, command, true), {})
+})
+
+/**
+ * A stand-in for an lstat result.
+ * @param {{ dir?: boolean, uid?: number, mode?: number }} [opts]
+ */
+const fakeStat = ({ dir = true, uid = 1000, mode = 0o40700 } = {}) => ({ isDirectory: () => dir, uid, mode })
+
+/**
+ * An lstat that answers from `stats` by path and records each path it was asked for.
+ * @param {Record<string, ReturnType<typeof fakeStat> | undefined>} stats
+ */
+function fakeLstat (stats) {
+  const asked = []
+  const lstat = (p) => {
+    asked.push(p)
+    if (!stats[p]) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
+    return stats[p]
+  }
+  return { lstat, asked }
+}
+
+test('endpointDirProblem accepts a private deck dir and base, checking both', () => {
+  const { lstat, asked } = fakeLstat({ '/run/user/1000/fleetmates-deck': fakeStat(), '/run/user/1000': fakeStat() })
+  assert.equal(endpointDirProblem('/run/user/1000/fleetmates-deck/hooks.sock', { platform: 'linux', uid: 1000, lstat }), null)
+  assert.deepEqual(asked, ['/run/user/1000/fleetmates-deck', '/run/user/1000'])
+})
+
+test('endpointDirProblem refuses a squatted runtime dir: another owner, group or world bits, a symlink, or missing', () => {
+  const sock = '/tmp/fleetmates-deck-1000/fleetmates-deck/deckd.sock'
+  const deck = '/tmp/fleetmates-deck-1000/fleetmates-deck'
+  const base = '/tmp/fleetmates-deck-1000'
+  const cases = [
+    ['base owned by another uid', { [deck]: fakeStat(), [base]: fakeStat({ uid: 1001 }) }, /owned by uid 1001/],
+    ['deck dir owned by another uid', { [deck]: fakeStat({ uid: 0 }), [base]: fakeStat() }, /owned by uid 0/],
+    ['a 0777 base', { [deck]: fakeStat(), [base]: fakeStat({ mode: 0o40777 }) }, /mode 0777/],
+    ['a group-readable deck dir', { [deck]: fakeStat({ mode: 0o40750 }), [base]: fakeStat() }, /mode 0750/],
+    ['a symlinked deck dir', { [deck]: fakeStat({ dir: false, mode: 0o120777 }), [base]: fakeStat() }, /not a directory/],
+    ['a missing deck dir', { [base]: fakeStat() }, /ENOENT/],
+  ]
+  for (const [name, stats, reason] of cases) {
+    const { lstat } = fakeLstat(stats)
+    assert.match(endpointDirProblem(sock, { platform: 'linux', uid: 1000, lstat }) ?? 'null', reason, name)
+    assert.match(endpointDirProblem(sock, { platform: 'darwin', uid: 1000, lstat }) ?? 'null', reason, `${name} on darwin`)
+  }
+})
+
+test('endpointDirProblem checks only the fallback dir for a too-long socket path, and nothing on win32', () => {
+  const { lstat, asked } = fakeLstat({ '/tmp/fleetmates-deck-1000': fakeStat() })
+  assert.equal(endpointDirProblem('/tmp/fleetmates-deck-1000/hooks.sock', { platform: 'linux', uid: 1000, lstat }), null)
+  assert.deepEqual(asked, ['/tmp/fleetmates-deck-1000'], 'not /tmp itself')
+  const win = fakeLstat({})
+  assert.equal(endpointDirProblem('\\\\.\\pipe\\fleetmates-deck-0123456789abcdef-hooks', { platform: 'win32', uid: null, lstat: win.lstat }), null)
+  assert.deepEqual(win.asked, [])
 })

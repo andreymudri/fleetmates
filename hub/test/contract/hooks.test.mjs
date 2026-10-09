@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import os from 'node:os'
@@ -271,4 +271,64 @@ test('hook exits silently when stdin never finishes', async () => {
   assert.equal(code, 0)
   assert.equal(Buffer.concat(output).length, 0)
   assert.ok(Date.now() - started < 1000)
+})
+
+/**
+ * Run the hook once with a listening hooks socket that `layout(runtime, home)` puts in place, and
+ * report what reached the socket and what was spooled.
+ * @param {(runtime: string, home: string) => Promise<string>} layout returns the path to listen on
+ */
+async function hookAgainst (layout) {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'deck-hook-squat-'))
+  const runtime = path.join(home, 'runtime')
+  const received = []
+  const server = createServer(socket => {
+    socket.setEncoding('utf8')
+    socket.on('data', chunk => received.push(chunk))
+  })
+  try {
+    const listenOn = await layout(runtime, home)
+    await new Promise(resolve => server.listen(listenOn, resolve))
+    const hook = JSON.parse(await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
+    const child = spawnSync(process.execPath, [executable], { input: JSON.stringify(hook), encoding: 'utf8', env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: runtime }, timeout: 3000 })
+    assert.equal(child.status, 0)
+    assert.equal(child.stdout + child.stderr, '')
+    await new Promise(resolve => setTimeout(resolve, 50))
+    const spooled = await readdir(path.join(home, 'state/fleetmates/deck/spool')).catch(() => [])
+    return { received: received.join(''), spooled }
+  } finally {
+    await new Promise(resolve => server.close(resolve))
+    await rm(home, { recursive: true, force: true })
+  }
+}
+
+posixTest('the hook sends nothing to a socket in a runtime dir with group or world bits, and spools instead', { reason: 'file modes and Unix sockets' }, async () => {
+  const { received, spooled } = await hookAgainst(async runtime => {
+    await mkdir(path.join(runtime, 'fleetmates-deck'), { recursive: true, mode: 0o700 })
+    await chmod(runtime, 0o777)
+    return path.join(runtime, 'fleetmates-deck', 'hooks.sock')
+  })
+  assert.equal(received, '')
+  assert.equal(spooled.length, 1)
+})
+
+posixTest('the hook sends nothing to a socket behind a symlinked deck dir, and spools instead', { reason: 'symlinks and Unix sockets' }, async () => {
+  const { received, spooled } = await hookAgainst(async (runtime, home) => {
+    const elsewhere = path.join(home, 'elsewhere')
+    await mkdir(elsewhere, { mode: 0o700 })
+    await mkdir(runtime, { mode: 0o700 })
+    await symlink(elsewhere, path.join(runtime, 'fleetmates-deck'))
+    return path.join(elsewhere, 'hooks.sock')
+  })
+  assert.equal(received, '')
+  assert.equal(spooled.length, 1)
+})
+
+posixTest('the hook sends to a socket in private runtime dirs, and spools nothing', { reason: 'file modes and Unix sockets' }, async () => {
+  const { received, spooled } = await hookAgainst(async runtime => {
+    await mkdir(path.join(runtime, 'fleetmates-deck'), { recursive: true, mode: 0o700 })
+    return path.join(runtime, 'fleetmates-deck', 'hooks.sock')
+  })
+  assert.equal(validateEnvelope(received).ok, true)
+  assert.deepEqual(spooled, [])
 })
