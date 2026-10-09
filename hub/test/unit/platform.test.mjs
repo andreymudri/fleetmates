@@ -7,7 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   runtimeBase, deckDir, endpoint, isPipe, ensurePrivateDir, privateFileProblem, killTree,
-  resolveCommand, quoteCmdArg, commandSpawn, openUrlArgv, isClaudeProgram, unwrapNodeShim,
+  resolveCommand, quoteCmdArg, commandSpawn, openUrlArgv, isClaudeProgram, unwrapCmdShim,
 } from '../../platform/index.mjs'
 import * as platformModule from '../../platform/index.mjs'
 
@@ -20,7 +20,7 @@ test('the platform module imports only node: modules and exports exactly the doc
   for (const s of specifiers) assert.match(s, /^node:/, `${s} is not a node: module`)
   assert.deepEqual(Object.keys(platformModule).sort(), [
     'commandSpawn', 'deckDir', 'endpoint', 'ensurePrivateDir', 'isClaudeProgram', 'isPipe', 'killTree',
-    'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand', 'runtimeBase', 'unwrapNodeShim',
+    'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand', 'runtimeBase', 'unwrapCmdShim',
   ])
 })
 
@@ -223,32 +223,52 @@ const CMD_SHIM = [
   'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*', '',
 ].join('\r\n')
 
-test('unwrapNodeShim finds the JS entry of an npm cmd-shim written to disk, and null otherwise', async () => {
+// The body npm's cmd-shim writes for a native bin, as `npm i -g @anthropic-ai/claude-code@2.1.285`
+// installs it at %APPDATA%\npm\claude.cmd (CRLF line endings).
+const EXE_SHIM = [
+  '@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT /b', ':start', 'SETLOCAL', 'CALL :find_dp0',
+  '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*', '',
+].join('\r\n')
+
+test('unwrapCmdShim finds the node script or native exe an npm cmd-shim written to disk targets, and null otherwise', async () => {
   const base = await mkdtemp(path.join(tmpdir(), 'deck-shim-'))
   try {
-    const shim = path.join(base, 'claude.cmd')
-    await writeFile(shim, CMD_SHIM)
     const file = 'C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd'
-    const readShim = p => { assert.equal(p, file); return readFileSync(shim, 'utf8') }
-    assert.equal(unwrapNodeShim(file, { readFile: readShim }), 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js')
-    // %~dp0, upper case, .mjs and .cjs, and a parent-relative path.
-    assert.equal(unwrapNodeShim('C:\\a\\b\\x.cmd', { readFile: () => '@"%~DP0\\..\\lib\\X.MJS" %*' }), 'C:\\a\\lib\\X.MJS')
-    assert.equal(unwrapNodeShim('C:\\a\\x.cmd', { readFile: () => 'node "%dp0%\\bin\\x.cjs" %*' }), 'C:\\a\\bin\\x.cjs')
-    assert.equal(unwrapNodeShim('C:\\a\\x.cmd', { readFile: () => 'C:\\tools\\real.exe %*' }), null)
-    assert.equal(unwrapNodeShim('C:\\a\\x.cmd', { readFile: () => '"%dp0%\\node.exe" %*' }), null)
-    assert.equal(unwrapNodeShim('C:\\a\\x.cmd', { readFile: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) } }), null)
+    const fromDisk = async body => {
+      const shim = path.join(base, 'claude.cmd')
+      await writeFile(shim, body)
+      return p => { assert.equal(p, file); return readFileSync(shim, 'utf8') }
+    }
+    assert.deepEqual(unwrapCmdShim(file, { readFile: await fromDisk(CMD_SHIM) }),
+      { kind: 'node', script: 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js' })
+    assert.deepEqual(unwrapCmdShim(file, { readFile: await fromDisk(EXE_SHIM) }),
+      { kind: 'exe', file: 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe' })
+    // %~dp0, upper case, .mjs, .cjs and .EXE, and a parent-relative path.
+    assert.deepEqual(unwrapCmdShim('C:\\a\\b\\x.cmd', { readFile: () => '@"%~DP0\\..\\lib\\X.MJS" %*' }), { kind: 'node', script: 'C:\\a\\lib\\X.MJS' })
+    assert.deepEqual(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => 'node "%dp0%\\bin\\x.cjs" %*' }), { kind: 'node', script: 'C:\\a\\bin\\x.cjs' })
+    assert.deepEqual(unwrapCmdShim('C:\\a\\b\\x.cmd', { readFile: () => '"%~dp0\\..\\bin\\X.EXE" %*' }), { kind: 'exe', file: 'C:\\a\\bin\\X.EXE' })
+    // A body that names both a script and an exe is a node shim: the script wins wherever it appears.
+    assert.deepEqual(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => '"%dp0%\\tool.exe" %*\r\n"%dp0%\\later.js" %*' }), { kind: 'node', script: 'C:\\a\\later.js' })
+    // Not a shim: a target outside %dp0%, an unquoted target, or an unreadable file.
+    assert.equal(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => 'C:\\tools\\real.exe %*' }), null)
+    assert.equal(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => '%dp0%\\real.exe %*' }), null)
+    assert.equal(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => '"%dp0%\\run.bat" %*' }), null)
+    assert.equal(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }) } }), null)
   } finally {
     await rm(base, { recursive: true, force: true })
   }
 })
 
-test('commandSpawn runs an npm cmd-shim .cmd through node directly, with no cmd.exe', () => {
+test('commandSpawn runs an npm cmd-shim .cmd through node or its native exe directly, with no cmd.exe', () => {
   const file = 'C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd'
   const js = 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js'
-  const args = ['x"&echo INJECTED>%TEMP%\\pwn.txt&"y', 'a\nb']
+  const exe = 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe'
+  const args = ['x"&echo INJECTED>%TEMP%\\pwn.txt&"y', 'a\nb', '{"k":"v w"}']
   assert.deepEqual(commandSpawn(file, args, { platform: 'win32', env: {}, readFile: () => CMD_SHIM, nodePath: 'C:\\node\\node.exe' }),
     { file: 'C:\\node\\node.exe', args: [js, ...args], options: { windowsHide: true } })
   assert.equal(commandSpawn(file, [], { platform: 'win32', env: {}, readFile: () => CMD_SHIM }).file, process.execPath)
+  assert.deepEqual(commandSpawn(file, args, { platform: 'win32', env: {}, readFile: () => EXE_SHIM, nodePath: 'C:\\node\\node.exe' }),
+    { file: exe, args, options: { windowsHide: true } })
 })
 
 test('commandSpawn refuses ", CR, LF and % in an argument to a .cmd or .bat it cannot unwrap, naming only the index', () => {

@@ -157,23 +157,31 @@ export function quoteCmdArg (arg) {
   return s.replace(/([()%!^"<>&|])/g, '^$1')
 }
 
+const SHIM_SCRIPT = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:js|cjs|mjs))"/i
+const SHIM_EXE = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.exe)"/i
+
 /**
- * The JS entry of an npm cmd-shim `.cmd` (a quoted `%dp0%\...` or `%~dp0\...` path ending in .js,
- * .cjs or .mjs), resolved against the shim's directory; null when `file` is not one or cannot be read.
+ * What an npm cmd-shim `.cmd` runs: a quoted `%dp0%\...` or `%~dp0\...` target resolved against the
+ * shim's directory. A .js, .cjs or .mjs target is `{ kind: 'node', script }` and wins over any .exe
+ * target in the same body (the node shim also names `%dp0%\node.exe`); otherwise a .exe target is
+ * `{ kind: 'exe', file }`. Null when `file` names neither or cannot be read.
  * @param {string} file
  * @param {{ readFile?: (p: string, enc: string) => string }} [opts]
- * @returns {string | null}
+ * @returns {{ kind: 'node', script: string } | { kind: 'exe', file: string } | null}
  */
-export function unwrapNodeShim (file, { readFile = fs.readFileSync } = {}) {
+export function unwrapCmdShim (file, { readFile = fs.readFileSync } = {}) {
   let text
   try {
     text = String(readFile(file, 'utf8'))
   } catch {
     return null
   }
-  const match = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:js|cjs|mjs))"/i.exec(text)
-  if (!match) return null
-  return path.win32.resolve(path.win32.dirname(file), match[1])
+  const dir = path.win32.dirname(file)
+  const script = SHIM_SCRIPT.exec(text)
+  if (script) return { kind: 'node', script: path.win32.resolve(dir, script[1]) }
+  const exe = SHIM_EXE.exec(text)
+  if (exe) return { kind: 'exe', file: path.win32.resolve(dir, exe[1]) }
+  return null
 }
 
 // cmd.exe re-parses a batch file's %* after the caret escapes are gone, so these cannot be passed
@@ -182,7 +190,7 @@ const UNSAFE_CMD_CHARS = /["\r\n%]/
 
 /**
  * The file, argv and spawn options to run `file` with `args`. On win32 an npm cmd-shim `.cmd` runs
- * its JS entry with node directly; any other `.cmd` or `.bat` runs through cmd.exe and refuses an
+ * its JS entry with node, or its native .exe target, directly; any other `.cmd` or `.bat` runs through cmd.exe and refuses an
  * argument containing `"`, CR, LF or `%` with code `unsafe_cmd_arg`.
  * @param {string} file
  * @param {string[]} args
@@ -192,8 +200,9 @@ const UNSAFE_CMD_CHARS = /["\r\n%]/
 export function commandSpawn (file, args, { platform = process.platform, env = process.env, nodePath, readFile = fs.readFileSync } = {}) {
   if (platform !== 'win32') return { file, args, options: {} }
   if (/\.cmd$/i.test(file)) {
-    const js = unwrapNodeShim(file, { readFile })
-    if (js !== null) return { file: nodePath ?? process.execPath, args: [js, ...args], options: { windowsHide: true } }
+    const shim = unwrapCmdShim(file, { readFile })
+    if (shim?.kind === 'node') return { file: nodePath ?? process.execPath, args: [shim.script, ...args], options: { windowsHide: true } }
+    if (shim?.kind === 'exe') return { file: shim.file, args, options: { windowsHide: true } }
   }
   if (/\.(cmd|bat)$/i.test(file)) {
     const bad = args.findIndex(arg => UNSAFE_CMD_CHARS.test(String(arg)))
