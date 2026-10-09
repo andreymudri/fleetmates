@@ -154,6 +154,7 @@
 - Test: `hub/test/unit/vault-mcp-client.test.mjs`
 - Test: `hub/test/integration/server.test.mjs`
 - Test: `hub/test/integration/deckd-link.test.mjs`
+- Test: `hub/test/integration/m1-cleanup-server.test.mjs`
 
 **Depends:** T1, T2, T3
 
@@ -167,6 +168,7 @@
 - `vault-mcp.mjs`: spawns its command through `resolveCommand` + `commandSpawn`, so `npx` resolves to `npx.cmd` on win32.
 - `notify.mjs`: `createNotifier({ platform = process.platform, ... })` keeps linux defaults; darwin defaults to `osascript -e 'display notification ...'` (title and body passed as separate `-e` argument strings built with AppleScript string escaping, never shell) and `afplay /System/Library/Sounds/Glass.aiff`, with no action buttons; win32 returns a notifier whose popup and bell resolve `{ ok: false, reason: 'unsupported on win32' }` without spawning.
 - `setup/browser.mjs`: on darwin opens with `open`, on win32 with `openUrlArgv`; linux unchanged.
+- `m1-cleanup-server.test.mjs` 'Retry now without XDG_RUNTIME_DIR...' pinned the old behaviour (nothing connects without XDG); it now expects the startup connect attempt's `down` row before `checking`, and keeps asserting the true down state is republished.
 - Tests cover each branch with injected `platform` and spawn/run functions. `server.test.mjs` adds one test that boots the server with `XDG_RUNTIME_DIR` removed and asserts the hook endpoint and deckd link resolve to the `runtimeBase` fallback; POSIX-mode assertions in the owned test files are wrapped in `posixTest`.
 - Mutations each fail a test, then are restored: an unguarded `getuid` in `auth.mjs`; the server requiring `XDG_RUNTIME_DIR` for the hook socket; the darwin notifier building a shell string; the ask engine spawning without `commandSpawn`.
 

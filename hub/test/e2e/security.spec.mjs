@@ -482,7 +482,9 @@ test('untrusted text (M3): qa 1.7 payloads in option labels, rule patterns read 
   await writeFile(path.join(dir, 'README.md'), `${repo}\n${diffText}\n`)
   const edit = { tool_name: 'Edit', tool_input: { file_path: path.join(dir, 'README.md'), old_string: repo, new_string: `${repo}\n${diffText}`, replace_all: false } }
   await h.observe(session, [{ e: 'PreToolUse', ...edit }, { e: 'PostToolUse', ...edit }, { e: 'Stop' }])
-  await until(() => (h.session(id).changedFiles ?? []).length === 1, { message: 'the changed file' })
+  // The repo also holds the untracked .claude/settings.local.json this test wrote, which counts as changed
+  // unless the host's global git excludes hide it, so wait for README.md itself rather than a file count.
+  await until(() => (h.session(id).changedFiles ?? []).some(file => file.path === path.join(dir, 'README.md')), { message: 'the changed file' })
   const served = await h.api(`/api/sessions/${id}/diff?path=README.md`)
   assert.equal(served.status, 200)
   assert.ok(served.data.diff.includes(`+${diffText}`), 'the server diff carries the payload')
