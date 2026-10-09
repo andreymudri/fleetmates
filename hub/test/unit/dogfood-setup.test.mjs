@@ -121,11 +121,12 @@ function spawner(results, stdout = {}) {
 
 test('open honours $BROWSER first, with %s substitution, and passes only the file path', async () => {
   const file = '/home/you/.local/state/fleetmates/deck/open.html'
+  // $BROWSER is the Linux opener's; darwin and win32 open with their own commands, so the platform is pinned.
   const s = spawner({ firefox: true })
-  assert.equal(await openInBrowser(file, { env: { BROWSER: 'firefox --new-window' }, ...s }), true)
+  assert.equal(await openInBrowser(file, { env: { BROWSER: 'firefox --new-window' }, platform: 'linux', ...s }), true)
   assert.deepEqual(s.calls.map(call => [call.file, call.argv]), [['firefox', ['--new-window', file]]])
   const t = spawner({ chromium: true })
-  assert.equal(await openInBrowser(file, { env: { BROWSER: 'nobrowser:chromium --app=%s' }, ...t }), true)
+  assert.equal(await openInBrowser(file, { env: { BROWSER: 'nobrowser:chromium --app=%s' }, platform: 'linux', ...t }), true)
   assert.deepEqual(t.calls.map(call => [call.file, call.argv]), [['nobrowser', [file]], ['chromium', [`--app=${file}`]]])
 })
 

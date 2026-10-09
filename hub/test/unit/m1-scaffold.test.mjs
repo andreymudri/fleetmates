@@ -1,12 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, readFile, mkdtemp, rm } from 'node:fs/promises'
+import { readFile, mkdtemp, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright-core'
+import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
+import { findChromium } from '../helpers/chromium.mjs'
 
 // The phase gate runs this file through its hub-test check; root npm test does not run hub tests.
 
@@ -15,6 +18,19 @@ const root = path.dirname(hub)
 
 const json = async (file) => JSON.parse(await readFile(file, 'utf8'))
 
+/**
+ * Run npm with `args`: `process.execPath` with the npm-cli.js installed next to it (Windows layout, then the POSIX
+ * `lib/` layout), else `npm` through resolveCommand and commandSpawn, since `npm` is `npm.cmd` on Windows and a
+ * spawn without a shell cannot run that.
+ */
+function npm(args, options) {
+  const dir = path.dirname(process.execPath)
+  const cli = [path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), path.join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')].find(file => existsSync(file))
+  if (cli) return execFileSync(process.execPath, [cli, ...args], options)
+  const spawn = commandSpawn(resolveCommand('npm'), args)
+  return execFileSync(spawn.file, spawn.args, { ...options, ...spawn.options })
+}
+
 test('M1 build mounts a visible React heading in Chromium', async () => {
   const pkg = await json(path.join(hub, 'package.json'))
   const lock = await json(path.join(hub, 'package-lock.json'))
@@ -22,7 +38,9 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
 
   assert.equal(pkg.private, undefined)
   assert.equal(pkg.type, 'module')
-  assert.equal(pkg.engines.node, '>=24.2.0')
+  // Node 24.2 to 24.15 node:sqlite truncates a bound string at its first NUL; 24.16.0 is the first fixed release.
+  assert.equal(pkg.engines.node, '>=24.16.0')
+  assert.equal(lock.packages[''].engines.node, pkg.engines.node)
   assert.equal(typeof pkg.scripts.build, 'string')
   for (const name of ['react', 'react-dom', 'vite', 'markdown-it']) {
     const version = pkg.dependencies?.[name] ?? pkg.devDependencies?.[name]
@@ -38,7 +56,7 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
   let browser
   let server
   try {
-    execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
+    npm(['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
     const html = await readFile(path.join(out, 'index.html'), 'utf8')
     assert.match(html, /<div id="root"><\/div>/)
     server = createServer(async (request, response) => {
@@ -58,22 +76,8 @@ test('M1 build mounts a visible React heading in Chromium', async () => {
       }
     })
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
-    const candidates = [
-      process.env.CHROMIUM_PATH,
-      '/usr/bin/chromium',
-      '/usr/bin/google-chrome',
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
-    ]
-    let executablePath
-    for (const candidate of candidates) {
-      if (!candidate) continue
-      try {
-        await access(candidate)
-        executablePath = candidate
-        break
-      } catch {}
-    }
+    const testing = '/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
+    const executablePath = findChromium() ?? (existsSync(testing) ? testing : null)
     assert.ok(executablePath, 'Chromium or Chrome is required for the build smoke test')
     browser = await chromium.launch({ executablePath, headless: true })
     const page = await browser.newPage()

@@ -15,6 +15,7 @@ import { createInputMachine, INPUT_QUIET_MS, COLLISION_WINDOW_MS, COLLISION_HOLD
 import { encodeFrame, FRAME_KIND } from '../../server/pty-bridge/frames.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 /** A manual clock with setTimeout and clearTimeout. */
 function clock() {
@@ -131,15 +132,18 @@ after(async () => {
   await deckd?.close()
   await bin?.cleanup()
   await rt?.cleanup()
-  fs.rmSync(dir, { recursive: true, force: true })
+  // Windows refuses to remove a directory a closing process or an open file still holds; retry for a while.
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 
 test('kitty types, the browser types inside the window: terminal_active, collision, quiet, lastInputFrom browser, then detached', async t => {
   const home = fs.mkdtempSync(path.join(dir, 'home-'))
-  const state = path.join(home, '.local/state/fleetmates/deck')
-  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
-  const deck = await startDeckServer({ env: { HOME: home, XDG_RUNTIME_DIR: rt.dir }, port: 0, notifications: false,
+  const env = { HOME: home, XDG_RUNTIME_DIR: rt.dir }
+  // The token where the server reads it for this env: ~/.local/state/... on linux, under AppData\Local on win32.
+  const tokenFile = setupPaths(env).token
+  fs.mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 })
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 })
+  const deck = await startDeckServer({ env, port: 0, notifications: false,
     runPollMs: 3_600_000, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
   t.after(() => deck.close())
   const kittyClient = await connectDeckd({ runtimeDir: rt.dir, kind: 'terminal', name: 'kitty' })

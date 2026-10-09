@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -9,6 +10,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { runnerImport } from 'vite'
 import { initialState } from '../../web/src/state/deck-store.js'
+import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const src = path.join(hub, 'web/src')
@@ -109,6 +111,19 @@ test('the M2 screens keep the M1 failure notices where M1 shows them', async () 
   assert.equal(notices('new').length, 0, 'New session shows deckd down in its own form; the screen beneath it carries the notices')
 })
 
+/**
+ * Run npm with `args`: `process.execPath` with the npm-cli.js installed next to it (Windows layout, then the POSIX
+ * `lib/` layout), else `npm` through resolveCommand and commandSpawn, since `npm` is `npm.cmd` on Windows and a
+ * spawn without a shell cannot run that.
+ */
+function npm(args, options) {
+  const dir = path.dirname(process.execPath)
+  const cli = [path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), path.join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')].find(file => existsSync(file))
+  if (cli) return execFileSync(process.execPath, [cli, ...args], options)
+  const spawn = commandSpawn(resolveCommand('npm'), args)
+  return execFileSync(spawn.file, spawn.args, { ...options, ...spawn.options })
+}
+
 // Class names used by rules that declare something (a minifier drops empty rules). Statement at-rules such as
 // terminal.css's `@import '@xterm/xterm/css/xterm.css';` are dropped first so their paths do not read as selectors.
 const classesOf = css => new Set([...css.replace(/\/\*[\s\S]*?\*\//g, '').replace(/@import[^;]*;/g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
@@ -116,9 +131,9 @@ const classesOf = css => new Set([...css.replace(/\/\*[\s\S]*?\*\//g, '').replac
 
 test('the production build carries the six M2 stylesheets and xterm.css', async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'm2-wiring-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const out = path.join(dir, 'web')
-  execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
+  npm(['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
   const assets = await readdir(path.join(out, 'assets'))
   const built = classesOf((await Promise.all(assets.filter(name => name.endsWith('.css')).map(name => readFile(path.join(out, 'assets', name), 'utf8')))).join('\n'))
   const sheets = {}

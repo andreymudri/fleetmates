@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -10,6 +11,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { runnerImport } from 'vite'
 import { chromium } from 'playwright-core'
 import { createDeckStore, initialState, reduce } from '../../web/src/state/deck-store.js'
+import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
+import { findChromium } from '../helpers/chromium.mjs'
 
 const hub = fileURLToPath(new URL('../..', import.meta.url))
 const src = path.join(hub, 'web/src')
@@ -727,14 +731,17 @@ test('the notifier failure notice links to Settings through navigate and shows t
 
 // ---------------------------------------------------------------- Build and browser
 
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
+/**
+ * Run npm with `args`: `process.execPath` with the npm-cli.js installed next to it (Windows layout, then the POSIX
+ * `lib/` layout), else `npm` through resolveCommand and commandSpawn, since `npm` is `npm.cmd` on Windows and a
+ * spawn without a shell cannot run that.
+ */
+function npm(args, options) {
+  const dir = path.dirname(process.execPath)
+  const cli = [path.join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), path.join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')].find(file => existsSync(file))
+  if (cli) return execFileSync(process.execPath, [cli, ...args], options)
+  const spawn = commandSpawn(resolveCommand('npm'), args)
+  return execFileSync(spawn.file, spawn.args, { ...options, ...spawn.options })
 }
 
 // Class names used by rules that declare something (a minifier drops empty rules).
@@ -744,7 +751,7 @@ const classesOf = css => new Set([...css.replace(/\/\*[\s\S]*?\*\//g, '').matchA
 test('the production build carries the component, observe and setup stylesheets, and the built deck runs First run end to end', async t => {
   const dir = await mkdtemp(path.join(tmpdir(), 'setup-'))
   const out = path.join(dir, 'web')
-  execFileSync('npm', ['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
+  npm(['run', 'build', '--', '--outDir', out], { cwd: hub, stdio: 'pipe' })
   const assets = await readdir(path.join(out, 'assets'))
   const built = (await Promise.all(assets.filter(name => name.endsWith('.css')).map(name => readFile(path.join(out, 'assets', name), 'utf8')))).join('\n')
   const sheets = {}
@@ -757,24 +764,25 @@ test('the production build carries the component, observe and setup stylesheets,
     assert.deepEqual(missing, [], `the built CSS carries ${name}.css`)
   }
 
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the First run browser test')
   const { startDeckServer } = await import('../../server/main.mjs')
   const token = 'c'.repeat(43)
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   await mkdir(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
-  await mkdir(state, { recursive: true, mode: 0o700 })
-  await writeFile(path.join(state, 'token'), token, { mode: 0o600 })
-  const hookDir = path.join(dir, '.local/share/fleetmates-deck/hook')
-  await mkdir(hookDir, { recursive: true })
-  await writeFile(path.join(hookDir, 'deck-hook.mjs'), '// fake hook\n')
+  // The token, hook and Claude settings where the server looks for this env: XDG paths on linux, AppData on win32.
+  const paths = setupPaths(env)
+  await mkdir(paths.state, { recursive: true, mode: 0o700 })
+  await writeFile(paths.token, token, { mode: 0o600 })
+  await mkdir(path.dirname(paths.hook), { recursive: true })
+  await writeFile(paths.hook, '// fake hook\n')
   const deck = await startDeckServer({ env, port: 0, staticDir: out, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }) })
   const browser = await chromium.launch({ executablePath, headless: true })
   t.after(async () => { await browser.close()
     await deck.close()
-    await rm(dir, { recursive: true, force: true }) })
+    // Windows refuses to remove a directory while a just-closed file in it is still held; retry for a while.
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
   const base = `http://127.0.0.1:${deck.address().port}`
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } })
   const errors = []
@@ -797,7 +805,7 @@ test('the production build carries the component, observe and setup stylesheets,
 
   await page.getByRole('button', { name: 'Install hooks' }).click()
   await page.waitForSelector('li[data-check="hooks"].check-row--ok', { timeout: 5000 })
-  assert.match(await readFile(path.join(dir, '.claude/settings.json'), 'utf8'), /deck-hook\.mjs/)
+  assert.match(await readFile(paths.settings, 'utf8'), /deck-hook\.mjs/)
   assert.equal(await sail.textContent(), 'Set sail')
   assert.equal(await sail.getAttribute('aria-disabled'), null)
   await sail.click()

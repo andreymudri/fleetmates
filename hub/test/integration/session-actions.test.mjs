@@ -11,11 +11,13 @@ import { startDeckd } from '../../deckd/main.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
 import { startDeckServer } from '../../server/main.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
-import { fakeBin } from '../helpers/fake-bin.mjs'
+import { fakeBin, nodeClaudeShim } from '../helpers/fake-bin.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 const token = 'a'.repeat(43)
-// deckd spawns only `claude`, so the stub is found as `claude` on PATH.
-const stubDir = fileURLToPath(new URL('./stubs/', import.meta.url))
+// deckd spawns only `claude`, so the stub is found as `claude` on PATH. Windows cannot run the extensionless
+// `#!/usr/bin/env node` stub, so there `before` puts an npm-style claude.cmd that runs it with node in its place.
+let stubDir = fileURLToPath(new URL('./stubs/', import.meta.url))
 const startFixture = JSON.parse(fs.readFileSync(new URL('../fixtures/hooks/2.1.282/SessionStart.startup.json', import.meta.url)))
 
 let rt
@@ -30,6 +32,11 @@ before(async () => {
   rt = await makeRuntimeDir()
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sac-'))
   bin = await fakeBin({ version: '2.1.282' })
+  if (process.platform === 'win32') {
+    const shimDir = fs.mkdtempSync(path.join(dir, 'stub-'))
+    await nodeClaudeShim(shimDir, { script: path.join(stubDir, 'claude') })
+    stubDir = shimDir
+  }
   // Launched spawns (Relaunch) take the login environment: the fake claude, waiting forever.
   hangScript = path.join(dir, 'hang.json')
   fs.writeFileSync(hangScript, JSON.stringify({ sessionId: 'auto', steps: [{ hang: true }] }))
@@ -42,18 +49,21 @@ after(async () => {
   await deckd?.close()
   await bin?.cleanup()
   await rt?.cleanup()
-  fs.rmSync(dir, { recursive: true, force: true })
+  // Windows refuses to remove a directory a closing process or an open file still holds; retry for a while.
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 })
 
 async function server(t) {
   const home = fs.mkdtempSync(path.join(dir, 'home-'))
-  const state = path.join(home, '.local/state/fleetmates/deck')
-  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
+  const env = { HOME: home, XDG_RUNTIME_DIR: rt.dir }
+  // The token where the server reads it for this env: ~/.local/state/... on linux, under AppData\Local on win32.
+  const tokenFile = setupPaths(env).token
+  fs.mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 })
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 })
   const staticDir = path.join(home, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  const deck = await startDeckServer({ env: { HOME: home, XDG_RUNTIME_DIR: rt.dir }, port: 0, staticDir, notifications: false,
+  const deck = await startDeckServer({ env, port: 0, staticDir, notifications: false,
     runPollMs: 3_600_000, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
   t.after(() => deck.close())
   const origin = `http://127.0.0.1:${deck.address().port}`
@@ -119,7 +129,8 @@ test('Stop sets the stop flag, deckd ends the PTY with SIGTERM, and the session 
   assert.equal(stopped.data.session.id, session.id)
   assert.equal(deck.store.get('SELECT user_stop_requested FROM sessions WHERE id=?', session.id).user_stop_requested, 1)
   const exit = await exited
-  assert.ok(exit.signal === 'SIGTERM' || exit.signal === 15 || exit.code === 143, `ended by SIGTERM: ${JSON.stringify(exit)}`)
+  // Windows has no SIGTERM: deckd ends the tree with taskkill there, so only the POSIX exit carries the signal.
+  if (process.platform !== 'win32') assert.ok(exit.signal === 'SIGTERM' || exit.signal === 15 || exit.code === 143, `ended by SIGTERM: ${JSON.stringify(exit)}`)
   const ended = await until(() => !byId(deck, session.id).alive && byId(deck, session.id), 'the exit')
   assert.equal(ended.state, 'ended', 'row 42: a requested stop is never a crash')
   assert.equal(ended.crashKind, null)

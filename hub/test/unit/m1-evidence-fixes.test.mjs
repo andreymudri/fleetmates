@@ -253,7 +253,8 @@ test('stylesheets: the fleet scrolls under the header, the drawer animates in, a
 test('notify-send gets a title and body stripped of controls and bidi, capped, then escaped (08-security 4.9)', async () => {
   const { createNotifier } = await import('../../server/adapters/notify.mjs')
   const calls = []
-  const notifier = createNotifier({ run: async (command, args) => { calls.push(args)
+  // notify-send is the linux notifier; the win32 one is in-tab only and runs nothing, so the platform is pinned.
+  const notifier = createNotifier({ platform: 'linux', run: async (command, args) => { calls.push(args)
     return { ok: true, exitCode: 0, stdout: '7\n' } } })
   const popup = async (title, body) => {
     calls.length = 0
@@ -366,7 +367,8 @@ test('a tool path outside the working directory stays absolute', async () => {
   const { toolLine } = await import('../../server/machines/request.mjs')
   assert.equal(toolLine('Read', { file_path: '/etc/passwd' }, '/home/you/proj'), 'Read /etc/passwd')
   assert.equal(toolLine('Read', { file_path: '/home/you/project2/a.txt' }, '/home/you/proj'), 'Read /home/you/project2/a.txt')
-  assert.equal(toolLine('Read', { file_path: '/home/you/proj/src/a.txt' }, '/home/you/proj'), 'Read src/a.txt')
+  // A path inside the working directory is shown relative, with the host's separator (src\a.txt on Windows).
+  assert.equal(toolLine('Read', { file_path: '/home/you/proj/src/a.txt' }, '/home/you/proj'), `Read ${path.join('src', 'a.txt')}`)
 })
 
 test('notification text strips LINE and PARAGRAPH SEPARATOR from the title and the body, and keeps only line feeds as body line breaks', async () => {

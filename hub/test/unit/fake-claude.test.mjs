@@ -7,6 +7,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pty from 'node-pty'
 import { fakeBin } from '../helpers/fake-bin.mjs'
+import { posixTest } from '../helpers/platform.mjs'
+import { commandSpawn, killTree } from '../../platform/index.mjs'
 import { testedVersion } from '../helpers/tested-version.mjs'
 import { askArgv } from '../../server/ask/engine.mjs'
 import {
@@ -17,6 +19,8 @@ import {
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const scriptsDir = path.join(hubDir, 'test', 'fixtures', 'scripts')
 const captureCc = path.join(hubDir, 'test', 'capture', 'capture-cc.mjs')
+// capture-cc runs `claude` through spawnSync and a `#!/bin/sh` wrapper; it is an owner tool for real Claude Code.
+const CAPTURE_POSIX = 'capture-cc drives a POSIX claude wrapper'
 
 /**
  * Make a temp dir removed by the returned cleanup.
@@ -28,16 +32,51 @@ async function tempDir (prefix) {
 }
 
 /**
- * Run the fake `claude` in a PTY through the PATH that fakeBin() builds.
- * @param {{ env: NodeJS.ProcessEnv, args?: string[], cwd?: string, cols?: number, rows?: number }} opts
+ * win32 only, at most once: close a node-pty 1.1.0 pseudoconsole and its conout worker, the rest of node-pty's own
+ * kill() without the console-list agent it forks, as deckd/pty-host.mjs does after an exit. On the Windows VM this
+ * file did not finish after its last test while these stayed open.
+ * @param {import('node-pty').IPty} p
  */
-function runFake ({ env, args = [], cwd = os.tmpdir(), cols = 80, rows = 24 }) {
-  const p = pty.spawn('claude', args, { env: /** @type {Record<string, string>} */ (env), cwd, cols, rows, name: 'xterm-256color' })
+function releasePseudoconsole (p) {
+  const agent = /** @type {any} */ (p)._agent
+  if (process.platform !== 'win32' || !agent || agent.released) return
+  agent.released = true
+  try {
+    if (agent._inSocket) agent._inSocket.readable = false
+    if (agent._outSocket) agent._outSocket.readable = false
+    agent._ptyNative?.kill(agent._pty, Boolean(agent._useConptyDll))
+    agent._conoutSocketWorker?.dispose()
+  } catch {}
+}
+
+/**
+ * The output with VT control sequences removed on win32, where ConPTY wraps what the child wrote in its own
+ * (`ESC[?9001h`, a clear, the window title). Elsewhere the output is returned as it is.
+ * @param {string} text
+ */
+const childText = text => process.platform === 'win32'
+  ? text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+  : text
+
+/**
+ * Run the fake `claude` in a PTY: fakeBin()'s `claudePath` through commandSpawn, which on Windows runs the
+ * claude.cmd shim's script with node (node-pty applies no PATHEXT, so a bare `claude` is not found there).
+ * `stop()` ends it: node-pty's kill() on POSIX; on win32 killTree, then the pseudoconsole is closed.
+ * @param {{ file: string, env: NodeJS.ProcessEnv, args?: string[], cwd?: string, cols?: number, rows?: number }} opts
+ */
+function runFake ({ file, env, args = [], cwd = os.tmpdir(), cols = 80, rows = 24 }) {
+  const cmd = commandSpawn(file, args, { env })
+  const p = pty.spawn(cmd.file, cmd.args, { env: /** @type {Record<string, string>} */ (env), cwd, cols, rows, name: 'xterm-256color' })
   let output = ''
   p.onData(d => { output += d })
   /** @type {Promise<{ exitCode: number, signal?: number }>} */
-  const exited = new Promise(resolve => p.onExit(resolve))
-  return { p, exited, output: () => output }
+  const exited = new Promise(resolve => p.onExit(event => { releasePseudoconsole(p); resolve(event) }))
+  const stop = () => {
+    if (process.platform !== 'win32') return p.kill()
+    killTree(p.pid, 'SIGKILL')
+    releasePseudoconsole(p)
+  }
+  return { p, exited, stop, output: () => output }
 }
 
 /**
@@ -70,10 +109,10 @@ async function readLog (file) {
 test('claude --version prints FAKE_CLAUDE_VERSION in the real format', async () => {
   const bin = await fakeBin({ version: '9.8.7' })
   try {
-    const run = runFake({ env: bin.env, args: ['--version'] })
+    const run = runFake({ file: bin.claudePath, env: bin.env, args: ['--version'] })
     const { exitCode } = await run.exited
     assert.equal(exitCode, 0)
-    assert.equal(run.output().trim(), '9.8.7 (Claude Code)')
+    assert.equal(childText(run.output()).trim(), '9.8.7 (Claude Code)')
   } finally {
     await bin.cleanup()
   }
@@ -83,7 +122,7 @@ test('echo.json echoes input bytes and logs every chunk', async () => {
   const t = await tempDir('deck-fake-echo-')
   const log = path.join(t.dir, 'log.jsonl')
   const bin = await fakeBin({ script: path.join(scriptsDir, 'echo.json'), log })
-  const run = runFake({ env: bin.env })
+  const run = runFake({ file: bin.claudePath, env: bin.env })
   try {
     await waitFor(async () => (await readLog(log)).some(e => e.ready))
     run.p.write('abc')
@@ -97,7 +136,7 @@ test('echo.json echoes input bytes and logs every chunk', async () => {
     assert.equal(inputs.map(e => e.input).join(''), 'abcxyz')
     for (const e of inputs) assert.equal(typeof e.ts, 'number')
   } finally {
-    run.p.kill()
+    run.stop()
     await run.exited
     await bin.cleanup()
     await t.cleanup()
@@ -108,19 +147,25 @@ test('resize.json logs a resize after pty.resize', async () => {
   const t = await tempDir('deck-fake-resize-')
   const log = path.join(t.dir, 'log.jsonl')
   const bin = await fakeBin({ script: path.join(scriptsDir, 'resize.json'), log })
-  const run = runFake({ env: bin.env, cols: 80, rows: 24 })
+  const run = runFake({ file: bin.claudePath, env: bin.env, cols: 80, rows: 24 })
   try {
     await waitFor(async () => (await readLog(log)).some(e => e.ready))
     run.p.resize(100, 30)
     const entry = await waitFor(async () => (await readLog(log)).find(e => e.resize))
     assert.deepEqual(entry.resize, { cols: 100, rows: 30 })
   } finally {
-    run.p.kill()
+    run.stop()
     await run.exited
     await bin.cleanup()
     await t.cleanup()
   }
 })
+
+/**
+ * A hook command for cmd.exe that copies its stdin to `file` with node; only used on Windows.
+ * @param {string} file
+ */
+const copyStdinTo = file => `"${process.execPath}" -e "process.stdin.pipe(require('fs').createWriteStream(process.argv[1]))" "${file}"`
 
 test('idle.json fires a SessionStart hook from $HOME/.claude/settings.json and exits 0', async () => {
   const t = await tempDir('deck-fake-idle-')
@@ -131,14 +176,15 @@ test('idle.json fires a SessionStart hook from $HOME/.claude/settings.json and e
   await mkdir(cwd)
   const settings = {
     hooks: {
-      SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: `cat > '${got}'`, timeout: 5 }] }]
+      // The fake runs hook commands through /bin/sh, and through cmd.exe on Windows, which has no `cat`.
+      SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: process.platform === 'win32' ? copyStdinTo(got) : `cat > '${got}'`, timeout: 5 }] }]
     }
   }
   await writeFile(path.join(home, '.claude', 'settings.json'), JSON.stringify(settings))
   const log = path.join(t.dir, 'log.jsonl')
   const bin = await fakeBin({ script: path.join(scriptsDir, 'idle.json'), log })
   try {
-    const run = runFake({ env: { ...bin.env, HOME: home }, cwd })
+    const run = runFake({ file: bin.claudePath, env: { ...bin.env, HOME: home }, cwd })
     const { exitCode } = await run.exited
     assert.equal(exitCode, 0)
     const payload = JSON.parse(await readFile(got, 'utf8'))
@@ -161,7 +207,7 @@ test('a script naming a missing frame exits 96', async () => {
   await writeFile(script, JSON.stringify({ steps: [{ frame: 'nope' }] }))
   const bin = await fakeBin({ script, log: path.join(t.dir, 'log.jsonl') })
   try {
-    const run = runFake({ env: bin.env })
+    const run = runFake({ file: bin.claudePath, env: bin.env })
     const { exitCode } = await run.exited
     assert.equal(exitCode, 96)
     assert.match(run.output(), /missing frame nope for 2\.1\.282/)
@@ -171,7 +217,7 @@ test('a script naming a missing frame exits 96', async () => {
   }
 })
 
-test('capture-cc refuses a claude version other than testedClaudeCode, starting nothing', async () => {
+posixTest('capture-cc refuses a claude version other than testedClaudeCode, starting nothing', { reason: CAPTURE_POSIX }, async () => {
   const t = await tempDir('deck-capture-smoke-')
   const out = path.join(t.dir, 'out')
   const log = path.join(t.dir, 'log.jsonl')
@@ -350,7 +396,7 @@ async function runCapture (dir, bin) {
   return { ...result, home, tmp, out }
 }
 
-test('capture-cc past the version gate writes redacted hooks and MANIFEST, leaving no temp dirs', async () => {
+posixTest('capture-cc past the version gate writes redacted hooks and MANIFEST, leaving no temp dirs', { reason: CAPTURE_POSIX }, async () => {
   const t = await tempDir('deck-capture-e2e-')
   try {
     const payload = {
@@ -382,7 +428,7 @@ test('capture-cc past the version gate writes redacted hooks and MANIFEST, leavi
   }
 })
 
-test('capture-cc removes its temp dirs when the capture throws', async () => {
+posixTest('capture-cc removes its temp dirs when the capture throws', { reason: CAPTURE_POSIX }, async () => {
   const t = await tempDir('deck-capture-throw-')
   try {
     const bin = await captureStub(t.dir, '{ not json')
@@ -409,7 +455,7 @@ const trustDialog = selected => [
   'Enter to confirm · Esc to cancel\r\n'
 ].join('')
 
-test('capture-cc startup moves ❯ to "Yes, I trust" when the dialog preselects "No, exit"', async () => {
+posixTest('capture-cc startup moves ❯ to "Yes, I trust" when the dialog preselects "No, exit"', { reason: CAPTURE_POSIX }, async () => {
   const t = await tempDir('deck-capture-trust-')
   /** @type {Awaited<ReturnType<typeof fakeBin>> | undefined} */
   let bin
@@ -511,7 +557,7 @@ test('fake claude exits 97 when expectInput times out', async () => {
   await writeFile(script, JSON.stringify({ steps: [{ expectInput: { match: 'never', timeoutMs: 100 } }] }))
   const bin = await fakeBin({ script, log: path.join(t.dir, 'log.jsonl') })
   try {
-    const run = runFake({ env: bin.env })
+    const run = runFake({ file: bin.claudePath, env: bin.env })
     assert.equal((await run.exited).exitCode, 97)
     assert.match(run.output(), /expectInput timed out after 100 ms/)
   } finally {
@@ -521,14 +567,16 @@ test('fake claude exits 97 when expectInput times out', async () => {
 })
 
 /**
- * Run the fake `claude -p` by the wrapper's absolute path (no PATH lookup) with an isolated env, the prompt on
- * stdin, and collect stdout, stderr and the exit code.
- * @param {{ binDir: string, argv: string[], env: Record<string, string>, prompt?: string }} opts
+ * Run the fake `claude -p` by the wrapper's absolute path (no PATH lookup; through commandSpawn, so on Windows
+ * the claude.cmd shim's script runs with node) with an isolated env, the prompt on stdin, and collect stdout,
+ * stderr and the exit code.
+ * @param {{ claudePath: string, argv: string[], env: Record<string, string>, prompt?: string }} opts
  * @returns {Promise<{ code: number|null, stdout: string, stderr: string }>}
  */
-function runAsk ({ binDir, argv, env, prompt = 'Como o worker faz retry?' }) {
+function runAsk ({ claudePath, argv, env, prompt = 'Como o worker faz retry?' }) {
   return new Promise((resolve, reject) => {
-    const child = spawnChild(path.join(binDir, 'claude'), argv, { env, stdio: ['pipe', 'pipe', 'pipe'] })
+    const cmd = commandSpawn(claudePath, argv, { env })
+    const child = spawnChild(cmd.file, cmd.args, { ...cmd.options, env, stdio: ['pipe', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', d => { stdout += d })
@@ -552,7 +600,7 @@ async function askSetup (fixture) {
   const log = path.join(t.dir, 'log.jsonl')
   const env = { PATH: '/usr/bin:/bin', HOME: t.dir, XDG_RUNTIME_DIR: run, FAKE_CLAUDE_P_FIXTURE: fixture, FAKE_CLAUDE_LOG: log }
   const cleanup = async () => { await bin.cleanup(); await t.cleanup() }
-  return { binDir: bin.binDir, env, log, cleanup }
+  return { claudePath: bin.claudePath, env, log, cleanup }
 }
 
 const askArgvOk = () => askArgv({ mcpCommand: ['npx', '-y', '@andreymudri/vault-mcp'], vaultPath: '/home/you/vault', lang: 'en', systemPrompt: 'PROMPT' })
@@ -561,7 +609,7 @@ test('fake claude -p with the Ask argv replays the fixture and logs the prompt l
   const fixture = path.join(hubDir, 'test', 'fixtures', 'claude-p', 'synthetic', 'answer-cited.jsonl')
   const s = await askSetup(fixture)
   try {
-    const r = await runAsk({ binDir: s.binDir, argv: askArgvOk(), env: s.env })
+    const r = await runAsk({ claudePath: s.claudePath, argv: askArgvOk(), env: s.env })
     assert.equal(r.code, 0, r.stderr)
     assert.equal(r.stdout, await readFile(fixture, 'utf8'))
     const log = await readLog(s.log)
@@ -577,7 +625,7 @@ test('fake claude -p exits 98 when --allowedTools is widened with mcp__vault__va
   try {
     const argv = askArgvOk()
     argv[argv.indexOf('--allowedTools') + 1] += ',mcp__vault__vault_learn'
-    const r = await runAsk({ binDir: s.binDir, argv, env: s.env })
+    const r = await runAsk({ claudePath: s.claudePath, argv, env: s.env })
     assert.equal(r.code, 98)
     assert.match(r.stderr, /--allowedTools/)
     assert.equal(r.stdout, '')
@@ -590,7 +638,7 @@ test('fake claude -p exits 98 without --strict-mcp-config', async () => {
   const s = await askSetup('answer-cited')
   try {
     const argv = askArgvOk().filter(a => a !== '--strict-mcp-config')
-    const r = await runAsk({ binDir: s.binDir, argv, env: s.env })
+    const r = await runAsk({ claudePath: s.claudePath, argv, env: s.env })
     assert.equal(r.code, 98)
     assert.match(r.stderr, /missing --strict-mcp-config/)
     assert.equal(r.stdout, '')
@@ -602,14 +650,14 @@ test('fake claude -p exits 98 without --strict-mcp-config', async () => {
 test('fake claude -p exits 98 on --safe-mode and on a variadic flag that swallows the next one', async () => {
   const s = await askSetup('answer-cited')
   try {
-    const safe = await runAsk({ binDir: s.binDir, argv: [...askArgvOk(), '--safe-mode'], env: s.env })
+    const safe = await runAsk({ claudePath: s.claudePath, argv: [...askArgvOk(), '--safe-mode'], env: s.env })
     assert.equal(safe.code, 98)
     assert.match(safe.stderr, /--safe-mode/)
     const argv = askArgvOk()
     const at = argv.indexOf('--tools')
     argv.splice(at, 2)
     argv.push('--tools', '')
-    const late = await runAsk({ binDir: s.binDir, argv, env: s.env })
+    const late = await runAsk({ claudePath: s.claudePath, argv, env: s.env })
     assert.equal(late.code, 98)
     assert.match(late.stderr, /--tools is not followed by exactly one value/)
   } finally {
@@ -623,7 +671,8 @@ test('fake claude -p hangs on {"hang":true}, and passes FAKE_CLAUDE_P_STDERR and
   await writeFile(fixture, '{"type":"system","subtype":"init","mcp_servers":[{"name":"vault","status":"connected"}]}\n{"hang":true}\n')
   const s = await askSetup(fixture)
   try {
-    const child = spawnChild(path.join(s.binDir, 'claude'), askArgvOk(), { env: s.env, stdio: ['pipe', 'pipe', 'ignore'] })
+    const cmd = commandSpawn(s.claudePath, askArgvOk(), { env: s.env })
+    const child = spawnChild(cmd.file, cmd.args, { ...cmd.options, env: s.env, stdio: ['pipe', 'pipe', 'ignore'] })
     let out = ''
     child.stdout.on('data', d => { out += d })
     child.stdin.end('x')
@@ -633,7 +682,7 @@ test('fake claude -p hangs on {"hang":true}, and passes FAKE_CLAUDE_P_STDERR and
     assert.equal(child.exitCode, null, 'still running')
     child.kill('SIGKILL')
     await closed
-    const r = await runAsk({ binDir: s.binDir, argv: askArgvOk(), env: { ...s.env, FAKE_CLAUDE_P_FIXTURE: 'error', FAKE_CLAUDE_P_STDERR: 'over quota', FAKE_CLAUDE_P_EXIT: '3' } })
+    const r = await runAsk({ claudePath: s.claudePath, argv: askArgvOk(), env: { ...s.env, FAKE_CLAUDE_P_FIXTURE: 'error', FAKE_CLAUDE_P_STDERR: 'over quota', FAKE_CLAUDE_P_EXIT: '3' } })
     assert.equal(r.code, 3)
     assert.equal(r.stderr, 'over quota')
     assert.match(r.stdout, /"is_error":true/)
@@ -665,7 +714,7 @@ test('fake claude exits 2 on a bad script', async () => {
   await writeFile(script, JSON.stringify({ steps: [{ nonsense: true }] }))
   const bin = await fakeBin({ script, log: path.join(t.dir, 'log.jsonl') })
   try {
-    const run = runFake({ env: bin.env })
+    const run = runFake({ file: bin.claudePath, env: bin.env })
     assert.equal((await run.exited).exitCode, 2)
     assert.match(run.output(), /unknown step/)
   } finally {
@@ -719,7 +768,7 @@ test('option2Rule keeps only the permissions object, redacted', () => {
   })
 })
 
-test('capture-cc starts claude in a repo with the capture settings and a passing, committed capture.test.mjs', async () => {
+posixTest('capture-cc starts claude in a repo with the capture settings and a passing, committed capture.test.mjs', { reason: CAPTURE_POSIX }, async () => {
   const t = await tempDir('deck-capture-repo-state-')
   try {
     const bin = path.join(t.dir, 'bin')
@@ -770,7 +819,7 @@ const bashPrompt = keys => [
   { expectKey: { ...keys, timeoutMs: 20000 } }
 ]
 
-test('capture-cc bash-2 saves the rule option 2 wrote as option2-rule.json, redacted, and lists it in MANIFEST; bash-3 needs PermissionDenied', async () => {
+posixTest('capture-cc bash-2 saves the rule option 2 wrote as option2-rule.json, redacted, and lists it in MANIFEST; bash-3 needs PermissionDenied', { reason: CAPTURE_POSIX }, async () => {
   const t = await tempDir('deck-capture-opt2-')
   /** @type {Awaited<ReturnType<typeof fakeBin>> | undefined} */
   let bin
@@ -883,7 +932,8 @@ async function assertFixtureSet (root, v) {
   for (const rel of added) {
     assert.ok(await readFile(path.join(root, rel)).then(() => true, () => false), `${v} MANIFEST recapture.added ${rel} exists`)
   }
-  const addedHooks = added.filter(rel => path.dirname(rel) === path.join('hooks', v)).map(rel => path.basename(rel))
+  // MANIFEST paths are POSIX on every platform, so they are compared with path.posix, not the host path.
+  const addedHooks = added.filter(rel => path.posix.dirname(rel) === path.posix.join('hooks', v)).map(rel => path.posix.basename(rel))
   const listed = [...new Set([...manifest.hooks, ...addedHooks])].filter(f => f.endsWith('.json') && !NOT_PAYLOADS.has(f)).sort()
   const hookFiles = (await readdir(hooksDir)).filter(f => f.endsWith('.json') && f !== 'MANIFEST.json').sort()
   const payloadFiles = hookFiles.filter(f => !NOT_PAYLOADS.has(f))
