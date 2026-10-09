@@ -80,7 +80,7 @@ test('hookEndpoint on win32 reads the hooks key the deck wrote under its base, a
   })
 })
 
-test('hookEndpoint on win32 treats a hooks key whose lock names a dead pid as missing, so the hook spools instead of dialing a crashed server\'s name', async () => {
+test('hookEndpoint on win32 treats a hooks key whose lock names a dead pid as missing (ENOENT), so the hook does not dial a crashed server\'s name', async () => {
   await inScratch(async () => {
     const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })
     const dir = deckDir(base, { platform: 'win32' })
