@@ -3,8 +3,15 @@
 // platform module's, and pin the win32 form of the hook command in Claude Code settings.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { endpoint, runtimeBase } from '../../platform/index.mjs'
+import fs from 'node:fs'
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
+import net from 'node:net'
+import os from 'node:os'
+import path from 'node:path'
+import { deckDir, endpoint, endpointSecret, runtimeBase } from '../../platform/index.mjs'
 import { ancestry, endpointDirProblem, hookEndpoint, makeEnvelope, spoolDir } from '../../hook/deck-hook.mjs'
+import { createIngestor, startHookSocket } from '../../server/ingest/socket.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
 import { deckHookCommand, hooksInstalled, HOOK_EVENTS, isDeckHook, transformHooks } from '../../server/setup/hooks.mjs'
 
@@ -20,17 +27,117 @@ const parityCases = [
   ['win32, XDG set', 'win32', { XDG_RUNTIME_DIR: 'D:\\Run\\Deck', HOME: 'C:\\Users\\you' }],
 ]
 
+const SECRET = 'c'.repeat(64)
+
 for (const [name, platform, env] of parityCases) {
   test(`hookEndpoint matches the platform module's hooks endpoint: ${name}`, () => {
-    assert.equal(hookEndpoint(env, platform), endpoint(runtimeBase({ env, platform }), 'hooks', { platform }))
+    // POSIX takes no secret; on win32 both hash the same one.
+    const secret = platform === 'win32' ? SECRET : undefined
+    assert.equal(hookEndpoint(env, platform, { secret }), endpoint(runtimeBase({ env, platform }), 'hooks', { platform, secret }))
   })
 }
 
-test('hookEndpoint on win32 is a named pipe that ignores the case of the base', () => {
-  const upper = hookEndpoint({ LOCALAPPDATA: 'C:\\USERS\\YOU\\APPDATA\\LOCAL' }, 'win32')
-  const lower = hookEndpoint({ LOCALAPPDATA: 'c:\\users\\you\\appdata\\local' }, 'win32')
+test('hookEndpoint on win32 is a named pipe that ignores the case of the base and depends on the secret', () => {
+  const upper = hookEndpoint({ LOCALAPPDATA: 'C:\\USERS\\YOU\\APPDATA\\LOCAL' }, 'win32', { secret: SECRET })
+  const lower = hookEndpoint({ LOCALAPPDATA: 'c:\\users\\you\\appdata\\local' }, 'win32', { secret: SECRET })
   assert.match(upper, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-hooks$/)
   assert.equal(upper, lower)
+  const other = hookEndpoint({ LOCALAPPDATA: 'c:\\users\\you\\appdata\\local' }, 'win32', { secret: 'd'.repeat(64) })
+  assert.notEqual(other, lower)
+  assert.equal(other, endpoint(runtimeBase({ env: { LOCALAPPDATA: 'c:\\users\\you\\appdata\\local' }, platform: 'win32' }), 'hooks', { platform: 'win32', secret: 'd'.repeat(64) }))
+})
+
+/**
+ * Run `fn` with a fresh temp dir as the working directory, so a relative win32 base and its key file
+ * land under it on any host (on POSIX the key file is one file whose name holds the backslashes).
+ * @param {(dir: string) => Promise<void>} fn
+ */
+async function inScratch (fn) {
+  const cwd = process.cwd()
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'hook-key-'))
+  process.chdir(dir)
+  try {
+    await fn(dir)
+  } finally {
+    process.chdir(cwd)
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+}
+
+const WIN_ENV = { LOCALAPPDATA: 'local', USERPROFILE: 'C:\\Users\\you' }
+
+test('hookEndpoint on win32 reads the key the deck wrote under its base, and throws without a valid one', async () => {
+  await inScratch(async () => {
+    const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })
+    assert.throws(() => hookEndpoint(WIN_ENV, 'win32'), { code: 'ENOENT' }, 'no key: the caller spools')
+    fs.mkdirSync(deckDir(base, { platform: 'win32' }), { recursive: true })
+    const keyFile = path.win32.join(deckDir(base, { platform: 'win32' }), 'endpoint.key')
+    fs.writeFileSync(keyFile, 'not a key')
+    assert.throws(() => hookEndpoint(WIN_ENV, 'win32'), { code: 'ENOENT' }, 'a malformed key is no key')
+    const secret = endpointSecret(base, { platform: 'win32', create: true, log: () => {} })
+    assert.equal(hookEndpoint(WIN_ENV, 'win32'), endpoint(base, 'hooks', { platform: 'win32', secret }))
+  })
+})
+
+test('startHookSocket on win32 writes the endpoint key and listens on the pipe the hook computes from it', async () => {
+  await inScratch(async () => {
+    const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })
+    const accepted = []
+    const ingest = createIngestor({ onEvent: row => accepted.push(row.hookTs), onRejected: () => {}, reorderMs: 0 })
+    let server
+    try {
+      server = await startHookSocket({ runtimeDir: base, ingest, platform: 'win32', uid: null })
+      const secret = endpointSecret(base, { platform: 'win32' })
+      assert.match(secret ?? '', /^[0-9a-f]{64}$/, 'the server wrote the key')
+      assert.equal(server.path, endpoint(base, 'hooks', { platform: 'win32', secret }))
+      assert.equal(hookEndpoint(WIN_ENV, 'win32'), server.path)
+      const hook = { session_id: 's1', transcript_path: '/home/you/.claude/projects/x/a.jsonl', cwd: '/repo', hook_event_name: 'Stop', stop_hook_active: false }
+      const line = JSON.stringify({ v: 1, deckHookVersion: '0.1.0', hookTs: 9, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook }) + '\n'
+      await new Promise((resolve, reject) => { const socket = net.connect(server.path); socket.on('error', reject); socket.on('connect', () => socket.end(line)); socket.on('close', resolve) })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      ingest.flush()
+      assert.deepEqual(accepted, [9])
+    } finally {
+      await server?.close()
+      ingest.close()
+    }
+  })
+})
+
+/** The error startHookSocket rejects with, or null after closing the listener it started. */
+async function startError (opts) {
+  let server
+  try { server = await startHookSocket(opts) } catch (error) { return error }
+  await server.close()
+  return null
+}
+
+posixTest('startHookSocket refuses a symlinked deck dir or base, which the hook refuses too', { reason: 'symlinked directories and POSIX modes' }, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'hook-sym-'))
+  const ingest = createIngestor({ onEvent: () => {}, onRejected: () => {}, reorderMs: 0 })
+  try {
+    fs.chmodSync(root, 0o700)
+    const uid = process.getuid?.() ?? null
+    // A real private base whose deck dir is a symlink to another private dir.
+    const base = path.join(root, 'b')
+    const elsewhere = path.join(root, 'elsewhere')
+    await mkdir(base, { mode: 0o700 })
+    await mkdir(elsewhere, { mode: 0o700 })
+    await symlink(elsewhere, path.join(base, 'fleetmates-deck'))
+    assert.match(endpointDirProblem(endpoint(base, 'hooks', { platform: 'linux', uid }), { platform: 'linux', uid }) ?? 'null', /not a directory/)
+    assert.equal((await startError({ runtimeDir: base, ingest, platform: 'linux', uid }))?.code, 'not_private')
+    assert.deepEqual(fs.readdirSync(elsewhere), [], 'no socket was made behind the symlink')
+    // A base that is itself a symlink to a private dir.
+    const real = path.join(root, 'real')
+    await mkdir(real, { mode: 0o700 })
+    const linked = path.join(root, 'linked')
+    await symlink(real, linked)
+    assert.equal((await startError({ runtimeDir: linked, ingest, platform: 'linux', uid }))?.code, 'not_private')
+    assert.ok(!fs.existsSync(path.join(real, 'fleetmates-deck', 'hooks.sock')), 'no socket was made behind the symlink')
+  } finally {
+    ingest.close()
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test('ancestry on win32 reports no claude pid and reads neither /proc nor ps', () => {

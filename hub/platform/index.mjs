@@ -2,7 +2,7 @@
 // process trees and commands. Every function takes its platform inputs as options defaulting to the
 // live process, so tests can pin linux, darwin and win32 on any host. Imports only node: modules.
 import childProcess from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import { mkdir, stat } from 'node:fs/promises'
 import os from 'node:os'
@@ -35,17 +35,96 @@ export function deckDir (base, { platform = process.platform } = {}) {
   return (platform === 'win32' ? path.win32 : path.posix).join(base, 'fleetmates-deck')
 }
 
+// The win32 endpoint key: 32 random bytes as 64 lowercase hex digits, in `<deckDir(base)>\endpoint.key`.
+const ENDPOINT_KEY = 'endpoint.key'
+const SECRET_RE = /^[0-9a-f]{64}$/
+
 /**
- * The deckd or hooks endpoint: a Unix socket on POSIX, a named pipe on win32.
+ * Read a win32 endpoint key file without following a symbolic link.
+ * @returns {{ secret: string } | { missing: true } | { bad: string }}
+ */
+function readEndpointKey (file, fsImpl) {
+  let fd
+  try {
+    fd = openNoFollowSync(file, fs.constants.O_RDONLY, { platform: 'win32', fs: fsImpl })
+  } catch (err) {
+    if (err.code === 'ENOENT') return { missing: true }
+    return { bad: `unreadable (${err.code ?? err.message})` }
+  }
+  try {
+    const text = String(fsImpl.readFileSync(fd, 'utf8'))
+    return SECRET_RE.test(text) ? { secret: text } : { bad: 'malformed' }
+  } catch (err) {
+    return { bad: `unreadable (${err.code ?? err.message})` }
+  } finally {
+    fsImpl.closeSync(fd)
+  }
+}
+
+/**
+ * The secret a win32 endpoint name hashes, read from `<deckDir(base)>\endpoint.key`. Null off
+ * win32, and on win32 null when the key is missing or is not exactly 64 lowercase hex digits. With
+ * `create: true` a missing key is written (a temp file linked to the name, so it fails when another
+ * starter wrote one first, then reread), and a malformed or unreadable one is logged and replaced.
+ * deckd and the deck server create; clients only read.
+ * @param {string} base
+ * @param {{ platform?: string, create?: boolean, fs?: any, log?: (line: string) => void }} [opts]
+ * @returns {string | null}
+ */
+export function endpointSecret (base, { platform = process.platform, create = false, fs: fsImpl = fs, log = line => { process.stderr.write(`deck: ${line}\n`) } } = {}) {
+  if (platform !== 'win32') return null
+  const dir = deckDir(base, { platform })
+  const file = path.win32.join(dir, ENDPOINT_KEY)
+  const found = readEndpointKey(file, fsImpl)
+  if ('secret' in found) return found.secret
+  if (!create) return null
+  fsImpl.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const temp = path.win32.join(dir, `${ENDPOINT_KEY}.${randomBytes(6).toString('hex')}.tmp`)
+  const { O_WRONLY, O_CREAT, O_EXCL } = fs.constants
+  const fd = openNoFollowSync(temp, O_WRONLY | O_CREAT | O_EXCL, { platform, fs: fsImpl, mode: 0o600 })
+  try {
+    fsImpl.writeSync(fd, randomBytes(32).toString('hex'))
+  } finally {
+    fsImpl.closeSync(fd)
+  }
+  try {
+    if ('missing' in found) {
+      try {
+        fsImpl.linkSync(temp, file)
+      } catch (err) {
+        if (err.code !== 'EEXIST') throw err
+      }
+    } else {
+      log(`endpoint key ${file} is ${found.bad}; writing a new one`)
+      fsImpl.renameSync(temp, file)
+    }
+  } finally {
+    try { fsImpl.unlinkSync(temp) } catch {}
+  }
+  const again = readEndpointKey(file, fsImpl)
+  if ('secret' in again) return again.secret
+  throw new Error(`endpoint key ${file} is ${'missing' in again ? 'missing' : again.bad} after writing it`)
+}
+
+/**
+ * The deckd or hooks endpoint: a Unix socket on POSIX, a named pipe on win32. The pipe name hashes
+ * the case-folded base and `secret`, which defaults to `endpointSecret(base)`; on win32 a missing
+ * secret throws with code ENOENT, and one that is not 64 lowercase hex digits throws. POSIX takes no
+ * secret.
  * @param {string} base
  * @param {'deckd' | 'hooks'} name
- * @param {{ platform?: string, uid?: number | null }} [opts]
+ * @param {{ platform?: string, uid?: number | null, secret?: string | null }} [opts]
  * @returns {string}
  */
-export function endpoint (base, name, { platform = process.platform, uid = currentUid() } = {}) {
+export function endpoint (base, name, { platform = process.platform, uid = currentUid(), secret } = {}) {
   if (!ENDPOINT_NAMES.has(name)) throw new Error(`unknown endpoint name ${JSON.stringify(name)}; expected deckd or hooks`)
   if (platform === 'win32') {
-    const h = createHash('sha256').update(path.win32.resolve(base).toLowerCase()).digest('hex').slice(0, 16)
+    const key = secret === undefined ? endpointSecret(base, { platform }) : secret
+    if (key === null) {
+      throw Object.assign(new Error(`no endpoint key under ${deckDir(base, { platform })}: deckd and the deck server write it when they start`), { code: 'ENOENT' })
+    }
+    if (typeof key !== 'string' || !SECRET_RE.test(key)) throw new Error('the endpoint secret must be 64 lowercase hex digits')
+    const h = createHash('sha256').update(path.win32.resolve(base).toLowerCase() + '\0' + key).digest('hex').slice(0, 16)
     return `\\\\.\\pipe\\fleetmates-deck-${h}-${name}`
   }
   const sock = path.posix.join(deckDir(base, { platform }), `${name}.sock`)

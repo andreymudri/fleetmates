@@ -3,7 +3,8 @@ import { connect, createServer } from 'node:net'
 import path from 'node:path'
 import { createReorderBuffer } from './reorder.mjs'
 import { dedupeKey, validateEnvelope } from './validate.mjs'
-import { endpoint, ensurePrivateDir, isPipe } from '../../platform/index.mjs'
+import { checkEndpointDirs } from '../../deckd/client.mjs'
+import { endpoint, endpointSecret, ensurePrivateDir, isPipe } from '../../platform/index.mjs'
 
 const maxLine = 1024 * 1024
 
@@ -55,14 +56,17 @@ export function createIngestor({ onEvent, onRejected, reorderMs = 250, now = Dat
 /**
  * Listen for newline-delimited hook envelopes on `endpoint(runtimeDir, 'hooks')`: a 0600 Unix socket in a 0700
  * directory on POSIX, a named pipe on win32. On POSIX a runtime base or socket directory owned by another uid, or with
- * any group or world permission bit, is refused with ensurePrivateDir's error. A pipe has no file, so nothing is created, checked, chmodded or
- * unlinked for it; a pipe name already in use fails with EADDRINUSE. `fsOps` replaces the file system calls in tests.
+ * any group or world permission bit, is refused with ensurePrivateDir's error, and a symlinked base or deck dir with
+ * checkEndpointDirs' `not_private`, as the hook and fm refuse them. On win32 the pipe name hashes the endpoint key,
+ * written by endpointSecret (`create: true`) when missing; `fsOps` is never used for a pipe, and a pipe name already in
+ * use fails with EADDRINUSE. `fsOps` replaces the file system calls in tests.
  * @param {{ runtimeDir: string, ingest: object, platform?: string, uid?: number | null,
  *   fsOps?: { mkdirSync: typeof mkdirSync, chmodSync: typeof chmodSync, lstatSync: typeof lstatSync, unlinkSync: typeof unlinkSync } }} opts
  */
 export async function startHookSocket({ runtimeDir, ingest, platform = process.platform, uid = process.getuid?.() ?? null,
   fsOps = { mkdirSync, chmodSync, lstatSync, unlinkSync } }) {
-  const socketPath = endpoint(runtimeDir, 'hooks', { platform, uid })
+  const secret = platform === 'win32' ? endpointSecret(runtimeDir, { platform, create: true }) : undefined
+  const socketPath = endpoint(runtimeDir, 'hooks', { platform, uid, secret })
   const pipe = isPipe(socketPath)
   if (!pipe) {
     // The base (XDG_RUNTIME_DIR, or a shared fallback such as /tmp/fleetmates-deck-<uid>) must be this user's and
@@ -72,6 +76,8 @@ export async function startHookSocket({ runtimeDir, ingest, platform = process.p
     fsOps.mkdirSync(dir, { recursive: true, mode: 0o700 })
     fsOps.chmodSync(dir, 0o700)
     await ensurePrivateDir(dir, { platform, uid })
+    // ensurePrivateDir follows symlinks; the hook's endpointDirProblem does not. Refuse what the hook would refuse.
+    await checkEndpointDirs(runtimeDir, { platform, uid })
   }
   const server = createServer(socket => {
     let pending = ''

@@ -5,8 +5,10 @@ import fs, { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import {
-  runtimeBase, deckDir, endpoint, isPipe, ensurePrivateDir, privateFileProblem, killTree,
+  runtimeBase, deckDir, endpoint, endpointSecret, isPipe, ensurePrivateDir, privateFileProblem, killTree,
   resolveCommand, quoteCmdArg, escapeCmdCommand, commandSpawn, openUrlArgv, isClaudeProgram, unwrapCmdShim,
   windowsChildEnv, openNoFollowSync, openNoFollow, createInputModeFilter,
 } from '../../platform/index.mjs'
@@ -14,13 +16,37 @@ import * as platformModule from '../../platform/index.mjs'
 
 const moduleFile = fileURLToPath(new URL('../../platform/index.mjs', import.meta.url))
 
+const SECRET = 'a'.repeat(64)
+const OTHER_SECRET = '0123456789abcdef'.repeat(4)
+
+/** The win32 key file of `base`, as endpointSecret names it. */
+const keyFile = base => path.win32.join(deckDir(base, { platform: 'win32' }), 'endpoint.key')
+
+/**
+ * Run `fn` with a fresh temp dir as the working directory. The win32 key file of the relative base
+ * 'base' is then a file under that dir on any host: on Windows `base\fleetmates-deck\endpoint.key`,
+ * on POSIX one file whose name holds the backslashes.
+ * @param {(dir: string) => Promise<void>} fn
+ */
+async function inScratch (fn) {
+  const cwd = process.cwd()
+  const dir = await mkdtemp(path.join(tmpdir(), 'deck-key-'))
+  process.chdir(dir)
+  try {
+    await fn(dir)
+  } finally {
+    process.chdir(cwd)
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+}
+
 test('the platform module imports only node: modules and exports exactly the documented names', async () => {
   const source = await readFile(moduleFile, 'utf8')
   const specifiers = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map(m => m[1])
   assert.ok(specifiers.length > 0)
   for (const s of specifiers) assert.match(s, /^node:/, `${s} is not a node: module`)
   assert.deepEqual(Object.keys(platformModule).sort(), [
-    'commandSpawn', 'createInputModeFilter', 'deckDir', 'endpoint', 'ensurePrivateDir', 'escapeCmdCommand', 'isClaudeProgram',
+    'commandSpawn', 'createInputModeFilter', 'deckDir', 'endpoint', 'endpointSecret', 'ensurePrivateDir', 'escapeCmdCommand', 'isClaudeProgram',
     'isPipe', 'killTree', 'openNoFollow', 'openNoFollowSync', 'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand',
     'runtimeBase', 'unwrapCmdShim', 'windowsChildEnv',
   ])
@@ -53,7 +79,8 @@ test('every path is built with the injected platform flavour, never the host pat
   assert.equal(deckDir('/Users/you/run', { platform: 'darwin' }), '/Users/you/run/fleetmates-deck')
   assert.equal(deckDir('/home/you\\run', { platform: 'linux' }), '/home/you\\run/fleetmates-deck')
   assert.equal(endpoint('/Users/you/run', 'hooks', { platform: 'darwin', uid: 501 }), '/Users/you/run/fleetmates-deck/hooks.sock')
-  assert.equal(endpoint('C:/Users/you/run', 'deckd', { platform: 'win32', uid: null }), endpoint('C:\\Users\\you\\run', 'deckd', { platform: 'win32', uid: null }))
+  assert.equal(endpoint('C:/Users/you/run', 'deckd', { platform: 'win32', uid: null, secret: SECRET }),
+    endpoint('C:\\Users\\you\\run', 'deckd', { platform: 'win32', uid: null, secret: SECRET }))
   assert.equal(resolveCommand('claude', { platform: 'win32', env: { PATH: 'C:/npm' }, exists: p => p === 'C:\\npm\\claude.cmd' }), 'C:\\npm\\claude.cmd')
   assert.deepEqual(unwrapCmdShim('C:/npm/claude.cmd', { readFile: () => '"%dp0%\\bin\\claude.exe" %*' }), { kind: 'exe', file: 'C:\\npm\\bin\\claude.exe' })
   assert.equal(isClaudeProgram('/usr/bin\\claude', { platform: 'linux' }), false)
@@ -83,15 +110,118 @@ test('endpoint on POSIX is a socket under deckDir, with a /tmp fallback past 100
   assert.equal(endpoint('/' + 'y'.repeat(73), 'deckd', { platform: 'linux', uid: 7 }), '/tmp/fleetmates-deck-7/deckd.sock')
 })
 
-test('endpoint on win32 is a named pipe hashed from the case-folded base', () => {
-  const a = endpoint('C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run', 'deckd', { platform: 'win32', uid: null })
+test('endpoint on win32 is a named pipe hashed from the case-folded base and the secret', () => {
+  const base = 'C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run'
+  const a = endpoint(base, 'deckd', { platform: 'win32', uid: null, secret: SECRET })
   assert.match(a, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-deckd$/)
-  const upper = endpoint('C:\\USERS\\YOU\\AppData\\Local\\fleetmates-deck\\run', 'deckd', { platform: 'win32', uid: null })
+  const h = createHash('sha256').update(path.win32.resolve(base).toLowerCase() + '\0' + SECRET).digest('hex').slice(0, 16)
+  assert.equal(a, `\\\\.\\pipe\\fleetmates-deck-${h}-deckd`)
+  const upper = endpoint('C:\\USERS\\YOU\\AppData\\Local\\fleetmates-deck\\run', 'deckd', { platform: 'win32', uid: null, secret: SECRET })
   assert.equal(upper, a, 'same base, different case, same pipe')
-  const other = endpoint('D:\\elsewhere', 'deckd', { platform: 'win32', uid: null })
+  const other = endpoint('D:\\elsewhere', 'deckd', { platform: 'win32', uid: null, secret: SECRET })
   assert.notEqual(other, a)
-  const hooks = endpoint('C:\\Users\\you\\AppData\\Local\\fleetmates-deck\\run', 'hooks', { platform: 'win32', uid: null })
+  const hooks = endpoint(base, 'hooks', { platform: 'win32', uid: null, secret: SECRET })
   assert.equal(hooks, a.replace(/-deckd$/, '-hooks'))
+  // Another user who knows the base but not the secret cannot predict the name.
+  assert.notEqual(endpoint(base, 'deckd', { platform: 'win32', uid: null, secret: OTHER_SECRET }), a)
+  const keyless = createHash('sha256').update(path.win32.resolve(base).toLowerCase()).digest('hex').slice(0, 16)
+  assert.notEqual(a, `\\\\.\\pipe\\fleetmates-deck-${keyless}-deckd`)
+})
+
+test('endpoint on win32 without a secret and without a key file throws ENOENT; a secret that is not 64 hex digits throws', async () => {
+  await inScratch(async () => {
+    assert.throws(() => endpoint('base', 'deckd', { platform: 'win32', uid: null }), { code: 'ENOENT' })
+    for (const secret of ['', 'abc', SECRET.toUpperCase(), SECRET + '0', 42]) {
+      assert.throws(() => endpoint('base', 'hooks', { platform: 'win32', uid: null, secret }), /secret/, String(secret))
+    }
+  })
+})
+
+test('endpoint on win32 without a secret reads the key file of its base', async () => {
+  await inScratch(async () => {
+    const secret = endpointSecret('base', { platform: 'win32', create: true })
+    assert.equal(endpoint('base', 'deckd', { platform: 'win32', uid: null }), endpoint('base', 'deckd', { platform: 'win32', uid: null, secret }))
+  })
+})
+
+test('endpoint on POSIX ignores a secret: the socket path is the same with and without one', () => {
+  for (const [platform, uid] of [['linux', 1000], ['darwin', 501]]) {
+    for (const base of ['/run/user/1000', '/run/' + 'x'.repeat(90)]) {
+      assert.equal(endpoint(base, 'deckd', { platform, uid, secret: SECRET }), endpoint(base, 'deckd', { platform, uid }), `${platform} ${base}`)
+    }
+  }
+})
+
+test('endpointSecret is null off win32 and touches no file', async () => {
+  await inScratch(async (dir) => {
+    for (const platform of ['linux', 'darwin']) {
+      assert.equal(endpointSecret('base', { platform }), null)
+      assert.equal(endpointSecret('base', { platform, create: true }), null)
+    }
+    assert.deepEqual(fs.readdirSync(dir), [])
+  })
+})
+
+test('endpointSecret on win32: a reader gets null for a missing key and creates nothing; a creator writes 64 hex digits that every later call reads', async () => {
+  await inScratch(async (dir) => {
+    assert.equal(endpointSecret('base', { platform: 'win32' }), null)
+    assert.deepEqual(fs.readdirSync(dir), [], 'a reader creates nothing')
+    const created = endpointSecret('base', { platform: 'win32', create: true })
+    assert.match(created, /^[0-9a-f]{64}$/)
+    assert.equal(readFileSync(keyFile('base'), 'utf8'), created, 'the key file holds exactly the secret')
+    assert.equal(endpointSecret('base', { platform: 'win32' }), created)
+    assert.equal(endpointSecret('base', { platform: 'win32', create: true }), created, 'a second creator keeps the key')
+  })
+})
+
+test('endpointSecret on win32 creates exclusively: a creator that loses the race rereads the key the winner wrote', async () => {
+  await inScratch(async () => {
+    const winner = 'b'.repeat(64)
+    let raced = false
+    // Another starter writes its key between this creator's first read and its own create.
+    const racing = { ...fs, linkSync (from, to) {
+      if (!raced) { raced = true
+        fs.mkdirSync(path.win32.dirname(keyFile('base')), { recursive: true })
+        fs.writeFileSync(keyFile('base'), winner) }
+      return fs.linkSync(from, to)
+    } }
+    assert.equal(endpointSecret('base', { platform: 'win32', create: true, fs: racing }), winner)
+    assert.equal(raced, true)
+    assert.equal(readFileSync(keyFile('base'), 'utf8'), winner)
+  })
+})
+
+test('endpointSecret on win32 treats a malformed key as missing for readers; a creator logs it and writes a new one', async () => {
+  await inScratch(async () => {
+    for (const bad of ['', 'abc', 'z'.repeat(64), 'a'.repeat(64) + '\n', 'a'.repeat(63)]) {
+      fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+      fs.writeFileSync(keyFile('base'), bad)
+      assert.equal(endpointSecret('base', { platform: 'win32' }), null, JSON.stringify(bad))
+      assert.equal(readFileSync(keyFile('base'), 'utf8'), bad, 'a reader leaves it alone')
+      const logged = []
+      const fresh = endpointSecret('base', { platform: 'win32', create: true, log: line => logged.push(line) })
+      assert.match(fresh, /^[0-9a-f]{64}$/)
+      assert.equal(readFileSync(keyFile('base'), 'utf8'), fresh)
+      assert.equal(logged.length, 1)
+      assert.match(logged[0], /malformed/)
+    }
+  })
+})
+
+test('setupPaths on win32 names the pipes from the key file at each access, and without a key one unreachable name per paths object', async () => {
+  await inScratch(async () => {
+    const env = { USERPROFILE: 'C:\\Users\\you', LOCALAPPDATA: 'local' }
+    const paths = setupPaths(env, { platform: 'win32', uid: null })
+    const base = runtimeBase({ env, platform: 'win32' })
+    const before = paths.endpoints.deckd
+    assert.match(before, /^\\\\\.\\pipe\\fleetmates-deck-[0-9a-f]{16}-deckd$/)
+    assert.equal(paths.endpoints.deckd, before, 'the same name at every access while there is no key')
+    assert.equal(paths.endpoints.hooks, before.replace(/-deckd$/, '-hooks'))
+    const secret = endpointSecret(base, { platform: 'win32', create: true })
+    assert.equal(paths.endpoints.deckd, endpoint(base, 'deckd', { platform: 'win32', secret }), 'a key written after setupPaths is read at access')
+    assert.equal(paths.endpoints.hooks, endpoint(base, 'hooks', { platform: 'win32', secret }))
+    assert.notEqual(before, paths.endpoints.deckd)
+  })
 })
 
 test('endpoint refuses an unknown name on every platform', () => {

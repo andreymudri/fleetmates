@@ -15,7 +15,7 @@ import { PtyHost, DeckdError } from './pty-host.mjs'
 import { captureLoginEnv, dropSessionVars, changedNames } from './login-env.mjs'
 import { capHistory } from './screen-model.mjs'
 import { checkEndpointDirs } from './client.mjs'
-import { runtimeBase, deckDir, endpoint, isPipe, ensurePrivateDir } from '../platform/index.mjs'
+import { runtimeBase, deckDir, endpoint, endpointSecret, isPipe, ensurePrivateDir } from '../platform/index.mjs'
 
 /** How long `exits` keeps an exit record. */
 const EXIT_RETENTION_MS = 24 * 60 * 60 * 1000
@@ -37,13 +37,14 @@ const GUARD_QUIET_MAX_MS = 5000
 
 /**
  * The deck directory and deckd's endpoint for a runtime dir: `socketPath` is
- * a Unix socket path on POSIX and a named pipe on win32.
+ * a Unix socket path on POSIX and a named pipe on win32, whose name hashes
+ * `secret` (by default the endpoint key under the runtime dir).
  * @param {string} runtimeDir
- * @param {{ platform?: string }} [opts]
+ * @param {{ platform?: string, secret?: string | null }} [opts]
  * @returns {{ dir: string, socketPath: string }}
  */
-export function socketPaths (runtimeDir, { platform = process.platform } = {}) {
-  return { dir: deckDir(runtimeDir, { platform }), socketPath: endpoint(runtimeDir, 'deckd', { platform }) }
+export function socketPaths (runtimeDir, { platform = process.platform, secret } = {}) {
+  return { dir: deckDir(runtimeDir, { platform }), socketPath: endpoint(runtimeDir, 'deckd', { platform, secret }) }
 }
 
 /**
@@ -174,7 +175,8 @@ async function exitHistory (host, maxBytes) {
 /**
  * Start deckd listening on `endpoint(runtimeDir, 'deckd')`: on POSIX
  * `$runtimeDir/fleetmates-deck/deckd.sock` (or the short /tmp path when that
- * is too long for a socket), on win32 a named pipe.
+ * is too long for a socket), on win32 a named pipe whose name hashes the
+ * endpoint key, which deckd writes in the deck dir when it is missing.
  * The runtime dir is created when missing and, on POSIX, refused when another
  * user owns it or it has any group or world permission bit
  * (docs/deck/08-security.md 4.3); the socket's directory is made 0700 and
@@ -192,11 +194,16 @@ async function exitHistory (host, maxBytes) {
 export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CAP, version = '0.0.0', loginEnv = dropSessionVars(process.env), historyCap = EXIT_TAIL_BYTES, platform = process.platform }) {
   await ensurePrivateDir(runtimeDir, { platform })
   const loginEnvNames = changedNames(loginEnv, process.env).slice(0, LOGIN_ENV_NAMES_MAX)
-  const { dir, socketPath } = socketPaths(runtimeDir, { platform })
-  const pipe = isPipe(socketPath)
-  if (pipe) {
+  const dir = deckDir(runtimeDir, { platform })
+  // win32: the pipe name hashes the endpoint key, written here when missing.
+  let secret
+  if (platform === 'win32') {
     await ensurePrivateDir(dir, { platform })
-  } else {
+    secret = endpointSecret(runtimeDir, { platform, create: true })
+  }
+  const { socketPath } = socketPaths(runtimeDir, { platform, secret })
+  const pipe = isPipe(socketPath)
+  if (!pipe) {
     // The deck dir, and the socket's own dir when the endpoint fell back to
     // a short /tmp path; a dir left behind with a looser mode is tightened.
     for (const d of new Set([dir, path.dirname(socketPath)])) {

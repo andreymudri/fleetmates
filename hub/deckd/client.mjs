@@ -5,7 +5,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { lstat as fsLstat } from 'node:fs/promises'
 import { encode, createLineDecoder, PROTO } from './protocol.mjs'
-import { endpoint, deckDir } from '../platform/index.mjs'
+import { endpoint, endpointSecret, deckDir } from '../platform/index.mjs'
 
 /**
  * On POSIX, refuse to connect through a directory another local user could
@@ -59,7 +59,8 @@ export class DeckdRequestError extends Error {
 
 /**
  * Connect to deckd and say `hello`. Rejects with the socket error (`code`
- * ENOENT or ECONNREFUSED when no deckd listens), with code `not_private`
+ * ENOENT or ECONNREFUSED when no deckd listens), with code ENOENT on win32
+ * when there is no endpoint key to read, with code `not_private`
  * when checkEndpointDirs refuses the directories (POSIX; checked before
  * connecting), or with a DeckdRequestError when deckd refuses the hello.
  *
@@ -80,9 +81,15 @@ export class DeckdRequestError extends Error {
  */
 export async function connectDeckd ({ runtimeDir, kind, name, proto = PROTO, platform = process.platform, uid = process.getuid?.() ?? null }) {
   await checkEndpointDirs(runtimeDir, { platform, uid })
+  // win32: the pipe name hashes the endpoint key deckd writes when it starts;
+  // a client only reads it, and without one there is no deckd to reach.
+  const secret = endpointSecret(runtimeDir, { platform })
+  if (platform === 'win32' && secret === null) {
+    throw Object.assign(new Error(`deckd is not running: no endpoint key in ${deckDir(runtimeDir, { platform })}`), { code: 'ENOENT' })
+  }
   // The endpoint main.mjs listens on, from the platform module rather than
   // from main.mjs, because main.mjs loads node-pty, which a client has no use for.
-  const socket = net.connect(endpoint(runtimeDir, 'deckd', { platform }))
+  const socket = net.connect(endpoint(runtimeDir, 'deckd', { platform, secret: secret ?? undefined }))
   await new Promise((resolve, reject) => {
     socket.once('connect', () => { socket.off('error', reject); resolve(undefined) })
     socket.once('error', reject)
