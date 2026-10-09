@@ -288,6 +288,7 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 - Modify: `hub/deckd/pty-host.mjs`
 - Modify: `hub/bin/fm.mjs`
 - Test: `hub/test/unit/deckd-protocol.test.mjs`
+- Test: `hub/test/unit/pty-signals.test.mjs`
 - Test: `hub/test/integration/deckd-m3.test.mjs`
 - Test: `hub/test/integration/fm.test.mjs`
 - Test: `hub/test/integration/launch.test.mjs`
@@ -300,7 +301,7 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 **Acceptance:**
 - `pty-host.mjs`, on win32 only (POSIX unchanged): the env handed to node-pty is `windowsChildEnv(requestEnv)`; before calling node-pty the resolved file (after `commandSpawn`) must exist and end in `.exe` or `.com` (case-insensitive), otherwise the spawn is refused with the existing `spawn_failed` error shape and node-pty is never called; output passes through one `createInputModeFilter({ platform })` per PTY before the ring, the screen model and output events.
 - `fm.mjs`: everything written to its own stdout from the session passes through `createInputModeFilter({ platform })`, so a replayed `ESC[?9001h` never reaches the outer console.
-- Tests: `deckd-protocol.test.mjs` uses `nodeClaudeShim` on win32 instead of a shebang stub, and adds a unit test with an injected platform win32 and an injected node-pty spawn that asserts a `.mjs` or missing file is refused without calling it. `deckd-m3.test.mjs` passes on Windows. `fm.test.mjs`: kills sessions with `killTree`, removes temp dirs with `maxRetries`, builds `fm ls` expectations with `path.join`, and skips the byte-exact replay assertions on win32 with the reason `ConPTY re-renders output`. `launch.test.mjs` registers every `t.after` cleanup before the call that can throw and builds state paths with `setupPaths(env)`. `deliver.test.mjs` passes on Windows (the SystemRoot fix).
+- Tests: `pty-signals.test.mjs` win32 cases inject an existing `.exe` (or `.com`) where they expect node-pty to be called, so the PE check does not refuse them. `deckd-protocol.test.mjs` uses `nodeClaudeShim` on win32 instead of a shebang stub, and adds a unit test with an injected platform win32 and an injected node-pty spawn that asserts a `.mjs` or missing file is refused without calling it. `deckd-m3.test.mjs` passes on Windows. `fm.test.mjs`: kills sessions with `killTree`, removes temp dirs with `maxRetries`, builds `fm ls` expectations with `path.join`, and skips the byte-exact replay assertions on win32 with the reason `ConPTY re-renders output`. `launch.test.mjs` registers every `t.after` cleanup before the call that can throw and builds state paths with `setupPaths(env)`. `deliver.test.mjs` passes on Windows (the SystemRoot fix).
 - Mutations each fail a test, then are restored: drop `windowsChildEnv` in pty-host (the VM run fails; on Linux the injected-platform unit test fails); drop the PE check; drop the filter in fm.
 
 - [ ] Step 1: Write the tests; observe them fail.
