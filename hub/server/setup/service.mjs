@@ -146,7 +146,7 @@ export function createServiceManager({
       // A pid file left by a crash or a reboot may name an unrelated process tree. Kill only a pid whose command line
       // runs this service's entry; otherwise only drop the stale pid file. A failed taskkill is checked again the same
       // way, and stop fails while the process still runs.
-      if (/^[1-9][0-9]*$/.test(pid) && await isServiceProcess(pid, service)) {
+      if (await isServiceProcess(pid, service)) {
         const result = await run('taskkill', ['/PID', pid, '/T', '/F'])
         if (result.code !== 0 && await isServiceProcess(pid, service)) throw new Error(`taskkill /PID ${pid} failed: ${result.stderr?.trim() || `exit ${result.code}`}`)
       }
