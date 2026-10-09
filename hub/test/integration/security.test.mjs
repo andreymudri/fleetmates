@@ -212,8 +212,11 @@ test('a term.attach from a socket opened with a wrong token is never processed: 
   const tokenFile = setupPaths({ HOME: home, XDG_RUNTIME_DIR: runtimeDir }).token
   fs.mkdirSync(path.dirname(tokenFile), { recursive: true, mode: 0o700 })
   fs.writeFileSync(tokenFile, token, { mode: 0o600 })
-  t.after(() => rmDir(home))
-  const h = await harness(t, { env: { HOME: home, XDG_RUNTIME_DIR: runtimeDir }, connectDeckd: async () => deckdClient, helloTimeoutMs: 5000 })
+  // The server's store lives under `home`, so `home` is removed only after the harness has closed the server: after
+  // hooks run in the order they were registered. Removed first, Windows refused it (EPERM) while deck.db was open, and
+  // the throwing hook left the server listening, so the file never finished.
+  let h
+  try { h = await harness(t, { env: { HOME: home, XDG_RUNTIME_DIR: runtimeDir }, connectDeckd: async () => deckdClient, helloTimeoutMs: 5000 }) } finally { t.after(() => rmDir(home)) }
   assert.equal(h.deck.link.connected, true)
   const client = h.ws({}, ['deck.v1', 'deck.auth.wrong'])
   const opened = once(client, 'open').then(() => {

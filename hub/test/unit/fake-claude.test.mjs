@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import pty from 'node-pty'
 import { fakeBin } from '../helpers/fake-bin.mjs'
 import { posixTest } from '../helpers/platform.mjs'
-import { commandSpawn } from '../../platform/index.mjs'
+import { commandSpawn, killTree } from '../../platform/index.mjs'
 import { testedVersion } from '../helpers/tested-version.mjs'
 import { askArgv } from '../../server/ask/engine.mjs'
 import {
@@ -32,8 +32,36 @@ async function tempDir (prefix) {
 }
 
 /**
+ * win32 only, at most once: close a node-pty 1.1.0 pseudoconsole and its conout worker, the rest of node-pty's own
+ * kill() without the console-list agent it forks, as deckd/pty-host.mjs does after an exit. On the Windows VM this
+ * file did not finish after its last test while these stayed open.
+ * @param {import('node-pty').IPty} p
+ */
+function releasePseudoconsole (p) {
+  const agent = /** @type {any} */ (p)._agent
+  if (process.platform !== 'win32' || !agent || agent.released) return
+  agent.released = true
+  try {
+    if (agent._inSocket) agent._inSocket.readable = false
+    if (agent._outSocket) agent._outSocket.readable = false
+    agent._ptyNative?.kill(agent._pty, Boolean(agent._useConptyDll))
+    agent._conoutSocketWorker?.dispose()
+  } catch {}
+}
+
+/**
+ * The output with VT control sequences removed on win32, where ConPTY wraps what the child wrote in its own
+ * (`ESC[?9001h`, a clear, the window title). Elsewhere the output is returned as it is.
+ * @param {string} text
+ */
+const childText = text => process.platform === 'win32'
+  ? text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+  : text
+
+/**
  * Run the fake `claude` in a PTY: fakeBin()'s `claudePath` through commandSpawn, which on Windows runs the
  * claude.cmd shim's script with node (node-pty applies no PATHEXT, so a bare `claude` is not found there).
+ * `stop()` ends it: node-pty's kill() on POSIX; on win32 killTree, then the pseudoconsole is closed.
  * @param {{ file: string, env: NodeJS.ProcessEnv, args?: string[], cwd?: string, cols?: number, rows?: number }} opts
  */
 function runFake ({ file, env, args = [], cwd = os.tmpdir(), cols = 80, rows = 24 }) {
@@ -42,8 +70,13 @@ function runFake ({ file, env, args = [], cwd = os.tmpdir(), cols = 80, rows = 2
   let output = ''
   p.onData(d => { output += d })
   /** @type {Promise<{ exitCode: number, signal?: number }>} */
-  const exited = new Promise(resolve => p.onExit(resolve))
-  return { p, exited, output: () => output }
+  const exited = new Promise(resolve => p.onExit(event => { releasePseudoconsole(p); resolve(event) }))
+  const stop = () => {
+    if (process.platform !== 'win32') return p.kill()
+    killTree(p.pid, 'SIGKILL')
+    releasePseudoconsole(p)
+  }
+  return { p, exited, stop, output: () => output }
 }
 
 /**
@@ -79,7 +112,7 @@ test('claude --version prints FAKE_CLAUDE_VERSION in the real format', async () 
     const run = runFake({ file: bin.claudePath, env: bin.env, args: ['--version'] })
     const { exitCode } = await run.exited
     assert.equal(exitCode, 0)
-    assert.equal(run.output().trim(), '9.8.7 (Claude Code)')
+    assert.equal(childText(run.output()).trim(), '9.8.7 (Claude Code)')
   } finally {
     await bin.cleanup()
   }
@@ -103,7 +136,7 @@ test('echo.json echoes input bytes and logs every chunk', async () => {
     assert.equal(inputs.map(e => e.input).join(''), 'abcxyz')
     for (const e of inputs) assert.equal(typeof e.ts, 'number')
   } finally {
-    run.p.kill()
+    run.stop()
     await run.exited
     await bin.cleanup()
     await t.cleanup()
@@ -121,7 +154,7 @@ test('resize.json logs a resize after pty.resize', async () => {
     const entry = await waitFor(async () => (await readLog(log)).find(e => e.resize))
     assert.deepEqual(entry.resize, { cols: 100, rows: 30 })
   } finally {
-    run.p.kill()
+    run.stop()
     await run.exited
     await bin.cleanup()
     await t.cleanup()
