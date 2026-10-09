@@ -1,6 +1,6 @@
 import { isRoute } from './deck-store.js'
 
-/** sessionStorage key that holds this tab's deck token. */
+/** Storage key that holds this tab's deck token. */
 export const TOKEN_KEY = 'fleetmates-deck.token'
 /** API version this build speaks (docs/deck/05-api.md section 8). */
 export const API_VERSION = 1
@@ -8,20 +8,46 @@ export const API_VERSION = 1
 export const BUILD = 'm5'
 
 /**
- * Move `#token=<t>` from the URL fragment into sessionStorage and drop the fragment with
- * `history.replaceState`, so the token never stays in the address bar or history.
- * A fragment `to=<route>` is returned only when it names a known SPA route.
- * @param {{ location: { hash: string, pathname: string, search: string }, history: { replaceState: Function }, storage: Storage }} env
+ * Move `#token=<t>` from the URL fragment into storage and drop the fragment with `history.replaceState`, so the
+ * token never stays in the address bar or history. A fragment `to=<route>` is returned only when it names a known
+ * SPA route.
+ *
+ * `durable` is the store an installed PWA reads on its next launch (localStorage): an installed app opens at its
+ * `start_url`, with no fragment and a fresh sessionStorage, so a token kept only per tab would be lost. The token
+ * is written to both stores and read from `storage` first, which keeps an already open tab on its own token.
+ * @param {{ location: { hash: string, pathname: string, search: string }, history: { replaceState: Function }, storage: Storage, durable?: Storage | null }} env
  * @returns {{ token: string | null, to: string | null }}
  */
-export function captureToken({ location, history, storage }) {
+export function captureToken({ location, history, storage, durable = null }) {
   const params = new URLSearchParams(location.hash.replace(/^#/, ''))
   const fragment = params.get('token')
-  if (!fragment) return { token: storage.getItem(TOKEN_KEY), to: null }
+  if (!fragment) return { token: storage.getItem(TOKEN_KEY) ?? durable?.getItem(TOKEN_KEY) ?? null, to: null }
   storage.setItem(TOKEN_KEY, fragment)
+  durable?.setItem(TOKEN_KEY, fragment)
   history.replaceState(null, '', location.pathname + location.search)
   const to = params.get('to')
   return { token: fragment, to: to && isRoute(to) ? to : null }
+}
+
+/**
+ * Whether this device kept the token past the life of its tab. Only remote access does that, so this is also the
+ * test for "is there anything to sign out of" (`durable` is the localStorage of main.jsx).
+ * @param {Storage | null | undefined} durable
+ * @returns {boolean}
+ */
+export function tokenIsDurable(durable) {
+  try { return !!durable?.getItem(TOKEN_KEY) } catch { return false }
+}
+
+/**
+ * Forget the deck token on this device, in both stores. The deck token itself is unchanged: another device that
+ * paired with the same passphrase keeps working, and revoking everything is still `init --rotate-token`.
+ * @param {{ storage?: Storage | null, durable?: Storage | null }} stores
+ */
+export function forgetToken({ storage, durable }) {
+  for (const store of [storage, durable]) {
+    try { store?.removeItem(TOKEN_KEY) } catch {}
+  }
 }
 
 /**
@@ -34,12 +60,13 @@ export function wsProtocols(token) {
 }
 
 /**
- * The deck WebSocket URL for the page's own host.
- * @param {{ host: string }} location
+ * The deck WebSocket URL for the page's own origin. The scheme follows the page: a deck reached through an HTTPS
+ * tunnel must upgrade with `wss:`, since a browser refuses a plaintext socket from a secure page.
+ * @param {{ host: string, protocol?: string }} location
  * @returns {string}
  */
 export function wsUrl(location) {
-  return `ws://${location.host}/api/ws`
+  return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`
 }
 
 /**

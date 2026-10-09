@@ -36,7 +36,7 @@ export function tailLines(lines, statusRows) {
 
 /**
  * @typedef {{ readyState: number, bufferedAmount: number, send: (data: string | Buffer) => void }} TabSocket
- * @typedef {{ ws: TabSocket, sessionId: string, ptyId: string, cols: number, rows: number, buffer: { seq: number, msg: any }[] | null,
+ * @typedef {{ ws: TabSocket, sessionId: string, ptyId: string, cols: number, rows: number, fit: boolean, buffer: { seq: number, msg: any }[] | null,
  *   syncs: number, dropping: boolean, attached: boolean }} Tab
  */
 
@@ -131,12 +131,13 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
     const later = tab.buffer.filter(entry => entry.seq > seam)
     tab.buffer = null
     for (const entry of later) deliver(tab, Buffer.from(entry.msg.data, 'base64'))
-    if (first) link.request('resize', { ptyId: tab.ptyId, cols: tab.cols, rows: tab.rows, source: { kind: 'browser' } }).catch(() => {})
+    // A phone attaches with `resize: false`: the PTY is the owner's terminal on the machine, so it keeps its size.
+    if (first && tab.fit) link.request('resize', { ptyId: tab.ptyId, cols: tab.cols, rows: tab.rows, source: { kind: 'browser' } }).catch(() => {})
   }
 
   async function attach(ws, msg) {
     const { sessionId, cols, rows } = msg
-    if (typeof sessionId !== 'string' || !ID.test(sessionId) || !isSize(cols) || !isSize(rows)) return termError(ws, typeof sessionId === 'string' ? sessionId : null, 'validation_failed')
+    if (typeof sessionId !== 'string' || !ID.test(sessionId) || !isSize(cols) || !isSize(rows) || msg.resize !== undefined && typeof msg.resize !== 'boolean') return termError(ws, typeof sessionId === 'string' ? sessionId : null, 'validation_failed')
     const row = rowOf(sessionId)
     if (!row) return termError(ws, sessionId, 'not_found')
     if (!hasPty(row)) return termError(ws, sessionId, 'no_pty')
@@ -144,7 +145,7 @@ export function createPtyBridge({ link, store, publish, now = Date.now, setTimeo
     const socket = socketOf(ws)
     const previous = socket.tabs.get(sessionId)
     /** @type {Tab} */
-    const tab = { ws, sessionId, ptyId: row.pty_id, cols, rows, buffer: [], syncs: 0, dropping: false, attached: false }
+    const tab = { ws, sessionId, ptyId: row.pty_id, cols, rows, fit: msg.resize !== false, buffer: [], syncs: 0, dropping: false, attached: false }
     socket.tabs.set(sessionId, tab)
     const pty = ptyOf(tab.ptyId)
     pty.tabs.add(tab)

@@ -58,6 +58,9 @@ export function Rail({ t, path, counts, recording, navigate }) {
         onClick={linkHandler(navigate, item.href)}
       >
         {ICONS[item.id]}
+        {/* The phone bottom bar shows this label under the icon (styles/mobile.css); on a desktop it is
+            display:none and the hover tooltip beside the icon carries the same text plus its shortcut. */}
+        <span className="rail-label" aria-hidden="true">{item.section}</span>
         {item.id === 'sessions' && badge ? <span className="rail-badge" aria-hidden="true">{badge}</span> : null}
         {item.id === 'meetings' && recording ? <span className="rail-rec motion-rec-pulse" aria-hidden="true" /> : null}
       </a>

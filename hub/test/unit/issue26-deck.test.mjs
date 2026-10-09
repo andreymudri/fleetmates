@@ -167,3 +167,22 @@ test('native reports, diagrams and timelines render next action first and escape
   const prompt = renderToStaticMarkup(createElement(prompts.PromptBar, { session: { repoId: '/example', origin: 'observed' }, request: { id: 'r1', kind: 'question', summary: 'Continue?', options: [] } }))
   assert.match(prompt, /Next: Answer the question/)
 })
+
+test('a research request names the field it refuses, and a phone keyboard\'s trailing space on the domain is not one', async () => {
+  const base = { topic: 'Caching behavior', domain: 'web', sourceTypes: ['docs'] }
+  assert.equal(validateRequest({ ...base, domain: 'web ' }).domain, 'web', 'the autocompleted word with its space is trimmed')
+  const field = body => { try { validateRequest(body) } catch (error) { return [error.code, error.details.fields[0]] } return null }
+  assert.deepEqual(field({ ...base, domain: 'web dev' }), ['validation_failed', 'domain'])
+  assert.deepEqual(field({ ...base, topic: 'ab' }), ['validation_failed', 'topic'])
+  assert.deepEqual(field({ ...base, sourceTypes: [] }), ['validation_failed', 'sourceTypes'])
+  assert.deepEqual(field({ ...base, sourceUrls: ['file:///tmp/note'] }), ['validation_failed', 'sourceUrls'])
+  assert.deepEqual(field({ ...base, extra: 1 }), ['validation_failed', 'extra'])
+  const { module } = await runnerImport(fileURLToPath(new URL('../../web/src/screens/research/Research.jsx', import.meta.url)))
+  const html = renderToStaticMarkup(createElement(module.ResearchForm, { error: { code: 'validation_failed', message: 'validation_failed', details: { fields: ['domain'] } } }))
+  assert.match(html, /Check the target domain \(letters, numbers, - and _ only\)/)
+  assert.doesNotMatch(html, />validation_failed</)
+  assert.match(html, /autocapitalize="none"/i)
+  const repoHtml = renderToStaticMarkup(createElement(module.ResearchForm, { repos: [{ id: '/x/memory', name: 'memory' }], error: { code: 'validation_failed', details: { fields: ['repoKey'] } } }))
+  assert.match(repoHtml, /Check the repository \(research runs in a git repository\)/)
+  assert.match(repoHtml, /<option value="" selected="">Choose a repository<\/option>/, 'no repository is chosen for the owner')
+})

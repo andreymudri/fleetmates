@@ -20,7 +20,8 @@ import { createFleetmatesReader, taskForCwd } from './adapters/fleetmates.mjs'
 import { initializeLedgerTimeline, syncLedgerTimeline } from './ledger-timeline.mjs'
 import { createApi } from './http/api.mjs'
 import { createRouter, apiError } from './http/router.mjs'
-import { readToken } from './http/auth.mjs'
+import { parsePublicOrigin, readToken } from './http/auth.mjs'
+import { createRemoteAccess } from './http/remote-pass.mjs'
 import { createWsHub } from './ws/hub.mjs'
 import { authorize } from './http/auth.mjs'
 import { openInBrowser } from './setup/browser.mjs'
@@ -155,6 +156,13 @@ export async function createDeckServer(options = {}) {
   try { config = JSON.parse(fs.readFileSync(path.join(paths.config, 'config.json'), 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
   const port = options.port ?? (env.DECK_PORT === undefined ? config.port ?? 47800 : Number(env.DECK_PORT))
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('invalid DECK_PORT')
+  // Remote access (08-security 4.2): opt in with one exact public origin, resolved as the port is. Without it the
+  // deck answers IPv4 loopback only, exactly as before, and the passphrase exchange does not exist.
+  // Resolved in the shape the port above is resolved: the option, then DECK_PUBLIC_ORIGIN, then config.json. A set
+  // but empty variable is not an absent one; it means loopback only, so a drop-in turns remote access off without
+  // editing config.json.
+  const publicOrigin = parsePublicOrigin(options.publicOrigin ?? (env.DECK_PUBLIC_ORIGIN === undefined ? config.publicOrigin ?? null : env.DECK_PUBLIC_ORIGIN))
+  const remote = createRemoteAccess({ file: path.join(paths.state, 'remote-pass.json'), now, ...owner, ...(options.remoteAccess ?? {}) })
   let boundPort = port
   const store = options.store ?? openDeckDb(path.join(paths.state, 'deck.db'), owner)
   const epoch = store.get('SELECT value FROM meta WHERE key=?', 'epoch').value
@@ -624,13 +632,14 @@ export async function createDeckServer(options = {}) {
     if (!tokenValid) throw apiError(401, 'unauthorized')
     return currentToken
   }
-  const server = http.createServer(createRouter({ api: api.route, staticDir: options.staticDir ?? builtSpa, getToken: refreshToken, getPort: () => boundPort }))
-  hub = createWsHub({ server, store, epoch, link, snapshot: api.snapshot, getToken: refreshToken, getPort: () => boundPort, now, heartbeatMs: options.heartbeatMs, helloTimeoutMs: options.helloTimeoutMs })
+  const server = http.createServer(createRouter({ api: api.route, staticDir: options.staticDir ?? builtSpa, getToken: refreshToken, getPort: () => boundPort,
+    getPublicOrigin: () => publicOrigin, remote }))
+  hub = createWsHub({ server, store, epoch, link, snapshot: api.snapshot, getToken: refreshToken, getPort: () => boundPort, getPublicOrigin: () => publicOrigin, now, heartbeatMs: options.heartbeatMs, helloTimeoutMs: options.helloTimeoutMs })
   // Deck tabs: WebSocket upgrades that pass the hub's own checks, until their socket closes. A popup "Open"
   // navigates a connected tab and otherwise opens the deck in the browser.
   const tabs = new Set()
   server.on('upgrade', (req, socket) => {
-    try { if (req.url !== '/api/ws' || authorize(req, { port: boundPort, token: refreshToken(), upgrade: true })) return } catch { return }
+    try { if (req.url !== '/api/ws' || authorize(req, { port: boundPort, token: refreshToken(), upgrade: true, publicOrigin })) return } catch { return }
     tabs.add(socket)
     socket.once('close', () => tabs.delete(socket))
   })
@@ -848,8 +857,23 @@ export async function startDeckServer(options = {}) {
     return deck } catch (error) { await deck.close()
     throw error }
 }
+/**
+ * The server entrypoint's own arguments. Only `--public-origin <url>` for now, for an operator who runs the server
+ * by hand; under systemd the drop-in sets `DECK_PUBLIC_ORIGIN` and `fleetmates-deck remote-access` writes
+ * `publicOrigin` into `config.json`.
+ * @param {string[]} argv
+ * @returns {{ publicOrigin?: string }}
+ */
+export function parseServerArgs(argv) {
+  const options = {}
+  for (let i = 0; i < argv.length; i += 2) {
+    if (argv[i] !== '--public-origin' || typeof argv[i + 1] !== 'string') throw Error('usage: server/main.mjs [--public-origin <https://host>]')
+    options.publicOrigin = argv[i + 1]
+  }
+  return options
+}
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  startDeckServer().then(deck => {
+  startDeckServer(parseServerArgs(process.argv.slice(2))).then(deck => {
     for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { deck.close().catch(() => { process.exitCode = 1 }) })
   }).catch(() => { process.stderr.write('deck server startup failed\n')
     process.exitCode = 1 })

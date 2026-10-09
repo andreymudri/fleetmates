@@ -52,6 +52,10 @@ body,
 }
 .rail-list--bottom { margin-top: auto; }
 .rail-item { position: relative; }
+/* The bottom-bar label of the phone layout (styles/mobile.css); the desktop Rail is icons and tooltips only. */
+.rail-label { display: none; }
+/* The Home header mark is the phone layout's only brand chrome (styles/mobile.css); the Rail carries it elsewhere. */
+.home-mark { display: none; }
 .rail-link {
   position: relative;
   display: grid;
@@ -279,24 +283,22 @@ body,
   height: var(--space-16);
   border: 1px solid currentColor;
   border-radius: var(--radius-round);
+  background: none;
+  color: inherit;
   font-size: 11px;
-  cursor: default;
+  cursor: pointer;
 }
 .rec-bar-quiet-tip {
   position: absolute;
   top: calc(100% + var(--space-6));
-  left: 50%;
-  transform: translateX(-50%);
+  left: var(--space-16);
   z-index: var(--z-tooltip);
   padding: var(--space-4) var(--space-8);
   border-radius: var(--radius-sm);
   background: var(--bg-raised);
   color: var(--text-strong);
   white-space: nowrap;
-  visibility: hidden;
 }
-.rec-bar-quiet-info:hover .rec-bar-quiet-tip,
-.rec-bar-quiet-info:focus-visible .rec-bar-quiet-tip { visibility: visible; }
 .rec-bar-actions { display: flex; gap: var(--space-8); margin-left: auto; }
 .rec-bar .button--ghost { color: var(--text-on-red-tint); }
 .rec-bar .button--danger-confirm {
@@ -309,4 +311,15 @@ body,
 @media (max-width: 1439px) {
   .rec-bar-quiet { display: none; }
   .rec-bar-quiet-info { display: inline-grid; }
+}
+
+/* Installed PWA (remote access): the shell keeps clear of the notch, the home indicator and the rounded corners.
+   Only in standalone display mode, so a browser tab keeps the layout it has. */
+@media (display-mode: standalone) {
+  .shell {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
 }
