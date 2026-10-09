@@ -1,7 +1,14 @@
 # fleetmates
 
-A Claude Code plugin that runs a written plan across background teammates, each in its own git
-worktree, with an automated gate between phases.
+**A Claude Code plugin that runs a written plan across background teammates, each in its own git
+worktree, with an automated gate between phases.**
+
+[![npm](https://img.shields.io/npm/v/fleetmates?color=cb3837&logo=npm)](https://www.npmjs.com/package/fleetmates) [![test](https://github.com/andreymudri/fleetmates/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/andreymudri/fleetmates/actions/workflows/test.yml) [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![node >=24.2.0](https://img.shields.io/badge/node-%3E%3D24.2.0-339933?logo=node.js&logoColor=white)](package.json) [![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](package.json)
+
+![How a fleetmates run works: a plan of three tasks that each declare their files, init-run grouping them into two phases, two teammates working in parallel on their own branches, the gate checking merge, test, fileset and ownership and the integrator merging, then a phase 2 gate failing fileset because T3 edited src/middleware/auth.mjs outside its declared files, a fix round, and the run passing every phase](https://raw.githubusercontent.com/andreymudri/fleetmates/master/docs/media/fleetmates-demo.gif)
+
+*One real run on a demo todo-api. The plan, branch names, check names and verdicts are the run's own; the teammates' commits
+were scripted.*
 
 You write a plan. The plugin splits it into phases of tasks whose file sets don't overlap,
 dispatches one teammate per task, and refuses to move to the next phase until a gate — computed
@@ -10,20 +17,28 @@ from git, not from anything an agent reported — says the phase is clean.
 Teammates run as Claude Code subagents, or headless through the Codex CLI or the Cursor CLI — see
 [Running on Codex](#running-on-codex) and [Running on Cursor](#running-on-cursor).
 
-![How a fleetmates run works: a plan of three tasks that each declare their files, init-run grouping them into two phases, two teammates working in parallel on their own branches, the gate checking merge, test, fileset and ownership and the integrator merging, then a phase 2 gate failing fileset because T3 edited src/middleware/auth.mjs outside its declared files, a fix round, and the run passing every phase](https://raw.githubusercontent.com/andreymudri/fleetmates/master/docs/media/fleetmates-demo.gif)
+## Why fleetmates
 
-*One real run on a demo todo-api. The plan, branch names, check names and verdicts are the run's own; the teammates' commits
-were scripted.*
+- **Parallel teammates in isolated worktrees.** Each task gets its own git worktree and branch, so
+  teammates in the same phase never edit the same checkout.
+- **A phase gate computed from git.** Merge, test, fileset and ownership checks run on the merged
+  tree, plus any command, agent or MCP checks the manifest declares. Nothing an agent wrote under
+  `.fleetmates/` decides a verdict.
+- **Declared file sets.** A task may change only the files its plan lists. A change outside them
+  fails `fileset` and names the path.
+- **Fix rounds with a budget.** After a failed gate, `fix` decides whether to retry, escalate or do
+  nothing, within the phase's `fixRounds` budget.
+- **Review lenses.** Reviewers run one lens each (for example correctness, security, tests or
+  `claims`), and the manifest decides which severities block.
+- **Codex and Cursor harnesses.** The same plan, gate and result contract, dispatched headless
+  through the Codex CLI or the Cursor CLI.
+- **A local deck.** An optional web UI in `hub/` shows which session needs you and mirrors the
+  team run.
+- **Zero dependencies.** No runtime or dev dependencies; tests use the built-in `node:test` runner.
 
-```
-phase 1   T1  T2  T3        3 worktrees, in parallel
-  gate    merge · test · fileset · ownership · review
-phase 2   T4
-  gate    ...
-          -> merged to the run branch
-```
+## Quick start
 
-## Requirements
+Requirements:
 
 - Claude Code
 - Node.js >= 24.2.0
@@ -33,7 +48,7 @@ phase 2   T4
 
 Zero runtime and zero dev dependencies. Tests use the built-in `node:test` runner.
 
-## Install
+Install the plugin in Claude Code:
 
     /plugin marketplace add andreymudri/fleetmates
     /plugin install fleetmates
@@ -44,184 +59,7 @@ the next session without a publish:
 
     claude --plugin-dir /path/to/fleetmates
 
-### What installing registers
-
-Beyond the skills and commands, the plugin declares a `SubagentStop` hook with no matcher and
-`async: false`. That means **every** subagent stop on this machine — in any project, including one
-with no fleetmates run — synchronously spawns `node scripts/subagent-stop.mjs` before the stop is
-allowed to complete.
-
-The handler is written to be cheap and to fail open: it resolves the stopping agent through a
-worktree location record and returns immediately when it finds none, which is the case for every
-subagent outside a run, and any error is an allow. But it is a synchronous spawn on a hot path and
-it is machine-wide rather than scoped to this repository, so it is worth knowing before installing.
-
-The plugin also registers a synchronous main-session `Stop` guard. It enforces only an
-explicit session binding, never the newest run in the repository. Bind the orchestrating
-session on its run branch with:
-
-```sh
-node scripts/cli.mjs bind-session --run <id> --plan <path> --session <session-id> --base <base>
-```
-
-The guard recomputes `finish --enforcement-only`, blocks once on failed or unresolved
-checks, and displays skipped obligations. A cheap PASS does not establish delivery
-completion. Missing bindings, changed requirements, process errors, timeouts and the
-harness retry escape allow stopping. Process death is not prevented. The unbound path
-costs one Git discovery process. Verify live callback behavior with `doctor --hooks --stop --session <session-id>`
-in the installed harness. A receipt records that this handler fired, not that delivery passed.
-
-Use `suspend --run <id> --plan <path> --base <base>` to pause, `resume --run <id>` to
-continue, or `abandon --run <id> --plan <path> --base <base>` to end that run identity.
-`run-status --run <id>` reports their Git refs. Suspension and abandonment never mean
-verified completion. Marker refs are writable local observations, not authenticated
-operator identity or authorization. No transcript is stored in the session binding.
-
-### Update notices
-
-Claude Code updates plugins in the background and says nothing, so a new version usually arrives
-silently. This plugin tells you two things instead.
-
-**Which version you are on, and whether the install actually works.** The first session after the
-installed version changes, the plugin reports the change, links its release notes, and confirms
-what it found — `ready: 14 skills, 3 agents, cli ok`. Once per version, then silent. No network.
-
-If parts are missing it says so instead, naming them, and repeats that **every** session until
-fixed:
-
-    WARNING: fleetmates is installed but NOT fully working. Missing: scripts/cli.mjs.
-    Fleet commands and phase gates will fail. Reinstall with /plugin install fleetmates.
-
-Note what this cannot tell you: whether the plugin is *enabled*. Claude Code only runs a plugin's
-hooks when `enabledPlugins` has it turned on, so if it were off, nothing here would run to report
-it. The check covers the failure you can actually hit with it on — a partial unpack, an interrupted
-update, a missing `node`.
-
-**Whether a newer one is published.** A background check compares the installed version against the
-published one and reports a newer one on a later session. It runs at most once every 24 hours.
-
-The check is a single `GET` to `https://registry.npmjs.org/fleetmates/latest`, the npm registry's
-record of the newest published version, with a five-second timeout. It sends nothing about you, your machine,
-or your project beyond the request itself, and it runs in a hook declared `"async": true`, so it
-never delays a session. If it fails — offline, proxied, no `curl` — it exits silently, and the
-24-hour limit still applies: the attempt is stamped before it is made, so a machine that can never
-reach the registry does not retry on every session.
-
-Turn it off with:
-
-    FLEETMATES_UPDATE_CHECK=0
-
-`CLAUDE_TEAMMATES_UPDATE_CHECK=0`, the name from before the rename, still works, so an opt-out set
-under the old name is not switched back on.
-
-Both notices keep their state in `${CLAUDE_CONFIG_DIR:-~/.claude}/fleetmates/`: the version
-you last saw, and the cached result of the last check. Deleting that directory re-shows the current
-version's notice once.
-
-Because the check writes a cache the *next* session reads, a newly published version is reported
-one session after the check that found it. That is the cost of never blocking session start.
-
-## Running on Codex
-
-fleetmates also runs headless under Codex CLI, alongside Claude Code, from the same package:
-
-    codex plugin marketplace add andreymudri/fleetmates
-    codex plugin add fleetmates@fleetmates
-    codex login
-
-The package installs unchanged from the same `.claude-plugin/marketplace.json` — there is no
-separate Codex manifest.
-
-**Trust the hooks in `/hooks` after installing.** Without that, `using-fleetmates` activates only
-by its description text, not through the `SubagentStop` hook this plugin relies on for
-enforcement.
-
-### Sandbox
-
-Teammates run sandboxed in an isolated clone by default (`harnesses.codex.sandbox = "clone"`) —
-never unsandboxed. A git-less `files` fallback and `full` (`danger-full-access`) are also
-selectable. The orchestrator itself needs full access to write the run repo's git, and exits with
-a fixable message if it is started inside a sandbox. Network access is off by default.
-
-In `files` mode the teammate has no repository of its own, so:
-
-- its prompt opens with an override telling it to skip every git step of the implementer
-  instructions (task branch, `locate`, commit, commit proof, `complete`);
-- fleetmates commits the checkout as **one commit** on the task branch, byte for byte, without
-  running git in the checkout;
-- a change to `.cursor/*.json`, `.cursor/hooks/`, `.claude/settings*.json` or `.vscode/` is refused
-  (the task is orphaned, naming the paths) rather than dropped.
-
-## Running on Cursor
-
-Cursor can run a fleet's teammates. The orchestrator stays whichever harness you drive — Claude
-Code or Codex — and passes `--harness cursor` to `dispatch`, `dispatch-reviews`,
-`dispatch-integrator` and `message`:
-
-    cursor-agent login
-
-### Sandbox
-
-Cursor runs git itself, outside its own sandbox, so a repository inside a teammate's workspace is a
-way out of it. Cursor teammates therefore only ever run in a git-less `files` checkout
-(`harnesses.cursor.sandbox` accepts nothing else), always with `--sandbox enabled` and never with
-`--force`:
-
-- A Cursor teammate cannot commit. Its prompt opens with an override telling it to skip every git
-  step of the implementer instructions, and when it finishes, fleetmates commits its checkout as
-  **one commit** on the task branch, byte for byte, without ever pointing git at the checkout.
-- Checkouts live under `$XDG_CACHE_HOME/fleetmates/cursor/` (default `~/.cache`), outside the
-  repository: Cursor runs the `.cursor/hooks.json` of any git repository that encloses its
-  workspace. `dispatch` refuses if that cache directory is itself inside a git repository.
-  A checkout is removed once its task is recorded `done`; a blocked, failed or orphaned task keeps
-  its checkout, so `message` or a new `dispatch` can resume it there.
-- `.cursor/{sandbox,hooks,cli,mcp,worktrees}.json`, `.cursor/hooks/`, `.claude/settings*.json` and
-  `.vscode/` are removed from the checkout before every session, without following symlinks at any
-  level. A teammate that changes one of them — or replaces `.cursor` or `.claude` with a file or a
-  symlink — is orphaned, and that checkout is refused for good; none of those paths ever changes on
-  the task branch.
-- Network access is off by default; `harnesses.cursor.network = true` turns it on.
-- `dispatch` refuses to start while a global `~/.cursor/sandbox.json` widens every sandbox (extra
-  writable paths, a non-default `type`, or a network default of `allow`), and warns when a global
-  `~/.cursor/hooks.json` exists, because those hooks run outside the sandbox.
-
-### Platforms
-
-The Cursor sandbox behaviour above was measured on Linux. The adapter spawns `cursor-agent`
-directly, without a shell, which a Windows `.cmd` shim does not support; running Cursor teammates on
-Windows is untested.
-
-Strict execution and native verification are POSIX-only. On Windows `workflow-execute`,
-`workflow-resume`, `workflow-status`, `workflow-resolve`, `workflow-accept`, `workflow-prune`,
-`execution-record`, `execution-status` and `dispatch --execution` refuse with exit 2 and print the
-reason on one line. Legacy dispatch without `--execution` is unaffected.
-
-### Models and effort
-
-Cursor has no separate effort setting: effort is part of the model id. Map each tier to the variant
-you want in `harnesses.cursor.tierModels`, for example
-`{ "cheap": "composer-2.5", "mid": "claude-sonnet-5-thinking-high", "capable": "claude-opus-5-high" }`
-(`cursor-agent models` lists them). An unmapped tier runs `--model auto`, the only model a free
-Cursor plan accepts. `agents.<role>.effort` is ignored for Cursor teammates, and each
-session record says so with `effortIgnored: true`.
-
-## Coming from claude-teammates
-
-fleetmates is claude-teammates, renamed. To move over:
-
-1. `/plugin uninstall claude-teammates` — left installed, its hooks keep running beside the new
-   ones, and fleetmates warns about it at every session start until it is gone.
-2. `/plugin marketplace add andreymudri/fleetmates`, then `/plugin install fleetmates`.
-3. Run any fleetmates command once in each repository. The first run moves `.teammates/`,
-   `teammates.gate.json`, `teammates.local.json`, the `teammates/<run>/<task>` branches and the
-   `refs/teammates/` claim refs to their `fleetmates` names, and adds the new ignore lines next
-   to the old ones. It refuses, and changes nothing, while a teammate from an old run is still
-   working, or when both spellings of something already exist.
-
-A migration that fails part-way stops, and prints every step it completed with the command that
-reverses it.
-
-## Getting started
+Then:
 
 Say what you want built. The `using-fleetmates` skill routes you: an unclear idea goes to
 `brainstorming`, settled requirements go to `writing-plans`, and a written plan with three or
@@ -231,7 +69,34 @@ A fleet is worth it when tasks genuinely don't overlap. For a two-task change, r
 in one session costs less than orchestrating it — the plugin will say so rather than fan out
 regardless.
 
-## What the phase gate guarantees
+Installing registers a machine-wide synchronous `SubagentStop` hook, a main-session `Stop` guard
+and an update check that runs at most once a day. [docs/reference/installation.md](docs/reference/installation.md) says
+exactly what each one does and how to turn the update check off.
+
+## How it works
+
+```
+phase 1   T1  T2  T3        3 worktrees, in parallel
+  gate    merge · test · fileset · ownership · review
+phase 2   T4
+  gate    ...
+          -> merged to the run branch
+```
+
+1. **Plan.** Each task in the plan declares the files it may touch (`**Files:**`) and the tasks it
+   depends on (`**Depends:**`). The `writing-plans` skill produces this format.
+2. **Phases.** `init-run` groups tasks whose dependencies are met and whose file sets are disjoint
+   into phases.
+3. **Teammates.** Each task in a phase goes to its own teammate, in its own worktree, on the
+   branch `fleetmates/<run>/<task>`.
+4. **Gate.** When the phase finishes, the gate merges its branches into a scratch worktree and runs
+   its checks there. Only on PASS does the integrator merge the branches into the run branch.
+5. **Land.** `finish` recomputes the verdict of every phase before the run branch lands.
+
+The GIF above walks through one such run, including a gate that catches a file changed outside its
+declared set.
+
+### What the phase gate guarantees
 
 The gate merges the phase's task branches into a scratch worktree and runs its checks there, so
 `test` measures what integration will actually produce. It also checks that each teammate's
@@ -248,7 +113,37 @@ catches drift and mistakes reliably. It is not a security boundary, and nothing 
 relied on as one. `docs/specs/2026-08-05-tamper-evident-enforcement-design.md` lists exactly
 what is out of scope, and `tests/adversarial.test.mjs` pins each limit with a test.
 
-## Commands
+## fleetmates deck
+
+A local web deck in `hub/` that watches your Claude Code sessions and tells you which one needs
+you. It is a separate package with its own dependencies, not yet published; the plugin above does
+not need it.
+
+<table>
+  <tr>
+    <td width="50%"><img src="https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png" alt="The deck's Home: three sessions waiting on you (a Safe npm run test, a Destructive rm -rf dist and a question), a fleetmates team run in phase 2 and a running session"></td>
+    <td width="50%"><img src="https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/team.png" alt="The Team run page of a fleetmates run: phase 1 done with gate 1 passed, task T3 of phase 2 running after gate 2 failed on fileset, and the lead session's tool steps"></td>
+  </tr>
+  <tr>
+    <td><em>Home: which session is working, which one needs you, and the team run.</em></td>
+    <td><em>Team run: phases, gates and tasks of a fleetmates run.</em></td>
+  </tr>
+</table>
+
+From a checkout, on Linux with systemd:
+
+    npm ci --prefix hub && npm --prefix hub run build
+    node scripts/cli.mjs deck init
+    node scripts/cli.mjs ui
+
+`node scripts/cli.mjs deck <init|doctor|status|open|uninstall-hooks>` forwards to the deck's own
+`fleetmates-deck` command, and `ui` is `deck open`; both refuse with the install command when
+`hub/node_modules` is missing. See [hub/README.md](hub/README.md) for requirements, security and
+uninstall, and [docs/deck/](docs/deck/) for the design.
+
+## Reference
+
+### Commands
 
 Run everything through `node scripts/cli.mjs <command> --root <project root>`. The skills call
 these for you; they are listed here because an operator often wants the same answer directly.
@@ -288,42 +183,8 @@ Reviews:
   findings path and scratch worktree already resolved
 - `collect-reviews --run <id>` — rebuild a `gate --results` file from the reviewers' findings drops
 
-Reviewer dispatches now check the tracked task specification and declared scope before their
-assigned quality lens. The recorded plan path is used by default; `review-dispatch --plan <path>`
-can name it explicitly. Unverifiable specifications use `unableToVerify`, which prevents a clean
-review result. Implementer summaries start with the next action and step progress, then include
-actual verification commands, worktrees, exit status and output tied to the final tested commit.
-These instructions do not replace Git-derived checks or prove that an agent ran a command.
-
-Instruction security lint runs in CI and inside the mandatory fileset check for committed skill
-and agent changes. It also checks declared instruction files of tasks already integrated, so
-merging before verification does not bypass the scan. It uses fixed diagnostics with file/line
-and rule identifiers, without forwarding instruction text to the lead or running that text.
-
-```sh
-node scripts/security-lint.mjs --root .
-node scripts/security-lint.mjs --root . --changed main --ref HEAD --json
-```
-
-The standalone command scans `skills/` and `agents/`; changed-commit mode also recognizes nested
-skill/agent directories and `AGENTS.md`. Refs are HEAD, full commit IDs, branch names or qualified
-refs. Committed scans read the immutable Git blobs, not worktree copies. Local scans reject
-observable links and non-regular files. Inputs are limited to 512 KiB per file, 256 instruction
-files and 5,000 filesystem entries; diagnostics cap each file at 100 findings plus a truncation
-marker. Exit 0 means no matching rule, 1 means findings, and 2 means the scan could not complete.
-
-Rules flag format/control characters except normal whitespace, mixed Latin/Greek/Cyrillic words
-and compatibility spellings, hidden comments or inline HTML/CSS, long whitespace padding,
-refusal overrides, unconditional skill triggers and recognizable provider shell-outs. The exact
-shipped startup description of `using-fleetmates` has an explicit entrypoint exception. Lint is
-heuristic: quoted examples can trigger findings, obfuscated attacks can evade it, and a clean
-result is not proof of safety. It does not install, execute or fetch scanned instructions.
-
-One lens carries a method of its own. `claims` reads the diff for sentences asserting a guarantee —
-a comment, a skill line, a spec line — then breaks what each one protects and runs the suite: a
-claim whose mutation leaves the suite green is a finding. It is bounded, not exhaustive. It probes a
-capped number of the claims it enumerates and reports the rest under an `unprobed` key, and it
-returns nothing at all when it cannot get a green baseline first.
+How reviewers check the task specification, how the instruction security lint works, and how
+the `claims` lens probes claims by mutation are covered in [docs/reference/reviews.md](docs/reference/reviews.md).
 
 Housekeeping:
 
@@ -338,7 +199,7 @@ Housekeeping:
   it is gitignored, and deleting it is the operator's call — an age-based sweep would take the
   only record of a run someone is in the middle of resuming
 
-## Skills
+### Skills
 
 - `using-fleetmates` — entrypoint; routes to the right process or fleet skill before anything else happens
 - `brainstorming` — explores intent and design before implementation
@@ -354,65 +215,15 @@ Housekeeping:
 - `finishing-a-development-branch` — re-runs the gate to verify each phase, then decides how the run branch lands
 - `writing-skills` — creating, editing, and verifying skills before deployment
 
-## Gate manifest
+### Gate manifest
 
 Copy `fleetmates.gate.json` into any project the fleet runs in, or let
 `node scripts/cli.mjs gate --run <id>` infer one from `package.json` and print it for you to
-confirm. A project whose test runner is itself a dependency should declare what to link into the
-preview:
+confirm. `fileset` and `ownership` run on every phase even when the manifest omits them. Linking
+dependencies into the preview, protected paths, JUnit reports and declared skips are covered in
+[docs/reference/gate-manifest.md](docs/reference/gate-manifest.md).
 
-```json
-{ "preview": { "link": ["node_modules"] } }
-```
-
-The preview contains tracked content only, so without that a command check runs against a tree
-with no dependencies installed and fails for a reason that has nothing to do with the code.
-
-`fileset` and `ownership` run on every phase even when the manifest omits them. Paths that decide
-what the gate checks can be protected; the manifest always is:
-
-```json
-{ "protected": ["package.json", "tests/conftest.py"] }
-```
-
-A task may change a protected path only when its plan line says so —
-``- Modify (protected): `package.json` `` — and the plan is read from the anchor commit, so a
-marking added mid-run counts once it is amended on the base branch and the base is merged into
-the run branch.
-
-A `command` check can hand the gate a JUnit report, and the gate then compares the tests that ran
-before the phase with the tests that run after it:
-
-```json
-{ "name": "test", "kind": "command",
-  "run": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=\"$FLEETMATES_REPORT_DIR/node.xml\" tests/*.test.mjs",
-  "report": { "format": "junit", "dir": true } }
-```
-
-`"dir": true` means the runner writes under `$FLEETMATES_REPORT_DIR` (`%FLEETMATES_REPORT_DIR%` on
-Windows, where checks run through `cmd.exe` and the suggested manifest carries no report), a fresh
-directory per run;
-`"path": "build/test-results/test"` names an in-tree report instead, deleted before each run — only
-ever inside the gate's own preview and baseline worktrees, and never through a symbolic link. A test
-that stops running needs its file marked ``- Test (drops): `…` `` in the plan; a new test that is
-skipped where the gate runs needs its unit declared:
-
-```json
-{ "skips": [{ "file": "tests/db/test_schema.py", "reason": "POSTGRES_ADMIN_DSN not provisioned in the gate" }] }
-```
-
-For pytest pass `-o junit_family=xunit1` so cases carry their file. cargo-nextest leaves `#[ignore]`d
-tests out of its JUnit report, so have the check also write its listing beside it:
-
-```json
-{ "name": "test", "kind": "command",
-  "run": "cargo nextest run; s=$?; cargo nextest list --message-format json > target/nextest/default/nextest-list.json; exit $s",
-  "report": { "format": "junit", "path": "target/nextest/default" } }
-```
-
-with `[profile.default.junit] path = "junit.xml"` in `.config/nextest.toml`.
-
-## Configuration
+### Configuration
 
 Two files, split by trust rather than by topic.
 
@@ -446,7 +257,10 @@ integrations had a conflict, so the replay covered clean integrations only. The 
 escalates every conflict ([`agents/tm-integrator.md`](agents/tm-integrator.md)), so it never
 resolves one on any model. Set `agents.integrator.tier` to route integration higher.
 
-### `caveman` is narrower than its position in that table suggests
+The `config list|get|set|unset` subcommands and how to check a hand edit are covered in
+[docs/reference/configuration.md](docs/reference/configuration.md).
+
+#### `caveman` is narrower than its position in that table suggests
 
 Measured 2026-08-25 against real subagent transcripts, because it had been carried for a session
 as the largest remaining token lever and is not one.
@@ -468,77 +282,7 @@ If a run's output cost is the problem, reach for `agents.<role>.effort`. Thinkin
 agent's output tokens; `effort` is the control for thinking and no style instruction can touch it.
 Lowering it trades review depth for tokens, which `caveman` does not.
 
-### The four subcommands manage ergonomics, not enforcement
-
-    node scripts/cli.mjs config list
-    node scripts/cli.mjs config get maxParallel
-    node scripts/cli.mjs config set <key> <value> [--local]
-    node scripts/cli.mjs config unset <key> [--local]
-
-`get`, `set` and `unset` accept only the four ergonomics keys in the table above. They do **not**
-accept `phases`, `lens` or `preview` in either file — including without `--local`:
-
-    $ node scripts/cli.mjs config set lens correctness
-    unknown config key: lens        # exit 2
-
-That is deliberate, not a gap. Enforcement policy is edited **by hand** in `fleetmates.gate.json`
-so it lands as a reviewable diff rather than as a CLI mutation that leaves nothing to read.
-
-**Check a hand edit with `config list`.** It *validates* more than it *prints*, and the two sets
-are worth keeping apart. What it prints is fixed: the eight ergonomics rows in the worked example
-below, and nothing else — `phases`, `lens` and `preview` never appear in its output. What it
-validates is the whole of both layers, so it exits 2 with a message on a file that is no longer
-valid JSON, a malformed ergonomics key, or a badly *shaped* enforcement key:
-
-    $ node scripts/cli.mjs config list          # fleetmates.gate.json holds "lens": "performance"
-    lens must be a non-empty array of strings   # exit 2
-
-To read back an enforcement key's value, open `fleetmates.gate.json`. No subcommand will show it.
-
-**`config list` checks shape, not content, and the difference bites.** A `lens` of `["nonsense"]`
-is a well-shaped array of strings, so it is accepted, and `config list` exits 0 without printing
-it. Whether those lens names mean anything to a reviewer is only exercised when the next `gate`
-dispatches one — the same is true of a check's `run` string or a `preview.link` path. Shape is
-structure and the CLI can see it; content is policy and only a real run can.
-
-**Do not reach for `config get` here.** It rejects every enforcement key by name, in either file,
-and that rejection says nothing about the manifest:
-
-    $ node scripts/cli.mjs config get lens
-    unknown config key: lens                    # exit 2
-
-`config list` is the verification step; `config get` is for the ergonomics keys in the table above.
-
-`list` reads both layers; `set` and `unset` write the tracked manifest unless you pass `--local`.
-
-Worked example — raise the fan-out on a large machine without committing that choice:
-
-    $ node scripts/cli.mjs config set maxParallel 12 --local
-    wrote fleetmates.local.json
-
-    $ node scripts/cli.mjs config list
-    maxParallel  12  (fleetmates.local.json)
-    caveman      false  (default)
-    agents.implementer.tier    -  (default)
-    agents.implementer.effort  -  (default)
-    agents.reviewer.tier    -  (default)
-    agents.reviewer.effort  -  (default)
-    agents.integrator.tier    -  (default)
-    agents.integrator.effort  -  (default)
-
-In a project whose `.gitignore` does not yet exclude the file, `config set --local` adds the
-entry and reports `added fleetmates.local.json to .gitignore` on a second line. This repository
-already carries that entry, so the transcript above is what you get here.
-
-`config list` prints the layer each *ergonomics* value came from, so a value you did not expect
-can be traced to the file that set it.
-
-**Model names never appear in either file.** Configuration stores a *tier* — `cheap`, `mid` or
-`capable`. The map from tier to a concrete model lives in the dispatching skill and reaches the
-CLI through `workflow --models`, so this repository and `fleetmates.gate.json` stay free of model
-names that would otherwise go stale. Setting a model name as a tier is rejected.
-
-### Why `mid` runs on opus
+#### Why `mid` runs on opus
 
 On the Claude harness the map is `cheap -> haiku`, `mid -> opus`, `capable -> opus`. A replay of
 30 tasks that had already merged in real runs, each rerun at every tier from its base tree:
@@ -558,26 +302,34 @@ To restore sonnet for `mid`, change the map on the dispatch side, not in configu
 `mid` tasks on sonnet and pass
 `--models '{"cheap":"haiku","mid":"sonnet","capable":"opus"}'` to `workflow`.
 
-## fleetmates deck
+### Running on Codex
 
-A local web deck in `hub/` that watches your Claude Code sessions and tells you which one needs
-you. It is a separate package with its own dependencies, not yet published; the plugin above does
-not need it.
+fleetmates also runs headless under Codex CLI, alongside Claude Code, from the same package:
 
-![The deck's Home: three sessions waiting on you (a Safe npm run test, a Destructive rm -rf dist and a question), a fleetmates team run in phase 2 and a running session](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
+    codex plugin marketplace add andreymudri/fleetmates
+    codex plugin add fleetmates@fleetmates
+    codex login
 
-*Home with three sessions waiting on you. More screens are in [hub/README.md](hub/README.md).*
+Trust the hooks in `/hooks` after installing. Teammates run sandboxed in an isolated clone by
+default (`harnesses.codex.sandbox = "clone"`). Sandbox modes, the `files` fallback and network
+access are covered in [docs/reference/harnesses.md](docs/reference/harnesses.md#running-on-codex).
 
-From a checkout, on Linux with systemd:
+### Running on Cursor
 
-    npm ci --prefix hub && npm --prefix hub run build
-    node scripts/cli.mjs deck init
-    node scripts/cli.mjs ui
+Cursor can run a fleet's teammates while Claude Code or Codex stays the orchestrator: pass
+`--harness cursor` to `dispatch`, `dispatch-reviews`, `dispatch-integrator` and `message`, after
 
-`node scripts/cli.mjs deck <init|doctor|status|open|uninstall-hooks>` forwards to the deck's own
-`fleetmates-deck` command, and `ui` is `deck open`; both refuse with the install command when
-`hub/node_modules` is missing. See [hub/README.md](hub/README.md) for requirements, security and
-uninstall, and [docs/deck/](docs/deck/) for the design.
+    cursor-agent login
+
+Cursor teammates always run in a git-less `files` checkout with the sandbox enabled. The sandbox
+rules, platforms and model mapping are covered in
+[docs/reference/harnesses.md](docs/reference/harnesses.md#running-on-cursor).
+
+### Execution, recovery and diagnostics
+
+The event ledger, hook diagnostics (`doctor --hooks`), reviewer outcome reports and the bounded
+execution commands (`environment-check`, `workflow-execute` and the rest) are documented in
+[docs/reference/execution.md](docs/reference/execution.md).
 
 ## Layout
 
@@ -601,7 +353,28 @@ every agent in a fleet run is told to run `npm test`, some of them repeatedly, a
 sitting in an agent's context is re-read on every later turn. Measured across three real agents,
 cache reads were 2.19M tokens against 212 tokens of fresh input.
 
-Design notes: `docs/specs/`.
+Design notes live in [docs/specs/](docs/specs/), and the deck's design in [docs/deck/](docs/deck/).
+
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: the project has no
+dependencies, and every new test must be shown to fail before it is trusted.
+
+## Coming from claude-teammates
+
+fleetmates is claude-teammates, renamed. To move over:
+
+1. `/plugin uninstall claude-teammates` — left installed, its hooks keep running beside the new
+   ones, and fleetmates warns about it at every session start until it is gone.
+2. `/plugin marketplace add andreymudri/fleetmates`, then `/plugin install fleetmates`.
+3. Run any fleetmates command once in each repository. The first run moves `.teammates/`,
+   `teammates.gate.json`, `teammates.local.json`, the `teammates/<run>/<task>` branches and the
+   `refs/teammates/` claim refs to their `fleetmates` names, and adds the new ignore lines next
+   to the old ones. It refuses, and changes nothing, while a teammate from an old run is still
+   working, or when both spellings of something already exist.
+
+A migration that fails part-way stops, and prints every step it completed with the command that
+reverses it.
 
 ## License
 
@@ -609,400 +382,3 @@ MIT — see `LICENSE`.
 
 Some skills are adapted from [superpowers](https://github.com/obra/superpowers) (© Jesse Vincent,
 MIT). See `NOTICE.md` for what was adapted and `LICENSE-THIRD-PARTY` for the license text.
-# Event ledger and hook diagnostics
-
-`node scripts/cli.mjs digest --ledger --run <runId> --root <project>` reports each task's
-fixed event counts and result enums. Bash commands are represented by SHA-256 fingerprints;
-command output and handoff prose are never included. Events live in per-task JSONL files under
-`.fleetmates/<runId>/ledger/`. The reader rejects links, non-regular files, partial records,
-invalid events and files over 1 MiB. An unavailable ledger is reported explicitly. The ledger
-is writable observation data, not a substitute for the existing git-derived enforcement.
-
-SessionStart restores a registered teammate's own task and phase from its committed plan in
-`docs/plans/`. PreCompact emits a reminder; SessionStart on compact re-injects it afterward.
-PostToolUse records Bash outcomes when the harness supplies an exit code, otherwise unknown.
-Repeated stops without new successful command fingerprints or a passing gate trigger a fixed
-stall warning, capped at three blocks; active-stop retries are allowed to terminate as blocked.
-The headless driver already caps enforcement retries and records its gate and handoff events.
-
-`node scripts/cli.mjs doctor --hooks [--session <sessionId>]` checks callback receipts from the
-last 24 hours in the Claude config directory. It reports unverified callbacks honestly. Start a
-session, run Bash, compact, and stop a teammate in the installed Claude Code version to prove
-the callbacks fire. Synthetic tests validate the handlers, not a live Claude installation.
-
-### Reviewer outcome reports
-
-`workflow-report --file <json>` can include `reviewOutcomes` with `findings`
-and optional independently established `labeledDefects`. Findings declare
-`id`, `identity` (the acceptance input hash), `outcome` (confirmed, refuted,
-duplicate, unreproduced or accepted), `rationale`, nonempty `evidence` log
-references, and `provenance` (`lens`, `category`, `model`, `source`). A duplicate
-also names `duplicateOf`. The report preserves each source observation in a
-canonical group and reports metrics by lens, category and model. Stale inputs,
-missing duplicate targets and cycles cannot silently become current evidence.
-References and outcomes are observations, not independent reproduction proof.
-This is reporting only; it does not change review policy or model selection.
-
-A `workflow-report` input can also include `verifierProfile` with a `package`
-object, `platform` (`linux`, `darwin` or `win32`) and optional `required` npm
-script names (`test` by default; also `typecheck`, `lint`, `build`). It emits a
-versioned Node/TypeScript proposal using existing gate inference and required
-fileset, ownership and review checks. Missing scripts make it not ready. Review
-and track this proposal before using it; generating it runs no commands and
-satisfies no acceptance requirement. Command gate results distinguish actual
-timeouts from otherwise unclassified failures; inspect evidence before deciding
-whether a code change or retry is appropriate.
-
-Command gate results also include `log`: a private local `path`, retained
-`bytes`, `observedBytes`, `maxBytes`, a `sha256` of the retained bytes,
-`complete`, `truncated` and any storage `error` code. Successful commands keep
-their empty diagnostic summary while retaining output for inspection. The
-default executor captures raw combined stdout/stderr in arrival order;
-buffered custom executors retain their returned output instead. These are
-output observations, not authenticated execution or acceptance receipts.
-
-Each command gets a separate `fm-command-log-*/output.log` beneath the system
-temporary directory, outside its working tree. Directories/files use 0700/0600
-on POSIX; Windows uses the temporary directory's existing access controls.
-Logs survive preview removal until the operator or operating system removes
-them. Output is stored without redaction and may contain sensitive project
-diagnostics. Delete the containing directory when the evidence is no longer
-needed; there is no automatic retention sweep or durable recovery guarantee.
-
-Each log retains at most 16 MiB. Failure summaries carry at most 40 lines and
-64 KiB of decoded diagnostic text, plus an incompleteness notice when needed.
-Timeouts and output/storage limits leave `complete: false`. Incomplete capture
-cannot pass a command check even when the subprocess exits zero. The existing
-`outcome` describes the subprocess; `log` separately describes its output
-evidence. A content hash detects changed bytes only when compared with the
-receipt; it does not authenticate the operator or establish semantic success.
-
-For anchored context, a task may include an `**Acceptance:**` section in its
-tracked plan. Its entire task contract then enters the bounded bundle as
-mandatory context. Existing `**Depends:** T1` declarations also include the
-upstream task's contract. Implementation, review and integration use the plan
-anchor, with source lines and hashes; later edits do not silently replace it.
-Missing dependencies or mandatory budget overflow refuse dispatch. This does
-not infer dependencies from file history or treat learnings as tracked policy.
-
-Tasks may also declare `ui: design/settings.html, design/settings.md` using
-unique repository-relative Markdown, HTML or SVG files. Commit targets on the
-chosen base with the plan. `init-run` rejects missing or nonregular committed
-targets; dispatch reads their contents at the plan anchor into mandatory
-bounded context. An agent check can select `lens: ["ui"]`; that method requires
-rendered and behavioral evidence and reports unavailable verification explicitly.
-Renderer setup, artifact capture and a native `kind: "ui"` adapter remain
-unsupported. Source structure alone does not prove visual acceptance.
-
-`ci-status --file <json>` provides read-only GitHub CI reporting for the current
-committed branch tip. Input declares `repository` (`owner/repository`), `inputs`
-(`commit`, `plan`, `manifest`, `environment`, `verifier`) and nonempty `required`
-checks such as `[{"name":"test (ubuntu-latest)","app":"github-actions"}]`.
-It requires the installed/authenticated `gh` CLI. Current exact-commit required
-checks must all succeed; pending, skipped, missing and truncated results cannot
-pass. Exit codes are 0 for passed CI checks, 4 for unmet checks and 2 for an
-invalid/unavailable query. Other input fields are declared associations, not
-independently verified by GitHub metadata. Uncommitted changes are outside its
-scope. This command performs no repairs, publication, merge or deployment.
-
-`feedback-draft --file <json>` prepares reviewed feedback proposals without
-writing project files. Input has `runId`, `date` (ISO day), `inputs`, `planPath`
-and `findings`. inputs.commit must match the current branch tip and inputs.plan
-must be the SHA-256 of the committed plan. Each finding declares `id`, `title`,
-`type` (rule, decision, pitfall, defect), `description`, `scope` and `evidence`.
-Defects also declare exact `files` and `acceptance`; optional `dependsOnTasks`
-and `dependsOnFindings` make dependencies explicit. Proposed tasks follow all
-existing terminal tasks. Learnings stay proposed and owned by the repo.
-Review the draft and apply it through authoritative plan and ownership rules;
-this command does not amend the plan, write learnings or call Vault.
-Workflow JSON inputs are limited to opened regular files and an actual 1 MiB
-read budget.
-
-`workflow-profile --file <json>` expands a reusable profile in dry-run mode.
-Choose `bug-fix`, `feature`, `migration`, `ui` or `research`; provide `runId`,
-`planPath`, `baseBranch`, `harness` (`codex`/`cursor`), exact `inputs` hashes and
-capability declarations (`available`/`unavailable`/`unknown`). The proposal shows
-phases, required artifacts, existing CLI commands and side effects. Tracked
-checks and repair budgets remain mandatory. Migration parameters require
-`compatibility` and `rollback`; UI requires render capability; a profile with
-`parameters.requiresVault: true` requires Vault. The expansion is nonexecutable:
-a controller and actual verification remain necessary, and no agent or command
-runs during dry-run. Declared capabilities do not grant permissions.
-
-### Execution prerequisites (issues 44 and 45 remain open)
-
-`environment-check --file <json> [--execute] --root <project>` accepts
-`{"commit":"<exact-commit>","recipePath":"recipe.json","harness":"codex"}`.
-The request is a local input file; the recipe and declared lockfiles must be
-regular committed blobs at that exact commit. The recipe has these exact fields:
-
-```json
-{
-  "version": 1,
-  "toolchains": [{ "name": "node", "command": "node", "argv": ["--version"], "expected": "v26." }],
-  "lockfiles": ["package-lock.json"],
-  "setup": [{ "name": "install", "run": "npm ci --ignore-scripts --no-audit --no-fund", "timeoutMs": 60000 }],
-  "baseline": [{ "name": "test", "run": "npm test", "timeoutMs": 60000 }],
-  "required": ["harness", "render", "ci"],
-  "dependencies": "clean-checkout"
-}
-```
-
-This is the tested dependency-free fixture recipe on Node v26.7.0, not a
-universal project installation recipe. Core requires Node >= 24.2.0. Choose
-and commit the toolchain prefix, lockfiles and setup appropriate to the project.
-`dependencies` can instead be `linked`, which reports reproducibility limits.
-Arrays are bounded to 20 entries; baseline requires at least one check.
-Check timeouts range from 1 to 3,600,000 ms. Tool/service probes are bounded to
-5 seconds, 250 ms cleanup and 64 KiB output. Services are `harness`, `render`,
-`ci` and `vault`; unrequested services are omitted.
-
-In the clean fixture, this command returned 4 without `--execute`, 0 after
-setup/baseline and required probes passed, and 2 for an injected `ready` field.
-Inspect the receipt, not just the exit: setup/baseline include durations and
-private log references, completeness and hashes. Missing capabilities stay
-unavailable or unknown. Browser presence is not UI validation; GitHub login
-is not an executed workflow. The tested Vault probe reported unavailable.
-
-`dispatch`, `dispatch-reviews` and `dispatch-integrator` accept
-`--environment <recipe-path>` and `--role-policy <policy-path>`, both committed
-repository-relative paths. A policy has version 1 and explicitly declared roles;
-each entry must include all six boolean fields:
-
-```json
-{
-  "version": 1,
-  "roles": {
-    "implementer": { "read": true, "write": true, "execute": true, "network": false, "sharedRefs": false, "publication": false },
-    "reviewer": { "read": true, "write": false, "execute": true, "network": false, "sharedRefs": false, "publication": false },
-    "integrator": { "read": true, "write": true, "execute": true, "network": false, "sharedRefs": false, "publication": false }
-  }
-}
-```
-
-The tested resolver maps Codex clone/files reviewers to read-only and writable
-roles to workspace-write. Required `full` mode, `execute: false`, reviewer
-network, shared-ref authority and publication are unsupported. Host-approved
-network is required for a network request. Cursor files-mode resolution maps
-nonwriting/nonexecuting roles to ask and writable/executing roles to its enabled
-sandbox; executing read-only review and required non-model environment
-verification remain unsupported. Resolver readiness is not native readiness.
-These integrator entries grant no shared-ref or publication authority.
-Actual CLI trials with this policy returned 4 for Codex integrator dispatch
-and Cursor reviewer dispatch because their selected sandbox mode was
-unsupported; a missing committed policy returned 2. Thus a supported resolver
-row alone does not establish a supported dispatch path.
-
-Required native verification in the 2026-10-06 isolated-clone trial refused
-with exit 4 because restrictions were not independently observed. There was no
-required-policy fallback. In the 2026-10-07 execution-recovery trials on a
-Linux host, the same contracts reported `enforcement.kind: "required"` with
-`observed: true` for both implementer and reviewer dispatch; readiness depends
-on the host's native sandbox runtime. The standalone `environment-check` trial used the
-host command executor; its pass does not establish required sandbox enforcement.
-Legacy invocation remains a separately unverified compatibility path.
-Changed source HEAD invalidates a bound continuation even when contract bytes
-are equal. Recipes and retrieved text are not permission grants.
-
-See [current observations and consumer obligations](docs/specs/2026-10-06-execution-prerequisites-validation.md)
-for commands, evidence provenance, unresolved findings and evaluation limits.
-
-`execution-record --file <json>` stores immutable local execution observations
-in the main repository's common Git directory. Events declare `id`, `runId`,
-`step`, `attempt`, `kind`, `at` and `inputs`; kinds are `step-started`,
-`step-completed`, `step-failed`, `effect-started`, `effect-completed`,
-`effect-failed` or `effect-unknown`. Effects also declare `{id,kind,reference}`
-with kind `pr`, `vault` or `publication`. Optional `branches` map fully qualified
-refs/heads names to exact SHAs. Identical retries are idempotent; conflicting
-IDs refuse. No external effect is executed and prompt/command/output fields
-are excluded from persisted records.
-
-`execution-status --run <id> --file <json>` reads `{inputs}` and reconciles
-recorded branch tips with Git. Interrupted, stale and unknown-effect attempts
-stay unresolved. A completed observation still requires current gates and is
-never verified delivery. Use the main repository's root; disposable clones
-have separate metadata. Automatic driver recovery and external reconciliation
-adapters remain unsupported; these commands repeat no external action.
-
-### Bounded workflow execution (issues 42, 43 and 33 remain open)
-
-Six commands run, recover and maintain a fixed workflow profile. Each
-requires an absolute `--root`; a missing or relative root exits 2 before
-anything is read.
-
-```sh
-node scripts/cli.mjs workflow-execute --file <request.json> --root <absolute-project-root>
-node scripts/cli.mjs workflow-resume  --run <id>            --root <absolute-project-root>
-node scripts/cli.mjs workflow-status  --run <id>            --root <absolute-project-root>
-node scripts/cli.mjs workflow-resolve --file <resolution.json> --root <absolute-project-root>
-node scripts/cli.mjs workflow-accept  --file <absolute-acceptance.json> --root <absolute-project-root>
-node scripts/cli.mjs workflow-prune   --run <id>            --root <absolute-project-root>
-```
-
-A version 1 request has exactly these fields. There are no defaults: a
-missing field, an unknown field, an executable or argv field all exit 2.
-
-```json
-{"version":1,"profile":"bug-fix","runId":"p1b","planPath":"plan.md","baseBranch":"main",
- "baseCommit":"<exact commit at the tip of baseBranch>","runBranch":"run/p1b","harness":"codex","sandboxMode":"clone",
- "parameters":{},"limits":{"maxWallMs":2400000,"maxAttempts":40,"maxRepairRounds":1,"stepTimeoutMs":1500000},
- "environment":"env.json","rolePolicy":"roles.json",
- "retention":{"maxArtifactBytes":4194304,"maxRunBytes":67108864,"maxAgeMs":2592000000},
- "model":"<model>","effort":"low"}
-```
-
-- `profile` is `bug-fix`, `feature`, `migration`, `ui` or `research`; `harness`
-  is `codex` or `cursor`; `sandboxMode` is `clone` or `files`.
-- `runId` matches `^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`. `runBranch` must differ
-  from `baseBranch`, exist, and be checked out at the root.
-- `baseCommit` must be the current tip of `baseBranch`; a moved base is
-  reported as a `changed-input` blocker with exit 4 before any journal write.
-- `planPath`, `environment` and `rolePolicy` are repository-relative paths read
-  from the committed base. The recipe and policy shapes are the ones in the
-  execution prerequisites section. The controller resolves the integrator in
-  the host-bounded mode, whose contract is read, write, execute and sharedRefs
-  true with network and publication false; the trials used such a policy.
-- `parameters` is an object of at most 4,096 JSON bytes. `migration` needs
-  `compatibility` and `rollback`; `requiresVault` is a boolean; `dispatch` is
-  reserved.
-- `limits`: `maxWallMs` 1,000 to 86,400,000; `maxAttempts` 1 to 500;
-  `maxRepairRounds` 0 to 10; `stepTimeoutMs` 1,000 to 21,600,000.
-- `retention`: positive integers up to 16 MiB per artifact, 256 MiB per run
-  and 365 days.
-- `model` is one bounded token not starting with a dash. `effort` is `low`,
-  `medium`, `high`, `xhigh`, `max` or null; Cursor requires null. The trusted
-  host adds them only to `dispatch` and `dispatch-reviews`.
-
-The controller runs `init-run`, `preview-check`, then per phase `dispatch`,
-`dispatch-reviews`, `collect-reviews`, `gate` and a host-bounded no-ff merge,
-then acceptance and `finish`. The CLI it runs is the installed one, never a
-path from the request. Each step's start is journaled before it runs, and its
-outputs are retained and read back before the next step is released.
-
-Exit codes. `workflow-execute` and `workflow-resume` exit 0 only for a
-`verified-complete` report and 4 for every other report. A
-`verified-complete` report needs passing acceptance evidence for every
-required criterion and native verification, which runs the real `codex
-sandbox`. No real-model or sandbox trial has run against this source, so the
-exit 0 path is unproven. In the repository suite, a fixture run with
-acceptance recorded runs `finish` and reports `obligations.verifiedComplete:
-true`, and its injected verification fixture keeps the state `unresolved`
-with exit 4. `workflow-status` reads only. It exits 0 only when no attempt is
-unresolved, no effect is unknown and the run lifecycle is `running`, and 4
-otherwise, including an absent run and a run whose lifecycle marker reads
-`suspended`. Attempts recorded before an integration moved the run branch to
-the after-ref its integration receipt names read `superseded`, which is not
-unresolved, so a normally finished run reports `reconciled`.
-`workflow-resolve` takes
-`{"version":1,"runId":"<id>","effectId":"<id>","outcome":"<outcome>","reason":"<token>"}`,
-where `reason` matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`; any other reason
-exits 2 with an error saying it must be one token with no spaces. Outcomes
-depend on the effect kind: `agent-dispatch` takes `not-started` or
-`completed`, while `pr`, `vault` and `publication` take `completed`,
-`failed` or `unknown`. It records only a local observation of an effect
-already in the journal, performs no external action, and exits 2 for an
-effect the journal never recorded or an outcome its kind does not take.
-
-`workflow-accept` reads
-`{"version":1,"runId":"<id>","tree":"<tree id>","criteria":[{"criterion":"<token>","status":"pass|fail","note":"<text>"}]}`
-with 1 to 20 criteria, each named once and each note at most 1,024
-characters. It exits 2 for a relative `--file`, a run with no retained
-request, a tree other than the run branch's current tree, or a run branch
-that is no longer at the tip its last completed integration recorded. It
-retains one `acceptance-evidence` artifact per criterion holding
-`{version, criterion, tree, status}`, records them as a completed
-`acceptance` journal step and exits 0. `workflow-resume` passes the retained
-references to the controller, one per criterion; the code keeps the latest
-one recorded for a criterion, a choice no test pins yet. The evidence is a
-local operator observation, not authenticated authorization.
-
-`workflow-prune` treats every artifact a journal event references as live
-and never removes it. Non-live content goes when it is older than
-`maxAgeMs` or larger than `maxArtifactBytes`, while the run is over
-`maxRunBytes`, or while the store is full; when the journal references no
-artifact at all, everything goes. It prints what it removed and kept (each
-kept entry marked live or not), the bytes left, unresolved references and
-whether the retention limits hold, and exits 0. An invalid run id exits 2.
-An unreferenced artifact within its bounds is kept.
-
-Resume rereads the retained request and the committed contracts, reuses prior
-outputs only after revalidating them, and always reruns `collect-reviews` and
-`gate`. In the 2026-10-07 trial a controller killed during the gate was
-resumed without redispatching any model or repeating the merge. Each agent
-step (`dispatch`, `dispatch-reviews`) is journaled as an `agent-dispatch`
-effect whose start is persisted before the spawn. One that was interrupted or
-timed out is an unknown effect: status exits 4 and resume will not redispatch
-it until an operator resolves it with `workflow-resolve`. `not-started` lets
-resume redispatch the step; `completed` lets resume reuse it once its outputs
-validate, and blocks it when they do not. `doctor` reports the same journal
-summary.
-
-Repair rounds. A gate FAIL (exit 1) is a code failure and goes to the
-existing `fix --verdict` decision. On `retry` the controller runs
-`record-fix-round` for each named task, then `dispatch --fix-round --task
-<id>...` for exactly those tasks, then review, collection, gate and
-integration again under round-suffixed step ids. Rounds per phase are
-bounded by the smaller of `maxRepairRounds` and the phase's manifest fix
-budget and, when the driver journal is in use, by 9 (the driver's 10
-attempts per task less the first dispatch). `escalate`, a `none` decision
-for a failed verdict, or an exhausted budget stops the run `failed`; the
-report's `host.repairRounds.delivered` counts the rounds run. Gate exit 5 is
-classified as infrastructure and never reaches the fix decision.
-
-Two `dispatch` flags serve the controller. `--execution <absolute path>`
-names a JSON execution contract `{version: 1, common, runId, executionId,
-inputs, retention, maxAttempts, deadlineAt}` that is passed unchanged to the
-driver as its required execution, so the driver journals each attempt. The
-controller writes one per dispatch attempt under
-`.fleetmates/<run>/execution/` and appends the flag to every `dispatch` argv,
-except for a cursor harness or a files sandbox, which strict driver execution
-refuses; the report then names the driver journal unavailable. The contract
-it writes always says `maxAttempts` 10, whatever the request's
-`maxAttempts`. `--fix-round --task <id>` (repeatable) dispatches only the
-named tasks of the phase with the fix-round brief, which checks the task
-branch out without resetting it, and respawns them even when a `done` result
-is recorded. `--task` without `--fix-round`, `--fix-round` without `--task`,
-a task outside the phase, a relative `--execution` path and a missing
-contract file all exit 2 before any probe or spawn.
-
-Storage is private and local: the journal is under
-`<git-common-dir>/fleetmates-execution/<sha256 of run id>/` (at most 1,000
-events and 1 MiB) and artifacts under
-`<git-common-dir>/fleetmates-artifacts/<sha256 of run id>/<sha256>.bin`, with
-0700 directories and 0600 files. Artifacts can contain task summaries, private
-log paths and command output. `workflow-prune` removes what no journal event
-references once it is past its bounds; delete a run's two directories by hand
-to drop live evidence as well.
-
-Integrator dispatch outside the workflow. The controller merges in its own
-host-bounded mode and uses neither legacy `dispatch-integrator` mode; both are
-kept by owner decision. Both exit 4 before spawning unless the run's status
-records a PASS for the current phase. Without a flag the integrator agent runs
-in full mode in the main checkout, and the command exits 0 once the process
-exits, printing that completion is unverified: nothing checks what it did.
-`--isolated-legacy` is a bare flag (a value exits 2). It also requires the
-recorded PASS to match the current phase, anchor, plan hash and task tips and
-an ownership preflight to pass, and it exits 4 unless the harness supports
-effort, the configured sandbox mode is `full` and the integrator role has a
-model. It spawns the agent in a registered worktree on the run branch under
-`.fleetmates/<run>/sessions/`, and accepts the work only if the process exits
-0, the result is `done` for the run branch with files inside the phase's
-declared sets, the worktree is clean, the run branch gained exactly one
-first-parent merge per task in plan order whose parents are the previous tip
-and the recorded task tip, ownership passes, and the run ref did not move
-during validation. The worktree is kept. Trust limits: the agent runs with
-full authority as the same user, and its filesystem, network and publication
-restrictions are prompt instructions, not confinement. The checks come after
-the fact and observe refs, the main checkout, the worktree and the result
-file only, so anything else it did, such as a remote action or a write
-outside those, is not detected. On either mode, a committed, valid
-`--role-policy` or `--environment` contract exits 4; a missing, uncommitted,
-modified or invalid one exits 2; neither spawns, because a required policy
-never falls back to legacy dispatch.
-
-Limits: the read-only PR outcome query has no CLI entry point; Vault and
-publication effects have no adapter. Observations are same-UID local
-evidence, not isolation from a hostile process. Driver recovery does not keep
-Deck terminals alive across a deckd restart. See the
-[execution and recovery validation](docs/specs/2026-10-06-execution-recovery-validation.md)
-for the real trials, findings, open items and issue matrices.
