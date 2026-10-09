@@ -1,15 +1,16 @@
 // Read-only heuristics before install approvals. Nothing here executes an extension.
 import { constants } from 'node:fs'
-import { lstat, open, realpath } from 'node:fs/promises'
+import { lstat, realpath } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { fleetmatesScriptsDir } from '../adapters/fleetmates.mjs'
 import { parseCommand, commandBase } from './shell.mjs'
+import { openNoFollow } from '../../platform/index.mjs'
 const { scanShippedInstructions, lintInstructionText, MAX_INSTRUCTION_BYTES } = await import(pathToFileURL(path.join(fleetmatesScriptsDir(), 'security-lint.mjs')).href)
 const rank = { safe: 0, caution: 1, destructive: 2 }
 
 async function scanFile(file, label) {
-  const h = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+  const h = await openNoFollow(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
   try {
     const stat = await h.stat()
     if (!stat.isFile() || await realpath(file) !== file) throw new Error('unsafe scan target')

@@ -1,9 +1,10 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { tmpdir } from 'node:os'
 import { expireRequests, matchKey, toolLine } from './request.mjs'
+import { openNoFollowSync } from '../../platform/index.mjs'
 
 const maxGitOutput = 1024 * 1024
 const maxChangedPaths = 512
@@ -97,7 +98,7 @@ function workingPath(root, name, budget) {
 }
 
 function hashFile(file, normalize, budget, algorithm = 'sha256', blob = false, ident = false) {
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const fd = openNoFollowSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
   try {
     const before = fstatSync(fd)
     if (Date.now() >= budget.deadline || !before.isFile() || before.size > budget.remaining) throw new Error('scan limit')
@@ -318,7 +319,7 @@ function lineBytes(root, name, scan, budget) {
       return bytes
     }
     if (!stat.isFile() || stat.size > maxGitOutput || stat.size > budget.remaining) return null
-    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    fd = openNoFollowSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
     const before = fstatSync(fd)
     if (!before.isFile() || before.size !== stat.size) return null
     const bytes = Buffer.alloc(before.size)

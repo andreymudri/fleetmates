@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, readSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { homedir } from 'node:os'
 import { activeTiers, classify, worktrees } from '../approvals/tiers.mjs'
 import { recordAllow, ruleThreshold } from '../approvals/rules.mjs'
+import { openNoFollowSync } from '../../platform/index.mjs'
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical)
@@ -875,7 +876,7 @@ function transcriptQuestion(location) {
   if (typeof location !== 'string' || !path.isAbsolute(location)) return null
   let fd
   try {
-    fd = openSync(location, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    fd = openNoFollowSync(location, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
     const info = fstatSync(fd)
     if (!info.isFile() || typeof process.getuid === 'function' && info.uid !== process.getuid()) return null
     const offset = Math.max(0, info.size - 65536)

@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import { validateDraft, validateScout } from './contract.mjs'
 import { apiError } from '../http/router.mjs'
 import { rankSources } from './sources.mjs'
+import { openNoFollow } from '../../platform/index.mjs'
 
 export const RESEARCH_ID = /^research-[a-f0-9-]{36}$/
 export const OUTPUT_MAX = 256 * 1024
@@ -22,7 +23,7 @@ export async function readOutputFile (repo, relative) {
   }
   const parent = await fs.realpath(path.dirname(target))
   if (!parent.startsWith(root + path.sep)) throw apiError(422, 'research_output_invalid')
-  const handle = await fs.open(path.join(parent, path.basename(target)), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const handle = await openNoFollow(path.join(parent, path.basename(target)), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
   try {
     const stat = await handle.stat()
     if (!stat.isFile() || stat.size > OUTPUT_MAX) throw apiError(422, 'research_output_invalid')

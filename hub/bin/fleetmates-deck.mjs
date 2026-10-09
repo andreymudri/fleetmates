@@ -9,7 +9,7 @@ import { deckHookCommand, readSettings, transformHooks, writeSettings } from '..
 import { UNIT_NAMES, renderUnit } from '../server/setup/units.mjs'
 import { doctor, serviceProbe, status } from '../server/setup/doctor.mjs'
 import { createServiceManager } from '../server/setup/service.mjs'
-import { ensurePrivateDir } from '../platform/index.mjs'
+import { ensurePrivateDir, openNoFollowSync } from '../platform/index.mjs'
 import { initChecks } from '../server/setup/wait.mjs'
 import { openInBrowser } from '../server/setup/browser.mjs'
 import { redact } from '../server/approvals/audit.mjs'
@@ -186,7 +186,7 @@ async function main() {
     try {
       const lines = exportMisses({ all: sql => db.prepare(sql).all() }, { kind })
       if (out) {
-        const fd = fs.openSync(out, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o600)
+        const fd = openNoFollowSync(out, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, { mode: 0o600 })
         try { fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, lines) } finally { fs.closeSync(fd) }
       } else process.stdout.write(lines)
     } finally { db.close() }
