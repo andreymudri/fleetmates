@@ -16,13 +16,12 @@ function shq (s) {
 }
 
 /**
- * The npm cmd-shim body for a node script, CRLF line endings, with `_prog` falling back to `node`
- * replaced by the absolute node path, so the shim does not depend on node being on PATH.
- * @param {string} node absolute node path
+ * The npm cmd-shim body for a node script, CRLF line endings, exactly as npm writes it: `_prog` is
+ * `%dp0%\node.exe` when that exists, else `node` from PATH (fakeBin's env keeps PATH).
  * @param {string} rel the script relative to the shim's directory, backslash separated
  * @returns {string}
  */
-export function cmdShim (node, rel) {
+export function cmdShim (rel) {
   return [
     '@ECHO off',
     'GOTO start',
@@ -36,7 +35,7 @@ export function cmdShim (node, rel) {
     'IF EXIST "%dp0%\\node.exe" (',
     '  SET "_prog=%dp0%\\node.exe"',
     ') ELSE (',
-    `  SET "_prog=${node}"`,
+    '  SET "_prog=node"',
     '  SET PATHEXT=%PATHEXT:;.JS;=;%',
     ')',
     '',
@@ -66,7 +65,7 @@ export async function fakeBin ({ script, log, version = '2.1.282', platform = pr
       rel = 'fake-claude-entry.mjs'
       await writeFile(path.join(binDir, rel), `await import(${JSON.stringify(pathToFileURL(fakeClaude).href)})\n`)
     }
-    await writeFile(claudePath, cmdShim(process.execPath, rel.split(/[\\/]/).join('\\')), { mode: 0o755 })
+    await writeFile(claudePath, cmdShim(rel.split(/[\\/]/).join('\\')), { mode: 0o755 })
   } else {
     await writeFile(claudePath, `#!/bin/sh\nexec ${shq(process.execPath)} ${shq(fakeClaude)} "$@"\n`, { mode: 0o755 })
   }

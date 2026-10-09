@@ -112,8 +112,7 @@ async function forcedFakeBin (opts) {
   }
 }
 
-// The npm cmd-shim body for a node script; only the _prog fallback (the absolute node path instead of
-// `node`) and the script path vary.
+// The npm cmd-shim body for a node script, exactly as npm writes it; only the script path varies.
 const SHIM_LINES = [
   '@ECHO off',
   'GOTO start',
@@ -127,7 +126,7 @@ const SHIM_LINES = [
   'IF EXIST "%dp0%\\node.exe" (',
   '  SET "_prog=%dp0%\\node.exe"',
   ') ELSE (',
-  '  SET "_prog=<node>"',
+  '  SET "_prog=node"',
   '  SET PATHEXT=%PATHEXT:;.JS;=;%',
   ')',
   '',
@@ -147,7 +146,7 @@ test('fakeBin writes claude.cmd as an npm cmd-shim with CRLF under FLEETMATES_TE
     assert.ok(m, 'the shim names a %dp0%-relative script')
     const rel = m[1]
     assert.equal(path.resolve(bin.binDir, rel.split('\\').join(path.sep)), fakeClaude)
-    const want = SHIM_LINES.join('\r\n').replace('<node>', process.execPath).replace('<rel>', rel)
+    const want = SHIM_LINES.join('\r\n').replace('<rel>', rel)
     assert.equal(text, want)
     assert.match(text, new RegExp(`\\r\\n[^\\r\\n]* & "%_prog%"  "%dp0%\\\\${rel.replace(/[.\\]/g, '\\$&')}" %\\*\\r\\n$`))
   } finally {
