@@ -260,7 +260,6 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 
 **Files:**
 - Modify: `hub/platform/index.mjs`
-- Modify: `hub/package.json`
 - Modify: `hub/test/helpers/fake-bin.mjs`
 - Create: `hub/test/helpers/chromium.mjs`
 - Test: `hub/test/unit/platform.test.mjs`
@@ -275,7 +274,6 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
   - `windowsChildEnv(env, { base = process.env, platform } = {})`: on POSIX returns `env` unchanged. On win32 returns a new object with one key per case-insensitive name (a later key in `env` wins over an earlier one, and `env` wins over `base`), and fills each of `SystemRoot`, `SystemDrive`, `windir`, `TEMP`, `TMP`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `USERNAME`, `USERDOMAIN`, `LOGONSERVER`, `ComSpec`, `PATHEXT` from `base` (case-insensitive lookup) when `env` has none.
   - `openNoFollowSync(file, flags = fs.constants.O_RDONLY, { platform, fs: fsImpl = fs } = {})` returning an fd, and `openNoFollow(file, flags, opts)` returning a `FileHandle`. POSIX: `open(file, flags | O_NOFOLLOW)`, unchanged behaviour. win32: `lstat` first and throw an error with `code: 'ELOOP'` when it is a symbolic link; open; `fstat` the fd and compare `dev` and `ino` with the lstat result (bigint stats), closing and throwing `ELOOP` on a mismatch.
   - `createInputModeFilter({ platform } = {})`: returns `(chunk: string) => string`. On win32 it removes every `ESC [ ? 9001 h` and `ESC [ ? 9001 l`, including a sequence split across chunks (it holds back at most the incomplete prefix and emits it with the next chunk when it turns out not to be the sequence). On POSIX it returns the chunk unchanged.
-- `hub/package.json`: `engines.node` becomes `>=24.16.0`.
 - `hub/test/helpers/fake-bin.mjs`: on win32 the returned `env` has exactly one PATH key (every key matching `/^path$/i` removed, then `PATH` set). It also exports `nodeClaudeShim(dir)`, which writes an npm-style cmd-shim `claude.cmd` that runs the fake claude with `process.execPath` (the shape `unwrapCmdShim` recognises), and returns its path.
 - `hub/test/helpers/chromium.mjs` exports `findChromium()`: `CHROMIUM_PATH` when set and existing, else the first existing of `/usr/bin/chromium`, `/usr/bin/chromium-browser`, `/usr/bin/google-chrome`, `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`, `%ProgramFiles%\Google\Chrome\Application\chrome.exe`, `%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe`, `%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe`; else null. It imports nothing from `hub/` outside `test/`.
 - Tests: `platform.test.mjs` covers `windowsChildEnv` (POSIX identity; win32 with `Path` and `PATH` both present collapses to one key holding the `env` value; missing `SystemRoot` filled from base; present one kept), `openNoFollowSync`/`openNoFollow` on a real temp symlink (POSIX refuses with ELOOP; win32 path with an injected `fs` whose `lstat` reports a symlink refuses with ELOOP; an injected dev/ino mismatch refuses), and `createInputModeFilter` (removes both sequences, a sequence split at every byte offset across two chunks, leaves `ESC[?900h` and other CSI alone, POSIX identity). `test-helpers-platform.test.mjs` covers the single PATH key (inject a `Path`-bearing env under the force flag) and `nodeClaudeShim` content.
@@ -400,6 +398,8 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 
 **Files:**
 - Modify: `hub/server/machines/notification.mjs`
+- Modify: `hub/package.json`
+- Modify: `hub/package-lock.json`
 - Test: `hub/test/integration/security.test.mjs`
 - Test: `hub/test/integration/session-actions.test.mjs`
 - Test: `hub/test/integration/shared-input.test.mjs`
@@ -423,6 +423,7 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 
 **Acceptance:**
 - `notification.mjs`: a popup or bell result `{ ok: false, reason: 'unsupported on <platform>' }` is recorded as skipped, not `notify.failed`; any other `ok: false` stays `notify.failed`. `notify.test.mjs` pins both.
+- `hub/package.json` and the root package entry of `hub/package-lock.json`: `engines.node` becomes `>=24.16.0` (Node 24.2 to 24.15 `node:sqlite` truncates a bound string at NUL); `m1-scaffold.test.mjs` asserts the new floor.
 - Test files: deck paths from `setupPaths(env)`; claude through `bin.claudePath` and `commandSpawn`; `npm` through `process.execPath` with `npm-cli.js` resolved next to it, or through `resolveCommand` + `commandSpawn`; browser tests take the browser from `findChromium()` in `test/helpers/chromium.mjs`; adapters whose Linux behaviour a test pins get `platform: 'linux'` (browser opener, doctor, notifier); capture-cc cases skip on win32 with the reason `capture-cc drives a POSIX claude wrapper`; separator assertions use `path.join`.
 - Each listed file passes on Windows (with Chrome installed) or skips individual tests with a stated reason.
 - Mutation: `notification.mjs` treating `unsupported` as `notify.failed` (a test fails).
