@@ -35,7 +35,7 @@ export function createServiceManager({
     if (result.code !== 0) throw new Error(`${file} ${args.join(' ')} failed: ${result.stderr?.trim() || `exit ${result.code}`}`)
     return result
   }
-  // Every method validates its service before doing anything, and every method is async.
+  // start, stop, restart and isActive reject an unknown service before doing anything; describe throws for one.
   const guard = fn => async service => { checkService(service); return fn(service) }
 
   if (platform === 'linux') {
@@ -117,13 +117,23 @@ export function createServiceManager({
       child.unref()
       await writeFile(pidFile(service), `${child.pid}\n`, { mode: 0o600 })
     }
+    // True when tasklist reports `pid` as a node.exe process. tasklist /FO CSV /NH prints one quoted row per match.
+    const isNodeProcess = async pid => {
+      const result = await run('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'])
+      if (result.code !== 0) return false
+      return String(result.stdout ?? '').split(/\r?\n/).some(line => {
+        const fields = [...line.matchAll(/"([^"]*)"/g)].map(match => match[1])
+        return fields[0]?.toLowerCase() === 'node.exe' && fields[1] === pid
+      })
+    }
     const stop = async service => {
       let pid
       try { pid = String(await readFile(pidFile(service), 'utf8')).trim() } catch (error) { if (error.code === 'ENOENT') return; throw error }
-      // A pid file left by a crash or a reboot may name an unrelated process tree, so kill only while the probe answers.
-      if (await probe(service) && /^[1-9][0-9]*$/.test(pid)) {
+      // A pid file left by a crash or a reboot may name an unrelated process tree. Kill when the probe answers, or when
+      // the probe is silent but the pid is still a node.exe (a hung service); otherwise only drop the stale pid file.
+      if (/^[1-9][0-9]*$/.test(pid) && (await probe(service) || await isNodeProcess(pid))) {
         const result = await run('taskkill', ['/PID', pid, '/T', '/F'])
-        if (result.code !== 0 && await probe(service)) throw new Error(`taskkill /PID ${pid} failed: ${result.stderr?.trim() || `exit ${result.code}`}`)
+        if (result.code !== 0 && (await probe(service) || await isNodeProcess(pid))) throw new Error(`taskkill /PID ${pid} failed: ${result.stderr?.trim() || `exit ${result.code}`}`)
       }
       await rm(pidFile(service), { force: true })
     }

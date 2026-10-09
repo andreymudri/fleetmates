@@ -18,7 +18,7 @@ const TARGETS = {
 }
 
 /** Recording fakes for every injected effect. */
-function harness({ platform, active = () => false, runCode = () => 0, uid = 501 } = {}) {
+function harness({ platform, active = () => false, runCode = () => 0, runOut = () => '', uid = 501 } = {}) {
   const target = TARGETS[platform]
   const sep = platform === 'win32' ? '\\' : '/'
   const paths = {
@@ -47,7 +47,7 @@ function harness({ platform, active = () => false, runCode = () => 0, uid = 501 
     nodePath: target.node,
     hubPath: target.hub,
     env: { PATH: '/usr/bin' },
-    run: async (file, args) => { calls.push([file, ...args]); const code = runCode(file, args); return { code, stdout: '', stderr: code ? 'failed' : '' } },
+    run: async (file, args) => { calls.push([file, ...args]); const code = runCode(file, args); return { code, stdout: runOut(file, args), stderr: code ? 'failed' : '' } },
     spawn: (file, args, options) => {
       const child = { pid: nextPid++, unrefCalled: false, unref() { this.unrefCalled = true } }
       spawns.push({ file, args, options, child })
@@ -255,14 +255,49 @@ test('detached stop of an active service runs taskkill on the recorded tree and 
   assert.deepEqual(calls, [], 'no pid file, nothing to kill')
 })
 
-test('detached stop with a leftover pid file and no answering probe kills nothing and removes the pid file', async () => {
-  const { manager, files, calls, probes } = harness({ platform: 'win32', active: () => false })
-  const pidFile = `${WIN_STATE}\\run\\deckd.pid`
-  files.set(pidFile, '4242\n')
+const DECKD_PID = `${WIN_STATE}\\run\\deckd.pid`
+const TASKLIST = ['tasklist', '/FI', 'PID eq 4242', '/FO', 'CSV', '/NH']
+const tasklistSays = row => (file, args) => file === 'tasklist' ? row : ''
+
+test('detached stop with a silent probe kills a hung service whose pid is still node.exe', async () => {
+  const { manager, files, calls, probes } = harness({ platform: 'win32', active: () => false,
+    runOut: tasklistSays('"Node.EXE","4242","Console","1","52,120 K"\r\n') })
+  files.set(DECKD_PID, '4242\n')
   await manager.stop('deckd')
   assert.deepEqual(probes, ['deckd'])
-  assert.deepEqual(calls, [])
-  assert.equal(files.has(pidFile), false)
+  assert.deepEqual(calls, [TASKLIST, ['taskkill', '/PID', '4242', '/T', '/F']])
+  assert.equal(files.has(DECKD_PID), false)
+})
+
+test('detached stop with a silent probe does not kill a reused pid that names another image', async () => {
+  const { manager, files, calls } = harness({ platform: 'win32', active: () => false,
+    runOut: tasklistSays('"notepad.exe","4242","Console","1","12,000 K"\r\n') })
+  files.set(DECKD_PID, '4242\n')
+  await manager.stop('deckd')
+  assert.deepEqual(calls, [TASKLIST])
+  assert.equal(files.has(DECKD_PID), false)
+})
+
+test('detached stop with a silent probe and no process for the pid kills nothing and removes the pid file', async () => {
+  const { manager, files, calls } = harness({ platform: 'win32', active: () => false,
+    runOut: tasklistSays('INFO: No tasks are running which match the specified criteria.\r\n') })
+  files.set(DECKD_PID, '4242\n')
+  await manager.stop('deckd')
+  assert.deepEqual(calls, [TASKLIST])
+  assert.equal(files.has(DECKD_PID), false)
+})
+
+test('every service method of every kind rejects an unknown service before doing anything', async () => {
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    for (const method of ['start', 'stop', 'restart', 'isActive']) {
+      const { manager, files, calls, spawns, probes, writes, removed } = harness({ platform, active: () => true })
+      files.set(`${WIN_STATE}\\run\\other.pid`, '4242\n')
+      await assert.rejects(manager[method]('other'), /unknown service: other/, `${platform} ${method}`)
+      assert.deepEqual([calls, spawns, probes, writes, removed], [[], [], [], [], []], `${platform} ${method} did nothing`)
+    }
+    const { manager } = harness({ platform })
+    assert.throws(() => manager.describe('other'), /unknown service: other/, `${platform} describe`)
+  }
 })
 
 test('detached stop never passes a corrupt pid to taskkill', async () => {
