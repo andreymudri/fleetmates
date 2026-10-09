@@ -7,7 +7,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { validateEnvelope } from '../../server/ingest/validate.mjs'
-import { makeEnvelope } from '../../hook/deck-hook.mjs'
+import { hookEndpoint, makeEnvelope } from '../../hook/deck-hook.mjs'
+import { isWindows, posixTest } from '../helpers/platform.mjs'
 
 const fixtures = fileURLToPath(new URL('../fixtures/hooks/2.1.282/', import.meta.url))
 const executable = fileURLToPath(new URL('../../hook/deck-hook.mjs', import.meta.url))
@@ -66,7 +67,7 @@ test('option2-rule.json is a settings excerpt, not a hook payload, and is skippe
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
 
-test('hook without a socket spools privately and exits silently', async () => {
+posixTest('hook without a socket spools privately and exits silently', { reason: 'spool file and directory modes' }, async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'deck-hook-'))
   try {
     const hook = JSON.parse(await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
@@ -95,7 +96,7 @@ test('hook without a socket spools privately and exits silently', async () => {
   } finally { await rm(home, { recursive: true, force: true }) }
 })
 
-test('hook tightens a preexisting permissive spool file before appending', async () => {
+posixTest('hook tightens a preexisting permissive spool file before appending', { reason: 'spool file modes' }, async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'deck-hook-mode-'))
   try {
     const dir = path.join(home, 'state/fleetmates/deck/spool')
@@ -122,7 +123,7 @@ test('malformed stdin does not change hook exit status or write output', () => {
   assert.equal(child.stderr, '')
 })
 
-test('hook finds a node process running a claude entrypoint in its parent chain', async () => {
+posixTest('hook finds a node process running a claude entrypoint in its parent chain', { reason: 'the hook reads /proc or ps, which win32 does not have' }, async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'deck-hook-parent-'))
   try {
     const fakeClaude = path.join(home, 'claude')
@@ -144,7 +145,10 @@ test('hook sends one complete line to the runtime socket without creating spool'
   const home = await mkdtemp(path.join(os.tmpdir(), 'deck-hook-socket-'))
   const runtime = path.join(home, 'runtime')
   const socketDir = path.join(runtime, 'fleetmates-deck')
-  const socketPath = path.join(socketDir, 'hooks.sock')
+  const hookEnv = { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: runtime }
+  // The hook's own endpoint rule: <runtime>/fleetmates-deck/hooks.sock here, a named pipe on win32.
+  const socketPath = hookEndpoint(hookEnv)
+  if (!isWindows) assert.equal(socketPath, path.join(socketDir, 'hooks.sock'))
   await mkdir(socketDir, { recursive: true, mode: 0o700 })
   let resolveWire
   const wireDone = new Promise(resolve => { resolveWire = resolve })
@@ -156,7 +160,7 @@ test('hook sends one complete line to the runtime socket without creating spool'
   })
   try {
     await new Promise(resolve => server.listen(socketPath, resolve))
-    await chmod(socketPath, 0o600)
+    if (!isWindows) await chmod(socketPath, 0o600)
     const hook = JSON.parse(await readFile(path.join(fixtures, 'Stop.json'), 'utf8'))
     // The 200 ms budget is the hook script's own run, which its in-script timer bounds. Node's
     // interpreter boot comes before the script and grows with machine load, so the clock is read
@@ -164,7 +168,7 @@ test('hook sends one complete line to the runtime socket without creating spool'
     // loads and once at process exit.
     const clock = path.join(home, 'clock.mjs')
     await writeFile(clock, "import { writeSync } from 'node:fs'\nwriteSync(3, `${performance.now()}\\n`)\nprocess.on('exit', () => { writeSync(3, `${performance.now()}\\n`) })\n")
-    const child = spawn(process.execPath, ['--import', clock, executable], { env: { ...process.env, HOME: home, XDG_STATE_HOME: path.join(home, 'state'), XDG_RUNTIME_DIR: runtime }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] })
+    const child = spawn(process.execPath, ['--import', clock, executable], { env: hookEnv, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] })
     child.stdin.end(JSON.stringify(hook))
     const output = []
     child.stdout.on('data', chunk => output.push(chunk))

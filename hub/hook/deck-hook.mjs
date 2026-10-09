@@ -1,5 +1,5 @@
 import { constants, readFileSync, mkdirSync, openSync, writeSync, closeSync, fstatSync, fchmodSync, readdirSync, renameSync, existsSync, unlinkSync, chmodSync } from 'node:fs'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { connect } from 'node:net'
 import { execFileSync } from 'node:child_process'
 import os from 'node:os'
@@ -31,9 +31,15 @@ function tooDeep(value) {
   return false
 }
 
-function ancestry() {
+/**
+ * The hook's own pid, its ancestors up to the first claude process, and that claude's pid. On win32
+ * there is no /proc and no ps, so it reports only its own pid and a null claude pid, without reading
+ * or spawning anything. readFile and execFile are injectable for tests.
+ */
+export function ancestry({ platform = process.platform, readFile = readFileSync, execFile = execFileSync } = {}) {
   const pidChain = [process.pid]
   let claudePid = null
+  if (platform === 'win32') return { pidChain, claudePid }
   let pid = process.ppid
   while (pid > 1 && pidChain.length < 8) {
     pidChain.push(pid)
@@ -41,11 +47,11 @@ function ancestry() {
       let parentPid
       let command
       try {
-        const status = readFileSync(`/proc/${pid}/status`, 'utf8')
+        const status = readFile(`/proc/${pid}/status`, 'utf8')
         parentPid = Number(status.match(/^PPid:\s*(\d+)$/m)?.[1] ?? 0)
-        command = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean)
+        command = readFile(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean)
       } catch {
-        const row = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'ppid=', '-o', 'command='], { encoding: 'utf8', timeout: 80, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+        const row = execFile('/bin/ps', ['-p', String(pid), '-o', 'ppid=', '-o', 'command='], { encoding: 'utf8', timeout: 80, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
         const match = row.match(/^(\d+)\s+(.+)$/)
         if (!match) break
         parentPid = Number(match[1])
@@ -59,6 +65,27 @@ function ancestry() {
     } catch { break }
   }
   return { pidChain, claudePid }
+}
+
+/**
+ * The hooks endpoint the deck server listens on. A copy of `endpoint(runtimeBase({ env, platform }),
+ * 'hooks', { platform })` from hub/platform/index.mjs, because this file is copied alone by init and
+ * imports only node: modules; hook-platform.test.mjs pins the two together.
+ */
+export function hookEndpoint(env = process.env, platform = process.platform) {
+  const uid = process.getuid?.() ?? null
+  const home = env.HOME || os.homedir()
+  let base
+  if (typeof env.XDG_RUNTIME_DIR === 'string' && env.XDG_RUNTIME_DIR !== '') base = env.XDG_RUNTIME_DIR
+  else if (platform === 'darwin') base = path.posix.join(home, 'Library', 'Caches', 'fleetmates-deck')
+  else if (platform === 'win32') base = path.win32.join(env.LOCALAPPDATA || path.win32.join(home, 'AppData', 'Local'), 'fleetmates-deck', 'run')
+  else base = `/tmp/fleetmates-deck-${uid}`
+  if (platform === 'win32') {
+    const h = createHash('sha256').update(path.win32.resolve(base).toLowerCase()).digest('hex').slice(0, 16)
+    return `\\\\.\\pipe\\fleetmates-deck-${h}-hooks`
+  }
+  const sock = path.posix.join(base, 'fleetmates-deck', 'hooks.sock')
+  return Buffer.byteLength(sock) > 100 ? `/tmp/fleetmates-deck-${uid}/hooks.sock` : sock
 }
 
 function truncateInput(value, state) {
@@ -75,11 +102,11 @@ function truncateInput(value, state) {
 }
 
 /** Build the versioned envelope with only fields needed for deck state. */
-export function makeEnvelope(hook, { hookTs = Date.now(), ptyId = process.env.FLEETMATES_DECK_PTY ?? null } = {}) {
+export function makeEnvelope(hook, { hookTs = Date.now(), ptyId = process.env.FLEETMATES_DECK_PTY ?? null, platform = process.platform } = {}) {
   const state = { truncated: false }
   const copy = Object.fromEntries(Object.entries(hook).filter(([key]) => hookFields.has(key)))
   if (copy.tool_input !== undefined && !tooDeep(copy.tool_input)) copy.tool_input = truncateInput(copy.tool_input, state)
-  const envelope = { v: 1, deckHookVersion, hookTs, ptyId, ...ancestry(), truncated: state.truncated, hook: copy }
+  const envelope = { v: 1, deckHookVersion, hookTs, ptyId, ...ancestry({ platform }), truncated: state.truncated, hook: copy }
   if (Buffer.byteLength(JSON.stringify(envelope)) > maxLine) {
     delete copy.tool_input
     envelope.truncated = true
@@ -101,10 +128,9 @@ function readStdin() {
   })
 }
 
-function sendSocket(line, runtimeDir) {
+function sendSocket(line, endpointPath) {
   return new Promise((resolve, reject) => {
-    if (!runtimeDir) { reject(Error('runtime directory unavailable')); return }
-    const socket = connect(path.join(runtimeDir, 'fleetmates-deck', 'hooks.sock'))
+    const socket = connect(endpointPath)
     socket.setTimeout(100, () => socket.destroy(Error('socket timeout')))
     socket.once('error', reject)
     socket.once('connect', () => socket.end(line, () => resolve()))
@@ -156,7 +182,7 @@ export async function main() {
     const envelope = makeEnvelope(hook, { hookTs })
     const line = JSON.stringify(envelope) + '\n'
     if (Buffer.byteLength(line) > maxLine) return
-    try { await sendSocket(line, process.env.XDG_RUNTIME_DIR) } catch { spool(line, process.env, hookTs) }
+    try { await sendSocket(line, hookEndpoint(process.env)) } catch { spool(line, process.env, hookTs) }
   } catch { /* Hooks must never change Claude Code's result. */ }
 }
 

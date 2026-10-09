@@ -10,6 +10,8 @@ import nodePty from 'node-pty'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
+import { endpoint, runtimeBase } from '../../platform/index.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -297,7 +299,7 @@ test('fm claude and fm attach exit with the code of a signalled child when the P
   assert.equal(b.exitCode, 128 + 9)
 })
 
-test('fm claude passes its environment, exits with the child\'s exit code, and restores the terminal', async () => {
+posixTest('fm claude passes its environment, exits with the child\'s exit code, and restores the terminal', { reason: '/bin/sh and stty' }, async () => {
   const exitScript = path.join(tmp, 'exit7.json')
   await writeFile(exitScript, JSON.stringify({ steps: [{ expectInput: { match: 'q', timeoutMs: 30000 } }, { exit: { code: 7 } }] }))
   const known = await knownPtys()
@@ -342,7 +344,7 @@ async function scriptedDeckd (respond) {
       respond(req, sock)
     }, () => {}))
   })
-  await new Promise((resolve) => server.listen(path.join(dir, 'deckd.sock'), () => resolve(undefined)))
+  await new Promise((resolve) => server.listen(endpoint(fakeRt.dir, 'deckd'), () => resolve(undefined)))
   return {
     ops,
     conns,
@@ -427,7 +429,7 @@ test('fm attach exits 1 when the deckd connection drops', async () => {
   }
 })
 
-test('fm claude falls back to plain claude and fm attach exits 2 when deckd is not running', async () => {
+posixTest('fm claude falls back to plain claude and fm attach exits 2 when deckd is not running', { reason: 'a stale Unix socket file' }, async () => {
   const exit0 = path.join(tmp, 'exit0.json')
   await writeFile(exit0, JSON.stringify({ steps: [{ exit: { code: 0 } }] }))
   const empty = await makeRuntimeDir()
@@ -447,9 +449,8 @@ test('fm claude falls back to plain claude and fm attach exits 2 when deckd is n
       assert.equal(r.code, 2, r.stderr)
       assert.match(r.stderr, /deckd is not running/)
     }
-    const r = await runPlain(['claude'], { ...env, XDG_RUNTIME_DIR: '', FAKE_CLAUDE_SCRIPT: exit0 })
-    assert.equal(r.code, 0, r.stderr)
-    assert.equal(r.stderr, FALLBACK_LINE)
+    // An unset XDG_RUNTIME_DIR no longer means "no deckd": fm looks on the platform fallback base,
+    // which the last test in this file covers.
   } finally {
     await empty.cleanup()
     await stale.cleanup()
@@ -550,7 +551,7 @@ async function fallbackClaude (name, steps) {
   }
 }
 
-test('fm claude without deckd runs plain claude with the same args, without FLEETMATES_DECK_PTY, and exits with its code', async () => {
+posixTest('fm claude without deckd runs plain claude with the same args, without FLEETMATES_DECK_PTY, and exits with its code', { reason: 'a /bin/sh claude wrapper' }, async () => {
   const fake = await fallbackClaude('fallback-exit4', [{ exit: { code: 4 } }])
   try {
     const r = await runFm(['claude', '--foo'], fake.env)
@@ -564,7 +565,7 @@ test('fm claude without deckd runs plain claude with the same args, without FLEE
   }
 })
 
-test('fm claude without deckd forwards SIGHUP, SIGTERM and SIGINT to plain claude and exits 128 plus the signal', async () => {
+posixTest('fm claude without deckd forwards SIGHUP, SIGTERM and SIGINT to plain claude and exits 128 plus the signal', { reason: 'POSIX signals and a /bin/sh claude wrapper' }, async () => {
   const fake = await fallbackClaude('fallback-hang', [{ hang: {} }])
   try {
     for (const sig of /** @type {const} */ (['SIGHUP', 'SIGTERM', 'SIGINT'])) {
@@ -795,7 +796,7 @@ async function deckdProxy ({ hold } = {}) {
   /** @type {net.Socket | null} */
   let down = null
   const server = net.createServer((sock) => {
-    const up = net.connect(path.join(rt.dir, 'fleetmates-deck', 'deckd.sock'))
+    const up = net.connect(endpoint(rt.dir, 'deckd'))
     socks.push(sock, up)
     down = sock
     sock.on('error', () => {})
@@ -819,7 +820,7 @@ async function deckdProxy ({ hold } = {}) {
     })
     up.on('close', () => sock.destroy())
   })
-  await new Promise((resolve) => server.listen(path.join(dir, 'deckd.sock'), () => resolve(undefined)))
+  await new Promise((resolve) => server.listen(endpoint(proxyRt.dir, 'deckd'), () => resolve(undefined)))
   return {
     log,
     answers,
@@ -861,7 +862,7 @@ function detachSent (proxy, ptyId) {
   return { at, closedAt, answer: at === -1 ? undefined : proxy.answers.get(proxy.log[at].id) }
 }
 
-test('SIGHUP to fm attach detaches without printing and leaves the PTY running', async () => {
+posixTest('SIGHUP to fm attach detaches without printing and leaves the PTY running', { reason: 'SIGHUP, which fm handles off win32 only' }, async () => {
   const p = await spawnAt(tmp)
   const proxy = await deckdProxy()
   try {
@@ -895,7 +896,7 @@ test('SIGHUP to fm attach detaches without printing and leaves the PTY running',
   }
 })
 
-test('SIGHUP to fm attach before deckd answers attach detaches once it answers, without printing', async () => {
+posixTest('SIGHUP to fm attach before deckd answers attach detaches once it answers, without printing', { reason: 'SIGHUP, which fm handles off win32 only' }, async () => {
   const p = await spawnAt(tmp)
   const proxy = await deckdProxy({ hold: 'attach' })
   try {
@@ -924,7 +925,7 @@ test('SIGHUP to fm attach before deckd answers attach detaches once it answers, 
   }
 })
 
-test('SIGHUP to fm claude before deckd answers spawn detaches from the spawned PTY once it answers, without printing', async () => {
+posixTest('SIGHUP to fm claude before deckd answers spawn detaches from the spawned PTY once it answers, without printing', { reason: 'SIGHUP, which fm handles off win32 only' }, async () => {
   const proxy = await deckdProxy({ hold: 'spawn' })
   /** @type {string | undefined} */
   let id
@@ -954,7 +955,7 @@ test('SIGHUP to fm claude before deckd answers spawn detaches from the spawned P
   }
 })
 
-test('SIGHUP to fm attach <repo> before deckd answers the first attach detaches from the repo\'s PTY, without printing', async () => {
+posixTest('SIGHUP to fm attach <repo> before deckd answers the first attach detaches from the repo\'s PTY, without printing', { reason: 'SIGHUP, which fm handles off win32 only' }, async () => {
   const repo = path.join(tmp, 'hup-repo')
   await mkdir(path.join(repo, '.git'), { recursive: true })
   await writeFile(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/main\n')
@@ -1024,5 +1025,64 @@ test('fm attach exits with the child code when the exit event shares a write wit
     assert.equal(exited.exitCode, 6)
   } finally {
     await fake.close()
+  }
+})
+
+test('fm with XDG_RUNTIME_DIR unset attaches to a deckd on the platform fallback base, and lists it', async () => {
+  // Without XDG_RUNTIME_DIR the base comes from runtimeBase(): /tmp/fleetmates-deck-<uid> on linux,
+  // under HOME on darwin, under LOCALAPPDATA on win32. HOME and LOCALAPPDATA point into this test's
+  // temp dir, so only the linux base is shared with anything outside this test.
+  const home = path.join(tmp, 'no-xdg-home')
+  await mkdir(home)
+  const noXdg = { ...env, HOME: home, LOCALAPPDATA: path.join(home, 'AppData', 'Local') }
+  delete noXdg.XDG_RUNTIME_DIR
+  const base = runtimeBase({ env: noXdg })
+  const existed = await stat(base).then(() => true, () => false)
+  // deckd is started with this base as its XDG_RUNTIME_DIR, which it expects to exist already.
+  await mkdir(base, { recursive: true, mode: 0o700 })
+  const exitScript = path.join(tmp, 'no-xdg-exit3.json')
+  await writeFile(exitScript, JSON.stringify({ steps: [{ expectInput: { match: 'q', timeoutMs: 30000 } }, { exit: { code: 3 } }] }))
+  /** @type {import('node:child_process').ChildProcess | null} */
+  let other = null
+  /** @type {Awaited<ReturnType<typeof connectDeckd>> | null} */
+  let watcher = null
+  try {
+    // Another test file may run a deckd on the shared linux base for a moment; wait for it to go.
+    let stderr = ''
+    other = await until(async () => {
+      stderr = ''
+      const child = spawn(process.execPath, [mainPath], { env: { ...noXdg, XDG_RUNTIME_DIR: base, DECKD_LOGIN_ENV: 'inherit' }, stdio: ['ignore', 'ignore', 'pipe'] })
+      const up = await new Promise((resolve) => {
+        child.stderr?.on('data', (d) => {
+          stderr += d
+          if (stderr.includes('deckd listening on')) resolve(true)
+        })
+        child.once('exit', () => resolve(false))
+      })
+      if (up) return child
+      if (!stderr.includes('another deckd')) throw new Error(`deckd on the fallback base did not start: ${stderr}`)
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      return null
+    }, () => `the fallback base to be free: ${stderr}`, 30000)
+    watcher = await connectDeckd({ runtimeDir: base, kind: 'server', name: 'fm-test-no-xdg' })
+    const w = watcher
+    const fmNoXdg = runInPty(process.execPath, [fmPath, 'claude'], { env: { ...noXdg, FAKE_CLAUDE_SCRIPT: exitScript } })
+    const p = await until(async () => (await w.request('list')).ptys.find((/** @type {any} */ x) => x.clients.some((/** @type {any} */ c) => c.kind === 'terminal')),
+      () => `fm claude to attach on the fallback base: ${JSON.stringify(fmNoXdg.out())}`)
+    assert.equal(p.origin, 'wrapped')
+    const ls = await runFm(['ls'], noXdg)
+    assert.equal(ls.code, 0, ls.stderr)
+    assert.match(ls.stdout, new RegExp(`^${p.ptyId}\\s`, 'm'))
+    fmNoXdg.pty.write('q')
+    const exited = await fmNoXdg.exited()
+    assert.equal(exited.exitCode, 3, fmNoXdg.out())
+  } finally {
+    watcher?.close()
+    if (other && other.exitCode === null) {
+      const gone = new Promise((resolve) => other?.once('exit', resolve))
+      other.kill('SIGTERM')
+      await gone
+    }
+    if (!existed) await rm(base, { recursive: true, force: true })
   }
 })
