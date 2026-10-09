@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import path from 'node:path'
 import net from 'node:net'
 import os from 'node:os'
+import { EventEmitter } from 'node:events'
 import { spawn, spawnSync } from 'node:child_process'
 import { chmod, readFile, writeFile, mkdtemp, mkdir, rm, stat, symlink } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
@@ -10,10 +11,10 @@ import nodePty from 'node-pty'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
-import { endpoint, runtimeBase } from '../../platform/index.mjs'
+import { endpoint, killTree, runtimeBase } from '../../platform/index.mjs'
 import { posixTest } from '../helpers/platform.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
-import { forwardedSignals, onHangup } from '../../bin/fm.mjs'
+import { forwardedSignals, main as fmMain, onHangup } from '../../bin/fm.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const hubDir = path.resolve(here, '..', '..')
@@ -22,6 +23,11 @@ const fmPath = path.join(hubDir, 'bin', 'fm.mjs')
 const script = path.join(hubDir, 'test', 'fixtures', 'scripts', 'two-sources.json')
 const TERM_NAME = 'fm-test'
 const FALLBACK_LINE = 'deckd is not running, starting plain claude; this session will be observed only\n'
+// Retried: the Windows VM run could not remove a directory a just-killed child still held.
+const RM_RETRY = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }
+// On Windows fm runs inside a ConPTY, which the VM run showed re-rendering what fm writes, so the
+// byte-exact replay assertions skip there.
+const CONPTY_REWRITES = process.platform === 'win32' && 'ConPTY re-renders output'
 
 /** @type {Awaited<ReturnType<typeof makeRuntimeDir>>} */
 let rt
@@ -184,8 +190,10 @@ afterEach(() => {
 })
 
 after(async () => {
+  // killTree, not pty.kill(): on win32 node-pty's kill() lists the console's processes through an
+  // agent that failed with `AttachConsole failed` in the Windows VM run, leaving children alive.
   for (const { pty } of ptys) {
-    try { pty.kill('SIGKILL') } catch {}
+    try { killTree(pty.pid, 'SIGKILL') } catch {}
   }
   browser?.close()
   stoppingDeckd = true
@@ -194,9 +202,9 @@ after(async () => {
     deckd.kill('SIGTERM')
     await exited
   }
-  await fb?.cleanup()
-  await rt?.cleanup()
-  await rm(tmp, { recursive: true, force: true })
+  if (fb) await rm(fb.binDir, RM_RETRY)
+  if (rt) await rm(rt.dir, RM_RETRY)
+  if (tmp) await rm(tmp, RM_RETRY)
 })
 
 /** @type {ReturnType<typeof runInPty>} */
@@ -261,7 +269,7 @@ test('a resize of the fm terminal is forwarded to the PTY', async () => {
   await until(async () => (await fakeLog()).some((e) => e.resize && e.ts >= t0), 'the fake to log a resize')
 })
 
-test('fm attach replays earlier output, then streams, with no byte lost or doubled at the seam', async () => {
+test('fm attach replays earlier output, then streams, with no byte lost or doubled at the seam', { skip: CONPTY_REWRITES }, async () => {
   // Keep output flowing while fm attach connects, until deckd reports the
   // attach and for a while after, so the replay/stream seam falls inside it.
   let attachedAt = -1
@@ -364,7 +372,7 @@ async function scriptedDeckd (respond) {
  */
 const okLine = (id, fields = {}) => encode({ id, ok: true, ...fields })
 
-test('fm attach drops output already in the replay and keeps output after it, even from the same read', async () => {
+test('fm attach drops output already in the replay and keeps output after it, even from the same read', { skip: CONPTY_REWRITES }, async () => {
   // `screen` is answered with output events on both sides of the response,
   // all in one socket write, so the seam does not depend on timing. PRE was
   // sent before the snapshot (deckd would have it in the replay), POST after.
@@ -672,7 +680,7 @@ test('fm ls lists each PTY with its repo, pid, start and attached clients', asyn
     const rb = row(b.ptyId)
     assert.equal(rb[1], 'ls-repo-b')
     assert.equal(rb[4], '-')
-    assert.equal(row(c.ptyId)[1], '~/ls-plain')
+    assert.equal(row(c.ptyId)[1], path.join('~', 'ls-plain'))
   } finally {
     for (const p of [a, b, c]) await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
   }
@@ -707,7 +715,7 @@ test('fm ls does not take an ancestor with an empty .git directory, or a .git fi
       assert.ok(line, `no row for ${id}: ${r.stdout}`)
       return line.split(/ {2,}/)[1]
     }
-    assert.deepEqual(sessions.map((s) => repo(s.ptyId)), ['~/ls-empty-ancestor/work', 'real', 'linked', '~/ls-empty-ancestor/bogus', 'dangling'])
+    assert.deepEqual(sessions.map((s) => repo(s.ptyId)), [path.join('~', 'ls-empty-ancestor', 'work'), 'real', 'linked', path.join('~', 'ls-empty-ancestor', 'bogus'), 'dangling'])
   } finally {
     for (const p of sessions) await browser.request('kill', { ptyId: p.ptyId, signal: 'SIGKILL', graceMs: 0 }).catch(() => {})
   }
@@ -987,7 +995,7 @@ posixTest('SIGHUP to fm attach <repo> before deckd answers the first attach deta
   }
 })
 
-test('a dropped event makes fm attach ask for the screen again and repaint it', async () => {
+test('a dropped event makes fm attach ask for the screen again and repaint it', { skip: CONPTY_REWRITES }, async () => {
   let screens = 0
   const fake = await scriptedDeckd((req, sock) => {
     if (req.op === 'screen') {
@@ -1084,7 +1092,7 @@ test('fm with XDG_RUNTIME_DIR unset attaches to a deckd on the platform fallback
       other.kill('SIGTERM')
       await gone
     }
-    if (!existed) await rm(base, { recursive: true, force: true })
+    if (!existed) await rm(base, RM_RETRY)
   }
 })
 
@@ -1102,6 +1110,133 @@ test('fm listens for SIGHUP off win32 only', () => {
     const proc = { on: (/** @type {string} */ event, /** @type {() => void} */ fn) => { assert.equal(fn, handler); events.push(event) } }
     assert.equal(onHangup(handler, { platform, proc }), listens, platform)
     assert.deepEqual(events, listens ? ['SIGHUP'] : [], platform)
+  }
+})
+
+/**
+ * A stand-in for `process` to run fm's main in this process: no TTY, stdout and stderr collected,
+ * signal listeners recorded by name, and `exited` settling with the code passed to exit().
+ * @param {NodeJS.ProcessEnv} e
+ */
+function fakeProc (e) {
+  /** @type {Buffer[]} */
+  const out = []
+  /** @type {string[]} */
+  const signals = []
+  let stderr = ''
+  /** @type {(code: number) => void} */
+  let onExit = () => {}
+  /** @type {Promise<number>} */
+  const exited = new Promise((resolve) => { onExit = resolve })
+  const stdin = Object.assign(new EventEmitter(), { isTTY: false })
+  const stdout = Object.assign(new EventEmitter(), {
+    isTTY: false,
+    /**
+     * @param {string | Buffer} data
+     * @param {() => void} [cb]
+     */
+    write (data, cb) {
+      out.push(Buffer.from(data))
+      if (cb) setImmediate(cb)
+      return true
+    }
+  })
+  const proc = {
+    stdin,
+    stdout,
+    stderr: { write: (/** @type {string} */ s) => { stderr += s; return true } },
+    env: e,
+    cwd: () => tmp,
+    exit: (/** @type {number} */ code) => { onExit(code) },
+    on: (/** @type {string} */ event) => { signals.push(event) }
+  }
+  return { proc, exited, signals, stdout: () => Buffer.concat(out).toString('latin1'), stderr: () => stderr }
+}
+
+// fm's main with an injected platform. The linux runs check a POSIX runtime dir, which a Windows
+// host does not have.
+const WIN32_HOST = process.platform === 'win32' && 'the linux branch checks a POSIX runtime dir'
+for (const [platform, skip] of /** @type {const} */ ([['win32', false], ['linux', WIN32_HOST]])) {
+  test(`fm attach on ${platform} filters win32-input-mode requests from the replay and the stream only on win32, and listens for SIGHUP only off it`, { skip }, async () => {
+    const out = (/** @type {string} */ s) => encode({ ev: 'output', ptyId: 'pty_inmode00', data: b64(s) })
+    const fake = await scriptedDeckd((req, sock) => {
+      if (req.op === 'screen') {
+        // the replay, then output after it from the same read, a request split across two events
+        sock.write(okLine(req.id, { rev: 1, cols: 100, rows: 30, cursor: { x: 0, y: 0 }, lines: [], scrollback: b64('R1\x1b[?9001hR2') }) +
+          out('P\x1b[?90') + out('01lQ'))
+      } else {
+        sock.write(okLine(req.id))
+      }
+    })
+    try {
+      const fm = fakeProc(fake.env)
+      const run = fmMain(['attach', 'pty_inmode00'], { platform, proc: fm.proc })
+      await until(() => fm.stdout().includes('Q'), () => `the replay and the first output: ${JSON.stringify(fm.stdout())}`)
+      fake.conns[0].write(out('L\x1b[?9001hM'))
+      await until(() => fm.stdout().includes('M'), () => `the streamed output: ${JSON.stringify(fm.stdout())}`)
+      fake.conns[0].write(encode({ ev: 'exit', ptyId: 'pty_inmode00', code: 3, signal: null, at: Date.now() }))
+      assert.equal(await fm.exited, 3, fm.stderr())
+      await run
+      if (platform === 'win32') {
+        assert.equal(fm.stdout(), 'R1R2PQLM')
+        assert.deepEqual(fm.signals, [])
+      } else {
+        assert.equal(fm.stdout(), 'R1\x1b[?9001hR2P\x1b[?9001lQL\x1b[?9001hM')
+        assert.deepEqual(fm.signals, ['SIGHUP'])
+      }
+    } finally {
+      await fake.close()
+    }
+  })
+
+  test(`fm claude without deckd on ${platform} passes on ${forwardedSignals(platform).join(', ')} to plain claude`, { skip }, async () => {
+    const noDeckd = await makeRuntimeDir()
+    try {
+      /** @type {any[]} */
+      const spawned = []
+      const child = Object.assign(new EventEmitter(), { kill: (/** @type {string} */ sig) => { spawned.push(['kill', sig]) } })
+      const fm = fakeProc({ ...env, XDG_RUNTIME_DIR: noDeckd.dir })
+      await fmMain(['claude', '--flag'], {
+        platform,
+        proc: fm.proc,
+        spawn: /** @type {any} */ ((/** @type {string} */ file, /** @type {string[]} */ args) => { spawned.push([file, args]); return child })
+      })
+      assert.equal(fm.stderr(), FALLBACK_LINE)
+      assert.deepEqual(spawned.map(([, args]) => args), [['--flag']])
+      assert.deepEqual(fm.signals, platform === 'win32' ? ['SIGTERM', 'SIGINT'] : ['SIGHUP', 'SIGTERM', 'SIGINT'])
+      child.emit('exit', 4, null)
+      assert.equal(await fm.exited, 4)
+    } finally {
+      await rm(noDeckd.dir, RM_RETRY)
+    }
+  })
+}
+
+test('fm attach on win32 drops a win32-input-mode prefix it held back when a dropped event makes it repaint', async () => {
+  let screens = 0
+  const fake = await scriptedDeckd((req, sock) => {
+    if (req.op === 'screen') {
+      screens++
+      sock.write(okLine(req.id, { rev: screens, cols: 100, rows: 30, cursor: { x: 0, y: 0 }, lines: [], scrollback: b64(screens === 1 ? 'R' : 'B') }))
+    } else {
+      sock.write(okLine(req.id))
+    }
+  })
+  try {
+    const fm = fakeProc(fake.env)
+    const run = fmMain(['attach', 'pty_inmode01'], { platform: 'win32', proc: fm.proc })
+    await until(() => fm.stdout().includes('R'), 'the replay')
+    // a live chunk ending in what may be the start of a request: the filter holds it back
+    fake.conns[0].write(encode({ ev: 'output', ptyId: 'pty_inmode01', data: b64('A\x1b[?90') }))
+    await until(() => fm.stdout().includes('A'), 'the live output')
+    fake.conns[0].write(encode({ ev: 'dropped', ptyId: 'pty_inmode01', bytes: 100 }))
+    await until(() => fm.stdout().includes('B'), () => `the repaint: ${JSON.stringify(fm.stdout())}`)
+    fake.conns[0].write(encode({ ev: 'exit', ptyId: 'pty_inmode01', code: 0, signal: null, at: Date.now() }))
+    assert.equal(await fm.exited, 0, fm.stderr())
+    await run
+    assert.equal(fm.stdout(), 'RA\x1b[2J\x1b[HB')
+  } finally {
+    await fake.close()
   }
 })
 
@@ -1141,7 +1276,7 @@ async function squattedDeckd (layout) {
     connections: () => connections,
     async close () {
       await new Promise((resolve) => real.close(() => resolve(undefined)))
-      await rm(root, { recursive: true, force: true })
+      await rm(root, RM_RETRY)
     }
   }
 }

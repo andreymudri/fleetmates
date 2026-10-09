@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { connectDeckd } from '../deckd/client.mjs'
 import { endpointDirProblem } from '../hook/deck-hook.mjs'
-import { commandSpawn, endpoint, resolveCommand, runtimeBase } from '../platform/index.mjs'
+import { commandSpawn, createInputModeFilter, endpoint, resolveCommand, runtimeBase } from '../platform/index.mjs'
 
 const REPLAY_LINES = 5000
 const USAGE = 'usage: fm claude [args...] | fm attach <ptyId|repo> | fm ls'
@@ -24,14 +24,21 @@ const ESCAPE = 0x1d
 const CLEAR = '\x1b[2J\x1b[H'
 
 /**
+ * The parts of `process` fm uses, so a test can run `main` in its own process: the standard
+ * streams, the environment, the working directory, exit and signal listeners.
+ * @typedef {{ stdin: any, stdout: any, stderr: { write: (s: string) => unknown }, env: NodeJS.ProcessEnv, cwd: () => string, exit: (code: number) => unknown, on: (event: string, fn: () => void) => unknown }} Proc
+ */
+
+/**
  * Print a message to stderr and exit.
  * @param {number} code
  * @param {string} message
+ * @param {Proc} [proc]
  * @returns {never}
  */
-function die (code, message) {
-  process.stderr.write(message + '\n')
-  process.exit(code)
+function die (code, message, proc = process) {
+  proc.stderr.write(message + '\n')
+  return /** @type {never} */ (proc.exit(code))
 }
 
 /**
@@ -48,10 +55,13 @@ function exitStatus ({ code, signal }) {
   return Number.isInteger(code) ? /** @type {number} */ (code) : 1
 }
 
-/** @returns {{ cols: number, rows: number } | undefined} */
-function termSize () {
-  if (!process.stdout.isTTY) return undefined
-  const [cols, rows] = process.stdout.getWindowSize()
+/**
+ * @param {Proc} [proc]
+ * @returns {{ cols: number, rows: number } | undefined}
+ */
+function termSize (proc = process) {
+  if (!proc.stdout.isTTY) return undefined
+  const [cols, rows] = proc.stdout.getWindowSize()
   return cols > 0 && rows > 0 ? { cols, rows } : undefined
 }
 
@@ -59,9 +69,10 @@ function termSize () {
  * Leave raw mode, if this process entered it, before anything more is
  * printed. Node also resets the tty mode when the process exits: the
  * restore test in fm.test.mjs still passes with this call removed.
+ * @param {Proc} [proc]
  */
-function restoreTerminal () {
-  if (process.stdin.isTTY && process.stdin.isRaw) process.stdin.setRawMode(false)
+function restoreTerminal (proc = process) {
+  if (proc.stdin.isTTY && proc.stdin.isRaw) proc.stdin.setRawMode(false)
 }
 
 /**
@@ -102,26 +113,27 @@ export function onHangup (handler, { platform = process.platform, proc = process
  * runs through commandSpawn.
  * @param {string[]} args
  * @param {string} platform
+ * @param {{ proc?: Proc, spawn?: typeof spawn }} [deps]
  */
-function plainClaude (args, platform) {
-  process.stderr.write(FALLBACK + '\n')
-  const env = { ...process.env }
+function plainClaude (args, platform, { proc = process, spawn: spawnChild = spawn } = {}) {
+  proc.stderr.write(FALLBACK + '\n')
+  const env = { ...proc.env }
   delete env.FLEETMATES_DECK_PTY
   let run
   try {
     run = commandSpawn(resolveCommand('claude', { env, platform }), args, { platform, env })
   } catch (err) {
-    die(1, `fm: ${/** @type {Error} */ (err).message}`)
+    return die(1, `fm: ${/** @type {Error} */ (err).message}`, proc)
   }
-  const child = spawn(run.file, run.args, { stdio: 'inherit', env, ...run.options })
+  const child = spawnChild(run.file, run.args, { stdio: 'inherit', env, ...run.options })
   for (const sig of forwardedSignals(platform)) {
-    process.on(sig, () => { child.kill(sig) })
+    proc.on(sig, () => { child.kill(sig) })
   }
   child.once('error', (err) => {
-    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') die(127, 'fm: claude not found on PATH')
-    die(1, `fm: ${err.message}`)
+    if (/** @type {NodeJS.ErrnoException} */ (err).code === 'ENOENT') die(127, 'fm: claude not found on PATH', proc)
+    else die(1, `fm: ${err.message}`, proc)
   })
-  child.once('exit', (code, signal) => process.exit(exitStatus({ code, signal })))
+  child.once('exit', (code, signal) => proc.exit(exitStatus({ code, signal })))
 }
 
 /**
@@ -178,10 +190,11 @@ function localTime (ms) {
  * Print deckd's PTYs: one row each, columns PTY, REPO, PID, STARTED, CLIENTS.
  * @param {any[]} ptys deckd `list` entries
  * @param {string} home
+ * @param {Proc} [proc]
  */
-function printList (ptys, home) {
+function printList (ptys, home, proc = process) {
   if (ptys.length === 0) {
-    process.stdout.write('No sessions in deckd.\n')
+    proc.stdout.write('No sessions in deckd.\n')
     return
   }
   const rows = [['PTY', 'REPO', 'PID', 'STARTED', 'CLIENTS']]
@@ -190,21 +203,27 @@ function printList (ptys, home) {
     rows.push([String(p.ptyId), repoOf(String(p.cwd), home), String(p.pid), localTime(p.startedAt), clients.length ? clients.join(', ') : '-'])
   }
   const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)))
-  for (const r of rows) process.stdout.write(r.map((cell, i) => i === r.length - 1 ? cell : cell.padEnd(widths[i])).join('  ') + '\n')
+  for (const r of rows) proc.stdout.write(r.map((cell, i) => i === r.length - 1 ? cell : cell.padEnd(widths[i])).join('  ') + '\n')
 }
 
 /**
- * Run `fm claude`, `fm attach` or `fm ls`.
+ * Run `fm claude`, `fm attach` or `fm ls`. `platform` picks the signals fm handles and whether
+ * session output is filtered; the connection to deckd itself is made the way this host makes it.
+ * `proc` stands in for `process`, and `spawn` for child_process's, which runs a plain claude
+ * without deckd. Everything written to stdout from the session, replay and stream, passes through
+ * a createInputModeFilter, a fresh one for each replay, so on win32 a replayed win32-input-mode
+ * request (`ESC [ ? 9001 h`) does not reach the outer console. In the Windows VM run that request
+ * switched the console to sending key records, and fm never saw the Ctrl ] d that detaches.
  * @param {string[]} argv arguments after `fm`
- * @param {{ platform?: string }} [opts]
+ * @param {{ platform?: string, proc?: Proc, spawn?: typeof spawn }} [opts]
  */
-async function main (argv, { platform = process.platform } = {}) {
+export async function main (argv, { platform = process.platform, proc = process, spawn: spawnChild = spawn } = {}) {
   const [cmd, ...rest] = argv
-  if (cmd !== 'claude' && !(cmd === 'attach' && rest.length === 1) && !(cmd === 'ls' && rest.length === 0)) die(1, USAGE)
+  if (cmd !== 'claude' && !(cmd === 'attach' && rest.length === 1) && !(cmd === 'ls' && rest.length === 0)) return die(1, USAGE, proc)
 
   // XDG_RUNTIME_DIR when set, else the platform's fallback base.
-  const runtimeDir = runtimeBase({ platform })
-  const name = process.env.TERM_PROGRAM || process.env.TERM
+  const runtimeDir = runtimeBase({ platform, env: proc.env })
+  const name = proc.env.TERM_PROGRAM || proc.env.TERM
   /** @type {{ kind: 'terminal', name?: string }} */
   const source = name ? { kind: 'terminal', name } : { kind: 'terminal' }
 
@@ -213,9 +232,9 @@ async function main (argv, { platform = process.platform } = {}) {
   // no deckd. A missing dir is just no deckd, without a message.
   const problem = endpointDirProblem(endpoint(runtimeDir, 'deckd', { platform }), { platform })
   if (problem) {
-    if (!problem.includes('(ENOENT)')) process.stderr.write(`fm: not connecting to deckd: ${problem}\n`)
-    if (cmd === 'claude') return plainClaude(rest, platform)
-    die(2, 'deckd is not running')
+    if (!problem.includes('(ENOENT)')) proc.stderr.write(`fm: not connecting to deckd: ${problem}\n`)
+    if (cmd === 'claude') return plainClaude(rest, platform, { proc, spawn: spawnChild })
+    return die(2, 'deckd is not running', proc)
   }
 
   let client
@@ -223,17 +242,17 @@ async function main (argv, { platform = process.platform } = {}) {
     client = await connectDeckd({ runtimeDir, kind: 'terminal', name })
   } catch (err) {
     if (deckdDown(err)) {
-      if (cmd === 'claude') return plainClaude(rest, platform)
-      die(2, 'deckd is not running')
+      if (cmd === 'claude') return plainClaude(rest, platform, { proc, spawn: spawnChild })
+      return die(2, 'deckd is not running', proc)
     }
-    die(1, `fm: ${/** @type {Error} */ (err).message}`)
+    return die(1, `fm: ${/** @type {Error} */ (err).message}`, proc)
   }
   const deckd = client
 
   if (cmd === 'ls') {
     const res = await deckd.request('list')
     deckd.close()
-    printList(res.ptys ?? [], process.env.HOME || os.homedir())
+    printList(res.ptys ?? [], proc.env.HOME || os.homedir(), proc)
     return
   }
 
@@ -246,10 +265,23 @@ async function main (argv, { platform = process.platform } = {}) {
   const finish = (code, message) => {
     if (finished) return
     finished = true
-    restoreTerminal()
-    if (message) process.stderr.write(message + '\n')
+    restoreTerminal(proc)
+    if (message) proc.stderr.write(message + '\n')
     deckd.close()
-    process.stdout.write('', () => process.exit(code))
+    proc.stdout.write('', () => proc.exit(code))
+  }
+
+  /** One input-mode filter for the platform; each replay starts a new one. */
+  const newFilter = () => createInputModeFilter({ platform })
+  let filter = newFilter()
+  /**
+   * Write session output to stdout through the input-mode filter.
+   * @param {Buffer} buf
+   */
+  const show = (buf) => {
+    // latin1 maps each byte to one char and back, so the bytes around a removed sequence stay as they were
+    const kept = filter(buf.toString('latin1'))
+    if (kept) proc.stdout.write(Buffer.from(kept, 'latin1'))
   }
 
   /** @type {string | null} */
@@ -276,9 +308,11 @@ async function main (argv, { platform = process.platform } = {}) {
   const replay = async (screen, prefix = '') => {
     const snap = await screen
     const cut = /** @type {number} */ (deckd.seqOf(snap))
-    process.stdout.write(prefix)
-    process.stdout.write(Buffer.from(snap.scrollback, 'base64'))
-    for (const { n, buf } of held) if (n > cut) process.stdout.write(buf)
+    // The replay restarts the stream, so a sequence prefix held back before it is dropped.
+    filter = newFilter()
+    proc.stdout.write(prefix)
+    show(Buffer.from(snap.scrollback, 'base64'))
+    for (const { n, buf } of held) if (n > cut) show(buf)
     held = []
     replayed = true
   }
@@ -314,7 +348,7 @@ async function main (argv, { platform = process.platform } = {}) {
   deckd.on('output', (ev, n) => {
     if (ptyId === null || ev.ptyId !== ptyId) return
     const buf = Buffer.from(ev.data, 'base64')
-    if (replayed) process.stdout.write(buf)
+    if (replayed) show(buf)
     else held.push({ n, buf })
   })
   deckd.on('dropped', (ev) => {
@@ -358,7 +392,7 @@ async function main (argv, { platform = process.platform } = {}) {
     const attached = deckd.request('attach', { ptyId: id, stream: true })
     const screen = deckd.request('screen', { ptyId: id, scrollback: REPLAY_LINES })
     screen.catch(() => {})
-    const size = termSize()
+    const size = termSize(proc)
     if (size) deckd.request('resize', { ptyId: id, ...size, source }).catch(() => {})
     attaching = id
     hangupDetach = hungUp ? deckd.request('detach', { ptyId: id }).catch(() => {}) : null
@@ -373,17 +407,17 @@ async function main (argv, { platform = process.platform } = {}) {
     hungUp = true
     if (attachedOk) detach()
     else if (attaching !== null && hangupDetach === null) hangupDetach = deckd.request('detach', { ptyId: attaching }).catch(() => {})
-  }, { platform })
+  }, { platform, proc })
 
-  if (process.stdin.isTTY) process.stdin.setRawMode(true)
+  if (proc.stdin.isTTY) proc.stdin.setRawMode(true)
 
   try {
     if (cmd === 'claude') {
       const res = await deckd.request('spawn', {
-        cwd: process.cwd(),
+        cwd: proc.cwd(),
         argv: ['claude', ...rest],
-        env: process.env,
-        ...termSize(),
+        env: proc.env,
+        ...termSize(proc),
         origin: 'wrapped'
       })
       ptyId = res.ptyId
@@ -398,7 +432,7 @@ async function main (argv, { platform = process.platform } = {}) {
     } catch (err) {
       // `fm attach <repo>`: the argument is not a live ptyId.
       if (cmd !== 'attach' || /** @type {{ code?: string }} */ (err).code !== 'not_found') throw err
-      ptyId = await resolveRepo(deckd, rest[0])
+      ptyId = await resolveRepo(deckd, rest[0], proc)
       pending = attachTo(ptyId)
       await pending.attached
     }
@@ -411,10 +445,10 @@ async function main (argv, { platform = process.platform } = {}) {
     const id = /** @type {string} */ (ptyId)
 
     let escaped = false
-    process.stdin.on('data', (chunk) => {
+    proc.stdin.on('data', (/** @type {Buffer} */ chunk) => {
       /** @type {Buffer} */
       let out = chunk
-      if (process.stdin.isTTY) {
+      if (proc.stdin.isTTY) {
         /** @type {number[]} */
         const bytes = []
         for (const b of chunk) {
@@ -438,8 +472,8 @@ async function main (argv, { platform = process.platform } = {}) {
       }
       deckd.request('write', { ptyId: id, data: out.toString('base64'), source }).catch(() => {})
     })
-    process.stdout.on('resize', () => {
-      const size = termSize()
+    proc.stdout.on('resize', () => {
+      const size = termSize(proc)
       if (size) deckd.request('resize', { ptyId: id, ...size, source }).catch(() => {})
     })
     await replay(pending.screen)
@@ -458,17 +492,18 @@ async function main (argv, { platform = process.platform } = {}) {
  * PTY or several match.
  * @param {Awaited<ReturnType<typeof connectDeckd>>} deckd
  * @param {string} arg
+ * @param {Proc} [proc]
  * @returns {Promise<string>}
  */
-async function resolveRepo (deckd, arg) {
+async function resolveRepo (deckd, arg, proc = process) {
   const { ptys = [] } = await deckd.request('list')
-  const home = process.env.HOME || os.homedir()
+  const home = proc.env.HOME || os.homedir()
   const matches = ptys.filter((/** @type {any} */ p) => repoOf(String(p.cwd), home) === arg).map((/** @type {any} */ p) => String(p.ptyId))
   if (matches.length === 1) return matches[0]
-  restoreTerminal()
+  restoreTerminal(proc)
   deckd.close()
-  if (matches.length === 0) die(1, `fm: no session for ${arg}`)
-  die(1, `fm: ${matches.length} sessions for ${arg}: ${matches.join(', ')}`)
+  if (matches.length === 0) return die(1, `fm: no session for ${arg}`, proc)
+  return die(1, `fm: ${matches.length} sessions for ${arg}: ${matches.join(', ')}`, proc)
 }
 
 /**

@@ -50,9 +50,9 @@ before(async () => {
 after(async () => {
   term?.close()
   await deckd?.close()
-  await bin?.cleanup()
-  await rt?.cleanup()
-  fs.rmSync(dir, { recursive: true, force: true })
+  // Retried: the Windows VM run could not remove a directory a just-killed child still held.
+  const rmRetry = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }
+  for (const d of [bin?.binDir, rt?.dir, dir]) if (d) fs.rmSync(d, rmRetry)
 })
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))

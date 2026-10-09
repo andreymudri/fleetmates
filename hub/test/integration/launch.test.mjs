@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { startDeckd } from '../../deckd/main.mjs'
 import { startDeckServer } from '../../server/main.mjs'
 import { deckHookCommand, transformHooks } from '../../server/setup/hooks.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { FLEETMATES_JOB_PROMPT, firstPromptKeys } from '../../server/launch/launch.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
@@ -24,38 +25,44 @@ const TASK = 'fix the flaky combat test'
  * settings run deck-hook. The fake claude runs `script` (a fixture name or a path) and logs to `log`.
  */
 async function deck(t, script) {
-  const rt = await makeRuntimeDir()
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lch-'))
-  const bin = await fakeBin({ version: '2.1.282' })
+  // The cleanup is registered before the first call that can throw, so a start that fails part way (the
+  // server, say) still closes the deckd it started and removes the directories. Each step undoes only what
+  // was made, deckd and the server before their directories.
+  let rt, home, bin, deckd, server, off
+  let deckdClosed = false
+  const stopDeckd = async () => { if (deckd && !deckdClosed) { deckdClosed = true
+    await deckd.close() } }
+  t.after(async () => {
+    off?.()
+    await stopDeckd()
+    await server?.close()
+    // Retried: the Windows VM run could not remove a directory a just-killed child still held.
+    const rmRetry = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }
+    for (const dir of [bin?.binDir, rt?.dir, home]) if (dir) fs.rmSync(dir, rmRetry)
+  })
+  rt = await makeRuntimeDir()
+  home = fs.mkdtempSync(path.join(os.tmpdir(), 'lch-'))
+  bin = await fakeBin({ version: '2.1.282' })
   const log = path.join(home, 'fake.log')
-  const state = path.join(home, '.local/state/fleetmates/deck')
-  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
-  fs.mkdirSync(path.join(home, '.claude'))
-  fs.writeFileSync(path.join(home, '.claude/settings.json'), JSON.stringify(transformHooks({}, deckHookCommand(process.execPath, hookScript))))
+  const serverEnv = { HOME: home, XDG_RUNTIME_DIR: rt.dir }
+  // the deck's state dir and Claude Code's settings file for this HOME, on the host's platform
+  const paths = setupPaths(serverEnv)
+  fs.mkdirSync(paths.state, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(paths.token, token, { mode: 0o600 })
+  fs.mkdirSync(path.dirname(paths.settings), { recursive: true })
+  fs.writeFileSync(paths.settings, JSON.stringify(transformHooks({}, deckHookCommand(process.execPath, hookScript))))
   const repo = path.join(home, 'repos', 'ship')
   fs.mkdirSync(path.join(repo, '.git'), { recursive: true })
   fs.writeFileSync(path.join(repo, '.git/HEAD'), 'ref: refs/heads/main\n')
   const staticDir = path.join(home, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  const deckd = await startDeckd({ runtimeDir: rt.dir, loginEnv: { PATH: bin.env.PATH, HOME: home, XDG_RUNTIME_DIR: rt.dir,
+  deckd = await startDeckd({ runtimeDir: rt.dir, loginEnv: { PATH: bin.env.PATH, HOME: home, XDG_RUNTIME_DIR: rt.dir,
     FAKE_CLAUDE_SCRIPT: script, FAKE_CLAUDE_LOG: log, FAKE_CLAUDE_VERSION: '2.1.282' } })
-  const server = await startDeckServer({ env: { HOME: home, XDG_RUNTIME_DIR: rt.dir }, port: 0, staticDir, notifications: false,
+  server = await startDeckServer({ env: serverEnv, port: 0, staticDir, notifications: false,
     runPollMs: 3_600_000, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
   const published = []
-  const off = server.subscribe(event => published.push(event))
-  let deckdClosed = false
-  const stopDeckd = async () => { if (!deckdClosed) { deckdClosed = true
-    await deckd.close() } }
-  t.after(async () => {
-    off()
-    await stopDeckd()
-    await server.close()
-    await bin.cleanup()
-    await rt.cleanup()
-    fs.rmSync(home, { recursive: true, force: true })
-  })
+  off = server.subscribe(event => published.push(event))
   const origin = `http://127.0.0.1:${server.address().port}`
   const request = async (route, method = 'GET', body) => {
     const response = await fetch(origin + route, { method, body: body === undefined ? undefined : JSON.stringify(body),

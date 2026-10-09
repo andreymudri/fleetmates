@@ -8,9 +8,24 @@ import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP, MAX_LINE } from '..
 import { Ring } from '../../deckd/ring.mjs'
 import { startDeckd } from '../../deckd/main.mjs'
 import { connectDeckd } from '../../deckd/client.mjs'
+import { PtyHost } from '../../deckd/pty-host.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
+import { nodeClaudeShim } from '../helpers/fake-bin.mjs'
 
-const stub = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'integration', 'stubs', 'claude')
+const stubScript = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'integration', 'stubs', 'claude')
+
+/**
+ * The `claude` argv[0] for the stub. ConPTY runs only PE images, so on Windows the shebang stub is
+ * reached through an npm-style `claude.cmd` in `dir` that commandSpawn unwraps to node.
+ * @param {string} dir
+ * @returns {Promise<string>}
+ */
+async function stubClaude (dir) {
+  if (process.platform !== 'win32') return stubScript
+  const bin = path.join(dir, 'stub-bin')
+  await mkdir(bin, { recursive: true })
+  return nodeClaudeShim(bin, { script: stubScript })
+}
 
 /**
  * Build a decoder that records what it produced.
@@ -133,6 +148,7 @@ test('history: proto 2 gets it on the exit record and on screen with history: tr
   const c1 = await connectDeckd({ runtimeDir: rt.dir, kind: 'server', name: 'history1', proto: 1 })
   try {
     const since = Date.now() - 1
+    const stub = await stubClaude(rt.dir)
     const { ptyId } = await c2.request('spawn', { cwd: rt.dir, argv: [stub], env: {}, cols: 90, rows: 20, origin: 'launched' })
     const end = Date.now() + 15000
     while (!(await c2.request('screen', { ptyId, scrollback: 0 })).lines.includes('READY')) {
@@ -194,9 +210,19 @@ async function exitRecordOf (script, { stall = false, ...deckdOpts } = {}) {
   const rt = await makeRuntimeDir()
   const bin = path.join(rt.dir, 'bin')
   await mkdir(bin, { mode: 0o700 })
-  const claude = path.join(bin, 'claude')
   const flag = path.join(rt.dir, 'flag')
-  await writeFile(claude, `#!/usr/bin/env node\n${script.replace('FLAG', JSON.stringify(flag))}\n`, { mode: 0o700 })
+  const body = script.replace('FLAG', JSON.stringify(flag))
+  /** @type {string} */
+  let claude
+  if (process.platform === 'win32') {
+    // A CommonJS file (the scripts use require) run by node through an npm-style claude.cmd.
+    const cjs = path.join(rt.dir, 'one-shot.cjs')
+    await writeFile(cjs, body + '\n')
+    claude = await nodeClaudeShim(bin, { script: cjs })
+  } else {
+    claude = path.join(bin, 'claude')
+    await writeFile(claude, `#!/usr/bin/env node\n${body}\n`, { mode: 0o700 })
+  }
   const deckd = await startDeckd({ runtimeDir: rt.dir, loginEnv: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: rt.dir }, ...deckdOpts })
   const c = await connectDeckd({ runtimeDir: rt.dir, kind: 'server', name: 'history-exit', proto: 2 })
   try {
@@ -247,4 +273,104 @@ test('history: the exit record caps history.data at the byte cap, starting right
   assert.doesNotMatch(data, /row 0 /)
   // a whole serialized line: its colour, then the row text up to the CRLF
   assert.match(data, /^\x1b\[3\dmrow \d+ çé\r\n/, JSON.stringify(data.slice(0, 40)))
+})
+
+/**
+ * A stand-in for node-pty's spawn: records each call and returns a process that never runs, whose
+ * output is fed by calling `emit(chunk)` on the recorded call.
+ * @param {any[]} calls
+ */
+function recordingPtySpawn (calls) {
+  return (/** @type {string} */ file, /** @type {any} */ args, /** @type {any} */ opts) => {
+    /** @type {any} */
+    const call = { file, args, opts, emit: (/** @type {Buffer} */ _chunk) => { throw new Error('onData was never registered') } }
+    calls.push(call)
+    return {
+      pid: 4242,
+      onData (/** @type {(d: Buffer) => void} */ fn) { call.emit = fn },
+      onExit () {},
+      write () {},
+      resize () {},
+      kill () {}
+    }
+  }
+}
+
+/**
+ * PtyHost.spawn with a recording pty and the given platform; every path exists unless `exists` says
+ * otherwise. Returns the host (the caller disposes it) and the recorded node-pty calls.
+ * @param {string} platform
+ * @param {{ argv?: string[], baseEnv?: Record<string, string>, env?: Record<string, string>, hostEnv?: Record<string, string>, exists?: (p: string) => boolean, readFile?: (p: string) => string, onOutput?: (host: any, data: Buffer) => void }} [opts]
+ */
+function fakeHost (platform, { argv = ['C:\\bin\\claude.exe'], baseEnv = {}, env = {}, hostEnv = {}, exists = () => true, readFile = () => '', onOutput = () => {} } = {}) {
+  /** @type {any[]} */
+  const calls = []
+  const host = PtyHost.spawn({ argv, cwd: '/home/you', baseEnv, env }, { onOutput, onExit () {} },
+    { platform, ptySpawn: recordingPtySpawn(calls), exists, readFile, hostEnv })
+  return { host, calls }
+}
+
+test('on win32 PtyHost hands node-pty one key per variable name and the Windows base variables it lacks', () => {
+  const hostEnv = { SYSTEMROOT: 'C:\\Windows', TEMP: 'C:\\Users\\you\\AppData\\Local\\Temp', Path: 'C:\\host' }
+  const { host, calls } = fakeHost('win32', { baseEnv: { Path: 'C:\\login', TEMP: 'C:\\login-temp' }, env: { PATH: 'C:\\request' }, hostEnv })
+  try {
+    const env = calls[0].opts.env
+    assert.deepEqual(Object.keys(env).filter((k) => /^path$/i.test(k)), ['PATH'])
+    assert.equal(env.PATH, 'C:\\request')
+    // missing from the login and request env: taken from deckd's own env
+    assert.equal(env.SystemRoot, 'C:\\Windows')
+    // present: kept
+    assert.equal(env.TEMP, 'C:\\login-temp')
+    assert.equal(env.FLEETMATES_DECK_PTY, host.ptyId)
+    assert.equal(env.TERM, 'xterm-256color')
+  } finally {
+    host.dispose()
+  }
+})
+
+test('on linux PtyHost hands node-pty the env as merged, with no Windows variables added', () => {
+  const { host, calls } = fakeHost('linux', { argv: ['claude'], baseEnv: { Path: '/login' }, env: { PATH: '/request' }, hostEnv: { SystemRoot: 'C:\\Windows' } })
+  try {
+    assert.deepEqual(calls[0].opts.env, { Path: '/login', PATH: '/request', FLEETMATES_DECK_PTY: host.ptyId, TERM: 'xterm-256color' })
+  } finally {
+    host.dispose()
+  }
+})
+
+test('on win32 PtyHost removes win32-input-mode requests from output, also split across reads, before the ring, the screen and output events', async () => {
+  /** @type {Buffer[]} */
+  const events = []
+  const { host, calls } = fakeHost('win32', { onOutput: (_h, data) => events.push(data) })
+  try {
+    // é is split between two reads as well, so a byte-for-byte pass of the rest is checked too
+    const e = Buffer.from('é')
+    const chunks = [
+      Buffer.from('a\x1b[?90'),
+      Buffer.from('01hb\x1b[?9001'),
+      Buffer.concat([Buffer.from('lc'), e.subarray(0, 1)]),
+      Buffer.concat([e.subarray(1), Buffer.from('\x1b[?900hd')])
+    ]
+    for (const chunk of chunks) calls[0].emit(chunk)
+    const expected = 'abcé\x1b[?900hd'
+    assert.equal(Buffer.concat(events).toString('utf8'), expected)
+    assert.equal(host.ring.snapshot().toString('utf8'), expected)
+    await host.screen.flush()
+    assert.match(host.screen.lines().join('\n'), /abcéd/)
+  } finally {
+    host.dispose()
+  }
+})
+
+test('on linux PtyHost passes output through byte for byte, win32-input-mode requests included', () => {
+  /** @type {Buffer[]} */
+  const events = []
+  const { host, calls } = fakeHost('linux', { argv: ['claude'], onOutput: (_h, data) => events.push(data) })
+  try {
+    calls[0].emit(Buffer.from('a\x1b[?90'))
+    calls[0].emit(Buffer.from('01hb'))
+    assert.equal(Buffer.concat(events).toString(), 'a\x1b[?9001hb')
+    assert.equal(host.ring.snapshot().toString(), 'a\x1b[?9001hb')
+  } finally {
+    host.dispose()
+  }
 })

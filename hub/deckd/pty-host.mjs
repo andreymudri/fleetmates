@@ -6,7 +6,7 @@ import { createRequire } from 'node:module'
 import { Ring } from './ring.mjs'
 import { ScreenModel } from './screen-model.mjs'
 import { dropSessionVars } from './login-env.mjs'
-import { isClaudeProgram, killTree, resolveCommand, commandSpawn } from '../platform/index.mjs'
+import { isClaudeProgram, killTree, resolveCommand, commandSpawn, windowsChildEnv, createInputModeFilter } from '../platform/index.mjs'
 
 const require = createRequire(import.meta.url)
 /** @type {typeof import('node-pty')} */
@@ -75,8 +75,10 @@ export function signalProcessGroup (pid, signal, kill = process.kill) {
  * What PtyHost takes from its surroundings, each defaulting to the live one,
  * so a test can pin the platform and stand in for node-pty and the kill
  * calls: `ptySpawn` is node-pty's `spawn`; `exists` and `readFile` serve
- * resolveCommand and commandSpawn; `kill` and `spawnSync` serve killTree.
- * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function }} PtyDeps
+ * resolveCommand and commandSpawn; `kill` and `spawnSync` serve killTree;
+ * `hostEnv` is the environment the
+ * Windows base variables are taken from (this process's).
+ * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function, hostEnv?: Record<string, string | undefined> }} PtyDeps
  */
 
 export class PtyHost {
@@ -86,7 +88,9 @@ export class PtyHost {
    * win32 also `claude.exe` or `claude.cmd` in any case. The child's
    * environment is `{ ...baseEnv, ...env }` (baseEnv defaults to this
    * process's environment without TERM and Claude Code's session variables),
-   * then `FLEETMATES_DECK_PTY=<ptyId>` and `TERM=xterm-256color`.
+   * then `FLEETMATES_DECK_PTY=<ptyId>` and `TERM=xterm-256color`; on win32
+   * that goes through windowsChildEnv, so it has one key per variable name
+   * and the Windows base variables (SystemRoot and the rest) it lacks.
    * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, baseEnv?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
    * @param {PtyDeps} [deps]
@@ -109,12 +113,15 @@ export class PtyHost {
    * directly, any other `.cmd` or `.bat` runs through ComSpec, its command
    * line handed to node-pty as one string so it is not quoted again. An
    * argument cmd.exe cannot pass to a batch file is refused with
-   * `bad_request`. On POSIX argv runs as given.
+   * `bad_request`. Output is passed through createInputModeFilter, so a
+   * win32-input-mode request (`ESC [ ? 9001 h` or `l`) reaches neither the
+   * ring, the screen model nor output events. On POSIX argv runs as given and
+   * output is not touched.
    * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, baseEnv?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
    * @param {PtyDeps} [deps]
    */
-  constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync } = {}) {
+  constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync, hostEnv = process.env } = {}) {
     this.platform = platform
     /** Set once node-pty's kill() has closed the win32 pseudoconsole. */
     this.pseudoconsoleClosed = false
@@ -160,7 +167,8 @@ export class PtyHost {
     /** @type {(() => void) | null} */
     this.unwatchScreen = null
 
-    const env = { ...(req.baseEnv ?? dropSessionVars(process.env)), ...(req.env ?? {}), FLEETMATES_DECK_PTY: this.ptyId, TERM: 'xterm-256color' }
+    const merged = { ...(req.baseEnv ?? dropSessionVars(process.env)), ...(req.env ?? {}), FLEETMATES_DECK_PTY: this.ptyId, TERM: 'xterm-256color' }
+    const env = /** @type {Record<string, string>} */ (windowsChildEnv(merged, { base: hostEnv, platform }))
     /** @type {{ file: string, args: string[], options: Record<string, boolean> }} */
     let cmd
     try {
@@ -187,8 +195,14 @@ export class PtyHost {
       throw new DeckdError('spawn_failed', /** @type {Error} */ (err).message)
     }
     this.pid = this.proc.pid
+    const filter = createInputModeFilter({ platform })
     this.proc.onData((/** @type {Buffer | string} */ d) => {
-      const buf = typeof d === 'string' ? Buffer.from(d, 'utf8') : d
+      let buf = typeof d === 'string' ? Buffer.from(d, 'utf8') : d
+      if (platform === 'win32') {
+        // latin1 maps each byte to one char and back, so a character split across reads stays split
+        buf = Buffer.from(filter(buf.toString('latin1')), 'latin1')
+        if (buf.length === 0) return
+      }
       this.ring.push(buf)
       this.screen.write(buf)
       hooks.onOutput(this, buf)
