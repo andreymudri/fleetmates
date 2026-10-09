@@ -255,7 +255,8 @@ test('requestView adds reasons, rulePattern, ruleNote, description, confirmLabel
   assert.equal(entry.rule, 'Bash(npm run {script})')
   assert.equal(entry.ruleNote, undefined)
   const input = { command: 'npm run test' }
-  const classified = classify({ toolName: 'Bash', toolInput: input, cwd: '/home/you/work', repoRoot: '/home/you/work' })
+  // The POSIX verdict, on every host: on win32 every request asks (floor.platform).
+  const classified = classify({ toolName: 'Bash', toolInput: input, cwd: '/home/you/work', repoRoot: '/home/you/work', platform: 'linux' })
   assert.equal(classified.tier, 'safe')
   const allow = [{ key: '1', label: 'Yes' }, { key: '2', label: "Yes, and don't ask again for npm run test" }, { key: '3', label: 'No' }]
   const stored = row({ tier: classified.tier, input, rule: classified.ruleCandidate, reasons: classified.reasons, options: allow })

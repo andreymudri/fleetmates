@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { syncBuiltinESMExports } from 'node:module'
+import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -10,6 +10,21 @@ import { classify, createWorktreeCache, DEFAULT_TIERS, hooksPathCache, maxTier, 
 import { createTiersStore, effectiveTiers, ENTRY_KEYS, validateTiers } from '../../server/approvals/tiers-store.mjs'
 import { isPlain } from '../../server/approvals/shell.mjs'
 import { allowedCommand } from '../../server/adapters/git-read.mjs'
+import { floorProbes, probeReaches } from '../../server/approvals/rules.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
+
+// A second instance of tiers.mjs whose `node:path` is path.win32, the host path module on Windows,
+// so a Linux run sees what a Windows host would if tiers.mjs resolved parsed paths with the host
+// `path`. Only imports made by that instance are redirected.
+const WIN_HOST_TIERS = `${new URL('../../server/approvals/tiers.mjs', import.meta.url).href}?host=win32`
+const WIN32_PATH = `data:text/javascript,${encodeURIComponent("import p from 'node:path'; const w = p.win32; export default w; export const { posix, win32, sep, delimiter, basename, dirname, extname, format, isAbsolute, join, matchesGlob, normalize, parse, relative, resolve, toNamespacedPath } = w")}`
+registerHooks({
+  resolve(specifier, context, next) {
+    if ((specifier === 'node:path' || specifier === 'path') && context.parentURL === WIN_HOST_TIERS) return { url: WIN32_PATH, shortCircuit: true }
+    return next(specifier, context)
+  }
+})
+const winHost = await import(WIN_HOST_TIERS)
 
 // The tier engine is POSIX (docs/deck/16-platforms.md section 6): a test that pins its path-based
 // classification runs only on a POSIX host.
@@ -170,6 +185,26 @@ test('the worktree cache reads git worktree list once per repo and drops a repo 
     assert.equal(calls.length, 2)
     assert.deepEqual(cache.get('relative/path'), [])
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+// The cache holds what git prints, in the host's form: on win32 a drive root and drive worktrees
+// are absolute, and classify converts them to their Git Bash form (docs/deck/16-platforms.md
+// section 6). Runs on every host: the platform and the directory check are injected.
+// Mutation run for this test: the cache's absolute checks back to path.posix.isAbsolute alone; this
+// test failed.
+test('on win32 the worktree cache reads a drive root and keeps drive worktrees as git prints them', async () => {
+  const root = 'C:\\Users\\you\\repo'
+  const calls = []
+  const cache = createWorktreeCache({ platform: 'win32', isDirectory: dir => dir === root, read: async (dir, args) => {
+    calls.push([dir, args])
+    return { code: 0, stdout: Buffer.from(`worktree C:/Users/you/repo\nHEAD abc\n\nworktree C:\\Users\\you\\linked\n\nworktree /srv/linked\n\nworktree relative/tree\n`) }
+  } })
+  assert.deepEqual(await cache.load(root), ['C:/Users/you/repo', 'C:\\Users\\you\\linked', '/srv/linked'])
+  assert.deepEqual(calls, [[root, ['worktree', 'list', '--porcelain']]])
+  assert.deepEqual(cache.get('relative/path'), [])
+  // The linux control: a drive path is not absolute there, so no read starts.
+  const posixCache = createWorktreeCache({ platform: 'linux', isDirectory: () => true, read: async () => { throw new Error('no read expected') } })
+  assert.deepEqual(await posixCache.load(root), [])
 })
 
 test('the sed script rule takes only p, d, =, q and s with g, p, I or a number (D-88 (4))', () => {
@@ -1731,4 +1766,102 @@ test('a write to ~/Library/LaunchAgents/io.fleetmates.deck.* hits the persistenc
     const other = s.run('Write', { file_path: path.join(s.home, 'Library', 'LaunchAgents', 'com.example.agent.plist'), content: 'x' })
     assert.ok(!other.reasons.some(item => item.entryId === 'floor.persistence'), ids(other))
   } finally { s.close() }
+})
+
+// docs/deck/16-platforms.md section 6: Claude Code runs the Bash tool through Git Bash on Windows, so
+// the tier engine resolves parsed paths with path.posix on every host, and on win32 reads `C:\x`,
+// `C:/x` and `/c/x` as one path. Runs on every host: the paths are Windows-shaped strings that need
+// not exist, and the engine is run twice, once as loaded and once with path.win32 as its host path.
+// Mutation runs for this test: tiers.mjs importing the host `path` again, and separately the win32
+// path conversion (hostForm) made the identity; this test failed for each.
+test('on win32 every Destructive floor probe stays Destructive, under a Windows host path module too', () => {
+  const home = 'C:\\Users\\you'
+  const repo = 'C:\\Users\\you\\dev\\rustot'
+  const env = { USERPROFILE: home, APPDATA: `${home}\\AppData\\Roaming`, LOCALAPPDATA: `${home}\\AppData\\Local` }
+  const paths = setupPaths(env, { platform: 'win32' })
+  const deckPaths = { config: paths.config, state: paths.state, runtime: paths.runtime, token: paths.token, port: 47800 }
+  const probes = floorProbes({ env, homeDir: home, platform: 'win32' })
+  assert.equal(probes.length, 15, probes.map(probe => `${probe.carrier} ${probe.args}`).join('\n'))
+  for (const [label, engine] of [['as loaded', classify], ['win32 host path', winHost.classify]]) {
+    const request = (toolName, toolInput) => engine({ toolName, toolInput, cwd: repo, repoRoot: repo, homeDir: home, deckPaths, platform: 'win32' })
+    const run = command => request('Bash', { command })
+    for (const probe of probes) {
+      const text = `${probe.carrier} ${probe.args}`
+      const result = run(text)
+      expectTier(result, 'destructive', probe.floor, `${label}: ${text}`)
+      assert.ok(result.reasons.some(item => item.entryId === 'floor.platform'), `${label}: ${text}: ${ids(result)}`)
+      assert.equal(probeReaches(run, probe.carrier, probe.args), true, `${label}: ${text}`)
+    }
+    // The deck's state on win32, named with either slash, in any case, or in its Git Bash form.
+    for (const target of ['C:/Users/you/AppData/Local/fleetmates/deck/state/token', "'c:\\users\\YOU\\appdata\\local\\fleetmates\\deck\\state\\token'", '/c/Users/you/AppData/Local/fleetmates/deck/state/token', '/C/USERS/you/AppData/Local/fleetmates/deck/state']) {
+      expectTier(run(`cp x ${target}`), 'destructive', 'floor.deck', `${label}: cp x ${target}`)
+    }
+    expectTier(run('cp x ~/.bashrc'), 'destructive', 'floor.persistence', `${label}: cp x ~/.bashrc`)
+    expectTier(request('Write', { file_path: 'C:\\Users\\you\\.bashrc', content: 'x' }), 'destructive', 'floor.persistence', `${label}: Write C:\\Users\\you\\.bashrc`)
+    expectTier(request('Write', { file_path: 'C:\\Users\\you\\Library\\LaunchAgents\\io.fleetmates.deck.web.plist', content: 'x' }), 'destructive', 'floor.persistence', `${label}: Write LaunchAgents`)
+    // A path elsewhere stays below Destructive: the conversion does not make every path a floor.
+    expectTier(run('cp x C:/Users/you/dev/other/notes.txt'), 'caution', 'floor.platform', `${label}: cp outside the repo`)
+  }
+})
+
+// Windows-shaped paths for the injected-platform tests below. They need not exist, and the deck paths
+// are given, so no XDG variable of the host is read.
+const WIN_HOME = 'C:\\Users\\you'
+const WIN_REPO = `${WIN_HOME}\\dev\\rustot`
+const WIN_DECK = { config: `${WIN_HOME}\\AppData\\Roaming\\fleetmates\\deck`, state: `${WIN_HOME}\\AppData\\Local\\fleetmates\\deck\\state`, runtime: null, token: `${WIN_HOME}\\AppData\\Local\\fleetmates\\deck\\state\\token`, port: 47800 }
+const onWin32 = (toolName, toolInput) => classify({ toolName, toolInput, cwd: WIN_REPO, repoRoot: WIN_REPO, homeDir: WIN_HOME, deckPaths: WIN_DECK, platform: 'win32' })
+
+// On win32 a docker -v value is `<drive>:<path>:<target>[:opts]`, and the parser splits it on every
+// `:`, so tiers.mjs rejoins a one-letter source with the path after it before the mount check. Runs
+// on every host: the platform is injected.
+// Mutation runs for this test: the drive rejoin removed from the mount check, and separately
+// hostForm removed from the mount source; this test failed for each.
+test('on win32 a docker -v bind mount of a drive path reaches floor.mount, as on linux', () => {
+  const win = command => onWin32('Bash', { command })
+  for (const command of ['docker run -v C:/Users/you:/host x', "docker run -v 'C:\\Users\\you:/host' x", 'docker run -v C:/:/host x', 'docker run -v c:/USERS:/h:ro x',
+    'docker run -v D:/:/d x', 'docker run -v /c/Users/you:/host x', 'docker run --mount type=bind,source=C:/Users/you,target=/h x',
+    // A trailing separator names the same directory.
+    'docker run -v C:/Users/you/:/h x', "docker run -v 'C:\\Users\\you\\:/h' x", 'docker run --mount type=bind,source=C:/Users/you/,target=/h x', 'docker run -v C:/:/h x']) {
+    expectTier(win(command), 'destructive', 'floor.mount', command)
+  }
+  // A drive path that holds neither the home nor is a drive root, and a named volume, stay below the floor.
+  for (const command of ['docker run -v C:/data/cache:/cache x', 'docker run -v C:/Users/you/dev/rustot/build:/out x', 'docker run -v cache:/cache x']) {
+    const result = win(command)
+    assert.ok(!result.reasons.some(item => item.entryId === 'floor.mount'), `${command}: ${ids(result)}`)
+  }
+  // The linux control: the same mounts in POSIX form, and a one-letter source is a named volume there.
+  const linux = command => classify({ toolName: 'Bash', toolInput: { command }, cwd: '/home/you/dev/rustot', repoRoot: '/home/you/dev/rustot', homeDir: '/home/you', deckPaths: { config: '/home/you/.config/fleetmates/deck', state: '/home/you/.local/state/fleetmates/deck', runtime: null, port: 47800 }, platform: 'linux' })
+  for (const command of ['docker run -v /home/you:/host x', 'docker run -v /:/host x']) expectTier(linux(command), 'destructive', 'floor.mount', command)
+  const named = linux('docker run -v C:/Users/you:/host x')
+  assert.ok(!named.reasons.some(item => item.entryId === 'floor.mount'), ids(named))
+})
+
+// The file tools on win32 read their Windows-form path in its Git Bash form, so each verdict below
+// rests on the path, not only on floor.platform.
+// Mutation run for this test: the hostForm call removed from resolveIn; this test failed.
+test('on win32 the file tools judge a Windows-form path by the file it names', () => {
+  const has = (result, id, label) => assert.ok(result.reasons.some(item => item.entryId === id), `${label}: no ${id} in ${ids(result)}`)
+  for (const file of [`${WIN_HOME}\\.ssh\\id_rsa`, 'C:/Users/you/.ssh/id_rsa']) has(onWin32('Read', { file_path: file }), 'read.secret', `Read ${file}`)
+  has(onWin32('Write', { file_path: `${WIN_HOME}\\.claude\\settings.json`, content: 'x' }), 'floor.claude-settings', 'Write settings')
+  has(onWin32('Write', { file_path: WIN_DECK.token, content: 'x' }), 'floor.deck', 'Write token')
+  has(onWin32('Write', { file_path: `${WIN_HOME}\\notes.txt`, content: 'x' }), 'caution.file.write-outside', 'Write outside the repo')
+  for (const [label, result] of [['Read id_rsa', onWin32('Read', { file_path: `${WIN_HOME}\\.ssh\\id_rsa` })], ['Write notes', onWin32('Write', { file_path: `${WIN_HOME}\\notes.txt`, content: 'x' })]]) {
+    assert.ok(!result.reasons.some(item => item.entryId.startsWith('safe.')), `${label}: ${ids(result)}`)
+  }
+})
+
+// classify reads Windows paths only for the call it was given win32 for, also when that call throws.
+// Two things hold this: the `finally` restore, and each call setting the flag from its own platform.
+// Mutation runs for this test: the `finally` restore removed alone left it green (the next call resets
+// the flag, and nothing else reads it); the restore removed and the flag only ever set to true made
+// it fail.
+test('a win32 classify that throws leaves the next linux classify reading POSIX paths', () => {
+  const throwing = { get command() { throw new Error('unreadable input') } }
+  assert.throws(() => classify({ toolName: 'Bash', toolInput: throwing, cwd: WIN_REPO, repoRoot: WIN_REPO, homeDir: WIN_HOME, deckPaths: WIN_DECK, platform: 'win32' }), /unreadable input/)
+  // On linux `C:\Users\you\.bashrc` in quotes is a file named so in the working directory, not the
+  // .bashrc of a home at /c/Users/you.
+  const result = classify({ toolName: 'Bash', toolInput: { command: "cp x 'C:\\Users\\you\\.bashrc'" }, cwd: '/c/Users/you/dev/rustot', repoRoot: '/c/Users/you/dev/rustot', homeDir: '/c/Users/you', deckPaths: { config: '/c/Users/you/.config/fleetmates/deck', state: '/c/Users/you/.local/state/fleetmates/deck', runtime: null, port: 47800 }, platform: 'linux' })
+  assert.ok(!result.reasons.some(item => item.entryId === 'floor.persistence'), ids(result))
+  // The control: the same command on win32 is the home's .bashrc.
+  expectTier(onWin32('Bash', { command: "cp x 'C:\\Users\\you\\.bashrc'" }), 'destructive', 'floor.persistence', 'win32 control')
 })

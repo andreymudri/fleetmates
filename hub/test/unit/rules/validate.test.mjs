@@ -1,17 +1,23 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { openDeckDb } from '../../../server/db/index.mjs'
 import { classify, DEFAULT_TIERS, hooksPathCache } from '../../../server/approvals/tiers.mjs'
 import { setupPaths } from '../../../server/setup/paths.mjs'
-import { canonicalPattern, FLOOR_PROBE_EXEMPT, floorProbes, listRules, probeReaches, PERSISTENCE_DIRS, PERSISTENCE_FILES, RULE_COPY, samePattern, validatePattern, writeRule } from '../../../server/approvals/rules.mjs'
+import { canonicalPattern, FLOOR_PROBE_EXEMPT, floorProbes, listRules, probeReaches, PERSISTENCE_DIRS, PERSISTENCE_FILES, RULE_COPY, samePattern, validatePattern as validateOn, writeRule } from '../../../server/approvals/rules.mjs'
 
 // Pattern validation for rules (07-approvals 7.3, F13, D-76, D-86).
 
 const DESTRUCTIVE = 'Destructive commands can never become rules.'
+
+// validatePattern refuses every rule on win32 (docs/deck/16-platforms.md section 6), so the tests that
+// pin what it accepts or refuses on POSIX pass `platform: 'linux'`; a test may pass another platform.
+const validatePattern = (pattern, options = {}) => validateOn(pattern, { platform: 'linux', ...options })
+// A test that validates against a sandbox of real temp directories needs POSIX paths for them.
+const hostPaths = { skip: process.platform === 'win32' && 'validatePattern classifies for the host' }
 
 test('the refusal copy is the Decided text', () => {
   assert.equal(RULE_COPY.destructive, DESTRUCTIVE)
@@ -83,7 +89,7 @@ function git(cwd, args) {
   return execFileSync('git', args, { cwd, env, stdio: 'ignore' })
 }
 
-test('a suggestion written for npm run test:unit writes exactly Bash(npm run test:unit)', async () => {
+test('a suggestion written for npm run test:unit writes exactly Bash(npm run test:unit)', hostPaths, async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'deck-rules-validate-'))
   const store = openDeckDb(path.join(root, 'state', 'deck.db'))
   try {
@@ -118,7 +124,7 @@ function sandbox() {
 
 // Mutation run for this test: the protected-root check removed from pathVerdict (only the text match
 // kept, as before this fix); this test failed.
-test('a Read or file-tool glob whose root is, holds or lies inside a deck control or protected path is refused', async () => {
+test('a Read or file-tool glob whose root is, holds or lies inside a deck control or protected path is refused', hostPaths, async () => {
   const s = sandbox()
   try {
     await s.settle()
@@ -144,7 +150,7 @@ const PREFIX_TIERS = { entries: DEFAULT_TIERS.entries.map(entry => Object.hasOwn
 // Mutation run for this test: `own` forced to false in bashVerdict; this test failed on the accepted
 // control. Under D-101 the refused prefixes here are no tiers rules, so disabling the floor probes
 // leaves this test green; the Safe-entry test further down fails for that mutation instead.
-test('a Bash prefix whose arguments can reach a Destructive floor is refused; a user tiers prefix rule stays accepted', async () => {
+test('a Bash prefix whose arguments can reach a Destructive floor is refused; a user tiers prefix rule stays accepted', hostPaths, async () => {
   const s = sandbox()
   try {
     await s.settle()
@@ -188,7 +194,7 @@ test('the persistence lists match the floor lists in tiers.mjs', () => {
 
 // Mutation runs for this test: `own` forced to false in bashVerdict, and separately the word list
 // applied to Safe entry rules again; this test failed for each (on the PREFIX_TIERS pass).
-test('every Safe tiers rule validates ok with tier safe and lists with destructive false', async () => {
+test('every Safe tiers rule validates ok with tier safe and lists with destructive false', hostPaths, async () => {
   const s = sandbox()
   const store = openDeckDb(path.join(s.root, 'state', 'deck.db'))
   try {
@@ -214,7 +220,7 @@ test('every Safe tiers rule validates ok with tier safe and lists with destructi
 
 // Mutation runs for this test: the `rule` field restored on safe.python.ruff-check, and separately on
 // safe.terraform.fmt, in tiers.default.json; this test failed for each.
-test('D-98: classify suggests no rule for ruff check or terraform fmt', async () => {
+test('D-98: classify suggests no rule for ruff check or terraform fmt', hostPaths, async () => {
   const s = sandbox()
   try {
     await s.settle()
@@ -256,7 +262,7 @@ const D103_REMOVED = Object.keys(D103_RULES)
 // Mutation runs for this test: `"rule":"Bash(cargo build:*)","ruleNote":"anyFlags"` restored on
 // safe.cargo.build in tiers.default.json, and separately `"rule":"Bash(mypy:*)"` on
 // safe.python.mypy; this test failed for each.
-test('D-102, D-103: each entry that lost its rule stays Safe and gives no rule candidate', async () => {
+test('D-102, D-103: each entry that lost its rule stays Safe and gives no rule candidate', hostPaths, async () => {
   const s = sandbox()
   try {
     await s.settle()
@@ -285,7 +291,7 @@ test('D-103: no Safe Bash entry carries a prefix rule; the exact script template
 })
 
 // Mutation run for this test: the same restore of the mypy rule; this test failed.
-test('D-103: the three removed prefix rules are refused, in either form', async () => {
+test('D-103: the three removed prefix rules are refused, in either form', hostPaths, async () => {
   const s = sandbox()
   try {
     await s.settle()
@@ -296,7 +302,7 @@ test('D-103: the three removed prefix rules are refused, in either form', async 
 })
 
 // Mutation run for this test: the reachesDestructive line deleted from bashVerdict; this test failed.
-test('a user Safe entry whose prefix rule reaches a Destructive entry is refused by reachesDestructive', async () => {
+test('a user Safe entry whose prefix rule reaches a Destructive entry is refused by reachesDestructive', hostPaths, async () => {
   const s = sandbox()
   try {
     await s.settle()
@@ -313,7 +319,7 @@ test('a user Safe entry whose prefix rule reaches a Destructive entry is refused
 
 // Mutation run for this test: the D-101 refusal of a prefix that is not a tiers rule removed from
 // bashVerdict, so any prefix the other checks pass was accepted again; this test failed.
-test('D-101: a Bash prefix rule is accepted only as the rule of a Safe tiers entry', async () => {
+test('D-101: a Bash prefix rule is accepted only as the rule of a Safe tiers entry', hostPaths, async () => {
   const s = sandbox()
   const store = openDeckDb(path.join(s.root, 'state', 'deck.db'))
   try {
@@ -339,7 +345,7 @@ test('D-101: a Bash prefix rule is accepted only as the rule of a Safe tiers ent
 
 // Mutation run for this test: bashVerdict returned ok as soon as `own` held, skipping
 // reachesDestructive, classify and the floor probes; this test failed.
-test('a Safe tiers entry whose rule reaches a Destructive entry or floor is still refused', async () => {
+test('a Safe tiers entry whose rule reaches a Destructive entry or floor is still refused', hostPaths, async () => {
   const s = sandbox()
   try {
     await s.settle()
@@ -350,7 +356,7 @@ test('a Safe tiers entry whose rule reaches a Destructive entry or floor is stil
 
 // Mutation runs for this test: related() returned inside(down) only, and separately pathVerdict
 // dropped `...roots.map(realExisting)`; this test failed for each.
-test('a glob root inside a protected path, or reaching one through a symlink, is refused', async () => {
+test('a glob root inside a protected path, or reaching one through a symlink, is refused', hostPaths, async () => {
   const s = sandbox()
   try {
     await s.settle()
@@ -364,7 +370,7 @@ test('a glob root inside a protected path, or reaching one through a symlink, is
 })
 
 // Mutation run for this test: globRoots kept only path.resolve('/', rest) for a `/p` glob; this test failed.
-test('a /p glob is read as absolute, repo-relative and .claude-relative', async () => {
+test('a /p glob is read as absolute, repo-relative and .claude-relative', hostPaths, async () => {
   const s = sandbox()
   try {
     await s.settle()
@@ -377,4 +383,63 @@ test('a /p glob is read as absolute, repo-relative and .claude-relative', async 
 test('WebFetch refuses any 127.x host and a host with an empty label', () => {
   assert.deepEqual(validatePattern('WebFetch(domain:127.0.0.2)'), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE })
   assert.equal(validatePattern('WebFetch(domain:docs..rs)').code, 'invalid_pattern')
+})
+
+// docs/deck/16-platforms.md section 6: nothing is auto-approved on Windows, and a written rule would
+// auto-approve inside Claude Code, so validatePattern and writeRule refuse every rule there. Runs on
+// every host: the platform is injected.
+// Mutation run for this test: the win32 refusal removed from validatePattern; this test failed.
+test('on win32 every rule is refused with rules_unsupported_on_win32 and writeRule writes nothing', async () => {
+  const unsupported = { ok: false, code: 'rules_unsupported_on_win32', message: RULE_COPY.unsupported }
+  assert.equal(typeof RULE_COPY.unsupported, 'string')
+  for (const pattern of ['mcp__vault__vault_search', 'Bash(npm run test)', 'WebFetch(domain:docs.nestjs.com)', 'WebSearch', 'Read(src/**)', 'Bash(rm:*)', 'not a pattern']) {
+    assert.deepEqual(validatePattern(pattern, { platform: 'win32' }), unsupported, pattern)
+  }
+  // The control: the same pattern is accepted off Windows.
+  assert.equal(validatePattern('mcp__vault__vault_search', { platform: 'linux' }).ok, true)
+  assert.equal(validatePattern('mcp__vault__vault_search', { platform: 'darwin' }).ok, true)
+  const root = mkdtempSync(path.join(tmpdir(), 'deck-rules-win32-'))
+  const store = openDeckDb(path.join(root, 'state', 'deck.db'))
+  try {
+    const repoId = realpathSync(root)
+    store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', repoId, 'web', 0, 0, 'web', 1)
+    await assert.rejects(writeRule(store, { repoId, pattern: 'mcp__vault__vault_search', source: 'manual', stateDir: path.join(root, 'state'), at: 1, gitRead: async () => null, platform: 'win32' }),
+      error => error.code === 'rules_unsupported_on_win32' && error.status === 422)
+    assert.equal(existsSync(path.join(repoId, '.claude', 'settings.local.json')), false)
+    assert.equal(store.get('SELECT COUNT(*) AS n FROM rules').n, 0)
+  } finally { store.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})
+
+// The T8 deferral: the deck's launchd agents are part of the persistence floor for rules too, so no
+// rule may read or write them, hold them, or name them in any case.
+// Mutation run for this test: the LaunchAgents check removed from pathVerdict; this test failed.
+test('a path rule reaching ~/Library/LaunchAgents/io.fleetmates.deck.* is refused', hostPaths, async () => {
+  const s = sandbox()
+  try {
+    await s.settle()
+    for (const pattern of ['Read(~/Library/LaunchAgents/io.fleetmates.deck.web.plist)', 'Write(~/Library/LaunchAgents/io.fleetmates.deck.deckd.plist)',
+      'Read(~/library/launchagents/IO.FLEETMATES.DECK.web.plist)', 'Read(~/Library/LaunchAgents/io.fleetmates.deck.*)', 'Read(~/Library/LaunchAgents/**)',
+      'Read(~/Library/**)', `Read(/${s.homeDir}/Library/LaunchAgents/io.fleetmates.deck.web.plist)`]) {
+      assert.deepEqual(validatePattern(pattern, s.options), { ok: false, code: 'destructive_rule', message: DESTRUCTIVE }, pattern)
+    }
+    // Another agent in the same directory is not the deck's.
+    assert.equal(validatePattern('Read(~/Library/LaunchAgents/com.example.agent.plist)', s.options).ok, true)
+  } finally { s.close() }
+})
+
+// The mirror judges rules found in a settings file with the checks of validatePattern but without its
+// win32 refusal, so a hand-added Destructive rule still lists as Destructive on Windows. Runs on every
+// host: the platform is injected.
+// Mutation run for this test: ruleView calling validatePattern instead of judgePattern; this test failed.
+test('on win32 listRules still marks a hand-added Destructive rule destructive', () => {
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-rules-list-')))
+  const store = openDeckDb(path.join(root, 'state', 'deck.db'))
+  try {
+    const repoId = path.join(root, 'web')
+    mkdirSync(path.join(repoId, '.claude'), { recursive: true })
+    store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', repoId, 'web', 0, 0, 'web', 1)
+    writeFileSync(path.join(repoId, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(rm:*)', 'mcp__vault__vault_search'] } }))
+    const listed = listRules(store, repoId, { at: 1, platform: 'win32' })
+    assert.deepEqual(listed.rules.map(rule => [rule.pattern, rule.destructive]), [['Bash(rm:*)', true], ['mcp__vault__vault_search', false]])
+  } finally { store.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
 })
