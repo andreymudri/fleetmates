@@ -264,3 +264,254 @@ export function isClaudeProgram (file, { platform = process.platform } = {}) {
   if (platform === 'win32') return ['claude', 'claude.exe', 'claude.cmd'].includes(path.win32.basename(file).toLowerCase())
   return path.posix.basename(file) === 'claude'
 }
+
+// The variables Windows programs expect from the system environment. child_process adds them on its
+// own; node-pty passes the env as given.
+const WINDOWS_BASE_VARS = ['SystemRoot', 'SystemDrive', 'windir', 'TEMP', 'TMP', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+  'USERNAME', 'USERDOMAIN', 'LOGONSERVER', 'ComSpec', 'PATHEXT']
+
+/**
+ * The environment to hand a Windows child. POSIX: `env` itself. win32: a new object with one key per
+ * case-insensitive name (a later key in `env` replaces an earlier one, so `Path` then `PATH` keeps
+ * `PATH`), plus each Windows base variable `env` lacks, looked up case-insensitively in `base`.
+ * @param {Record<string, string | undefined>} env
+ * @param {{ base?: Record<string, string | undefined>, platform?: string }} [opts]
+ * @returns {Record<string, string | undefined>}
+ */
+export function windowsChildEnv (env, { base = process.env, platform = process.platform } = {}) {
+  if (platform !== 'win32') return env
+  /** @type {Record<string, string | undefined>} */
+  const out = {}
+  /** @type {Map<string, string>} */
+  const keyOf = new Map()
+  for (const [key, value] of Object.entries(env)) {
+    const upper = key.toUpperCase()
+    const previous = keyOf.get(upper)
+    if (previous !== undefined) delete out[previous]
+    keyOf.set(upper, key)
+    out[key] = value
+  }
+  for (const name of WINDOWS_BASE_VARS) {
+    if (keyOf.has(name.toUpperCase())) continue
+    const value = envValue(base, name.toUpperCase())
+    if (value !== undefined) out[name] = value
+  }
+  return out
+}
+
+/**
+ * The error a no-follow open throws for a symbolic link, or for a name that changed under it.
+ * @param {string} file
+ */
+function loopError (file) {
+  return Object.assign(new Error(`ELOOP: refusing to open ${file}: it is a symbolic link or changed while being opened`), {
+    code: 'ELOOP', syscall: 'open', path: file,
+  })
+}
+
+/** Whether two bigint stats name the same file. */
+const sameFile = (a, b) => a.dev === b.dev && a.ino === b.ino
+
+// How many times a win32 no-follow open re-runs lstat, open and fstat when the name appears or
+// disappears between the lstat and the open.
+const WIN32_OPEN_ATTEMPTS = 3
+
+/**
+ * The flags a win32 no-follow open passes to open. `O_TRUNC` waits for the check (ftruncate after
+ * it). A name lstat found is opened without `O_CREAT`, so a swap to a dangling symlink cannot create
+ * the link's target; a name lstat did not find is created with `O_CREAT | O_EXCL`, so a symlink
+ * planted in between fails the open instead of being followed.
+ * @param {number} flags
+ * @param {boolean} missing
+ */
+function win32OpenFlags (flags, missing) {
+  const { O_CREAT = 0, O_EXCL = 0, O_TRUNC = 0 } = fs.constants
+  return missing ? (flags & ~O_TRUNC) | O_CREAT | O_EXCL : flags & ~(O_TRUNC | O_CREAT | O_EXCL)
+}
+
+/**
+ * Whether a win32 open error means the name changed between lstat and open, so the sequence is
+ * worth re-running: EEXIST after a missing name, ENOENT after a found one. Only under the caller's
+ * `O_CREAT` without `O_EXCL`; otherwise the error is the answer POSIX would give.
+ * @param {NodeJS.ErrnoException} err
+ * @param {number} flags
+ * @param {boolean} missing
+ */
+function win32Retryable (err, flags, missing) {
+  const { O_CREAT = 0, O_EXCL = 0 } = fs.constants
+  if (!(flags & O_CREAT) || (flags & O_EXCL)) return false
+  return err.code === (missing ? 'EEXIST' : 'ENOENT')
+}
+
+/**
+ * Whether `target` is the empty regular file this call's fd refers to. A win32 open with
+ * `O_CREAT | O_EXCL` follows a dangling symlink planted after the lstat and creates its target
+ * (reported from the orchestrator's Windows 11 VM run; Linux fails EEXIST instead). After refusing,
+ * the open removes that target only when this holds, so nothing whose identity differs from the fd
+ * is unlinked.
+ * @param {any} target lstat of the resolved name
+ * @param {any} opened fstat of the fd
+ * @returns {boolean}
+ */
+function isOwnEmptyFile (target, opened) {
+  return target.isFile() && sameFile(target, opened) && target.size === 0n
+}
+
+/**
+ * Refuse what a win32 no-follow open's first lstat found: ELOOP for a symbolic link, and EEXIST for
+ * an existing name under the caller's `O_CREAT | O_EXCL` (the open itself runs without `O_CREAT`
+ * for a found name, so it would not report that). `before` is null for a missing name.
+ * @param {string} file
+ * @param {number} flags
+ * @param {any} before
+ */
+function win32CheckBefore (file, flags, before) {
+  const { O_CREAT = 0, O_EXCL = 0 } = fs.constants
+  if (before?.isSymbolicLink()) throw loopError(file)
+  if (before && (flags & O_CREAT) && (flags & O_EXCL)) {
+    throw Object.assign(new Error(`EEXIST: file already exists, open '${file}'`), { code: 'EEXIST', syscall: 'open', path: file })
+  }
+}
+
+/**
+ * Open `file` without following a symbolic link at its last component, returning an fd. POSIX adds
+ * `O_NOFOLLOW`. win32 has no `O_NOFOLLOW`: it lstats the name and refuses a symbolic link with
+ * ELOOP, opens, then fstats the fd and refuses (closing it) when its dev and ino differ from the
+ * lstat. On win32 `O_TRUNC` is applied with ftruncate after that check, a found name is opened
+ * without `O_CREAT`, a missing name under `O_CREAT` is created with `O_EXCL` and lstat after the
+ * open, and a name that appeared or vanished in between re-runs the sequence (at most 3 attempts).
+ * When that exclusive create is refused after the open, the file it created through a planted
+ * symlink is unlinked, but only if it is still the fd's own empty regular file (`isOwnEmptyFile`).
+ * @param {string} file
+ * @param {number} [flags]
+ * @param {{ platform?: string, fs?: any, mode?: number }} [opts]
+ * @returns {number}
+ */
+export function openNoFollowSync (file, flags = fs.constants.O_RDONLY, { platform = process.platform, fs: fsImpl = fs, mode } = {}) {
+  if (platform !== 'win32') return fsImpl.openSync(file, flags | fs.constants.O_NOFOLLOW, mode)
+  let last
+  for (let attempt = 0; attempt < WIN32_OPEN_ATTEMPTS; attempt++) {
+    let before = null
+    try {
+      before = fsImpl.lstatSync(file, { bigint: true })
+    } catch (err) {
+      if (err.code !== 'ENOENT' || !(flags & (fs.constants.O_CREAT ?? 0))) throw err
+    }
+    win32CheckBefore(file, flags, before)
+    let fd
+    try {
+      fd = fsImpl.openSync(file, win32OpenFlags(flags, before === null), mode)
+    } catch (err) {
+      if (!win32Retryable(err, flags, before === null)) throw err
+      last = err
+      continue
+    }
+    try {
+      const opened = fsImpl.fstatSync(fd, { bigint: true })
+      const seen = before ?? fsImpl.lstatSync(file, { bigint: true })
+      if (seen.isSymbolicLink() || !sameFile(seen, opened)) {
+        if (before === null) {
+          try {
+            const target = fsImpl.realpathSync(file)
+            if (isOwnEmptyFile(fsImpl.lstatSync(target, { bigint: true }), opened)) fsImpl.unlinkSync(target)
+          } catch {}
+        }
+        throw loopError(file)
+      }
+      if (before !== null && (flags & (fs.constants.O_TRUNC ?? 0))) fsImpl.ftruncateSync(fd, 0)
+    } catch (err) {
+      fsImpl.closeSync(fd)
+      throw err
+    }
+    return fd
+  }
+  throw last
+}
+
+/**
+ * `openNoFollowSync` returning a `FileHandle`; an injected `fs` supplies `fs.promises`.
+ * @param {string} file
+ * @param {number} [flags]
+ * @param {{ platform?: string, fs?: any, mode?: number }} [opts]
+ * @returns {Promise<import('node:fs/promises').FileHandle>}
+ */
+export async function openNoFollow (file, flags = fs.constants.O_RDONLY, { platform = process.platform, fs: fsImpl = fs, mode } = {}) {
+  const fsp = fsImpl.promises
+  if (platform !== 'win32') return fsp.open(file, flags | fs.constants.O_NOFOLLOW, mode)
+  let last
+  for (let attempt = 0; attempt < WIN32_OPEN_ATTEMPTS; attempt++) {
+    let before = null
+    try {
+      before = await fsp.lstat(file, { bigint: true })
+    } catch (err) {
+      if (err.code !== 'ENOENT' || !(flags & (fs.constants.O_CREAT ?? 0))) throw err
+    }
+    win32CheckBefore(file, flags, before)
+    let handle
+    try {
+      handle = await fsp.open(file, win32OpenFlags(flags, before === null), mode)
+    } catch (err) {
+      if (!win32Retryable(err, flags, before === null)) throw err
+      last = err
+      continue
+    }
+    try {
+      const opened = await handle.stat({ bigint: true })
+      const seen = before ?? await fsp.lstat(file, { bigint: true })
+      if (seen.isSymbolicLink() || !sameFile(seen, opened)) {
+        if (before === null) {
+          try {
+            const target = await fsp.realpath(file)
+            if (isOwnEmptyFile(await fsp.lstat(target, { bigint: true }), opened)) await fsp.unlink(target)
+          } catch {}
+        }
+        throw loopError(file)
+      }
+      if (before !== null && (flags & (fs.constants.O_TRUNC ?? 0))) await handle.truncate(0)
+    } catch (err) {
+      await handle.close()
+      throw err
+    }
+    return handle
+  }
+  throw last
+}
+
+const INPUT_MODE_SEQUENCES = ['\x1b[?9001h', '\x1b[?9001l']
+const INPUT_MODE_RE = /\x1b\[\?9001[hl]/g
+
+/**
+ * The length of the longest tail of `s` that is a proper prefix of a win32-input-mode sequence.
+ * @param {string} s
+ * @returns {number}
+ */
+function inputModePrefixLength (s) {
+  for (let n = Math.min(s.length, INPUT_MODE_SEQUENCES[0].length - 1); n > 0; n--) {
+    const tail = s.slice(-n)
+    if (INPUT_MODE_SEQUENCES.some(seq => seq.startsWith(tail))) return n
+  }
+  return 0
+}
+
+/**
+ * A stateful filter for one output stream. win32: removes every `ESC[?9001h` and `ESC[?9001l`
+ * (ConPTY's win32-input-mode switch), holding back an incomplete prefix at the end of a chunk and
+ * emitting it with the next chunk when it turns out not to be one. POSIX: the identity.
+ * @param {{ platform?: string }} [opts]
+ * @returns {(chunk: string) => string}
+ */
+export function createInputModeFilter ({ platform = process.platform } = {}) {
+  if (platform !== 'win32') return chunk => chunk
+  let carry = ''
+  return chunk => {
+    let s = carry + chunk
+    // Removing one sequence can join its neighbours into another; repeat until none is left.
+    for (let prev = ''; prev !== s;) {
+      prev = s
+      s = s.replace(INPUT_MODE_RE, '')
+    }
+    const held = inputModePrefixLength(s)
+    carry = s.slice(s.length - held)
+    return s.slice(0, s.length - held)
+  }
+}

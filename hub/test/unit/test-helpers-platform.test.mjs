@@ -1,13 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import pty from 'node-pty'
-import { fakeBin } from '../helpers/fake-bin.mjs'
+import { fakeBin, nodeClaudeShim } from '../helpers/fake-bin.mjs'
+import { findChromium } from '../helpers/chromium.mjs'
+import { commandSpawn, unwrapCmdShim } from '../../platform/index.mjs'
 
 const execFileP = promisify(execFile)
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -217,4 +220,98 @@ test('the fake claude logs exactly one resize for one pty resize, though SIGWINC
     await bin.cleanup()
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('fakeBin under FLEETMATES_TEST_FORCE_WINDOWS=1 returns an env with exactly one PATH key, even when Path is also set', async () => {
+  // A Linux env is case-sensitive, so it can hold Path and PATH at once, as `{ ...process.env }` does on
+  // Windows. On a Windows host process.env is case-insensitive: setting Path would replace PATH.
+  const injected = !hostWindows && process.env.Path === undefined
+  if (injected) process.env.Path = 'C:\\stale-path-wins-on-windows'
+  let bin
+  try {
+    bin = await forcedFakeBin({})
+  } finally {
+    if (injected) delete process.env.Path
+  }
+  try {
+    assert.deepEqual(Object.keys(bin.env).filter(k => /^path$/i.test(k)), ['PATH'])
+    assert.ok(bin.env.PATH?.startsWith(bin.binDir + path.delimiter), bin.env.PATH)
+    assert.ok(!bin.env.PATH.includes('stale-path-wins-on-windows'))
+  } finally {
+    await bin.cleanup()
+  }
+})
+
+test('nodeClaudeShim writes an npm cmd-shim claude.cmd that commandSpawn runs with process.execPath', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-node-shim-'))
+  try {
+    const shim = await nodeClaudeShim(dir)
+    assert.equal(shim, path.join(dir, 'claude.cmd'))
+    const text = await readFile(shim, 'utf8')
+    assert.doesNotMatch(text, /[^\r]\n/, 'every line ends in CRLF')
+    assert.equal(text, SHIM_LINES.join('\r\n').replace('<rel>', 'fake-claude-entry.mjs'))
+    assert.deepEqual(unwrapCmdShim(shim), { kind: 'node', script: path.win32.resolve(path.win32.dirname(shim), 'fake-claude-entry.mjs') })
+    const spec = commandSpawn(shim, ['--version'], { platform: 'win32', env: {} })
+    assert.equal(spec.file, process.execPath)
+    assert.deepEqual(spec.args.slice(1), ['--version'])
+    // On Windows run exactly what commandSpawn returned; elsewhere its win32 path is not a host path.
+    const args = hostWindows ? spec.args : [path.join(dir, 'fake-claude-entry.mjs'), '--version']
+    const { stdout } = await execFileP(spec.file, args, { env: { ...process.env, FAKE_CLAUDE_VERSION: '4.5.6' } })
+    assert.equal(stdout.trim(), '4.5.6 (Claude Code)')
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5 })
+  }
+})
+
+test('nodeClaudeShim runs another node script when one is given', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-node-shim-'))
+  try {
+    const script = path.join(dir, 'other.mjs')
+    await writeFile(script, "process.stdout.write('other-' + process.argv.slice(2).join(','))\n")
+    const shim = await nodeClaudeShim(dir, { script })
+    const spec = commandSpawn(shim, ['a', 'b'], { platform: 'win32', env: {} })
+    const args = hostWindows ? spec.args : [path.join(dir, 'fake-claude-entry.mjs'), 'a', 'b']
+    const { stdout } = await execFileP(spec.file, args)
+    assert.equal(stdout, 'other-a,b')
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5 })
+  }
+})
+
+test('findChromium prefers an existing CHROMIUM_PATH, then the first existing well-known path, else null', () => {
+  const env = {
+    ProgramFiles: 'C:\\Program Files',
+    'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+    LOCALAPPDATA: 'C:\\Users\\you\\AppData\\Local',
+  }
+  const all = [
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Users\\you\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe',
+  ]
+  assert.equal(findChromium({ env: { ...env, CHROMIUM_PATH: '/opt/c/chrome' }, exists: () => true }), '/opt/c/chrome')
+  // A CHROMIUM_PATH that does not exist falls through to the list.
+  assert.equal(findChromium({ env: { ...env, CHROMIUM_PATH: '/opt/c/chrome' }, exists: p => p === all[2] }), all[2])
+  for (let i = 0; i < all.length; i++) {
+    const present = new Set(all.slice(i))
+    assert.equal(findChromium({ env, exists: p => present.has(p) }), all[i], `first existing is ${all[i]}`)
+  }
+  assert.equal(findChromium({ env, exists: () => false }), null)
+  // Without the Windows variables those candidates are not built.
+  /** @type {string[]} */
+  const asked = []
+  assert.equal(findChromium({ env: {}, exists: p => { asked.push(p); return false } }), null)
+  assert.deepEqual(asked, all.slice(0, 4))
+})
+
+test('findChromium on this host returns null or an existing file, and the helper imports only node: modules', async () => {
+  const found = findChromium()
+  assert.ok(found === null || existsSync(found), String(found))
+  const source = await readFile(path.join(hubDir, 'test', 'helpers', 'chromium.mjs'), 'utf8')
+  const specifiers = [...source.matchAll(/^\s*import\s[^'"]*['"]([^'"]+)['"]/gm)].map(m => m[1])
+  for (const s of specifiers) assert.match(s, /^node:/, `${s} is not a node: module`)
 })
