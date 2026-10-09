@@ -10,6 +10,11 @@ from git, not from anything an agent reported — says the phase is clean.
 Teammates run as Claude Code subagents, or headless through the Codex CLI or the Cursor CLI — see
 [Running on Codex](#running-on-codex) and [Running on Cursor](#running-on-cursor).
 
+![A terminal demo: a three-task plan for a small todo-api, init-run splitting it into two phases, the phase 1 gate passing, the phase 2 gate failing fileset because task T3 edited src/middleware/auth.mjs outside its declared files, and finish reporting both phases PASS after the fix](https://raw.githubusercontent.com/andreymudri/fleetmates/master/docs/media/fleetmates-demo.gif)
+
+*A real run in a demo repo: the teammates' commits are scripted, the CLI output is not. The gate
+catches the file T3 touched outside its declared set from git alone.*
+
 ```
 phase 1   T1  T2  T3        3 worktrees, in parallel
   gate    merge · test · fileset · ownership · review
@@ -559,7 +564,9 @@ A local web deck in `hub/` that watches your Claude Code sessions and tells you 
 you. It is a separate package with its own dependencies, not yet published; the plugin above does
 not need it.
 
-![The deck's Home with three sessions waiting on you](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
+![The deck's Home: three sessions waiting on you (a Safe npm run test, a Destructive rm -rf dist and a question), a fleetmates team run in phase 2 and a running session](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
+
+*Home with three sessions waiting on you. More screens are in [hub/README.md](hub/README.md).*
 
 From a checkout, on Linux with systemd:
 
