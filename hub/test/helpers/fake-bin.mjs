@@ -18,13 +18,19 @@ function shq (s) {
 /**
  * Put a fake `claude` first on PATH. The wrapper execs the fake from
  * test/fake-claude/ at run time; the fake need not exist when this is called.
- * @param {{ script?: string, log?: string, version?: string }} opts
- * @returns {Promise<{ binDir: string, env: NodeJS.ProcessEnv, cleanup: () => Promise<void> }>}
+ * On Windows (or under FLEETMATES_TEST_FORCE_WINDOWS=1, which only changes the file written) the
+ * wrapper is `claude.cmd` with CRLF line endings; elsewhere it is a `#!/bin/sh` script named `claude`.
+ * @param {{ script?: string, log?: string, version?: string, platform?: NodeJS.Platform }} opts
+ * @returns {Promise<{ binDir: string, claudePath: string, env: NodeJS.ProcessEnv, cleanup: () => Promise<void> }>}
  */
-export async function fakeBin ({ script, log, version = '2.1.282' } = {}) {
+export async function fakeBin ({ script, log, version = '2.1.282', platform = process.platform } = {}) {
   const binDir = await mkdtemp(path.join(os.tmpdir(), 'deck-fake-bin-'))
-  const wrapper = `#!/bin/sh\nexec ${shq(process.execPath)} ${shq(fakeClaude)} "$@"\n`
-  await writeFile(path.join(binDir, 'claude'), wrapper, { mode: 0o755 })
+  const windows = platform === 'win32' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1'
+  const claudePath = path.join(binDir, windows ? 'claude.cmd' : 'claude')
+  const wrapper = windows
+    ? `@"${process.execPath}" "${fakeClaude}" %*\r\n`
+    : `#!/bin/sh\nexec ${shq(process.execPath)} ${shq(fakeClaude)} "$@"\n`
+  await writeFile(claudePath, wrapper, { mode: 0o755 })
   /** @type {NodeJS.ProcessEnv} */
   const env = {
     ...process.env,
@@ -34,5 +40,5 @@ export async function fakeBin ({ script, log, version = '2.1.282' } = {}) {
   if (script !== undefined) env.FAKE_CLAUDE_SCRIPT = script
   if (log !== undefined) env.FAKE_CLAUDE_LOG = log
   const cleanup = () => rm(binDir, { recursive: true, force: true })
-  return { binDir, env, cleanup }
+  return { binDir, claudePath, env, cleanup }
 }
