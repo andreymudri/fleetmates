@@ -157,6 +157,17 @@ export function quoteCmdArg (arg) {
   return s.replace(/([()%!^"<>&|])/g, '^$1')
 }
 
+/**
+ * Escape the command (first token) of a `cmd.exe /d /s /c` line, as cross-spawn's escapeCommand does:
+ * caret-escape every cmd metacharacter, the space included, and do not quote it. A quoted command
+ * would make cmd.exe take `"C:\Program` as the program.
+ * @param {string} file
+ * @returns {string}
+ */
+export function escapeCmdCommand (file) {
+  return String(file).replace(/([()\][%!^"`<>&|;, *?])/g, '^$1')
+}
+
 const SHIM_SCRIPT = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:js|cjs|mjs))"/i
 const SHIM_EXE = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.exe)"/i
 
@@ -190,7 +201,8 @@ const UNSAFE_CMD_CHARS = /["\r\n%]/
 
 /**
  * The file, argv and spawn options to run `file` with `args`. On win32 an npm cmd-shim `.cmd` runs
- * its JS entry with node, or its native .exe target, directly; any other `.cmd` or `.bat` runs through cmd.exe and refuses an
+ * its JS entry with node, or its native .exe target, directly; any other `.cmd` or `.bat` runs through
+ * cmd.exe (command escaped by escapeCmdCommand, arguments quoted by quoteCmdArg) and refuses an
  * argument containing `"`, CR, LF or `%` with code `unsafe_cmd_arg`.
  * @param {string} file
  * @param {string[]} args
@@ -211,7 +223,7 @@ export function commandSpawn (file, args, { platform = process.platform, env = p
     }
     return {
       file: env.ComSpec || 'cmd.exe',
-      args: ['/d', '/s', '/c', '"' + [file, ...args].map(quoteCmdArg).join(' ') + '"'],
+      args: ['/d', '/s', '/c', '"' + [escapeCmdCommand(file), ...args.map(arg => quoteCmdArg(arg))].join(' ') + '"'],
       options: { windowsVerbatimArguments: true, windowsHide: true },
     }
   }

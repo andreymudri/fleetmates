@@ -7,7 +7,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   runtimeBase, deckDir, endpoint, isPipe, ensurePrivateDir, privateFileProblem, killTree,
-  resolveCommand, quoteCmdArg, commandSpawn, openUrlArgv, isClaudeProgram, unwrapCmdShim,
+  resolveCommand, quoteCmdArg, escapeCmdCommand, commandSpawn, openUrlArgv, isClaudeProgram, unwrapCmdShim,
 } from '../../platform/index.mjs'
 import * as platformModule from '../../platform/index.mjs'
 
@@ -19,7 +19,7 @@ test('the platform module imports only node: modules and exports exactly the doc
   assert.ok(specifiers.length > 0)
   for (const s of specifiers) assert.match(s, /^node:/, `${s} is not a node: module`)
   assert.deepEqual(Object.keys(platformModule).sort(), [
-    'commandSpawn', 'deckDir', 'endpoint', 'ensurePrivateDir', 'isClaudeProgram', 'isPipe', 'killTree',
+    'commandSpawn', 'deckDir', 'endpoint', 'ensurePrivateDir', 'escapeCmdCommand', 'isClaudeProgram', 'isPipe', 'killTree',
     'openUrlArgv', 'privateFileProblem', 'quoteCmdArg', 'resolveCommand', 'runtimeBase', 'unwrapCmdShim',
   ])
 })
@@ -220,14 +220,25 @@ test('quoteCmdArg quotes for cmd.exe the way cross-spawn does', () => {
 
 const noShim = () => '@echo off\r\nC:\\tools\\real.exe %*\r\n'
 
+test('escapeCmdCommand caret-escapes every cmd.exe metacharacter in a command path, as cross-spawn does', () => {
+  assert.equal(escapeCmdCommand('C:\\Program Files\\x\\tool.cmd'), 'C:\\Program^ Files\\x\\tool.cmd')
+  assert.equal(escapeCmdCommand('()[]%!^"`<>&|;, *?'), '^(^)^[^]^%^!^^^"^`^<^>^&^|^;^,^ ^*^?')
+  assert.equal(escapeCmdCommand('C:\\npm\\claude.cmd'), 'C:\\npm\\claude.cmd')
+})
+
 test('commandSpawn wraps .cmd and .bat in cmd.exe on win32 and passes everything else through', () => {
   const cmd = commandSpawn('C:\\npm\\claude.cmd', ['--resume', 'a&b'], { platform: 'win32', env: { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }, readFile: noShim })
   assert.deepEqual(cmd, {
     file: 'C:\\Windows\\System32\\cmd.exe',
-    args: ['/d', '/s', '/c', '"^"C:\\npm\\claude.cmd^" ^"--resume^" ^"a^&b^""'],
+    args: ['/d', '/s', '/c', '"C:\\npm\\claude.cmd ^"--resume^" ^"a^&b^""'],
     options: { windowsVerbatimArguments: true, windowsHide: true },
   })
   assert.equal(commandSpawn('X.BAT', [], { platform: 'win32', env: {}, readFile: noShim }).file, 'cmd.exe')
+  // The command is caret-escaped, not quoted: cmd.exe would take a quoted "C:\Program as the program.
+  assert.deepEqual(commandSpawn('C:\\Program Files\\x\\tool.cmd', ['pack', '--dry-run'], { platform: 'win32', env: {}, readFile: noShim }).args,
+    ['/d', '/s', '/c', '"C:\\Program^ Files\\x\\tool.cmd ^"pack^" ^"--dry-run^""'])
+  assert.deepEqual(commandSpawn('C:\\Program Files (x86)\\x\\tool.bat', [], { platform: 'win32', env: {}, readFile: noShim }).args,
+    ['/d', '/s', '/c', '"C:\\Program^ Files^ ^(x86^)\\x\\tool.bat"'])
   assert.deepEqual(commandSpawn('C:\\bin\\claude.exe', ['a b'], { platform: 'win32', env: {} }),
     { file: 'C:\\bin\\claude.exe', args: ['a b'], options: { windowsHide: true } })
   assert.deepEqual(commandSpawn('/usr/bin/claude', ['a b'], { platform: 'linux' }), { file: '/usr/bin/claude', args: ['a b'], options: {} })
