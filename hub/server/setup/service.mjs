@@ -25,9 +25,11 @@ function checkService(service) {
 export function createServiceManager({
   platform = process.platform, paths, nodePath = process.execPath, hubPath, run = defaultRun, spawn = childProcess.spawn,
   uid = process.getuid?.() ?? null, probe, writeFile = fs.promises.writeFile, mkdir = fs.promises.mkdir,
-  readFile = fs.promises.readFile, rm = fs.promises.rm, env = process.env
+  readFile = fs.promises.readFile, rm = fs.promises.rm, env = process.env, open = fs.openSync, close = fs.closeSync
 }) {
-  const entry = service => path.join(hubPath, ...ENTRIES[service])
+  // Paths follow the target platform, not the host, so an injected platform builds the same paths on any host.
+  const p = platform === 'win32' ? path.win32 : path.posix
+  const entry = service => p.join(hubPath, ...ENTRIES[service])
   const must = async (file, args) => {
     const result = await run(file, args)
     if (result.code !== 0) throw new Error(`${file} ${args.join(' ')} failed: ${result.stderr?.trim() || `exit ${result.code}`}`)
@@ -43,7 +45,7 @@ export function createServiceManager({
         let changedUnit = false
         let webUnitChanged = false
         for (const name of UNIT_NAMES) {
-          const changed = writeUnit(path.join(paths.units, name), renderUnit(name, nodePath, hubPath))
+          const changed = writeUnit(p.join(paths.units, name), renderUnit(name, nodePath, hubPath))
           changedUnit = changed || changedUnit
           if (name === SYSTEMD_UNITS.web) webUnitChanged = changed
         }
@@ -57,7 +59,7 @@ export function createServiceManager({
       isActive: guard(async service => (await run('systemctl', ['--user', 'is-active', '--quiet', SYSTEMD_UNITS[service]])).code === 0),
       async uninstall() {
         await run('systemctl', ['--user', 'disable', '--now', ...UNIT_NAMES])
-        for (const name of UNIT_NAMES) await rm(path.join(paths.units, name), { force: true })
+        for (const name of UNIT_NAMES) await rm(p.join(paths.units, name), { force: true })
         await run('systemctl', ['--user', 'daemon-reload'])
       },
       describe(service) { checkService(service); return `journalctl --user -u ${SYSTEMD_UNITS[service]}` }
@@ -65,8 +67,8 @@ export function createServiceManager({
   }
 
   if (platform === 'darwin') {
-    const agents = path.join(paths.home, 'Library', 'LaunchAgents')
-    const plist = service => path.join(agents, `${LAUNCHD_LABELS[service]}.plist`)
+    const agents = p.join(paths.home, 'Library', 'LaunchAgents')
+    const plist = service => p.join(agents, `${LAUNCHD_LABELS[service]}.plist`)
     const domain = () => {
       if (uid === null || uid === undefined) throw new Error('launchd needs the user id for the gui domain')
       return `gui/${uid}`
@@ -94,23 +96,23 @@ export function createServiceManager({
       },
       describe(service) {
         checkService(service)
-        return `logs: ${path.join(paths.logs, `${service}.out.log`)}, ${path.join(paths.logs, `${service}.err.log`)}`
+        return `logs: ${p.join(paths.logs, `${service}.out.log`)}, ${p.join(paths.logs, `${service}.err.log`)}`
       }
     }
   }
 
   if (platform === 'win32') {
-    const runDir = path.join(paths.state, 'run')
-    const pidFile = service => path.join(runDir, `${service}.pid`)
-    const logFile = service => path.join(paths.logs, `${service}.log`)
+    const runDir = p.join(paths.state, 'run')
+    const pidFile = service => p.join(runDir, `${service}.pid`)
+    const logFile = service => p.join(paths.logs, `${service}.log`)
     const launch = async service => {
       await mkdir(paths.logs, { recursive: true, mode: 0o700 })
       await mkdir(runDir, { recursive: true, mode: 0o700 })
-      const fd = fs.openSync(logFile(service), 'a', 0o600)
+      const fd = open(logFile(service), 'a', 0o600)
       let child
       try {
         child = spawn(nodePath, [entry(service)], { detached: true, windowsHide: true, stdio: ['ignore', fd, fd], env })
-      } finally { fs.closeSync(fd) }
+      } finally { close(fd) }
       if (!child?.pid) throw new Error(`could not start ${service}`)
       child.unref()
       await writeFile(pidFile(service), `${child.pid}\n`, { mode: 0o600 })
@@ -128,7 +130,7 @@ export function createServiceManager({
     return {
       kind: 'detached',
       async install() {
-        const command = `conhost.exe --headless "${nodePath}" "${path.join(hubPath, 'bin', 'fleetmates-deck.mjs')}" start`
+        const command = `conhost.exe --headless "${nodePath}" "${p.join(hubPath, 'bin', 'fleetmates-deck.mjs')}" start`
         await must('reg', ['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', command, '/f'])
         for (const service of SERVICES) if (!await probe(service)) await launch(service)
       },
