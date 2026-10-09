@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readlinkSync, readSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, readlinkSync, readSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { gitRead } from '../adapters/git-read.mjs'
+import { openNoFollowSync } from '../../platform/index.mjs'
 
 /** The count kinds of docs/deck/07-approvals.md section 8. */
 export const COUNT_KINDS = Object.freeze(['push_overwritten', 'reset_files', 'clean_files', 'rm_paths'])
@@ -142,7 +143,7 @@ function indexEntries(output) {
 }
 
 function readBytes(file, size) {
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  const fd = openNoFollowSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
   try {
     const stat = fstatSync(fd)
     if (!stat.isFile() || stat.size !== size) return null

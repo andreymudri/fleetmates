@@ -19,6 +19,11 @@ import { applySessionHook, captureReviewBaseline, leadRunId, workingRoot } from 
 import { projectHome } from '../../server/machines/counts.mjs'
 import { applyRequestHook, classifyHook, expireRequests, legacyDestructive, permissionTier } from '../../server/machines/request.mjs'
 import { classify, hooksPathCache, worktrees } from '../../server/approvals/tiers.mjs'
+import { posixTest } from '../helpers/platform.mjs'
+
+// Windows cannot remove a directory while a SQLite file in it is open or a child process (such as the
+// classifier's background hooksPath git read) has its cwd there; retry instead of failing the cleanup.
+const RM = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }
 
 // The tier engine is POSIX (docs/deck/16-platforms.md section 6): a test that pins its path-based
 // classification runs only on a POSIX host.
@@ -41,7 +46,7 @@ function harness() {
   const file = path.join(dir, 'deck.db')
   const store = openDeckDb(file)
   const projector = createProjector({ store, now: () => 1000 })
-  return { store, projector, file, close() { store.close(); rmSync(dir, { recursive: true, force: true }) } }
+  return { store, projector, file, close() { store.close(); rmSync(dir, RM) } }
 }
 
 test('observed PID loss during announced replacement finishes normally with committed history and closures', () => {
@@ -218,7 +223,7 @@ test('literal embedded shell writes retain sensitive floors and command-local di
       "echo '$(tee .claude/settings.json)'", 'echo "$(tee $UNKNOWN/settings.json)"'
     ]) assert.equal(tier(command), 'caution', command)
     assert.equal(existsSync(path.join(controls, 'settings.json')), false)
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 // D-92 (d): any exception from the classifier rates the request Caution with reason classify.error,
@@ -279,7 +284,7 @@ test('configured Claude settings retain the write floor for literal aliases and 
   } finally {
     if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR
     else process.env.CLAUDE_CONFIG_DIR = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -494,7 +499,7 @@ test('the session view reads reviewBaseline as null when the stored head is not 
   } finally { h.close() }
 })
 
-test('Git scans refuse symlinked ancestors without reading or retaining synthetic outside files', () => {
+posixTest('Git scans refuse symlinked ancestors without reading or retaining synthetic outside files', { reason: 'a #! fake git found through PATH as `git`, and directory symlinks' }, () => {
   const h = harness()
   const originalRead = fs.readSync
   try {
@@ -601,7 +606,7 @@ test('literal shell groups and control prefixes preserve executable risk without
     for (const command of ['{ tee .claude/settings.json; }', 'if true; then tee .claude/settings.json; fi', 'if true; then cd .claude; tee settings.json; fi', 'echo "$(if true; then tee .claude/settings.json; fi)"']) assert.equal(tier(command), 'destructive', command)
     for (const command of ["echo '{ rm victim.txt; }'", "printf '%s' 'if true; then rm victim.txt; fi'", '{ printf rm; }', 'if true; then printf rm; fi', 'for x in rm; do echo "$x"; done', 'if true; then tee ordinary/settings.json; fi']) assert.equal(tier(command), 'caution', command)
     assert.equal(existsSync(path.join(root, 'victim.txt')), false)
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('delayed unresolved user-input openings publish committed requests without rewinding newer clocks', () => {
@@ -803,7 +808,7 @@ test('command substitutions reading the relative deck token retain the Destructi
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -824,7 +829,7 @@ test('literal nested shell writes protect Claude permission settings', posix, ()
     for (const command of ["printf '%s' 'sh -c printf x > settings.local.json'", "sh -c 'printf x > ordinary.txt'"]) {
       assert.equal(permissionTier({ cwd, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root }), 'caution', command)
     }
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('captured AskUserQuestion answers close the question without rewriting outcome input', () => {
@@ -930,7 +935,7 @@ test('sessions in sibling directories share the canonical Git repository root', 
     start.hookTs = 1002
     h.projector.applyHooks([start])
     assert.equal(h.projector.snapshot().sessions.find(row => row.claudeSessionId === 'worktree').repoId, worktree)
-  } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(dir, RM) }
 })
 
 test('an ancestor with an empty .git directory, or a .git file without gitdir:, is not the session repository root', () => {
@@ -963,7 +968,7 @@ test('an ancestor with an empty .git directory, or a .git file without gitdir:, 
     const expected = [plain, real, path.join(bogus, 'src'), dangling]
     assert.deepEqual(cwds.map((_, index) => repoOf(`empty-git-${index}`)), expected)
     assert.deepEqual(cwds.map(cwd => workingRoot(cwd)), expected)
-  } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(dir, RM) }
 })
 
 test('deck controls and destructive shell substitutions have a Destructive floor', posix, () => {
@@ -1002,7 +1007,8 @@ test('a successful Edit outcome reaches done and can be reviewed', () => {
     h.projector.applyHooks([stop])
     const session = h.projector.snapshot().sessions[0]
     assert.equal(session.state, 'done')
-    assert.deepEqual(session.changedFiles.map(file => file.path), ['/tmp/demo.txt'])
+    // The projector stores the path resolved on the host: C:\tmp\demo.txt on Windows.
+    assert.deepEqual(session.changedFiles.map(file => file.path), [path.resolve('/tmp/demo.txt')])
     h.projector.signal(session.id, { type: 'review' }, 1003)
     assert.equal(h.projector.snapshot().sessions[0].state, 'reviewed')
   } finally { h.close() }
@@ -1140,7 +1146,7 @@ test('Bash-created untracked files enter review and the review baseline advances
     h.projector.applyHooks([hook('UserPromptSubmit', 1015, { prompt: 'Change tracked file' }), hook('Stop', 1016)])
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
     assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file])
-  } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(dir, RM) }
 })
 
 test('an unborn Git repository still reports Bash-created files at Stop', () => {
@@ -1161,7 +1167,7 @@ test('an unborn Git repository still reports Bash-created files at Stop', () => 
     h.projector.applyHooks([hook('PostToolUse', 1002, { tool_name: 'Bash', tool_input: { command: 'printf created > created.txt' } }), hook('Stop', 1003)])
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
     assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(row => row.path), [file])
-  } finally { h.close(); rmSync(dir, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(dir, RM) }
 })
 
 test('Git change projection never executes repository clean filters', () => {
@@ -1199,10 +1205,10 @@ test('Git change projection never executes repository clean filters', () => {
     h.projector.applyHooks([hook('UserPromptSubmit', 2003), hook('Stop', 2003)])
     assert.equal(existsSync(path.join(repo, 'executed')), false)
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
-  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(repo, RM) }
 })
 
-test('review fingerprints retain later executable-mode changes', () => {
+posixTest('review fingerprints retain later executable-mode changes', { reason: 'executable bit (NTFS has no mode bits)' }, () => {
   const repo = mkdtempSync(path.join(tmpdir(), 'deck-review-mode-'))
   const h = harness()
   try {
@@ -1233,7 +1239,7 @@ test('review fingerprints retain later executable-mode changes', () => {
     chmodSync(file, 0o644)
     h.projector.applyHooks([hook('UserPromptSubmit', 1006), hook('Stop', 1006)])
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
-  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(repo, RM) }
 })
 
 test('notification-only approval closes on a recent observed tool outcome', () => {
@@ -1585,7 +1591,7 @@ test('relative deck token operands remain protected across file-reading commands
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -1605,7 +1611,7 @@ test('unspaced input redirections retain the protected token tier', posix, () =>
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -1648,7 +1654,7 @@ test('symlinked parents retain the deck control floor for reads and new writes',
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -1669,7 +1675,7 @@ test('symlinked Git control files and parents retain the destructive write floor
       assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path, content: '[core]' } }, { repoRoot: repo }), 'destructive', file_path)
     }
     assert.equal(permissionTier({ cwd: repo, tool_name: 'Write', tool_input: { file_path: 'ordinary.txt', content: 'x' } }, { repoRoot: repo }), 'safe')
-  } finally { rmSync(repo, { recursive: true, force: true }) }
+  } finally { rmSync(repo, RM) }
 })
 
 test('Bash writes resolve relative sensitive targets and symlink aliases', posix, () => {
@@ -1697,7 +1703,7 @@ test('Bash writes resolve relative sensitive targets and symlink aliases', posix
     for (const [command, expected] of [["printf 'config-link'", 'safe'], ['cat config-link', 'caution'], ['printf x > ordinary.txt', 'caution']]) {
       assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), expected, command)
     }
-  } finally { rmSync(repo, { recursive: true, force: true }) }
+  } finally { rmSync(repo, RM) }
 })
 
 test('clear starts alias wait at the end hook timestamp', () => {
@@ -1980,7 +1986,7 @@ test('observed hook opens and closes a request, and restart keeps the projection
     h.store.close()
     const reopened = openDeckDb(h.file)
     try { assert.equal(createProjector({ store: reopened }).snapshot().requests[0].state, 'answered') } finally { reopened.close() }
-  } finally { rmSync(path.dirname(h.file), { recursive: true, force: true }) }
+  } finally { rmSync(path.dirname(h.file), RM) }
 })
 
 test('process alias, stale and counts across repos', () => {
@@ -2045,7 +2051,7 @@ test('clear, resume and fork retain unreviewed edits in done', () => {
       h.projector.applyHooks([start])
       assert.equal(h.projector.snapshot().sessions[0].state, 'done', source)
       assert.equal(h.projector.snapshot().counts.toReview, 1, source)
-      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(file => file.path), ['/tmp/changed.txt'], source)
+      assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles.map(file => file.path), [path.resolve('/tmp/changed.txt')], source)
       h.projector.signal(h.projector.snapshot().sessions[0].id, { type: 'review' }, 1005)
       const reviewedStart = fixture('SessionStart.clear.json', { source, session_id: `${source}-reviewed` })
       reviewedStart.hookTs = 1006
@@ -2438,7 +2444,7 @@ test('Bash writes after cd protect Claude settings and symlinked controls', posi
       assert.equal(permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command } }, { repoRoot: root }), 'destructive', command)
     }
     assert.equal(permissionTier({ cwd: root, tool_name: 'Bash', tool_input: { command: 'cd ordinary && printf x > output.txt' } }, { repoRoot: root }), 'caution')
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 
@@ -2577,7 +2583,7 @@ for (const [variable, suffix] of [
   } finally {
     if (previous === undefined) delete process.env[variable]
     else process.env[variable] = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -2694,7 +2700,7 @@ for (const tool_name of ['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']) 
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -2968,7 +2974,7 @@ for (const kind of ['large', 'crlf']) test(`clean ${kind} checkout stays idle an
     rmSync(file)
     h.projector.applyHooks([hook('UserPromptSubmit', 13000), hook('Stop', 13000)])
     assertChanged()
-  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(repo, RM) }
 })
 
 
@@ -3007,7 +3013,7 @@ test('an incomplete bounded scan cannot advance a Git review boundary or discard
     h.projector.applyHooks([hook('UserPromptSubmit', 7000), hook('Stop', 7000)])
     assert.equal(h.projector.snapshot().sessions[0].state, 'idle')
     assert.deepEqual(h.projector.snapshot().sessions[0].changedFiles, [])
-  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(repo, RM) }
 })
 
 test('streaming Git scans preserve symlink targets and never invoke repository execution controls', () => {
@@ -3047,7 +3053,7 @@ test('streaming Git scans preserve symlink targets and never invoke repository e
     h.projector.applyHooks([hook('UserPromptSubmit', 7000), hook('Stop', 7000)])
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
     assert.equal(existsSync(sentinel), false)
-  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(repo, RM) }
 })
 
 for (const tool_name of ['Grep', 'Glob']) test(`${tool_name} resolves literal query paths to deck controls without executing patterns`, posix, () => {
@@ -3102,7 +3108,7 @@ for (const tool_name of ['Grep', 'Glob']) test(`${tool_name} resolves literal qu
       if (previous[index] === undefined) delete process.env[variable]
       else process.env[variable] = previous[index]
     }
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -3173,7 +3179,7 @@ test('reviewed sessions ignore repeated idle notifications without moving the re
       h.projector.applyHooks([{ ...quiet, hookTs: 10000 }])
       assert.deepEqual(boundary(), nextReview, activity)
       assert.equal(h.projector.snapshot().counts.toReview, 0, activity)
-    } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+    } finally { h.close(); rmSync(repo, RM) }
   }
 })
 
@@ -3226,7 +3232,7 @@ test('Bash control reads track literal directory changes and nested shell scopes
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -3309,7 +3315,7 @@ test('Gitlink commit and dirty submodule changes survive review boundaries witho
     h.projector.applyHooks([hook('UserPromptSubmit', 11000), hook('Stop', 11000)])
     assertChanged()
     assert.equal(existsSync(path.join(repo, 'executed')), false)
-    rmSync(sub, { recursive: true, force: true })
+    rmSync(sub, RM)
     h.projector.applyHooks([hook('UserPromptSubmit', 12000), hook('Stop', 12000)])
     assertChanged()
     reviewAndStop(13000)
@@ -3323,7 +3329,7 @@ test('Gitlink commit and dirty submodule changes survive review boundaries witho
     assert.equal(uninitialized.state, 'idle')
     assert.deepEqual(uninitialized.changedFiles, [])
     assert.equal(h.projector.snapshot().counts.toReview, 0)
-  } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(repo, RM) }
 })
 
 test('clean PTY exit refreshes final Git changes for state, history, counts and committed publication', () => {
@@ -3381,11 +3387,11 @@ test('clean PTY exit refreshes final Git changes for state, history, counts and 
         assert.equal(reader.get('SELECT reviewed_at FROM session_summaries WHERE session_id=?', id).reviewed_at, 4000)
         assert.equal(reader.get('SELECT files_changed FROM session_summaries WHERE session_id=?', id).files_changed, 1)
       }
-    } finally { reader.close(); h.close(); rmSync(repo, { recursive: true, force: true }) }
+    } finally { reader.close(); h.close(); rmSync(repo, RM) }
   }
 })
 
-test('Git mode comparison and review fingerprints honor core.filemode true and false', () => {
+posixTest('Git mode comparison and review fingerprints honor core.filemode true and false', { reason: 'executable bit (NTFS has no mode bits)' }, () => {
   for (const enabled of [false, true]) {
     const repo = mkdtempSync(path.join(tmpdir(), 'deck-filemode-'))
     const h = harness()
@@ -3415,7 +3421,7 @@ test('Git mode comparison and review fingerprints honor core.filemode true and f
       h.projector.applyHooks([hook('UserPromptSubmit', 6000), hook('Stop', 6000)])
       assert.equal(h.projector.snapshot().sessions[0].state, enabled ? 'done' : 'idle')
       assert.equal(h.projector.snapshot().counts.toReview, enabled ? 1 : 0)
-    } finally { h.close(); rmSync(repo, { recursive: true, force: true }) }
+    } finally { h.close(); rmSync(repo, RM) }
   }
 })
 
@@ -3472,7 +3478,7 @@ test('wrapper chdir options use command-local directories for protected reads an
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -3500,7 +3506,7 @@ test('wrapper directories apply to file-writing executables and nested shells bu
     assert.equal(tier('env -C ordinary true; tee controls/settings.local.json'), 'destructive')
     assert.equal(tier('env -C "$UNKNOWN_CWD" tee settings.local.json'), 'caution')
     assert.equal(existsSync(path.join(project, 'settings.local.json')), false)
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('duplicate waiting hooks preserve reviewed and waiting boundaries until actual activity', () => {
@@ -3881,7 +3887,7 @@ test('env split string controls honor command-local cwd and nested read write sc
   } finally {
     if (previous === undefined) delete process.env.XDG_STATE_HOME
     else process.env.XDG_STATE_HOME = previous
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -4022,7 +4028,7 @@ test('registered deck hook programs have a write floor across configured roots a
       if (previous[index] === undefined) delete process.env[variable]
       else process.env[variable] = previous[index]
     }
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -4161,7 +4167,7 @@ test('sensitive requested names and canonical targets both enforce file write fl
     else process.env.HOME = previousHome
     if (previousData === undefined) delete process.env.XDG_DATA_HOME
     else process.env.XDG_DATA_HOME = previousData
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, RM)
   }
 })
 
@@ -4185,7 +4191,7 @@ test('literal and nested shell writes retain sensitive names through file and pa
     for (const command of ['tee ordinary-alias', 'sh -c "printf x > ordinary-alias"', 'env -C plain tee config', 'env -C .git printf x; tee ordinary-alias']) assert.equal(tier(command), 'caution', command)
     assert.equal(readFileSync(path.join(root, '.git/config'), 'utf8'), 'synthetic')
     assert.equal(readFileSync(path.join(root, 'ordinary'), 'utf8'), 'synthetic')
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('requested and canonical CLAUDE.md paths preserve local and global repo boundaries', posix, () => {
@@ -4217,7 +4223,7 @@ test('requested and canonical CLAUDE.md paths preserve local and global repo bou
       for (const command of [`tee '${file}'`, `sh -c 'printf x > "${file}"'`]) assert.equal(permissionTier({ cwd: repo, tool_name: 'Bash', tool_input: { command } }, { repoRoot: repo }), expected, command)
     }
     assert.equal(readFileSync(path.join(repo, 'plain'), 'utf8'), 'synthetic')
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('delayed prompts cancel older permissions and AskUserQuestion without rewinding activity', () => {
@@ -4382,7 +4388,7 @@ test('Git text statistics project real line changes and persist nonzero history 
     assert.deepEqual(files, [{ path: 'created.txt', adds: 4, dels: 0 }, { path: 'file.txt', adds: 3, dels: 1 }, { path: 'removed.txt', adds: 0, dels: 2 }])
     send('SessionEnd', 5000, { reason: 'prompt_input_exit' })
     assert.deepEqual({ ...h.store.get('SELECT files_changed,adds,dels FROM session_summaries') }, { files_changed: 3, adds: 7, dels: 3 })
-  } finally { h.close(); rmSync(root, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(root, RM) }
 })
 
 test('reviewed text contents establish incremental line statistics across further edits and commits', () => {
@@ -4415,10 +4421,10 @@ test('reviewed text contents establish incremental line statistics across furthe
     assert.deepEqual(files, [{ path: 'created.txt', adds: 1, dels: 0 }, { path: 'file.txt', adds: 2, dels: 1 }])
     send('SessionEnd', 6000, { reason: 'prompt_input_exit' })
     assert.deepEqual({ ...h.store.get('SELECT adds,dels FROM session_summaries') }, { adds: 3, dels: 1 })
-  } finally { h.close(); rmSync(root, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(root, RM) }
 })
 
-test('bounded line statistics preserve binary mode rename and CRLF semantics without executing Git controls', () => {
+posixTest('bounded line statistics preserve binary mode rename and CRLF semantics without executing Git controls', { reason: 'executable bit (NTFS has no mode bits); the CRLF row is also missing on Windows, cause not verified' }, () => {
   const root = mkdtempSync(path.join(tmpdir(), 'deck-safe-lines-'))
   const h = harness()
   try {
@@ -4460,7 +4466,7 @@ test('bounded line statistics preserve binary mode rename and CRLF semantics wit
     send('SessionEnd', 4000, { reason: 'prompt_input_exit' })
     assert.deepEqual({ ...h.store.get('SELECT files_changed,adds,dels FROM session_summaries') }, { files_changed: 7, adds: 4, dels: 3 })
     assert.equal(existsSync(sentinel), false)
-  } finally { h.close(); rmSync(root, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(root, RM) }
 })
 
 test('valid Git global flags preserve destructive subcommands across ordering wrappers and nested shells', posix, () => {
@@ -4481,7 +4487,7 @@ test('valid Git global flags preserve destructive subcommands across ordering wr
     for (const options of ['--no-pager --no-optional-locks -C . -P', '-P -c color.ui=false --no-pager -C . --no-optional-locks', '-P -C . --no-optional-locks', '--literal-pathspecs --no-replace-objects --no-lazy-fetch --no-pager']) assert.equal(tier(`git ${options} clean -fd`), 'destructive', options)
     for (const command of ['git --unknown-global clean -fd', 'git --no-pager --help', 'git --version clean -fd', 'git -c', 'git -C']) assert.equal(tier(command), 'caution', command)
     assert.equal(tier('git -P status'), 'safe')
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('line statistics limits retain changed paths and review boundaries instead of inventing totals', () => {
@@ -4514,7 +4520,7 @@ test('line statistics limits retain changed paths and review boundaries instead 
     assert.equal(path.basename(files[0].path), 'large.txt')
     assert.deepEqual([files[0].adds, files[0].dels], [null, null])
     assert.equal(h.projector.snapshot().sessions[0].state, 'done')
-  } finally { h.close(); rmSync(root, { recursive: true, force: true }) }
+  } finally { h.close(); rmSync(root, RM) }
 })
 
 test('Git no-advice and documented boolean global options retain destructive operations', posix, () => {
@@ -4536,7 +4542,7 @@ test('Git no-advice and documented boolean global options retain destructive ope
     }
     assert.equal(tier('git --no-advice --no-optional-locks -P --no-lazy-fetch clean -fd'), 'destructive')
     for (const command of ['git --no-advice=true clean -fd', 'git --unknown-global clean -fd', 'git -pP clean -fd', 'git -- clean -fd']) assert.equal(tier(command), 'caution', command)
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('Git attr-source and required global values consume one argument across accepted forms', posix, () => {
@@ -4563,7 +4569,7 @@ test('Git attr-source and required global values consume one argument across acc
       assert.equal(tier(`git ${quote(option)} clean -fd`), 'caution')
     }
     for (const command of ['git --attr-source', 'git --attr-source clean -fd', 'git --git-dir clean -fd', 'git --namespace clean -fd', 'git --config-env clean -fd', 'git -C', 'git -c', 'git --attr-source=HEAD --unknown-option clean -fd']) assert.equal(tier(command), 'caution', command)
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('Git exec-path assignment executes builtins while bare and information options stop dispatch', posix, () => {
@@ -4594,7 +4600,7 @@ test('Git exec-path assignment executes builtins while bare and information opti
     assert.equal(tier('git --exec-path=/tmp/unused --exec-path clean -fd'), 'caution')
     assert.equal(tier('git --attr-source=HEAD --no-advice --exec-path clean -fd'), 'caution')
     assert.equal(tier('git --exec-path=/tmp/unused --unknown-global clean -fd'), 'caution')
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('late subagent starts keep a live background agent visible through Stop without rewinding clocks', () => {
@@ -4740,7 +4746,7 @@ test('promisor missing trees and blobs cannot launch remote helpers despite ambi
         assert.deepEqual(h.store.get('SELECT changed_files,review_baseline FROM sessions'), before)
         assert.equal(h.projector.snapshot().sessions[0].state, 'done')
         assert.equal(existsSync(marker), false, missing)
-      } finally { h.close(); rmSync(root, { recursive: true, force: true }) }
+      } finally { h.close(); rmSync(root, RM) }
     }
   } finally {
     if (previous === undefined) delete process.env.GIT_NO_LAZY_FETCH
@@ -5181,7 +5187,7 @@ test('sparse omitted tracked files stay clean while present edits real deletions
     send('UserPromptSubmit', 4000)
     send('Stop', 5000)
     let session = h.projector.snapshot().sessions[0]
-    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]).sort(), [['keep/a.txt', 2, 1], ['keep/deleted.txt', 0, 1]])
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]).sort(), [[path.join('keep', 'a.txt'), 2, 1], [path.join('keep', 'deleted.txt'), 0, 1]])
     h.projector.signal(session.id, { type: 'review' }, 6000)
     send('UserPromptSubmit', 7000)
     send('Stop', 8000)
@@ -5191,14 +5197,14 @@ test('sparse omitted tracked files stay clean while present edits real deletions
     send('UserPromptSubmit', 9000)
     send('Stop', 10000)
     session = h.projector.snapshot().sessions[0]
-    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [['omit/b.txt', 1, 1]])
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [[path.join('omit', 'b.txt'), 1, 1]])
     h.projector.signal(session.id, { type: 'review' }, 11000)
     rmSync(path.join(root, 'omit', 'b.txt'))
     git(['update-index', '--force-remove', 'omit/b.txt'])
     send('UserPromptSubmit', 12000)
     send('Stop', 13000)
     session = h.projector.snapshot().sessions[0]
-    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [['omit/b.txt', 0, 1]])
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [[path.join('omit', 'b.txt'), 0, 1]])
     assert.equal(session.state, 'done')
   } finally { h.close() }
 })
@@ -5221,7 +5227,7 @@ test('literal path-valued options enforce control floors without interpreting or
     for (const command of ['grep --file=cache/token', 'grep --file="cache/token"', 'grep -fcache/token', 'sed --file=cache/token', 'awk -fcache/token', 'curl --config=cache/token', 'curl -Kcache/token', 'env -C cache grep --file=token', 'sh -c \'grep --file="$XDG_STATE_HOME/fleetmates/deck/token"\'', 'curl --output=settings-link https://example.invalid', 'curl -osettings-link https://example.invalid']) assert.equal(tier(command), 'destructive', command)
     for (const command of ['grep --file=ordinary.txt', 'grep --regexp=cache/token', 'sed --expression=cache/token', 'curl --output=ordinary.txt https://example.invalid', 'unknown --file=cache/token']) assert.equal(tier(command), 'caution', command)
     assert.equal(readFileSync(path.join(project, 'cache', 'token'), 'utf8'), 'synthetic-token\n')
-  } finally { old === undefined ? delete process.env.XDG_STATE_HOME : process.env.XDG_STATE_HOME = old; rmSync(root, { recursive: true, force: true }) }
+  } finally { old === undefined ? delete process.env.XDG_STATE_HOME : process.env.XDG_STATE_HOME = old; rmSync(root, RM) }
 })
 
 test('fixture Git ignores private hostile global system and signing configuration while retaining local config', () => {
@@ -5248,7 +5254,7 @@ test('fixture Git ignores private hostile global system and signing configuratio
     assert.equal(git(['config', '--bool', '--get', 'core.filemode']).toString().trim(), 'false')
     assert.throws(() => git(['config', '--get', 'fixture.owner']), error => error.status === 1)
     assert.equal(existsSync(sentinel), false)
-  } finally { rmSync(root, { recursive: true, force: true }) }
+  } finally { rmSync(root, RM) }
 })
 
 test('sparse staged blobs retain accurate totals review boundaries and known edits on missing objects', () => {
@@ -5279,7 +5285,7 @@ test('sparse staged blobs retain accurate totals review boundaries and known edi
     send('UserPromptSubmit', 2000)
     send('Stop', 3000)
     let session = h.projector.snapshot().sessions[0]
-    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [['omit/b', 2, 1]])
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [[path.join('omit', 'b'), 2, 1]])
     h.projector.signal(session.id, { type: 'review' }, 4000)
     send('UserPromptSubmit', 5000)
     send('Stop', 6000)
@@ -5288,7 +5294,7 @@ test('sparse staged blobs retain accurate totals review boundaries and known edi
     send('UserPromptSubmit', 7000)
     send('Stop', 8000)
     session = h.projector.snapshot().sessions[0]
-    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [['omit/b', 1, 1]])
+    assert.deepEqual(session.changedFiles.map(row => [path.relative(root, row.path), row.adds, row.dels]), [[path.join('omit', 'b'), 1, 1]])
     const boundary = h.store.get('SELECT review_baseline FROM sessions WHERE id=?', session.id).review_baseline
     rmSync(path.join(root, '.git', 'objects', oid.slice(0, 2), oid.slice(2)))
     send('UserPromptSubmit', 9000)
@@ -5531,6 +5537,13 @@ test('leadRunId reads --run only from the scripts/cli.mjs command segment', () =
     'node scripts/cli.mjs status | grep x --run foo', 'node scripts/cli.mjs status\ngit log --run foo', 'git log --run foo', 42]) {
     assert.equal(leadRunId(command), null, String(command))
   }
+})
+
+test('leadRunId accepts a Windows backslash path to scripts\\cli.mjs, bare or quoted, on every host', () => {
+  assert.equal(leadRunId('node C:\\Users\\you\\fleetmates\\scripts\\cli.mjs dispatch --run=r1 --phase 1'), 'r1')
+  assert.equal(leadRunId('node "C:\\Users\\you\\fleetmates\\scripts\\cli.mjs" gate --run r2 --phase 1'), 'r2')
+  assert.equal(leadRunId("node 'C:\\Users\\you\\fleetmates\\scripts\\cli.mjs' gate --run \"r 3\""), 'r 3')
+  assert.equal(leadRunId('node "C:\\Users\\you\\fleetmates\\scripts\\cli.mjs" status; git log --run foo'), null)
 })
 
 test('request open stores the M3 tier, reasons and rule candidate, and a notification-only request stays Caution', posix, () => {
