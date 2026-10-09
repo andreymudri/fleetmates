@@ -27,18 +27,24 @@ ${JSON.stringify(request)}`
 
 export function validateRequest (body) {
   const keys = ['topic', 'preset', 'domain', 'sourceTypes', 'focusNotes', 'repoKey', 'missId', 'relatedNotes', 'sourceUrls']
-  if (Object.keys(body).some(key => !keys.includes(key))) throw apiError(422, 'validation_failed')
+  // Each refusal names the field, so the form can say which one to fix instead of a bare validation_failed.
+  const fail = field => { throw apiError(422, 'validation_failed', { field }) }
+  const unknown = Object.keys(body).find(key => !keys.includes(key))
+  if (unknown) fail(unknown)
   const text = (value, max) => typeof value === 'string' && value.trim() && value.length <= max && !/[\u0000-\u001f]/u.test(value)
-  if (!text(body.topic, 500) || body.topic.trim().length < 3 || !Object.hasOwn(PRESETS, body.preset ?? 'standard') ||
-    !text(body.domain, 100) || !/^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u.test(body.domain) ||
-    !Array.isArray(body.sourceTypes) || !body.sourceTypes.length || body.sourceTypes.length > 4 || body.sourceTypes.some(type => !['docs', 'repo', 'blog', 'paper'].includes(type)) ||
-    body.focusNotes !== undefined && (typeof body.focusNotes !== 'string' || body.focusNotes.length > 3000 || /[\u0000-\u0008\u000b-\u001f]/u.test(body.focusNotes))) throw apiError(422, 'validation_failed')
-  if (body.missId !== undefined && (typeof body.missId !== 'string' || body.missId.length > 100)) throw apiError(422, 'validation_failed')
-  if (body.relatedNotes !== undefined && (!Array.isArray(body.relatedNotes) || body.relatedNotes.length > 20 || body.relatedNotes.some(note => !text(note, 150) || /[\[\]\\/]/.test(note)))) throw apiError(422, 'validation_failed')
+  // A phone keyboard ends an autocompleted word with a space; the stored values are the trimmed ones.
+  if (typeof body.domain === 'string') body = { ...body, domain: body.domain.trim() }
+  if (!text(body.topic, 500) || body.topic.trim().length < 3) fail('topic')
+  if (!Object.hasOwn(PRESETS, body.preset ?? 'standard')) fail('preset')
+  if (!text(body.domain, 100) || !/^[\p{L}\p{N}][\p{L}\p{N}_-]*$/u.test(body.domain)) fail('domain')
+  if (!Array.isArray(body.sourceTypes) || !body.sourceTypes.length || body.sourceTypes.length > 4 || body.sourceTypes.some(type => !['docs', 'repo', 'blog', 'paper'].includes(type))) fail('sourceTypes')
+  if (body.focusNotes !== undefined && (typeof body.focusNotes !== 'string' || body.focusNotes.length > 3000 || /[\u0000-\u0008\u000b-\u001f]/u.test(body.focusNotes))) fail('focusNotes')
+  if (body.missId !== undefined && (typeof body.missId !== 'string' || body.missId.length > 100)) fail('missId')
+  if (body.relatedNotes !== undefined && (!Array.isArray(body.relatedNotes) || body.relatedNotes.length > 20 || body.relatedNotes.some(note => !text(note, 150) || /[\[\]\\/]/.test(note)))) fail('relatedNotes')
   let sourceUrls
   if (body.sourceUrls !== undefined) {
-    if (!Array.isArray(body.sourceUrls) || body.sourceUrls.length > MAX_SOURCE_URLS) throw apiError(422, 'validation_failed')
-    try { sourceUrls = [...new Set(body.sourceUrls.map(value => sourceUrl(value).href))] } catch { throw apiError(422, 'validation_failed') }
+    if (!Array.isArray(body.sourceUrls) || body.sourceUrls.length > MAX_SOURCE_URLS) fail('sourceUrls')
+    try { sourceUrls = [...new Set(body.sourceUrls.map(value => sourceUrl(value).href))] } catch { fail('sourceUrls') }
   }
   return { ...(sourceUrls?.length ? { sourceUrls } : {}), ...(body.relatedNotes?.length ? { relatedNotes: [...new Set(body.relatedNotes)] } : {}), ...(body.missId ? { missId: body.missId } : {}), topic: body.topic.trim(), preset: body.preset ?? 'standard', domain: body.domain, sourceTypes: [...new Set(body.sourceTypes)], focusNotes: body.focusNotes ?? '' }
 }
