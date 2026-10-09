@@ -6,6 +6,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
+import { createServiceManager } from '../../server/setup/service.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 
 const token = 'a'.repeat(43)
@@ -20,13 +23,16 @@ function home(t, { runtime = true } = {}) {
     env.XDG_RUNTIME_DIR = path.join(dir, 'r')
     fs.mkdirSync(env.XDG_RUNTIME_DIR, { mode: 0o700 })
   }
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // Every deck path comes from setupPaths, the function the server reads them from (XDG on linux and darwin,
+  // %LOCALAPPDATA% and %APPDATA% under HOME on win32).
+  const paths = setupPaths(env)
+  const state = paths.state
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
+  fs.writeFileSync(paths.token, token, { mode: 0o600 })
   const staticDir = path.join(dir, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  return { dir, env, state, staticDir }
+  return { dir, env, paths, state, staticDir }
 }
 
 async function harness(t, options = {}, place = home(t)) {
@@ -34,7 +40,7 @@ async function harness(t, options = {}, place = home(t)) {
     connectDeckd: async () => { throw Error('fake offline') }, reconnectMs: 60_000,
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }), ...options })
   t.after(async () => { await deck.close()
-    fs.rmSync(place.dir, { recursive: true, force: true }) })
+    fs.rmSync(place.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) })
   const request = async (route, init = {}) => {
     const origin = `http://127.0.0.1:${deck.address().port}`
     const headers = { Authorization: `Bearer ${token}`, Origin: origin, ...(init.body ? { 'Content-Type': 'application/json' } : {}) }
@@ -79,7 +85,8 @@ function fakeDeckd({ onList } = {}) {
 test('the security review\'s title payload reaches notify-send as "needs you · destructive · <task>"', async t => {
   const calls = []
   const { createNotifier } = await import('../../server/adapters/notify.mjs')
-  const notifier = createNotifier({ run: async (command, args) => { calls.push(args)
+  // The payload under test is notify-send's argv, so the linux notifier is asked for on every host.
+  const notifier = createNotifier({ platform: 'linux', run: async (command, args) => { calls.push(args)
     return { ok: true, exitCode: 0, stdout: `${calls.length}\n` } } })
   const h = await harness(t, { notifications: true, notifier, notificationTickMs: 20 })
   const at = Date.now() - 20_000
@@ -166,12 +173,16 @@ test('a deckd drop during the handshake counts one reconnect attempt, not two', 
 })
 
 test('Retry now without XDG_RUNTIME_DIR republishes the true down state after the checking row', async t => {
-  const h = await harness(t, {}, home(t, { runtime: false }))
+  // Without XDG_RUNTIME_DIR the link connects under the runtimeBase fallback, so the failed startup attempt publishes a
+  // down row first. darwin (win32 on Windows) puts that base under this test's own HOME, not the shared linux
+  // /tmp/fleetmates-deck-<uid> that another test or a real deckd may hold.
+  const h = await harness(t, { platform: process.platform === 'win32' ? 'win32' : 'darwin' }, home(t, { runtime: false }))
+  assert.deepEqual(deckdRows(h.deck).map(row => [row.state, row.reason]), [['down', 'deckd_unavailable']])
   const response = await h.request('/api/deps/deckd/retry', { method: 'POST' })
   assert.equal(response.status, 202)
   assert.equal(response.data.dep.state, 'checking')
-  await waitFor(() => deckdRows(h.deck).length >= 2, 'the republished state')
-  assert.deepEqual(deckdRows(h.deck).map(row => [row.state, row.reason]), [['checking', null], ['down', 'deckd_unavailable']])
+  await waitFor(() => deckdRows(h.deck).length >= 3, 'the republished state')
+  assert.deepEqual(deckdRows(h.deck).map(row => [row.state, row.reason]), [['down', 'deckd_unavailable'], ['checking', null], ['down', 'deckd_unavailable']])
 })
 
 test('Retry now probes on a later macrotask, so the probe outcome is published after the API\'s checking row', async t => {
@@ -187,6 +198,17 @@ test('Retry now probes on a later macrotask, so the probe outcome is published a
   assert.deepEqual(deckdRows(h.deck).map(row => [row.state, row.attempt]), [['down', 1], ['checking', 1], ['down', 2]])
 })
 
+/**
+ * The service manager this test pins: systemd, over the test's runCommand. It is injected off linux, where the deck's
+ * own default would be launchd or a detached process; on linux the server's default is used and so is covered too.
+ */
+function systemdOffLinux(runCommand) {
+  if (process.platform === 'linux') return {}
+  return { serviceManager: createServiceManager({ platform: 'linux', paths: { units: '/home/you/.config/systemd/user' }, hubPath: '/home/you/hub',
+    run: async (file, args) => { const result = runCommand(file, args)
+      return { code: result.status, stdout: result.stdout, stderr: result.stderr } } }) }
+}
+
 test('Start runs the deckd unit, then probes and publishes ok after the checking row; a failed start probes nothing', async t => {
   const commands = []
   let started = false
@@ -195,7 +217,7 @@ test('Start runs the deckd unit, then probes and publishes ok after the checking
     if (file === 'systemctl') started = true
     return { status: 0, stdout: '', stderr: '' }
   }
-  const h = await harness(t, { runCommand, connectDeckd: async () => {
+  const h = await harness(t, { runCommand, ...systemdOffLinux(runCommand), connectDeckd: async () => {
     if (!started) throw Error('fake offline')
     return fakeDeckd()
   } })
@@ -207,7 +229,8 @@ test('Start runs the deckd unit, then probes and publishes ok after the checking
   assert.deepEqual(deckdRows(h.deck).map(row => row.state), ['down', 'checking', 'ok'])
 
   let probes = 0
-  const failed = await harness(t, { runCommand: file => ({ status: file === 'systemctl' ? 5 : 0, stdout: '', stderr: '' }),
+  const failing = file => ({ status: file === 'systemctl' ? 5 : 0, stdout: '', stderr: '' })
+  const failed = await harness(t, { runCommand: failing, ...systemdOffLinux(failing),
     connectDeckd: async () => { probes++
       throw Error('fake offline') } })
   const refused = await failed.request('/api/deps/deckd/start', { method: 'POST' })
@@ -220,8 +243,8 @@ test('Start runs the deckd unit, then probes and publishes ok after the checking
 
 test('a path containing NUL is a 400, not a 500: the configured scan root and a session cwd', async t => {
   const place = home(t)
-  fs.mkdirSync(path.join(place.dir, '.config/fleetmates/deck'), { recursive: true })
-  fs.writeFileSync(path.join(place.dir, '.config/fleetmates/deck/config.json'), JSON.stringify({ scanRoot: path.join(place.dir, 'a\0b') }))
+  fs.mkdirSync(place.paths.config, { recursive: true })
+  fs.writeFileSync(path.join(place.paths.config, 'config.json'), JSON.stringify({ scanRoot: path.join(place.dir, 'a\0b') }))
   const h = await harness(t, {}, place)
   const rescan = await h.request('/api/repos/rescan', { method: 'POST' })
   assert.equal(rescan.status, 400)
@@ -232,11 +255,11 @@ test('a path containing NUL is a 400, not a 500: the configured scan root and a 
   h.deck.ingest.flush()
   const { id } = h.deck.store.get('SELECT id FROM sessions')
   const disk = await h.request(`/api/sessions/${id}/disk`)
-  assert.equal(disk.status, 400)
+  assert.equal(disk.status, 400, JSON.stringify({ body: disk.data, cwd: h.deck.store.get('SELECT cwd FROM sessions WHERE id=?', id).cwd }))
   assert.equal(disk.data.error.code, 'validation_failed')
 })
 
-test('rescan skips a subdirectory it cannot read instead of failing the whole scan; an unreadable root still fails', async t => {
+posixTest('rescan skips a subdirectory it cannot read instead of failing the whole scan; an unreadable root still fails', { reason: 'chmod 0 does not stop the owner reading a directory on Windows' }, async t => {
   const h = await harness(t)
   const root = path.join(h.dir, 'repos')
   fs.mkdirSync(path.join(root, 'repo/.git'), { recursive: true })

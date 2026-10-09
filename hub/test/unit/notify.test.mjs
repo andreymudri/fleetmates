@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { openDeckDb } from '../../server/db/index.mjs'
 import { createProjector } from '../../server/machines/projector.mjs'
+import { createNotifier } from '../../server/adapters/notify.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 
 async function moduleAt(name) {
   try { return await import(`../../server/${name}.mjs`) } catch (error) {
@@ -13,7 +15,7 @@ async function moduleAt(name) {
   }
 }
 
-test('command adapter uses popup replacement and a bell shim without shell expansion or private diagnostics', async () => {
+posixTest('command adapter uses popup replacement and a bell shim without shell expansion or private diagnostics', { reason: 'runs a #! shim script' }, async () => {
   const { createNotifier } = await moduleAt('adapters/notify')
   assert.equal(typeof createNotifier, 'function')
   const dir = mkdtempSync(path.join(tmpdir(), 'deck-notify-'))
@@ -81,7 +83,9 @@ async function harness() {
     open(command = 'pwd') { send('PermissionRequest', { tool_name: 'Bash', tool_input: { command } }); return projector.snapshot().requests.at(-1).id },
     close(command = 'pwd') { send('PostToolUse', { tool_name: 'Bash', tool_input: { command }, tool_response: { success: true } }) },
     restart() { store.close(); store = openDeckDb(file); machine = createNotificationMachine(options()); projector = createProjector({ store, now: () => at }) },
-    cleanup() { store.close(); rmSync(dir, { recursive: true, force: true }) }
+    // The machine and the store are closed first. Windows can still refuse the removal for a while afterwards (EPERM),
+    // so it retries for up to five seconds.
+    cleanup() { machine.close(); store.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 }) }
   }
 }
 
@@ -302,4 +306,59 @@ test('terminal popup preferences can change live and never change test ping hist
     assert.deepEqual(await h.machine.testPing(), { ok: false })
     assert.equal(h.store.all('SELECT * FROM notification_history').length, 2)
   } finally { h.cleanup() }
+})
+
+/** A runner that records each command and answers ok with an id on stdout. */
+function recordingRun() {
+  const calls = []
+  const run = async (command, args, options) => {
+    calls.push({ command, args, input: options.input ?? null })
+    return { ok: true, exitCode: 0, stdout: '42\n' }
+  }
+  return { calls, run }
+}
+
+test('linux keeps notify-send, pw-play and makoctl as the default commands', async () => {
+  const { calls, run } = recordingRun()
+  const notifier = createNotifier({ platform: 'linux', env: {}, run })
+  assert.deepEqual(await notifier.popup({ title: 't', body: 'b' }), { ok: true, id: 42 })
+  assert.deepEqual(await notifier.bell(), { ok: true })
+  assert.deepEqual(await notifier.dismiss(42), { ok: true })
+  assert.deepEqual(calls.map(call => call.command), ['notify-send', 'pw-play', 'makoctl'])
+})
+
+test('darwin shows a popup with osascript, title and body as separate -e strings with AppleScript escaping, and rings afplay Glass', async () => {
+  const { calls, run } = recordingRun()
+  const notifier = createNotifier({ platform: 'darwin', env: {}, run })
+  const title = 'say "hi" \\ $(touch forbidden)'
+  const body = 'line one\n"two" & <three>'
+  let acted = false
+  assert.deepEqual(await notifier.popup({ title, body, replaceId: 9, actions: ['allow', 'open'], onAction: () => { acted = true } }), { ok: true, id: null })
+  assert.deepEqual(calls[0], { command: 'osascript', input: null, args: [
+    '-e', 'set deckTitle to "say \\"hi\\" \\\\ $(touch forbidden)"',
+    '-e', 'set deckBody to "line one\\n\\"two\\" & <three>"',
+    '-e', 'display notification deckBody with title deckTitle'
+  ] })
+  assert.equal(acted, false)
+  assert.deepEqual(await notifier.bell(), { ok: true })
+  assert.deepEqual(calls[1], { command: 'afplay', args: ['/System/Library/Sounds/Glass.aiff'], input: null })
+  assert.deepEqual(await notifier.dismiss(9), { ok: true })
+  assert.deepEqual(await notifier.testPing(), { ok: true, id: null })
+  assert.deepEqual(calls.map(call => call.command), ['osascript', 'afplay', 'osascript'])
+})
+
+test('darwin reports a failed osascript as notify_failed', async () => {
+  const notifier = createNotifier({ platform: 'darwin', env: {}, run: async () => ({ ok: false, exitCode: 1 }) })
+  assert.deepEqual(await notifier.popup({ title: 't', body: 'b' }), { ok: false, error: { code: 'notify_failed', exitCode: 1 } })
+})
+
+test('win32 popups and bells resolve unsupported on win32 without running anything', async () => {
+  const { calls, run } = recordingRun()
+  const notifier = createNotifier({ platform: 'win32', env: {}, run })
+  assert.deepEqual(await notifier.popup({ title: 't', body: 'b', actions: ['open'] }), { ok: false, reason: 'unsupported on win32' })
+  assert.deepEqual(await notifier.bell(), { ok: false, reason: 'unsupported on win32' })
+  assert.deepEqual(await notifier.testPing(), { ok: false, reason: 'unsupported on win32' })
+  assert.deepEqual(await notifier.dismiss(3), { ok: true })
+  notifier.close()
+  assert.deepEqual(calls, [])
 })

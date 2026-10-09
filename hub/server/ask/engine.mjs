@@ -12,6 +12,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apiError } from '../http/router.mjs'
 import { CLAUDE_SESSION_VARS } from '../../deckd/login-env.mjs'
+import { commandSpawn, killTree, resolveCommand } from '../../platform/index.mjs'
 
 /** The four vault-mcp read tools, the only tools an ask may run (D-132). */
 export const ASK_READ_TOOLS = Object.freeze(['vault_search', 'vault_get_note', 'vault_list', 'vault_backlinks'].map(t => `mcp__vault__${t}`))
@@ -257,6 +258,7 @@ export function readProcIdentity (pid, readText = file => readFileSync(file, 'ut
  * id (default `readProcIdentity`), recorded at spawn and checked before a reap.
  * @param {{
  *   claudeCommand: string,
+ *   platform?: string,
  *   spawn?: typeof nodeSpawn,
  *   stateDir: string,
  *   env?: NodeJS.ProcessEnv,
@@ -269,10 +271,10 @@ export function readProcIdentity (pid, readText = file => readFileSync(file, 'ut
  * }} opts
  */
 export function createAskEngine ({
-  claudeCommand, spawn = nodeSpawn, stateDir, env = process.env, now = Date.now,
+  claudeCommand, platform = process.platform, spawn = nodeSpawn, stateDir, env = process.env, now = Date.now,
   timers = { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: h => clearTimeout(h) },
   log = () => {}, maxConcurrent = 2,
-  killGroup = (pid, signal) => { try { process.kill(-pid, signal) } catch {} },
+  killGroup = (pid, signal) => { try { killTree(pid, signal, { platform }) } catch {} },
   procIdentity = readProcIdentity
 }) {
   const askDir = path.join(stateDir, 'ask')
@@ -457,9 +459,13 @@ export function createAskEngine ({
     try {
       ensureDir()
       const argv = askArgv({ mcpCommand, vaultPath, lang, systemPrompt: systemPromptFor(lang) })
-      child = spawn(claudeCommand, argv, { cwd: askDir, env: askEnv(env), detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      // win32: `claude` resolves through PATH and PATHEXT, and an npm claude.cmd runs node on its script directly.
+      const command = commandSpawn(resolveCommand(claudeCommand, { env, platform }), argv, { platform, env })
+      child = spawn(command.file, command.args, { cwd: askDir, env: askEnv(env), detached: true, stdio: ['pipe', 'pipe', 'pipe'], ...command.options })
     } catch (err) {
-      r.failure = `could not start claude: ${/** @type {any} */ (err).code ?? /** @type {Error} */ (err).message}`
+      r.failure = /** @type {any} */ (err).code === 'unsafe_cmd_arg'
+        ? 'could not start claude: claudeCommand is a .cmd or .bat file that cannot take the ask arguments safely; point it at claude.exe or an npm claude.cmd'
+        : `could not start claude: ${/** @type {any} */ (err).code ?? /** @type {Error} */ (err).message}`
       settle(r)
       return
     }

@@ -13,6 +13,7 @@ import {
 } from '../../server/ask/engine.mjs'
 import { CLAUDE_SESSION_VARS } from '../../deckd/login-env.mjs'
 import { parseAnswer, validateCitations } from '../../server/ask/answer.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 
 const hubDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const fixtures = path.join(hubDir, 'test', 'fixtures', 'claude-p', 'synthetic')
@@ -107,7 +108,7 @@ async function setup (t, { fixture, extraEnv = {}, maxConcurrent, procIdentity }
   /** @type {object[]} */
   const logs = []
   const timers = fakeTimers()
-  const claudeCommand = path.join(bin.binDir, 'claude')
+  const claudeCommand = bin.claudePath
   const engine = createAskEngine({
     claudeCommand,
     stateDir: path.join(dir, 'state'),
@@ -356,7 +357,7 @@ test('result.is_error gives the result text; an exit without a result gives the 
   assert.ok(r2.stderrTail.endsWith('Invalid API key'))
 })
 
-test('the child gets FLEETMATES_DECK_ROLE=ask, no desktop or secret variables, the prompt on stdin and the 0700 ask cwd', async (t) => {
+posixTest('the child gets FLEETMATES_DECK_ROLE=ask, no desktop or secret variables, the prompt on stdin and the 0700 ask cwd', { reason: 'asserts the 0700 mode of the ask cwd and spawns the #! wrapper by name' }, async (t) => {
   const s = await setup(t, { fixture: 'answer-cited' })
   const prompt = 'Como o worker faz retry?'
   await s.engine.run(ask('t1', { prompt }))
@@ -403,7 +404,7 @@ test('readProcIdentity reads a live pid start time and the boot id on Linux, and
   assert.equal(readProcIdentity(2 ** 22 + 7), null)
 })
 
-test('reapOrphans kills a listed group whose start time and boot id still match, and returns its thread', async (t) => {
+posixTest('reapOrphans kills a listed group whose start time and boot id still match, and returns its thread', { reason: 'kills a POSIX process group' }, async (t) => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-ask-reap-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
   await mkdir(path.join(dir, 'run'), { mode: 0o700 })
@@ -564,4 +565,59 @@ test('the ask limits are 120 s total and 45 s idle, and the timeout message says
   assert.equal(ASK_TOTAL_MS, 120000)
   assert.equal(ASK_IDLE_MS, 45000)
   assert.equal(ASK_TIMEOUT_ERROR, 'timed out after 120 s')
+})
+
+// The npm cmd-shim that @anthropic-ai/claude-code installs as claude.cmd, with a placeholder package path.
+const CLAUDE_SHIM = [
+  '@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT /b', ':start', 'SETLOCAL', 'CALL :find_dp0', '',
+  'IF EXIST "%dp0%\\node.exe" (', '  SET "_prog=%dp0%\\node.exe"', ') ELSE (', '  SET "_prog=node"', '  SET PATHEXT=%PATHEXT:;.JS;=;%', ')', '',
+  'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\claude-placeholder\\cli.js" %*', ''
+].join('\r\n')
+
+/**
+ * Run one ask through an engine whose spawn records its call and then throws, so nothing is started.
+ * @param {import('node:test').TestContext} t
+ * @param {{ platform: string, claudeCommand: string }} opts
+ */
+async function spawnCall (t, { platform, claudeCommand }) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-ask-plat-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  /** @type {{ file: string, args: string[], options: any }[]} */
+  const calls = []
+  const engine = createAskEngine({
+    claudeCommand, platform, stateDir: path.join(dir, 'state'), env: { PATH: '/usr/bin' },
+    spawn: /** @type {any} */ ((/** @type {string} */ file, /** @type {string[]} */ args, /** @type {any} */ options) => {
+      calls.push({ file, args, options })
+      throw Object.assign(new Error('spawn spy'), { code: 'ESPY' })
+    })
+  })
+  const result = await engine.run(ask('t-plat'))
+  return { calls, result, dir }
+}
+
+test('on win32 the ask spawns claude through commandSpawn: an npm claude.cmd shim runs node on its script, hidden, with the same argv', async (t) => {
+  const shimDir = await mkdtemp(path.join(os.tmpdir(), 'deck-ask-shim-'))
+  t.after(() => rm(shimDir, { recursive: true, force: true }))
+  const shim = path.join(shimDir, 'claude.cmd')
+  await writeFile(shim, CLAUDE_SHIM)
+  const linux = await spawnCall(t, { platform: 'linux', claudeCommand: '/home/you/.local/bin/claude' })
+  assert.equal(linux.calls.length, 1)
+  assert.equal(linux.calls[0].file, '/home/you/.local/bin/claude')
+  assert.equal('windowsHide' in linux.calls[0].options, false)
+  assert.equal(linux.result.error, 'could not start claude: ESPY')
+  const win = await spawnCall(t, { platform: 'win32', claudeCommand: shim })
+  assert.equal(win.calls.length, 1)
+  assert.equal(win.calls[0].file, process.execPath)
+  assert.equal(win.calls[0].args[0], path.win32.resolve(path.win32.dirname(shim), 'node_modules\\claude-placeholder\\cli.js'))
+  assert.deepEqual(win.calls[0].args.slice(1), linux.calls[0].args)
+  assert.equal(win.calls[0].options.windowsHide, true)
+  assert.equal(win.calls[0].options.detached, true)
+  assert.equal(win.calls[0].options.cwd, path.join(win.dir, 'state', 'ask'))
+})
+
+test('on win32 a claude batch file that is not an npm shim is refused before spawning, with a message naming the fix', async (t) => {
+  const { calls, result } = await spawnCall(t, { platform: 'win32', claudeCommand: 'C:\\Users\\you\\bin\\claude.bat' })
+  assert.deepEqual(calls, [])
+  assert.equal(result.status, 'error')
+  assert.equal(result.error, 'could not start claude: claudeCommand is a .cmd or .bat file that cannot take the ask arguments safely; point it at claude.exe or an npm claude.cmd')
 })

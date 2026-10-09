@@ -5,20 +5,29 @@ import path from 'node:path'
 import os from 'node:os'
 import net from 'node:net'
 import http from 'node:http'
-import { once } from 'node:events'
+import { EventEmitter, once } from 'node:events'
+import { fileURLToPath } from 'node:url'
 import { createHmac } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { WebSocket } from 'ws'
-import { startDeckServer } from '../../server/main.mjs'
+import { openPath, startDeckServer } from '../../server/main.mjs'
+import { readToken } from '../../server/http/auth.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
+import { openInBrowser } from '../../server/setup/browser.mjs'
+import { endpoint, runtimeBase } from '../../platform/index.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 const token = 'a'.repeat(43)
 const fixture = JSON.parse(fs.readFileSync(new URL('../fixtures/hooks/2.1.282/SessionStart.startup.json', import.meta.url)))
 async function harness(t, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srv-'))
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   fs.mkdirSync(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // Every deck path comes from setupPaths, the function the server reads them from (XDG on linux and darwin,
+  // %LOCALAPPDATA% and %APPDATA% under HOME on win32).
+  const paths = setupPaths(env)
+  const state = paths.state
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
+  fs.writeFileSync(paths.token, token, { mode: 0o600 })
   const staticDir = path.join(dir, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
@@ -38,8 +47,8 @@ async function harness(t, options = {}) {
     deck.ingest.flush()
   }
   t.after(async () => { await deck.close()
-    fs.rmSync(dir, { recursive: true, force: true }) })
-  return { get deck() { return deck }, dir, env, state, request, send, opts,
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) })
+  return { get deck() { return deck }, dir, env, paths, state, request, send, opts,
     async restart() { await deck.close()
       deck = await startDeckServer(opts) } }
 }
@@ -102,11 +111,11 @@ test('canonical session and request reads, filters, steps, review, dismiss and h
   assert.equal((await h.request('/api/sessions?repoKey=missing')).status, 404)
   assert.equal((await h.request('/api/requests/id/answer', { method: 'POST', body: '{}' })).status, 404)
 })
-test('preferences persist with config split, precedence and atomic validation', async t => {
+posixTest('preferences persist with config split, precedence and atomic validation', { reason: 'asserts the 0600 file mode of config.json' }, async t => {
   const h = await harness(t)
   assert.equal((await h.request('/api/prefs')).data.sources.textSize, 'default')
   assert.equal((await h.request('/api/prefs', { method: 'PATCH', body: JSON.stringify({ textSize: 16, lang: 'pt' }) })).data.prefs.textSize, 16)
-  assert.equal(fs.statSync(path.join(h.dir, '.config/fleetmates/deck/config.json')).mode & 0o777, 0o600)
+  assert.equal(fs.statSync(path.join(h.paths.config, 'config.json')).mode & 0o777, 0o600)
   assert.equal((await h.request('/api/prefs', { method: 'PATCH', body: '{"textSize":14,"extra":true}' })).status, 422)
   assert.equal((await h.request('/api/prefs')).data.prefs.textSize, 16)
   await h.restart()
@@ -190,15 +199,15 @@ test('spool, live hook socket and SQLite survive restart while deckd is offline'
   const h = await harness(t)
   // Recent hook times: the restart runs the 30-day retention job, which rightly drops a session that ended in 1970.
   const at = Date.now() - 10_000
-  const sock = net.connect(path.join(h.env.XDG_RUNTIME_DIR, 'fleetmates-deck/hooks.sock'))
+  const sock = net.connect(endpoint(h.env.XDG_RUNTIME_DIR, 'hooks'))
   await once(sock, 'connect')
   sock.end(JSON.stringify({ v: 1, hookTs: at, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: { ...fixture, cwd: h.dir } }) + '\n')
   await once(sock, 'close')
   await waitFor(() => h.deck.projector.snapshot().sessions.length === 1)
   h.send('SessionEnd', at + 1000, { reason: 'prompt_input_exit' })
   const oldEpoch = h.deck.epoch
-  fs.mkdirSync(path.join(h.state, 'spool'), { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(h.state, 'spool/hooks-20260930-1790000000000-abcdefabcdef.jsonl'), JSON.stringify({ v: 1, hookTs: at + 2000, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: { ...fixture, cwd: h.dir, session_id: 'other-session' } }) + '\n', { mode: 0o600 })
+  fs.mkdirSync(h.paths.spool, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(path.join(h.paths.spool, 'hooks-20260930-1790000000000-abcdefabcdef.jsonl'), JSON.stringify({ v: 1, hookTs: at + 2000, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: { ...fixture, cwd: h.dir, session_id: 'other-session' } }) + '\n', { mode: 0o600 })
   await h.restart()
   assert.equal(h.deck.epoch, oldEpoch)
   assert.equal((await h.request('/api/history')).data.summaries.length, 1)
@@ -315,7 +324,7 @@ test('built relative SPA assets resolve from nested history routes', async t => 
   assert.match(html, /href="\/app.css"/)
   assert.match((await fetch(base + '/app.js')).headers.get('content-type'), /javascript/)
 })
-test('SPA fallback refuses an index.html symlink that escapes the static root', async t => {
+posixTest('SPA fallback refuses an index.html symlink that escapes the static root', { reason: 'creates symlinks' }, async t => {
   const h = await harness(t)
   const outside = path.join(h.dir, 'outside.html')
   fs.writeFileSync(outside, 'OUTSIDE_PRIVATE_CONTENT')
@@ -331,13 +340,13 @@ test('SPA fallback refuses an index.html symlink that escapes the static root', 
   }
   assert.equal(await (await fetch(base + '/app.js')).text(), 'export const deck = true')
 })
-test('default server process delivers T7 popups, suppresses recording bells and resumes normal bells', { timeout: 15_000 }, async t => {
+posixTest('default server process delivers T7 popups, suppresses recording bells and resumes normal bells', { timeout: 15_000, reason: 'runs #! shims and a Unix-socket scribed' }, async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proc-'))
   const runtime = path.join(dir, 'r')
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  const { state, token: tokenFile } = setupPaths({ HOME: dir })
   const bin = path.join(dir, 'bin')
   for (const target of [runtime, state, bin]) fs.mkdirSync(target, { recursive: true, mode: 0o700 })
-  fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 })
   const log = path.join(dir, 'commands.jsonl')
   for (const name of ['notify-send', 'pw-play', 'makoctl', 'systemctl', 'claude']) fs.writeFileSync(path.join(bin, name), `#!${process.execPath}
 import fs from 'node:fs'
@@ -381,7 +390,7 @@ process.stdout.write('42\\n')
       clearTimeout(timeout)
     }
     await new Promise(resolve => scribed.close(resolve))
-    fs.rmSync(dir, { recursive: true, force: true })
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
   })
   const headers = { Authorization: `Bearer ${token}`, Origin: `http://127.0.0.1:${port}`, 'Content-Type': 'application/json' }
   let ready = false
@@ -415,4 +424,163 @@ process.stdout.write('42\\n')
   assert.equal(commands().filter(row => row.command === 'notify-send').length, 3)
   assert.equal(diagnostics.includes(token), false)
   assert.equal(diagnostics.includes('recording-session'), false)
+})
+
+// Platform tests (docs/plans/2026-10-08-deck-platforms.md, Task 5). A platform other than the host's is injected
+// as darwin on POSIX hosts and as win32 on Windows, so the hook endpoint the server opens is one this host can serve.
+const otherPlatform = process.platform === 'win32' ? 'win32' : 'darwin'
+
+/** Source text without block and line comments, so a comment naming a symbol is not counted as code. */
+function stripComments(text) {
+  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:\\'"`])\/\/.*$/gm, '$1')
+}
+
+/** Every .mjs file under `dir`. */
+function sources(dir) {
+  return fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+    const full = path.join(dir, entry.name)
+    if (entry.isDirectory()) return sources(full)
+    return entry.name.endsWith('.mjs') ? [full] : []
+  })
+}
+
+test('no unguarded process.getuid() call remains under hub/server', () => {
+  const files = sources(fileURLToPath(new URL('../../server/', import.meta.url)))
+  assert.ok(files.length > 50, `found ${files.length} server sources`)
+  const unguarded = []
+  for (const file of files) {
+    stripComments(fs.readFileSync(file, 'utf8')).split('\n').forEach((line, index) => {
+      if (/process\.getuid\(\)/.test(line) && !/typeof process\.getuid === 'function'/.test(line)) unguarded.push(`${path.basename(file)}:${index + 1}`)
+    })
+  }
+  assert.deepEqual(unguarded, [])
+})
+
+test('readToken accepts a token on win32 on owner profile ACLs alone and keeps the POSIX refusals and their message', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tok-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))
+  const file = path.join(dir, 'token')
+  fs.writeFileSync(file, token, { mode: 0o644 })
+  fs.chmodSync(file, 0o644)
+  const otherUid = (process.getuid?.() ?? 0) + 1
+  assert.equal(readToken(file, { platform: 'win32', uid: otherUid }), token)
+  assert.throws(() => readToken(file, { platform: 'linux', uid: otherUid }), { message: 'deck token must be a private 0600 file' })
+  assert.throws(() => readToken(file, { platform: 'linux', uid: null }), { message: 'deck token must be a private 0600 file' })
+  fs.writeFileSync(file, 'short')
+  assert.throws(() => readToken(file, { platform: 'win32' }), { message: 'invalid deck token' })
+})
+
+test('without XDG_RUNTIME_DIR the server listens for hooks and reaches deckd under the runtimeBase fallback', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'srvx-'))
+  const env = { HOME: dir }
+  const { state, token: tokenFile } = setupPaths(env)
+  fs.mkdirSync(state, { recursive: true, mode: 0o700 })
+  fs.writeFileSync(tokenFile, token, { mode: 0o600 })
+  const runtimeDirs = []
+  const deck = await startDeckServer({ env, platform: otherPlatform, port: 0, staticDir: dir, notifications: false, runPollMs: 3_600_000, reconnectMs: 60_000,
+    connectDeckd: async options => { runtimeDirs.push(options.runtimeDir)
+      throw Error('fake offline') }, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
+  t.after(async () => { await deck.close()
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) })
+  const base = runtimeBase({ env, platform: otherPlatform })
+  assert.equal(base, otherPlatform === 'darwin' ? path.posix.join(dir, 'Library', 'Caches', 'fleetmates-deck') : path.win32.join(dir, 'AppData', 'Local', 'fleetmates-deck', 'run'))
+  assert.deepEqual(runtimeDirs, [base], 'the deckd link connects under the fallback base')
+  assert.equal(deck.hookEndpoint(), endpoint(base, 'hooks', { platform: otherPlatform }))
+  const sock = net.connect(deck.hookEndpoint())
+  await once(sock, 'connect')
+  sock.end(JSON.stringify({ v: 1, hookTs: Date.now(), ptyId: null, claudePid: null, pidChain: [], truncated: false, hook: { ...fixture, cwd: dir } }) + '\n')
+  await once(sock, 'close')
+  await waitFor(() => deck.projector.snapshot().sessions.length === 1)
+})
+
+test('without XDG_RUNTIME_DIR a second server on the same fallback base leaves the live hook endpoint alone and starts', async t => {
+  const dirs = [fs.mkdtempSync(path.join(os.tmpdir(), 'srvy-')), fs.mkdtempSync(path.join(os.tmpdir(), 'srvy-'))]
+  const env = { HOME: dirs[0] }
+  const decks = []
+  t.after(async () => { for (const deck of decks) await deck.close()
+    for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) })
+  for (const dir of dirs) {
+    const paths = setupPaths({ HOME: dir })
+    fs.mkdirSync(paths.state, { recursive: true, mode: 0o700 })
+    fs.writeFileSync(paths.token, token, { mode: 0o600 })
+    // Both share HOME, so runtimeBase gives both one base; each keeps its own state through `paths`.
+    decks.push(await startDeckServer({ env, paths, platform: otherPlatform, port: 0, staticDir: dir, notifications: false,
+      runPollMs: 3_600_000, reconnectMs: 60_000, connectDeckd: async () => { throw Error('fake offline') }, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) }))
+  }
+  assert.equal(decks[0].hookEndpoint(), endpoint(runtimeBase({ env, platform: otherPlatform }), 'hooks', { platform: otherPlatform }))
+  assert.equal(decks[1].hookEndpoint(), null)
+})
+
+test('off linux, Start scribed answers unsupported on <platform> and never runs systemd-run; the health row says so', async t => {
+  const execs = []
+  const h = await harness(t, { platform: otherPlatform, scribedExecFile: (...args) => { execs.push(args)
+    return Promise.resolve({ stdout: '', stderr: '' }) } })
+  const response = await h.request('/api/deps/scribed/start', { method: 'POST' })
+  assert.equal(response.status, 503)
+  assert.equal(response.data.error.code, 'scribed_unavailable')
+  assert.deepEqual(response.data.error.details, { reason: `unsupported on ${otherPlatform}` })
+  assert.deepEqual(execs, [])
+  const row = (await h.request('/api/health')).data.deps.find(dep => dep.dep === 'scribed')
+  assert.equal(row.state, 'down')
+  assert.equal(row.reason, `unsupported on ${otherPlatform}`)
+})
+
+test('Start deckd calls the service adapter start(deckd) instead of systemctl; a failed start is 502', async t => {
+  const started = []
+  const commands = []
+  let fail = false
+  const h = await harness(t, { reconnectMs: 60_000, serviceManager: { start: async service => { started.push(service)
+    if (fail) throw Error('could not start') } },
+  runCommand: (file, args) => { commands.push([file, ...args])
+    return { status: 0, stdout: '', stderr: '' } } })
+  assert.equal((await h.request('/api/deps/deckd/start', { method: 'POST' })).status, 202)
+  assert.deepEqual(started, ['deckd'])
+  assert.deepEqual(commands.filter(command => command[0] === 'systemctl'), [])
+  fail = true
+  const refused = await h.request('/api/deps/deckd/start', { method: 'POST' })
+  assert.equal(refused.status, 502)
+  assert.equal(refused.data.error.code, 'dependency_start_failed')
+})
+
+posixTest('on darwin Start deckd kickstarts the LaunchAgent in the gui domain of this user', { reason: 'injects darwin, whose hook endpoint is a Unix socket' }, async t => {
+  const commands = []
+  const h = await harness(t, { platform: 'darwin', reconnectMs: 60_000, runCommand: (file, args) => { commands.push([file, ...args])
+    return { status: 0, stdout: '', stderr: '' } } })
+  assert.equal((await h.request('/api/deps/deckd/start', { method: 'POST' })).status, 202)
+  assert.deepEqual(commands.filter(command => command[0] === 'launchctl' || command[0] === 'systemctl'),
+    [['launchctl', 'kickstart', `gui/${process.getuid()}/io.fleetmates.deck.deckd`]])
+})
+
+test('openPath runs xdg-open on linux, open on darwin and cmd.exe start on win32, as argv with no shell', async () => {
+  const calls = []
+  const spawnSpy = (file, args, options) => {
+    calls.push({ file, args, options })
+    const child = new EventEmitter()
+    child.unref = () => {}
+    setImmediate(() => child.emit('spawn'))
+    return child
+  }
+  const env = { PATH: '/usr/bin' }
+  const file = '/home/you/notes & more.md'
+  for (const platform of ['linux', 'darwin', 'win32']) await openPath(file, { platform, env, spawn: spawnSpy })
+  assert.deepEqual(calls[0], { file: 'xdg-open', args: [file], options: { env, stdio: 'ignore', detached: true } })
+  assert.deepEqual(calls[1], { file: 'open', args: [file], options: { env, stdio: 'ignore', detached: true } })
+  assert.deepEqual(calls[2], { file: 'cmd.exe', args: ['/d', '/s', '/c', 'start', '""', '^"/home/you/notes ^& more.md^"'],
+    options: { env, stdio: 'ignore', detached: true, windowsVerbatimArguments: true, windowsHide: true } })
+})
+
+test('openInBrowser uses open on darwin and cmd.exe start on win32; linux keeps $BROWSER first', async () => {
+  const started = []
+  const start = async (file, argv, env, extra) => { started.push([file, argv, extra ?? null])
+    return true }
+  const query = async () => ({ status: 1, stdout: '' })
+  const file = '/home/you/.local/state/fleetmates/deck/open.html'
+  assert.equal(await openInBrowser(file, { env: { BROWSER: 'firefox' }, platform: 'darwin', start, query }), true)
+  assert.equal(await openInBrowser(file, { env: { BROWSER: 'firefox' }, platform: 'win32', start, query }), true)
+  assert.equal(await openInBrowser(file, { env: { BROWSER: 'firefox' }, platform: 'linux', start, query }), true)
+  assert.deepEqual(started, [
+    ['open', [file], null],
+    ['cmd.exe', ['/d', '/s', '/c', 'start', '""', `^"${file}^"`], { windowsVerbatimArguments: true, windowsHide: true }],
+    ['firefox', [file], null]
+  ])
 })

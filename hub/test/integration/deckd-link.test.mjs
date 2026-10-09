@@ -15,6 +15,7 @@ import { createDeckdLink } from '../../server/pty/link.mjs'
 import { readStoredHistory } from '../../server/screen/history.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { fakeBin } from '../helpers/fake-bin.mjs'
+import { runtimeBase } from '../../platform/index.mjs'
 
 const token = 'a'.repeat(43)
 const hooks = new URL('../fixtures/hooks/2.1.282/', import.meta.url)
@@ -89,6 +90,26 @@ async function until(fn, what) {
 }
 
 const sessionOf = (deck, ptyId) => deck.projector.snapshot().sessions.find(row => row.ptyId === ptyId)
+
+test('without XDG_RUNTIME_DIR the link connects, and retries, under the runtimeBase fallback of its platform', async t => {
+  const home = fs.mkdtempSync(path.join(dir, 'nox-'))
+  const store = openDeckDb(path.join(home, 'deck.db'))
+  const projector = createProjector({ store })
+  t.after(() => store.close())
+  for (const platform of ['darwin', 'linux', 'win32']) {
+    const env = { HOME: home }
+    const dirs = []
+    const link = createDeckdLink({ env, platform, reconnectMs: 60_000, connectDeckd: async options => { dirs.push(options.runtimeDir)
+      throw Error('fake offline') }, store, projector, publish: () => {} })
+    await link.start()
+    assert.equal(link.health().state, 'down')
+    link.retry()
+    await until(() => dirs.length === 2, 'the retry probe')
+    link.close()
+    assert.deepEqual(dirs, [runtimeBase({ env, platform }), runtimeBase({ env, platform })], platform)
+  }
+  assert.equal(runtimeBase({ env: { HOME: home }, platform: 'darwin' }), path.posix.join(home, 'Library', 'Caches', 'fleetmates-deck'))
+})
 const write = (deck, ptyId, text, kind = 'deck') => deck.link.request('write', { ptyId, data: Buffer.from(text).toString('base64'), source: { kind } })
 
 test('a wrapped spawn becomes one starting row that did not join mid-life', async t => {
