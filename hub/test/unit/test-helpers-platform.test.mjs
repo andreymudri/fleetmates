@@ -15,6 +15,19 @@ const helperUrl = pathToFileURL(path.join(hubDir, 'test', 'helpers', 'platform.m
 const fakeClaude = path.join(hubDir, 'test', 'fake-claude', 'fake-claude.mjs')
 const scriptsDir = path.join(hubDir, 'test', 'fixtures', 'scripts')
 const FORCE = 'FLEETMATES_TEST_FORCE_WINDOWS'
+// Expectations without the force flag depend on the host: on a Windows host posixTest skips anyway.
+const hostWindows = process.platform === 'win32'
+
+/**
+ * Assert a child run without the force flag: one pass off Windows, one skip on a Windows host.
+ * @param {string} tap
+ */
+function assertUnforced (tap) {
+  assert.equal(summary(tap, 'pass'), hostWindows ? 0 : 1)
+  assert.equal(summary(tap, 'skipped'), hostWindows ? 1 : 0)
+  assert.equal(summary(tap, 'fail'), 0)
+  assert.match(tap, new RegExp(`isWindows=${hostWindows}`))
+}
 
 /**
  * Run `node --test` on a one-test file that uses `posixTest` (or `posixIt`) and return its TAP output.
@@ -52,11 +65,10 @@ function summary (tap, name) {
   return m ? Number(m[1]) : NaN
 }
 
-test('posixTest runs its test on linux without the force flag', async () => {
+test('posixTest runs its test without the force flag on a POSIX host (and skips on a Windows host)', async () => {
   const tap = await runChild({ force: false, call: 'posixTest("one", () => {})' })
-  assert.equal(summary(tap, 'pass'), 1)
-  assert.equal(summary(tap, 'skipped'), 0)
-  assert.doesNotMatch(tap, /# SKIP/)
+  assertUnforced(tap)
+  if (!hostWindows) assert.doesNotMatch(tap, /# SKIP/)
 })
 
 test('posixTest skips with the default POSIX only message under FLEETMATES_TEST_FORCE_WINDOWS=1', async () => {
@@ -73,8 +85,7 @@ test('posixTest takes the reason from opts and isWindows follows the force flag'
   assert.match(tap, /^ok 1 - one # SKIP POSIX only: needs chmod$/m)
   assert.match(tap, /isWindows=true/)
   const off = await runChild({ force: false, call: 'posixTest("one", { reason: "needs chmod" }, () => {})' })
-  assert.equal(summary(off, 'pass'), 1)
-  assert.match(off, /isWindows=false/)
+  assertUnforced(off)
 })
 
 test('posixIt has the same contract inside describe', async () => {
@@ -83,8 +94,7 @@ test('posixIt has the same contract inside describe', async () => {
   assert.equal(summary(on, 'skipped'), 1)
   assert.match(on, /ok 1 - one # SKIP POSIX only: file modes, symlinks or Unix sockets$/m)
   const off = await runChild({ force: false, call: call.replace('throw new Error("ran")', '') })
-  assert.equal(summary(off, 'pass'), 1)
-  assert.equal(summary(off, 'skipped'), 0)
+  assertUnforced(off)
 })
 
 test('fakeBin writes claude.cmd with CRLF under FLEETMATES_TEST_FORCE_WINDOWS=1', async () => {
@@ -111,7 +121,8 @@ test('fakeBin writes the unchanged POSIX shell wrapper without the force flag', 
   delete process.env[FORCE]
   let bin
   try {
-    bin = await fakeBin({})
+    // A Windows host writes claude.cmd by default, so there the POSIX branch is asked for by platform.
+    bin = await fakeBin(hostWindows ? { platform: 'linux' } : {})
   } finally {
     if (before !== undefined) process.env[FORCE] = before
   }
@@ -124,11 +135,16 @@ test('fakeBin writes the unchanged POSIX shell wrapper without the force flag', 
   }
 })
 
-test('the fake claude logs exactly one resize when SIGWINCH and stdout resize both fire', async () => {
+// On Linux one pty resize raises both SIGWINCH and a process.stdout 'resize' event in the fake (seen
+// with the dedup removed: two entries). Which of the two a Windows host raises is unverified here; one
+// entry is expected either way.
+test('the fake claude logs exactly one resize for one pty resize, though SIGWINCH and stdout resize both fire on Linux', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'deck-fake-resize1-'))
   const log = path.join(dir, 'log.jsonl')
   const bin = await fakeBin({ script: path.join(scriptsDir, 'resize.json'), log })
-  const p = pty.spawn('claude', [], { env: /** @type {Record<string, string>} */ (bin.env), cwd: dir, cols: 80, rows: 24, name: 'xterm-256color' })
+  // node and the script directly, not the claude wrapper: spawning `claude` failed with node-pty's
+  // 'File not found' on a Windows host (reported from a Windows VM run, not reproduced here).
+  const p = pty.spawn(process.execPath, [fakeClaude], { env: /** @type {Record<string, string>} */ (bin.env), cwd: dir, cols: 80, rows: 24, name: 'xterm-256color' })
   /** @type {Promise<unknown>} */
   const exited = new Promise(resolve => p.onExit(resolve))
   const read = async () => (await readFile(log, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(l => JSON.parse(l))
