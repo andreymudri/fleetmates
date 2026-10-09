@@ -16,9 +16,14 @@ schema changed.
   Origin and Content-Security-Policy checks; without it the server behaves exactly as before.
   `fleetmates-deck remote-pass` sets the passphrase a new device types to get the deck token; it is
   read from the terminal, stored as a scrypt hash in a 0600 file, and the exchange is rate limited.
-- The deck is installable as a PWA: a manifest, iOS meta tags, safe areas, and a service worker that
-  caches the static shell only. Nothing under `/api` or `/.well-known` is cached, and the token is
-  kept in `localStorage` so an installed app does not lose it between launches.
+- The deck is installable as a PWA: a manifest, icons, iOS meta tags, safe areas, and a service
+  worker that caches the static shell only. Nothing under `/api` or `/.well-known` is cached, and
+  the token is kept in `localStorage` so an installed app does not lose it between launches.
+- A phone layout below the new `--breakpoint-mobile` (768px), in one sheet (`web/src/styles/mobile.css`):
+  the shell loses its 1280px floor, the Rail becomes a labelled bottom bar, Home and Focus go to one
+  column, inline actions reach 44px and the toasts clear the home indicator.
+- A client laid out as a phone no longer sends terminal resizes. The PTY is the one on the machine,
+  so a phone opening Focus would otherwise reflow the terminal its owner is working in.
 
 ## v0.6.0
 

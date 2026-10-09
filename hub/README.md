@@ -339,9 +339,18 @@ Three steps, all on the machine that runs the deck.
    `~/.local/state/fleetmates/deck/remote-pass.json`, mode 0600. At least 10 characters, and the
    obvious ones are refused.
 
-3. On the phone, open the origin, type the passphrase, then "Add to home screen". The deck trades
-   the passphrase for its token, the installed app keeps that token, and from then on it opens
-   straight into the deck.
+3. On the phone, open the origin. The deck shows Unlock: type the passphrase, then "Add to home
+   screen". The deck trades the passphrase for its token, the installed app keeps that token, and
+   from then on it opens straight into the deck.
+
+Below 768px the deck lays itself out as a phone: one column, the Rail as a labelled bottom bar, the
+Focus session list dropped, 44px touch targets and the toasts clear of the home indicator. That
+layout lives in one sheet, `web/src/styles/mobile.css`.
+
+The terminal is the one exception to full control. The phone mirrors it and types into it, but it
+never sends its size to the server: the PTY is the one running on your machine, so a resize from a
+390px phone would reflow the terminal you are working in. Claude Code output stays laid out for the
+width the machine set.
 
 What the pairing screen hands the phone is the deck's own token, not a per-device one. Revoking a
 phone therefore means rotating the deck token (`fleetmates-deck init --rotate-token`), which signs
