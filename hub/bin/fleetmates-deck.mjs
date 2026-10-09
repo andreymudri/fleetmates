@@ -199,24 +199,33 @@ function remoteAccess(rest) {
   process.stdout.write('restart the web server for it to take effect: systemctl --user restart fleetmates-deck\n')
 }
 
-/** Read one line from stdin without echoing it, so the passphrase never reaches the terminal or the scrollback. */
-async function readSecret(prompt) {
-  if (!process.stdin.isTTY) {
-    const { createInterface } = await import('node:readline')
-    const lines = createInterface({ input: process.stdin })
-    for await (const line of lines) { lines.close()
-      return line }
-    return ''
-  }
-  process.stdout.write(prompt)
+/**
+ * Read passphrases from stdin without echoing them, so the passphrase never reaches the terminal or the
+ * scrollback. One reader for the whole prompt sequence: a piped stdin delivers its lines to the same interface.
+ */
+async function secretReader() {
   const { createInterface } = await import('node:readline')
   const { Writable } = await import('node:stream')
-  const output = new Writable({ write(chunk, encoding, done) { done() } })
-  const lines = createInterface({ input: process.stdin, output, terminal: true })
-  try {
-    return await new Promise(resolve => lines.question('', answer => resolve(answer)))
-  } finally { lines.close()
-    process.stdout.write('\n') }
+  if (!process.stdin.isTTY) {
+    // A piped stdin is read whole first: its lines arrive together, and a second prompt would miss them.
+    const chunks = []
+    for await (const chunk of process.stdin) chunks.push(chunk)
+    const lines = Buffer.concat(chunks).toString('utf8').split('\n')
+    let next = 0
+    return { read: async () => lines[next++] ?? '', close: () => {} }
+  }
+  const sink = new Writable({ write(chunk, encoding, done) { done() } })
+  const lines = createInterface({ input: process.stdin, output: sink, terminal: true })
+  return {
+    read(prompt) {
+      process.stdout.write(prompt)
+      return new Promise(resolve => lines.question('', answer => {
+        process.stdout.write('\n')
+        resolve(answer)
+      }))
+    },
+    close: () => lines.close()
+  }
 }
 
 /**
@@ -224,8 +233,12 @@ async function readSecret(prompt) {
  * shell history would both show, and stored as a scrypt hash in a private 0600 file beside the deck token.
  */
 async function remotePass() {
-  const passphrase = checkPassphrase(await readSecret('remote access passphrase: '))
-  if (await readSecret('repeat it: ') !== passphrase) throw new Error('the two passphrases differ')
+  const reader = await secretReader()
+  let passphrase
+  try {
+    passphrase = checkPassphrase(await reader.read('remote access passphrase: '))
+    if (await reader.read('repeat it: ') !== passphrase) throw new Error('the two passphrases differ')
+  } finally { reader.close() }
   privateDir(paths.state)
   const file = path.join(paths.state, 'remote-pass.json')
   writePassphraseFile(file, await hashPassphrase(passphrase))

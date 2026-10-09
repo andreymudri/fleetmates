@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { authorize, parsePublicOrigin, requestOrigin, securityHeaders } from '../../server/http/auth.mjs'
 import { checkPassphrase, createRemoteAccess, hashPassphrase, readPassphraseFile, verifyPassphrase, writePassphraseFile } from '../../server/http/remote-pass.mjs'
 import { parseServerArgs } from '../../server/main.mjs'
@@ -122,4 +124,31 @@ test('the exchange is unavailable without a passphrase file, and rate limited on
   assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
   assert.deepEqual(await remote.verify('wrong once more'), { ok: false, code: 'unauthorized' })
   assert.equal(slept.at(-1), 250, 'the delay restarts after a success')
+})
+
+test('the CLI writes the public origin to config.json and the passphrase, read from stdin, to its own file', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cli-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const bin = fileURLToPath(new URL('../../bin/fleetmates-deck.mjs', import.meta.url))
+  const run = (args, input = '') => spawnSync(process.execPath, [bin, ...args], { env: { ...process.env, HOME: dir, XDG_CONFIG_HOME: path.join(dir, '.config'), XDG_STATE_HOME: path.join(dir, '.local/state') }, input, encoding: 'utf8' })
+  const configFile = path.join(dir, '.config/fleetmates/deck/config.json')
+  fs.mkdirSync(path.dirname(configFile), { recursive: true, mode: 0o700 })
+  fs.writeFileSync(configFile, '{"port":47801}\n', { mode: 0o600 })
+  assert.equal(run(['remote-access', '--public-origin', 'https://machine.tail1234.ts.net/']).status, 0)
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { port: 47801, publicOrigin: 'https://machine.tail1234.ts.net' }, 'the port beside it is kept')
+  const wildcard = run(['remote-access', '--public-origin', 'https://*.ts.net'])
+  assert.equal(wildcard.status, 1)
+  assert.match(wildcard.stderr, /wildcard/)
+  assert.equal(run(['remote-access', '--off']).status, 0)
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { port: 47801 })
+  // The passphrase comes from stdin only: it is never an argument, which `ps` and the shell history would show.
+  assert.match(run(['remote-pass', 'correct horse battery']).stderr, /usage/)
+  assert.equal(run(['remote-pass'], 'short\nshort\n').status, 1)
+  assert.equal(run(['remote-pass'], 'correct horse battery\nanother one here\n').status, 1)
+  const set = run(['remote-pass'], 'correct horse battery\ncorrect horse battery\n')
+  assert.equal(set.status, 0, set.stderr)
+  const file = path.join(dir, '.local/state/fleetmates/deck/remote-pass.json')
+  assert.equal(fs.lstatSync(file).mode & 0o777, 0o600)
+  assert.equal(await verifyPassphrase('correct horse battery', readPassphraseFile(file)), true)
+  assert.equal(fs.readFileSync(file, 'utf8').includes('correct horse'), false)
 })
