@@ -448,11 +448,13 @@ test('kill produces an exit event and exits { since } returns it', async () => {
   assert.deepEqual(list.ptys, [])
 })
 
-posixTest('an absolute path whose basename is claude is accepted', { reason: 'SIGTERM reaches the process group only on POSIX' }, async () => {
+test('an absolute path whose basename is claude is accepted', async () => {
+  // POSIX: the stub itself; Windows: its absolute claude.cmd shim.
   const id = await spawnReady({}, [stub.claude])
   await c.request('kill', { ptyId: id, signal: 'SIGTERM', graceMs: 2000 })
   const ev = await c.waitFor((e) => e.ev === 'exit' && e.ptyId === id)
-  assert.equal(ev.signal, 'SIGTERM')
+  // A signal reaches the process group only on POSIX; win32 kill is taskkill /F.
+  if (!onWindows) assert.equal(ev.signal, 'SIGTERM')
 })
 
 posixTest('kill escalates to SIGKILL after graceMs when SIGTERM is ignored', { reason: 'win32 kill is taskkill /F whatever the signal' }, async () => {

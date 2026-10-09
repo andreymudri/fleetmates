@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import path from 'node:path'
 import os from 'node:os'
-import { mkdtemp, mkdir, chmod, writeFile, readFile, rm, rmdir, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, chmod, writeFile, readFile, rm, rmdir, stat, symlink } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
@@ -15,7 +15,7 @@ import { cmdShim } from '../helpers/fake-bin.mjs'
 import { posixTest } from '../helpers/platform.mjs'
 import { runtimeBase, deckDir, endpoint } from '../../platform/index.mjs'
 import { startDeckd } from '../../deckd/main.mjs'
-import { connectDeckd } from '../../deckd/client.mjs'
+import { connectDeckd, checkEndpointDirs } from '../../deckd/client.mjs'
 import { encode, createLineDecoder } from '../../deckd/protocol.mjs'
 import { PtyHost } from '../../deckd/pty-host.mjs'
 import { Ring } from '../../deckd/ring.mjs'
@@ -573,15 +573,28 @@ test('main with XDG_RUNTIME_DIR unset listens under the runtimeBase fallback, an
   const baseExisted = await exists(base)
   const deckDirExisted = await exists(deckDir(base))
   try {
-    await runMain(env, async (stderr) => {
-      assert.ok(stderr().includes(`deckd listening on ${endpoint(base, 'deckd')}`), stderr())
-      const c = await connectDeckd({ runtimeDir: base, kind: 'server', name: 'm2' })
+    // The base is shared by every user of the fallback on this machine: a
+    // parallel test file, another worktree or a gate preview may hold it with
+    // its own deckd. main has no override for it, so wait for that one to go
+    // (up to 30 s) instead of failing on `another deckd is listening`.
+    const deadline = Date.now() + 30000
+    for (;;) {
       try {
-        assert.equal(typeof (await c.request('ping')).at, 'number')
-      } finally {
-        c.close()
+        await runMain(env, async (stderr) => {
+          assert.ok(stderr().includes(`deckd listening on ${endpoint(base, 'deckd')}`), stderr())
+          const c = await connectDeckd({ runtimeDir: base, kind: 'server', name: 'm2' })
+          try {
+            assert.equal(typeof (await c.request('ping')).at, 'number')
+          } finally {
+            c.close()
+          }
+        })
+        break
+      } catch (err) {
+        if (!/^deckd exited \d+: [^]*another deckd is listening on /.test(/** @type {Error} */ (err).message) || Date.now() > deadline) throw err
+        await new Promise((resolve) => setTimeout(resolve, 250))
       }
-    })
+    }
   } finally {
     // Not recursive: a concurrent run of this test (another worktree, a gate
     // preview) may be using the same base, and its socket must survive.
@@ -621,4 +634,90 @@ test('on a pipe endpoint a second deckd on the same base is refused, and connect
     process.chdir(cwd)
     await rm(scratch, { recursive: true, force: true })
   }
+})
+
+/**
+ * A runtime dir laid out as deckd leaves it (base and deck dir 0700), changed
+ * by `prepare`, with a plain listener on its deckd endpoint that counts the
+ * connections it receives, standing in for a squatter's.
+ * @param {(base: string, deck: string) => Promise<void>} prepare
+ * @param {(base: string, connections: () => number) => Promise<void>} fn
+ */
+async function withSquatter (prepare, fn) {
+  const base = await mkdtemp(path.join(rt.dir, 'sq-'))
+  const deck = path.join(base, 'fleetmates-deck')
+  await mkdir(deck, { mode: 0o700 })
+  await chmod(deck, 0o700)
+  await prepare(base, deck)
+  let connections = 0
+  const server = net.createServer((s) => { connections++; s.destroy() })
+  await new Promise((resolve) => server.listen(endpoint(base, 'deckd'), () => resolve(undefined)))
+  try {
+    await fn(base, () => connections)
+  } finally {
+    await new Promise((resolve) => server.close(() => resolve(undefined)))
+    await rm(base, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Assert connectDeckd refuses `base` with not_private, naming `dir` and
+ * `problem`, before connecting to anything.
+ * @param {string} base
+ * @param {() => number} connections
+ * @param {string} dir
+ * @param {RegExp} problem
+ * @param {number | null} [uid]
+ */
+async function assertNotPrivate (base, connections, dir, problem, uid) {
+  const err = await connectDeckd({ runtimeDir: base, kind: 'server', name: 'm2', ...(uid === undefined ? {} : { uid }) }).then(
+    (c) => { c.close(); return null }, (e) => e)
+  assert.equal(err?.code, 'not_private', String(err))
+  assert.ok(err.message.startsWith(`deckd endpoint dir ${dir} is not private: it `), err.message)
+  assert.match(err.message, problem)
+  assert.equal(connections(), 0)
+}
+
+posixTest('connectDeckd refuses a runtime dir that allows group or world access, before connecting', async () => {
+  await withSquatter((base) => chmod(base, 0o777), async (base, connections) => {
+    await assertNotPrivate(base, connections, base, /has mode 0777/)
+  })
+})
+
+posixTest('connectDeckd refuses a deck dir that allows group access, before connecting', async () => {
+  await withSquatter((_base, deck) => chmod(deck, 0o750), async (base, connections) => {
+    await assertNotPrivate(base, connections, deckDir(base), /has mode 0750/)
+  })
+})
+
+posixTest('connectDeckd refuses a deck dir that is a symlink, though its target is private', async () => {
+  await withSquatter(async (base, deck) => {
+    const real = path.join(base, 'real')
+    await mkdir(real, { mode: 0o700 })
+    await chmod(real, 0o700)
+    await rm(deck, { recursive: true })
+    await symlink(real, deck)
+  }, async (base, connections) => {
+    await assertNotPrivate(base, connections, deckDir(base), /is a symlink/)
+  })
+})
+
+posixTest('connectDeckd refuses dirs owned by another uid', async () => {
+  const other = (process.getuid?.() ?? 0) + 1
+  await withSquatter(async () => {}, async (base, connections) => {
+    await assertNotPrivate(base, connections, base, new RegExp(`is owned by uid ${process.getuid?.()}, not by this user`), other)
+  })
+})
+
+posixTest('checkEndpointDirs accepts the layout deckd makes, and a missing base rejects with ENOENT as an unreachable deckd does', async () => {
+  await withSquatter(async () => {}, async (base) => {
+    await checkEndpointDirs(base)
+  })
+  const missing = path.join(rt.dir, 'no-such-base')
+  await assert.rejects(checkEndpointDirs(missing), { code: 'ENOENT' })
+  await assert.rejects(connectDeckd({ runtimeDir: missing, kind: 'server' }), { code: 'ENOENT' })
+})
+
+test('checkEndpointDirs checks nothing for a win32 pipe endpoint', async () => {
+  await checkEndpointDirs(path.join(rt.dir, 'no-such-base'), { platform: 'win32', lstat: () => { throw new Error('lstat must not run on win32') } })
 })
