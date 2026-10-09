@@ -198,7 +198,7 @@ test('endpointSecret on win32 treats a malformed key as missing for readers; a c
   })
 })
 
-test('endpointSecret on win32: two creators over a malformed key end on the one key the file holds, because the second waits for the start lock', async () => {
+test('endpointSecret on win32: two creators over a malformed key end on the one key the file holds, because the second finds the start lock held', async () => {
   await inScratch(async () => {
     fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
     fs.writeFileSync(keyFile('base', 'deckd'), 'malformed')
@@ -209,7 +209,7 @@ test('endpointSecret on win32: two creators over a malformed key end on the one 
     const racing = { ...fs, renameSync (from, to) {
       if (!nested) {
         nested = true
-        try { second.value = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, log: () => {}, lockWaitMs: 100 }) } catch (error) { second.error = error }
+        try { second.value = endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, log: () => {} }) } catch (error) { second.error = error }
       }
       return fs.renameSync(from, to)
     } }
@@ -218,32 +218,7 @@ test('endpointSecret on win32: two creators over a malformed key end on the one 
     assert.equal(first, final)
     assert.equal(nested, true)
     assert.ok(second.value === undefined || second.value === final, `the second creator got ${second.value}, the file holds ${final}`)
-    assert.equal(second.error?.code, 'EADDRINUSE', 'the second creator found the lock held by a live process')
-  })
-})
-
-test('a start lock left by a dead process is taken over; one held by a live process makes a creator give up with EADDRINUSE', async () => {
-  await inScratch(async () => {
-    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
-    fs.writeFileSync(lockFile('base', 'deckd'), '4242')
-    const asked = []
-    const dead = pid => { asked.push(pid); return false }
-    assert.match(endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, alive: dead }), /^[0-9a-f]{64}$/)
-    assert.deepEqual(asked, [4242])
-    assert.equal(fs.existsSync(lockFile('base', 'deckd')), false)
-    fs.writeFileSync(lockFile('base', 'hooks'), '4242')
-    const started = Date.now()
-    assert.throws(() => endpointSecret('base', { platform: 'win32', name: 'hooks', create: true, alive: () => true, lockWaitMs: 80 }),
-      { code: 'EADDRINUSE', message: /pid 4242/ })
-    assert.ok(Date.now() - started >= 80, 'it waited for the holder')
-    assert.equal(readFileSync(lockFile('base', 'hooks'), 'utf8'), '4242', 'a live holder keeps its lock')
-    const server = net.createServer()
-    try {
-      await assert.rejects(listenEndpoint('base', 'hooks', server, { platform: 'win32', alive: () => true, lockWaitMs: 80 }), { code: 'EADDRINUSE' })
-      assert.equal(server.listening, false)
-    } finally {
-      if (server.listening) await new Promise(resolve => server.close(resolve))
-    }
+    assert.equal(second.error?.code, 'EADDRINUSE', 'the second creator found the lock held by a live deck process')
   })
 })
 
@@ -285,7 +260,44 @@ posixTest('a symbolic link planted at the temp name a key is written through is 
   })
 })
 
-test('listenEndpoint on win32 listens on a new key each start and writes the key only after the pipe listens', async () => {
+const DEAD = 999999
+/** An `alive` for which only DEAD is gone. */
+const allButDead = pid => pid !== DEAD
+const closeServer = server => server.listening ? new Promise(resolve => server.close(resolve)) : Promise.resolve()
+/** Bytes a stand-in listener received, by connection. */
+async function listener (pipe) {
+  const got = []
+  const server = net.createServer(socket => { socket.on('data', chunk => got.push(String(chunk))) })
+  await new Promise(resolve => server.listen(pipe, resolve))
+  return { server, got }
+}
+/** Connect to `pipe`, send `text`, and wait until the server side had time to read it. */
+async function send (pipe, text) {
+  await new Promise((resolve, reject) => { const socket = net.connect(pipe); socket.on('error', reject); socket.on('connect', () => socket.end(text)); socket.on('close', resolve) })
+  await new Promise(resolve => setTimeout(resolve, 20))
+}
+
+test('endpointSecret takes over a start lock whose holder is dead, and refuses while a live deck server holds it', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, cmd: 'x' }))
+    const asked = []
+    const alive = pid => { asked.push(pid); return pid !== DEAD }
+    assert.match(endpointSecret('base', { platform: 'win32', name: 'deckd', create: true, alive }), /^[0-9a-f]{64}$/)
+    assert.deepEqual(asked, [DEAD])
+    assert.equal(fs.existsSync(lockFile('base', 'deckd')), false, 'endpointSecret releases the lock')
+    const server = net.createServer()
+    try {
+      await listenEndpoint('base', 'hooks', server, { platform: 'win32' })
+      fs.rmSync(keyFile('base', 'hooks'))
+      assert.throws(() => endpointSecret('base', { platform: 'win32', name: 'hooks', create: true }), { code: 'EADDRINUSE', message: /pid \d+/ })
+    } finally {
+      await closeServer(server)
+    }
+  })
+})
+
+test('listenEndpoint on win32 listens on a new key each start, writes the key only after the pipe listens, holds the start lock while listening, and a clean close removes the key and the lock', async () => {
   await inScratch(async () => {
     /** @type {any[]} */
     const atPublish = []
@@ -304,58 +316,159 @@ test('listenEndpoint on win32 listens on a new key each start and writes the key
       assert.equal(first, endpoint('base', 'deckd', { platform: 'win32' }), 'a client computes the pipe the server listens on')
       assert.deepEqual(atPublish, [{ listening: true, address: first, pipe: first }], 'the key appeared only after its pipe was listening')
       firstKey = endpointSecret('base', { platform: 'win32', name: 'deckd' })
+      assert.equal(JSON.parse(readFileSync(lockFile('base', 'deckd'), 'utf8')).pid, process.pid, 'the start lock is held while listening')
     } finally {
-      if (server.listening) await new Promise(resolve => server.close(resolve))
+      await closeServer(server)
     }
+    assert.equal(fs.existsSync(keyFile('base', 'deckd')), false, 'a clean close removes the key')
+    assert.equal(fs.existsSync(lockFile('base', 'deckd')), false, 'and releases the lock')
+    assert.throws(() => endpoint('base', 'deckd', { platform: 'win32' }), { code: 'ENOENT' }, 'clients find the server not running')
     server = net.createServer()
-    const second = await listenEndpoint('base', 'deckd', server, { platform: 'win32', fs: watching })
     try {
+      const second = await listenEndpoint('base', 'deckd', server, { platform: 'win32' })
       assert.notEqual(second, first, 'a restart listens under a new name')
       assert.notEqual(endpointSecret('base', { platform: 'win32', name: 'deckd' }), firstKey)
       assert.equal(second, endpoint('base', 'deckd', { platform: 'win32' }))
-      assert.equal(fs.existsSync(lockFile('base', 'deckd')), false, 'the start lock is released')
     } finally {
-      await new Promise(resolve => server.close(resolve))
+      await closeServer(server)
     }
   })
 })
 
-test('listenEndpoint on win32 refuses with EADDRINUSE while the current key\'s pipe answers, and leaves the key', async () => {
+test('listenEndpoint on win32 refuses with EADDRINUSE and the current pipe while a live deck server holds the start lock, and leaves its key', async () => {
   await inScratch(async () => {
     const live = net.createServer()
-    const pipe = await listenEndpoint('base', 'hooks', live, { platform: 'win32' })
-    const key = endpointSecret('base', { platform: 'win32', name: 'hooks' })
     const other = net.createServer()
     try {
-      await assert.rejects(listenEndpoint('base', 'hooks', other, { platform: 'win32' }), { code: 'EADDRINUSE', path: pipe })
+      const pipe = await listenEndpoint('base', 'hooks', live, { platform: 'win32' })
+      const key = endpointSecret('base', { platform: 'win32', name: 'hooks' })
+      await assert.rejects(listenEndpoint('base', 'hooks', other, { platform: 'win32' }), { code: 'EADDRINUSE', path: pipe, holder: process.pid })
       assert.equal(other.listening, false)
       assert.equal(endpointSecret('base', { platform: 'win32', name: 'hooks' }), key)
     } finally {
-      await new Promise(resolve => live.close(resolve))
-      if (other.listening) await new Promise(resolve => other.close(resolve))
+      await closeServer(live)
+      await closeServer(other)
     }
   })
 })
 
-test('listenEndpoint on win32: a second start begun while the first writes its key waits for the lock, finds the first listening, and is refused', async () => {
+test('after a crash a squatter on the old pipe name neither blocks the next start nor receives anything sent after it', async () => {
   await inScratch(async () => {
+    // What a server killed while listening leaves: its key, and its lock naming a dead pid.
+    const oldKey = 'b'.repeat(64)
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(keyFile('base', 'hooks'), oldKey)
+    fs.writeFileSync(lockFile('base', 'hooks'), JSON.stringify({ pid: DEAD, cmd: process.argv[1] }))
+    // Another local user who saw the name creates it.
+    const squat = await listener(endpoint('base', 'hooks', { platform: 'win32', secret: oldKey }))
+    const deck = net.createServer(socket => { socket.on('data', chunk => received.push(String(chunk))) })
+    const received = []
+    try {
+      const pipe = await listenEndpoint('base', 'hooks', deck, { platform: 'win32', alive: allButDead })
+      assert.notEqual(pipe, squat.server.address())
+      await send(endpoint('base', 'hooks', { platform: 'win32' }), 'envelope\n')
+      assert.deepEqual(received, ['envelope\n'])
+      assert.deepEqual(squat.got, [])
+    } finally {
+      await closeServer(deck)
+      await closeServer(squat.server)
+    }
+  })
+})
+
+test('a lock whose live pid is not a deck server (a reused pid) is taken over; a matching command line, or one that cannot be read, holds it', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    const record = JSON.stringify({ pid: 4242, cmd: 'C:\\Users\\you\\hub\\deckd\\main.mjs' })
+    const cases = [
+      ['another program', '"C:\\Windows\\notepad.exe"', true],
+      ['the deck, other case and separators', '"node" "c:/users/YOU/hub/deckd/main.mjs"', false],
+      ['a query that failed', null, false],
+    ]
+    for (const [label, line, starts] of cases) {
+      fs.writeFileSync(lockFile('base', 'deckd'), record)
+      const asked = []
+      const server = net.createServer()
+      try {
+        const start = listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: () => true, commandLine: pid => { asked.push(pid); return line } })
+        if (starts) assert.match(await start, /-deckd$/, label)
+        else await assert.rejects(start, { code: 'EADDRINUSE', holder: 4242 }, label)
+        assert.deepEqual(asked, [4242], label)
+      } finally {
+        await closeServer(server)
+      }
+    }
+    fs.writeFileSync(lockFile('base', 'deckd'), record)
+    const asked = []
+    const server = net.createServer()
+    try {
+      await listenEndpoint('base', 'deckd', server, { platform: 'win32', alive: () => false, commandLine: pid => { asked.push(pid); return '' } })
+      assert.deepEqual(asked, [], 'a dead pid is not asked about')
+    } finally {
+      await closeServer(server)
+    }
+  })
+})
+
+test('two starters taking over one stale lock: the one whose rename moved the other\'s fresh lock puts it back, so only one server runs', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, cmd: 'x' }))
     const first = net.createServer()
     const second = net.createServer()
     /** @type {Promise<string> | null} */
-    let racing = null
-    const hook = { ...fs, renameSync (from, to) {
-      if (!racing && to === keyFile('base', 'deckd')) racing = listenEndpoint('base', 'deckd', second, { platform: 'win32' })
+    let firstStart = null
+    // `second` judged the lock stale; before its rename moves it aside, `first` takes the same stale lock over.
+    const racing = { ...fs, renameSync (from, to) {
+      if (!firstStart && from === lockFile('base', 'deckd') && to.endsWith('.stale')) firstStart = listenEndpoint('base', 'deckd', first, { platform: 'win32', alive: allButDead })
       return fs.renameSync(from, to)
     } }
-    const pipe = await listenEndpoint('base', 'deckd', first, { platform: 'win32', fs: hook })
     try {
-      assert.ok(racing)
-      await assert.rejects(racing, { code: 'EADDRINUSE', path: pipe })
+      const secondStart = listenEndpoint('base', 'deckd', second, { platform: 'win32', alive: allButDead, fs: racing })
+      await assert.rejects(secondStart, { code: 'EADDRINUSE' })
+      assert.ok(firstStart)
+      const pipe = await firstStart
+      assert.equal(first.listening, true)
       assert.equal(second.listening, false)
-      assert.equal(endpoint('base', 'deckd', { platform: 'win32' }), pipe, 'clients compute the first server\'s pipe')
+      assert.equal(endpoint('base', 'deckd', { platform: 'win32' }), pipe)
+      assert.equal(JSON.parse(readFileSync(lockFile('base', 'deckd'), 'utf8')).pid, process.pid)
+      assert.deepEqual(fs.readdirSync('.').filter(f => f.endsWith('.stale')), [], 'nothing is left aside')
     } finally {
-      await new Promise(resolve => first.close(resolve))
-      if (second.listening) await new Promise(resolve => second.close(resolve))
+      await closeServer(first)
+      await closeServer(second)
+    }
+  })
+})
+
+test('closing removes the start lock and the key only while they are still this server\'s', async () => {
+  await inScratch(async () => {
+    const server = net.createServer()
+    await listenEndpoint('base', 'deckd', server, { platform: 'win32' })
+    // Another process's lock and key took their places.
+    const otherLock = JSON.stringify({ pid: 4242, cmd: 'other' })
+    fs.writeFileSync(`${lockFile('base', 'deckd')}.other`, otherLock)
+    fs.renameSync(`${lockFile('base', 'deckd')}.other`, lockFile('base', 'deckd'))
+    fs.writeFileSync(keyFile('base', 'deckd'), 'c'.repeat(64))
+    await closeServer(server)
+    assert.equal(readFileSync(lockFile('base', 'deckd'), 'utf8'), otherLock)
+    assert.equal(readFileSync(keyFile('base', 'deckd'), 'utf8'), 'c'.repeat(64))
+  })
+})
+
+test('listenEndpoint closes the server, releases the lock and rethrows when the key cannot be written', async () => {
+  await inScratch(async () => {
+    const failing = { ...fs, renameSync (from, to) {
+      if (to === keyFile('base', 'hooks')) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' })
+      return fs.renameSync(from, to)
+    } }
+    const server = net.createServer()
+    try {
+      await assert.rejects(listenEndpoint('base', 'hooks', server, { platform: 'win32', fs: failing }), { code: 'EIO' })
+      assert.equal(server.listening, false)
+      assert.equal(fs.existsSync(lockFile('base', 'hooks')), false)
+      assert.equal(fs.existsSync(keyFile('base', 'hooks')), false)
+    } finally {
+      await closeServer(server)
     }
   })
 })

@@ -4,7 +4,6 @@
 import childProcess from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
-import net from 'node:net'
 import { mkdir, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -39,13 +38,10 @@ export function deckDir (base, { platform = process.platform } = {}) {
 }
 
 // win32 endpoint keys: one per endpoint, `<deckDir(base)>\endpoint-<name>.key`, holding 32 random bytes
-// as 64 lowercase hex digits. `endpoint-<name>.lock` serializes the processes that write one.
+// as 64 lowercase hex digits. `endpoint-<name>.lock` names the process that serves the endpoint: it is
+// taken before the key is written and, for a listening server, held until that server closes.
 const SECRET_RE = /^[0-9a-f]{64}$/
-const LOCK_WAIT_MS = 3000
-const LOCK_POLL_MS = 25
-const LOCK_RETRIES = 10
-const PROBE_MS = 1000
-const SLEEPER = new Int32Array(new SharedArrayBuffer(4))
+const LOCK_ATTEMPTS = 10
 const logLine = line => { process.stderr.write(`deck: ${line}\n`) }
 
 /** Whether process `pid` exists (EPERM: it exists, owned by someone else). */
@@ -56,6 +52,20 @@ function defaultAlive (pid) {
   } catch (err) {
     return err.code === 'EPERM'
   }
+}
+
+/**
+ * The command line of process `pid`: this process's own from process.argv; another's on a Windows host
+ * from Win32_Process through PowerShell, '' when no such process, and null when the query fails or the
+ * host is not Windows. `pid` is a positive integer (checked by the caller) before it enters the query.
+ */
+function defaultCommandLine (pid) {
+  if (pid === process.pid) return [process.execPath, ...process.argv.slice(1)].join(' ')
+  if (process.platform !== 'win32') return null
+  const result = childProcess.spawnSync('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`],
+    { encoding: 'utf8', timeout: 10000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+  if (result.error || result.status !== 0) return null
+  return String(result.stdout ?? '').trim()
 }
 
 function checkName (name) {
@@ -110,7 +120,7 @@ function writeTemp (file, text, fsImpl, random) {
   return temp
 }
 
-/** Put `secret` at `file` by renaming a complete temp file over it, so a reader sees the old key or the new one. */
+/** Put `secret` at `file` by renaming a complete temp file over it. */
 function publishKey (file, secret, fsImpl, random) {
   const temp = writeTemp(file, secret, fsImpl, random)
   try {
@@ -120,103 +130,96 @@ function publishKey (file, secret, fsImpl, random) {
   }
 }
 
+const fold = text => text.replace(/\//g, '\\').toLowerCase()
+
 /**
- * One attempt at the start lock: a file holding this pid, linked into place so it appears whole or not
- * at all. `held` when a live process holds it; a lock whose holder is dead or unreadable is removed
- * (only while it is still the file that was judged) and the answer is `again`.
- * @returns {{ state: 'taken', release: () => void } | { state: 'held', holder: number } | { state: 'again' }}
+ * Whether the holder a lock records is a live deck server: its pid is alive and its command line
+ * contains the script the lock recorded (case-insensitive, `/` and `\` alike), so a pid Windows reused
+ * for another program does not hold the lock. The command line is asked for only when the pid is
+ * alive. A command line that cannot be read counts as a deck, so a failing query refuses a start
+ * rather than letting a second server run: a lock then stays held while both that pid lives and the
+ * query fails, and the error names the lock file.
  */
-function tryLock (lock, { fsImpl, alive, random }) {
-  const temp = writeTemp(lock, String(process.pid), fsImpl, random)
-  try {
-    fsImpl.linkSync(temp, lock)
-    const mine = fsImpl.lstatSync(lock, { bigint: true })
-    return {
-      state: 'taken',
-      release () {
+function holderIsDeck (record, { alive, commandLine }) {
+  if (!record || typeof record !== 'object' || !Number.isInteger(record.pid) || record.pid <= 0 || typeof record.cmd !== 'string' || record.cmd === '') return false
+  if (!alive(record.pid)) return false
+  const line = commandLine(record.pid)
+  if (line === null) return true
+  return fold(line).includes(fold(record.cmd))
+}
+
+/**
+ * Take the start lock of endpoint `name`: a file recording this pid and script, linked into place so
+ * it appears whole or not at all. A lock whose holder is a live deck server (holderIsDeck) refuses
+ * with EADDRINUSE and `holder`. Any other lock is stale and is moved aside with a rename, which moves
+ * one file: of two starters that judged the same stale lock, the one that finds it moved a different
+ * file (another starter's fresh lock) links that file back and starts over, so neither deletes the
+ * other's lock. A third starter linking its own lock in the instant that file is away is not
+ * excluded. Returns the release function, which removes the lock only while it is still this one.
+ */
+function takeLock (lock, name, { fsImpl, random, alive, commandLine }) {
+  const record = JSON.stringify({ pid: process.pid, cmd: process.argv[1] || process.execPath })
+  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
+    const temp = writeTemp(lock, record, fsImpl, random)
+    let linked = false
+    try {
+      fsImpl.linkSync(temp, lock)
+      linked = true
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err
+    } finally {
+      try { fsImpl.unlinkSync(temp) } catch {}
+    }
+    if (linked) {
+      const mine = fsImpl.lstatSync(lock, { bigint: true })
+      return () => {
         try {
           const now = fsImpl.lstatSync(lock, { bigint: true })
           if (now.ino === mine.ino && now.dev === mine.dev) fsImpl.unlinkSync(lock)
         } catch {}
-      },
+      }
     }
-  } catch (err) {
-    if (err.code !== 'EEXIST') throw err
-  } finally {
-    try { fsImpl.unlinkSync(temp) } catch {}
-  }
-  let seen
-  let holder = NaN
-  try {
-    seen = fsImpl.lstatSync(lock, { bigint: true })
-    holder = Number(readNoFollow(lock, fsImpl))
-  } catch (err) {
-    if (err.code === 'ENOENT') return { state: 'again' }
-  }
-  if (Number.isInteger(holder) && holder > 0 && alive(holder)) return { state: 'held', holder }
-  try {
-    const now = fsImpl.lstatSync(lock, { bigint: true })
-    if (seen && now.ino === seen.ino && now.dev === seen.dev) fsImpl.unlinkSync(lock)
-  } catch {}
-  return { state: 'again' }
-}
-
-function lockBusy (name, holder) {
-  return Object.assign(new Error(`another ${name} endpoint is starting (pid ${holder})`), { code: 'EADDRINUSE' })
-}
-
-/**
- * Take the start lock of endpoint `name`, waiting at most `waitMs` for a live holder. `sleep` is
- * synchronous (Atomics.wait) in `lockSync` and a timer in `lockAsync`.
- */
-function lockSync (lock, name, opts) {
-  const deadline = Date.now() + opts.waitMs
-  for (let again = 0; again < LOCK_RETRIES;) {
-    const got = tryLock(lock, opts)
-    if (got.state === 'taken') return got.release
-    if (got.state === 'again') { again++; continue }
-    if (Date.now() >= deadline) throw lockBusy(name, got.holder)
-    Atomics.wait(SLEEPER, 0, 0, LOCK_POLL_MS)
+    let seen
+    let holder = null
+    try {
+      seen = fsImpl.lstatSync(lock, { bigint: true })
+      holder = JSON.parse(readNoFollow(lock, fsImpl))
+    } catch (err) {
+      if (err.code === 'ENOENT' && !seen) continue
+    }
+    if (holderIsDeck(holder, { alive, commandLine })) {
+      throw Object.assign(new Error(`another ${name} server holds ${lock} (pid ${holder.pid})`), { code: 'EADDRINUSE', holder: holder.pid })
+    }
+    const aside = `${lock}.${random(6).toString('hex')}.stale`
+    try {
+      fsImpl.renameSync(lock, aside)
+    } catch (err) {
+      if (err.code === 'ENOENT') continue
+      throw err
+    }
+    const moved = fsImpl.lstatSync(aside, { bigint: true })
+    if (!(seen && moved.ino === seen.ino && moved.dev === seen.dev)) {
+      try { fsImpl.linkSync(aside, lock) } catch {}
+    }
+    fsImpl.unlinkSync(aside)
   }
   throw new Error(`could not take the endpoint lock ${lock}`)
-}
-
-async function lockAsync (lock, name, opts) {
-  const deadline = Date.now() + opts.waitMs
-  for (let again = 0; again < LOCK_RETRIES;) {
-    const got = tryLock(lock, opts)
-    if (got.state === 'taken') return got.release
-    if (got.state === 'again') { again++; continue }
-    if (Date.now() >= deadline) throw lockBusy(name, got.holder)
-    await new Promise(resolve => setTimeout(resolve, LOCK_POLL_MS))
-  }
-  throw new Error(`could not take the endpoint lock ${lock}`)
-}
-
-/** Whether something accepts a connection on `pipe` within `ms`; a connection that neither opens nor fails in time counts as an answer. */
-function answers (pipe, ms) {
-  return new Promise(resolve => {
-    const socket = net.connect(pipe)
-    const done = value => { clearTimeout(timer); socket.destroy(); resolve(value) }
-    const timer = setTimeout(() => done(true), ms)
-    socket.once('connect', () => done(true))
-    socket.once('error', () => done(false))
-  })
 }
 
 /**
  * The secret the win32 endpoint `name` hashes, read from `<deckDir(base)>\endpoint-<name>.key`. Null off
  * win32, and on win32 null when the key is missing, is not exactly 64 lowercase hex digits, or is a
  * symbolic link. Clients call this on every connect. With `create: true` a missing or bad key is
- * written under the start lock (a bad one is logged), and a valid one is returned as it is; the deck
- * itself starts its endpoints with `listenEndpoint`, which writes a new key every time.
+ * written under the start lock (a bad one is logged) and the lock released again, and a valid one is
+ * returned as it is; while a live deck server holds the lock that write refuses with EADDRINUSE. The
+ * deck itself starts its endpoints with `listenEndpoint`, which writes a new key every time.
  * @param {string} base
  * @param {{ platform?: string, name?: 'deckd' | 'hooks', create?: boolean, fs?: any, log?: (line: string) => void,
- *   random?: (n: number) => Buffer, alive?: (pid: number) => boolean, lockWaitMs?: number }} [opts]
+ *   random?: (n: number) => Buffer, alive?: (pid: number) => boolean, commandLine?: (pid: number) => string | null }} [opts]
  * @returns {string | null}
  */
 export function endpointSecret (base, { platform = process.platform, name, create = false, fs: fsImpl = fs, log = logLine,
-  random = randomBytes, alive = defaultAlive, lockWaitMs = LOCK_WAIT_MS } = {}) {
+  random = randomBytes, alive = defaultAlive, commandLine = defaultCommandLine } = {}) {
   if (platform !== 'win32') return null
   checkName(name)
   const { dir, key, lock } = keyPaths(base, name)
@@ -224,7 +227,7 @@ export function endpointSecret (base, { platform = process.platform, name, creat
   if ('secret' in found) return found.secret
   if (!create) return null
   fsImpl.mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const release = lockSync(lock, name, { fsImpl, alive, random, waitMs: lockWaitMs })
+  const release = takeLock(lock, name, { fsImpl, random, alive, commandLine })
   try {
     const now = readEndpointKey(key, fsImpl)
     if ('secret' in now) return now.secret
@@ -239,36 +242,52 @@ export function endpointSecret (base, { platform = process.platform, name, creat
 }
 
 /**
- * Listen `server` on the win32 pipe of endpoint `name` under a new key, and return the pipe. Under the
- * start lock: when the pipe of the current key answers, reject with code EADDRINUSE and `path` set to
- * that pipe, leaving the key alone. Otherwise the order is: listen on the pipe of a new random secret,
- * then write that secret to the key file. A client reads the key before it connects, so the pipe a key
- * names is already this server's when the key appears; until then clients still read the old key.
- * When the key cannot be written the server is closed and the error rethrown.
+ * Listen `server` on the win32 pipe of endpoint `name` under a new key, and return the pipe.
+ *
+ * Single instance: the start lock (takeLock), in the private deck dir, held for the server's
+ * lifetime. While a live deck server holds it this rejects with code EADDRINUSE (`path` is the pipe
+ * of the current key when there is one). Whatever answers on an old pipe name is not asked: the key
+ * is always replaced, so clients leave an old name, squatted or not, at the next start.
+ *
+ * Order: listen on the pipe of a new random secret, then write that secret to the key file. A client
+ * reads the key before it connects, so the pipe a key names is already this server's when the key
+ * appears. When the key cannot be written the server is closed, the lock released and the error
+ * rethrown. When the server closes, the key is removed if it is still this server's, then the lock
+ * released, so clients of a stopped deck find no key and treat it as not running.
+ *
+ * Not closed: a server that dies without closing (a crash, a kill) leaves its key and lock behind.
+ * Until the next start replaces the key, clients keep dialing the dead server's pipe name, and a local
+ * user who saw that name in `\\.\pipe\` can create it and receive what they send (hook envelopes,
+ * fm's hello).
  * @param {string} base
  * @param {'deckd' | 'hooks'} name
  * @param {import('node:net').Server} server
  * @param {{ platform?: string, fs?: any, log?: (line: string) => void, random?: (n: number) => Buffer,
- *   alive?: (pid: number) => boolean, lockWaitMs?: number, probeMs?: number }} [opts]
+ *   alive?: (pid: number) => boolean, commandLine?: (pid: number) => string | null }} [opts]
  * @returns {Promise<string>}
  */
 export async function listenEndpoint (base, name, server, { platform = process.platform, fs: fsImpl = fs, log = logLine,
-  random = randomBytes, alive = defaultAlive, lockWaitMs = LOCK_WAIT_MS, probeMs = PROBE_MS } = {}) {
+  random = randomBytes, alive = defaultAlive, commandLine = defaultCommandLine } = {}) {
   if (platform !== 'win32') throw new Error('listenEndpoint names win32 pipes only')
   checkName(name)
   const { dir, key, lock } = keyPaths(base, name)
   fsImpl.mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const release = await lockAsync(lock, name, { fsImpl, alive, random, waitMs: lockWaitMs })
+  let release
+  try {
+    release = takeLock(lock, name, { fsImpl, random, alive, commandLine })
+  } catch (err) {
+    const current = readEndpointKey(key, fsImpl)
+    if (err.code === 'EADDRINUSE' && 'secret' in current) {
+      err.path = endpoint(base, name, { platform, secret: current.secret })
+      err.message = `another ${name} is listening on ${err.path} (pid ${err.holder})`
+    }
+    throw err
+  }
+  const secret = random(32).toString('hex')
+  const pipe = endpoint(base, name, { platform, secret })
   try {
     const current = readEndpointKey(key, fsImpl)
-    if ('secret' in current) {
-      const live = endpoint(base, name, { platform, secret: current.secret })
-      if (await answers(live, probeMs)) throw Object.assign(new Error(`another ${name} is listening on ${live}`), { code: 'EADDRINUSE', path: live })
-    } else if ('bad' in current) {
-      log(`endpoint key ${key} is ${current.bad}; writing a new one`)
-    }
-    const secret = random(32).toString('hex')
-    const pipe = endpoint(base, name, { platform, secret })
+    if ('bad' in current) log(`endpoint key ${key} is ${current.bad}; writing a new one`)
     await new Promise((resolve, reject) => {
       server.once('error', reject)
       server.listen(pipe, () => { server.off('error', reject); resolve(undefined) })
@@ -279,10 +298,17 @@ export async function listenEndpoint (base, name, server, { platform = process.p
       await new Promise(resolve => server.close(() => resolve(undefined)))
       throw err
     }
-    return pipe
-  } finally {
+  } catch (err) {
     release()
+    throw err
   }
+  server.once('close', () => {
+    try {
+      if (readEndpointKey(key, fsImpl).secret === secret) fsImpl.unlinkSync(key)
+    } catch {}
+    release()
+  })
+  return pipe
 }
 
 /**

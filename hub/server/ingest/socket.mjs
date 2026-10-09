@@ -58,8 +58,8 @@ export function createIngestor({ onEvent, onRejected, reorderMs = 250, now = Dat
  * directory on POSIX, a named pipe on win32. On POSIX a runtime base or socket directory owned by another uid, or with
  * any group or world permission bit, is refused with ensurePrivateDir's error, and a symlinked base or deck dir with
  * checkEndpointDirs' `not_private`, as the hook and fm refuse them. On win32 the pipe is started by listenEndpoint: while
- * the pipe of the current hooks key answers (another deck server listens), this rejects with EADDRINUSE and leaves that
- * server's key alone; otherwise it listens under a new key, then writes the key. `fsOps` is never used for a pipe.
+ * another live deck server holds the hooks start lock, this rejects with EADDRINUSE and leaves that server's key alone;
+ * otherwise it listens under a new key, then writes the key, and closing removes it. `fsOps` is never used for a pipe.
  * `fsOps` replaces the file system calls in tests.
  * @param {{ runtimeDir: string, ingest: object, platform?: string, uid?: number | null,
  *   fsOps?: { mkdirSync: typeof mkdirSync, chmodSync: typeof chmodSync, lstatSync: typeof lstatSync, unlinkSync: typeof unlinkSync } }} opts

@@ -102,15 +102,51 @@ test('startHookSocket on win32 writes a new hooks key each start and listens on 
       await assert.rejects(startHookSocket({ runtimeDir: base, ingest, platform: 'win32', uid: null }), { code: 'EADDRINUSE', path: server.path })
       assert.equal(endpointSecret(base, { platform: 'win32', name: 'hooks' }), secret)
       assert.equal(hookEndpoint(WIN_ENV, 'win32'), server.path)
-      // After this one closes, the next start writes a new key, and the hook follows it.
+      // A clean close removes the key, so the hook finds no server; the next start writes a new key, and the hook follows it.
       const first = server.path
       await server.close()
+      assert.throws(() => hookEndpoint(WIN_ENV, 'win32'), { code: 'ENOENT' })
       server = await startHookSocket({ runtimeDir: base, ingest, platform: 'win32', uid: null })
       assert.notEqual(server.path, first)
       assert.equal(hookEndpoint(WIN_ENV, 'win32'), server.path)
     } finally {
       await server?.close()
       ingest.close()
+    }
+  })
+})
+
+test('after a crash, a squatter on the old hooks pipe does not stop startHookSocket, and the hook sends to the new pipe, not the squatter', async () => {
+  await inScratch(async () => {
+    const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })
+    const dir = deckDir(base, { platform: 'win32' })
+    // What a server killed while listening leaves: its hooks key, and its lock naming a pid that is gone.
+    const oldKey = 'b'.repeat(64)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.key'), oldKey)
+    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.lock'), JSON.stringify({ pid: 2147483646, cmd: 'gone' }))
+    const squatted = []
+    const squat = net.createServer(socket => socket.on('data', chunk => squatted.push(String(chunk))))
+    await new Promise(resolve => squat.listen(endpoint(base, 'hooks', { platform: 'win32', secret: oldKey }), resolve))
+    const accepted = []
+    const ingest = createIngestor({ onEvent: row => accepted.push(row.hookTs), onRejected: () => {}, reorderMs: 0 })
+    let server
+    try {
+      server = await startHookSocket({ runtimeDir: base, ingest, platform: 'win32', uid: null })
+      assert.notEqual(server.path, squat.address())
+      const target = hookEndpoint(WIN_ENV, 'win32')
+      assert.equal(target, server.path)
+      const hook = { session_id: 's1', transcript_path: '/home/you/.claude/projects/x/a.jsonl', cwd: '/repo', hook_event_name: 'Stop', stop_hook_active: false }
+      const line = JSON.stringify({ v: 1, deckHookVersion: '0.1.0', hookTs: 11, ptyId: null, claudePid: null, pidChain: [], truncated: false, hook }) + '\n'
+      await new Promise((resolve, reject) => { const socket = net.connect(target); socket.on('error', reject); socket.on('connect', () => socket.end(line)); socket.on('close', resolve) })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      ingest.flush()
+      assert.deepEqual(accepted, [11])
+      assert.deepEqual(squatted, [])
+    } finally {
+      await server?.close()
+      ingest.close()
+      await new Promise(resolve => squat.close(resolve))
     }
   })
 })

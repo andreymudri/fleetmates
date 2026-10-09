@@ -176,8 +176,9 @@ async function exitHistory (host, maxBytes) {
  * Start deckd listening on `endpoint(runtimeDir, 'deckd')`: on POSIX
  * `$runtimeDir/fleetmates-deck/deckd.sock` (or the short /tmp path when that
  * is too long for a socket), on win32 a named pipe started by listenEndpoint:
- * deckd refuses to start while the pipe of the current deckd key answers, and
- * otherwise listens under a new key, which it then writes to the deck dir.
+ * deckd refuses to start while another live deckd holds the deckd start lock,
+ * and otherwise listens under a new key, which it then writes to the deck dir;
+ * closing removes that key.
  * The runtime dir is created when missing and, on POSIX, refused when another
  * user owns it or it has any group or world permission bit
  * (docs/deck/08-security.md 4.3); the socket's directory is made 0700 and

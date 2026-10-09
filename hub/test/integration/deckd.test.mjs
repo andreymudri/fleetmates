@@ -638,6 +638,8 @@ test('with platform win32 deckd writes a new key at every start, a client reads 
     }
     const firstPipe = first.socketPath
     await first.close()
+    // A clean close removes the key: a client finds no deckd rather than dialing the dead pipe's name.
+    await assert.rejects(connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
     first = await startDeckd({ runtimeDir: 'base', platform: 'win32', loginEnv: {} })
     const fresh = endpointSecret('base', { platform: 'win32', name: 'deckd' })
     assert.notEqual(fresh, secret, 'a restart writes a new key')
