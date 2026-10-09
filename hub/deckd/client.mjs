@@ -11,9 +11,9 @@ import { endpoint, deckDir } from '../platform/index.mjs'
  * On POSIX, refuse to connect through a directory another local user could
  * have prepared: with XDG_RUNTIME_DIR unset the base is the shared
  * `/tmp/fleetmates-deck-<uid>`, and whoever creates it first would receive
- * the hello and every keystroke. Each of the runtime dir, its deck dir and
- * the socket's own dir (when the endpoint fell back to a short /tmp path)
- * is lstat'ed and must be a real directory (not a symlink), owned by `uid`
+ * the hello and every keystroke. The runtime dir and its deck dir (or, when
+ * the endpoint fell back to a short /tmp path, only that path's dir) are
+ * lstat'ed, and each must be a real directory (not a symlink), owned by `uid`
  * (when not null), with no group or world permission bit. Otherwise rejects
  * with code `not_private` and a message naming the dir. A dir that does not
  * exist rejects with the lstat error (ENOENT), as an unreachable deckd does.
@@ -23,8 +23,13 @@ import { endpoint, deckDir } from '../platform/index.mjs'
  */
 export async function checkEndpointDirs (runtimeDir, { platform = process.platform, uid = process.getuid?.() ?? null, lstat = fsLstat } = {}) {
   if (platform === 'win32') return
-  const socketDir = path.posix.dirname(endpoint(runtimeDir, 'deckd', { platform }))
-  for (const dir of new Set([runtimeDir, deckDir(runtimeDir, { platform }), socketDir])) {
+  const socket = endpoint(runtimeDir, 'deckd', { platform })
+  const deck = deckDir(runtimeDir, { platform })
+  // The same rule as the hook and fm: the base and its deck dir for
+  // `<base>/fleetmates-deck/deckd.sock`; only the socket's own dir for the
+  // short /tmp fallback a too-long path gets.
+  const dirs = socket === path.posix.join(deck, 'deckd.sock') ? [runtimeDir, deck] : [path.posix.dirname(socket)]
+  for (const dir of dirs) {
     const st = await lstat(dir)
     let problem = null
     if (st.isSymbolicLink()) problem = 'is a symlink'

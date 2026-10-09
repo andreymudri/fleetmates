@@ -718,6 +718,39 @@ posixTest('checkEndpointDirs accepts the layout deckd makes, and a missing base 
   await assert.rejects(connectDeckd({ runtimeDir: missing, kind: 'server' }), { code: 'ENOENT' })
 })
 
+test('checkEndpointDirs checks the base and deck dir, or only the /tmp fallback dir for a too-long base', async () => {
+  /** @type {string[]} */
+  let seen = []
+  /** @param {string} p */
+  const lstat = async (p) => {
+    seen.push(p)
+    return /** @type {any} */ ({ isSymbolicLink: () => false, isDirectory: () => true, uid: 1000, mode: 0o40700 })
+  }
+  await checkEndpointDirs('/run/user/1000', { platform: 'linux', uid: 1000, lstat })
+  assert.deepEqual(seen, ['/run/user/1000', '/run/user/1000/fleetmates-deck'])
+  seen = []
+  const long = '/home/you/' + 'x'.repeat(100)
+  assert.equal(endpoint(long, 'deckd', { platform: 'linux', uid: 1000 }), '/tmp/fleetmates-deck-1000/deckd.sock')
+  await checkEndpointDirs(long, { platform: 'linux', uid: 1000, lstat })
+  // the endpoint's uid is this process's, as deckd's is
+  assert.deepEqual(seen, [`/tmp/fleetmates-deck-${process.getuid?.() ?? null}`])
+})
+
+posixTest('startDeckd refuses a deck dir that is a symlink, which its clients would refuse', async () => {
+  const base = await mkdtemp(path.join(rt.dir, 'sl-'))
+  try {
+    const real = path.join(base, 'real')
+    await mkdir(real, { mode: 0o700 })
+    await chmod(real, 0o700)
+    await symlink(real, path.join(base, 'fleetmates-deck'))
+    const err = await startError(base)
+    assert.equal(/** @type {any} */ (err)?.code, 'not_private', String(err))
+    assert.match(String(err?.message), /fleetmates-deck is not private: it is a symlink/)
+  } finally {
+    await rm(base, { recursive: true, force: true })
+  }
+})
+
 test('checkEndpointDirs checks nothing for a win32 pipe endpoint', async () => {
   await checkEndpointDirs(path.join(rt.dir, 'no-such-base'), { platform: 'win32', lstat: () => { throw new Error('lstat must not run on win32') } })
 })

@@ -14,6 +14,7 @@ import { encode, createLineDecoder, PROTO, OUTPUT_QUEUE_CAP, MAX_LINE } from './
 import { PtyHost, DeckdError } from './pty-host.mjs'
 import { captureLoginEnv, dropSessionVars, changedNames } from './login-env.mjs'
 import { capHistory } from './screen-model.mjs'
+import { checkEndpointDirs } from './client.mjs'
 import { runtimeBase, deckDir, endpoint, isPipe, ensurePrivateDir } from '../platform/index.mjs'
 
 /** How long `exits` keeps an exit record. */
@@ -203,6 +204,9 @@ export async function startDeckd ({ runtimeDir, outputQueueCap = OUTPUT_QUEUE_CA
       await chmod(d, 0o700)
       await ensurePrivateDir(d, { platform })
     }
+    // ensurePrivateDir follows symlinks; the clients' rule does not. Refuse
+    // here what every client would refuse, such as a symlinked deck dir.
+    await checkEndpointDirs(runtimeDir, { platform })
     await clearStaleSocket(socketPath)
   }
 
