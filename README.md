@@ -10,10 +10,10 @@ from git, not from anything an agent reported — says the phase is clean.
 Teammates run as Claude Code subagents, or headless through the Codex CLI or the Cursor CLI — see
 [Running on Codex](#running-on-codex) and [Running on Cursor](#running-on-cursor).
 
-![A terminal demo: a three-task plan for a small todo-api, init-run splitting it into two phases, the phase 1 gate passing, the phase 2 gate failing fileset because task T3 edited src/middleware/auth.mjs outside its declared files, and finish reporting both phases PASS after the fix](https://raw.githubusercontent.com/andreymudri/fleetmates/master/docs/media/fleetmates-demo.gif)
+![How a fleetmates run works: a plan of three tasks that each declare their files, init-run grouping them into two phases, two teammates working in parallel on their own branches, the gate checking merge, test, fileset and ownership and the integrator merging, then a phase 2 gate failing fileset because T3 edited src/middleware/auth.mjs outside its declared files, a fix round, and the run passing every phase](https://raw.githubusercontent.com/andreymudri/fleetmates/master/docs/media/fleetmates-demo.gif)
 
-*A real run in a demo repo: the teammates' commits are scripted, the CLI output is not. The gate
-catches the file T3 touched outside its declared set from git alone.*
+*One real run on a demo todo-api. The plan, branch names, check names and verdicts are the run's own; the teammates' commits
+were scripted.*
 
 ```
 phase 1   T1  T2  T3        3 worktrees, in parallel
