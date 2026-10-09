@@ -52,6 +52,8 @@ body,
 }
 .rail-list--bottom { margin-top: auto; }
 .rail-item { position: relative; }
+/* The bottom-bar label of the phone layout (styles/mobile.css); the desktop Rail is icons and tooltips only. */
+.rail-label { display: none; }
 .rail-link {
   position: relative;
   display: grid;

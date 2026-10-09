@@ -391,6 +391,7 @@
   --breakpoint-wide: 1920px;
   --breakpoint-desktop: 1440px;
   --breakpoint-laptop: 1280px;
+  --breakpoint-mobile: 768px;
   --breakpoint-short: 1000px;
 
   /* component */
