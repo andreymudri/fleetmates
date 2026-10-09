@@ -7,6 +7,8 @@ import path from 'node:path'
 import os from 'node:os'
 import { startDeckServer } from '../../server/main.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
+import { createServiceManager } from '../../server/setup/service.mjs'
+import { posixTest } from '../helpers/platform.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
 
 const token = 'a'.repeat(43)
@@ -83,7 +85,8 @@ function fakeDeckd({ onList } = {}) {
 test('the security review\'s title payload reaches notify-send as "needs you · destructive · <task>"', async t => {
   const calls = []
   const { createNotifier } = await import('../../server/adapters/notify.mjs')
-  const notifier = createNotifier({ run: async (command, args) => { calls.push(args)
+  // The payload under test is notify-send's argv, so the linux notifier is asked for on every host.
+  const notifier = createNotifier({ platform: 'linux', run: async (command, args) => { calls.push(args)
     return { ok: true, exitCode: 0, stdout: `${calls.length}\n` } } })
   const h = await harness(t, { notifications: true, notifier, notificationTickMs: 20 })
   const at = Date.now() - 20_000
@@ -195,6 +198,17 @@ test('Retry now probes on a later macrotask, so the probe outcome is published a
   assert.deepEqual(deckdRows(h.deck).map(row => [row.state, row.attempt]), [['down', 1], ['checking', 1], ['down', 2]])
 })
 
+/**
+ * The service manager this test pins: systemd, over the test's runCommand. It is injected off linux, where the deck's
+ * own default would be launchd or a detached process; on linux the server's default is used and so is covered too.
+ */
+function systemdOffLinux(runCommand) {
+  if (process.platform === 'linux') return {}
+  return { serviceManager: createServiceManager({ platform: 'linux', paths: { units: '/home/you/.config/systemd/user' }, hubPath: '/home/you/hub',
+    run: async (file, args) => { const result = runCommand(file, args)
+      return { code: result.status, stdout: result.stdout, stderr: result.stderr } } }) }
+}
+
 test('Start runs the deckd unit, then probes and publishes ok after the checking row; a failed start probes nothing', async t => {
   const commands = []
   let started = false
@@ -203,7 +217,7 @@ test('Start runs the deckd unit, then probes and publishes ok after the checking
     if (file === 'systemctl') started = true
     return { status: 0, stdout: '', stderr: '' }
   }
-  const h = await harness(t, { runCommand, connectDeckd: async () => {
+  const h = await harness(t, { runCommand, ...systemdOffLinux(runCommand), connectDeckd: async () => {
     if (!started) throw Error('fake offline')
     return fakeDeckd()
   } })
@@ -215,7 +229,8 @@ test('Start runs the deckd unit, then probes and publishes ok after the checking
   assert.deepEqual(deckdRows(h.deck).map(row => row.state), ['down', 'checking', 'ok'])
 
   let probes = 0
-  const failed = await harness(t, { runCommand: file => ({ status: file === 'systemctl' ? 5 : 0, stdout: '', stderr: '' }),
+  const failing = file => ({ status: file === 'systemctl' ? 5 : 0, stdout: '', stderr: '' })
+  const failed = await harness(t, { runCommand: failing, ...systemdOffLinux(failing),
     connectDeckd: async () => { probes++
       throw Error('fake offline') } })
   const refused = await failed.request('/api/deps/deckd/start', { method: 'POST' })
@@ -240,11 +255,11 @@ test('a path containing NUL is a 400, not a 500: the configured scan root and a 
   h.deck.ingest.flush()
   const { id } = h.deck.store.get('SELECT id FROM sessions')
   const disk = await h.request(`/api/sessions/${id}/disk`)
-  assert.equal(disk.status, 400)
+  assert.equal(disk.status, 400, JSON.stringify({ body: disk.data, cwd: h.deck.store.get('SELECT cwd FROM sessions WHERE id=?', id).cwd }))
   assert.equal(disk.data.error.code, 'validation_failed')
 })
 
-test('rescan skips a subdirectory it cannot read instead of failing the whole scan; an unreadable root still fails', async t => {
+posixTest('rescan skips a subdirectory it cannot read instead of failing the whole scan; an unreadable root still fails', { reason: 'chmod 0 does not stop the owner reading a directory on Windows' }, async t => {
   const h = await harness(t)
   const root = path.join(h.dir, 'repos')
   fs.mkdirSync(path.join(root, 'repo/.git'), { recursive: true })

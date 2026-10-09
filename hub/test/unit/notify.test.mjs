@@ -83,8 +83,9 @@ async function harness() {
     open(command = 'pwd') { send('PermissionRequest', { tool_name: 'Bash', tool_input: { command } }); return projector.snapshot().requests.at(-1).id },
     close(command = 'pwd') { send('PostToolUse', { tool_name: 'Bash', tool_input: { command }, tool_response: { success: true } }) },
     restart() { store.close(); store = openDeckDb(file); machine = createNotificationMachine(options()); projector = createProjector({ store, now: () => at }) },
-    // Windows can briefly refuse to delete the database files just after close (EPERM), so the removal retries.
-    cleanup() { store.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) }
+    // The machine and the store are closed first. Windows can still refuse the removal for a while afterwards (EPERM),
+    // so it retries for up to five seconds.
+    cleanup() { machine.close(); store.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 }) }
   }
 }
 
