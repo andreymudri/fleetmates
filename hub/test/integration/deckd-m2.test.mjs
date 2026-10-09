@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import path from 'node:path'
 import os from 'node:os'
-import { mkdtemp, mkdir, chmod, writeFile, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, chmod, writeFile, readFile, rm, rmdir, stat } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
@@ -557,8 +557,12 @@ test('main with XDG_RUNTIME_DIR unset listens under the runtimeBase fallback, an
       }
     })
   } finally {
-    if (!baseExisted) await rm(base, { recursive: true, force: true })
-    else if (!deckDirExisted) await rm(deckDir(base), { recursive: true, force: true })
+    // Not recursive: a concurrent run of this test (another worktree, a gate
+    // preview) may be using the same base, and its socket must survive.
+    // A dir still holding something stays.
+    const rmEmpty = (/** @type {string} */ d) => rmdir(d).catch(() => {})
+    if (!deckDirExisted) await rmEmpty(deckDir(base))
+    if (!baseExisted) await rmEmpty(base)
     await rm(home, { recursive: true, force: true })
   }
 })
