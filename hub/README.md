@@ -206,8 +206,21 @@ files on each search and never indexed or cached.
 
 ## Requirements
 
-- Linux with systemd user services. macOS, Windows and WSL are not supported.
-- Node.js 24.2 or newer. CI uses the version in `hub/.node-version`.
+- One of three platforms:
+  - Linux with systemd user services (the reference platform);
+  - macOS, where the deck runs as two launchd LaunchAgents;
+  - native Windows (not WSL), where the deck runs as two hidden background processes that an
+    HKCU Run value starts at logon. On Windows every approval request asks, the deck writes no
+    permission rules, and popups and the bell stay inside the deck tab.
+
+  Meetings are Linux only. What differs per platform is in
+  [docs/deck/16-platforms.md](https://github.com/andreymudri/fleetmates/blob/master/docs/deck/16-platforms.md),
+  and how to run the deck on macOS and Windows is in
+  [docs/deck/13-operations.md](https://github.com/andreymudri/fleetmates/blob/master/docs/deck/13-operations.md)
+  section 14.
+- Node.js 24.16.0 or newer (`engines` `>=24.16.0`): Node 24.2 to 24.15 `node:sqlite` truncates a
+  bound string at its first NUL. CI uses the version in `hub/.node-version`, on Linux, macOS and
+  Windows.
 - Claude Code. The hook and screen fixtures were captured from Claude Code 2.1.285;
   `fleetmates-deck doctor` tells you when yours differs.
 - Chromium or Firefox.
