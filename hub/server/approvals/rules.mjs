@@ -17,7 +17,9 @@ import { activeTiers, classify as defaultClassify } from './tiers.mjs'
 export const RULE_COPY = Object.freeze({
   destructive: 'Destructive commands can never become rules.',
   script: 'Script rules name one script exactly.',
-  invalid: 'Not a Claude Code permission pattern.'
+  invalid: 'Not a Claude Code permission pattern.',
+  // docs/deck/16-platforms.md section 6: on Windows every request asks, and a rule would not.
+  unsupported: 'Rules are not written on Windows: every request asks there.'
 })
 
 /** The default suggestion threshold (07-approvals 6, Decided). */
@@ -289,11 +291,12 @@ function realExisting(location) {
 }
 
 // The deck's controls (F9) and Claude Code's settings directory, for `env` with `homeDir` as HOME.
-function deckContext({ env = process.env, homeDir = null } = {}) {
-  const base = { ...env, ...(absolute(homeDir) ? { HOME: homeDir } : {}) }
+function deckContext({ env = process.env, homeDir = null, platform = process.platform } = {}) {
+  const given = platform === 'win32' ? typeof homeDir === 'string' && path.win32.isAbsolute(homeDir) : absolute(homeDir)
+  const base = { ...env, ...(given ? { HOME: homeDir } : {}) }
   let paths = {}
-  try { paths = setupPaths(base) } catch {}
-  const home = absolute(homeDir) ? homeDir : paths.home
+  try { paths = setupPaths(base, { platform }) } catch {}
+  const home = given ? homeDir : paths.home
   const controls = [paths.config, paths.state, paths.share, paths.runtime, paths.token].filter(absolute)
   return {
     home,
@@ -356,6 +359,18 @@ function related(a, b) {
   return inside(down) || inside(up)
 }
 
+// The deck's launchd agents (the persistence floor of tiers.mjs, docs/deck/16-platforms.md): a root
+// that is one of them, lies inside one, or holds `~/Library/LaunchAgents` (and so the agents).
+const LAUNCH_AGENTS = 'library/launchagents'
+const LAUNCH_AGENT_PREFIX = 'io.fleetmates.deck.'
+function reachesLaunchAgent(root, home) {
+  if (!absolute(home)) return false
+  const rel = path.relative(fold(home), fold(root)).split(path.sep).join('/')
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return false
+  if (rel === '' || LAUNCH_AGENTS === rel || LAUNCH_AGENTS.startsWith(`${rel}/`)) return true
+  return rel.startsWith(`${LAUNCH_AGENTS}/`) && rel.slice(LAUNCH_AGENTS.length + 1).startsWith(LAUNCH_AGENT_PREFIX)
+}
+
 // A root that names a `.git` directory, Claude Code settings or hooks by its components, in any repo.
 function namesProtectedComponent(root) {
   const parts = fold(root).split('/')
@@ -370,9 +385,9 @@ function pathVerdict(tool, spec, { classify, tiers, repoRoot, ctx }) {
   if (!roots) return refused('invalid_pattern', RULE_COPY.invalid)
   const targets = protectedTargets(ctx, repoRoot)
   const candidates = [...new Set([...roots, ...roots.map(realExisting)])]
-  if (namesControl(spec, ctx) || candidates.some(root => namesProtectedComponent(root) || targets.some(target => related(root, target)))) return refused('destructive_rule', RULE_COPY.destructive)
+  if (namesControl(spec, ctx) || candidates.some(root => namesProtectedComponent(root) || reachesLaunchAgent(root, ctx.home) || targets.some(target => related(root, target)))) return refused('destructive_rule', RULE_COPY.destructive)
   if (tool !== 'Read') return refused('invalid_pattern', RULE_COPY.invalid)
-  const result = classify({ toolName: 'Read', toolInput: { file_path: roots[0] }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, homeDir: ctx.home, deckPaths: ctx.deckPaths, tiers })
+  const result = classify({ toolName: 'Read', toolInput: { file_path: roots[0] }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, homeDir: ctx.home, deckPaths: ctx.deckPaths, tiers, platform: ctx.platform })
   if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
   return { ok: true, pattern: `${tool}(${spec})`, tool, tier: result.tier, warning: null }
 }
@@ -382,12 +397,17 @@ function pathVerdict(tool, spec, { classify, tiers, repoRoot, ctx }) {
  * tiers.mjs. Each probe names its floor and a carrier command that reaches the floor with it, which
  * validate.test.mjs runs; the same test fails when tiers.mjs gains a Destructive floor that has
  * neither a probe nor an entry in {@link FLOOR_PROBE_EXEMPT}.
- * @param {{ env?: object, homeDir?: string|null }} [options]
+ * On win32 the home and deck paths are Windows paths, named in single quotes so the backslashes
+ * reach the command as written (Claude Code runs the Bash tool through Git Bash there).
+ * @param {{ env?: object, homeDir?: string|null, platform?: string }} [options]
  * @returns {{ floor: string, carrier: string, args: string }[]}
  */
-export function floorProbes({ env = process.env, homeDir = null } = {}) {
-  const ctx = deckContext({ env, homeDir })
+export function floorProbes({ env = process.env, homeDir = null, platform = process.platform } = {}) {
+  const ctx = deckContext({ env, homeDir, platform })
   const home = ctx.home
+  const win = platform === 'win32'
+  const isAbsolute = value => typeof value === 'string' && (win ? path.win32 : path.posix).isAbsolute(value)
+  const at = (...parts) => win ? `'${path.win32.join(home, ...parts)}'` : `${home}/${parts.join('/')}`
   const probes = [
     { floor: 'floor.git-config-write', carrier: 'git config', args: 'core.hooksPath /tmp/x' },
     { floor: 'floor.git-config-write', carrier: 'git config', args: 'core.fsmonitor x' },
@@ -401,15 +421,15 @@ export function floorProbes({ env = process.env, homeDir = null } = {}) {
     { floor: 'floor.mount', carrier: 'docker run', args: '-v /:/host x' },
     { floor: 'floor.privileged', carrier: 'docker run', args: '--privileged x' }
   ]
-  if (absolute(home)) {
-    probes.push({ floor: 'floor.claude-settings', carrier: 'cp', args: `x ${home}/.claude/settings.json` })
-    probes.push({ floor: 'floor.persistence', carrier: 'cp', args: `x ${home}/.bashrc` })
-    probes.push({ floor: 'floor.persistence', carrier: 'tee', args: `${home}/.bashrc` })
+  if (isAbsolute(home)) {
+    probes.push({ floor: 'floor.claude-settings', carrier: 'cp', args: `x ${at('.claude', 'settings.json')}` })
+    probes.push({ floor: 'floor.persistence', carrier: 'cp', args: `x ${at('.bashrc')}` })
+    probes.push({ floor: 'floor.persistence', carrier: 'tee', args: at('.bashrc') })
   }
   // floor.deck is probed by its write form only: the classifier also rates any command that merely
   // names a deck control Destructive, which `probeReaches` subtracts, so a read of the token
   // (`cat <token>`) is not something a probe can tell from a mention (`cargo test <token>`).
-  if (absolute(ctx.token)) probes.push({ floor: 'floor.deck', carrier: 'cp', args: `x ${ctx.token}` })
+  if (isAbsolute(ctx.token)) probes.push({ floor: 'floor.deck', carrier: 'cp', args: `x ${win ? `'${ctx.token}'` : ctx.token}` })
   return probes
 }
 
@@ -498,10 +518,10 @@ function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
   const own = prefix !== null && safeEntryRule(pattern, tiers)
   if (prefix !== null && !own) return refused('destructive_rule', RULE_COPY.destructive)
   if (prefix !== null && reachesDestructive(words, tiers)) return refused('destructive_rule', RULE_COPY.destructive)
-  const run = text => classify({ toolName: 'Bash', toolInput: { command: text }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, homeDir: ctx.home, deckPaths: ctx.deckPaths, tiers })
+  const run = text => classify({ toolName: 'Bash', toolInput: { command: text }, cwd: repoRoot ?? null, repoRoot: repoRoot ?? null, homeDir: ctx.home, deckPaths: ctx.deckPaths, tiers, platform: ctx.platform })
   const result = run(command)
   if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
-  if (prefix !== null && floorProbes({ env: ctx.env, homeDir: ctx.home }).some(probe => probeReaches(run, prefix, probe.args))) return refused('destructive_rule', RULE_COPY.destructive)
+  if (prefix !== null && floorProbes({ env: ctx.env, homeDir: ctx.home, platform: ctx.platform }).some(probe => probeReaches(run, prefix, probe.args))) return refused('destructive_rule', RULE_COPY.destructive)
   return { ok: true, pattern, tool: 'Bash', tier: own ? 'safe' : result.tier, warning: null }
 }
 
@@ -521,15 +541,25 @@ function bashVerdict(pattern, inner, { classify, tiers, repoRoot, ctx }) {
  *   a persistence floor path.
  * An npm or pnpm script prefix, in any option layout, is `invalid_pattern` with "Script rules name
  * one script exactly."; anything else outside the syntax is `invalid_pattern`.
+ * On win32 every pattern is refused with `rules_unsupported_on_win32` (docs/deck/16-platforms.md
+ * section 6): nothing is auto-approved there, and a written rule would auto-approve inside Claude Code.
  * @param {string} pattern
- * @param {{ classify?: Function, tiers?: { entries: object[] }, repoRoot?: string|null, homeDir?: string|null, env?: object }} [options]
+ * @param {{ classify?: Function, tiers?: { entries: object[] }, repoRoot?: string|null, homeDir?: string|null, env?: object, platform?: string }} [options]
  * @returns {PatternVerdict}
  */
-export function validatePattern(pattern, { classify = defaultClassify, tiers = activeTiers(), repoRoot = null, homeDir = null, env = process.env } = {}) {
+export function validatePattern(pattern, options = {}) {
+  const { platform = process.platform } = options
+  if (platform === 'win32') return refused('rules_unsupported_on_win32', RULE_COPY.unsupported)
+  return judgePattern(pattern, { ...options, platform })
+}
+
+// The checks of validatePattern without the win32 refusal, which the mirror uses to mark a rule found
+// in a settings file Destructive whatever the platform.
+function judgePattern(pattern, { classify = defaultClassify, tiers = activeTiers(), repoRoot = null, homeDir = null, env = process.env, platform = process.platform } = {}) {
   if (typeof pattern !== 'string') return refused('invalid_pattern', RULE_COPY.invalid)
   const text = pattern.trim()
   if (!text || text !== pattern || text.length > 1000 || /[\u0000-\u001f\u007f]/.test(text)) return refused('invalid_pattern', RULE_COPY.invalid)
-  const ctx = { ...deckContext({ env, homeDir }), env }
+  const ctx = { ...deckContext({ env, homeDir, platform }), env, platform }
   const call = /^([A-Za-z][A-Za-z0-9_]*)\((.*)\)$/s.exec(text)
   if (!call) {
     if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(text)) return refused('invalid_pattern', RULE_COPY.invalid)
@@ -543,7 +573,7 @@ export function validatePattern(pattern, { classify = defaultClassify, tiers = a
         if (reach || namesControl(text, ctx)) return refused('destructive_rule', RULE_COPY.destructive)
         return { ok: true, pattern: text, tool: text, tier: 'caution', warning: 'toolWide' }
       }
-      const result = classify({ toolName: text, toolInput: {}, tiers })
+      const result = classify({ toolName: text, toolInput: {}, tiers, platform })
       if (result.tier === 'destructive' || namesControl(text, ctx)) return refused('destructive_rule', RULE_COPY.destructive)
       return { ok: true, pattern: text, tool: text, tier: result.tier, warning: null }
     }
@@ -556,7 +586,7 @@ export function validatePattern(pattern, { classify = defaultClassify, tiers = a
     const host = /^domain:([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)$/.exec(inner)?.[1]?.toLowerCase()
     if (!host || host.includes('..')) return refused('invalid_pattern', RULE_COPY.invalid)
     if (LOOPBACK_HOSTS.has(host) || /^127\./.test(host)) return refused('destructive_rule', RULE_COPY.destructive)
-    const result = classify({ toolName: 'WebFetch', toolInput: { url: `https://${host}/` }, tiers })
+    const result = classify({ toolName: 'WebFetch', toolInput: { url: `https://${host}/` }, tiers, platform })
     if (result.tier === 'destructive') return refused('destructive_rule', RULE_COPY.destructive)
     return { ok: true, pattern: text, tool, tier: result.tier, warning: null }
   }
@@ -690,7 +720,7 @@ export function applyThreshold(store, threshold, { at = Date.now() } = {}) {
 // The mirror, the writer and the revoker (07-approvals 7.2, 7.4 and 9)
 
 function ruleView(row, tiers) {
-  const verdict = validatePattern(row.pattern, { tiers, classify: defaultClassify, repoRoot: row.repo_id })
+  const verdict = judgePattern(row.pattern, { tiers, classify: defaultClassify, repoRoot: row.repo_id })
   const destructive = !verdict.ok && verdict.code === 'destructive_rule'
   return {
     repoId: row.repo_id,
@@ -719,12 +749,12 @@ function ruleView(row, tiers) {
  * `destructive_rule` code and nothing is written), then written as given: callers pass the deck's
  * canvas form `Bash(<prefix>:*)` (D-97).
  * @param {{ get: Function, all: Function, run: Function, appendEvent: Function, tx: Function }} store
- * @param {{ repoId: string, pattern: string, source: 'suggested'|'manual', stateDir: string, at?: number, gitRead?: Function, beforeRename?: (attempt: number) => void, tiers?: object, publish?: Function }} options
+ * @param {{ repoId: string, pattern: string, source: 'suggested'|'manual', stateDir: string, at?: number, gitRead?: Function, beforeRename?: (attempt: number) => void, tiers?: object, publish?: Function, platform?: string }} options
  * @returns {Promise<{ rule: object, backupPath: string|null, beforeSha256: string|null, afterSha256: string }>}
  */
-export async function writeRule(store, { repoId, pattern, source, stateDir, at = Date.now(), gitRead = defaultGitRead, beforeRename, tiers = activeTiers(), publish } = {}) {
-  // The writer validates the pattern itself, so no caller can write a refused rule.
-  const verdict = validatePattern(pattern, { tiers, repoRoot: repoId })
+export async function writeRule(store, { repoId, pattern, source, stateDir, at = Date.now(), gitRead = defaultGitRead, beforeRename, tiers = activeTiers(), publish, platform = process.platform } = {}) {
+  // The writer validates the pattern itself, so no caller can write a refused rule (on win32, none).
+  const verdict = validatePattern(pattern, { tiers, repoRoot: repoId, platform })
   if (!verdict.ok) throw apiError(422, verdict.code, { message: verdict.message })
   const done = rewrite(repoId, {
     stateDir, at, beforeRename, create: true,
@@ -844,9 +874,9 @@ export function listRules(store, repoId, { at = Date.now(), tiers = activeTiers(
  * The rules service bound to a store, the deck's state directory and a publisher, for the API
  * (Task 16) and answer delivery (Task 10). Each method that changes the database runs in its own
  * transaction and publishes the events it appended; `recordAllow` runs inside the caller's.
- * @param {{ store: object, paths?: { state: string }, publish?: Function, now?: () => number, gitRead?: Function, classify?: Function, tiers?: () => object }} options
+ * @param {{ store: object, paths?: { state: string }, publish?: Function, now?: () => number, gitRead?: Function, classify?: Function, tiers?: () => object, platform?: string }} options
  */
-export function createRules({ store, paths = setupPaths(process.env), publish = () => {}, now = Date.now, gitRead = defaultGitRead, classify = defaultClassify, tiers = activeTiers } = {}) {
+export function createRules({ store, paths = setupPaths(process.env), publish = () => {}, now = Date.now, gitRead = defaultGitRead, classify = defaultClassify, tiers = activeTiers, platform = process.platform } = {}) {
   const inTx = fn => {
     const before = Number(store.get('SELECT COALESCE(MAX(seq), 0) AS seq FROM events').seq)
     const result = store.tx(fn)
@@ -859,8 +889,8 @@ export function createRules({ store, paths = setupPaths(process.env), publish = 
     dismissOffer: (repoId, pattern) => inTx(() => dismissOffer(store, repoId, pattern, { at: now() })),
     offers: () => offers(store, { tiers: tiers() }),
     setThreshold: threshold => inTx(() => applyThreshold(store, threshold, { at: now() })),
-    validatePattern: (pattern, options = {}) => validatePattern(pattern, { classify, tiers: tiers(), ...options }),
-    write: (repoId, pattern, { source = 'manual', beforeRename } = {}) => writeRule(store, { repoId, pattern, source, stateDir: paths.state, at: now(), gitRead, beforeRename, tiers: tiers(), publish }),
+    validatePattern: (pattern, options = {}) => validatePattern(pattern, { classify, tiers: tiers(), platform, ...options }),
+    write: (repoId, pattern, { source = 'manual', beforeRename } = {}) => writeRule(store, { repoId, pattern, source, stateDir: paths.state, at: now(), gitRead, beforeRename, tiers: tiers(), publish, platform }),
     revoke: (repoId, pattern, { undo = false, beforeRename } = {}) => revokeRule(store, { repoId, pattern, stateDir: paths.state, undo, at: now(), beforeRename, publish }),
     listRules: repoId => listRules(store, repoId, { at: now(), tiers: tiers(), publish })
   }

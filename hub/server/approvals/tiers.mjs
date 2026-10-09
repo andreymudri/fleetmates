@@ -5,7 +5,9 @@
 import { createHash } from 'node:crypto'
 import { existsSync, globSync, lstatSync, readdirSync, readFileSync, readlinkSync, statSync } from 'node:fs'
 import os from 'node:os'
-import path from 'node:path'
+// docs/deck/16-platforms.md section 6: Claude Code runs the Bash tool through Git Bash on Windows, so
+// parsed command paths are POSIX paths on every host, never the host's `path`.
+import { posix as path } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gitRead, HOOKS_PATH_ENV, HOOKS_PATH_READS, hooksPathEnvironment, hooksPathFileRead } from '../adapters/git-read.mjs'
 import { destructiveSql, legacyDestructive } from '../machines/request.mjs'
@@ -176,8 +178,29 @@ function realExisting(location) {
   return current
 }
 
+// On win32 (docs/deck/16-platforms.md section 6) a Windows path and its Git Bash form name the same
+// file: `C:\x`, `C:/x` and `/c/x` all read as `/c/x`, with `\` read as `/`. A drive path the parser
+// already joined to the working directory (`/c/repo/C:\x`) is taken from its drive on. Set by
+// classify for the length of one synchronous call.
+let windowsPaths = false
+function gitBashPath(text) {
+  if (typeof text !== 'string') return text
+  const at = text.search(/(?:^|\/)[A-Za-z]:[\\/]/)
+  const rest = (at < 0 ? text : text.slice(text[at] === '/' ? at + 1 : at)).replace(/\\/g, '/')
+  const drive = /^([A-Za-z]):\//.exec(rest)
+  return drive ? path.normalize(`/${drive[1].toLowerCase()}${rest.slice(2)}`) : rest
+}
+const hostForm = text => windowsPaths ? gitBashPath(text) : text
+// An absolute input path (home, cwd, repo root, deck paths): POSIX, or on win32 also a Windows path.
+const inputPath = (text, platform) => {
+  if (typeof text !== 'string') return null
+  const form = platform === 'win32' ? gitBashPath(text) : text
+  return path.isAbsolute(form) ? path.normalize(form) : null
+}
+
 function resolveIn(location, cwd) {
   if (typeof location !== 'string' || !location) return null
+  location = hostForm(location)
   if (path.isAbsolute(location)) return path.normalize(location)
   return typeof cwd === 'string' && path.isAbsolute(cwd) ? path.resolve(cwd, location) : null
 }
@@ -252,14 +275,16 @@ function scopeRelative(location, scope) {
   return null
 }
 
-function deckControls(deckPaths, home) {
+// On win32 the defaults are the win32 layout (setupPaths with `platform: 'win32'`, from the home as
+// given), and every path is compared in its Git Bash form.
+function deckControls(deckPaths, home, platform) {
   const env = { ...process.env, ...(home ? { HOME: home } : {}) }
-  const defaults = setupPaths(env)
+  const defaults = setupPaths(env, { platform })
   const given = deckPaths ?? {}
   const config = given.config ?? defaults.config
   const state = given.state ?? defaults.state
   const runtime = given.runtime === undefined ? defaults.runtime : given.runtime
-  const dirs = [config, state, runtime, given.token].filter(dir => typeof dir === 'string' && path.isAbsolute(dir))
+  const dirs = [config, state, runtime, given.token].map(dir => inputPath(dir, platform)).filter(Boolean)
   const all = new Set(dirs)
   for (const dir of dirs) all.add(realExisting(dir))
   const port = String(given.port ?? process.env.DECK_PORT ?? 47800)
@@ -536,14 +561,18 @@ const FILTER_READS = Object.freeze({
   yq: /\b(?:env|strenv|envsubst|load\w*|eval\w*)\b/
 })
 
-function context(input) {
-  const home = typeof input.homeDir === 'string' && path.isAbsolute(input.homeDir) ? path.normalize(input.homeDir) : (process.env.HOME && path.isAbsolute(process.env.HOME) ? process.env.HOME : os.homedir())
+function context(input, platform) {
+  const win = platform === 'win32'
+  const given = [input.homeDir, process.env.HOME, ...(win ? [process.env.USERPROFILE] : []), os.homedir()].find(dir => inputPath(dir, platform) !== null) ?? null
+  const home = inputPath(given, platform)
+  const repoRoot = win ? inputPath(input.repoRoot, platform) : input.repoRoot
+  const worktrees = win && Array.isArray(input.worktrees) ? input.worktrees.map(tree => inputPath(tree, platform)) : input.worktrees
   return {
     home,
-    cwd: typeof input.cwd === 'string' && path.isAbsolute(input.cwd) ? path.normalize(input.cwd) : null,
-    deck: deckControls(input.deckPaths, home),
-    scope: repoScope(input.repoRoot, input.worktrees, home),
-    lexicalRoots: repoScope(input.repoRoot, input.worktrees, home, true)
+    cwd: inputPath(input.cwd, platform),
+    deck: deckControls(input.deckPaths, win ? given : home, platform),
+    scope: repoScope(repoRoot, worktrees, home),
+    lexicalRoots: repoScope(repoRoot, worktrees, home, true)
   }
 }
 
@@ -552,6 +581,7 @@ const reason = (entryId, tier, segment, description) => ({ entryId, tier, segmen
 // The verdict on one write target: a floor, "writes outside the repo", or null inside the scope.
 function writeVerdict(location, ctx, segment) {
   if (location === null) return reason('scope.outside', 'caution', segment, 'writes outside the repo')
+  location = hostForm(location)
   if (DEV_NULLS.has(location)) return null
   const paths = candidates(location)
   if (paths.some(candidate => ctx.deck.dirs.some(dir => withinFolded(candidate, dir)))) return reason('floor.deck', 'destructive', segment, 'writes the deck\'s own files')
@@ -1453,7 +1483,7 @@ function classifySegment(segment, ctx, ready, out) {
   for (const assigned of segment.assignments) if (envFloor(assigned.name)) push(reason('floor.env', 'caution', text, `sets ${assigned.name}`))
   if (segment.payloadOf !== null) push(reason('floor.payload', 'caution', text, segment.remote ? 'runs on another host or in a container' : 'runs a command for another command'))
   for (const mount of segment.mounts) {
-    const source = typeof mount.source === 'string' ? path.normalize(mount.source) : null
+    const source = typeof mount.source === 'string' ? path.normalize(hostForm(mount.source)) : null
     if (source && (source === '/' || within(ctx.home, source))) push(reason('floor.mount', 'destructive', text, 'mounts your home directory into a container'))
   }
   if (segment.privileged) push(reason('floor.privileged', 'destructive', text, 'runs a privileged container'))
@@ -1860,11 +1890,18 @@ function actionInput(toolName, toolInput) {
  * @returns {{ tier: 'safe'|'caution'|'destructive', reasons: { entryId: string, tier: string, segment: string, description: string }[], ruleCandidate: string|null, ruleNote: string|null, confirm: { template: string|null, count: string|null }, description: string }}
  */
 export function classify(input) {
-  const { toolName, cwd = null, repoRoot = null, platform = process.platform } = input ?? {}
+  const platform = input?.platform ?? process.platform
+  const previous = windowsPaths
+  windowsPaths = platform === 'win32'
+  try { return classifyOn(input, platform) } finally { windowsPaths = previous }
+}
+
+function classifyOn(input, platform) {
+  const { toolName, cwd = null, repoRoot = null } = input ?? {}
   const toolInput = actionInput(toolName, input?.toolInput)
   const tiers = input?.tiers ?? DEFAULT_TIERS
   const ready = prepare(tiers)
-  const ctx = context(input ?? {})
+  const ctx = context(input ?? {}, platform)
   const reasons = []
   let ruleCandidate = null
   let ruleNote = null

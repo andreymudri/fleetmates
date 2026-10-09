@@ -134,14 +134,15 @@ const place = value => {
   return value
 }
 const cases = readFileSync(new URL('../fixtures/tiers/cases.jsonl', import.meta.url), 'utf8').split('\n').filter(Boolean).map((line, index) => ({ ...JSON.parse(line), line: index + 1 }))
-const run = row => classify({
+const run = (row, extra = {}) => classify({
   toolName: row.toolName,
   toolInput: place(row.toolInput),
   cwd: place(row.cwd),
   repoRoot: row.repoRoot === undefined ? path.join(home, 'repo') : place(row.repoRoot),
   worktrees: place(row.worktrees ?? []),
   homeDir: home,
-  deckPaths
+  deckPaths,
+  ...extra
 })
 // D-92 (a): core.hooksPath is read through git in the background; every repo root the corpus
 // names is read before any row runs, so no row sees the fallback for an unread repo.
@@ -150,7 +151,9 @@ const corpusRoots = new Set([path.join(home, 'repo'), ...cases.flatMap(row => [r
 for (const dir of corpusRoots) for (const form of new Set([dir, (() => { try { return realpathSync(dir) } catch { return dir } })()])) await hooksPathCache.load(form, home)
 const shown = row => `line ${row.line}: ${row.toolName} ${row.toolInput.command ?? row.toolInput.file_path ?? row.toolInput.url ?? ''}`
 
-test('every corpus case classifies at its expected tier, reason and rule candidate', () => {
+// The corpus pins the POSIX verdicts (docs/deck/16-platforms.md section 6), and its paths are moved
+// into a host temp tree, so on Windows every case would read as a win32 request.
+test('every corpus case classifies at its expected tier, reason and rule candidate', { skip: process.platform === 'win32' && 'the tier engine reads POSIX paths; on Windows every request asks (floor.platform)' }, () => {
   assert.ok(cases.length >= 300, `${cases.length} cases`)
   const failures = []
   for (const row of cases) {
@@ -162,6 +165,23 @@ test('every corpus case classifies at its expected tier, reason and rule candida
     if (row.expected !== 'safe' && result.ruleCandidate !== null) failures.push(`${shown(row)} suggests a rule for a ${result.tier} request`)
   }
   assert.deepEqual(failures, [], `\n${failures.join('\n')}`)
+})
+
+// One corpus row per tier with the platform injected as win32, so it runs on every host: a Safe row
+// asks with floor.platform and offers no rule, and a Destructive row stays Destructive.
+// Mutation run for this test: the floor.platform reason removed from classify; this test failed.
+test('on win32 a Safe corpus row asks with floor.platform and a Destructive row stays Destructive', () => {
+  const safe = cases.find(row => row.toolInput.command === 'npm run test:unit')
+  const destructive = cases.find(row => row.toolInput.command === 'cd /tmp && rm -rf build')
+  assert.equal(safe.expected, 'safe')
+  assert.equal(destructive.expected, 'destructive')
+  const asked = run(safe, { platform: 'win32' })
+  assert.equal(asked.tier, 'caution', asked.reasons.map(item => item.entryId).join(', '))
+  assert.ok(asked.reasons.some(item => item.entryId === 'floor.platform' && item.tier === 'caution'))
+  assert.equal(asked.ruleCandidate, null)
+  const kept = run(destructive, { platform: 'win32' })
+  assert.equal(kept.tier, 'destructive')
+  assert.ok(kept.reasons.some(item => item.entryId === 'floor.platform'))
 })
 
 test('the corpus holds a Destructive, a Caution and a Safe case for each review finding it covers', () => {

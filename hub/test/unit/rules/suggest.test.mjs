@@ -29,7 +29,7 @@ function harness() {
   const allow = (options = {}, threshold = 5) => store.tx(() => recordAllow(store, request(options), { via: 'browser', at: 1000 + n, threshold }))
   const counter = (pattern = 'Bash(npm run test)') => store.get('SELECT count, state FROM rule_counters WHERE repo_id = ? AND pattern = ?', repoId, pattern)
   const events = type => store.all('SELECT data FROM events WHERE type = ? ORDER BY seq', type).map(row => JSON.parse(row.data))
-  return { root, repo, repoId, store, request, allow, counter, events, close() { store.close(); rmSync(root, { recursive: true, force: true }) } }
+  return { root, repo, repoId, store, request, allow, counter, events, close() { store.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) } }
 }
 
 // Mutation run for this test: `count >= threshold` changed to `count > threshold` in recordAllow; this
@@ -171,7 +171,9 @@ function envelope(name, changes, hookTs, claudePid) {
 // Mutation runs for this test: the `opened !== closed` comparison removed from recordAllow (the null
 // checks kept), and separately the recordAllow call removed from applyRequestHook; this test failed
 // for each.
-test('a terminal allow counts only when both hook rows carry the same claude_pid', () => {
+// The projector classifies with the host platform, and the count needs the Safe verdict, which on
+// win32 is never given (every request asks, docs/deck/16-platforms.md section 6).
+test('a terminal allow counts only when both hook rows carry the same claude_pid', { skip: process.platform === 'win32' && 'the projector classifies for the host, and on win32 nothing is Safe' }, () => {
   const tool = { tool_name: 'mcp__vault__vault_search', tool_input: { query: 'rules' } }
   for (const [opened, closed, counts] of [[42, 42, true], [42, 43, false], [null, 42, false], [42, null, false]]) {
     const h = harness()

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { syncBuiltinESMExports } from 'node:module'
+import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -10,6 +10,21 @@ import { classify, createWorktreeCache, DEFAULT_TIERS, hooksPathCache, maxTier, 
 import { createTiersStore, effectiveTiers, ENTRY_KEYS, validateTiers } from '../../server/approvals/tiers-store.mjs'
 import { isPlain } from '../../server/approvals/shell.mjs'
 import { allowedCommand } from '../../server/adapters/git-read.mjs'
+import { floorProbes, probeReaches } from '../../server/approvals/rules.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
+
+// A second instance of tiers.mjs whose `node:path` is path.win32, the host path module on Windows,
+// so a Linux run sees what a Windows host would if tiers.mjs resolved parsed paths with the host
+// `path`. Only imports made by that instance are redirected.
+const WIN_HOST_TIERS = `${new URL('../../server/approvals/tiers.mjs', import.meta.url).href}?host=win32`
+const WIN32_PATH = `data:text/javascript,${encodeURIComponent("import p from 'node:path'; const w = p.win32; export default w; export const { posix, win32, sep, delimiter, basename, dirname, extname, format, isAbsolute, join, matchesGlob, normalize, parse, relative, resolve, toNamespacedPath } = w")}`
+registerHooks({
+  resolve(specifier, context, next) {
+    if ((specifier === 'node:path' || specifier === 'path') && context.parentURL === WIN_HOST_TIERS) return { url: WIN32_PATH, shortCircuit: true }
+    return next(specifier, context)
+  }
+})
+const winHost = await import(WIN_HOST_TIERS)
 
 // The tier engine is POSIX (docs/deck/16-platforms.md section 6): a test that pins its path-based
 // classification runs only on a POSIX host.
@@ -1731,4 +1746,40 @@ test('a write to ~/Library/LaunchAgents/io.fleetmates.deck.* hits the persistenc
     const other = s.run('Write', { file_path: path.join(s.home, 'Library', 'LaunchAgents', 'com.example.agent.plist'), content: 'x' })
     assert.ok(!other.reasons.some(item => item.entryId === 'floor.persistence'), ids(other))
   } finally { s.close() }
+})
+
+// docs/deck/16-platforms.md section 6: Claude Code runs the Bash tool through Git Bash on Windows, so
+// the tier engine resolves parsed paths with path.posix on every host, and on win32 reads `C:\x`,
+// `C:/x` and `/c/x` as one path. Runs on every host: the paths are Windows-shaped strings that need
+// not exist, and the engine is run twice, once as loaded and once with path.win32 as its host path.
+// Mutation runs for this test: tiers.mjs importing the host `path` again, and separately the win32
+// path conversion (hostForm) made the identity; this test failed for each.
+test('on win32 every Destructive floor probe stays Destructive, under a Windows host path module too', () => {
+  const home = 'C:\\Users\\you'
+  const repo = 'C:\\Users\\you\\dev\\rustot'
+  const env = { USERPROFILE: home, APPDATA: `${home}\\AppData\\Roaming`, LOCALAPPDATA: `${home}\\AppData\\Local` }
+  const paths = setupPaths(env, { platform: 'win32' })
+  const deckPaths = { config: paths.config, state: paths.state, runtime: paths.runtime, token: paths.token, port: 47800 }
+  const probes = floorProbes({ env, homeDir: home, platform: 'win32' })
+  assert.equal(probes.length, 15, probes.map(probe => `${probe.carrier} ${probe.args}`).join('\n'))
+  for (const [label, engine] of [['as loaded', classify], ['win32 host path', winHost.classify]]) {
+    const request = (toolName, toolInput) => engine({ toolName, toolInput, cwd: repo, repoRoot: repo, homeDir: home, deckPaths, platform: 'win32' })
+    const run = command => request('Bash', { command })
+    for (const probe of probes) {
+      const text = `${probe.carrier} ${probe.args}`
+      const result = run(text)
+      expectTier(result, 'destructive', probe.floor, `${label}: ${text}`)
+      assert.ok(result.reasons.some(item => item.entryId === 'floor.platform'), `${label}: ${text}: ${ids(result)}`)
+      assert.equal(probeReaches(run, probe.carrier, probe.args), true, `${label}: ${text}`)
+    }
+    // The deck's state on win32, named with either slash, in any case, or in its Git Bash form.
+    for (const target of ['C:/Users/you/AppData/Local/fleetmates/deck/state/token', "'c:\\users\\YOU\\appdata\\local\\fleetmates\\deck\\state\\token'", '/c/Users/you/AppData/Local/fleetmates/deck/state/token', '/C/USERS/you/AppData/Local/fleetmates/deck/state']) {
+      expectTier(run(`cp x ${target}`), 'destructive', 'floor.deck', `${label}: cp x ${target}`)
+    }
+    expectTier(run('cp x ~/.bashrc'), 'destructive', 'floor.persistence', `${label}: cp x ~/.bashrc`)
+    expectTier(request('Write', { file_path: 'C:\\Users\\you\\.bashrc', content: 'x' }), 'destructive', 'floor.persistence', `${label}: Write C:\\Users\\you\\.bashrc`)
+    expectTier(request('Write', { file_path: 'C:\\Users\\you\\Library\\LaunchAgents\\io.fleetmates.deck.web.plist', content: 'x' }), 'destructive', 'floor.persistence', `${label}: Write LaunchAgents`)
+    // A path elsewhere stays below Destructive: the conversion does not make every path a floor.
+    expectTier(run('cp x C:/Users/you/dev/other/notes.txt'), 'caution', 'floor.platform', `${label}: cp outside the repo`)
+  }
 })
