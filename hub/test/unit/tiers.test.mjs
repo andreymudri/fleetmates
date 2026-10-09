@@ -1819,7 +1819,9 @@ const onWin32 = (toolName, toolInput) => classify({ toolName, toolInput, cwd: WI
 test('on win32 a docker -v bind mount of a drive path reaches floor.mount, as on linux', () => {
   const win = command => onWin32('Bash', { command })
   for (const command of ['docker run -v C:/Users/you:/host x', "docker run -v 'C:\\Users\\you:/host' x", 'docker run -v C:/:/host x', 'docker run -v c:/USERS:/h:ro x',
-    'docker run -v D:/:/d x', 'docker run -v /c/Users/you:/host x', 'docker run --mount type=bind,source=C:/Users/you,target=/h x']) {
+    'docker run -v D:/:/d x', 'docker run -v /c/Users/you:/host x', 'docker run --mount type=bind,source=C:/Users/you,target=/h x',
+    // A trailing separator names the same directory.
+    'docker run -v C:/Users/you/:/h x', "docker run -v 'C:\\Users\\you\\:/h' x", 'docker run --mount type=bind,source=C:/Users/you/,target=/h x', 'docker run -v C:/:/h x']) {
     expectTier(win(command), 'destructive', 'floor.mount', command)
   }
   // A drive path that holds neither the home nor is a drive root, and a named volume, stay below the floor.
