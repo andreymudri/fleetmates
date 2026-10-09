@@ -1803,3 +1803,63 @@ test('on win32 every Destructive floor probe stays Destructive, under a Windows 
     expectTier(run('cp x C:/Users/you/dev/other/notes.txt'), 'caution', 'floor.platform', `${label}: cp outside the repo`)
   }
 })
+
+// Windows-shaped paths for the injected-platform tests below. They need not exist, and the deck paths
+// are given, so no XDG variable of the host is read.
+const WIN_HOME = 'C:\\Users\\you'
+const WIN_REPO = `${WIN_HOME}\\dev\\rustot`
+const WIN_DECK = { config: `${WIN_HOME}\\AppData\\Roaming\\fleetmates\\deck`, state: `${WIN_HOME}\\AppData\\Local\\fleetmates\\deck\\state`, runtime: null, token: `${WIN_HOME}\\AppData\\Local\\fleetmates\\deck\\state\\token`, port: 47800 }
+const onWin32 = (toolName, toolInput) => classify({ toolName, toolInput, cwd: WIN_REPO, repoRoot: WIN_REPO, homeDir: WIN_HOME, deckPaths: WIN_DECK, platform: 'win32' })
+
+// On win32 a docker -v value is `<drive>:<path>:<target>[:opts]`, and the parser splits it on every
+// `:`, so tiers.mjs rejoins a one-letter source with the path after it before the mount check. Runs
+// on every host: the platform is injected.
+// Mutation runs for this test: the drive rejoin removed from the mount check, and separately
+// hostForm removed from the mount source; this test failed for each.
+test('on win32 a docker -v bind mount of a drive path reaches floor.mount, as on linux', () => {
+  const win = command => onWin32('Bash', { command })
+  for (const command of ['docker run -v C:/Users/you:/host x', "docker run -v 'C:\\Users\\you:/host' x", 'docker run -v C:/:/host x', 'docker run -v c:/USERS:/h:ro x',
+    'docker run -v D:/:/d x', 'docker run -v /c/Users/you:/host x', 'docker run --mount type=bind,source=C:/Users/you,target=/h x']) {
+    expectTier(win(command), 'destructive', 'floor.mount', command)
+  }
+  // A drive path that holds neither the home nor is a drive root, and a named volume, stay below the floor.
+  for (const command of ['docker run -v C:/data/cache:/cache x', 'docker run -v C:/Users/you/dev/rustot/build:/out x', 'docker run -v cache:/cache x']) {
+    const result = win(command)
+    assert.ok(!result.reasons.some(item => item.entryId === 'floor.mount'), `${command}: ${ids(result)}`)
+  }
+  // The linux control: the same mounts in POSIX form, and a one-letter source is a named volume there.
+  const linux = command => classify({ toolName: 'Bash', toolInput: { command }, cwd: '/home/you/dev/rustot', repoRoot: '/home/you/dev/rustot', homeDir: '/home/you', deckPaths: { config: '/home/you/.config/fleetmates/deck', state: '/home/you/.local/state/fleetmates/deck', runtime: null, port: 47800 }, platform: 'linux' })
+  for (const command of ['docker run -v /home/you:/host x', 'docker run -v /:/host x']) expectTier(linux(command), 'destructive', 'floor.mount', command)
+  const named = linux('docker run -v C:/Users/you:/host x')
+  assert.ok(!named.reasons.some(item => item.entryId === 'floor.mount'), ids(named))
+})
+
+// The file tools on win32 read their Windows-form path in its Git Bash form, so each verdict below
+// rests on the path, not only on floor.platform.
+// Mutation run for this test: the hostForm call removed from resolveIn; this test failed.
+test('on win32 the file tools judge a Windows-form path by the file it names', () => {
+  const has = (result, id, label) => assert.ok(result.reasons.some(item => item.entryId === id), `${label}: no ${id} in ${ids(result)}`)
+  for (const file of [`${WIN_HOME}\\.ssh\\id_rsa`, 'C:/Users/you/.ssh/id_rsa']) has(onWin32('Read', { file_path: file }), 'read.secret', `Read ${file}`)
+  has(onWin32('Write', { file_path: `${WIN_HOME}\\.claude\\settings.json`, content: 'x' }), 'floor.claude-settings', 'Write settings')
+  has(onWin32('Write', { file_path: WIN_DECK.token, content: 'x' }), 'floor.deck', 'Write token')
+  has(onWin32('Write', { file_path: `${WIN_HOME}\\notes.txt`, content: 'x' }), 'caution.file.write-outside', 'Write outside the repo')
+  for (const [label, result] of [['Read id_rsa', onWin32('Read', { file_path: `${WIN_HOME}\\.ssh\\id_rsa` })], ['Write notes', onWin32('Write', { file_path: `${WIN_HOME}\\notes.txt`, content: 'x' })]]) {
+    assert.ok(!result.reasons.some(item => item.entryId.startsWith('safe.')), `${label}: ${ids(result)}`)
+  }
+})
+
+// classify reads Windows paths only for the call it was given win32 for, also when that call throws.
+// Two things hold this: the `finally` restore, and each call setting the flag from its own platform.
+// Mutation runs for this test: the `finally` restore removed alone left it green (the next call resets
+// the flag, and nothing else reads it); the restore removed and the flag only ever set to true made
+// it fail.
+test('a win32 classify that throws leaves the next linux classify reading POSIX paths', () => {
+  const throwing = { get command() { throw new Error('unreadable input') } }
+  assert.throws(() => classify({ toolName: 'Bash', toolInput: throwing, cwd: WIN_REPO, repoRoot: WIN_REPO, homeDir: WIN_HOME, deckPaths: WIN_DECK, platform: 'win32' }), /unreadable input/)
+  // On linux `C:\Users\you\.bashrc` in quotes is a file named so in the working directory, not the
+  // .bashrc of a home at /c/Users/you.
+  const result = classify({ toolName: 'Bash', toolInput: { command: "cp x 'C:\\Users\\you\\.bashrc'" }, cwd: '/c/Users/you/dev/rustot', repoRoot: '/c/Users/you/dev/rustot', homeDir: '/c/Users/you', deckPaths: { config: '/c/Users/you/.config/fleetmates/deck', state: '/c/Users/you/.local/state/fleetmates/deck', runtime: null, port: 47800 }, platform: 'linux' })
+  assert.ok(!result.reasons.some(item => item.entryId === 'floor.persistence'), ids(result))
+  // The control: the same command on win32 is the home's .bashrc.
+  expectTier(onWin32('Bash', { command: "cp x 'C:\\Users\\you\\.bashrc'" }), 'destructive', 'floor.persistence', 'win32 control')
+})

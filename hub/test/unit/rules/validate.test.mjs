@@ -426,3 +426,20 @@ test('a path rule reaching ~/Library/LaunchAgents/io.fleetmates.deck.* is refuse
     assert.equal(validatePattern('Read(~/Library/LaunchAgents/com.example.agent.plist)', s.options).ok, true)
   } finally { s.close() }
 })
+
+// The mirror judges rules found in a settings file with the checks of validatePattern but without its
+// win32 refusal, so a hand-added Destructive rule still lists as Destructive on Windows. Runs on every
+// host: the platform is injected.
+// Mutation run for this test: ruleView calling validatePattern instead of judgePattern; this test failed.
+test('on win32 listRules still marks a hand-added Destructive rule destructive', () => {
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'deck-rules-list-')))
+  const store = openDeckDb(path.join(root, 'state', 'deck.db'))
+  try {
+    const repoId = path.join(root, 'web')
+    mkdirSync(path.join(repoId, '.claude'), { recursive: true })
+    store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', repoId, 'web', 0, 0, 'web', 1)
+    writeFileSync(path.join(repoId, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(rm:*)', 'mcp__vault__vault_search'] } }))
+    const listed = listRules(store, repoId, { at: 1, platform: 'win32' })
+    assert.deepEqual(listed.rules.map(rule => [rule.pattern, rule.destructive]), [['Bash(rm:*)', true], ['mcp__vault__vault_search', false]])
+  } finally { store.close(); rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) }
+})

@@ -191,6 +191,9 @@ function gitBashPath(text) {
   return drive ? path.normalize(`/${drive[1].toLowerCase()}${rest.slice(2)}`) : rest
 }
 const hostForm = text => windowsPaths ? gitBashPath(text) : text
+// On win32 a docker -v value is `<drive>:<path>:<target>[:opts]`; the parser splits it on every `:`,
+// so a one-letter source followed by a path is rejoined into the drive path it was.
+const mountSource = mount => windowsPaths && /^[A-Za-z]$/.test(mount.source) && typeof mount.target === 'string' && /^[\\/]/.test(mount.target) ? `${mount.source}:${mount.target}` : mount.source
 // An absolute input path (home, cwd, repo root, deck paths): POSIX, or on win32 also a Windows path.
 const inputPath = (text, platform) => {
   if (typeof text !== 'string') return null
@@ -1483,8 +1486,10 @@ function classifySegment(segment, ctx, ready, out) {
   for (const assigned of segment.assignments) if (envFloor(assigned.name)) push(reason('floor.env', 'caution', text, `sets ${assigned.name}`))
   if (segment.payloadOf !== null) push(reason('floor.payload', 'caution', text, segment.remote ? 'runs on another host or in a container' : 'runs a command for another command'))
   for (const mount of segment.mounts) {
-    const source = typeof mount.source === 'string' ? path.normalize(hostForm(mount.source)) : null
-    if (source && (source === '/' || within(ctx.home, source))) push(reason('floor.mount', 'destructive', text, 'mounts your home directory into a container'))
+    const source = typeof mount.source === 'string' ? path.normalize(hostForm(mountSource(mount))) : null
+    // On win32 a drive root (`/c`) is the root of a file system, as `/` is.
+    const root = source === '/' || (windowsPaths && /^\/[a-z]\/?$/i.test(source ?? ''))
+    if (source && (root || (windowsPaths ? withinFolded(ctx.home, source) : within(ctx.home, source)))) push(reason('floor.mount', 'destructive', text, 'mounts your home directory into a container'))
   }
   if (segment.privileged) push(reason('floor.privileged', 'destructive', text, 'runs a privileged container'))
   for (const write of segment.writes) {

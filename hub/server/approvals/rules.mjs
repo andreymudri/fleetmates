@@ -719,8 +719,9 @@ export function applyThreshold(store, threshold, { at = Date.now() } = {}) {
 // ---------------------------------------------------------------------------------------------
 // The mirror, the writer and the revoker (07-approvals 7.2, 7.4 and 9)
 
-function ruleView(row, tiers) {
-  const verdict = judgePattern(row.pattern, { tiers, classify: defaultClassify, repoRoot: row.repo_id })
+// judgePattern, not validatePattern: a rule found in the file is marked Destructive on win32 too.
+function ruleView(row, tiers, platform = process.platform) {
+  const verdict = judgePattern(row.pattern, { tiers, classify: defaultClassify, repoRoot: row.repo_id, platform })
   const destructive = !verdict.ok && verdict.code === 'destructive_rule'
   return {
     repoId: row.repo_id,
@@ -777,7 +778,7 @@ export async function writeRule(store, { repoId, pattern, source, stateDir, at =
     store.run('INSERT INTO rule_audit(at, repo_id, pattern, action, actor, approvals_before) VALUES(?,?,?,?,?,?)', at, repoId, pattern, 'added', source === 'suggested' ? 'suggestion' : 'manual', approvalsBefore)
     if (counter?.state === 'offered') append({ at, type: 'rule.withdrawn', entityId: null, data: { repoId, pattern } })
     store.run('INSERT INTO rule_counters(repo_id, pattern, count, state, updated_at) VALUES(?,?,0,?,?) ON CONFLICT(repo_id, pattern) DO UPDATE SET state = excluded.state, offered_at = NULL, updated_at = excluded.updated_at', repoId, pattern, 'accepted', at)
-    const rule = ruleView(store.get('SELECT * FROM rules WHERE repo_id = ? AND pattern = ?', repoId, pattern), tiers)
+    const rule = ruleView(store.get('SELECT * FROM rules WHERE repo_id = ? AND pattern = ?', repoId, pattern), tiers, platform)
     append({ at, type: 'rule.upserted', entityId: null, data: rule })
     return rule
   })
@@ -832,14 +833,14 @@ export function revokeRule(store, { repoId, pattern, stateDir, undo = false, at 
  * reported as `readError`.
  * @param {{ get: Function, all: Function, run: Function, appendEvent: Function, tx: Function }} store
  * @param {string} repoId
- * @param {{ at?: number, tiers?: object, publish?: Function }} [options]
+ * @param {{ at?: number, tiers?: object, publish?: Function, platform?: string }} [options]
  * @returns {{ repoId: string, settingsPath: string, readError?: { file: string, message: string }, rules: object[] }}
  */
-export function listRules(store, repoId, { at = Date.now(), tiers = activeTiers(), publish } = {}) {
+export function listRules(store, repoId, { at = Date.now(), tiers = activeTiers(), publish, platform = process.platform } = {}) {
   const file = settingsPath(repoId)
   let list
   try { list = allowList(readSettings(repoId).data) } catch (error) {
-    const rules = store.all('SELECT * FROM rules WHERE repo_id = ? ORDER BY pattern', repoId).map(row => ruleView(row, tiers))
+    const rules = store.all('SELECT * FROM rules WHERE repo_id = ? ORDER BY pattern', repoId).map(row => ruleView(row, tiers, platform))
     return { repoId, settingsPath: file, readError: { file: error.details?.path ?? file, message: error.details?.errno ?? error.code ?? 'unreadable' }, rules }
   }
   const events = []
@@ -862,9 +863,9 @@ export function listRules(store, repoId, { at = Date.now(), tiers = activeTiers(
         if (counter.state === 'offered') append({ at, type: 'rule.withdrawn', entityId: null, data: { repoId, pattern: counter.pattern } })
         store.run("UPDATE rule_counters SET state = 'accepted', offered_at = NULL, updated_at = ? WHERE repo_id = ? AND pattern = ?", at, repoId, counter.pattern)
       }
-      append({ at, type: 'rule.upserted', entityId: null, data: ruleView(store.get('SELECT * FROM rules WHERE repo_id = ? AND pattern = ?', repoId, pattern), tiers) })
+      append({ at, type: 'rule.upserted', entityId: null, data: ruleView(store.get('SELECT * FROM rules WHERE repo_id = ? AND pattern = ?', repoId, pattern), tiers, platform) })
     }
-    return present.map(pattern => ruleView(store.get('SELECT * FROM rules WHERE repo_id = ? AND pattern = ?', repoId, pattern), tiers))
+    return present.map(pattern => ruleView(store.get('SELECT * FROM rules WHERE repo_id = ? AND pattern = ?', repoId, pattern), tiers, platform))
   })
   for (const event of events) publish?.(event)
   return { repoId, settingsPath: file, rules }
@@ -892,6 +893,6 @@ export function createRules({ store, paths = setupPaths(process.env), publish = 
     validatePattern: (pattern, options = {}) => validatePattern(pattern, { classify, tiers: tiers(), platform, ...options }),
     write: (repoId, pattern, { source = 'manual', beforeRename } = {}) => writeRule(store, { repoId, pattern, source, stateDir: paths.state, at: now(), gitRead, beforeRename, tiers: tiers(), publish, platform }),
     revoke: (repoId, pattern, { undo = false, beforeRename } = {}) => revokeRule(store, { repoId, pattern, stateDir: paths.state, undo, at: now(), beforeRename, publish }),
-    listRules: repoId => listRules(store, repoId, { at: now(), tiers: tiers(), publish })
+    listRules: repoId => listRules(store, repoId, { at: now(), tiers: tiers(), publish, platform })
   }
 }
