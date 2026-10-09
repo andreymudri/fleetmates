@@ -1,12 +1,13 @@
 // One PTY owned by deckd: the node-pty process, its scrollback ring, its
 // headless screen model, attached clients and the last input source.
 import os from 'node:os'
+import fs from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { Ring } from './ring.mjs'
 import { ScreenModel } from './screen-model.mjs'
 import { dropSessionVars } from './login-env.mjs'
-import { isClaudeProgram, killTree, resolveCommand, commandSpawn } from '../platform/index.mjs'
+import { isClaudeProgram, killTree, resolveCommand, commandSpawn, windowsChildEnv, createInputModeFilter } from '../platform/index.mjs'
 
 const require = createRequire(import.meta.url)
 /** @type {typeof import('node-pty')} */
@@ -74,10 +75,38 @@ export function signalProcessGroup (pid, signal, kill = process.kill) {
 /**
  * What PtyHost takes from its surroundings, each defaulting to the live one,
  * so a test can pin the platform and stand in for node-pty and the kill
- * calls: `ptySpawn` is node-pty's `spawn`; `exists` and `readFile` serve
- * resolveCommand and commandSpawn; `kill` and `spawnSync` serve killTree.
- * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function }} PtyDeps
+ * calls: `ptySpawn` is node-pty's `spawn`; `exists` serves resolveCommand
+ * and the win32 check of the file to run; `readFile` serves commandSpawn;
+ * `kill` and `spawnSync` serve killTree; `hostEnv` is the environment the
+ * Windows base variables are taken from (this process's); `nodePath` is the
+ * node an npm cmd-shim is run with (this process's).
+ * @typedef {{ platform?: string, ptySpawn?: (file: string, args: string[] | string, opts: object) => any, exists?: (p: string) => boolean, readFile?: (p: string, enc: string) => string, kill?: typeof process.kill, spawnSync?: Function, hostEnv?: Record<string, string | undefined>, nodePath?: string }} PtyDeps
  */
+
+const AGENT_SHAPE = "node-pty's agent is not the 1.1.0 shape"
+
+/**
+ * Close the win32 pseudoconsole of a node-pty 1.1.0 process the way PtyHost does (its
+ * #closePseudoconsole explains why not through node-pty's kill()): the native kill, which calls
+ * ClosePseudoConsole, then disposing the conout worker. Exported for tests that run node-pty
+ * themselves. Returns null once closed, else why it was not: the agent is not the 1.1.0 shape, or
+ * the message of what threw.
+ * @param {any} proc a node-pty process
+ * @returns {string | null}
+ */
+export function closeWin32Pseudoconsole (proc) {
+  const agent = proc._agent
+  if (!agent || typeof agent._ptyNative?.kill !== 'function' || typeof agent._pty !== 'number') return AGENT_SHAPE
+  try {
+    if (agent._inSocket) agent._inSocket.readable = false
+    if (agent._outSocket) agent._outSocket.readable = false
+    agent._ptyNative.kill(agent._pty, Boolean(agent._useConptyDll))
+    agent._conoutSocketWorker?.dispose()
+  } catch (err) {
+    return /** @type {Error} */ (err).message
+  }
+  return null
+}
 
 export class PtyHost {
   /**
@@ -86,7 +115,9 @@ export class PtyHost {
    * win32 also `claude.exe` or `claude.cmd` in any case. The child's
    * environment is `{ ...baseEnv, ...env }` (baseEnv defaults to this
    * process's environment without TERM and Claude Code's session variables),
-   * then `FLEETMATES_DECK_PTY=<ptyId>` and `TERM=xterm-256color`.
+   * then `FLEETMATES_DECK_PTY=<ptyId>` and `TERM=xterm-256color`; on win32
+   * that goes through windowsChildEnv, so it has one key per variable name
+   * and the Windows base variables (SystemRoot and the rest) it lacks.
    * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, baseEnv?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
    * @param {PtyDeps} [deps]
@@ -109,12 +140,18 @@ export class PtyHost {
    * directly, any other `.cmd` or `.bat` runs through ComSpec, its command
    * line handed to node-pty as one string so it is not quoted again. An
    * argument cmd.exe cannot pass to a batch file is refused with
-   * `bad_request`. On POSIX argv runs as given.
+   * `bad_request`. The file that would run must then exist and end in
+   * `.exe` or `.com`, else `spawn_failed` and node-pty is not called: in the
+   * Windows VM run node-pty leaked its pseudoconsole, a worker and a pipe when
+   * CreateProcess failed on a file that is not a PE image. Output is
+   * passed through createInputModeFilter, so a win32-input-mode request
+   * (`ESC [ ? 9001 h` or `l`) reaches neither the ring, the screen model nor
+   * output events. On POSIX argv runs as given and output is not touched.
    * @param {{ cwd?: string, argv: string[], env?: Record<string, string>, baseEnv?: Record<string, string>, cols?: number, rows?: number, origin?: string }} req
    * @param {{ onOutput: (host: PtyHost, data: Buffer) => void, onExit: (host: PtyHost, exit: { code: number, signal: string | null, at: number }) => void }} hooks
    * @param {PtyDeps} [deps]
    */
-  constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync } = {}) {
+  constructor (req, hooks, { platform = process.platform, ptySpawn = nodePty.spawn, exists, readFile, kill, spawnSync, hostEnv = process.env, nodePath } = {}) {
     this.platform = platform
     /** Set once node-pty's kill() has closed the win32 pseudoconsole. */
     this.pseudoconsoleClosed = false
@@ -160,12 +197,16 @@ export class PtyHost {
     /** @type {(() => void) | null} */
     this.unwatchScreen = null
 
-    const env = { ...(req.baseEnv ?? dropSessionVars(process.env)), ...(req.env ?? {}), FLEETMATES_DECK_PTY: this.ptyId, TERM: 'xterm-256color' }
+    const merged = { ...(req.baseEnv ?? dropSessionVars(process.env)), ...(req.env ?? {}), FLEETMATES_DECK_PTY: this.ptyId, TERM: 'xterm-256color' }
+    const env = /** @type {Record<string, string>} */ (windowsChildEnv(merged, { base: hostEnv, platform }))
     /** @type {{ file: string, args: string[], options: Record<string, boolean> }} */
     let cmd
     try {
       const file = resolveCommand(req.argv[0], { env, platform, exists })
-      cmd = commandSpawn(file, req.argv.slice(1), { platform, env, readFile })
+      cmd = commandSpawn(file, req.argv.slice(1), { platform, env, readFile, nodePath })
+      if (platform === 'win32' && !(/\.(exe|com)$/i.test(cmd.file) && (exists ?? fs.existsSync)(cmd.file))) {
+        throw new Error(`${req.argv[0]} runs ${cmd.file}, which is not an existing .exe or .com program`)
+      }
     } catch (err) {
       this.screen.dispose()
       const e = /** @type {Error & { code?: string }} */ (err)
@@ -187,8 +228,14 @@ export class PtyHost {
       throw new DeckdError('spawn_failed', /** @type {Error} */ (err).message)
     }
     this.pid = this.proc.pid
+    const filter = createInputModeFilter({ platform })
     this.proc.onData((/** @type {Buffer | string} */ d) => {
-      const buf = typeof d === 'string' ? Buffer.from(d, 'utf8') : d
+      let buf = typeof d === 'string' ? Buffer.from(d, 'utf8') : d
+      if (platform === 'win32') {
+        // latin1 maps each byte to one char and back, so a character split across reads stays split
+        buf = Buffer.from(filter(buf.toString('latin1')), 'latin1')
+        if (buf.length === 0) return
+      }
       this.ring.push(buf)
       this.screen.write(buf)
       hooks.onOutput(this, buf)
@@ -358,19 +405,9 @@ export class PtyHost {
   #closePseudoconsole () {
     if (this.platform !== 'win32' || this.pseudoconsoleClosed) return
     this.pseudoconsoleClosed = true
-    const agent = this.proc._agent
-    if (!agent || typeof agent._ptyNative?.kill !== 'function' || typeof agent._pty !== 'number') {
-      console.error(`deckd: cannot close the pseudoconsole of ${this.ptyId}: node-pty's agent is not the 1.1.0 shape`)
-      return
-    }
-    try {
-      if (agent._inSocket) agent._inSocket.readable = false
-      if (agent._outSocket) agent._outSocket.readable = false
-      agent._ptyNative.kill(agent._pty, Boolean(agent._useConptyDll))
-      agent._conoutSocketWorker?.dispose()
-    } catch (err) {
-      console.error(`deckd: closing the pseudoconsole of ${this.ptyId} failed: ${/** @type {Error} */ (err).message}`)
-    }
+    const problem = closeWin32Pseudoconsole(this.proc)
+    if (problem === AGENT_SHAPE) console.error(`deckd: cannot close the pseudoconsole of ${this.ptyId}: ${problem}`)
+    else if (problem) console.error(`deckd: closing the pseudoconsole of ${this.ptyId} failed: ${problem}`)
   }
 
   /** Clear the timers and the screen model; on win32 also close the pseudoconsole if still open. */
