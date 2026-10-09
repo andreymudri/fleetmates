@@ -64,7 +64,8 @@ function sandbox(fixture = 'empty.json', { isolatedHub = false, webEntry = false
   writeFileSync(settings, readFileSync(path.join(fixtures, fixture)))
   // Every launcher `open` may try is faked, so no test reaches the real desktop. By default only
   // xdg-open succeeds; DECK_TEST_DEFAULT_BROWSER, DECK_TEST_GTK_LAUNCH, DECK_TEST_XDG_OPEN_STATUS steer them.
-  for (const name of ['systemctl', 'xdg-open', 'claude', 'notify-send', 'xdg-settings', 'gtk-launch', 'gio', 'deck-test-browser']) {
+  // launchctl, open and osascript are faked too, so on macOS init and start never touch the user's real launchd domain.
+  for (const name of ['systemctl', 'launchctl', 'open', 'osascript', 'xdg-open', 'claude', 'notify-send', 'xdg-settings', 'gtk-launch', 'gio', 'deck-test-browser']) {
     const file = path.join(bin, name)
     writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${name}:'"$*" >> "$DECK_TEST_CALLS"\nif [ '${name}' = claude ]; then echo "\${DECK_TEST_CLAUDE_VERSION:-${testedVersion()}} (Claude Code)"; fi\nif [ '${name}' = xdg-settings ]; then [ -n "$DECK_TEST_DEFAULT_BROWSER" ] || exit 1; echo "$DECK_TEST_DEFAULT_BROWSER"; exit 0; fi\nif [ '${name}' = gtk-launch ]; then exit \${DECK_TEST_GTK_LAUNCH:-1}; fi\nif [ '${name}' = gio ] || [ '${name}' = deck-test-browser ]; then exit 1; fi\nif [ '${name}' = xdg-open ]; then exit \${DECK_TEST_XDG_OPEN_STATUS:-0}; fi\nif [ '${name}' = systemctl ] && [ "$2" = is-active ]; then unit="$3"; if [ "$unit" = --quiet ]; then unit="$4"; fi; if [ "$unit" = fleetmates-deck.service ] && [ "$DECK_TEST_WEB_ACTIVE" = 1 ]; then exit 0; fi; if [ "$unit" = fleetmates-deckd.service ] && [ "$DECK_TEST_DECKD_ACTIVE" = 1 ]; then exit 0; fi; exit 3; fi\nif [ '${name}' = systemctl ] && [ "$DECK_TEST_MODEL_WEB" = 1 ] && [ "$2" = enable ]; then\n  if [ -e "$DECK_TEST_WEB_ENTRY" ]; then\n    printf active > "$DECK_TEST_WEB_STATE"\n  elif grep -Fqx "ConditionPathExists=$DECK_TEST_WEB_ENTRY" "$XDG_CONFIG_HOME/systemd/user/fleetmates-deck.service"; then\n    printf skipped > "$DECK_TEST_WEB_STATE"\n  else\n    printf failed > "$DECK_TEST_WEB_STATE"\n    exit 1\n  fi\nfi\n`)
     execFileSync('chmod', ['700', file])
@@ -162,6 +163,9 @@ posixTest('init installs every event required by the hook integration contract',
       { matcher: '*', hooks: [{ type: 'command', command, async: true, timeout: 5 }] }
     ], event)
   }
+  // The service manager init reached is the sandbox's recording shim, never the host's.
+  const calls = readFileSync(s.calls, 'utf8')
+  assert.match(calls, process.platform === 'darwin' ? /^launchctl:bootstrap gui\/\d+ .*io\.fleetmates\.deck\.deckd\.plist$/m : /^systemctl:--user /m)
 })
 
 posixTest('init writes the tiers.json stub with mode 0600 and the schema beside it, and leaves an existing tiers.json untouched', () => {
@@ -1046,7 +1050,7 @@ posixTest('a test may stop early and leave its listener running', async () => {
   assert.equal(abandoned.child.exitCode, null, 'the listener is up when its test ends')
 })
 
-posixTest('every listener a test started has exited before the next test runs, including an abandoned one', () => {
+posixTest('every listener a test started has exited before the next test runs, including an abandoned one', { skip: SYSTEMD_ONLY }, () => {
   assert.ok(abandoned, 'the previous test started a listener')
   assert.ok(startedListeners.length >= 9, `the earlier tests started listeners: ${startedListeners.length}`)
   const alive = startedListeners.filter(child => child.exitCode === null && child.signalCode === null)
