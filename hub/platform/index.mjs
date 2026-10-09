@@ -168,14 +168,22 @@ export function escapeCmdCommand (file) {
   return String(file).replace(/([()\][%!^"`<>&|;, *?])/g, '^$1')
 }
 
-const SHIM_SCRIPT = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:js|cjs|mjs))"/i
-const SHIM_EXE = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.exe)"/i
+// The invocation line of an npm cmd-shim, matched per line (m flag, CRLF tolerated by \s*$).
+// Node: `"%_prog%"` or a quoted `%dp0%\node.exe`, then exactly one quoted %dp0% script, then `%*`,
+// optionally after the shim's `endLocal & ... & ` prefix. No interpreter flags, nothing after `%*`.
+const SHIM_NODE_LINE = /(?:^|&)[ \t]*"(%_prog%|(?:%dp0%|%~dp0)\\node\.exe)"[ \t]+"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:js|cjs|mjs))"[ \t]+%\*\s*$/im
+// Exe: a line that is only a quoted %dp0% exe followed by `%*`.
+const SHIM_EXE_LINE = /^[ \t]*"(?:%dp0%|%~dp0)\\([^"\r\n]+\.exe)"[ \t]+%\*\s*$/im
+const SHIM_PROG = /SET "_prog=([^"\r\n]*)"/gi
+const NODE_PROG = /^(?:node|(?:%dp0%|%~dp0)\\node\.exe)$/i
 
 /**
- * What an npm cmd-shim `.cmd` runs: a quoted `%dp0%\...` or `%~dp0\...` target resolved against the
- * shim's directory. A .js, .cjs or .mjs target is `{ kind: 'node', script }` and wins over any .exe
- * target in the same body (the node shim also names `%dp0%\node.exe`); otherwise a .exe target is
- * `{ kind: 'exe', file }`. Null when `file` names neither or cannot be read.
+ * What an npm cmd-shim `.cmd` runs, resolved against the shim's directory.
+ * `{ kind: 'node', script }` when the invocation line runs node (`"%_prog%"` where every
+ * `SET "_prog=..."` names node, or a quoted `%dp0%\node.exe`) on exactly one quoted .js, .cjs or .mjs
+ * script followed by `%*`. Otherwise `{ kind: 'exe', file }` when a line is only a quoted
+ * `%dp0%\...exe` followed by `%*`. Null for anything else: shims for other interpreters (sh,
+ * python), node with interpreter flags, extra arguments, or a file that cannot be read.
  * @param {string} file
  * @param {{ readFile?: (p: string, enc: string) => string }} [opts]
  * @returns {{ kind: 'node', script: string } | { kind: 'exe', file: string } | null}
@@ -188,9 +196,13 @@ export function unwrapCmdShim (file, { readFile = fs.readFileSync } = {}) {
     return null
   }
   const dir = path.win32.dirname(file)
-  const script = SHIM_SCRIPT.exec(text)
-  if (script) return { kind: 'node', script: path.win32.resolve(dir, script[1]) }
-  const exe = SHIM_EXE.exec(text)
+  const node = SHIM_NODE_LINE.exec(text)
+  if (node) {
+    const progs = [...text.matchAll(SHIM_PROG)].map(m => m[1])
+    const runsNode = node[1].toLowerCase() !== '%_prog%' || (progs.length > 0 && progs.every(p => NODE_PROG.test(p)))
+    if (runsNode) return { kind: 'node', script: path.win32.resolve(dir, node[2]) }
+  }
+  const exe = SHIM_EXE_LINE.exec(text)
   if (exe) return { kind: 'exe', file: path.win32.resolve(dir, exe[1]) }
   return null
 }

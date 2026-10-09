@@ -189,6 +189,9 @@ test('resolveCommand leaves POSIX names alone and searches PATH x PATHEXT on win
   const exists = p => files.has(p.toLowerCase())
   const env = { PATH: `C:\\Windows\\System32;;${dir}` }
   assert.equal(resolveCommand('claude', { platform: 'win32', env, exists }), path.win32.join(dir, 'claude.cmd'))
+  // Keys spelled as a copied Windows env spells them (`{ ...process.env }` loses the case-insensitive lookup).
+  assert.equal(resolveCommand('claude', { platform: 'win32', env: { Path: dir, PathExt: '.CMD' }, exists }), path.win32.join(dir, 'claude.cmd'))
+  assert.equal(resolveCommand('claude', { platform: 'win32', env: { Path: dir, PathExt: '.BAT' }, exists }), 'claude')
 
   // .EXE before .CMD when PATHEXT says so, in the same directory.
   files.add(path.win32.join(dir, 'claude.exe').toLowerCase())
@@ -279,6 +282,13 @@ const EXE_SHIM = [
   '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*', '',
 ].join('\r\n')
 
+// npm's cmd-shim body for a bin run by `prog` (node, sh, python), ending in `invocation` (CRLF).
+const shimBody = (prog, invocation) => [
+  '@ECHO off', 'GOTO start', ':find_dp0', 'SET dp0=%~dp0', 'EXIT /b', ':start', 'SETLOCAL', 'CALL :find_dp0', '',
+  `IF EXIST "%dp0%\\${prog}.exe" (`, `  SET "_prog=%dp0%\\${prog}.exe"`, ') ELSE (', `  SET "_prog=${prog}"`, `  SET PATHEXT=%PATHEXT:;.JS;=;%`, ')', '',
+  `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & ${invocation}`, '',
+].join('\r\n')
+
 test('unwrapCmdShim finds the node script or native exe an npm cmd-shim written to disk targets, and null otherwise', async () => {
   const base = await mkdtemp(path.join(tmpdir(), 'deck-shim-'))
   try {
@@ -292,12 +302,27 @@ test('unwrapCmdShim finds the node script or native exe an npm cmd-shim written 
       { kind: 'node', script: 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js' })
     assert.deepEqual(unwrapCmdShim(file, { readFile: await fromDisk(EXE_SHIM) }),
       { kind: 'exe', file: 'C:\\Users\\you\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe' })
-    // %~dp0, upper case, .mjs, .cjs and .EXE, and a parent-relative path.
-    assert.deepEqual(unwrapCmdShim('C:\\a\\b\\x.cmd', { readFile: () => '@"%~DP0\\..\\lib\\X.MJS" %*' }), { kind: 'node', script: 'C:\\a\\lib\\X.MJS' })
-    assert.deepEqual(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => 'node "%dp0%\\bin\\x.cjs" %*' }), { kind: 'node', script: 'C:\\a\\bin\\x.cjs' })
+    // %~dp0, upper case, .mjs, .cjs and .EXE, a parent-relative path, and node named as %dp0%\node.exe.
+    assert.deepEqual(unwrapCmdShim('C:\\a\\b\\x.cmd', { readFile: () => shimBody('node', '"%_prog%" "%~DP0\\..\\lib\\X.MJS" %*') }), { kind: 'node', script: 'C:\\a\\lib\\X.MJS' })
+    assert.deepEqual(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => '"%dp0%\\node.exe" "%dp0%\\bin\\x.cjs" %*' }), { kind: 'node', script: 'C:\\a\\bin\\x.cjs' })
     assert.deepEqual(unwrapCmdShim('C:\\a\\b\\x.cmd', { readFile: () => '"%~dp0\\..\\bin\\X.EXE" %*' }), { kind: 'exe', file: 'C:\\a\\bin\\X.EXE' })
-    // A body that names both a script and an exe is a node shim: the script wins wherever it appears.
-    assert.deepEqual(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => '"%dp0%\\tool.exe" %*\r\n"%dp0%\\later.js" %*' }), { kind: 'node', script: 'C:\\a\\later.js' })
+    // A body with both a node invocation and a direct exe invocation is a node shim.
+    assert.deepEqual(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => '"%dp0%\\tool.exe" %*\r\n' + shimBody('node', '"%_prog%" "%dp0%\\later.js" %*') }),
+      { kind: 'node', script: 'C:\\a\\later.js' })
+    // Shims for other interpreters name their interpreter as an exe; unwrapping would drop the script.
+    assert.equal(unwrapCmdShim(file, { readFile: () => shimBody('sh', '"%_prog%"  "%dp0%\\node_modules\\pkg\\bin\\run.sh" %*') }), null)
+    assert.equal(unwrapCmdShim(file, { readFile: () => shimBody('python', '"%_prog%"  "%dp0%\\node_modules\\pkg\\bin\\run.py" %*') }), null)
+    assert.equal(unwrapCmdShim(file, { readFile: () => shimBody('sh', '"%_prog%"  "%dp0%\\node_modules\\pkg\\bin\\run.js" %*') }), null)
+    // "%_prog%" is node only when every SET "_prog=..." names node, and at least one does.
+    assert.equal(unwrapCmdShim(file, { readFile: () => shimBody('node', '"%_prog%"  "%dp0%\\cli.js" %*').replace('SET "_prog=node"', 'SET "_prog=sh"') }), null)
+    assert.equal(unwrapCmdShim(file, { readFile: () => '"%_prog%"  "%dp0%\\cli.js" %*' }), null)
+    // A node shim with interpreter flags, or anything else on the invocation line, is not unwrapped.
+    assert.equal(unwrapCmdShim(file, { readFile: () => shimBody('node', '"%_prog%" --max-old-space-size=4096 "%dp0%\\node_modules\\pkg\\cli.js" %*') }), null)
+    assert.equal(unwrapCmdShim(file, { readFile: () => shimBody('node', '"%_prog%"  "%dp0%\\node_modules\\pkg\\cli.js" --extra %*') }), null)
+    assert.equal(unwrapCmdShim(file, { readFile: () => shimBody('node', '"%_prog%"  "%dp0%\\node_modules\\pkg\\cli.js"') }), null)
+    assert.equal(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => '"%dp0%\\tool.exe" --flag %*' }), null)
+    assert.equal(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => '"%dp0%\\tool.exe" %* & echo more' }), null)
+    assert.equal(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => 'IF EXIST "%dp0%\\tool.exe" %*' }), null)
     // Not a shim: a target outside %dp0%, an unquoted target, or an unreadable file.
     assert.equal(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => 'C:\\tools\\real.exe %*' }), null)
     assert.equal(unwrapCmdShim('C:\\a\\x.cmd', { readFile: () => '%dp0%\\real.exe %*' }), null)
