@@ -97,20 +97,71 @@ test('posixIt has the same contract inside describe', async () => {
   assertUnforced(off)
 })
 
-test('fakeBin writes claude.cmd with CRLF under FLEETMATES_TEST_FORCE_WINDOWS=1', async () => {
+/**
+ * Call fakeBin with FLEETMATES_TEST_FORCE_WINDOWS=1 set, restoring the variable afterwards.
+ * @param {Parameters<typeof fakeBin>[0]} opts
+ */
+async function forcedFakeBin (opts) {
   const before = process.env[FORCE]
   process.env[FORCE] = '1'
-  let bin
   try {
-    bin = await fakeBin({})
+    return await fakeBin(opts)
   } finally {
     if (before === undefined) delete process.env[FORCE]
     else process.env[FORCE] = before
   }
+}
+
+// The npm cmd-shim body for a node script; only the _prog fallback (the absolute node path instead of
+// `node`) and the script path vary.
+const SHIM_LINES = [
+  '@ECHO off',
+  'GOTO start',
+  ':find_dp0',
+  'SET dp0=%~dp0',
+  'EXIT /b',
+  ':start',
+  'SETLOCAL',
+  'CALL :find_dp0',
+  '',
+  'IF EXIST "%dp0%\\node.exe" (',
+  '  SET "_prog=%dp0%\\node.exe"',
+  ') ELSE (',
+  '  SET "_prog=<node>"',
+  '  SET PATHEXT=%PATHEXT:;.JS;=;%',
+  ')',
+  '',
+  'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\<rel>" %*',
+  ''
+]
+// How a cmd-shim unwrapper finds the JS entry: a quoted %dp0%-relative .js, .cjs or .mjs path.
+const SHIM_SCRIPT = /"(?:%dp0%|%~dp0)\\([^"\r\n]+\.(?:js|cjs|mjs))"/i
+
+test('fakeBin writes claude.cmd as an npm cmd-shim with CRLF under FLEETMATES_TEST_FORCE_WINDOWS=1', async () => {
+  const bin = await forcedFakeBin({})
   try {
     assert.equal(bin.claudePath, path.join(bin.binDir, 'claude.cmd'))
     const text = await readFile(bin.claudePath, 'utf8')
-    assert.equal(text, `@"${process.execPath}" "${fakeClaude}" %*\r\n`)
+    assert.doesNotMatch(text, /[^\r]\n/, 'every line ends in CRLF')
+    const m = SHIM_SCRIPT.exec(text)
+    assert.ok(m, 'the shim names a %dp0%-relative script')
+    const rel = m[1]
+    assert.equal(path.resolve(bin.binDir, rel.split('\\').join(path.sep)), fakeClaude)
+    const want = SHIM_LINES.join('\r\n').replace('<node>', process.execPath).replace('<rel>', rel)
+    assert.equal(text, want)
+    assert.match(text, new RegExp(`\\r\\n[^\\r\\n]* & "%_prog%"  "%dp0%\\\\${rel.replace(/[.\\]/g, '\\$&')}" %\\*\\r\\n$`))
+  } finally {
+    await bin.cleanup()
+  }
+})
+
+test('fakeBin addresses a fake-claude-entry.mjs in binDir when the fake is on another drive', async () => {
+  const bin = await forcedFakeBin({ version: '9.8.7', relative: () => 'D:\\hub\\test\\fake-claude\\fake-claude.mjs' })
+  try {
+    const text = await readFile(bin.claudePath, 'utf8')
+    assert.equal(SHIM_SCRIPT.exec(text)?.[1], 'fake-claude-entry.mjs')
+    const { stdout } = await execFileP(process.execPath, [path.join(bin.binDir, 'fake-claude-entry.mjs'), '--version'], { env: bin.env })
+    assert.equal(stdout.trim(), '9.8.7 (Claude Code)')
   } finally {
     await bin.cleanup()
   }
