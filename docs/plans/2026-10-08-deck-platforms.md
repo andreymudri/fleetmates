@@ -382,6 +382,7 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 - Test: `hub/test/integration/run-join.test.mjs`
 - Test: `hub/test/integration/run-watch.test.mjs`
 - Test: `hub/test/integration/runs-crew-open.test.mjs`
+- Test: `hub/test/unit/archive.test.mjs`
 
 **Depends:** T9
 
