@@ -187,6 +187,26 @@ test('the worktree cache reads git worktree list once per repo and drops a repo 
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+// The cache holds what git prints, in the host's form: on win32 a drive root and drive worktrees
+// are absolute, and classify converts them to their Git Bash form (docs/deck/16-platforms.md
+// section 6). Runs on every host: the platform and the directory check are injected.
+// Mutation run for this test: the cache's absolute checks back to path.posix.isAbsolute alone; this
+// test failed.
+test('on win32 the worktree cache reads a drive root and keeps drive worktrees as git prints them', async () => {
+  const root = 'C:\\Users\\you\\repo'
+  const calls = []
+  const cache = createWorktreeCache({ platform: 'win32', isDirectory: dir => dir === root, read: async (dir, args) => {
+    calls.push([dir, args])
+    return { code: 0, stdout: Buffer.from(`worktree C:/Users/you/repo\nHEAD abc\n\nworktree C:\\Users\\you\\linked\n\nworktree /srv/linked\n\nworktree relative/tree\n`) }
+  } })
+  assert.deepEqual(await cache.load(root), ['C:/Users/you/repo', 'C:\\Users\\you\\linked', '/srv/linked'])
+  assert.deepEqual(calls, [[root, ['worktree', 'list', '--porcelain']]])
+  assert.deepEqual(cache.get('relative/path'), [])
+  // The linux control: a drive path is not absolute there, so no read starts.
+  const posixCache = createWorktreeCache({ platform: 'linux', isDirectory: () => true, read: async () => { throw new Error('no read expected') } })
+  assert.deepEqual(await posixCache.load(root), [])
+})
+
 test('the sed script rule takes only p, d, =, q and s with g, p, I or a number (D-88 (4))', () => {
   for (const script of ['1,5p', 's/a/b/g', 's|a|b|2', '/x/d', '$p', '1~2p', '0,/re/p', '/a/,+2d', '/a/I,/b/Mp', '1!d', '1! p', 'q', 'q5', '=', 'p;p', 's/a/b/ p', 's/[0-9]/x/g', 's/[[:alpha:]]/x/', '\\,a,p', 's/a/b/gI3']) assert.equal(sedScriptSafe(script), true, script)
   // GNU sed 4.10 ends a label at a blank and runs what follows (`:a e CMD`), and reads blanks

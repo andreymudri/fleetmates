@@ -275,8 +275,10 @@ test('normalizeLongOption matches exact options and unique prefixes', () => {
   assert.equal(normalizeLongOption('-f', []), '-f')
 })
 
-// The 100 KB parse is timed against a 10 KB parse of the same shape, not against a fixed budget, so a
-// loaded machine slows both alike: linear work gives a ratio near 10, quadratic work near 100.
+// The 100 KB parse is timed against a 10 KB parse of the same shape, not against a fixed budget. The
+// 10 KB parse is timed as a batch of ten, so both timed blocks take about as long and a loaded machine
+// slows them alike; the rounds alternate the two. The ratio is per parse: linear work gives about 10,
+// quadratic work about 100.
 test('a 100 KB command of nested quotes parses in linear time', () => {
   const unit = `"a'b'c" 'd"e"f' $'g\\'h' "i\\"j" `
   const flat = size => 'echo ' + unit.repeat(Math.ceil(size / unit.length))
@@ -293,21 +295,22 @@ test('a 100 KB command of nested quotes parses in linear time', () => {
   const nestedResult = parseCommand(nested, { cwd })
   assert.equal(nestedResult.segments.length, 5, 'four nested bash -c payloads and the innermost echo')
   assert.equal(nestedResult.segments[4].words.length, 5001)
-  const best = input => {
-    let fastest = Infinity
-    for (let run = 0; run < 7; run++) {
-      const started = performance.now()
-      const result = parseCommand(input, { cwd })
-      fastest = Math.min(fastest, performance.now() - started)
-      assert.equal(result.ok, true)
-    }
-    return fastest
+  const BATCH = 10
+  const timed = (input, times) => {
+    const started = performance.now()
+    for (let k = 0; k < times; k++) assert.equal(parseCommand(input, { cwd }).ok, true)
+    return performance.now() - started
   }
   for (const [large, small] of [[command, flat(10 * 1024)], [nested, nesting(250)]]) {
     assert.ok(small.length * 9 < large.length && large.length < small.length * 11, `${small.length} and ${large.length} characters`)
-    best(small)
-    const smallMs = best(small)
-    const largeMs = best(large)
+    timed(small, BATCH)
+    timed(large, 1)
+    let smallMs = Infinity
+    let largeMs = Infinity
+    for (let round = 0; round < 7; round++) {
+      smallMs = Math.min(smallMs, timed(small, BATCH) / BATCH)
+      largeMs = Math.min(largeMs, timed(large, 1))
+    }
     const ratio = largeMs / smallMs
     assert.ok(ratio < 30, `parsed ${large.length} characters in ${largeMs.toFixed(1)} ms and ${small.length} in ${smallMs.toFixed(2)} ms: ratio ${ratio.toFixed(1)}`)
   }

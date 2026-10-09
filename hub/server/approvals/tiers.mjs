@@ -7,7 +7,7 @@ import { existsSync, globSync, lstatSync, readdirSync, readFileSync, readlinkSyn
 import os from 'node:os'
 // docs/deck/16-platforms.md section 6: Claude Code runs the Bash tool through Git Bash on Windows, so
 // parsed command paths are POSIX paths on every host, never the host's `path`.
-import { posix as path } from 'node:path'
+import nodePath, { posix as path } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { gitRead, HOOKS_PATH_ENV, HOOKS_PATH_READS, hooksPathEnvironment, hooksPathFileRead } from '../adapters/git-read.mjs'
 import { destructiveSql, legacyDestructive } from '../machines/request.mjs'
@@ -1957,32 +1957,36 @@ function classifyOn(input, platform) {
   }
 }
 
+const hostDirectory = root => {
+  try { return existsSync(root) && statSync(root).isDirectory() } catch { return false }
+}
+
 /**
  * A per-repo cache of `git worktree list --porcelain` read through the Task 11 helper, so the
  * synchronous classifier can take worktrees. `get` returns the cached list (empty until the first
  * read finishes) and starts that read; `drop` forgets a repo, for WorktreeCreate and
- * WorktreeRemove hooks.
- * @param {{ read?: (root: string, args: string[]) => Promise<{ code: number, stdout: Buffer } | null> }} [options]
+ * WorktreeRemove hooks. Roots and worktrees are kept as given and as git prints them, in the host's
+ * form: on win32 a drive path (`C:\x`, `C:/x`) is absolute too, and classify converts it.
+ * @param {{ read?: (root: string, args: string[]) => Promise<{ code: number, stdout: Buffer } | null>, platform?: string, isDirectory?: (root: string) => boolean }} [options]
  */
-export function createWorktreeCache({ read = gitRead } = {}) {
+export function createWorktreeCache({ read = gitRead, platform = process.platform, isDirectory = hostDirectory } = {}) {
   const cache = new Map()
+  const absolute = text => typeof text === 'string' && (platform === 'win32' ? nodePath.win32 : path).isAbsolute(text)
   const refresh = async root => {
     const result = await read(root, ['worktree', 'list', '--porcelain'])
-    const list = result && result.code === 0 ? String(result.stdout).split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice(9)).filter(tree => path.isAbsolute(tree)) : []
+    const list = result && result.code === 0 ? String(result.stdout).split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice(9)).filter(absolute) : []
     const entry = cache.get(root)
     if (entry) entry.list = list
     return list
   }
   return {
     get(root) {
-      if (typeof root !== 'string' || !path.isAbsolute(root)) return []
+      if (!absolute(root)) return []
       const entry = cache.get(root)
       if (entry) return entry.list
       const fresh = { list: [] }
       cache.set(root, fresh)
-      let directory = false
-      try { directory = existsSync(root) && statSync(root).isDirectory() } catch {}
-      fresh.pending = directory ? refresh(root) : Promise.resolve([])
+      fresh.pending = isDirectory(root) ? refresh(root) : Promise.resolve([])
       return fresh.list
     },
     async load(root) {
