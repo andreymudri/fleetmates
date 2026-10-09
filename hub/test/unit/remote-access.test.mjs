@@ -1,0 +1,125 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { authorize, parsePublicOrigin, requestOrigin, securityHeaders } from '../../server/http/auth.mjs'
+import { checkPassphrase, createRemoteAccess, hashPassphrase, readPassphraseFile, verifyPassphrase, writePassphraseFile } from '../../server/http/remote-pass.mjs'
+import { parseServerArgs } from '../../server/main.mjs'
+
+const origin = parsePublicOrigin('https://machine.tail1234.ts.net')
+const request = (headers, method = 'GET') => ({ method, headers })
+
+test('a public origin is one exact https origin, and anything else is refused at startup', () => {
+  assert.deepEqual(origin, { origin: 'https://machine.tail1234.ts.net', host: 'machine.tail1234.ts.net', ws: 'wss://machine.tail1234.ts.net' })
+  assert.equal(parsePublicOrigin('https://machine.tail1234.ts.net/').origin, 'https://machine.tail1234.ts.net')
+  assert.equal(parsePublicOrigin('https://machine.tail1234.ts.net:8443').host, 'machine.tail1234.ts.net:8443')
+  for (const value of [undefined, null, '']) assert.equal(parsePublicOrigin(value), null, `${value} keeps the deck loopback only`)
+  for (const [value, reason] of [
+    ['https://*.ts.net', /wildcard/],
+    ['*', /wildcard/],
+    ['https://*', /wildcard/],
+    ['http://machine.tail1234.ts.net', /https/],
+    ['ws://machine.tail1234.ts.net', /https/],
+    ['machine.tail1234.ts.net', /https/],
+    ['https://machine.tail1234.ts.net/deck', /path, query or fragment/],
+    ['https://machine.tail1234.ts.net/?x=1', /path, query or fragment/],
+    ['https://machine.tail1234.ts.net/#f', /path, query or fragment/],
+    ['https://user:pw@machine.tail1234.ts.net', /credentials/],
+    [47800, /https/]
+  ]) assert.throws(() => parsePublicOrigin(value), reason, String(value))
+})
+
+test('authorize accepts the loopback and the public pair, and never a mixed one', () => {
+  const token = 'a'.repeat(43)
+  const loopback = { host: '127.0.0.1:47800', origin: 'http://127.0.0.1:47800', authorization: `Bearer ${token}` }
+  const tunnel = { host: origin.host, origin: origin.origin, authorization: `Bearer ${token}` }
+  const options = { port: 47800, token, publicOrigin: origin }
+  assert.equal(authorize(request(loopback), options), null)
+  assert.equal(authorize(request(tunnel), options), null)
+  assert.equal(authorize(request({ ...tunnel, origin: loopback.origin }), options).code, 'forbidden_origin', 'a tunnel Host with a loopback Origin')
+  assert.equal(authorize(request({ ...loopback, origin: tunnel.origin }), options).code, 'forbidden_origin', 'a loopback Host with a tunnel Origin')
+  assert.equal(authorize(request({ ...tunnel, host: 'other.ts.net' }), options).code, 'forbidden_host')
+  assert.equal(authorize(request({ ...tunnel, origin: 'https://machine.tail1234.ts.net.evil.test' }), options).code, 'forbidden_origin')
+  assert.equal(authorize(request({ ...tunnel, authorization: 'Bearer wrong' }), options).code, 'unauthorized')
+  assert.equal(authorize(request({ ...tunnel, 'sec-fetch-site': 'cross-site' }), options).code, 'forbidden_origin')
+  // Without the opt-in the public host is just another foreign host, and the loopback pair still passes.
+  assert.equal(authorize(request(tunnel), { port: 47800, token }).code, 'forbidden_host')
+  assert.equal(authorize(request(loopback), { port: 47800, token }), null)
+  assert.equal(authorize(request({ ...loopback, host: 'localhost:47800' }), options).status, 421)
+  assert.equal(requestOrigin(request(tunnel), 47800, origin), origin.origin)
+  assert.equal(requestOrigin(request(loopback), 47800, origin), 'http://127.0.0.1:47800')
+})
+
+test('the public origin adds itself, its wss form and worker-src to the policy, and nothing without it', () => {
+  const plain = securityHeaders(47800, false)['Content-Security-Policy']
+  assert.match(plain, /connect-src 'self' ws:\/\/127\.0\.0\.1:47800;/)
+  assert.doesNotMatch(plain, /worker-src/)
+  assert.doesNotMatch(plain, /tail1234/)
+  const opened = securityHeaders(47800, false, origin)['Content-Security-Policy']
+  assert.match(opened, /connect-src 'self' ws:\/\/127\.0\.0\.1:47800 https:\/\/machine\.tail1234\.ts\.net wss:\/\/machine\.tail1234\.ts\.net;/)
+  assert.match(opened, /worker-src 'self';/, "default-src 'none' blocks the service worker without it")
+  assert.equal(plain, opened.replace(" https://machine.tail1234.ts.net wss://machine.tail1234.ts.net", '').replace("worker-src 'self'; ", ''),
+    'the opt-in changes the policy in those two places only')
+  assert.equal(securityHeaders(47800, true, origin)['Cache-Control'], 'no-store')
+})
+
+test('the server entrypoint takes --public-origin and refuses anything else', () => {
+  assert.deepEqual(parseServerArgs([]), {})
+  assert.deepEqual(parseServerArgs(['--public-origin', 'https://machine.tail1234.ts.net']), { publicOrigin: 'https://machine.tail1234.ts.net' })
+  for (const argv of [['--public-origin'], ['--open'], ['https://machine.tail1234.ts.net']]) assert.throws(() => parseServerArgs(argv), /usage/)
+})
+
+test('a passphrase is checked, stored as a scrypt hash in a 0600 file, and compared against that hash', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pass-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  for (const value of ['', '   ', 'short', 'password', 'PASSWORD', 'let-me-in', 'fleetmates']) assert.throws(() => checkPassphrase(value), Error, value)
+  assert.equal(checkPassphrase('correct horse battery'), 'correct horse battery')
+  const record = await hashPassphrase('correct horse battery')
+  assert.equal(record.v, 1)
+  assert.equal(JSON.stringify(record).includes('correct horse'), false, 'the passphrase itself is never stored')
+  assert.equal(await verifyPassphrase('correct horse battery', record), true)
+  assert.equal(await verifyPassphrase('correct horse batterx', record), false)
+  assert.equal(await verifyPassphrase('', record), false)
+  // The same passphrase hashed again differs, so the salt is per installation.
+  assert.notEqual((await hashPassphrase('correct horse battery')).hash, record.hash)
+  const file = path.join(dir, 'remote-pass.json')
+  writePassphraseFile(file, record)
+  assert.equal(fs.lstatSync(file).mode & 0o777, 0o600)
+  assert.deepEqual(readPassphraseFile(file), record)
+  fs.chmodSync(file, 0o644)
+  assert.throws(() => readPassphraseFile(file), /private 0600 file/)
+  fs.chmodSync(file, 0o600)
+  fs.writeFileSync(file, '{"v":2}', { mode: 0o600 })
+  assert.throws(() => readPassphraseFile(file), /invalid remote access passphrase file/)
+})
+
+test('the exchange is unavailable without a passphrase file, and rate limited once there is one', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pass-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const file = path.join(dir, 'remote-pass.json')
+  let at = 1_000_000
+  const slept = []
+  const remote = createRemoteAccess({ file, now: () => at, maxAttempts: 3, windowMs: 1000, sleep: ms => { slept.push(ms)
+    return Promise.resolve() } })
+  assert.equal(remote.enabled(), false)
+  assert.deepEqual(await remote.verify('correct horse battery'), { ok: false, code: 'pairing_unavailable' })
+  writePassphraseFile(file, await hashPassphrase('correct horse battery'))
+  assert.equal(remote.enabled(), true)
+  assert.deepEqual(await remote.verify('wrong one here'), { ok: false, code: 'unauthorized' })
+  assert.deepEqual(await remote.verify('wrong two here'), { ok: false, code: 'unauthorized' })
+  assert.deepEqual(slept, [250, 500], 'a wrong answer costs more each time')
+  assert.deepEqual(await remote.verify('wrong three here'), { ok: false, code: 'unauthorized' })
+  const blocked = await remote.verify('correct horse battery')
+  assert.equal(blocked.ok, false)
+  assert.equal(blocked.code, 'too_many_attempts', 'the right passphrase is refused too while the window is full')
+  assert.equal(blocked.retryAfterMs, 1000)
+  // The window passes and the counter empties.
+  at += 1001
+  assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
+  // A success clears what the failures before it left.
+  for (let i = 0; i < 2; i++) await remote.verify('wrong again here')
+  assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
+  assert.deepEqual(await remote.verify('wrong once more'), { ok: false, code: 'unauthorized' })
+  assert.equal(slept.at(-1), 250, 'the delay restarts after a success')
+})
