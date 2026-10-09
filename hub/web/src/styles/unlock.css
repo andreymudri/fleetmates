@@ -43,6 +43,8 @@
 }
 .unlock-field { position: relative; }
 .unlock-field input {
+  /* Border box: the padding sits inside the 100%, or the field overflows the card and a phone zooms the page out. */
+  box-sizing: border-box;
   width: 100%;
   min-height: var(--size-control-hero);
   padding: 0 var(--space-48) 0 var(--space-14);
