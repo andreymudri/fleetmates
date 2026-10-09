@@ -203,15 +203,24 @@ test('a proto 2 hello carries loginEnvNames, sorted names only; proto 1 does not
   }
 })
 
-test('exits carries a tail for proto 2 only: the last 1,000 lines, at most 256 KiB', async () => {
+posixTest('exits carries a tail for proto 2 only: the last 1,000 lines, at most 256 KiB', {
+  // The assertions count the echoed bytes line by line. ConPTY re-renders
+  // output instead of passing it through, and on the Windows 11 VM the
+  // 20,000-line echo had not reached END on the screen after 27 s.
+  reason: 'ConPTY re-renders the echoed flood, so the tail is not the byte stream these assertions count'
+}, async () => {
   const c2 = await client(2)
   const c1 = await client(1)
+  /** PTYs this test spawned, killed in `finally` when a failure left them running. @type {string[]} */
+  const spawned = []
   try {
     const since = Date.now() - 1
     // Short lines: the 1,000-line cut decides.
     const short = await c2.request('spawn', { cwd: rt.dir, argv: [stub], env: {}, cols: 80, rows: 24, origin: 'launched' })
+    spawned.push(short.ptyId)
     // Long lines: the last 1,000 are 301 bytes each, so the 256 KiB cut decides.
     const long = await c2.request('spawn', { cwd: rt.dir, argv: [stub], env: {}, cols: 80, rows: 24, origin: 'launched' })
+    spawned.push(long.ptyId)
     await waitRow(c2, short.ptyId, (l) => l === 'READY')
     await waitRow(c2, long.ptyId, (l) => l === 'READY')
     let shortText = ''
@@ -252,6 +261,8 @@ test('exits carries a tail for proto 2 only: the last 1,000 lines, at most 256 K
     assert.match(longRows[longRows.length - 2], /^L19999y/)
     assert.equal(longRows[longRows.length - 1], 'END\r')
   } finally {
+    const live = new Set((await c2.request('list').catch(() => ({ ptys: [] }))).ptys.map((/** @type {any} */ p) => p.ptyId))
+    for (const id of spawned) if (live.has(id)) await killAndWait(c2, id)
     c1.close()
     c2.close()
   }
@@ -289,6 +300,8 @@ test('launched spawns get the login env, wrapped spawns only req.env; both get T
 test('spawn refuses a non-string env value, an env that is not an object, and a bad cwd', async () => {
   const c = await client(2)
   try {
+    // Only PTYs these spawns could have added count, not one an earlier test left running.
+    const before = new Set((await c.request('list')).ptys.map((/** @type {any} */ p) => p.ptyId))
     const base = { argv: [stub], origin: 'launched' }
     for (const fields of [
       { cwd: rt.dir, env: { A: 1 } },
@@ -302,7 +315,7 @@ test('spawn refuses a non-string env value, an env that is not an object, and a 
       await assert.rejects(c.request('spawn', { ...base, ...fields }), { code: 'bad_request' }, JSON.stringify(fields))
     }
     const list = await c.request('list')
-    assert.deepEqual(list.ptys, [])
+    assert.deepEqual(list.ptys.filter((/** @type {any} */ p) => !before.has(p.ptyId)), [])
   } finally {
     c.close()
   }
