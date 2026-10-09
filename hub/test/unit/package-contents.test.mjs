@@ -8,6 +8,13 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { fleetmatesScriptsDir } from '../../server/adapters/fleetmates.mjs'
 import { ENTRIES } from '../../bin/vendor-fleetmates.mjs'
+import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
+
+/** Run npm through the platform module: on win32 npm is npm.cmd, which execFileSync cannot start without it. */
+function runNpm (args, options) {
+  const npm = commandSpawn(resolveCommand('npm'), args)
+  return execFileSync(npm.file, npm.args, { ...npm.options, ...options })
+}
 
 // The deck package ships without the fleetmates repository root, so the server's fleetmates adapter
 // must find the root modules it imports (names, liveness, git and what they import) inside the
@@ -114,7 +121,7 @@ test('inside a fleetmates checkout the adapter reads the root modules, never a v
 
 test('the packed file list includes the platform module', () => {
   // --ignore-scripts skips prepack, so this lists the files rule without building or vendoring.
-  const out = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: hub, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const out = runNpm(['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: hub, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
   const files = JSON.parse(out)[0].files.map(file => file.path)
   assert.ok(files.includes('platform/index.mjs'), 'platform/index.mjs is packed')
 })
@@ -134,7 +141,7 @@ test('a packed and extracted package imports server/main.mjs and deckd/main.mjs'
     await symlink(path.join(hub, 'node_modules'), path.join(staged, 'node_modules'))
     const packed = path.join(base, 'pack')
     await mkdir(packed)
-    execFileSync('npm', ['pack', '--pack-destination', packed], { cwd: staged, stdio: 'pipe' })
+    runNpm(['pack', '--pack-destination', packed], { cwd: staged, stdio: 'pipe' })
     assert.equal(existsSync(path.join(staged, 'vendor')), false, 'postpack removes the vendored copy')
     const [tarball] = await readdir(packed)
     const extracted = path.join(base, 'installed')
