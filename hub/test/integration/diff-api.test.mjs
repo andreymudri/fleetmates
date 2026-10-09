@@ -8,6 +8,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 import { captureReviewBaseline } from '../../server/machines/session.mjs'
 
 const token = 'a'.repeat(43)
@@ -19,16 +20,20 @@ function git(repo, ...args) {
 test('the diff route returns the hunk of a changed file and refuses an escaping, unknown or missing path', async t => {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dif-')))
   const saved = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM }
-  t.after(() => {
+  let deck
+  // Registered before anything that can throw; the server closes before its directory is removed.
+  t.after(async () => {
+    await deck?.close()
     for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value
-    fs.rmSync(dir, { recursive: true, force: true })
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   })
   process.env.HOME = dir
   process.env.XDG_CONFIG_HOME = path.join(dir, '.config')
   process.env.GIT_CONFIG_NOSYSTEM = '1'
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   fs.mkdirSync(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // Where the server reads its state for this env on this platform.
+  const { state } = setupPaths(env)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   const staticDir = path.join(dir, 'web')
@@ -44,9 +49,8 @@ test('the diff route returns the hunk of a changed file and refuses an escaping,
   const baseline = captureReviewBaseline(repo)
   fs.writeFileSync(path.join(repo, 'a.txt'), 'one\nTWO\nthree\n')
 
-  const deck = await startDeckServer({ env, port: 0, staticDir, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
+  deck = await startDeckServer({ env, port: 0, staticDir, notifications: false, connectDeckd: async () => { throw Error('fake offline') },
     runPollMs: 3_600_000, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
-  t.after(() => deck.close())
   const now = Date.now()
   deck.store.run("INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?, 'harbor', 0, 1, 'harbor', 0)", repo)
   deck.store.run('INSERT INTO sessions(id,origin,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at,changed_files,review_baseline) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',

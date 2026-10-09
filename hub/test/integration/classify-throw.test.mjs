@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 // D-92 (d): before Task 20, a Bash command named `constructor` made the classifier throw (a
 // word-keyed table lookup reached Object.prototype), and the throw escaped the hook ingest: the
@@ -16,9 +17,15 @@ const fixture = JSON.parse(fs.readFileSync(new URL('../fixtures/hooks/2.1.282/Se
 
 async function harness(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clt-'))
+  let deck = null
+  t.after(async () => {
+    await deck?.close()
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  })
   const env = { HOME: dir, XDG_RUNTIME_DIR: path.join(dir, 'r') }
   fs.mkdirSync(env.XDG_RUNTIME_DIR, { mode: 0o700 })
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  // Where the server reads its state for this env on this platform.
+  const { state } = setupPaths(env)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   const staticDir = path.join(dir, 'web')
@@ -26,13 +33,8 @@ async function harness(t) {
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
   const opts = { env, port: 0, staticDir, notifications: false, connectDeckd: async () => { throw Error('fake offline') }, runPollMs: 3_600_000,
     runCommand: () => ({ status: 0, stdout: '2.1.282', stderr: '' }) }
-  let deck = null
   const envelope = (event, at, extra) => JSON.stringify({ v: 1, hookTs: at, ptyId: null, claudePid: null, pidChain: [], truncated: false,
     hook: { ...fixture, cwd: dir, hook_event_name: event, ...extra } })
-  t.after(async () => {
-    await deck?.close()
-    fs.rmSync(dir, { recursive: true, force: true })
-  })
   return {
     state,
     envelope,
@@ -71,7 +73,9 @@ test('a constructor PermissionRequest is rated Caution, and a later request and 
   h.send('PermissionRequest', at + 2000, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
   h.send('Stop', at + 3000, { stop_hook_active: false })
   const requests = await allRequests(h)
-  assert.deepEqual(requests.map(row => [row.createdAt - at, row.summary, row.tier]).sort((a, b) => a[0] - b[0]), [[1000, 'constructor', 'caution'], [2000, 'pwd', 'safe']])
+  // On win32 the floor.platform reason makes every request at least Caution (server/approvals/tiers.mjs).
+  const pwdTier = process.platform === 'win32' ? 'caution' : 'safe'
+  assert.deepEqual(requests.map(row => [row.createdAt - at, row.summary, row.tier]).sort((a, b) => a[0] - b[0]), [[1000, 'constructor', 'caution'], [2000, 'pwd', pwdTier]])
   assert.ok(reasonIds(h, requests.find(row => row.summary === 'constructor').id).includes('unknown.command'))
   // The Stop applied too: it is the session's last activity.
   const sessions = (await h.request('/api/sessions')).data.sessions

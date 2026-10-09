@@ -12,6 +12,7 @@ import { openDeckDb } from '../../server/db/index.mjs'
 import { recover } from '../../server/approvals/deliver.mjs'
 import { ensureRepo } from '../../server/adapters/repos.mjs'
 import { startDeckServer } from '../../server/main.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 const NOW = Date.UTC(2026, 9, 4, 12, 0)
 
@@ -19,7 +20,7 @@ function seeded(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rcv-'))
   const store = openDeckDb(path.join(dir, 'deck.db'))
   t.after(() => { store.close()
-    fs.rmSync(dir, { recursive: true, force: true }) })
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
   ensureRepo(store, '/home/you/dev/web', () => NOW)
   store.run('INSERT INTO sessions(id,origin,pty_id,process_key,repo_id,cwd,state,state_since,since_ts,last_activity_at,alive,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
     's1', 'wrapped', 'pty-1', 'k1', '/home/you/dev/web', '/home/you/dev/web', 'needs_approval', NOW, NOW, NOW, 1, NOW)
@@ -88,13 +89,16 @@ test('the server recovers at start: a seeded sending row is idle once it listens
   const s = seeded(t)
   s.request('stuck', { delivery: 'sending', answer: attempt() })
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rcv-home-'))
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
-  const state = path.join(home, '.local/state/fleetmates/deck')
+  let deck
+  t.after(async () => { await deck?.close()
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
+  const env = { HOME: home }
+  // Where the server reads its state for this env on this platform.
+  const { state } = setupPaths(env)
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), 'a'.repeat(43), { mode: 0o600 })
-  const deck = await startDeckServer({ env: { HOME: home }, store: s.store, port: 0, staticDir: home, notifications: false,
+  deck = await startDeckServer({ env, store: s.store, port: 0, staticDir: home, notifications: false,
     connectDeckd: async () => { throw Error('fake offline') }, runPollMs: 3_600_000, runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
-  t.after(() => deck.close())
   assert.equal(s.row('stuck').delivery, 'idle')
   assert.equal(s.row('stuck').answer, null)
 })

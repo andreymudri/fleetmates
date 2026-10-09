@@ -27,7 +27,7 @@ function harness() {
       id, 'wrapped', '/repo', '/repo', state, stateSince, stateSince, stateSince, alive, 1, endedAt, JSON.stringify(changed), archivedAt, archivedAt === null ? null : 'owner')
     if (open) store.run("INSERT INTO requests(id,session_id,kind,tier,summary,state,source,match_key,created_at) VALUES(?,?,'permission','safe','ok','open','permission_request',?,1)", `r-${id}`, id, `m-${id}`)
   }
-  return { store, projector, clock, events, row, dir, close() { store.close(); rmSync(dir, { recursive: true, force: true }) } }
+  return { store, projector, clock, events, row, dir, close() { store.close(); rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) } }
 }
 const upserts = (events, id) => events.filter(event => event.type === 'session.upserted' && event.entityId === id)
 

@@ -9,19 +9,29 @@ import path from 'node:path'
 import os from 'node:os'
 import { startDeckServer } from '../../server/main.mjs'
 import { openDeckDb } from '../../server/db/index.mjs'
+import { setupPaths } from '../../server/setup/paths.mjs'
 
 const token = 'a'.repeat(43)
 const watchers = () => process.getActiveResourcesInfo().filter(name => name === 'FSEventWrap').length
 
-/** A private HOME whose deck database already knows a repo holding run r1 on disk. */
-function home() {
+/**
+ * A private HOME whose deck database already knows a repo holding run r1 on disk. Its cleanup is registered
+ * first: it closes the deck a caller stores in `place.deck`, then removes HOME.
+ */
+function home(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rw-'))
+  const place = { dir, deck: null }
+  t.after(async () => { await place.deck?.close()
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) })
+  const env = { HOME: dir, PATH: process.env.PATH }
+  // Where the server reads its state for this env on this platform.
+  const paths = setupPaths(env)
   const repo = path.join(fs.realpathSync(dir), 'dev', 'alpha')
   const runDir = path.join(repo, '.fleetmates', 'r1')
   fs.mkdirSync(runDir, { recursive: true })
   fs.writeFileSync(path.join(runDir, 'plan.json'), JSON.stringify({ runId: 'r1', totalPhases: 1, tasks: [{ id: 'T1', title: 'First', phase: 1, files: [], deps: [] }] }))
   fs.writeFileSync(path.join(runDir, 'status.json'), JSON.stringify({ runId: 'r1', tasks: [{ id: 'T1', state: 'pending' }] }))
-  const state = path.join(dir, '.local/state/fleetmates/deck')
+  const state = paths.state
   fs.mkdirSync(state, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(state, 'token'), token, { mode: 0o600 })
   const store = openDeckDb(path.join(state, 'deck.db'))
@@ -30,22 +40,20 @@ function home() {
   const staticDir = path.join(dir, 'web')
   fs.mkdirSync(staticDir)
   fs.writeFileSync(path.join(staticDir, 'index.html'), '<h1>Test deck</h1>')
-  return { dir, repo, runDir, staticDir, env: { HOME: dir, PATH: process.env.PATH } }
+  return Object.assign(place, { repo, runDir, staticDir, env, paths })
 }
 
 /** Start the deck over home(); `setup(place)` runs first, so whatever it writes is on disk at startup. */
 async function harness(t, setup = () => {}) {
-  const place = home()
+  const place = home(t)
   setup(place)
   // A closed watcher's handle is released on a later turn of the event loop, so the previous test's deck may
   // still count here. Nothing else in this file watches files, so every earlier watcher must reach zero.
   await waitFor(() => watchers() === 0, 2000, 'earlier watchers to close')
   const before = 0
-  const deck = await startDeckServer({ env: place.env, port: 0, staticDir: place.staticDir, notifications: false,
+  const deck = place.deck = await startDeckServer({ env: place.env, port: 0, staticDir: place.staticDir, notifications: false,
     connectDeckd: async () => { throw Error('fake offline') }, reconnectMs: 600_000, runPollMs: 600_000,
     runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
-  t.after(async () => { await deck.close()
-    fs.rmSync(place.dir, { recursive: true, force: true }) })
   const events = []
   deck.subscribe(event => events.push(event))
   const updates = () => events.filter(event => event.type === 'run.updated' && event.data.runId === 'r1')
@@ -99,11 +107,9 @@ test('closing the deck server closes its run-directory watchers', async t => {
 
 /** A deck server over an injected run reader; returns the server and the run.updated events for r1. */
 async function injected(t, place, runReader) {
-  const deck = await startDeckServer({ env: place.env, port: 0, staticDir: place.staticDir, notifications: false,
+  const deck = place.deck = await startDeckServer({ env: place.env, port: 0, staticDir: place.staticDir, notifications: false,
     connectDeckd: async () => { throw Error('fake offline') }, reconnectMs: 600_000, runPollMs: 600_000, runReader,
     runCommand: () => ({ status: 0, stdout: '', stderr: '' }) })
-  t.after(async () => { await deck.close()
-    fs.rmSync(place.dir, { recursive: true, force: true }) })
   const events = []
   deck.subscribe(event => events.push(event))
   const updates = () => events.filter(event => event.type === 'run.updated' && event.data.runId === 'r1')
@@ -129,7 +135,7 @@ function gatedReader(place, current) {
 const settle = () => new Promise(resolve => setTimeout(resolve, 20))
 
 test('a watch event during a pass reruns the pass once it ends, publishing both states in order', async t => {
-  const place = home()
+  const place = home(t)
   let state = 'pending'
   const gate = gatedReader(place, () => state)
   const { updates } = await injected(t, place, gate.reader)
@@ -156,7 +162,7 @@ test('a watch event during a pass reruns the pass once it ends, publishing both 
 })
 
 test('a watch event during the priming pass reruns the pass once priming ends, publishing the change', async t => {
-  const place = home()
+  const place = home(t)
   let state = 'pending'
   const gate = gatedReader(place, () => state)
   const { updates } = await injected(t, place, gate.reader)
@@ -175,7 +181,7 @@ test('a watch event during the priming pass reruns the pass once priming ends, p
 })
 
 test('a failing priming list leaves the baseline empty, so the next pass publishes the unchanged run once', async t => {
-  const place = home()
+  const place = home(t)
   let fire = null
   let calls = 0
   const runReader = {
@@ -209,7 +215,7 @@ test('a repo registered after the first read rebuilds the reader with the watch,
   fs.mkdirSync(betaRun, { recursive: true })
   fs.writeFileSync(path.join(betaRun, 'plan.json'), JSON.stringify({ runId: 'r2', totalPhases: 1, tasks: [{ id: 'T1', title: 'First', phase: 1, files: [], deps: [] }] }))
   fs.writeFileSync(path.join(betaRun, 'status.json'), JSON.stringify({ runId: 'r2', tasks: [{ id: 'T1', state: 'pending' }] }))
-  const store = openDeckDb(path.join(h.dir, '.local/state/fleetmates/deck/deck.db'))
+  const store = openDeckDb(path.join(h.paths.state, 'deck.db'))
   store.run('INSERT INTO repos(id,name,crew_slot,crew_slot_shared,crew_seed,first_seen_at) VALUES(?,?,?,?,?,?)', beta, 'beta', 1, 0, 'beta', 1)
   store.close()
   const listed = await h.runs()
