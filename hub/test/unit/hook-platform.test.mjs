@@ -98,6 +98,37 @@ test('hookEndpoint on win32 treats a hooks key whose lock names a dead pid as mi
   })
 })
 
+/**
+ * Run `fn` with process.kill answering EPERM for `pid` (signal 0), as Windows does for a process of a
+ * user this one may not signal, such as an elevated deck server. Restored afterwards.
+ */
+async function withEpermFor (pid, fn) {
+  const real = process.kill
+  process.kill = (target, signal) => {
+    if (target === pid) throw Object.assign(new Error(`kill EPERM ${pid}`), { code: 'EPERM', errno: -1, syscall: 'kill' })
+    return real.call(process, target, signal)
+  }
+  try {
+    return await fn()
+  } finally {
+    process.kill = real
+  }
+}
+
+test('hookEndpoint on win32 keeps the hooks key when kill(pid, 0) answers EPERM for its lock holder, which means it is alive', async () => {
+  await inScratch(async () => {
+    const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })
+    const dir = deckDir(base, { platform: 'win32' })
+    fs.mkdirSync(dir, { recursive: true })
+    const secret = 'f'.repeat(64)
+    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.key'), secret)
+    fs.writeFileSync(path.win32.join(dir, 'endpoint-hooks.lock'), JSON.stringify({ pid: 4242, started: 1 }))
+    await withEpermFor(4242, () => {
+      assert.equal(hookEndpoint(WIN_ENV, 'win32'), endpoint(base, 'hooks', { platform: 'win32', secret }))
+    })
+  })
+})
+
 test('startHookSocket on win32 writes a new hooks key each start and listens on the pipe the hook computes from it; a second one is refused while the first answers', async () => {
   await inScratch(async () => {
     const base = runtimeBase({ env: WIN_ENV, platform: 'win32' })

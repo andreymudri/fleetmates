@@ -514,6 +514,42 @@ test('a deck server started from a relative script path under a non-ASCII direct
   })
 })
 
+/**
+ * Run `fn` with process.kill answering EPERM for `pid` (signal 0), as Windows does for a process of a
+ * user this one may not signal, such as an elevated deck server. Restored afterwards.
+ */
+async function withEpermFor (pid, fn) {
+  const real = process.kill
+  process.kill = (target, signal) => {
+    if (target === pid) throw Object.assign(new Error(`kill EPERM ${pid}`), { code: 'EPERM', errno: -1, syscall: 'kill' })
+    return real.call(process, target, signal)
+  }
+  try {
+    return await fn()
+  } finally {
+    process.kill = real
+  }
+}
+
+test('a lock holder that kill(pid, 0) answers EPERM for is alive: it refuses a second start, and liveHolder keeps its key', async () => {
+  await inScratch(async () => {
+    const started = 1_790_000_000_000
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: 4242, started }))
+    fs.writeFileSync(keyFile('base', 'deckd'), 'e'.repeat(64))
+    const server = net.createServer()
+    await withEpermFor(4242, async () => {
+      try {
+        // The default alive check; only the creation time is injected.
+        await assert.rejects(listenEndpoint('base', 'deckd', server, { platform: 'win32', creationTime: () => started }), { code: 'EADDRINUSE', holder: 4242 })
+        assert.equal(endpointSecret('base', { platform: 'win32', name: 'deckd', liveHolder: true }), 'e'.repeat(64))
+      } finally {
+        await closeServer(server)
+      }
+    })
+  })
+})
+
 test('dropEndpoint removes the key and lock of the pid that was killed, and only those', async () => {
   await inScratch(async () => {
     const dead = () => false

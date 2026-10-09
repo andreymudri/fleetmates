@@ -653,6 +653,22 @@ test('with platform win32 deckd writes a new key at every start, a client reads 
     } finally {
       again.close()
     }
+    // A holder that kill(pid, 0) answers EPERM for (an elevated deckd, to an unelevated client) is alive.
+    const lockPath = path.win32.join(deckDir('base', { platform: 'win32' }), 'endpoint-deckd.lock')
+    const ownLock = readFileSync(lockPath, 'utf8')
+    writeFileSync(lockPath, JSON.stringify({ pid: 4242, started: 1 }))
+    const realKill = process.kill
+    process.kill = (target, signal) => {
+      if (target === 4242) throw Object.assign(new Error('kill EPERM 4242'), { code: 'EPERM', syscall: 'kill' })
+      return realKill.call(process, target, signal)
+    }
+    try {
+      const elevated = await connectDeckd({ runtimeDir: 'base', platform: 'win32', kind: 'server', name: 'key' })
+      elevated.close()
+    } finally {
+      process.kill = realKill
+      writeFileSync(lockPath, ownLock)
+    }
     await assert.rejects(connectDeckd({ runtimeDir: 'nokey', platform: 'win32', kind: 'server' }), { code: 'ENOENT', message: /^deckd is not running: no endpoint key in / })
     // What a crashed deckd leaves: its key, and its lock naming a pid that is gone.
     mkdirSync(deckDir('crashed', { platform: 'win32' }), { recursive: true })
