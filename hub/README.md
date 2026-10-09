@@ -5,7 +5,7 @@ you, and which one finished, sends a desktop popup when one is waiting on you, a
 started with `fm claude` or from the deck, mirrors the live terminal in the browser so you can type
 into it.
 
-![Home with nine sessions, three of them waiting on you](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
+![Home with five sessions: three waiting on you (a Safe npm run test, a Destructive rm -rf dist and a question), a fleetmates team run in phase 2 and a running session](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/home.png)
 
 **Status: 0.5.0, the first version published to npm** as `@andreymudri/fleetmates-deck`, with
 the commands `fleetmates-deck` and `fm`. Includes Memory and Research on top of Meetings,
@@ -44,6 +44,14 @@ into them.
   repo's crew member, and Settings, Appearance sets text size, motion and density.
 - Restarting the web server leaves every `fm claude` and launched session running; the browser
   reconnects and keeps typing into them.
+
+![Focus on a session started in deckd: its live terminal shows a Bash permission prompt for npm run test, and the PromptBar below names it Safe](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/focus.png)
+
+*Focus mirrors the session's live terminal. The list on the left switches between sessions.*
+
+![The Team run page of a fleetmates run: phase 1 done with gate 1 passed, task T3 of phase 2 running after gate 2 failed on fileset, and the lead session's tool steps](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/team.png)
+
+*The Team run page reads the run's plan, status and branches from the repository.*
 
 ### The `fm` command
 
@@ -88,6 +96,10 @@ browser.
   retries on its own.
 - Focus, Changes shows the diff of each changed file against the session's review baseline.
 - Team run "Review N requests" opens the drawer on that run's requests only.
+
+![The Needs-you drawer grouping open requests by tier: a Safe npm run test with Allow once, a Caution request, a question with its options, and a Destructive request](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/needs-you.png)
+
+*The Needs-you drawer (`Alt U`) groups open requests by tier.*
 
 ### Tiers
 
@@ -258,7 +270,7 @@ replaces the token.
 `open` starts the web server if needed, checks that the process on the port is really the deck,
 and opens `http://127.0.0.1:47800/` in your browser with the token in the URL fragment.
 
-![First run with the hooks check failing](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/first-run.png)
+![First run: the Claude Code version, hooks and deckd checks passing, vault-mcp unchecked, the optional scribed check warning, and the notifications test](https://raw.githubusercontent.com/andreymudri/fleetmates/master/hub/docs/screenshots/first-run.png)
 
 | Command | Does |
 |---|---|
