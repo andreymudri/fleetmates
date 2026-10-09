@@ -190,9 +190,15 @@ async function remoteAccess(rest) {
   if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error(`${file} is not a JSON object`)
   if (parsed) config.publicOrigin = parsed.origin
   else delete config.publicOrigin
-  const temp = `${file}.${process.pid}.tmp`
+  // A random name created with O_EXCL through openNoFollowSync, as platform/index.mjs publishes a key file: a
+  // predictable temporary name can be waiting for the write.
+  const temp = `${file}.${randomBytes(6).toString('hex')}.tmp`
   try {
-    fs.writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
+    const fd = openNoFollowSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, { mode: 0o600 })
+    try {
+      fs.writeFileSync(fd, `${JSON.stringify(config, null, 2)}\n`)
+      fs.fsyncSync(fd)
+    } finally { fs.closeSync(fd) }
     fs.renameSync(temp, file)
   } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp) }
   process.stdout.write(parsed ? `public origin: ${parsed.origin}\n` : 'public origin: removed\n')
@@ -210,7 +216,9 @@ async function secretReader() {
     // A piped stdin is read whole first: its lines arrive together, and a second prompt would miss them.
     const chunks = []
     for await (const chunk of process.stdin) chunks.push(chunk)
-    const lines = Buffer.concat(chunks).toString('utf8').split('\n')
+    // CRLF too: `type pass.txt | fleetmates-deck remote-pass` on Windows ends every line with a carriage return,
+    // and a passphrase stored with a trailing \r would match here and never match what a phone types.
+    const lines = Buffer.concat(chunks).toString('utf8').split(/\r?\n/)
     let next = 0
     return { read: async () => lines[next++] ?? '', close: () => {} }
   }

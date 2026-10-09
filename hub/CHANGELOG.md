@@ -15,7 +15,10 @@ schema changed.
   --public-origin <url>` adds one exact HTTPS origin (a `tailscale serve` address) to the Host,
   Origin and Content-Security-Policy checks; without it the server behaves exactly as before.
   `fleetmates-deck remote-pass` sets the passphrase a new device types to get the deck token; it is
-  read from the terminal, stored as a scrypt hash in a 0600 file, and the exchange is rate limited.
+  read from the terminal, stored as a scrypt hash in a private file, and the exchange is throttled:
+  one attempt at a time, a delay that doubles to 4 s, a bounded queue, and a `Retry-After` once 10
+  wrong answers land within 5 minutes. A correct passphrase is always checked, so no one on the
+  tailnet can lock the owner out by guessing.
 - The deck is installable as a PWA: a manifest, icons, iOS meta tags, safe areas, and a service
   worker that caches the static shell only. Nothing under `/api` or `/.well-known` is cached, and
   the token is kept in `localStorage` so an installed app does not lose it between launches.

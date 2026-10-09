@@ -4,8 +4,8 @@ import { readFile, readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { runnerImport } from 'vite'
 import { fileURLToPath } from 'node:url'
-import { TOKEN_KEY, captureToken, wsUrl } from '../../web/src/state/api.js'
-import { UNLOCK_COMMAND, UNLOCK_PATH, exchangePassphrase, refusal, waitMessage } from '../../web/src/state/unlock.js'
+import { TOKEN_KEY, captureToken, forgetToken, tokenIsDurable, wsUrl } from '../../web/src/state/api.js'
+import { UNLOCK_COMMAND, UNLOCK_PATH, exchangePassphrase, pairable, refusal, waitMessage } from '../../web/src/state/unlock.js'
 import { messages as en } from '../../web/src/i18n/en.js'
 
 const web = fileURLToPath(new URL('../../web/', import.meta.url))
@@ -16,7 +16,7 @@ const memoryStorage = () => {
 }
 const fakeLocation = href => {
   const url = new URL(href)
-  return { hash: url.hash, pathname: url.pathname, search: url.search, host: url.host, protocol: url.protocol }
+  return { hash: url.hash, pathname: url.pathname, search: url.search, host: url.host, hostname: url.hostname, protocol: url.protocol }
 }
 
 test('the socket scheme follows the page, so an HTTPS tunnel upgrades with wss', () => {
@@ -39,6 +39,27 @@ test('the token is kept durably for an installed PWA while an open tab keeps its
   assert.deepEqual(captureToken({ location: fakeLocation('http://127.0.0.1:47800/'), history, storage: other, durable }), { token: 'tab', to: null })
   // Without a durable store the behaviour is the old one exactly.
   assert.deepEqual(captureToken({ location: fakeLocation('http://127.0.0.1:47800/'), history, storage: memoryStorage() }), { token: null, to: null })
+  // Signing out forgets both copies; the deck token itself is untouched, so another paired phone keeps working.
+  assert.equal(tokenIsDurable(durable), true)
+  forgetToken({ storage: session, durable })
+  assert.equal(tokenIsDurable(durable), false)
+  assert.equal(session.getItem(TOKEN_KEY), null)
+  assert.equal(tokenIsDurable(null), false)
+})
+
+test('only a page that could pair shows Unlock and keeps the token past its tab', async () => {
+  for (const href of ['http://127.0.0.1:47800/', 'http://localhost:47800/s/x']) assert.equal(pairable(fakeLocation(href)), false, href)
+  assert.equal(pairable(fakeLocation('https://machine.tail1234.ts.net/')), true)
+  const main = await readFile(`${web}src/main.jsx`, 'utf8')
+  // A local tab without a token belongs on the shell's own authentication failure, not on a passphrase prompt,
+  // and a local deck does not turn a tab-lifetime token into a stored one.
+  assert.match(main, /const remote = pairable\(window\.location\)/)
+  assert.match(main, /token \|\| !remote\n?\s*\? <Shell/)
+  assert.match(main, /const durable = remote \|\| window\.matchMedia\?\.\('\(display-mode: standalone\)'\)\?\.matches \? window\.localStorage : null/)
+  // The worker is for the tunnel: isSecureContext is true on loopback too, and a local deck has no use for one.
+  assert.match(main, /window\.location\.protocol === 'https:'/)
+  const settings = await readFile(`${web}src/screens/settings/Settings.jsx`, 'utf8')
+  assert.match(settings, /settings\.conn\.signOut/, 'Settings offers a way to forget the key this device kept')
 })
 
 test('the unlock exchange posts the passphrase and tells the four refusals apart', async () => {

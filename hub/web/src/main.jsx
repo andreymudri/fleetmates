@@ -30,16 +30,22 @@ import { deckScreens } from './screens/failures/Failures.jsx'
 import { createTerminalClient } from './state/terminal.js'
 import { Unlock } from './screens/unlock/Unlock.jsx'
 import { TOKEN_KEY } from './state/api.js'
+import { pairable } from './state/unlock.js'
 
 // Components and screens never import CSS themselves (the vite runnerImport test loader cannot load it);
 // each deck stylesheet is imported here, once. xterm's stylesheet is the exception: it is imported here and also
 // `@import`ed by terminal.css, and the production build carries its rules once.
 
-const { token, to } = captureToken({ location: window.location, history: window.history, storage: window.sessionStorage, durable: window.localStorage })
+// Remote access is the only reason this device keeps a token past the tab: on a local deck the token stays in
+// sessionStorage, as it always has, so a loopback tab does not turn a tab-lifetime secret into a stored one.
+const remote = pairable(window.location)
+const durable = remote || window.matchMedia?.('(display-mode: standalone)')?.matches ? window.localStorage : null
+const { token, to } = captureToken({ location: window.location, history: window.history, storage: window.sessionStorage, durable })
 if (to) window.history.replaceState(null, '', to)
-// The installed PWA shell: a service worker at the root, with scope '/', that caches the static shell only.
-// It is registered after load so it never competes with the first paint, and only in a secure context.
-if ('serviceWorker' in navigator && window.isSecureContext) {
+// The installed PWA shell: a service worker at the root, with scope '/', that caches the static shell only. It is
+// registered after load so it never competes with the first paint, and only over HTTPS: `isSecureContext` is true
+// on loopback too, and a local deck has no use for a worker.
+if ('serviceWorker' in navigator && window.location.protocol === 'https:') {
   window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {}) })
 }
 
@@ -69,6 +75,6 @@ const unlocked = nextToken => {
   window.localStorage.setItem(TOKEN_KEY, nextToken)
   window.location.replace('/')
 }
-createRoot(document.getElementById('root')).render(token
+createRoot(document.getElementById('root')).render(token || !remote
   ? <Shell store={store} connection={connection} api={api} screens={screens} />
   : <Unlock onUnlocked={unlocked} />)

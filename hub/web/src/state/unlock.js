@@ -10,6 +10,17 @@ export const TIMEOUT_MS = 8000
 export const SUCCESS_MS = 450
 
 /**
+ * Whether this page could ever pair: remote access is an opt-in tunnel, so a tab on IPv4 loopback is a local deck
+ * whose token comes from `fleetmates-deck open`, not from a passphrase. Such a tab without a token belongs on the
+ * shell's own authentication failure, not on a screen asking for a passphrase that does not exist.
+ * @param {{ hostname: string }} location
+ * @returns {boolean}
+ */
+export function pairable(location) {
+  return !['127.0.0.1', 'localhost', '[::1]', '::1'].includes(location.hostname)
+}
+
+/**
  * Trade the remote access passphrase for the deck token. The reply carries the deck's own token, so the request is
  * `no-store` and the caller stores the token itself, never a URL and never a cookie.
  *

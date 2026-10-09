@@ -35,6 +35,8 @@ export function parsePublicOrigin(value) {
   try { url = new URL(value) } catch { throw Error('public origin must be one https:// origin') }
   if (url.protocol !== 'https:') throw Error('public origin must use https://')
   if (!url.hostname) throw Error('public origin must name a host')
+  // A loopback public origin would shadow the deck's own checks for every local tab rather than open a tunnel.
+  if (['127.0.0.1', 'localhost', '[::1]', '::1', '0.0.0.0'].includes(url.hostname)) throw Error('public origin must not be a loopback host')
   if (url.username || url.password) throw Error('public origin must carry no credentials')
   if (!['', '/'].includes(url.pathname) || url.search || url.hash) throw Error('public origin must have no path, query or fragment')
   return { origin: url.origin, host: url.host, ws: `wss://${url.host}` }
@@ -50,15 +52,19 @@ export function parsePublicOrigin(value) {
 export function requestOrigin(req, port, publicOrigin = null) {
   return publicOrigin && req.headers.host === publicOrigin.host ? publicOrigin.origin : `http://127.0.0.1:${port}`
 }
-/** Check canonical Host, browser Origin, fetch metadata and token before routing. */
-export function authorize(req, { port, token, upgrade = false, api = true, publicOrigin = null }) {
+/**
+ * Check canonical Host, browser Origin, fetch metadata and token before routing. `api` turns on the browser checks
+ * every `/api` request gets: an Origin on writes, `sec-fetch-site`, no preflight. `requireToken` is separate from
+ * it, so the passphrase exchange, which is the one surface with no token to present, still gets all of them.
+ */
+export function authorize(req, { port, token, upgrade = false, api = true, requireToken = api, publicOrigin = null }) {
   const host = req.headers.host
   if (host !== `127.0.0.1:${port}` && !(publicOrigin && host === publicOrigin.host)) return { status: host === `localhost:${port}` ? 421 : 403, code: 'forbidden_host' }
   const origin = req.headers.origin
   if ((upgrade || api && !['GET', 'HEAD'].includes(req.method) || origin) && origin !== requestOrigin(req, port, publicOrigin)) return { status: 403, code: 'forbidden_origin' }
   if (api && req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(req.headers['sec-fetch-site'])) return { status: 403, code: 'forbidden_origin' }
   if (api && req.method === 'OPTIONS') return { status: 403, code: 'forbidden_origin' }
-  if (api) {
+  if (requireToken) {
     const protocols = String(req.headers['sec-websocket-protocol'] ?? '').split(',').map(value => value.trim())
     const carrier = upgrade ? protocols.find(value => value.startsWith('deck.auth.'))?.slice(10) : /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1]
     if (!sameToken(carrier, token) || upgrade && !protocols.includes('deck.v1')) return { status: 401, code: 'unauthorized' }
@@ -67,8 +73,9 @@ export function authorize(req, { port, token, upgrade = false, api = true, publi
 }
 /**
  * Set the common browser isolation headers and API cache policy. With a public origin the policy also allows that
- * origin and its `wss://` form in `connect-src`, and `worker-src 'self'` so `default-src 'none'` stops refusing the
- * service worker the installed PWA registers.
+ * origin and its `wss://` form in `connect-src`, and names `worker-src 'self'` for the service worker the installed
+ * PWA registers rather than leaving it to each engine's reading of `default-src 'none'`. The worker is registered
+ * over HTTPS only (web/src/main.jsx), so a loopback deck never needs this and its headers do not change.
  */
 export function securityHeaders(port, api = false, publicOrigin = null) {
   return {

@@ -18,6 +18,9 @@ test('a public origin is one exact https origin, and anything else is refused at
   assert.deepEqual(origin, { origin: 'https://machine.tail1234.ts.net', host: 'machine.tail1234.ts.net', ws: 'wss://machine.tail1234.ts.net' })
   assert.equal(parsePublicOrigin('https://machine.tail1234.ts.net/').origin, 'https://machine.tail1234.ts.net')
   assert.equal(parsePublicOrigin('https://machine.tail1234.ts.net:8443').host, 'machine.tail1234.ts.net:8443')
+  // The default port is not part of the origin a browser sends, so it must not be part of the one we compare to.
+  assert.deepEqual(parsePublicOrigin('https://machine.tail1234.ts.net:443'), parsePublicOrigin('https://machine.tail1234.ts.net'))
+  assert.equal(parsePublicOrigin('https://MACHINE.Tail1234.TS.NET').host, 'machine.tail1234.ts.net', 'a host is case insensitive')
   for (const value of [undefined, null, '']) assert.equal(parsePublicOrigin(value), null, `${value} keeps the deck loopback only`)
   for (const [value, reason] of [
     ['https://*.ts.net', /wildcard/],
@@ -30,6 +33,8 @@ test('a public origin is one exact https origin, and anything else is refused at
     ['https://machine.tail1234.ts.net/?x=1', /path, query or fragment/],
     ['https://machine.tail1234.ts.net/#f', /path, query or fragment/],
     ['https://user:pw@machine.tail1234.ts.net', /credentials/],
+    ['https://127.0.0.1:47800', /loopback/],
+    ['https://localhost', /loopback/],
     [47800, /https/]
   ]) assert.throws(() => parsePublicOrigin(value), reason, String(value))
 })
@@ -62,7 +67,7 @@ test('the public origin adds itself, its wss form and worker-src to the policy, 
   assert.doesNotMatch(plain, /tail1234/)
   const opened = securityHeaders(47800, false, origin)['Content-Security-Policy']
   assert.match(opened, /connect-src 'self' ws:\/\/127\.0\.0\.1:47800 https:\/\/machine\.tail1234\.ts\.net wss:\/\/machine\.tail1234\.ts\.net;/)
-  assert.match(opened, /worker-src 'self';/, "default-src 'none' blocks the service worker without it")
+  assert.match(opened, /worker-src 'self';/, 'the installed PWA registers a worker, so the policy names one')
   assert.equal(plain, opened.replace(" https://machine.tail1234.ts.net wss://machine.tail1234.ts.net", '').replace("worker-src 'self'; ", ''),
     'the opt-in changes the policy in those two places only')
   assert.equal(securityHeaders(47800, true, origin)['Cache-Control'], 'no-store')
@@ -112,40 +117,71 @@ posixTest('the record file is private, and only POSIX has a mode and an owner to
   assert.equal(readRemotePass(file, { uid: process.getuid() + 1 }).bad.includes('not by this user'), true)
 })
 
-test('the exchange is unavailable without a passphrase file, and rate limited once there is one', async t => {
+test('the exchange is unavailable without a passphrase file, and throttles wrong answers once there is one', async t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pass-'))
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
   const file = path.join(dir, 'remote-pass.json')
   let at = 1_000_000
   const slept = []
   const logged = []
-  const remote = createRemoteAccess({ file, now: () => at, maxAttempts: 3, windowMs: 1000, log: line => logged.push(line), sleep: ms => { slept.push(ms)
+  // A stand-in for the scrypt comparison, so the test counts what reaches it without paying for 128 MiB a time.
+  const tried = []
+  const compare = async (passphrase, record) => { tried.push(passphrase)
+    return passphrase === 'correct horse battery' && record.v === 1 }
+  const remote = createRemoteAccess({ file, now: () => at, maxAttempts: 3, windowMs: 1000, compare, log: line => logged.push(line), sleep: ms => { slept.push(ms)
     return Promise.resolve() } })
   assert.equal(remote.enabled(), false)
   assert.deepEqual(await remote.verify('correct horse battery'), { ok: false, code: 'pairing_unavailable' })
   writeRemotePass(file, await hashPassphrase('correct horse battery'))
   assert.equal(remote.enabled(), true)
+  // Too short to be the passphrase: refused before scrypt, and never counted, so free requests cannot fill the window.
+  assert.deepEqual(await remote.verify(''), { ok: false, code: 'unauthorized' })
+  assert.deepEqual(await remote.verify('short'), { ok: false, code: 'unauthorized' })
+  assert.deepEqual(tried, [], 'neither reached the comparison')
   assert.deepEqual(await remote.verify('wrong one here'), { ok: false, code: 'unauthorized' })
   assert.deepEqual(await remote.verify('wrong two here'), { ok: false, code: 'unauthorized' })
   assert.deepEqual(slept, [250, 500], 'a wrong answer costs more each time')
-  assert.deepEqual(await remote.verify('wrong three here'), { ok: false, code: 'unauthorized' })
-  const blocked = await remote.verify('correct horse battery')
-  assert.equal(blocked.ok, false)
-  assert.equal(blocked.code, 'too_many_attempts', 'the right passphrase is refused too while the window is full')
-  assert.equal(blocked.retryAfterMs, 1000)
-  // The window passes and the counter empties.
-  at += 1001
-  assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
-  // A success clears what the failures before it left.
-  for (let i = 0; i < 2; i++) await remote.verify('wrong again here')
+  const full = await remote.verify('wrong three here')
+  assert.equal(full.code, 'too_many_attempts')
+  assert.equal(full.retryAfterMs, 1000, 'what is left of the window, for the Retry-After header')
+  // The owner is never locked out by someone else's wrong guesses: a full window still verifies, and the right
+  // passphrase gets through and clears the counter.
   assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
   assert.deepEqual(await remote.verify('wrong once more'), { ok: false, code: 'unauthorized' })
   assert.equal(slept.at(-1), 250, 'the delay restarts after a success')
+  at += 1001
+  assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
   // A file that exists but cannot be used reads as "no passphrase set", and says why once.
   fs.writeFileSync(file, '{"v":9}', { mode: 0o600 })
   assert.deepEqual(await remote.verify('correct horse battery'), { ok: false, code: 'pairing_unavailable' })
   assert.deepEqual(await remote.verify('correct horse battery'), { ok: false, code: 'pairing_unavailable' })
   assert.deepEqual(logged, ['remote_pass.rejected not a passphrase record'])
+})
+
+test('concurrent attempts are serialized and bounded: a burst cannot outrun the counter or flood scrypt', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pass-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  const file = path.join(dir, 'remote-pass.json')
+  writeRemotePass(file, await hashPassphrase('correct horse battery'))
+  let running = 0
+  let peak = 0
+  let reached = 0
+  // A comparison that yields, as scrypt does: without the queue every caller would be inside it at once.
+  const compare = async passphrase => {
+    reached++
+    peak = Math.max(peak, ++running)
+    await new Promise(resolve => setImmediate(resolve))
+    running--
+    return passphrase === 'correct horse battery'
+  }
+  const remote = createRemoteAccess({ file, maxAttempts: 10, maxPending: 3, compare, sleep: () => Promise.resolve(), log: () => {} })
+  const results = await Promise.all(Array.from({ length: 200 }, (_, i) => remote.verify(`wrong guess ${i}`)))
+  assert.equal(peak, 1, 'one derivation at a time, or a peer queues a thousand 128 MiB jobs on the threadpool')
+  assert.ok(reached <= 10, `at most maxAttempts reach the comparison, not ${reached}`)
+  assert.equal(results.filter(result => result.code === 'too_many_attempts').length, 200 - reached, 'the rest are refused without work')
+  assert.equal(results.filter(result => result.ok).length, 0)
+  // And the owner still gets in right after the burst.
+  assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
 })
 
 test('the CLI writes the public origin to config.json and the passphrase, read from stdin, to its own file', async t => {

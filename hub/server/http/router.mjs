@@ -47,13 +47,16 @@ export function createRouter({ api, staticDir, getToken, getPort, getPublicOrigi
     const port = getPort()
     const publicOrigin = getPublicOrigin()
     const isApi = /^\/api(?:\/|\?|$)/.test(req.url)
-    const isPair = publicOrigin !== null && remote !== null && req.url === PAIR_PATH
+    // The exchange is routed whether or not remote access is on, so a deck without it answers a real 404 instead
+    // of the SPA fallback's 200 and an HTML body. It gets every browser check `/api` gets; only the token, which
+    // is the thing it exists to hand out, is not required.
+    const isPair = req.url === PAIR_PATH
     for (const [key, value] of Object.entries(securityHeaders(port, isApi || isPair, publicOrigin))) res.setHeader(key, value)
     try {
-      const auth = authorize(req, { port, token: getToken(), api: isApi, publicOrigin })
+      const auth = authorize(req, { port, token: getToken(), api: isApi || isPair, requireToken: isApi, publicOrigin })
       if (auth) {
-        // 421 answers a `localhost:<port>` Host, so the redirect names the origin that Host arrived through:
-        // the public one when the request came by the tunnel, else IPv4 loopback.
+        // 421 answers a `localhost:<port>` Host, which only a local browser sends, so this Location is always
+        // the loopback origin; `requestOrigin` is used for the one rule that decides both it and the URL base.
         if (auth.status === 421) res.setHeader('Location', `${requestOrigin(req, port, publicOrigin)}/`)
         throw apiError(auth.status, auth.code)
       }
@@ -64,6 +67,7 @@ export function createRouter({ api, staticDir, getToken, getPort, getPublicOrigi
         // size of the deck token, and revoking one phone means rotating that token (`init --rotate-token`) for
         // every client. That is deliberate; a per-device token store is the change to make if it stops being enough.
         if (req.method !== 'POST') throw apiError(404, 'not_found')
+        if (publicOrigin === null || remote === null) throw apiError(404, 'pairing_unavailable')
         const body = await readBody(req)
         const result = await remote.verify(typeof body.passphrase === 'string' ? body.passphrase : '')
         if (!result.ok) {

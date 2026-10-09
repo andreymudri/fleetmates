@@ -337,7 +337,8 @@ Three steps, all on the machine that runs the deck.
    `remote-pass` asks for the passphrase on the terminal, twice, and never takes it as an argument
    (arguments show up in `ps` and in your shell history). It is stored as a scrypt hash in
    `~/.local/state/fleetmates/deck/remote-pass.json`, mode 0600. At least 10 characters, and the
-   obvious ones are refused.
+   obvious ones are refused. It also reads a piped stdin, for a password manager; `echo` into it and
+   the passphrase lands in your shell history, so prefer a file or the prompt.
 
 3. On the phone, open the origin. The deck shows Unlock: type the passphrase, then "Add to home
    screen". The deck trades the passphrase for its token, the installed app keeps that token, and
@@ -352,10 +353,16 @@ never sends its size to the server: the PTY is the one running on your machine, 
 390px phone would reflow the terminal you are working in. Claude Code output stays laid out for the
 width the machine set.
 
-What the pairing screen hands the phone is the deck's own token, not a per-device one. Revoking a
-phone therefore means rotating the deck token (`fleetmates-deck init --rotate-token`), which signs
-out every client, including your browser. The exchange is rate limited globally, 10 attempts per 5
-minutes with a growing delay, as defence in depth: the tailnet is the real perimeter.
+What Unlock hands the phone is the deck's own token, not a per-device one. "Sign out this device"
+in Settings, Connections forgets that copy on the phone; revoking a phone you no longer hold means
+rotating the deck token (`fleetmates-deck init --rotate-token`), which signs out every client,
+including your browser.
+
+The exchange is throttled rather than locked: attempts run one at a time, a wrong one costs a delay
+that doubles up to 4 seconds, anything arriving while three are already queued is refused without
+being checked, and after 10 wrong answers in 5 minutes every further wrong answer is refused with a
+`Retry-After`. The right passphrase is always checked, so nobody on your tailnet can lock you out of
+your own deck by guessing at it. All of that is defence in depth: the tailnet is the real perimeter.
 
 The installed app caches only the static shell (HTML, JS, CSS, icons, fonts). Nothing under `/api`
 or `/.well-known` is ever cached, and the WebSocket does not go through the service worker, so no

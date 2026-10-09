@@ -97,16 +97,26 @@ test('the passphrase exchange returns the deck token, and refuses a wrong one an
   const wrong = await h.pair('not the passphrase')
   assert.equal(wrong.status, 401)
   assert.equal(wrong.data.error.code, 'unauthorized')
-  for (let i = 0; i < 9; i++) await h.pair('not the passphrase')
-  const flooded = await h.pair(PASSPHRASE)
-  assert.equal(flooded.status, 429)
-  assert.equal(flooded.data.error.code, 'too_many_attempts')
-  // The Unlock screen counts down from this header and never invents a number when it is absent.
-  assert.match(flooded.headers['retry-after'], /^\d+$/)
   assert.equal(wrong.headers['retry-after'], undefined, 'a wrong passphrase carries no wait')
+  // A burst, not a loop: the window check and the counter sat on either side of an await, so concurrent posts
+  // used to read an empty counter and all reach scrypt. Most of these must be refused without any work.
+  const burst = await Promise.all(Array.from({ length: 40 }, (_, i) => h.pair(`not the passphrase ${i}`)))
+  const refused = burst.filter(response => response.status === 429)
+  assert.ok(refused.length >= 30, `the burst is bounded, ${refused.length} of 40 refused outright`)
+  assert.match(refused[0].headers['retry-after'], /^\d+$/, 'the Unlock screen counts down from this header')
+  assert.equal(burst.filter(response => response.status === 200).length, 0)
+  // The owner is never locked out by someone else's guesses.
+  const right = await h.pair(PASSPHRASE)
+  assert.equal(right.status, 200)
+  assert.equal(right.data.token, token)
   // The exchange is still a same-origin surface: a foreign Origin never reaches it.
   assert.equal((await h.request('/.well-known/fleetmates-deck/pair', { 'Content-Type': 'application/json', Origin: 'https://evil.example' }, 'POST', '{}')).status, 403)
   assert.equal((await h.request('/.well-known/fleetmates-deck/pair')).status, 404, 'GET is not the exchange')
+  // The exchange carries no token, so it gets the other API checks instead: a POST with no Origin at all, and a
+  // cross-site fetch metadata header, are both refused.
+  assert.equal((await h.request('/.well-known/fleetmates-deck/pair', { 'Content-Type': 'application/json', Origin: null }, 'POST', '{}')).status, 403)
+  assert.equal((await h.request('/.well-known/fleetmates-deck/pair', { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'cross-site' }, 'POST', '{}')).status, 403)
+  assert.equal((await h.request('/.well-known/fleetmates-deck/pair', { 'Content-Type': 'application/json' }, 'OPTIONS')).status, 403, 'no preflight')
 })
 
 test('without a public origin nothing changes: no exchange, no worker-src, no tunnel host', async t => {
@@ -116,9 +126,12 @@ test('without a public origin nothing changes: no exchange, no worker-src, no tu
   assert.equal((await h.request('/api/version', { Authorization: `Bearer ${token}` })).status, 403, 'the tunnel host is a foreign host again')
   const page = await h.request('/', { ...loopback, Origin: null })
   assert.doesNotMatch(page.headers['content-security-policy'], /worker-src|tail1234/)
+  // A real JSON 404, not the SPA fallback: a 200 with an index.html body would read to the client as a deck that
+  // cannot be reached, and a desktop tab without a token would be told to check its tailnet.
   const pair = await h.request('/.well-known/fleetmates-deck/pair', { ...loopback, 'Content-Type': 'application/json' }, 'POST', JSON.stringify({ passphrase: PASSPHRASE }))
   assert.equal(pair.status, 404, 'the exchange does not exist without the opt-in')
-  assert.equal(pair.data.error.code, 'not_found')
+  assert.equal(pair.headers['content-type'], 'application/json; charset=utf-8')
+  assert.equal(pair.data.error.code, 'pairing_unavailable')
 })
 
 test('the exchange is unavailable when no passphrase was ever set', async t => {

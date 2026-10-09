@@ -30,6 +30,27 @@ export function captureToken({ location, history, storage, durable = null }) {
 }
 
 /**
+ * Whether this device kept the token past the life of its tab. Only remote access does that, so this is also the
+ * test for "is there anything to sign out of" (`durable` is the localStorage of main.jsx).
+ * @param {Storage | null | undefined} durable
+ * @returns {boolean}
+ */
+export function tokenIsDurable(durable) {
+  try { return !!durable?.getItem(TOKEN_KEY) } catch { return false }
+}
+
+/**
+ * Forget the deck token on this device, in both stores. The deck token itself is unchanged: another device that
+ * paired with the same passphrase keeps working, and revoking everything is still `init --rotate-token`.
+ * @param {{ storage?: Storage | null, durable?: Storage | null }} stores
+ */
+export function forgetToken({ storage, durable }) {
+  for (const store of [storage, durable]) {
+    try { store?.removeItem(TOKEN_KEY) } catch {}
+  }
+}
+
+/**
  * WebSocket subprotocols: the version marker plus the raw token (05-api.md section 1).
  * @param {string} token
  * @returns {string[]}
