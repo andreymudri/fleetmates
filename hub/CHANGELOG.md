@@ -5,7 +5,7 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
-## Unreleased
+## v0.6.0
 
 Platform support: the deck runs on Linux, macOS and native Windows (D-149,
 `docs/deck/16-platforms.md`).
