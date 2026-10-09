@@ -334,7 +334,8 @@ export function TerminalView({
 
       let attachedOnce = false
       const attach = () => {
-        handle = client.attach(sessionId, { cols: term.cols, rows: term.rows }, handlers)
+        // The attach carries the guard too: the server fits the PTY to the first attach's size unless told not to.
+        handle = client.attach(sessionId, { cols: term.cols, rows: term.rows, resize: !phoneAtAttach }, handlers)
       }
       const handlers = {
         onAttached: () => {

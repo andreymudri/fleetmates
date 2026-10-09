@@ -91,7 +91,8 @@ export function decodeServerFrame(buffer) {
 export function createTerminalClient(connection) {
   const attached = new Map()
   let tails = null
-  const sendAttach = (sessionId, entry) => connection.send({ t: 'term.attach', sessionId, cols: entry.cols, rows: entry.rows })
+  // `resize: false` (a phone) asks the server to attach without fitting the PTY to this tab's size.
+  const sendAttach = (sessionId, entry) => connection.send({ t: 'term.attach', sessionId, cols: entry.cols, rows: entry.rows, ...(entry.resize === false ? { resize: false } : {}) })
   const off = [
     connection.onTerm(message => {
       const entry = attached.get(message?.sessionId)
@@ -116,8 +117,8 @@ export function createTerminalClient(connection) {
     })
   ]
   return {
-    attach(sessionId, { cols, rows }, handlers = {}) {
-      const entry = { cols, rows, handlers }
+    attach(sessionId, { cols, rows, resize = true }, handlers = {}) {
+      const entry = { cols, rows, resize, handlers }
       attached.set(sessionId, entry)
       sendAttach(sessionId, entry)
       const current = () => attached.get(sessionId) === entry

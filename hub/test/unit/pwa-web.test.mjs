@@ -206,6 +206,8 @@ test('the key bar fires on release, survives a reader tap, and never outlives it
   // The render flag follows the query; the resize guard keeps its own, read when the PTY is attached.
   assert.match(source, /const phoneAtAttach = phoneViewport\(scope\)/)
   assert.match(source, /if \(!phoneAtAttach\) handle\?\.resize/)
+  // The first attach is a resize too (the server fits the PTY to it), so it carries the same guard.
+  assert.match(source, /client\.attach\(sessionId, \{ cols: term\.cols, rows: term\.rows, resize: !phoneAtAttach \}, handlers\)/)
   assert.match(source, /query\.addEventListener\('change', onChange\)/)
   const mobile = await readFile(`${web}src/styles/mobile.css`, 'utf8')
   assert.match(mobile, /touch-action: pan-x/)
