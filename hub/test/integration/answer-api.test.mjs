@@ -21,6 +21,9 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const scriptsDir = path.resolve(here, '..', 'fixtures', 'scripts')
 const VERSION = '2.1.285'
 const token = 'a'.repeat(43)
+// A test that needs a Safe request. The server classifies with the host platform, and on win32 the floor.platform
+// reason makes every request at least Caution (server/approvals/tiers.mjs), so these skip there.
+const safeTest = (name, fn) => test(name, { skip: process.platform === 'win32' && 'every request asks on Windows (floor.platform)' }, fn)
 
 let rt
 let deckd
@@ -177,7 +180,7 @@ test('a Destructive answer without confirm is 409 confirm_required and the fake 
   assert.deepEqual(inputs(s.log), ['1'])
 })
 
-test('a batch holding a Destructive id is 409 batch_not_safe and answers none', async t => {
+safeTest('a batch holding a Destructive id is 409 batch_not_safe and answers none', async t => {
   const h = await server(t)
   const s = await spawn(t, h, 'prompt-swap')
   const safe = await s.request('npm run test', { onScreen: false })
@@ -258,7 +261,7 @@ test('a popup allow action on a Destructive request answers nothing and opens th
   assert.equal(h.notifierClosed(), 1)
 })
 
-test('a popup allow action on a Safe request answers it once through the deliverer, via popup', async t => {
+safeTest('a popup allow action on a Safe request answers it once through the deliverer, via popup', async t => {
   const h = await server(t)
   const s = await spawn(t, h, 'approve-safe')
   const req = await s.request('npm run test')
@@ -271,7 +274,7 @@ test('a popup allow action on a Safe request answers it once through the deliver
   assert.deepEqual(h.opened, [], 'an allow opens nothing')
 })
 
-test('a tiers.json change raises an open request and is audited; a broken file is rejected and reported', async t => {
+safeTest('a tiers.json change raises an open request and is audited; a broken file is rejected and reported', async t => {
   const h = await server(t, { notifications: false })
   const s = await spawn(t, h, 'approve-safe')
   const req = await s.request('npm run test')
@@ -291,7 +294,7 @@ test('a tiers.json change raises an open request and is audited; a broken file i
   assert.equal(s.row(req.id).tier, 'caution', 'the previous set stays in force')
 })
 
-test('approve-safe through HTTP closes the request and publishes request.updated then request.closed; unknown keys are refused', async t => {
+safeTest('approve-safe through HTTP closes the request and publishes request.updated then request.closed; unknown keys are refused', async t => {
   const h = await server(t)
   const s = await spawn(t, h, 'approve-safe')
   const req = await s.request('npm run test')
@@ -377,7 +380,7 @@ test('the follow-up after a deck deny reaches the fake over HTTP as one sanitize
   assert.equal(entries(s.log).find(entry => entry.expectInput).expectInput, '\x1b[200~use pnpm[A instead\x1b[201~\r')
 })
 
-test('answer-batch refuses any choice but allow and answers nothing; with allow it returns one result per id', async t => {
+safeTest('answer-batch refuses any choice but allow and answers nothing; with allow it returns one result per id', async t => {
   const h = await server(t, { notifications: false })
   const s = await spawn(t, h, 'approve-safe')
   const req = await s.request('npm run test')
@@ -395,7 +398,7 @@ test('answer-batch refuses any choice but allow and answers nothing; with allow 
   assert.deepEqual(JSON.parse(s.row(req.id).answer), { via: 'batch', choice: 'allow' })
 })
 
-test('a popup allow the deliverer refuses at click time opens the session instead (state-machines 2.7 row 6)', async t => {
+safeTest('a popup allow the deliverer refuses at click time opens the session instead (state-machines 2.7 row 6)', async t => {
   const h = await server(t)
   const s = await spawn(t, h, inline([
     { hook: 'PermissionRequest', variant: 'Bash', with: bashInput('cat notes.txt', 'Read the notes') }, CLEAR,

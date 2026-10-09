@@ -11,6 +11,7 @@ import { once } from 'node:events'
 import { WebSocket } from 'ws'
 import { startDeckServer } from '../../server/main.mjs'
 import { setupPaths } from '../../server/setup/paths.mjs'
+import { endpoint } from '../../platform/index.mjs'
 
 const token = 'a'.repeat(43)
 const HOUR = 3_600_000
@@ -246,7 +247,8 @@ test('an archived live session that gets a permission hook on the hook socket is
   assert.equal(snapshot.sessions.find(session => session.id === id).archivedBy, 'owner')
   assert.equal(snapshot.counts.archived, 1)
 
-  const sock = net.connect(path.join(h.env.XDG_RUNTIME_DIR, 'fleetmates-deck/hooks.sock'))
+  // The hook endpoint the server listens on for this XDG_RUNTIME_DIR: a Unix socket on POSIX, a named pipe on win32.
+  const sock = net.connect(endpoint(h.env.XDG_RUNTIME_DIR, 'hooks'))
   await once(sock, 'connect')
   sock.end(JSON.stringify({ v: 1, hookTs: Date.now(), ptyId: null, claudePid: null, pidChain: [], truncated: false,
     hook: { ...fixture, cwd: h.dir, hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'pwd' } } }) + '\n')

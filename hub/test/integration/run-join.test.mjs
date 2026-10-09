@@ -118,9 +118,10 @@ test('a lead running scripts/cli.mjs --run from the repo root becomes the run le
   const one = await h.request('/api/runs/alpha/r1')
   assert.equal(one.status, 200)
   assert.equal(one.data.run.leadSessionId, lead.id)
-  // `--run=<id>` and a quoted cli path are the same call.
+  // `--run=<id>` and a quoted cli path are the same call. The path is written with forward slashes, which is what
+  // the lead pattern matches (`scripts/cli.mjs`, server/machines/session.mjs); on linux this is path.join unchanged.
   h.start('lead-2', h.repo)
-  h.bash('lead-2', h.repo, `node "${path.join(h.repo, 'scripts', 'cli.mjs')}" gate --plan p.md --run=r1 --phase 1`)
+  h.bash('lead-2', h.repo, `node "${path.join(h.repo, 'scripts', 'cli.mjs').replaceAll(path.sep, '/')}" gate --plan p.md --run=r1 --phase 1`)
   assert.equal(h.sessionFor('lead-2').role, 'lead')
 })
 

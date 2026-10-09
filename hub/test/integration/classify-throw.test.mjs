@@ -73,7 +73,9 @@ test('a constructor PermissionRequest is rated Caution, and a later request and 
   h.send('PermissionRequest', at + 2000, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
   h.send('Stop', at + 3000, { stop_hook_active: false })
   const requests = await allRequests(h)
-  assert.deepEqual(requests.map(row => [row.createdAt - at, row.summary, row.tier]).sort((a, b) => a[0] - b[0]), [[1000, 'constructor', 'caution'], [2000, 'pwd', 'safe']])
+  // On win32 the floor.platform reason makes every request at least Caution (server/approvals/tiers.mjs).
+  const pwdTier = process.platform === 'win32' ? 'caution' : 'safe'
+  assert.deepEqual(requests.map(row => [row.createdAt - at, row.summary, row.tier]).sort((a, b) => a[0] - b[0]), [[1000, 'constructor', 'caution'], [2000, 'pwd', pwdTier]])
   assert.ok(reasonIds(h, requests.find(row => row.summary === 'constructor').id).includes('unknown.command'))
   // The Stop applied too: it is the session's last activity.
   const sessions = (await h.request('/api/sessions')).data.sessions
