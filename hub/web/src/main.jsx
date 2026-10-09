@@ -30,7 +30,7 @@ import { deckScreens } from './screens/failures/Failures.jsx'
 import { createTerminalClient } from './state/terminal.js'
 import { Unlock } from './screens/unlock/Unlock.jsx'
 import { TOKEN_KEY } from './state/api.js'
-import { pairable } from './state/unlock.js'
+import { forgetRejectedToken, pairable } from './state/unlock.js'
 
 // Components and screens never import CSS themselves (the vite runnerImport test loader cannot load it);
 // each deck stylesheet is imported here, once. xterm's stylesheet is the exception: it is imported here and also
@@ -63,6 +63,11 @@ const connection = createConnection({
   reload: () => window.location.reload()
 })
 connection.start()
+// A rotated token sends a paired phone back to Unlock rather than to a fatal screen it cannot act on.
+const stopForgetting = store.subscribe(() => {
+  if (forgetRejectedToken({ remote, state: store.getState().connection.state, storages: [window.sessionStorage, window.localStorage],
+    key: TOKEN_KEY, reload: () => window.location.replace('/') })) stopForgetting()
+})
 
 const terminals = createTerminalClient(connection)
 const screens = deckScreens({ api, feed, terminals, dispatch: store.dispatch })

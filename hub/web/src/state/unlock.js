@@ -68,3 +68,18 @@ export function refusal(status, code) {
 export function waitMessage(seconds) {
   return seconds < 60 ? { key: 'unlock.wait.seconds', params: { n: seconds } } : { key: 'unlock.wait.minutes', params: { n: Math.ceil(seconds / 60) } }
 }
+
+/**
+ * Forget a rejected token on a remote device and go back to Unlock. `init --rotate-token` is how the owner revokes
+ * every paired phone; the phone still holds the old token durably, and without this it would open on the shell's
+ * "token rejected" screen, which tells it to run a command only the machine can run. A local tab keeps that
+ * screen: its token comes from `fleetmates-deck open`, not from a passphrase.
+ * @param {{ remote: boolean, state: string, storages: { removeItem: (key: string) => void }[], key: string, reload: () => void }} options
+ * @returns {boolean} whether the token was forgotten
+ */
+export function forgetRejectedToken({ remote, state, storages, key, reload }) {
+  if (!remote || state !== 'token_invalid') return false
+  for (const storage of storages) { try { storage.removeItem(key) } catch {} }
+  reload()
+  return true
+}

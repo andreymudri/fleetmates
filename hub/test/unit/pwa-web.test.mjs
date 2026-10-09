@@ -5,7 +5,7 @@ import path from 'node:path'
 import { runnerImport } from 'vite'
 import { fileURLToPath } from 'node:url'
 import { TOKEN_KEY, captureToken, forgetToken, tokenIsDurable, wsUrl } from '../../web/src/state/api.js'
-import { UNLOCK_COMMAND, UNLOCK_PATH, exchangePassphrase, pairable, refusal, waitMessage } from '../../web/src/state/unlock.js'
+import { UNLOCK_COMMAND, UNLOCK_PATH, exchangePassphrase, forgetRejectedToken, pairable, refusal, waitMessage } from '../../web/src/state/unlock.js'
 import { messages as en } from '../../web/src/i18n/en.js'
 
 const web = fileURLToPath(new URL('../../web/', import.meta.url))
@@ -254,4 +254,20 @@ test('the recording bar quiet note is a button, reachable without hover', async 
   assert.doesNotMatch(rec, /role="tooltip"/, 'a tooltip no tap can open is not an affordance')
   const shell = await readFile(`${web}src/styles/shell.css`, 'utf8')
   assert.doesNotMatch(shell, /rec-bar-quiet-info:hover/, 'there is no hover on touch')
+})
+
+test('a remote device forgets a rejected token and goes back to Unlock; a local tab keeps the fatal screen', async () => {
+  const store = () => { const map = new Map([['k', 'old']]); return { map, removeItem: key => map.delete(key) } }
+  const session = store(), durable = store()
+  let reloads = 0
+  assert.equal(forgetRejectedToken({ remote: true, state: 'token_invalid', storages: [session, durable], key: 'k', reload: () => reloads++ }), true)
+  assert.equal(session.map.has('k') || durable.map.has('k'), false, 'both copies are gone')
+  assert.equal(reloads, 1)
+  const local = store()
+  assert.equal(forgetRejectedToken({ remote: false, state: 'token_invalid', storages: [local], key: 'k', reload: () => reloads++ }), false)
+  assert.equal(forgetRejectedToken({ remote: true, state: 'live', storages: [local], key: 'k', reload: () => reloads++ }), false)
+  assert.equal(local.map.get('k'), 'old')
+  assert.equal(reloads, 1)
+  const main = await readFile(new URL('../../web/src/main.jsx', import.meta.url), 'utf8')
+  assert.match(main, /forgetRejectedToken\(\{ remote, state: store\.getState\(\)\.connection\.state, storages: \[window\.sessionStorage, window\.localStorage\]/)
 })
