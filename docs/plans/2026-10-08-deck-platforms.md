@@ -493,6 +493,8 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 - Test: `hub/test/unit/hook-platform.test.mjs`
 - Test: `hub/test/unit/service.test.mjs`
 - Test: `hub/test/integration/deckd.test.mjs`
+- Test: `hub/test/integration/fm.test.mjs`
+- Test: `hub/test/contract/hooks.test.mjs`
 
 **Depends:** T10, T11, T12, T13, T14, T15
 
@@ -501,8 +503,31 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 **Acceptance:**
 - Threat: on Windows a named pipe name is machine-global. Another local user who can predict `\\.\pipe\fleetmates-deck-<h>-<name>` can create it first and receive hook envelopes or fm keystrokes. Fix: on win32 the pipe name also hashes a 32-byte random secret stored in `<deckDir(base)>\endpoint.key`. `deckDir` lives under `%LOCALAPPDATA%`, which only the user, SYSTEM and Administrators can read. `endpoint(base, name, { platform, secret })` on win32 takes `<h>` = the first 16 hex digits of SHA-256 of `resolved-lowercased-base + '\0' + secret`; without a secret on win32 it throws. A new `endpointSecret(base, { platform, create })` reads the key file, and with `create: true` writes it (exclusive create, then reread) when it is missing. deckd and the server call it with `create: true`; the clients (deckd client, link, hook, fm) read it and treat a missing key as "deckd/server not running" (the hook spools). POSIX endpoints are unchanged and take no secret.
 - The hook's inline `hookEndpoint` computes the same name; `hook-platform.test.mjs` pins parity with a secret.
+- Amendment (2026-10-09, phase 5 security review): a persistent key makes the names stable across restarts, and any local user can list `\\.\pipe\`, so a name seen once can be created first during a later restart. Each endpoint therefore has its own key (`endpoint-<name>.key`), and its creator (deckd for `deckd`, the server for `hooks`) writes a fresh key every time it starts listening, after making sure no live instance answers on the current name (deckd keeps refusing to run twice). Clients reread the key on every connect. Two creators racing over a malformed or missing key must not end up on different names than the clients compute. `fm.test.mjs` and `contract/hooks.test.mjs` create the key with `endpointSecret` before they listen on a win32 endpoint.
 - `service.mjs` detached `stop`: before `taskkill`, the pid is confirmed to be this deck's process by its command line (from `wmic`-free `Get-CimInstance Win32_Process` output or `tasklist /V` is not enough; use `powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter 'ProcessId=<n>').CommandLine"` through `run`) containing the service's entry path; otherwise the pid file is removed without killing. A failed `taskkill` is followed by a recheck, and stop reports failure if the process is still alive. Both paths have tests with injected `run`.
 - Mutations each fail a test, then are restored: endpoint without the secret on win32; the hook's copy ignoring the secret; stop killing without the command-line check.
+
+- [ ] Step 1: Write the tests; observe them fail.
+- [ ] Step 2: Implement; run the mutations; restore; run the hub suite; commit only the declared files.
+
+### Task 18: deckd makes the macOS spawn helper executable when npm skipped the postinstall
+
+**Files:**
+- Modify: `hub/bin/prepare-native.mjs`
+- Modify: `hub/deckd/pty-host.mjs`
+- Test: `hub/test/unit/prepare-native.test.mjs`
+- Test: `hub/test/unit/pty-signals.test.mjs`
+
+**Depends:** T16
+
+**Model:** mid
+
+**Acceptance:**
+- Measured on 2026-10-09: npm 11.19.0 (`npm install -g <tarball>`, on Linux and on the Windows VM) skips install scripts not covered by `allowScripts`, including the deck's own `postinstall` (`node bin/prepare-native.mjs`), even when the package is named in `--allow-scripts` for a tarball install. On macOS that leaves node-pty 1.1.0's prebuilt `spawn-helper` without execute bits, so every PTY spawn would fail.
+- `prepare-native.mjs` gains `prepareNativeSync(opts)` with the same contract as `prepareNative` (darwin only, the same three helper paths, `O_NOFOLLOW` open, regular file only, adds `0o111`, throws when none is found); `prepareNative` keeps its behaviour.
+- `pty-host.mjs`: on darwin, before the first node-pty spawn in the process, `PtyHost` runs the injectable `prepare` dep (default `prepareNativeSync`) once; a throw is a `spawn_failed` `DeckdError` whose message says to reinstall, and node-pty is not called. Later spawns do not run it again after a success. Other platforms never run it.
+- Tests: `pty-signals.test.mjs` with an injected platform `darwin`, an injected `ptySpawn` and an injected `prepare` pins: prepare runs before ptySpawn, runs once across two hosts, a throwing prepare gives `spawn_failed` without calling ptySpawn; with platform `linux` prepare is never called. `prepare-native.test.mjs` covers `prepareNativeSync` like `prepareNative` (missing helper rejected, execute bits added as a `posixTest`, symlinked helper refused).
+- Mutations each fail a test, then are restored: drop the darwin prepare call in pty-host; run it on every platform; `prepareNativeSync` not adding the execute bits.
 
 - [ ] Step 1: Write the tests; observe them fail.
 - [ ] Step 2: Implement; run the mutations; restore; run the hub suite; commit only the declared files.
@@ -516,14 +541,15 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 - Modify: `hub/README.md`
 - Modify: `hub/CHANGELOG.md`
 - Modify: `.github/workflows/deck.yml`
+- Test: `hub/test/unit/m1-scaffold.test.mjs`
 
 **Depends:** T16
 
 **Model:** mid
 
 **Acceptance:**
-- `16-platforms.md`: section 3 records the measured pipe DACL (Everyone and Anonymous read, SYSTEM and Administrators full, creator full; a second `listen` on the same name fails EADDRINUSE) and the per-user endpoint secret of Task 16; section 5 records the ConPTY facts (SystemRoot, failed spawn refusal, win32-input-mode filtering, no `O_NOFOLLOW` and `openNoFollow`); section 6 records the Task 12 decision (POSIX path parsing for Bash, case-insensitive deck paths, no rule writes on win32); section 8 describes the VM verification and the CI job. `13-operations.md` gains macOS (launchd) and Windows (`fleetmates-deck start`/`stop`, Run key, logs) operations. `14-decisions.md` gains D-149 (the deck runs on macOS and native Windows; 16-platforms) and D-150 (approvals on Windows: ask always, POSIX parsing, no rule writes). `hub/README.md` lists the three platforms and the Node floor `>=24.16.0`. `hub/CHANGELOG.md` gets an Unreleased section with the platform support.
-- `.github/workflows/deck.yml`: the hub job runs on a matrix of `ubuntu-latest`, `macos-latest` and `windows-latest`; on Windows it runs `npm --prefix hub test` with Chrome from the runner image; the Linux-only steps stay on Linux.
+- `16-platforms.md`: section 3 records the measured pipe DACL (Everyone and Anonymous read, SYSTEM and Administrators full, creator full; a second `listen` on the same name fails EADDRINUSE) and the per-user endpoint secret of Task 16; section 5 records the ConPTY facts (SystemRoot, failed spawn refusal, win32-input-mode filtering, no `O_NOFOLLOW` and `openNoFollow`); section 6 records the Task 12 decision (POSIX path parsing for Bash, case-insensitive deck paths, no rule writes on win32); section 8 describes the VM verification and the CI job. `13-operations.md` gains macOS (launchd) and Windows (`fleetmates-deck start`/`stop`, Run key, logs) operations. `14-decisions.md` gains D-149 (the deck runs on macOS and native Windows; 16-platforms) and D-150 (approvals on Windows: ask always, POSIX parsing, no rule writes). `hub/README.md` lists the three platforms and the Node floor `>=24.16.0`. `hub/CHANGELOG.md` gets an Unreleased section with the platform support. `13-operations.md` also records two measured install and start facts: npm 11 skips install scripts by default (Task 18 makes deckd prepare the macOS helper itself), and on Windows a deck started over an OpenSSH session is killed when that session ends, so start it from a local console or let the Run key start it at logon.
+- `.github/workflows/deck.yml`: the hub job runs on a matrix of `ubuntu-latest`, `macos-latest` and `windows-latest`; on Windows it runs `npm --prefix hub test` with Chrome from the runner image; the Linux-only steps stay on Linux. `m1-scaffold.test.mjs` 'deck CI declares...' is updated to assert the three-OS matrix (it currently asserts no `windows-latest`); its other assertions keep their meaning.
 - Docs: English, plain prose, no em dash, placeholders for personal paths.
 
 - [ ] Step 1: Edit; commit only the declared files.
