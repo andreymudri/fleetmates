@@ -175,10 +175,11 @@ function holderIsDeck (record, { alive, creationTime }) {
  * it appears whole or not at all. A lock whose holder is a live deck server (holderIsDeck) refuses
  * with EADDRINUSE and `holder`. Any other lock is stale and is moved aside with a rename, which moves
  * one file: of two starters that judged the same stale lock, the one that finds it moved a different
- * file (another starter's fresh lock) links that file back and starts over, so neither deletes the
- * other's lock. A third starter linking its own lock in the instant that file is away is not
- * excluded. Returns the release function, which removes the lock only while it is still this one,
- * and `previous`, the record of the stale lock it took over (null when there was none).
+ * file (another starter's fresh lock: another inode, or the same inode number with other contents) links
+ * that file back and starts over, so neither deletes the other's lock. A third starter linking its own
+ * lock in the instant that file is away is not excluded. Returns the release function, which removes the
+ * lock only while it is still this one, and `previous`, the record of the stale lock it took over (null
+ * when there was none).
  * @returns {{ release: () => void, previous: any }}
  */
 function takeLock (lock, name, { fsImpl, random, alive, creationTime }) {
@@ -206,10 +207,12 @@ function takeLock (lock, name, { fsImpl, random, alive, creationTime }) {
       return { release, previous }
     }
     let seen
+    let seenText = null
     let holder = null
     try {
       seen = fsImpl.lstatSync(lock, { bigint: true })
-      holder = JSON.parse(readNoFollow(lock, fsImpl))
+      seenText = readNoFollow(lock, fsImpl)
+      holder = JSON.parse(seenText)
     } catch (err) {
       if (err.code === 'ENOENT' && !seen) continue
     }
@@ -224,7 +227,13 @@ function takeLock (lock, name, { fsImpl, random, alive, creationTime }) {
       throw err
     }
     const moved = fsImpl.lstatSync(aside, { bigint: true })
-    if (seen && moved.ino === seen.ino && moved.dev === seen.dev) previous = holder
+    // The inode alone does not say the file moved is the one judged stale: a starter that took the stale lock over
+    // meanwhile unlinked it, and its fresh lock can get the freed inode number back (ext4 hands it out again at
+    // once). So the contents must match too (an unreadable one on both sides counts as a match); a fresh lock records
+    // a live pid and start, never the stale record.
+    let movedText = null
+    try { movedText = readNoFollow(aside, fsImpl) } catch {}
+    if (seen && moved.ino === seen.ino && moved.dev === seen.dev && movedText === seenText) previous = holder
     else {
       try { fsImpl.linkSync(aside, lock) } catch {}
     }

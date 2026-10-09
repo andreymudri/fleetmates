@@ -668,6 +668,45 @@ test('two starters taking over one stale lock: the one whose rename moved the ot
   })
 })
 
+// What failed on an ext4 CI runner: `first` unlinks the stale lock it moved aside, and the fresh lock it links in can
+// get that freed inode number back, so `second` took the fresh lock for the stale one it judged and deleted it.
+// Here the reuse is forced: a lock moved aside after `first` started reports the stale lock's inode.
+test('two starters taking over one stale lock: a fresh lock that got the stale lock\'s inode number back is still put back', async () => {
+  await inScratch(async () => {
+    fs.mkdirSync(deckDir('base', { platform: 'win32' }), { recursive: true })
+    fs.writeFileSync(lockFile('base', 'deckd'), JSON.stringify({ pid: DEAD, started: 1 }))
+    const stale = fs.lstatSync(lockFile('base', 'deckd'), { bigint: true })
+    const first = net.createServer()
+    const second = net.createServer()
+    /** @type {Promise<string> | null} */
+    let firstStart = null
+    let reused = 0
+    const racing = { ...fs,
+      renameSync (from, to) {
+        if (!firstStart && from === lockFile('base', 'deckd') && to.endsWith('.stale')) firstStart = listenEndpoint('base', 'deckd', first, { platform: 'win32', alive: allButDead })
+        return fs.renameSync(from, to)
+      },
+      lstatSync (file, options) {
+        const stats = fs.lstatSync(file, options)
+        if (!firstStart || !String(file).endsWith('.stale')) return stats
+        reused++
+        return Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, { ino: stale.ino, dev: stale.dev })
+      } }
+    try {
+      await assert.rejects(listenEndpoint('base', 'deckd', second, { platform: 'win32', alive: allButDead, fs: racing }), { code: 'EADDRINUSE' })
+      assert.ok(reused > 0, 'the moved fresh lock reported the stale inode')
+      await firstStart
+      assert.equal(first.listening, true)
+      assert.equal(second.listening, false)
+      assert.equal(JSON.parse(readFileSync(lockFile('base', 'deckd'), 'utf8')).pid, process.pid)
+      assert.deepEqual(fs.readdirSync('.').filter(f => f.endsWith('.stale')), [], 'nothing is left aside')
+    } finally {
+      await closeServer(first)
+      await closeServer(second)
+    }
+  })
+})
+
 test('closing removes the start lock and the key only while they are still this server\'s', async () => {
   await inScratch(async () => {
     const server = net.createServer()
