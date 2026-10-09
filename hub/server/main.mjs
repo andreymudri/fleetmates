@@ -159,7 +159,7 @@ export async function createDeckServer(options = {}) {
   // Remote access (08-security 4.2): opt in with one exact public origin, resolved as the port is. Without it the
   // deck answers IPv4 loopback only, exactly as before, and the passphrase exchange does not exist.
   const publicOrigin = parsePublicOrigin(options.publicOrigin ?? env.DECK_PUBLIC_ORIGIN ?? config.publicOrigin ?? null)
-  const remote = createRemoteAccess({ file: path.join(paths.state, 'remote-pass.json'), now, ...(options.remoteAccess ?? {}) })
+  const remote = createRemoteAccess({ file: path.join(paths.state, 'remote-pass.json'), now, ...owner, ...(options.remoteAccess ?? {}) })
   let boundPort = port
   const store = options.store ?? openDeckDb(path.join(paths.state, 'deck.db'), owner)
   const epoch = store.get('SELECT value FROM meta WHERE key=?', 'epoch').value

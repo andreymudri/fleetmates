@@ -66,8 +66,13 @@ export function createRouter({ api, staticDir, getToken, getPort, getPublicOrigi
         if (req.method !== 'POST') throw apiError(404, 'not_found')
         const body = await readBody(req)
         const result = await remote.verify(typeof body.passphrase === 'string' ? body.passphrase : '')
-        if (!result.ok) throw apiError(result.code === 'too_many_attempts' ? 429 : result.code === 'pairing_unavailable' ? 404 : 401, result.code,
-          result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs })
+        if (!result.ok) {
+          // The Unlock screen counts down from Retry-After and never invents a number, so the header is the
+          // contract: it is sent whenever, and only when, the deck knows how long the wait is.
+          if (result.retryAfterMs !== undefined) res.setHeader('Retry-After', String(Math.ceil(result.retryAfterMs / 1000)))
+          throw apiError(result.code === 'too_many_attempts' ? 429 : result.code === 'pairing_unavailable' ? 404 : 401, result.code,
+            result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs })
+        }
         json(req, res, 200, { token: getToken() })
         return
       }

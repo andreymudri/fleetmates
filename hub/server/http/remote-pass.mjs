@@ -1,5 +1,6 @@
-import { lstatSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
+import fs from 'node:fs'
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
+import { openNoFollowSync, privateFileProblem } from '../../platform/index.mjs'
 // The remote access passphrase (08-security 4.2, remote access): the one secret a phone on the tailnet types to
 // get the deck token. It is chosen by the owner and it persists; nothing here generates or expires it.
 /** Shortest passphrase the deck accepts. A phone types this once, so length is cheaper here than anywhere else. */
@@ -31,22 +32,44 @@ export async function hashPassphrase(passphrase, salt = randomBytes(16)) {
   const key = await derive(passphrase, salt, PARAMS)
   return { v: 1, ...PARAMS, salt: salt.toString('base64url'), hash: key.toString('base64url') }
 }
-/** Read a private, owner-owned passphrase record without following symlinks, as `readToken` reads the deck token. */
-export function readPassphraseFile(file) {
-  const info = lstatSync(file)
-  if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o600) throw Error('remote access passphrase must be a private 0600 file')
-  const record = JSON.parse(readFileSync(file, 'utf8'))
+/**
+ * Read the passphrase record, in the shape the endpoint keys use (`{ secret } | { missing } | { bad }`), so a deck
+ * with no passphrase and a deck with an unusable one are two different answers rather than one silent refusal.
+ * On POSIX the file must be owned by `uid` and have mode 0600; on win32 it has no mode to check and the owner's
+ * profile ACLs are what keep it private, exactly as `readToken` now reads the deck token.
+ * @param {string} file
+ * @param {{ platform?: string, uid?: number | null }} [opts]
+ * @returns {{ record: object } | { missing: true } | { bad: string }}
+ */
+export function readRemotePass(file, { platform = process.platform, uid = process.getuid?.() ?? null } = {}) {
+  let info
+  try { info = fs.lstatSync(file) } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return { missing: true }
+    return { bad: 'unreadable' }
+  }
+  if (!info.isFile()) return { bad: 'not a regular file' }
+  const problem = privateFileProblem(info, { platform, uid })
+  if (problem) return { bad: problem }
+  let record
+  try { record = JSON.parse(fs.readFileSync(file, 'utf8')) } catch { return { bad: 'not JSON' } }
   if (record?.v !== 1 || !/^[A-Za-z0-9_-]+$/.test(record.salt ?? '') || !/^[A-Za-z0-9_-]+$/.test(record.hash ?? '')
-    || ![record.cost, record.blockSize, record.parallelization, record.keyLength].every(value => Number.isInteger(value) && value > 0)) throw Error('invalid remote access passphrase file')
-  return record
+    || ![record.cost, record.blockSize, record.parallelization, record.keyLength].every(value => Number.isInteger(value) && value > 0)) return { bad: 'not a passphrase record' }
+  return { record }
 }
-/** Write the record as a private 0600 file, replacing any previous one in one rename. */
-export function writePassphraseFile(file, record) {
+/**
+ * Write the record as a private file, replacing any previous one in one rename. The temporary file is opened with
+ * `openNoFollowSync`, which refuses a symbolic link on Windows too, where `O_NOFOLLOW` does not exist.
+ * @param {string} file
+ * @param {object} record
+ * @param {{ platform?: string }} [opts]
+ */
+export function writeRemotePass(file, record, { platform = process.platform } = {}) {
   const temp = `${file}.${process.pid}.tmp`
   try {
-    writeFileSync(temp, `${JSON.stringify(record)}\n`, { mode: 0o600 })
-    renameSync(temp, file)
-  } finally { try { unlinkSync(temp) } catch {} }
+    const fd = openNoFollowSync(temp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC, { platform, mode: 0o600 })
+    try { fs.writeFileSync(fd, `${JSON.stringify(record)}\n`) } finally { fs.closeSync(fd) }
+    fs.renameSync(temp, file)
+  } finally { try { fs.unlinkSync(temp) } catch {} }
 }
 /** Compare a typed passphrase against a stored record in constant time, as `sameToken` compares token carriers. */
 export async function verifyPassphrase(passphrase, record) {
@@ -62,17 +85,25 @@ export async function verifyPassphrase(passphrase, record) {
  * 127.0.0.1, so a per-address key would only look like a limit, and `X-Forwarded-For` or `Tailscale-User-Login`
  * are proxy headers this token-free surface must not trust. The tailnet is the primary perimeter; this counter and
  * the growing delay are defence in depth against a device already inside it guessing a human-chosen passphrase.
- * @param {{ file: string, now?: () => number, maxAttempts?: number, windowMs?: number, sleep?: (ms: number) => Promise<void> }} options
+ * @param {{ file: string, platform?: string, uid?: number | null, now?: () => number, maxAttempts?: number, windowMs?: number, sleep?: (ms: number) => Promise<void>, log?: (line: string) => void }} options
  * @returns {{ enabled: () => boolean, verify: (passphrase: string) => Promise<{ ok: boolean, code?: string, retryAfterMs?: number }> }}
  */
-export function createRemoteAccess({ file, now = Date.now, maxAttempts = 10, windowMs = 300_000, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+export function createRemoteAccess({ file, platform = process.platform, uid = process.getuid?.() ?? null, now = Date.now, maxAttempts = 10, windowMs = 300_000,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), log = line => { try { process.stderr.write(`deck: ${line}\n`) } catch {} } }) {
   let failures = []
+  let reported = null
   const current = () => {
     failures = failures.filter(at => at > now() - windowMs)
     return failures
   }
+  // A file that exists but cannot be used is reported once per distinct reason, as the tiers store reports a
+  // rejected tiers.json, and is answered as "no passphrase set": there is nothing the phone can type against it.
   const record = () => {
-    try { return readPassphraseFile(file) } catch { return null }
+    const result = readRemotePass(file, { platform, uid })
+    if (result.bad !== undefined && result.bad !== reported) { reported = result.bad
+      log(`remote_pass.rejected ${result.bad}`) }
+    if (result.record) reported = null
+    return result.record ?? null
   }
   return {
     enabled: () => record() !== null,

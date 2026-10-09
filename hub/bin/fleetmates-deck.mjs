@@ -15,7 +15,7 @@ import { openInBrowser } from '../server/setup/browser.mjs'
 import { redact } from '../server/approvals/audit.mjs'
 import { exportMisses } from '../server/ask/export-misses.mjs'
 import { parsePublicOrigin } from '../server/http/auth.mjs'
-import { checkPassphrase, hashPassphrase, writePassphraseFile } from '../server/http/remote-pass.mjs'
+import { checkPassphrase, hashPassphrase, writeRemotePass } from '../server/http/remote-pass.mjs'
 
 const hub = fileURLToPath(new URL('..', import.meta.url))
 const paths = setupPaths()
@@ -178,12 +178,12 @@ async function audit(rest) {
  * `config.json` beside the port, since it is ordinary configuration. The passphrase is a secret and never goes
  * in this file; it lives hashed in its own 0600 file (`remote-pass`).
  */
-function remoteAccess(rest) {
+async function remoteAccess(rest) {
   const value = rest[0] === '--off' && rest.length === 1 ? null : rest[0] === '--public-origin' && rest.length === 2 ? rest[1] : undefined
   if (value === undefined) throw new Error(USAGE)
   // Validated here so a typo fails at the terminal rather than at the next server start.
   const parsed = parsePublicOrigin(value)
-  privateDir(paths.config)
+  await privateDir(paths.config)
   const file = path.join(paths.config, 'config.json')
   let config = {}
   try { config = JSON.parse(fs.readFileSync(file, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
@@ -239,9 +239,9 @@ async function remotePass() {
     passphrase = checkPassphrase(await reader.read('remote access passphrase: '))
     if (await reader.read('repeat it: ') !== passphrase) throw new Error('the two passphrases differ')
   } finally { reader.close() }
-  privateDir(paths.state)
+  await privateDir(paths.state)
   const file = path.join(paths.state, 'remote-pass.json')
-  writePassphraseFile(file, await hashPassphrase(passphrase))
+  writeRemotePass(file, await hashPassphrase(passphrase))
   process.stdout.write(`remote access passphrase: stored in ${file}\n`)
 }
 
