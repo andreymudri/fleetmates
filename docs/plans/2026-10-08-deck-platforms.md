@@ -516,6 +516,7 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 - Modify: `hub/README.md`
 - Modify: `hub/CHANGELOG.md`
 - Modify: `.github/workflows/deck.yml`
+- Test: `hub/test/unit/m1-scaffold.test.mjs`
 
 **Depends:** T16
 
@@ -523,7 +524,7 @@ Phases 1 and 2 were verified file by file on the Windows 11 VM. A full run of th
 
 **Acceptance:**
 - `16-platforms.md`: section 3 records the measured pipe DACL (Everyone and Anonymous read, SYSTEM and Administrators full, creator full; a second `listen` on the same name fails EADDRINUSE) and the per-user endpoint secret of Task 16; section 5 records the ConPTY facts (SystemRoot, failed spawn refusal, win32-input-mode filtering, no `O_NOFOLLOW` and `openNoFollow`); section 6 records the Task 12 decision (POSIX path parsing for Bash, case-insensitive deck paths, no rule writes on win32); section 8 describes the VM verification and the CI job. `13-operations.md` gains macOS (launchd) and Windows (`fleetmates-deck start`/`stop`, Run key, logs) operations. `14-decisions.md` gains D-149 (the deck runs on macOS and native Windows; 16-platforms) and D-150 (approvals on Windows: ask always, POSIX parsing, no rule writes). `hub/README.md` lists the three platforms and the Node floor `>=24.16.0`. `hub/CHANGELOG.md` gets an Unreleased section with the platform support.
-- `.github/workflows/deck.yml`: the hub job runs on a matrix of `ubuntu-latest`, `macos-latest` and `windows-latest`; on Windows it runs `npm --prefix hub test` with Chrome from the runner image; the Linux-only steps stay on Linux.
+- `.github/workflows/deck.yml`: the hub job runs on a matrix of `ubuntu-latest`, `macos-latest` and `windows-latest`; on Windows it runs `npm --prefix hub test` with Chrome from the runner image; the Linux-only steps stay on Linux. `m1-scaffold.test.mjs` 'deck CI declares...' is updated to assert the three-OS matrix (it currently asserts no `windows-latest`); its other assertions keep their meaning.
 - Docs: English, plain prose, no em dash, placeholders for personal paths.
 
 - [ ] Step 1: Edit; commit only the declared files.
