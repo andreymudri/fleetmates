@@ -112,6 +112,13 @@ test('inside a fleetmates checkout the adapter reads the root modules, never a v
   }
 })
 
+test('the packed file list includes the platform module', () => {
+  // --ignore-scripts skips prepack, so this lists the files rule without building or vendoring.
+  const out = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: hub, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const files = JSON.parse(out)[0].files.map(file => file.path)
+  assert.ok(files.includes('platform/index.mjs'), 'platform/index.mjs is packed')
+})
+
 test('a packed and extracted package imports server/main.mjs and deckd/main.mjs', async () => {
   // Stage hub/ beside a link to the real scripts/ so prepack runs as it would in the repo, without
   // writing web/dist or vendor/ into the working tree. node_modules is linked, not installed.
