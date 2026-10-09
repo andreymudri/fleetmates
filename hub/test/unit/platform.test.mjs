@@ -588,6 +588,101 @@ test('a symlink planted on win32 between an lstat that found nothing and the ope
   }
 })
 
+/**
+ * Wrap an fs so that an exclusive create on a dangling symlink creates the link's target, as the
+ * orchestrator's Windows 11 VM run showed CreateFile with CREATE_NEW doing. Linux fails EEXIST there.
+ * @param {any} base
+ */
+function windowsExclFs (base) {
+  const { O_CREAT, O_EXCL } = fs.constants
+  const follow = (p, flags) => {
+    if (!((flags & O_CREAT) && (flags & O_EXCL))) return p
+    let st
+    try { st = fs.lstatSync(p) } catch { return p }
+    if (!st.isSymbolicLink()) return p
+    const target = path.resolve(path.dirname(p), fs.readlinkSync(p))
+    return fs.existsSync(target) ? p : target
+  }
+  return {
+    ...base,
+    openSync: (p, flags, mode) => fs.openSync(follow(p, flags), flags, mode),
+    promises: { ...base.promises, open: (p, flags, mode) => fs.promises.open(follow(p, flags), flags, mode) },
+  }
+}
+
+test('a win32 exclusive create that followed a planted symlink removes the target it created before refusing', async t => {
+  const fx = await linkFixture()
+  try {
+    if (!fx.symlinkOk) return t.skip('this account cannot create symlinks')
+    const { O_WRONLY, O_CREAT, O_TRUNC } = fs.constants
+    for (const [name, open] of OPEN_FNS) {
+      const file = path.join(fx.dir, `out-win-${name}`)
+      const victim = path.join(fx.dir, `victim-win-${name}`)
+      /** @type {string[]} */
+      const created = []
+      const injected = windowsExclFs(racingFs(p => fs.symlinkSync(victim, p)))
+      const watch = { ...injected, openSync: (p, f, m) => { const fd = injected.openSync(p, f, m); created.push(String(fs.existsSync(victim))); return fd } }
+      watch.promises = { ...injected.promises, open: async (p, f, m) => { const h = await injected.promises.open(p, f, m); created.push(String(fs.existsSync(victim))); return h } }
+      await assert.rejects(open(file, O_WRONLY | O_CREAT | O_TRUNC, { platform: 'win32', fs: watch }), { code: 'ELOOP' }, name)
+      assert.deepEqual(created, ['true'], `${name}: the emulated open created the target`)
+      assert.equal(fs.existsSync(victim), false, `${name}: the symlink target is not left behind`)
+    }
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('a symlink to an existing empty file, planted on win32 after an lstat that found nothing, is refused and the file is kept', async t => {
+  const fx = await linkFixture()
+  try {
+    if (!fx.symlinkOk) return t.skip('this account cannot create symlinks')
+    const { O_WRONLY, O_CREAT } = fs.constants
+    for (const [name, open] of OPEN_FNS) {
+      const file = path.join(fx.dir, `to-empty-${name}`)
+      const existing = path.join(fx.dir, `existing-empty-${name}`)
+      fs.writeFileSync(existing, '')
+      await assert.rejects(open(file, O_WRONLY | O_CREAT, { platform: 'win32', fs: racingFs(p => fs.symlinkSync(existing, p)) }), { code: 'ELOOP' }, name)
+      assert.equal(fs.existsSync(existing), true, `${name}: the existing file is not opened and removed`)
+    }
+  } finally {
+    await fx.cleanup()
+  }
+})
+
+test('a refused win32 exclusive create never unlinks a file that is not its own', async t => {
+  const fx = await linkFixture()
+  try {
+    if (!fx.symlinkOk) return t.skip('this account cannot create symlinks')
+    const { O_WRONLY, O_CREAT } = fs.constants
+    // After the exclusive create, the name is swapped for a symlink to an existing file.
+    const swap = p => { fs.unlinkSync(p); fs.symlinkSync(fx.real, p) }
+    for (const [name, open] of OPEN_FNS) {
+      const file = path.join(fx.dir, `own-${name}`)
+      const injected = {
+        ...fs,
+        openSync: (p, f, m) => { const fd = fs.openSync(p, f, m); swap(p); return fd },
+        promises: { ...fs.promises, open: async (p, f, m) => { const h = await fs.promises.open(p, f, m); swap(p); return h } },
+      }
+      await assert.rejects(open(file, O_WRONLY | O_CREAT, { platform: 'win32', fs: injected }), { code: 'ELOOP' }, name)
+      assert.equal(fs.readFileSync(fx.real, 'utf8'), 'secret', `${name}: the other file is kept`)
+      // An empty file that is not the fd's own is kept too.
+      fs.rmSync(file)
+      const empty = path.join(fx.dir, `empty-${name}`)
+      fs.writeFileSync(empty, '')
+      const swapEmpty = p => { fs.unlinkSync(p); fs.symlinkSync(empty, p) }
+      const injectedEmpty = {
+        ...fs,
+        openSync: (p, f, m) => { const fd = fs.openSync(p, f, m); swapEmpty(p); return fd },
+        promises: { ...fs.promises, open: async (p, f, m) => { const h = await fs.promises.open(p, f, m); swapEmpty(p); return h } },
+      }
+      await assert.rejects(open(file, O_WRONLY | O_CREAT, { platform: 'win32', fs: injectedEmpty }), { code: 'ELOOP' }, name)
+      assert.equal(fs.existsSync(empty), true, `${name}: an empty file of another identity is kept`)
+    }
+  } finally {
+    await fx.cleanup()
+  }
+})
+
 test('a regular file swapped on win32 for a dangling symlink between lstat and open is refused, and its target is not created', async t => {
   const fx = await linkFixture()
   try {

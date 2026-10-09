@@ -344,6 +344,20 @@ function win32Retryable (err, flags, missing) {
 }
 
 /**
+ * Whether `target` is the empty regular file this call's fd refers to. A win32 open with
+ * `O_CREAT | O_EXCL` follows a dangling symlink planted after the lstat and creates its target
+ * (reported from the orchestrator's Windows 11 VM run; Linux fails EEXIST instead). After refusing,
+ * the open removes that target only when this holds, so nothing whose identity differs from the fd
+ * is unlinked.
+ * @param {any} target lstat of the resolved name
+ * @param {any} opened fstat of the fd
+ * @returns {boolean}
+ */
+function isOwnEmptyFile (target, opened) {
+  return target.isFile() && sameFile(target, opened) && target.size === 0n
+}
+
+/**
  * Refuse what a win32 no-follow open's first lstat found: ELOOP for a symbolic link, and EEXIST for
  * an existing name under the caller's `O_CREAT | O_EXCL` (the open itself runs without `O_CREAT`
  * for a found name, so it would not report that). `before` is null for a missing name.
@@ -366,6 +380,8 @@ function win32CheckBefore (file, flags, before) {
  * lstat. On win32 `O_TRUNC` is applied with ftruncate after that check, a found name is opened
  * without `O_CREAT`, a missing name under `O_CREAT` is created with `O_EXCL` and lstat after the
  * open, and a name that appeared or vanished in between re-runs the sequence (at most 3 attempts).
+ * When that exclusive create is refused after the open, the file it created through a planted
+ * symlink is unlinked, but only if it is still the fd's own empty regular file (`isOwnEmptyFile`).
  * @param {string} file
  * @param {number} [flags]
  * @param {{ platform?: string, fs?: any, mode?: number }} [opts]
@@ -391,8 +407,17 @@ export function openNoFollowSync (file, flags = fs.constants.O_RDONLY, { platfor
       continue
     }
     try {
+      const opened = fsImpl.fstatSync(fd, { bigint: true })
       const seen = before ?? fsImpl.lstatSync(file, { bigint: true })
-      if (seen.isSymbolicLink() || !sameFile(seen, fsImpl.fstatSync(fd, { bigint: true }))) throw loopError(file)
+      if (seen.isSymbolicLink() || !sameFile(seen, opened)) {
+        if (before === null) {
+          try {
+            const target = fsImpl.realpathSync(file)
+            if (isOwnEmptyFile(fsImpl.lstatSync(target, { bigint: true }), opened)) fsImpl.unlinkSync(target)
+          } catch {}
+        }
+        throw loopError(file)
+      }
       if (before !== null && (flags & (fs.constants.O_TRUNC ?? 0))) fsImpl.ftruncateSync(fd, 0)
     } catch (err) {
       fsImpl.closeSync(fd)
@@ -431,8 +456,17 @@ export async function openNoFollow (file, flags = fs.constants.O_RDONLY, { platf
       continue
     }
     try {
+      const opened = await handle.stat({ bigint: true })
       const seen = before ?? await fsp.lstat(file, { bigint: true })
-      if (seen.isSymbolicLink() || !sameFile(seen, await handle.stat({ bigint: true }))) throw loopError(file)
+      if (seen.isSymbolicLink() || !sameFile(seen, opened)) {
+        if (before === null) {
+          try {
+            const target = await fsp.realpath(file)
+            if (isOwnEmptyFile(await fsp.lstat(target, { bigint: true }), opened)) await fsp.unlink(target)
+          } catch {}
+        }
+        throw loopError(file)
+      }
       if (before !== null && (flags & (fs.constants.O_TRUNC ?? 0))) await handle.truncate(0)
     } catch (err) {
       await handle.close()
