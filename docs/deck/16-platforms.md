@@ -29,8 +29,8 @@ the Windows 11 test VM, and Node 24.16 fixes it.
 
 On macOS node-pty runs every PTY through its prebuilt `spawn-helper`, which needs its execute bits.
 npm 11 skips install scripts by default, so the deck's `postinstall` that sets them may never
-run. Task 18 makes deckd set them itself before its first PTY spawn on darwin
-([13-operations.md](13-operations.md) section 14).
+run. deckd therefore makes the helper executable itself before its first PTY spawn on macOS
+([13-operations.md](13-operations.md) section 14.1).
 
 ## 2. Runtime base and endpoints
 
@@ -73,7 +73,7 @@ with sudo. A second `listen` on a pipe name that is already listening fails with
 
 A pipe name is machine-global, and any local user can list `\\.\pipe\`. A user who could
 predict the name could create it before the deck starts and receive hook envelopes or `fm`
-keystrokes (squatting). Since Task 16 the name is not predictable. Each endpoint has its own key
+keystrokes (squatting). The name is therefore not predictable. Each endpoint has its own key
 file in the deck directory, `<deckDir(base)>\endpoint-deckd.key` and `endpoint-hooks.key`, under
 `%LOCALAPPDATA%`, which only the user, SYSTEM and Administrators can read. A key is 32 random bytes
 written as 64 lowercase hex digits, and the pipe name hashes it (section 2), so the name changes
@@ -116,14 +116,16 @@ implementation from `process.platform`:
 - **launchd** (macOS): plists `io.fleetmates.deck.deckd.plist` and `io.fleetmates.deck.web.plist`
   with `ProgramArguments` set to the absolute node binary and entry file, `RunAtLoad`,
   `KeepAlive` on failure, `Umask` 63 (octal 077), stdout and stderr to files in the state `logs`
-  directory. `launchctl bootstrap gui/<uid>`, `launchctl kickstart -k gui/<uid>/<label>`,
-  `launchctl bootout` and `launchctl print` drive them.
+  directory. `install` runs `launchctl bootout` and then `launchctl bootstrap gui/<uid> <plist>`
+  for each; `start` is `launchctl kickstart gui/<uid>/<label>`, `restart` is
+  `launchctl kickstart -k`, and `stop` is `launchctl kill SIGTERM`. `isActive` is the same
+  endpoint or HTTP probe as on Windows.
 - **detached** (Windows): `start` spawns `node <entry>` detached with `windowsHide`, writes the
   pid to `<state>/run/<service>.pid`, and logs to the state `logs` directory. `isActive` is a
   connect probe of the endpoint (deckd) or an HTTP probe (web), never the pid alone. `stop` first
   reads the recorded pid's command line (`Get-CimInstance Win32_Process` through PowerShell) and
   kills the tree with `taskkill /T /F` only when that command line runs this service's entry file;
-  otherwise, or when the query fails, it only removes the pid file (Task 16). After a failed
+  otherwise, or when the query fails, it only removes the pid file. After a failed
   `taskkill` it checks again, and `stop` fails while the process still runs. `install` adds a value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` that runs
   `conhost.exe --headless <node> <fleetmates-deck.mjs> start`, so no console window appears at
@@ -189,7 +191,7 @@ when the platform is `win32`. Nothing is auto-approved there; every request reac
 Floors that name service control gain their macOS and Windows forms: `launchctl` against a
 `io.fleetmates.deck.*` label, and writes to `~/Library/LaunchAgents/io.fleetmates.deck.*`.
 
-Decision (Task 12, D-150):
+Decision (D-150):
 
 - **POSIX path parsing for Bash.** Claude Code runs its Bash tool through Git Bash on Windows, so
   the tier engine resolves parsed command paths with `path.posix` on every platform, never with
@@ -227,8 +229,8 @@ win on Windows too when they are set, which is what the tests use.
   | Tree | Pass | Fail | Skipped |
   |---|---|---|---|
   | master before the port | 891 | 951 | not recorded |
-  | after phase 4 (Tasks 9 to 15) | 1653 | 0 | 425 |
-  | after phase 5 (Task 16) | 1684 | 0 | 428 |
+  | after the Windows test sweep | 1653 | 0 | 425 |
+  | after the per-endpoint pipe keys (section 3) | 1684 | 0 | 428 |
 
   Each skip is one test with its reason in the skip message (`posixTest`, below).
 - Windows end to end, from the npm tarball (0.5.2) on the same VM:

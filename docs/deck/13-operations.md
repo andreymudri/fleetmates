@@ -428,10 +428,11 @@ the package is named in `--allow-scripts` for a tarball install.
 
 - Windows and Linux: node-pty's prebuilt binaries work without that script.
 - macOS: the script exists to give node-pty's prebuilt `spawn-helper` its execute bits, and every
-  PTY spawn needs them. Task 18 makes deckd set them itself: on darwin, before its first PTY spawn,
-  deckd runs the same preparation once; when it fails, the spawn is refused with `spawn_failed`
-  and a message that says to reinstall. Until Task 18 is integrated, run
-  `node <hub>/bin/prepare-native.mjs` by hand after installing on macOS.
+  PTY spawn needs them. deckd does it itself: before its first PTY spawn it makes the helper
+  executable, and it skips the change when the helper already is. When the change is needed but
+  the user running the deck cannot make it (a root-owned or read-only install), the spawn fails
+  with `spawn_failed` and a message saying to `chmod +x` the helper as its owner. Do that, then
+  start the session again.
 
 ### 14.2 macOS: launchd
 
@@ -446,7 +447,7 @@ binary with the entry file, starts at load (`RunAtLoad`), restarts after a faile
 | Start both | `fleetmates-deck start` (`launchctl kickstart gui/<uid>/<label>`) |
 | Stop both | `fleetmates-deck stop` (`launchctl kill SIGTERM gui/<uid>/<label>`; stopping deckd ends every PTY session) |
 | Restart the web server | `launchctl kickstart -k gui/<uid>/io.fleetmates.deck.web` |
-| Inspect a job | `launchctl print gui/<uid>/io.fleetmates.deck.deckd` |
+| Inspect a job (by hand; the deck never runs it) | `launchctl print gui/<uid>/io.fleetmates.deck.deckd` |
 | Remove autostart | `launchctl bootout gui/<uid>/io.fleetmates.deck.web`, the same for `io.fleetmates.deck.deckd`, then remove the two plists |
 
 Logs: launchd writes each service's stdout and stderr to the state `logs` directory,

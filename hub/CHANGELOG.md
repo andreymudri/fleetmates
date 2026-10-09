@@ -33,7 +33,9 @@ Platform support: the deck runs on Linux, macOS and native Windows (D-149,
 - No-follow opens use `openNoFollowSync` and `openNoFollow`, which refuse symbolic links on Windows
   too, where `O_NOFOLLOW` does not exist.
 - npm 11 skips install scripts by default, including this package's `postinstall`. On macOS
-  deckd makes node-pty's spawn helper executable itself before its first spawn (Task 18).
+  deckd makes node-pty's spawn helper executable itself before its first spawn, and skips that
+  when it already is. When it cannot (a root-owned or read-only install), the spawn fails with a
+  message saying to `chmod +x` the helper as its owner.
 - CI: the hub job runs on `ubuntu-latest`, `macos-latest` and `windows-latest`.
 
 ## v0.5.2
