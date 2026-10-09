@@ -5,6 +5,17 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
+## v0.5.2
+
+The first published 0.5 release. Tag deck-v0.5.1 exists, but its release workflow never published: one end-to-end spec timed out on the GitHub runner.
+
+- Tested Claude Code: 2.1.285 (unchanged)
+- deckd changed: no. The PTY protocol is unchanged.
+- Database migration: no.
+- Restart the web server to pick it up.
+- Carries every 0.5.1 change listed below.
+- The security spec's untrusted-text test waits for the edited README.md itself instead of a count of changed files. Its repo also holds an untracked `.claude/settings.local.json`. That file counts as changed unless the host's global git excludes hide it, which is why the test passed on a developer machine and timed out on the runner.
+
 ## v0.5.1
 
 Release fixes for 0.5.0.

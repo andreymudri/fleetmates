@@ -1,6 +1,6 @@
 {
   "name": "@andreymudri/fleetmates-deck",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "fleetmates deck: a local web deck that observes Claude Code sessions",
   "license": "MIT",
   "homepage": "https://github.com/andreymudri/fleetmates/tree/master/hub#readme",
