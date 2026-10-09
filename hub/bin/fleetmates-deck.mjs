@@ -14,12 +14,14 @@ import { initChecks } from '../server/setup/wait.mjs'
 import { openInBrowser } from '../server/setup/browser.mjs'
 import { redact } from '../server/approvals/audit.mjs'
 import { exportMisses } from '../server/ask/export-misses.mjs'
+import { parsePublicOrigin } from '../server/http/auth.mjs'
+import { checkPassphrase, hashPassphrase, writePassphraseFile } from '../server/http/remote-pass.mjs'
 
 const hub = fileURLToPath(new URL('..', import.meta.url))
 const paths = setupPaths()
 const command = deckHookCommand(process.execPath, paths.hook)
 const args = process.argv.slice(2)
-const USAGE = 'usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | start | stop | uninstall-hooks | audit [--repo <name>] [--since <YYYY-MM-DD>] | export-misses [--kind retrieval|all] [--out <file>]'
+const USAGE = 'usage: fleetmates-deck init [--dry-run] [--rotate-token] | doctor | status | open | start | stop | uninstall-hooks | remote-access --public-origin <url> | --off | remote-pass | audit [--repo <name>] [--since <YYYY-MM-DD>] | export-misses [--kind retrieval|all] [--out <file>]'
 // The user's tiers.json (07-approvals 4.1): created by init only when missing, with the schema copied beside it.
 const tiersFile = path.join(paths.config, 'tiers.json')
 const tiersSchema = path.join(paths.config, 'tiers.schema.json')
@@ -171,6 +173,65 @@ async function audit(rest) {
   } finally { db.close() }
 }
 
+/**
+ * `remote-access --public-origin <url>` and `--off`: the opt-in public origin of the Tailscale tunnel, kept in
+ * `config.json` beside the port, since it is ordinary configuration. The passphrase is a secret and never goes
+ * in this file; it lives hashed in its own 0600 file (`remote-pass`).
+ */
+function remoteAccess(rest) {
+  const value = rest[0] === '--off' && rest.length === 1 ? null : rest[0] === '--public-origin' && rest.length === 2 ? rest[1] : undefined
+  if (value === undefined) throw new Error(USAGE)
+  // Validated here so a typo fails at the terminal rather than at the next server start.
+  const parsed = parsePublicOrigin(value)
+  privateDir(paths.config)
+  const file = path.join(paths.config, 'config.json')
+  let config = {}
+  try { config = JSON.parse(fs.readFileSync(file, 'utf8')) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error(`${file} is not a JSON object`)
+  if (parsed) config.publicOrigin = parsed.origin
+  else delete config.publicOrigin
+  const temp = `${file}.${process.pid}.tmp`
+  try {
+    fs.writeFileSync(temp, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
+    fs.renameSync(temp, file)
+  } finally { if (fs.existsSync(temp)) fs.unlinkSync(temp) }
+  process.stdout.write(parsed ? `public origin: ${parsed.origin}\n` : 'public origin: removed\n')
+  process.stdout.write('restart the web server for it to take effect: systemctl --user restart fleetmates-deck\n')
+}
+
+/** Read one line from stdin without echoing it, so the passphrase never reaches the terminal or the scrollback. */
+async function readSecret(prompt) {
+  if (!process.stdin.isTTY) {
+    const { createInterface } = await import('node:readline')
+    const lines = createInterface({ input: process.stdin })
+    for await (const line of lines) { lines.close()
+      return line }
+    return ''
+  }
+  process.stdout.write(prompt)
+  const { createInterface } = await import('node:readline')
+  const { Writable } = await import('node:stream')
+  const output = new Writable({ write(chunk, encoding, done) { done() } })
+  const lines = createInterface({ input: process.stdin, output, terminal: true })
+  try {
+    return await new Promise(resolve => lines.question('', answer => resolve(answer)))
+  } finally { lines.close()
+    process.stdout.write('\n') }
+}
+
+/**
+ * `remote-pass`: set the remote access passphrase. It is read from stdin, never from argv, which `ps` and the
+ * shell history would both show, and stored as a scrypt hash in a private 0600 file beside the deck token.
+ */
+async function remotePass() {
+  const passphrase = checkPassphrase(await readSecret('remote access passphrase: '))
+  if (await readSecret('repeat it: ') !== passphrase) throw new Error('the two passphrases differ')
+  privateDir(paths.state)
+  const file = path.join(paths.state, 'remote-pass.json')
+  writePassphraseFile(file, await hashPassphrase(passphrase))
+  process.stdout.write(`remote access passphrase: stored in ${file}\n`)
+}
+
 async function main() {
   const [name, ...rest] = args
   if (name === 'export-misses') {
@@ -193,6 +254,8 @@ async function main() {
     return
   }
   if (name === 'audit') return audit(rest)
+  if (name === 'remote-access') return remoteAccess(rest)
+  if (name === 'remote-pass' && rest.length === 0) return remotePass()
   if (name === 'init' && rest.every(arg => ['--dry-run', '--rotate-token'].includes(arg))) return init(rest.includes('--dry-run'), rest.includes('--rotate-token'))
   if (name === 'uninstall-hooks' && rest.length === 0) {
     const current = readSettings(paths.settings)
