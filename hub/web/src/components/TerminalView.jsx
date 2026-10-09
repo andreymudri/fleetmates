@@ -49,6 +49,8 @@ export function terminalOptions({ readOnly = false, connected = false, screenRea
 }
 
 const REDUCE_QUERY = '(prefers-reduced-motion: reduce)'
+// One below --breakpoint-mobile (768px), the width at which styles/mobile.css lays the deck out as a phone.
+const PHONE_QUERY = '(max-width: 767px)'
 
 /**
  * Whether motion is reduced: the OS `prefers-reduced-motion` query, or Settings "Always reduce motion",
@@ -58,6 +60,16 @@ const REDUCE_QUERY = '(prefers-reduced-motion: reduce)'
  */
 export function motionReduced({ matchMedia, root } = {}) {
   return !!matchMedia?.(REDUCE_QUERY)?.matches || root?.getAttribute?.('data-motion') === 'reduce'
+}
+
+/**
+ * Whether this client lays out as a phone, from the viewport and never from a user agent string, the same way
+ * `motionReduced` reads its media query.
+ * @param {{ matchMedia?: (query: string) => { matches: boolean } }} [scope]
+ * @returns {boolean}
+ */
+export function phoneViewport({ matchMedia } = {}) {
+  return !!matchMedia?.(PHONE_QUERY)?.matches
 }
 
 function cssVar(element, name, fallback) {
@@ -214,9 +226,14 @@ export function TerminalView({
       element.addEventListener('paste', onPaste, true)
       cleanups.push(() => element.removeEventListener('paste', onPaste, true))
 
+      // The local fit always runs, so the browser shows whole lines. Sending the new size to the server is what a
+      // phone must not do: the PTY is the one the owner is working in on the machine, so a resize from a phone
+      // reflows their desktop terminal under them. Decided for remote access: full control from the phone, except
+      // this. The viewport decides, not the user agent.
+      const phone = phoneViewport(scope)
       const refit = () => {
         try { fit.fit() } catch {}
-        handle?.resize(term.cols, term.rows)
+        if (!phone) handle?.resize(term.cols, term.rows)
       }
       const scheduleResize = () => {
         if (timer !== null) { pending = true
