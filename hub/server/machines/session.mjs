@@ -776,8 +776,9 @@ export function applySessionHook(store, envelope, existing, requestChanged) {
   return store.get('SELECT * FROM sessions WHERE id = ?', existing.id)
 }
 
-// `scripts/cli.mjs`, then (in the same command segment) `--run <id>` or `--run=<id>`, the id bare or quoted.
-const LEAD_COMMAND = /scripts\/cli\.mjs\b["']?[^;&|\n]*?\s--run(?:=|\s+)(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;&|"'()<>`$]+))/
+// `scripts/cli.mjs` (or `scripts\cli.mjs`, as a Windows shell writes it), then (in the same command
+// segment) `--run <id>` or `--run=<id>`, the id bare or quoted.
+const LEAD_COMMAND = /scripts[\\/]cli\.mjs\b["']?[^;&|\n]*?\s--run(?:=|\s+)(?:"([^"\n]*)"|'([^'\n]*)'|([^\s;&|"'()<>`$]+))/
 
 /**
  * The run id a fleetmates lead names in a Bash command (`node scripts/cli.mjs <verb> --run <id>`), or null.

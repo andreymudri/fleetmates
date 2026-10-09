@@ -5539,6 +5539,13 @@ test('leadRunId reads --run only from the scripts/cli.mjs command segment', () =
   }
 })
 
+test('leadRunId accepts a Windows backslash path to scripts\\cli.mjs, bare or quoted, on every host', () => {
+  assert.equal(leadRunId('node C:\\Users\\you\\fleetmates\\scripts\\cli.mjs dispatch --run=r1 --phase 1'), 'r1')
+  assert.equal(leadRunId('node "C:\\Users\\you\\fleetmates\\scripts\\cli.mjs" gate --run r2 --phase 1'), 'r2')
+  assert.equal(leadRunId("node 'C:\\Users\\you\\fleetmates\\scripts\\cli.mjs' gate --run \"r 3\""), 'r 3')
+  assert.equal(leadRunId('node "C:\\Users\\you\\fleetmates\\scripts\\cli.mjs" status; git log --run foo'), null)
+})
+
 test('request open stores the M3 tier, reasons and rule candidate, and a notification-only request stays Caution', posix, () => {
   const cases = [
     ['npm run test', 'safe', 'Bash(npm run test)', 'safe.npm.run-script'],
