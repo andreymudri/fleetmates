@@ -310,3 +310,14 @@ body,
   .rec-bar-quiet { display: none; }
   .rec-bar-quiet-info { display: inline-grid; }
 }
+
+/* Installed PWA (remote access): the shell keeps clear of the notch, the home indicator and the rounded corners.
+   Only in standalone display mode, so a browser tab keeps the layout it has. */
+@media (display-mode: standalone) {
+  .shell {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+}
