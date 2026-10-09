@@ -56,7 +56,7 @@ async function until(fn, what, timeoutMs = 10000) {
   for (;;) {
     const value = await fn()
     if (value) return value
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`)
+    if (Date.now() > end) throw new Error(`timed out waiting for ${typeof what === 'function' ? what() : what}`)
     await sleep(20)
   }
 }
@@ -72,6 +72,26 @@ const DA1_REPLY = /\x1b\[\?[0-9;]*c/g
 const inputs = log => {
   const typed = entries(log).filter(entry => typeof entry.input === 'string').map(entry => entry.input)
   return process.platform === 'win32' ? typed.map(input => input.replace(DA1_REPLY, '')).filter(input => input !== '') : typed
+}
+/** Every input the fake logged, as it arrived (console replies kept), for failure messages. */
+const rawInputs = log => JSON.stringify(entries(log).filter(entry => typeof entry.input === 'string').map(entry => entry.input))
+
+/**
+ * The fixture script `name`, as an object. On win32 every `^`-anchored expectInput, branches included, also lets
+ * DA1 replies come first: the fake matches against everything it read since the last step, and the console's
+ * replies arrive before what the deck types. Elsewhere the script is the fixture unchanged.
+ */
+function scriptFor(name) {
+  const script = JSON.parse(fs.readFileSync(path.join(scriptsDir, `${name}.json`), 'utf8'))
+  if (process.platform !== 'win32') return script
+  const tolerate = steps => {
+    for (const step of steps) {
+      if (step.expectInput?.match?.startsWith('^')) step.expectInput.match = '^(?:\\x1b\\[\\?[0-9;]*c)*' + step.expectInput.match.slice(1)
+      for (const branch of Object.values(step.branch ?? {})) tolerate(branch)
+    }
+  }
+  tolerate(script.steps)
+  return script
 }
 
 const CLEAR = { print: '\u001b[2J\u001b[H' }
@@ -369,7 +389,7 @@ test('a deck deny the closing hook contradicts gets exactly one answered audit r
 
 test('the follow-up after a deck deny reaches the fake over HTTP as one sanitized paste', async t => {
   const h = await server(t, { notifications: false })
-  const s = await spawn(t, h, 'deny-then-instruct')
+  const s = await spawn(t, h, scriptFor('deny-then-instruct'))
   const req = await s.request('npm run test')
   const denied = await h.post(`/api/requests/${req.id}/answer`, { choice: 'deny' })
   assert.equal(denied.status, 202)
@@ -382,7 +402,7 @@ test('the follow-up after a deck deny reaches the fake over HTTP as one sanitize
     return response
   }, 'the follow-up to be accepted')
   assert.equal(sent.status, 202)
-  await until(() => entries(s.log).some(entry => entry.expectInput), 'the fake to take the paste')
+  await until(() => entries(s.log).some(entry => entry.expectInput), () => `the fake to take the paste; it read ${rawInputs(s.log)}`)
   assert.equal(entries(s.log).find(entry => entry.expectInput).expectInput, '\x1b[200~use pnpm[A instead\x1b[201~\r')
 })
 
