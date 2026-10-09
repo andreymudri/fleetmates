@@ -149,7 +149,12 @@ test('the exchange is unavailable without a passphrase file, and throttles wrong
   assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
   assert.deepEqual(await remote.verify('wrong once more'), { ok: false, code: 'unauthorized' })
   assert.equal(slept.at(-1), 250, 'the delay restarts after a success')
+  // The window expires on its own: fill it again, step past it, and a wrong answer is an ordinary one again.
+  await remote.verify('wrong two again')
+  assert.equal((await remote.verify('wrong three again')).code, 'too_many_attempts')
   at += 1001
+  assert.deepEqual(await remote.verify('wrong after the window'), { ok: false, code: 'unauthorized' }, 'the old failures no longer count')
+  assert.equal(slept.at(-1), 250, 'and the delay starts over')
   assert.deepEqual(await remote.verify('correct horse battery'), { ok: true })
   // A file that exists but cannot be used reads as "no passphrase set", and says why once.
   fs.writeFileSync(file, '{"v":9}', { mode: 0o600 })

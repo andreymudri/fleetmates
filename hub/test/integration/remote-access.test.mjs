@@ -104,6 +104,7 @@ test('the passphrase exchange returns the deck token, and refuses a wrong one an
   const refused = burst.filter(response => response.status === 429)
   assert.ok(refused.length >= 30, `the burst is bounded, ${refused.length} of 40 refused outright`)
   assert.match(refused[0].headers['retry-after'], /^\d+$/, 'the Unlock screen counts down from this header')
+  assert.ok(Number(refused[0].headers['retry-after']) >= 1, 'a wait of zero seconds would have the screen retry at once')
   assert.equal(burst.filter(response => response.status === 200).length, 0)
   // The owner is never locked out by someone else's guesses.
   const right = await h.pair(PASSPHRASE)

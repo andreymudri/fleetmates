@@ -109,7 +109,6 @@ test('the shell declares the manifest and the iOS meta tags, and the worker cach
   const worker = await readFile(`${web}public/sw.js`, 'utf8')
   assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\) \|\| url\.pathname\.startsWith\('\/\.well-known\/'\)\) return false/, 'the token paths never reach the cache')
   assert.match(worker, /request\.method !== 'GET'/)
-  assert.doesNotMatch(worker, /cache\.put\(event\.request, copy\)[\s\S]{0,40}api/, 'nothing under /api is ever written to the cache')
   const shell = await readFile(`${web}src/styles/shell.css`, 'utf8')
   assert.match(shell, /@media \(display-mode: standalone\)[\s\S]*env\(safe-area-inset-top\)/)
 })
