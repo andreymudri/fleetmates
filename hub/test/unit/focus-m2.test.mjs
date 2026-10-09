@@ -2,7 +2,8 @@
 // fake terminal client, and the action, panel and deep-link helpers the Focus route wires around it.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { findChromium } from '../helpers/chromium.mjs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -346,16 +347,6 @@ test('focus.css styles the M2 Focus with tokens only and collapses at 1280 px', 
   assert.doesNotMatch(source, /import\s+['"][^'"]+\.css['"]/)
 })
 
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
-}
-
 // A page that mounts the real Focus route with a stub terminal client. `window.h.source(state)` sets s1's
 // input-machine state and `window.h.show(id)` switches the route without remounting Focus.
 const COLLISION_HARNESS = `import React, { useState } from 'react'
@@ -389,7 +380,7 @@ createRoot(document.getElementById('root')).render(<App />)
 `
 
 test('the collision chip shows for 3 s from the collision even when the machine settles first, and a session switch clears it', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the Focus browser test')
   const dir = await mkdtemp(path.join(tmpdir(), 'focus-'))
   t.after(() => rm(dir, { recursive: true, force: true }))

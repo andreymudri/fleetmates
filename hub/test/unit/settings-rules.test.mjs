@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { findChromium } from '../helpers/chromium.mjs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -178,16 +179,6 @@ test('the Add dialog warns "Allows every {tool} call in {repo}" for a tool-wide 
   assert.doesNotMatch(render(rules.AddRuleDialog, { repo: rules5.repos[0], pattern: 'Bash(ls)', onPattern: noop, onSubmit: noop, onCancel: noop }), /Allows every/)
 })
 
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
-}
-
 // A page that mounts the stateful Settings on /settings/rules with a recording api; `window.h.bump()` raises rulesRev.
 const HARNESS = `import React, { useState } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -219,7 +210,7 @@ createRoot(document.getElementById('root')).render(<App />)
 `
 
 test('in the browser: Cancel takes focus, a revoke toasts and re-reads, rulesRev re-fetches, Never saves null, and Add shows the refusal', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the Approval rules browser test')
   const dir = await mkdtemp(path.join(tmpdir(), 'rules-'))
   t.after(() => rm(dir, { recursive: true, force: true }))

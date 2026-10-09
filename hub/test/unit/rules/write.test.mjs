@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { openDeckDb } from '../../../server/db/index.mjs'
+import { posixTest } from '../../helpers/platform.mjs'
 import { BACKUPS_KEPT, backupDir, listRules, revokeRule, samePattern, writeRule } from '../../../server/approvals/rules.mjs'
 
 // The settings writer, revoker and mirror (07-approvals 7.2, 7.4 and 9).
@@ -26,7 +27,9 @@ function harness(name) {
   }
   const git = []
   const gitRead = async (cwd, args) => { git.push([cwd, args]); return { code: 1, stdout: Buffer.alloc(0) } }
-  const write = (pattern, options = {}) => writeRule(store, { repoId, pattern, source: 'manual', stateDir: state, at: 1_790_000_000_000, gitRead, ...options })
+  // platform 'linux': these tests pin the writer's mechanics, which win32 never reaches because it refuses
+  // every rule (docs/deck/16-platforms.md section 6, pinned in validate.test.mjs).
+  const write = (pattern, options = {}) => writeRule(store, { repoId, pattern, source: 'manual', stateDir: state, at: 1_790_000_000_000, gitRead, platform: 'linux', ...options })
   const revoke = (pattern, options = {}) => revokeRule(store, { repoId, pattern, stateDir: state, at: 1_790_000_100_000, ...options })
   const events = type => store.all('SELECT data FROM events WHERE type = ? ORDER BY seq', type).map(row => JSON.parse(row.data))
   const audit = () => store.all('SELECT pattern, action, actor FROM rule_audit ORDER BY id').map(row => ({ ...row }))
@@ -72,7 +75,7 @@ test('write then revoke leaves every other key byte-identical and the key and ar
   }
 })
 
-test('a new settings file is created 0600 and a write keeps the mode of an existing one', async () => {
+posixTest('a new settings file is created 0600 and a write keeps the mode of an existing one', { reason: 'file modes' }, async () => {
   const h = harness(null)
   try {
     await h.write('Bash(npm run test)')
@@ -191,7 +194,7 @@ test('the backup is taken before the re-read compare, and a change landing after
 })
 
 // Mutation run for this test: the uid comparison removed from readSettings; this test failed.
-test('a settings file owned by another user is refused and left unchanged', async () => {
+posixTest('a settings file owned by another user is refused and left unchanged', { reason: 'file owner uids' }, async () => {
   const h = harness('local-full.json')
   const getuid = process.getuid
   try {
@@ -205,7 +208,7 @@ test('a settings file owned by another user is refused and left unchanged', asyn
 })
 
 // Mutation run for this test: the BACKUPS_KEPT pruning removed from backup(); this test failed.
-test('a backup of the previous bytes appears (0600) and the 21st write keeps 20', async () => {
+test('a backup of the previous bytes appears and the 21st write keeps 20', async () => {
   const h = harness('local-full.json')
   try {
     const first = await h.write('Bash(npm run test)')
@@ -213,8 +216,6 @@ test('a backup of the previous bytes appears (0600) and the 21st write keeps 20'
     assert.equal(path.dirname(first.backupPath), dir)
     assert.match(path.basename(first.backupPath), /^\d{8}-\d{6}\.json$/)
     assert.deepEqual(readFileSync(first.backupPath), fixture('local-full.json'))
-    assert.equal(statSync(first.backupPath).mode & 0o777, 0o600)
-    assert.equal(statSync(dir).mode & 0o777, 0o700)
     assert.match(first.beforeSha256, /^[0-9a-f]{64}$/)
     for (let i = 2; i <= 21; i++) await h.write(`Bash(echo rule-${i})`)
     const kept = readdirSync(dir)
@@ -226,6 +227,15 @@ test('a backup of the previous bytes appears (0600) and the 21st write keeps 20'
   try {
     assert.equal((await g.write('Bash(npm run test)')).backupPath, null)
   } finally { g.close() }
+})
+
+posixTest('a backup is 0600 in a 0700 directory', { reason: 'file modes' }, async () => {
+  const h = harness('local-full.json')
+  try {
+    const first = await h.write('Bash(npm run test)')
+    assert.equal(statSync(first.backupPath).mode & 0o777, 0o600)
+    assert.equal(statSync(backupDir(h.state, h.repoId)).mode & 0o777, 0o700)
+  } finally { h.close() }
 })
 
 // D-103: the writer refuses every Bash prefix rule, so `:*` against ` *` is pinned on samePattern and
@@ -252,7 +262,7 @@ test('revoke reports already_removed, resets the counter and audits revoked or u
   const h = harness('local-full.json')
   try {
     h.store.run("INSERT INTO rule_counters(repo_id,pattern,count,state,updated_at) VALUES(?,'Bash(npm run test)',5,'offered',1)", h.repoId)
-    const written = await writeRule(h.store, { repoId: h.repoId, pattern: 'Bash(npm run test)', source: 'suggested', stateDir: h.state, at: 5, gitRead: async () => ({ code: 0, stdout: Buffer.alloc(0) }) })
+    const written = await writeRule(h.store, { repoId: h.repoId, pattern: 'Bash(npm run test)', source: 'suggested', stateDir: h.state, at: 5, gitRead: async () => ({ code: 0, stdout: Buffer.alloc(0) }), platform: 'linux' })
     assert.equal(written.rule.source, 'suggested')
     assert.equal(written.rule.approvalsBefore, 5)
     assert.equal(written.rule.tracked, true)

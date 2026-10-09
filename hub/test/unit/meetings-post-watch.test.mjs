@@ -10,6 +10,10 @@ import { createPostWatch } from '../../server/meetings/post-watch.mjs'
 import { addPin, getMeeting, pins, upsertMeeting } from '../../server/meetings/store.mjs'
 import { writeMeetingsTree } from '../helpers/meetings-tree.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const MINUTE = 60 * 1000
 
 async function withTree (fn, { variants = [] } = {}) {
@@ -71,7 +75,7 @@ async function freshSession (tree, id) {
 
 const updates = published => published.filter(e => e.type === 'meeting.updated')
 
-test('writing recorded, transcribed, awaiting_names, transcribed, synthesized in turn publishes five meeting.updated in that order', async () => withTree(async ({ store, tree, published, make }) => {
+test('writing recorded, transcribed, awaiting_names, transcribed, synthesized in turn publishes five meeting.updated in that order', { skip: LINUX_ONLY }, async () => withTree(async ({ store, tree, published, make }) => {
   // The poll never fires here (manual timers): fs.watch alone drives each step.
   const id = '2026-09-12T15-30-00'
   const dir = await freshSession(tree, id)

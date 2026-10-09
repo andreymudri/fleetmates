@@ -5,6 +5,10 @@ import { createScribedClient } from '../../server/adapters/scribed.mjs'
 import { startFakeScribed } from '../fakes/fake-scribed.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const MEETING = '2026-10-04T10-00-00'
 const QUESTION_SENTINEL = 'PERGUNTA-SENTINELA-7731'
 const ANSWER_SENTINEL = 'RESPOSTA-SENTINELA-4419'
@@ -68,7 +72,7 @@ function spaced (/** @type {object[]} */ lines, gap = 20) {
   return { events: lines, splitAt, chunkDelayMs: gap }
 }
 
-test('ask returns the transient thread at once, publishes deltas in order, then ask.done with the joined text', async () => {
+test('ask returns the transient thread at once, publishes deltas in order, then ask.done with the joined text', { skip: LINUX_ONLY }, async () => {
   await withAsk({}, async ({ fake, ask, events }) => {
     fake.on('ask', () => spaced([
       { type: 'ask_delta', text: 'Esse ' },
@@ -99,7 +103,7 @@ test('ask returns the transient thread at once, publishes deltas in order, then 
   })
 })
 
-test('an error after deltas publishes ask.error with scribed\'s message verbatim', async () => {
+test('an error after deltas publishes ask.error with scribed\'s message verbatim', { skip: LINUX_ONLY }, async () => {
   const message = 'claude -p falhou: tempo esgotado após 120 s'
   await withAsk({ askDeltas: ['parcial '], askError: message }, async ({ ask, events }) => {
     ask.ask(MEETING, 'Pergunta?')
@@ -114,7 +118,7 @@ test('an error after deltas publishes ask.error with scribed\'s message verbatim
   })
 })
 
-test('a second ask for the meeting while the first is in flight is ask_in_progress', async () => {
+test('a second ask for the meeting while the first is in flight is ask_in_progress', { skip: LINUX_ONLY }, async () => {
   await withAsk({}, async ({ fake, ask, events }) => {
     fake.on('ask', () => ({ delayMs: 200, events: [{ type: 'ask_delta', text: 'ok' }, { type: 'ask_done' }] }))
     ask.ask(MEETING, 'Primeira?')
@@ -125,7 +129,7 @@ test('a second ask for the meeting while the first is in flight is ask_in_progre
   })
 })
 
-test('an ask for a meeting that is not recording is not_recording and sends nothing', async () => {
+test('an ask for a meeting that is not recording is not_recording and sends nothing', { skip: LINUX_ONLY }, async () => {
   await withAsk({}, async ({ fake, ask, view }) => {
     assert.throws(() => ask.ask('2026-10-03T09-00-00', 'Pergunta?'), (err) => err.status === 409 && err.code === 'not_recording')
     view.state = 'stopping'
@@ -135,7 +139,7 @@ test('an ask for a meeting that is not recording is not_recording and sends noth
   })
 })
 
-test('scribed unreachable is scribed_unavailable, before the ask or as ask.error after it', async () => {
+test('scribed unreachable is scribed_unavailable, before the ask or as ask.error after it', { skip: LINUX_ONLY }, async () => {
   await withAsk({}, async ({ fake, ask, events, view }) => {
     view.state = 'unavailable'
     assert.throws(() => ask.ask(MEETING, 'Pergunta?'), (err) => err.status === 503 && err.code === 'scribed_unavailable')
@@ -147,7 +151,7 @@ test('scribed unreachable is scribed_unavailable, before the ask or as ask.error
   })
 })
 
-test('after stop no further delta is published while the fake keeps sending', async () => {
+test('after stop no further delta is published while the fake keeps sending', { skip: LINUX_ONLY }, async () => {
   await withAsk({}, async ({ fake, ask, events }) => {
     const lines = Array.from({ length: 20 }, (_, i) => ({ type: 'ask_delta', text: `d${i} ` }))
     fake.on('ask', () => spaced([...lines, { type: 'ask_done' }], 25))
@@ -163,7 +167,7 @@ test('after stop no further delta is published while the fake keeps sending', as
   })
 })
 
-test('nothing reaches the store: a store whose appendEvent throws is never called', async () => {
+test('nothing reaches the store: a store whose appendEvent throws is never called', { skip: LINUX_ONLY }, async () => {
   let calls = 0
   const store = { appendEvent () { calls++; throw new Error('ask events must not be stored') } }
   await withAsk({}, async ({ ask, events }) => {
@@ -174,7 +178,7 @@ test('nothing reaches the store: a store whose appendEvent throws is never calle
   }, { store })
 })
 
-test('log calls hold ids and lengths, never the question or the answer', async () => {
+test('log calls hold ids and lengths, never the question or the answer', { skip: LINUX_ONLY }, async () => {
   await withAsk({ askDeltas: [`a ${ANSWER_SENTINEL}`] }, async ({ ask, events, logs }) => {
     ask.ask(MEETING, `q ${QUESTION_SENTINEL}`)
     await until(() => events.some((e) => e.type === 'ask.done'))
@@ -186,7 +190,7 @@ test('log calls hold ids and lengths, never the question or the answer', async (
   })
 })
 
-test('history returns scribed history asks as { t, question, answer } for the recording meeting only', async () => {
+test('history returns scribed history asks as { t, question, answer } for the recording meeting only', { skip: LINUX_ONLY }, async () => {
   await withAsk({}, async ({ fake, ask }) => {
     fake.setStatus({ asks: [{ t: 12.5, question: 'Quem?', answer: 'A equipe.', context_minutes: 5 }] })
     assert.deepEqual(await ask.history(MEETING), [{ t: 12.5, question: 'Quem?', answer: 'A equipe.' }])

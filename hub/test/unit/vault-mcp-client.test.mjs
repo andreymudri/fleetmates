@@ -208,10 +208,12 @@ test('the fake refuses a write tool with isError and logs it without the argumen
 
 test('slow answers twice give degraded and fast probes twice give ok again; the 30 s timer pings', async () => {
   const log = path.join(tmp, 'slow.log')
+  // Real time: a slow answer takes 4 times slowMs. The start and the pings, which the fake answers
+  // without delay, are timed against the same slowMs, so it leaves them room on a loaded machine.
   const { client, timers } = makeClient({
-    env: { FAKE_VAULT_MODE: 'slow', FAKE_VAULT_DELAY_MS: '300', FAKE_VAULT_LOG: log },
+    env: { FAKE_VAULT_MODE: 'slow', FAKE_VAULT_DELAY_MS: '4000', FAKE_VAULT_LOG: log },
     now: Date.now,
-    client: { slowMs: 150 }
+    client: { slowMs: 1000 }
   })
   try {
     await client.start()

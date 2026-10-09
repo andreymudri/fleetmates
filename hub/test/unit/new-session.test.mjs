@@ -1,7 +1,8 @@
 // Task 10: the New session form (docs/deck/screens/new-session.md, acceptance criteria 1 to 9, D-68).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { findChromium } from '../helpers/chromium.mjs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -378,16 +379,6 @@ test('the scan root reads as missing only when the rescan fails with settings_io
   assert.equal(await ns.probeScanRoot(fakeApi({ 'POST /api/repos/rescan': other })), false)
 })
 
-async function findChromium() {
-  for (const candidate of [process.env.CHROMIUM_PATH, '/usr/bin/chromium', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']) {
-    if (!candidate) continue
-    try { await access(candidate)
-      return candidate } catch {}
-  }
-  return null
-}
-
 // A page that mounts the stateful NewSession with a recording api; `window.h.load(repos)` delivers the snapshot.
 const HARNESS = `import React, { useState } from 'react'
 import { createRoot } from 'react-dom/client'
@@ -414,7 +405,7 @@ createRoot(document.getElementById('root')).render(<App />)
 `
 
 test('a ?repo= that arrives before the repos resolves once they load, and never overrides a repo the user typed', async t => {
-  const executablePath = await findChromium()
+  const executablePath = findChromium()
   assert.ok(executablePath, 'Chromium or Chrome is required for the New session browser test')
   const dir = await mkdtemp(path.join(tmpdir(), 'newsess-'))
   t.after(() => rm(dir, { recursive: true, force: true }))

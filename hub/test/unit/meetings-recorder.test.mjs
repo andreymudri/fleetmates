@@ -10,6 +10,10 @@ import { getMeeting, upsertMeeting } from '../../server/meetings/store.mjs'
 import { startFakeScribed } from '../fakes/fake-scribed.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 // Timers the test advances by hand. Socket I/O stays real, so each step waits for its outcome with `waitFor`.
 function fakeClock (start = Date.parse('2026-10-04T13:00:00Z')) {
   let t = start
@@ -136,7 +140,7 @@ async function setup (t, { fake: fakeOpts = {}, timeouts = {}, startFake = true,
 const otherId = '2026-10-04T09-59-30'
 const live = (id, t0, t1, text, source = 'mic') => ({ t0, t1, source, text, lang: 'pt', asr_model: 'medium-int8', session_id: id })
 
-test('row 5: start creates the meeting row and opens the subscription', async t => {
+test('row 5: start creates the meeting row and opens the subscription', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   assert.equal(h.subscribed(), false)
@@ -151,7 +155,7 @@ test('row 5: start creates the meeting row and opens the subscription', async t 
   await waitFor(h.subscribed, 'a subscription')
 })
 
-test('row 6: a refused start leaves idle with lastError.message verbatim', async t => {
+test('row 6: a refused start leaves idle with lastError.message verbatim', { skip: LINUX_ONLY }, async t => {
   const message = 'a sessão anterior ainda está encerrando; tente de novo em instantes'
   const h = await setup(t)
   h.fake.on('start', () => ({ type: 'error', cmd: 'start', message }))
@@ -164,7 +168,7 @@ test('row 6: a refused start leaves idle with lastError.message verbatim', async
   assert.equal(h.of('meeting.status').at(-1).data.lastError.message, message)
 })
 
-test('row 7: a start timeout gives idle, then a poll with recording true gives recording', async t => {
+test('row 7: a start timeout gives idle, then a poll with recording true gives recording', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t, { timeouts: { start: 150 } })
   h.fake.on('start', () => null)
   await h.ready()
@@ -176,7 +180,7 @@ test('row 7: a start timeout gives idle, then a poll with recording true gives r
   assert.equal(h.recorder.view().meetingId, otherId)
 })
 
-test('row 13: while the stop is in flight a poll with recording false is ignored', async t => {
+test('row 13: while the stop is in flight a poll with recording false is ignored', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t, { fake: { stopDelayMs: 700 } })
   await h.ready()
   await h.recorder.start('pessoal')
@@ -192,7 +196,7 @@ test('row 13: while the stop is in flight a poll with recording false is ignored
   assert.deepEqual(h.stopped, [id])
 })
 
-test('slow becomes true after 60 s of stop', async t => {
+test('slow becomes true after 60 s of stop', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   h.fake.on('stop', () => null)
   await h.ready()
@@ -206,7 +210,7 @@ test('slow becomes true after 60 s of stop', async t => {
   assert.equal(h.of('meeting.status').at(-1).data.slow, true)
 })
 
-test('row 11: another client\'s start gives recording and quiet within one poll', async t => {
+test('row 11: another client\'s start gives recording and quiet within one poll', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   h.fake.setStatus({ recording: true, session_id: otherId, tag: 'client-a', elapsed_s: 30, routed_apps: ['Zoom'] })
@@ -223,7 +227,7 @@ test('row 11: another client\'s start gives recording and quiet within one poll'
   await waitFor(h.subscribed, 'a subscription')
 })
 
-test('row 12: another client\'s stop sets the row stopping and calls onStopped', async t => {
+test('row 12: another client\'s stop sets the row stopping and calls onStopped', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   h.fake.setStatus({ recording: true, session_id: otherId, tag: 'pessoal', elapsed_s: 30 })
@@ -237,7 +241,7 @@ test('row 12: another client\'s stop sets the row stopping and calls onStopped',
   assert.deepEqual(h.stopped, [otherId])
 })
 
-test('row 14: a changed session_id closes the old meeting and joins the new one', async t => {
+test('row 14: a changed session_id closes the old meeting and joins the new one', { skip: LINUX_ONLY }, async t => {
   const next = '2026-10-04T10-05-00'
   const h = await setup(t)
   await h.ready()
@@ -253,7 +257,7 @@ test('row 14: a changed session_id closes the old meeting and joins the new one'
   assert.deepEqual(h.stopped, [otherId])
 })
 
-test('row 2: scribed gone mid-recording gives unavailable, lost and isRecording false', async t => {
+test('row 2: scribed gone mid-recording gives unavailable, lost and isRecording false', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   await h.recorder.start('pessoal')
@@ -269,7 +273,7 @@ test('row 2: scribed gone mid-recording gives unavailable, lost and isRecording 
   assert.equal(h.of('health.changed').at(-1).data.state, 'down')
 })
 
-test('row 15: a transcript event of another session is dropped', async t => {
+test('row 15: a transcript event of another session is dropped', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   await h.recorder.start('pessoal')
@@ -299,7 +303,7 @@ async function recordWithOneLine (h, tag, text, t0 = 0, t1 = 5) {
   return { id, dir, first }
 }
 
-test('row 16: after the subscription ends, the reconnect publishes the 3 missed lines and meeting.recovered 3', async t => {
+test('row 16: after the subscription ends, the reconnect publishes the 3 missed lines and meeting.recovered 3', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   const { id, dir, first } = await recordWithOneLine(h, 'pessoal', 'antes')
   await writeFile(path.join(dir, 'transcript.jsonl'), JSON.stringify(first) + '\n', { mode: 0o600 })
@@ -314,7 +318,7 @@ test('row 16: after the subscription ends, the reconnect publishes the 3 missed 
   assert.equal(h.recorder.ring(id).length, 4)
 })
 
-test('row 16: when transcript.jsonl cannot be read, tail fills the gap with the minutes rounded up', async t => {
+test('row 16: when transcript.jsonl cannot be read, tail fills the gap with the minutes rounded up', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t, { fake: { tailText: '[00:04] Você: antes\n[00:06] Você: um\n[01:02] Sala: dois\n' } })
   const { id, dir } = await recordWithOneLine(h, 'pessoal', 'antes')
   const outside = path.join(h.sessionDir, 'outside.jsonl')
@@ -356,7 +360,7 @@ test('while scribed is down the probe backs off 2, 4, 8 s', async t => {
   assert.equal(h.recorder.view().state, 'unavailable')
 })
 
-test('a status timeout makes the health degraded, and two answers make it ok again', async t => {
+test('a status timeout makes the health degraded, and two answers make it ok again', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t, { timeouts: { status: 100 } })
   await h.ready()
   assert.equal(h.recorder.health().state, 'ok')
@@ -371,7 +375,7 @@ test('a status timeout makes the health degraded, and two answers make it ok aga
   assert.deepEqual(h.of('health.changed').map(e => e.data.state), ['ok', 'degraded', 'ok'])
 })
 
-test('ten polls that change only elapsed_s append no meeting.status', async t => {
+test('ten polls that change only elapsed_s append no meeting.status', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   await h.recorder.start('pessoal')
@@ -385,7 +389,7 @@ test('ten polls that change only elapsed_s append no meeting.status', async t =>
   assert.equal(h.appended.filter(type => type === 'meeting.status').length, before)
 })
 
-test('meeting.transcript never reaches store.appendEvent and carries no seq', async t => {
+test('meeting.transcript never reaches store.appendEvent and carries no seq', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   await h.recorder.start('pessoal')
@@ -398,7 +402,7 @@ test('meeting.transcript never reaches store.appendEvent and carries no seq', as
   assert.equal(h.of('meeting.transcript')[0].data.ephemeral, true)
 })
 
-test('the log calls of a confidential meeting hold no transcript text', async t => {
+test('the log calls of a confidential meeting hold no transcript text', { skip: LINUX_ONLY }, async t => {
   const sentinel = 'SENTINEL-confidencial-7f3a'
   const h = await setup(t)
   const { id, dir, first } = await recordWithOneLine(h, 'client-a', `${sentinel} ao vivo`)
@@ -417,7 +421,7 @@ test('the log calls of a confidential meeting hold no transcript text', async t 
   assert.equal(JSON.stringify(h.logs).includes(sentinel), false)
 })
 
-test('an unknown tag throws unknown_tag and sends nothing to scribed', async t => {
+test('an unknown tag throws unknown_tag and sends nothing to scribed', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   await assert.rejects(h.recorder.start('acme'), err => err.code === 'unknown_tag' && err.status === 422)
@@ -425,7 +429,7 @@ test('an unknown tag throws unknown_tag and sends nothing to scribed', async t =
   assert.equal(h.recorder.view().state, 'idle')
 })
 
-test('a second meeting\'s ring carries none of the first meeting\'s lines', async t => {
+test('a second meeting\'s ring carries none of the first meeting\'s lines', { skip: LINUX_ONLY }, async t => {
   const second = '2026-10-04T10-05-00'
   const h = await setup(t)
   await h.ready()
@@ -442,7 +446,7 @@ test('a second meeting\'s ring carries none of the first meeting\'s lines', asyn
 })
 
 for (const [name, answer] of [['undefined', undefined], ['null', null], ['an object without confidential', {}]]) {
-  test(`a policy answer of ${name} makes the meeting confidential (fail closed)`, async t => {
+  test(`a policy answer of ${name} makes the meeting confidential (fail closed)`, { skip: LINUX_ONLY }, async t => {
     const h = await setup(t, { policy: () => answer })
     await h.ready()
     await h.recorder.start('pessoal')
@@ -451,7 +455,7 @@ for (const [name, answer] of [['undefined', undefined], ['null', null], ['an obj
   })
 }
 
-test('joining a meeting whose row is already confidential keeps it confidential', async t => {
+test('joining a meeting whose row is already confidential keeps it confidential', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   upsertMeeting(h.store, { id: otherId, tag: 'client-a', confidential: true, state: 'recording', startedAt: 1, at: 1 })
@@ -461,7 +465,7 @@ test('joining a meeting whose row is already confidential keeps it confidential'
   assert.equal(h.recorder.view().confidential, true)
 })
 
-test('start while starting, recording or stopping throws invalid_state and sends no second start', async t => {
+test('start while starting, recording or stopping throws invalid_state and sends no second start', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t, { fake: { stopDelayMs: 300 } })
   const starts = () => h.fake.received.filter(r => r.parsed?.cmd === 'start').length
   await h.ready()
@@ -487,7 +491,7 @@ async function loseMeeting (h) {
   return lostId
 }
 
-test('a start after scribed came back closes the meeting lost when it went down', async t => {
+test('a start after scribed came back closes the meeting lost when it went down', { skip: LINUX_ONLY }, async t => {
   const next = '2026-10-04T10-05-00'
   const h = await setup(t)
   const lostId = await loseMeeting(h)
@@ -503,7 +507,7 @@ test('a start after scribed came back closes the meeting lost when it went down'
   assert.deepEqual(h.stopped, [lostId])
 })
 
-test('a refused start keeps the lost meeting for the next poll, which rejoins it', async t => {
+test('a refused start keeps the lost meeting for the next poll, which rejoins it', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   const lostId = await loseMeeting(h)
   await h.restartFake()
@@ -520,7 +524,7 @@ test('a refused start keeps the lost meeting for the next poll, which rejoins it
   assert.deepEqual(h.stopped, [])
 })
 
-test('the tail fallback keeps a line that prints below the last t1 and skips lines the ring holds', async t => {
+test('the tail fallback keeps a line that prints below the last t1 and skips lines the ring holds', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t, { fake: { tailText: '[00:05] Você: antes\n[00:05] Sala: logo depois\n[00:07] Você: um\n' } })
   const { dir } = await recordWithOneLine(h, 'pessoal', 'antes', 5.0, 5.4)
   const outside = path.join(h.sessionDir, 'outside.jsonl')
@@ -533,7 +537,7 @@ test('the tail fallback keeps a line that prints below the last t1 and skips lin
   assert.deepEqual(h.of('meeting.transcript').slice(1).map(e => e.data.line.text), ['logo depois', 'um'])
 })
 
-test('joining a meeting in progress fills the ring from transcript.jsonl', async t => {
+test('joining a meeting in progress fills the ring from transcript.jsonl', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   const dir = path.join(h.sessionDir, otherId)
@@ -545,7 +549,7 @@ test('joining a meeting in progress fills the ring from transcript.jsonl', async
   assert.deepEqual(h.recorder.ring(otherId).map(line => line.text), ['um', 'dois'])
 })
 
-test('back from row 2 on the same meeting, the ring is kept and the gap is filled', async t => {
+test('back from row 2 on the same meeting, the ring is kept and the gap is filled', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   const { id, dir, first } = await recordWithOneLine(h, 'pessoal', 'antes')
   await writeFile(path.join(dir, 'transcript.jsonl'), JSON.stringify(first) + '\n', { mode: 0o600 })
@@ -563,7 +567,7 @@ test('back from row 2 on the same meeting, the ring is kept and the gap is fille
   assert.deepEqual(h.recorder.ring(id).map(line => line.text), ['antes', 'um', 'dois'])
 })
 
-test('row 10: a failed stop sets lastError and the next poll decides', async t => {
+test('row 10: a failed stop sets lastError and the next poll decides', { skip: LINUX_ONLY }, async t => {
   const message = 'não foi possível encerrar a sessão'
   const h = await setup(t)
   h.fake.on('stop', () => ({ type: 'error', cmd: 'stop', message }))
@@ -578,7 +582,7 @@ test('row 10: a failed stop sets lastError and the next poll decides', async t =
   assert.equal(h.recorder.view().state, 'recording')
 })
 
-test('the ring keeps the newest ringCap lines', async t => {
+test('the ring keeps the newest ringCap lines', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t, { ringCap: 3 })
   await h.ready()
   await h.recorder.start('pessoal')
@@ -589,7 +593,7 @@ test('the ring keeps the newest ringCap lines', async t => {
   assert.deepEqual(h.recorder.ring(id).map(line => line.text), ['l2', 'l3', 'l4'])
 })
 
-test('a poll sent before a start answer cannot undo the start', async t => {
+test('a poll sent before a start answer cannot undo the start', { skip: LINUX_ONLY }, async t => {
   const h = await setup(t)
   await h.ready()
   const before = h.statusCount()

@@ -15,6 +15,10 @@ import {
   subscribe
 } from '../../server/adapters/scribed.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const here = path.dirname(fileURLToPath(import.meta.url))
 const fixtures = path.join(here, '..', 'fixtures', 'scribed', 'd4ffb9d')
 
@@ -145,7 +149,7 @@ test('decodeEvent ignores unknown keys and rejects booleans in number fields', (
   assert.throws(() => decodeEvent(Buffer.from([0x7b, 0xff, 0x7d])), /^ProtocolError: linha não é UTF-8 válido/)
 })
 
-test('defaultSocketPath follows XDG_RUNTIME_DIR and has no fallback', () => {
+test('defaultSocketPath follows XDG_RUNTIME_DIR and has no fallback', { skip: LINUX_ONLY }, () => {
   assert.equal(defaultSocketPath({ XDG_RUNTIME_DIR: '/run/user/4242' }), '/run/user/4242/turbidassist.sock')
   assert.throws(() => defaultSocketPath({}), /XDG_RUNTIME_DIR/)
   assert.throws(() => defaultSocketPath({ XDG_RUNTIME_DIR: '' }), /XDG_RUNTIME_DIR/)
@@ -186,7 +190,7 @@ async function fakeScribed (onCommand) {
 const IDLE = '{"type": "status", "recording": false, "session_id": null, "tag": null, "elapsed_s": 0, "routed_apps": []}\n'
 const REC = '{"type": "status", "recording": true, "session_id": "2026-09-08T14-00-12", "tag": "acme", "elapsed_s": 812, "routed_apps": ["Chromium"]}\n'
 
-test('status sends one status command and resolves with the decoded answer', async () => {
+test('status sends one status command and resolves with the decoded answer', { skip: LINUX_ONLY }, async () => {
   const fake = await fakeScribed((socket, cmd) => {
     if (cmd.cmd === 'status') socket.write(REC)
   })
@@ -199,7 +203,7 @@ test('status sends one status command and resolves with the decoded answer', asy
   }
 })
 
-test('status rejects with the daemon error message', async () => {
+test('status rejects with the daemon error message', { skip: LINUX_ONLY }, async () => {
   const fake = await fakeScribed((socket) => {
     socket.write('{"type": "error", "cmd": "?", "message": "cmd desconhecido"}\n')
   })
@@ -215,7 +219,7 @@ test('status rejects with the daemon error message', async () => {
   }
 })
 
-test('status times out when the daemon never answers', async () => {
+test('status times out when the daemon never answers', { skip: LINUX_ONLY }, async () => {
   const fake = await fakeScribed(() => {})
   try {
     await assert.rejects(status({ socketPath: fake.socketPath, timeoutMs: 100 }), { name: 'ScribedTimeout' })
@@ -224,7 +228,7 @@ test('status times out when the daemon never answers', async () => {
   }
 })
 
-test('status rejects as unavailable when nothing listens', async () => {
+test('status rejects as unavailable when nothing listens', { skip: LINUX_ONLY }, async () => {
   const rt = await makeRuntimeDir()
   try {
     await assert.rejects(status({ socketPath: path.join(rt.dir, 'turbidassist.sock') }), { name: 'ScribedUnavailable' })
@@ -233,7 +237,7 @@ test('status rejects as unavailable when nothing listens', async () => {
   }
 })
 
-test('subscribe delivers the status then two transcript lines in order', async () => {
+test('subscribe delivers the status then two transcript lines in order', { skip: LINUX_ONLY }, async () => {
   const t1 = '{"type": "transcript", "event": {"t0": 12.48, "t1": 15.9, "source": "mic", "text": "vou subir o fix"}}\n'
   const t2 = '{"type": "transcript", "event": {"t0": 16.0, "t1": 18.2, "source": "room", "text": "então tá, sessão já começou"}}\n'
   const fake = await fakeScribed((socket, cmd) => {
@@ -265,7 +269,7 @@ test('subscribe delivers the status then two transcript lines in order', async (
   }
 })
 
-test('subscribe reports the daemon closing the stream', async () => {
+test('subscribe reports the daemon closing the stream', { skip: LINUX_ONLY }, async () => {
   const fake = await fakeScribed((socket, cmd) => {
     if (cmd.cmd === 'subscribe') socket.end(IDLE)
   })
@@ -282,7 +286,7 @@ test('subscribe reports the daemon closing the stream', async () => {
   }
 })
 
-test('subscribe closes with an error on a line that does not decode', async () => {
+test('subscribe closes with an error on a line that does not decode', { skip: LINUX_ONLY }, async () => {
   const fake = await fakeScribed((socket, cmd) => {
     if (cmd.cmd === 'subscribe') socket.write('{"type": "boom"}\n')
   })

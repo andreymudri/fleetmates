@@ -19,6 +19,10 @@ import { startFakeScribed } from '../fakes/fake-scribed.mjs'
 import { makeRuntimeDir } from '../helpers/runtime-dir.mjs'
 import { meetings5, writeMeetingsTree } from '../helpers/meetings-tree.mjs'
 
+// Meetings and scribed run on Linux only (docs/deck/16-platforms.md section 1). FLEETMATES_TEST_FORCE_WINDOWS=1
+// shows the skip on Linux, as it does for posixTest.
+const LINUX_ONLY = (process.platform !== 'linux' || process.env.FLEETMATES_TEST_FORCE_WINDOWS === '1') && 'meetings and scribed are Linux only (16-platforms section 1)'
+
 const token = 'q'.repeat(43)
 const serverMain = fileURLToPath(new URL('../../server/main.mjs', import.meta.url))
 const hookFixture = JSON.parse(fs.readFileSync(new URL('../fixtures/hooks/2.1.282/SessionStart.startup.json', import.meta.url)))
@@ -123,7 +127,7 @@ process.stdout.write('42\\n')
   return { home, rt, fake, child, request, calls, popups, permission, recorder, until, get diagnostics() { return diagnostics } }
 }
 
-test('a deck recording quiets the chime but not the popup; after the stop nothing rings late, and a new session rings once', { timeout: 30_000 }, async t => {
+test('a deck recording quiets the chime but not the popup; after the stop nothing rings late, and a new session rings once', { skip: LINUX_ONLY, timeout: 30_000 }, async t => {
   const h = await harness(t)
   const started = await h.request('/api/meetings/start', { method: 'POST', body: { tag: 'pessoal' } })
   assert.equal(started.status, 202, JSON.stringify(started.data))
@@ -148,7 +152,7 @@ test('a deck recording quiets the chime but not the popup; after the stop nothin
   assert.equal(h.popups().length, 2)
 })
 
-test('a recording another client started quiets the chime within one poll, and nothing rings when it ends', { timeout: 30_000 }, async t => {
+test('a recording another client started quiets the chime within one poll, and nothing rings when it ends', { skip: LINUX_ONLY, timeout: 30_000 }, async t => {
   const h = await harness(t)
   assert.equal((await h.recorder()).state, 'idle')
   const startedAt = Date.now()
@@ -170,7 +174,7 @@ test('a recording another client started quiets the chime within one poll, and n
   assert.equal(h.calls('pw-play').length, 1)
 })
 
-test('with quietInMeetings false a request during a recording rings', { timeout: 30_000 }, async t => {
+test('with quietInMeetings false a request during a recording rings', { skip: LINUX_ONLY, timeout: 30_000 }, async t => {
   const h = await harness(t)
   const patched = await h.request('/api/prefs', { method: 'PATCH', body: { quietInMeetings: false } })
   assert.equal(patched.status, 200, JSON.stringify(patched.data))
