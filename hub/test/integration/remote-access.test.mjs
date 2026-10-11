@@ -177,10 +177,17 @@ test('the public origin resolves as the port does: options, then the environment
   fs.writeFileSync(paths.token, token, { mode: 0o600 })
   fs.mkdirSync(paths.config, { recursive: true, mode: 0o700 })
   fs.writeFileSync(path.join(paths.config, 'config.json'), JSON.stringify({ publicOrigin: 'https://from-config.ts.net' }), { mode: 0o600 })
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }))
+  // One hook closes every deck before removing the directory: t.after hooks run in registration order, and
+  // Windows refuses to remove a directory whose database a still-open deck holds, so the EPERM would skip the
+  // later close hooks and leave the servers keeping the test process alive.
+  const decks = []
+  t.after(async () => {
+    await Promise.all(decks.map(deck => deck.close()))
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  })
   const start = async env => {
     const deck = await startDeckServer({ env: { HOME: dir, ...env }, port: 0, notifications: false, connectDeckd: async () => { throw Error('offline') } })
-    t.after(() => deck.close())
+    decks.push(deck)
     const port = deck.address().port
     const ask = host => new Promise((resolve, reject) => {
       const req = http.request({ host: '127.0.0.1', port, path: '/api/version', headers: { Host: host, Authorization: `Bearer ${token}` } }, res => { res.resume()
