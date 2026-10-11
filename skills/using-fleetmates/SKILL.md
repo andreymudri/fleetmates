@@ -28,6 +28,7 @@ apply, the process skill goes first.
 | Situation | Skill |
 |---|---|
 | Exploring an idea, unclear requirements, before any design or plan | `brainstorming` |
+| A plan or design has unresolved decisions, or the user asks to be grilled | `grilling` |
 | Requirements are settled and a multi-step change needs a written plan | `writing-plans` |
 | A written plan exists and there's a git repo with 3+ disjoint tasks — run a fleet | `parallel-execution` |
 | A written plan exists but the work doesn't warrant a fleet — work it inline | `executing-plans` |

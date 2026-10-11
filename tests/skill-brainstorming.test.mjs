@@ -21,6 +21,10 @@ test('terminates by handing off to writing-plans', async () => {
   assert.match(await body(), /writing-plans/)
 })
 
+test('hands the question phase to grilling', async () => {
+  assert.match(await body(), /`grilling`/)
+})
+
 test('carries upstream attribution', async () => {
   assert.match(await body(), /Adapted from the MIT-licensed superpowers plugin/)
 })

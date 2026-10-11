@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The `grilling` skill: a requirements interview that walks the feature as a design tree, asks one
+  question per message with its own recommended answer, reads the repository instead of asking what
+  a file can answer, and keeps an open-questions ledger of resolved, open and deferred decisions. It
+  stops when no branch is open and the user confirms, never at a question count. `brainstorming`
+  hands its question phase to it, and its spec self-review now checks the ledger left nothing
+  unresolved or silently dropped.
+
 ## v2.4.0
 
 ### Added

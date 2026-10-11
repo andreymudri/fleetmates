@@ -24,7 +24,9 @@ Every project goes through this process. A todo list, a single-function utility,
 You MUST complete these in order:
 
 1. **Explore project context** — check files, docs, recent commits
-2. **Ask clarifying questions** — one at a time, understand purpose/constraints/success criteria
+2. **Ask clarifying questions** — hand this phase to the `grilling` skill: questions one at a
+   time, walked as a design tree, with an open-questions ledger. Its resolved decisions and
+   deferred items carry into the design doc
 3. **Propose 2-3 approaches** — with trade-offs and your recommendation
 4. **Present design** — in sections scaled to their complexity, get user approval after each section
 5. **Write design doc** — save to `docs/specs/YYYY-MM-DD-<topic>-design.md`
@@ -37,7 +39,7 @@ You MUST complete these in order:
 ```dot
 digraph brainstorming {
     "Explore project context" [shape=box];
-    "Ask clarifying questions" [shape=box];
+    "Ask clarifying questions\n(grilling skill)" [shape=box];
     "Propose 2-3 approaches" [shape=box];
     "Present design sections" [shape=box];
     "User approves design?" [shape=diamond];
@@ -46,8 +48,8 @@ digraph brainstorming {
     "User reviews spec?" [shape=diamond];
     "Invoke writing-plans skill" [shape=doublecircle];
 
-    "Explore project context" -> "Ask clarifying questions";
-    "Ask clarifying questions" -> "Propose 2-3 approaches";
+    "Explore project context" -> "Ask clarifying questions\n(grilling skill)";
+    "Ask clarifying questions\n(grilling skill)" -> "Propose 2-3 approaches" [label="ledger resolved"];
     "Propose 2-3 approaches" -> "Present design sections";
     "Present design sections" -> "User approves design?";
     "User approves design?" -> "Present design sections" [label="no, revise"];
@@ -59,7 +61,7 @@ digraph brainstorming {
 }
 ```
 
-**The terminal state is invoking `writing-plans`.** Do NOT invoke any other implementation skill. The ONLY skill you invoke after brainstorming is `writing-plans`.
+**The terminal state is invoking `writing-plans`.** Once the design is approved, do NOT invoke any other implementation skill: the ONLY skill you invoke after the design is `writing-plans`. The one skill invoked before then is `grilling`, which runs step 2's question phase and hands its ledger back here — it is part of this process, not a transition out of it.
 
 ## The Process
 
@@ -68,10 +70,10 @@ digraph brainstorming {
 - Check out the current project state first (files, docs, recent commits)
 - Before asking detailed questions, assess scope: if the request describes multiple independent subsystems (e.g., "build a platform with chat, file storage, billing, and analytics"), flag this immediately. Don't spend questions refining details of a project that needs to be decomposed first.
 - If the project is too large for a single spec, help the user decompose into sub-projects: what are the independent pieces, how do they relate, what order should they be built? Then brainstorm the first sub-project through the normal design flow. Each sub-project gets its own spec → plan → implementation cycle.
-- For appropriately-scoped projects, ask questions **one at a time** to refine the idea
-- Prefer multiple choice questions when possible, but open-ended is fine too
-- Only one question per message - if a topic needs more exploration, break it into multiple questions
+- For appropriately-scoped projects, invoke the `grilling` skill and run the question phase there: questions **one at a time**, walked as a design tree, each carrying your recommended answer, with an open-questions ledger
+- `grilling` governs the form of those questions — asked one at a time with declared options, never as prose. Do not run a second, looser question phase here
 - Focus on understanding: purpose, constraints, success criteria
+- The ledger the interview produces is an input to the design doc: every resolved decision appears in the design, and every deferred item appears with its reason and the trigger that reopens it
 
 **Exploring approaches:**
 
@@ -116,6 +118,7 @@ After writing the spec document, look at it with fresh eyes:
 2. **Internal consistency:** Do any sections contradict each other? Does the architecture match the feature descriptions?
 3. **Scope check:** Is this focused enough for a single implementation plan, or does it need decomposition?
 4. **Ambiguity check:** Could any requirement be interpreted two different ways? If so, pick one and make it explicit.
+5. **Ledger check:** Is anything from the `grilling` ledger left unresolved or silently dropped? Every resolved decision must appear in the spec, and every deferred item must appear with its reason and the trigger that reopens it.
 
 Fix any issues inline. No need to re-review — just fix and move on.
 
@@ -129,4 +132,4 @@ Wait for the user's response. If they request changes, make them and re-run the 
 **Implementation:**
 
 - Invoke the `writing-plans` skill to create a detailed implementation plan
-- Do NOT invoke any other skill. `writing-plans` is the next step.
+- Do NOT invoke any other skill at this point. `writing-plans` is the next step. (`grilling` belongs earlier, at step 2, not here.)
