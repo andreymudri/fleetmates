@@ -5,7 +5,7 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
-## Unreleased
+## v0.7.0
 
 - Tested Claude Code: 2.1.285 (unchanged)
 - deckd changed: no. The PTY protocol is unchanged.
