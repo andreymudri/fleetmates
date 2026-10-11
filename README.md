@@ -203,6 +203,7 @@ Housekeeping:
 
 - `using-fleetmates` — entrypoint; routes to the right process or fleet skill before anything else happens
 - `brainstorming` — explores intent and design before implementation
+- `grilling` — interviews the design tree until no decision is left unresolved
 - `writing-plans` — turns a spec into a plan this plugin can parse, phase, and dispatch to a fleet
 - `executing-plans` — executes a written plan inline in this session, with checkpoints
 - `parallel-execution` — splits a plan into phases and dispatches worktree-isolated implementers
