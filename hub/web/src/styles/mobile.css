@@ -1,0 +1,240 @@
+/*
+ * Phone layout (design `/workspace/design/mobile-adaptation.md`). One sheet, one media block, imported last from
+ * main.jsx, so the whole adaptation is in one place and deleting the file returns the deck to its desktop layout.
+ *
+ * The query is `max-width: 767px`, one below `--breakpoint-mobile` (768px). A media query cannot read a custom
+ * property, so the number is written out here; the token is the one to change if the breakpoint moves.
+ */
+@media (max-width: 767px) {
+  :root {
+    /* Height of the Rail once it is a bottom bar: icon, label and its own padding. Toasts clear it. */
+    --layout-mobile-bar: 60px;
+  }
+
+  /* 1. The shell loses its 1280px floor and stacks: content, then the Rail as a bottom bar. 100dvh, because
+     iOS Safari's 100vh is the tall viewport and hides the last rows behind the browser UI. */
+  .shell {
+    flex-direction: column;
+    height: 100dvh;
+    min-width: 0;
+    overflow-x: hidden;
+  }
+  .shell--recording { flex-wrap: nowrap; }
+  .shell--recording > .rail,
+  .shell--recording > .shell-main { height: auto; }
+  .shell-main { order: 1; }
+  .shell-content {
+    padding: var(--space-16) var(--space-16) var(--space-24);
+    padding-left: max(var(--space-16), env(safe-area-inset-left));
+    padding-right: max(var(--space-16), env(safe-area-inset-right));
+  }
+
+  /* 2. The Rail becomes a bottom bar with visible labels: there is no hover on a phone, so the tooltip can never
+     be read and the icon-only links would stay unlabelled. The logo is left out; four items plus a logo do not
+     fit across 390px. */
+  .rail {
+    order: 2;
+    flex: none;
+    flex-direction: row;
+    align-items: stretch;
+    width: 100%;
+    padding: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+    border-right: 0;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .rail-logo { display: none; }
+  .rail-list {
+    flex: 1;
+    flex-direction: row;
+    justify-content: space-around;
+  }
+  .rail-list--bottom { flex: none; margin-top: 0; }
+  .rail-item { flex: 1; }
+  .rail-link {
+    flex-direction: column;
+    gap: var(--space-2);
+    width: 100%;
+    min-height: var(--layout-mobile-bar);
+    border-radius: 0;
+  }
+  .rail-label {
+    display: block;
+    font-size: var(--font-size-2xs);
+    line-height: 1;
+  }
+  .rail-tooltip { display: none; }
+
+  /* 3. Home in one column, rows at their content height, and a header that wraps into title and a scrolling
+     chip row. Two columns at 390px leaves about 165px per card, which no session card survives. */
+  .home-grid,
+  .quiet-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-12);
+    padding: 0 var(--space-16) var(--space-16);
+  }
+  .home-grid { grid-auto-rows: auto; }
+  .quiet-row { min-height: 0; }
+  .home-header {
+    flex-wrap: wrap;
+    min-height: 0;
+    padding: var(--space-12) var(--space-16);
+  }
+  .counts {
+    flex-basis: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .strip-chip-text { max-width: 60vw; }
+  /* Most card titles are the task text; two lines, as `.card-now` already clamps. */
+  .card-title {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+  /* The quiet cards are dimmed until hover or focus, which never arrives on touch. */
+  .quiet-card--idle,
+  .quiet-card--done { opacity: 1; }
+  .request-command { overflow-wrap: anywhere; }
+
+  /* 4. Focus in one column: the session list goes (the bottom bar already returns to Sessions) and the details
+     panel takes the full width under the main pane. */
+  .focus-screen { grid-template-columns: minmax(0, 1fr); }
+  .focus-list { display: none; }
+  .focus-main { padding: 0 var(--space-16) var(--space-16); }
+  .focus-details { border-left: 0; border-top: 1px solid var(--border-subtle); }
+
+  /* 5. Touch targets. 28px inline actions are exactly the ones that matter here: Deny, Allow once, Stop, Nudge,
+     Archive, Undo. Form controls go to 16px as well, or iOS Safari zooms the page when one takes focus. */
+  .button--xs {
+    min-height: var(--size-control-hero);
+    padding: 0 var(--space-14);
+  }
+  .answer-actions,
+  .card-actions,
+  .drawer-actions { gap: var(--space-12); }
+  .file-chip,
+  .card-rule-accept,
+  .drawer-rule-accept,
+  .drawer-close {
+    min-height: 44px;
+    padding-block: var(--space-10);
+  }
+  .text-input,
+  .setting-select select,
+  textarea {
+    min-height: var(--size-control-hero);
+    font-size: var(--font-size-lg);
+  }
+
+  /* 6. The notch and the home indicator. Both fixed stacks clear the bottom bar and the inset, and a toast is
+     never wider than the screen. */
+  .toast-stack {
+    right: max(var(--space-12), env(safe-area-inset-right));
+    left: max(var(--space-12), env(safe-area-inset-left));
+    bottom: calc(var(--space-12) + var(--layout-mobile-bar) + env(safe-area-inset-bottom));
+    align-items: stretch;
+  }
+  .toast { width: auto; }
+  .archive-toast {
+    left: var(--space-12);
+    right: var(--space-12);
+    bottom: calc(var(--space-12) + var(--layout-mobile-bar) + env(safe-area-inset-bottom));
+    transform: none;
+  }
+
+  /* The density control belongs to a screen wide enough for both; a phone always takes the compact grid, with
+     the full card kept for the states that need a human (Home.jsx `needsFull`). */
+  .home-density { display: none; }
+  .home-mark {
+    display: block;
+    flex: none;
+    color: var(--brand-accent);
+  }
+
+  /* The phone's xterm keeps the PTY's size (components/TerminalView.jsx), so its host scrolls both ways. */
+  .terminal-host {
+    max-height: 58dvh;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* The terminal key bar (components/TerminalView.jsx): 52px above the keyboard, 44px keys, scrolling sideways.
+     The bottom bar is in flow, not fixed, so the two never fight over the bottom edge while the keyboard is up. */
+  .terminal-keys {
+    display: flex;
+    gap: var(--space-6);
+    flex: none;
+    align-items: center;
+    height: 52px;
+    padding: 0 var(--space-8);
+    overflow-x: auto;
+    scrollbar-width: none;
+    /* The bar is wider than the screen, so it scrolls; pan-x tells the browser a horizontal drag is a scroll
+       and not a press, which is the other half of the key firing on pointerup. */
+    touch-action: pan-x;
+    background: var(--bg-sunken);
+    border-top: 1px solid var(--border-subtle);
+  }
+  .terminal-key {
+    flex: none;
+    min-width: 44px;
+    height: 44px;
+    padding: 0 var(--space-8);
+    background: var(--bg-control);
+    color: var(--text-default);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    font-family: var(--font-family-mono);
+    font-size: var(--font-size-sm);
+  }
+  /* The sticky Ctrl, while it is waiting for the next keystroke. */
+  .terminal-key[aria-pressed='true'] {
+    background: var(--brand-accent);
+    color: var(--text-on-primary);
+    border-color: var(--brand-accent);
+  }
+  /* Five tabs (Log, Changes, Facts, Memory, Terminal) do not fit in 358px, so the row scrolls. */
+  .focus-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  /* 7. The overlays: Needs you is a full screen pane, not a side drawer. `openOverlay` already pushes a history
+     entry, so the Android back button closes it; at this width the slide and the scrim bought nothing. */
+  .drawer {
+    width: 100%;
+    max-width: none;
+    box-shadow: none;
+    animation-name: deck-fade-in;
+  }
+  .drawer-scrim { background: var(--bg-canvas); }
+  /* The keyboard half of the footer is dead weight on a phone; where the rules live is not. */
+  .drawer-footer-keys { display: none; }
+  .drawer-footer-rules::first-letter { text-transform: uppercase; }
+  .palette-scrim { padding-top: var(--space-24); }
+  .palette { width: 100%; }
+
+  /* Settings and First run stack, and their action buttons take the full width. */
+  .settings {
+    flex-direction: column;
+    gap: var(--space-16);
+  }
+  .settings-nav {
+    flex: none;
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .settings-nav-list {
+    display: flex;
+    gap: var(--space-8);
+  }
+  .check-row { flex-direction: column; align-items: stretch; }
+  .first-run-footer { flex-direction: column; align-items: stretch; }
+  .first-run-buttons {
+    margin-left: 0;
+    flex-direction: column;
+  }
+}

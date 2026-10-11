@@ -830,6 +830,19 @@ export function needsFilterParam(filter) {
 const DENSITY_KEY = 'deck.density'
 const DENSITIES = new Set(['comfortable', 'compact'])
 
+/** One below `--breakpoint-mobile` (768px), the width at which styles/mobile.css lays the deck out as a phone. */
+export const PHONE_QUERY = '(max-width: 767px)'
+
+/**
+ * Whether this client lays out as a phone, from the viewport and never from a user agent string. Read once where
+ * a change would be disruptive (the terminal's resize guard, the Home density), and watched where it is not.
+ * @param {{ matchMedia?: (query: string) => { matches: boolean } }} [scope]
+ * @returns {boolean}
+ */
+export function phoneViewport({ matchMedia } = {}) {
+  return !!matchMedia?.(PHONE_QUERY)?.matches
+}
+
 /**
  * Home card density from `localStorage` `deck.density`: `comfortable` (default) or `compact`.
  * A storage that throws (private mode, quota) reads as the default.

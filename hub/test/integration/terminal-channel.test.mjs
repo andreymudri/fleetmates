@@ -217,6 +217,22 @@ test('the attach seam: output that arrived before the screen response is in the 
   assert.deepEqual(resize.fields, { ptyId: row.ptyId, cols: 90, rows: 25, source: { kind: 'browser' } })
 })
 
+test('an attach with resize false streams the PTY without fitting it to the tab, and a non-boolean resize is refused', async t => {
+  const fake = scripted({ manual: ['screen'] })
+  const deck = await server(t, fake.connect)
+  const row = await spawned(fake, deck)
+  const c = await client(t, deck)
+  c.send({ t: 'term.attach', sessionId: row.id, cols: 90, rows: 25, resize: 'no' })
+  await c.until(() => c.json.some(m => m.t === 'term.error' && m.error?.code === 'validation_failed'), 'the refused attach')
+  c.send({ t: 'term.attach', sessionId: row.id, cols: 37, rows: 24, resize: false })
+  const screen = await fake.until(() => fake.requests.find(r => r.op === 'screen' && !r.answered), 'the screen request')
+  screen.reply()
+  fake.emit('output', { ptyId: row.ptyId, data: Buffer.from('after|').toString('base64') })
+  await c.until(() => outputs(c, row.id).includes('after|'), 'the streamed output')
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.equal(fake.requests.filter(r => r.op === 'resize').length, 0, 'a phone never resizes the PTY on attach')
+})
+
 test('an observed session gets no_pty, an unknown one not_found, and the socket stays open', async t => {
   const fake = scripted()
   const deck = await server(t, fake.connect)

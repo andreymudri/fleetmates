@@ -9,7 +9,7 @@ const IGNORED_TYPES = new Set(['ui.focus', 'bell.played'])
  * Attach authenticated snapshot/replay sockets to an HTTP server. With a deckd `link`, ready sockets also
  * carry the terminal channel through the PTY bridge.
  */
-export function createWsHub({ server, store, epoch, snapshot, getToken, getPort, link = null, now = Date.now,
+export function createWsHub({ server, store, epoch, snapshot, getToken, getPort, getPublicOrigin = () => null, link = null, now = Date.now,
   heartbeatMs = 15_000, helloTimeoutMs = 5000 }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, handleProtocols: () => 'deck.v1' })
   const states = new Map()
@@ -22,11 +22,11 @@ export function createWsHub({ server, store, epoch, snapshot, getToken, getPort,
   }
   function reject(socket, status, code) {
     const body = JSON.stringify({ error: { code, message: code, retryable: false } })
-    const headers = { ...securityHeaders(getPort(), true), 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Connection: 'close' }
+    const headers = { ...securityHeaders(getPort(), true, getPublicOrigin()), 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Connection: 'close' }
     socket.end(`HTTP/1.1 ${status} Rejected\r\n${Object.entries(headers).map(([key, value]) => `${key}: ${value}`).join('\r\n')}\r\n\r\n${body}`)
   }
   function upgrade(req, socket, head) {
-    const failure = authorize(req, { port: getPort(), token: getToken(), upgrade: true })
+    const failure = authorize(req, { port: getPort(), token: getToken(), upgrade: true, publicOrigin: getPublicOrigin() })
     if (failure) { reject(socket, failure.status, failure.code)
       return }
     if (req.url !== '/api/ws') { reject(socket, 404, 'not_found')
@@ -38,7 +38,7 @@ export function createWsHub({ server, store, epoch, snapshot, getToken, getPort,
   }
   server.on('upgrade', onUpgrade)
   wss.on('headers', headers => {
-    for (const [key, value] of Object.entries(securityHeaders(getPort(), true))) headers.push(`${key}: ${value}`)
+    for (const [key, value] of Object.entries(securityHeaders(getPort(), true, getPublicOrigin()))) headers.push(`${key}: ${value}`)
   })
   let hub
   const bridge = link ? createPtyBridge({ link, store, now, publish: event => hub.publish(event) }) : null

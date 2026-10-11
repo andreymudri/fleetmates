@@ -352,7 +352,11 @@ test('Alt A allows the focused Safe row once, Up and Down move the focus, and th
   assert.deepEqual(answers(api), [['POST', '/api/requests/c/answer', { choice: 'allow' }]])
   h.key({ key: 'ArrowUp', code: 'ArrowUp' })
   assert.deepEqual(h.focus.rows, ['c', 'a'])
-  assert.ok(h.view().replace(/&#x27;/g, '\'').includes('Alt A allow focused · Alt D deny · Alt Shift A allow all Safe · rules live in each repo\'s .claude/settings.local.json'))
+  // The footer is two spans, so the phone layout can drop the shortcut half (styles/mobile.css); the text of the
+  // two together is still the one sentence.
+  const footer = h.view().replace(/&#x27;/g, '\'').replace(/<[^>]+>/g, '')
+  assert.ok(footer.includes('Alt A allow focused · Alt D deny · Alt Shift A allow all Safe · rules live in each repo\'s .claude/settings.local.json'))
+  assert.ok(h.view().includes('class="drawer-footer-rules"'), 'the half that says where rules live survives on a phone')
   assert.doesNotMatch(h.view(), /Answering here arrives with approvals/)
 })
 

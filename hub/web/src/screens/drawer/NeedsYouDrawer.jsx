@@ -51,7 +51,12 @@ export const DRAWER_COPY = Object.freeze({
   'drawer.rule.suggest.anyFlags': 'It will allow {command} with any flags.',
   'drawer.rule.added': 'Rule added to {repo}: {pattern}',
   'drawer.rule.undo': 'Undo',
+  // The footer is composed of its two halves, so the phone layout can drop the shortcut one and keep the
+  // sentence about where rules live, which has no other home on a phone. Concatenated they are the desktop
+  // sentence, character for character, including the separator that ends `drawer.footer.keys`.
   'drawer.footer': 'Alt A allow focused · Alt D deny · Alt Shift A allow all Safe · rules live in each repo\'s .claude/settings.local.json',
+  'drawer.footer.keys': 'Alt A allow focused · Alt D deny · Alt Shift A allow all Safe · ',
+  'drawer.footer.rules': 'rules live in each repo\'s .claude/settings.local.json',
   'drawer.footer.m1': 'Answer in your terminal for now. Answering here arrives with approvals.'
 })
 
@@ -691,7 +696,10 @@ export function DrawerView({ state, t, now = Date.now(), navigate, onClose = () 
             ))}
           </div>
         ) : null}
-        <footer className="drawer-footer">{translate(t, DRAWER_COPY, 'drawer.footer')}</footer>
+        <footer className="drawer-footer">
+          <span className="drawer-footer-keys">{translate(t, DRAWER_COPY, 'drawer.footer.keys')}</span>
+          <span className="drawer-footer-rules">{translate(t, DRAWER_COPY, 'drawer.footer.rules')}</span>
+        </footer>
       </section>
     </div>
   )

@@ -53,6 +53,24 @@ export function recBarShown(recorder) {
  * and sits inside a landmark while the bar shows.
  * @param {{ recorder: object, t?: Function, lang?: string, elapsedS: number, reduced?: boolean, navigate: Function, onPin: () => void, onStop: () => void, skipLink?: import('react').ReactNode }} props
  */
+/**
+ * The quiet-mode note behind its info icon, below 1440px. A real button with `aria-expanded`, not a hover
+ * tooltip: there is no hover on touch, and `:focus-visible` does not fire on a tap, so on a phone the note was
+ * unreachable. Its own component, so RecBarView stays free of hooks.
+ * @param {{ quiet: string }} props
+ */
+function QuietNote({ quiet }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <button type="button" className="rec-bar-quiet-info" aria-label={quiet} aria-expanded={open ? 'true' : 'false'} onClick={() => setOpen(!open)}>
+        <span aria-hidden="true">i</span>
+      </button>
+      {open ? <span className="rec-bar-quiet-tip" role="status">{quiet}</span> : null}
+    </>
+  )
+}
+
 export function RecBarView({ recorder, t, lang = 'en', elapsedS, reduced = false, navigate, onPin, onStop, skipLink = null }) {
   if (!recBarShown(recorder)) return null
   const say = (key, params) => translate(t, REC_COPY, key, params)
@@ -79,10 +97,7 @@ export function RecBarView({ recorder, t, lang = 'en', elapsedS, reduced = false
         ? (
           <>
             <span className="rec-bar-quiet">{quiet}</span>
-            <span className="rec-bar-quiet-info" tabIndex={0} aria-label={quiet}>
-              <span aria-hidden="true">i</span>
-              <span className="rec-bar-quiet-tip" role="tooltip">{quiet}</span>
-            </span>
+            <QuietNote quiet={quiet} />
           </>
           )
         : null}

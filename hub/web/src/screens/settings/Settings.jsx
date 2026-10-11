@@ -4,6 +4,7 @@ import { linkHandler } from '../../shell/Rail.jsx'
 import { deckApi } from '../drawer/NeedsYouDrawer.jsx'
 import { Checklist } from '../first-run/FirstRun.jsx'
 import { readDensity, writeDensity } from '../../state/deck-store.js'
+import { forgetToken, tokenIsDurable } from '../../state/api.js'
 import { fetchMeetings } from '../../state/actions.js'
 import { ApprovalRules, rulesNavSub, useRules } from './ApprovalRules.jsx'
 
@@ -74,6 +75,8 @@ export const SETTINGS_COPY = Object.freeze({
   'settings.conn.startError': 'Could not start {dep}: {error}',
   'settings.conn.checklist': 'Run the setup checklist again',
   'settings.conn.stale': 'A running session counts as adrift after {n} min without activity.',
+  'settings.conn.signOut': 'Sign out this device',
+  'settings.conn.signOut.hint': 'Forgets the deck key kept on this device after remote access unlocked it. You unlock again with the passphrase.',
   'settings.conn.deckdOutdated': 'deckd is older than the deck; restart it when no session is running',
   'settings.conn.hooksOutdated': 'Hooks are from an older deck release. Run fleetmates-deck init.',
   'settings.appearance.density': 'Density',
@@ -505,7 +508,7 @@ function TextPref({ pref, value, locked, t, error, note = null, onSave, onNote =
  * `turbid` is the {@link turbidStatus} line shown under the "TurbidAssist config.yaml" field.
  * @param {{ prefs: object, sources?: object, health?: object[], t?: Function, errors?: Record<string, string>, notes?: Record<string, string>, found?: number | null, busy?: Record<string, boolean>, startErrors?: Record<string, string>, checklist?: React.ReactNode, turbid?: { tone: string, text: string } | null, onSave: (key: string, value: unknown) => void, onNote?: (key: string, note: string | null) => void, onRescan: () => void, onStart: (dep: string) => void, onChecklist: () => void }} props
  */
-export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors = {}, notes = {}, found = null, busy = {}, startErrors = {}, checklist = null, turbid = null, onSave, onNote, onRescan, onStart, onChecklist }) {
+export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors = {}, notes = {}, found = null, busy = {}, startErrors = {}, checklist = null, turbid = null, signedIn = false, onSave, onNote, onRescan, onStart, onChecklist, onSignOut }) {
   const tr = (key, params) => translate(t, SETTINGS_COPY, key, params)
   const text = pref => <TextPref key={pref.key} pref={pref} value={prefs[pref.key]} locked={sources[pref.key] === 'env'} t={t} error={errors[pref.key]} note={notes[pref.key] ?? null} onSave={onSave} onNote={onNote} />
   return (
@@ -539,6 +542,13 @@ export function ConnectionsSection({ prefs, sources = {}, health = [], t, errors
       {health.find(row => row.dep === 'hooks')?.reason === 'hooks_outdated' ? <p className="setting-hint hooks-outdated">{tr('settings.conn.hooksOutdated')}</p> : null}
       {checklist ??<button type="button" className="button button--secondary" onClick={onChecklist}>{tr('settings.conn.checklist')}</button>}
       <p className="setting-hint settings-stale">{tr('settings.conn.stale', { n: Number(prefs.staleMinutes ?? 20) })}</p>
+      {/* Only where a device kept the key past its tab, which is what remote access does (state/unlock.js). */}
+      {signedIn && onSignOut ? (
+        <div className="setting-row">
+          <button type="button" className="button button--secondary" onClick={onSignOut}>{tr('settings.conn.signOut')}</button>
+          <p className="setting-hint">{tr('settings.conn.signOut.hint')}</p>
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -601,6 +611,13 @@ export function Settings({ route, state, t, navigate, api, feed, dispatch }) {
   const [startErrors, setStartErrors] = useState({})
   const [checklist, setChecklist] = useState(false)
   const [density, setDensity] = useState(() => readDensity(browserStorage()))
+  // "Sign out this device" shows only where the token outlived its tab, which is what unlocking over remote
+  // access does. It clears both stores and reloads into Unlock.
+  const signedIn = () => tokenIsDurable(browserStorage())
+  const signOut = () => {
+    forgetToken({ storage: globalThis.window?.sessionStorage, durable: browserStorage() })
+    globalThis.window?.location?.replace('/')
+  }
   const rules = useRules(client, state.data.rulesRev ?? 0)
   useEffect(() => {
     let current = true
@@ -657,7 +674,7 @@ export function Settings({ route, state, t, navigate, api, feed, dispatch }) {
     body = <ConnectionsSection prefs={prefs} sources={known} health={state.data.health} t={t} errors={errors} notes={notes} found={found} busy={busy} startErrors={startErrors}
       checklist={checklist ? <Checklist state={state} t={t} navigate={navigate} api={client} feed={feed} mode="rerun" onDone={() => setChecklist(false)} /> : null}
       turbid={turbidStatus(meetingsList, prefs.turbidassistConfig, t)}
-      onSave={onSave} onNote={onNote} onRescan={onRescan} onStart={onStart} onChecklist={() => setChecklist(true)} />
+      signedIn={signedIn()} onSave={onSave} onNote={onNote} onRescan={onRescan} onStart={onStart} onChecklist={() => setChecklist(true)} onSignOut={signOut} />
   }
   return <SettingsView section={section} prefs={prefs} rules={rules.data} loading={sources === null} t={t} navigate={navigate}>{body}</SettingsView>
 }

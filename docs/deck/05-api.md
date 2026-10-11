@@ -390,7 +390,7 @@ Client to server (JSON):
 
 | Type | Fields | Effect |
 |---|---|---|
-| `term.attach` | `{ sessionId, cols, rows }` | server asks deckd for a screen snapshot plus the last 1,000 scrollback lines, sends them as one `snapshot` binary frame, then streams output. Error `no_pty` for observed sessions, `deckd_unavailable` when deckd is down |
+| `term.attach` | `{ sessionId, cols, rows, resize? }` | server asks deckd for a screen snapshot plus the last 1,000 scrollback lines, sends them as one `snapshot` binary frame, then streams output. On the first attach it fits the PTY to `cols` x `rows`, unless `resize` is `false` (a phone, which never changes the size of the terminal on the machine). A `resize` that is not a boolean is `validation_failed`. Error `no_pty` for observed sessions, `deckd_unavailable` when deckd is down |
 | `term.detach` | `{ sessionId }` | stop streaming |
 | `term.resize` | `{ sessionId, cols, rows }` | forwarded to deckd with `source: browser`; deckd applies the resize rule (SM-O12: follow the most recent input source, at most once per second) |
 | `sub.tails` | `{ sessionIds: string[] }` | subscribe compact tails (replaces the previous set) |

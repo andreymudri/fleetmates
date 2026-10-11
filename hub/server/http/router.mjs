@@ -1,7 +1,11 @@
 import path from 'node:path'
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { createHmac } from 'node:crypto'
-import { authorize, securityHeaders } from './auth.mjs'
+import { authorize, requestOrigin, securityHeaders } from './auth.mjs'
+/** Path of the token-free passphrase exchange a phone posts to (08-security 4.2, remote access). */
+export const PAIR_PATH = '/.well-known/fleetmates-deck/pair'
+/** Shell paths a missing file answers as 404, never as index.html: a service worker served HTML fails silently. */
+const SHELL_ONLY = /^\/(?:sw\.js|manifest\.webmanifest|icons\/.+)$/
 /** Construct a stable API failure without including request content. */
 export function apiError(status, code, details = {}) {
   return Object.assign(new Error(code), { status, code, details })
@@ -34,19 +38,48 @@ export async function readBody(req) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw apiError(422, 'validation_failed')
   return body
 }
-/** Route authenticated API requests and confined built SPA assets. */
-export function createRouter({ api, staticDir, getToken, getPort }) {
+/**
+ * Route authenticated API requests and confined built SPA assets. `getPublicOrigin` returns the opt-in public origin
+ * (null when the deck is loopback only) and `remote` the passphrase exchange that origin enables.
+ */
+export function createRouter({ api, staticDir, getToken, getPort, getPublicOrigin = () => null, remote = null }) {
   return async (req, res) => {
     const port = getPort()
+    const publicOrigin = getPublicOrigin()
     const isApi = /^\/api(?:\/|\?|$)/.test(req.url)
-    for (const [key, value] of Object.entries(securityHeaders(port, isApi))) res.setHeader(key, value)
+    // The exchange is routed whether or not remote access is on, so a deck without it answers a real 404 instead
+    // of the SPA fallback's 200 and an HTML body. It gets every browser check `/api` gets; only the token, which
+    // is the thing it exists to hand out, is not required.
+    const isPair = req.url === PAIR_PATH
+    for (const [key, value] of Object.entries(securityHeaders(port, isApi || isPair, publicOrigin))) res.setHeader(key, value)
     try {
-      const auth = authorize(req, { port, token: getToken(), api: isApi })
+      const auth = authorize(req, { port, token: getToken(), api: isApi || isPair, requireToken: isApi, publicOrigin })
       if (auth) {
-        if (auth.status === 421) res.setHeader('Location', `http://127.0.0.1:${port}/`)
+        // 421 answers a `localhost:<port>` Host, which only a local browser sends, so this Location is always
+        // the loopback origin; `requestOrigin` is used for the one rule that decides both it and the URL base.
+        if (auth.status === 421) res.setHeader('Location', `${requestOrigin(req, port, publicOrigin)}/`)
         throw apiError(auth.status, auth.code)
       }
-      const url = new URL(req.url, `http://127.0.0.1:${port}`)
+      const origin = requestOrigin(req, port, publicOrigin)
+      const url = new URL(req.url, origin)
+      if (isPair) {
+        // The exchange hands back the deck token itself rather than a per-device one: the blast radius stays the
+        // size of the deck token, and revoking one phone means rotating that token (`init --rotate-token`) for
+        // every client. That is deliberate; a per-device token store is the change to make if it stops being enough.
+        if (req.method !== 'POST') throw apiError(404, 'not_found')
+        if (publicOrigin === null || remote === null) throw apiError(404, 'pairing_unavailable')
+        const body = await readBody(req)
+        const result = await remote.verify(typeof body.passphrase === 'string' ? body.passphrase : '')
+        if (!result.ok) {
+          // The Unlock screen counts down from Retry-After and never invents a number, so the header is the
+          // contract: it is sent whenever, and only when, the deck knows how long the wait is.
+          if (result.retryAfterMs !== undefined) res.setHeader('Retry-After', String(Math.ceil(result.retryAfterMs / 1000)))
+          throw apiError(result.code === 'too_many_attempts' ? 429 : result.code === 'pairing_unavailable' ? 404 : 401, result.code,
+            result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs })
+        }
+        json(req, res, 200, { token: getToken() })
+        return
+      }
       if (isApi) {
         const segments = url.pathname.split('/').filter(Boolean).map(value => decodeURIComponent(value))
         const body = await readBody(req)
@@ -64,20 +97,28 @@ export function createRouter({ api, staticDir, getToken, getPort }) {
       }
       const root = await realpath(staticDir)
       const requested = decodeURIComponent(url.pathname)
+      // The service worker, the manifest and the icons never fall back to index.html: a worker handed an HTML body
+      // registers and then fails at the first fetch, which is a far worse failure than a 404.
+      const shellOnly = SHELL_ONLY.test(requested)
       let file = path.resolve(root, '.' + requested)
       if (!file.startsWith(root + path.sep) && file !== root) throw apiError(404, 'not_found')
       try {
         file = await realpath(file)
-        if (!file.startsWith(root + path.sep) || !(await stat(file)).isFile()) file = path.join(root, 'index.html')
+        if (!file.startsWith(root + path.sep) || !(await stat(file)).isFile()) {
+          if (shellOnly) throw apiError(404, 'not_found')
+          file = path.join(root, 'index.html')
+        }
       } catch (error) {
+        if (error.status) throw error
         if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error
+        if (shellOnly) throw apiError(404, 'not_found')
         file = path.join(root, 'index.html')
       }
       file = await realpath(file)
       if (!file.startsWith(root + path.sep)) throw apiError(404, 'not_found')
       let content = await readFile(file)
       if (path.basename(file) === 'index.html') content = Buffer.from(content.toString('utf8').replace(/(src|href)="\.\//g, '$1="/'))
-      const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.json': 'application/json' }
+      const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.woff2': 'font/woff2', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.ico': 'image/x-icon' }
       res.writeHead(200, { 'Content-Type': types[path.extname(file)] ?? 'application/octet-stream' })
       res.end(req.method === 'HEAD' ? undefined : content)
     } catch (error) {

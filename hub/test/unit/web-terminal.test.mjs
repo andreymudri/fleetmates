@@ -138,6 +138,20 @@ test('the terminal client attaches, routes frames by session and re-attaches aft
   assert.equal(client.attach('sc', { cols: 80, rows: 24 }, handlers('c')).write('x'), false, 'nothing is sent while the socket is not live')
 })
 
+test('an attach with resize false says so to the server, again on every re-attach, so a phone never fits the PTY', () => {
+  const connection = fakeConnection()
+  const client = createTerminalClient(connection)
+  client.attach('sp', { cols: 37, rows: 24, resize: false }, {})
+  client.attach('sd', { cols: 120, rows: 40 }, {})
+  connection.emitLive()
+  assert.deepEqual(connection.sent, [
+    { t: 'term.attach', sessionId: 'sp', cols: 37, rows: 24, resize: false },
+    { t: 'term.attach', sessionId: 'sd', cols: 120, rows: 40 },
+    { t: 'term.attach', sessionId: 'sp', cols: 37, rows: 24, resize: false },
+    { t: 'term.attach', sessionId: 'sd', cols: 120, rows: 40 }
+  ])
+})
+
 test('tail subscriptions are sent, capped at 50 ids and sent again on onLive', () => {
   const connection = fakeConnection()
   const client = createTerminalClient(connection)
