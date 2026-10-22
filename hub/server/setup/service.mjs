@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import childProcess from 'node:child_process'
+import childProcess from '../../platform/child.mjs'
 import { LAUNCHD_LABELS, UNIT_NAMES, renderPlist, renderUnit, writeUnit } from './units.mjs'
 import { POWERSHELL_UTF8, dropEndpoint as platformDropEndpoint } from '../../platform/index.mjs'
 

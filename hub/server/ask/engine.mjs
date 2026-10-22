@@ -5,7 +5,7 @@
 // prompts and, on Linux, `/proc` for the identity of the processes it started; the vault is reached by the
 // child's own vault-mcp, never from here. Logs carry run and thread ids, lengths, durations and exit codes only.
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { spawn as nodeSpawn } from 'node:child_process'
+import { spawn as nodeSpawn } from '../../platform/child.mjs'
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
 import path from 'node:path'

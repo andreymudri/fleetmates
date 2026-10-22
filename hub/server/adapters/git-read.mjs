@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile } from '../../platform/child.mjs'
 import path from 'node:path'
 
 /**

@@ -6,7 +6,7 @@
 // Logs carry event names, ids, sizes, durations, exit codes and error codes only, never tool
 // arguments or answers.
 
-import { spawn as nodeSpawn } from 'node:child_process'
+import { spawn as nodeSpawn } from '../../platform/child.mjs'
 import { commandSpawn, resolveCommand } from '../../platform/index.mjs'
 
 /** The protocol version the client offers in `initialize`. */

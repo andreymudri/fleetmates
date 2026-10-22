@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from '../../platform/child.mjs'
 import { openUrlArgv } from '../../platform/index.mjs'
 
 /** Run a short query command and return its exit status and stdout. */

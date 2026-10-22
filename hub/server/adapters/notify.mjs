@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn } from '../../platform/child.mjs'
 import { StringDecoder } from 'node:string_decoder'
 
 /**

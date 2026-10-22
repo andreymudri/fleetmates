@@ -9,7 +9,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn } from '../platform/child.mjs'
 import { fileURLToPath } from 'node:url'
 import { connectDeckd } from '../deckd/client.mjs'
 import { endpointDirProblem } from '../hook/deck-hook.mjs'

@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync } from '../../platform/child.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, lstatSync, readFileSync, readlinkSync, readSync, realpathSync, statSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
