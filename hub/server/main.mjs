@@ -9,6 +9,7 @@ import { createProjector, requestView } from './machines/projector.mjs'
 import { autoArchiveCandidates } from './machines/archive.mjs'
 import { createIngestor, startHookSocket } from './ingest/socket.mjs'
 import { startSpoolDrain } from './ingest/spool.mjs'
+import { withScanCache } from './machines/session.mjs'
 import { hookVersionOutdated } from './ingest/validate.mjs'
 import { connectDeckd as defaultConnectDeckd } from '../deckd/client.mjs'
 import { setupPaths } from './setup/paths.mjs'
@@ -768,7 +769,8 @@ export async function createDeckServer(options = {}) {
       notifications = createNotificationMachine({ store, now, publish, onAction: popupAction,
         notifier: options.notifier ?? createNotifier({ platform, env: processEnv }), recording: () => recorder.isRecording() })
     }
-    spool = await startSpoolDrain({ dir: paths.spool, ingest })
+    // The hook socket starts below, so no live hook can change a work tree's scan while this cached drain runs.
+    spool = await withScanCache(() => startSpoolDrain({ dir: paths.spool, ingest }))
     // The hook endpoint lives under runtimeBase: XDG_RUNTIME_DIR when it is set, else the platform's fallback base. On
     // linux that fallback is shared by every deck server of this user, so when another one already listens there this
     // server leaves it alone and takes hooks from the spool only.
@@ -875,6 +877,6 @@ export function parseServerArgs(argv) {
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   startDeckServer(parseServerArgs(process.argv.slice(2))).then(deck => {
     for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { deck.close().catch(() => { process.exitCode = 1 }) })
-  }).catch(() => { process.stderr.write('deck server startup failed\n')
+  }).catch(error => { process.stderr.write(`deck server startup failed: ${error?.code ?? error?.name ?? 'error'}\n`)
     process.exitCode = 1 })
 }
