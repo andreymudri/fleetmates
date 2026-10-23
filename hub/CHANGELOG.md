@@ -5,6 +5,18 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
+## v0.7.1
+
+- Tested Claude Code: 2.1.285 (unchanged)
+- deckd changed: no. The PTY protocol is unchanged.
+- Database migration: no.
+- Restart the web server to pick it up.
+- Windows: every child process the deck starts (git scans, setup checks, launchers) runs with a hidden
+  window, so console windows no longer flash while the services run (#56).
+- The startup spool drain reuses one git change scan per work tree and baseline, so a large backlog of
+  spooled hooks no longer keeps the web server from listening (#58). A startup failure now logs its
+  error code.
+
 ## v0.7.0
 
 - Tested Claude Code: 2.1.285 (unchanged)
