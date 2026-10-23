@@ -154,6 +154,7 @@ function gitRun(args, { cwd, env, input, raw = false }, label = 'commitFilesTree
     // write-tree) can exit before an empty write lands, and that write then fails with EPIPE.
     const child = spawn('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
       cwd, env: { ...process.env, ...env }, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     })
     const stdout = []
     let stderr = ''

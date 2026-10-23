@@ -89,7 +89,7 @@ export function defaultGitExec(args, cwdOrOpts, env) {
     env = cwdOrOpts.env
   }
   return new Promise((resolve, reject) => {
-    const child = spawn('git', args, env ? { cwd, env: { ...process.env, ...env } } : { cwd })
+    const child = spawn('git', args, env ? { cwd, env: { ...process.env, ...env }, windowsHide: true } : { cwd, windowsHide: true })
     // Decode the stream, not each chunk: `stdout += buffer` decodes chunks one at a time, so a
     // multi-byte character split across a pipe boundary became two U+FFFD and a non-ASCII path
     // read back from git no longer matched the file set it was checked against.
