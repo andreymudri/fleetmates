@@ -2,7 +2,7 @@
 // amended by the owner on 2026-10-01). A systemd user service starts with a
 // thin environment, so deckd asks the owner's login shell for the one a
 // terminal would have, once, and hands it to the sessions it launches.
-import { spawn } from 'node:child_process'
+import { spawn } from '../platform/child.mjs'
 import { randomBytes } from 'node:crypto'
 
 /**

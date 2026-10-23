@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process'
+import { spawnSync } from '../../platform/child.mjs'
 import { connectOnce, deckService, doctor } from './doctor.mjs'
 
 /**

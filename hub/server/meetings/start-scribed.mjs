@@ -1,6 +1,6 @@
 // "Start scribed" (OPS-O1, SM-O13, MEET-O10): starts TurbidAssist's scribed as a transient systemd user unit with
 // the command the owner decided on 2026-10-04, then waits for its socket to answer.
-import { execFile as execFileCallback } from 'node:child_process'
+import { execFile as execFileCallback } from '../../platform/child.mjs'
 import os from 'node:os'
 import { promisify } from 'node:util'
 import { redact } from '../approvals/audit.mjs'
