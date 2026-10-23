@@ -21,7 +21,7 @@ export function stopReceiptPath(env = process.env) {
 }
 
 export async function resolveContext(cwd) {
-  const dirs = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel'], { cwd, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n')
+  const dirs = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel'], { cwd, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim().split('\n')
   const root = path.dirname(dirs[0]), top = dirs[1]
   const found = await findTaskByWorktree(root, top)
   if (!found) return null

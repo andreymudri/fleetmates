@@ -41,6 +41,7 @@ function git(args, cwd) {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 10_000,
+      windowsHide: true,
     }).trim()
   } catch {
     return null
