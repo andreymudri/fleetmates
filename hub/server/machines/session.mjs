@@ -404,7 +404,22 @@ export function captureReviewBaseline(root, previous = null, includeExisting = t
   } catch { return null }
 }
 
+let scanCache = null
+
+/** Run `work` with git change scans memoized per (root, baseline), for replays where the work tree cannot move. */
+export async function withScanCache(work) {
+  scanCache = new Map()
+  try { return await work() } finally { scanCache = null }
+}
+
 function gitChangedFiles(root, value) {
+  if (!scanCache) return scanChangedFiles(root, value)
+  const key = JSON.stringify([root, value])
+  if (!scanCache.has(key)) scanCache.set(key, scanChangedFiles(root, value))
+  return scanCache.get(key)
+}
+
+function scanChangedFiles(root, value) {
   const saved = baseline(value)
   if (!saved) return null
   const scan = gitPaths(root, saved.head)
