@@ -5,6 +5,15 @@ The deck package versions on its own, separately from the fleetmates plugin. Rel
 whether `fleetmates-deckd` changed (restarting it ends every PTY session), and whether the database
 schema changed.
 
+## v0.7.2
+
+- Tested Claude Code: 2.1.285 (unchanged)
+- deckd changed: no. The PTY protocol is unchanged.
+- Database migration: no.
+- Restart the web server to pick it up.
+- Windows: the git children the vendored fleetmates modules start (run and branch reads) also run with a
+  hidden window, so console windows no longer flash while the deck server runs (#56, the case 0.7.1 missed).
+
 ## v0.7.1
 
 - Tested Claude Code: 2.1.285 (unchanged)
