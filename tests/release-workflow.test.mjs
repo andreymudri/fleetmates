@@ -35,3 +35,14 @@ test('a version already on npm is reported and skipped, not failed', async () =>
   assert.match(yml, /npm view "fleetmates@\$\{VERSION\}" version/)
   assert.match(yml, /is already on npm — nothing to publish/)
 })
+
+test('after publish, the directory branch is refreshed from the tag by tools/directory-branch.mjs', async () => {
+  const yml = await read('.github/workflows/release.yml')
+  const job = yml.slice(yml.indexOf('\n  directory:\n'))
+  assert.match(job, /^\n {2}directory:\n(?: {4}.*\n|\s*\n)*? {4}needs: publish\n/)
+  assert.match(job, /contents: write/)
+  assert.match(job, /node tools\/directory-branch\.mjs --ref HEAD/)
+  assert.match(job, /git push origin "\$\{sha\}:refs\/heads\/directory"/)
+  // Only the directory job may write to the repository.
+  assert.equal(yml.match(/contents: write/g).length, 1)
+})
