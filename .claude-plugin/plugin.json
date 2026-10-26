@@ -10,6 +10,7 @@
   "repository": "https://github.com/andreymudri/fleetmates",
   "documentationUrl": "https://github.com/andreymudri/fleetmates#readme",
   "supportUrl": "https://github.com/andreymudri/fleetmates/issues",
+  "privacyPolicyUrl": "https://github.com/andreymudri/fleetmates/blob/master/SECURITY.md#the-one-outbound-request",
   "license": "MIT",
   "keywords": [
     "orchestration",
