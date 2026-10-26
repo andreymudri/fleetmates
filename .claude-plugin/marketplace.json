@@ -1,0 +1,17 @@
+{
+  "name": "fleetmates",
+  "owner": {
+    "name": "andreymudri"
+  },
+  "description": "Marketplace for fleetmates, a Claude Code plugin that runs a written plan as a fleet of worktree-isolated teammates with phase gates.",
+  "plugins": [
+    {
+      "name": "fleetmates",
+      "source": {
+        "source": "npm",
+        "package": "fleetmates"
+      },
+      "description": "Runs a written plan across background teammates, each in its own git worktree, with an automated gate between phases: brainstorming, planning, TDD, debugging, parallel execution, and supervision."
+    }
+  ]
+}

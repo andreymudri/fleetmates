@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Async SessionStart hook: checks whether a newer fleetmates is published.
+#
+# Emits NOTHING. It writes a cache file that hooks/session-start reads on a later
+# session. Keeping the network call out of the emitting hook is the whole point:
+# session-start is declared "async": false and blocks, so a fetch there would add
+# latency to every session and fail visibly when offline.
+#
+# The consequence is deliberate: a newly published version is reported one session
+# AFTER the check that discovered it. That is the price of never blocking.
+
+set -uo pipefail
+
+# Resolved without expanding an unset variable: under `set -u`, the default branch
+# of `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}` still expands ${HOME} and dies when it
+# is unset. With neither set there is nowhere to cache a result, so there is no
+# point making the request.
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+  STATE_DIR="${CLAUDE_CONFIG_DIR}/fleetmates"
+elif [ -n "${HOME:-}" ]; then
+  STATE_DIR="${HOME}/.claude/fleetmates"
+else
+  exit 0
+fi
+CACHE="${STATE_DIR}/update-check.json"
+THROTTLE_SECONDS=86400
+# The URL is overridable by ARGUMENT, never by environment. An env override is a
+# beacon-retarget waiting to happen: a cloned repo's .envrc or devcontainer.json
+# could point every session at an attacker host, and the attacker would then
+# control the version string printed into session context. Nothing sets argv here
+# except the test suite, which passes a file:// fixture so it never hits the network.
+RAW_URL="${1:-https://registry.npmjs.org/fleetmates/latest}"
+
+# Opt-out is checked first, before anything else: a disabled install makes no
+# request at all, rather than making one and discarding the result. The old
+# variable is still read: a rename must never switch a network call back on for
+# someone who turned it off.
+# legacy-name:begin
+case "${FLEETMATES_UPDATE_CHECK:-${CLAUDE_TEAMMATES_UPDATE_CHECK:-1}}" in
+  0|false|no|off) exit 0 ;;
+esac
+# legacy-name:end
+
+now=$(date +%s 2>/dev/null) || exit 0
+
+# Throttle on the cache file's age. `stat` differs between GNU and BSD, so try
+# both spellings; an unreadable mtime is treated as stale rather than fatal.
+if [ -f "${CACHE}" ]; then
+  mtime=$(stat -c %Y "${CACHE}" 2>/dev/null || stat -f %m "${CACHE}" 2>/dev/null || echo 0)
+  if [ "${mtime}" -gt 0 ] 2>/dev/null && [ $((now - mtime)) -lt "${THROTTLE_SECONDS}" ]; then
+    exit 0
+  fi
+fi
+
+# The throttle must be established BEFORE the attempt, not as a side effect of a
+# successful one. Written the other way round, every failing path left no stamp, so
+# precisely the users who can never succeed — offline, or behind a proxy serving a
+# block page — sent a fresh request on every single session start, while README and
+# SECURITY.md both promised at most one a day. Stamping first makes the documented
+# rate limit true for failures as well as successes.
+mkdir -p "${STATE_DIR}" 2>/dev/null || exit 0
+touch "${CACHE}" 2>/dev/null || exit 0
+
+command -v curl >/dev/null 2>&1 || exit 0
+body=$(curl -fsS --max-time 5 "${RAW_URL}" 2>/dev/null) || exit 0
+[ -n "${body}" ] || exit 0
+
+# Extracted with grep/sed rather than a JSON parser — bash has none, and the field
+# is a flat string. The domain check below is what makes that safe: a redirect to
+# an HTML error page, or any value carrying markup, is rejected rather than cached.
+published=$(printf '%s' "${body}" \
+  | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' \
+  | head -n 1 \
+  | sed 's/.*"\([^"]*\)"$/\1/')
+case "${published}" in
+  ''|*[!0-9.]*) exit 0 ;;
+esac
+
+# Written atomically: session-start may read this concurrently, and a half-written
+# file must never be observable. The stamp above already created the file, so a
+# failed check leaves a zero-byte cache — which read_json_string finds no key in,
+# and which therefore produces no notice.
+tmp="${CACHE}.$$"
+printf '{"published":"%s","checkedAt":%s}\n' "${published}" "${now}" > "${tmp}" 2>/dev/null || exit 0
+mv -f "${tmp}" "${CACHE}" 2>/dev/null || rm -f "${tmp}" 2>/dev/null
+
+exit 0

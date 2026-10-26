@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# SessionStart hook for the fleetmates plugin.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+ENTRYPOINT="${PLUGIN_ROOT}/skills/using-fleetmates/SKILL.md"
+
+escape_for_json() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+# Fail loudly, never fatally. A silent miss is indistinguishable from a healthy
+# session, and the process would stop self-activating with no signal at all.
+# A hard non-zero exit is rejected: it risks disrupting or spamming every
+# session start, which is a worse cure than the disease.
+if [ -r "${ENTRYPOINT}" ]; then
+    content=$(cat "${ENTRYPOINT}")
+    session_context="<EXTREMELY_IMPORTANT>\nYou have fleetmates.\n\n**Below is the full content of your 'fleetmates:using-fleetmates' skill - your introduction to using skills. For all other skills, use the 'Skill' tool:**\n\n$(escape_for_json "$content")\n</EXTREMELY_IMPORTANT>"
+else
+    warning="WARNING: the fleetmates plugin is installed but NOT active. Its entrypoint could not be read at ${ENTRYPOINT} (skills/using-fleetmates/SKILL.md). Process skills will not self-activate this session. Check the plugin installation."
+    session_context=$(escape_for_json "$warning")
+fi
+
+# Update notice. Reads two local files and makes no network call — the fetch lives
+# in hooks/update-check, which is declared "async": true and emits nothing. Every
+# branch here is optional and non-fatal: a missing file means no notice, never an
+# error, because a broken notice must not cost anyone their session.
+# Resolved without expanding an unset variable. `${CLAUDE_CONFIG_DIR:-${HOME}/.claude}`
+# looks safe but is not: under `set -u` the default branch still expands ${HOME},
+# so a session with neither variable set died with "HOME: unbound variable" and a
+# non-zero exit — from the hook that must never fail. With neither set there is
+# nowhere to keep state, so the notice is skipped rather than guessed at.
+STATE_DIR=""
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    STATE_DIR="${CLAUDE_CONFIG_DIR}/fleetmates"
+elif [ -n "${HOME:-}" ]; then
+    STATE_DIR="${HOME}/.claude/fleetmates"
+fi
+SEEN_FILE="${STATE_DIR}/last-seen-version"
+CACHE_FILE="${STATE_DIR}/update-check.json"
+
+read_json_string() {
+    # $1 = file, $2 = key. Flat string fields only; bash has no JSON parser, and
+    # both files this reads are written by this plugin rather than by a user.
+    #
+    # `-f`, not `-r`: a FIFO is readable, and reading one blocks forever. This hook
+    # is declared "async": false, so a blocked read here hangs session start with no
+    # timeout — the worst failure this script has.
+    [ -f "$1" ] || return 1
+    grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null \
+      | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+# Digits and dots only. update-check applies the same filter on write, but this file
+# lives in the user's config directory and is re-validated on read rather than
+# trusted: a value carrying markup would otherwise land verbatim in session context.
+version_or_empty() {
+    case "${1:-}" in
+        ''|*[!0-9.]*) printf '' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+installed=$(read_json_string "${PLUGIN_ROOT}/.claude-plugin/plugin.json" version || true)
+installed=$(version_or_empty "${installed}")
+notice=""
+
+# No state directory means no marker and no cache, so the notice cannot be
+# once-only and would repeat every session. Skip it entirely instead.
+[ -n "${STATE_DIR}" ] || installed=""
+
+# Case 1: the installed version changed since this machine last saw it. Fires once
+# per version — the marker is written as soon as the notice is built.
+if [ -n "${installed}" ]; then
+    seen=""
+    [ -f "${SEEN_FILE}" ] && seen=$(head -n 1 "${SEEN_FILE}" 2>/dev/null)
+    if [ "${seen}" != "${installed}" ]; then
+        if [ -n "${seen}" ]; then
+            notice="fleetmates updated: ${seen} -> ${installed}"
+        else
+            notice="fleetmates ${installed} is active"
+        fi
+        notice="${notice}"$'\n'"Release notes: https://github.com/andreymudri/fleetmates/releases/tag/v${installed}"
+        # Written via a temp file and renamed, for two reasons. A plain redirect onto
+        # a FIFO blocks forever with no reader, which would hang this blocking hook —
+        # the `-f` guard above stops the READ, but the write needs its own defence.
+        # And the rename is atomic, so a concurrent session cannot observe a
+        # half-written marker and repeat the notice.
+        if mkdir -p "${STATE_DIR}" 2>/dev/null; then
+            seen_tmp="${SEEN_FILE}.$$"
+            if printf '%s\n' "${installed}" > "${seen_tmp}" 2>/dev/null; then
+                mv -f "${seen_tmp}" "${SEEN_FILE}" 2>/dev/null || rm -f "${seen_tmp}" 2>/dev/null
+            fi
+        fi
+    fi
+fi
+
+# Case 2: the async check found a newer published version. Reported one session
+# after the check that discovered it, because that check never blocks this hook.
+published=$(read_json_string "${CACHE_FILE}" published || true)
+published=$(version_or_empty "${published}")
+if [ -n "${published}" ] && [ -n "${installed}" ] && [ "${published}" != "${installed}" ]; then
+    # sort -V is what keeps 0.10.0 from being read as older than 0.9.0. Where it is
+    # unavailable the comparison yields nothing and no notice is emitted: silence is
+    # the right failure mode for a notification.
+    newest=$(printf '%s\n%s\n' "${installed}" "${published}" | sort -V 2>/dev/null | tail -n 1)
+    if [ "${newest}" = "${published}" ]; then
+        [ -n "${notice}" ] && notice="${notice}"$'\n'
+        notice="${notice}fleetmates ${published} is available (installed: ${installed}). Run /plugin update fleetmates"
+    fi
+fi
+
+# Install self-check. Enabled is not the same as working: `enabledPlugins` being true
+# is why this hook runs at all, so the plugin cannot detect its own disabled state —
+# if it were off, nothing here would execute. What it CAN detect is an install that is
+# present but unusable, which is the failure an operator actually hits: a partial
+# unpack, a half-finished update, or a missing node.
+#
+# Filesystem stats and one `command -v`, no subprocess beyond that: this runs in the
+# hook that blocks session start.
+missing=""
+add_missing() { missing="${missing}${missing:+, }$1"; }
+
+[ -f "${PLUGIN_ROOT}/scripts/cli.mjs" ] || add_missing "scripts/cli.mjs"
+command -v node >/dev/null 2>&1 || add_missing "node not on PATH"
+
+skill_count=$(find "${PLUGIN_ROOT}/skills" -maxdepth 2 -name 'SKILL.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+agent_count=$(find "${PLUGIN_ROOT}/agents" -maxdepth 1 -name 'tm-*.md' 2>/dev/null | wc -l | tr -d '[:space:]')
+[ "${skill_count:-0}" -gt 0 ] 2>/dev/null || add_missing "skills/"
+[ "${agent_count:-0}" -gt 0 ] 2>/dev/null || add_missing "agents/tm-*.md"
+
+if [ -n "${missing}" ]; then
+    # Repeated every session, not once: a broken install stays broken, and the
+    # operator needs the message on the session where they hit the failure — not
+    # only on the one where the version happened to change.
+    broken="WARNING: fleetmates is installed but NOT fully working. Missing: ${missing}."
+    broken="${broken}"$'\n'"Fleet commands and phase gates will fail. Reinstall with /plugin install fleetmates, or check the plugin directory at ${PLUGIN_ROOT}."
+    session_context="${session_context}\n\n$(escape_for_json "${broken}")"
+elif [ -n "${notice}" ]; then
+    # Only alongside a version notice: on a healthy install this is reassurance, and
+    # reassurance repeated every session is noise.
+    notice="${notice}"$'\n'"ready: ${skill_count} skills, ${agent_count} agents, cli ok"
+fi
+
+if [ -n "${notice}" ]; then
+    session_context="${session_context}\n\n$(escape_for_json "${notice}")"
+fi
+
+# A claude-teammates install left enabled beside this one runs its own SessionStart and
+# SubagentStop hooks too: two entrypoints injected, and an old stop hook looking for
+# .teammates/ after fleetmates has migrated it to .fleetmates/. Repeated every session,
+# like the broken-install warning, because it stays true until the operator acts.
+# `-f`, not `-r`: a FIFO planted at that path would block this synchronous hook forever.
+# legacy-name:begin
+PLUGINS_FILE=""
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    PLUGINS_FILE="${CLAUDE_CONFIG_DIR}/plugins/installed_plugins.json"
+elif [ -n "${HOME:-}" ]; then
+    PLUGINS_FILE="${HOME}/.claude/plugins/installed_plugins.json"
+fi
+if [ -n "${PLUGINS_FILE}" ] && [ -f "${PLUGINS_FILE}" ] && grep -q '"claude-teammates@' "${PLUGINS_FILE}" 2>/dev/null; then
+    legacy_warning="WARNING: claude-teammates is still installed alongside fleetmates. Both plugins' hooks run every session and at every teammate stop, and the old ones look for .teammates/ after fleetmates has moved it. Run /plugin uninstall claude-teammates."
+    session_context="${session_context}\n\n$(escape_for_json "${legacy_warning}")"
+fi
+# legacy-name:end
+
+# Output context injection as JSON.
+# Cursor hooks expect additional_context (snake_case).
+# Claude Code hooks expect hookSpecificOutput.additionalContext (nested).
+# Copilot CLI (v1.0.11+) and others expect additionalContext (top-level, SDK standard).
+# Claude Code reads BOTH additional_context and hookSpecificOutput without
+# deduplication, so we must emit only the field the current platform consumes.
+if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+  printf '{\n  "additional_context": "%s"\n}\n' "$session_context"
+elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -z "${COPILOT_CLI:-}" ]; then
+  printf '{\n  "hookSpecificOutput": {\n    "hookEventName": "SessionStart",\n    "additionalContext": "%s"\n  }\n}\n' "$session_context"
+else
+  printf '{\n  "additionalContext": "%s"\n}\n' "$session_context"
+fi
+
+exit 0
