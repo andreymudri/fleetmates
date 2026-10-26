@@ -58,3 +58,28 @@ jobs:
             exit 0
           fi
           npm publish --provenance --access public
+
+  directory:
+    # The Claude plugin directory times out validating this repository's full root, so it tracks
+    # the `directory` branch, which holds only what npm ships. Refresh it from each released tag.
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Refresh the directory branch from this tag
+        run: |
+          git fetch origin '+refs/heads/directory:refs/remotes/origin/directory' || true
+          parent=$(git rev-parse -q --verify refs/remotes/origin/directory || true)
+          sha=$(node tools/directory-branch.mjs --ref HEAD ${parent:+--parent "$parent"})
+          if [ "$sha" = unchanged ]; then
+            echo "directory branch already matches ${GITHUB_REF_NAME}"
+          else
+            git push origin "${sha}:refs/heads/directory"
+          fi
