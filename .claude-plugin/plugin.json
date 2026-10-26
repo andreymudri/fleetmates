@@ -8,6 +8,8 @@
   },
   "homepage": "https://github.com/andreymudri/fleetmates",
   "repository": "https://github.com/andreymudri/fleetmates",
+  "documentationUrl": "https://github.com/andreymudri/fleetmates#readme",
+  "supportUrl": "https://github.com/andreymudri/fleetmates/issues",
   "license": "MIT",
   "keywords": [
     "orchestration",
