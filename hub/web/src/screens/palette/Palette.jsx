@@ -4,7 +4,7 @@ import { CrewAvatar, poseFor } from '../../components/CrewAvatar.jsx'
 import { EmptyState } from '../../components/EmptyState.jsx'
 import { StatusPill, compactDuration, pillParams, shown, titleText, translate } from '../../components/StatusPill.jsx'
 import { answerRequest, archiveSession, askVault, searchVault } from '../../state/actions.js'
-import { noteHref } from '../../components/NoteChip.jsx'
+import { noteHref, vaultDownText } from '../../components/NoteChip.jsx'
 import { matchRoute } from '../../state/deck-store.js'
 import { answerable, closeOverlay, deckApi, deckdDown, leaveOverlay, openOverlay, repoFor, tierOf, trapTab } from '../drawer/NeedsYouDrawer.jsx'
 
@@ -205,7 +205,7 @@ export function paletteModel(state, { query = '', now = Date.now(), expanded = [
     const command = commandRows(typed.slice(1), repos, t)
     return finish([['actions', command.rows]], expanded, t, command.message)
   }
-  const memoryRows = memory && typed.trim() ? memory.down ? [{ kind: 'memoryDown', key: 'memory-down', title: 'Memory is unavailable: vault-mcp is not answering.' }] : [
+  const memoryRows = memory && typed.trim() ? memory.down ? [{ kind: 'memoryDown', key: 'memory-down', title: vaultDownText(memory.vault) }] : [
     ...(typed.startsWith('?') ? [{ kind: 'askVault', key: 'ask-vault', text: typed.slice(1).trim(), title: `Ask your vault: "${titleText(typed.slice(1).trim())}"`, subtitle: 'Starts a thread in Memory' }] : []),
     ...(memory.loading ? [{ kind: 'memoryLoading', key: 'memory-loading', title: 'Searching notes…' }] : (memory.hits ?? []).map(hit => ({ ...hit, kind: 'memoryNote', key: `memory-${hit.path}:${hit.line}`, title: titleText(hit.title ?? hit.path), subtitle: titleText(hit.path.split('/').slice(0, -1).join('/')) })))
   ] : []
@@ -495,7 +495,7 @@ export function Palette({ state, t, navigate, api, onClose = () => closeOverlay(
     input.current?.focus()
     return () => opener?.focus?.()
   }, [])
-  const model = paletteModel(state, { query, now, expanded, t, memory: { hits: memoryHits, loading: memoryLoading, down: vaultDown } })
+  const model = paletteModel(state, { query, now, expanded, t, memory: { hits: memoryHits, loading: memoryLoading, down: vaultDown, vault: state.memory?.vault } })
   const current = Math.min(active, model.rows.length - 1)
   const env = { navigate, leave: onLeave, onClose, expand: group => setExpanded(list => [...list, group]), api: api ?? deckApi() }
   if (onArchive) env.archive = onArchive

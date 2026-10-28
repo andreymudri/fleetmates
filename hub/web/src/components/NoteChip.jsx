@@ -16,6 +16,17 @@ export function noteHref(path, line = null) {
 }
 
 /**
+ * The line shown when memory is unavailable, from the vault-mcp health row: an unset vault path is a setup gap, not an outage.
+ * @param {{ reason?: string | null } | undefined} vault
+ * @returns {string}
+ */
+export function vaultDownText(vault) {
+  return vault?.reason === 'VAULT_PATH is not set'
+    ? 'Memory is unavailable: no vault path is set. Set it in Settings.'
+    : 'Memory is unavailable: vault-mcp is not answering.'
+}
+
+/**
  * The domain of a vault path: `<d>` for `02-wiki/<d>/...`, `projects` for `03-projects/...`, else null.
  * @param {string} path
  * @returns {string | null}

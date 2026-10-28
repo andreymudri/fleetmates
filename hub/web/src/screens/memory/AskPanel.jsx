@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Citation } from '../../components/Citation.jsx'
+import { vaultDownText } from '../../components/NoteChip.jsx'
 import { titleText } from '../../components/StatusPill.jsx'
 import { renderMarkdown } from '../team-run/PlanDrawer.jsx'
 
@@ -17,7 +18,7 @@ export function citedMarkdown(text, citations, navigate) {
   }
   return transform(renderMarkdown(text))
 }
-export function AskPanel({ thread, messages = [], threads = [], misses = [], asking = false, down = false, prefill = '', focusComposer = false, navigate = () => {}, onSend, onStop, onDelete, onThread }) {
+export function AskPanel({ thread, messages = [], threads = [], misses = [], asking = false, down = false, vault, prefill = '', focusComposer = false, navigate = () => {}, onSend, onStop, onDelete, onThread }) {
   const [text, setText] = useState(prefill), [history, setHistory] = useState(false), [expanded, setExpanded] = useState({})
   const composer = useRef(null)
   useEffect(() => { setText(prefill) }, [prefill, thread?.id])
@@ -50,7 +51,7 @@ export function AskPanel({ thread, messages = [], threads = [], misses = [], ask
       </article>)}
     </div>
     {asking ? <div className="ask-stream" aria-live="off" aria-busy="true"><p>{streaming?.text ? titleText(streaming.text) : 'Searching your vault…'}</p><button onClick={onStop}>Stop</button></div> : null}
-    {down ? <p>Memory is unavailable: vault-mcp is not answering.</p> : null}
+    {down ? <p>{vaultDownText(vault)}</p> : null}
     <form onSubmit={event => { event.preventDefault(); send() }}><label className="sr-only" htmlFor="vault-question">Ask your vault</label>
       <textarea ref={composer} id="vault-question" placeholder="Ask a follow-up" maxLength={4000} value={text} disabled={down || asking} autoFocus={focusComposer}
         onChange={event => setText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send() } }} />

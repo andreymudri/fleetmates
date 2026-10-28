@@ -16,18 +16,19 @@ Two separate things share this repo:
 
 ## Current state of the deck
 
-All deck work lives on the `feat/deck` branch. Base new deck branches and fleet runs on it
-(`--base feat/deck`), not on `master`, and commit deck plans there.
+The deck lives on `master`; the old `feat/deck` branch is merged and no longer used. Base new
+deck branches and fleet runs on `master`. Releases are tagged `deck-vX.Y.Z`.
 
-M0 (the spike) is done. M1 (Observe) is integrated on `feat/deck`; its remaining exit steps need
-the owner and are listed in `docs/deck/m1-exit.md`. Start from these files:
+Milestones M0 through M5 are implemented, and M6 (Deep research) is a tested release candidate. The
+exit steps that need the owner (real vault questions, real research runs, the M1 dogfood week)
+are listed in `docs/deck/m1-exit.md` through `m5-exit.md` and `docs/deck/m6-progress.md`. Start
+from these files:
 
-- `docs/deck/spikes/m0.md`: what M0 built, its measurements, and the open questions it
-  answered. Section 6 lists known defects and follow-ups with file:line. Section 7 lists what
-  M1 inherits. Section 9 lists the checks only the owner can do.
-- `docs/deck/12-milestones.md`: the milestones. M2 follows M1's exit.
+- `docs/deck/12-milestones.md`: the milestones and what each one covers.
 - `docs/deck/README.md`: how the design docs are organized.
-- `docs/plans/2026-09-26-deck-m0.md`: the M0 plan, including its deviations from the handoff.
+- `docs/deck/16-platforms.md`: Linux, macOS and Windows differences.
+- `docs/deck/spikes/m0.md`: what M0 built and measured. Section 6 lists early defects with
+  file:line.
 
 Section 6 of the report may be out of date. Before fixing or citing an item from it, check it
 against the current code: grep for the symbol, and run or mutate the test that is supposed to pin
@@ -56,8 +57,8 @@ Hub:
     TMPDIR=/tmp/hx npm --prefix hub run perf    # keystroke echo through Focus; headless /usr/bin/chromium, override with CHROMIUM_PATH
 
 Use a short `TMPDIR` for hub tests. Unix socket paths are limited to about 108 bytes, and a long
-temp dir makes the socket tests fail with errors that look like real bugs. CI runs only the root
-suite. The hub suite is Linux and macOS only, and is not in CI yet.
+temp dir makes the socket tests fail with errors that look like real bugs. CI runs the root
+suite, and `.github/workflows/deck.yml` runs the hub suite on Linux, macOS and Windows.
 
 Before you finish, kill every deckd, deck server, fake claude and headless Chromium you started.
 From the repository root this command must print nothing:
