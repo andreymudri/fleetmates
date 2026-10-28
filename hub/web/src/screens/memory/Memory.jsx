@@ -38,7 +38,7 @@ export function MemoryView({ graph, notes = [], captures = [], misses = [], note
         {view === 'misses' ? <MissesView misses={misses} navigate={navigate} onResolve={onResolve} api={api} /> : null}
       </section>
       {route.path ? <NotePanel result={note} line={route.line} loading={!note && !noteError} error={noteError} navigate={navigate} onOpen={onOpen} onAsk={onPrefill} /> :
-        <AskPanel thread={memory.threads?.[threadId]} threads={Object.values(memory.threads ?? {})} misses={misses} messages={messages} asking={!!memory.asking?.[threadId]} navigate={navigate} prefill={prefill} focusComposer={newThread} onSend={onSend} onStop={onStop} onThread={onThread} onDelete={onDelete} />}
+        <AskPanel thread={memory.threads?.[threadId]} threads={Object.values(memory.threads ?? {})} misses={misses} messages={messages} asking={!!memory.asking?.[threadId]} down={down} vault={vault} navigate={navigate} prefill={prefill} focusComposer={newThread} onSend={onSend} onStop={onStop} onThread={onThread} onDelete={onDelete} />}
     </div>}
   </main>
 }
