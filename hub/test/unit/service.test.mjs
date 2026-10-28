@@ -385,3 +385,21 @@ test('detached install adds the HKCU Run value and starts both services; uninsta
   assert.deepEqual(drops, [[RUN_BASE, 'deckd', 4242, 'win32'], [RUN_BASE, 'hooks', 4243, 'win32']])
   assert.equal(files.has(`${WIN_STATE}\\run\\deckd.pid`), false)
 })
+
+test('detached start leaves a live server that has not bound its port alone, so stop can still end it (#58)', async () => {
+  const { manager, files, spawns, calls } = harness({ platform: 'win32', active: () => false, runOut: commandLines({ 777: WEB_LINE }) })
+  files.set(WEB_PID, '777\n')
+  await manager.start('web')
+  assert.equal(spawns.length, 0, 'no second server is launched next to the one still starting')
+  assert.equal(files.get(WEB_PID), '777\n', 'the pid file still names the live server')
+  await manager.stop('web')
+  assert.deepEqual(calls.at(-1), TASKKILL(777), 'stop kills the server that never listened')
+})
+
+test('detached start replaces a pid file whose process is gone', async () => {
+  const { manager, files, spawns } = harness({ platform: 'win32', active: () => false })
+  files.set(WEB_PID, '777\n')
+  await manager.start('web')
+  assert.equal(spawns.length, 1)
+  assert.equal(files.get(WEB_PID), '4242\n')
+})
