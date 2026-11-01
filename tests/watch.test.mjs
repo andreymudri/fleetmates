@@ -95,6 +95,15 @@ test('resumes 0 and respawns 1: the first stall is respawn', () => {
   assert.equal(d.attempt, 1)
 })
 
+// Without the guard, a NaN clock makes `now - lastActionAt < window` false, so a just-nudged task
+// would be resumed again on every tick. The guard refuses the clock instead.
+test('nextAction refuses a non-finite clock instead of deciding', () => {
+  const h = { ...emptyHistory(), resumes: 1, lastActionAt: T0 }
+  for (const bad of [NaN, undefined, Infinity]) {
+    assert.throws(() => nextAction(stalled, h, config, bad), /numeric clock/)
+  }
+})
+
 test('the input history object is never mutated', () => {
   const h = { resumes: 1, respawns: 0, lastActionAt: null, orphaned: false, notified: false }
   const snapshot = JSON.stringify(h)
