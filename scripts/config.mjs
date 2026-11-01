@@ -216,6 +216,31 @@ export function validateHarnesses(harnesses, file) {
   }
 }
 
+// The watchdog's knobs. Not an enforcement key: nothing here changes a verdict, it only decides how
+// hard the orchestrator nudges a stalled teammate, so both layers may carry it.
+const WATCH_FIELDS = {
+  enabled: (v) => typeof v === 'boolean',
+  resumes: (v) => Number.isInteger(v) && v >= 0,
+  respawns: (v) => Number.isInteger(v) && v >= 0,
+  staleMinutes: (v) => Number.isInteger(v) && v >= 1,
+  intervalMinutes: (v) => Number.isInteger(v) && v >= 1,
+}
+const WATCH_RULES = {
+  enabled: 'a boolean', resumes: 'an integer >= 0', respawns: 'an integer >= 0',
+  staleMinutes: 'an integer >= 1', intervalMinutes: 'an integer >= 1',
+}
+
+export function validateWatch(watch, file) {
+  if (watch === null || typeof watch !== 'object' || Array.isArray(watch)) {
+    throw new ConfigError('watch must be an object')
+  }
+  for (const [field, value] of Object.entries(watch)) {
+    if (!Object.hasOwn(WATCH_FIELDS, field)) throw new ConfigError(`unknown key in ${file}: watch.${field}`)
+    if (!WATCH_FIELDS[field](value)) throw new ConfigError(`watch.${field} must be ${WATCH_RULES[field]}`)
+  }
+  return watch
+}
+
 export function validateLocal(local) {
   if (local === null || typeof local !== 'object' || Array.isArray(local)) {
     throw new ConfigError(`${LOCAL_FILE} must contain a JSON object`)
@@ -226,7 +251,7 @@ export function validateLocal(local) {
         `${key} is an enforcement key; it may only be set in ${GATE_FILE}`,
       )
     }
-    if (!['maxParallel', 'caveman', 'agents', 'harnesses'].includes(key)) {
+    if (!['maxParallel', 'caveman', 'agents', 'harnesses', 'watch'].includes(key)) {
       throw new ConfigError(`unknown key in ${LOCAL_FILE}: ${key}`)
     }
   }
@@ -256,6 +281,7 @@ export function validateLocal(local) {
     }
   }
   if (local.harnesses !== undefined) validateHarnesses(local.harnesses, LOCAL_FILE)
+  if (local.watch !== undefined) validateWatch(local.watch, LOCAL_FILE)
   return local
 }
 
@@ -292,6 +318,7 @@ export function validateGate(gate) {
     }
   }
   if (gate.harnesses !== undefined) validateHarnesses(gate.harnesses, GATE_FILE)
+  if (gate.watch !== undefined) validateWatch(gate.watch, GATE_FILE)
   // Every entry in ENFORCEMENT_KEYS has a validator. If a future key joins that list without
   // one, refusing is the right direction — waving an unchecked enforcement key through is the
   // one outcome this must never have — but it is refused as a ConfigError, not as a raw
@@ -375,6 +402,8 @@ export async function loadConfig(root) {
       caveman: pick('caveman', false),
       agents,
       harnesses,
+      // Literal defaults rather than an import of scripts/watch.mjs, so config.mjs does not depend on the watchdog.
+      watch: { enabled: true, resumes: 2, respawns: 1, staleMinutes: 20, intervalMinutes: 5, ...gate.watch, ...local?.watch },
     },
     sources,
   }
@@ -425,6 +454,8 @@ export function validateKey(dotted, value) {
   assertSafeKey(dotted)
   if (dotted === 'maxParallel') return VALIDATORS.maxParallel(value)
   if (dotted === 'caveman') return VALIDATORS.caveman(value)
+  const watchMatch = /^watch\.([A-Za-z]+)$/.exec(dotted)
+  if (watchMatch) { validateWatch({ [watchMatch[1]]: value }, LOCAL_FILE); return value }
   const agentMatch = /^agents\.([a-z]+)\.(tier|effort)$/.exec(dotted)
   if (agentMatch) {
     const [, role, field] = agentMatch
