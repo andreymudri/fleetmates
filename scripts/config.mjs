@@ -224,10 +224,13 @@ const WATCH_FIELDS = {
   respawns: (v) => Number.isInteger(v) && v >= 0,
   staleMinutes: (v) => Number.isInteger(v) && v >= 1,
   intervalMinutes: (v) => Number.isInteger(v) && v >= 1,
+  learn: (v) => typeof v === 'boolean',
+  spinFailures: (v) => Number.isInteger(v) && v >= 2,
 }
 const WATCH_RULES = {
   enabled: 'a boolean', resumes: 'an integer >= 0', respawns: 'an integer >= 0',
   staleMinutes: 'an integer >= 1', intervalMinutes: 'an integer >= 1',
+  learn: 'a boolean', spinFailures: 'an integer >= 2',
 }
 
 export function validateWatch(watch, file) {
@@ -403,7 +406,7 @@ export async function loadConfig(root) {
       agents,
       harnesses,
       // Literal defaults rather than an import of scripts/watch.mjs, so config.mjs does not depend on the watchdog.
-      watch: { enabled: true, resumes: 2, respawns: 1, staleMinutes: 20, intervalMinutes: 5, ...gate.watch, ...local?.watch },
+      watch: { enabled: true, resumes: 2, respawns: 1, staleMinutes: 20, intervalMinutes: 5, learn: true, spinFailures: 5, ...gate.watch, ...local?.watch },
     },
     sources,
   }
