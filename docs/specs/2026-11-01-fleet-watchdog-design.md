@@ -144,7 +144,38 @@ message is fixed text and never quotes teammate output.
 - Watching reviewers or the integrator.
 - Using watchdog state as gate evidence.
 
+## Amendment: spinning teammates and a learned window
+
+Approved by the owner on 2026-11-01 after reviewing Microsoft's TokenEconomizer, whose failure-loop
+guard and per-repository envelope cover the two gaps below. Ideas only; no code is taken from it.
+
+**Spinning.** A teammate that re-runs the same failing command keeps its commits and file writes
+fresh, so liveness reads it as `working` and the ladder never fires on the most expensive kind of
+stuck. A new pure `spinState` reads the task's event ledger: one command fingerprint failing
+`watch.spinFailures` times (default 5) inside the stale window, with no success of that command in
+between, turns a `working` row into `spinning`. A spinning row walks the same ladder as a stalled
+one; its events carry `reason: "spinning"` and the orchestrator's resume text tells the teammate
+to stop retrying unchanged. No judge model is used: the rule is deterministic and costs nothing.
+
+This depends on the ledger recording failures, which it did not. Measured with a hook probe on
+Claude Code 2.1.316: a failed Bash call fires only `PostToolUseFailure`, and a successful one's
+`PostToolUse` payload carries no exit code. `context-hook.mjs` listened only to `PostToolUse` and
+read `exit_code`, so every success was recorded `unknown` and no failure was recorded. The
+amendment fixes that too, which also restores the success reset `stallDecision` relies on.
+
+**Learned window.** The ladder's history now keeps, per task, the longest quiet stretch seen
+(`maxQuietMs`, the smaller of tip age and touch age). When a task finishes `done` without the
+watchdog ever acting, that value becomes one sample in `.fleetmates/watch-envelope.json`. Once 5
+samples exist, and unless `watch.learn` is false, the stale window is p90 of the samples times 1.5,
+clamped to 10-60 minutes; before that, `watch.staleMinutes` applies. The file is teammate-writable,
+so the clamp is what bounds a forged sample. The window in use is printed in a `start` event.
+
+New config keys: `watch.spinFailures` (integer >= 2, default 5) and `watch.learn` (boolean,
+default true).
+
 ## Deferred
 
-- Whether 20 minutes is the right default stale window. It needs real stall timings, which the
-  event ledger will now record. Reopens after the first three fleet runs with the watchdog on.
+- Whether p90 x 1.5 with a 10-60 minute clamp is the right learned window. Reopens after the first
+  three fleet runs that reach 5 samples, by comparing it with the stalls those runs recorded.
+- Learning repository facts from repeated failures and injecting them into briefs (TokenEconomizer's
+  envfacts idea). Separate spec; reopens once T8's failure events have a few runs of data.
