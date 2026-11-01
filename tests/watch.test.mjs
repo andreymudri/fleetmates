@@ -112,3 +112,92 @@ test('the input history object is never mutated', () => {
   nextAction(stalled, h, { ...config, resumes: 0, respawns: 0 }, T0)
   assert.equal(JSON.stringify(h), snapshot)
 })
+
+const spinning = { taskId: 'T1', state: 'spinning' }
+
+test('a spinning row walks the same ladder as stalled, every non-none decision carrying reason spinning', () => {
+  let hs = emptyHistory()
+  let hp = emptyHistory()
+  let t = T0
+  const seen = []
+  for (let i = 0; i < 5; i++) {
+    const ds = nextAction(spinning, hs, config, t)
+    const dp = nextAction(stalled, hp, config, t)
+    assert.equal(ds.action, dp.action)
+    assert.equal(ds.attempt, dp.attempt)
+    assert.deepEqual(ds.history, dp.history)
+    assert.equal(ds.reason, 'spinning', `${ds.action} attempt ${ds.attempt}`)
+    seen.push(ds.action)
+    hs = ds.history
+    hp = dp.history
+    t += window
+  }
+  assert.deepEqual(seen, ['resume', 'resume', 'respawn', 'resume', 'resume'])
+  const last = nextAction(spinning, hs, config, t)
+  assert.equal(last.action, 'orphan')
+  assert.equal(last.reason, 'spinning')
+  const inside = nextAction(spinning, { ...emptyHistory(), resumes: 1, lastActionAt: T0 }, config, T0 + MIN)
+  assert.equal(inside.action, 'none')
+  assert.equal('reason' in inside, false)
+})
+
+test('a stalled row\'s decisions carry no reason', () => {
+  let h = emptyHistory()
+  let t = T0
+  for (let i = 0; i < 6; i++) {
+    const d = nextAction(stalled, h, config, t)
+    assert.notEqual(d.action, 'none')
+    assert.equal('reason' in d, false, d.action)
+    h = d.history
+    t += window
+  }
+})
+
+test('emptyHistory has maxQuietMs null and sampled false', () => {
+  const h = emptyHistory()
+  assert.equal(h.maxQuietMs, null)
+  assert.equal(h.sampled, false)
+})
+
+test('maxQuietMs is the largest min(tipAgeMs, touchAgeMs) seen for working, stalled and spinning rows', () => {
+  let h = emptyHistory()
+  const steps = [
+    [{ state: 'working', tipAgeMs: 5 * MIN, touchAgeMs: 2 * MIN }, 2 * MIN],
+    [{ state: 'stalled', tipAgeMs: 30 * MIN, touchAgeMs: 25 * MIN }, 25 * MIN],
+    [{ state: 'working', tipAgeMs: 1 * MIN, touchAgeMs: 1 * MIN }, 25 * MIN],
+    [{ state: 'spinning', tipAgeMs: 40 * MIN, touchAgeMs: null }, 40 * MIN],
+    [{ state: 'working', tipAgeMs: null, touchAgeMs: 50 * MIN }, 50 * MIN],
+    [{ state: 'working', tipAgeMs: null, touchAgeMs: null }, 50 * MIN],
+  ]
+  let t = T0
+  for (const [row, expected] of steps) {
+    h = nextAction({ taskId: 'T1', ...row }, h, config, t).history
+    assert.equal(h.maxQuietMs, expected, `after ${JSON.stringify(row)}`)
+    t += window
+  }
+})
+
+test('maxQuietMs is tracked even for an orphaned history', () => {
+  const h = { ...emptyHistory(), orphaned: true }
+  const d = nextAction({ taskId: 'T1', state: 'working', tipAgeMs: 7 * MIN, touchAgeMs: 9 * MIN }, h, config, T0)
+  assert.equal(d.history.maxQuietMs, 7 * MIN)
+})
+
+test('maxQuietMs is untouched by unknown and not started rows', () => {
+  const h = { ...emptyHistory(), maxQuietMs: 3 * MIN }
+  for (const state of ['unknown', 'not started']) {
+    const d = nextAction({ taskId: 'T1', state, tipAgeMs: 90 * MIN, touchAgeMs: 90 * MIN }, h, config, T0)
+    assert.equal(d.history.maxQuietMs, 3 * MIN, state)
+  }
+  const fresh = nextAction({ taskId: 'T1', state: 'not started', tipAgeMs: 90 * MIN, touchAgeMs: 90 * MIN }, undefined, config, T0)
+  assert.equal(fresh.history.maxQuietMs, null)
+})
+
+test('tracking maxQuietMs never mutates the input history', () => {
+  const h = { ...emptyHistory(), maxQuietMs: MIN }
+  const snapshot = JSON.stringify(h)
+  for (const state of ['working', 'stalled', 'spinning']) {
+    nextAction({ taskId: 'T1', state, tipAgeMs: 60 * MIN, touchAgeMs: 60 * MIN }, h, config, T0)
+  }
+  assert.equal(JSON.stringify(h), snapshot)
+})
