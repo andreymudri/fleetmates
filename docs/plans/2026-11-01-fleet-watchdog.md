@@ -338,6 +338,7 @@ and no failure is recorded at all.
 - Modify: `scripts/context-hook.mjs`
 - Modify: `scripts/event-ledger.mjs`
 - Modify: `hooks/hooks.json`
+- Modify: `scripts/hook-doctor.mjs`
 - Test: `tests/event-ledger.test.mjs`
 
 **Depends:** T4
@@ -370,6 +371,7 @@ export function bashResult(hook, input) {
 ```
 
 - [ ] **Step 4:** In `hooks/hooks.json` add a `PostToolUseFailure` entry mirroring the existing `PostToolUse` one (matcher `Bash`, same `context-hook.mjs` command, same timeout).
+- [ ] **Step 4b:** `scripts/hook-doctor.mjs` builds its required receipts from `HOOK_NAMES`, so adding `PostToolUseFailure` there would make `doctor --hooks` report ok only after a session saw a failing Bash call. Exclude `PostToolUseFailure` from the required list (report its receipt as optional when present), and add a test in `tests/event-ledger.test.mjs` that `doctor --hooks` is ok with every other receipt present and no `PostToolUseFailure` receipt.
 - [ ] **Step 5:** Run `node --test tests/event-ledger.test.mjs` and the full suite with a private TMPDIR and a 600000 ms timeout; pass. Mutations: return `'unknown'` for `PostToolUseFailure`, drop the `interrupted` check, drop the hooks.json entry; each must fail a test. Restore.
 - [ ] **Step 6:** Commit `fix(hooks): record Bash failures and successes from Claude Code's real hook payloads`.
 
