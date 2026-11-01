@@ -1205,7 +1205,7 @@ test('validateGate accepts the same watch block and rejects a malformed one', ()
 test('loadConfig resolves the watch defaults when no layer sets them', async () => {
   await withTempRoot(async (root) => {
     const { resolved } = await loadConfig(root)
-    assert.deepEqual(resolved.watch, { enabled: true, resumes: 2, respawns: 1, staleMinutes: 20, intervalMinutes: 5 })
+    assert.deepEqual(resolved.watch, { enabled: true, resumes: 2, respawns: 1, staleMinutes: 20, intervalMinutes: 5, learn: true, spinFailures: 5 })
   })
 })
 
@@ -1225,4 +1225,21 @@ test('loadConfig lets a local watch.resumes beat a gate value and keeps the othe
 test('validateKey accepts a watch.* value that is valid and refuses one that is not', () => {
   assert.equal(validateKey('watch.respawns', 2), 2)
   assert.throws(() => validateKey('watch.respawns', -1), ConfigError)
+})
+
+test('watch.learn must be a boolean and watch.spinFailures an integer >= 2', () => {
+  assert.doesNotThrow(() => validateLocal({ watch: { learn: false, spinFailures: 2 } }))
+  for (const [bad, key] of [
+    [{ learn: 'yes' }, 'watch.learn'],
+    [{ learn: 1 }, 'watch.learn'],
+    [{ spinFailures: 1 }, 'watch.spinFailures'],
+    [{ spinFailures: 2.5 }, 'watch.spinFailures'],
+  ]) {
+    assert.throws(() => validateLocal({ watch: bad }), (err) => err instanceof ConfigError && err.message.includes(`${key} must be`), key)
+  }
+})
+
+test('validateKey refuses watch.spinFailures below 2', () => {
+  assert.equal(validateKey('watch.spinFailures', 3), 3)
+  assert.throws(() => validateKey('watch.spinFailures', 1), (err) => err instanceof ConfigError && err.message.includes('watch.spinFailures must be'))
 })
