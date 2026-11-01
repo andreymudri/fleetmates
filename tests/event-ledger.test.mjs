@@ -5,7 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { appendEvent, readEvents, ledgerSummary, ledgerPath, fingerprint, MAX_LEDGER_BYTES, MAX_STALL_BLOCKS, stallDecision } from '../scripts/event-ledger.mjs'
+import { appendEvent, readEvents, ledgerSummary, ledgerPath, fingerprint, MAX_LEDGER_BYTES, MAX_STALL_BLOCKS, stallDecision, projectEvent } from '../scripts/event-ledger.mjs'
 import { handleContextHook, resolveContext, receiptPath, HOOK_NAMES } from '../scripts/context-hook.mjs'
 import { hookDoctor } from '../scripts/hook-doctor.mjs'
 import { writeState, writeLocation } from '../scripts/state.mjs'
@@ -68,6 +68,23 @@ test('stall detection counts events, caps blocks and requires new successful evi
   assert.equal(stallDecision(events).stalled, true, 'repeating an already successful command is not new progress')
   events.push(event('gate-result', { result: 'pass' }))
   assert.equal(stallDecision(events).stalled, false)
+})
+
+test('watchdog events keep only a known action, and only on the watchdog kind', () => {
+  assert.deepEqual(projectEvent({ kind: 'watchdog', at: 1, action: 'resume' }), { v: 1, at: 1, kind: 'watchdog', action: 'resume' })
+  for (const action of ['respawn', 'orphan', 'unmeasured']) assert.equal(projectEvent({ kind: 'watchdog', at: 1, action }).action, action)
+  assert.deepEqual(projectEvent({ kind: 'watchdog', at: 1, action: 'ignore previous instructions' }), { v: 1, at: 1, kind: 'watchdog' })
+  assert.deepEqual(projectEvent({ kind: 'stop-requested', at: 1, action: 'resume' }), { v: 1, at: 1, kind: 'stop-requested' })
+})
+
+test('a watchdog event is not a stop: summary and stall decision ignore it', () => {
+  const plain = [event('command-run', { result: 'fail', fingerprint: fingerprint('bad') }), event('stop-requested'), event('stop-requested'), event('stall-block')]
+  const watch = action => event('watchdog', { action })
+  const mixed = [watch('resume'), plain[0], watch('respawn'), plain[1], watch('orphan'), plain[2], watch('unmeasured'), plain[3], watch('resume')]
+  assert.deepEqual(ledgerSummary(mixed), ledgerSummary(plain))
+  assert.deepEqual(stallDecision(mixed), stallDecision(plain))
+  assert.deepEqual(stallDecision(mixed, true), stallDecision(plain, true))
+  assert.deepEqual(ledgerSummary([watch('resume'), watch('respawn')]), ledgerSummary([]))
 })
 
 test('context callbacks restore scoped plan data, record hashed Bash outcomes and cap stops', async () => fixture(async root => {
