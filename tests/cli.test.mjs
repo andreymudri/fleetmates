@@ -2198,7 +2198,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 114, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
+const CENSUS_EXPECTED = { 'cli.mjs': 124, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2398,10 +2398,19 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **133 lines: 114 in `cli.mjs`, 6 in
+// can no longer drift away from the code unnoticed. It came to **143 lines: 124 in `cli.mjs`, 6 in
 // `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **1 site in `cli.mjs`**: `dispatch --fix-round`'s unknown-task refusal,
+// The most recent move was **10 sites in `cli.mjs`**, the watchdog's `watch` and `rescue`
+// commands. `watch`: the unreadable-plan refusal (the `--plan` value and the parse error), the
+// no-run-directory refusal (the run id), the config-failure line, the lock-held refusal (the lock
+// path), and `onAction`'s ledger-failure `watch-error` event. `rescue`: the no-registered-worktree
+// refusal (the `--task` value), the no-uncommitted-work line and the rescued-to line (the task id
+// and the patch path), the worktree-removed line (a path git reports, which a teammate chose),
+// and the rescue-failed line (the error, which can quote that path). Driven by
+// `tests/watch-cli.test.mjs` for their exit codes and wording; none is row-driven here.
+//
+// The move before that was **1 site in `cli.mjs`**: `dispatch --fix-round`'s unknown-task refusal,
 // which wraps the `--phase` and `--run` argv values and each `--task` value it names, like the
 // T7 headless-dispatch group below. Not row-driven; its exit 2 is driven by
 // `tests/execution-controller-cli.test.mjs` ("dispatch refuses an unusable --fix-round or
