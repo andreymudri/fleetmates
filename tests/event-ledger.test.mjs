@@ -100,7 +100,6 @@ test('context callbacks restore scoped plan data, record hashed Bash outcomes an
   await handleContextHook({ cwd: root, hook_event_name: 'PreCompact' }, options)
   assert.match(output.pop(), /"task":/)
   await handleContextHook({ cwd: root, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'secret command' }, tool_response: { exit_code: 1 } }, options)
-  await handleContextHook({ cwd: root, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'secret command' }, error: 'Exit code 1', is_interrupt: false }, options)
   for (let i = 0; i < 5; i++) await handleContextHook({ cwd: root, hook_event_name: 'SubagentStop' }, options)
   assert.equal(output.length, MAX_STALL_BLOCKS)
   const events = await readEvents(ledgerPath(root, 'r1', 'T1'))
@@ -151,6 +150,21 @@ test('hook doctor refuses unobserved, stale and different-session receipts', asy
   assert.equal((await hookDoctor({ env, now: 1001, sessionId: 'session-a' })).ok, true)
   assert.equal((await hookDoctor({ env, now: 1001, sessionId: 'session-b' })).ok, false)
   assert.equal((await hookDoctor({ env, now: 2000, maxAgeMs: 1 })).ok, false)
+}))
+
+test('hook doctor keeps the failing-Bash receipt optional', async () => fixture(async root => {
+  const env = { CLAUDE_CONFIG_DIR: root }
+  for (const hook of HOOK_NAMES.filter(hook => hook !== 'PostToolUseFailure')) await appendEvent(receiptPath(env), event('hook-fired', { hook, fingerprint: fingerprint('session-a') }))
+  const without = await hookDoctor({ env, now: 1001, sessionId: 'session-a' })
+  assert.equal(without.ok, true, 'no failing Bash call is needed to pass doctor --hooks')
+  assert.deepEqual(without.hooks.find(h => h.hook === 'PostToolUseFailure'), { hook: 'PostToolUseFailure', state: 'optional', lastAt: null, optional: true })
+  await appendEvent(receiptPath(env), event('hook-fired', { hook: 'PostToolUseFailure', fingerprint: fingerprint('session-a') }))
+  const withIt = await hookDoctor({ env, now: 1001, sessionId: 'session-a' })
+  assert.equal(withIt.ok, true)
+  assert.equal(withIt.hooks.find(h => h.hook === 'PostToolUseFailure').state, 'observed')
+  await rm(receiptPath(env))
+  await appendEvent(receiptPath(env), event('hook-fired', { hook: 'PostToolUseFailure', fingerprint: fingerprint('session-a') }))
+  assert.equal((await hookDoctor({ env, now: 1001, sessionId: 'session-a' })).ok, false, 'an optional receipt cannot stand in for the required ones')
 }))
 
 test('registered worktree reminder reads committed docs plan rather than live edits', async () => fixture(async root => {
