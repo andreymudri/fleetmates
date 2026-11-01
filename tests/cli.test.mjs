@@ -6708,7 +6708,7 @@ async function writeVerdict(root, verdict) {
 test('usage lists the fix subcommand', async () => {
   await withRepo(async ({ io, lines }) => {
     assert.equal(await runCli(['nope'], io), 2)
-    assert.match(lines.join('\n'), /init-run\|gate\|doctor\|liveness\|digest\|claim\|unclaim\|locate\|brief\|workflow\|dispatch\|dispatch-reviews\|dispatch-integrator\|message\|sessions\|complete\|fix/)
+    assert.match(lines.join('\n'), /init-run\|gate\|doctor\|liveness\|watch\|rescue\|digest\|claim\|unclaim\|locate\|brief\|workflow\|dispatch\|dispatch-reviews\|dispatch-integrator\|message\|sessions\|complete\|fix/)
     assert.match(lines.join('\n'), /fix\s+--run <id> --phase <n> --verdict <path>/)
   })
 })
