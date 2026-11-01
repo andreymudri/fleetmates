@@ -100,6 +100,7 @@ test('context callbacks restore scoped plan data, record hashed Bash outcomes an
   await handleContextHook({ cwd: root, hook_event_name: 'PreCompact' }, options)
   assert.match(output.pop(), /"task":/)
   await handleContextHook({ cwd: root, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'secret command' }, tool_response: { exit_code: 1 } }, options)
+  await handleContextHook({ cwd: root, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'secret command' }, error: 'Exit code 1', is_interrupt: false }, options)
   for (let i = 0; i < 5; i++) await handleContextHook({ cwd: root, hook_event_name: 'SubagentStop' }, options)
   assert.equal(output.length, MAX_STALL_BLOCKS)
   const events = await readEvents(ledgerPath(root, 'r1', 'T1'))
@@ -108,6 +109,38 @@ test('context callbacks restore scoped plan data, record hashed Bash outcomes an
   assert.ok(!(await readFile(ledgerPath(root, 'r1', 'T1'), 'utf8')).includes('secret command'))
   assert.equal((await hookDoctor({ env, now: 1001 })).ok, true)
 }))
+
+test('Bash outcomes are read from the hook that fired and the measured payload shapes', async () => fixture(async root => {
+  const env = { CLAUDE_CONFIG_DIR: path.join(root, 'config') }
+  const context = { root, runId: 'r1', taskId: 'T1', phase: 1, totalPhases: 1, plan: 'docs/plans/test.md', sha: 'a'.repeat(40), task: { id: 'T1' } }
+  const options = { env, now: () => 1000, resolve: async () => context, out: () => {} }
+  const file = ledgerPath(root, 'r1', 'T1')
+  const run = async input => {
+    await rm(file, { force: true })
+    await handleContextHook({ cwd: root, ...input }, options)
+    return (await readEvents(file)).filter(e => e.kind === 'command-run')
+  }
+  const success = { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'npm test' } }
+  const response = { stdout: 'ok', stderr: '', interrupted: false, isImage: false, noOutputExpected: false }
+  assert.deepEqual((await run({ ...success, tool_response: response })).map(e => e.result), ['pass'])
+  assert.deepEqual((await run({ ...success, tool_response: { ...response, interrupted: true } })).map(e => e.result), ['fail'])
+  const failed = await run({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_input: { command: 'npm test' }, error: 'Exit code 3\nbad', is_interrupt: false })
+  assert.deepEqual(failed.map(e => [e.result, e.fingerprint]), [['fail', fingerprint('npm test')]])
+  assert.deepEqual(await run({ hook_event_name: 'PostToolUseFailure', tool_name: 'Read', tool_input: { file_path: 'x' }, error: 'missing', is_interrupt: false }), [])
+  assert.deepEqual((await run({ ...success, tool_response: { exit_code: 1 } })).map(e => e.result), ['fail'])
+  assert.deepEqual((await run({ ...success, tool_response: { exit_code: 0 } })).map(e => e.result), ['pass'])
+  const receipts = (await readEvents(receiptPath(env))).filter(e => e.kind === 'hook-fired').map(e => e.hook)
+  assert.ok(receipts.includes('PostToolUseFailure'), 'PostToolUseFailure receipt keeps its hook name')
+}))
+
+test('PostToolUseFailure for Bash is wired to the shipped context handler', async () => {
+  const config = JSON.parse(await readFile(new URL('../hooks/hooks.json', import.meta.url), 'utf8'))
+  const groups = config.hooks.PostToolUseFailure ?? []
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].matcher, 'Bash')
+  assert.deepEqual(groups[0].hooks, config.hooks.PostToolUse[0].hooks)
+  assert.equal(groups[0].hooks[0].command, 'node "${CLAUDE_PLUGIN_ROOT}/scripts/context-hook.mjs"')
+})
 
 test('hook doctor refuses unobserved, stale and different-session receipts', async () => fixture(async root => {
   const env = { CLAUDE_CONFIG_DIR: root }

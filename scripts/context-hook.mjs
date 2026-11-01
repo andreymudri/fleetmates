@@ -10,7 +10,7 @@ import { assignPhases } from './phases.mjs'
 import { findTaskByWorktree, readState } from './state.mjs'
 import { appendEvent, readEvents, fingerprint, ledgerPath, stallDecision } from './event-ledger.mjs'
 
-export const HOOK_NAMES = ['SessionStart', 'PreCompact', 'PostToolUse', 'SubagentStop']
+export const HOOK_NAMES = ['SessionStart', 'PreCompact', 'PostToolUse', 'PostToolUseFailure', 'SubagentStop']
 export function receiptPath(env = process.env) {
   return path.resolve(env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'fleetmates', 'hook-receipts.jsonl')
 }
@@ -49,6 +49,18 @@ export function renderContext(context, hook) {
   return hook === 'SessionStart' ? JSON.stringify({ hookSpecificOutput: { hookEventName: hook, additionalContext } }) : additionalContext
 }
 
+// Claude Code reports a Bash call's outcome by WHICH hook fires, not by an exit code: a non-zero
+// exit fires PostToolUseFailure only, and PostToolUse's tool_response carries no exit code
+// (measured on 2.1.316). The exit_code branch keeps older payloads and other harnesses working.
+export function bashResult(hook, input) {
+  if (hook === 'PostToolUseFailure') return 'fail'
+  const response = input.tool_response
+  const exit = response?.exit_code ?? response?.exitCode
+  if (typeof exit === 'number') return exit === 0 ? 'pass' : 'fail'
+  if (response?.interrupted === true) return 'fail'
+  return response && typeof response === 'object' ? 'pass' : 'unknown'
+}
+
 export async function handleContextHook(input, { env = process.env, now = Date.now, resolve = resolveContext, out = () => {} } = {}) {
   const hook = input?.hook_event_name
   if (!HOOK_NAMES.includes(hook)) return 0
@@ -62,11 +74,9 @@ export async function handleContextHook(input, { env = process.env, now = Date.n
     await appendEvent(file, { kind: 'task-started', at: now() })
     out(renderContext(context, hook))
   } else if (hook === 'PreCompact') out(renderContext(context, hook))
-  else if (hook === 'PostToolUse' && input.tool_name === 'Bash') {
-    const response = input.tool_response
-    const exit = response?.exit_code ?? response?.exitCode
+  else if ((hook === 'PostToolUse' || hook === 'PostToolUseFailure') && input.tool_name === 'Bash') {
     await appendEvent(file, { kind: 'command-run', at: now(), fingerprint: fingerprint(input.tool_input?.command ?? ''),
-      result: exit === 0 ? 'pass' : typeof exit === 'number' || response?.interrupted === true ? 'fail' : 'unknown' })
+      result: bashResult(hook, input) })
   } else if (hook === 'SubagentStop') {
     await appendEvent(file, { kind: 'stop-requested', at: now() })
     const decision = stallDecision(await readEvents(file), input.stop_hook_active === true)
