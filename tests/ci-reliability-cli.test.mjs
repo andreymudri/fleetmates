@@ -464,12 +464,28 @@ test('ci-wait exits 1 when one of two workflows with same-named jobs fails', asy
   assert.match(ctx.lines.join('\n'), /deck.*timed_out.*runs\/21/)
 })
 
-test('ci-wait fails every non-success conclusion of a completed run', async (t) => {
+// Spec section 4: `success` and `skipped` pass; every other conclusion of a completed run fails,
+// `neutral` and a missing (null) conclusion included.
+test('ci-wait judges each conclusion of a completed run', async (t) => {
   const ctx = await ciRepo(t)
-  for (const conclusion of ['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure']) {
-    const { io } = ciIo(ctx, (sha) => [workflowRun(30, 'test', sha, 'completed', conclusion)])
-    assert.equal(await ciWait(ctx, io), 1, `${conclusion}: ${ctx.lines.join('\n')}`)
+  const table = [
+    ['success', 0], ['skipped', 0],
+    ['failure', 1], ['cancelled', 1], ['timed_out', 1], ['action_required', 1], ['startup_failure', 1],
+    ['neutral', 1], ['stale', 1], [null, 1],
+  ]
+  for (const [conclusion, code] of table) {
+    const { io } = ciIo(ctx, (sha) => [workflowRun(31, 'deck', sha, 'completed', 'success'), workflowRun(30, 'test', sha, 'completed', conclusion)])
+    assert.equal(await ciWait(ctx, io), code, `${conclusion}: ${ctx.lines.join('\n')}`)
   }
+})
+
+// A failure is final: the wait ends on the poll that sees it, whatever is still running beside it.
+test('ci-wait ends on the first failed run without waiting for one still running', async (t) => {
+  const ctx = await ciRepo(t)
+  const { io, calls } = ciIo(ctx, (sha) => [workflowRun(32, 'deck', sha, 'in_progress'), workflowRun(33, 'test', sha, 'completed', 'failure')])
+  assert.equal(await ciWait(ctx, io, ['--minutes', '5']), 1, ctx.lines.join('\n'))
+  assert.equal(calls.length, 1)
+  assert.match(ctx.lines.join('\n'), /runs\/33/)
 })
 
 test('ci-wait counts the latest attempt of a re-run', async (t) => {
@@ -576,6 +592,48 @@ test('ci-wait reads whether workflows exist from the tip commit\'s tree, not the
   const second = ciIo(committed, (sha) => [workflowRun(90, 'test', sha, 'completed', 'success')])
   assert.equal(await ciWait(committed, second.io), 0, committed.lines.join('\n'))
   assert.equal(second.calls.length, 1)
+})
+
+// `--branch` need not be what the root has checked out: the branch's own tip decides, in both
+// directions.
+test('ci-wait reads the workflows of the --branch tip, not of the checked-out HEAD', async (t) => {
+  // HEAD (run-branch) has none; the named branch has one: it waits on that branch's CI.
+  const ctx = await ciRepo(t, { workflow: null })
+  git(ctx.root, ['checkout', '--quiet', '-b', 'with-ci'])
+  await writeWorkflow(ctx.root, LINUX_WORKFLOW)
+  git(ctx.root, ['add', '.github'])
+  git(ctx.root, ['commit', '--quiet', '-m', 'ci'])
+  const withCi = git(ctx.root, ['rev-parse', 'with-ci']).trim()
+  git(ctx.root, ['checkout', '--quiet', 'run-branch'])
+  const waits = ciIo(ctx, (sha) => [workflowRun(91, 'test', sha, 'completed', 'success')])
+  ctx.lines.length = 0
+  assert.equal(await runCli(['ci-wait', '--branch', 'with-ci', '--root', ctx.root], waits.io), 0, ctx.lines.join('\n'))
+  assert.equal(waits.calls.length, 1)
+  assert.match(waits.calls[0].argv[2], new RegExp(`head_sha=${withCi}&`))
+
+  // HEAD has one; the named branch has none: skipped, gh never called.
+  git(ctx.root, ['checkout', '--quiet', 'with-ci'])
+  git(ctx.root, ['branch', 'no-ci', 'main'])
+  const skips = ciIo(ctx, () => { throw new Error('gh must not be called') })
+  ctx.lines.length = 0
+  assert.equal(await runCli(['ci-wait', '--branch', 'no-ci', '--root', ctx.root], skips.io), 0, ctx.lines.join('\n'))
+  assert.match(ctx.lines.join('\n'), /no CI workflows: skipped/)
+  assert.equal(skips.calls.length, 0)
+})
+
+// `git ls-tree` without -z quotes a name holding non-ASCII, `"` or `\`, which no longer ends in
+// `.yml`; such a workflow must still count.
+test('ci-wait finds a workflow whose file name git would quote', async (t) => {
+  const names = ['tést.yml', ...(process.platform === 'win32' ? [] : ['a"b.yml'])]
+  for (const name of names) {
+    const ctx = await ciRepo(t, { workflow: null })
+    await writeWorkflow(ctx.root, LINUX_WORKFLOW, name)
+    git(ctx.root, ['add', '.github'])
+    git(ctx.root, ['commit', '--quiet', '-m', 'ci'])
+    const { io, calls } = ciIo(ctx, (sha) => [workflowRun(92, 'test', sha, 'completed', 'success')])
+    assert.equal(await ciWait(ctx, io), 0, `${name}: ${ctx.lines.join('\n')}`)
+    assert.equal(calls.length, 1, name)
+  }
 })
 
 test('ci-wait refuses a branch that does not exist and a bad --minutes with exit 2', async (t) => {
