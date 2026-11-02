@@ -31,8 +31,9 @@ after(() => {
   rmSync(privateTmp, { recursive: true, force: true })
 })
 
-// Double quotes are the one quoting both /bin/sh and cmd.exe read.
-const q = (p) => `"${p}"`
+// cmd.exe reads only double quotes. /bin/sh expands $( ) inside double quotes, so a POSIX temp
+// path (the hostile-TMPDIR sweep plants one) goes in single quotes.
+const q = (p) => (WIN ? `"${p}"` : `'${p.replaceAll("'", "'\\''")}'`)
 const nodeRun = (script) => `${q(process.execPath)} ${q(script)}`
 
 async function scratch(t, prefix = 'case-') {
@@ -269,7 +270,7 @@ test('shellCommand runs win32 checks verbatim through cmd.exe, the way node\'s s
     args: ['/d', '/s', '/c', '"node -e "process.exit(0)""'],
     windowsVerbatimArguments: true,
   })
-  assert.equal(shellCommand(run, { platform: 'win32', comspec: undefined }).file, 'cmd.exe')
+  assert.equal(shellCommand(run, { platform: 'win32', comspec: '' }).file, 'cmd.exe')
   assert.deepEqual(shellCommand(run, { platform: 'linux' }), { file: '/bin/sh', args: ['-c', run], windowsVerbatimArguments: false })
 })
 

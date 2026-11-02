@@ -180,6 +180,19 @@ function attr(tag, name) {
   return m ? decode(m[1] ?? m[2]) : null
 }
 
+// The index of the `>` that ends the tag opening at `start`, skipping any `>` inside a quoted
+// attribute value (legal XML, and a real file path can hold one), or -1. Linear in the tag.
+function tagEnd(xml, start) {
+  let quote = null
+  for (let i = start; i < xml.length; i += 1) {
+    const ch = xml[i]
+    if (quote !== null) { if (ch === quote) quote = null }
+    else if (ch === '"' || ch === "'") quote = ch
+    else if (ch === '>') return i
+  }
+  return -1
+}
+
 // `readReport` keeps an inventory (how often each test ran or was skipped), not outcomes, so it
 // is used here to vet the report (no link, no FIFO, bounded size, well-formed JUnit) and this scan
 // reads each testcase's id and whether it holds a <failure> or <error>. One pass of indexOf
@@ -196,7 +209,7 @@ function outcomes(xml, roots) {
   for (;;) {
     const start = xml.indexOf('<testcase', i)
     if (start === -1) break
-    const close = xml.indexOf('>', start)
+    const close = tagEnd(xml, start)
     if (close === -1) break
     const tag = xml.slice(start, close + 1)
     const name = attr(tag, 'name')

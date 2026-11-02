@@ -107,7 +107,7 @@ function cli(args, { cwd, env = cleanEnv() } = {}) {
 // ---------------------------------------------------------------------------------------------
 // platform-sim
 
-test('platform-sim runs the command under the simulator, prints one applied line and keeps its exit code', async (t) => {
+test('platform-sim runs the command under the simulator, prints one applied line and keeps its exit code', { skip: process.platform === 'win32' && 'the symlinked temp dir, which fails the probe, is skipped on Windows' }, async (t) => {
   const root = await tempDir(t, 'fm-cirel-sim-')
   const realTmp = await realpath(tmpdir())
   // Plain, the probe passes: the failure below is the simulator's doing.

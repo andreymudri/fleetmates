@@ -502,6 +502,16 @@ test('an absolute file attribute under cwd becomes a relative id; the same test 
   assert.deepEqual(r.quarantinedFailures, ['tests/b.test.mjs::c::works'])
 })
 
+test('a > inside a quoted file attribute does not end the testcase tag', async (t) => {
+  const s = await setup(t, { fails: 0, report: true })
+  await seed(s.root, { 'tests/a>b.test.mjs::c::works': entry() })
+  const report = junit([['works', 'fail', 'tests/a>b.test.mjs']])
+  const { exec } = scripted([{ code: 1, xml: report }, { code: 1, xml: report }], s.reportPath)
+  const r = await runFlaky(NODE_ARGV, { root: s.root, cwd: s.root, env: s.env, report: s.reportPath, exec, write: s.write, now: () => NOW })
+  assert.equal(r.code, 0)
+  assert.deepEqual(r.quarantinedFailures, ['tests/a>b.test.mjs::c::works'])
+})
+
 test('an excused run prints one line saying the exit code was overridden, and a ::warning under GitHub', async (t) => {
   const s = await setup(t, { fails: 0, report: true })
   await seed(s.root, { 'c::t1': entry(), 'c::t2': entry() })
