@@ -7,9 +7,10 @@ import path from 'node:path'
 
 export const MAX_LEDGER_BYTES = 1024 * 1024
 export const MAX_STALL_BLOCKS = 3
-const KINDS = new Set(['task-started', 'command-run', 'gate-result', 'handoff', 'stop-requested', 'stall-block', 'hook-fired'])
+const KINDS = new Set(['task-started', 'command-run', 'gate-result', 'handoff', 'stop-requested', 'stall-block', 'hook-fired', 'watchdog'])
 const RESULTS = new Set(['pass', 'fail', 'unknown', 'done', 'blocked', 'running'])
-const HOOKS = new Set(['SessionStart', 'PreCompact', 'PostToolUse', 'SubagentStop', 'Stop'])
+const HOOKS = new Set(['SessionStart', 'PreCompact', 'PostToolUse', 'PostToolUseFailure', 'SubagentStop', 'Stop'])
+const WATCH_ACTIONS = new Set(['resume', 'respawn', 'orphan', 'unmeasured'])
 export const fingerprint = (text) => createHash('sha256').update(String(text)).digest('hex')
 
 export function projectEvent(value) {
@@ -18,21 +19,49 @@ export function projectEvent(value) {
   if (RESULTS.has(value.result)) event.result = value.result
   if (/^[a-f0-9]{64}$/.test(value.fingerprint ?? '')) event.fingerprint = value.fingerprint
   if (HOOKS.has(value.hook)) event.hook = value.hook
+  if (event.kind === 'watchdog' && WATCH_ACTIONS.has(value.action)) event.action = value.action
   return event
 }
 
 export function ledgerPath(root, runId, taskId) {
-  if (typeof runId !== 'string' || !runId || runId.split(/[\\/]/).some(p => !p || p === '.' || p === '..')) throw new Error('invalid ledger run')
+  if (typeof runId !== 'string' || !runId || runId.split(/[\\/]/).some(p => !p || p === '.' || p === '..' || p === '.fleetmates' || p === 'fleetmates')) throw new Error('invalid ledger run')
   if (typeof taskId !== 'string' || !taskId) throw new Error('invalid ledger task')
   const target = path.resolve(root, '.fleetmates', runId, 'ledger', `${fingerprint(taskId)}.jsonl`)
   if (!target.startsWith(path.resolve(root, '.fleetmates') + path.sep)) throw new Error('ledger escapes root')
   return target
 }
 
+// A link is refused only below the state directory, the part a teammate can plant. Above it the
+// path is the user's: macOS reaches the temp dir through /var -> /private/var and Windows through
+// 8.3 names like RUNNER~1, so comparing the whole path to its realpath refused every ledger there.
+//
+// The anchor is the parent of the OUTERMOST `.fleetmates`, never the nearest: a run id is
+// teammate-influenced (the location record that names it is teammate-written), and a nearest
+// match let a run id of `x/fleetmates` move the anchor below a link the teammate planted at
+// `.fleetmates/x`, sending the ledger outside the repository. Hook receipts live under the config
+// dir's `fleetmates/` and contain no `.fleetmates`, so they anchor on that. With neither, the
+// whole path must be its own realpath, as before.
+function stateAnchor(p) {
+  let outer = null
+  let nearestPlain = null
+  for (let cur = p; ; cur = path.dirname(cur)) {
+    const base = path.basename(cur)
+    if (base === '.fleetmates') outer = path.dirname(cur)
+    if (base === 'fleetmates' && nearestPlain === null) nearestPlain = path.dirname(cur)
+    if (path.dirname(cur) === cur) break
+  }
+  return outer ?? nearestPlain
+}
+
+async function expected(p) {
+  const anchor = stateAnchor(p)
+  return anchor === null ? p : path.join(await realpath(anchor), path.relative(anchor, p))
+}
+
 async function safeParent(file, create = false) {
   const parent = path.dirname(path.resolve(file))
   if (create) await mkdir(parent, { recursive: true })
-  if (await realpath(parent) !== parent) throw new Error('ledger parent is a link')
+  if (await realpath(parent) !== await expected(parent)) throw new Error('ledger parent is a link')
 }
 
 export async function appendEvent(file, value) {
@@ -41,7 +70,7 @@ export async function appendEvent(file, value) {
   const h = await open(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600)
   try {
     const stat = await h.stat()
-    if (!stat.isFile() || stat.size + Buffer.byteLength(line) > MAX_LEDGER_BYTES || await realpath(file) !== path.resolve(file)) throw new Error('ledger is unsafe or full')
+    if (!stat.isFile() || stat.size + Buffer.byteLength(line) > MAX_LEDGER_BYTES || await realpath(file) !== await expected(path.resolve(file))) throw new Error('ledger is unsafe or full')
     await h.write(line)
   } finally { await h.close() }
 }
@@ -52,7 +81,7 @@ export async function readEvents(file) {
     await safeParent(file)
     h = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
     const stat = await h.stat()
-    if (!stat.isFile() || stat.size > MAX_LEDGER_BYTES || await realpath(file) !== path.resolve(file)) throw new Error('ledger is unsafe or full')
+    if (!stat.isFile() || stat.size > MAX_LEDGER_BYTES || await realpath(file) !== await expected(path.resolve(file))) throw new Error('ledger is unsafe or full')
     const buffer = Buffer.alloc(MAX_LEDGER_BYTES + 1)
     const { bytesRead } = await h.read(buffer, 0, buffer.length, 0)
     if (bytesRead > MAX_LEDGER_BYTES) throw new Error('ledger is full')
@@ -66,11 +95,13 @@ export async function readEvents(file) {
 }
 
 export function ledgerSummary(events) {
-  const counts = Object.fromEntries([...KINDS].map(kind => [kind, 0]))
+  // A watchdog event records supervision, not teammate progress: it is neither counted nor a stop.
+  const counts = Object.fromEntries([...KINDS].filter(kind => kind !== 'watchdog').map(kind => [kind, 0]))
   let gate = 'unknown', handoff = 'running', blocks = 0, stops = 0
   const successes = new Set()
   for (const raw of events) {
     const event = projectEvent(raw)
+    if (event.kind === 'watchdog') continue
     counts[event.kind] += 1
     if (event.kind === 'gate-result') gate = event.result ?? 'unknown'
     if (event.kind === 'handoff') handoff = event.result ?? 'unknown'
