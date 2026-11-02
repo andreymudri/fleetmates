@@ -140,7 +140,8 @@ export function ciAdvice(summary, pkg)       // string[] of warnings, each one l
 **Files:**
 - Modify: `skills/finishing-a-development-branch/SKILL.md`
 - Modify: `skills/phase-gate/SKILL.md`
-- Modify: `skills/fleetmates-config/SKILL.md`
+- Modify: `scripts/ci-workflows.mjs`
+- Test: `tests/ci-workflows.test.mjs`
 - Modify: `README.md`
 - Modify: `CHANGELOG.md`
 - Test: `tests/skill-finishing-branch.test.mjs`
@@ -148,7 +149,7 @@ export function ciAdvice(summary, pkg)       // string[] of warnings, each one l
 **Depends:** T6
 
 - [ ] **Step 1:** Add a test first that `finishing-a-development-branch` has a `## Remote CI` section, placed before `## Integration options`, that names `ci-wait`, says the push is asked for unless `ci.push` is `auto`, and says a red, pending or unreadable CI means the merge is not offered. Run and watch it fail.
-- [ ] **Step 2:** Write that section. In `phase-gate`, document `platformSim`, `flaky`, the quarantine file and its protection, and the automatic `portability` lens. In `fleetmates-config`, document `ci.push` and `ci.waitMinutes`. In `README.md`, add a short "CI reliability" section with the GitHub Actions step `node <fleetmates root>/scripts/cli.mjs flaky --report <path> -- <test command>`. Add an `## Unreleased` `### Added` entry to `CHANGELOG.md`.
+- [ ] **Step 2:** Write that section. In `phase-gate`, document `platformSim`, `flaky`, the quarantine file and its protection, and the automatic `portability` lens. Document `ci.push` and `ci.waitMinutes` in the finishing skill's Remote CI section; `skills/fleetmates-config/SKILL.md` is byte-pinned reviewed text and is left unchanged. Fix `ciAdvice` in `scripts/ci-workflows.mjs` to suggest the real invocation `node "<fleetmates root>/scripts/cli.mjs" flaky -- <test command>` (there is no `fleetmates` binary), with a test that the advice names `scripts/cli.mjs flaky`. In `README.md`, add a short "CI reliability" section with the GitHub Actions step `node <fleetmates root>/scripts/cli.mjs flaky --report <path> -- <test command>`. Add an `## Unreleased` `### Added` entry to `CHANGELOG.md`.
 - [ ] **Step 3:** Run the full root suite (the skill contract tests check every subcommand a skill names).
 
 ### Task 8: dogfood in this repository
