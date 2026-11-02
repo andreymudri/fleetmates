@@ -10,7 +10,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile, realpath } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runCli, windowsCommandArgv, quarantineWritable, judgeCheckRuns } from '../scripts/cli.mjs'
+import { runCli, windowsCommandArgv, quarantineWritable, judgeWorkflowRuns, shimmedExec } from '../scripts/cli.mjs'
 import { QUARANTINE_FILE } from '../scripts/flaky.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -164,6 +164,53 @@ test('windowsCommandArgv routes a .cmd shim through cmd.exe on win32 only', () =
   assert.throws(() => windowsCommandArgv(['npm', 'run', '"x"'], { platform: 'win32', env, exists }), /cmd\.exe/)
 })
 
+// Every character cmd.exe reads itself, one row each, so dropping any one from the rule fails.
+test('windowsCommandArgv refuses each cmd.exe metacharacter in a shim argument', () => {
+  const env = { PATH: 'C:\\node', PATHEXT: '.CMD' }
+  const exists = (p) => p.toLowerCase() === 'c:\\node\\npm.cmd'
+  for (const ch of ['"', '&', '|', '<', '>', '^', '%', '!', '\r', '\n']) {
+    assert.throws(() => windowsCommandArgv(['npm', 'test', `a${ch}b`], { platform: 'win32', env, exists }), /cmd\.exe/, JSON.stringify(ch))
+  }
+  // A plain argument with a space passes: node quotes it and cmd.exe keeps the quotes.
+  assert.deepEqual(windowsCommandArgv(['npm', 'run', 'a b'], { platform: 'win32', env, exists }), ['cmd.exe', '/d', '/c', 'npm', 'run', 'a b'])
+})
+
+test('windowsCommandArgv refuses a shim whose own path holds whitespace', () => {
+  assert.throws(
+    () => windowsCommandArgv(['C:\\Program Files\\nodejs\\npm.cmd', 'test'], { platform: 'win32', env: {}, exists: () => false }),
+    /cmd\.exe/,
+  )
+})
+
+// flaky's filtered retry joins test names with `|` and may quote them, which cmd.exe cannot carry.
+// When the first attempt's argv went through, a refused retry reruns that whole command instead.
+test('shimmedExec reruns the whole command when a filtered retry cannot pass through cmd.exe', async () => {
+  const env = { PATH: 'C:\\node', PATHEXT: '.CMD', ComSpec: 'cmd.exe' }
+  const exists = (p) => p.toLowerCase() === 'c:\\node\\npm.cmd'
+  const spawned = []
+  const notes = []
+  const exec = shimmedExec({ platform: 'win32', exists, run: async (argv) => { spawned.push(argv); return { code: 0 } }, onFallback: (text) => notes.push(text) })
+  await exec(['npm', 'test'], { cwd: '.', env })
+  await exec(['npm', 'test', '--', '--test-name-pattern', '^(a|b)$'], { cwd: '.', env })
+  assert.deepEqual(spawned, [['cmd.exe', '/d', '/c', 'npm', 'test'], ['cmd.exe', '/d', '/c', 'npm', 'test']])
+  assert.equal(notes.length, 1)
+  // A first argv cmd.exe cannot carry is still refused: there is no earlier command to fall back to.
+  const fresh = shimmedExec({ platform: 'win32', exists, run: async () => ({ code: 0 }) })
+  await assert.rejects(fresh(['npm', 'test', 'a|b'], { cwd: '.', env }), /cmd\.exe/)
+  // Off win32 nothing is rewritten.
+  const posix = []
+  const plain = shimmedExec({ platform: 'linux', exists, run: async (argv) => { posix.push(argv); return { code: 0 } } })
+  await plain(['npm', 'test', 'a|b'], { cwd: '.', env })
+  assert.deepEqual(posix, [['npm', 'test', 'a|b']])
+})
+
+test('a command that wraps nothing still refuses a stray --', async (t) => {
+  const { root, io, lines } = await repo(t)
+  lines.length = 0
+  assert.equal(await runCli(['doctor', '--run', 'r1', '--plan', 'plan.md', '--root', root, '--', 'foo'], io), 2)
+  assert.match(lines.join('\n'), /doctor does not take --/)
+})
+
 // ---------------------------------------------------------------------------------------------
 // flaky
 
@@ -273,6 +320,19 @@ test('review-dispatch adds no portability reviewer for a Linux-only CI', async (
   assert.deepEqual(await dispatchedLenses(ctx), ['correctness'])
 })
 
+// An explicit empty lens list is not topped up with `portability`: a phase that dispatches no
+// review must not dispatch one because the CI runs on Windows.
+test('review-dispatch keeps an explicit empty lens list empty under a Windows CI', async (t) => {
+  const ctx = await reviewRepo(t, WINDOWS_WORKFLOW)
+  await writeFile(path.join(ctx.root, 'fleetmates.gate.json'), JSON.stringify({
+    lens: ['correctness'],
+    phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [], blockOn: ['high'] }] } },
+  }), 'utf8')
+  ctx.lines.length = 0
+  await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', ctx.root], ctx.io)
+  assert.doesNotMatch(ctx.lines.join('\n'), /portability/)
+})
+
 // The lens review-dispatch added is one collect-reviews expects: otherwise its findings file is
 // "ignored" and the round passes without the portability review.
 test('collect-reviews expects the portability lens review-dispatch added', async (t) => {
@@ -324,15 +384,15 @@ test('doctor suggests releasing a quarantined test after a long pass streak', as
 })
 
 // ---------------------------------------------------------------------------------------------
-// ci-wait
+// ci-wait: judges the GitHub Actions workflow runs of the tip commit (spec section 4)
 
-const APP = { slug: 'github-actions' }
-function checkRun(id, name, sha, status, conclusion = null) {
-  return { id, name, head_sha: sha, status, conclusion, app: APP, html_url: `https://github.com/o/r/actions/runs/9/job/${id}` }
+function workflowRun(id, name, sha, status, conclusion = null, { attempt = 1, event = 'push' } = {}) {
+  return { id, run_attempt: attempt, name, event, head_sha: sha, status, conclusion, html_url: `https://github.com/o/r/actions/runs/${id}` + (attempt > 1 ? `/attempts/${attempt}` : '') }
 }
 
-// A fake clock and gh: `snapshots(sha, call)` answers each poll; sleep advances the clock.
-function ciIo(ctx, snapshots) {
+// A fake clock and gh: `snapshots(sha, call)` answers each poll with the workflow runs; sleep
+// advances the clock. `total` overrides total_count.
+function ciIo(ctx, snapshots, { total } = {}) {
   let clock = 1_000_000
   const calls = []
   return {
@@ -343,69 +403,128 @@ function ciIo(ctx, snapshots) {
       sleep: async (ms) => { clock += ms },
       ciExec: async (argv, opts) => {
         calls.push({ argv, cwd: opts?.cwd })
-        const sha = /commits\/([0-9a-f]+)\/check-runs/.exec(argv[2])?.[1]
+        const sha = /head_sha=([0-9a-f]+)/.exec(argv[2])?.[1]
         const runs = snapshots(sha, calls.length)
-        return { code: 0, stdout: JSON.stringify({ total_count: runs.length, check_runs: runs }), stderr: '' }
+        return { code: 0, stdout: JSON.stringify({ total_count: total ?? runs.length, workflow_runs: runs }), stderr: '' }
       },
     },
   }
 }
 
+// The workflow is COMMITTED: ci-wait reads whether workflows exist from the tip commit's tree.
 async function ciRepo(t, { workflow = LINUX_WORKFLOW } = {}) {
   const ctx = await repo(t)
-  if (workflow) await writeWorkflow(ctx.root, workflow)
+  if (workflow) {
+    await writeWorkflow(ctx.root, workflow)
+    git(ctx.root, ['add', '.github'])
+    git(ctx.root, ['commit', '--quiet', '-m', 'ci'])
+  }
   const sha = git(ctx.root, ['rev-parse', 'run-branch']).trim()
   return { ...ctx, sha }
 }
 
-test('ci-wait exits 0 when every check run on the tip passed', async (t) => {
+async function ciWait(ctx, io, extra = []) {
+  ctx.lines.length = 0
+  return runCli(['ci-wait', '--branch', 'run-branch', ...extra, '--root', ctx.root], io)
+}
+
+test('ci-wait exits 0 when every workflow run on the tip succeeded, asking for the tip\'s runs', async (t) => {
   const ctx = await ciRepo(t)
-  const { io, calls } = ciIo(ctx, (sha) => [checkRun(1, 'test (ubuntu)', sha, 'completed', 'success'), checkRun(2, 'lint', sha, 'completed', 'success')])
-  const code = await runCli(['ci-wait', '--branch', 'run-branch', '--root', ctx.root], io)
-  assert.equal(code, 0, ctx.lines.join('\n'))
+  const { io, calls } = ciIo(ctx, (sha) => [workflowRun(10, 'test', sha, 'completed', 'success'), workflowRun(11, 'deck', sha, 'completed', 'success')])
+  assert.equal(await ciWait(ctx, io), 0, ctx.lines.join('\n'))
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].argv[0], 'gh')
-  assert.equal(calls[0].argv[1], 'api')
-  assert.ok(calls[0].argv[2].startsWith(`repos/{owner}/{repo}/commits/${ctx.sha}/check-runs`), calls[0].argv[2])
+  assert.deepEqual(calls[0].argv, ['gh', 'api', `repos/{owner}/{repo}/actions/runs?head_sha=${ctx.sha}&per_page=100`])
   assert.equal(calls[0].cwd, ctx.root)
 })
 
-test('ci-wait exits 1 on a failed check and prints its job URL', async (t) => {
+// The reviewer's repro: run 10 failed and run 11 passed under one workflow name (the push and the
+// pull_request runs of one workflow). Grouping by name hid the failure.
+test('ci-wait exits 1 when the push run of a workflow fails beside its passing pull_request run', async (t) => {
   const ctx = await ciRepo(t)
-  const { io } = ciIo(ctx, (sha) => [checkRun(1, 'test (ubuntu)', sha, 'completed', 'success'), checkRun(2, 'test (windows)', sha, 'completed', 'failure'), checkRun(3, 'slow', sha, 'in_progress')])
-  const code = await runCli(['ci-wait', '--branch', 'run-branch', '--root', ctx.root], io)
-  assert.equal(code, 1, ctx.lines.join('\n'))
-  assert.match(ctx.lines.join('\n'), /test \(windows\).*https:\/\/github\.com\/o\/r\/actions\/runs\/9\/job\/2/)
+  const { io } = ciIo(ctx, (sha) => [
+    workflowRun(10, 'test', sha, 'completed', 'failure', { event: 'push' }),
+    workflowRun(11, 'test', sha, 'completed', 'success', { event: 'pull_request' }),
+  ])
+  assert.equal(await ciWait(ctx, io), 1, ctx.lines.join('\n'))
+  assert.match(ctx.lines.join('\n'), /test.*failure.*https:\/\/github\.com\/o\/r\/actions\/runs\/10\b/)
 })
 
-test('ci-wait polls a pending check until it passes', async (t) => {
+test('ci-wait exits 1 when one of two workflows with same-named jobs fails', async (t) => {
   const ctx = await ciRepo(t)
-  const { io, calls } = ciIo(ctx, (sha, call) => [checkRun(1, 'test', sha, call < 3 ? 'in_progress' : 'completed', call < 3 ? null : 'success')])
-  assert.equal(await runCli(['ci-wait', '--branch', 'run-branch', '--minutes', '5', '--root', ctx.root], io), 0, ctx.lines.join('\n'))
-  assert.equal(calls.length, 3)
+  const { io } = ciIo(ctx, (sha) => [
+    workflowRun(20, 'test', sha, 'completed', 'success'),
+    workflowRun(21, 'deck', sha, 'completed', 'timed_out'),
+  ])
+  assert.equal(await ciWait(ctx, io), 1, ctx.lines.join('\n'))
+  assert.match(ctx.lines.join('\n'), /deck.*timed_out.*runs\/21/)
 })
 
-test('ci-wait exits 3 when a check is still pending past --minutes', async (t) => {
+test('ci-wait fails every non-success conclusion of a completed run', async (t) => {
   const ctx = await ciRepo(t)
-  const { io, calls } = ciIo(ctx, (sha) => [checkRun(1, 'test', sha, 'completed', 'success'), checkRun(2, 'slow', sha, 'queued')])
-  const code = await runCli(['ci-wait', '--branch', 'run-branch', '--minutes', '1', '--root', ctx.root], io)
-  assert.equal(code, 3, ctx.lines.join('\n'))
-  assert.match(ctx.lines.join('\n'), /slow/)
+  for (const conclusion of ['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure']) {
+    const { io } = ciIo(ctx, (sha) => [workflowRun(30, 'test', sha, 'completed', conclusion)])
+    assert.equal(await ciWait(ctx, io), 1, `${conclusion}: ${ctx.lines.join('\n')}`)
+  }
+})
+
+test('ci-wait counts the latest attempt of a re-run', async (t) => {
+  const ctx = await ciRepo(t)
+  const passed = ciIo(ctx, (sha) => [
+    workflowRun(40, 'test', sha, 'completed', 'failure', { attempt: 1 }),
+    workflowRun(40, 'test', sha, 'completed', 'success', { attempt: 2 }),
+  ])
+  assert.equal(await ciWait(ctx, passed.io), 0, ctx.lines.join('\n'))
+  // And the other way round, listed in the opposite order: the newer attempt failed.
+  const failed = ciIo(ctx, (sha) => [
+    workflowRun(40, 'test', sha, 'completed', 'failure', { attempt: 2 }),
+    workflowRun(40, 'test', sha, 'completed', 'success', { attempt: 1 }),
+  ])
+  assert.equal(await ciWait(ctx, failed.io), 1, ctx.lines.join('\n'))
+})
+
+test('ci-wait exits 3 when a run is still in progress beside a passing one past --minutes', async (t) => {
+  const ctx = await ciRepo(t)
+  const { io, calls } = ciIo(ctx, (sha) => [workflowRun(50, 'test', sha, 'completed', 'success'), workflowRun(51, 'deck', sha, 'in_progress')])
+  assert.equal(await ciWait(ctx, io, ['--minutes', '1']), 3, ctx.lines.join('\n'))
+  assert.match(ctx.lines.join('\n'), /deck.*runs\/51/)
   // Every 30 s over one minute: at 0, 30 and 60 s.
   assert.equal(calls.length, 3)
 })
 
-test('ci-wait treats a tip with no check runs yet as pending, not passed', async (t) => {
+test('ci-wait treats queued and waiting runs as pending', async (t) => {
+  const ctx = await ciRepo(t)
+  for (const status of ['queued', 'waiting', 'requested', 'pending']) {
+    const { io } = ciIo(ctx, (sha) => [workflowRun(52, 'test', sha, status)])
+    assert.equal(await ciWait(ctx, io, ['--minutes', '1']), 3, `${status}: ${ctx.lines.join('\n')}`)
+  }
+})
+
+test('ci-wait polls an in-progress run until it passes', async (t) => {
+  const ctx = await ciRepo(t)
+  const { io, calls } = ciIo(ctx, (sha, call) => [workflowRun(60, 'test', sha, call < 3 ? 'in_progress' : 'completed', call < 3 ? null : 'success')])
+  assert.equal(await ciWait(ctx, io, ['--minutes', '5']), 0, ctx.lines.join('\n'))
+  assert.equal(calls.length, 3)
+})
+
+test('ci-wait treats a tip with no workflow run yet as pending, not passed', async (t) => {
   const ctx = await ciRepo(t)
   const { io } = ciIo(ctx, () => [])
-  assert.equal(await runCli(['ci-wait', '--branch', 'run-branch', '--minutes', '1', '--root', ctx.root], io), 3, ctx.lines.join('\n'))
+  assert.equal(await ciWait(ctx, io, ['--minutes', '1']), 3, ctx.lines.join('\n'))
+})
+
+test('ci-wait refuses with exit 4 when the tip has more workflow runs than one page holds', async (t) => {
+  const ctx = await ciRepo(t)
+  // A full, consistent response of 101 passing runs: refused for its size alone.
+  const { io } = ciIo(ctx, (sha) => Array.from({ length: 101 }, (_, i) => workflowRun(100 + i, 'test', sha, 'completed', 'success')))
+  assert.equal(await ciWait(ctx, io), 4, ctx.lines.join('\n'))
+  assert.match(ctx.lines.join('\n'), /101/)
 })
 
 test('ci-wait reads its window from ci.waitMinutes when --minutes is absent', async (t) => {
   const ctx = await ciRepo(t)
   assert.equal(await runCli(['config', 'set', 'ci.waitMinutes', '2', '--root', ctx.root], ctx.io), 0)
-  const { io, calls } = ciIo(ctx, (sha) => [checkRun(1, 'slow', sha, 'queued')])
-  assert.equal(await runCli(['ci-wait', '--branch', 'run-branch', '--root', ctx.root], io), 3, ctx.lines.join('\n'))
+  const { io, calls } = ciIo(ctx, (sha) => [workflowRun(80, 'test', sha, 'queued')])
+  assert.equal(await ciWait(ctx, io), 3, ctx.lines.join('\n'))
   assert.equal(calls.length, 5)
 })
 
@@ -417,23 +536,41 @@ test('ci-wait exits 4 naming gh when gh is missing', async (t) => {
     sleep: async () => {},
     ciExec: async () => { throw Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' }) },
   }
-  assert.equal(await runCli(['ci-wait', '--branch', 'run-branch', '--root', ctx.root], io), 4)
-  assert.match(ctx.lines.join('\n'), /`gh`/)
+  assert.equal(await ciWait(ctx, io), 4)
+  assert.match(ctx.lines.join('\n'), /`gh` is not installed or not on PATH/)
 })
 
-test('ci-wait exits 4 when gh cannot read the check runs', async (t) => {
+test('ci-wait exits 4 when gh cannot read the workflow runs', async (t) => {
   const ctx = await ciRepo(t)
   const io = { ...ctx.io, now: () => 0, sleep: async () => {}, ciExec: async () => ({ code: 1, stdout: '', stderr: 'gh auth login required\n' }) }
-  assert.equal(await runCli(['ci-wait', '--branch', 'run-branch', '--root', ctx.root], io), 4)
+  assert.equal(await ciWait(ctx, io), 4)
   assert.match(ctx.lines.join('\n'), /could not be read/)
 })
 
 test('ci-wait skips with exit 0 when the project has no CI workflows, and never calls gh', async (t) => {
   const ctx = await ciRepo(t, { workflow: null })
   const { io, calls } = ciIo(ctx, () => { throw new Error('gh must not be called') })
-  assert.equal(await runCli(['ci-wait', '--branch', 'run-branch', '--root', ctx.root], io), 0)
+  assert.equal(await ciWait(ctx, io), 0)
   assert.match(ctx.lines.join('\n'), /no CI workflows: skipped/)
   assert.equal(calls.length, 0)
+})
+
+// Whether there is CI to wait for is a property of the pushed commit, not of the working tree.
+test('ci-wait reads whether workflows exist from the tip commit\'s tree, not the working tree', async (t) => {
+  // Uncommitted workflow: the tip has none, so there is nothing to wait for.
+  const uncommitted = await ciRepo(t, { workflow: null })
+  await writeWorkflow(uncommitted.root, LINUX_WORKFLOW)
+  const first = ciIo(uncommitted, () => { throw new Error('gh must not be called') })
+  assert.equal(await ciWait(uncommitted, first.io), 0, uncommitted.lines.join('\n'))
+  assert.match(uncommitted.lines.join('\n'), /no CI workflows: skipped/)
+  assert.equal(first.calls.length, 0)
+
+  // Committed on the tip, deleted from the working tree: the tip's CI is still read.
+  const committed = await ciRepo(t)
+  await rm(path.join(committed.root, '.github'), { recursive: true, force: true })
+  const second = ciIo(committed, (sha) => [workflowRun(90, 'test', sha, 'completed', 'success')])
+  assert.equal(await ciWait(committed, second.io), 0, committed.lines.join('\n'))
+  assert.equal(second.calls.length, 1)
 })
 
 test('ci-wait refuses a branch that does not exist and a bad --minutes with exit 2', async (t) => {
@@ -446,16 +583,14 @@ test('ci-wait refuses a branch that does not exist and a bad --minutes with exit
   assert.equal(calls.length, 0)
 })
 
-test('judgeCheckRuns ignores check runs on another commit', () => {
+test('judgeWorkflowRuns ignores runs on another commit and refuses an unreadable response', () => {
   const sha = 'a'.repeat(40)
   const other = 'b'.repeat(40)
-  const runs = [checkRun(1, 'test', sha, 'completed', 'success'), checkRun(2, 'test', other, 'completed', 'failure')]
-  assert.equal(judgeCheckRuns(sha, { total_count: 2, check_runs: runs }).state, 'pass')
-  // A check that ran only on another commit is not required of this one.
-  const elsewhere = [checkRun(1, 'test', sha, 'completed', 'success'), checkRun(2, 'lint', other, 'completed', 'failure')]
-  assert.equal(judgeCheckRuns(sha, { total_count: 2, check_runs: elsewhere }).state, 'pass')
-  assert.equal(judgeCheckRuns(sha, { total_count: 1, check_runs: [checkRun(3, 'x', other, 'completed', 'success')] }).state, 'pending')
-  assert.equal(judgeCheckRuns(sha, { nope: true }).state, 'unreadable')
+  const snap = (runs) => ({ total_count: runs.length, workflow_runs: runs })
+  assert.equal(judgeWorkflowRuns(sha, snap([workflowRun(1, 'test', sha, 'completed', 'success'), workflowRun(2, 'test', other, 'completed', 'failure')])).state, 'pass')
+  assert.equal(judgeWorkflowRuns(sha, snap([workflowRun(3, 'x', other, 'completed', 'success')])).state, 'pending')
+  assert.equal(judgeWorkflowRuns(sha, { nope: true }).state, 'unreadable')
+  assert.equal(judgeWorkflowRuns(sha, { total_count: 2, workflow_runs: [workflowRun(1, 'test', sha, 'completed', 'success')] }).state, 'unreadable')
 })
 
 // ---------------------------------------------------------------------------------------------

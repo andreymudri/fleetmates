@@ -61,7 +61,6 @@ import { appendEvent, ledgerPath, readEvents } from './event-ledger.mjs'
 import { readWorkflows, workflowSummary, ciAdvice } from './ci-workflows.mjs'
 import { buildSimEnv, runPlatformSim } from './platform-sim.mjs'
 import { runFlaky, readQuarantine, FlakyConfigError, RELEASE_STREAK, QUARANTINE_FILE } from './flaky.mjs'
-import { summarizeCi } from './ci-evidence.mjs'
 import { spawn as spawnChild, execFile } from 'node:child_process'
 
 // The temp root as GIT would spell it, which is not what `os.tmpdir()` returns.
@@ -376,14 +375,35 @@ export async function quarantineWritable(dir, env = process.env) {
   return (await real(top)) === (await real(dir)) && (await real(gitDir)) === (await real(common))
 }
 
-// Spawns argv without a shell, with inherited stdio, after the win32 shim rule above.
+// Spawns argv without a shell, with inherited stdio.
 function spawnInherited(argv, { cwd, env }) {
   return new Promise((resolve, reject) => {
-    const [file, ...args] = windowsCommandArgv(argv, { env })
-    const child = spawnChild(file, args, { cwd, env, stdio: 'inherit', shell: false })
+    const child = spawnChild(argv[0], argv.slice(1), { cwd, env, stdio: 'inherit', shell: false })
     child.on('error', reject)
     child.on('close', (code, signal) => resolve({ code: code ?? (signal ? 1 : 0) }))
   })
+}
+
+// The `exec` the flaky detector runs each attempt through: every argv goes through the win32 shim
+// rule above. The detector's filtered retry joins test names with `|` and can carry `"`, `%` or
+// `^` from a test title, which cmd.exe cannot be handed; when such a retry is refused after the
+// first attempt's argv was accepted, the retry reruns that first command whole instead (the
+// detector's own fallback when it cannot filter), and `onFallback` says so. A first argv that is
+// refused still throws. `platform`, `exists` and `run` are test seams.
+export function shimmedExec({ platform = process.platform, exists = existsSync, run = spawnInherited, onFallback = () => {} } = {}) {
+  let first = null
+  return async (argv, opts) => {
+    let resolved
+    try {
+      resolved = windowsCommandArgv(argv, { platform, env: opts?.env ?? process.env, exists })
+    } catch (err) {
+      if (first === null) throw err
+      onFallback('flaky: the filtered retry cannot pass through cmd.exe; rerunning the whole command')
+      resolved = first
+    }
+    if (first === null) first = resolved
+    return run(resolved, opts)
+  }
 }
 
 // One `gh` invocation for `ci-wait`: `{ code, stdout, stderr }` for any exit status, a rejection
@@ -438,36 +458,37 @@ async function phaseReviewLenses(root, config, phaseName, check) {
 
 export const CI_POLL_MS = 30_000
 
-// Judges one check-runs snapshot of commit `sha` for `ci-wait`, with every check run on that commit
-// required (deduplicated by name and app; `summarizeCi` keeps the latest attempt of each). Returns
-// `{ state: 'pass'|'fail'|'pending'|'unreadable', ... }`. A commit with no check run yet is pending:
-// the workflows exist, so GitHub has not registered them yet. A `skipped`, `cancelled`, `neutral`
-// or `stale` conclusion is not a pass and is reported with the failures.
-export function judgeCheckRuns(sha, snapshot) {
-  if (!snapshot || !Array.isArray(snapshot.check_runs) || !Number.isSafeInteger(snapshot.total_count)) {
-    return { state: 'unreadable', reason: 'the response carries no check_runs list' }
+// Judges one `actions/runs?head_sha=<sha>` response for `ci-wait` (spec section 4): every GitHub
+// Actions workflow run on commit `sha` must be `completed` with conclusion `success`. A re-run keeps
+// its run id with a higher `run_attempt`, so the latest attempt of each id is the one judged. Runs
+// are judged whole, never by name: the push and pull_request runs of one workflow are two runs, a
+// job waiting behind `needs:` keeps its run in progress, and a job skipped by `if:` does not fail
+// its run. Returns `{ state: 'pass'|'fail'|'pending'|'unreadable', ... }`: any completed run with
+// another conclusion fails; otherwise any run not yet completed, or no run at all yet, is pending;
+// a response that is not a full single page (more than 100 runs) is unreadable.
+export const CI_RUNS_PAGE = 100
+export function judgeWorkflowRuns(sha, snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.workflow_runs) || !Number.isSafeInteger(snapshot.total_count)) {
+    return { state: 'unreadable', reason: 'the response carries no workflow_runs list' }
   }
-  const required = []
-  const seen = new Set()
-  for (const run of snapshot.check_runs) {
-    if (run?.head_sha !== sha || typeof run.name !== 'string' || !run.name || typeof run.app?.slug !== 'string' || !run.app.slug) continue
-    const key = JSON.stringify([run.name, run.app.slug])
-    if (seen.has(key)) continue
-    seen.add(key)
-    required.push({ name: run.name, app: run.app.slug })
+  if (snapshot.total_count > CI_RUNS_PAGE || snapshot.total_count !== snapshot.workflow_runs.length) {
+    return { state: 'unreadable', reason: `the commit has ${snapshot.total_count} workflow runs and this read ${snapshot.workflow_runs.length} (one page of at most ${CI_RUNS_PAGE})` }
   }
-  if (required.length === 0) return { state: 'pending', pending: [], reason: 'no check run has started on this commit yet' }
-  let summary
-  try {
-    summary = summarizeCi({ inputs: { commit: sha, plan: 'ci-wait', manifest: 'ci-wait', environment: 'ci-wait', verifier: 'ci-wait' }, required, snapshot })
-  } catch (err) {
-    return { state: 'unreadable', reason: err.message }
+  const latest = new Map()
+  for (const run of snapshot.workflow_runs) {
+    if (run?.head_sha !== sha) continue
+    if (!Number.isSafeInteger(run.id)) return { state: 'unreadable', reason: 'a workflow run has no numeric id' }
+    const attempt = Number.isSafeInteger(run.run_attempt) ? run.run_attempt : 1
+    const held = latest.get(run.id)
+    if (!held || attempt > held.attempt) latest.set(run.id, { ...run, attempt })
   }
-  if (summary.truncated) return { state: 'unreadable', reason: `the commit has ${snapshot.total_count} check runs and one page holds ${snapshot.check_runs.length}` }
-  const failed = summary.obligations.filter((o) => o.status === 'fail' || o.status === 'unresolved')
+  const runs = [...latest.values()]
+  if (runs.length === 0) return { state: 'pending', pending: [], reason: 'no workflow run has started on this commit yet' }
+  const failed = runs.filter((r) => r.status === 'completed' && r.conclusion !== 'success')
   if (failed.length > 0) return { state: 'fail', failed }
-  if (summary.complete) return { state: 'pass', passed: summary.obligations }
-  return { state: 'pending', pending: summary.obligations.filter((o) => o.status !== 'pass') }
+  const pending = runs.filter((r) => r.status !== 'completed')
+  if (pending.length > 0) return { state: 'pending', pending }
+  return { state: 'pass', passed: runs }
 }
 
 // Exported so the suite can DERIVE the command list rather than restate it. A hardcoded list
@@ -7555,7 +7576,7 @@ export async function runCli(argv, io = { out: console.log }) {
         root,
         cwd: root,
         report: flags.report ?? null,
-        exec: spawnInherited,
+        exec: shimmedExec({ onFallback: (text) => io.out(text) }),
         canWrite: await quarantineWritable(root),
         write: (text) => io.out(text.replace(/\n$/, '')),
       })
@@ -7568,7 +7589,7 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   // `ci-wait --branch <b> [--minutes <n>]`: waits for the remote CI of the branch's tip commit.
-  // Exit 0 every check run on the tip passed (or the project has no workflows: skipped, and said),
+  // Exit 0 every workflow run on the tip succeeded (or the tip has no workflows: skipped, and said),
   // 1 one failed, 3 still pending when the window closed, 4 `gh` could not read it, 2 a bad
   // invocation. It reads; it never pushes. `io.ciExec`, `io.sleep` and `io.now` are test seams.
   if (command === 'ci-wait') {
@@ -7593,16 +7614,22 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`--branch takes a branch name\n\n${USAGE}`)
       return 2
     }
-    if (!(await readWorkflows(root)).present) {
-      io.out('no CI workflows: skipped — this project has no .github/workflows, so there is no remote CI to wait for')
-      return 0
-    }
     let sha
     try {
       sha = await createGit({ cwd: root }).resolveRef(`refs/heads/${flags.branch}`)
     } catch {
       io.out(`no branch ${printable(flags.branch)} in ${printable(root)}`)
       return 2
+    }
+    // Read off the tip commit's tree, not the working tree: what GitHub runs is the pushed commit.
+    const listed = await defaultGitExec(['ls-tree', '--name-only', sha, '--', '.github/workflows/'], root)
+    if (listed.code !== 0) {
+      io.out(`could not list .github/workflows at ${sha}: ${printable(listed.stderr.trim())}`)
+      return 2
+    }
+    if (!listed.stdout.split(/\r?\n/).some((name) => /\.ya?ml$/i.test(name))) {
+      io.out(`no CI workflows: skipped — the tip commit ${sha} has no .github/workflows, so there is no remote CI to wait for`)
+      return 0
     }
     const exec = io.ciExec ?? defaultCiExec
     const sleep = io.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
@@ -7612,7 +7639,7 @@ export async function runCli(argv, io = { out: console.log }) {
     for (;;) {
       let res
       try {
-        res = await exec(['gh', 'api', `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`], { cwd: root })
+        res = await exec(['gh', 'api', `repos/{owner}/{repo}/actions/runs?head_sha=${sha}&per_page=${CI_RUNS_PAGE}`], { cwd: root })
       } catch (err) {
         io.out(err?.code === 'ENOENT'
           ? '`gh` is not installed or not on PATH: remote CI could not be read, so this branch is not verified'
@@ -7626,22 +7653,22 @@ export async function runCli(argv, io = { out: console.log }) {
       }
       let snapshot
       try { snapshot = JSON.parse(res.stdout) } catch { snapshot = null }
-      const verdict = judgeCheckRuns(sha, snapshot)
+      const verdict = judgeWorkflowRuns(sha, snapshot)
       if (verdict.state === 'unreadable') {
         io.out(`remote CI could not be read: ${printable(verdict.reason)}`)
         return 4
       }
       if (verdict.state === 'fail') {
-        for (const o of verdict.failed) io.out(`failed: ${printable(o.name)} (${printable(o.conclusion ?? o.status)}) ${printable(o.url ?? 'no job URL')}`)
+        for (const r of verdict.failed) io.out(`failed: ${printable(r.name ?? `run ${r.id}`)} (${printable(r.conclusion ?? 'no conclusion')}) ${printable(r.html_url ?? 'no run URL')}`)
         return 1
       }
       if (verdict.state === 'pass') {
-        io.out(`passed: ${verdict.passed.length} check run(s) on ${sha}`)
+        io.out(`passed: ${verdict.passed.length} workflow run(s) on ${sha}`)
         return 0
       }
       const remaining = deadline - now()
       if (remaining <= 0) {
-        const names = verdict.pending.map((o) => `${printable(o.name)} ${printable(o.url ?? '')}`.trim())
+        const names = verdict.pending.map((r) => `${printable(r.name ?? `run ${r.id}`)} ${printable(r.html_url ?? '')}`.trim())
         io.out(`still pending after ${minutes} min: ${names.length ? names.join(', ') : verdict.reason}`)
         return 3
       }
