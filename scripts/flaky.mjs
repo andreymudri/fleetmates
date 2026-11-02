@@ -4,7 +4,7 @@
 //
 // The report and the command's argv are written by a process running teammate code, so every name
 // read from them goes through `printable` before it reaches a terminal or a step summary.
-import { open, lstat, writeFile, rename as fsRename, rm, appendFile } from 'node:fs/promises'
+import { open, lstat, realpath, writeFile, rename as fsRename, rm, appendFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
@@ -151,13 +151,39 @@ function decode(text) {
   })
 }
 
+// The unit a testcase belongs to: its `file` attribute, made relative to the directory the
+// command ran in when it is absolute, else its `classname`. `readReport` has already refused a
+// file outside `roots` and a testcase with neither attribute, so neither case reaches here.
+function unitOf(tag, roots) {
+  const file = attr(tag, 'file')
+  if (file !== null && file !== '') {
+    const norm = file.replaceAll('\\', '/')
+    if (!path.posix.isAbsolute(norm) && !/^[A-Za-z]:\//.test(norm)) return path.posix.normalize(norm)
+    for (const r of roots) {
+      if (norm.startsWith(`${r}/`)) return path.posix.normalize(norm.slice(r.length + 1))
+    }
+    return norm
+  }
+  return attr(tag, 'classname') ?? ''
+}
+
+function attr(tag, name) {
+  const m = tag.match(new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`))
+  return m ? decode(m[1] ?? m[2]) : null
+}
+
 // `readReport` keeps an inventory (how often each test ran or was skipped), not outcomes, so it
 // is used here to vet the report (no link, no FIFO, bounded size, well-formed JUnit) and this scan
-// reads each testcase's name and whether it holds a <failure> or <error>. One pass of indexOf
+// reads each testcase's id and whether it holds a <failure> or <error>. One pass of indexOf
 // calls that only move forward, so it stays linear on agent-written input.
-function outcomes(xml) {
+//
+// A test's id is `<unit>::<name>` (unit as in `unitOf`), so a quarantined test never excuses a
+// same-named test in another file. `names` maps each id back to its bare name, which is what a
+// filtered retry passes to the runner: runners filter by test name, not by file.
+function outcomes(xml, roots) {
   const passed = new Set()
   const failed = new Set()
+  const names = new Map()
   let i = 0
   for (;;) {
     const start = xml.indexOf('<testcase', i)
@@ -165,16 +191,17 @@ function outcomes(xml) {
     const close = xml.indexOf('>', start)
     if (close === -1) break
     const tag = xml.slice(start, close + 1)
-    const name = tag.match(/\sname\s*=\s*(?:"([^"]*)"|'([^']*)')/)
+    const name = attr(tag, 'name')
+    const id = name === null ? null : `${unitOf(tag, roots)}::${name}`
+    if (id !== null) names.set(id, name)
     if (tag.endsWith('/>')) {
-      if (name) passed.add(decode(name[1] ?? name[2]))
+      if (id !== null) passed.add(id)
       i = close + 1
       continue
     }
     const end = xml.indexOf('</testcase>', close)
     const body = xml.slice(close + 1, end === -1 ? xml.length : end)
-    if (name) {
-      const id = decode(name[1] ?? name[2])
+    if (id !== null) {
       if (/<(failure|error)[\s/>]/.test(body)) failed.add(id)
       else if (!/<skipped[\s/>]/.test(body)) passed.add(id)
     }
@@ -182,16 +209,19 @@ function outcomes(xml) {
     i = end + '</testcase>'.length
   }
   for (const id of failed) passed.delete(id)
-  return { passed: [...passed], failed: [...failed] }
+  return { passed: [...passed], failed: [...failed], names }
 }
 
-// `{ passed, failed }` names from the report, or null when it is missing or unreadable, which
+// `{ passed, failed, names }` from the report, or null when it is missing or unreadable, which
 // means the caller cannot tell which tests ran and falls back to the whole command.
 async function readOutcomes(report, cwd) {
   if (!report) return null
   const target = path.resolve(cwd, report)
   try {
-    if (await readReport(target, { root: [cwd, target] }) === null) return null
+    // Both spellings of cwd: a runner may report the real path of a directory reached through a link.
+    const roots = [...new Set([cwd, await realpath(cwd).catch(() => cwd)])]
+      .map((r) => r.replaceAll('\\', '/').replace(/\/+$/, ''))
+    if (await readReport(target, { root: roots }) === null) return null
     const handle = await openReportFile(target)
     let text
     try {
@@ -201,7 +231,7 @@ async function readOutcomes(report, cwd) {
     } finally {
       await handle.close()
     }
-    return outcomes(text)
+    return outcomes(text, roots)
   } catch {
     return null
   }
@@ -237,7 +267,7 @@ function cell(text) {
 }
 
 // Returns { code, flaky: string[], quarantinedFailures: string[], retried: 'none'|'filtered'|'whole' }.
-// `write` receives the detector's own lines (`flaky: <name>`, and GitHub annotations when
+// `write` receives the detector's own lines (`flaky: <id>`, ids being `<file or classname>::<name>`, and GitHub annotations when
 // GITHUB_ACTIONS=true); the command's output goes to the inherited stdio of the default exec.
 // `exec(argv, { cwd, env })` resolves to `{ code }`.
 export async function runFlaky(argv, {
@@ -247,6 +277,7 @@ export async function runFlaky(argv, {
   if (!Array.isArray(argv) || argv.length === 0) throw new TypeError('runFlaky needs a non-empty argv array')
   // Read before anything runs: a malformed store refuses the whole run.
   const store = await readQuarantine(root)
+  const quarantinedBefore = new Set(Object.keys(store.tests))
   const commandId = argv.join(' ')
   const stamp = () => new Date(now()).toISOString()
   let dirty = false
@@ -266,7 +297,7 @@ export async function runFlaky(argv, {
     result = { code: 0, flaky: [], quarantinedFailures: [], retried: 'none' }
   } else {
     const failedFirst = firstOutcomes && firstOutcomes.failed.length > 0 ? firstOutcomes.failed : null
-    const filtered = failedFirst ? retryArgv(argv, failedFirst) : null
+    const filtered = failedFirst ? retryArgv(argv, failedFirst.map((id) => firstOutcomes.names.get(id))) : null
     const retried = filtered ? 'filtered' : 'whole'
     await clearReport(report, cwd)
     const second = await exec(filtered ?? argv, { cwd, env })
@@ -280,9 +311,11 @@ export async function runFlaky(argv, {
       dirty = true
       result = { code: 0, flaky, quarantinedFailures: [], retried }
     } else {
-      // Red unless every test still failing is a named, quarantined test. A whole command is never
-      // quarantined (no report, or a report naming no failed test on the first attempt), and a
-      // retry whose report names no failed test failed outside any test, so both keep the code.
+      // Excused only when every test that failed on the first attempt either passed on the retry or
+      // is quarantined, and every test still failing is quarantined. So a whole command is never
+      // excused (no report, or a first report naming no failed test), nor a retry whose report
+      // names no failed test (the failure is outside any test), nor a first-attempt failure that is
+      // missing from the retry report.
       const secondOutcomes = await readOutcomes(report, cwd)
       const stillFailing = secondOutcomes ? secondOutcomes.failed : []
       const recovered = failedFirst && secondOutcomes
@@ -299,10 +332,14 @@ export async function runFlaky(argv, {
         store.tests[id] = { ...store.tests[id], passStreak: 0 }
         dirty = true
       }
+      // Judged against the store as it was before this run: a test recorded just above as
+      // recovered is not thereby quarantined.
+      const quarantined = (id) => quarantinedBefore.has(id)
       const excused = failedFirst !== null && stillFailing.length > 0
-        && stillFailing.every((id) => Object.hasOwn(store.tests, id))
+        && failedFirst.every((id) => recovered.includes(id) || quarantined(id))
+        && stillFailing.every(quarantined)
       result = excused
-        ? { code: 0, flaky: recovered, quarantinedFailures: stillFailing, retried }
+        ? { code: 0, flaky: recovered, quarantinedFailures: stillFailing, retried, overridden: first.code }
         : { code: first.code, flaky: recovered, quarantinedFailures: [], retried }
     }
   }
@@ -315,6 +352,14 @@ export async function runFlaky(argv, {
   for (const id of result.quarantinedFailures) {
     write(`flaky: quarantined test failed: ${printable(id)}\n`)
     if (github) write(`::warning title=flaky::quarantined test ${annotation(id)} failed\n`)
+  }
+  // Known limit (spec): a failure outside any test in the same run as a quarantined test failing
+  // twice cannot be told apart with one retry, so every excused run says what it overrode.
+  if (result.overridden !== undefined) {
+    const why = `exit code ${result.overridden} overridden: every remaining failure is a quarantined test (${result.quarantinedFailures.join(', ')})`
+    write(`flaky: ${printable(why)}\n`)
+    if (github) write(`::warning title=flaky::${annotation(why)}\n`)
+    delete result.overridden
   }
   if (github && env.GITHUB_STEP_SUMMARY && (result.flaky.length > 0 || result.quarantinedFailures.length > 0)) {
     const rows = [
