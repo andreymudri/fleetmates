@@ -8,7 +8,7 @@ import { PromptBar, promptKeyBody } from '../../components/PromptBar.jsx'
 import { MetaLine, StatusPill, compactDuration, pillParams, shown, stateLabel, titleText, translate } from '../../components/StatusPill.jsx'
 import { TerminalView } from '../../components/TerminalView.jsx'
 import { Citation } from '../../components/Citation.jsx'
-import { NoteChip } from '../../components/NoteChip.jsx'
+import { NoteChip, vaultDownText } from '../../components/NoteChip.jsx'
 import { linkHandler } from '../../shell/Rail.jsx'
 import { answerRequest, fetchDiff, fetchScrollback, fetchSessionMemory, nudgeSession, relaunchSession, stopSession } from '../../state/actions.js'
 import { parseNeedsFilter } from '../../state/deck-store.js'
@@ -466,14 +466,14 @@ function FileList({ files, selectedFile, onSelectFile, diff, onRetryDiff, t }) {
   )
 }
 
-export function FocusMemory({ memory, down, navigate }) {
+export function FocusMemory({ memory, down, vault, navigate }) {
   return <section aria-label="Related memory"><h3>Related memory</h3>
-    {down ? <p>Memory is unavailable: vault-mcp is not answering.</p> : !memory ? <p aria-busy="true">Searching your vault…</p> : memory.related?.length ? memory.related.slice(0, 3).map((hit, i) => <Citation key={i} {...hit} variant="callout" navigate={navigate} />) : <p>Nothing in your vault matches this task yet.</p>}
+    {down ? <p>{vaultDownText(vault)}</p> : !memory ? <p aria-busy="true">Searching your vault…</p> : memory.related?.length ? memory.related.slice(0, 3).map((hit, i) => <Citation key={i} {...hit} variant="callout" navigate={navigate} />) : <p>Nothing in your vault matches this task yet.</p>}
     <h3>Read</h3>{memory?.read?.map((note, i) => <NoteChip key={i} {...note} navigate={navigate} />)}
     <h3>Learned</h3>{memory?.learned?.map((note, i) => <NoteChip key={i} {...note} variant="learned" navigate={navigate} />)}
   </section>
 }
-function Details({ session, tab, onTab, now, t, lang, selectedFile, onSelectFile, diff, onRetryDiff, memory, memoryDown, navigate }) {
+function Details({ session, tab, onTab, now, t, lang, selectedFile, onSelectFile, diff, onRetryDiff, memory, memoryDown, vault, navigate }) {
   const files = session.changedFiles ?? []
   const labels = {
     changes: `${translate(t, FOCUS_COPY, 'focus.tabs.changes')}${files.length ? ` ${files.length}` : ''}`,
@@ -494,7 +494,7 @@ function Details({ session, tab, onTab, now, t, lang, selectedFile, onSelectFile
         ))}
       </div>
       <div className="focus-panel" role="tabpanel" id="focus-panel" aria-labelledby={`focus-tab-${tab}`}>
-        {tab === 'memory' ? <FocusMemory memory={memory} down={memoryDown} navigate={navigate} /> : tab === 'facts' ? <Facts session={session} now={now} t={t} lang={lang} /> : files.length
+        {tab === 'memory' ? <FocusMemory memory={memory} down={memoryDown} vault={vault} navigate={navigate} /> : tab === 'facts' ? <Facts session={session} now={now} t={t} lang={lang} /> : files.length
           ? <FileList files={files} selectedFile={selectedFile} onSelectFile={onSelectFile} diff={diff} onRetryDiff={onRetryDiff} t={t} />
           : <EmptyState kind="focusChanges" t={t} />}
       </div>
@@ -665,7 +665,7 @@ export function FocusView({
             badge={<span className={`tier-badge tier-badge--${tierOf(request)}`}>{translate(t, CARD_COPY, `tier.${tierOf(request)}`)}</span>} />
         ) : <RequestBar key={request.id} request={request} t={t} />)}
       </section>
-      <Details session={session} tab={tab} onTab={onTab} now={now} t={t} lang={lang} selectedFile={selectedFile} onSelectFile={onSelectFile} diff={diff} onRetryDiff={onRetryDiff} memory={memory} memoryDown={['down', 'unknown'].includes(state.memory?.vault.state)} navigate={navigate} />
+      <Details session={session} tab={tab} onTab={onTab} now={now} t={t} lang={lang} selectedFile={selectedFile} onSelectFile={onSelectFile} diff={diff} onRetryDiff={onRetryDiff} memory={memory} memoryDown={['down', 'unknown'].includes(state.memory?.vault.state)} vault={state.memory?.vault} navigate={navigate} />
       {session.runRef ? <LedgerTimeline timeline={timeline} lang={lang} /> : null}
       {confirming ? (
         <ConfirmDialog title={translate(t, FOCUS_COPY, 'focus.stop.title', { repo: shown(repo.name), task })} body={translate(t, FOCUS_COPY, 'focus.stop.body')}

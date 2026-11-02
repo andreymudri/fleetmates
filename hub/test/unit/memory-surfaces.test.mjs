@@ -48,3 +48,17 @@ test('Home shows current captures and unresolved misses, hides zero recap counts
   assert.match(render(SessionCard, props), /learned 1 thing/)
   assert.doesNotMatch(render(SessionCard, { ...props, session: { ...props.session, learnedToday: 0 } }), /learned 0/)
 })
+test('vaultDownText says the vault is not configured instead of not answering', async () => {
+  const { vaultDownText } = await load('components/NoteChip.jsx')
+  assert.match(vaultDownText({ state: 'down', reason: 'VAULT_PATH is not set' }), /no vault path is set/)
+  assert.doesNotMatch(vaultDownText({ state: 'down', reason: 'VAULT_PATH is not set' }), /not answering/)
+  assert.match(vaultDownText({ state: 'down', reason: 'initialize failed: timed out' }), /not answering/)
+  assert.match(vaultDownText(undefined), /not answering/)
+  const { FocusMemory } = await load('screens/focus/Focus.jsx')
+  assert.match(render(FocusMemory, { down: true, vault: { state: 'down', reason: 'VAULT_PATH is not set' } }), /no vault path is set/)
+  const { paletteModel } = await load('screens/palette/Palette.jsx')
+  const state = { data: { sessions: [], requests: [], repos: [], order: [], health: [] }, view: { path: '/' } }
+  assert.match(paletteModel(state, { query: '?x', memory: { down: true, vault: { reason: 'VAULT_PATH is not set' } } }).rows[0].title, /no vault path is set/)
+  const { AskPanel } = await load('screens/memory/AskPanel.jsx')
+  assert.match(render(AskPanel, { down: true, vault: { state: 'down', reason: 'VAULT_PATH is not set' } }), /no vault path is set/)
+})

@@ -144,9 +144,20 @@ export function createServiceManager({
       const line = await commandLineOf(pid)
       return line !== null && runsEntry(line, service)
     }
+    const recordedPid = async service => {
+      try { return String(await readFile(pidFile(service), 'utf8')).trim() } catch (error) { if (error.code === 'ENOENT') return null; throw error }
+    }
+    // A server still replaying its startup backlog runs but does not answer the probe yet. Launching a second one would
+    // overwrite its pid file, the second one would fail on the locked database, and stop would no longer find the first.
+    const ensure = async service => {
+      if (await probe(service)) return
+      const pid = await recordedPid(service)
+      if (pid && await isServiceProcess(pid, service)) return
+      await launch(service)
+    }
     const stop = async service => {
-      let pid
-      try { pid = String(await readFile(pidFile(service), 'utf8')).trim() } catch (error) { if (error.code === 'ENOENT') return; throw error }
+      const pid = await recordedPid(service)
+      if (pid === null) return
       // A pid file left by a crash or a reboot may name an unrelated process tree. Kill only a pid whose command line
       // runs this service's entry; otherwise only drop the stale pid file. A failed taskkill is checked again the same
       // way, and stop fails while the process still runs. taskkill /F skips the server's own close, which removes its
@@ -163,9 +174,9 @@ export function createServiceManager({
       async install() {
         const command = `conhost.exe --headless "${nodePath}" "${p.join(hubPath, 'bin', 'fleetmates-deck.mjs')}" start`
         await must('reg', ['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', command, '/f'])
-        for (const service of SERVICES) if (!await probe(service)) await launch(service)
+        for (const service of SERVICES) await ensure(service)
       },
-      start: guard(async service => { if (!await probe(service)) await launch(service) }),
+      start: guard(ensure),
       stop: guard(stop),
       restart: guard(async service => { await stop(service); await launch(service) }),
       isActive: guard(service => probe(service)),
