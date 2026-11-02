@@ -16,9 +16,10 @@ for this repository.
 
 ## Success criteria
 
-- The three real failures fixed on 2026-11-02 (ledger refusing a symlinked ancestor, CRLF in the
-  rescue patch test, EPERM writing a hidden `.git` file) each go red under the platform simulator
-  on Linux when their fix is reverted.
+- Two of the three real failures fixed on 2026-11-02 (the ledger refusing a symlinked ancestor,
+  CRLF in the rescue patch test) each go red under the platform simulator on Linux when their fix
+  is reverted. The third, EPERM writing a hidden `.git` file, is a Windows file attribute no
+  environment variable reproduces; it is in the portability lens checklist instead.
 - A test that fails once and passes on its retry no longer turns a check red, and is never
   silent: it is reported and recorded in a tracked quarantine list.
 - A fleet run is not offered for merge while the project's remote CI is red or pending on the
@@ -125,7 +126,7 @@ the merge is not offered. With no workflows, the step is skipped and the finish 
 ## Testing
 
 Every new test is mutation-checked, as `CONTRIBUTING.md` requires. The simulator is proved
-against the three real failures above: each is reintroduced in a fixture, fails under
+against the two reproducible failures above: each is reintroduced in a fixture, fails under
 `platform-sim` on Linux, and passes plainly. The flaky detector is tested with a fake runner that
 fails a set number of times. The lens trigger is tested against fixture workflow files. The
 finish step is tested with an injected `gh` and fake check-run snapshots.
