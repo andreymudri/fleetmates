@@ -451,6 +451,9 @@ test('judgeCheckRuns ignores check runs on another commit', () => {
   const other = 'b'.repeat(40)
   const runs = [checkRun(1, 'test', sha, 'completed', 'success'), checkRun(2, 'test', other, 'completed', 'failure')]
   assert.equal(judgeCheckRuns(sha, { total_count: 2, check_runs: runs }).state, 'pass')
+  // A check that ran only on another commit is not required of this one.
+  const elsewhere = [checkRun(1, 'test', sha, 'completed', 'success'), checkRun(2, 'lint', other, 'completed', 'failure')]
+  assert.equal(judgeCheckRuns(sha, { total_count: 2, check_runs: elsewhere }).state, 'pass')
   assert.equal(judgeCheckRuns(sha, { total_count: 1, check_runs: [checkRun(3, 'x', other, 'completed', 'success')] }).state, 'pending')
   assert.equal(judgeCheckRuns(sha, { nope: true }).state, 'unreadable')
 })
