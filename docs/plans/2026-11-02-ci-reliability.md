@@ -111,11 +111,12 @@ export function ciAdvice(summary, pkg)       // string[] of warnings, each one l
 - Modify: `scripts/gate-runner.mjs`
 - Modify: `scripts/gate-config.mjs`
 - Test: `tests/gate-ci-reliability.test.mjs`
+- Test: `tests/gate-config.test.mjs`
 
 **Depends:** T1, T2, T3
 
 - [ ] **Step 1:** Write `tests/gate-ci-reliability.test.mjs` first: a `command` check with `"platformSim": true` running the realpath probe fails, and the same check without the flag passes; a check with `"flaky": true` running `fails-n-times.mjs` with one failure passes and its result carries `flaky: ['<id>']`, and with two failures fails; `platformSim` and `flaky` together compose (the retry also runs under the simulator); a non-boolean `platformSim` or `flaky` is refused by manifest validation with the check name; `protectedPaths({})` includes `fleetmates.flaky.json`; `reviewLenses(config, phaseName, summary)` adds `portability` when `summary.oses` has `macos` or `windows`, does not add it for Linux only, keeps it when the manifest lists it, and never duplicates it. Run and watch them fail.
-- [ ] **Step 2:** In `gate-config.mjs`: add `fleetmates.flaky.json` to the fixed protected set in `protectedPaths`; export `reviewLenses(config, phaseName, summary)` returning the review check's lenses plus `portability` per the rule above.
+- [ ] **Step 2:** In `gate-config.mjs`: add `fleetmates.flaky.json` to the fixed protected set in `protectedPaths`, and update the exact expected lists in `tests/gate-config.test.mjs` that pin that set; export `reviewLenses(config, phaseName, summary)` returning the review check's lenses plus `portability` per the rule above.
 - [ ] **Step 3:** In `gate-runner.mjs` `runCommandCheck`: validate the two flags; when either is set, run the check's command through `runFlaky` and/or `runPlatformSim` instead of the plain `exec`, keeping the existing timeout, log, claim and report handling; attach `flaky` and `quarantinedFailures` to the result and include them in its printed output. The quarantine is written only when `previewDir` is null and `cwd` is the main worktree.
 - [ ] **Step 4:** Run, mutate (ignore the `platformSim` flag) and watch the probe test fail. Restore.
 
