@@ -139,3 +139,21 @@ test('an on: value it cannot read is reported as null, not guessed', async t => 
   assert.equal((await one(t, `on: { push: { branches: [master }\n${job('ubuntu-latest')}`)).branchPushes, null)
   assert.equal((await one(t, job('ubuntu-latest'))).branchPushes, null)
 })
+
+test('the flaky step is recognised with a quoted cli.mjs path, as the spec invokes it', async t => {
+  const step = run => `on: push\n${job('ubuntu-latest', `      - run: ${run}\n`)}`
+  assert.equal((await one(t, step('node "${{ github.workspace }}/scripts/cli.mjs" flaky -- npm test'))).usesFlaky, true)
+  assert.equal((await one(t, step("node '/x/scripts/cli.mjs' flaky --report r.json -- npm test"))).usesFlaky, true)
+  assert.equal((await one(t, step('node /x/scripts/cli.mjs flaky -- npm test'))).usesFlaky, true)
+  assert.equal((await one(t, step('node "/x/scripts/cli.mjs" flakyish -- npm test'))).usesFlaky, false)
+  assert.equal((await one(t, step('node "/x/scripts/cli.mjs" gate -- flaky'))).usesFlaky, false)
+})
+
+// The rule: a push filter covers fleet run branches when, after GitHub's ordered `!` negations,
+// it matches `run/ci-reliability` or `fleetmates/ci-reliability/T1`. `*` matches no slash, `**`
+// matches anything.
+test('a branch filter covers fleet run branches only when a pattern matches run/<id> or fleetmates/<run>/<task>', async t => {
+  const covers = async list => (await one(t, `on:\n  push:\n    branches: [${list}]\n${job('ubuntu-latest')}`)).branchPushes
+  for (const yes of ["'**'", "'run/**'", "'fleetmates/**'", "'run/*'", "master, 'run/**'", "'fleetmates/*/*'", "'**', '!run/**'"]) assert.equal(await covers(yes), true, yes)
+  for (const no of ["'feat/*'", 'master', "'release/*'", "'*'", "'fleetmates/*'", "'**/master'", "'run-*'", "'**', '!run/**', '!fleetmates/**'"]) assert.equal(await covers(no), false, no)
+})

@@ -164,10 +164,37 @@ function blockValue(inline, children) {
   return { kind: 'map', map, block: true }
 }
 
-// Whether a branch filter lets an arbitrary branch through: `*` matches one path segment only,
-// so only `**` (or a pattern starting with it) covers a run branch such as `run/<id>`.
-function coversAnyBranch(pattern) {
-  return typeof pattern === 'string' && pattern.startsWith('**')
+// Sample names of the branches a fleet run pushes: a run branch and a task branch.
+export const FLEET_BRANCH_SAMPLES = ['run/ci-reliability', 'fleetmates/ci-reliability/T1']
+
+// A GitHub branch-filter glob as a RegExp: `**` matches anything, `*` matches anything but `/`,
+// `?` one character that is not `/`; every other character is literal.
+function globRegExp(pattern) {
+  let out = ''
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]
+    if (c === '*' && pattern[i + 1] === '*') { out += '.*'; i++ }
+    else if (c === '*') out += '[^/]*'
+    else if (c === '?') out += '[^/]'
+    else out += c.replace(/[\\^$.|+()[\]{}]/g, '\\$&')
+  }
+  return new RegExp(`^${out}$`)
+}
+
+// The rule: a `branches` filter covers fleet run branches when it matches at least one name in
+// FLEET_BRANCH_SAMPLES. Patterns apply in order, as GitHub applies them: a match includes the
+// name and a later `!pattern` match excludes it again. So `**`, `run/**` and `fleetmates/**`
+// count, while `feat/*`, `master`, `release/*` and a bare `*` (no slash) do not.
+function coversFleetBranches(patterns) {
+  return FLEET_BRANCH_SAMPLES.some(name => {
+    let included = false
+    for (const p of patterns) {
+      if (typeof p !== 'string' || p === '') continue
+      if (p.startsWith('!')) { if (globRegExp(p.slice(1)).test(name)) included = false }
+      else if (globRegExp(p).test(name)) included = true
+    }
+    return included
+  })
 }
 
 // `push` value -> true | false | null (unreadable).
@@ -186,7 +213,7 @@ function pushCoversBranches(value) {
     if (branches === undefined || branches.kind === 'empty') return null
     const list = branches.kind === 'list' ? branches.list : branches.kind === 'scalar' ? [branches.value] : null
     if (!list) return null
-    return list.some(coversAnyBranch)
+    return coversFleetBranches(list)
   }
   // `branches-ignore` without `branches` runs on every other branch.
   if ('branches-ignore' in value.map) return true
@@ -237,7 +264,9 @@ function readOses(ls) {
   return oses
 }
 
-const FLAKY = /(?:^|[\s/"'])(?:cli\.mjs|fleetmates)\s+flaky(?:\s|$)/
+// `cli.mjs flaky` or `fleetmates flaky`, where the cli.mjs path may end in a closing quote, as in
+// the spec's own `node "<root>/scripts/cli.mjs" flaky -- <command>`.
+const FLAKY = /(?:^|[\s/"'])(?:cli\.mjs["']?|fleetmates)\s+flaky(?:\s|$)/
 
 function readFlaky(ls) {
   return ls.some(l => FLAKY.test(l.text))
