@@ -200,3 +200,38 @@ test('the README documents the escape hatch to full test output', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
   assert.match(readme, /npm run test:verbose/)
 })
+
+// The watchdog's skill text. Comments are stripped before anything is matched, so a markdown
+// comment that names an event or a command cannot stand in for the instruction itself.
+const stripComments = (text) => text.replace(/<!--[\s\S]*?-->/g, '')
+const rawOf = (section) => section.blocks.map((b) => b.raw).join('\n')
+
+test('stripComments removes a markdown comment, so a commented instruction cannot satisfy these tests', () => {
+  assert.equal(stripComments('a <!-- cli.mjs" watch --run --> b'), 'a  b')
+  assert.equal(stripComments('<!--\n`resume`\n-->\n'), '\n')
+})
+
+test('parallel-execution starts the watchdog under Monitor in the dispatch section', async () => {
+  const { body } = await skill('parallel-execution')
+  const dispatch = parseDoc(stripComments(body), 'parallel-execution').section(/^2\. Dispatch the phase$/)
+  assert.ok(
+    dispatch.code.some((b) => b.code.includes('cli.mjs" watch --run')),
+    'section 2 must carry a cli.mjs watch --run command block',
+  )
+  assertStatement(dispatch, /\bMonitor\b/, 'section 2 must tell the orchestrator to run watch with Monitor')
+})
+
+test('fleet-supervision documents the watchdog events and the commands each response runs', async () => {
+  const { body } = await skill('fleet-supervision')
+  const doc = parseDoc(stripComments(body), 'fleet-supervision')
+  const watchdog = doc.section(/^The watchdog$/)
+  const raw = rawOf(watchdog)
+  for (const event of ['start', 'resume', 'respawn', 'orphan', 'unmeasured', 'watch-error', 'exit']) {
+    assert.ok(raw.includes(`\`${event}\``), `The watchdog section must name the ${event} event`)
+  }
+  assert.match(raw, /reason: spinning/, 'The watchdog section must name the spinning reason')
+  assert.match(raw, /cli\.mjs"? rescue --run/, 'The watchdog section must name rescue --run')
+  assert.match(raw, /cli\.mjs"? dispatch [^\n|]*--task/, 'The watchdog section must name dispatch with --task')
+  // The heartbeat report itself did not change: liveness still only reports.
+  assertStatement(doc.section(/^The heartbeat$/), /^It reports; it does not act\.$/, 'liveness must still be described as report-only')
+})

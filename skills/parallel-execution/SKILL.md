@@ -110,6 +110,18 @@ verdict.
 
 Wait on completion notifications. Do not poll in a loop.
 
+After dispatching a phase, start the fleet watchdog, unless `watch.enabled` is false:
+
+    node "<fleetmates root>/scripts/cli.mjs" watch --run <runId> --plan <planPath> --root <project root>
+
+Run it with `Monitor`, so each line it prints to stdout arrives as one JSON event; the
+`fleet-supervision` skill says how to answer each one. It exits on its own, printing an `exit`
+event with reason `phase-idle`, once the phase has nothing in flight: every task of the current
+phase is `done`, `blocked` or `orphaned` in the run status. Start at
+most one per run. While one holds `.fleetmates/<runId>/watch.lock`, a second `watch` on the same
+run exits 2 and names the pid holding the lock. With `watch.enabled` set to false, `watch` prints
+`watchdog disabled by watch.enabled` and exits 0.
+
 ### On a harness other than Claude Code
 
 When the orchestrator is not Claude Code, the Workflow tool and background `Agent` calls do not
