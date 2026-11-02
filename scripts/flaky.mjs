@@ -4,7 +4,8 @@
 //
 // The report and the command's argv are written by a process running teammate code, so every name
 // read from them goes through `printable` before it reaches a terminal or a step summary.
-import { readFile, writeFile, rename, rm, appendFile } from 'node:fs/promises'
+import { open, lstat, writeFile, rename as fsRename, rm, appendFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import path from 'node:path'
@@ -14,6 +15,8 @@ import { readReport, openReportFile, MAX_REPORT_BYTES } from './test-report.mjs'
 export const QUARANTINE_FILE = 'fleetmates.flaky.json'
 // After this many passes in a row a quarantined test is a candidate for release (`doctor` says so).
 export const RELEASE_STREAK = 20
+
+export const QUARANTINE_MAX_BYTES = 1024 * 1024
 
 export class FlakyConfigError extends Error {}
 
@@ -41,23 +44,53 @@ function validate(doc, file) {
 }
 
 // `{ v: 1, tests: {} }` when the file is absent; FlakyConfigError naming the file when it is not
-// a valid quarantine store.
+// a valid quarantine store. Opened once without following a link and without blocking on a FIFO,
+// then judged and read through that handle, bounded by QUARANTINE_MAX_BYTES. win32 has neither
+// flag, so there an lstat refuses a link first and the handle must be the file lstat saw.
 export async function readQuarantine(root) {
   const file = path.join(root, QUARANTINE_FILE)
-  let text
+  const refuse = (why) => { throw new FlakyConfigError(`${file} ${why}`) }
+  const noFollow = constants.O_NOFOLLOW
+  let seen = null
+  if (noFollow === undefined) {
+    try { seen = await lstat(file, { bigint: true }) } catch (err) {
+      if (err?.code === 'ENOENT') return { v: 1, tests: {} }
+      refuse(`cannot be read: ${printable(err?.code ?? err?.message ?? err)}`)
+    }
+    if (seen.isSymbolicLink()) refuse('is a symbolic link')
+  }
+  let handle
   try {
-    text = await readFile(file, 'utf8')
+    handle = await open(file, constants.O_RDONLY | (noFollow ?? 0) | (constants.O_NONBLOCK ?? 0))
   } catch (err) {
     if (err?.code === 'ENOENT') return { v: 1, tests: {} }
-    throw new FlakyConfigError(`${file} cannot be read: ${printable(err?.code ?? err?.message ?? err)}`)
+    if (err?.code === 'ELOOP') refuse('is a symbolic link')
+    refuse(`cannot be read: ${printable(err?.code ?? err?.message ?? err)}`)
+  }
+  let text
+  try {
+    const info = await handle.stat({ bigint: true })
+    if (seen && (info.dev !== seen.dev || info.ino !== seen.ino)) refuse('was replaced while it was being opened')
+    if (!info.isFile()) refuse('is not a regular file')
+    if (info.size > BigInt(QUARANTINE_MAX_BYTES)) refuse(`is larger than ${QUARANTINE_MAX_BYTES} bytes`)
+    const buffer = Buffer.alloc(Number(info.size))
+    let offset = 0
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset)
+      if (bytesRead === 0) break
+      offset += bytesRead
+    }
+    text = buffer.subarray(0, offset).toString('utf8')
+  } finally {
+    await handle.close()
   }
   let doc
-  try { doc = JSON.parse(text) } catch { throw new FlakyConfigError(`${file} is malformed: not valid JSON`) }
+  try { doc = JSON.parse(text) } catch { refuse('is malformed: not valid JSON') }
   return validate(doc, file)
 }
 
 // Temp file in the same directory, then rename: a reader never sees a half-written store.
-async function writeQuarantine(root, store) {
+export async function writeQuarantine(root, store, { rename = fsRename } = {}) {
   const file = path.join(root, QUARANTINE_FILE)
   const temp = path.join(root, `.${QUARANTINE_FILE}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`)
   const sorted = Object.fromEntries(Object.entries(store.tests).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
@@ -174,6 +207,18 @@ async function readOutcomes(report, cwd) {
   }
 }
 
+// Removes a report file (or a link standing where one should be) before an attempt, so the names
+// read after it come from that attempt. A directory report is left alone: `readOutcomes` reads
+// names from a single file only, so a directory never picks the retried tests anyway.
+async function clearReport(report, cwd) {
+  if (!report) return
+  const target = path.resolve(cwd, report)
+  let info
+  try { info = await lstat(target) } catch { return }
+  if (info.isDirectory()) return
+  await rm(target, { force: true })
+}
+
 function defaultExec(argv, { cwd, env }) {
   return new Promise((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), { cwd, env, stdio: 'inherit', shell: false })
@@ -206,6 +251,7 @@ export async function runFlaky(argv, {
   const stamp = () => new Date(now()).toISOString()
   let dirty = false
 
+  await clearReport(report, cwd)
   const first = await exec(argv, { cwd, env })
   const firstOutcomes = await readOutcomes(report, cwd)
   let result
@@ -222,6 +268,7 @@ export async function runFlaky(argv, {
     const failedFirst = firstOutcomes && firstOutcomes.failed.length > 0 ? firstOutcomes.failed : null
     const filtered = failedFirst ? retryArgv(argv, failedFirst) : null
     const retried = filtered ? 'filtered' : 'whole'
+    await clearReport(report, cwd)
     const second = await exec(filtered ?? argv, { cwd, env })
     if (second.code === 0) {
       const flaky = failedFirst ?? [commandId]
@@ -233,12 +280,30 @@ export async function runFlaky(argv, {
       dirty = true
       result = { code: 0, flaky, quarantinedFailures: [], retried }
     } else {
+      // Red unless every test still failing is a named, quarantined test. A whole command is never
+      // quarantined (no report, or a report naming no failed test on the first attempt), and a
+      // retry whose report names no failed test failed outside any test, so both keep the code.
       const secondOutcomes = await readOutcomes(report, cwd)
-      const stillFailing = secondOutcomes && secondOutcomes.failed.length > 0 ? secondOutcomes.failed : (failedFirst ?? [commandId])
-      const allQuarantined = stillFailing.every((id) => Object.hasOwn(store.tests, id))
-      result = allQuarantined
-        ? { code: 0, flaky: [], quarantinedFailures: stillFailing, retried }
-        : { code: first.code, flaky: [], quarantinedFailures: [], retried }
+      const stillFailing = secondOutcomes ? secondOutcomes.failed : []
+      const recovered = failedFirst && secondOutcomes
+        ? failedFirst.filter((id) => secondOutcomes.passed.includes(id))
+        : []
+      const at = stamp()
+      for (const id of recovered) {
+        const prior = Object.hasOwn(store.tests, id) ? store.tests[id] : null
+        store.tests[id] = { firstSeen: prior?.firstSeen ?? at, lastSeen: at, flakes: (prior?.flakes ?? 0) + 1, passStreak: 0 }
+        dirty = true
+      }
+      for (const id of stillFailing) {
+        if (!Object.hasOwn(store.tests, id) || store.tests[id].passStreak === 0) continue
+        store.tests[id] = { ...store.tests[id], passStreak: 0 }
+        dirty = true
+      }
+      const excused = failedFirst !== null && stillFailing.length > 0
+        && stillFailing.every((id) => Object.hasOwn(store.tests, id))
+      result = excused
+        ? { code: 0, flaky: recovered, quarantinedFailures: stillFailing, retried }
+        : { code: first.code, flaky: recovered, quarantinedFailures: [], retried }
     }
   }
 
