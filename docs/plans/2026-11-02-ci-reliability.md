@@ -14,6 +14,7 @@ Spec: `docs/specs/2026-11-02-ci-reliability-design.md`.
 - Run long test commands in the foreground with an explicit timeout of at least 600000 ms
 - Each teammate runs its tests with a private `TMPDIR` under its own worktree
 - Nothing in this plan edits a user's GitHub workflow; only Task 8 edits this repository's own
+- No task edits `fleetmates.gate.json`; turning `platformSim` and `flaky` on for this repository's gate is a separate owner-visible commit after the run
 
 ## Destination
 
@@ -59,7 +60,7 @@ export async function runPlatformSim(argv, { cwd, onOutput = (chunk) => process.
 - Create: `tests/fixtures/flaky/fails-n-times.mjs`
 
 - [ ] **Step 1:** Write `fails-n-times.mjs`: reads a counter file named by `FLAKY_COUNTER`, increments it, exits 1 while the count is at most `FLAKY_FAILS`, else 0; when `FLAKY_REPORT` is set it also writes a JUnit file with one `<testcase name="t1">` that carries a `<failure>` on failing runs.
-- [ ] **Step 2:** Write `tests/flaky.test.mjs` first: fails 0 times -> exit 0, no retry, quarantine untouched; fails once -> exit 0, one `flaky` entry naming `t1` (from the report) or the whole command (without one), quarantine file written with `{ v: 1, tests: { "<id>": { firstSeen, lastSeen, flakes: 1, passStreak: 0 } } }`; fails twice -> the original exit code and no quarantine change; a test already quarantined that fails twice -> exit 0 with a `quarantined` warning; a quarantined test that passes -> `passStreak` + 1 and `flakes` unchanged; a malformed quarantine file -> throws `FlakyConfigError` naming the file and no command runs; `GITHUB_ACTIONS=true` -> a `::warning title=flaky::` line per flaky test and a markdown table appended to the file named by `GITHUB_STEP_SUMMARY`; `retryArgv` returns `--test-name-pattern` for node:test, `-t` for vitest and jest, `--deselect`-free `-k` for pytest, and `null` for an unknown runner; `canWrite: false` (teammate worktree) reports but never writes the quarantine file. Run it and watch it fail.
+- [ ] **Step 2:** Write `tests/flaky.test.mjs` first: fails 0 times -> exit 0, no retry, quarantine untouched; fails once -> exit 0, one `flaky` entry naming `t1` (from the report) or the whole command (without one), quarantine file written with `{ v: 1, tests: { "<id>": { firstSeen, lastSeen, flakes: 1, passStreak: 0 } } }`; fails twice -> the original exit code and no quarantine change; a test already quarantined that fails twice -> exit 0 with a `quarantined` warning; without a report, a recorded whole-command entry never excuses a second failure (fails twice -> the original exit code even when that entry exists); a retry that exits non-zero while its report names no failed test -> the original exit code; the report file is removed before each attempt so a stale report cannot pick the retried tests; every name read from a report or argv that reaches stdout, a `::warning` line or the step summary carries no raw control byte (a test name containing ESC, CR and newline); a quarantined test that passes -> `passStreak` + 1 and `flakes` unchanged; a malformed quarantine file -> throws `FlakyConfigError` naming the file and no command runs; `GITHUB_ACTIONS=true` -> a `::warning title=flaky::` line per flaky test and a markdown table appended to the file named by `GITHUB_STEP_SUMMARY`; `retryArgv` returns `--test-name-pattern` for node:test, `-t` for vitest and jest, `--deselect`-free `-k` for pytest, and `null` for an unknown runner; `canWrite: false` (teammate worktree) reports but never writes the quarantine file. Run it and watch it fail.
 - [ ] **Step 3:** Create `scripts/flaky.mjs` exporting:
 
 ```js
@@ -151,14 +152,12 @@ export function ciAdvice(summary, pkg)       // string[] of warnings, each one l
 ### Task 8: dogfood in this repository
 
 **Files:**
-- Modify (protected): `fleetmates.gate.json`
 - Modify: `.github/workflows/test.yml`
 - Modify: `.github/workflows/deck.yml`
 - Modify: `package.json`
 
 **Depends:** T6
 
-- [ ] **Step 1:** In `fleetmates.gate.json`, set `"platformSim": true` and `"flaky": true` on the `test` check of every phase.
-- [ ] **Step 2:** In `test.yml` and `deck.yml`, run on `push` to every branch (keep `pull_request`), and run the suites through `node scripts/cli.mjs flaky -- npm test` (root) and `node scripts/cli.mjs flaky -- npm --prefix hub test` (hub).
-- [ ] **Step 3:** Add `"test:platform-sim": "node scripts/cli.mjs platform-sim -- npm test"` to `package.json` scripts.
-- [ ] **Step 4:** Run `npm run test:platform-sim` with the timeout above and report the counts. A failure here is a real portability bug: report it with the test name rather than weakening anything.
+- [ ] **Step 1:** In `test.yml` and `deck.yml`, run on `push` to every branch (keep `pull_request`), and run the suites through `node scripts/cli.mjs flaky -- npm test` (root) and `node scripts/cli.mjs flaky -- npm --prefix hub test` (hub).
+- [ ] **Step 2:** Add `"test:platform-sim": "node scripts/cli.mjs platform-sim -- npm test"` to `package.json` scripts.
+- [ ] **Step 3:** Run `npm run test:platform-sim` with the timeout above and report the counts. A failure here is a real portability bug: report it with the test name rather than weakening anything.
