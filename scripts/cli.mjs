@@ -21,7 +21,7 @@ import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBrief } from './brief.mjs'
-import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks } from './gate-config.mjs'
+import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks, reviewLenses } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
   getKey, setKey, unsetKey, ensureGitignored, ConfigError,
@@ -58,6 +58,11 @@ import { spinState } from './spin.mjs'
 import { learnedStaleMinutes, addSample } from './watch-envelope.mjs'
 import { rescueWorktree } from './rescue.mjs'
 import { appendEvent, ledgerPath, readEvents } from './event-ledger.mjs'
+import { readWorkflows, workflowSummary, ciAdvice } from './ci-workflows.mjs'
+import { buildSimEnv, runPlatformSim } from './platform-sim.mjs'
+import { runFlaky, readQuarantine, FlakyConfigError, RELEASE_STREAK, QUARANTINE_FILE } from './flaky.mjs'
+import { summarizeCi } from './ci-evidence.mjs'
+import { spawn as spawnChild, execFile } from 'node:child_process'
 
 // The temp root as GIT would spell it, which is not what `os.tmpdir()` returns.
 //
@@ -153,7 +158,7 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|platform-sim|flaky|ci-wait|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
@@ -204,6 +209,9 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   complete --run <id> --task <id> --plan <path> [--base <branch>] [--root <path>] [--enforcement-only]
   fix      --run <id> --phase <n> --verdict <path> [--root <path>]
   record-fix-round --run <id> --phase <n> --task <id> [--root <path>]
+  platform-sim [--root <path>] -- <command...>
+  flaky    [--report <path>] [--root <path>] -- <command...>
+  ci-wait  --branch <name> [--minutes <1-720>] [--root <path>]
   config   list [--root <path>]
   config   get <key> [--root <path>]
   config   set <key> <value> [--root <path>] [--local]
@@ -309,6 +317,159 @@ async function readPackage(root) {
   }
 }
 
+// The commands whose argv after the first `--` is a command they run (see `runCli`).
+const PASSTHROUGH_COMMANDS = new Set(['platform-sim', 'flaky'])
+
+// Characters cmd.exe reads itself on its command line. An argument holding one cannot be passed
+// through `cmd.exe /c` by quoting alone, so it is refused rather than quoted by guess.
+const CMD_UNSAFE = /["&|<>^%!\r\n]/
+
+// `platform-sim` and `flaky` spawn argv[0] without a shell, and on Windows a `.cmd` or `.bat` shim
+// (npm, npx) does not run that way. On win32 a name that resolves through PATH and PATHEXT (or an
+// explicit extension) to such a shim is run as `cmd.exe /d /c <argv...>`; anything else, and every
+// argv off win32, is returned unchanged. `exists` is a test seam. The resolution order mirrors
+// cmd.exe's PATH search minus the current directory; it is tested with an injected platform, not
+// on a Windows host.
+export function windowsCommandArgv(argv, { platform = process.platform, env = process.env, exists = existsSync } = {}) {
+  if (platform !== 'win32' || argv.length === 0) return argv
+  const win = path.win32
+  const get = (name) => {
+    const key = Object.keys(env).find((k) => k.toUpperCase() === name)
+    return key === undefined ? undefined : env[key]
+  }
+  const exts = (get('PATHEXT') || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+  const [cmd] = argv
+  let resolved = null
+  if (win.extname(cmd) !== '') {
+    resolved = cmd
+  } else {
+    const dirs = /[\\/]/.test(cmd) ? [''] : (get('PATH') || '').split(';').filter(Boolean)
+    outer: for (const dir of dirs) {
+      for (const ext of exts) {
+        const candidate = dir === '' ? `${cmd}${ext}` : win.join(dir, `${cmd}${ext}`)
+        if (exists(candidate)) { resolved = candidate; break outer }
+      }
+    }
+  }
+  if (resolved === null || !/\.(cmd|bat)$/i.test(resolved)) return argv
+  const unsafe = argv.find((arg) => CMD_UNSAFE.test(arg) || (arg === cmd && /\s/.test(arg)))
+  if (unsafe !== undefined) {
+    throw new Error(`${printable(cmd)} is a Windows batch shim that only runs through cmd.exe, and the argument ${printable(JSON.stringify(unsafe))} holds a character cmd.exe would interpret; call the runner directly (for example node and its script) instead`)
+  }
+  return [get('COMSPEC') || 'cmd.exe', '/d', '/c', ...argv]
+}
+
+// Whether `flaky` may write the tracked quarantine file under `dir`: only in CI
+// (GITHUB_ACTIONS=true), or when `dir` is the top level of a repository's MAIN worktree. A linked
+// worktree is a teammate's, and a teammate must not quarantine its own failing test. The same rule
+// as the gate's own (scripts/gate-runner.mjs `isMainWorktree`), mirrored because that one is not
+// exported.
+export async function quarantineWritable(dir, env = process.env) {
+  if (env.GITHUB_ACTIONS === 'true') return true
+  const stdout = await new Promise((resolve) => {
+    execFile('git', ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir'], { cwd: dir, windowsHide: true }, (err, out) => resolve(err ? null : out))
+  })
+  if (stdout === null) return false
+  const [top, gitDir, common] = stdout.split(/\r?\n/)
+  if (!top || !gitDir || !common) return false
+  const real = (p) => realpath(p).catch(() => path.resolve(p))
+  return (await real(top)) === (await real(dir)) && (await real(gitDir)) === (await real(common))
+}
+
+// Spawns argv without a shell, with inherited stdio, after the win32 shim rule above.
+function spawnInherited(argv, { cwd, env }) {
+  return new Promise((resolve, reject) => {
+    const [file, ...args] = windowsCommandArgv(argv, { env })
+    const child = spawnChild(file, args, { cwd, env, stdio: 'inherit', shell: false })
+    child.on('error', reject)
+    child.on('close', (code, signal) => resolve({ code: code ?? (signal ? 1 : 0) }))
+  })
+}
+
+// One `gh` invocation for `ci-wait`: `{ code, stdout, stderr }` for any exit status, a rejection
+// (with `code: 'ENOENT'` when gh is not installed) when it could not be spawned at all.
+function defaultCiExec(argv, { cwd }) {
+  return new Promise((resolve, reject) => {
+    execFile(argv[0], argv.slice(1), { cwd, windowsHide: true, timeout: 60_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
+      if (err && typeof err.code !== 'number') { reject(err); return }
+      resolve({ code: err ? err.code : 0, stdout, stderr })
+    })
+  })
+}
+
+// `doctor`'s CI reliability section: the `ciAdvice` warnings for `.github/workflows` under a `CI:`
+// heading, plus any workflow file the reader skipped, and the quarantined tests whose pass streak
+// reached RELEASE_STREAK. Suggestions only: none of it moves doctor's exit code, and nothing is
+// printed when there is nothing to say. Workflow paths, reasons and test ids come from files a
+// teammate can write, so each goes through `printable`.
+async function printCiReliabilityAdvice(root, io) {
+  const read = await readWorkflows(root)
+  let pkg = null
+  try { pkg = await readPackage(root) } catch { pkg = null }
+  const advice = ciAdvice(workflowSummary(read), pkg)
+  if (advice.length > 0 || read.skipped.length > 0) {
+    io.out('CI:')
+    for (const line of advice) io.out(`  ${printable(line)}`)
+    for (const s of read.skipped) io.out(`  skipped ${printable(s.path)}: ${printable(s.reason)}`)
+  }
+  let store
+  try {
+    store = await readQuarantine(root)
+  } catch (err) {
+    if (!(err instanceof FlakyConfigError)) throw err
+    io.out(`flaky quarantine: ${printable(err.message)}`)
+    return
+  }
+  const releasable = Object.entries(store.tests).filter(([, entry]) => entry.passStreak >= RELEASE_STREAK)
+  if (releasable.length === 0) return
+  io.out('flaky quarantine:')
+  for (const [id, entry] of releasable) {
+    io.out(`  ${printable(id)} passed ${entry.passStreak} times in a row; consider removing it from ${QUARANTINE_FILE}`)
+  }
+}
+
+// The lenses one phase's review dispatches and collects: the agent check's own, plus
+// `portability` when `.github/workflows` runs on macOS or Windows (`reviewLenses`). An explicit
+// empty list stays empty, so the refusal that a pass over zero lenses is not a review still holds.
+async function phaseReviewLenses(root, config, phaseName, check) {
+  if (Array.isArray(check.lens) && check.lens.length === 0) return check.lens
+  return reviewLenses(config, phaseName, workflowSummary(await readWorkflows(root)))
+}
+
+export const CI_POLL_MS = 30_000
+
+// Judges one check-runs snapshot of commit `sha` for `ci-wait`, with every check run on that commit
+// required (deduplicated by name and app; `summarizeCi` keeps the latest attempt of each). Returns
+// `{ state: 'pass'|'fail'|'pending'|'unreadable', ... }`. A commit with no check run yet is pending:
+// the workflows exist, so GitHub has not registered them yet. A `skipped`, `cancelled`, `neutral`
+// or `stale` conclusion is not a pass and is reported with the failures.
+export function judgeCheckRuns(sha, snapshot) {
+  if (!snapshot || !Array.isArray(snapshot.check_runs) || !Number.isSafeInteger(snapshot.total_count)) {
+    return { state: 'unreadable', reason: 'the response carries no check_runs list' }
+  }
+  const required = []
+  const seen = new Set()
+  for (const run of snapshot.check_runs) {
+    if (run?.head_sha !== sha || typeof run.name !== 'string' || !run.name || typeof run.app?.slug !== 'string' || !run.app.slug) continue
+    const key = JSON.stringify([run.name, run.app.slug])
+    if (seen.has(key)) continue
+    seen.add(key)
+    required.push({ name: run.name, app: run.app.slug })
+  }
+  if (required.length === 0) return { state: 'pending', pending: [], reason: 'no check run has started on this commit yet' }
+  let summary
+  try {
+    summary = summarizeCi({ inputs: { commit: sha, plan: 'ci-wait', manifest: 'ci-wait', environment: 'ci-wait', verifier: 'ci-wait' }, required, snapshot })
+  } catch (err) {
+    return { state: 'unreadable', reason: err.message }
+  }
+  if (summary.truncated) return { state: 'unreadable', reason: `the commit has ${snapshot.total_count} check runs and one page holds ${snapshot.check_runs.length}` }
+  const failed = summary.obligations.filter((o) => o.status === 'fail' || o.status === 'unresolved')
+  if (failed.length > 0) return { state: 'fail', failed }
+  if (summary.complete) return { state: 'pass', passed: summary.obligations }
+  return { state: 'pending', pending: summary.obligations.filter((o) => o.status !== 'pass') }
+}
+
 // Exported so the suite can DERIVE the command list rather than restate it. A hardcoded list
 // catches a command REMOVED from these tables and not one ADDED without an entry — and adding is
 // the direction that happens, which is how a 21st subcommand could swallow an unknown flag and
@@ -385,6 +546,11 @@ export const REQUIRED = {
   // fallthrough: a command absent from this map also skips the whole missing-argument
   // branch, so the omission would read as "not a command" to anyone auditing the table.
   config: [],
+  // The CI reliability commands belong to no run: the first two wrap the command after `--`, and
+  // `ci-wait` reads the remote CI of one branch tip.
+  'platform-sim': [],
+  flaky: [],
+  'ci-wait': ['branch'],
   // Forwarded to the deck's own CLI, which belongs to no run; forwardDeck checks the subcommand.
   ui: [],
   deck: [],
@@ -454,6 +620,9 @@ export const KNOWN_FLAGS = {
   usage: ['session', 'json', 'run'],
   'map-notes': ['run', 'write'],
   config: ['local'],
+  'platform-sim': [],
+  flaky: ['report'],
+  'ci-wait': ['branch', 'minutes'],
   // Forwarded to hub/bin/fleetmates-deck.mjs; forwardDeck narrows these per deck subcommand.
   ui: [],
   deck: ['dry-run', 'rotate-token'],
@@ -2820,6 +2989,8 @@ const CONFIG_KEYS = [
   ...ROLES.flatMap((role) => [`agents.${role}.tier`, `agents.${role}.effort`]),
   // The watchdog's knobs, so `get` and `unset` accept every key `set` already validates.
   ...['enabled', 'resumes', 'respawns', 'staleMinutes', 'intervalMinutes', 'learn', 'spinFailures'].map((k) => `watch.${k}`),
+  'ci.push',
+  'ci.waitMinutes',
 ]
 
 // `unset` may also name one role's entry — `agents.implementer` is a real subtree of the layer
@@ -3647,7 +3818,13 @@ export async function runCli(argv, io = { out: console.log }) {
   // that promised never to fail the dispatch is what fails it. A caller supplying only `out`
   // keeps working: `err` defaults to console.error, exactly as `out` defaults to console.log.
   io = { err: console.error, ...io }
-  const [command, ...rest] = argv
+  const [command, ...afterCommand] = argv
+  // `platform-sim` and `flaky` wrap a command: everything after the first `--` is that command's
+  // argv, untouched by the flag parser. Every other command still reads `--` as a flag it does not
+  // take, so a stray one is refused rather than silently swallowing the rest of the line.
+  const split = PASSTHROUGH_COMMANDS.has(command) ? afterCommand.indexOf('--') : -1
+  const rest = split >= 0 ? afterCommand.slice(0, split) : afterCommand
+  const passthrough = split >= 0 ? afterCommand.slice(split + 1) : []
   const { flags, positional, rejected, repeated } = parseFlags(rest)
   // Refused before EVERYTHING else — before the required-argument check, before any command
   // body. A rejected spelling must not be able to reach a guard that tests the flag it was
@@ -5029,6 +5206,7 @@ export async function runCli(argv, io = { out: console.log }) {
         + ' above as having no changes, because without the anchor nothing tells the two apart',
       )
     }
+    await printCiReliabilityAdvice(root, io)
     // 1 on problems, mirroring the gate, so a caller can branch on the exit code. It is still
     // a report: nothing is recorded, and no verdict is issued or implied.
     return report.problems.length === 0 ? 0 : 1
@@ -6280,6 +6458,7 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
     const check = agentChecks[0]
+    const lenses = await phaseReviewLenses(root, config, phaseName, check)
 
     const tierModels = parseTierModels(flags, io)
     if (tierModels === TIER_MODELS_REJECTED) return 2
@@ -6391,7 +6570,7 @@ export async function runCli(argv, io = { out: console.log }) {
         runId,
         phaseName,
         checkName: check.name,
-        lenses: check.lens,
+        lenses,
         blockOn: check.blockOn ?? ['high'],
         // The fixed reviewer tier is `capable`; only the tracked manifest replaces it.
         tier: config.agents?.reviewer?.tier ?? 'capable',
@@ -6685,9 +6864,13 @@ export async function runCli(argv, io = { out: console.log }) {
     }
 
 
+    // The same lens list `review-dispatch` emitted, `portability` included when the CI runs on
+    // macOS or Windows: a lens dispatched there and not expected here would be "ignored", and the
+    // round would pass without that review.
+    const lenses = await phaseReviewLenses(root, config, phaseName, check)
     const files = []
     const unreadable = []
-    for (const lens of check.lens) {
+    for (const lens of lenses) {
       let name
       try {
         name = reviewFileName(phaseName, lens)
@@ -6787,7 +6970,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const collected = collectReviewResults({
       checkName: check.name,
-      lenses: check.lens,
+      lenses,
       files,
       blockOn: check.blockOn ?? ['high'],
       // `lens` is filled in per file by collectReviewResults; phase and branches are the run's.
@@ -7333,6 +7516,137 @@ export async function runCli(argv, io = { out: console.log }) {
     await writeState(root, runId, 'status', next)
     io.out(`${flags.task} phase ${phase} round ${readFixRounds(next, phase)[flags.task]}`)
     return 0
+  }
+
+  // `platform-sim -- <command...>`: runs the command under scripts/platform-sim.mjs from the
+  // project root, prints one `platform-sim: applied ...` line before the command's own output, and
+  // exits with the command's code (127 when it could not be spawned).
+  if (command === 'platform-sim') {
+    if (passthrough.length === 0) { io.out(`platform-sim needs a command after --\n\n${USAGE}`); return 2 }
+    let argv
+    try { argv = windowsCommandArgv(passthrough) } catch (err) { io.out(`platform-sim: ${err.message}`); return 2 }
+    const announce = async (options) => {
+      const sim = await buildSimEnv(options)
+      const skipped = sim.skipped.map((s) => `${s.name} (${s.reason})`)
+      io.out(`platform-sim: applied ${sim.applied.join(', ')}${skipped.length ? `; skipped ${skipped.join('; ')}` : ''}`)
+      return sim
+    }
+    try {
+      const { code } = await runPlatformSim(argv, { cwd: root, buildEnv: announce, onOutput: (chunk) => process.stdout.write(chunk) })
+      return code
+    } catch (err) {
+      io.out(`platform-sim: could not run ${printable(passthrough[0])}: ${printable(err.message)}`)
+      return 127
+    }
+  }
+
+  // `flaky [--report <path>] -- <command...>`: scripts/flaky.mjs from the project root. The
+  // quarantine file is written only where `quarantineWritable` allows it; a malformed one refuses
+  // with exit 2 before the command runs.
+  if (command === 'flaky') {
+    if (passthrough.length === 0) { io.out(`flaky needs a command after --\n\n${USAGE}`); return 2 }
+    if (flags.report !== undefined && (typeof flags.report !== 'string' || flags.report === '')) {
+      io.out(`--report takes a path\n\n${USAGE}`)
+      return 2
+    }
+    try { windowsCommandArgv(passthrough) } catch (err) { io.out(`flaky: ${err.message}`); return 2 }
+    try {
+      const result = await runFlaky(passthrough, {
+        root,
+        cwd: root,
+        report: flags.report ?? null,
+        exec: spawnInherited,
+        canWrite: await quarantineWritable(root),
+        write: (text) => io.out(text.replace(/\n$/, '')),
+      })
+      return result.code
+    } catch (err) {
+      if (err instanceof FlakyConfigError) { io.out(printable(err.message)); return 2 }
+      io.out(`flaky: could not run ${printable(passthrough[0])}: ${printable(err.message)}`)
+      return 127
+    }
+  }
+
+  // `ci-wait --branch <b> [--minutes <n>]`: waits for the remote CI of the branch's tip commit.
+  // Exit 0 every check run on the tip passed (or the project has no workflows: skipped, and said),
+  // 1 one failed, 3 still pending when the window closed, 4 `gh` could not read it, 2 a bad
+  // invocation. It reads; it never pushes. `io.ciExec`, `io.sleep` and `io.now` are test seams.
+  if (command === 'ci-wait') {
+    let minutes
+    if (flags.minutes !== undefined) {
+      minutes = typeof flags.minutes === 'string' && /^\d+$/.test(flags.minutes) ? Number(flags.minutes) : NaN
+      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 720) {
+        io.out(`--minutes takes an integer from 1 to 720, got ${printable(JSON.stringify(flags.minutes))}`)
+        return 2
+      }
+    } else {
+      try {
+        minutes = (await loadConfig(root)).resolved.ci.waitMinutes
+      } catch (err) {
+        const message = configFailureMessage(err)
+        if (message === null) throw err
+        io.out(message)
+        return 2
+      }
+    }
+    if (typeof flags.branch !== 'string' || flags.branch === '') {
+      io.out(`--branch takes a branch name\n\n${USAGE}`)
+      return 2
+    }
+    if (!(await readWorkflows(root)).present) {
+      io.out('no CI workflows: skipped — this project has no .github/workflows, so there is no remote CI to wait for')
+      return 0
+    }
+    let sha
+    try {
+      sha = await createGit({ cwd: root }).resolveRef(`refs/heads/${flags.branch}`)
+    } catch {
+      io.out(`no branch ${printable(flags.branch)} in ${printable(root)}`)
+      return 2
+    }
+    const exec = io.ciExec ?? defaultCiExec
+    const sleep = io.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)))
+    const now = io.now ?? Date.now
+    const deadline = now() + minutes * 60_000
+    io.out(`ci-wait: ${printable(flags.branch)} at ${sha}, up to ${minutes} min`)
+    for (;;) {
+      let res
+      try {
+        res = await exec(['gh', 'api', `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`], { cwd: root })
+      } catch (err) {
+        io.out(err?.code === 'ENOENT'
+          ? '`gh` is not installed or not on PATH: remote CI could not be read, so this branch is not verified'
+          : `\`gh\` could not run: ${printable(err?.message ?? err)} — remote CI could not be read, so this branch is not verified`)
+        return 4
+      }
+      if (res.code !== 0) {
+        const detail = String(res.stderr ?? '').trim().split(/\r?\n/)[0] ?? ''
+        io.out(`\`gh api\` exited ${res.code}${detail ? `: ${printable(detail)}` : ''} — remote CI could not be read (is \`gh auth status\` logged in?), so this branch is not verified`)
+        return 4
+      }
+      let snapshot
+      try { snapshot = JSON.parse(res.stdout) } catch { snapshot = null }
+      const verdict = judgeCheckRuns(sha, snapshot)
+      if (verdict.state === 'unreadable') {
+        io.out(`remote CI could not be read: ${printable(verdict.reason)}`)
+        return 4
+      }
+      if (verdict.state === 'fail') {
+        for (const o of verdict.failed) io.out(`failed: ${printable(o.name)} (${printable(o.conclusion ?? o.status)}) ${printable(o.url ?? 'no job URL')}`)
+        return 1
+      }
+      if (verdict.state === 'pass') {
+        io.out(`passed: ${verdict.passed.length} check run(s) on ${sha}`)
+        return 0
+      }
+      const remaining = deadline - now()
+      if (remaining <= 0) {
+        const names = verdict.pending.map((o) => `${printable(o.name)} ${printable(o.url ?? '')}`.trim())
+        io.out(`still pending after ${minutes} min: ${names.length ? names.join(', ') : verdict.reason}`)
+        return 3
+      }
+      await sleep(Math.min(CI_POLL_MS, remaining))
+    }
   }
 
   // Reads the subcommand and key from `positional`, targets a layer with `--local`, and maps

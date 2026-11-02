@@ -244,6 +244,27 @@ export function validateWatch(watch, file) {
   return watch
 }
 
+// The finish step's remote CI wait (docs/specs/2026-11-02-ci-reliability-design.md, section 4).
+// Not an enforcement key: it decides whether the finish asks before pushing and how long it waits,
+// never a verdict, so both layers may carry it.
+export const CI_PUSH_MODES = ['ask', 'auto']
+const CI_FIELDS = {
+  push: (v) => CI_PUSH_MODES.includes(v),
+  waitMinutes: (v) => Number.isInteger(v) && v >= 1 && v <= 720,
+}
+const CI_RULES = { push: `one of ${CI_PUSH_MODES.join(', ')}`, waitMinutes: 'an integer from 1 to 720' }
+
+export function validateCi(ci, file) {
+  if (ci === null || typeof ci !== 'object' || Array.isArray(ci)) {
+    throw new ConfigError('ci must be an object')
+  }
+  for (const [field, value] of Object.entries(ci)) {
+    if (!Object.hasOwn(CI_FIELDS, field)) throw new ConfigError(`unknown key in ${file}: ci.${field}`)
+    if (!CI_FIELDS[field](value)) throw new ConfigError(`ci.${field} must be ${CI_RULES[field]}`)
+  }
+  return ci
+}
+
 export function validateLocal(local) {
   if (local === null || typeof local !== 'object' || Array.isArray(local)) {
     throw new ConfigError(`${LOCAL_FILE} must contain a JSON object`)
@@ -254,7 +275,7 @@ export function validateLocal(local) {
         `${key} is an enforcement key; it may only be set in ${GATE_FILE}`,
       )
     }
-    if (!['maxParallel', 'caveman', 'agents', 'harnesses', 'watch'].includes(key)) {
+    if (!['maxParallel', 'caveman', 'agents', 'harnesses', 'watch', 'ci'].includes(key)) {
       throw new ConfigError(`unknown key in ${LOCAL_FILE}: ${key}`)
     }
   }
@@ -285,6 +306,7 @@ export function validateLocal(local) {
   }
   if (local.harnesses !== undefined) validateHarnesses(local.harnesses, LOCAL_FILE)
   if (local.watch !== undefined) validateWatch(local.watch, LOCAL_FILE)
+  if (local.ci !== undefined) validateCi(local.ci, LOCAL_FILE)
   return local
 }
 
@@ -322,6 +344,7 @@ export function validateGate(gate) {
   }
   if (gate.harnesses !== undefined) validateHarnesses(gate.harnesses, GATE_FILE)
   if (gate.watch !== undefined) validateWatch(gate.watch, GATE_FILE)
+  if (gate.ci !== undefined) validateCi(gate.ci, GATE_FILE)
   // Every entry in ENFORCEMENT_KEYS has a validator. If a future key joins that list without
   // one, refusing is the right direction — waving an unchecked enforcement key through is the
   // one outcome this must never have — but it is refused as a ConfigError, not as a raw
@@ -406,6 +429,7 @@ export async function loadConfig(root) {
       agents,
       harnesses,
       // Literal defaults rather than an import of scripts/watch.mjs, so config.mjs does not depend on the watchdog.
+      ci: { push: 'ask', waitMinutes: 60, ...gate.ci, ...local?.ci },
       watch: { enabled: true, resumes: 2, respawns: 1, staleMinutes: 20, intervalMinutes: 5, learn: true, spinFailures: 5, ...gate.watch, ...local?.watch },
     },
     sources,
@@ -459,6 +483,8 @@ export function validateKey(dotted, value) {
   if (dotted === 'caveman') return VALIDATORS.caveman(value)
   const watchMatch = /^watch\.([A-Za-z]+)$/.exec(dotted)
   if (watchMatch) { validateWatch({ [watchMatch[1]]: value }, LOCAL_FILE); return value }
+  const ciMatch = /^ci\.([A-Za-z]+)$/.exec(dotted)
+  if (ciMatch) { validateCi({ [ciMatch[1]]: value }, LOCAL_FILE); return value }
   const agentMatch = /^agents\.([a-z]+)\.(tier|effort)$/.exec(dotted)
   if (agentMatch) {
     const [, role, field] = agentMatch
