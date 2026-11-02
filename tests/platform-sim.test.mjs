@@ -1,8 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, readdirSync, realpathSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,8 +15,8 @@ const quiet = () => {}
 const SCRATCH_PREFIX = 'fm-platform-sim-'
 const scratchDirs = () => new Set(readdirSync(tmpdir()).filter((n) => n.startsWith(SCRATCH_PREFIX)))
 
-// An empty home and no GIT_CONFIG_GLOBAL, so the probes never read the user's own git config.
-// The temp dir is canonicalised so the plain run is plain on hosts whose temp dir is already
+// An empty home, no GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM=1, so the probes never read the
+// user's or the host's git config (Git for Windows sets core.autocrlf=true system-wide). The temp dir is canonicalised so the plain run is plain on hosts whose temp dir is already
 // reached through a link (macOS /var -> /private/var).
 async function isolatedEnv(t) {
   const home = await mkdtemp(path.join(tmpdir(), 'fm-sim-home-'))
@@ -24,7 +24,7 @@ async function isolatedEnv(t) {
   const realTmp = realpathSync(tmpdir())
   const env = {
     ...process.env, HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: path.join(home, '.config'),
-    TMPDIR: realTmp, TMP: realTmp, TEMP: realTmp,
+    TMPDIR: realTmp, TMP: realTmp, TEMP: realTmp, GIT_CONFIG_NOSYSTEM: '1',
   }
   delete env.GIT_CONFIG_GLOBAL
   return { home, env }
@@ -34,6 +34,15 @@ for (const [name, probe] of [['realpath', realpathProbe], ['eol', eolProbe]]) {
   test(`${name} probe exits 0 when spawned plainly`, async (t) => {
     const { env } = await isolatedEnv(t)
     const r = spawnSync(process.execPath, [probe], { env, encoding: 'utf8' })
+    assert.equal(r.status, 0, r.stderr)
+  })
+
+  // Git for Windows ships a system config with core.autocrlf=true; the plain run must not see it.
+  test(`${name} probe exits 0 plainly on a host whose system git config sets autocrlf`, async (t) => {
+    const { home, env } = await isolatedEnv(t)
+    const system = path.join(home, 'system-gitconfig')
+    await writeFile(system, '[core]\n\tautocrlf = true\n')
+    const r = spawnSync(process.execPath, [probe], { env: { ...env, GIT_CONFIG_SYSTEM: system }, encoding: 'utf8' })
     assert.equal(r.status, 0, r.stderr)
   })
 
@@ -86,6 +95,39 @@ test('GIT_CONFIG_GLOBAL includes the previous ~/.gitconfig and git reads through
   assert.equal(name.stdout.trim(), 'Sim Probe')
   const crlf = spawnSync('git', ['config', '--global', 'core.autocrlf'], { env: sim.env, encoding: 'utf8' })
   assert.equal(crlf.stdout.trim(), 'true')
+})
+
+test('GIT_CONFIG_GLOBAL includes the XDG git config before ~/.gitconfig', async (t) => {
+  const { home, env } = await isolatedEnv(t)
+  const xdg = path.join(env.XDG_CONFIG_HOME, 'git', 'config')
+  await mkdir(path.dirname(xdg), { recursive: true })
+  await writeFile(xdg, '[user]\n\tname = Xdg Probe\n')
+  const only = await buildSimEnv({ baseEnv: env, platform: 'linux', homedir: home })
+  t.after(() => only.cleanup())
+  const onlyText = await readFile(only.env.GIT_CONFIG_GLOBAL, 'utf8')
+  assert.ok(onlyText.includes(`path = ${JSON.stringify(xdg)}`), onlyText)
+  const name = spawnSync('git', ['config', '--global', '--includes', 'user.name'], { env: only.env, encoding: 'utf8' })
+  assert.equal(name.stdout.trim(), 'Xdg Probe')
+
+  const dot = path.join(home, '.gitconfig')
+  await writeFile(dot, '[user]\n\tname = Dot Probe\n')
+  const both = await buildSimEnv({ baseEnv: env, platform: 'linux', homedir: home })
+  t.after(() => both.cleanup())
+  const bothText = await readFile(both.env.GIT_CONFIG_GLOBAL, 'utf8')
+  const xi = bothText.indexOf(JSON.stringify(xdg))
+  const di = bothText.indexOf(JSON.stringify(dot))
+  assert.ok(xi >= 0 && di > xi, bothText)
+})
+
+// The simulator layers over the user's whole git setup; it leaves the system config alone.
+test('buildSimEnv neither sets GIT_CONFIG_NOSYSTEM nor drops GIT_CONFIG_SYSTEM', async (t) => {
+  const { home, env } = await isolatedEnv(t)
+  const baseEnv = { ...env, GIT_CONFIG_SYSTEM: path.join(home, 'system-gitconfig') }
+  delete baseEnv.GIT_CONFIG_NOSYSTEM
+  const sim = await buildSimEnv({ baseEnv, platform: 'linux', homedir: home })
+  t.after(() => sim.cleanup())
+  assert.equal(sim.env.GIT_CONFIG_NOSYSTEM, undefined)
+  assert.equal(sim.env.GIT_CONFIG_SYSTEM, baseEnv.GIT_CONFIG_SYSTEM)
 })
 
 test('GIT_CONFIG_GLOBAL includes a previous GIT_CONFIG_GLOBAL from the base env', async (t) => {
@@ -141,13 +183,15 @@ test('output from stdout and stderr streams through onOutput', async (t) => {
 
 test('the child runs under umask 077 and the parent umask is unchanged', { skip: process.platform === 'win32' }, async (t) => {
   const { env } = await isolatedEnv(t)
-  const parentBefore = process.umask()
+  // Pin the parent at 022 so the assertion does not depend on the host's own umask.
+  const hostUmask = process.umask(0o022)
+  t.after(() => process.umask(hostUmask))
   let out = ''
   await runPlatformSim([process.execPath, '-e', 'console.log(process.umask().toString(8))'], {
     baseEnv: env, onOutput: (c) => { out += c },
   })
   assert.equal(out.trim(), '77')
-  assert.equal(process.umask(), parentBefore)
+  assert.equal(process.umask(), 0o022)
 })
 
 test('on win32 the symlink and umask conditions are reported as skipped', async (t) => {
@@ -241,4 +285,40 @@ test('a child killed by SIGTERM yields exit code 143', posixOnly, async (t) => {
   const { env } = await isolatedEnv(t)
   const r = await runPlatformSim([process.execPath, '-e', 'process.kill(process.pid, "SIGTERM")'], { baseEnv: env, onOutput: quiet })
   assert.equal(r.code, 143)
+})
+
+test('cleanup never follows a symlink out of the scratch directory', posixOnly, async (t) => {
+  const { env } = await isolatedEnv(t)
+  const outside = await mkdtemp(path.join(tmpdir(), 'fm-sim-outside-'))
+  const ro = path.join(outside, 'ro')
+  await mkdir(ro)
+  await writeFile(path.join(ro, 'keep'), 'x')
+  await chmod(ro, 0o555)
+  t.after(async () => { await chmod(ro, 0o755); await rm(outside, { recursive: true, force: true }) })
+  const script = 'require("node:fs").symlinkSync(process.argv[1], require("node:path").join(process.env.TMPDIR, "out"), "dir")'
+  let out = ''
+  const r = await runPlatformSim([process.execPath, '-e', script, ro], { baseEnv: env, onOutput: (c) => { out += c } })
+  assert.equal(r.code, 0, out)
+  assert.equal(statSync(ro).mode & 0o777, 0o555)
+  assert.equal(existsSync(path.join(ro, 'keep')), true)
+})
+
+test('a failed symlink skips that condition and still runs the command', async (t) => {
+  const { env } = await isolatedEnv(t)
+  const symlinkImpl = async () => { throw Object.assign(new Error('injected symlink failure'), { code: 'EPERM' }) }
+  const buildEnv = (opts) => buildSimEnv({ ...opts, symlinkImpl })
+  const before = scratchDirs()
+  let out = ''
+  const r = await runPlatformSim([process.execPath, '-e', 'console.log(process.env.TMPDIR); process.exit(4)'], {
+    baseEnv: env, platform: 'linux', buildEnv, onOutput: (c) => { out += c },
+  })
+  assert.equal(r.code, 4)
+  const simTmp = out.trim()
+  assert.ok(simTmp.includes(' '), simTmp)
+  assert.equal(r.applied.includes('symlinked-tmpdir'), false)
+  assert.ok(r.applied.includes('space-in-tmpdir'))
+  const skip = r.skipped.find((s) => s.name === 'symlinked-tmpdir')
+  assert.ok(skip, JSON.stringify(r.skipped))
+  assert.match(skip.reason, /EPERM/)
+  assert.deepEqual([...scratchDirs()].filter((n) => !before.has(n)), [])
 })

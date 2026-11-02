@@ -57,7 +57,10 @@ async function restoreWrite(dir) {
   for (const name of await readdir(dir)) await restoreWrite(path.join(dir, name))
 }
 
-export async function buildSimEnv({ baseEnv = process.env, platform = process.platform, homedir = os.homedir() } = {}) {
+// The system git config (GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM) passes through untouched: the
+// simulator layers its conditions over the user's whole git setup rather than replacing it.
+// symlinkImpl is a test seam; callers leave it at fs.symlink.
+export async function buildSimEnv({ baseEnv = process.env, platform = process.platform, homedir = os.homedir(), symlinkImpl = symlink } = {}) {
   const realBase = await realpath(os.tmpdir())
   const scratch = await mkdtemp(path.join(realBase, SCRATCH_PREFIX))
   const cleanup = async () => {
@@ -76,7 +79,7 @@ export async function buildSimEnv({ baseEnv = process.env, platform = process.pl
       await mkdir(simTmp)
     } else {
       try {
-        await symlink(target, simTmp, 'dir')
+        await symlinkImpl(target, simTmp, 'dir')
         applied.push('symlinked-tmpdir')
       } catch (err) {
         skipped.push({ name: 'symlinked-tmpdir', reason: `could not create the symlink: ${err.code ?? err.message}` })
