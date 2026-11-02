@@ -14,6 +14,7 @@ Spec: `docs/specs/2026-11-02-ci-reliability-design.md`.
 - Run long test commands in the foreground with an explicit timeout of at least 600000 ms
 - Each teammate runs its tests with a private `TMPDIR` under its own worktree
 - Nothing in this plan edits a user's GitHub workflow; only Task 8 edits this repository's own
+- No task edits `fleetmates.gate.json`; turning `platformSim` and `flaky` on for this repository's gate is a separate owner-visible commit after the run
 
 ## Destination
 
@@ -151,14 +152,12 @@ export function ciAdvice(summary, pkg)       // string[] of warnings, each one l
 ### Task 8: dogfood in this repository
 
 **Files:**
-- Modify (protected): `fleetmates.gate.json`
 - Modify: `.github/workflows/test.yml`
 - Modify: `.github/workflows/deck.yml`
 - Modify: `package.json`
 
 **Depends:** T6
 
-- [ ] **Step 1:** In `fleetmates.gate.json`, set `"platformSim": true` and `"flaky": true` on the `test` check of every phase.
-- [ ] **Step 2:** In `test.yml` and `deck.yml`, run on `push` to every branch (keep `pull_request`), and run the suites through `node scripts/cli.mjs flaky -- npm test` (root) and `node scripts/cli.mjs flaky -- npm --prefix hub test` (hub).
-- [ ] **Step 3:** Add `"test:platform-sim": "node scripts/cli.mjs platform-sim -- npm test"` to `package.json` scripts.
-- [ ] **Step 4:** Run `npm run test:platform-sim` with the timeout above and report the counts. A failure here is a real portability bug: report it with the test name rather than weakening anything.
+- [ ] **Step 1:** In `test.yml` and `deck.yml`, run on `push` to every branch (keep `pull_request`), and run the suites through `node scripts/cli.mjs flaky -- npm test` (root) and `node scripts/cli.mjs flaky -- npm --prefix hub test` (hub).
+- [ ] **Step 2:** Add `"test:platform-sim": "node scripts/cli.mjs platform-sim -- npm test"` to `package.json` scripts.
+- [ ] **Step 3:** Run `npm run test:platform-sim` with the timeout above and report the counts. A failure here is a real portability bug: report it with the test name rather than weakening anything.
