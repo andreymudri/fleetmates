@@ -4,12 +4,12 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runCommandCheck, runChecks, defaultExec } from '../scripts/gate-runner.mjs'
+import { runCommandCheck, runChecks, defaultExec, shellCommand, simAttemptArgv } from '../scripts/gate-runner.mjs'
 import { protectedPaths, reviewLenses } from '../scripts/gate-config.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -47,8 +47,14 @@ function flakyEnv(t, vars) {
   t.after(() => { for (const key of Object.keys(vars)) delete process.env[key] })
 }
 
+// The helper's git reads no host config: an empty global file and no system file, so a host's
+// commit signing or hooks path cannot fail the setup.
+const emptyGitConfig = path.join(privateTmp, 'empty-gitconfig')
+writeFileSync(emptyGitConfig, '')
+const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: emptyGitConfig, GIT_CONFIG_NOSYSTEM: '1' }
+
 function git(cwd, ...args) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: gitEnv })
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`)
   return r.stdout
 }
@@ -56,7 +62,7 @@ function git(cwd, ...args) {
 async function repo(t) {
   const dir = await scratch(t, 'repo-')
   git(dir, 'init', '-q')
-  git(dir, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'init')
+  git(dir, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'init')
   return dir
 }
 
@@ -177,6 +183,22 @@ test('the quarantine is written from the main worktree outside a preview', async
   assert.deepEqual(Object.keys(store.tests), result.flaky)
 })
 
+test('a quarantined test that fails twice is excused and reported', async (t) => {
+  const cwd = await repo(t)
+  const seen = '2026-01-01T00:00:00.000Z'
+  const store = { v: 1, tests: { 'fixture::t1': { firstSeen: seen, lastSeen: seen, flakes: 1, passStreak: 0 } } }
+  await writeFile(path.join(cwd, 'fleetmates.flaky.json'), `${JSON.stringify(store, null, 2)}\n`)
+  flakyEnv(t, { FLAKY_COUNTER: path.join(cwd, '..', `${path.basename(cwd)}.count`), FLAKY_FAILS: '2', FLAKY_REPORT: path.join(cwd, 'report.xml') })
+  const check = { name: 'test', kind: 'command', run: nodeRun(failsNTimes), flaky: true, report: { format: 'junit', path: 'report.xml' } }
+  // The in-tree report form runs only in a tree the gate owns, so the main worktree stands in as one.
+  const result = await runCommandCheck(check, { cwd, previewDir: cwd })
+  assert.equal(result.status, 'pass', result.output)
+  assert.deepEqual(result.quarantinedFailures, ['fixture::t1'])
+  assert.deepEqual(result.flaky, [])
+  assert.match(result.output, /flaky: quarantined test failed: fixture::t1/)
+  assert.match(result.output, /flaky: exit code 1 overridden/)
+})
+
 test('the quarantine is not written inside a preview', async (t) => {
   const cwd = await repo(t)
   flakyEnv(t, { FLAKY_COUNTER: path.join(cwd, '..', `${path.basename(cwd)}.count`), FLAKY_FAILS: '1' })
@@ -238,4 +260,33 @@ test('reviewLenses keeps a listed portability lens and never duplicates it', () 
 
 test('reviewLenses starts from the default lens list when the review check names none', () => {
   assert.deepEqual(reviewLenses(manifest(), 'p1', { oses: new Set(['macos']) }), ['correctness', 'security', 'tests', 'portability'])
+})
+
+test('shellCommand runs win32 checks verbatim through cmd.exe, the way node\'s shell option does', () => {
+  const run = 'node -e "process.exit(0)"'
+  assert.deepEqual(shellCommand(run, { platform: 'win32', comspec: 'C:\\Windows\\system32\\cmd.exe' }), {
+    file: 'C:\\Windows\\system32\\cmd.exe',
+    args: ['/d', '/s', '/c', '"node -e "process.exit(0)""'],
+    windowsVerbatimArguments: true,
+  })
+  assert.equal(shellCommand(run, { platform: 'win32', comspec: undefined }).file, 'cmd.exe')
+  assert.deepEqual(shellCommand(run, { platform: 'linux' }), { file: '/bin/sh', args: ['-c', run], windowsVerbatimArguments: false })
+})
+
+test('platformSim: a run holding double quotes passes on this host', async (t) => {
+  const cwd = await scratch(t)
+  const result = await runCommandCheck({ name: 'quoted', kind: 'command', run: `${q(process.execPath)} -e "process.exit(0)"`, platformSim: true }, { cwd })
+  assert.equal(result.status, 'pass', result.output)
+})
+
+// The verbatim path is the one win32 takes. The flag means nothing to a POSIX spawn, so on this host
+// it runs /bin/sh and shows that path still applies the simulator's environment and cleans up.
+test('platformSim: the verbatim spawn path runs under the simulator and removes its scratch', { skip: WIN && 'drives /bin/sh' }, async (t) => {
+  const cwd = await scratch(t)
+  const spec = { file: '/bin/sh', args: ['-c', nodeRun(realpathProbe)], windowsVerbatimArguments: true }
+  const r = await defaultExec(process.execPath, cwd, { argv: simAttemptArgv(spec), timeoutMs: 60_000 })
+  assert.equal(r.code, 1, r.output)
+  assert.match(r.output, /os\.tmpdir\(\) is not canonical/)
+  assert.match(r.output, /platform-sim: applied .*symlinked-tmpdir.*; skipped umask-077 \(not applied to a verbatim shell command\)/)
+  assert.deepEqual(readdirSync(privateTmp).filter((n) => n.startsWith('fm-platform-sim-')), [])
 })

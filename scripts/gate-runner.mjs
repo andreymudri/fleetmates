@@ -660,31 +660,63 @@ export function reliabilityFault(check) {
 // the same options as a plain check: the timeout, the process-group kill and the log are tested on
 // this path (tests/gate-ci-reliability.test.mjs); the preview claim rides the same `onSpawn` and
 // is not separately tested here. It ignores SIGTERM so that, when the timeout signals the group,
-// it outlives the command long enough for `runPlatformSim` to remove its scratch directory.
+// it outlives the command long enough to remove the simulator's scratch directory.
+//
+// Its one argument is a `shellCommand`-shaped spec as JSON. `runPlatformSim` spawns with node's
+// ordinary argv quoting, which cmd.exe does not read back, so a spec that needs
+// `windowsVerbatimArguments` is run here instead: the same simulator environment from
+// `buildSimEnv`, spawned with the flag. That path does not apply the umask (on win32 the simulator
+// skips it anyway), and it says so in its `applied` line.
 const SIM_TRAMPOLINE = `
-const { runPlatformSim } = await import(${JSON.stringify(new URL('./platform-sim.mjs', import.meta.url).href)})
+const { runPlatformSim, buildSimEnv } = await import(${JSON.stringify(new URL('./platform-sim.mjs', import.meta.url).href)})
+const { spawn } = await import('node:child_process')
 process.on('SIGTERM', () => {})
+const spec = JSON.parse(process.argv[1])
+const onOutput = (chunk) => process.stdout.write(chunk)
+async function runVerbatim() {
+  const sim = await buildSimEnv()
+  try {
+    const code = await new Promise((resolve, reject) => {
+      const child = spawn(spec.file, spec.args, { cwd: process.cwd(), env: sim.env, stdio: ['ignore', 'pipe', 'pipe'], windowsVerbatimArguments: true, windowsHide: true })
+      child.stdout.on('data', onOutput)
+      child.stderr.on('data', onOutput)
+      child.on('error', reject)
+      child.on('close', (status) => resolve(typeof status === 'number' ? status : 1))
+    })
+    const applied = sim.applied.filter((name) => name !== 'umask-077')
+    const skipped = sim.skipped.concat(sim.applied.includes('umask-077') ? [{ name: 'umask-077', reason: 'not applied to a verbatim shell command' }] : [])
+    return { code, applied, skipped }
+  } finally {
+    try { await sim.cleanup() } catch (err) { onOutput('platform-sim: could not remove the scratch directory: ' + err.message + '\\n') }
+  }
+}
 let r
 try {
-  r = await runPlatformSim(process.argv.slice(1), { cwd: process.cwd(), onOutput: (chunk) => process.stdout.write(chunk) })
+  r = spec.windowsVerbatimArguments
+    ? await runVerbatim()
+    : await runPlatformSim([spec.file, ...spec.args], { cwd: process.cwd(), onOutput })
 } catch (err) {
-  process.stdout.write('platform-sim: could not run the command: ' + err.message + '\\n')
+  onOutput('platform-sim: could not run the command: ' + err.message + '\\n')
   process.exit(127)
 }
 const skipped = r.skipped.map((s) => s.name + ' (' + s.reason + ')')
-process.stdout.write('platform-sim: applied ' + r.applied.join(', ') + (skipped.length ? '; skipped ' + skipped.join('; ') : '') + '\\n')
+onOutput('platform-sim: applied ' + r.applied.join(', ') + (skipped.length ? '; skipped ' + skipped.join('; ') : '') + '\\n')
 process.exitCode = r.code
 `
 
-// The check's `run` string as argv for the flaky detector and the simulator, both of which spawn
-// without a shell: the platform shell, invoked the way node's own `shell: true` invokes it. Without
-// the simulator the flaky path hands this exact array back to `exec` as the `run` string with a
-// shell. Under the simulator on win32, node quotes `run` as an ordinary argument for cmd.exe; a
-// `run` holding double quotes is unverified there.
-function shellArgv(run) {
-  return process.platform === 'win32'
-    ? [process.env.ComSpec || 'cmd.exe', '/d', '/s', '/c', run]
-    : ['/bin/sh', '-c', run]
+// The node argv that runs one simulated attempt of `spec` (`{ file, args, windowsVerbatimArguments }`).
+export function simAttemptArgv(spec) {
+  return ['--input-type=module', '-e', SIM_TRAMPOLINE, '--', JSON.stringify(spec)]
+}
+
+// The check's `run` string as a spawn spec for the flaky detector and the simulator, which spawn
+// without a shell: the platform shell, invoked the way node's own `shell: true` invokes it. On
+// win32 that is `cmd.exe /d /s /c "<run>"` with `windowsVerbatimArguments`, because cmd.exe does
+// not undo the backslash escaping node's ordinary argv quoting puts on a double quote.
+export function shellCommand(run, { platform = process.platform, comspec = process.env.ComSpec } = {}) {
+  return platform === 'win32'
+    ? { file: comspec || 'cmd.exe', args: ['/d', '/s', '/c', `"${run}"`], windowsVerbatimArguments: true }
+    : { file: '/bin/sh', args: ['-c', run], windowsVerbatimArguments: false }
 }
 
 // Whether `dir` is the top level of a repository's main worktree, the only place the gate writes
@@ -712,7 +744,10 @@ async function runReliably(check, { cwd, previewDir, exec, contract, execOptions
   const outputs = []
   let timedOut = false
   let outputLimited = false
-  const shellForm = shellArgv(check.run)
+  const shell = shellCommand(check.run)
+  // The array the flaky detector sees. Handed back unchanged (the whole-command retry), it means
+  // `shell`, verbatim flag included; any other argv is a plain command.
+  const shellForm = [shell.file, ...shell.args]
   const attempt = async (argv) => {
     if (timedOut || outputLimited) return { code: 1 }
     const remaining = deadline - Date.now()
@@ -722,8 +757,9 @@ async function runReliably(check, { cwd, previewDir, exec, contract, execOptions
       return { code: 1 }
     }
     const options = { ...execOptions, timeoutMs: remaining }
+    const spec = argv === shellForm ? shell : { file: argv[0], args: argv.slice(1), windowsVerbatimArguments: false }
     const r = check.platformSim === true
-      ? await exec(process.execPath, cwd, { ...options, argv: ['--input-type=module', '-e', SIM_TRAMPOLINE, '--', ...argv] })
+      ? await exec(process.execPath, cwd, { ...options, argv: simAttemptArgv(spec) })
       : argv === shellForm
         ? await exec(check.run, cwd, options)
         : await exec(argv[0], cwd, { ...options, argv: argv.slice(1) })
