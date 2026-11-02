@@ -77,6 +77,11 @@ failure that happens only on a plain Linux run still reaches the remote CI.
    `fleetmates.flaky.json` with the date and a count. A second failure exits with the original
    code.
 4. A test already in quarantine that fails is reported as a warning and does not fail the check.
+   Only named tests from a report are ever quarantined. Without a report, a pass on the retry is
+   reported as a flake of the whole command and recorded for visibility, but the whole command is
+   never treated as quarantined: if it fails twice, the check is red, every time. Likewise, a
+   retry that exits non-zero while its report names no failed test is red, because the failure is
+   outside any test (a crash, an unhandled rejection, a coverage threshold).
    A quarantined test that passes increments a pass streak. After 20 passes in a row, `doctor`
    suggests removing it.
 
