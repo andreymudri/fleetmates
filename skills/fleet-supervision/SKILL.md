@@ -123,7 +123,7 @@ used by worktree" until that worktree is pruned.
 
 ## The watchdog
 
-`watch`, started under `Monitor` after each dispatch (see `parallel-execution` section 2), acts on
+`watch`, started under `Monitor` after each dispatch (see `Watch the phase` in `parallel-execution`), acts on
 the signals `liveness` reports. It prints one JSON object per stdout line. The first is `start`,
 naming the stale window in use, for example
 `{"event":"start","staleMinutes":20,"learned":false,"samples":0}`. Then, every `intervalMinutes`,
