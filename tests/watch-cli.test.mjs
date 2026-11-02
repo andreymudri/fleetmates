@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -31,6 +31,7 @@ async function withRun(fn) {
   git(root, ['init', '--quiet', '--initial-branch=main'])
   git(root, ['config', 'user.email', 'test@example.com'])
   git(root, ['config', 'user.name', 'Test'])
+  git(root, ['config', 'core.autocrlf', 'false'])
   await writeFile(path.join(root, 'plan.md'), PLAN, 'utf8')
   await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'x' }), 'utf8')
   await writeFile(path.join(root, '.gitignore'), '.fleetmates/\nfleetmates.local.json\nwt-*/\n', 'utf8')
@@ -107,6 +108,26 @@ test('loadConfig resolves watch to the watchdog defaults plus learn and spinFail
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+// macOS reaches the temp dir through /var -> /private/var and Windows through an 8.3 name, so a
+// --root that is not its own realpath is the normal case there. A symlink reproduces it on Linux.
+test('watch --once records its action when --root is reached through a symlink', { skip: process.platform === 'win32' }, async () => {
+  await withRun(async ({ root, io, lines, g }) => {
+    const wt = await stalledAndWorking(root, g)
+    const alias = `${root}-alias`
+    await symlink(root, alias, 'dir')
+    try {
+      assert.equal(await watchOnce(alias, io), 0, lines.join('\n'))
+      const out = events(lines)
+      assert.deepEqual(out.map((e) => e.event), ['start', 'resume'], JSON.stringify(lines))
+      const ledger = await readEvents(ledgerPath(root, 'r1', 'T1'))
+      assert.ok(ledger.some((e) => e.kind === 'watchdog' && e.action === 'resume'), JSON.stringify(ledger))
+    } finally {
+      await rm(alias, { force: true })
+      g(['worktree', 'remove', '--force', wt])
+    }
+  })
 })
 
 test('watch --once resumes the stalled task only, records it, and a second pass waits out the grace window', async () => {
@@ -326,6 +347,7 @@ test('rescue refuses a worktree whose .git points at another repository and leav
     try {
       git(other, ['init', '--quiet', '--initial-branch=main'])
       git(other, ['-c', 'user.email=test@example.com', '-c', 'user.name=Test', 'commit', '--quiet', '--allow-empty', '-m', 'o'])
+      await unlink(path.join(wt, '.git')) // hidden on Windows: writing over it is EPERM
       await writeFile(path.join(wt, '.git'), `gitdir: ${path.join(other, '.git')}\n`, 'utf8')
       const code = await runCli(['rescue', '--run', 'r1', '--task', 'T1', '--root', root], io)
       assert.equal(code, 1)

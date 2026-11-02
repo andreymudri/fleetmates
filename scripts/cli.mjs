@@ -5130,15 +5130,20 @@ export async function runCli(argv, io = { out: console.log }) {
   // The watchdog. Supervision only: it prints what the orchestrator should do next and records
   // its own ladder in `watch.json`; nothing a gate check reads is written here.
   if (command === 'watch') {
+    // The ledger refuses a parent whose realpath differs from its path, so a --root reached
+    // through a symlink (macOS /var -> /private/var) or an 8.3 name (Windows RUNNER~1) would make
+    // every watchdog record fail. Resolve once here, with `.native` for the 8.3 case.
+    let watchRoot = root
+    try { watchRoot = realpathSync.native(root) } catch { /* keep the given root */ }
     let tasks = []
     try {
-      tasks = assignPhases(parsePlan(await readFile(path.resolve(root, flags.plan), 'utf8')))
+      tasks = assignPhases(parsePlan(await readFile(path.resolve(watchRoot, flags.plan), 'utf8')))
     } catch (err) {
       io.out(`cannot read the plan at ${printable(flags.plan)}: ${printable(err.message)}`)
       return 2
     }
     try {
-      await stat(runDir(root, runId))
+      await stat(runDir(watchRoot, runId))
     } catch {
       io.out(
         `run ${printable(runId)} has no directory under ${NAMES.stateDir} — check --run, because a run id that`
@@ -5148,7 +5153,7 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     let resolved
     try {
-      ({ resolved } = await loadConfig(root))
+      ({ resolved } = await loadConfig(watchRoot))
     } catch (err) {
       io.out(printable(err.message))
       return 2
@@ -5158,7 +5163,7 @@ export async function runCli(argv, io = { out: console.log }) {
       return 0
     }
 
-    const lock = path.join(runDir(root, runId), 'watch.lock')
+    const lock = path.join(runDir(watchRoot, runId), 'watch.lock')
     const isAlive = (pid) => { try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' } }
     try {
       await acquireLock(lock, process.pid, isAlive)
@@ -5167,7 +5172,7 @@ export async function runCli(argv, io = { out: console.log }) {
       throw err
     }
     try {
-      return await watchRun({ root, runId, flags, tasks, watchConfig: resolved.watch, io })
+      return await watchRun({ root: watchRoot, runId, flags, tasks, watchConfig: resolved.watch, io })
     } finally {
       await releaseLock(lock, process.pid)
     }

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { rescuePatchPath, rescueWorktree } from '../scripts/rescue.mjs'
@@ -18,6 +18,7 @@ async function fixture(t) {
   git(repo, ['config', 'user.name', 'test'])
   git(repo, ['config', 'user.email', 'test@example.invalid'])
   git(repo, ['config', 'commit.gpgsign', 'false'])
+  git(repo, ['config', 'core.autocrlf', 'false'])
   await writeFile(path.join(repo, 'tracked.txt'), 'one\n')
   await writeFile(path.join(repo, '.gitignore'), 'ignored.log\n')
   git(repo, ['add', '.'])
@@ -146,6 +147,7 @@ test('rescueWorktree refuses a worktree whose .git file points at a foreign git 
   await writeFile(script, `#!/bin/sh\ntouch "${marker}"\n`, { mode: 0o755 })
   git(foreign, ['config', 'core.fsmonitor', script])
   await dirtyWorktree(f.wt)
+  await unlink(path.join(f.wt, '.git')) // hidden on Windows: writing over it is EPERM
   await writeFile(path.join(f.wt, '.git'), `gitdir: ${path.join(foreign, '.git')}\n`)
   const removed = []
   await assert.rejects(() => rescueWorktree({
