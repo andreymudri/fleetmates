@@ -459,14 +459,17 @@ async function phaseReviewLenses(root, config, phaseName, check) {
 export const CI_POLL_MS = 30_000
 
 // Judges one `actions/runs?head_sha=<sha>` response for `ci-wait` (spec section 4): every GitHub
-// Actions workflow run on commit `sha` must be `completed` with conclusion `success`. A re-run keeps
+// Actions workflow run on commit `sha` must be `completed` with conclusion `success` or `skipped`
+// (a whole run skipped, as by a workflow-level condition, is no failure). A re-run keeps
 // its run id with a higher `run_attempt`, so the latest attempt of each id is the one judged. Runs
 // are judged whole, never by name: the push and pull_request runs of one workflow are two runs, a
 // job waiting behind `needs:` keeps its run in progress, and a job skipped by `if:` does not fail
 // its run. Returns `{ state: 'pass'|'fail'|'pending'|'unreadable', ... }`: any completed run with
-// another conclusion fails; otherwise any run not yet completed, or no run at all yet, is pending;
+// another conclusion (`neutral`, `stale` and a null one included) fails, and a failure is decided
+// before anything still running is waited on; otherwise any run not yet completed, or no run at all yet, is pending;
 // a response that is not a full single page (more than 100 runs) is unreadable.
 export const CI_RUNS_PAGE = 100
+const CI_PASSING_CONCLUSIONS = new Set(['success', 'skipped'])
 export function judgeWorkflowRuns(sha, snapshot) {
   if (!snapshot || !Array.isArray(snapshot.workflow_runs) || !Number.isSafeInteger(snapshot.total_count)) {
     return { state: 'unreadable', reason: 'the response carries no workflow_runs list' }
@@ -484,7 +487,7 @@ export function judgeWorkflowRuns(sha, snapshot) {
   }
   const runs = [...latest.values()]
   if (runs.length === 0) return { state: 'pending', pending: [], reason: 'no workflow run has started on this commit yet' }
-  const failed = runs.filter((r) => r.status === 'completed' && r.conclusion !== 'success')
+  const failed = runs.filter((r) => r.status === 'completed' && !CI_PASSING_CONCLUSIONS.has(r.conclusion))
   if (failed.length > 0) return { state: 'fail', failed }
   const pending = runs.filter((r) => r.status !== 'completed')
   if (pending.length > 0) return { state: 'pending', pending }
@@ -7622,12 +7625,14 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
     // Read off the tip commit's tree, not the working tree: what GitHub runs is the pushed commit.
-    const listed = await defaultGitExec(['ls-tree', '--name-only', sha, '--', '.github/workflows/'], root)
+    // `-z`: without it git quotes a name holding non-ASCII, `"` or `\`, which then no longer ends
+    // in `.yml`.
+    const listed = await defaultGitExec(['ls-tree', '-z', '--name-only', sha, '--', '.github/workflows/'], root)
     if (listed.code !== 0) {
       io.out(`could not list .github/workflows at ${sha}: ${printable(listed.stderr.trim())}`)
       return 2
     }
-    if (!listed.stdout.split(/\r?\n/).some((name) => /\.ya?ml$/i.test(name))) {
+    if (!listed.stdout.split('\0').some((name) => /\.ya?ml$/i.test(name))) {
       io.out(`no CI workflows: skipped — the tip commit ${sha} has no .github/workflows, so there is no remote CI to wait for`)
       return 0
     }
