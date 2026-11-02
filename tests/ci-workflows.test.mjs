@@ -157,3 +157,31 @@ test('a branch filter covers fleet run branches only when a pattern matches run/
   for (const yes of ["'**'", "'run/**'", "'fleetmates/**'", "'run/*'", "master, 'run/**'", "'fleetmates/*/*'", "'**', '!run/**'"]) assert.equal(await covers(yes), true, yes)
   for (const no of ["'feat/*'", 'master', "'release/*'", "'*'", "'fleetmates/*'", "'**/master'", "'run-*'", "'**', '!run/**', '!fleetmates/**'"]) assert.equal(await covers(no), false, no)
 })
+
+test('a ~250 KiB whitespace-heavy line is read in under 1 s and reported as unread', async t => {
+  const long = `${' '.repeat(250 * 1024)}x`
+  const root = project(t, { 'ci.yml': `on: push\n${long}\n${job('windows-latest')}` })
+  const started = performance.now()
+  const read = await readWorkflows(root)
+  const elapsed = performance.now() - started
+  assert.ok(elapsed < 1000, `took ${Math.round(elapsed)} ms`)
+  const [file] = read.files
+  assert.deepEqual(file.unread, [{ line: 2, reason: 'longer than 4 KiB' }])
+  assert.equal(file.branchPushes, true)
+  assert.deepEqual([...file.oses], ['windows'])
+  // A line just under the cap is still read.
+  const near = await one(t, `on: push\n${job(`windows-latest${' '.repeat(4000)}`)}`)
+  assert.deepEqual(near.unread, [])
+  assert.deepEqual([...near.oses], ['windows'])
+})
+
+test('workflow files beyond the cap of 64 are skipped and reported', async t => {
+  const files = {}
+  for (let i = 0; i < 66; i++) files[`w${String(i).padStart(2, '0')}.yml`] = `on: push\n${job('ubuntu-latest')}`
+  const read = await readWorkflows(project(t, files))
+  assert.equal(read.files.length, 64)
+  assert.deepEqual(read.skipped, [
+    { path: '.github/workflows/w64.yml', reason: 'more than 64 workflow files' },
+    { path: '.github/workflows/w65.yml', reason: 'more than 64 workflow files' },
+  ])
+})

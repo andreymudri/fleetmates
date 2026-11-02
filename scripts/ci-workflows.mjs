@@ -1,5 +1,7 @@
 // A line-oriented reader for the few keys this needs. Not a YAML parser: it reads `on:`,
 // `runs-on:`, `os:` lists and `run:` lines, and reports what it could not read rather than guessing.
+// Reading is bounded: files over 256 KiB, lines over 4 KiB and files past the 64th are reported,
+// not read.
 //
 // Nothing here prints. Paths and reasons come from the user's repository, so a caller that shows
 // them on a terminal passes them through `printable` from `scripts/reviews.mjs`.
@@ -27,9 +29,18 @@ function stripComment(line) {
   return line
 }
 
-function lines(text) {
-  return text.split(/\r?\n/).map(raw => {
-    const content = stripComment(raw).replace(/\s+$/, '')
+// A line longer than this is not read: it becomes a blank line and is listed in `unread`.
+export const MAX_LINE_CHARS = 4096
+
+// Trimming uses trimEnd/trim, not a `/\s+$/` regex, which backtracks quadratically on a long
+// whitespace run that does not end the line.
+function lines(text, unread) {
+  return text.split(/\r?\n/).map((raw, i) => {
+    if (raw.length > MAX_LINE_CHARS) {
+      unread.push({ line: i + 1, reason: 'longer than 4 KiB' })
+      return { indent: 0, text: '' }
+    }
+    const content = stripComment(raw).trimEnd()
     return { indent: content.length - content.trimStart().length, text: content.trim() }
   })
 }
@@ -273,9 +284,13 @@ function readFlaky(ls) {
 }
 
 export function readWorkflowText(text) {
-  const ls = lines(text)
-  return { oses: readOses(ls), branchPushes: readOn(ls), usesFlaky: readFlaky(ls) }
+  const unread = []
+  const ls = lines(text, unread)
+  return { oses: readOses(ls), branchPushes: readOn(ls), usesFlaky: readFlaky(ls), unread }
 }
+
+// At most this many workflow files are read, in name order; the rest are listed in `skipped`.
+export const MAX_WORKFLOW_FILES = 64
 
 export async function readWorkflows(root) {
   const dir = join(root, ...WORKFLOW_DIR)
@@ -288,8 +303,10 @@ export async function readWorkflows(root) {
   }
   const files = []
   const skipped = []
-  for (const name of names.filter(n => /\.ya?ml$/i.test(n)).sort()) {
+  const workflowNames = names.filter(n => /\.ya?ml$/i.test(n)).sort()
+  for (const [index, name] of workflowNames.entries()) {
     const path = [...WORKFLOW_DIR, name].join('/')
+    if (index >= MAX_WORKFLOW_FILES) { skipped.push({ path, reason: 'more than 64 workflow files' }); continue }
     let info
     try {
       info = await stat(join(dir, name))
