@@ -101,7 +101,7 @@ severities and `blockOn`.
 
 - the test workflows run only on `pull_request` and the default branch, so a run branch push
   gets no CI;
-- the matrix covers a single OS while the project claims more (package `os` field or README);
+- the matrix covers a single OS while `package.json` has no `os` field restricting it to that OS;
 - no step uses the flaky detector.
 
 It only suggests; it never edits a workflow.
