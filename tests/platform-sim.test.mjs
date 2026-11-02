@@ -181,3 +181,64 @@ test('buildSimEnv cleanup removes the scratch directory', async (t) => {
   await sim.cleanup()
   assert.equal(existsSync(path.dirname(link)), false)
 })
+
+const posixOnly = { skip: process.platform === 'win32' }
+
+test('a read-only directory left under TMPDIR is still removed and the exit code is kept', posixOnly, async (t) => {
+  const { env } = await isolatedEnv(t)
+  const before = scratchDirs()
+  const script = [
+    'const fs = require("node:fs"), path = require("node:path")',
+    'const ro = path.join(process.env.TMPDIR, "ro", "inner")',
+    'fs.mkdirSync(ro, { recursive: true })',
+    'fs.writeFileSync(path.join(ro, "f"), "x")',
+    'fs.chmodSync(ro, 0o555)',
+    'fs.chmodSync(path.dirname(ro), 0o500)',
+    'process.exit(3)',
+  ].join('\n')
+  let out = ''
+  const r = await runPlatformSim([process.execPath, '-e', script], { baseEnv: env, onOutput: (c) => { out += c } })
+  assert.equal(r.code, 3, out)
+  assert.deepEqual([...scratchDirs()].filter((n) => !before.has(n)), [])
+})
+
+const failingCleanup = async (opts) => {
+  const sim = await buildSimEnv(opts)
+  return { ...sim, cleanup: async () => { await sim.cleanup(); throw new Error('injected cleanup failure') } }
+}
+
+test('a cleanup failure is reported on onOutput and never replaces the exit code', async (t) => {
+  const { env } = await isolatedEnv(t)
+  let out = ''
+  const r = await runPlatformSim([process.execPath, '-e', 'process.exit(5)'], {
+    baseEnv: env, buildEnv: failingCleanup, onOutput: (c) => { out += c },
+  })
+  assert.equal(r.code, 5)
+  assert.match(out, /injected cleanup failure/)
+})
+
+test('a cleanup failure after a spawn error still rejects with the spawn error', async (t) => {
+  const { env } = await isolatedEnv(t)
+  const missing = path.join(tmpdir(), 'fm-sim-no-such-dir', 'nested')
+  await assert.rejects(
+    runPlatformSim([process.execPath, '-e', '0'], { cwd: missing, baseEnv: env, buildEnv: failingCleanup, onOutput: quiet }),
+    (err) => err.code === 'ENOENT',
+  )
+})
+
+test('buildSimEnv removes its scratch directory when it fails after creating it', async (t) => {
+  const { home, env } = await isolatedEnv(t)
+  const before = scratchDirs()
+  // GIT_CONFIG_GLOBAL is read only after the scratch directory exists.
+  const baseEnv = { ...env }
+  delete baseEnv.GIT_CONFIG_GLOBAL
+  Object.defineProperty(baseEnv, 'GIT_CONFIG_GLOBAL', { enumerable: true, get() { throw new Error('injected env failure') } })
+  await assert.rejects(buildSimEnv({ baseEnv, platform: 'linux', homedir: home }), /injected env failure/)
+  assert.deepEqual([...scratchDirs()].filter((n) => !before.has(n)), [])
+})
+
+test('a child killed by SIGTERM yields exit code 143', posixOnly, async (t) => {
+  const { env } = await isolatedEnv(t)
+  const r = await runPlatformSim([process.execPath, '-e', 'process.kill(process.pid, "SIGTERM")'], { baseEnv: env, onOutput: quiet })
+  assert.equal(r.code, 143)
+})

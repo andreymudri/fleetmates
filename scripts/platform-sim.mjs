@@ -3,7 +3,7 @@
 // space, git checks out with core.autocrlf=true, and on POSIX the child runs under umask 077.
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -46,10 +46,24 @@ function gitConfigText(includes) {
   return lines.join('\n') + '\n'
 }
 
+// The command may leave directories it made read-only, which rm cannot empty. Give every
+// directory back u+rwx before removing, using lstat so a symlink is never followed out of the
+// scratch directory.
+async function restoreWrite(dir) {
+  let st
+  try { st = await lstat(dir) } catch { return }
+  if (!st.isDirectory()) return
+  if ((st.mode & 0o700) !== 0o700) await chmod(dir, (st.mode & 0o7777) | 0o700)
+  for (const name of await readdir(dir)) await restoreWrite(path.join(dir, name))
+}
+
 export async function buildSimEnv({ baseEnv = process.env, platform = process.platform, homedir = os.homedir() } = {}) {
   const realBase = await realpath(os.tmpdir())
   const scratch = await mkdtemp(path.join(realBase, SCRATCH_PREFIX))
-  const cleanup = () => rm(scratch, { recursive: true, force: true })
+  const cleanup = async () => {
+    await restoreWrite(scratch)
+    await rm(scratch, { recursive: true, force: true })
+  }
   try {
     const applied = []
     const skipped = []
@@ -91,15 +105,27 @@ export async function buildSimEnv({ baseEnv = process.env, platform = process.pl
   }
 }
 
-export async function runPlatformSim(argv, { cwd, onOutput = (chunk) => process.stdout.write(chunk), platform = process.platform, baseEnv = process.env } = {}) {
+// buildEnv is a test seam; callers leave it at buildSimEnv.
+export async function runPlatformSim(argv, { cwd, onOutput = (chunk) => process.stdout.write(chunk), platform = process.platform, baseEnv = process.env, buildEnv = buildSimEnv } = {}) {
   if (!Array.isArray(argv) || argv.length === 0) throw new Error('runPlatformSim needs a command')
-  const sim = await buildSimEnv({ baseEnv, platform })
+  const sim = await buildEnv({ baseEnv, platform })
+  // A cleanup failure is reported, never thrown: it must not replace the command's exit code
+  // or the spawn error.
+  const cleanup = async () => {
+    try {
+      await sim.cleanup()
+    } catch (err) {
+      onOutput(`platform-sim: could not remove the scratch directory: ${err.message}\n`)
+    }
+  }
+  let code
   try {
     const umask = sim.applied.includes('umask-077')
+    // argv[0] is spawned without a shell, so resolving Windows .cmd shims is the caller's concern.
     const [file, args] = umask
       ? [process.execPath, ['-e', UMASK_TRAMPOLINE, '--', ...argv]]
       : [argv[0], argv.slice(1)]
-    const code = await new Promise((resolve, reject) => {
+    code = await new Promise((resolve, reject) => {
       const child = spawn(file, args, { cwd, env: sim.env, stdio: ['ignore', 'pipe', 'pipe'] })
       child.stdout.on('data', onOutput)
       child.stderr.on('data', onOutput)
@@ -108,8 +134,8 @@ export async function runPlatformSim(argv, { cwd, onOutput = (chunk) => process.
         resolve(typeof status === 'number' ? status : 128 + (os.constants.signals[signal] ?? 0))
       })
     })
-    return { code, applied: sim.applied, skipped: sim.skipped }
   } finally {
-    await sim.cleanup()
+    await cleanup()
   }
+  return { code, applied: sim.applied, skipped: sim.skipped }
 }
