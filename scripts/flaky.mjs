@@ -151,20 +151,28 @@ function decode(text) {
   })
 }
 
-// The unit a testcase belongs to: its `file` attribute, made relative to the directory the
-// command ran in when it is absolute, else its `classname`. `readReport` has already refused a
-// file outside `roots` and a testcase with neither attribute, so neither case reaches here.
-function unitOf(tag, roots) {
+// The `file` attribute made relative to the directory the command ran in when it is absolute
+// (under either spelling in `roots`), and posix-normalised, or null when there is none.
+function fileOf(tag, roots) {
   const file = attr(tag, 'file')
-  if (file !== null && file !== '') {
-    const norm = file.replaceAll('\\', '/')
-    if (!path.posix.isAbsolute(norm) && !/^[A-Za-z]:\//.test(norm)) return path.posix.normalize(norm)
-    for (const r of roots) {
-      if (norm.startsWith(`${r}/`)) return path.posix.normalize(norm.slice(r.length + 1))
-    }
-    return norm
+  if (file === null || file === '') return null
+  const norm = file.replaceAll('\\', '/')
+  if (!path.posix.isAbsolute(norm) && !/^[A-Za-z]:\//.test(norm)) return path.posix.normalize(norm)
+  for (const r of roots) {
+    if (norm.startsWith(`${r}/`)) return path.posix.normalize(norm.slice(r.length + 1))
   }
-  return attr(tag, 'classname') ?? ''
+  return norm
+}
+
+// What a testcase is keyed by, ahead of its name: `<file>::<classname>` when it has both (node:test
+// writes the enclosing describe as the classname, so two describes in one file stay apart), else
+// whichever of the two it has. `readReport` has already refused a file outside `roots` and a
+// testcase with neither attribute.
+function unitOf(tag, roots) {
+  const file = fileOf(tag, roots)
+  const classname = attr(tag, 'classname')
+  const parts = [file, classname].filter((p) => p !== null && p !== '')
+  return parts.join('::')
 }
 
 function attr(tag, name) {
@@ -177,7 +185,7 @@ function attr(tag, name) {
 // reads each testcase's id and whether it holds a <failure> or <error>. One pass of indexOf
 // calls that only move forward, so it stays linear on agent-written input.
 //
-// A test's id is `<unit>::<name>` (unit as in `unitOf`), so a quarantined test never excuses a
+// A test's id is `<unit>::<name>` (unit as in `unitOf`, so `<file>::<classname>::<name>` at most), so a quarantined test never excuses a
 // same-named test in another file. `names` maps each id back to its bare name, which is what a
 // filtered retry passes to the runner: runners filter by test name, not by file.
 function outcomes(xml, roots) {
@@ -267,7 +275,7 @@ function cell(text) {
 }
 
 // Returns { code, flaky: string[], quarantinedFailures: string[], retried: 'none'|'filtered'|'whole' }.
-// `write` receives the detector's own lines (`flaky: <id>`, ids being `<file or classname>::<name>`, and GitHub annotations when
+// `write` receives the detector's own lines (`flaky: <id>`, ids being `<file>::<classname>::<name>` or the part of it the report has, and GitHub annotations when
 // GITHUB_ACTIONS=true); the command's output goes to the inherited stdio of the default exec.
 // `exec(argv, { cwd, env })` resolves to `{ code }`.
 export async function runFlaky(argv, {

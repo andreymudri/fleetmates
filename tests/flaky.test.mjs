@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, writeFile, rm, readdir, symlink, mkdir } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, rm, readdir, symlink, mkdir, realpath } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { spawn } from 'node:child_process'
 import os from 'node:os'
@@ -201,10 +201,11 @@ test('retryArgv: one filter flag per known runner, null for an unknown one', () 
 
 // `cases` is [name, 'pass'|'fail'|'skip'][]; names are written into the XML as given, so a test
 // can spell a control byte as a numeric character reference.
-// An optional third element sets the testcase's `file` attribute.
+// An optional third element sets the testcase's `file` attribute; an optional fourth replaces the
+// classname `c`, and `null` there leaves the classname out.
 function junit(cases) {
-  const body = cases.map(([name, state, file]) => {
-    const attrs = `name="${name}" classname="c"${file ? ` file="${file}"` : ''}`
+  const body = cases.map(([name, state, file, classname = 'c']) => {
+    const attrs = `name="${name}"${classname === null ? '' : ` classname="${classname}"`}${file ? ` file="${file}"` : ''}`
     return state === 'pass'
       ? `<testcase ${attrs}/>`
       : `<testcase ${attrs}>${state === 'fail' ? '<failure message="x"/>' : '<skipped/>'}</testcase>`
@@ -480,7 +481,7 @@ test('red unless every test still failing is quarantined: one quarantined failur
 
 test('tests are identified by file plus name: a quarantined test never excuses a same-named test in another file', async (t) => {
   const s = await setup(t, { fails: 0, report: true })
-  await seed(s.root, { 'a.test.mjs::works': entry() })
+  await seed(s.root, { 'a.test.mjs::c::works': entry() })
   const report = (state) => junit([['works', 'pass', 'a.test.mjs'], ['works', state, 'b.test.mjs']])
   const { exec, seen } = scripted([{ code: 1, xml: report('fail') }, { code: 1, xml: report('fail') }], s.reportPath)
   const r = await runFlaky(NODE_ARGV, { root: s.root, cwd: s.root, env: s.env, report: s.reportPath, exec, write: s.write, now: () => NOW })
@@ -492,13 +493,13 @@ test('tests are identified by file plus name: a quarantined test never excuses a
 
 test('an absolute file attribute under cwd becomes a relative id; the same test quarantined is excused', async (t) => {
   const s = await setup(t, { fails: 0, report: true })
-  await seed(s.root, { 'tests/b.test.mjs::works': entry() })
+  await seed(s.root, { 'tests/b.test.mjs::c::works': entry() })
   const abs = path.join(s.root, 'tests', 'b.test.mjs').replaceAll('\\', '/')
   const report = junit([['works', 'fail', abs]])
   const { exec } = scripted([{ code: 1, xml: report }, { code: 1, xml: report }], s.reportPath)
   const r = await runFlaky(NODE_ARGV, { root: s.root, cwd: s.root, env: s.env, report: s.reportPath, exec, write: s.write, now: () => NOW })
   assert.equal(r.code, 0)
-  assert.deepEqual(r.quarantinedFailures, ['tests/b.test.mjs::works'])
+  assert.deepEqual(r.quarantinedFailures, ['tests/b.test.mjs::c::works'])
 })
 
 test('an excused run prints one line saying the exit code was overridden, and a ::warning under GitHub', async (t) => {
@@ -561,4 +562,61 @@ test('a test that fails only on the whole retry is not excused by a quarantined 
   assert.equal(r.retried, 'whole')
   assert.equal(r.code, 2)
   assert.deepEqual(r.quarantinedFailures, [])
+})
+
+// --- Re-review findings ------------------------------------------------------------------------
+
+test('ids include the classname: a quarantined `A > works` never excuses `B > works` in the same file', async (t) => {
+  const s = await setup(t, { fails: 0, report: true })
+  await seed(s.root, { 'a.test.mjs::A::works': entry() })
+  const report = junit([['works', 'pass', 'a.test.mjs', 'A'], ['works', 'fail', 'a.test.mjs', 'B']])
+  const { exec } = scripted([{ code: 1, xml: report }, { code: 1, xml: report }], s.reportPath)
+  const r = await runFlaky(['make', 'test'], { root: s.root, cwd: s.root, env: s.env, report: s.reportPath, exec, write: s.write, now: () => NOW })
+  assert.equal(r.code, 1)
+  assert.deepEqual(r.quarantinedFailures, [])
+
+  // The other way round: `A > works` itself failing twice is the quarantined test, under that id.
+  const own = junit([['works', 'fail', 'a.test.mjs', 'A'], ['works', 'pass', 'a.test.mjs', 'B']])
+  const again = scripted([{ code: 1, xml: own }, { code: 1, xml: own }], s.reportPath)
+  const r2 = await runFlaky(['make', 'test'], { root: s.root, cwd: s.root, env: s.env, report: s.reportPath, exec: again.exec, write: s.write, now: () => NOW })
+  assert.equal(r2.code, 0)
+  assert.deepEqual(r2.quarantinedFailures, ['a.test.mjs::A::works'])
+})
+
+test('id fallbacks: <file>::<name> with no classname, <classname>::<name> with no file', async (t) => {
+  for (const [file, classname, key] of [['a.test.mjs', null, 'a.test.mjs::works'], [undefined, 'Suite', 'Suite::works']]) {
+    const s = await setup(t, { fails: 0, report: true })
+    await seed(s.root, { [key]: entry() })
+    const report = junit([['works', 'fail', file, classname]])
+    const { exec } = scripted([{ code: 1, xml: report }, { code: 1, xml: report }], s.reportPath)
+    const r = await runFlaky(['make', 'test'], { root: s.root, cwd: s.root, env: s.env, report: s.reportPath, exec, write: s.write, now: () => NOW })
+    assert.equal(r.code, 0, key)
+    assert.deepEqual(r.quarantinedFailures, [key])
+  }
+})
+
+test('a relative `file` is normalised: ./tests/b.test.mjs matches the store entry tests/b.test.mjs', async (t) => {
+  const s = await setup(t, { fails: 0, report: true })
+  await seed(s.root, { 'tests/b.test.mjs::c::works': entry() })
+  const report = junit([['works', 'fail', './tests/b.test.mjs']])
+  const { exec } = scripted([{ code: 1, xml: report }, { code: 1, xml: report }], s.reportPath)
+  const r = await runFlaky(['make', 'test'], { root: s.root, cwd: s.root, env: s.env, report: s.reportPath, exec, write: s.write, now: () => NOW })
+  assert.equal(r.code, 0)
+  assert.deepEqual(r.quarantinedFailures, ['tests/b.test.mjs::c::works'])
+})
+
+test('cwd reached through a symlink: a report naming files by the real path still matches the store', { skip: process.platform === 'win32' && 'symlinks need a privilege on Windows' }, async (t) => {
+  const s = await setup(t, { fails: 0 })
+  const real = path.join(s.root, 'real')
+  const link = path.join(s.root, 'link')
+  await mkdir(real)
+  await symlink(real, link)
+  const reportPath = path.join(link, 'report.xml')
+  await seed(link, { 'tests/b.test.mjs::c::works': entry() })
+  const abs = path.join(await realpath(real), 'tests', 'b.test.mjs').replaceAll('\\', '/')
+  const report = junit([['works', 'fail', abs]])
+  const { exec } = scripted([{ code: 1, xml: report }, { code: 1, xml: report }], reportPath)
+  const r = await runFlaky(['make', 'test'], { root: link, cwd: link, env: s.env, report: reportPath, exec, write: s.write, now: () => NOW })
+  assert.equal(r.code, 0)
+  assert.deepEqual(r.quarantinedFailures, ['tests/b.test.mjs::c::works'])
 })
