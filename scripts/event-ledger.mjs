@@ -31,10 +31,28 @@ export function ledgerPath(root, runId, taskId) {
   return target
 }
 
+// A link is refused only below the state directory (`.fleetmates/` for a run ledger, `fleetmates/`
+// for hook receipts), the part a teammate can plant. Above it the path is the user's: macOS
+// reaches the temp dir through /var -> /private/var and Windows through 8.3 names like RUNNER~1,
+// so comparing the whole path to its realpath refused every ledger there. Without such a
+// directory in the path, the whole path must be its own realpath, as before.
+function stateAnchor(p) {
+  for (let cur = p; ; cur = path.dirname(cur)) {
+    const base = path.basename(cur)
+    if (base === '.fleetmates' || base === 'fleetmates') return path.dirname(cur)
+    if (path.dirname(cur) === cur) return null
+  }
+}
+
+async function expected(p) {
+  const anchor = stateAnchor(p)
+  return anchor === null ? p : path.join(await realpath(anchor), path.relative(anchor, p))
+}
+
 async function safeParent(file, create = false) {
   const parent = path.dirname(path.resolve(file))
   if (create) await mkdir(parent, { recursive: true })
-  if (await realpath(parent) !== parent) throw new Error('ledger parent is a link')
+  if (await realpath(parent) !== await expected(parent)) throw new Error('ledger parent is a link')
 }
 
 export async function appendEvent(file, value) {
@@ -43,7 +61,7 @@ export async function appendEvent(file, value) {
   const h = await open(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600)
   try {
     const stat = await h.stat()
-    if (!stat.isFile() || stat.size + Buffer.byteLength(line) > MAX_LEDGER_BYTES || await realpath(file) !== path.resolve(file)) throw new Error('ledger is unsafe or full')
+    if (!stat.isFile() || stat.size + Buffer.byteLength(line) > MAX_LEDGER_BYTES || await realpath(file) !== await expected(path.resolve(file))) throw new Error('ledger is unsafe or full')
     await h.write(line)
   } finally { await h.close() }
 }
@@ -54,7 +72,7 @@ export async function readEvents(file) {
     await safeParent(file)
     h = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
     const stat = await h.stat()
-    if (!stat.isFile() || stat.size > MAX_LEDGER_BYTES || await realpath(file) !== path.resolve(file)) throw new Error('ledger is unsafe or full')
+    if (!stat.isFile() || stat.size > MAX_LEDGER_BYTES || await realpath(file) !== await expected(path.resolve(file))) throw new Error('ledger is unsafe or full')
     const buffer = Buffer.alloc(MAX_LEDGER_BYTES + 1)
     const { bytesRead } = await h.read(buffer, 0, buffer.length, 0)
     if (bytesRead > MAX_LEDGER_BYTES) throw new Error('ledger is full')

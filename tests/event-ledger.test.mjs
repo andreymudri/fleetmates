@@ -55,6 +55,24 @@ test('ledger rejects malformed, oversized, partial and linked storage', async ()
   assert.equal(await readFile(target, 'utf8'), '')
 }))
 
+// The guard is about links a teammate can plant under `.fleetmates/`, not about how the user
+// reached the repository: macOS temp dirs sit behind /var -> /private/var.
+test('ledger accepts a root reached through a link and refuses a linked ledger directory', async () => fixture(async root => {
+  const repo = path.join(root, 'repo')
+  await mkdir(repo)
+  const via = path.join(root, 'via')
+  try { await symlink(repo, via, 'dir') } catch (err) { if (err.code === 'EPERM') return; throw err }
+  const file = ledgerPath(via, 'r1', 'T1')
+  await appendEvent(file, event('task-started'))
+  assert.equal((await readEvents(file)).length, 1)
+  const elsewhere = path.join(root, 'elsewhere')
+  await mkdir(elsewhere)
+  await mkdir(path.join(repo, '.fleetmates', 'r2'), { recursive: true })
+  await symlink(elsewhere, path.join(repo, '.fleetmates', 'r2', 'ledger'), 'dir')
+  await assert.rejects(appendEvent(ledgerPath(via, 'r2', 'T1'), event('task-started')), /parent is a link/)
+  await assert.rejects(appendEvent(ledgerPath(repo, 'r2', 'T1'), event('task-started')), /parent is a link/)
+}))
+
 test('stall detection counts events, caps blocks and requires new successful evidence', () => {
   const events = [event('command-run', { result: 'fail', fingerprint: fingerprint('bad') }), event('stop-requested'), event('stop-requested')]
   assert.equal(stallDecision(events).block, true)
