@@ -16,16 +16,23 @@ test('walks the design tree, parent decisions before the children that depend on
 test('gives an ordered per-round loop from the open bucket to the restated ledger', async () => {
   const b = await body()
   assert.match(b, /Take the top entry of the \*\*OPEN\*\* bucket/i)
-  assert.match(b, /Ask exactly one question, as one `AskUserQuestion` call/i)
-  assert.match(b, /Record the answer in the ledger/i)
+  assert.match(b, /Ask up to four questions, as one `AskUserQuestion` call/i)
+  assert.match(b, /Record every answer in the ledger/i)
   assert.match(b, /When a branch closes, restate the ledger/i)
 })
 
-test('asks with AskUserQuestion, one question per call, never in prose', async () => {
+test('asks with AskUserQuestion, up to four independent questions per call, never in prose', async () => {
   const b = await body()
   assert.match(b, /Ask with `AskUserQuestion`, never in prose/i)
-  assert.match(b, /One question per `AskUserQuestion` call, one call per turn/i)
-  assert.match(b, /do not batch several questions into one call/i)
+  assert.match(b, /Up to four questions per `AskUserQuestion` call, one call per turn/i)
+  assert.match(b, /never put a question in the same call as a question it depends on/i)
+  assert.match(b, /Ask fewer when fewer are independent; never pad a round/i)
+})
+
+test('a dependent question waits for the round after its parent is answered', async () => {
+  const b = await body()
+  assert.match(b, /waits for the next round/i)
+  assert.match(b, /batch a question with the one it depends on/i)
 })
 
 test('declares two to four real options and leaves the typed answer to the tool', async () => {
