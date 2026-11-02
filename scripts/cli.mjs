@@ -53,6 +53,11 @@ import { dispatchPhase, waitForExit, runPool, killProcess, pidAlive } from './dr
 import { buildCoupling, neighboursOf, inventory, hotPairs, renderMap } from './codemap.mjs'
 import { mapNotesStale, mapNotesPrompt, mapNotesWritable } from './mapnotes.mjs'
 import { deriveContext, runOwnershipCheck } from './gate-runner.mjs'
+import { runWatch, acquireLock, releaseLock, LockHeldError } from './watch-loop.mjs'
+import { spinState } from './spin.mjs'
+import { learnedStaleMinutes, addSample } from './watch-envelope.mjs'
+import { rescueWorktree } from './rescue.mjs'
+import { appendEvent, ledgerPath, readEvents } from './event-ledger.mjs'
 
 // The temp root as GIT would spell it, which is not what `os.tmpdir()` returns.
 //
@@ -148,12 +153,14 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
+  watch    --run <id> --plan <path> [--once] [--root <path>]
+  rescue   --run <id> --task <t> [--root <path>]
   context-bundle --file <json> [--root <path>]
   workflow-report --file <json> [--root <path>]
   ci-status --file <json> [--root <path>]
@@ -212,7 +219,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|d
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round', 'dry-run', 'rotate-token'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round', 'dry-run', 'rotate-token', 'once'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -311,6 +318,8 @@ export const REQUIRED = {
   gate: ['run', 'plan'],
   doctor: ['run', 'plan'],
   liveness: ['run', 'plan'],
+  watch: ['run', 'plan'],
+  rescue: ['run', 'task'],
   // `--phase` is the manifest phase key, not a plan phase number, so it stays out of
   // NUMERIC_PHASE_COMMANDS and defaults to `default` exactly as `gate`'s does. Not required here
   // even so, because whether that default is ambiguous depends on the RUN rather than on the argv
@@ -396,6 +405,8 @@ export const KNOWN_FLAGS = {
   gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
   doctor: ['run', 'plan', 'base', 'run-branch', 'hooks', 'session', 'stop'],
   liveness: ['run', 'plan', 'stale'],
+  watch: ['run', 'plan', 'once'],
+  rescue: ['run', 'task'],
   digest: ['run', 'ledger'],
   diagram: ['run'],
   claim: ['run', 'task', 'by'],
@@ -479,7 +490,7 @@ const GATE_STATE_FAILURE = 5
 // existing four (`finish`, `prune-run`, `init-run`, `gate`) already touched git before this set
 // named them.
 const GIT_WRITING_COMMANDS = new Set([
-  'dispatch', 'dispatch-reviews', 'dispatch-integrator', 'finish', 'prune-run', 'init-run', 'gate',
+  'dispatch', 'dispatch-reviews', 'dispatch-integrator', 'finish', 'prune-run', 'init-run', 'gate', 'rescue',
   'workflow-execute', 'workflow-resume', 'workflow-resolve', 'workflow-accept', 'workflow-prune',
 ])
 
@@ -2807,6 +2818,8 @@ const CONFIG_KEYS = [
   'maxParallel',
   'caveman',
   ...ROLES.flatMap((role) => [`agents.${role}.tier`, `agents.${role}.effort`]),
+  // The watchdog's knobs, so `get` and `unset` accept every key `set` already validates.
+  ...['enabled', 'resumes', 'respawns', 'staleMinutes', 'intervalMinutes', 'learn', 'spinFailures'].map((k) => `watch.${k}`),
 ]
 
 // `unset` may also name one role's entry — `agents.implementer` is a real subtree of the layer
@@ -3435,6 +3448,195 @@ export function integratorMergeSubject(task) {
   const title = String(task?.title ?? '').split(/\r?\n/)[0].replace(/[^A-Za-z0-9 ,./()_:-]+/g, ' ').replace(/\s+/g, ' ').trim()
   const subject = `merge: integrate ${task.id}${title ? ` ${title}` : ''}`
   return subject.length <= 72 ? subject : subject.slice(0, 72).trimEnd()
+}
+
+// The signal gathering behind `liveness`, shared with `watch` so both read a teammate the same
+// way. `problem` carries the text `liveness` prints before exiting 2; `finished` is a run whose
+// every phase is integrated.
+async function currentPhaseSignals(root, runId, flags, tasks) {
+  const git = createGit({ cwd: root })
+  let derived = null
+  let deriveError = null
+  try {
+    derived = await derive(root, runId, { ...flags, plan: flags.plan })
+  } catch (err) {
+    deriveError = err.message
+  }
+  const phaseProblem = deriveError ?? derived?.phaseError ?? null
+  if (phaseProblem) {
+    return {
+      problem: `liveness could not derive the current phase: ${phaseProblem}`
+        + ' — without a current phase this report cannot tell a hung teammate from a finished one,'
+        + ' so it reports nothing rather than raising a stall it has not measured',
+    }
+  }
+  if (derived.currentPhase == null) {
+    return { problem: null, finished: true, phase: null, subject: [], tips: {}, touches: {} }
+  }
+  const subject = tasks.filter((t) => t.phase === derived.currentPhase)
+  // The phase is derived from the plan at the ANCHOR; these rows come from the plan in the
+  // WORKING TREE. Amending a plan mid-run is a documented procedure in this plugin — `plan-drift`
+  // exists because it happens — and an amendment that drops the derived phase's tasks left this
+  // printing a bare header at exit 0: an all-clear covering nobody. Same class as the three
+  // states above, so it gets the same answer.
+  if (subject.length === 0) {
+    return {
+      problem: `the plan in the working tree has no task in phase ${derived.currentPhase}, which is the`
+        + ` phase derived from the plan at the anchor — reporting nothing rather than an all-clear`
+        + ' covering no teammate. Run plan-drift to see what changed.',
+    }
+  }
+
+  // Worktree paths come from git rather than from `.fleetmates/`, which is written by the very
+  // teammates being reported on. This is NOT a claim that the path is trustworthy: `git worktree
+  // list` reports whatever path was passed to `git worktree add`, so the directory is still the
+  // teammate's choice, and `liveness.mjs`'s header concedes both signals are forgeable anyway.
+  // What it buys is narrower and worth stating exactly — the report follows the directory git
+  // has checked out for that branch right now, so redirecting it means moving a real worktree
+  // rather than editing a JSON file the teammate already owns.
+  const byBranch = new Map()
+  for (const wt of await git.worktrees()) {
+    if (wt.branch) byBranch.set(wt.branch, wt.path)
+  }
+
+  const tips = {}
+  const touches = {}
+  for (const task of subject) {
+    const branch = taskBranchName(runId, task.id)
+    if (await git.branchExists(branch)) {
+      const sha = await git.resolveRef(`refs/heads/${branch}`)
+      tips[task.id] = { branch, at: await git.commitTime(sha) }
+    }
+    const dir = byBranch.get(branch)
+    if (dir) {
+      // The project's own ignore rules prune the walk. A failure here is not fatal: an empty set
+      // walks everything, which can only floor the row into `unknown` — the honest answer — and
+      // never invent freshness. The likeliest cause is the worktree directory being gone, which
+      // the walk itself already treats as no measurement.
+      const ignored = new Set(await git.ignoredPaths(dir).catch(() => []))
+      const walked = await newestMtime(dir, { ignored })
+      touches[task.id] = { branch, at: walked.at, floored: walked.floored }
+    }
+  }
+
+  return { problem: null, finished: false, phase: derived.currentPhase, subject, tips, touches }
+}
+
+// A task in one of these states has returned, so the watchdog neither nudges it nor waits on it.
+const WATCH_TERMINAL = new Set(['done', 'blocked', 'orphaned'])
+// Thrown by `sleep` under `--once` so the loop stops after exactly one tick.
+const WATCH_ONCE = Symbol('watch-once')
+
+async function readJsonOr(file, fallback) {
+  try { return JSON.parse(await readFile(file, 'utf8')) } catch { return fallback }
+}
+
+async function writeJsonAtomic(file, data) {
+  await mkdir(path.dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`
+  await writeFile(tmp, `${JSON.stringify(data, null, 2)}\n`, 'utf8')
+  await rename(tmp, file)
+}
+
+// The body of `watch` once the lock is held. `watch.json` is the ladder per task and
+// `.fleetmates/watch-envelope.json` the learned stale window; both are teammate-writable and
+// read by nothing but this command.
+async function watchRun({ root, runId, flags, tasks, watchConfig, io }) {
+  const stateFile = path.join(runDir(root, runId), 'watch.json')
+  const envelopeFile = path.join(root, NAMES.stateDir, 'watch-envelope.json')
+  const readSamples = async () => {
+    const envelope = await readJsonOr(envelopeFile, null)
+    return Array.isArray(envelope?.samplesMs) ? envelope.samplesMs : []
+  }
+  const window = watchConfig.learn
+    ? learnedStaleMinutes(await readSamples(), watchConfig.staleMinutes)
+    : { minutes: watchConfig.staleMinutes, learned: false, samples: 0 }
+  const emit = (event) => io.out(JSON.stringify(event))
+  emit({ event: 'start', staleMinutes: window.minutes, learned: window.learned, samples: window.samples })
+  const config = { ...watchConfig, staleMinutes: window.minutes }
+
+  const taskStates = async () => {
+    const status = await readState(root, runId, 'status')
+    return new Map((Array.isArray(status?.tasks) ? status.tasks : []).map((t) => [t?.id, t?.state]))
+  }
+
+  // A task that finished without the watchdog ever acting is a sample of how long a healthy
+  // teammate goes quiet here. Mutates `history` (the loop's own object) so the next save keeps
+  // `sampled: true` rather than overwriting it.
+  const sampleFinished = async (history) => {
+    const states = await taskStates()
+    let samplesMs = null
+    for (const [id, h] of Object.entries(history)) {
+      if (states.get(id) !== 'done' || !h || typeof h !== 'object') continue
+      if (h.resumes !== 0 || h.respawns !== 0 || h.orphaned || h.sampled || !Number.isFinite(h.maxQuietMs)) continue
+      samplesMs = addSample(samplesMs ?? await readSamples(), h.maxQuietMs)
+      history[id] = { ...h, sampled: true }
+    }
+    if (samplesMs === null) return false
+    await writeJsonAtomic(envelopeFile, { v: 1, samplesMs })
+    return true
+  }
+
+  const state = {
+    load: async () => {
+      const saved = await readJsonOr(stateFile, null)
+      return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : null
+    },
+    save: async (history) => {
+      await sampleFinished(history)
+      await writeJsonAtomic(stateFile, history)
+    },
+  }
+
+  let lastTickFailed = false
+  const tick = async () => {
+    lastTickFailed = true
+    const signals = await currentPhaseSignals(root, runId, flags, tasks)
+    if (signals.problem) throw new Error(signals.problem)
+    if (signals.finished) { lastTickFailed = false; return { inFlight: false, rows: [] } }
+    const states = await taskStates()
+    const live = signals.subject.filter((t) => !WATCH_TERMINAL.has(states.get(t.id)))
+    if (live.length === 0) { lastTickFailed = false; return { inFlight: false, rows: [] } }
+    const now = Date.now()
+    const rows = livenessRows({ tasks: live, tips: signals.tips, touches: signals.touches, now, staleMinutes: window.minutes })
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].state !== 'working') continue
+      try {
+        const events = await readEvents(ledgerPath(root, runId, rows[i].taskId))
+        const spin = spinState(events, { now, windowMs: window.minutes * 60000, failures: watchConfig.spinFailures })
+        if (spin.spinning) rows[i] = { ...rows[i], state: 'spinning' }
+      } catch { /* an unreadable ledger leaves the row as it was */ }
+    }
+    lastTickFailed = false
+    return { inFlight: true, rows }
+  }
+
+  const onAction = async (taskId, decision) => {
+    try {
+      await appendEvent(ledgerPath(root, runId, taskId), { kind: 'watchdog', at: Date.now(), action: decision.action })
+    } catch (err) {
+      emit({ event: 'watch-error', message: printable(err?.message ?? String(err)) })
+    }
+  }
+
+  const sleep = flags.once === true
+    ? async () => { throw WATCH_ONCE }
+    : (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  let code
+  try {
+    code = await runWatch({ tick, emit, state, sleep, now: Date.now, config, onAction })
+  } catch (err) {
+    if (err !== WATCH_ONCE) throw err
+    // One tick that failed is not a clean pass, even though the loop itself would have retried.
+    code = lastTickFailed ? 1 : 0
+  }
+  // The loop exits on phase-idle before saving, so the phase's last finisher is sampled here.
+  if (code === 0) {
+    const history = (await state.load()) ?? {}
+    if (await sampleFinished(history)) await writeJsonAtomic(stateFile, history)
+  }
+  return code
 }
 
 export async function runCli(argv, io = { out: console.log }) {
@@ -4833,7 +5035,6 @@ export async function runCli(argv, io = { out: console.log }) {
   }
 
   if (command === 'liveness') {
-    const git = createGit({ cwd: root })
     // Same reasoning as `doctor`: the plan is read from the working tree, because a report that
     // enforces nothing has no reason to read it at the anchor, and a diagnostic that needs a
     // committed plan is useless at the moment a run is going wrong.
@@ -4887,72 +5088,16 @@ export async function runCli(argv, io = { out: console.log }) {
     //
     // The first two exit 2 — this report could not be produced — rather than 0 or 1, because both
     // of those are assertions about teammates that nothing here measured.
-    let derived = null
-    let deriveError = null
-    try {
-      derived = await derive(root, runId, { ...flags, plan: flags.plan })
-    } catch (err) {
-      deriveError = err.message
-    }
-    const phaseProblem = deriveError ?? derived?.phaseError ?? null
-    if (phaseProblem) {
-      io.out(
-        `liveness could not derive the current phase: ${phaseProblem}`
-        + ' — without a current phase this report cannot tell a hung teammate from a finished one,'
-        + ' so it reports nothing rather than raising a stall it has not measured',
-      )
+    const signals = await currentPhaseSignals(root, runId, flags, tasks)
+    if (signals.problem) {
+      io.out(signals.problem)
       return 2
     }
-    if (derived.currentPhase == null) {
+    if (signals.finished) {
       io.out(`every phase of run ${runId} is integrated — no teammate of this run is expected to be working`)
       return 0
     }
-    const subject = tasks.filter((t) => t.phase === derived.currentPhase)
-    // The phase is derived from the plan at the ANCHOR; these rows come from the plan in the
-    // WORKING TREE. Amending a plan mid-run is a documented procedure in this plugin — `plan-drift`
-    // exists because it happens — and an amendment that drops the derived phase's tasks left this
-    // printing a bare header at exit 0: an all-clear covering nobody. Same class as the three
-    // states above, so it gets the same answer.
-    if (subject.length === 0) {
-      io.out(
-        `the plan in the working tree has no task in phase ${derived.currentPhase}, which is the`
-        + ` phase derived from the plan at the anchor — reporting nothing rather than an all-clear`
-        + ' covering no teammate. Run plan-drift to see what changed.',
-      )
-      return 2
-    }
-
-    // Worktree paths come from git rather than from `.fleetmates/`, which is written by the very
-    // teammates being reported on. This is NOT a claim that the path is trustworthy: `git worktree
-    // list` reports whatever path was passed to `git worktree add`, so the directory is still the
-    // teammate's choice, and `liveness.mjs`'s header concedes both signals are forgeable anyway.
-    // What it buys is narrower and worth stating exactly — the report follows the directory git
-    // has checked out for that branch right now, so redirecting it means moving a real worktree
-    // rather than editing a JSON file the teammate already owns.
-    const byBranch = new Map()
-    for (const wt of await git.worktrees()) {
-      if (wt.branch) byBranch.set(wt.branch, wt.path)
-    }
-
-    const tips = {}
-    const touches = {}
-    for (const task of subject) {
-      const branch = taskBranchName(runId, task.id)
-      if (await git.branchExists(branch)) {
-        const sha = await git.resolveRef(`refs/heads/${branch}`)
-        tips[task.id] = { branch, at: await git.commitTime(sha) }
-      }
-      const dir = byBranch.get(branch)
-      if (dir) {
-        // The project's own ignore rules prune the walk. A failure here is not fatal: an empty set
-        // walks everything, which can only floor the row into `unknown` — the honest answer — and
-        // never invent freshness. The likeliest cause is the worktree directory being gone, which
-        // the walk itself already treats as no measurement.
-        const ignored = new Set(await git.ignoredPaths(dir).catch(() => []))
-        const walked = await newestMtime(dir, { ignored })
-        touches[task.id] = { branch, at: walked.at, floored: walked.floored }
-      }
-    }
+    const { subject, tips, touches } = signals
 
     const rows = livenessRows({ tasks: subject, tips, touches, now: Date.now(), staleMinutes })
     io.out(renderLiveness(rows, { staleMinutes }))
@@ -4980,6 +5125,81 @@ export async function runCli(argv, io = { out: console.log }) {
     // on the strength of something nobody looked at.
     if (hasUnknown(rows)) return 2
     return 0
+  }
+
+  // The watchdog. Supervision only: it prints what the orchestrator should do next and records
+  // its own ladder in `watch.json`; nothing a gate check reads is written here.
+  if (command === 'watch') {
+    let tasks = []
+    try {
+      tasks = assignPhases(parsePlan(await readFile(path.resolve(root, flags.plan), 'utf8')))
+    } catch (err) {
+      io.out(`cannot read the plan at ${printable(flags.plan)}: ${printable(err.message)}`)
+      return 2
+    }
+    try {
+      await stat(runDir(root, runId))
+    } catch {
+      io.out(
+        `run ${printable(runId)} has no directory under ${NAMES.stateDir} — check --run, because a run id that`
+        + ' matches nothing produces a report about no teammate at all',
+      )
+      return 2
+    }
+    let resolved
+    try {
+      ({ resolved } = await loadConfig(root))
+    } catch (err) {
+      io.out(printable(err.message))
+      return 2
+    }
+    if (!resolved.watch.enabled) {
+      io.out('watchdog disabled by watch.enabled')
+      return 0
+    }
+
+    const lock = path.join(runDir(root, runId), 'watch.lock')
+    const isAlive = (pid) => { try { process.kill(pid, 0); return true } catch (e) { return e.code === 'EPERM' } }
+    try {
+      await acquireLock(lock, process.pid, isAlive)
+    } catch (err) {
+      if (err instanceof LockHeldError) { io.out(printable(err.message)); return 2 }
+      throw err
+    }
+    try {
+      return await watchRun({ root, runId, flags, tasks, watchConfig: resolved.watch, io })
+    } finally {
+      await releaseLock(lock, process.pid)
+    }
+  }
+
+  if (command === 'rescue') {
+    const git = createGit({ cwd: root })
+    const branch = taskBranchName(runId, flags.task)
+    const worktree = (await git.worktrees()).find((wt) => wt.branch === branch)?.path
+    if (!worktree) {
+      io.out(`no worktree is registered for task ${printable(flags.task)}`)
+      return 2
+    }
+    try {
+      const commonDir = (await defaultGitExec(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root }))
+        .stdout.trim()
+      const { patchFile, empty } = await rescueWorktree({
+        worktree,
+        patchDir: path.join(runDir(root, runId), 'rescue'),
+        taskId: flags.task,
+        commonDir,
+        removeWorktree: (d) => git.removeWorktree(d),
+      })
+      io.out(empty
+        ? `${printable(flags.task)} had no uncommitted work`
+        : `rescued ${printable(flags.task)} to ${printable(patchFile)}`)
+      io.out(`worktree removed: ${printable(worktree)}`)
+      return 0
+    } catch (err) {
+      io.out(`rescue failed, worktree left in place: ${printable(err?.message ?? String(err))}`)
+      return 1
+    }
   }
 
   if (command === 'rebuild-state') {
