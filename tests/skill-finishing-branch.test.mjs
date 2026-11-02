@@ -266,7 +266,24 @@ test('the push is asked for unless ci.push is auto, and no other sentence in the
   assertClaim(await remoteCi(), {
     claim: /^Ask the user before pushing the run branch, unless ci\.push is auto, in which case push without asking\.$/,
     subject: /ci\.push/i,
+    allow: [CI_KEYS],
   })
+})
+
+// The values and defaults of both keys, as scripts/config.mjs validates them (`config set ci.push
+// yes` and `ci.waitMinutes 721` exit 2), stated once and followed by how each is set.
+const CI_KEYS = /^Two config keys shape this step: ci\.push is ask \(the default\) or auto, and ci\.waitMinutes is an integer from 1 to 720, 60 by default\.$/
+
+test('the Remote CI section states the values and defaults of ci.push and ci.waitMinutes, then how to set them', async () => {
+  const scope = await remoteCi()
+  assertClaim(scope, {
+    claim: CI_KEYS,
+    then: /^Set either through the CLI, in the tracked fleetmates\.gate\.json by default or with --local in the gitignored fleetmates\.local\.json; any other value is refused with exit 2\.$/,
+  })
+  const block = scope.code.find((b) => /config set ci\.push/.test(b.code))
+  assert.ok(block, `${scope.label}: no code block sets ci.push`)
+  assert.match(block.code, /^node "<fleetmates root>\/scripts\/cli\.mjs" config set ci\.push auto --root <project root> \[--local\]$/m)
+  assert.match(block.code, /^node "<fleetmates root>\/scripts\/cli\.mjs" config set ci\.waitMinutes 30 --root <project root> \[--local\]$/m)
 })
 
 test('a red, pending or unreadable CI means the merge is not offered', async () => {

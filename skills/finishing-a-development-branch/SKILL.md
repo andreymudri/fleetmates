@@ -143,6 +143,16 @@ Ask the user before pushing the run branch, unless ci.push is auto, in which cas
 asking. The `ci-wait` command only reads; it never pushes, so the push is this step's own action. If the user
 declines the push, remote CI was not read: say so, and present the run as unverified by CI.
 
+Two config keys shape this step: `ci.push` is `ask` (the default) or `auto`, and
+`ci.waitMinutes` is an integer from 1 to 720, 60 by default. Set either through the CLI, in the
+tracked `fleetmates.gate.json` by default or with `--local` in the gitignored
+`fleetmates.local.json`; any other value is refused with exit 2. The `config list` command does not print
+them, so read one back with `config get`:
+
+    node "<fleetmates root>/scripts/cli.mjs" config set ci.push auto --root <project root> [--local]
+    node "<fleetmates root>/scripts/cli.mjs" config set ci.waitMinutes 30 --root <project root> [--local]
+    node "<fleetmates root>/scripts/cli.mjs" config get ci.push --root <project root>
+
 Then wait for the remote CI of the branch tip:
 
     node "<fleetmates root>/scripts/cli.mjs" ci-wait --branch <run branch> --root <project root> [--minutes <1-720>]

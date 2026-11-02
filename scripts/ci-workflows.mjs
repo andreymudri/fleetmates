@@ -367,7 +367,7 @@ export function ciAdvice(summary, pkg) {
     }
   }
   if (!summary.usesFlaky) {
-    out.push('no workflow step runs the flaky detector; run the tests through `fleetmates flaky -- <command>` so a timing flake is reported instead of failing the job')
+    out.push('no workflow step runs the flaky detector; run the tests through `node "<fleetmates root>/scripts/cli.mjs" flaky -- <test command>` so a timing flake is reported instead of failing the job')
   }
   return out
 }
