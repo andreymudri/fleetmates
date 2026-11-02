@@ -82,6 +82,12 @@ failure that happens only on a plain Linux run still reaches the remote CI.
    never treated as quarantined: if it fails twice, the check is red, every time. Likewise, a
    retry that exits non-zero while its report names no failed test is red, because the failure is
    outside any test (a crash, an unhandled rejection, a coverage threshold).
+   A run is excused only when every test that failed on the first attempt either passed on the
+   retry or is quarantined, and every test still failing is quarantined. Tests are identified by
+   their file (or JUnit classname) plus name, so a quarantined test never excuses a same-named
+   test elsewhere. Known limit: a failure outside any test that happens in the same run as a
+   quarantined test failing twice cannot be told apart with a single retry; every excused run
+   therefore prints a line saying the exit code was overridden and why.
    A quarantined test that passes increments a pass streak. After 20 passes in a row, `doctor`
    suggests removing it.
 
