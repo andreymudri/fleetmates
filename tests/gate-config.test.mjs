@@ -212,10 +212,10 @@ test('inferGateConfig emits no preview key when given no package', () => {
 // --- protected paths and implicit enforcement checks (docs/specs/2026-09-26-protected-paths-design.md)
 
 test('protectedPaths always holds the manifest under both names and adds the manifest key, normalised', () => {
-  assert.deepEqual(protectedPaths({}), ['fleetmates.gate.json', 'teammates.gate.json'])
+  assert.deepEqual(protectedPaths({}), ['fleetmates.gate.json', 'teammates.gate.json', 'fleetmates.flaky.json'])
   assert.deepEqual(
     protectedPaths({ protected: ['package.json', './package.json', 'tests\\conftest.py', 'fleetmates.gate.json'] }),
-    ['fleetmates.gate.json', 'teammates.gate.json', 'package.json', 'tests/conftest.py'],
+    ['fleetmates.gate.json', 'teammates.gate.json', 'fleetmates.flaky.json', 'package.json', 'tests/conftest.py'],
   )
 })
 
@@ -241,7 +241,7 @@ test('an enforcement check carries the protected set from the top-level key, nev
     phases: { default: { checks: [{ name: 'fileset', kind: 'fileset', protected: [] }] } },
   }
   for (const check of checksForPhase(config, 'default')) {
-    assert.deepEqual(check.protected, ['fleetmates.gate.json', 'teammates.gate.json', 'package.json'], check.name)
+    assert.deepEqual(check.protected, ['fleetmates.gate.json', 'teammates.gate.json', 'fleetmates.flaky.json', 'package.json'], check.name)
   }
 })
 
