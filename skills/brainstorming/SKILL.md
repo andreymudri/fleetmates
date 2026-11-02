@@ -9,7 +9,7 @@ _Adapted from the MIT-licensed superpowers plugin by Jesse Vincent. See NOTICE.m
 
 Help turn ideas into fully formed designs and specs through natural collaborative dialogue.
 
-Start by understanding the current project context, then ask questions one at a time to refine the idea. Once you understand what you're building, present the design and get user approval.
+Start by understanding the current project context, then ask questions in rounds of up to four at a time to refine the idea. Once you understand what you're building, present the design and get user approval.
 
 <HARD-GATE>
 Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it. This applies to EVERY project regardless of perceived simplicity.
@@ -70,8 +70,8 @@ digraph brainstorming {
 - Check out the current project state first (files, docs, recent commits)
 - Before asking detailed questions, assess scope: if the request describes multiple independent subsystems (e.g., "build a platform with chat, file storage, billing, and analytics"), flag this immediately. Don't spend questions refining details of a project that needs to be decomposed first.
 - If the project is too large for a single spec, help the user decompose into sub-projects: what are the independent pieces, how do they relate, what order should they be built? Then brainstorm the first sub-project through the normal design flow. Each sub-project gets its own spec → plan → implementation cycle.
-- For appropriately-scoped projects, invoke the `grilling` skill and run the question phase there: questions **one at a time**, walked as a design tree, each carrying your recommended answer, with an open-questions ledger
-- `grilling` governs the form of those questions — asked one at a time with declared options, never as prose. Do not run a second, looser question phase here
+- For appropriately-scoped projects, invoke the `grilling` skill and run the question phase there: questions in rounds of **up to four at a time**, never batching a question with one it depends on, walked as a design tree, each carrying your recommended answer, with an open-questions ledger
+- `grilling` governs the form of those questions — asked in rounds of up to four with declared options, never as prose. Do not run a second, looser question phase here
 - Focus on understanding: purpose, constraints, success criteria
 - The ledger the interview produces is an input to the design doc: every resolved decision appears in the design, and every deferred item appears with its reason and the trigger that reopens it
 

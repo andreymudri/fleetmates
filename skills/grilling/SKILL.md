@@ -18,12 +18,13 @@ step 2: that step's question phase is this skill.
 
 Each round, in order:
 
-1. Take the top entry of the **OPEN** bucket — the one blocking the most below it.
-2. Fact-find first: if the repository, docs or history answer it, read them and state the answer
-   instead of asking.
-3. Ask exactly one question, as one `AskUserQuestion` call.
-4. Record the answer in the ledger: move the entry to **RESOLVED** with the option chosen, and
-   add any new child decisions the answer opened to **OPEN**, in blocking order.
+1. Take the top entry of the **OPEN** bucket — the one blocking the most below it — and, walking
+   down the bucket, up to three more entries whose answers do not depend on it or on each other.
+2. Fact-find first: if the repository, docs or history answer one of them, read them and state the
+   answer instead of asking. Refill the round from **OPEN** the same way.
+3. Ask up to four questions, as one `AskUserQuestion` call.
+4. Record every answer in the ledger: move each entry to **RESOLVED** with the option chosen, and
+   add any new child decisions the answers opened to **OPEN**, in blocking order.
 5. If the user typed their own answer, check what it reopened and move those entries back to
    **OPEN** before continuing.
 6. When a branch closes, restate the ledger.
@@ -38,11 +39,21 @@ a concurrent write. Walk it branch by branch — resolve a parent before the chi
 on it, and finish a branch before starting the next. Scattered questions produce answers that
 contradict each other, because each was answered against a different imagined design.
 
+A round of four does not change that order; it only fills the round with what is already
+askable. Siblings under a resolved parent are the natural batch: once storage is decided, who
+owns writes and how long entries are kept can be answered side by side. A child whose options
+depend on an answer in this round waits for the next round, because its options cannot be
+written until the parent is known. Questions from another branch may fill a round only when
+nothing in the current branch is askable and their answers cannot change each other.
+
 ## The shape of one turn
 
-**Ask with `AskUserQuestion`, never in prose. One question per `AskUserQuestion` call, one call
-per turn** — do not batch several questions into one call. Prose hides what the decision turns
-on, the same reason `using-fleetmates` refuses to put the fleet-or-inline choice in prose: a
+**Ask with `AskUserQuestion`, never in prose. Up to four questions per `AskUserQuestion` call, one
+call per turn** — and never put a question in the same call as a question it depends on, because
+the user answers both against a parent that is not settled yet. Ask fewer when fewer are
+independent; never pad a round to reach four with a question the ledger does not need yet. Each
+question keeps its own short `header`, so the user can tell the decisions apart at a glance. Prose
+hides what the decision turns on, the same reason `using-fleetmates` refuses to put the fleet-or-inline choice in prose: a
 paragraph reads as commentary, options read as a decision with consequences attached.
 
 Each question declares **two to four options, three by default**, one of them flagged as your own
@@ -55,7 +66,7 @@ order. You do not declare a "something else" option: Claude Code appends a free-
 every `AskUserQuestion` prompt itself, so the user can always type an answer none of yours
 offered, and a typed answer is a new branch that can reopen what was already resolved.
 
-> `AskUserQuestion`, header `Ledger`, one question:
+> `AskUserQuestion`, one of the questions in a round (header `Ledger`):
 >
 > **Where does the run ledger live?** This decides who can corrupt it, and it sets up who may
 > write it during a fix round.
@@ -168,7 +179,8 @@ earlier ones.
 
 | Thought | Reality |
 |---------|---------|
-| "I'll batch these five questions into one message" | The user answers three of them, and the two you lose are the ones they had no opinion on yet — the ones worth a round. |
+| "I'll batch these five questions into one message" | The tool takes four, and prose takes none. Past four, the ones you lose are the ones the user had no opinion on yet — the ones worth a round. |
+| "I'll batch a question with the one it depends on, to save a round" | The user answers the child against a parent they have not chosen yet, so one of the two answers is for a design that will not exist. Ask the parent now and the child next round. |
 | "I'll just ask where the config lives" | If a file answers it, reading it costs you a tool call and asking costs the user a round. Read it and state what you assumed. |
 | "Five questions in, that feels like enough" | A count is not a stop condition. Read the ledger: if a branch is open, the interview is not done. |
 | "They don't seem sure, I'll press until they decide" | An extracted answer to a high-fidelity question is noise with a confident tone. Defer it with the experiment that would settle it. |
