@@ -25,6 +25,10 @@
   successful one as `pass`. Claude Code's real hook payloads carry no exit code, so before this
   every success was recorded `unknown` and no failure was recorded at all. `doctor --hooks` reports the
   `PostToolUseFailure` receipt when seen and does not require it.
+- The event ledger no longer refuses every write when the repository is reached through a symlink
+  or a Windows 8.3 short name, as macOS temp directories and Windows CI runners are. Links are now
+  refused only from the outermost `.fleetmates/` down, and a run id may not contain `fleetmates`
+  or `.fleetmates`, so a teammate still cannot redirect its ledger outside the repository.
 
 ## v2.5.0
 
