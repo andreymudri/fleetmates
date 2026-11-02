@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v2.6.0
+
+### Added
 
 - Fleet watchdog. `cli.mjs watch --run <id> --plan <path>` prints one JSON event per line (`start`,
   `resume`, `respawn`, `orphan`, `unmeasured`, `watch-error`, `exit`) for the orchestrator to run
@@ -13,6 +15,12 @@
   command failing `spinFailures` times with no pass in between. The stale window is learned per
   repository from finished tasks the watchdog never acted on, clamped to 10-60 minutes. Watchdog
   state is supervision only and is read by no gate check.
+- `grilling` asks up to four questions per round, in one `AskUserQuestion` call. A question that
+  depends on another in the same round waits for the next round, and a round is never padded to
+  reach four. `brainstorming` follows the same rule.
+
+### Fixed
+
 - A failed Bash call is now recorded in the event ledger, through `PostToolUseFailure`, and a
   successful one as `pass`. Claude Code's real hook payloads carry no exit code, so before this
   every success was recorded `unknown` and no failure was recorded at all. `doctor --hooks` reports the
