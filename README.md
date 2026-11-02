@@ -347,15 +347,19 @@ before a push where possible, and reported rather than hidden where not:
   `"platformSim": true` runs this way instead of plainly.
 - `flaky [--report <path>] -- <command...>` retries a failing command exactly once. A pass on the
   retry exits 0, prints a `flaky:` line per test and records the test in the tracked
-  `fleetmates.flaky.json`, which is protected like the gate manifest. With a JUnit `--report` it
-  names each test `<file>::<classname>::<name>`, and for node:test, vitest, jest and pytest it
-  retries only the failed tests. A command that fails twice is red unless the report shows every
-  failed test either passing on the retry or already in quarantine, with each excused run printing
-  the exit code it overrode; without a report, two failures are always red. A gate `command` check with `"flaky": true` runs this way; there the
-  retry is always the whole command.
+  `fleetmates.flaky.json`, which is protected like the gate manifest. With a `--report` that is a
+  single JUnit file it names each test `<file>::<classname>::<name>`, and for node:test, vitest,
+  jest and pytest it retries only the failed tests. A report directory, such as a runner's report
+  folder, is not read for names: the flake is recorded under the whole command, which is never
+  quarantined as a named test. A command that fails twice is red unless a single-file report shows
+  every failed test either passing on the retry or already in quarantine, with each excused run
+  printing the exit code it overrode; without such a report, two failures are always red. A gate
+  `command` check with `"flaky": true` runs this way; there the retry is always the whole command,
+  and the gate never records a named test, because it writes the quarantine file only from the main
+  worktree, where a `"dir": true` report is a directory and an in-tree `"path"` report is refused.
 - `review-dispatch` adds a `portability` reviewer when `.github/workflows` runs on macOS or Windows.
 - `doctor` warns when no workflow runs on a pushed run branch, when the CI matrix covers a single
-  operating system, and when no workflow step runs the flaky detector. It only suggests.
+  operating system that the `os` field of `package.json` does not restrict the package to, and when no workflow step runs the flaky detector. It only suggests.
 - `finishing-a-development-branch` pushes the run branch (asking first unless `ci.push` is `auto`)
   and runs `ci-wait --branch <run branch>`, which polls the branch tip's GitHub Actions workflow
   runs through `gh` for up to `ci.waitMinutes` minutes (default 60). The merge is not offered while
@@ -366,7 +370,7 @@ appends a table to the job summary:
 
     - run: node <fleetmates root>/scripts/cli.mjs flaky --report <path> -- <test command>
 
-Under `GITHUB_ACTIONS=true` it writes `fleetmates.flaky.json` in the job's checkout. Outside CI it
+`<path>` must be the single JUnit file the test command writes; a directory names no tests. Under `GITHUB_ACTIONS=true` it writes `fleetmates.flaky.json` in the job's checkout. Outside CI it
 writes the file only from the main worktree, never from a teammate's.
 
 ## Layout

@@ -411,9 +411,15 @@ attempts together, and an attempt that timed out is not retried.
 In the gate, the retry reruns the whole command. The check runs through a shell (`/bin/sh -c <run>`,
 or `cmd.exe /d /s /c "<run>"` on Windows), so the detector cannot read the test runner off its
 arguments and never filters the retry to the failed tests; the Windows form is unit-tested only.
-When the check declares a `report`, the detector reads from it which tests failed, and names each
-one `<file>::<classname>::<name>` (or the part of that the report carries). Without a report it
-names the whole command, as `/bin/sh -c <run>` on POSIX.
+The detector names failed tests only from a report that is a single JUnit file, as
+`<file>::<classname>::<name>` (or the part of that the report carries). Otherwise it names the
+whole command, as `/bin/sh -c <run>` on POSIX, and a whole command is never quarantined as a named
+test. In the gate that covers both report forms in the main worktree: a `"dir": true` report is a
+directory, which the detector does not read names from, and an in-tree `"path"` report is refused
+outside a worktree the gate owns. Since the gate writes the quarantine file only from the main
+worktree, it never records a named test there; named tests reach the file through the `flaky`
+command with a single-file `--report`. Inside a merge preview an in-tree `"path"` report does name
+the failed tests, so a test already in the file can still be excused there.
 
 When both attempts fail, the check fails with the first attempt's exit code, with one exception:
 a run is excused only when every test that failed on the first attempt either passed on the retry
