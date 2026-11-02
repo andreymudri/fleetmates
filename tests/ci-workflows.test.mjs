@@ -117,6 +117,15 @@ test('workflowSummary unions the files', async t => {
   assert.equal(summary.usesFlaky, true)
 })
 
+// No `fleetmates` binary ships (package.json has no `bin`), so the advice must name the real
+// invocation through scripts/cli.mjs, never a bare `fleetmates flaky`.
+test('ciAdvice suggests the flaky detector through scripts/cli.mjs, not a fleetmates binary', () => {
+  const [flaky] = ciAdvice({ present: true, oses: new Set(['linux', 'windows']), branchPushes: true, usesFlaky: false }, {})
+  assert.match(flaky, /flaky detector/)
+  assert.match(flaky, /node "<fleetmates root>\/scripts\/cli\.mjs" flaky -- <test command>/)
+  assert.doesNotMatch(flaky, /(^|[^/])\bfleetmates flaky\b/)
+})
+
 test('ciAdvice gives the three warnings, and nothing for a workflow set that satisfies all three', () => {
   const bad = { present: true, oses: new Set(['linux']), branchPushes: false, usesFlaky: false }
   const warnings = ciAdvice(bad, { name: 'x' })

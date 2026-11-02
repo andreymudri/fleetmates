@@ -239,3 +239,56 @@ test('handles an inline run with no recorded gates by running the test suite fre
 test('handles the case where no run directory exists at all', async () => {
   assert.match(await body(), /no run directory/i)
 })
+
+// The remote CI step (docs/specs/2026-11-02-ci-reliability-design.md, section 4). It has to come
+// before the integration options, because its whole point is that a red, pending or unreadable CI
+// keeps the merge from being offered; placed after them, the choice is already on the table.
+const remoteCi = async () => (await doc()).section(/^Remote CI$/)
+
+test('the Remote CI section sits before the integration options', async () => {
+  const d = await doc()
+  const index = (title) => d.sections.findIndex((s) => s.level === 2 && title.test(s.title))
+  const ci = index(/^Remote CI$/)
+  const options = index(/^Integration options$/)
+  assert.notEqual(ci, -1, 'no ## Remote CI section')
+  assert.notEqual(options, -1, 'no ## Integration options section')
+  assert.ok(ci < options, '## Remote CI must come before ## Integration options')
+})
+
+test('the Remote CI section waits through ci-wait, invoked from the fleetmates root', async () => {
+  const scope = await remoteCi()
+  const block = scope.code.find((b) => /\bci-wait\b/.test(b.code))
+  assert.ok(block, `${scope.label}: no code block runs ci-wait`)
+  assert.match(block.code, /^node "<fleetmates root>\/scripts\/cli\.mjs" ci-wait --branch <run branch> --root <project root>/)
+})
+
+test('the push is asked for unless ci.push is auto, and no other sentence in the section speaks for ci.push', async () => {
+  assertClaim(await remoteCi(), {
+    claim: /^Ask the user before pushing the run branch, unless ci\.push is auto, in which case push without asking\.$/,
+    subject: /ci\.push/i,
+    allow: [CI_KEYS],
+  })
+})
+
+// The values and defaults of both keys, as scripts/config.mjs validates them (`config set ci.push
+// yes` and `ci.waitMinutes 721` exit 2), stated once and followed by how each is set.
+const CI_KEYS = /^Two config keys shape this step: ci\.push is ask \(the default\) or auto, and ci\.waitMinutes is an integer from 1 to 720, 60 by default\.$/
+
+test('the Remote CI section states the values and defaults of ci.push and ci.waitMinutes, then how to set them', async () => {
+  const scope = await remoteCi()
+  assertClaim(scope, {
+    claim: CI_KEYS,
+    then: /^Set either through the CLI, in the tracked fleetmates\.gate\.json by default or with --local in the gitignored fleetmates\.local\.json; any other value is refused with exit 2\.$/,
+  })
+  const block = scope.code.find((b) => /config set ci\.push/.test(b.code))
+  assert.ok(block, `${scope.label}: no code block sets ci.push`)
+  assert.match(block.code, /^node "<fleetmates root>\/scripts\/cli\.mjs" config set ci\.push auto --root <project root> \[--local\]$/m)
+  assert.match(block.code, /^node "<fleetmates root>\/scripts\/cli\.mjs" config set ci\.waitMinutes 30 --root <project root> \[--local\]$/m)
+})
+
+test('a red, pending or unreadable CI means the merge is not offered', async () => {
+  assertClaim(await remoteCi(), {
+    claim: /^A red, pending or unreadable CI means the merge is not offered:/,
+    subject: /merge is (not )?offered|offer the merge/i,
+  })
+})
