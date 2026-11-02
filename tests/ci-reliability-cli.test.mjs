@@ -441,11 +441,16 @@ test('ci-wait exits 0 when every workflow run on the tip succeeded, asking for t
 // pull_request runs of one workflow). Grouping by name hid the failure.
 test('ci-wait exits 1 when the push run of a workflow fails beside its passing pull_request run', async (t) => {
   const ctx = await ciRepo(t)
-  const { io } = ciIo(ctx, (sha) => [
-    workflowRun(10, 'test', sha, 'completed', 'failure', { event: 'push' }),
-    workflowRun(11, 'test', sha, 'completed', 'success', { event: 'pull_request' }),
-  ])
-  assert.equal(await ciWait(ctx, io), 1, ctx.lines.join('\n'))
+  // Both orders: a by-name grouping keeps whichever run it meets first or last, and either one hides
+  // the failure in one of these.
+  for (const order of [[0, 1], [1, 0]]) {
+    const runs = (sha) => [
+      workflowRun(10, 'test', sha, 'completed', 'failure', { event: 'push' }),
+      workflowRun(11, 'test', sha, 'completed', 'success', { event: 'pull_request' }),
+    ]
+    const { io } = ciIo(ctx, (sha) => order.map((i) => runs(sha)[i]))
+    assert.equal(await ciWait(ctx, io), 1, `${order}: ${ctx.lines.join('\n')}`)
+  }
   assert.match(ctx.lines.join('\n'), /test.*failure.*https:\/\/github\.com\/o\/r\/actions\/runs\/10\b/)
 })
 
