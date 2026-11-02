@@ -122,7 +122,7 @@ It only suggests; it never edits a workflow.
 has GitHub Actions workflows, it asks before pushing the run branch (`ci.push: auto` in config
 skips the question), then polls the GitHub Actions workflow runs for the branch tip until all pass, one fails,
 or `ci.waitMinutes` (default 60) passes. It judges workflow runs, not individual check runs:
-every workflow run on the tip commit must be completed with conclusion `success` (a re-run is the
+every workflow run on the tip commit must be completed with conclusion `success` or `skipped` (a run whose every job was skipped by `if:` failed nothing; `neutral`, a missing conclusion and every other value fail) (a re-run is the
 same run id with a newer attempt, so the latest attempt counts), a run still queued or in
 progress is pending, and a tip with no workflow run yet is pending. Judging whole runs keeps the
 push and pull request runs of one workflow apart, waits for jobs behind `needs:`, and does not
